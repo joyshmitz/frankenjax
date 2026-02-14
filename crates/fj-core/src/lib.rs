@@ -66,6 +66,13 @@ pub enum Primitive {
     Sin,
     Cos,
     ReduceSum,
+    Reshape,
+    Slice,
+    Gather,
+    Scatter,
+    Transpose,
+    BroadcastInDim,
+    Concatenate,
 }
 
 impl Primitive {
@@ -78,6 +85,13 @@ impl Primitive {
             Self::Sin => "sin",
             Self::Cos => "cos",
             Self::ReduceSum => "reduce_sum",
+            Self::Reshape => "reshape",
+            Self::Slice => "slice",
+            Self::Gather => "gather",
+            Self::Scatter => "scatter",
+            Self::Transpose => "transpose",
+            Self::BroadcastInDim => "broadcast_in_dim",
+            Self::Concatenate => "concatenate",
         }
     }
 }
@@ -248,6 +262,102 @@ impl TensorValue {
         self.shape.rank()
     }
 
+    #[must_use]
+    pub fn leading_dim(&self) -> Option<u32> {
+        self.shape.dims.first().copied()
+    }
+
+    pub fn slice_axis0(&self, index: usize) -> Result<Value, ValueError> {
+        let axis_size = self
+            .leading_dim()
+            .ok_or(ValueError::RankZeroAxisSliceUnsupported)?;
+        if index >= axis_size as usize {
+            return Err(ValueError::SliceIndexOutOfBounds {
+                index,
+                axis_size: axis_size as usize,
+            });
+        }
+
+        if self.rank() == 1 {
+            return Ok(Value::Scalar(self.elements[index]));
+        }
+
+        let slice_len = self
+            .shape
+            .dims
+            .iter()
+            .skip(1)
+            .try_fold(1_usize, |acc, dim| acc.checked_mul(*dim as usize))
+            .ok_or(ValueError::ShapeOverflow {
+                shape: self.shape.clone(),
+            })?;
+
+        let start = index
+            .checked_mul(slice_len)
+            .ok_or(ValueError::ShapeOverflow {
+                shape: self.shape.clone(),
+            })?;
+        let end = start
+            .checked_add(slice_len)
+            .ok_or(ValueError::ShapeOverflow {
+                shape: self.shape.clone(),
+            })?;
+        let elements = self.elements[start..end].to_vec();
+        let subshape = Shape {
+            dims: self.shape.dims[1..].to_vec(),
+        };
+        Ok(Value::Tensor(TensorValue::new(
+            self.dtype, subshape, elements,
+        )?))
+    }
+
+    pub fn stack_axis0(slices: &[Value]) -> Result<Self, ValueError> {
+        if slices.is_empty() {
+            return Err(ValueError::EmptyAxisStack);
+        }
+
+        match &slices[0] {
+            Value::Scalar(first) => {
+                let mut elements = Vec::with_capacity(slices.len());
+                elements.push(*first);
+                for value in &slices[1..] {
+                    let Value::Scalar(lit) = value else {
+                        return Err(ValueError::MixedAxisStackKinds);
+                    };
+                    elements.push(*lit);
+                }
+                let dtype = infer_dtype_from_literals(&elements);
+                TensorValue::new(dtype, Shape::vector(slices.len() as u32), elements)
+            }
+            Value::Tensor(first) => {
+                let mut elements = first.elements.clone();
+                for value in &slices[1..] {
+                    let Value::Tensor(tensor) = value else {
+                        return Err(ValueError::MixedAxisStackKinds);
+                    };
+                    if tensor.dtype != first.dtype {
+                        return Err(ValueError::AxisStackDTypeMismatch {
+                            expected: first.dtype,
+                            actual: tensor.dtype,
+                        });
+                    }
+                    if tensor.shape != first.shape {
+                        return Err(ValueError::AxisStackShapeMismatch {
+                            expected: first.shape.clone(),
+                            actual: tensor.shape.clone(),
+                        });
+                    }
+                    elements.extend_from_slice(&tensor.elements);
+                }
+
+                let mut dims = Vec::with_capacity(first.shape.rank() + 1);
+                dims.push(slices.len() as u32);
+                dims.extend_from_slice(&first.shape.dims);
+                TensorValue::new(first.dtype, Shape { dims }, elements)
+            }
+        }
+    }
+
     pub fn to_f64_vec(&self) -> Option<Vec<f64>> {
         self.elements.iter().copied().map(Literal::as_f64).collect()
     }
@@ -262,6 +372,21 @@ pub enum ValueError {
         shape: Shape,
         expected_count: u64,
         actual_count: usize,
+    },
+    RankZeroAxisSliceUnsupported,
+    SliceIndexOutOfBounds {
+        index: usize,
+        axis_size: usize,
+    },
+    EmptyAxisStack,
+    MixedAxisStackKinds,
+    AxisStackShapeMismatch {
+        expected: Shape,
+        actual: Shape,
+    },
+    AxisStackDTypeMismatch {
+        expected: DType,
+        actual: DType,
     },
 }
 
@@ -282,11 +407,57 @@ impl std::fmt::Display for ValueError {
                     shape.dims, expected_count, actual_count
                 )
             }
+            Self::RankZeroAxisSliceUnsupported => {
+                write!(f, "cannot axis-slice rank-0 scalar tensor")
+            }
+            Self::SliceIndexOutOfBounds { index, axis_size } => {
+                write!(
+                    f,
+                    "axis-slice index {} out of bounds for axis size {}",
+                    index, axis_size
+                )
+            }
+            Self::EmptyAxisStack => {
+                write!(f, "cannot stack empty slice list")
+            }
+            Self::MixedAxisStackKinds => {
+                write!(f, "cannot stack mixed scalar/tensor slice kinds")
+            }
+            Self::AxisStackShapeMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "stack shape mismatch: expected {:?}, got {:?}",
+                    expected.dims, actual.dims
+                )
+            }
+            Self::AxisStackDTypeMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "stack dtype mismatch: expected {:?}, got {:?}",
+                    expected, actual
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for ValueError {}
+
+fn infer_dtype_from_literals(elements: &[Literal]) -> DType {
+    if elements
+        .iter()
+        .all(|literal| matches!(literal, Literal::I64(_)))
+    {
+        DType::I64
+    } else if elements
+        .iter()
+        .all(|literal| matches!(literal, Literal::Bool(_)))
+    {
+        DType::Bool
+    } else {
+        DType::F64
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Atom {
@@ -423,6 +594,8 @@ pub enum ProgramSpec {
     AddOne,
     SinX,
     CosX,
+    Dot3,
+    ReduceSumVec,
 }
 
 #[must_use]
@@ -503,6 +676,28 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
             vec![VarId(2)],
             vec![Equation {
                 primitive: Primitive::Cos,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        ),
+        ProgramSpec::Dot3 => Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3)],
+            vec![Equation {
+                primitive: Primitive::Dot,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                outputs: smallvec![VarId(3)],
+                params: BTreeMap::new(),
+            }],
+        ),
+        ProgramSpec::ReduceSumVec => Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::ReduceSum,
                 inputs: smallvec![Atom::Var(VarId(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
@@ -680,6 +875,52 @@ mod tests {
         let tensor = value.as_tensor().expect("expected tensor value");
         assert_eq!(tensor.shape, Shape::vector(3));
         assert_eq!(tensor.len(), 3);
+    }
+
+    #[test]
+    fn tensor_slice_axis0_on_rank2_returns_rank1_slice() {
+        let tensor = TensorValue::new(
+            super::DType::I64,
+            Shape { dims: vec![2, 3] },
+            vec![
+                Literal::I64(1),
+                Literal::I64(2),
+                Literal::I64(3),
+                Literal::I64(4),
+                Literal::I64(5),
+                Literal::I64(6),
+            ],
+        )
+        .expect("rank2 tensor should build");
+
+        let slice = tensor.slice_axis0(1).expect("slice should succeed");
+        let Value::Tensor(slice_tensor) = slice else {
+            panic!("slice should be tensor");
+        };
+        assert_eq!(slice_tensor.shape, Shape::vector(3));
+        assert_eq!(
+            slice_tensor.elements,
+            vec![Literal::I64(4), Literal::I64(5), Literal::I64(6)]
+        );
+    }
+
+    #[test]
+    fn stack_axis0_restores_rank2_from_rank1_slices() {
+        let row_a = Value::vector_i64(&[1, 2, 3]).expect("vector should build");
+        let row_b = Value::vector_i64(&[4, 5, 6]).expect("vector should build");
+        let stacked = TensorValue::stack_axis0(&[row_a, row_b]).expect("stack should succeed");
+        assert_eq!(stacked.shape, Shape { dims: vec![2, 3] });
+        assert_eq!(
+            stacked.elements,
+            vec![
+                Literal::I64(1),
+                Literal::I64(2),
+                Literal::I64(3),
+                Literal::I64(4),
+                Literal::I64(5),
+                Literal::I64(6)
+            ]
+        );
     }
 
     #[test]

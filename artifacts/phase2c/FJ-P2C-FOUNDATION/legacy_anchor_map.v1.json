@@ -1,0 +1,136 @@
+{
+  "schema_version": "frankenjax.legacy-anchor-map.v1",
+  "packet_id": "FJ-P2C-FOUNDATION",
+  "generated_at_unix_ms": 1771089243000,
+  "generated_by": "CobaltMountain",
+  "legacy_oracle_root": "/data/projects/frankenjax/legacy_jax_code/jax",
+  "anchors": [
+    {
+      "anchor_id": "core.jaxpr",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "Jaxpr",
+      "behavior_summary": "Canonical Jaxpr container tracks const/in/out vars, equations, effects, and debug info under explicit structural invariants.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 96,
+        "end": 214
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "core.closed_jaxpr",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "ClosedJaxpr",
+      "behavior_summary": "ClosedJaxpr pairs Jaxpr with const payload and preserves pretty-print and callable semantics via jaxpr_as_fun.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 245,
+        "end": 321
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "core.new_jaxpr_eqn",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "new_jaxpr_eqn",
+      "behavior_summary": "Equation creation validates var/literal types under checks and stamps source/context metadata for downstream tracing and debugging.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 475,
+        "end": 485
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "core.eval_jaxpr",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "eval_jaxpr",
+      "behavior_summary": "Jaxpr evaluation executes equations in order, binds inputs/consts into env, dispatches primitive binds, and writes outputs with type checks.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 729,
+        "end": 791
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "core.tracer",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "Tracer",
+      "behavior_summary": "Tracer API defines abstract execution boundary, concretization errors, and conversion restrictions for transformed values.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 910,
+        "end": 1052
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "core.ensure_no_leaks",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "ensure_no_leaks",
+      "behavior_summary": "Trace lifecycle context invalidates traces and raises on leaked tracers under leak-check mode.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1482,
+        "end": 1512
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "partial_eval.trace_to_jaxpr_dynamic",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "trace_to_jaxpr_dynamic",
+      "behavior_summary": "Dynamic tracing path builds staged jaxpr with leak checks and validates jaxpr well-formedness before returning.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 2465,
+        "end": 2505
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "core.check_jaxpr",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "check_jaxpr",
+      "behavior_summary": "Type/well-formedness checker validates variable binding order, type compatibility, and equation-effect subset invariants.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 3251,
+        "end": 3418
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "tests.jaxpr_effects_subset",
+      "legacy_path": "jax/tests/jaxpr_effects_test.py",
+      "legacy_symbol": "test_jaxpr_typecheck_should_verify_eqn_effects_are_subset",
+      "behavior_summary": "Regression test asserting equation effects must be subset of declared jaxpr effects; invalid edits must fail check_jaxpr.",
+      "evidence_kind": "test_case",
+      "lines": {
+        "start": 146,
+        "end": 159
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "tests.jaxpr_util_profile",
+      "legacy_path": "jax/tests/jaxpr_util_test.py",
+      "legacy_symbol": "testJaxprEqnHistogramAsPprof",
+      "behavior_summary": "Jaxpr utility regression test proving equation-level profiling/histogram observability over make_jaxpr outputs.",
+      "evidence_kind": "test_case",
+      "lines": {
+        "start": 107,
+        "end": 113
+      },
+      "confidence": "medium"
+    }
+  ],
+  "extraction_invariants": [
+    "Jaxpr variable reads must be preceded by bindings and pass type compatibility checks.",
+    "Equation effects must be a subset of declared jaxpr effects.",
+    "Tracer lifecycle must not leak transformed values beyond trace scope.",
+    "Transform composition evidence must remain deterministic for cache-key and parity semantics.",
+    "Unknown incompatible features fail closed in strict compatibility mode."
+  ]
+}

@@ -9,6 +9,9 @@ use fj_dispatch::{DispatchRequest, dispatch};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc;
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct HarnessConfig {
@@ -211,6 +214,8 @@ pub enum FixtureProgram {
     AddOne,
     SinX,
     CosX,
+    Dot3,
+    ReduceSumVec,
 }
 
 impl FixtureProgram {
@@ -223,6 +228,8 @@ impl FixtureProgram {
             Self::AddOne => ProgramSpec::AddOne,
             Self::SinX => ProgramSpec::SinX,
             Self::CosX => ProgramSpec::CosX,
+            Self::Dot3 => ProgramSpec::Dot3,
+            Self::ReduceSumVec => ProgramSpec::ReduceSumVec,
         }
     }
 }
@@ -307,6 +314,14 @@ pub struct TransformFixtureCase {
     pub mode: FixtureMode,
     pub program: FixtureProgram,
     pub transforms: Vec<FixtureTransform>,
+    #[serde(default = "default_comparator_kind")]
+    pub comparator: ComparatorKind,
+    #[serde(default)]
+    pub baseline_mismatch: bool,
+    #[serde(default)]
+    pub flaky: bool,
+    #[serde(default)]
+    pub simulated_delay_ms: u64,
     pub args: Vec<FixtureValue>,
     pub expected: Vec<FixtureValue>,
     pub atol: f64,
@@ -343,6 +358,69 @@ pub struct TransformParityReport {
     pub reports: Vec<TransformCaseReport>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchRunnerConfig {
+    pub case_timeout: Duration,
+}
+
+impl Default for BatchRunnerConfig {
+    fn default() -> Self {
+        Self {
+            case_timeout: default_case_timeout(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OracleCaptureRequest {
+    pub legacy_root: PathBuf,
+    pub output_path: PathBuf,
+    pub strict: bool,
+    pub python_bin: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OracleCaptureResult {
+    pub command: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub bundle: TransformFixtureBundle,
+}
+
+#[derive(Debug)]
+pub enum OracleCaptureError {
+    Io(std::io::Error),
+    ScriptFailed {
+        status: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+}
+
+impl std::fmt::Display for OracleCaptureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "oracle capture io error: {err}"),
+            Self::ScriptFailed {
+                status,
+                stdout,
+                stderr,
+            } => write!(
+                f,
+                "oracle capture script failed (status={status:?})\nstdout:\n{stdout}\nstderr:\n{stderr}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OracleCaptureError {}
+
+impl From<std::io::Error> for OracleCaptureError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComparatorKind {
@@ -360,6 +438,14 @@ pub enum DriftClassification {
     Improvement,
     Flake,
     Timeout,
+}
+
+const fn default_comparator_kind() -> ComparatorKind {
+    ComparatorKind::ApproxAtolRtol
+}
+
+const fn default_case_timeout() -> Duration {
+    Duration::from_secs(2)
 }
 
 pub fn read_transform_fixture_bundle(
@@ -393,6 +479,112 @@ pub fn run_transform_fixture_bundle(
     }
 }
 
+pub fn capture_transform_fixture_bundle_with_oracle(
+    request: &OracleCaptureRequest,
+) -> Result<OracleCaptureResult, OracleCaptureError> {
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("capture_legacy_fixtures.py");
+    let python = request
+        .python_bin
+        .clone()
+        .or_else(default_python_for_repo)
+        .unwrap_or_else(|| PathBuf::from("python3"));
+
+    let mut cmd = Command::new(&python);
+    cmd.arg(&script)
+        .arg("--legacy-root")
+        .arg(&request.legacy_root)
+        .arg("--output")
+        .arg(&request.output_path);
+    if request.strict {
+        cmd.arg("--strict");
+    }
+
+    let rendered_cmd = format!(
+        "{} {} --legacy-root {} --output {}{}",
+        python.display(),
+        script.display(),
+        request.legacy_root.display(),
+        request.output_path.display(),
+        if request.strict { " --strict" } else { "" }
+    );
+
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        return Err(OracleCaptureError::ScriptFailed {
+            status: output.status.code(),
+            stdout,
+            stderr,
+        });
+    }
+
+    let bundle = read_transform_fixture_bundle(&request.output_path)?;
+    Ok(OracleCaptureResult {
+        command: rendered_cmd,
+        stdout,
+        stderr,
+        bundle,
+    })
+}
+
+#[must_use]
+pub fn run_transform_fixture_bundle_batched(
+    _config: &HarnessConfig,
+    bundle: &TransformFixtureBundle,
+    batch: &BatchRunnerConfig,
+) -> TransformParityReport {
+    let mut pending = Vec::with_capacity(bundle.cases.len());
+
+    for case in bundle.cases.clone() {
+        let expected_json = serde_json::to_string(&case.expected)
+            .unwrap_or_else(|err| format!("<expected serialization error: {err}>"));
+        let case_for_timeout = case.clone();
+        let (tx, rx) = mpsc::channel::<TransformCaseReport>();
+        std::thread::spawn(move || {
+            let report = run_transform_fixture_case(&case);
+            let _ = tx.send(report);
+        });
+        pending.push((case_for_timeout, expected_json, rx));
+    }
+
+    let mut reports = Vec::with_capacity(pending.len());
+    for (case, expected_json, rx) in pending {
+        match rx.recv_timeout(batch.case_timeout) {
+            Ok(report) => reports.push(report),
+            Err(_) => reports.push(TransformCaseReport {
+                case_id: case.case_id,
+                family: case.family,
+                mode: case.mode,
+                comparator: case.comparator,
+                drift_classification: DriftClassification::Timeout,
+                matched: false,
+                expected_json,
+                actual_json: None,
+                error: Some(format!(
+                    "timeout waiting for case result after {}ms",
+                    batch.case_timeout.as_millis()
+                )),
+            }),
+        }
+    }
+
+    let matched_cases = reports.iter().filter(|report| report.matched).count();
+    TransformParityReport {
+        schema_version: "frankenjax.transform-parity-report.v1".to_owned(),
+        total_cases: reports.len(),
+        matched_cases,
+        mismatched_cases: reports.len().saturating_sub(matched_cases),
+        reports,
+    }
+}
+
+pub fn emit_parity_json(report: &TransformParityReport) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(report)
+}
+
 #[must_use]
 pub fn emit_parity_markdown(report: &TransformParityReport) -> String {
     let mut out = String::new();
@@ -424,7 +616,20 @@ pub fn emit_parity_markdown(report: &TransformParityReport) -> String {
     out
 }
 
+fn default_python_for_repo() -> Option<PathBuf> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let venv_python = repo_root.join(".venv").join("bin").join("python");
+    if venv_python.exists() {
+        return Some(venv_python);
+    }
+    None
+}
+
 fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseReport {
+    if case.simulated_delay_ms > 0 {
+        std::thread::sleep(Duration::from_millis(case.simulated_delay_ms));
+    }
+
     let runtime_args = case
         .args
         .iter()
@@ -441,10 +646,12 @@ fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseRepor
                 case_id: case.case_id.clone(),
                 family: case.family,
                 mode: case.mode,
-                comparator: ComparatorKind::ApproxAtolRtol,
+                comparator: case.comparator,
                 drift_classification: classify_drift(
                     false,
                     Some("fixture argument conversion failed"),
+                    case.baseline_mismatch,
+                    case.flaky,
                 ),
                 matched: false,
                 expected_json,
@@ -480,11 +687,7 @@ fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseRepor
 
     match result {
         Ok(response) => {
-            let matched =
-                response.outputs.len() == case.expected.len()
-                    && case.expected.iter().zip(response.outputs.iter()).all(
-                        |(expected, actual)| expected.approx_matches(actual, case.atol, case.rtol),
-                    );
+            let matched = compare_outputs(case, &response.outputs);
 
             let actual_json = serde_json::to_string(&response.outputs)
                 .unwrap_or_else(|err| format!("<actual serialization error: {err}>"));
@@ -493,7 +696,7 @@ fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseRepor
                 case_id: case.case_id.clone(),
                 family: case.family,
                 mode: case.mode,
-                comparator: ComparatorKind::ApproxAtolRtol,
+                comparator: case.comparator,
                 drift_classification: classify_drift(
                     matched,
                     if matched {
@@ -501,6 +704,8 @@ fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseRepor
                     } else {
                         Some("output mismatch")
                     },
+                    case.baseline_mismatch,
+                    case.flaky,
                 ),
                 matched,
                 expected_json,
@@ -516,8 +721,13 @@ fn run_transform_fixture_case(case: &TransformFixtureCase) -> TransformCaseRepor
             case_id: case.case_id.clone(),
             family: case.family,
             mode: case.mode,
-            comparator: ComparatorKind::ApproxAtolRtol,
-            drift_classification: classify_drift(false, Some(&err.to_string())),
+            comparator: case.comparator,
+            drift_classification: classify_drift(
+                false,
+                Some(&err.to_string()),
+                case.baseline_mismatch,
+                case.flaky,
+            ),
             matched: false,
             expected_json,
             actual_json: None,
@@ -531,7 +741,107 @@ fn approx_equal(expected: f64, actual: f64, atol: f64, rtol: f64) -> bool {
     (expected - actual).abs() <= tolerance
 }
 
-fn classify_drift(matched: bool, error: Option<&str>) -> DriftClassification {
+fn compare_outputs(case: &TransformFixtureCase, actual: &[Value]) -> bool {
+    if case.expected.len() != actual.len() {
+        return false;
+    }
+
+    match case.comparator {
+        ComparatorKind::Exact => {
+            case.expected
+                .iter()
+                .zip(actual.iter())
+                .all(|(expected, actual_value)| {
+                    expected
+                        .to_runtime_value()
+                        .is_ok_and(|expected_value| expected_value == *actual_value)
+                })
+        }
+        ComparatorKind::ApproxAtolRtol => {
+            case.expected
+                .iter()
+                .zip(actual.iter())
+                .all(|(expected, actual_value)| {
+                    expected.approx_matches(actual_value, case.atol, case.rtol)
+                })
+        }
+        ComparatorKind::ShapeOnly => {
+            case.expected
+                .iter()
+                .zip(actual.iter())
+                .all(|(expected, actual_value)| {
+                    value_shape_fingerprint(expected) == value_shape_runtime(actual_value)
+                })
+        }
+        ComparatorKind::TypeOnly => {
+            case.expected
+                .iter()
+                .zip(actual.iter())
+                .all(|(expected, actual_value)| {
+                    value_type_fingerprint(expected) == value_type_runtime(actual_value)
+                })
+        }
+    }
+}
+
+fn value_shape_fingerprint(expected: &FixtureValue) -> String {
+    match expected {
+        FixtureValue::ScalarF64 { .. } | FixtureValue::ScalarI64 { .. } => "scalar".to_owned(),
+        FixtureValue::VectorF64 { values } => format!("vector:{}", values.len()),
+        FixtureValue::VectorI64 { values } => format!("vector:{}", values.len()),
+    }
+}
+
+fn value_shape_runtime(actual: &Value) -> String {
+    if let Some(tensor) = actual.as_tensor() {
+        if tensor.shape.dims.is_empty() {
+            "scalar".to_owned()
+        } else {
+            format!("vector:{}", tensor.elements.len())
+        }
+    } else {
+        "scalar".to_owned()
+    }
+}
+
+fn value_type_fingerprint(expected: &FixtureValue) -> &'static str {
+    match expected {
+        FixtureValue::ScalarF64 { .. } | FixtureValue::VectorF64 { .. } => "f64",
+        FixtureValue::ScalarI64 { .. } | FixtureValue::VectorI64 { .. } => "i64",
+    }
+}
+
+fn value_type_runtime(actual: &Value) -> &'static str {
+    if let Some(scalar) = actual.as_scalar_literal() {
+        if scalar.as_i64().is_some() {
+            return "i64";
+        }
+        if scalar.as_f64().is_some() {
+            return "f64";
+        }
+    }
+
+    if let Some(tensor) = actual.as_tensor() {
+        return match tensor.dtype {
+            fj_core::DType::I64 | fj_core::DType::I32 => "i64",
+            fj_core::DType::F64 | fj_core::DType::F32 => "f64",
+            fj_core::DType::Bool => "bool",
+        };
+    }
+
+    "unknown"
+}
+
+fn classify_drift(
+    matched: bool,
+    error: Option<&str>,
+    baseline_mismatch: bool,
+    flaky: bool,
+) -> DriftClassification {
+    if matched && baseline_mismatch {
+        return DriftClassification::Improvement;
+    }
+
     if matched {
         return DriftClassification::Pass;
     }
@@ -540,17 +850,25 @@ fn classify_drift(matched: bool, error: Option<&str>) -> DriftClassification {
         return DriftClassification::Timeout;
     }
 
+    if flaky {
+        return DriftClassification::Flake;
+    }
+
     DriftClassification::Regression
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DriftClassification, FixtureFamily, FixtureMode, FixtureProgram, FixtureTransform,
-        FixtureValue, HarnessConfig, ParityCase, TransformFixtureBundle, TransformFixtureCase,
-        classify_drift, collect_json_fixtures, default_fixture_manifest, emit_parity_markdown,
-        evaluate_parity, read_fixture_note, run_smoke, run_transform_fixture_bundle,
+        BatchRunnerConfig, ComparatorKind, DriftClassification, FixtureFamily, FixtureMode,
+        FixtureProgram, FixtureTransform, FixtureValue, HarnessConfig, OracleCaptureRequest,
+        ParityCase, TransformFixtureBundle, TransformFixtureCase,
+        capture_transform_fixture_bundle_with_oracle, classify_drift, collect_json_fixtures,
+        default_fixture_manifest, emit_parity_json, emit_parity_markdown, evaluate_parity,
+        read_fixture_note, run_smoke, run_transform_fixture_bundle,
+        run_transform_fixture_bundle_batched,
     };
+    use tempfile::tempdir;
 
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
@@ -620,6 +938,10 @@ mod tests {
                 mode: FixtureMode::Strict,
                 program: FixtureProgram::Add2,
                 transforms: vec![FixtureTransform::Jit],
+                comparator: ComparatorKind::ApproxAtolRtol,
+                baseline_mismatch: false,
+                flaky: false,
+                simulated_delay_ms: 0,
                 args: vec![
                     FixtureValue::ScalarI64 { value: 2 },
                     FixtureValue::ScalarI64 { value: 5 },
@@ -652,14 +974,25 @@ mod tests {
     #[test]
     fn test_drift_classification_timeout_and_regression() {
         assert_eq!(
-            classify_drift(false, Some("timeout waiting for oracle")),
+            classify_drift(false, Some("timeout waiting for oracle"), false, false),
             DriftClassification::Timeout
         );
         assert_eq!(
-            classify_drift(false, Some("shape mismatch")),
+            classify_drift(false, Some("shape mismatch"), false, false),
             DriftClassification::Regression
         );
-        assert_eq!(classify_drift(true, None), DriftClassification::Pass);
+        assert_eq!(
+            classify_drift(true, None, true, false),
+            DriftClassification::Improvement
+        );
+        assert_eq!(
+            classify_drift(false, Some("intermittent mismatch"), false, true),
+            DriftClassification::Flake
+        );
+        assert_eq!(
+            classify_drift(true, None, false, false),
+            DriftClassification::Pass
+        );
     }
 
     #[test]
@@ -675,6 +1008,10 @@ mod tests {
                 mode: FixtureMode::Strict,
                 program: FixtureProgram::Add2,
                 transforms: vec![FixtureTransform::Jit],
+                comparator: ComparatorKind::ApproxAtolRtol,
+                baseline_mismatch: false,
+                flaky: false,
+                simulated_delay_ms: 0,
                 args: vec![
                     FixtureValue::ScalarI64 { value: 1 },
                     FixtureValue::ScalarI64 { value: 2 },
@@ -688,5 +1025,187 @@ mod tests {
         let markdown = emit_parity_markdown(&report);
         assert!(markdown.contains("Transform Parity Report"));
         assert!(markdown.contains("jit_add_scalar_markdown"));
+    }
+
+    #[test]
+    fn test_parity_json_emitter_round_trip() {
+        let cfg = HarnessConfig::default_paths();
+        let bundle = TransformFixtureBundle {
+            schema_version: "frankenjax.transform-fixtures.v1".to_owned(),
+            generated_by: "unit-test".to_owned(),
+            generated_at_unix_ms: 0,
+            cases: vec![TransformFixtureCase {
+                case_id: "jit_add_scalar_json".to_owned(),
+                family: FixtureFamily::Jit,
+                mode: FixtureMode::Strict,
+                program: FixtureProgram::Add2,
+                transforms: vec![FixtureTransform::Jit],
+                comparator: ComparatorKind::ApproxAtolRtol,
+                baseline_mismatch: false,
+                flaky: false,
+                simulated_delay_ms: 0,
+                args: vec![
+                    FixtureValue::ScalarI64 { value: 1 },
+                    FixtureValue::ScalarI64 { value: 1 },
+                ],
+                expected: vec![FixtureValue::ScalarI64 { value: 2 }],
+                atol: 1e-6,
+                rtol: 1e-6,
+            }],
+        };
+        let report = run_transform_fixture_bundle(&cfg, &bundle);
+        let json = emit_parity_json(&report).expect("parity json should serialize");
+        let decoded: super::TransformParityReport =
+            serde_json::from_str(&json).expect("parity json should parse");
+        assert_eq!(decoded.total_cases, 1);
+    }
+
+    #[test]
+    fn test_comparator_taxonomy_exact_shape_type_and_approx() {
+        let cfg = HarnessConfig::default_paths();
+        let bundle = TransformFixtureBundle {
+            schema_version: "frankenjax.transform-fixtures.v1".to_owned(),
+            generated_by: "unit-test".to_owned(),
+            generated_at_unix_ms: 0,
+            cases: vec![
+                TransformFixtureCase {
+                    case_id: "cmp_exact".to_owned(),
+                    family: FixtureFamily::Jit,
+                    mode: FixtureMode::Strict,
+                    program: FixtureProgram::Add2,
+                    transforms: vec![FixtureTransform::Jit],
+                    comparator: ComparatorKind::Exact,
+                    baseline_mismatch: false,
+                    flaky: false,
+                    simulated_delay_ms: 0,
+                    args: vec![
+                        FixtureValue::ScalarI64 { value: 2 },
+                        FixtureValue::ScalarI64 { value: 2 },
+                    ],
+                    expected: vec![FixtureValue::ScalarI64 { value: 4 }],
+                    atol: 0.0,
+                    rtol: 0.0,
+                },
+                TransformFixtureCase {
+                    case_id: "cmp_shape_only".to_owned(),
+                    family: FixtureFamily::Vmap,
+                    mode: FixtureMode::Strict,
+                    program: FixtureProgram::AddOne,
+                    transforms: vec![FixtureTransform::Vmap],
+                    comparator: ComparatorKind::ShapeOnly,
+                    baseline_mismatch: false,
+                    flaky: false,
+                    simulated_delay_ms: 0,
+                    args: vec![FixtureValue::VectorI64 {
+                        values: vec![10, 20, 30],
+                    }],
+                    expected: vec![FixtureValue::VectorI64 {
+                        values: vec![999, 999, 999],
+                    }],
+                    atol: 1e-6,
+                    rtol: 1e-6,
+                },
+                TransformFixtureCase {
+                    case_id: "cmp_type_only".to_owned(),
+                    family: FixtureFamily::Jit,
+                    mode: FixtureMode::Strict,
+                    program: FixtureProgram::Square,
+                    transforms: vec![FixtureTransform::Jit],
+                    comparator: ComparatorKind::TypeOnly,
+                    baseline_mismatch: false,
+                    flaky: false,
+                    simulated_delay_ms: 0,
+                    args: vec![FixtureValue::ScalarF64 { value: 2.0 }],
+                    expected: vec![FixtureValue::ScalarF64 { value: -1234.0 }],
+                    atol: 1e-6,
+                    rtol: 1e-6,
+                },
+                TransformFixtureCase {
+                    case_id: "cmp_approx".to_owned(),
+                    family: FixtureFamily::Grad,
+                    mode: FixtureMode::Strict,
+                    program: FixtureProgram::Square,
+                    transforms: vec![FixtureTransform::Grad],
+                    comparator: ComparatorKind::ApproxAtolRtol,
+                    baseline_mismatch: false,
+                    flaky: false,
+                    simulated_delay_ms: 0,
+                    args: vec![FixtureValue::ScalarF64 { value: 3.0 }],
+                    expected: vec![FixtureValue::ScalarF64 { value: 6.0 }],
+                    atol: 1e-3,
+                    rtol: 1e-3,
+                },
+            ],
+        };
+        let report = run_transform_fixture_bundle(&cfg, &bundle);
+        assert_eq!(report.mismatched_cases, 0);
+        let comparators = report
+            .reports
+            .iter()
+            .map(|case| case.comparator)
+            .collect::<Vec<_>>();
+        assert!(comparators.contains(&ComparatorKind::Exact));
+        assert!(comparators.contains(&ComparatorKind::ShapeOnly));
+        assert!(comparators.contains(&ComparatorKind::TypeOnly));
+        assert!(comparators.contains(&ComparatorKind::ApproxAtolRtol));
+    }
+
+    #[test]
+    fn test_batch_runner_marks_timeout() {
+        let cfg = HarnessConfig::default_paths();
+        let bundle = TransformFixtureBundle {
+            schema_version: "frankenjax.transform-fixtures.v1".to_owned(),
+            generated_by: "unit-test".to_owned(),
+            generated_at_unix_ms: 0,
+            cases: vec![TransformFixtureCase {
+                case_id: "batch_timeout".to_owned(),
+                family: FixtureFamily::Jit,
+                mode: FixtureMode::Strict,
+                program: FixtureProgram::Add2,
+                transforms: vec![FixtureTransform::Jit],
+                comparator: ComparatorKind::ApproxAtolRtol,
+                baseline_mismatch: false,
+                flaky: false,
+                simulated_delay_ms: 50,
+                args: vec![
+                    FixtureValue::ScalarI64 { value: 1 },
+                    FixtureValue::ScalarI64 { value: 2 },
+                ],
+                expected: vec![FixtureValue::ScalarI64 { value: 3 }],
+                atol: 1e-6,
+                rtol: 1e-6,
+            }],
+        };
+        let report = run_transform_fixture_bundle_batched(
+            &cfg,
+            &bundle,
+            &BatchRunnerConfig {
+                case_timeout: std::time::Duration::from_millis(5),
+            },
+        );
+        assert_eq!(report.total_cases, 1);
+        assert_eq!(
+            report.reports[0].drift_classification,
+            DriftClassification::Timeout
+        );
+    }
+
+    #[test]
+    fn test_oracle_capture_invocation_produces_large_bundle() {
+        let cfg = HarnessConfig::default_paths();
+        let tmp = tempdir().expect("tempdir should build");
+        let output = tmp.path().join("oracle-capture.json");
+        let result = capture_transform_fixture_bundle_with_oracle(&OracleCaptureRequest {
+            legacy_root: cfg.oracle_root.clone(),
+            output_path: output,
+            strict: false,
+            python_bin: None,
+        })
+        .expect("oracle capture script should run");
+        assert!(
+            result.bundle.cases.len() >= 50,
+            "expected expanded fixture corpus, got {}",
+            result.bundle.cases.len()
+        );
     }
 }

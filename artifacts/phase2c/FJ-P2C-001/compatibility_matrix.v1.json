@@ -1,0 +1,70 @@
+{
+  "schema_version": "frankenjax.compatibility-matrix.v1",
+  "generated_at_unix_ms": 1771091682000,
+  "scoped_api_version": "v1",
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "allowlisted_repair"
+  },
+  "rows": [
+    {
+      "subsystem": "fj-core",
+      "jax_behavior": "IR core variable-binding, outvar derivability, and transform-composition contract enforcement",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guaranteed",
+      "drift_policy": "fail-closed",
+      "tests": [
+        "crates/fj-core/src/lib.rs",
+        "artifacts/phase2c/FJ-P2C-001/contract_table.v1.json"
+      ],
+      "notes": "Strict and hardened both reject unsupported transform composition at packet boundary."
+    },
+    {
+      "subsystem": "fj-interpreters",
+      "jax_behavior": "IR interpreter rejects unresolved variables and malformed equation flows deterministically",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guaranteed",
+      "drift_policy": "fail-closed",
+      "tests": [
+        "crates/fj-interpreters/src/lib.rs",
+        "artifacts/phase2c/FJ-P2C-001/contract_table_support.md"
+      ],
+      "notes": "No successful output path is allowed for unresolved variable references."
+    },
+    {
+      "subsystem": "fj-dispatch",
+      "jax_behavior": "Dispatch enforces transform-order checks and deterministic error semantics for packet scope",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guaranteed",
+      "drift_policy": "fail-closed",
+      "tests": [
+        "crates/fj-dispatch/src/lib.rs",
+        "crates/fj-conformance/tests/transforms.rs"
+      ],
+      "notes": "Hardened may add diagnostics but cannot bypass transform-order contract."
+    },
+    {
+      "subsystem": "fj-cache",
+      "jax_behavior": "Compatibility-critical cache-key gating at packet boundary",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guarded-recovery",
+      "drift_policy": "allowlisted-repair",
+      "tests": [
+        "crates/fj-cache/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ],
+      "notes": "Strict rejects unknown incompatible features; hardened permits only allowlisted hashed recovery path."
+    },
+    {
+      "subsystem": "fj-core-prettyprint",
+      "jax_behavior": "Byte-for-byte pretty-print formatting parity with upstream JAX",
+      "strict_mode": "out-of-scope",
+      "hardened_mode": "out-of-scope",
+      "drift_policy": "explicit-non-goal",
+      "tests": [
+        "artifacts/phase2c/FJ-P2C-001/legacy_anchor_map.v1.json"
+      ],
+      "notes": "Canonical internal representation is prioritized over textual format parity."
+    }
+  ]
+}

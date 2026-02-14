@@ -1,0 +1,47 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_p2c001_full_dispatch_pipeline",
+  "test_id": "e2e::e2e_p2c001_full_dispatch_pipeline",
+  "packet_id": "P2C-001",
+  "fixture_id": "2e57fb0b2c791d7076717759bd4eb0eb9caf13f788ab5afd9c0d1f3fae2d57f8",
+  "seed": null,
+  "mode": "strict",
+  "ts_utc_unix_ms": 1771096046947,
+  "env": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_toolchain": "nightly-x86_64-unknown-linux-gnu"
+  },
+  "artifact_refs": [
+    "/data/projects/frankenjax/crates/fj-conformance/fixtures/transforms/legacy_transform_cases.v1.json"
+  ],
+  "replay_command": "cargo test -p fj-conformance --test e2e -- e2e_p2c001_full_dispatch_pipeline --exact --nocapture",
+  "input_capture": {
+    "fixture_path": "/data/projects/frankenjax/crates/fj-conformance/fixtures/transforms/legacy_transform_cases.v1.json",
+    "strict_mode": true
+  },
+  "intermediate_states": [
+    {
+      "exists": true,
+      "step": "fixture_exists"
+    },
+    {
+      "case_count": 68,
+      "schema_version": "frankenjax.transform-fixtures.v1",
+      "step": "bundle_loaded"
+    },
+    {
+      "matched_cases": 68,
+      "mismatched_cases": 0,
+      "step": "parity_run_complete"
+    }
+  ],
+  "output_capture": {
+    "matched_cases": 68,
+    "mismatched_cases": 0,
+    "total_cases": 68
+  },
+  "result": "pass",
+  "duration_ms": 4,
+  "details": null
+}

@@ -1,0 +1,101 @@
+{
+  "schema_version": "frankenjax.risk-note.v1",
+  "packet_id": "FJ-P2C-FOUNDATION",
+  "generated_at_unix_ms": 1771088770000,
+  "threat_surface_summary": "Foundation dispatch/cache path is protected by strict fail-closed controls, while hardened deviations are restricted to explicit allowlisted behavior.",
+  "risks": [
+    {
+      "risk_id": "risk.foundation.cache-confusion",
+      "category": "security",
+      "description": "Cache confusion could map semantically incompatible traces to the same compiled artifact.",
+      "likelihood": "medium",
+      "impact": "high",
+      "mitigation_status": "mitigated",
+      "mitigations": [
+        "Canonical cache payload binds mode, backend, transform stack, compile options, hook, and JAXPR fingerprint.",
+        "Strict mode rejects unknown incompatible features fail-closed."
+      ],
+      "residual_risk": "Medium until adversarial cache-collision corpus expands.",
+      "evidence_refs": [
+        "artifacts/phase2c/FJ-P2C-FOUNDATION/security_threat_matrix.md",
+        "artifacts/phase2c/FJ-P2C-FOUNDATION/fail_closed_audit.md"
+      ]
+    },
+    {
+      "risk_id": "risk.foundation.transform-order",
+      "category": "compatibility",
+      "description": "Unsupported transform ordering could bypass intended semantics if unchecked.",
+      "likelihood": "low",
+      "impact": "high",
+      "mitigation_status": "mitigated",
+      "mitigations": [
+        "Transform composition is verified before dispatch execution.",
+        "Unsupported stacks fail with explicit transform errors."
+      ],
+      "residual_risk": "Low for currently scoped transform families; future transforms require new invariant tests.",
+      "evidence_refs": [
+        "crates/fj-core/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "risk_id": "risk.foundation.malformed-graph-and-shape",
+      "category": "correctness",
+      "description": "Malformed graph structures and shape/rank spoofing can trigger invalid execution paths.",
+      "likelihood": "medium",
+      "impact": "critical",
+      "mitigation_status": "in_progress",
+      "mitigations": [
+        "Dispatch and lax layers enforce explicit scalar/vector constraints and reject unsupported ranks.",
+        "Conformance harness supports adversarial fixture expansion and drift classification."
+      ],
+      "residual_risk": "Medium-High until full adversarial/fuzz suite is in place for malformed graph and shape signatures.",
+      "evidence_refs": [
+        "artifacts/phase2c/FJ-P2C-FOUNDATION/security_threat_matrix.md",
+        "crates/fj-dispatch/src/lib.rs",
+        "crates/fj-lax/src/lib.rs"
+      ]
+    },
+    {
+      "risk_id": "risk.foundation.evidence-ledger-tampering",
+      "category": "operability",
+      "description": "Decision logs could be modified post-hoc without cryptographic attestations.",
+      "likelihood": "medium",
+      "impact": "medium",
+      "mitigation_status": "planned",
+      "mitigations": [
+        "Ledger records include deterministic fields and structured evidence signals.",
+        "Mode and transform-depth signals are recorded per dispatch decision."
+      ],
+      "residual_risk": "Medium until tamper-evident signatures are implemented.",
+      "evidence_refs": [
+        "crates/fj-ledger/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "risk_id": "risk.foundation.raptorq-sidecar-corruption",
+      "category": "security",
+      "description": "Corrupted durability sidecars may hide data loss if not continuously scrubbed.",
+      "likelihood": "low",
+      "impact": "high",
+      "mitigation_status": "in_progress",
+      "mitigations": [
+        "Scrub and decode-proof pipelines exist and are test-covered.",
+        "Sidecar artifacts are committed for current long-lived fixture bundles."
+      ],
+      "residual_risk": "Low-Medium until nightly scrub automation is enforced for all protected artifacts.",
+      "evidence_refs": [
+        "crates/fj-conformance/src/durability.rs",
+        "artifacts/durability/legacy_transform_cases.v1.scrub.json",
+        "artifacts/durability/legacy_transform_cases.v1.decode-proof.json"
+      ]
+    }
+  ],
+  "top_open_risk_id": "risk.foundation.malformed-graph-and-shape",
+  "signoff": {
+    "author": "CobaltMountain",
+    "approved": false,
+    "signed_at": "2026-02-14T17:02:50Z"
+  }
+}

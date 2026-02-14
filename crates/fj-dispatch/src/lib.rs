@@ -2,7 +2,7 @@
 
 use fj_cache::{CacheKeyError, CacheKeyInputRef, build_cache_key_ref};
 use fj_core::{
-    CompatibilityMode, DType, Jaxpr, TensorValue, TraceTransformLedger, Transform,
+    CompatibilityMode, Jaxpr, TensorValue, TraceTransformLedger, Transform,
     TransformCompositionError, Value, verify_transform_composition,
 };
 use fj_interpreters::{InterpreterError, eval_jaxpr};
@@ -55,7 +55,7 @@ impl std::fmt::Display for TransformExecutionError {
                 write!(f, "grad currently requires scalar first output")
             }
             Self::VmapRequiresRankOneLeadingArgument => {
-                write!(f, "vmap currently requires rank-1 first argument")
+                write!(f, "vmap currently requires first argument with rank >= 1")
             }
             Self::VmapMismatchedLeadingDimension { expected, actual } => {
                 write!(
@@ -274,73 +274,76 @@ fn execute_vmap(
     let lead_tensor = args[0]
         .as_tensor()
         .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?;
-    if lead_tensor.rank() != 1 {
+    if lead_tensor.rank() == 0 {
         return Err(TransformExecutionError::VmapRequiresRankOneLeadingArgument.into());
     }
 
-    let lead_len = lead_tensor.len();
+    let lead_len = lead_tensor
+        .leading_dim()
+        .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?
+        as usize;
     if lead_len == 0 {
         return Err(TransformExecutionError::EmptyVmapOutput.into());
     }
 
-    let mut per_output_scalars: Vec<Vec<fj_core::Literal>> = Vec::new();
+    let mut per_output_values: Vec<Vec<Value>> = Vec::new();
 
     for index in 0..lead_len {
         let mut mapped_args = Vec::with_capacity(args.len());
-        mapped_args.push(Value::Scalar(lead_tensor.elements[index]));
+        mapped_args.push(
+            lead_tensor
+                .slice_axis0(index)
+                .map_err(|err| TransformExecutionError::TensorBuild(err.to_string()))?,
+        );
 
         for arg in &args[1..] {
             match arg {
                 Value::Scalar(lit) => mapped_args.push(Value::Scalar(*lit)),
                 Value::Tensor(tensor) => {
-                    if tensor.rank() != 1 {
+                    if tensor.rank() == 0 {
                         return Err(
                             TransformExecutionError::VmapRequiresRankOneLeadingArgument.into()
                         );
                     }
-                    if tensor.len() != lead_len {
+                    let arg_lead = tensor
+                        .leading_dim()
+                        .ok_or(TransformExecutionError::VmapRequiresRankOneLeadingArgument)?
+                        as usize;
+                    if arg_lead != lead_len {
                         return Err(TransformExecutionError::VmapMismatchedLeadingDimension {
                             expected: lead_len,
-                            actual: tensor.len(),
+                            actual: arg_lead,
                         }
                         .into());
                     }
-                    mapped_args.push(Value::Scalar(tensor.elements[index]));
+                    mapped_args.push(
+                        tensor
+                            .slice_axis0(index)
+                            .map_err(|err| TransformExecutionError::TensorBuild(err.to_string()))?,
+                    );
                 }
             }
         }
 
         let mapped_output = execute_with_transforms(root_jaxpr, tail, &mapped_args)?;
         if index == 0 {
-            per_output_scalars = vec![Vec::with_capacity(lead_len); mapped_output.len()];
-        } else if mapped_output.len() != per_output_scalars.len() {
+            per_output_values = vec![Vec::with_capacity(lead_len); mapped_output.len()];
+        } else if mapped_output.len() != per_output_values.len() {
             return Err(TransformExecutionError::VmapInconsistentOutputArity {
-                expected: per_output_scalars.len(),
+                expected: per_output_values.len(),
                 actual: mapped_output.len(),
             }
             .into());
         }
 
         for (output_idx, value) in mapped_output.iter().enumerate() {
-            let scalar = value
-                .as_scalar_literal()
-                .ok_or(TransformExecutionError::VmapNonScalarOutput)?;
-            per_output_scalars[output_idx].push(scalar);
+            per_output_values[output_idx].push(value.clone());
         }
     }
 
-    let mut outputs = Vec::with_capacity(per_output_scalars.len());
-    for scalars in per_output_scalars {
-        let dtype = if scalars
-            .iter()
-            .all(|literal| matches!(literal, fj_core::Literal::I64(_)))
-        {
-            DType::I64
-        } else {
-            DType::F64
-        };
-
-        let tensor = TensorValue::new(dtype, fj_core::Shape::vector(lead_len as u32), scalars)
+    let mut outputs = Vec::with_capacity(per_output_values.len());
+    for values in per_output_values {
+        let tensor = TensorValue::stack_axis0(&values)
             .map_err(|err| TransformExecutionError::TensorBuild(err.to_string()))?;
         outputs.push(Value::Tensor(tensor));
     }
@@ -375,7 +378,8 @@ pub fn calibrated_posterior_abandoned(
 mod tests {
     use super::{DispatchError, DispatchRequest, dispatch};
     use fj_core::{
-        CompatibilityMode, ProgramSpec, TraceTransformLedger, Transform, Value, build_program,
+        CompatibilityMode, DType, ProgramSpec, Shape, TensorValue, TraceTransformLedger, Transform,
+        Value, build_program,
     };
     use std::collections::BTreeMap;
 
@@ -452,6 +456,44 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_vmap_add_one_rank2_tensor() {
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    fj_core::Literal::I64(1),
+                    fj_core::Literal::I64(2),
+                    fj_core::Literal::I64(3),
+                    fj_core::Literal::I64(4),
+                ],
+            )
+            .expect("matrix should build"),
+        );
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("dispatch vmap rank2 should succeed");
+
+        let output = response.outputs[0]
+            .as_tensor()
+            .expect("vmap output should be tensor");
+        assert_eq!(output.shape, Shape { dims: vec![2, 2] });
+        let as_i64 = output
+            .elements
+            .iter()
+            .map(|literal| literal.as_i64().expect("expected i64 element"))
+            .collect::<Vec<_>>();
+        assert_eq!(as_i64, vec![2, 3, 4, 5]);
+    }
+
+    #[test]
     fn transform_order_is_explicit() {
         let good = dispatch(DispatchRequest {
             mode: CompatibilityMode::Strict,
@@ -491,6 +533,49 @@ mod tests {
                 super::TransformExecutionError::NonScalarGradientInput
             )
         ));
+    }
+
+    #[test]
+    fn strict_mode_rejects_unknown_features_fail_closed() {
+        let err = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Add2, &[Transform::Jit]),
+            args: vec![Value::scalar_i64(2), Value::scalar_i64(4)],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec!["future.backend.protocol.v2".to_owned()],
+        })
+        .expect_err("strict mode must reject unknown incompatible features");
+
+        match err {
+            DispatchError::Cache(fj_cache::CacheKeyError::UnknownIncompatibleFeatures {
+                features,
+            }) => {
+                assert_eq!(features, vec!["future.backend.protocol.v2".to_owned()]);
+            }
+            other => {
+                panic!("expected fail-closed cache-key rejection, got: {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hardened_mode_allowlists_unknown_features_for_auditable_progress() {
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Hardened,
+            ledger: ledger(ProgramSpec::Add2, &[Transform::Jit]),
+            args: vec![Value::scalar_i64(2), Value::scalar_i64(4)],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec!["future.backend.protocol.v2".to_owned()],
+        })
+        .expect("hardened mode should permit allowlisted unknown features");
+
+        assert_eq!(response.outputs, vec![Value::scalar_i64(6)]);
+        assert!(response.cache_key.starts_with("fjx-"));
+        assert_eq!(response.evidence_ledger.len(), 1);
     }
 
     #[test]

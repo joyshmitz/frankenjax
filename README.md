@@ -67,6 +67,50 @@ Notes:
 - strict legacy capture requires compatible `jax` + `jaxlib`
 - when unavailable, script falls back to deterministic analytical capture unless `--strict` is set
 
+## E2E Orchestration
+
+Run all discovered E2E scenarios:
+
+```bash
+./scripts/run_e2e.sh
+```
+
+Run one packet:
+
+```bash
+./scripts/run_e2e.sh --packet P2C-001
+```
+
+Run one scenario:
+
+```bash
+./scripts/run_e2e.sh --scenario e2e_p2c001_full_dispatch_pipeline
+```
+
+Each scenario emits a forensic log at `artifacts/e2e/<scenario>.e2e.json` with replay command, input capture, intermediate states, output capture, and timing.
+
+## Reliability Gates
+
+Budgets are defined in `artifacts/ci/reliability_budgets.v1.json`.
+
+Run full reliability gates (coverage + flake + runtime):
+
+```bash
+./scripts/enforce_quality_gates.sh
+```
+
+Run targeted gates during local iteration:
+
+```bash
+./scripts/enforce_quality_gates.sh --skip-coverage --flake-runs 3
+```
+
+Flake detector standalone:
+
+```bash
+./scripts/detect_flakes.sh --runs 10
+```
+
 ## Durability Commands
 
 Generate sidecar only:

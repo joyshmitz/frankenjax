@@ -43,6 +43,10 @@ class Case:
     expected: list[dict[str, Any]]
     atol: float
     rtol: float
+    comparator: str = "approx_atol_rtol"
+    baseline_mismatch: bool = False
+    flaky: bool = False
+    simulated_delay_ms: int = 0
 
 
 def fixture_value(value: Any) -> dict[str, Any]:
@@ -78,6 +82,35 @@ def fixture_value(value: Any) -> dict[str, Any]:
         ) from err
 
 
+def _scalar_samples() -> list[float]:
+    return [-3.0, -1.0, -0.5, 0.0, 0.5, 1.0]
+
+
+def _int_add_pairs() -> list[tuple[int, int]]:
+    return [(2, 5), (-3, 7), (0, 0), (11, -4), (42, -7), (8, 8), (15, 6), (-12, -9)]
+
+
+def _dot_vectors() -> list[tuple[list[int], list[int]]]:
+    return [
+        ([1, 2, 3], [4, 5, 6]),
+        ([2, 0, -1], [3, 7, 2]),
+        ([9, 9, 9], [1, 0, -1]),
+        ([-2, -3, -4], [5, 6, 7]),
+    ]
+
+
+def _reduce_vectors() -> list[list[int]]:
+    return [[1, 2, 3], [10, -2, 4], [0, 0, 0], [-5, 9, 2]]
+
+
+def _vmap_vectors_i64() -> list[list[int]]:
+    return [[1, 2, 3], [3, 4, 5], [10, 20, 30]]
+
+
+def _vmap_vectors_f64() -> list[list[float]]:
+    return [[1.0, 2.0, 3.0], [-1.5, 0.0, 1.5], [0.25, 0.5, 0.75]]
+
+
 def build_cases_with_oracle(jax, jnp) -> list[Case]:
     def add2(x, y):
         return x + y
@@ -91,191 +124,442 @@ def build_cases_with_oracle(jax, jnp) -> list[Case]:
     def add_one(x):
         return x + 1
 
-    return [
-        Case(
-            case_id="jit_add_scalar",
-            family="jit",
-            mode="strict",
-            program="add2",
-            transforms=["jit"],
-            args=[fixture_value(2), fixture_value(5)],
-            expected=[fixture_value(jax.jit(add2)(2, 5))],
+    def sin_x(x):
+        return jnp.sin(x)
+
+    def cos_x(x):
+        return jnp.cos(x)
+
+    def dot3(x, y):
+        return jnp.dot(x, y)
+
+    def reduce_sum_vec(x):
+        return jnp.sum(x)
+
+    jit_add2 = jax.jit(add2)
+    jit_square = jax.jit(square)
+    jit_square_plus_linear = jax.jit(square_plus_linear)
+    jit_sin = jax.jit(sin_x)
+    jit_cos = jax.jit(cos_x)
+    jit_dot3 = jax.jit(dot3)
+    jit_reduce_sum = jax.jit(reduce_sum_vec)
+    grad_square = jax.grad(square)
+    grad_square_plus_linear = jax.grad(square_plus_linear)
+    grad_sin = jax.grad(sin_x)
+    grad_cos = jax.grad(cos_x)
+    vmap_add_one = jax.vmap(add_one)
+    vmap_grad_square = jax.vmap(grad_square)
+    vmap_sin = jax.vmap(sin_x)
+    jit_vmap_add_one = jax.jit(vmap_add_one)
+
+    cases: list[Case] = []
+
+    def add_case(
+        case_id: str,
+        family: str,
+        program: str,
+        transforms: list[str],
+        args: list[Any],
+        expected: list[Any],
+        *,
+        atol: float,
+        rtol: float,
+        comparator: str = "approx_atol_rtol",
+    ) -> None:
+        cases.append(
+            Case(
+                case_id=case_id,
+                family=family,
+                mode="strict",
+                program=program,
+                transforms=transforms,
+                args=[fixture_value(arg) for arg in args],
+                expected=[fixture_value(item) for item in expected],
+                atol=atol,
+                rtol=rtol,
+                comparator=comparator,
+            )
+        )
+
+    for idx, (lhs, rhs) in enumerate(_int_add_pairs()):
+        add_case(
+            f"jit_add2_i64_{idx}",
+            "jit",
+            "add2",
+            ["jit"],
+            [lhs, rhs],
+            [jit_add2(lhs, rhs)],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+
+    for idx, x in enumerate(_scalar_samples()):
+        add_case(
+            f"jit_square_f64_{idx}",
+            "jit",
+            "square",
+            ["jit"],
+            [x],
+            [jit_square(x)],
             atol=1e-6,
             rtol=1e-6,
-        ),
-        Case(
-            case_id="grad_square_scalar",
-            family="grad",
-            mode="strict",
-            program="square",
-            transforms=["grad"],
-            args=[fixture_value(3.0)],
-            expected=[fixture_value(jax.grad(square)(3.0))],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="grad_square_plus_linear_scalar",
-            family="grad",
-            mode="strict",
-            program="square_plus_linear",
-            transforms=["grad"],
-            args=[fixture_value(3.0)],
-            expected=[fixture_value(jax.grad(square_plus_linear)(3.0))],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="vmap_add_one_vector",
-            family="vmap",
-            mode="strict",
-            program="add_one",
-            transforms=["vmap"],
-            args=[fixture_value(jnp.array([1, 2, 3]))],
-            expected=[fixture_value(jax.vmap(add_one)(jnp.array([1, 2, 3])))],
+        )
+        add_case(
+            f"jit_square_plus_linear_f64_{idx}",
+            "jit",
+            "square_plus_linear",
+            ["jit"],
+            [x],
+            [jit_square_plus_linear(x)],
             atol=1e-6,
             rtol=1e-6,
-        ),
-        Case(
-            case_id="vmap_grad_square_vector",
-            family="vmap",
-            mode="strict",
-            program="square",
-            transforms=["vmap", "grad"],
-            args=[fixture_value(jnp.array([1.0, 2.0, 3.0]))],
-            expected=[
-                fixture_value(jax.vmap(jax.grad(square))(jnp.array([1.0, 2.0, 3.0])))
-            ],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="jit_grad_square_plus_linear",
-            family="jit",
-            mode="strict",
-            program="square_plus_linear",
-            transforms=["jit", "grad"],
-            args=[fixture_value(3.0)],
-            expected=[fixture_value(jax.jit(jax.grad(square_plus_linear))(3.0))],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="grad_jit_square_plus_linear",
-            family="grad",
-            mode="strict",
-            program="square_plus_linear",
-            transforms=["grad", "jit"],
-            args=[fixture_value(3.0)],
-            expected=[fixture_value(jax.grad(jax.jit(square_plus_linear))(3.0))],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="jit_vmap_add_one_vector",
-            family="jit",
-            mode="strict",
-            program="add_one",
-            transforms=["jit", "vmap"],
-            args=[fixture_value(jnp.array([1, 2, 3]))],
-            expected=[fixture_value(jax.jit(jax.vmap(add_one))(jnp.array([1, 2, 3])))],
+        )
+        add_case(
+            f"jit_sin_x_f64_{idx}",
+            "jit",
+            "sin_x",
+            ["jit"],
+            [x],
+            [jit_sin(x)],
             atol=1e-6,
             rtol=1e-6,
-        ),
-    ]
+        )
+        add_case(
+            f"jit_cos_x_f64_{idx}",
+            "jit",
+            "cos_x",
+            ["jit"],
+            [x],
+            [jit_cos(x)],
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+    for idx, (lhs, rhs) in enumerate(_dot_vectors()):
+        lhs_arr = jnp.array(lhs)
+        rhs_arr = jnp.array(rhs)
+        add_case(
+            f"jit_dot3_i64_{idx}",
+            "jit",
+            "dot3",
+            ["jit"],
+            [lhs_arr, rhs_arr],
+            [jit_dot3(lhs_arr, rhs_arr)],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+
+    for idx, vec in enumerate(_reduce_vectors()):
+        arr = jnp.array(vec)
+        add_case(
+            f"jit_reduce_sum_vec_i64_{idx}",
+            "jit",
+            "reduce_sum_vec",
+            ["jit"],
+            [arr],
+            [jit_reduce_sum(arr)],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+
+    for idx, x in enumerate(_scalar_samples()[:4]):
+        add_case(
+            f"grad_square_f64_{idx}",
+            "grad",
+            "square",
+            ["grad"],
+            [x],
+            [grad_square(x)],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        add_case(
+            f"grad_square_plus_linear_f64_{idx}",
+            "grad",
+            "square_plus_linear",
+            ["grad"],
+            [x],
+            [grad_square_plus_linear(x)],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        add_case(
+            f"grad_sin_x_f64_{idx}",
+            "grad",
+            "sin_x",
+            ["grad"],
+            [x],
+            [grad_sin(x)],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        add_case(
+            f"grad_cos_x_f64_{idx}",
+            "grad",
+            "cos_x",
+            ["grad"],
+            [x],
+            [grad_cos(x)],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+
+    for idx, vec in enumerate(_vmap_vectors_i64()):
+        arr = jnp.array(vec)
+        add_case(
+            f"vmap_add_one_i64_{idx}",
+            "vmap",
+            "add_one",
+            ["vmap"],
+            [arr],
+            [vmap_add_one(arr)],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+        add_case(
+            f"jit_vmap_add_one_i64_{idx}",
+            "jit",
+            "add_one",
+            ["jit", "vmap"],
+            [arr],
+            [jit_vmap_add_one(arr)],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+
+    for idx, vec in enumerate(_vmap_vectors_f64()):
+        arr = jnp.array(vec)
+        add_case(
+            f"vmap_grad_square_f64_{idx}",
+            "vmap",
+            "square",
+            ["vmap", "grad"],
+            [arr],
+            [vmap_grad_square(arr)],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        add_case(
+            f"vmap_sin_x_f64_{idx}",
+            "vmap",
+            "sin_x",
+            ["vmap"],
+            [arr],
+            [vmap_sin(arr)],
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+    return cases
 
 
 def build_cases_fallback() -> list[Case]:
-    return [
-        Case(
-            case_id="jit_add_scalar",
-            family="jit",
-            mode="strict",
-            program="add2",
-            transforms=["jit"],
-            args=[fixture_value(2), fixture_value(5)],
-            expected=[fixture_value(7)],
+    import math
+
+    cases: list[Case] = []
+
+    def add_case(
+        case_id: str,
+        family: str,
+        program: str,
+        transforms: list[str],
+        args: list[Any],
+        expected: list[Any],
+        *,
+        atol: float,
+        rtol: float,
+        comparator: str = "approx_atol_rtol",
+    ) -> None:
+        cases.append(
+            Case(
+                case_id=case_id,
+                family=family,
+                mode="strict",
+                program=program,
+                transforms=transforms,
+                args=[fixture_value(arg) for arg in args],
+                expected=[fixture_value(item) for item in expected],
+                atol=atol,
+                rtol=rtol,
+                comparator=comparator,
+            )
+        )
+
+    for idx, (lhs, rhs) in enumerate(_int_add_pairs()):
+        add_case(
+            f"jit_add2_i64_{idx}",
+            "jit",
+            "add2",
+            ["jit"],
+            [lhs, rhs],
+            [lhs + rhs],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+
+    for idx, x in enumerate(_scalar_samples()):
+        add_case(
+            f"jit_square_f64_{idx}",
+            "jit",
+            "square",
+            ["jit"],
+            [x],
+            [x * x],
             atol=1e-6,
             rtol=1e-6,
-        ),
-        Case(
-            case_id="grad_square_scalar",
-            family="grad",
-            mode="strict",
-            program="square",
-            transforms=["grad"],
-            args=[fixture_value(3.0)],
-            expected=[fixture_value(6.0)],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="grad_square_plus_linear_scalar",
-            family="grad",
-            mode="strict",
-            program="square_plus_linear",
-            transforms=["grad"],
-            args=[fixture_value(3.0)],
-            expected=[fixture_value(8.0)],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="vmap_add_one_vector",
-            family="vmap",
-            mode="strict",
-            program="add_one",
-            transforms=["vmap"],
-            args=[fixture_value([1, 2, 3])],
-            expected=[fixture_value([2, 3, 4])],
+        )
+        add_case(
+            f"jit_square_plus_linear_f64_{idx}",
+            "jit",
+            "square_plus_linear",
+            ["jit"],
+            [x],
+            [x * x + 2.0 * x],
             atol=1e-6,
             rtol=1e-6,
-        ),
-        Case(
-            case_id="vmap_grad_square_vector",
-            family="vmap",
-            mode="strict",
-            program="square",
-            transforms=["vmap", "grad"],
-            args=[fixture_value([1.0, 2.0, 3.0])],
-            expected=[fixture_value([2.0, 4.0, 6.0])],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="jit_grad_square_plus_linear",
-            family="jit",
-            mode="strict",
-            program="square_plus_linear",
-            transforms=["jit", "grad"],
-            args=[fixture_value(3.0)],
-            expected=[fixture_value(8.0)],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="grad_jit_square_plus_linear",
-            family="grad",
-            mode="strict",
-            program="square_plus_linear",
-            transforms=["grad", "jit"],
-            args=[fixture_value(3.0)],
-            expected=[fixture_value(8.0)],
-            atol=1e-3,
-            rtol=1e-3,
-        ),
-        Case(
-            case_id="jit_vmap_add_one_vector",
-            family="jit",
-            mode="strict",
-            program="add_one",
-            transforms=["jit", "vmap"],
-            args=[fixture_value([1, 2, 3])],
-            expected=[fixture_value([2, 3, 4])],
+        )
+        add_case(
+            f"jit_sin_x_f64_{idx}",
+            "jit",
+            "sin_x",
+            ["jit"],
+            [x],
+            [math.sin(x)],
             atol=1e-6,
             rtol=1e-6,
-        ),
-    ]
+        )
+        add_case(
+            f"jit_cos_x_f64_{idx}",
+            "jit",
+            "cos_x",
+            ["jit"],
+            [x],
+            [math.cos(x)],
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+    for idx, (lhs, rhs) in enumerate(_dot_vectors()):
+        add_case(
+            f"jit_dot3_i64_{idx}",
+            "jit",
+            "dot3",
+            ["jit"],
+            [lhs, rhs],
+            [sum(a * b for a, b in zip(lhs, rhs))],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+
+    for idx, vec in enumerate(_reduce_vectors()):
+        add_case(
+            f"jit_reduce_sum_vec_i64_{idx}",
+            "jit",
+            "reduce_sum_vec",
+            ["jit"],
+            [vec],
+            [sum(vec)],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+
+    for idx, x in enumerate(_scalar_samples()[:4]):
+        add_case(
+            f"grad_square_f64_{idx}",
+            "grad",
+            "square",
+            ["grad"],
+            [x],
+            [2.0 * x],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        add_case(
+            f"grad_square_plus_linear_f64_{idx}",
+            "grad",
+            "square_plus_linear",
+            ["grad"],
+            [x],
+            [2.0 * x + 2.0],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        add_case(
+            f"grad_sin_x_f64_{idx}",
+            "grad",
+            "sin_x",
+            ["grad"],
+            [x],
+            [math.cos(x)],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        add_case(
+            f"grad_cos_x_f64_{idx}",
+            "grad",
+            "cos_x",
+            ["grad"],
+            [x],
+            [-math.sin(x)],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+
+    for idx, vec in enumerate(_vmap_vectors_i64()):
+        add_case(
+            f"vmap_add_one_i64_{idx}",
+            "vmap",
+            "add_one",
+            ["vmap"],
+            [vec],
+            [[value + 1 for value in vec]],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+        add_case(
+            f"jit_vmap_add_one_i64_{idx}",
+            "jit",
+            "add_one",
+            ["jit", "vmap"],
+            [vec],
+            [[value + 1 for value in vec]],
+            atol=0.0,
+            rtol=0.0,
+            comparator="exact",
+        )
+
+    for idx, vec in enumerate(_vmap_vectors_f64()):
+        add_case(
+            f"vmap_grad_square_f64_{idx}",
+            "vmap",
+            "square",
+            ["vmap", "grad"],
+            [vec],
+            [[2.0 * value for value in vec]],
+            atol=1e-3,
+            rtol=1e-3,
+        )
+        add_case(
+            f"vmap_sin_x_f64_{idx}",
+            "vmap",
+            "sin_x",
+            ["vmap"],
+            [vec],
+            [[math.sin(value) for value in vec]],
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+    return cases
 
 
 def parse_args() -> argparse.Namespace:
@@ -335,6 +619,10 @@ def main() -> int:
                 "mode": case.mode,
                 "program": case.program,
                 "transforms": case.transforms,
+                "comparator": case.comparator,
+                "baseline_mismatch": case.baseline_mismatch,
+                "flaky": case.flaky,
+                "simulated_delay_ms": case.simulated_delay_ms,
                 "args": case.args,
                 "expected": case.expected,
                 "atol": case.atol,

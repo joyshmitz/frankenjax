@@ -1,0 +1,329 @@
+{
+  "schema_version": "frankenjax.contract-table.v1",
+  "packet_id": "FJ-P2C-001",
+  "generated_at_unix_ms": 1771089509000,
+  "mode_matrix": [
+    {
+      "mode": "strict",
+      "contract_rows": [
+        {
+          "row_id": "p2c001.strict.inv001",
+          "title": "Equation inputs must resolve to bound variables",
+          "preconditions": [
+            "Jaxpr contains equation input atoms referencing variable IDs"
+          ],
+          "guarantees": [
+            "Each input var is present in invars/constvars or produced by a prior equation",
+            "Unbound variables fail closed before successful evaluation",
+            "legacy_anchor=jax/jax/_src/core.py:3251"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "var_input_unbound"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "var_id"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c001.strict.inv002",
+          "title": "Equation outputs cannot shadow existing variables",
+          "preconditions": [
+            "Equation emits output variables"
+          ],
+          "guarantees": [
+            "Output var IDs remain unique within Jaxpr scope",
+            "Shadowing attempts fail closed",
+            "legacy_anchor=jax/jax/_src/core.py:3251"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "var_output_shadow"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "var_id"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c001.strict.inv003",
+          "title": "Jaxpr outvars must be derivable from program body",
+          "preconditions": [
+            "Jaxpr declares output vars"
+          ],
+          "guarantees": [
+            "Each outvar resolves to an invar/constvar/equation output",
+            "Invalid outvar references fail closed",
+            "legacy_anchor=jax/jax/_src/core.py:3251"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "outvar_unresolved"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "outvar"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c001.strict.inv004",
+          "title": "Canonical IR fingerprint determinism",
+          "preconditions": [
+            "Equivalent Jaxpr inputs provided to fingerprint routine"
+          ],
+          "guarantees": [
+            "Equivalent Jaxpr values produce identical canonical fingerprint strings",
+            "Fingerprint mismatch fails closed for contract validation",
+            "legacy_anchor=jax/jax/_src/core.py:96"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "fingerprint_nondeterministic"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "fingerprint"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c001.strict.inv005",
+          "title": "Composition-signature hash stability",
+          "preconditions": [
+            "Equivalent transform stacks and evidence vectors provided"
+          ],
+          "guarantees": [
+            "Composition signature and derived hash are stable across restarts",
+            "Stack hash mismatch fails closed",
+            "legacy_anchor=jax/jax/_src/core.py:3763"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "stack_hash_nondeterministic"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "stack_hash"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c001.strict.inv006",
+          "title": "Transform composition cardinality and evidence alignment",
+          "preconditions": [
+            "Transform stack exists in TTL"
+          ],
+          "guarantees": [
+            "At most one Grad and one Vmap",
+            "Evidence count equals transform count",
+            "Invalid stacks fail closed before dispatch",
+            "legacy_anchor=jax/jax/_src/interpreters/partial_eval.py:2465"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "transform_composition_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "transform_depth"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        }
+      ]
+    },
+    {
+      "mode": "hardened",
+      "contract_rows": [
+        {
+          "row_id": "p2c001.hardened.inv007",
+          "title": "Malformed variable references are handled via explicit allowlisted repair",
+          "preconditions": [
+            "Malformed variable references detected at packet boundary"
+          ],
+          "guarantees": [
+            "Repair path emits deterministic audit entry",
+            "No panic pathway",
+            "legacy_anchor=jax/jax/_src/core.py:3251"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_var_ref_repair"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "repair_path"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c001.hardened.inv008",
+          "title": "Empty Jaxpr handling",
+          "preconditions": [
+            "Jaxpr has zero equations and zero outputs"
+          ],
+          "guarantees": [
+            "Request remains deterministic",
+            "Operational warning emitted",
+            "legacy_anchor=jax/jax/_src/core.py:96"
+          ],
+          "failure_behavior": {
+            "policy": "warn_and_continue",
+            "reason_code": "hardened_empty_jaxpr"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "eqn_count"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c001.hardened.inv009",
+          "title": "Large equation-count pressure guard",
+          "preconditions": [
+            "Jaxpr equation count exceeds threshold"
+          ],
+          "guarantees": [
+            "Deterministic warning path with no semantic rewrite",
+            "Execution continues under bounded guard policy",
+            "legacy_anchor=jax/jax/_src/core.py:729"
+          ],
+          "failure_behavior": {
+            "policy": "warn_and_continue",
+            "reason_code": "hardened_eqn_count_pressure"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "eqn_count"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    }
+  ],
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "allowlisted_repair"
+  },
+  "invariants": [
+    {
+      "invariant_id": "p2c001.strict.inv001",
+      "statement": "Equation inputs resolve only to previously bound variables.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-001/contract_table_support.md",
+        "crates/fj-interpreters/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c001.strict.inv002",
+      "statement": "Equation outputs do not shadow existing variable identifiers.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-001/contract_table_support.md",
+        "artifacts/phase2c/FJ-P2C-001/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c001.strict.inv003",
+      "statement": "Outvars remain derivable from input/const/equation-defined values.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-001/contract_table_support.md",
+        "crates/fj-interpreters/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c001.strict.inv004",
+      "statement": "Canonical fingerprinting is deterministic for equivalent Jaxpr values.",
+      "proof_artifact_refs": [
+        "crates/fj-core/src/proptest_strategies.rs",
+        "artifacts/phase2c/FJ-P2C-001/legacy_anchor_map.v1.json"
+      ]
+    },
+    {
+      "invariant_id": "p2c001.strict.inv005",
+      "statement": "Transform composition signature hash is stable across executions.",
+      "proof_artifact_refs": [
+        "crates/fj-core/src/proptest_strategies.rs",
+        "artifacts/phase2c/FJ-P2C-001/contract_table_support.md"
+      ]
+    },
+    {
+      "invariant_id": "p2c001.strict.inv006",
+      "statement": "Transform stack cardinality and evidence alignment are enforced before execution.",
+      "proof_artifact_refs": [
+        "crates/fj-core/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c001.hardened.inv007",
+      "statement": "Malformed var references follow explicit allowlisted repair policy in hardened mode.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-001/contract_table_support.md",
+        "artifacts/phase2c/FJ-P2C-FOUNDATION/security_threat_matrix.md"
+      ]
+    },
+    {
+      "invariant_id": "p2c001.hardened.inv008",
+      "statement": "Empty Jaxpr pathways are deterministic and auditable under hardened mode.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-001/contract_table_support.md"
+      ]
+    },
+    {
+      "invariant_id": "p2c001.hardened.inv009",
+      "statement": "Large equation-count pathways emit deterministic warnings while preserving semantics.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-001/contract_table_support.md",
+        "artifacts/performance/dispatch_baseline_2026-02-13.md"
+      ]
+    }
+  ]
+}

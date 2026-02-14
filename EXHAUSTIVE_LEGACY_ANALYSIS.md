@@ -2,6 +2,7 @@
 
 Date: 2026-02-13  
 Method stack: `$porting-to-rust` Phase-2 Deep Extraction + `$alien-artifact-coding` + `$extreme-software-optimization` + RaptorQ durability + frankenlibc/frankenfs strict/hardened doctrine.
+DOC-PASS-00 baseline matrix: `artifacts/docs/bd-3dl.23.1_gap_matrix.v1.md`
 
 ## 0. Mission and Completion Criteria
 
@@ -90,6 +91,12 @@ Decision law (runtime):
 | backend confusion | fail unknown backend/protocol | fail unknown backend/protocol | backend decision ledger |
 | callback lifetime hazard | fail invalid lifecycle state | quarantine and fail with trace | ffi lifecycle report |
 | unknown incompatible runtime metadata | fail-closed | fail-closed | compatibility drift report |
+
+Source-anchored foundation artifacts for this doctrine:
+- `artifacts/phase2c/FJ-P2C-FOUNDATION/security_threat_matrix.md`
+- `artifacts/phase2c/FJ-P2C-FOUNDATION/fail_closed_audit.md`
+- `artifacts/phase2c/global/compatibility_matrix.v1.json`
+- `artifacts/phase2c/FJ-P2C-FOUNDATION/risk_note.v1.json`
 
 ## 7. Conformance Program (Exhaustive First Wave)
 
@@ -275,3 +282,106 @@ Phase-2C is complete only when:
 4. High-risk packets include optimization proof artifacts.
 5. RaptorQ sidecars + decode proofs are scrub-clean.
 6. Governance backfill tasks are explicitly tied to packet outputs.
+
+## 18. Data Model, State, and Invariant Mapping (DOC-PASS-03)
+
+### 18.1 Canonical Data Model Inventory
+
+| Model entity | Primary owner | Core state fields | Non-negotiable invariants | Violation handling |
+|---|---|---|---|---|
+| Trace graph (`Trace`/`Tracer`/`Jaxpr`) | legacy: `jax/_src/core.py`; Rust: `fj-core` | var ids, equations, in/out vars, transform stack | every referenced var is defined; outputs do not shadow prior vars; canonical fingerprint determinism | strict: fail-closed with typed error; hardened: emit ledger event + bounded recovery only where contract allows |
+| Transform composition proof (`jit`/`grad`/`vmap`) | legacy: interpreter stack; Rust: `fj-core` + `fj-dispatch` | ordered transform vector, per-transform evidence | supported sequence only; evidence count equals transform count; composition signature stable | strict: reject unsupported composition; hardened: allow only documented bounded fallback and log divergence |
+| Cache identity (`cache_key`) | legacy: `cache_key.py`; Rust: `fj-cache` | backend id/version, compile options, flags, accelerator config, hooks | semantically equivalent inputs hash consistently; unknown incompatible metadata is not silently accepted in strict mode | strict: fail-closed on unknown incompatible metadata; hardened: explicit compatibility event + allowlisted continuation |
+| Dispatch request/response envelope | legacy: `dispatch.py`; Rust: `fj-dispatch` | mode, backend, transforms, args, options, unknown feature list | transform order preserved; request immutability during execution; response deterministic for deterministic inputs | strict: surface deterministic error; hardened: bounded fallback paths with audit signal |
+| Evidence/decision ledger | legacy analog spread across runtime policies; Rust: `fj-ledger` | evidence signals, posterior, loss matrix, action record | append-only ordering; calibrated posterior computation; decision traceability | strict/hardened: never drop records; always emit deterministic decision metadata |
+| Durability sidecar artifacts | legacy N/A (new contract); Rust: `fj-conformance::durability` | symbol manifest, source hash, scrub/proof reports | scrub hash equals source hash; decode proof succeeds for configured symbol loss | strict/hardened: decode-proof failure is release blocker (no silent bypass) |
+
+### 18.2 Critical State Transitions
+
+| Subsystem | States | Valid transitions | Invalid transition example | Required recovery/audit output |
+|---|---|---|---|---|
+| Trace/Jaxpr construction | `Init -> CollectEq -> SealOutvars -> Fingerprint` | monotonic equation append, then seal, then fingerprint | fingerprint before outvar seal | emit invariant failure with offending var/equation and stop in strict mode |
+| Transform execution stack | `Request -> Verify -> Apply(jit/grad/vmap)* -> Eval -> Return` | each transform consumes one stack entry in declared order | skipping verify and executing transforms directly | write transform-order incident to ledger; fail closed in strict mode |
+| Cache lifecycle | `CanonicalizeInput -> Hash -> Lookup -> Hit|Miss -> (Compile -> Write)` | read-before-write and deterministic key generation | write cache entry without canonical key | cache-integrity incident + block write path |
+| Runtime admission | `CollectEvidence -> PosteriorEstimate -> RecommendAction -> Keep|Kill|Reprofile` | decision derived from current posterior and loss matrix | emitting action without posterior/evidence update | log policy inconsistency and deny unsafe action |
+| Durability pipeline | `GenerateSidecar -> Scrub -> DecodeProof -> Gate` | scrub and proof must bind to same artifact hash | proof generated against stale sidecar | mark artifact invalid and block release path |
+
+### 18.3 Invariant Violation and Recovery Semantics
+
+| Invariant band | Detector | Strict mode behavior | Hardened mode behavior | Evidence artifact |
+|---|---|---|---|---|
+| Trace/Jaxpr shape or var integrity | IR validator + interpreter checks | immediate fail-closed | bounded diagnostic + fail-closed unless explicitly allowlisted | parity report + risk note |
+| Transform composition mismatch | composition proof verifier | reject request | bounded fallback only if contractually defined; always log | transform drift summary |
+| Cache metadata incompatibility | cache-key compatibility gate | reject key generation | allow only audited compatibility path with explicit event | compatibility matrix row + ledger event |
+| Dispatch/order anomaly | dispatch invariant checks | stop execution | stop or bounded fallback with mandatory audit trace | decision/evidence ledger |
+| Artifact durability mismatch | scrub/proof verifier | block release | block release | sidecar/scrub/decode-proof triplet |
+
+## 19. Execution-Path Tracing and Control-Flow Narratives (DOC-PASS-04)
+
+### 19.1 End-to-End Path E1: Request -> Trace -> Transform -> Runtime
+
+Nominal path:
+
+1. API layer receives transformed program intent (`jit`/`grad`/`vmap` family).
+2. Trace/Jaxpr model is built and normalized into canonical IR.
+3. Transform composition proof is validated before execution.
+4. Compatibility-gated cache key is derived.
+5. Dispatch applies transform wrappers in stack order.
+6. Interpreter evaluates residual IR path and returns outputs.
+7. Evidence ledger and runtime admission model emit decision metadata.
+
+Mandatory branch handling:
+
+| Branch | Trigger | Strict mode | Hardened mode |
+|---|---|---|---|
+| transform-order branch | unsupported sequence / evidence count mismatch | fail-closed before execution | bounded fallback only if contract allows + audit record |
+| cache-compat branch | unknown incompatible metadata | fail-closed key path | compatibility event + bounded continuation |
+| interpreter-integrity branch | malformed var/shape/graph refs | deterministic error and stop | deterministic error and stop (with additional diagnostics) |
+| policy branch | low-confidence admission posterior | choose conservative action (`Kill`/`Reprofile`) | same action with richer policy trace |
+
+### 19.2 End-to-End Path E2: Cache Hit/Miss and Compilation Decisioning
+
+1. Canonical key material assembled.
+2. Lookup branch:
+   - hit: short-circuit execution path.
+   - miss: full evaluation/compile path.
+3. Miss branch completes with guarded cache write.
+
+Safety-critical side branches:
+- stale/corrupt cache read -> bypass and record integrity incident.
+- unstable/untrusted key input -> refuse write to persistent cache.
+- backend mismatch -> fail-closed (no speculative reroute).
+
+### 19.3 End-to-End Path E3: Differential Conformance Pipeline
+
+1. Fixture corpus loaded by family and mode.
+2. Cases executed through dispatch path.
+3. Comparator branch classifies output (`exact`/`approx`/`shape`/`type`).
+4. Drift report emitted with strict/hardened split.
+5. Failure branch emits replayable forensic bundle.
+
+Non-negotiable branch law:
+- comparator mismatch may never be downgraded silently,
+- strict critical drift budget remains zero,
+- hardened divergence must be allowlisted and auditable.
+
+### 19.4 End-to-End Path E4: Durability Scrub/Proof Gate
+
+1. Generate sidecar repair symbols.
+2. Scrub integrity against source hash.
+3. Execute decode proof under configured symbol loss.
+4. Gate release on pass/pass outcome.
+
+Failure choreography:
+- scrub mismatch -> invalidate artifact, block release.
+- decode-proof failure -> block release and require regenerated evidence.
+- stale sidecar/proof pairing -> fail-closed until artifact tuple is re-bound.
+
+### 19.5 Verification Crosswalk
+
+Execution-path sections in this document are explicitly tied to:
+- `bd-3dl.12.5` (unit/property + logging coverage),
+- `bd-3dl.12.6` (differential/metamorphic/adversarial checks),
+- `bd-3dl.12.7` (E2E replay/forensics),
+- `bd-3dl.23.10` (docs-to-test/logging crosswalk),
+- `bd-3dl.23.11` and `bd-3dl.23.12` (integrated draft passes).

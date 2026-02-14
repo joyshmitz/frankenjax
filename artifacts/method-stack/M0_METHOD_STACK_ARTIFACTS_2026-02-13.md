@@ -8,6 +8,11 @@ Produced:
 - Evidence signal schema and ledger records in `crates/fj-ledger/src/lib.rs`.
 - Dispatch-generated evidence entries including transform-stack proof signal in `crates/fj-dispatch/src/lib.rs`.
 - Transform composition proof checker in `crates/fj-core/src/lib.rs`.
+- Essence extraction ledger + legacy anchor map artifacts:
+  - `artifacts/phase2c/FJ-P2C-FOUNDATION/essence_extraction_ledger.md`
+  - `artifacts/phase2c/FJ-P2C-FOUNDATION/legacy_anchor_map.v1.json`
+  - `artifacts/phase2c/FJ-P2C-001/behavior_extraction_ledger.md`
+  - `artifacts/phase2c/FJ-P2C-001/legacy_anchor_map.v1.json`
 
 Deferred:
 
@@ -49,6 +54,14 @@ Produced:
 - Strict/hardened mode contract in specs.
 - Strict-mode fail-closed unknown-feature handling in `crates/fj-cache/src/lib.rs`.
 - Transform sequence fail-closed checks for unsupported stacks in `crates/fj-core/src/lib.rs`.
+- Foundation threat matrix + compatibility envelope artifact:
+  - `artifacts/phase2c/FJ-P2C-FOUNDATION/security_threat_matrix.md`
+  - `artifacts/phase2c/global/compatibility_matrix.v1.json`
+- Fail-closed audit artifact:
+  - `artifacts/phase2c/FJ-P2C-FOUNDATION/fail_closed_audit.md`
+- Foundation risk record:
+  - `artifacts/phase2c/FJ-P2C-FOUNDATION/risk_note.v1.json`
+- Dispatch-level strict/hardened unknown-feature path tests in `crates/fj-dispatch/src/lib.rs`.
 
 Deferred:
 

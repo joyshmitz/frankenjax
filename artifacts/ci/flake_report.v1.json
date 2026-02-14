@@ -1,0 +1,20 @@
+{
+  "schema_version": "frankenjax.flake-report.v1",
+  "generated_at_unix_ms": 1771095983216,
+  "command": "cargo test --workspace --quiet",
+  "runs_requested": 1,
+  "pass_runs": 1,
+  "fail_runs": 0,
+  "suite_flake_rate": 0.000000,
+  "flaky_detected": false,
+  "log_dir": "/data/projects/frankenjax/artifacts/ci/flake-runs",
+  "runs": [
+    {
+      "run_index": null,
+      "status": null,
+      "exit_code": null,
+      "duration_ms": null,
+      "log_path": null
+    }
+  ]
+}

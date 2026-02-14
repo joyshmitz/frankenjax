@@ -82,6 +82,16 @@ pub fn eval_primitive(primitive: Primitive, inputs: &[Value]) -> Result<Value, E
         Primitive::Sin => eval_unary_elementwise(primitive, inputs, f64::sin),
         Primitive::Cos => eval_unary_elementwise(primitive, inputs, f64::cos),
         Primitive::ReduceSum => eval_reduce_sum(inputs),
+        Primitive::Reshape
+        | Primitive::Slice
+        | Primitive::Gather
+        | Primitive::Scatter
+        | Primitive::Transpose
+        | Primitive::BroadcastInDim
+        | Primitive::Concatenate => Err(EvalError::Unsupported {
+            primitive,
+            detail: "runtime kernel not implemented yet for this primitive".to_owned(),
+        }),
     }
 }
 

@@ -632,6 +632,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "fj-trace"
+version = "0.1.0"
+dependencies = [
+ "fj-core",
+ "smallvec",
+]
+
+[[package]]
 name = "fluent-uri"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

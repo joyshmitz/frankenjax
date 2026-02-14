@@ -1,0 +1,130 @@
+{
+  "schema_version": "frankenjax.legacy-anchor-map.v1",
+  "packet_id": "FJ-P2C-001",
+  "generated_at_unix_ms": 1771089391000,
+  "generated_by": "CobaltMountain",
+  "legacy_oracle_root": "/data/projects/frankenjax/legacy_jax_code/jax",
+  "anchors": [
+    {
+      "anchor_id": "p2c001.core.jaxpr",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "Jaxpr",
+      "behavior_summary": "Core IR object defines const/input/output vars, equations, effects, and debug metadata for transformed programs.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 96,
+        "end": 214
+      },
+      "confidence": "high",
+      "notes": "Mapped to `fj-core` Jaxpr model and deterministic fingerprint semantics."
+    },
+    {
+      "anchor_id": "p2c001.core.closed_jaxpr",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "ClosedJaxpr",
+      "behavior_summary": "Closed wrapper preserves jaxpr + const payload contract for executable graphs.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 245,
+        "end": 321
+      },
+      "confidence": "high",
+      "notes": "Rust parity is partial; equivalent public type is not fully implemented yet."
+    },
+    {
+      "anchor_id": "p2c001.core.new_jaxpr_eqn",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "new_jaxpr_eqn",
+      "behavior_summary": "Equation constructor validates var classes and stamps source/context metadata.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 475,
+        "end": 485
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "p2c001.core.eval_jaxpr",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "eval_jaxpr",
+      "behavior_summary": "Sequential equation evaluation with typed env reads/writes and primitive binds.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 729,
+        "end": 791
+      },
+      "confidence": "high",
+      "notes": "Mapped to `fj-interpreters::eval_jaxpr` behavior boundary for current packet scope."
+    },
+    {
+      "anchor_id": "p2c001.core.tracer",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "Tracer",
+      "behavior_summary": "Tracer boundary enforces abstract execution and concretization/error constraints for transformed values.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 910,
+        "end": 1052
+      },
+      "confidence": "high",
+      "notes": "Explicit gap: Rust tracer protocol not implemented yet."
+    },
+    {
+      "anchor_id": "p2c001.core.ensure_no_leaks",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "ensure_no_leaks",
+      "behavior_summary": "Trace lifecycle guard detects leaked tracers and fails when leak-check mode is enabled.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1482,
+        "end": 1512
+      },
+      "confidence": "high",
+      "notes": "No direct Rust equivalent yet; tracked as packet risk."
+    },
+    {
+      "anchor_id": "p2c001.partial_eval.trace_to_jaxpr_dynamic",
+      "legacy_path": "jax/jax/_src/interpreters/partial_eval.py",
+      "legacy_symbol": "trace_to_jaxpr_dynamic",
+      "behavior_summary": "Dynamic tracing path emits validated jaxpr with leak checks and optional DCE/lowering controls.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 2465,
+        "end": 2505
+      },
+      "confidence": "high",
+      "notes": "Staging parity is deferred to partial-eval packet work."
+    },
+    {
+      "anchor_id": "p2c001.core.check_jaxpr",
+      "legacy_path": "jax/jax/_src/core.py",
+      "legacy_symbol": "check_jaxpr",
+      "behavior_summary": "Well-formedness checker validates variable binding order, type compatibility, and effect-subset invariants.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 3251,
+        "end": 3418
+      },
+      "confidence": "high"
+    },
+    {
+      "anchor_id": "p2c001.tests.effects_subset",
+      "legacy_path": "jax/tests/jaxpr_effects_test.py",
+      "legacy_symbol": "test_jaxpr_typecheck_should_verify_eqn_effects_are_subset",
+      "behavior_summary": "Regression test proves invalid equation-effects subset must fail jaxpr typecheck.",
+      "evidence_kind": "test_case",
+      "lines": {
+        "start": 146,
+        "end": 159
+      },
+      "confidence": "high"
+    }
+  ],
+  "extraction_invariants": [
+    "IR construction must preserve variable-binding validity and deterministic equation ordering.",
+    "Transform composition evidence must remain deterministic and auditable.",
+    "Invalid transform stacks fail closed before execution.",
+    "Equation effects must be represented consistently with jaxpr-level effect declarations.",
+    "Tracer lifecycle leaks must remain a tracked correctness/safety constraint."
+  ]
+}

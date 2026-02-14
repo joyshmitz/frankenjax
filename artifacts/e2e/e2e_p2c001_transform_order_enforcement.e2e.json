@@ -1,0 +1,57 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_p2c001_transform_order_enforcement",
+  "test_id": "e2e::e2e_p2c001_transform_order_enforcement",
+  "packet_id": "P2C-001",
+  "fixture_id": "e89475aee31d7d8712020e0fe01a92ef2e858346f4978d99e15f3fcec2c28c95",
+  "seed": null,
+  "mode": "strict",
+  "ts_utc_unix_ms": 1771096046947,
+  "env": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_toolchain": "nightly-x86_64-unknown-linux-gnu"
+  },
+  "artifact_refs": [],
+  "replay_command": "cargo test -p fj-conformance --test e2e -- e2e_p2c001_transform_order_enforcement --exact --nocapture",
+  "input_capture": {
+    "bad_stack": [
+      "grad",
+      "vmap"
+    ],
+    "good_stack": [
+      "vmap",
+      "grad"
+    ],
+    "input_vector": [
+      1.0,
+      2.0,
+      3.0
+    ]
+  },
+  "intermediate_states": [
+    {
+      "outputs": [
+        2.0,
+        4.0,
+        6.0
+      ],
+      "step": "good_stack_executed"
+    },
+    {
+      "error": "NonScalarGradientInput",
+      "step": "bad_stack_rejected"
+    }
+  ],
+  "output_capture": {
+    "bad_stack_rejection": "NonScalarGradientInput",
+    "good_outputs": [
+      2.0,
+      4.0,
+      6.0
+    ]
+  },
+  "result": "pass",
+  "duration_ms": 0,
+  "details": null
+}

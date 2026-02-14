@@ -1,0 +1,83 @@
+{
+  "schema_version": "frankenjax.compatibility-matrix.v1",
+  "generated_at_unix_ms": 1771088770000,
+  "scoped_api_version": "v1",
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "allowlisted_repair"
+  },
+  "rows": [
+    {
+      "subsystem": "fj-cache",
+      "jax_behavior": "Unknown incompatible feature handling in cache-key generation",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guarded-recovery",
+      "drift_policy": "allowlisted-repair",
+      "tests": [
+        "crates/fj-cache/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ],
+      "notes": "Strict rejects unknown incompatible features fail-closed; hardened allows only allowlisted hashing behavior with deterministic keys."
+    },
+    {
+      "subsystem": "fj-core",
+      "jax_behavior": "Transform composition ordering and evidence-count invariants",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guaranteed",
+      "drift_policy": "fail-closed",
+      "tests": [
+        "crates/fj-core/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ],
+      "notes": "Unsupported transform stacks are rejected before execution."
+    },
+    {
+      "subsystem": "fj-dispatch",
+      "jax_behavior": "Dispatch execution for jit/grad/vmap with explicit runtime failure modes",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guaranteed",
+      "drift_policy": "fail-closed",
+      "tests": [
+        "crates/fj-dispatch/src/lib.rs",
+        "crates/fj-conformance/tests/transforms.rs"
+      ],
+      "notes": "Current hardened mode follows strict behavior except allowlisted cache-feature handling."
+    },
+    {
+      "subsystem": "fj-ledger",
+      "jax_behavior": "Deterministic audit records for strict/hardened decisions",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guaranteed",
+      "drift_policy": "fail-closed",
+      "tests": [
+        "crates/fj-ledger/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ],
+      "notes": "Audit logs are deterministic but not yet cryptographically signed."
+    },
+    {
+      "subsystem": "fj-conformance",
+      "jax_behavior": "Differential parity reports and drift classification for fixture bundles",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "out-of-scope",
+      "drift_policy": "explicit-non-goal",
+      "tests": [
+        "crates/fj-conformance/src/lib.rs",
+        "crates/fj-conformance/tests/transforms.rs"
+      ],
+      "notes": "Hardened-specific divergence categories are deferred to future packet work."
+    },
+    {
+      "subsystem": "fj-conformance-durability",
+      "jax_behavior": "RaptorQ sidecar generation, scrub, and decode-proof checks",
+      "strict_mode": "guaranteed",
+      "hardened_mode": "guaranteed",
+      "drift_policy": "fail-closed",
+      "tests": [
+        "crates/fj-conformance/src/durability.rs",
+        "crates/fj-conformance/src/bin/fj_durability.rs"
+      ],
+      "notes": "Nightly scrub automation across all artifact categories remains pending."
+    }
+  ]
+}

@@ -168,6 +168,13 @@ fn vjp(primitive: Primitive, inputs: &[Value], g: f64) -> Result<Vec<f64>, AdErr
             let b = to_f64(&inputs[1])?;
             Ok(vec![g * b, g * a])
         }
+        Primitive::Reshape
+        | Primitive::Slice
+        | Primitive::Gather
+        | Primitive::Scatter
+        | Primitive::Transpose
+        | Primitive::BroadcastInDim
+        | Primitive::Concatenate => Err(AdError::UnsupportedPrimitive(primitive)),
     }
 }
 

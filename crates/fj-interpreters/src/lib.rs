@@ -10,6 +10,10 @@ pub enum InterpreterError {
         expected: usize,
         actual: usize,
     },
+    ConstArity {
+        expected: usize,
+        actual: usize,
+    },
     MissingVariable(VarId),
     UnexpectedOutputArity {
         primitive: fj_core::Primitive,
@@ -25,6 +29,13 @@ impl std::fmt::Display for InterpreterError {
                 write!(
                     f,
                     "input arity mismatch: expected {}, got {}",
+                    expected, actual
+                )
+            }
+            Self::ConstArity { expected, actual } => {
+                write!(
+                    f,
+                    "const arity mismatch: expected {}, got {}",
                     expected, actual
                 )
             }
@@ -49,6 +60,21 @@ impl From<EvalError> for InterpreterError {
 }
 
 pub fn eval_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, InterpreterError> {
+    eval_jaxpr_with_consts(jaxpr, &[], args)
+}
+
+pub fn eval_jaxpr_with_consts(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Result<Vec<Value>, InterpreterError> {
+    if const_values.len() != jaxpr.constvars.len() {
+        return Err(InterpreterError::ConstArity {
+            expected: jaxpr.constvars.len(),
+            actual: const_values.len(),
+        });
+    }
+
     if args.len() != jaxpr.invars.len() {
         return Err(InterpreterError::InputArity {
             expected: jaxpr.invars.len(),
@@ -57,6 +83,10 @@ pub fn eval_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, Interpret
     }
 
     let mut env: FxHashMap<VarId, Value> = FxHashMap::default();
+    for (idx, var) in jaxpr.constvars.iter().enumerate() {
+        env.insert(*var, const_values[idx].clone());
+    }
+
     for (idx, var) in jaxpr.invars.iter().enumerate() {
         env.insert(*var, args[idx].clone());
     }
@@ -100,8 +130,10 @@ pub fn eval_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, Interpret
 
 #[cfg(test)]
 mod tests {
-    use super::{InterpreterError, eval_jaxpr};
-    use fj_core::{ProgramSpec, Value, build_program};
+    use super::{InterpreterError, eval_jaxpr, eval_jaxpr_with_consts};
+    use fj_core::{Atom, Equation, Jaxpr, Primitive, ProgramSpec, Value, VarId, build_program};
+    use smallvec::smallvec;
+    use std::collections::BTreeMap;
 
     #[test]
     fn eval_simple_add_jaxpr() {
@@ -134,6 +166,49 @@ mod tests {
             InterpreterError::InputArity {
                 expected: 2,
                 actual: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn eval_with_constvars_binding_works() {
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![VarId(2)],
+            vec![VarId(3)],
+            vec![Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                outputs: smallvec![VarId(3)],
+                params: BTreeMap::new(),
+            }],
+        );
+        let outputs =
+            eval_jaxpr_with_consts(&jaxpr, &[Value::scalar_i64(10)], &[Value::scalar_i64(7)])
+                .expect("closed-over const path should evaluate");
+        assert_eq!(outputs, vec![Value::scalar_i64(17)]);
+    }
+
+    #[test]
+    fn const_arity_mismatch_is_reported() {
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![VarId(2)],
+            vec![VarId(3)],
+            vec![Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                outputs: smallvec![VarId(3)],
+                params: BTreeMap::new(),
+            }],
+        );
+        let err = eval_jaxpr_with_consts(&jaxpr, &[], &[Value::scalar_i64(7)])
+            .expect_err("const arity mismatch should fail");
+        assert_eq!(
+            err,
+            InterpreterError::ConstArity {
+                expected: 1,
+                actual: 0,
             }
         );
     }

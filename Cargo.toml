@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/fj-core",
+  "crates/fj-trace",
   "crates/fj-interpreters",
   "crates/fj-dispatch",
   "crates/fj-lax",

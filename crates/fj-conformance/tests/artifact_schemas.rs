@@ -51,6 +51,27 @@ fn validate_schema_examples(name: &str) {
     );
 }
 
+fn validate_schema_instance(schema_name: &str, instance_rel_path: &str) {
+    let root = repo_root();
+    let schema_path = root.join(format!("artifacts/schemas/{schema_name}.schema.json"));
+    let instance_path = root.join(instance_rel_path);
+    let schema = read_json(&schema_path);
+    let instance = read_json(&instance_path);
+    let validator = jsonschema::validator_for(&schema)
+        .unwrap_or_else(|err| panic!("schema {} failed to compile: {err}", schema_path.display()));
+    let errors = validator
+        .iter_errors(&instance)
+        .map(|err| err.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "expected instance {} to pass {} validation, got errors: {}",
+        instance_path.display(),
+        schema_name,
+        errors.join(" | ")
+    );
+}
+
 #[test]
 fn all_v1_artifact_schemas_have_valid_and_invalid_examples() {
     let schemas = [
@@ -66,4 +87,28 @@ fn all_v1_artifact_schemas_have_valid_and_invalid_examples() {
     for schema_name in schemas {
         validate_schema_examples(schema_name);
     }
+}
+
+#[test]
+fn canonical_phase2c_security_artifacts_validate_against_v1_schemas() {
+    validate_schema_instance(
+        "compatibility_matrix.v1",
+        "artifacts/phase2c/global/compatibility_matrix.v1.json",
+    );
+    validate_schema_instance(
+        "legacy_anchor_map.v1",
+        "artifacts/phase2c/FJ-P2C-FOUNDATION/legacy_anchor_map.v1.json",
+    );
+    validate_schema_instance(
+        "legacy_anchor_map.v1",
+        "artifacts/phase2c/FJ-P2C-001/legacy_anchor_map.v1.json",
+    );
+    validate_schema_instance(
+        "contract_table.v1",
+        "artifacts/phase2c/FJ-P2C-001/contract_table.v1.json",
+    );
+    validate_schema_instance(
+        "risk_note.v1",
+        "artifacts/phase2c/FJ-P2C-FOUNDATION/risk_note.v1.json",
+    );
 }

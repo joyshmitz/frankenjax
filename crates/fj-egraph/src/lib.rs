@@ -92,6 +92,18 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             Primitive::Cos => FjLang::Cos([input_ids[0]]),
             Primitive::ReduceSum => FjLang::ReduceSum([input_ids[0]]),
             Primitive::Dot => FjLang::Dot([input_ids[0], input_ids[1]]),
+            Primitive::Reshape
+            | Primitive::Slice
+            | Primitive::Gather
+            | Primitive::Scatter
+            | Primitive::Transpose
+            | Primitive::BroadcastInDim
+            | Primitive::Concatenate => {
+                panic!(
+                    "primitive {} not supported by egraph lowering",
+                    eqn.primitive.as_str()
+                )
+            }
         };
 
         let id = expr.add(node);
@@ -256,6 +268,15 @@ fn id_to_atom(id: Id, node_to_var: &BTreeMap<usize, VarId>, expr: &RecExpr<FjLan
 
 /// Optimize a Jaxpr using equality saturation with algebraic rules.
 pub fn optimize_jaxpr(jaxpr: &Jaxpr) -> Jaxpr {
+    if jaxpr
+        .equations
+        .iter()
+        .any(|eqn| !is_egraph_supported_primitive(eqn.primitive))
+    {
+        // Keep behavior unchanged when e-graph cannot represent an operation yet.
+        return jaxpr.clone();
+    }
+
     let (expr, var_map) = jaxpr_to_egraph(jaxpr);
 
     // Get the root (last output)
@@ -272,6 +293,18 @@ pub fn optimize_jaxpr(jaxpr: &Jaxpr) -> Jaxpr {
     let (_, best_expr) = extractor.find_best(root_id);
 
     egraph_to_jaxpr(&best_expr, &jaxpr.invars, &jaxpr.outvars)
+}
+
+fn is_egraph_supported_primitive(primitive: Primitive) -> bool {
+    matches!(
+        primitive,
+        Primitive::Add
+            | Primitive::Mul
+            | Primitive::Sin
+            | Primitive::Cos
+            | Primitive::ReduceSum
+            | Primitive::Dot
+    )
 }
 
 #[cfg(test)]

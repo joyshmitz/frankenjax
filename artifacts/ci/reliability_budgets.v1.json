@@ -1,0 +1,25 @@
+{
+  "schema_version": "frankenjax.reliability-budgets.v1",
+  "coverage": {
+    "fj-core": { "line_min_percent": 90.0, "branch_min_percent": 80.0 },
+    "fj-lax": { "line_min_percent": 90.0, "branch_min_percent": 85.0 },
+    "fj-interpreters": { "line_min_percent": 85.0, "branch_min_percent": 75.0 },
+    "fj-cache": { "line_min_percent": 85.0, "branch_min_percent": 75.0 },
+    "fj-ledger": { "line_min_percent": 80.0, "branch_min_percent": 70.0 },
+    "fj-dispatch": { "line_min_percent": 85.0, "branch_min_percent": 80.0 },
+    "fj-runtime": { "line_min_percent": 75.0, "branch_min_percent": 65.0 },
+    "fj-conformance": { "line_min_percent": 70.0, "branch_min_percent": 60.0 }
+  },
+  "flake": {
+    "runs": 10,
+    "max_suite_flake_rate": 0.01,
+    "max_per_test_flake_rate": 0.001
+  },
+  "runtime_seconds": {
+    "unit_tests_workspace": 30,
+    "property_tests": 60,
+    "differential_oracle": 120,
+    "e2e_scenarios": 180,
+    "full_pipeline": 600
+  }
+}
