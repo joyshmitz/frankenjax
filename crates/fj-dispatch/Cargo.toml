@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+fj-ad = { path = "../fj-ad" }
 fj-cache = { path = "../fj-cache" }
 fj-core = { path = "../fj-core" }
 fj-interpreters = { path = "../fj-interpreters" }

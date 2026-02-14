@@ -77,6 +77,63 @@ pub fn compatibility_matrix_row(input: &CacheKeyInput) -> String {
     )
 }
 
+pub struct CacheKeyInputRef<'a> {
+    pub mode: CompatibilityMode,
+    pub backend: &'a str,
+    pub jaxpr: &'a Jaxpr,
+    pub transform_stack: &'a [Transform],
+    pub compile_options: &'a BTreeMap<String, String>,
+    pub custom_hook: Option<&'a str>,
+    pub unknown_incompatible_features: &'a [String],
+}
+
+pub fn build_cache_key_ref(input: &CacheKeyInputRef<'_>) -> Result<CacheKey, CacheKeyError> {
+    if input.mode == CompatibilityMode::Strict && !input.unknown_incompatible_features.is_empty() {
+        return Err(CacheKeyError::UnknownIncompatibleFeatures {
+            features: input.unknown_incompatible_features.to_vec(),
+        });
+    }
+
+    let payload = canonical_payload_ref(input);
+    let mut hasher = Sha256::new();
+    hasher.update(payload.as_bytes());
+    let digest = hasher.finalize();
+
+    Ok(CacheKey {
+        namespace: "fjx",
+        digest_hex: bytes_to_hex(&digest),
+    })
+}
+
+fn canonical_payload_ref(input: &CacheKeyInputRef<'_>) -> String {
+    let transforms = input
+        .transform_stack
+        .iter()
+        .map(|transform| transform.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let compile_options = input
+        .compile_options
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(";");
+
+    let unknown = input.unknown_incompatible_features.join(",");
+
+    format!(
+        "mode={:?}|backend={}|transforms={}|compile={}|hook={}|unknown={}|jaxpr={}",
+        input.mode,
+        input.backend,
+        transforms,
+        compile_options,
+        input.custom_hook.unwrap_or("none"),
+        unknown,
+        input.jaxpr.canonical_fingerprint(),
+    )
+}
+
 fn canonical_payload(input: &CacheKeyInput) -> String {
     let transforms = input
         .transform_stack
@@ -117,16 +174,12 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{CacheKeyError, CacheKeyInput, build_cache_key};
-    use fj_core::{CompatibilityMode, Jaxpr};
+    use fj_core::{CompatibilityMode, Jaxpr, Transform};
+    use proptest::prelude::*;
     use std::collections::BTreeMap;
 
     fn empty_jaxpr() -> Jaxpr {
-        Jaxpr {
-            invars: vec![],
-            constvars: vec![],
-            outvars: vec![],
-            equations: vec![],
-        }
+        Jaxpr::new(vec![], vec![], vec![], vec![])
     }
 
     #[test]
@@ -181,5 +234,34 @@ mod tests {
         let key_a = build_cache_key(&input).expect("key generation should succeed");
         let key_b = build_cache_key(&input).expect("key generation should succeed");
         assert_eq!(key_a, key_b);
+    }
+
+    fn arb_transform() -> impl Strategy<Value = Transform> {
+        prop_oneof![
+            Just(Transform::Jit),
+            Just(Transform::Grad),
+            Just(Transform::Vmap),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn cache_key_stability(
+            backend in "[a-z]{3,6}",
+            transforms in proptest::collection::vec(arb_transform(), 0..3),
+        ) {
+            let input = CacheKeyInput {
+                mode: CompatibilityMode::Hardened,
+                backend,
+                jaxpr: empty_jaxpr(),
+                transform_stack: transforms,
+                compile_options: BTreeMap::new(),
+                custom_hook: None,
+                unknown_incompatible_features: vec![],
+            };
+            let key_a = build_cache_key(&input).expect("key gen");
+            let key_b = build_cache_key(&input).expect("key gen");
+            prop_assert_eq!(key_a, key_b);
+        }
     }
 }

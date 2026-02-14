@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
+#[cfg(test)]
+pub mod proptest_strategies;
+
 use serde::{Deserialize, Serialize};
+use smallvec::{SmallVec, smallvec};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -293,47 +297,90 @@ pub enum Atom {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Equation {
     pub primitive: Primitive,
-    pub inputs: Vec<Atom>,
-    pub outputs: Vec<VarId>,
+    pub inputs: SmallVec<[Atom; 4]>,
+    pub outputs: SmallVec<[VarId; 2]>,
     pub params: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Jaxpr {
     pub invars: Vec<VarId>,
     pub constvars: Vec<VarId>,
     pub outvars: Vec<VarId>,
     pub equations: Vec<Equation>,
+    #[serde(skip)]
+    fingerprint_cache: std::sync::OnceLock<String>,
 }
+
+impl Clone for Jaxpr {
+    fn clone(&self) -> Self {
+        Self {
+            invars: self.invars.clone(),
+            constvars: self.constvars.clone(),
+            outvars: self.outvars.clone(),
+            equations: self.equations.clone(),
+            fingerprint_cache: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl PartialEq for Jaxpr {
+    fn eq(&self, other: &Self) -> bool {
+        self.invars == other.invars
+            && self.constvars == other.constvars
+            && self.outvars == other.outvars
+            && self.equations == other.equations
+    }
+}
+
+impl Eq for Jaxpr {}
 
 impl Jaxpr {
     #[must_use]
-    pub fn canonical_fingerprint(&self) -> String {
-        let mut out = String::new();
-        write_var_list(&mut out, "in", &self.invars);
-        write_var_list(&mut out, "const", &self.constvars);
-        write_var_list(&mut out, "out", &self.outvars);
-
-        for eqn in &self.equations {
-            let _ = write!(&mut out, "eqn:{}(", eqn.primitive.as_str());
-            for atom in &eqn.inputs {
-                write_atom(&mut out, atom);
-                out.push(',');
-            }
-            out.push(')');
-            out.push_str("->");
-            for outvar in &eqn.outputs {
-                let _ = write!(&mut out, "v{},", outvar.0);
-            }
-            out.push('{');
-            for (key, value) in &eqn.params {
-                let _ = write!(&mut out, "{key}={value};");
-            }
-            out.push('}');
-            out.push('|');
+    pub fn new(
+        invars: Vec<VarId>,
+        constvars: Vec<VarId>,
+        outvars: Vec<VarId>,
+        equations: Vec<Equation>,
+    ) -> Self {
+        Self {
+            invars,
+            constvars,
+            outvars,
+            equations,
+            fingerprint_cache: std::sync::OnceLock::new(),
         }
+    }
 
-        out
+    #[must_use]
+    pub fn canonical_fingerprint(&self) -> &str {
+        self.fingerprint_cache.get_or_init(|| {
+            let mut out = String::new();
+            write_var_list(&mut out, "in", &self.invars);
+            write_var_list(&mut out, "const", &self.constvars);
+            write_var_list(&mut out, "out", &self.outvars);
+
+            for eqn in &self.equations {
+                let _ = write!(&mut out, "eqn:{}(", eqn.primitive.as_str());
+                for atom in &eqn.inputs {
+                    write_atom(&mut out, atom);
+                    out.push(',');
+                }
+                out.push(')');
+                out.push_str("->");
+                for outvar in &eqn.outputs {
+                    let _ = write!(&mut out, "v{},", outvar.0);
+                }
+                out.push('{');
+                for (key, value) in &eqn.params {
+                    let _ = write!(&mut out, "{key}={value};");
+                }
+                out.push('}');
+                out.push('|');
+            }
+
+            out
+        })
     }
 }
 
@@ -374,69 +421,93 @@ pub enum ProgramSpec {
     Square,
     SquarePlusLinear,
     AddOne,
+    SinX,
+    CosX,
 }
 
 #[must_use]
 pub fn build_program(spec: ProgramSpec) -> Jaxpr {
     match spec {
-        ProgramSpec::Add2 => Jaxpr {
-            invars: vec![VarId(1), VarId(2)],
-            constvars: vec![],
-            outvars: vec![VarId(3)],
-            equations: vec![Equation {
+        ProgramSpec::Add2 => Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3)],
+            vec![Equation {
                 primitive: Primitive::Add,
-                inputs: vec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
-                outputs: vec![VarId(3)],
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
             }],
-        },
-        ProgramSpec::Square => Jaxpr {
-            invars: vec![VarId(1)],
-            constvars: vec![],
-            outvars: vec![VarId(2)],
-            equations: vec![Equation {
+        ),
+        ProgramSpec::Square => Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
                 primitive: Primitive::Mul,
-                inputs: vec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
-                outputs: vec![VarId(2)],
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
             }],
-        },
-        ProgramSpec::SquarePlusLinear => Jaxpr {
-            invars: vec![VarId(1)],
-            constvars: vec![],
-            outvars: vec![VarId(4)],
-            equations: vec![
+        ),
+        ProgramSpec::SquarePlusLinear => Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(4)],
+            vec![
                 Equation {
                     primitive: Primitive::Mul,
-                    inputs: vec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
-                    outputs: vec![VarId(2)],
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
                 },
                 Equation {
                     primitive: Primitive::Mul,
-                    inputs: vec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(2))],
-                    outputs: vec![VarId(3)],
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(2))],
+                    outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
                 },
                 Equation {
                     primitive: Primitive::Add,
-                    inputs: vec![Atom::Var(VarId(2)), Atom::Var(VarId(3))],
-                    outputs: vec![VarId(4)],
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(3))],
+                    outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
                 },
             ],
-        },
-        ProgramSpec::AddOne => Jaxpr {
-            invars: vec![VarId(1)],
-            constvars: vec![],
-            outvars: vec![VarId(2)],
-            equations: vec![Equation {
+        ),
+        ProgramSpec::AddOne => Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
                 primitive: Primitive::Add,
-                inputs: vec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
-                outputs: vec![VarId(2)],
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
+                outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
             }],
-        },
+        ),
+        ProgramSpec::SinX => Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Sin,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        ),
+        ProgramSpec::CosX => Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Cos,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        ),
     }
 }
 
@@ -470,7 +541,7 @@ impl TraceTransformLedger {
             let _ = write!(&mut out, "{}>", transform.as_str());
         }
         out.push_str("|jaxpr=");
-        out.push_str(&self.root_jaxpr.canonical_fingerprint());
+        out.push_str(self.root_jaxpr.canonical_fingerprint());
         out
     }
 }

@@ -1,12 +1,14 @@
 #![forbid(unsafe_code)]
 
-use fj_cache::{CacheKeyError, CacheKeyInput, build_cache_key};
+use fj_cache::{CacheKeyError, CacheKeyInputRef, build_cache_key_ref};
 use fj_core::{
     CompatibilityMode, DType, Jaxpr, TensorValue, TraceTransformLedger, Transform,
     TransformCompositionError, Value, verify_transform_composition,
 };
 use fj_interpreters::{InterpreterError, eval_jaxpr};
-use fj_ledger::{DecisionRecord, EvidenceLedger, EvidenceSignal, LedgerEntry, LossMatrix};
+use fj_ledger::{
+    ConformalPredictor, DecisionRecord, EvidenceLedger, EvidenceSignal, LedgerEntry, LossMatrix,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,14 +135,14 @@ impl From<TransformExecutionError> for DispatchError {
 pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchError> {
     let composition_proof = verify_transform_composition(&request.ledger)?;
 
-    let cache_key = build_cache_key(&CacheKeyInput {
+    let cache_key = build_cache_key_ref(&CacheKeyInputRef {
         mode: request.mode,
-        backend: request.backend,
-        jaxpr: request.ledger.root_jaxpr.clone(),
-        transform_stack: request.ledger.transform_stack.clone(),
-        compile_options: request.compile_options,
-        custom_hook: request.custom_hook,
-        unknown_incompatible_features: request.unknown_incompatible_features,
+        backend: &request.backend,
+        jaxpr: &request.ledger.root_jaxpr,
+        transform_stack: &request.ledger.transform_stack,
+        compile_options: &request.compile_options,
+        custom_hook: request.custom_hook.as_deref(),
+        unknown_incompatible_features: &request.unknown_incompatible_features,
     })?;
 
     let outputs = execute_with_transforms(
@@ -211,6 +213,26 @@ fn execute_grad(
         .into());
     }
 
+    args[0]
+        .as_f64_scalar()
+        .ok_or(TransformExecutionError::NonScalarGradientInput)?;
+
+    // If there are remaining transforms in the tail, fall back to finite-diff
+    // (symbolic AD only applies to the innermost evaluation).
+    if !tail.is_empty() {
+        return execute_grad_finite_diff(root_jaxpr, tail, args);
+    }
+
+    let derivative = fj_ad::grad_first(root_jaxpr, args)
+        .map_err(|e| TransformExecutionError::TensorBuild(format!("AD error: {e}")))?;
+    Ok(vec![Value::scalar_f64(derivative)])
+}
+
+fn execute_grad_finite_diff(
+    root_jaxpr: &Jaxpr,
+    tail: &[Transform],
+    args: &[Value],
+) -> Result<Vec<Value>, DispatchError> {
     let input_value = args[0]
         .as_f64_scalar()
         .ok_or(TransformExecutionError::NonScalarGradientInput)?;
@@ -331,6 +353,22 @@ fn heuristic_posterior_abandoned(ledger: &TraceTransformLedger) -> f64 {
     let depth_factor = ledger.transform_stack.len() as f64;
     let score = (eqn_factor + 2.0 * depth_factor) / (eqn_factor + 2.0 * depth_factor + 20.0);
     score.clamp(0.05, 0.95)
+}
+
+/// Compute posterior with conformal calibration when available.
+#[must_use]
+pub fn calibrated_posterior_abandoned(
+    ledger: &TraceTransformLedger,
+    conformal: Option<&ConformalPredictor>,
+) -> f64 {
+    let heuristic = heuristic_posterior_abandoned(ledger);
+    match conformal {
+        Some(cp) if cp.is_calibrated() => {
+            let estimate = cp.calibrated_posterior(heuristic);
+            estimate.point
+        }
+        _ => heuristic,
+    }
 }
 
 #[cfg(test)]

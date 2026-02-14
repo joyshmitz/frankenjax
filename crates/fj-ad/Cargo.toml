@@ -1,13 +1,13 @@
 [package]
-name = "fj-interpreters"
+name = "fj-ad"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 fj-core = { path = "../fj-core" }
 fj-lax = { path = "../fj-lax" }
-rustc-hash = { workspace = true }
+smallvec = { workspace = true }
 
 [dev-dependencies]
+fj-interpreters = { path = "../fj-interpreters" }
 proptest = { workspace = true }
-smallvec = { workspace = true }

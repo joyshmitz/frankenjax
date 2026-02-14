@@ -1,0 +1,12 @@
+[package]
+name = "fj-egraph"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+egg = { workspace = true }
+fj-core = { path = "../fj-core" }
+smallvec = { workspace = true }
+
+[dev-dependencies]
+fj-interpreters = { path = "../fj-interpreters" }

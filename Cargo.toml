@@ -9,9 +9,17 @@ members = [
   "crates/fj-runtime",
   "crates/fj-conformance",
   "crates/fj-ledger",
+  "crates/fj-ad",
+  "crates/fj-egraph",
 ]
 
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
 license = "MIT"
+
+[workspace.dependencies]
+smallvec = { version = "1.13", features = ["serde"] }
+rustc-hash = "2.1"
+proptest = "1.6"
+egg = "0.9"

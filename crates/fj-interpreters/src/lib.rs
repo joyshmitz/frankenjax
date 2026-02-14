@@ -2,7 +2,7 @@
 
 use fj_core::{Atom, Jaxpr, Value, VarId};
 use fj_lax::{EvalError, eval_primitive};
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterpreterError {
@@ -56,7 +56,7 @@ pub fn eval_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, Interpret
         });
     }
 
-    let mut env: BTreeMap<VarId, Value> = BTreeMap::new();
+    let mut env: FxHashMap<VarId, Value> = FxHashMap::default();
     for (idx, var) in jaxpr.invars.iter().enumerate() {
         env.insert(*var, args[idx].clone());
     }
@@ -136,5 +136,51 @@ mod tests {
                 actual: 1,
             }
         );
+    }
+
+    mod proptest_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn add_commutative(a in -1_000_000i64..1_000_000, b in -1_000_000i64..1_000_000) {
+                let jaxpr = build_program(ProgramSpec::Add2);
+                let out_ab = eval_jaxpr(&jaxpr, &[Value::scalar_i64(a), Value::scalar_i64(b)])
+                    .expect("add should succeed");
+                let out_ba = eval_jaxpr(&jaxpr, &[Value::scalar_i64(b), Value::scalar_i64(a)])
+                    .expect("add should succeed");
+                prop_assert_eq!(out_ab, out_ba);
+            }
+
+            #[test]
+            fn add_identity(a in -1_000_000i64..1_000_000) {
+                let jaxpr = build_program(ProgramSpec::AddOne);
+                let result = eval_jaxpr(&jaxpr, &[Value::scalar_i64(a)]);
+                prop_assert!(result.is_ok());
+            }
+
+            #[test]
+            fn reduce_sum_identity_scalar(x in prop::num::f64::NORMAL) {
+                use fj_core::{Atom, Equation, Jaxpr, Primitive, VarId};
+                use smallvec::smallvec;
+                use std::collections::BTreeMap;
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1)],
+                    vec![],
+                    vec![VarId(2)],
+                    vec![Equation {
+                        primitive: Primitive::ReduceSum,
+                        inputs: smallvec![Atom::Var(VarId(1))],
+                        outputs: smallvec![VarId(2)],
+                        params: BTreeMap::new(),
+                    }],
+                );
+                let out = eval_jaxpr(&jaxpr, &[Value::scalar_f64(x)])
+                    .expect("reduce_sum of scalar should succeed");
+                let out_val = out[0].as_f64_scalar().expect("should be scalar");
+                prop_assert!((out_val - x).abs() < 1e-10);
+            }
+        }
     }
 }

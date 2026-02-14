@@ -73,6 +73,7 @@ impl From<ValueError> for EvalError {
     }
 }
 
+#[inline]
 pub fn eval_primitive(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     match primitive {
         Primitive::Add => eval_binary_elementwise(primitive, inputs, |a, b| a + b, |a, b| a + b),
@@ -84,6 +85,7 @@ pub fn eval_primitive(primitive: Primitive, inputs: &[Value]) -> Result<Value, E
     }
 }
 
+#[inline]
 fn eval_binary_elementwise(
     primitive: Primitive,
     inputs: &[Value],
@@ -159,6 +161,7 @@ fn eval_binary_elementwise(
     }
 }
 
+#[inline]
 fn eval_unary_elementwise(
     primitive: Primitive,
     inputs: &[Value],
@@ -324,6 +327,7 @@ fn eval_reduce_sum(inputs: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
+#[inline]
 fn binary_literal_op(
     lhs: Literal,
     rhs: Literal,
@@ -347,6 +351,7 @@ fn binary_literal_op(
     }
 }
 
+#[inline]
 fn infer_dtype(elements: &[Literal]) -> DType {
     if elements
         .iter()

@@ -216,6 +216,98 @@
         "jit",
         "vmap"
       ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 0.0
+        }
+      ],
+      "atol": 1e-06,
+      "case_id": "grad_sin_at_zero",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 1.0
+        }
+      ],
+      "family": "grad",
+      "mode": "strict",
+      "program": "sin_x",
+      "rtol": 1e-06,
+      "transforms": [
+        "grad"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 0.0
+        }
+      ],
+      "atol": 1e-06,
+      "case_id": "grad_cos_at_zero",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 0.0
+        }
+      ],
+      "family": "grad",
+      "mode": "strict",
+      "program": "cos_x",
+      "rtol": 1e-06,
+      "transforms": [
+        "grad"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 1e+100
+        }
+      ],
+      "atol": 1e+95,
+      "case_id": "grad_square_adversarial_large",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 2e+100
+        }
+      ],
+      "family": "grad",
+      "mode": "strict",
+      "program": "square",
+      "rtol": 0.001,
+      "transforms": [
+        "grad"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 1e-100
+        }
+      ],
+      "atol": 1e-106,
+      "case_id": "grad_square_adversarial_small",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 2e-100
+        }
+      ],
+      "family": "grad",
+      "mode": "strict",
+      "program": "square",
+      "rtol": 1e-06,
+      "transforms": [
+        "grad"
+      ]
     }
   ],
   "generated_at_unix_ms": 1770973927573,

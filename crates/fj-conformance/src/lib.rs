@@ -209,6 +209,8 @@ pub enum FixtureProgram {
     Square,
     SquarePlusLinear,
     AddOne,
+    SinX,
+    CosX,
 }
 
 impl FixtureProgram {
@@ -219,6 +221,8 @@ impl FixtureProgram {
             Self::Square => ProgramSpec::Square,
             Self::SquarePlusLinear => ProgramSpec::SquarePlusLinear,
             Self::AddOne => ProgramSpec::AddOne,
+            Self::SinX => ProgramSpec::SinX,
+            Self::CosX => ProgramSpec::CosX,
         }
     }
 }
