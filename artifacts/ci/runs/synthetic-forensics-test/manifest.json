@@ -1,0 +1,117 @@
+{
+  "artifact_index": [
+    {
+      "category": "other",
+      "path": "ci-artifacts/test-run/G1/formatting.log",
+      "size_bytes": 512
+    },
+    {
+      "category": "test_log",
+      "path": "ci-artifacts/test-run/G2/jaxpr_fingerprint_deterministic.log",
+      "size_bytes": 2048
+    }
+  ],
+  "env": {
+    "git_branch": "main",
+    "git_sha": "abc1234567890",
+    "os": "Linux 6.17.0-14-generic x86_64",
+    "rust_version": "rustc 1.86.0-nightly"
+  },
+  "failures": [
+    {
+      "detail_path": "ci-artifacts/test-run/G1/formatting.log",
+      "gate": "G1",
+      "related_fixtures": [],
+      "replay_cmd": "cargo fmt -- --check",
+      "schema_version": "frankenjax.failure-diagnostic.v1",
+      "status": "fail",
+      "summary": "3 files have formatting issues",
+      "test": "fmt::check_formatting",
+      "timestamp_unix_ms": 1771109240786
+    },
+    {
+      "detail_path": "ci-artifacts/test-run/G2/jaxpr_fingerprint_deterministic.log",
+      "gate": "G2",
+      "related_fixtures": [],
+      "replay_cmd": "cargo test -p fj-core -- jaxpr_fingerprint_deterministic --nocapture",
+      "schema_version": "frankenjax.failure-diagnostic.v1",
+      "status": "fail",
+      "summary": "fingerprint mismatch: different hashes for identical jaxpr",
+      "test": "fj_core::tests::jaxpr_fingerprint_deterministic",
+      "timestamp_unix_ms": 1771109240786
+    },
+    {
+      "detail_path": "ci-artifacts/test-run/G4/fuzz_jaxpr_construction.log",
+      "gate": "G4",
+      "related_fixtures": [
+        "crates/fj-conformance/fuzz/corpus/crashes/crash-abc123"
+      ],
+      "replay_cmd": "cargo fuzz run fuzz_jaxpr_construction -- -runs=1",
+      "schema_version": "frankenjax.failure-diagnostic.v1",
+      "status": "error",
+      "summary": "panic in equation validation with empty invars",
+      "test": "fj_conformance::fuzz::fuzz_jaxpr_construction",
+      "timestamp_unix_ms": 1771109240786
+    },
+    {
+      "detail_path": "ci-artifacts/test-run/G6/dispatch_jit_scalar_add.log",
+      "gate": "G6",
+      "related_fixtures": [],
+      "replay_cmd": "cargo bench -p fj-dispatch -- dispatch_jit_scalar_add",
+      "schema_version": "frankenjax.failure-diagnostic.v1",
+      "status": "fail",
+      "summary": "p95 regression: 2500ns -> 3200ns (28% slower, threshold 5%)",
+      "test": "benches::dispatch_jit_scalar_add",
+      "timestamp_unix_ms": 1771109240786
+    }
+  ],
+  "finished_at_unix_ms": 1771109300786,
+  "gate_results": [
+    {
+      "duration_ms": 2000,
+      "failure_count": 1,
+      "gate_id": "G1",
+      "name": "fmt_lint",
+      "status": "fail"
+    },
+    {
+      "duration_ms": 30000,
+      "failure_count": 1,
+      "gate_id": "G2",
+      "name": "unit_tests",
+      "status": "fail"
+    },
+    {
+      "duration_ms": 15000,
+      "gate_id": "G3",
+      "name": "differential",
+      "status": "pass"
+    },
+    {
+      "duration_ms": 8000,
+      "failure_count": 1,
+      "gate_id": "G4",
+      "name": "adversarial",
+      "status": "fail"
+    },
+    {
+      "duration_ms": 10000,
+      "failure_count": 1,
+      "gate_id": "G6",
+      "name": "perf",
+      "status": "fail"
+    }
+  ],
+  "run_id": "synthetic-test-1771109240786",
+  "schema_version": "frankenjax.run-manifest.v1",
+  "started_at_unix_ms": 1771109240786,
+  "summary": {
+    "failed": 4,
+    "flaky": 0,
+    "overall_status": "fail",
+    "passed": 152,
+    "skipped": 0,
+    "total_tests": 156
+  },
+  "total_duration_ms": 60000
+}

@@ -1,0 +1,47 @@
+{
+  "schema_version": "frankenjax.golden-journey.v1",
+  "scenario_id": "gj_06_error_recovery",
+  "scenario_category": "error_recovery",
+  "ts_utc_unix_ms": 1771109240807,
+  "replay_command": "cargo test -p fj-conformance --test golden_journeys -- golden_journey_06 --exact --nocapture",
+  "input_capture": {
+    "error_cases": [
+      "tensor_grad",
+      "scalar_vmap",
+      "strict_unknown_features",
+      "wrong_arity"
+    ]
+  },
+  "assertions": [
+    {
+      "name": "grad_rejects_tensor_input",
+      "passed": true,
+      "detail": "error=Some(TransformExecution(NonScalarGradientInput))"
+    },
+    {
+      "name": "vmap_rejects_scalar_input",
+      "passed": true,
+      "detail": "error=Some(TransformExecution(VmapRequiresRankOneLeadingArgument))"
+    },
+    {
+      "name": "strict_rejects_unknown_features",
+      "passed": true,
+      "detail": "cache key error: strict mode rejected unknown incompatible features: future.feature.v99"
+    },
+    {
+      "name": "error_message_mentions_feature_name",
+      "passed": true,
+      "detail": "message includes feature name: true"
+    },
+    {
+      "name": "wrong_arity_produces_error",
+      "passed": true,
+      "detail": "error=Some(Interpreter(InputArity { expected: 2, actual: 1 }))"
+    }
+  ],
+  "output_capture": {
+    "all_errors_caught": true
+  },
+  "result": "pass",
+  "duration_ms": 0
+}

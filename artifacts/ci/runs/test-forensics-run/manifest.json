@@ -1,0 +1,422 @@
+{
+  "schema_version": "frankenjax.run-manifest.v1",
+  "run_id": "test-forensics-run",
+  "started_at_unix_ms": 1771109008213,
+  "finished_at_unix_ms": 1771109010121,
+  "total_duration_ms": 1908,
+  "summary": {
+    "total_tests": 52,
+    "passed": 52,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "overall_status": "pass"
+  },
+  "gate_results": [
+    {
+      "gate_id": "coverage",
+      "name": "coverage",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "gate_id": "flake",
+      "name": "flake",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "gate_id": "runtime",
+      "name": "runtime",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "gate_id": "crash",
+      "name": "crash",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "gate_id": "perf",
+      "name": "perf",
+      "status": "pass",
+      "duration_ms": 0
+    }
+  ],
+  "failures": [],
+  "artifact_index": [
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__jaxpr_duplicate_varid_detection.json",
+      "category": "test_log",
+      "size_bytes": 940,
+      "sha256": "42aed32b314cde0472a4e6a219d6cc68274941d82a6f34bd2a17b7a16a0b0e43"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__transform_composition_rejects_double_grad.json",
+      "category": "test_log",
+      "size_bytes": 970,
+      "sha256": "e0c032e6babd7e06093763490dedb6d02bc7e4ef3ca7ed2d5c52b73ff1b2bd1c"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__canonical_fingerprint_changes_on_program_change.json",
+      "category": "test_log",
+      "size_bytes": 988,
+      "sha256": "0218e87591d83c2859cb65941c8801a797ccae0490263a33d24c5ac1b220a761"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__jaxpr_construction_supports_all_primitives.json",
+      "category": "test_log",
+      "size_bytes": 973,
+      "sha256": "7ec1bdea2f02ce5656acaf02d2c1e9e3d408356c8b8ab95931abb0bbe22f530b"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__jaxpr_empty_program_is_valid.json",
+      "category": "test_log",
+      "size_bytes": 931,
+      "sha256": "ee85a0efe45b50dd21ada66ca0c0882784f9dc340b17b7042d2e7978b33c1354"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__jaxpr_constvars_binding_is_valid.json",
+      "category": "test_log",
+      "size_bytes": 943,
+      "sha256": "d33ab09bfede29f9e86c8518fe7157188241788f3ca71a3a850f18417a8b2021"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__tensor_slice_axis0_on_rank2_returns_rank1_slice.json",
+      "category": "test_log",
+      "size_bytes": 988,
+      "sha256": "ecb6161540f558c1ef62485f4610ea2a7539910a49de8d5e91919cd579c1068b"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__canonical_fingerprint_is_deterministic.json",
+      "category": "test_log",
+      "size_bytes": 961,
+      "sha256": "361ea0b7c46092fbe2bdd8cfefe076b2d5defe5b98b810cba49e08bfcaf4ee32"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__jaxpr_multi_equation_chain_is_valid.json",
+      "category": "test_log",
+      "size_bytes": 952,
+      "sha256": "0d604ca3fadd28f741ba3e78fadc74cf740bc103af700a8add883047581e754d"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__tensor_new_rejects_wrong_element_count.json",
+      "category": "test_log",
+      "size_bytes": 961,
+      "sha256": "2dbfd15c4a89b8868a184cd0d160290958c03ebd837f1c39f014e9ca7ccc1670"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__transform_composition_valid_double_compositions.json",
+      "category": "test_log",
+      "size_bytes": 988,
+      "sha256": "44b758c6e746760344780358a29e988b18f2734bf3549149bb3e7960ce13d1f8"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__transform_composition_rejects_double_vmap.json",
+      "category": "test_log",
+      "size_bytes": 970,
+      "sha256": "d7f298b67cc1118e8cb0a2e20d057dae1c96ce2b8e57450cfb351e03cb8cac12"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__vector_constructor_builds_tensor_value.json",
+      "category": "test_log",
+      "size_bytes": 961,
+      "sha256": "bfc0a664e1037054e8385254486fce8086d52b7398ba2bec11633e451ee4d1ef"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__ttl_hash_stability_across_runs.json",
+      "category": "test_log",
+      "size_bytes": 937,
+      "sha256": "5d8a3f821695309d2984ac663178f1e5430d9a6c67ebce7aa993d3dd46251899"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__transform_composition_valid_single_transforms.json",
+      "category": "test_log",
+      "size_bytes": 982,
+      "sha256": "278e5390b2efc6b51a923126fdfc9d339749b3001001d80464fbfe793fcd7429"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__transform_composition_rejects_evidence_count_mismatch.json",
+      "category": "test_log",
+      "size_bytes": 1006,
+      "sha256": "1120dc9b81ecd666e9895e1db0710b8996ec0bff6ba5a2466b5c3a2aad3af728"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__transform_composition_valid_triple_stack.json",
+      "category": "test_log",
+      "size_bytes": 967,
+      "sha256": "3d4110efe4ca60806b827a4b85feb160f6252f83c959823711b726e4908565cd"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__canonical_fingerprint_round_trip_stable.json",
+      "category": "test_log",
+      "size_bytes": 964,
+      "sha256": "d38e5992b4eec375c1b4126d7decadc6405212a23d52fdd1bd09412fb2682844"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__shape_scalar_rank_is_zero.json",
+      "category": "test_log",
+      "size_bytes": 922,
+      "sha256": "47f0404ebf9a3e08ac9ed5cee0ea514f38420c056c771a58fc6061e2fbccf2ba"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__stack_axis0_restores_rank2_from_rank1_slices.json",
+      "category": "test_log",
+      "size_bytes": 979,
+      "sha256": "dcb26985a34f7ac8d4e68f6a2ff04a6cc3387654e125ede586007524cd20d839"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__transform_composition_rejects_empty_evidence.json",
+      "category": "test_log",
+      "size_bytes": 979,
+      "sha256": "b810359746ed24eff31b4635e5667a0070c5c2fe86b7f40de7070eb125f0e0c7"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__ttl_construction_with_empty_stack_is_deterministic.json",
+      "category": "test_log",
+      "size_bytes": 997,
+      "sha256": "26704d21c78e5908deecebbd2217097f4a08dcccf445ef7121e0b178a6c4a1da"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__prop_fingerprint_uniqueness_for_distinct_jaxprs.json",
+      "category": "test_log",
+      "size_bytes": 988,
+      "sha256": "0dfffe25fb5466e47441abe19d6508a9fc2705da129412b26bd1cc9e6de96511"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__prop_jaxpr_generation_is_well_formed.json",
+      "category": "test_log",
+      "size_bytes": 955,
+      "sha256": "5a6c6cc1eb337e4167d0f1d361ed515b222614e19eabe0feca93314eb2ff2bda"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__prop_transform_composition_proof_idempotent.json",
+      "category": "test_log",
+      "size_bytes": 977,
+      "sha256": "924551c346d891a8dc07440cd579a79178508944122c4881a038121ed942b202"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__test_core_test_log_schema_contract.json",
+      "category": "test_log",
+      "size_bytes": 951,
+      "sha256": "df1f29932dda7e17a3cfd41c5e330468a2581faf39a46c3deb20a7660c1dbc96"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__proptest_strategy_entrypoints_are_exercised.json",
+      "category": "test_log",
+      "size_bytes": 978,
+      "sha256": "781fd78ca339b19e0de6be6be474bdb4da3e0f95217903f39a7854db5a8f691b"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__canonical_fingerprint_supports_bool_and_f64_literals.json",
+      "category": "test_log",
+      "size_bytes": 1003,
+      "sha256": "0284a7c5eb2dd31a698a99a7e48e3cc1a76e7a82cac8640f777e277be84dc317"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__build_program_variants_cover_all_specs.json",
+      "category": "test_log",
+      "size_bytes": 961,
+      "sha256": "ea1d01d1a3d28fe55d882fb566936886da8b5b2be80ca2b5b153d8c53e6254f1"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__jaxpr_validation_error_variants_have_actionable_messages.json",
+      "category": "test_log",
+      "size_bytes": 1015,
+      "sha256": "b17e07d57a170f8725d620e6959498b0a458dbd0d6810482ad4667a9b49616b1"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__literal_and_value_scalar_helpers_cover_paths.json",
+      "category": "test_log",
+      "size_bytes": 979,
+      "sha256": "3d87358ed2e089b643e86b4c743a5956ff0c301c08a6e0f5fccf42b7f0320ace"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-core/fj_core__tests__tensor_axis0_error_variants_are_reported.json",
+      "category": "test_log",
+      "size_bytes": 969,
+      "sha256": "9c21c0da365a6593663f01e4df56bfd2f50c3b47fc8c124e97f9951c4dba0b85"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__infer_new_primitives_shape_rules.json",
+      "category": "test_log",
+      "size_bytes": 950,
+      "sha256": "728772d2287d05f8ae0a6475a01b1c5db0bfb309642595348331aac08fd4710b"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__trace_to_jaxpr_validates_in_and_out_avals.json",
+      "category": "test_log",
+      "size_bytes": 977,
+      "sha256": "1e75aa63b9c007f977bdc9d2b1b908cc181c28192f54d3fc750ae94eea5cf2cb"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__nested_trace_contexts_can_open_and_close.json",
+      "category": "test_log",
+      "size_bytes": 974,
+      "sha256": "1174a52465b1002892a308cd42cbe6676bc9c1e41a5b4b945affc1d280ccbffa"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__infer_reshape_and_finalize_closed_jaxpr.json",
+      "category": "test_log",
+      "size_bytes": 971,
+      "sha256": "bf97366163ca7daf18e6bd5c93659fec0a8bdc17f41e20fcc25883495c3c3977"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__trace_to_jaxpr_rejects_mismatched_out_avals.json",
+      "category": "test_log",
+      "size_bytes": 983,
+      "sha256": "7e24d78e838d14cf57870b205cd8f0dd2f0cacc19d5647fd8d8e483e9204e013"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__finalize_rejects_unclosed_subtrace.json",
+      "category": "test_log",
+      "size_bytes": 956,
+      "sha256": "e97be9797d2c9157cd5d6c4cc4322a91aa64ca836131be5740673fd53edfc7db"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__prop_reduce_sum_axes_shape_consistency.json",
+      "category": "test_log",
+      "size_bytes": 968,
+      "sha256": "38ca078b2da4e6e8ad8d0e4fbfdf0d1a5838cdb1db104428a1c8645cae4fdcbb"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__prop_add_broadcast_shape_inference_consistent.json",
+      "category": "test_log",
+      "size_bytes": 990,
+      "sha256": "b40e7f9c9cb5fac2cdf8ab74dfe5fe6419533078c0ad22fde35003fbec17c303"
+    },
+    {
+      "path": "artifacts/testing/logs/fj-trace/fj_trace__tests__test_trace_test_log_schema_contract.json",
+      "category": "test_log",
+      "size_bytes": 961,
+      "sha256": "9b8f438ed24bcfa5bd3324849be85888d44384797add4bf8e0583e2c9c0277f6"
+    },
+    {
+      "path": "artifacts/e2e/e2e_p2c001_full_dispatch_pipeline.e2e.json",
+      "category": "e2e_log",
+      "size_bytes": 1363,
+      "sha256": "6b4e4c1d2544463ad61d74f01e68ce3882b222932b19e92dabf0f01f6e010e46"
+    },
+    {
+      "path": "artifacts/e2e/e2e_p2c001_transform_order_enforcement.e2e.json",
+      "category": "e2e_log",
+      "size_bytes": 1236,
+      "sha256": "66a5dc53efc4ed320624f0ec5cec475cd4b34b58177a23fa1cd3cd4ab353feda"
+    },
+    {
+      "path": "artifacts/e2e/e2e_p2c001_vmap_rank2_tensor_support.e2e.json",
+      "category": "e2e_log",
+      "size_bytes": 1159,
+      "sha256": "207c8541a34955c22e5ac351128f6dc5867e33fb7177350d50afe9794b2e081d"
+    },
+    {
+      "path": "artifacts/e2e/golden_journeys/gj_03_batched_computation.golden.json",
+      "category": "golden_journey",
+      "size_bytes": 981,
+      "sha256": "c3dbe1ae3ed4319af3157bbf69e96eb898e54c2cfa2cc12c7015b3ba39613658"
+    },
+    {
+      "path": "artifacts/e2e/golden_journeys/gj_01_basic_jit_transform.golden.json",
+      "category": "golden_journey",
+      "size_bytes": 1113,
+      "sha256": "39ebf83974774119f824ad97111bcdd0c8f5f942dd169aa5d20c94d56a4f7600"
+    },
+    {
+      "path": "artifacts/e2e/golden_journeys/gj_06_error_recovery.golden.json",
+      "category": "golden_journey",
+      "size_bytes": 1360,
+      "sha256": "099e4e0f18c886dc90eeb1caf521745cb3029f18b4322b03e814a1b5e235acb9"
+    },
+    {
+      "path": "artifacts/e2e/golden_journeys/gj_04_transform_composition.golden.json",
+      "category": "golden_journey",
+      "size_bytes": 1268,
+      "sha256": "cb8a95be4f0d594f1d65978c6bb86a85872ca40d37a53c385706c3d77df6b4f7"
+    },
+    {
+      "path": "artifacts/e2e/golden_journeys/gj_05_cache_hit_miss.golden.json",
+      "category": "golden_journey",
+      "size_bytes": 1208,
+      "sha256": "066e02f71fdc40a7cf39e81fade1a3878237e451b7207826b815a51b24f82a5a"
+    },
+    {
+      "path": "artifacts/e2e/golden_journeys/gj_02_gradient_computation.golden.json",
+      "category": "golden_journey",
+      "size_bytes": 1111,
+      "sha256": "91ba6840cdc9ab8e146adcd598a55fbbc69012d70318c4770cea466aaf7a3d4f"
+    },
+    {
+      "path": "artifacts/e2e/golden_journeys/gj_08_ledger_inspection.golden.json",
+      "category": "golden_journey",
+      "size_bytes": 2579,
+      "sha256": "93d2e6886c22808f278a1e34409efacf2f984f3c4196f882010448ab0df6fd0c"
+    },
+    {
+      "path": "artifacts/e2e/golden_journeys/gj_07_large_program.golden.json",
+      "category": "golden_journey",
+      "size_bytes": 1114,
+      "sha256": "6918039c3266628fc2a3aa454f4747a2019ba993ca0bb2968e935498842bba88"
+    },
+    {
+      "path": "artifacts/testing/fj-core.coverage.summary.v1.json",
+      "category": "coverage_report",
+      "size_bytes": 2033,
+      "sha256": "7f3fda59eeb4c3f992490a93977b3a8e0ae44d46992f95a906d980cba763cae8"
+    },
+    {
+      "path": "artifacts/ci/flake_report.v1.json",
+      "category": "other",
+      "size_bytes": 476,
+      "sha256": "99c064d077711618f2196610f23abf603c682da2a7d4b5d37d3b6375bb4dfc13"
+    },
+    {
+      "path": "artifacts/ci/reliability_gate_report.v1.json",
+      "category": "other",
+      "size_bytes": 854,
+      "sha256": "d8eff0cf22c01798981a497dc0ea0a60b0de51bb238a84a2ea97de92eedd2684"
+    },
+    {
+      "path": "artifacts/ci/coverage_raw_llvmcov.v1.json",
+      "category": "other",
+      "size_bytes": 182161,
+      "sha256": "67c5b60094716acb11e9382a20bc5f856e46fb6cbe569c473f0349549df2d278"
+    },
+    {
+      "path": "artifacts/ci/coverage_report.v1.json",
+      "category": "other",
+      "size_bytes": 2122,
+      "sha256": "57c0c11178530ae637311f65ec85eed0eb04f230a23f40a5a051dbc702f38558"
+    },
+    {
+      "path": "artifacts/ci/coverage_trend.v1.json",
+      "category": "other",
+      "size_bytes": 4736,
+      "sha256": "473e684da1670289356e7a09ac9747ecc79dc0f2be2f6e43a2f1d0796574683c"
+    },
+    {
+      "path": "artifacts/ci/crash_report.v1.json",
+      "category": "other",
+      "size_bytes": 384,
+      "sha256": "6ced2373407f1e179f231b3d922dac5fba39ed33870aa7868fee4322c0b665a5"
+    },
+    {
+      "path": "artifacts/ci/reliability_budgets.v1.json",
+      "category": "other",
+      "size_bytes": 1309,
+      "sha256": "1b772c4d901831343d5b3fa4e1a99ebd4993cabc0a7e30e046ce8793c4d36e23"
+    },
+    {
+      "path": "artifacts/performance/evidence/ir_core/streaming_cache_key_hasher.json",
+      "category": "perf_delta",
+      "size_bytes": 2475,
+      "sha256": "7548f914091e9090e9dd7ec5caa6ad5dff6e49a08517900324b7fc463c4fa083"
+    }
+  ],
+  "env": {
+    "rust_version": "rustc 1.95.0-nightly (a423f68a0 2026-02-13)",
+    "os": "Linux 6.17.0-14-generic x86_64",
+    "git_sha": "cbff629ed75277c4d712838746bce2844c4f531f",
+    "git_branch": "main"
+  }
+}

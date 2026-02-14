@@ -13,6 +13,7 @@ fj-ledger = { path = "../fj-ledger" }
 [dev-dependencies]
 criterion = "0.5.1"
 fj-test-utils = { path = "../fj-test-utils" }
+smallvec = { workspace = true }
 
 [[bench]]
 name = "dispatch_baseline"

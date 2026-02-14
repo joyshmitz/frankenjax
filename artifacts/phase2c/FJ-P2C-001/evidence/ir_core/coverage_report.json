@@ -1,0 +1,47 @@
+{
+  "schema_version": "frankenjax.coverage-report.v1",
+  "packet_id": "FJ-P2C-001",
+  "subsystem": "ir_core",
+  "generated_at": "2026-02-14T23:30:00Z",
+  "tool": "cargo-llvm-cov 0.6.23",
+  "crate": "fj-core",
+  "targets": {
+    "line_coverage_percent": 90.0,
+    "function_coverage_percent": 75.0
+  },
+  "results": {
+    "fj_core_lib": {
+      "file": "crates/fj-core/src/lib.rs",
+      "lines": { "total": 1534, "covered": 1429, "percent": 93.16 },
+      "functions": { "total": 165, "covered": 125, "percent": 75.76 },
+      "regions": { "total": 2244, "covered": 1987, "percent": 88.55 }
+    },
+    "proptest_strategies": {
+      "file": "crates/fj-core/src/proptest_strategies.rs",
+      "lines": { "total": 60, "covered": 60, "percent": 100.0 },
+      "functions": { "total": 10, "covered": 10, "percent": 100.0 },
+      "regions": { "total": 79, "covered": 76, "percent": 96.20 }
+    },
+    "fj_test_utils": {
+      "file": "crates/fj-test-utils/src/lib.rs",
+      "lines": { "total": 73, "covered": 63, "percent": 86.30 },
+      "functions": { "total": 11, "covered": 10, "percent": 90.91 },
+      "regions": { "total": 93, "covered": 74, "percent": 79.57 }
+    }
+  },
+  "totals": {
+    "lines": { "total": 1667, "covered": 1552, "percent": 93.10 },
+    "functions": { "total": 186, "covered": 145, "percent": 77.96 },
+    "regions": { "total": 2416, "covered": 2137, "percent": 88.45 }
+  },
+  "gate_status": {
+    "line_coverage": "PASS",
+    "function_coverage": "PASS",
+    "overall": "PASS"
+  },
+  "uncovered_areas": [
+    "Display trait implementations (cosmetic formatting paths)",
+    "Some error-path branches in dispatch (covered by adversarial tests at integration level)",
+    "Debug-only trace helpers"
+  ]
+}

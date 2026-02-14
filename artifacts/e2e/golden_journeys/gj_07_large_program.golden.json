@@ -1,0 +1,45 @@
+{
+  "schema_version": "frankenjax.golden-journey.v1",
+  "scenario_id": "gj_07_large_program",
+  "scenario_category": "large_program",
+  "ts_utc_unix_ms": 1771109240807,
+  "replay_command": "cargo test -p fj-conformance --test golden_journeys -- golden_journey_07 --exact --nocapture",
+  "input_capture": {
+    "equation_count": 200,
+    "program": "chain_add"
+  },
+  "assertions": [
+    {
+      "name": "large_jaxpr_well_formed",
+      "passed": true,
+      "detail": "equations=200, valid=Ok(())"
+    },
+    {
+      "name": "large_jaxpr_correct_output",
+      "passed": true,
+      "detail": "expected 200, got Some(200)"
+    },
+    {
+      "name": "large_jaxpr_timing_under_30ms",
+      "passed": true,
+      "detail": "eval_ms=0"
+    },
+    {
+      "name": "large_jaxpr_fingerprint_non_empty",
+      "passed": true,
+      "detail": "fingerprint_len=5813"
+    },
+    {
+      "name": "fingerprint_timing_under_10ms",
+      "passed": true,
+      "detail": "fingerprint_ms=0"
+    }
+  ],
+  "output_capture": {
+    "eval_ms": 0,
+    "fingerprint_ms": 0,
+    "output": 200
+  },
+  "result": "pass",
+  "duration_ms": 0
+}

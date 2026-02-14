@@ -1,0 +1,56 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_p2c001_transform_stack_composition",
+  "test_id": "e2e::e2e_p2c001_transform_stack_composition",
+  "packet_id": "P2C-001",
+  "fixture_id": "5adfb68d2fded890604faf8caf6f09db8bccb0553dddae10923d4c24f889f6e0",
+  "seed": null,
+  "mode": "strict",
+  "ts_utc_unix_ms": 1771109240777,
+  "env": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_toolchain": "nightly-x86_64-unknown-linux-gnu"
+  },
+  "artifact_refs": [],
+  "replay_command": "cargo test -p fj-conformance --test e2e -- e2e_p2c001_transform_stack_composition --exact --nocapture",
+  "input_capture": {
+    "description": "jit(grad(x^2))(3.0) = 6.0",
+    "expected_output": 6.0,
+    "input": 3.0,
+    "program": "Square",
+    "transforms": [
+      "Jit",
+      "Grad"
+    ]
+  },
+  "intermediate_states": [
+    {
+      "root_jaxpr_equations": 1,
+      "step": "ttl_built",
+      "transforms": [
+        "Jit",
+        "Grad"
+      ]
+    },
+    {
+      "proof_hash": "TransformCompositionProof { stack_signature: \"stack=jit>grad>|jaxpr=in=[v1,]const=[]out=[v2,]eqn:mul(v1,v1,)->v2,{}|\", stack_hash_hex: \"af0b8b92669d4277\", transform_count: 2, evidence_count: 2 }",
+      "step": "composition_proof_passed"
+    },
+    {
+      "cache_key": "fjx-76d109d1362137c3a8b2a7622f21dddd95dc24d5ea94e8871b2e0ac90fdaa159",
+      "ledger_entries": 1,
+      "output": 6.0,
+      "step": "dispatch_complete"
+    }
+  ],
+  "output_capture": {
+    "cache_key": "fjx-76d109d1362137c3a8b2a7622f21dddd95dc24d5ea94e8871b2e0ac90fdaa159",
+    "delta": 0.0,
+    "expected": 6.0,
+    "output": 6.0
+  },
+  "result": "pass",
+  "duration_ms": 0,
+  "details": null
+}

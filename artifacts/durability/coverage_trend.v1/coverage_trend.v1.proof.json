@@ -1,0 +1,15 @@
+{
+  "proof_id": "decode-proof-64c34c62b4066890",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/coverage_trend.v1/coverage_trend.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/coverage_trend.v1.json",
+  "expected_sha256_hex": "473e684da1670289356e7a09ac9747ecc79dc0f2be2f6e43a2f1d0796574683c",
+  "decoded_sha256_hex": null,
+  "dropped_symbols": [
+    "kind:source:sbn:0:esi:0",
+    "kind:source:sbn:0:esi:1"
+  ],
+  "attempted_symbol_count": 19,
+  "recovered": false,
+  "details": "drop-kind=source count=2; decode failed from retained symbols: decode error: insufficient symbols: have 19, need 19",
+  "generated_at_unix_ms": 1771109496642
+}

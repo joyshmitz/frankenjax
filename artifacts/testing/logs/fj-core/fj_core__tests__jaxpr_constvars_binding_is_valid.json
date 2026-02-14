@@ -1,0 +1,27 @@
+{
+  "schema_version": "frankenjax.test-log.v1",
+  "test_id": "fj_core::tests::jaxpr_constvars_binding_is_valid",
+  "fixture_id": "1665ca4b26fc40885614ccd0121f505d767280474b5c948b5598d5560bba3611",
+  "seed": null,
+  "mode": "strict",
+  "env": {
+    "rust_version": "rustc 1.95.0-nightly (a423f68a0 2026-02-13)",
+    "os": "linux",
+    "cargo_target_dir": "/data/tmp/cargo-target",
+    "timestamp_unix_ms": 1771109762786
+  },
+  "artifact_refs": [
+    "packet:FJ-P2C-001",
+    "replay: cargo test -p fj-core --lib fj_core::tests::jaxpr_constvars_binding_is_valid -- --exact --nocapture",
+    "/data/projects/frankenjax/crates/fj-core/../../artifacts/testing/logs/fj-core/fj_core__tests__jaxpr_constvars_binding_is_valid.json"
+  ],
+  "result": "pass",
+  "duration_ms": 80,
+  "details": "packet_id=FJ-P2C-001;suite_id=fj-core;result=pass",
+  "phase_timings": {
+    "setup_ms": 80,
+    "execute_ms": 0,
+    "verify_ms": 0,
+    "teardown_ms": 0
+  }
+}

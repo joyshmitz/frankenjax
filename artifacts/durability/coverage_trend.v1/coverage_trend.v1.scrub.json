@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/coverage_trend.v1/coverage_trend.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/coverage_trend.v1.json",
+  "expected_sha256_hex": "473e684da1670289356e7a09ac9747ecc79dc0f2be2f6e43a2f1d0796574683c",
+  "decoded_sha256_hex": "473e684da1670289356e7a09ac9747ecc79dc0f2be2f6e43a2f1d0796574683c",
+  "decoded_matches_expected": true,
+  "total_symbols": 21,
+  "source_symbols": 19,
+  "repair_symbols": 2,
+  "generated_at_unix_ms": 1771109496642
+}

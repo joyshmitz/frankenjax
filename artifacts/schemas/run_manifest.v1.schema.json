@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankenjax.dev/schemas/run_manifest.v1.schema.json",
+  "title": "FrankenJAX CI Run Manifest v1",
+  "description": "Manifest indexing all artifacts from a single CI run. Enables cross-reference from test name to evidence, fixture, and sidecar.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "total_duration_ms",
+    "summary",
+    "gate_results",
+    "failures",
+    "artifact_index"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "frankenjax.run-manifest.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "description": "Unique identifier for this CI run (timestamp + short hash).",
+      "minLength": 1
+    },
+    "started_at_unix_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "finished_at_unix_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "total_duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_tests", "passed", "failed", "skipped", "flaky", "overall_status"],
+      "properties": {
+        "total_tests": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "flaky": { "type": "integer", "minimum": 0 },
+        "overall_status": {
+          "type": "string",
+          "enum": ["pass", "fail"]
+        }
+      }
+    },
+    "gate_results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gate_id", "name", "status", "duration_ms"],
+        "properties": {
+          "gate_id": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["pass", "fail", "skipped"] },
+          "duration_ms": { "type": "integer", "minimum": 0 },
+          "failure_count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "failures": {
+      "type": "array",
+      "description": "Array of failure diagnostic records (see failure_diagnostic.v1.schema.json).",
+      "items": {
+        "type": "object",
+        "required": ["gate", "test", "status", "summary", "replay_cmd"],
+        "properties": {
+          "schema_version": { "type": "string" },
+          "gate": { "type": "string", "minLength": 1 },
+          "test": { "type": "string", "minLength": 1 },
+          "status": { "type": "string", "enum": ["fail", "error", "timeout", "flake"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "detail_path": { "type": "string" },
+          "replay_cmd": { "type": "string", "minLength": 1 },
+          "related_fixtures": { "type": "array", "items": { "type": "string" } },
+          "timestamp_unix_ms": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "artifact_index": {
+      "type": "array",
+      "description": "Index of all produced artifacts with paths and checksums.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "category", "size_bytes"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "category": {
+            "type": "string",
+            "enum": ["test_log", "e2e_log", "golden_journey", "coverage_report", "perf_delta", "crash_triage", "parity_gate", "risk_note", "durability_sidecar", "failure_diagnostic", "other"]
+          },
+          "size_bytes": { "type": "integer", "minimum": 0 },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+          "gate_id": { "type": "string" },
+          "test_id": { "type": "string" }
+        }
+      }
+    },
+    "env": {
+      "type": "object",
+      "description": "Environment of the CI run.",
+      "additionalProperties": false,
+      "properties": {
+        "rust_version": { "type": "string" },
+        "os": { "type": "string" },
+        "git_sha": { "type": "string" },
+        "git_branch": { "type": "string" }
+      }
+    }
+  }
+}

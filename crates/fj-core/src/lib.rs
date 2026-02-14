@@ -5,7 +5,7 @@ pub mod proptest_strategies;
 
 use serde::{Deserialize, Serialize};
 use smallvec::{SmallVec, smallvec};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -506,6 +506,49 @@ impl PartialEq for Jaxpr {
 
 impl Eq for Jaxpr {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JaxprValidationError {
+    DuplicateBinding { section: &'static str, var: VarId },
+    UnboundInputVar { equation_index: usize, var: VarId },
+    OutputShadowsBinding { equation_index: usize, var: VarId },
+    UnknownOutvar { var: VarId },
+}
+
+impl std::fmt::Display for JaxprValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateBinding { section, var } => {
+                write!(f, "duplicate binding in {} for var v{}", section, var.0)
+            }
+            Self::UnboundInputVar {
+                equation_index,
+                var,
+            } => {
+                write!(
+                    f,
+                    "equation {} references unbound input var v{}",
+                    equation_index, var.0
+                )
+            }
+            Self::OutputShadowsBinding {
+                equation_index,
+                var,
+            } => {
+                write!(
+                    f,
+                    "equation {} output var v{} shadows an existing binding",
+                    equation_index, var.0
+                )
+            }
+            Self::UnknownOutvar { var } => {
+                write!(f, "outvar v{} does not have a defining binding", var.0)
+            }
+        }
+    }
+}
+
+impl std::error::Error for JaxprValidationError {}
+
 impl Jaxpr {
     #[must_use]
     pub fn new(
@@ -552,6 +595,63 @@ impl Jaxpr {
 
             out
         })
+    }
+
+    pub fn validate_well_formed(&self) -> Result<(), JaxprValidationError> {
+        let mut bindings = BTreeSet::new();
+
+        for var in &self.invars {
+            if !bindings.insert(*var) {
+                return Err(JaxprValidationError::DuplicateBinding {
+                    section: "invars",
+                    var: *var,
+                });
+            }
+        }
+        for var in &self.constvars {
+            if !bindings.insert(*var) {
+                return Err(JaxprValidationError::DuplicateBinding {
+                    section: "constvars",
+                    var: *var,
+                });
+            }
+        }
+
+        for (equation_index, eqn) in self.equations.iter().enumerate() {
+            for atom in &eqn.inputs {
+                if let Atom::Var(var) = atom
+                    && !bindings.contains(var)
+                {
+                    return Err(JaxprValidationError::UnboundInputVar {
+                        equation_index,
+                        var: *var,
+                    });
+                }
+            }
+            for out_var in &eqn.outputs {
+                if !bindings.insert(*out_var) {
+                    return Err(JaxprValidationError::OutputShadowsBinding {
+                        equation_index,
+                        var: *out_var,
+                    });
+                }
+            }
+        }
+
+        let mut seen_outvars = BTreeSet::new();
+        for outvar in &self.outvars {
+            if !seen_outvars.insert(*outvar) {
+                return Err(JaxprValidationError::DuplicateBinding {
+                    section: "outvars",
+                    var: *outvar,
+                });
+            }
+            if !bindings.contains(outvar) {
+                return Err(JaxprValidationError::UnknownOutvar { var: *outvar });
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -858,114 +958,1164 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Literal, ProgramSpec, Shape, TensorValue, TraceTransformLedger, Transform, Value,
-        ValueError, build_program, verify_transform_composition,
+        Atom, DType, Equation, Jaxpr, JaxprValidationError, Literal, Primitive, ProgramSpec, Shape,
+        TensorValue, TraceTransformLedger, Transform, Value, ValueError, VarId, build_program,
+        verify_transform_composition,
     };
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
+    use serde::Serialize;
+    use smallvec::smallvec;
+    use std::any::Any;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::path::{Path, PathBuf};
+    use std::time::Instant;
+
+    const PACKET_ID: &str = "FJ-P2C-001";
+    const SUITE_ID: &str = "fj-core";
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn test_log_path(test_id: &str) -> PathBuf {
+        let file_name = test_id.replace("::", "__");
+        repo_root()
+            .join("artifacts")
+            .join("testing")
+            .join("logs")
+            .join(SUITE_ID)
+            .join(format!("{file_name}.json"))
+    }
+
+    fn replay_command(test_id: &str) -> String {
+        format!("cargo test -p fj-core --lib {test_id} -- --exact --nocapture")
+    }
+
+    fn duration_ms(start: Instant) -> u64 {
+        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn write_log(path: &Path, log: &fj_test_utils::TestLogV1) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| format!("log dir create failed: {err}"))?;
+        }
+        let payload = serde_json::to_string_pretty(log)
+            .map_err(|err| format!("log serialize failed: {err}"))?;
+        fs::write(path, payload).map_err(|err| format!("log write failed: {err}"))
+    }
+
+    fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
+        if let Some(msg) = payload.downcast_ref::<String>() {
+            return msg.clone();
+        }
+        if let Some(msg) = payload.downcast_ref::<&str>() {
+            return (*msg).to_owned();
+        }
+        "non-string panic payload".to_owned()
+    }
+
+    fn run_logged_test<Fixture, F>(
+        test_name: &str,
+        fixture: &Fixture,
+        mode: fj_test_utils::TestMode,
+        body: F,
+    ) where
+        Fixture: Serialize,
+        F: FnOnce() -> Result<Vec<String>, String> + std::panic::UnwindSafe,
+    {
+        let overall_start = Instant::now();
+        let setup_start = Instant::now();
+        let fixture_id = fj_test_utils::fixture_id_from_json(fixture).expect("fixture digest");
+        let test_id = fj_test_utils::test_id(module_path!(), test_name);
+        let mut log = fj_test_utils::TestLogV1::unit(
+            test_id.clone(),
+            fixture_id,
+            mode,
+            fj_test_utils::TestResult::Fail,
+        );
+        log.phase_timings.setup_ms = duration_ms(setup_start);
+
+        let execute_start = Instant::now();
+        let outcome = catch_unwind(AssertUnwindSafe(body));
+        log.phase_timings.execute_ms = duration_ms(execute_start);
+
+        let verify_start = Instant::now();
+        let mut panic_payload: Option<Box<dyn Any + Send>> = None;
+        let mut failure_detail: Option<String> = None;
+
+        match outcome {
+            Ok(Ok(mut artifact_refs)) => {
+                log.result = fj_test_utils::TestResult::Pass;
+                artifact_refs.push(format!("packet:{PACKET_ID}"));
+                artifact_refs.push(format!("replay: {}", replay_command(&test_id)));
+                log.artifact_refs = artifact_refs;
+                log.details = Some(format!(
+                    "packet_id={PACKET_ID};suite_id={SUITE_ID};result=pass"
+                ));
+            }
+            Ok(Err(detail)) => {
+                failure_detail = Some(detail.clone());
+                log.result = fj_test_utils::TestResult::Fail;
+                log.artifact_refs = vec![
+                    format!("packet:{PACKET_ID}"),
+                    format!("replay: {}", replay_command(&test_id)),
+                ];
+                log.details = Some(detail);
+            }
+            Err(payload) => {
+                let detail = panic_payload_to_string(payload.as_ref());
+                failure_detail = Some(detail.clone());
+                log.result = fj_test_utils::TestResult::Fail;
+                log.artifact_refs = vec![
+                    format!("packet:{PACKET_ID}"),
+                    format!("replay: {}", replay_command(&test_id)),
+                ];
+                log.details = Some(detail);
+                panic_payload = Some(payload);
+            }
+        }
+        log.phase_timings.verify_ms = duration_ms(verify_start);
+
+        let log_path = test_log_path(&test_id);
+        log.artifact_refs.push(log_path.display().to_string());
+        log.duration_ms = duration_ms(overall_start);
+
+        let teardown_start = Instant::now();
+        write_log(&log_path, &log).expect("test log write should succeed");
+        log.phase_timings.teardown_ms = duration_ms(teardown_start);
+        log.duration_ms = duration_ms(overall_start);
+        write_log(&log_path, &log).expect("test log rewrite should succeed");
+
+        if let Some(payload) = panic_payload {
+            std::panic::resume_unwind(payload);
+        }
+        if let Some(detail) = failure_detail {
+            panic!("{detail}");
+        }
+    }
+
+    fn all_primitives_jaxpr() -> Jaxpr {
+        let mut equations = Vec::new();
+
+        let mut reshape_params = BTreeMap::new();
+        reshape_params.insert("new_shape".to_owned(), "2,3".to_owned());
+        equations.push(Equation {
+            primitive: Primitive::Reshape,
+            inputs: smallvec![Atom::Var(VarId(1))],
+            outputs: smallvec![VarId(5)],
+            params: reshape_params,
+        });
+
+        let mut slice_params = BTreeMap::new();
+        slice_params.insert("start_indices".to_owned(), "0,0".to_owned());
+        slice_params.insert("limit_indices".to_owned(), "2,2".to_owned());
+        equations.push(Equation {
+            primitive: Primitive::Slice,
+            inputs: smallvec![Atom::Var(VarId(5))],
+            outputs: smallvec![VarId(6)],
+            params: slice_params,
+        });
+
+        let mut gather_params = BTreeMap::new();
+        gather_params.insert("slice_sizes".to_owned(), "1,2".to_owned());
+        equations.push(Equation {
+            primitive: Primitive::Gather,
+            inputs: smallvec![Atom::Var(VarId(5)), Atom::Var(VarId(2))],
+            outputs: smallvec![VarId(7)],
+            params: gather_params,
+        });
+
+        let mut transpose_params = BTreeMap::new();
+        transpose_params.insert("permutation".to_owned(), "1,0".to_owned());
+        equations.push(Equation {
+            primitive: Primitive::Transpose,
+            inputs: smallvec![Atom::Var(VarId(5))],
+            outputs: smallvec![VarId(8)],
+            params: transpose_params,
+        });
+
+        let mut broadcast_params = BTreeMap::new();
+        broadcast_params.insert("shape".to_owned(), "3,2,2".to_owned());
+        broadcast_params.insert("broadcast_dimensions".to_owned(), "1,2".to_owned());
+        equations.push(Equation {
+            primitive: Primitive::BroadcastInDim,
+            inputs: smallvec![Atom::Var(VarId(6))],
+            outputs: smallvec![VarId(9)],
+            params: broadcast_params,
+        });
+
+        let mut concat_params = BTreeMap::new();
+        concat_params.insert("dimension".to_owned(), "0".to_owned());
+        equations.push(Equation {
+            primitive: Primitive::Concatenate,
+            inputs: smallvec![Atom::Var(VarId(8)), Atom::Var(VarId(8))],
+            outputs: smallvec![VarId(10)],
+            params: concat_params,
+        });
+
+        equations.push(Equation {
+            primitive: Primitive::Scatter,
+            inputs: smallvec![Atom::Var(VarId(10)), Atom::Var(VarId(2))],
+            outputs: smallvec![VarId(11)],
+            params: BTreeMap::new(),
+        });
+
+        let mut reduce_params = BTreeMap::new();
+        reduce_params.insert("axes".to_owned(), "0".to_owned());
+        equations.push(Equation {
+            primitive: Primitive::ReduceSum,
+            inputs: smallvec![Atom::Var(VarId(11))],
+            outputs: smallvec![VarId(12)],
+            params: reduce_params,
+        });
+
+        equations.push(Equation {
+            primitive: Primitive::Sin,
+            inputs: smallvec![Atom::Var(VarId(12))],
+            outputs: smallvec![VarId(13)],
+            params: BTreeMap::new(),
+        });
+        equations.push(Equation {
+            primitive: Primitive::Cos,
+            inputs: smallvec![Atom::Var(VarId(13))],
+            outputs: smallvec![VarId(14)],
+            params: BTreeMap::new(),
+        });
+        equations.push(Equation {
+            primitive: Primitive::Add,
+            inputs: smallvec![Atom::Var(VarId(14)), Atom::Var(VarId(12))],
+            outputs: smallvec![VarId(15)],
+            params: BTreeMap::new(),
+        });
+        equations.push(Equation {
+            primitive: Primitive::Mul,
+            inputs: smallvec![Atom::Var(VarId(15)), Atom::Var(VarId(15))],
+            outputs: smallvec![VarId(16)],
+            params: BTreeMap::new(),
+        });
+        equations.push(Equation {
+            primitive: Primitive::Dot,
+            inputs: smallvec![Atom::Var(VarId(8)), Atom::Var(VarId(3))],
+            outputs: smallvec![VarId(17)],
+            params: BTreeMap::new(),
+        });
+        equations.push(Equation {
+            primitive: Primitive::Add,
+            inputs: smallvec![Atom::Var(VarId(16)), Atom::Var(VarId(17))],
+            outputs: smallvec![VarId(24)],
+            params: BTreeMap::new(),
+        });
+
+        Jaxpr::new(
+            vec![VarId(1), VarId(2), VarId(3)],
+            vec![VarId(4)],
+            vec![VarId(24)],
+            equations,
+        )
+    }
+
+    #[test]
+    fn jaxpr_construction_supports_all_primitives() {
+        run_logged_test(
+            "jaxpr_construction_supports_all_primitives",
+            &("all_primitives", 14_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = all_primitives_jaxpr();
+                jaxpr
+                    .validate_well_formed()
+                    .map_err(|err| format!("well-formed validation failed: {err}"))?;
+                let covered = jaxpr
+                    .equations
+                    .iter()
+                    .map(|eqn| eqn.primitive)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let expected = [
+                    Primitive::Add,
+                    Primitive::Mul,
+                    Primitive::Dot,
+                    Primitive::Sin,
+                    Primitive::Cos,
+                    Primitive::ReduceSum,
+                    Primitive::Reshape,
+                    Primitive::Slice,
+                    Primitive::Gather,
+                    Primitive::Scatter,
+                    Primitive::Transpose,
+                    Primitive::BroadcastInDim,
+                    Primitive::Concatenate,
+                ]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(covered, expected);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_constvars_binding_is_valid() {
+        run_logged_test(
+            "jaxpr_constvars_binding_is_valid",
+            &("constvars", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1)],
+                    vec![VarId(2)],
+                    vec![VarId(3)],
+                    vec![Equation {
+                        primitive: Primitive::Add,
+                        inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                        outputs: smallvec![VarId(3)],
+                        params: BTreeMap::new(),
+                    }],
+                );
+                jaxpr
+                    .validate_well_formed()
+                    .map_err(|err| format!("constvar jaxpr should be valid: {err}"))?;
+                assert!(jaxpr.canonical_fingerprint().contains("const=[v2,]"));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_multi_equation_chain_is_valid() {
+        run_logged_test(
+            "jaxpr_multi_equation_chain_is_valid",
+            &("square_plus_linear", 3_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+                assert_eq!(jaxpr.equations.len(), 3);
+                jaxpr
+                    .validate_well_formed()
+                    .map_err(|err| format!("program should validate: {err}"))?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_empty_program_is_valid() {
+        run_logged_test(
+            "jaxpr_empty_program_is_valid",
+            &("empty", 0_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = Jaxpr::new(vec![], vec![], vec![], vec![]);
+                jaxpr
+                    .validate_well_formed()
+                    .map_err(|err| format!("empty jaxpr should validate: {err}"))?;
+                assert_eq!(jaxpr.equations.len(), 0);
+                assert!(
+                    jaxpr
+                        .canonical_fingerprint()
+                        .starts_with("in=[]const=[]out=[]")
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_duplicate_varid_detection() {
+        run_logged_test(
+            "jaxpr_duplicate_varid_detection",
+            &("duplicate-varid", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let bad = Jaxpr::new(vec![VarId(1), VarId(1)], vec![], vec![VarId(1)], vec![]);
+                let err = bad
+                    .validate_well_formed()
+                    .expect_err("duplicate invar should fail");
+                assert!(matches!(
+                    err,
+                    JaxprValidationError::DuplicateBinding {
+                        section: "invars",
+                        var: VarId(1)
+                    }
+                ));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn canonical_fingerprint_is_deterministic() {
+        run_logged_test(
+            "canonical_fingerprint_is_deterministic",
+            &("fingerprint-deterministic", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+                let fp_a = jaxpr.canonical_fingerprint().to_owned();
+                let fp_b = jaxpr.canonical_fingerprint().to_owned();
+                assert_eq!(fp_a, fp_b);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn canonical_fingerprint_changes_on_program_change() {
+        run_logged_test(
+            "canonical_fingerprint_changes_on_program_change",
+            &("fingerprint-sensitivity", 2_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let base = build_program(ProgramSpec::SquarePlusLinear);
+                let mut modified = base.clone();
+                modified.equations[0]
+                    .params
+                    .insert("tweak".to_owned(), "1".to_owned());
+                assert_ne!(
+                    base.canonical_fingerprint(),
+                    modified.canonical_fingerprint()
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn canonical_fingerprint_round_trip_stable() {
+        run_logged_test(
+            "canonical_fingerprint_round_trip_stable",
+            &("fingerprint-roundtrip", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+                let encoded = serde_json::to_string(&jaxpr)
+                    .map_err(|err| format!("serialize failed: {err}"))?;
+                let decoded: Jaxpr = serde_json::from_str(&encoded)
+                    .map_err(|err| format!("decode failed: {err}"))?;
+                decoded
+                    .validate_well_formed()
+                    .map_err(|err| format!("decoded jaxpr should validate: {err}"))?;
+                assert_eq!(
+                    jaxpr.canonical_fingerprint(),
+                    decoded.canonical_fingerprint()
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn transform_composition_valid_single_transforms() {
+        run_logged_test(
+            "transform_composition_valid_single_transforms",
+            &["jit", "grad", "vmap"],
+            fj_test_utils::TestMode::Strict,
+            || {
+                for transform in [Transform::Jit, Transform::Grad, Transform::Vmap] {
+                    let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+                    ttl.push_transform(transform, format!("evidence-{}", transform.as_str()));
+                    let proof = verify_transform_composition(&ttl)
+                        .map_err(|err| format!("single transform should validate: {err}"))?;
+                    assert_eq!(proof.transform_count, 1);
+                    assert_eq!(proof.evidence_count, 1);
+                }
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn transform_composition_valid_double_compositions() {
+        run_logged_test(
+            "transform_composition_valid_double_compositions",
+            &["jit+grad", "jit+vmap", "vmap+grad"],
+            fj_test_utils::TestMode::Strict,
+            || {
+                let stacks = [
+                    [Transform::Jit, Transform::Grad],
+                    [Transform::Jit, Transform::Vmap],
+                    [Transform::Vmap, Transform::Grad],
+                ];
+                for stack in stacks {
+                    let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+                    ttl.push_transform(stack[0], "a");
+                    ttl.push_transform(stack[1], "b");
+                    verify_transform_composition(&ttl)
+                        .map_err(|err| format!("double transform should validate: {err}"))?;
+                }
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn transform_composition_valid_triple_stack() {
+        run_logged_test(
+            "transform_composition_valid_triple_stack",
+            &["jit", "vmap", "grad"],
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+                ttl.push_transform(Transform::Jit, "jit");
+                ttl.push_transform(Transform::Vmap, "vmap");
+                ttl.push_transform(Transform::Grad, "grad");
+                let proof = verify_transform_composition(&ttl)
+                    .map_err(|err| format!("triple transform should validate: {err}"))?;
+                assert_eq!(proof.transform_count, 3);
+                assert_eq!(proof.evidence_count, 3);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn transform_composition_rejects_double_grad() {
+        run_logged_test(
+            "transform_composition_rejects_double_grad",
+            &["grad", "grad"],
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+                ttl.push_transform(Transform::Grad, "g1");
+                ttl.push_transform(Transform::Grad, "g2");
+                let err =
+                    verify_transform_composition(&ttl).expect_err("double grad should reject");
+                assert!(format!("{err}").contains("at most one grad"));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn transform_composition_rejects_double_vmap() {
+        run_logged_test(
+            "transform_composition_rejects_double_vmap",
+            &["vmap", "vmap"],
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+                ttl.push_transform(Transform::Vmap, "v1");
+                ttl.push_transform(Transform::Vmap, "v2");
+                let err =
+                    verify_transform_composition(&ttl).expect_err("double vmap should reject");
+                assert!(format!("{err}").contains("at most one vmap"));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn transform_composition_rejects_evidence_count_mismatch() {
+        run_logged_test(
+            "transform_composition_rejects_evidence_count_mismatch",
+            &("mismatch", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let ttl = TraceTransformLedger {
+                    root_jaxpr: build_program(ProgramSpec::Square),
+                    transform_stack: vec![Transform::Jit],
+                    transform_evidence: vec![],
+                };
+                let err = verify_transform_composition(&ttl)
+                    .expect_err("evidence mismatch should reject");
+                assert!(format!("{err}").contains("cardinality mismatch"));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn transform_composition_rejects_empty_evidence() {
+        run_logged_test(
+            "transform_composition_rejects_empty_evidence",
+            &("empty-evidence", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+                ttl.push_transform(Transform::Jit, "   ");
+                let err =
+                    verify_transform_composition(&ttl).expect_err("empty evidence should fail");
+                assert!(format!("{err}").contains("is empty"));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn ttl_construction_with_empty_stack_is_deterministic() {
+        run_logged_test(
+            "ttl_construction_with_empty_stack_is_deterministic",
+            &("ttl-empty-stack", 0_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let ttl = TraceTransformLedger::new(build_program(ProgramSpec::Add2));
+                assert!(ttl.transform_stack.is_empty());
+                assert!(ttl.transform_evidence.is_empty());
+                let sig_a = ttl.composition_signature();
+                let sig_b = ttl.composition_signature();
+                assert_eq!(sig_a, sig_b);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn ttl_hash_stability_across_runs() {
+        run_logged_test(
+            "ttl_hash_stability_across_runs",
+            &("ttl-hash", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+                ttl.push_transform(Transform::Jit, "jit-evidence");
+                ttl.push_transform(Transform::Grad, "grad-evidence");
+                let proof_a = verify_transform_composition(&ttl)
+                    .map_err(|err| format!("proof failed: {err}"))?;
+                let proof_b = verify_transform_composition(&ttl)
+                    .map_err(|err| format!("proof failed: {err}"))?;
+                assert_eq!(proof_a.stack_hash_hex, proof_b.stack_hash_hex);
+                Ok(Vec::new())
+            },
+        );
+    }
 
     #[test]
     fn shape_scalar_rank_is_zero() {
-        let scalar = Shape::scalar();
-        assert_eq!(scalar.rank(), 0);
-        assert_eq!(scalar.element_count(), Some(1));
+        run_logged_test(
+            "shape_scalar_rank_is_zero",
+            &("shape-scalar", 0_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let scalar = Shape::scalar();
+                assert_eq!(scalar.rank(), 0);
+                assert_eq!(scalar.element_count(), Some(1));
+                Ok(Vec::new())
+            },
+        );
     }
 
     #[test]
     fn vector_constructor_builds_tensor_value() {
-        let value = Value::vector_i64(&[1, 2, 3]).expect("vector constructor should succeed");
-        let tensor = value.as_tensor().expect("expected tensor value");
-        assert_eq!(tensor.shape, Shape::vector(3));
-        assert_eq!(tensor.len(), 3);
+        run_logged_test(
+            "vector_constructor_builds_tensor_value",
+            &("vector", [1_i64, 2, 3]),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let value =
+                    Value::vector_i64(&[1, 2, 3]).expect("vector constructor should succeed");
+                let tensor = value.as_tensor().expect("expected tensor value");
+                assert_eq!(tensor.shape, Shape::vector(3));
+                assert_eq!(tensor.len(), 3);
+                Ok(Vec::new())
+            },
+        );
     }
 
     #[test]
     fn tensor_slice_axis0_on_rank2_returns_rank1_slice() {
-        let tensor = TensorValue::new(
-            super::DType::I64,
-            Shape { dims: vec![2, 3] },
-            vec![
-                Literal::I64(1),
-                Literal::I64(2),
-                Literal::I64(3),
-                Literal::I64(4),
-                Literal::I64(5),
-                Literal::I64(6),
-            ],
-        )
-        .expect("rank2 tensor should build");
+        run_logged_test(
+            "tensor_slice_axis0_on_rank2_returns_rank1_slice",
+            &("slice-axis0", [2_u32, 3_u32]),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let tensor = TensorValue::new(
+                    DType::I64,
+                    Shape { dims: vec![2, 3] },
+                    vec![
+                        Literal::I64(1),
+                        Literal::I64(2),
+                        Literal::I64(3),
+                        Literal::I64(4),
+                        Literal::I64(5),
+                        Literal::I64(6),
+                    ],
+                )
+                .expect("rank2 tensor should build");
 
-        let slice = tensor.slice_axis0(1).expect("slice should succeed");
-        let Value::Tensor(slice_tensor) = slice else {
-            panic!("slice should be tensor");
-        };
-        assert_eq!(slice_tensor.shape, Shape::vector(3));
-        assert_eq!(
-            slice_tensor.elements,
-            vec![Literal::I64(4), Literal::I64(5), Literal::I64(6)]
+                let slice = tensor.slice_axis0(1).expect("slice should succeed");
+                let Value::Tensor(slice_tensor) = slice else {
+                    return Err("slice should be tensor".to_owned());
+                };
+                assert_eq!(slice_tensor.shape, Shape::vector(3));
+                assert_eq!(
+                    slice_tensor.elements,
+                    vec![Literal::I64(4), Literal::I64(5), Literal::I64(6)]
+                );
+                Ok(Vec::new())
+            },
         );
     }
 
     #[test]
     fn stack_axis0_restores_rank2_from_rank1_slices() {
-        let row_a = Value::vector_i64(&[1, 2, 3]).expect("vector should build");
-        let row_b = Value::vector_i64(&[4, 5, 6]).expect("vector should build");
-        let stacked = TensorValue::stack_axis0(&[row_a, row_b]).expect("stack should succeed");
-        assert_eq!(stacked.shape, Shape { dims: vec![2, 3] });
-        assert_eq!(
-            stacked.elements,
-            vec![
-                Literal::I64(1),
-                Literal::I64(2),
-                Literal::I64(3),
-                Literal::I64(4),
-                Literal::I64(5),
-                Literal::I64(6)
-            ]
+        run_logged_test(
+            "stack_axis0_restores_rank2_from_rank1_slices",
+            &("stack-axis0", [2_u32, 3_u32]),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let row_a = Value::vector_i64(&[1, 2, 3]).expect("vector should build");
+                let row_b = Value::vector_i64(&[4, 5, 6]).expect("vector should build");
+                let stacked =
+                    TensorValue::stack_axis0(&[row_a, row_b]).expect("stack should succeed");
+                assert_eq!(stacked.shape, Shape { dims: vec![2, 3] });
+                assert_eq!(
+                    stacked.elements,
+                    vec![
+                        Literal::I64(1),
+                        Literal::I64(2),
+                        Literal::I64(3),
+                        Literal::I64(4),
+                        Literal::I64(5),
+                        Literal::I64(6)
+                    ]
+                );
+                Ok(Vec::new())
+            },
         );
     }
 
     #[test]
     fn tensor_new_rejects_wrong_element_count() {
-        let err = TensorValue::new(
-            super::DType::I64,
-            Shape::vector(4),
-            vec![Literal::I64(1), Literal::I64(2)],
-        )
-        .expect_err("shape mismatch should fail");
-
-        assert!(matches!(err, ValueError::ElementCountMismatch { .. }));
+        run_logged_test(
+            "tensor_new_rejects_wrong_element_count",
+            &("tensor-mismatch", 4_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let err = TensorValue::new(
+                    DType::I64,
+                    Shape::vector(4),
+                    vec![Literal::I64(1), Literal::I64(2)],
+                )
+                .expect_err("shape mismatch should fail");
+                assert!(matches!(err, ValueError::ElementCountMismatch { .. }));
+                Ok(Vec::new())
+            },
+        );
     }
 
     #[test]
-    fn composition_proof_is_deterministic() {
-        let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
-        ttl.push_transform(Transform::Jit, "jit-evidence");
-        ttl.push_transform(Transform::Grad, "grad-evidence");
+    fn literal_and_value_scalar_helpers_cover_paths() {
+        run_logged_test(
+            "literal_and_value_scalar_helpers_cover_paths",
+            &("literal-value-helpers", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let primitive_names = [
+                    Primitive::Add,
+                    Primitive::Mul,
+                    Primitive::Dot,
+                    Primitive::Sin,
+                    Primitive::Cos,
+                    Primitive::ReduceSum,
+                    Primitive::Reshape,
+                    Primitive::Slice,
+                    Primitive::Gather,
+                    Primitive::Scatter,
+                    Primitive::Transpose,
+                    Primitive::BroadcastInDim,
+                    Primitive::Concatenate,
+                ]
+                .into_iter()
+                .map(Primitive::as_str)
+                .collect::<Vec<_>>();
+                assert_eq!(primitive_names.len(), 13);
 
-        let proof_a = verify_transform_composition(&ttl).expect("proof should validate");
-        let proof_b = verify_transform_composition(&ttl).expect("proof should validate");
-        assert_eq!(proof_a.stack_hash_hex, proof_b.stack_hash_hex);
+                let scalar_i64 = Value::scalar_i64(7);
+                let scalar_bool = Value::scalar_bool(true);
+                let scalar_f64 = Value::scalar_f64(3.5);
+                assert_eq!(
+                    scalar_i64.as_scalar_literal().and_then(Literal::as_i64),
+                    Some(7)
+                );
+                assert_eq!(
+                    scalar_bool.as_scalar_literal().and_then(Literal::as_i64),
+                    None
+                );
+                assert_eq!(scalar_f64.as_f64_scalar(), Some(3.5));
+                assert_eq!(Literal::I64(9).as_i64(), Some(9));
+                assert_eq!(Literal::from_f64(1.25).as_f64(), Some(1.25));
+                assert!(Literal::I64(1).is_integral());
+                assert!(!Literal::Bool(false).is_integral());
+
+                let vector = Value::vector_f64(&[0.5, 1.5, 2.5]).expect("vector_f64 should work");
+                let vector_tensor = vector.as_tensor().expect("expected tensor");
+                assert_eq!(vector_tensor.to_f64_vec(), Some(vec![0.5, 1.5, 2.5]));
+                assert!(!vector_tensor.is_empty());
+                Ok(Vec::new())
+            },
+        );
     }
 
     #[test]
-    fn unsupported_sequence_rejected() {
-        let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
-        ttl.push_transform(Transform::Grad, "g1");
-        ttl.push_transform(Transform::Grad, "g2");
+    fn tensor_axis0_error_variants_are_reported() {
+        run_logged_test(
+            "tensor_axis0_error_variants_are_reported",
+            &("tensor-errors", 1_u32),
+            fj_test_utils::TestMode::Hardened,
+            || {
+                let overflow = TensorValue::new(
+                    DType::I64,
+                    Shape {
+                        dims: vec![u32::MAX, u32::MAX, 2],
+                    },
+                    vec![],
+                )
+                .expect_err("overflow shape should fail");
+                assert!(matches!(overflow, ValueError::ShapeOverflow { .. }));
+                let _overflow_text = format!("{overflow}");
 
-        let err = verify_transform_composition(&ttl).expect_err("double grad should fail");
-        assert!(format!("{err}").contains("at most one grad"));
+                let scalar_tensor =
+                    TensorValue::new(DType::I64, Shape::scalar(), vec![Literal::I64(1)])
+                        .expect("scalar tensor should build");
+                let rank_zero_err = scalar_tensor
+                    .slice_axis0(0)
+                    .expect_err("rank-0 axis slice should fail");
+                assert!(matches!(
+                    rank_zero_err,
+                    ValueError::RankZeroAxisSliceUnsupported
+                ));
+                let _rank_zero_text = format!("{rank_zero_err}");
+
+                let one_vec = TensorValue::new(DType::I64, Shape::vector(1), vec![Literal::I64(1)])
+                    .expect("vector should build");
+                let oob_err = one_vec
+                    .slice_axis0(1)
+                    .expect_err("out-of-bounds slice should fail");
+                assert!(matches!(oob_err, ValueError::SliceIndexOutOfBounds { .. }));
+                let _oob_text = format!("{oob_err}");
+
+                let empty_stack =
+                    TensorValue::stack_axis0(&[]).expect_err("empty stack should fail");
+                assert!(matches!(empty_stack, ValueError::EmptyAxisStack));
+                let _empty_stack_text = format!("{empty_stack}");
+
+                let mixed = TensorValue::stack_axis0(&[
+                    Value::scalar_i64(1),
+                    Value::vector_i64(&[1]).expect("vector"),
+                ])
+                .expect_err("mixed stack should fail");
+                assert!(matches!(mixed, ValueError::MixedAxisStackKinds));
+                let _mixed_text = format!("{mixed}");
+
+                let shape_mismatch = TensorValue::stack_axis0(&[
+                    Value::vector_i64(&[1, 2]).expect("vector"),
+                    Value::vector_i64(&[3, 4, 5]).expect("vector"),
+                ])
+                .expect_err("shape mismatch should fail");
+                assert!(matches!(
+                    shape_mismatch,
+                    ValueError::AxisStackShapeMismatch { .. }
+                ));
+                let _shape_mismatch_text = format!("{shape_mismatch}");
+
+                let dtype_mismatch = TensorValue::stack_axis0(&[
+                    Value::vector_i64(&[1, 2]).expect("vector"),
+                    Value::vector_f64(&[1.0, 2.0]).expect("vector"),
+                ])
+                .expect_err("dtype mismatch should fail");
+                assert!(matches!(
+                    dtype_mismatch,
+                    ValueError::AxisStackDTypeMismatch { .. }
+                ));
+                let _dtype_mismatch_text = format!("{dtype_mismatch}");
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_validation_error_variants_have_actionable_messages() {
+        run_logged_test(
+            "jaxpr_validation_error_variants_have_actionable_messages",
+            &("jaxpr-validation-errors", 4_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let dup_const = Jaxpr::new(vec![VarId(1)], vec![VarId(1)], vec![VarId(1)], vec![]);
+                let err = dup_const
+                    .validate_well_formed()
+                    .expect_err("duplicate const should fail");
+                assert!(matches!(
+                    err,
+                    JaxprValidationError::DuplicateBinding {
+                        section: "constvars",
+                        ..
+                    }
+                ));
+                assert!(format!("{err}").contains("duplicate binding"));
+
+                let unbound_input = Jaxpr::new(
+                    vec![],
+                    vec![],
+                    vec![VarId(1)],
+                    vec![Equation {
+                        primitive: Primitive::Add,
+                        inputs: smallvec![Atom::Var(VarId(99)), Atom::Lit(Literal::I64(1))],
+                        outputs: smallvec![VarId(1)],
+                        params: BTreeMap::new(),
+                    }],
+                );
+                let err = unbound_input
+                    .validate_well_formed()
+                    .expect_err("unbound input should fail");
+                assert!(matches!(err, JaxprValidationError::UnboundInputVar { .. }));
+                assert!(format!("{err}").contains("unbound input"));
+
+                let output_shadow = Jaxpr::new(
+                    vec![VarId(1)],
+                    vec![],
+                    vec![VarId(1)],
+                    vec![Equation {
+                        primitive: Primitive::Add,
+                        inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
+                        outputs: smallvec![VarId(1)],
+                        params: BTreeMap::new(),
+                    }],
+                );
+                let err = output_shadow
+                    .validate_well_formed()
+                    .expect_err("shadowing output should fail");
+                assert!(matches!(
+                    err,
+                    JaxprValidationError::OutputShadowsBinding { .. }
+                ));
+                assert!(format!("{err}").contains("shadows"));
+
+                let unknown_out = Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(9)], vec![]);
+                let err = unknown_out
+                    .validate_well_formed()
+                    .expect_err("unknown outvar should fail");
+                assert!(matches!(err, JaxprValidationError::UnknownOutvar { .. }));
+                assert!(format!("{err}").contains("outvar"));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn build_program_variants_cover_all_specs() {
+        run_logged_test(
+            "build_program_variants_cover_all_specs",
+            &("build-program-specs", 8_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let specs = [
+                    ProgramSpec::Add2,
+                    ProgramSpec::Square,
+                    ProgramSpec::SquarePlusLinear,
+                    ProgramSpec::AddOne,
+                    ProgramSpec::SinX,
+                    ProgramSpec::CosX,
+                    ProgramSpec::Dot3,
+                    ProgramSpec::ReduceSumVec,
+                ];
+                for spec in specs {
+                    let jaxpr = build_program(spec);
+                    jaxpr
+                        .validate_well_formed()
+                        .map_err(|err| format!("program {:?} invalid: {err}", spec))?;
+                    let _fingerprint = jaxpr.canonical_fingerprint();
+                }
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn canonical_fingerprint_supports_bool_and_f64_literals() {
+        run_logged_test(
+            "canonical_fingerprint_supports_bool_and_f64_literals",
+            &("fingerprint-literal-types", 2_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1)],
+                    vec![],
+                    vec![VarId(3)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::Bool(true))],
+                            outputs: smallvec![VarId(2)],
+                            params: BTreeMap::new(),
+                        },
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![
+                                Atom::Var(VarId(2)),
+                                Atom::Lit(Literal::from_f64(1.0)),
+                            ],
+                            outputs: smallvec![VarId(3)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let fingerprint = jaxpr.canonical_fingerprint().to_owned();
+                assert!(fingerprint.contains("bool:true"));
+                assert!(fingerprint.contains("f64bits:"));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn proptest_strategy_entrypoints_are_exercised() {
+        run_logged_test(
+            "proptest_strategy_entrypoints_are_exercised",
+            &("strategy-entrypoints", 1_u32),
+            fj_test_utils::TestMode::Hardened,
+            || {
+                let mut runner = TestRunner::new(ProptestConfig::with_cases(1));
+                runner
+                    .run(&super::proptest_strategies::arb_literal(), |_| Ok(()))
+                    .map_err(|err| err.to_string())?;
+                runner
+                    .run(&super::proptest_strategies::arb_var_id(), |_| Ok(()))
+                    .map_err(|err| err.to_string())?;
+                runner
+                    .run(&super::proptest_strategies::arb_atom(), |_| Ok(()))
+                    .map_err(|err| err.to_string())?;
+                runner
+                    .run(&super::proptest_strategies::arb_value(), |_| Ok(()))
+                    .map_err(|err| err.to_string())?;
+                runner
+                    .run(&super::proptest_strategies::arb_shape(), |_| Ok(()))
+                    .map_err(|err| err.to_string())?;
+                runner
+                    .run(&super::proptest_strategies::arb_primitive(), |_| Ok(()))
+                    .map_err(|err| err.to_string())?;
+                runner
+                    .run(&super::proptest_strategies::arb_transform(), |_| Ok(()))
+                    .map_err(|err| err.to_string())?;
+                runner
+                    .run(&super::proptest_strategies::arb_dtype(), |_| Ok(()))
+                    .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn prop_jaxpr_generation_is_well_formed() {
+        run_logged_test(
+            "prop_jaxpr_generation_is_well_formed",
+            &(
+                "prop-jaxpr-well-formed",
+                fj_test_utils::property_test_case_count(),
+            ),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+                    fj_test_utils::property_test_case_count(),
+                ));
+                runner
+                    .run(&super::proptest_strategies::arb_binary_jaxpr(), |jaxpr| {
+                        prop_assert!(jaxpr.validate_well_formed().is_ok());
+                        Ok(())
+                    })
+                    .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn prop_fingerprint_uniqueness_for_distinct_jaxprs() {
+        run_logged_test(
+            "prop_fingerprint_uniqueness_for_distinct_jaxprs",
+            &(
+                "prop-fingerprint-unique",
+                fj_test_utils::property_test_case_count(),
+            ),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+                    fj_test_utils::property_test_case_count(),
+                ));
+                let strategy = (
+                    super::proptest_strategies::arb_binary_jaxpr(),
+                    super::proptest_strategies::arb_binary_jaxpr(),
+                );
+                runner
+                    .run(&strategy, |(lhs, rhs)| {
+                        if lhs != rhs {
+                            prop_assert_ne!(
+                                lhs.canonical_fingerprint(),
+                                rhs.canonical_fingerprint()
+                            );
+                        }
+                        Ok(())
+                    })
+                    .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn prop_transform_composition_proof_idempotent() {
+        run_logged_test(
+            "prop_transform_composition_proof_idempotent",
+            &(
+                "prop-composition-idempotent",
+                fj_test_utils::property_test_case_count(),
+            ),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+                    fj_test_utils::property_test_case_count(),
+                ));
+                let stack_strategy =
+                    proptest::collection::vec(super::proptest_strategies::arb_transform(), 0..=3);
+
+                runner
+                    .run(&stack_strategy, |stack| {
+                        let grad_count = stack
+                            .iter()
+                            .filter(|transform| **transform == Transform::Grad)
+                            .count();
+                        let vmap_count = stack
+                            .iter()
+                            .filter(|transform| **transform == Transform::Vmap)
+                            .count();
+                        prop_assume!(grad_count <= 1 && vmap_count <= 1);
+
+                        let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+                        for (idx, transform) in stack.iter().enumerate() {
+                            ttl.push_transform(*transform, format!("ev-{idx}"));
+                        }
+                        let proof_a = verify_transform_composition(&ttl)
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                        let proof_b = verify_transform_composition(&ttl)
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                        prop_assert_eq!(proof_a, proof_b);
+                        Ok(())
+                    })
+                    .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
     }
 
     #[test]
     fn test_core_test_log_schema_contract() {
-        let fixture_id =
-            fj_test_utils::fixture_id_from_json(&(1_u32, 2_u32)).expect("fixture digest");
-        let log = fj_test_utils::TestLogV1::unit(
-            fj_test_utils::test_id(module_path!(), "test_core_test_log_schema_contract"),
-            fixture_id,
+        run_logged_test(
+            "test_core_test_log_schema_contract",
+            &("schema-contract", 1_u32),
             fj_test_utils::TestMode::Strict,
-            fj_test_utils::TestResult::Pass,
+            || {
+                let fixture_id =
+                    fj_test_utils::fixture_id_from_json(&(1_u32, 2_u32)).expect("fixture digest");
+                let log = fj_test_utils::TestLogV1::unit(
+                    fj_test_utils::test_id(module_path!(), "test_core_test_log_schema_contract"),
+                    fixture_id,
+                    fj_test_utils::TestMode::Strict,
+                    fj_test_utils::TestResult::Pass,
+                );
+                assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+                Ok(Vec::new())
+            },
         );
-        assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
     }
 }

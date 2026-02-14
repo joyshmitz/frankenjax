@@ -8,11 +8,14 @@ COVERAGE_REPORT_JSON="$ROOT_DIR/artifacts/ci/coverage_report.v1.json"
 COVERAGE_TREND_JSON="$ROOT_DIR/artifacts/ci/coverage_trend.v1.json"
 FLAKE_REPORT_JSON="$ROOT_DIR/artifacts/ci/flake_report.v1.json"
 RUNTIME_REPORT_JSON="$ROOT_DIR/artifacts/ci/runtime_report.v1.json"
+CRASH_REPORT_JSON="$ROOT_DIR/artifacts/ci/crash_report.v1.json"
 GATE_REPORT_JSON="$ROOT_DIR/artifacts/ci/reliability_gate_report.v1.json"
 
 SKIP_COVERAGE=0
 SKIP_FLAKE=0
 SKIP_RUNTIME=0
+SKIP_CRASH=0
+SKIP_PERF=0
 FLAKE_RUNS_OVERRIDE=""
 
 usage() {
@@ -24,6 +27,8 @@ Options:
   --skip-coverage          Skip coverage gate.
   --skip-flake             Skip flake gate.
   --skip-runtime           Skip runtime gate.
+  --skip-crash             Skip crash/P0 triage gate.
+  --skip-perf              Skip performance regression gate.
   --flake-runs <n>         Override flake runs (default from budgets).
   -h, --help               Show this help.
 USAGE
@@ -45,6 +50,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-runtime)
       SKIP_RUNTIME=1
+      shift
+      ;;
+    --skip-crash)
+      SKIP_CRASH=1
+      shift
+      ;;
+    --skip-perf)
+      SKIP_PERF=1
       shift
       ;;
     --flake-runs)
@@ -78,6 +91,8 @@ fi
 coverage_pass=true
 flake_pass=true
 runtime_pass=true
+crash_pass=true
+perf_pass=true
 
 coverage_failures_tmp="$(mktemp)"
 runtime_entries_tmp="$(mktemp)"
@@ -323,6 +338,126 @@ else
   echo "[runtime] skipped"
 fi
 
+if [[ $SKIP_CRASH -eq 0 ]]; then
+  crash_index_rel="$(jq -r '.crash_triage.index_path // "crates/fj-conformance/fuzz/corpus/crashes/index.v1.jsonl"' "$BUDGETS_JSON")"
+  if [[ "$crash_index_rel" = /* ]]; then
+    crash_index="$crash_index_rel"
+  else
+    crash_index="$ROOT_DIR/$crash_index_rel"
+  fi
+  crash_max_open_p0="$(jq -r '.crash_triage.max_open_p0 // 0' "$BUDGETS_JSON")"
+  crash_fail_on_new_p0="$(jq -r '.crash_triage.fail_on_new_p0 // true' "$BUDGETS_JSON")"
+  crash_known_p0_hashes_json="$(jq -c '.crash_triage.known_p0_hashes // []' "$BUDGETS_JSON")"
+  crash_generated_at_ms="$(date +%s%3N)"
+
+  if [[ -f "$crash_index" && -s "$crash_index" ]]; then
+    open_p0_count="$(
+      jq -s '
+        map(
+          select(
+            .severity == "P0"
+            and ((.status // "open") != "closed")
+            and ((.status // "open") != "resolved")
+          )
+        ) | length
+      ' "$crash_index"
+    )"
+
+    new_open_p0_hashes_json="$(
+      jq -s --argjson known "$crash_known_p0_hashes_json" '
+        [
+          .[]
+          | select(
+              .severity == "P0"
+              and ((.status // "open") != "closed")
+              and ((.status // "open") != "resolved")
+            )
+          | .crash_hash_sha256
+          | select(. != null)
+          | select(($known | index(.)) | not)
+        ] | unique
+      ' "$crash_index"
+    )"
+
+    all_open_p0_json="$(
+      jq -s '
+        [
+          .[]
+          | select(
+              .severity == "P0"
+              and ((.status // "open") != "closed")
+              and ((.status // "open") != "resolved")
+            )
+        ]
+      ' "$crash_index"
+    )"
+  else
+    open_p0_count=0
+    new_open_p0_hashes_json='[]'
+    all_open_p0_json='[]'
+  fi
+
+  new_open_p0_count="$(jq -nr --argjson hashes "$new_open_p0_hashes_json" '$hashes | length')"
+
+  if [[ "$open_p0_count" -gt "$crash_max_open_p0" ]]; then
+    crash_pass=false
+    echo "[crash] open P0 count exceeded: open=${open_p0_count}, max=${crash_max_open_p0}" >&2
+  fi
+  if [[ "$crash_fail_on_new_p0" == "true" && "$new_open_p0_count" -gt 0 ]]; then
+    crash_pass=false
+    echo "[crash] new open P0 crash(es) detected: count=${new_open_p0_count}" >&2
+  fi
+
+  jq -n \
+    --arg schema_version "frankenjax.crash-report.v1" \
+    --arg index_path "$crash_index" \
+    --argjson index_exists "$( [[ -f "$crash_index" ]] && echo true || echo false )" \
+    --argjson max_open_p0 "$crash_max_open_p0" \
+    --argjson open_p0_count "$open_p0_count" \
+    --argjson fail_on_new_p0 "$crash_fail_on_new_p0" \
+    --argjson known_p0_hashes "$crash_known_p0_hashes_json" \
+    --argjson new_open_p0_hashes "$new_open_p0_hashes_json" \
+    --argjson open_p0_records "$all_open_p0_json" \
+    --argjson passed "$crash_pass" \
+    --argjson generated_at_unix_ms "$crash_generated_at_ms" \
+    '{
+      schema_version: $schema_version,
+      generated_at_unix_ms: $generated_at_unix_ms,
+      index_path: $index_path,
+      index_exists: $index_exists,
+      max_open_p0: $max_open_p0,
+      open_p0_count: $open_p0_count,
+      fail_on_new_p0: $fail_on_new_p0,
+      known_p0_hashes: $known_p0_hashes,
+      new_open_p0_hashes: $new_open_p0_hashes,
+      open_p0_records: $open_p0_records,
+      passed: $passed
+    }' >"$CRASH_REPORT_JSON"
+
+  if [[ "$crash_pass" == "true" ]]; then
+    echo "[crash] gate passed"
+  fi
+else
+  echo "[crash] skipped"
+fi
+
+if [[ $SKIP_PERF -eq 0 ]]; then
+  PERF_REPORT_JSON="$ROOT_DIR/artifacts/ci/perf_regression_report.v1.json"
+  echo "[perf] running performance regression gate..."
+  set +e
+  "$ROOT_DIR/scripts/check_perf_regression.sh" --budgets "$BUDGETS_JSON"
+  perf_rc=$?
+  set -e
+  if [[ $perf_rc -ne 0 ]]; then
+    perf_pass=false
+    echo "[perf] gate failed" >&2
+  else
+    echo "[perf] gate passed"
+  fi
+else
+  echo "[perf] skipped"
+fi
+
 end_pipeline_s="$(date +%s)"
 pipeline_duration_s=$((end_pipeline_s - start_pipeline_s))
 full_budget_s="$(jq -r '.runtime_seconds.full_pipeline' "$BUDGETS_JSON")"
@@ -343,6 +478,12 @@ fi
 if [[ $SKIP_RUNTIME -eq 0 && "$runtime_pass" != "true" ]]; then
   overall_pass=false
 fi
+if [[ $SKIP_CRASH -eq 0 && "$crash_pass" != "true" ]]; then
+  overall_pass=false
+fi
+if [[ $SKIP_PERF -eq 0 && "$perf_pass" != "true" ]]; then
+  overall_pass=false
+fi
 
 generated_at_ms="$(date +%s%3N)"
 
@@ -352,12 +493,17 @@ jq -n \
   --arg coverage_report "$COVERAGE_REPORT_JSON" \
   --arg flake_report "$FLAKE_REPORT_JSON" \
   --arg runtime_report "$RUNTIME_REPORT_JSON" \
+  --arg crash_report "$CRASH_REPORT_JSON" \
   --argjson coverage_enabled "$((1 - SKIP_COVERAGE))" \
   --argjson flake_enabled "$((1 - SKIP_FLAKE))" \
   --argjson runtime_enabled "$((1 - SKIP_RUNTIME))" \
+  --argjson crash_enabled "$((1 - SKIP_CRASH))" \
+  --argjson perf_enabled "$((1 - SKIP_PERF))" \
   --argjson coverage_pass "$coverage_pass" \
   --argjson flake_pass "$flake_pass" \
   --argjson runtime_pass "$runtime_pass" \
+  --argjson crash_pass "$crash_pass" \
+  --argjson perf_pass "$perf_pass" \
   --argjson full_pipeline_duration_seconds "$pipeline_duration_s" \
   --argjson full_pipeline_budget_seconds "$full_budget_s" \
   --argjson generated_at_unix_ms "$generated_at_ms" \
@@ -382,6 +528,15 @@ jq -n \
       report: $runtime_report,
       full_pipeline_duration_seconds: $full_pipeline_duration_seconds,
       full_pipeline_budget_seconds: $full_pipeline_budget_seconds
+    },
+    crash: {
+      enabled: ($crash_enabled == 1),
+      passed: $crash_pass,
+      report: $crash_report
+    },
+    perf: {
+      enabled: ($perf_enabled == 1),
+      passed: $perf_pass
     },
     overall_passed: $overall_passed
   }' >"$GATE_REPORT_JSON"

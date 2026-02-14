@@ -61,6 +61,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
+name = "arc-swap"
+version = "1.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f3647c145568cec02c42054e07bdf9a5a698e15b466fb2341bfc393cd24aa5"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "asupersync"
 version = "0.1.1"
 dependencies = [
@@ -538,13 +547,16 @@ version = "0.1.0"
 dependencies = [
  "asupersync",
  "base64",
+ "fj-cache",
  "fj-core",
  "fj-dispatch",
+ "fj-interpreters",
  "fj-test-utils",
  "jsonschema",
  "serde",
  "serde_json",
  "sha2",
+ "smallvec",
  "tempfile",
 ]
 
@@ -555,6 +567,7 @@ dependencies = [
  "fj-test-utils",
  "proptest",
  "serde",
+ "serde_json",
  "smallvec",
 ]
 
@@ -569,6 +582,7 @@ dependencies = [
  "fj-interpreters",
  "fj-ledger",
  "fj-test-utils",
+ "smallvec",
 ]
 
 [[package]]
@@ -636,6 +650,9 @@ name = "fj-trace"
 version = "0.1.0"
 dependencies = [
  "fj-core",
+ "fj-test-utils",
+ "proptest",
+ "serde_json",
  "smallvec",
 ]
 
@@ -727,6 +744,8 @@ dependencies = [
 name = "ftui-core"
 version = "0.1.1"
 dependencies = [
+ "ahash 0.8.12",
+ "arc-swap",
  "bitflags 2.10.0",
  "signal-hook",
  "unicode-display-width",
@@ -748,6 +767,7 @@ dependencies = [
 name = "ftui-render"
 version = "0.1.1"
 dependencies = [
+ "ahash 0.8.12",
  "bitflags 2.10.0",
  "bumpalo",
  "ftui-core",
@@ -761,6 +781,8 @@ dependencies = [
 name = "ftui-style"
 version = "0.1.1"
 dependencies = [
+ "ahash 0.8.12",
+ "arc-swap",
  "ftui-render",
  "tracing",
 ]
@@ -785,6 +807,7 @@ dependencies = [
 name = "ftui-widgets"
 version = "0.1.1"
 dependencies = [
+ "ahash 0.8.12",
  "bitflags 2.10.0",
  "ftui-core",
  "ftui-layout",

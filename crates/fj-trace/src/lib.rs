@@ -1260,159 +1260,521 @@ mod tests {
         JaxprTrace, ShapedArray, SimpleTraceContext, TraceContext, TraceToJaxpr, TracerId,
     };
     use fj_core::{DType, Primitive, Shape, Value};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
+    use std::any::Any;
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::path::{Path, PathBuf};
+    use std::time::Instant;
+
+    const PACKET_ID: &str = "FJ-P2C-001";
+    const SUITE_ID: &str = "fj-trace";
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn test_log_path(test_id: &str) -> PathBuf {
+        let file_name = test_id.replace("::", "__");
+        repo_root()
+            .join("artifacts")
+            .join("testing")
+            .join("logs")
+            .join(SUITE_ID)
+            .join(format!("{file_name}.json"))
+    }
+
+    fn replay_command(test_id: &str) -> String {
+        format!("cargo test -p fj-trace --lib {test_id} -- --exact --nocapture")
+    }
+
+    fn duration_ms(start: Instant) -> u64 {
+        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn write_log(path: &Path, log: &fj_test_utils::TestLogV1) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|err| format!("log dir create failed: {err}"))?;
+        }
+        let payload = serde_json::to_string_pretty(log)
+            .map_err(|err| format!("log serialize failed: {err}"))?;
+        fs::write(path, payload).map_err(|err| format!("log write failed: {err}"))
+    }
+
+    fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
+        if let Some(msg) = payload.downcast_ref::<String>() {
+            return msg.clone();
+        }
+        if let Some(msg) = payload.downcast_ref::<&str>() {
+            return (*msg).to_owned();
+        }
+        "non-string panic payload".to_owned()
+    }
+
+    fn run_logged_test<F>(
+        test_name: &str,
+        fixture_id: String,
+        mode: fj_test_utils::TestMode,
+        body: F,
+    ) where
+        F: FnOnce() -> Result<Vec<String>, String> + std::panic::UnwindSafe,
+    {
+        let overall_start = Instant::now();
+        let setup_start = Instant::now();
+        let test_id = fj_test_utils::test_id(module_path!(), test_name);
+        let mut log = fj_test_utils::TestLogV1::unit(
+            test_id.clone(),
+            fixture_id,
+            mode,
+            fj_test_utils::TestResult::Fail,
+        );
+        log.phase_timings.setup_ms = duration_ms(setup_start);
+
+        let execute_start = Instant::now();
+        let outcome = catch_unwind(AssertUnwindSafe(body));
+        log.phase_timings.execute_ms = duration_ms(execute_start);
+
+        let verify_start = Instant::now();
+        let mut panic_payload: Option<Box<dyn Any + Send>> = None;
+        let mut failure_detail: Option<String> = None;
+
+        match outcome {
+            Ok(Ok(mut artifact_refs)) => {
+                log.result = fj_test_utils::TestResult::Pass;
+                artifact_refs.push(format!("packet:{PACKET_ID}"));
+                artifact_refs.push(format!("replay: {}", replay_command(&test_id)));
+                log.artifact_refs = artifact_refs;
+                log.details = Some(format!(
+                    "packet_id={PACKET_ID};suite_id={SUITE_ID};result=pass"
+                ));
+            }
+            Ok(Err(detail)) => {
+                failure_detail = Some(detail.clone());
+                log.result = fj_test_utils::TestResult::Fail;
+                log.artifact_refs = vec![
+                    format!("packet:{PACKET_ID}"),
+                    format!("replay: {}", replay_command(&test_id)),
+                ];
+                log.details = Some(detail);
+            }
+            Err(payload) => {
+                let detail = panic_payload_to_string(payload.as_ref());
+                failure_detail = Some(detail.clone());
+                log.result = fj_test_utils::TestResult::Fail;
+                log.artifact_refs = vec![
+                    format!("packet:{PACKET_ID}"),
+                    format!("replay: {}", replay_command(&test_id)),
+                ];
+                log.details = Some(detail);
+                panic_payload = Some(payload);
+            }
+        }
+        log.phase_timings.verify_ms = duration_ms(verify_start);
+
+        let log_path = test_log_path(&test_id);
+        log.artifact_refs.push(log_path.display().to_string());
+        log.duration_ms = duration_ms(overall_start);
+
+        let teardown_start = Instant::now();
+        write_log(&log_path, &log).expect("test log write should succeed");
+        log.phase_timings.teardown_ms = duration_ms(teardown_start);
+        log.duration_ms = duration_ms(overall_start);
+        write_log(&log_path, &log).expect("test log rewrite should succeed");
+
+        if let Some(payload) = panic_payload {
+            std::panic::resume_unwind(payload);
+        }
+        if let Some(detail) = failure_detail {
+            panic!("{detail}");
+        }
+    }
 
     #[test]
     fn infer_reshape_and_finalize_closed_jaxpr() {
-        let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
-            dtype: DType::F64,
-            shape: Shape { dims: vec![2, 3] },
-        }]);
+        run_logged_test(
+            "infer_reshape_and_finalize_closed_jaxpr",
+            fj_test_utils::fixture_id_from_json(&("reshape-finalize", [2_u32, 3_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape { dims: vec![2, 3] },
+                }]);
 
-        let input_id = TracerId(1);
-        let const_id = ctx.bind_const_value(Value::scalar_f64(10.0));
+                let input_id = TracerId(1);
+                let const_id = ctx.bind_const_value(Value::scalar_f64(10.0));
 
-        let mut reshape_params = BTreeMap::new();
-        reshape_params.insert("new_shape".to_owned(), "3,2".to_owned());
-        let reshaped = ctx
-            .process_primitive(Primitive::Reshape, &[input_id], reshape_params)
-            .expect("reshape inference should succeed");
+                let mut reshape_params = BTreeMap::new();
+                reshape_params.insert("new_shape".to_owned(), "3,2".to_owned());
+                let reshaped = ctx
+                    .process_primitive(Primitive::Reshape, &[input_id], reshape_params)
+                    .expect("reshape inference should succeed");
 
-        let _ = ctx
-            .process_primitive(Primitive::Add, &[reshaped[0], const_id], BTreeMap::new())
-            .expect("add inference should succeed");
+                let _ = ctx
+                    .process_primitive(Primitive::Add, &[reshaped[0], const_id], BTreeMap::new())
+                    .expect("add inference should succeed");
 
-        let closed = ctx.finalize().expect("trace finalize should succeed");
-        assert_eq!(closed.jaxpr.constvars.len(), 1);
-        assert_eq!(closed.const_values, vec![Value::scalar_f64(10.0)]);
-        assert_eq!(closed.jaxpr.equations.len(), 2);
+                let closed = ctx.finalize().expect("trace finalize should succeed");
+                assert_eq!(closed.jaxpr.constvars.len(), 1);
+                assert_eq!(closed.const_values, vec![Value::scalar_f64(10.0)]);
+                assert_eq!(closed.jaxpr.equations.len(), 2);
+                Ok(Vec::new())
+            },
+        );
     }
 
     #[test]
     fn nested_trace_contexts_can_open_and_close() {
-        let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
-            dtype: DType::I64,
-            shape: Shape::vector(4),
-        }]);
-        let nested_id = ctx.push_subtrace(vec![ShapedArray {
-            dtype: DType::I64,
-            shape: Shape::vector(4),
-        }]);
+        run_logged_test(
+            "nested_trace_contexts_can_open_and_close",
+            fj_test_utils::fixture_id_from_json(&("nested-trace", [4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape::vector(4),
+                }]);
+                let nested_id = ctx.push_subtrace(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape::vector(4),
+                }]);
 
-        assert_eq!(ctx.active_trace_id(), nested_id);
+                assert_eq!(ctx.active_trace_id(), nested_id);
 
-        let nested_in = TracerId(2);
-        let _ = ctx
-            .process_primitive(Primitive::ReduceSum, &[nested_in], BTreeMap::new())
-            .expect("nested reduce_sum should infer");
-        ctx.pop_subtrace().expect("nested frame should close");
+                let nested_in = TracerId(2);
+                let _ = ctx
+                    .process_primitive(Primitive::ReduceSum, &[nested_in], BTreeMap::new())
+                    .expect("nested reduce_sum should infer");
+                ctx.pop_subtrace().expect("nested frame should close");
 
-        assert_eq!(ctx.active_trace_id(), 1);
-        let root_in = TracerId(1);
-        let _ = ctx
-            .process_primitive(Primitive::ReduceSum, &[root_in], BTreeMap::new())
-            .expect("root reduce_sum should infer");
-        let closed = ctx.finalize().expect("root finalize should succeed");
-        assert_eq!(closed.jaxpr.equations.len(), 1);
+                assert_eq!(ctx.active_trace_id(), 1);
+                let root_in = TracerId(1);
+                let _ = ctx
+                    .process_primitive(Primitive::ReduceSum, &[root_in], BTreeMap::new())
+                    .expect("root reduce_sum should infer");
+                let closed = ctx.finalize().expect("root finalize should succeed");
+                assert_eq!(closed.jaxpr.equations.len(), 1);
+                Ok(Vec::new())
+            },
+        );
     }
 
     #[test]
     fn infer_new_primitives_shape_rules() {
-        let mut ctx = SimpleTraceContext::with_inputs(vec![
-            ShapedArray {
-                dtype: DType::F64,
-                shape: Shape { dims: vec![5, 7] },
+        run_logged_test(
+            "infer_new_primitives_shape_rules",
+            fj_test_utils::fixture_id_from_json(&("new-primitives", [5_u32, 7_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![5, 7] },
+                    },
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![2] },
+                    },
+                ]);
+
+                let x = TracerId(1);
+                let idx = TracerId(2);
+
+                let mut slice_params = BTreeMap::new();
+                slice_params.insert("start_indices".to_owned(), "1,2".to_owned());
+                slice_params.insert("limit_indices".to_owned(), "4,6".to_owned());
+                let sliced = ctx
+                    .process_primitive(Primitive::Slice, &[x], slice_params)
+                    .expect("slice inference should succeed");
+                assert_eq!(
+                    ctx.tracer_aval(sliced[0]).expect("aval present").shape,
+                    Shape { dims: vec![3, 4] }
+                );
+
+                let mut gather_params = BTreeMap::new();
+                gather_params.insert("slice_sizes".to_owned(), "2,2".to_owned());
+                let gathered = ctx
+                    .process_primitive(Primitive::Gather, &[x, idx], gather_params)
+                    .expect("gather inference should succeed");
+                assert_eq!(
+                    ctx.tracer_aval(gathered[0]).expect("aval present").shape,
+                    Shape {
+                        dims: vec![2, 2, 2]
+                    }
+                );
+
+                let mut transpose_params = BTreeMap::new();
+                transpose_params.insert("permutation".to_owned(), "1,0".to_owned());
+                let transposed = ctx
+                    .process_primitive(Primitive::Transpose, &[x], transpose_params)
+                    .expect("transpose inference should succeed");
+                assert_eq!(
+                    ctx.tracer_aval(transposed[0]).expect("aval present").shape,
+                    Shape { dims: vec![7, 5] }
+                );
+
+                let mut broadcast_params = BTreeMap::new();
+                broadcast_params.insert("shape".to_owned(), "3,5,7".to_owned());
+                broadcast_params.insert("broadcast_dimensions".to_owned(), "1,2".to_owned());
+                let broadcasted = ctx
+                    .process_primitive(Primitive::BroadcastInDim, &[x], broadcast_params)
+                    .expect("broadcast inference should succeed");
+                assert_eq!(
+                    ctx.tracer_aval(broadcasted[0]).expect("aval present").shape,
+                    Shape {
+                        dims: vec![3, 5, 7]
+                    }
+                );
+
+                let mut concat_params = BTreeMap::new();
+                concat_params.insert("dimension".to_owned(), "0".to_owned());
+                let concatenated = ctx
+                    .process_primitive(Primitive::Concatenate, &[x, x], concat_params)
+                    .expect("concat inference should succeed");
+                assert_eq!(
+                    ctx.tracer_aval(concatenated[0])
+                        .expect("aval present")
+                        .shape,
+                    Shape { dims: vec![10, 7] }
+                );
+                Ok(Vec::new())
             },
-            ShapedArray {
-                dtype: DType::I64,
-                shape: Shape { dims: vec![2] },
-            },
-        ]);
-
-        let x = TracerId(1);
-        let idx = TracerId(2);
-
-        let mut slice_params = BTreeMap::new();
-        slice_params.insert("start_indices".to_owned(), "1,2".to_owned());
-        slice_params.insert("limit_indices".to_owned(), "4,6".to_owned());
-        let sliced = ctx
-            .process_primitive(Primitive::Slice, &[x], slice_params)
-            .expect("slice inference should succeed");
-        assert_eq!(
-            ctx.tracer_aval(sliced[0]).expect("aval present").shape,
-            Shape { dims: vec![3, 4] }
-        );
-
-        let mut gather_params = BTreeMap::new();
-        gather_params.insert("slice_sizes".to_owned(), "2,2".to_owned());
-        let gathered = ctx
-            .process_primitive(Primitive::Gather, &[x, idx], gather_params)
-            .expect("gather inference should succeed");
-        assert_eq!(
-            ctx.tracer_aval(gathered[0]).expect("aval present").shape,
-            Shape {
-                dims: vec![2, 2, 2]
-            }
-        );
-
-        let mut transpose_params = BTreeMap::new();
-        transpose_params.insert("permutation".to_owned(), "1,0".to_owned());
-        let transposed = ctx
-            .process_primitive(Primitive::Transpose, &[x], transpose_params)
-            .expect("transpose inference should succeed");
-        assert_eq!(
-            ctx.tracer_aval(transposed[0]).expect("aval present").shape,
-            Shape { dims: vec![7, 5] }
-        );
-
-        let mut broadcast_params = BTreeMap::new();
-        broadcast_params.insert("shape".to_owned(), "3,5,7".to_owned());
-        broadcast_params.insert("broadcast_dimensions".to_owned(), "1,2".to_owned());
-        let broadcasted = ctx
-            .process_primitive(Primitive::BroadcastInDim, &[x], broadcast_params)
-            .expect("broadcast inference should succeed");
-        assert_eq!(
-            ctx.tracer_aval(broadcasted[0]).expect("aval present").shape,
-            Shape {
-                dims: vec![3, 5, 7]
-            }
-        );
-
-        let mut concat_params = BTreeMap::new();
-        concat_params.insert("dimension".to_owned(), "0".to_owned());
-        let concatenated = ctx
-            .process_primitive(Primitive::Concatenate, &[x, x], concat_params)
-            .expect("concat inference should succeed");
-        assert_eq!(
-            ctx.tracer_aval(concatenated[0])
-                .expect("aval present")
-                .shape,
-            Shape { dims: vec![10, 7] }
         );
     }
 
     #[test]
     fn trace_to_jaxpr_validates_in_and_out_avals() {
-        let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
-            dtype: DType::I64,
-            shape: Shape::vector(4),
-        }]);
-        let input = TracerId(1);
-        let outputs = ctx
-            .process_primitive(Primitive::ReduceSum, &[input], BTreeMap::new())
-            .expect("reduce_sum inference");
+        run_logged_test(
+            "trace_to_jaxpr_validates_in_and_out_avals",
+            fj_test_utils::fixture_id_from_json(&("trace-to-jaxpr", [4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape::vector(4),
+                }]);
+                let input = TracerId(1);
+                let outputs = ctx
+                    .process_primitive(Primitive::ReduceSum, &[input], BTreeMap::new())
+                    .expect("reduce_sum inference");
 
-        let trace = JaxprTrace {
-            trace_id: ctx.active_trace_id(),
-            in_avals: vec![ShapedArray {
-                dtype: DType::I64,
-                shape: Shape::vector(4),
-            }],
-            out_avals: vec![ctx.tracer_aval(outputs[0]).expect("aval present").clone()],
-        };
-        let closed = ctx
-            .trace_to_jaxpr(trace)
-            .expect("trace_to_jaxpr should pass");
-        assert_eq!(closed.jaxpr.equations.len(), 1);
+                let trace = JaxprTrace {
+                    trace_id: ctx.active_trace_id(),
+                    in_avals: vec![ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::vector(4),
+                    }],
+                    out_avals: vec![ctx.tracer_aval(outputs[0]).expect("aval present").clone()],
+                };
+                let closed = ctx
+                    .trace_to_jaxpr(trace)
+                    .expect("trace_to_jaxpr should pass");
+                assert_eq!(closed.jaxpr.equations.len(), 1);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn trace_to_jaxpr_rejects_mismatched_out_avals() {
+        run_logged_test(
+            "trace_to_jaxpr_rejects_mismatched_out_avals",
+            fj_test_utils::fixture_id_from_json(&("trace-bad-out-aval", [4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape::vector(4),
+                }]);
+                let input = TracerId(1);
+                let _ = ctx
+                    .process_primitive(Primitive::ReduceSum, &[input], BTreeMap::new())
+                    .expect("reduce_sum inference");
+
+                let trace = JaxprTrace {
+                    trace_id: ctx.active_trace_id(),
+                    in_avals: vec![ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::vector(4),
+                    }],
+                    out_avals: vec![ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::vector(99),
+                    }],
+                };
+                let err = ctx
+                    .trace_to_jaxpr(trace)
+                    .expect_err("mismatched out aval should fail");
+                assert!(matches!(err, super::TraceError::InvalidAbstractValue));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn finalize_rejects_unclosed_subtrace() {
+        run_logged_test(
+            "finalize_rejects_unclosed_subtrace",
+            fj_test_utils::fixture_id_from_json(&("nested-not-closed", 1_u32))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape::vector(4),
+                }]);
+                let _ = ctx.push_subtrace(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape::vector(4),
+                }]);
+                let err = ctx
+                    .finalize()
+                    .expect_err("nested subtrace should block finalize");
+                assert!(matches!(err, super::TraceError::NestedTraceNotClosed));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn prop_add_broadcast_shape_inference_consistent() {
+        run_logged_test(
+            "prop_add_broadcast_shape_inference_consistent",
+            fj_test_utils::fixture_id_from_json(&(
+                "prop-add-broadcast",
+                fj_test_utils::property_test_case_count(),
+            ))
+            .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+                    fj_test_utils::property_test_case_count(),
+                ));
+                let strategy = (1_u32..=8_u32, 1_u32..=8_u32);
+                runner
+                    .run(&strategy, |(lhs, rhs)| {
+                        prop_assume!(lhs == rhs || lhs == 1 || rhs == 1);
+                        let mut ctx = SimpleTraceContext::with_inputs(vec![
+                            ShapedArray {
+                                dtype: DType::I64,
+                                shape: Shape::vector(lhs),
+                            },
+                            ShapedArray {
+                                dtype: DType::I64,
+                                shape: Shape::vector(rhs),
+                            },
+                        ]);
+                        let out = ctx
+                            .process_primitive(
+                                Primitive::Add,
+                                &[TracerId(1), TracerId(2)],
+                                BTreeMap::new(),
+                            )
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                        let aval = ctx
+                            .tracer_aval(out[0])
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                        let expected = if lhs == 1 { rhs } else { lhs };
+                        prop_assert_eq!(aval.shape.clone(), Shape::vector(expected));
+                        Ok(())
+                    })
+                    .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn prop_reduce_sum_axes_shape_consistency() {
+        run_logged_test(
+            "prop_reduce_sum_axes_shape_consistency",
+            fj_test_utils::fixture_id_from_json(&(
+                "prop-reduce-sum",
+                fj_test_utils::property_test_case_count(),
+            ))
+            .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+                    fj_test_utils::property_test_case_count(),
+                ));
+                let strategy = (
+                    proptest::collection::vec(1_u32..=5_u32, 1..=4),
+                    0_u8..=15_u8,
+                );
+                runner
+                    .run(&strategy, |(dims, mask)| {
+                        let rank = dims.len();
+                        prop_assume!(rank > 0);
+                        let axes = (0..rank)
+                            .filter(|axis| (mask & (1_u8 << axis)) != 0)
+                            .collect::<Vec<_>>();
+                        let mut params = BTreeMap::new();
+                        params.insert(
+                            "axes".to_owned(),
+                            axes.iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()
+                                .join(","),
+                        );
+
+                        let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                            dtype: DType::I64,
+                            shape: Shape { dims: dims.clone() },
+                        }]);
+                        let out = ctx
+                            .process_primitive(Primitive::ReduceSum, &[TracerId(1)], params)
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                        let aval = ctx
+                            .tracer_aval(out[0])
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+
+                        let mut expected_dims = dims.clone();
+                        let mut axes_sorted = axes.clone();
+                        axes_sorted.sort_unstable();
+                        axes_sorted.dedup();
+                        for axis in axes_sorted.into_iter().rev() {
+                            expected_dims.remove(axis);
+                        }
+                        prop_assert_eq!(
+                            aval.shape.clone(),
+                            Shape {
+                                dims: expected_dims
+                            }
+                        );
+                        Ok(())
+                    })
+                    .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_trace_test_log_schema_contract() {
+        run_logged_test(
+            "test_trace_test_log_schema_contract",
+            fj_test_utils::fixture_id_from_json(&("trace-schema", 1_u32)).expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let fixture_id = fj_test_utils::fixture_id_from_json(&("trace", "schema-contract"))
+                    .expect("fixture digest");
+                let log = fj_test_utils::TestLogV1::unit(
+                    fj_test_utils::test_id(module_path!(), "test_trace_test_log_schema_contract"),
+                    fixture_id,
+                    fj_test_utils::TestMode::Strict,
+                    fj_test_utils::TestResult::Pass,
+                );
+                assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+                Ok(Vec::new())
+            },
+        );
     }
 }

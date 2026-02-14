@@ -1,0 +1,84 @@
+[package]
+name = "fj-conformance-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1.0.139"
+tempfile = "3.17.1"
+
+[dependencies.fj-cache]
+path = "../../fj-cache"
+
+[dependencies.fj-conformance]
+path = ".."
+
+[dependencies.fj-core]
+path = "../../fj-core"
+
+[dependencies.fj-dispatch]
+path = "../../fj-dispatch"
+
+[dependencies.fj-lax]
+path = "../../fj-lax"
+
+[dependencies.fj-trace]
+path = "../../fj-trace"
+
+[[bin]]
+name = "ir_deserializer"
+path = "fuzz_targets/ir_deserializer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shape_inference_engine"
+path = "fuzz_targets/shape_inference_engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transform_composition_verifier"
+path = "fuzz_targets/transform_composition_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_key_builder"
+path = "fuzz_targets/cache_key_builder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fixture_bundle_loader"
+path = "fuzz_targets/fixture_bundle_loader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decoder"
+path = "fuzz_targets/raptorq_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dispatch_request_builder"
+path = "fuzz_targets/dispatch_request_builder.rs"
+test = false
+doc = false
+bench = false
+
+# Keep fuzzing package separate from the workspace package graph.
+[workspace]
+members = ["."]

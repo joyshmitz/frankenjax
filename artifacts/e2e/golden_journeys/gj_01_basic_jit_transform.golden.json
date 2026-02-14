@@ -1,0 +1,45 @@
+{
+  "schema_version": "frankenjax.golden-journey.v1",
+  "scenario_id": "gj_01_basic_jit_transform",
+  "scenario_category": "basic_transform",
+  "ts_utc_unix_ms": 1771109240806,
+  "replay_command": "cargo test -p fj-conformance --test golden_journeys -- golden_journey_01 --exact --nocapture",
+  "input_capture": {
+    "args": [
+      3,
+      5
+    ],
+    "program": "Add2",
+    "transforms": [
+      "Jit"
+    ]
+  },
+  "assertions": [
+    {
+      "name": "output_equals_8",
+      "passed": true,
+      "detail": "expected 8, got Some(8)"
+    },
+    {
+      "name": "cache_key_present",
+      "passed": true,
+      "detail": "cache_key=fjx-90afc045c399ed3bad94d18a7bbcc70e46a6bcf3d4a2793a52fa52af415df7e8"
+    },
+    {
+      "name": "evidence_ledger_populated",
+      "passed": true,
+      "detail": "ledger_len=1"
+    },
+    {
+      "name": "jit_matches_eager",
+      "passed": true,
+      "detail": "jit=Some(8), eager=Some(8)"
+    }
+  ],
+  "output_capture": {
+    "cache_key": "fjx-90afc045c399ed3bad94d18a7bbcc70e46a6bcf3d4a2793a52fa52af415df7e8",
+    "output": 8
+  },
+  "result": "pass",
+  "duration_ms": 0
+}

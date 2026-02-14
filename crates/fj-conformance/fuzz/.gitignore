@@ -1,0 +1,8 @@
+target
+artifacts
+coverage
+corpus/generated
+!corpus/generated/.gitkeep
+corpus/crashes/*
+!corpus/crashes/.gitkeep
+!corpus/crashes/index.v1.jsonl

@@ -1,0 +1,54 @@
+{
+  "schema_version": "frankenjax.perf-evidence.v1",
+  "optimization_name": "streaming_cache_key_hasher",
+  "author": "BrightForge",
+  "created_at": "2026-02-14T22:22:00Z",
+  "hotspot_identification": {
+    "method": "criterion_benchmark_decomposition",
+    "hotspot": "fj_cache::build_cache_key_ref",
+    "evidence": "cache_key_generation benchmark measured 856ns for simple/1eq_1t, representing ~34% of total 2.5us dispatch latency",
+    "root_cause": "canonical_payload_ref() allocates intermediate String via format!(), transform Vec via collect+join, and bytes_to_hex uses format_args per byte"
+  },
+  "optimization_applied": {
+    "lever": "streaming_hasher_elimination_of_intermediate_string",
+    "description": "Replaced canonical_payload_ref() String construction with hash_canonical_payload_ref() that writes each field directly into SHA-256 hasher, eliminating the intermediate heap allocation. Also replaced format_args!-based hex encoding with lookup table.",
+    "files_changed": [
+      "crates/fj-cache/src/lib.rs"
+    ],
+    "commit_scope": "single optimization lever as required by bd-3dl.12.8"
+  },
+  "metrics": {
+    "before": {
+      "dispatch_latency_jit_scalar_add_ns": 2520,
+      "cache_key_simple_1eq_1t_ns": 856,
+      "cache_key_medium_3eq_2t_ns": 853,
+      "cache_key_large_100eq_1t_ns": 2380,
+      "cache_key_hardened_ns": 855
+    },
+    "after": {
+      "dispatch_latency_jit_scalar_add_ns": 1183,
+      "cache_key_simple_1eq_1t_ns": 253,
+      "cache_key_medium_3eq_2t_ns": 302,
+      "cache_key_large_100eq_1t_ns": 1640,
+      "cache_key_hardened_ns": 287
+    },
+    "improvement": {
+      "dispatch_latency_jit_scalar_add_percent": 53.1,
+      "cache_key_simple_1eq_1t_percent": 70.4,
+      "cache_key_medium_3eq_2t_percent": 64.6,
+      "cache_key_large_100eq_1t_percent": 31.1,
+      "cache_key_hardened_percent": 66.4
+    }
+  },
+  "isomorphism_proof": {
+    "tests_passed": "156/156 (workspace, excluding pre-existing durability failure)",
+    "differential_oracle_status": "23/23 oracle tests pass (ir_core_oracle.rs)",
+    "hash_compatibility_test": "streaming_hash_matches_owned_hash passes — streaming produces identical SHA-256 digest to old String-based approach",
+    "fixture_parity": "68/68 transform fixture cases match (transforms.rs)",
+    "e2e_scenarios": "3/3 e2e scenarios pass"
+  },
+  "regressions": {
+    "detected": false,
+    "notes": "All benchmarks improved or unchanged. No p95 regression on any metric."
+  }
+}

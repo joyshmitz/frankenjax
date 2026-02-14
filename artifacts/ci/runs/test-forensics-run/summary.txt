@@ -1,0 +1,24 @@
+============================================================
+  FrankenJAX CI Run Summary
+  Run ID:   test-forensics-run
+  Branch:   main
+  Commit:   cbff629ed75277c4d712838746bce2844c4f531f
+  Date:     2026-02-14 22:43:30 UTC
+============================================================
+
+RESULT: PASS
+
+Tests:    52 total, 52 passed, 0 failed, 0 skipped
+Artifacts: 61 indexed
+
+Gate Results:
+  coverage     pass
+  flake        pass
+  runtime      pass
+  crash        pass
+  perf         pass
+
+No failures detected.
+------------------------------------------------------------
+Manifest: /data/projects/frankenjax/artifacts/ci/runs/test-forensics-run/manifest.json
+Artifacts dir: /data/projects/frankenjax/artifacts/

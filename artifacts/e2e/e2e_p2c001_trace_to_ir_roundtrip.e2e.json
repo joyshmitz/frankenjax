@@ -1,0 +1,50 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_p2c001_trace_to_ir_roundtrip",
+  "test_id": "e2e::e2e_p2c001_trace_to_ir_roundtrip",
+  "packet_id": "P2C-001",
+  "fixture_id": "627ecfff69a940433d97358f34a7904e4d174d9018ca26c168fbb74a408dbf48",
+  "seed": null,
+  "mode": "strict",
+  "ts_utc_unix_ms": 1771109240777,
+  "env": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_toolchain": "nightly-x86_64-unknown-linux-gnu"
+  },
+  "artifact_refs": [],
+  "replay_command": "cargo test -p fj-conformance --test e2e -- e2e_p2c001_trace_to_ir_roundtrip --exact --nocapture",
+  "input_capture": {
+    "description": "f(x) = x^2 + x, verify Jaxpr structure + fingerprint stability",
+    "program": "SquarePlusLinear"
+  },
+  "intermediate_states": [
+    {
+      "equations": 3,
+      "invars": 1,
+      "outvars": 1,
+      "step": "jaxpr_built"
+    },
+    {
+      "step": "well_formed_check_passed"
+    },
+    {
+      "fingerprint": "in=[v1,]const=[]out=[v4,]eqn:mul(v1,v1,)->v2,{}|eqn:mul(v1,i64:2,)->v3,{}|eqn:add(v2,v3,)->v4,{}|",
+      "length": 97,
+      "step": "fingerprint_stable"
+    },
+    {
+      "step": "rebuild_fingerprint_matches"
+    }
+  ],
+  "output_capture": {
+    "equations": 3,
+    "fingerprint": "in=[v1,]const=[]out=[v4,]eqn:mul(v1,v1,)->v2,{}|eqn:mul(v1,i64:2,)->v3,{}|eqn:add(v2,v3,)->v4,{}|",
+    "fingerprint_stable": true,
+    "invars": 1,
+    "outvars": 1
+  },
+  "result": "pass",
+  "duration_ms": 0,
+  "details": null
+}

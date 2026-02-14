@@ -1,0 +1,52 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_p2c001_strict_vs_hardened_mode_split",
+  "test_id": "e2e::e2e_p2c001_strict_vs_hardened_mode_split",
+  "packet_id": "P2C-001",
+  "fixture_id": "1af3c32a5568f16fd63c544a2e9840bb942ff919b20e21757aedf3ed101024b3",
+  "seed": null,
+  "mode": "strict",
+  "ts_utc_unix_ms": 1771109240776,
+  "env": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_toolchain": "nightly-x86_64-unknown-linux-gnu"
+  },
+  "artifact_refs": [],
+  "replay_command": "cargo test -p fj-conformance --test e2e -- e2e_p2c001_strict_vs_hardened_mode_split --exact --nocapture",
+  "input_capture": {
+    "description": "strict mode rejects, hardened accepts unknown features",
+    "program": "Add2",
+    "unknown_features": [
+      "experimental_feature"
+    ]
+  },
+  "intermediate_states": [
+    {
+      "error": "cache key error: strict mode rejected unknown incompatible features: experimental_feature",
+      "mentions_feature": true,
+      "step": "strict_mode_rejected"
+    },
+    {
+      "cache_key": "fjx-ed4b52b8de8721b09725f11345d870e34ee5e4bd0c9dce2526528964caa366dc",
+      "ledger_entries": 1,
+      "output": 3,
+      "step": "hardened_mode_accepted"
+    },
+    {
+      "clean_key": "fjx-585552e777f2e42d6386fbee14ee158f9d36e3359db5d0350c99fea2fba5d0a9",
+      "hardened_key": "fjx-ed4b52b8de8721b09725f11345d870e34ee5e4bd0c9dce2526528964caa366dc",
+      "keys_differ": true,
+      "step": "cache_key_comparison"
+    }
+  ],
+  "output_capture": {
+    "cache_keys_differ_with_unknown_features": true,
+    "hardened_accepted": true,
+    "hardened_cache_key": "fjx-ed4b52b8de8721b09725f11345d870e34ee5e4bd0c9dce2526528964caa366dc",
+    "strict_rejected": true
+  },
+  "result": "pass",
+  "duration_ms": 0,
+  "details": null
+}

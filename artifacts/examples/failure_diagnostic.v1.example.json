@@ -1,0 +1,18 @@
+{
+  "schema_version": "frankenjax.failure-diagnostic.v1",
+  "gate": "G2",
+  "test": "fj_dispatch::tests::dispatch_grad_square_scalar",
+  "status": "fail",
+  "summary": "gradient of x^2 at x=3.0: expected 6.0, got 5.99998",
+  "detail_path": "artifacts/ci/runs/20260214-120000-abc1234/G2/dispatch_grad_square_scalar.log",
+  "replay_cmd": "cargo test -p fj-dispatch -- dispatch_grad_square_scalar --nocapture",
+  "related_fixtures": ["fixtures/transforms/legacy_transform_cases.v1.json"],
+  "timestamp_unix_ms": 1771108800000,
+  "env": {
+    "rust_version": "rustc 1.86.0-nightly",
+    "os": "Linux 6.17.0-14-generic x86_64",
+    "features": []
+  },
+  "error_output": "assertion `left == right` failed\n  left: 5.99998\n right: 6.0",
+  "root_cause_hint": "assertion_failure"
+}

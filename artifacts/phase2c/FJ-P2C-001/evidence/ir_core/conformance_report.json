@@ -1,0 +1,73 @@
+{
+  "schema_version": "frankenjax.conformance-report.v1",
+  "packet_id": "FJ-P2C-001",
+  "subsystem": "ir_core",
+  "generated_at": "2026-02-14T22:52:00Z",
+  "oracle_tests": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "tests": [
+      "oracle_jaxpr_construction_equation_counts",
+      "oracle_jaxpr_construction_primitives",
+      "oracle_canonical_fingerprint_deterministic",
+      "oracle_transform_composition_rules",
+      "oracle_composition_rejects_double_grad",
+      "oracle_eval_jaxpr_analytical_correctness",
+      "oracle_eval_jaxpr_float_analytical",
+      "oracle_cache_key_determinism"
+    ]
+  },
+  "metamorphic_tests": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "tests": [
+      "metamorphic_fingerprint_determinism_100x",
+      "metamorphic_composition_signature_stability",
+      "metamorphic_equation_ordering_stability",
+      "metamorphic_eval_determinism_50x"
+    ]
+  },
+  "adversarial_tests": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "tests": [
+      "adversarial_empty_jaxpr",
+      "adversarial_duplicate_variable_ids",
+      "adversarial_repeated_jit_transforms",
+      "adversarial_double_vmap",
+      "adversarial_large_jaxpr_stress_test",
+      "adversarial_unbound_variable_reference",
+      "adversarial_empty_transform_stack",
+      "adversarial_empty_evidence_string"
+    ]
+  },
+  "e2e_scenarios": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "tests": [
+      "e2e_p2c001_full_dispatch_pipeline",
+      "e2e_p2c001_transform_order_enforcement",
+      "e2e_p2c001_vmap_rank2_tensor_support",
+      "e2e_p2c001_trace_to_ir_roundtrip",
+      "e2e_p2c001_transform_stack_composition",
+      "e2e_p2c001_strict_vs_hardened_mode_split",
+      "e2e_p2c001_ir_determinism_under_replay",
+      "e2e_p2c001_large_jaxpr_stress"
+    ]
+  },
+  "golden_journeys": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0
+  },
+  "overall": {
+    "total_tests": 36,
+    "passed": 36,
+    "failed": 0,
+    "status": "pass"
+  }
+}

@@ -1,0 +1,140 @@
+{
+  "schema_version": "frankenjax.evidence-manifest.v1",
+  "packet_id": "FJ-P2C-001",
+  "subsystem": "ir_core",
+  "generated_at": "2026-02-14T23:35:00Z",
+  "author": "BrightForge",
+  "artifacts": {
+    "conformance_report": {
+      "path": "conformance_report.json",
+      "description": "36-test conformance report: oracle, metamorphic, adversarial, e2e, golden journeys",
+      "status": "complete"
+    },
+    "risk_note": {
+      "path": "risk_note.md",
+      "description": "5-threat risk analysis with residual risk ratings and mitigation evidence",
+      "status": "complete"
+    },
+    "invariant_checklist": {
+      "path": "invariant_checklist.md",
+      "description": "5 verified invariants with test evidence references",
+      "status": "complete"
+    },
+    "coverage_report": {
+      "path": "coverage_report.json",
+      "description": "cargo-llvm-cov 0.6.23 line/function/region coverage for fj-core",
+      "status": "complete"
+    },
+    "perf_delta": {
+      "path": "perf_delta.json",
+      "description": "Criterion benchmark delta from streaming hasher optimization",
+      "status": "complete"
+    },
+    "durability_sidecars": {
+      "path": "durability/",
+      "description": "RaptorQ sidecars for evidence bundle (3 sidecars generated; decode-proof blocked by known upstream issue)",
+      "status": "partial",
+      "known_issue": "Pre-existing RaptorQ decoder bug prevents scrub/proof for small files (bd-3dl.9 residual)"
+    }
+  },
+  "parity_gates": {
+    "G1_format": {
+      "status": "PASS",
+      "evidence": "cargo fmt --check passes on all crates"
+    },
+    "G2_unit_tests": {
+      "status": "PASS",
+      "evidence": "156/156 workspace tests pass (excluding pre-existing sidecar_round_trip_and_scrub_pass)"
+    },
+    "G3_oracle": {
+      "status": "PASS",
+      "evidence": "8/8 oracle tests pass (ir_core_oracle.rs)",
+      "tests": [
+        "oracle_jaxpr_construction_equation_counts",
+        "oracle_jaxpr_construction_primitives",
+        "oracle_canonical_fingerprint_deterministic",
+        "oracle_transform_composition_rules",
+        "oracle_composition_rejects_double_grad",
+        "oracle_eval_jaxpr_analytical_correctness",
+        "oracle_eval_jaxpr_float_analytical",
+        "oracle_cache_key_determinism"
+      ]
+    },
+    "G4_adversarial": {
+      "status": "PASS",
+      "evidence": "8/8 adversarial tests pass",
+      "tests": [
+        "adversarial_empty_jaxpr",
+        "adversarial_duplicate_variable_ids",
+        "adversarial_repeated_jit_transforms",
+        "adversarial_double_vmap",
+        "adversarial_large_jaxpr_stress_test",
+        "adversarial_unbound_variable_reference",
+        "adversarial_empty_transform_stack",
+        "adversarial_empty_evidence_string"
+      ]
+    },
+    "G5_metamorphic": {
+      "status": "PASS",
+      "evidence": "4/4 metamorphic tests pass",
+      "tests": [
+        "metamorphic_fingerprint_determinism_100x",
+        "metamorphic_composition_signature_stability",
+        "metamorphic_equation_ordering_stability",
+        "metamorphic_eval_determinism_50x"
+      ]
+    },
+    "G6_performance": {
+      "status": "PASS",
+      "evidence": "0 regressions detected, 5 benchmarks improved (avg 57.1%)",
+      "regression_threshold": "5% p95"
+    },
+    "G7_e2e": {
+      "status": "PASS",
+      "evidence": "8/8 e2e scenarios pass",
+      "tests": [
+        "e2e_p2c001_full_dispatch_pipeline",
+        "e2e_p2c001_transform_order_enforcement",
+        "e2e_p2c001_vmap_rank2_tensor_support",
+        "e2e_p2c001_trace_to_ir_roundtrip",
+        "e2e_p2c001_transform_stack_composition",
+        "e2e_p2c001_strict_vs_hardened_mode_split",
+        "e2e_p2c001_ir_determinism_under_replay",
+        "e2e_p2c001_large_jaxpr_stress"
+      ]
+    },
+    "G8_golden_journeys": {
+      "status": "PASS",
+      "evidence": "8/8 golden journey scenarios pass",
+      "tests": [
+        "golden_journey_01_hello_world_jit_dispatch",
+        "golden_journey_02_grad_scalar_square",
+        "golden_journey_03_vmap_rank2_tensorops",
+        "golden_journey_04_transform_composition",
+        "golden_journey_05_cache_hit_miss",
+        "golden_journey_06_error_recovery",
+        "golden_journey_07_large_program",
+        "golden_journey_08_ledger_inspection"
+      ]
+    },
+    "G9_coverage": {
+      "status": "PASS",
+      "evidence": "93.1% line coverage (target: 90%), 77.96% function coverage (target: 75%)"
+    },
+    "G10_durability": {
+      "status": "PARTIAL",
+      "evidence": "3/3 sidecars generated; scrub/decode-proof blocked by known RaptorQ issue",
+      "known_issue": "Pre-existing upstream decoder bug (bd-3dl.9 residual)"
+    }
+  },
+  "overall_assessment": {
+    "gates_passed": 9,
+    "gates_partial": 1,
+    "gates_failed": 0,
+    "verdict": "PASS_WITH_KNOWN_ISSUES",
+    "known_issues": [
+      "G10 durability scrub blocked by pre-existing RaptorQ small-file decode bug",
+      "sidecar_round_trip_and_scrub_pass test pre-existing failure (same root cause)"
+    ]
+  }
+}

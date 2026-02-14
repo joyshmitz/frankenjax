@@ -1,0 +1,5 @@
+{
+  "schema_version": "frankenjax.failure-diagnostic.v1",
+  "gate": "G2",
+  "test": "fj_dispatch::tests::dispatch_grad_square_scalar"
+}

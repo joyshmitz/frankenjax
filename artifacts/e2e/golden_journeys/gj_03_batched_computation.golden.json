@@ -1,0 +1,50 @@
+{
+  "schema_version": "frankenjax.golden-journey.v1",
+  "scenario_id": "gj_03_batched_computation",
+  "scenario_category": "batched_computation",
+  "ts_utc_unix_ms": 1771109240806,
+  "replay_command": "cargo test -p fj-conformance --test golden_journeys -- golden_journey_03 --exact --nocapture",
+  "input_capture": {
+    "input_data": [
+      10,
+      20,
+      30,
+      40,
+      50
+    ],
+    "program": "AddOne",
+    "transforms": [
+      "Vmap"
+    ]
+  },
+  "assertions": [
+    {
+      "name": "vmap_matches_manual_loop",
+      "passed": true,
+      "detail": "vmap=[11, 21, 31, 41, 51], manual=[11, 21, 31, 41, 51]"
+    },
+    {
+      "name": "output_length_matches_input",
+      "passed": true,
+      "detail": "output_len=5, input_len=5"
+    }
+  ],
+  "output_capture": {
+    "manual_output": [
+      11,
+      21,
+      31,
+      41,
+      51
+    ],
+    "vmap_output": [
+      11,
+      21,
+      31,
+      41,
+      51
+    ]
+  },
+  "result": "pass",
+  "duration_ms": 0
+}

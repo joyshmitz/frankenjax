@@ -21,5 +21,17 @@
     "differential_oracle": 120,
     "e2e_scenarios": 180,
     "full_pipeline": 600
+  },
+  "perf_regression": {
+    "max_p95_regression_percent": 5.0,
+    "baseline_save_name": "main",
+    "bench_filter": "",
+    "fail_on_unjustified_regression": true
+  },
+  "crash_triage": {
+    "index_path": "crates/fj-conformance/fuzz/corpus/crashes/index.v1.jsonl",
+    "max_open_p0": 0,
+    "fail_on_new_p0": true,
+    "known_p0_hashes": []
   }
 }

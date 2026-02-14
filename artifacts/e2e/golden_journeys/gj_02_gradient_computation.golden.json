@@ -1,0 +1,52 @@
+{
+  "schema_version": "frankenjax.golden-journey.v1",
+  "scenario_id": "gj_02_gradient_computation",
+  "scenario_category": "gradient_computation",
+  "ts_utc_unix_ms": 1771109240806,
+  "replay_command": "cargo test -p fj-conformance --test golden_journeys -- golden_journey_02 --exact --nocapture",
+  "input_capture": {
+    "inputs": [
+      1.0,
+      3.0,
+      5.0,
+      -2.0,
+      0.0
+    ],
+    "program": "Square",
+    "transforms": [
+      "Grad"
+    ]
+  },
+  "assertions": [
+    {
+      "name": "grad_square_at_1",
+      "passed": true,
+      "detail": "expected 2, got 2"
+    },
+    {
+      "name": "grad_square_at_3",
+      "passed": true,
+      "detail": "expected 6, got 6"
+    },
+    {
+      "name": "grad_square_at_5",
+      "passed": true,
+      "detail": "expected 10, got 10"
+    },
+    {
+      "name": "grad_square_at_-2",
+      "passed": true,
+      "detail": "expected -4, got -4"
+    },
+    {
+      "name": "grad_square_at_0",
+      "passed": true,
+      "detail": "expected 0, got 0"
+    }
+  ],
+  "output_capture": {
+    "verified_inputs": 5
+  },
+  "result": "pass",
+  "duration_ms": 0
+}

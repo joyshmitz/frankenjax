@@ -3,6 +3,7 @@
 use fj_conformance::durability::{
     SidecarConfig, encode_artifact_to_sidecar, generate_decode_proof, scrub_sidecar,
 };
+use serde_json;
 use std::path::PathBuf;
 
 fn main() {
@@ -24,6 +25,8 @@ fn run() -> Result<(), String> {
         "scrub" => cmd_scrub(args),
         "proof" => cmd_proof(args),
         "pipeline" => cmd_pipeline(args),
+        "batch" => cmd_batch(args),
+        "verify-only" => cmd_verify_only(args),
         _ => Err(usage()),
     }
 }
@@ -183,13 +186,227 @@ fn optional_string_flag(args: &[String], flag: &str) -> Result<Option<String>, S
     Ok(None)
 }
 
+fn cmd_batch(args: Vec<String>) -> Result<(), String> {
+    let artifact_dir = required_path_flag(&args, "--dir")?;
+    let output_dir = required_path_flag(&args, "--output")?;
+    let pattern = optional_string_flag(&args, "--pattern")?.unwrap_or_else(|| "*.json".to_owned());
+    let drop_source_count = optional_usize_flag(&args, "--drop-source")?.unwrap_or(2);
+    let json_output = args.iter().any(|a| a == "--json");
+
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("failed to create output dir: {e}"))?;
+
+    let entries: Vec<_> = std::fs::read_dir(&artifact_dir)
+        .map_err(|e| format!("failed to read dir {}: {e}", artifact_dir.display()))?
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            glob_match(&name, &pattern)
+        })
+        .collect();
+
+    let mut results = Vec::new();
+    let mut pass_count = 0_usize;
+    let mut fail_count = 0_usize;
+
+    for entry in &entries {
+        let artifact = entry.path();
+        let stem = artifact
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+
+        let sidecar = output_dir.join(format!("{stem}.sidecar.json"));
+        let report = output_dir.join(format!("{stem}.scrub.json"));
+        let proof = output_dir.join(format!("{stem}.proof.json"));
+
+        let pipeline_result = (|| -> Result<(), String> {
+            encode_artifact_to_sidecar(
+                &artifact,
+                &sidecar,
+                &SidecarConfig::default(),
+            )
+            .map_err(|e| e.to_string())?;
+
+            scrub_sidecar(&sidecar, &artifact, &report).map_err(|e| e.to_string())?;
+
+            let decode = generate_decode_proof(&sidecar, &artifact, &proof, drop_source_count)
+                .map_err(|e| e.to_string())?;
+
+            if !decode.recovered {
+                return Err(format!("decode proof failed for {}", artifact.display()));
+            }
+            Ok(())
+        })();
+
+        match &pipeline_result {
+            Ok(()) => {
+                pass_count += 1;
+                if !json_output {
+                    println!("  PASS: {}", artifact.display());
+                }
+            }
+            Err(e) => {
+                fail_count += 1;
+                if !json_output {
+                    eprintln!("  FAIL: {} — {e}", artifact.display());
+                }
+            }
+        }
+
+        results.push(serde_json::json!({
+            "artifact": artifact.display().to_string(),
+            "status": if pipeline_result.is_ok() { "pass" } else { "fail" },
+            "error": pipeline_result.err(),
+        }));
+    }
+
+    if json_output {
+        let report = serde_json::json!({
+            "schema_version": "frankenjax.durability-batch.v1",
+            "total": entries.len(),
+            "passed": pass_count,
+            "failed": fail_count,
+            "drop_source_count": drop_source_count,
+            "results": results,
+        });
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else {
+        println!(
+            "batch complete: {} total, {} passed, {} failed",
+            entries.len(),
+            pass_count,
+            fail_count
+        );
+    }
+
+    if fail_count > 0 {
+        Err(format!("{fail_count} artifact(s) failed durability pipeline"))
+    } else {
+        Ok(())
+    }
+}
+
+fn cmd_verify_only(args: Vec<String>) -> Result<(), String> {
+    let artifact_dir = required_path_flag(&args, "--dir")?;
+    let json_output = args.iter().any(|a| a == "--json");
+
+    let entries: Vec<_> = std::fs::read_dir(&artifact_dir)
+        .map_err(|e| format!("failed to read dir: {e}"))?
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext == "json")
+                && !e.file_name().to_string_lossy().contains(".sidecar.")
+                && !e.file_name().to_string_lossy().contains(".scrub.")
+                && !e.file_name().to_string_lossy().contains(".proof.")
+        })
+        .collect();
+
+    let mut pass_count = 0_usize;
+    let mut fail_count = 0_usize;
+    let mut missing_count = 0_usize;
+    let mut results = Vec::new();
+
+    for entry in &entries {
+        let artifact = entry.path();
+        let stem = artifact
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let sidecar = artifact.with_file_name(format!("{stem}.sidecar.json"));
+        if !sidecar.exists() {
+            missing_count += 1;
+            results.push(serde_json::json!({
+                "artifact": artifact.display().to_string(),
+                "status": "missing_sidecar",
+            }));
+            continue;
+        }
+
+        let scrub_result = scrub_sidecar(
+            &sidecar,
+            &artifact,
+            &artifact.with_file_name(format!("{stem}.verify.json")),
+        );
+
+        match scrub_result {
+            Ok(report) if report.decoded_matches_expected => {
+                pass_count += 1;
+                results.push(serde_json::json!({
+                    "artifact": artifact.display().to_string(),
+                    "status": "pass",
+                }));
+            }
+            Ok(_) => {
+                fail_count += 1;
+                results.push(serde_json::json!({
+                    "artifact": artifact.display().to_string(),
+                    "status": "integrity_fail",
+                }));
+            }
+            Err(e) => {
+                fail_count += 1;
+                results.push(serde_json::json!({
+                    "artifact": artifact.display().to_string(),
+                    "status": "error",
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    if json_output {
+        let report = serde_json::json!({
+            "schema_version": "frankenjax.durability-verify.v1",
+            "total": entries.len(),
+            "passed": pass_count,
+            "failed": fail_count,
+            "missing_sidecar": missing_count,
+            "results": results,
+        });
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    } else {
+        println!(
+            "verify: {} artifacts, {} passed, {} failed, {} missing sidecar",
+            entries.len(),
+            pass_count,
+            fail_count,
+            missing_count
+        );
+    }
+
+    if fail_count > 0 {
+        Err(format!("{fail_count} artifact(s) failed integrity verification"))
+    } else {
+        Ok(())
+    }
+}
+
+fn glob_match(name: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return name.ends_with(suffix);
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return name.starts_with(prefix);
+    }
+    name == pattern
+}
+
 fn usage() -> String {
     [
         "usage:",
         "  fj_durability generate --artifact <path> --sidecar <path> [--symbol-size <u16>] [--max-block-size <usize>] [--repair-overhead <f64>]",
         "  fj_durability scrub --artifact <path> --sidecar <path> --report <path>",
         "  fj_durability proof --artifact <path> --sidecar <path> --proof <path> [--drop-source <usize>]",
-        "  fj_durability pipeline --artifact <path> --sidecar <path> --report <path> --proof <path> [--symbol-size <u16>] [--max-block-size <usize>] [--repair-overhead <f64>] [--drop-source <usize>]",
+        "  fj_durability pipeline --artifact <path> --sidecar <path> --report <path> --proof <path> [opts...]",
+        "  fj_durability batch --dir <dir> --output <dir> [--pattern <glob>] [--drop-source <N>] [--json]",
+        "  fj_durability verify-only --dir <dir> [--json]",
     ]
     .join("\n")
 }

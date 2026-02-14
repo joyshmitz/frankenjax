@@ -1,0 +1,2249 @@
+/data/projects/frankenjax/crates/fj-core/src/lib.rs:
+    1|       |#![forbid(unsafe_code)]
+    2|       |
+    3|       |#[cfg(test)]
+    4|       |pub mod proptest_strategies;
+    5|       |
+    6|       |use serde::{Deserialize, Serialize};
+    7|       |use smallvec::{SmallVec, smallvec};
+    8|       |use std::collections::{BTreeMap, BTreeSet};
+    9|       |use std::fmt::Write;
+   10|       |
+   11|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+   12|       |pub enum CompatibilityMode {
+   13|       |    Strict,
+   14|       |    Hardened,
+   15|       |}
+   16|       |
+   17|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+   18|       |pub enum DType {
+   19|       |    F32,
+   20|       |    F64,
+   21|       |    I32,
+   22|       |    I64,
+   23|       |    Bool,
+   24|       |}
+   25|       |
+   26|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   27|       |pub struct Shape {
+   28|       |    pub dims: Vec<u32>,
+   29|       |}
+   30|       |
+   31|       |impl Shape {
+   32|       |    #[must_use]
+   33|      1|    pub fn scalar() -> Self {
+   34|      1|        Self { dims: Vec::new() }
+   35|      1|    }
+   36|       |
+   37|       |    #[must_use]
+   38|      6|    pub fn vector(len: u32) -> Self {
+   39|      6|        Self { dims: vec![len] }
+   40|      6|    }
+   41|       |
+   42|       |    #[must_use]
+   43|      3|    pub fn rank(&self) -> usize {
+   44|      3|        self.dims.len()
+   45|      3|    }
+   46|       |
+   47|       |    #[must_use]
+   48|      8|    pub fn element_count(&self) -> Option<u64> {
+   49|      8|        self.dims
+   50|      8|            .iter()
+   51|      9|            .try_fold(1_u64, |acc, dim| acc.checked_mul(u64::from(*dim)))
+                           ^8
+   52|      8|    }
+   53|       |}
+   54|       |
+   55|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   56|       |pub struct AbstractValue {
+   57|       |    pub dtype: DType,
+   58|       |    pub shape: Shape,
+   59|       |}
+   60|       |
+   61|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+   62|       |pub enum Primitive {
+   63|       |    Add,
+   64|       |    Mul,
+   65|       |    Dot,
+   66|       |    Sin,
+   67|       |    Cos,
+   68|       |    ReduceSum,
+   69|       |    Reshape,
+   70|       |    Slice,
+   71|       |    Gather,
+   72|       |    Scatter,
+   73|       |    Transpose,
+   74|       |    BroadcastInDim,
+   75|       |    Concatenate,
+   76|       |}
+   77|       |
+   78|       |impl Primitive {
+   79|       |    #[must_use]
+   80|    803|    pub fn as_str(self) -> &'static str {
+   81|    803|        match self {
+   82|    190|            Self::Add => "add",
+   83|    450|            Self::Mul => "mul",
+   84|     44|            Self::Dot => "dot",
+   85|     37|            Self::Sin => "sin",
+   86|     40|            Self::Cos => "cos",
+   87|     42|            Self::ReduceSum => "reduce_sum",
+   88|      0|            Self::Reshape => "reshape",
+   89|      0|            Self::Slice => "slice",
+   90|      0|            Self::Gather => "gather",
+   91|      0|            Self::Scatter => "scatter",
+   92|      0|            Self::Transpose => "transpose",
+   93|      0|            Self::BroadcastInDim => "broadcast_in_dim",
+   94|      0|            Self::Concatenate => "concatenate",
+   95|       |        }
+   96|    803|    }
+   97|       |}
+   98|       |
+   99|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+  100|       |pub enum Transform {
+  101|       |    Jit,
+  102|       |    Grad,
+  103|       |    Vmap,
+  104|       |}
+  105|       |
+  106|       |impl Transform {
+  107|       |    #[must_use]
+  108|  1.48k|    pub fn as_str(self) -> &'static str {
+  109|  1.48k|        match self {
+  110|    576|            Self::Jit => "jit",
+  111|    463|            Self::Grad => "grad",
+  112|    449|            Self::Vmap => "vmap",
+  113|       |        }
+  114|  1.48k|    }
+  115|       |}
+  116|       |
+  117|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+  118|       |pub struct VarId(pub u32);
+  119|       |
+  120|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+  121|       |pub enum Literal {
+  122|       |    I64(i64),
+  123|       |    Bool(bool),
+  124|       |    F64Bits(u64),
+  125|       |}
+  126|       |
+  127|       |impl Literal {
+  128|       |    #[must_use]
+  129|      0|    pub fn from_f64(value: f64) -> Self {
+  130|      0|        Self::F64Bits(value.to_bits())
+  131|      0|    }
+  132|       |
+  133|       |    #[must_use]
+  134|      0|    pub fn as_f64(self) -> Option<f64> {
+  135|      0|        match self {
+  136|      0|            Self::F64Bits(bits) => Some(f64::from_bits(bits)),
+  137|      0|            Self::I64(value) => Some(value as f64),
+  138|      0|            Self::Bool(_) => None,
+  139|       |        }
+  140|      0|    }
+  141|       |
+  142|       |    #[must_use]
+  143|      0|    pub fn as_i64(self) -> Option<i64> {
+  144|      0|        match self {
+  145|      0|            Self::I64(value) => Some(value),
+  146|      0|            Self::Bool(_) | Self::F64Bits(_) => None,
+  147|       |        }
+  148|      0|    }
+  149|       |
+  150|       |    #[must_use]
+  151|      0|    pub fn is_integral(self) -> bool {
+  152|      0|        matches!(self, Self::I64(_))
+  153|      0|    }
+  154|       |}
+  155|       |
+  156|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  157|       |pub enum Value {
+  158|       |    Scalar(Literal),
+  159|       |    Tensor(TensorValue),
+  160|       |}
+  161|       |
+  162|       |impl Value {
+  163|       |    #[must_use]
+  164|      0|    pub fn scalar_i64(value: i64) -> Self {
+  165|      0|        Self::Scalar(Literal::I64(value))
+  166|      0|    }
+  167|       |
+  168|       |    #[must_use]
+  169|      0|    pub fn scalar_f64(value: f64) -> Self {
+  170|      0|        Self::Scalar(Literal::from_f64(value))
+  171|      0|    }
+  172|       |
+  173|       |    #[must_use]
+  174|      0|    pub fn scalar_bool(value: bool) -> Self {
+  175|      0|        Self::Scalar(Literal::Bool(value))
+  176|      0|    }
+  177|       |
+  178|      3|    pub fn vector_i64(values: &[i64]) -> Result<Self, ValueError> {
+  179|      3|        let elements = values.iter().copied().map(Literal::I64).collect::<Vec<_>>();
+  180|      3|        Ok(Self::Tensor(TensorValue::new(
+  181|      3|            DType::I64,
+  182|      3|            Shape::vector(values.len() as u32),
+  183|      3|            elements,
+  184|      0|        )?))
+  185|      3|    }
+  186|       |
+  187|      0|    pub fn vector_f64(values: &[f64]) -> Result<Self, ValueError> {
+  188|      0|        let elements = values
+  189|      0|            .iter()
+  190|      0|            .copied()
+  191|      0|            .map(Literal::from_f64)
+  192|      0|            .collect::<Vec<_>>();
+  193|      0|        Ok(Self::Tensor(TensorValue::new(
+  194|      0|            DType::F64,
+  195|      0|            Shape::vector(values.len() as u32),
+  196|      0|            elements,
+  197|      0|        )?))
+  198|      0|    }
+  199|       |
+  200|       |    #[must_use]
+  201|      0|    pub fn as_scalar_literal(&self) -> Option<Literal> {
+  202|      0|        match self {
+  203|      0|            Self::Scalar(lit) => Some(*lit),
+  204|      0|            Self::Tensor(_) => None,
+  205|       |        }
+  206|      0|    }
+  207|       |
+  208|       |    #[must_use]
+  209|      0|    pub fn as_f64_scalar(&self) -> Option<f64> {
+  210|      0|        self.as_scalar_literal().and_then(Literal::as_f64)
+  211|      0|    }
+  212|       |
+  213|       |    #[must_use]
+  214|      1|    pub fn as_tensor(&self) -> Option<&TensorValue> {
+  215|      1|        match self {
+  216|      0|            Self::Scalar(_) => None,
+  217|      1|            Self::Tensor(tensor) => Some(tensor),
+  218|       |        }
+  219|      1|    }
+  220|       |}
+  221|       |
+  222|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  223|       |pub struct TensorValue {
+  224|       |    pub dtype: DType,
+  225|       |    pub shape: Shape,
+  226|       |    pub elements: Vec<Literal>,
+  227|       |}
+  228|       |
+  229|       |impl TensorValue {
+  230|      7|    pub fn new(dtype: DType, shape: Shape, elements: Vec<Literal>) -> Result<Self, ValueError> {
+  231|      7|        let expected_count = shape.element_count().ok_or(ValueError::ShapeOverflow {
+  232|      7|            shape: shape.clone(),
+  233|      7|        })?;
+                        ^0
+  234|       |
+  235|      7|        if expected_count as usize != elements.len() {
+  236|      1|            return Err(ValueError::ElementCountMismatch {
+  237|      1|                shape,
+  238|      1|                expected_count,
+  239|      1|                actual_count: elements.len(),
+  240|      1|            });
+  241|      6|        }
+  242|       |
+  243|      6|        Ok(Self {
+  244|      6|            dtype,
+  245|      6|            shape,
+  246|      6|            elements,
+  247|      6|        })
+  248|      7|    }
+  249|       |
+  250|       |    #[must_use]
+  251|      1|    pub fn len(&self) -> usize {
+  252|      1|        self.elements.len()
+  253|      1|    }
+  254|       |
+  255|       |    #[must_use]
+  256|      0|    pub fn is_empty(&self) -> bool {
+  257|      0|        self.elements.is_empty()
+  258|      0|    }
+  259|       |
+  260|       |    #[must_use]
+  261|      1|    pub fn rank(&self) -> usize {
+  262|      1|        self.shape.rank()
+  263|      1|    }
+  264|       |
+  265|       |    #[must_use]
+  266|      1|    pub fn leading_dim(&self) -> Option<u32> {
+  267|      1|        self.shape.dims.first().copied()
+  268|      1|    }
+  269|       |
+  270|      1|    pub fn slice_axis0(&self, index: usize) -> Result<Value, ValueError> {
+  271|      1|        let axis_size = self
+  272|      1|            .leading_dim()
+  273|      1|            .ok_or(ValueError::RankZeroAxisSliceUnsupported)?;
+                                                                          ^0
+  274|      1|        if index >= axis_size as usize {
+  275|      0|            return Err(ValueError::SliceIndexOutOfBounds {
+  276|      0|                index,
+  277|      0|                axis_size: axis_size as usize,
+  278|      0|            });
+  279|      1|        }
+  280|       |
+  281|      1|        if self.rank() == 1 {
+  282|      0|            return Ok(Value::Scalar(self.elements[index]));
+  283|      1|        }
+  284|       |
+  285|      1|        let slice_len = self
+  286|      1|            .shape
+  287|      1|            .dims
+  288|      1|            .iter()
+  289|      1|            .skip(1)
+  290|      1|            .try_fold(1_usize, |acc, dim| acc.checked_mul(*dim as usize))
+  291|      1|            .ok_or(ValueError::ShapeOverflow {
+  292|      1|                shape: self.shape.clone(),
+  293|      1|            })?;
+                            ^0
+  294|       |
+  295|      1|        let start = index
+  296|      1|            .checked_mul(slice_len)
+  297|      1|            .ok_or(ValueError::ShapeOverflow {
+  298|      1|                shape: self.shape.clone(),
+  299|      1|            })?;
+                            ^0
+  300|      1|        let end = start
+  301|      1|            .checked_add(slice_len)
+  302|      1|            .ok_or(ValueError::ShapeOverflow {
+  303|      1|                shape: self.shape.clone(),
+  304|      1|            })?;
+                            ^0
+  305|      1|        let elements = self.elements[start..end].to_vec();
+  306|      1|        let subshape = Shape {
+  307|      1|            dims: self.shape.dims[1..].to_vec(),
+  308|      1|        };
+  309|      1|        Ok(Value::Tensor(TensorValue::new(
+  310|      1|            self.dtype, subshape, elements,
+  311|      0|        )?))
+  312|      1|    }
+  313|       |
+  314|      1|    pub fn stack_axis0(slices: &[Value]) -> Result<Self, ValueError> {
+  315|      1|        if slices.is_empty() {
+  316|      0|            return Err(ValueError::EmptyAxisStack);
+  317|      1|        }
+  318|       |
+  319|      1|        match &slices[0] {
+  320|      0|            Value::Scalar(first) => {
+  321|      0|                let mut elements = Vec::with_capacity(slices.len());
+  322|      0|                elements.push(*first);
+  323|      0|                for value in &slices[1..] {
+  324|      0|                    let Value::Scalar(lit) = value else {
+  325|      0|                        return Err(ValueError::MixedAxisStackKinds);
+  326|       |                    };
+  327|      0|                    elements.push(*lit);
+  328|       |                }
+  329|      0|                let dtype = infer_dtype_from_literals(&elements);
+  330|      0|                TensorValue::new(dtype, Shape::vector(slices.len() as u32), elements)
+  331|       |            }
+  332|      1|            Value::Tensor(first) => {
+  333|      1|                let mut elements = first.elements.clone();
+  334|      1|                for value in &slices[1..] {
+  335|      1|                    let Value::Tensor(tensor) = value else {
+  336|      0|                        return Err(ValueError::MixedAxisStackKinds);
+  337|       |                    };
+  338|      1|                    if tensor.dtype != first.dtype {
+  339|      0|                        return Err(ValueError::AxisStackDTypeMismatch {
+  340|      0|                            expected: first.dtype,
+  341|      0|                            actual: tensor.dtype,
+  342|      0|                        });
+  343|      1|                    }
+  344|      1|                    if tensor.shape != first.shape {
+  345|      0|                        return Err(ValueError::AxisStackShapeMismatch {
+  346|      0|                            expected: first.shape.clone(),
+  347|      0|                            actual: tensor.shape.clone(),
+  348|      0|                        });
+  349|      1|                    }
+  350|      1|                    elements.extend_from_slice(&tensor.elements);
+  351|       |                }
+  352|       |
+  353|      1|                let mut dims = Vec::with_capacity(first.shape.rank() + 1);
+  354|      1|                dims.push(slices.len() as u32);
+  355|      1|                dims.extend_from_slice(&first.shape.dims);
+  356|      1|                TensorValue::new(first.dtype, Shape { dims }, elements)
+  357|       |            }
+  358|       |        }
+  359|      1|    }
+  360|       |
+  361|      0|    pub fn to_f64_vec(&self) -> Option<Vec<f64>> {
+  362|      0|        self.elements.iter().copied().map(Literal::as_f64).collect()
+  363|      0|    }
+  364|       |}
+  365|       |
+  366|       |#[derive(Debug, Clone, PartialEq, Eq)]
+  367|       |pub enum ValueError {
+  368|       |    ShapeOverflow {
+  369|       |        shape: Shape,
+  370|       |    },
+  371|       |    ElementCountMismatch {
+  372|       |        shape: Shape,
+  373|       |        expected_count: u64,
+  374|       |        actual_count: usize,
+  375|       |    },
+  376|       |    RankZeroAxisSliceUnsupported,
+  377|       |    SliceIndexOutOfBounds {
+  378|       |        index: usize,
+  379|       |        axis_size: usize,
+  380|       |    },
+  381|       |    EmptyAxisStack,
+  382|       |    MixedAxisStackKinds,
+  383|       |    AxisStackShapeMismatch {
+  384|       |        expected: Shape,
+  385|       |        actual: Shape,
+  386|       |    },
+  387|       |    AxisStackDTypeMismatch {
+  388|       |        expected: DType,
+  389|       |        actual: DType,
+  390|       |    },
+  391|       |}
+  392|       |
+  393|       |impl std::fmt::Display for ValueError {
+  394|      0|    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  395|      0|        match self {
+  396|      0|            Self::ShapeOverflow { shape } => {
+  397|      0|                write!(f, "shape element count overflowed: {:?}", shape.dims)
+  398|       |            }
+  399|       |            Self::ElementCountMismatch {
+  400|      0|                shape,
+  401|      0|                expected_count,
+  402|      0|                actual_count,
+  403|       |            } => {
+  404|      0|                write!(
+  405|      0|                    f,
+  406|       |                    "tensor element count mismatch for shape {:?}: expected {}, got {}",
+  407|       |                    shape.dims, expected_count, actual_count
+  408|       |                )
+  409|       |            }
+  410|       |            Self::RankZeroAxisSliceUnsupported => {
+  411|      0|                write!(f, "cannot axis-slice rank-0 scalar tensor")
+  412|       |            }
+  413|      0|            Self::SliceIndexOutOfBounds { index, axis_size } => {
+  414|      0|                write!(
+  415|      0|                    f,
+  416|       |                    "axis-slice index {} out of bounds for axis size {}",
+  417|       |                    index, axis_size
+  418|       |                )
+  419|       |            }
+  420|       |            Self::EmptyAxisStack => {
+  421|      0|                write!(f, "cannot stack empty slice list")
+  422|       |            }
+  423|       |            Self::MixedAxisStackKinds => {
+  424|      0|                write!(f, "cannot stack mixed scalar/tensor slice kinds")
+  425|       |            }
+  426|      0|            Self::AxisStackShapeMismatch { expected, actual } => {
+  427|      0|                write!(
+  428|      0|                    f,
+  429|       |                    "stack shape mismatch: expected {:?}, got {:?}",
+  430|       |                    expected.dims, actual.dims
+  431|       |                )
+  432|       |            }
+  433|      0|            Self::AxisStackDTypeMismatch { expected, actual } => {
+  434|      0|                write!(
+  435|      0|                    f,
+  436|       |                    "stack dtype mismatch: expected {:?}, got {:?}",
+  437|       |                    expected, actual
+  438|       |                )
+  439|       |            }
+  440|       |        }
+  441|      0|    }
+  442|       |}
+  443|       |
+  444|       |impl std::error::Error for ValueError {}
+  445|       |
+  446|      0|fn infer_dtype_from_literals(elements: &[Literal]) -> DType {
+  447|      0|    if elements
+  448|      0|        .iter()
+  449|      0|        .all(|literal| matches!(literal, Literal::I64(_)))
+  450|       |    {
+  451|      0|        DType::I64
+  452|      0|    } else if elements
+  453|      0|        .iter()
+  454|      0|        .all(|literal| matches!(literal, Literal::Bool(_)))
+  455|       |    {
+  456|      0|        DType::Bool
+  457|       |    } else {
+  458|      0|        DType::F64
+  459|       |    }
+  460|      0|}
+  461|       |
+  462|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  463|       |pub enum Atom {
+  464|       |    Var(VarId),
+  465|       |    Lit(Literal),
+  466|       |}
+  467|       |
+  468|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  469|       |pub struct Equation {
+  470|       |    pub primitive: Primitive,
+  471|       |    pub inputs: SmallVec<[Atom; 4]>,
+  472|       |    pub outputs: SmallVec<[VarId; 2]>,
+  473|       |    pub params: BTreeMap<String, String>,
+  474|       |}
+  475|       |
+  476|       |#[derive(Debug, Serialize, Deserialize)]
+  477|       |pub struct Jaxpr {
+  478|       |    pub invars: Vec<VarId>,
+  479|       |    pub constvars: Vec<VarId>,
+  480|       |    pub outvars: Vec<VarId>,
+  481|       |    pub equations: Vec<Equation>,
+  482|       |    #[serde(skip)]
+  483|       |    fingerprint_cache: std::sync::OnceLock<String>,
+  484|       |}
+  485|       |
+  486|       |impl Clone for Jaxpr {
+  487|      1|    fn clone(&self) -> Self {
+  488|      1|        Self {
+  489|      1|            invars: self.invars.clone(),
+  490|      1|            constvars: self.constvars.clone(),
+  491|      1|            outvars: self.outvars.clone(),
+  492|      1|            equations: self.equations.clone(),
+  493|      1|            fingerprint_cache: std::sync::OnceLock::new(),
+  494|      1|        }
+  495|      1|    }
+  496|       |}
+  497|       |
+  498|       |impl PartialEq for Jaxpr {
+  499|    256|    fn eq(&self, other: &Self) -> bool {
+  500|    256|        self.invars == other.invars
+  501|    256|            && self.constvars == other.constvars
+  502|    256|            && self.outvars == other.outvars
+  503|    256|            && self.equations == other.equations
+  504|    256|    }
+  505|       |}
+  506|       |
+  507|       |impl Eq for Jaxpr {}
+  508|       |
+  509|       |#[derive(Debug, Clone, PartialEq, Eq)]
+  510|       |pub enum JaxprValidationError {
+  511|       |    DuplicateBinding { section: &'static str, var: VarId },
+  512|       |    UnboundInputVar { equation_index: usize, var: VarId },
+  513|       |    OutputShadowsBinding { equation_index: usize, var: VarId },
+  514|       |    UnknownOutvar { var: VarId },
+  515|       |}
+  516|       |
+  517|       |impl std::fmt::Display for JaxprValidationError {
+  518|      0|    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  519|      0|        match self {
+  520|      0|            Self::DuplicateBinding { section, var } => {
+  521|      0|                write!(f, "duplicate binding in {} for var v{}", section, var.0)
+  522|       |            }
+  523|       |            Self::UnboundInputVar {
+  524|      0|                equation_index,
+  525|      0|                var,
+  526|       |            } => {
+  527|      0|                write!(
+  528|      0|                    f,
+  529|       |                    "equation {} references unbound input var v{}",
+  530|       |                    equation_index, var.0
+  531|       |                )
+  532|       |            }
+  533|       |            Self::OutputShadowsBinding {
+  534|      0|                equation_index,
+  535|      0|                var,
+  536|       |            } => {
+  537|      0|                write!(
+  538|      0|                    f,
+  539|       |                    "equation {} output var v{} shadows an existing binding",
+  540|       |                    equation_index, var.0
+  541|       |                )
+  542|       |            }
+  543|      0|            Self::UnknownOutvar { var } => {
+  544|      0|                write!(f, "outvar v{} does not have a defining binding", var.0)
+  545|       |            }
+  546|       |        }
+  547|      0|    }
+  548|       |}
+  549|       |
+  550|       |impl std::error::Error for JaxprValidationError {}
+  551|       |
+  552|       |impl Jaxpr {
+  553|       |    #[must_use]
+  554|  1.81k|    pub fn new(
+  555|  1.81k|        invars: Vec<VarId>,
+  556|  1.81k|        constvars: Vec<VarId>,
+  557|  1.81k|        outvars: Vec<VarId>,
+  558|  1.81k|        equations: Vec<Equation>,
+  559|  1.81k|    ) -> Self {
+  560|  1.81k|        Self {
+  561|  1.81k|            invars,
+  562|  1.81k|            constvars,
+  563|  1.81k|            outvars,
+  564|  1.81k|            equations,
+  565|  1.81k|            fingerprint_cache: std::sync::OnceLock::new(),
+  566|  1.81k|        }
+  567|  1.81k|    }
+  568|       |
+  569|       |    #[must_use]
+  570|  2.07k|    pub fn canonical_fingerprint(&self) -> &str {
+  571|  2.07k|        self.fingerprint_cache.get_or_init(|| {
+                                                            ^1.30k
+  572|  1.30k|            let mut out = String::new();
+  573|  1.30k|            write_var_list(&mut out, "in", &self.invars);
+  574|  1.30k|            write_var_list(&mut out, "const", &self.constvars);
+  575|  1.30k|            write_var_list(&mut out, "out", &self.outvars);
+  576|       |
+  577|  1.30k|            for eqn in &self.equations {
+                              ^803
+  578|    803|                let _ = write!(&mut out, "eqn:{}(", eqn.primitive.as_str());
+  579|  1.35k|                for atom in &eqn.inputs {
+                                          ^803
+  580|  1.35k|                    write_atom(&mut out, atom);
+  581|  1.35k|                    out.push(',');
+  582|  1.35k|                }
+  583|    803|                out.push(')');
+  584|    803|                out.push_str("->");
+  585|    803|                for outvar in &eqn.outputs {
+  586|    803|                    let _ = write!(&mut out, "v{},", outvar.0);
+  587|    803|                }
+  588|    803|                out.push('{');
+  589|    803|                for (key, value) in &eqn.params {
+                                   ^1   ^1
+  590|      1|                    let _ = write!(&mut out, "{key}={value};");
+  591|      1|                }
+  592|    803|                out.push('}');
+  593|    803|                out.push('|');
+  594|       |            }
+  595|       |
+  596|  1.30k|            out
+  597|  1.30k|        })
+  598|  2.07k|    }
+  599|       |
+  600|    262|    pub fn validate_well_formed(&self) -> Result<(), JaxprValidationError> {
+  601|    262|        let mut bindings = BTreeSet::new();
+  602|       |
+  603|    520|        for var in &self.invars {
+                                 ^262
+  604|    520|            if !bindings.insert(*var) {
+  605|      1|                return Err(JaxprValidationError::DuplicateBinding {
+  606|      1|                    section: "invars",
+  607|      1|                    var: *var,
+  608|      1|                });
+  609|    519|            }
+  610|       |        }
+  611|    261|        for var in &self.constvars {
+                          ^2
+  612|      2|            if !bindings.insert(*var) {
+  613|      0|                return Err(JaxprValidationError::DuplicateBinding {
+  614|      0|                    section: "constvars",
+  615|      0|                    var: *var,
+  616|      0|                });
+  617|      2|            }
+  618|       |        }
+  619|       |
+  620|    277|        for (equation_index, eqn) in self.equations.iter().enumerate() {
+                                                   ^261                  ^261
+  621|    547|            for atom in &eqn.inputs {
+                                      ^277
+  622|    547|                if let Atom::Var(var) = atom
+                                               ^545
+  623|    545|                    && !bindings.contains(var)
+  624|       |                {
+  625|      0|                    return Err(JaxprValidationError::UnboundInputVar {
+  626|      0|                        equation_index,
+  627|      0|                        var: *var,
+  628|      0|                    });
+  629|    547|                }
+  630|       |            }
+  631|    277|            for out_var in &eqn.outputs {
+  632|    277|                if !bindings.insert(*out_var) {
+  633|      0|                    return Err(JaxprValidationError::OutputShadowsBinding {
+  634|      0|                        equation_index,
+  635|      0|                        var: *out_var,
+  636|      0|                    });
+  637|    277|                }
+  638|       |            }
+  639|       |        }
+  640|       |
+  641|    261|        let mut seen_outvars = BTreeSet::new();
+  642|    261|        for outvar in &self.outvars {
+                          ^260
+  643|    260|            if !seen_outvars.insert(*outvar) {
+  644|      0|                return Err(JaxprValidationError::DuplicateBinding {
+  645|      0|                    section: "outvars",
+  646|      0|                    var: *outvar,
+  647|      0|                });
+  648|    260|            }
+  649|    260|            if !bindings.contains(outvar) {
+  650|      0|                return Err(JaxprValidationError::UnknownOutvar { var: *outvar });
+  651|    260|            }
+  652|       |        }
+  653|       |
+  654|    261|        Ok(())
+  655|    262|    }
+  656|       |}
+  657|       |
+  658|  3.91k|fn write_var_list(out: &mut String, label: &str, vars: &[VarId]) {
+  659|  3.91k|    let _ = write!(out, "{label}=[");
+  660|  3.91k|    for var in vars {
+                      ^2.87k
+  661|  2.87k|        let _ = write!(out, "v{},", var.0);
+  662|  2.87k|    }
+  663|  3.91k|    out.push(']');
+  664|  3.91k|}
+  665|       |
+  666|  1.35k|fn write_atom(out: &mut String, atom: &Atom) {
+  667|  1.35k|    match atom {
+  668|  1.34k|        Atom::Var(var) => {
+  669|  1.34k|            let _ = write!(out, "v{}", var.0);
+  670|  1.34k|        }
+  671|      5|        Atom::Lit(lit) => write_literal(out, *lit),
+  672|       |    }
+  673|  1.35k|}
+  674|       |
+  675|      5|fn write_literal(out: &mut String, lit: Literal) {
+  676|      5|    match lit {
+  677|      5|        Literal::I64(value) => {
+  678|      5|            let _ = write!(out, "i64:{value}");
+  679|      5|        }
+  680|      0|        Literal::Bool(value) => {
+  681|      0|            let _ = write!(out, "bool:{value}");
+  682|      0|        }
+  683|      0|        Literal::F64Bits(value) => {
+  684|      0|            let _ = write!(out, "f64bits:{value}");
+  685|      0|        }
+  686|       |    }
+  687|      5|}
+  688|       |
+  689|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+  690|       |pub enum ProgramSpec {
+  691|       |    Add2,
+  692|       |    Square,
+  693|       |    SquarePlusLinear,
+  694|       |    AddOne,
+  695|       |    SinX,
+  696|       |    CosX,
+  697|       |    Dot3,
+  698|       |    ReduceSumVec,
+  699|       |}
+  700|       |
+  701|       |#[must_use]
+  702|    273|pub fn build_program(spec: ProgramSpec) -> Jaxpr {
+  703|    273|    match spec {
+  704|      1|        ProgramSpec::Add2 => Jaxpr::new(
+  705|      1|            vec![VarId(1), VarId(2)],
+  706|      1|            vec![],
+  707|      1|            vec![VarId(3)],
+  708|      1|            vec![Equation {
+  709|      1|                primitive: Primitive::Add,
+  710|      1|                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                                                ^0                   ^0
+  711|      1|                outputs: smallvec![VarId(3)],
+                                                 ^0
+  712|      1|                params: BTreeMap::new(),
+  713|       |            }],
+  714|       |        ),
+  715|    268|        ProgramSpec::Square => Jaxpr::new(
+  716|    268|            vec![VarId(1)],
+  717|    268|            vec![],
+  718|    268|            vec![VarId(2)],
+  719|    268|            vec![Equation {
+  720|    268|                primitive: Primitive::Mul,
+  721|    268|                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                                                ^0                   ^0
+  722|    268|                outputs: smallvec![VarId(2)],
+                                                 ^0
+  723|    268|                params: BTreeMap::new(),
+  724|       |            }],
+  725|       |        ),
+  726|      4|        ProgramSpec::SquarePlusLinear => Jaxpr::new(
+  727|      4|            vec![VarId(1)],
+  728|      4|            vec![],
+  729|      4|            vec![VarId(4)],
+  730|      4|            vec![
+  731|       |                Equation {
+  732|      4|                    primitive: Primitive::Mul,
+  733|      4|                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                                                    ^0                   ^0
+  734|      4|                    outputs: smallvec![VarId(2)],
+                                                     ^0
+  735|      4|                    params: BTreeMap::new(),
+  736|       |                },
+  737|       |                Equation {
+  738|      4|                    primitive: Primitive::Mul,
+  739|      4|                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(2))],
+                                                    ^0                   ^0
+  740|      4|                    outputs: smallvec![VarId(3)],
+                                                     ^0
+  741|      4|                    params: BTreeMap::new(),
+  742|       |                },
+  743|       |                Equation {
+  744|      4|                    primitive: Primitive::Add,
+  745|      4|                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(3))],
+                                                    ^0                   ^0
+  746|      4|                    outputs: smallvec![VarId(4)],
+                                                     ^0
+  747|      4|                    params: BTreeMap::new(),
+  748|       |                },
+  749|       |            ],
+  750|       |        ),
+  751|      0|        ProgramSpec::AddOne => Jaxpr::new(
+  752|      0|            vec![VarId(1)],
+  753|      0|            vec![],
+  754|      0|            vec![VarId(2)],
+  755|      0|            vec![Equation {
+  756|      0|                primitive: Primitive::Add,
+  757|      0|                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
+  758|      0|                outputs: smallvec![VarId(2)],
+  759|      0|                params: BTreeMap::new(),
+  760|       |            }],
+  761|       |        ),
+  762|      0|        ProgramSpec::SinX => Jaxpr::new(
+  763|      0|            vec![VarId(1)],
+  764|      0|            vec![],
+  765|      0|            vec![VarId(2)],
+  766|      0|            vec![Equation {
+  767|      0|                primitive: Primitive::Sin,
+  768|      0|                inputs: smallvec![Atom::Var(VarId(1))],
+  769|      0|                outputs: smallvec![VarId(2)],
+  770|      0|                params: BTreeMap::new(),
+  771|       |            }],
+  772|       |        ),
+  773|      0|        ProgramSpec::CosX => Jaxpr::new(
+  774|      0|            vec![VarId(1)],
+  775|      0|            vec![],
+  776|      0|            vec![VarId(2)],
+  777|      0|            vec![Equation {
+  778|      0|                primitive: Primitive::Cos,
+  779|      0|                inputs: smallvec![Atom::Var(VarId(1))],
+  780|      0|                outputs: smallvec![VarId(2)],
+  781|      0|                params: BTreeMap::new(),
+  782|       |            }],
+  783|       |        ),
+  784|      0|        ProgramSpec::Dot3 => Jaxpr::new(
+  785|      0|            vec![VarId(1), VarId(2)],
+  786|      0|            vec![],
+  787|      0|            vec![VarId(3)],
+  788|      0|            vec![Equation {
+  789|      0|                primitive: Primitive::Dot,
+  790|      0|                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+  791|      0|                outputs: smallvec![VarId(3)],
+  792|      0|                params: BTreeMap::new(),
+  793|       |            }],
+  794|       |        ),
+  795|      0|        ProgramSpec::ReduceSumVec => Jaxpr::new(
+  796|      0|            vec![VarId(1)],
+  797|      0|            vec![],
+  798|      0|            vec![VarId(2)],
+  799|      0|            vec![Equation {
+  800|      0|                primitive: Primitive::ReduceSum,
+  801|      0|                inputs: smallvec![Atom::Var(VarId(1))],
+  802|      0|                outputs: smallvec![VarId(2)],
+  803|      0|                params: BTreeMap::new(),
+  804|       |            }],
+  805|       |        ),
+  806|       |    }
+  807|    273|}
+  808|       |
+  809|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  810|       |pub struct TraceTransformLedger {
+  811|       |    pub root_jaxpr: Jaxpr,
+  812|       |    pub transform_stack: Vec<Transform>,
+  813|       |    pub transform_evidence: Vec<String>,
+  814|       |}
+  815|       |
+  816|       |impl TraceTransformLedger {
+  817|       |    #[must_use]
+  818|    780|    pub fn new(root_jaxpr: Jaxpr) -> Self {
+  819|    780|        Self {
+  820|    780|            root_jaxpr,
+  821|    780|            transform_stack: Vec::new(),
+  822|    780|            transform_evidence: Vec::new(),
+  823|    780|        }
+  824|    780|    }
+  825|       |
+  826|    881|    pub fn push_transform(&mut self, transform: Transform, evidence_id: impl Into<String>) {
+  827|    881|        self.transform_stack.push(transform);
+  828|    881|        self.transform_evidence.push(evidence_id.into());
+  829|    881|    }
+  830|       |
+  831|       |    #[must_use]
+  832|  1.29k|    pub fn composition_signature(&self) -> String {
+  833|  1.29k|        let mut out = String::new();
+  834|  1.29k|        out.push_str("stack=");
+  835|  1.48k|        for transform in &self.transform_stack {
+                                       ^1.29k
+  836|  1.48k|            let _ = write!(&mut out, "{}>", transform.as_str());
+  837|  1.48k|        }
+  838|  1.29k|        out.push_str("|jaxpr=");
+  839|  1.29k|        out.push_str(self.root_jaxpr.canonical_fingerprint());
+  840|  1.29k|        out
+  841|  1.29k|    }
+  842|       |}
+  843|       |
+  844|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+  845|       |pub struct TransformCompositionProof {
+  846|       |    pub stack_signature: String,
+  847|       |    pub stack_hash_hex: String,
+  848|       |    pub transform_count: usize,
+  849|       |    pub evidence_count: usize,
+  850|       |}
+  851|       |
+  852|       |#[derive(Debug, Clone, PartialEq, Eq)]
+  853|       |pub enum TransformCompositionError {
+  854|       |    EvidenceCountMismatch {
+  855|       |        transform_count: usize,
+  856|       |        evidence_count: usize,
+  857|       |    },
+  858|       |    EmptyEvidence {
+  859|       |        index: usize,
+  860|       |        transform: Transform,
+  861|       |    },
+  862|       |    UnsupportedSequence {
+  863|       |        detail: String,
+  864|       |    },
+  865|       |}
+  866|       |
+  867|       |impl std::fmt::Display for TransformCompositionError {
+  868|      4|    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  869|      4|        match self {
+  870|       |            Self::EvidenceCountMismatch {
+  871|      1|                transform_count,
+  872|      1|                evidence_count,
+  873|       |            } => {
+  874|      1|                write!(
+  875|      1|                    f,
+  876|       |                    "transform/evidence cardinality mismatch: transforms={}, evidence={}",
+  877|       |                    transform_count, evidence_count
+  878|       |                )
+  879|       |            }
+  880|      1|            Self::EmptyEvidence { index, transform } => {
+  881|      1|                write!(
+  882|      1|                    f,
+  883|       |                    "transform evidence at index {} for {} is empty",
+  884|       |                    index,
+  885|      1|                    transform.as_str()
+  886|       |                )
+  887|       |            }
+  888|      2|            Self::UnsupportedSequence { detail } => {
+  889|      2|                write!(f, "unsupported transform sequence: {detail}")
+  890|       |            }
+  891|       |        }
+  892|      4|    }
+  893|       |}
+  894|       |
+  895|       |impl std::error::Error for TransformCompositionError {}
+  896|       |
+  897|    781|pub fn verify_transform_composition(
+  898|    781|    ledger: &TraceTransformLedger,
+  899|    781|) -> Result<TransformCompositionProof, TransformCompositionError> {
+  900|    781|    if ledger.transform_stack.len() != ledger.transform_evidence.len() {
+  901|      1|        return Err(TransformCompositionError::EvidenceCountMismatch {
+  902|      1|            transform_count: ledger.transform_stack.len(),
+  903|      1|            evidence_count: ledger.transform_evidence.len(),
+  904|      1|        });
+  905|    780|    }
+  906|       |
+  907|    977|    for (index, transform) in ledger.transform_stack.iter().enumerate() {
+                                            ^780                          ^780
+  908|    977|        if ledger.transform_evidence[index].trim().is_empty() {
+  909|      1|            return Err(TransformCompositionError::EmptyEvidence {
+  910|      1|                index,
+  911|      1|                transform: *transform,
+  912|      1|            });
+  913|    976|        }
+  914|       |    }
+  915|       |
+  916|    779|    let grad_count = ledger
+  917|    779|        .transform_stack
+  918|    779|        .iter()
+  919|    976|        .filter(|transform| **transform == Transform::Grad)
+                       ^779
+  920|    779|        .count();
+  921|    779|    if grad_count > 1 {
+  922|      1|        return Err(TransformCompositionError::UnsupportedSequence {
+  923|      1|            detail: "current engine supports at most one grad transform".to_owned(),
+  924|      1|        });
+  925|    778|    }
+  926|       |
+  927|    778|    let vmap_count = ledger
+  928|    778|        .transform_stack
+  929|    778|        .iter()
+  930|    974|        .filter(|transform| **transform == Transform::Vmap)
+                       ^778
+  931|    778|        .count();
+  932|    778|    if vmap_count > 1 {
+  933|      1|        return Err(TransformCompositionError::UnsupportedSequence {
+  934|      1|            detail: "current engine supports at most one vmap transform".to_owned(),
+  935|      1|        });
+  936|    777|    }
+  937|       |
+  938|    777|    let stack_signature = ledger.composition_signature();
+  939|    777|    let stack_hash_hex = format!("{:016x}", fnv1a_64(stack_signature.as_bytes()));
+  940|       |
+  941|    777|    Ok(TransformCompositionProof {
+  942|    777|        stack_signature,
+  943|    777|        stack_hash_hex,
+  944|    777|        transform_count: ledger.transform_stack.len(),
+  945|    777|        evidence_count: ledger.transform_evidence.len(),
+  946|    777|    })
+  947|    781|}
+  948|       |
+  949|    777|fn fnv1a_64(bytes: &[u8]) -> u64 {
+  950|    777|    let mut hash = 0xcbf29ce484222325_u64;
+  951|  45.9k|    for byte in bytes {
+                              ^777
+  952|  45.9k|        hash ^= u64::from(*byte);
+  953|  45.9k|        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+  954|  45.9k|    }
+  955|    777|    hash
+  956|    777|}
+  957|       |
+  958|       |#[cfg(test)]
+  959|       |mod tests {
+  960|       |    use super::{
+  961|       |        Atom, DType, Equation, Jaxpr, JaxprValidationError, Literal, Primitive, ProgramSpec, Shape,
+  962|       |        TensorValue, TraceTransformLedger, Transform, Value, ValueError, VarId, build_program,
+  963|       |        verify_transform_composition,
+  964|       |    };
+  965|       |    use proptest::prelude::*;
+  966|       |    use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
+  967|       |    use serde::Serialize;
+  968|       |    use smallvec::smallvec;
+  969|       |    use std::any::Any;
+  970|       |    use std::collections::BTreeMap;
+  971|       |    use std::fs;
+  972|       |    use std::panic::{AssertUnwindSafe, catch_unwind};
+  973|       |    use std::path::{Path, PathBuf};
+  974|       |    use std::time::Instant;
+  975|       |
+  976|       |    const PACKET_ID: &str = "FJ-P2C-001";
+  977|       |    const SUITE_ID: &str = "fj-core";
+  978|       |
+  979|     26|    fn repo_root() -> PathBuf {
+  980|     26|        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+  981|     26|    }
+  982|       |
+  983|     26|    fn test_log_path(test_id: &str) -> PathBuf {
+  984|     26|        let file_name = test_id.replace("::", "__");
+  985|     26|        repo_root()
+  986|     26|            .join("artifacts")
+  987|     26|            .join("testing")
+  988|     26|            .join("logs")
+  989|     26|            .join(SUITE_ID)
+  990|     26|            .join(format!("{file_name}.json"))
+  991|     26|    }
+  992|       |
+  993|     26|    fn replay_command(test_id: &str) -> String {
+  994|     26|        format!("cargo test -p fj-core --lib {test_id} -- --exact --nocapture")
+  995|     26|    }
+  996|       |
+  997|    156|    fn duration_ms(start: Instant) -> u64 {
+  998|    156|        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+  999|    156|    }
+ 1000|       |
+ 1001|     52|    fn write_log(path: &Path, log: &fj_test_utils::TestLogV1) -> Result<(), String> {
+ 1002|     52|        if let Some(parent) = path.parent() {
+ 1003|     52|            fs::create_dir_all(parent).map_err(|err| format!("log dir create failed: {err}"))?;
+                                                                   ^0                                      ^0
+ 1004|      0|        }
+ 1005|     52|        let payload = serde_json::to_string_pretty(log)
+ 1006|     52|            .map_err(|err| format!("log serialize failed: {err}"))?;
+                                         ^0                                     ^0
+ 1007|     52|        fs::write(path, payload).map_err(|err| format!("log write failed: {err}"))
+                                                             ^0
+ 1008|     52|    }
+ 1009|       |
+ 1010|      0|    fn panic_payload_to_string(payload: &(dyn Any + Send)) -> String {
+ 1011|      0|        if let Some(msg) = payload.downcast_ref::<String>() {
+ 1012|      0|            return msg.clone();
+ 1013|      0|        }
+ 1014|      0|        if let Some(msg) = payload.downcast_ref::<&str>() {
+ 1015|      0|            return (*msg).to_owned();
+ 1016|      0|        }
+ 1017|      0|        "non-string panic payload".to_owned()
+ 1018|      0|    }
+ 1019|       |
+ 1020|     26|    fn run_logged_test<Fixture, F>(
+ 1021|     26|        test_name: &str,
+ 1022|     26|        fixture: &Fixture,
+ 1023|     26|        mode: fj_test_utils::TestMode,
+ 1024|     26|        body: F,
+ 1025|     26|    ) where
+ 1026|     26|        Fixture: Serialize,
+ 1027|     26|        F: FnOnce() -> Result<Vec<String>, String> + std::panic::UnwindSafe,
+ 1028|       |    {
+ 1029|     26|        let overall_start = Instant::now();
+ 1030|     26|        let setup_start = Instant::now();
+ 1031|     26|        let fixture_id = fj_test_utils::fixture_id_from_json(fixture).expect("fixture digest");
+ 1032|     26|        let test_id = fj_test_utils::test_id(module_path!(), test_name);
+ 1033|     26|        let mut log = fj_test_utils::TestLogV1::unit(
+ 1034|     26|            test_id.clone(),
+ 1035|     26|            fixture_id,
+ 1036|     26|            mode,
+ 1037|     26|            fj_test_utils::TestResult::Fail,
+ 1038|       |        );
+ 1039|     26|        log.phase_timings.setup_ms = duration_ms(setup_start);
+ 1040|       |
+ 1041|     26|        let execute_start = Instant::now();
+ 1042|     26|        let outcome = catch_unwind(AssertUnwindSafe(body));
+ 1043|     26|        log.phase_timings.execute_ms = duration_ms(execute_start);
+ 1044|       |
+ 1045|     26|        let verify_start = Instant::now();
+ 1046|     26|        let mut panic_payload: Option<Box<dyn Any + Send>> = None;
+ 1047|     26|        let mut failure_detail: Option<String> = None;
+ 1048|       |
+ 1049|     26|        match outcome {
+ 1050|     26|            Ok(Ok(mut artifact_refs)) => {
+ 1051|     26|                log.result = fj_test_utils::TestResult::Pass;
+ 1052|     26|                artifact_refs.push(format!("packet:{PACKET_ID}"));
+ 1053|     26|                artifact_refs.push(format!("replay: {}", replay_command(&test_id)));
+ 1054|     26|                log.artifact_refs = artifact_refs;
+ 1055|     26|                log.details = Some(format!(
+ 1056|     26|                    "packet_id={PACKET_ID};suite_id={SUITE_ID};result=pass"
+ 1057|     26|                ));
+ 1058|     26|            }
+ 1059|      0|            Ok(Err(detail)) => {
+ 1060|      0|                failure_detail = Some(detail.clone());
+ 1061|      0|                log.result = fj_test_utils::TestResult::Fail;
+ 1062|      0|                log.artifact_refs = vec![
+ 1063|      0|                    format!("packet:{PACKET_ID}"),
+ 1064|      0|                    format!("replay: {}", replay_command(&test_id)),
+ 1065|      0|                ];
+ 1066|      0|                log.details = Some(detail);
+ 1067|      0|            }
+ 1068|      0|            Err(payload) => {
+ 1069|      0|                let detail = panic_payload_to_string(payload.as_ref());
+ 1070|      0|                failure_detail = Some(detail.clone());
+ 1071|      0|                log.result = fj_test_utils::TestResult::Fail;
+ 1072|      0|                log.artifact_refs = vec![
+ 1073|      0|                    format!("packet:{PACKET_ID}"),
+ 1074|      0|                    format!("replay: {}", replay_command(&test_id)),
+ 1075|      0|                ];
+ 1076|      0|                log.details = Some(detail);
+ 1077|      0|                panic_payload = Some(payload);
+ 1078|      0|            }
+ 1079|       |        }
+ 1080|     26|        log.phase_timings.verify_ms = duration_ms(verify_start);
+ 1081|       |
+ 1082|     26|        let log_path = test_log_path(&test_id);
+ 1083|     26|        log.artifact_refs.push(log_path.display().to_string());
+ 1084|     26|        log.duration_ms = duration_ms(overall_start);
+ 1085|       |
+ 1086|     26|        let teardown_start = Instant::now();
+ 1087|     26|        write_log(&log_path, &log).expect("test log write should succeed");
+ 1088|     26|        log.phase_timings.teardown_ms = duration_ms(teardown_start);
+ 1089|     26|        log.duration_ms = duration_ms(overall_start);
+ 1090|     26|        write_log(&log_path, &log).expect("test log rewrite should succeed");
+ 1091|       |
+ 1092|     26|        if let Some(payload) = panic_payload {
+                                  ^0
+ 1093|      0|            std::panic::resume_unwind(payload);
+ 1094|     26|        }
+ 1095|     26|        if let Some(detail) = failure_detail {
+                                  ^0
+ 1096|      0|            panic!("{detail}");
+ 1097|     26|        }
+ 1098|     26|    }
+ 1099|       |
+ 1100|      1|    fn all_primitives_jaxpr() -> Jaxpr {
+ 1101|      1|        let mut equations = Vec::new();
+ 1102|       |
+ 1103|      1|        let mut reshape_params = BTreeMap::new();
+ 1104|      1|        reshape_params.insert("new_shape".to_owned(), "2,3".to_owned());
+ 1105|      1|        equations.push(Equation {
+ 1106|      1|            primitive: Primitive::Reshape,
+ 1107|      1|            inputs: smallvec![Atom::Var(VarId(1))],
+                                            ^0
+ 1108|      1|            outputs: smallvec![VarId(5)],
+                                             ^0
+ 1109|      1|            params: reshape_params,
+ 1110|       |        });
+ 1111|       |
+ 1112|      1|        let mut slice_params = BTreeMap::new();
+ 1113|      1|        slice_params.insert("start_indices".to_owned(), "0,0".to_owned());
+ 1114|      1|        slice_params.insert("limit_indices".to_owned(), "2,2".to_owned());
+ 1115|      1|        equations.push(Equation {
+ 1116|      1|            primitive: Primitive::Slice,
+ 1117|      1|            inputs: smallvec![Atom::Var(VarId(5))],
+                                            ^0
+ 1118|      1|            outputs: smallvec![VarId(6)],
+                                             ^0
+ 1119|      1|            params: slice_params,
+ 1120|       |        });
+ 1121|       |
+ 1122|      1|        let mut gather_params = BTreeMap::new();
+ 1123|      1|        gather_params.insert("slice_sizes".to_owned(), "1,2".to_owned());
+ 1124|      1|        equations.push(Equation {
+ 1125|      1|            primitive: Primitive::Gather,
+ 1126|      1|            inputs: smallvec![Atom::Var(VarId(5)), Atom::Var(VarId(2))],
+                                            ^0                   ^0
+ 1127|      1|            outputs: smallvec![VarId(7)],
+                                             ^0
+ 1128|      1|            params: gather_params,
+ 1129|       |        });
+ 1130|       |
+ 1131|      1|        let mut transpose_params = BTreeMap::new();
+ 1132|      1|        transpose_params.insert("permutation".to_owned(), "1,0".to_owned());
+ 1133|      1|        equations.push(Equation {
+ 1134|      1|            primitive: Primitive::Transpose,
+ 1135|      1|            inputs: smallvec![Atom::Var(VarId(5))],
+                                            ^0
+ 1136|      1|            outputs: smallvec![VarId(8)],
+                                             ^0
+ 1137|      1|            params: transpose_params,
+ 1138|       |        });
+ 1139|       |
+ 1140|      1|        let mut broadcast_params = BTreeMap::new();
+ 1141|      1|        broadcast_params.insert("shape".to_owned(), "3,2,2".to_owned());
+ 1142|      1|        broadcast_params.insert("broadcast_dimensions".to_owned(), "1,2".to_owned());
+ 1143|      1|        equations.push(Equation {
+ 1144|      1|            primitive: Primitive::BroadcastInDim,
+ 1145|      1|            inputs: smallvec![Atom::Var(VarId(6))],
+                                            ^0
+ 1146|      1|            outputs: smallvec![VarId(9)],
+                                             ^0
+ 1147|      1|            params: broadcast_params,
+ 1148|       |        });
+ 1149|       |
+ 1150|      1|        let mut concat_params = BTreeMap::new();
+ 1151|      1|        concat_params.insert("dimension".to_owned(), "0".to_owned());
+ 1152|      1|        equations.push(Equation {
+ 1153|      1|            primitive: Primitive::Concatenate,
+ 1154|      1|            inputs: smallvec![Atom::Var(VarId(8)), Atom::Var(VarId(8))],
+                                            ^0                   ^0
+ 1155|      1|            outputs: smallvec![VarId(10)],
+                                             ^0
+ 1156|      1|            params: concat_params,
+ 1157|       |        });
+ 1158|       |
+ 1159|      1|        equations.push(Equation {
+ 1160|      1|            primitive: Primitive::Scatter,
+ 1161|      1|            inputs: smallvec![Atom::Var(VarId(10)), Atom::Var(VarId(2))],
+                                            ^0                    ^0
+ 1162|      1|            outputs: smallvec![VarId(11)],
+                                             ^0
+ 1163|      1|            params: BTreeMap::new(),
+ 1164|       |        });
+ 1165|       |
+ 1166|      1|        let mut reduce_params = BTreeMap::new();
+ 1167|      1|        reduce_params.insert("axes".to_owned(), "0".to_owned());
+ 1168|      1|        equations.push(Equation {
+ 1169|      1|            primitive: Primitive::ReduceSum,
+ 1170|      1|            inputs: smallvec![Atom::Var(VarId(11))],
+                                            ^0
+ 1171|      1|            outputs: smallvec![VarId(12)],
+                                             ^0
+ 1172|      1|            params: reduce_params,
+ 1173|       |        });
+ 1174|       |
+ 1175|      1|        equations.push(Equation {
+ 1176|      1|            primitive: Primitive::Sin,
+ 1177|      1|            inputs: smallvec![Atom::Var(VarId(12))],
+                                            ^0
+ 1178|      1|            outputs: smallvec![VarId(13)],
+                                             ^0
+ 1179|      1|            params: BTreeMap::new(),
+ 1180|       |        });
+ 1181|      1|        equations.push(Equation {
+ 1182|      1|            primitive: Primitive::Cos,
+ 1183|      1|            inputs: smallvec![Atom::Var(VarId(13))],
+                                            ^0
+ 1184|      1|            outputs: smallvec![VarId(14)],
+                                             ^0
+ 1185|      1|            params: BTreeMap::new(),
+ 1186|       |        });
+ 1187|      1|        equations.push(Equation {
+ 1188|      1|            primitive: Primitive::Add,
+ 1189|      1|            inputs: smallvec![Atom::Var(VarId(14)), Atom::Var(VarId(12))],
+                                            ^0                    ^0
+ 1190|      1|            outputs: smallvec![VarId(15)],
+                                             ^0
+ 1191|      1|            params: BTreeMap::new(),
+ 1192|       |        });
+ 1193|      1|        equations.push(Equation {
+ 1194|      1|            primitive: Primitive::Mul,
+ 1195|      1|            inputs: smallvec![Atom::Var(VarId(15)), Atom::Var(VarId(15))],
+                                            ^0                    ^0
+ 1196|      1|            outputs: smallvec![VarId(16)],
+                                             ^0
+ 1197|      1|            params: BTreeMap::new(),
+ 1198|       |        });
+ 1199|      1|        equations.push(Equation {
+ 1200|      1|            primitive: Primitive::Dot,
+ 1201|      1|            inputs: smallvec![Atom::Var(VarId(8)), Atom::Var(VarId(3))],
+                                            ^0                   ^0
+ 1202|      1|            outputs: smallvec![VarId(17)],
+                                             ^0
+ 1203|      1|            params: BTreeMap::new(),
+ 1204|       |        });
+ 1205|      1|        equations.push(Equation {
+ 1206|      1|            primitive: Primitive::Add,
+ 1207|      1|            inputs: smallvec![Atom::Var(VarId(16)), Atom::Var(VarId(17))],
+                                            ^0                    ^0
+ 1208|      1|            outputs: smallvec![VarId(24)],
+                                             ^0
+ 1209|      1|            params: BTreeMap::new(),
+ 1210|       |        });
+ 1211|       |
+ 1212|      1|        Jaxpr::new(
+ 1213|      1|            vec![VarId(1), VarId(2), VarId(3)],
+ 1214|      1|            vec![VarId(4)],
+ 1215|      1|            vec![VarId(24)],
+ 1216|      1|            equations,
+ 1217|       |        )
+ 1218|      1|    }
+ 1219|       |
+ 1220|       |    #[test]
+ 1221|      1|    fn jaxpr_construction_supports_all_primitives() {
+ 1222|      1|        run_logged_test(
+ 1223|      1|            "jaxpr_construction_supports_all_primitives",
+ 1224|      1|            &("all_primitives", 14_u32),
+ 1225|      1|            fj_test_utils::TestMode::Strict,
+ 1226|      1|            || {
+ 1227|      1|                let jaxpr = all_primitives_jaxpr();
+ 1228|      1|                jaxpr
+ 1229|      1|                    .validate_well_formed()
+ 1230|      1|                    .map_err(|err| format!("well-formed validation failed: {err}"))?;
+                                                 ^0                                              ^0
+ 1231|      1|                let covered = jaxpr
+ 1232|      1|                    .equations
+ 1233|      1|                    .iter()
+ 1234|      1|                    .map(|eqn| eqn.primitive)
+ 1235|      1|                    .collect::<std::collections::BTreeSet<_>>();
+ 1236|      1|                let expected = [
+ 1237|      1|                    Primitive::Add,
+ 1238|      1|                    Primitive::Mul,
+ 1239|      1|                    Primitive::Dot,
+ 1240|      1|                    Primitive::Sin,
+ 1241|      1|                    Primitive::Cos,
+ 1242|      1|                    Primitive::ReduceSum,
+ 1243|      1|                    Primitive::Reshape,
+ 1244|      1|                    Primitive::Slice,
+ 1245|      1|                    Primitive::Gather,
+ 1246|      1|                    Primitive::Scatter,
+ 1247|      1|                    Primitive::Transpose,
+ 1248|      1|                    Primitive::BroadcastInDim,
+ 1249|      1|                    Primitive::Concatenate,
+ 1250|      1|                ]
+ 1251|      1|                .into_iter()
+ 1252|      1|                .collect::<std::collections::BTreeSet<_>>();
+ 1253|      1|                assert_eq!(covered, expected);
+ 1254|      1|                Ok(Vec::new())
+ 1255|      1|            },
+ 1256|       |        );
+ 1257|      1|    }
+ 1258|       |
+ 1259|       |    #[test]
+ 1260|      1|    fn jaxpr_constvars_binding_is_valid() {
+ 1261|      1|        run_logged_test(
+ 1262|      1|            "jaxpr_constvars_binding_is_valid",
+ 1263|      1|            &("constvars", 1_u32),
+ 1264|      1|            fj_test_utils::TestMode::Strict,
+ 1265|      1|            || {
+ 1266|      1|                let jaxpr = Jaxpr::new(
+ 1267|      1|                    vec![VarId(1)],
+ 1268|      1|                    vec![VarId(2)],
+ 1269|      1|                    vec![VarId(3)],
+ 1270|      1|                    vec![Equation {
+ 1271|      1|                        primitive: Primitive::Add,
+ 1272|      1|                        inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                                                        ^0                   ^0
+ 1273|      1|                        outputs: smallvec![VarId(3)],
+                                                         ^0
+ 1274|      1|                        params: BTreeMap::new(),
+ 1275|       |                    }],
+ 1276|       |                );
+ 1277|      1|                jaxpr
+ 1278|      1|                    .validate_well_formed()
+ 1279|      1|                    .map_err(|err| format!("constvar jaxpr should be valid: {err}"))?;
+                                                 ^0                                               ^0
+ 1280|      1|                assert!(jaxpr.canonical_fingerprint().contains("const=[v2,]"));
+ 1281|      1|                Ok(Vec::new())
+ 1282|      1|            },
+ 1283|       |        );
+ 1284|      1|    }
+ 1285|       |
+ 1286|       |    #[test]
+ 1287|      1|    fn jaxpr_multi_equation_chain_is_valid() {
+ 1288|      1|        run_logged_test(
+ 1289|      1|            "jaxpr_multi_equation_chain_is_valid",
+ 1290|      1|            &("square_plus_linear", 3_u32),
+ 1291|      1|            fj_test_utils::TestMode::Strict,
+ 1292|      1|            || {
+ 1293|      1|                let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+ 1294|      1|                assert_eq!(jaxpr.equations.len(), 3);
+ 1295|      1|                jaxpr
+ 1296|      1|                    .validate_well_formed()
+ 1297|      1|                    .map_err(|err| format!("program should validate: {err}"))?;
+                                                 ^0                                        ^0
+ 1298|      1|                Ok(Vec::new())
+ 1299|      1|            },
+ 1300|       |        );
+ 1301|      1|    }
+ 1302|       |
+ 1303|       |    #[test]
+ 1304|      1|    fn jaxpr_empty_program_is_valid() {
+ 1305|      1|        run_logged_test(
+ 1306|      1|            "jaxpr_empty_program_is_valid",
+ 1307|      1|            &("empty", 0_u32),
+ 1308|      1|            fj_test_utils::TestMode::Strict,
+ 1309|      1|            || {
+ 1310|      1|                let jaxpr = Jaxpr::new(vec![], vec![], vec![], vec![]);
+ 1311|      1|                jaxpr
+ 1312|      1|                    .validate_well_formed()
+ 1313|      1|                    .map_err(|err| format!("empty jaxpr should validate: {err}"))?;
+                                                 ^0                                            ^0
+ 1314|      1|                assert_eq!(jaxpr.equations.len(), 0);
+ 1315|      1|                assert!(
+ 1316|      1|                    jaxpr
+ 1317|      1|                        .canonical_fingerprint()
+ 1318|      1|                        .starts_with("in=[]const=[]out=[]")
+ 1319|       |                );
+ 1320|      1|                Ok(Vec::new())
+ 1321|      1|            },
+ 1322|       |        );
+ 1323|      1|    }
+ 1324|       |
+ 1325|       |    #[test]
+ 1326|      1|    fn jaxpr_duplicate_varid_detection() {
+ 1327|      1|        run_logged_test(
+ 1328|      1|            "jaxpr_duplicate_varid_detection",
+ 1329|      1|            &("duplicate-varid", 1_u32),
+ 1330|      1|            fj_test_utils::TestMode::Strict,
+ 1331|      1|            || {
+ 1332|      1|                let bad = Jaxpr::new(vec![VarId(1), VarId(1)], vec![], vec![VarId(1)], vec![]);
+ 1333|      1|                let err = bad
+ 1334|      1|                    .validate_well_formed()
+ 1335|      1|                    .expect_err("duplicate invar should fail");
+ 1336|      1|                assert!(matches!(
+ 1337|      1|                    err,
+ 1338|       |                    JaxprValidationError::DuplicateBinding {
+ 1339|      1|                        section: "invars",
+ 1340|       |                        var: VarId(1)
+ 1341|       |                    }
+ 1342|       |                ));
+ 1343|      1|                Ok(Vec::new())
+ 1344|      1|            },
+ 1345|       |        );
+ 1346|      1|    }
+ 1347|       |
+ 1348|       |    #[test]
+ 1349|      1|    fn canonical_fingerprint_is_deterministic() {
+ 1350|      1|        run_logged_test(
+ 1351|      1|            "canonical_fingerprint_is_deterministic",
+ 1352|      1|            &("fingerprint-deterministic", 1_u32),
+ 1353|      1|            fj_test_utils::TestMode::Strict,
+ 1354|      1|            || {
+ 1355|      1|                let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+ 1356|      1|                let fp_a = jaxpr.canonical_fingerprint().to_owned();
+ 1357|      1|                let fp_b = jaxpr.canonical_fingerprint().to_owned();
+ 1358|      1|                assert_eq!(fp_a, fp_b);
+ 1359|      1|                Ok(Vec::new())
+ 1360|      1|            },
+ 1361|       |        );
+ 1362|      1|    }
+ 1363|       |
+ 1364|       |    #[test]
+ 1365|      1|    fn canonical_fingerprint_changes_on_program_change() {
+ 1366|      1|        run_logged_test(
+ 1367|      1|            "canonical_fingerprint_changes_on_program_change",
+ 1368|      1|            &("fingerprint-sensitivity", 2_u32),
+ 1369|      1|            fj_test_utils::TestMode::Strict,
+ 1370|      1|            || {
+ 1371|      1|                let base = build_program(ProgramSpec::SquarePlusLinear);
+ 1372|      1|                let mut modified = base.clone();
+ 1373|      1|                modified.equations[0]
+ 1374|      1|                    .params
+ 1375|      1|                    .insert("tweak".to_owned(), "1".to_owned());
+ 1376|      1|                assert_ne!(
+ 1377|      1|                    base.canonical_fingerprint(),
+ 1378|      1|                    modified.canonical_fingerprint()
+ 1379|       |                );
+ 1380|      1|                Ok(Vec::new())
+ 1381|      1|            },
+ 1382|       |        );
+ 1383|      1|    }
+ 1384|       |
+ 1385|       |    #[test]
+ 1386|      1|    fn canonical_fingerprint_round_trip_stable() {
+ 1387|      1|        run_logged_test(
+ 1388|      1|            "canonical_fingerprint_round_trip_stable",
+ 1389|      1|            &("fingerprint-roundtrip", 1_u32),
+ 1390|      1|            fj_test_utils::TestMode::Strict,
+ 1391|      1|            || {
+ 1392|      1|                let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+ 1393|      1|                let encoded = serde_json::to_string(&jaxpr)
+ 1394|      1|                    .map_err(|err| format!("serialize failed: {err}"))?;
+                                                 ^0                                 ^0
+ 1395|      1|                let decoded: Jaxpr = serde_json::from_str(&encoded)
+ 1396|      1|                    .map_err(|err| format!("decode failed: {err}"))?;
+                                                 ^0                              ^0
+ 1397|      1|                decoded
+ 1398|      1|                    .validate_well_formed()
+ 1399|      1|                    .map_err(|err| format!("decoded jaxpr should validate: {err}"))?;
+                                                 ^0                                              ^0
+ 1400|      1|                assert_eq!(
+ 1401|      1|                    jaxpr.canonical_fingerprint(),
+ 1402|      1|                    decoded.canonical_fingerprint()
+ 1403|       |                );
+ 1404|      1|                Ok(Vec::new())
+ 1405|      1|            },
+ 1406|       |        );
+ 1407|      1|    }
+ 1408|       |
+ 1409|       |    #[test]
+ 1410|      1|    fn transform_composition_valid_single_transforms() {
+ 1411|      1|        run_logged_test(
+ 1412|      1|            "transform_composition_valid_single_transforms",
+ 1413|      1|            &["jit", "grad", "vmap"],
+ 1414|      1|            fj_test_utils::TestMode::Strict,
+ 1415|      1|            || {
+ 1416|      3|                for transform in [Transform::Jit, Transform::Grad, Transform::Vmap] {
+                                               ^1^1
+ 1417|      3|                    let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+ 1418|      3|                    ttl.push_transform(transform, format!("evidence-{}", transform.as_str()));
+ 1419|      3|                    let proof = verify_transform_composition(&ttl)
+ 1420|      3|                        .map_err(|err| format!("single transform should validate: {err}"))?;
+                                                     ^0                                                 ^0
+ 1421|      3|                    assert_eq!(proof.transform_count, 1);
+ 1422|      3|                    assert_eq!(proof.evidence_count, 1);
+ 1423|       |                }
+ 1424|      1|                Ok(Vec::new())
+ 1425|      1|            },
+ 1426|       |        );
+ 1427|      1|    }
+ 1428|       |
+ 1429|       |    #[test]
+ 1430|      1|    fn transform_composition_valid_double_compositions() {
+ 1431|      1|        run_logged_test(
+ 1432|      1|            "transform_composition_valid_double_compositions",
+ 1433|      1|            &["jit+grad", "jit+vmap", "vmap+grad"],
+ 1434|      1|            fj_test_utils::TestMode::Strict,
+ 1435|      1|            || {
+ 1436|      1|                let stacks = [
+ 1437|      1|                    [Transform::Jit, Transform::Grad],
+ 1438|      1|                    [Transform::Jit, Transform::Vmap],
+ 1439|      1|                    [Transform::Vmap, Transform::Grad],
+ 1440|      1|                ];
+ 1441|      3|                for stack in stacks {
+                                           ^1
+ 1442|      3|                    let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+ 1443|      3|                    ttl.push_transform(stack[0], "a");
+ 1444|      3|                    ttl.push_transform(stack[1], "b");
+ 1445|      3|                    verify_transform_composition(&ttl)
+ 1446|      3|                        .map_err(|err| format!("double transform should validate: {err}"))?;
+                                                     ^0                                                 ^0
+ 1447|       |                }
+ 1448|      1|                Ok(Vec::new())
+ 1449|      1|            },
+ 1450|       |        );
+ 1451|      1|    }
+ 1452|       |
+ 1453|       |    #[test]
+ 1454|      1|    fn transform_composition_valid_triple_stack() {
+ 1455|      1|        run_logged_test(
+ 1456|      1|            "transform_composition_valid_triple_stack",
+ 1457|      1|            &["jit", "vmap", "grad"],
+ 1458|      1|            fj_test_utils::TestMode::Strict,
+ 1459|      1|            || {
+ 1460|      1|                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+ 1461|      1|                ttl.push_transform(Transform::Jit, "jit");
+ 1462|      1|                ttl.push_transform(Transform::Vmap, "vmap");
+ 1463|      1|                ttl.push_transform(Transform::Grad, "grad");
+ 1464|      1|                let proof = verify_transform_composition(&ttl)
+ 1465|      1|                    .map_err(|err| format!("triple transform should validate: {err}"))?;
+                                                 ^0                                                 ^0
+ 1466|      1|                assert_eq!(proof.transform_count, 3);
+ 1467|      1|                assert_eq!(proof.evidence_count, 3);
+ 1468|      1|                Ok(Vec::new())
+ 1469|      1|            },
+ 1470|       |        );
+ 1471|      1|    }
+ 1472|       |
+ 1473|       |    #[test]
+ 1474|      1|    fn transform_composition_rejects_double_grad() {
+ 1475|      1|        run_logged_test(
+ 1476|      1|            "transform_composition_rejects_double_grad",
+ 1477|      1|            &["grad", "grad"],
+ 1478|      1|            fj_test_utils::TestMode::Strict,
+ 1479|      1|            || {
+ 1480|      1|                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+ 1481|      1|                ttl.push_transform(Transform::Grad, "g1");
+ 1482|      1|                ttl.push_transform(Transform::Grad, "g2");
+ 1483|      1|                let err =
+ 1484|      1|                    verify_transform_composition(&ttl).expect_err("double grad should reject");
+ 1485|      1|                assert!(format!("{err}").contains("at most one grad"));
+ 1486|      1|                Ok(Vec::new())
+ 1487|      1|            },
+ 1488|       |        );
+ 1489|      1|    }
+ 1490|       |
+ 1491|       |    #[test]
+ 1492|      1|    fn transform_composition_rejects_double_vmap() {
+ 1493|      1|        run_logged_test(
+ 1494|      1|            "transform_composition_rejects_double_vmap",
+ 1495|      1|            &["vmap", "vmap"],
+ 1496|      1|            fj_test_utils::TestMode::Strict,
+ 1497|      1|            || {
+ 1498|      1|                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+ 1499|      1|                ttl.push_transform(Transform::Vmap, "v1");
+ 1500|      1|                ttl.push_transform(Transform::Vmap, "v2");
+ 1501|      1|                let err =
+ 1502|      1|                    verify_transform_composition(&ttl).expect_err("double vmap should reject");
+ 1503|      1|                assert!(format!("{err}").contains("at most one vmap"));
+ 1504|      1|                Ok(Vec::new())
+ 1505|      1|            },
+ 1506|       |        );
+ 1507|      1|    }
+ 1508|       |
+ 1509|       |    #[test]
+ 1510|      1|    fn transform_composition_rejects_evidence_count_mismatch() {
+ 1511|      1|        run_logged_test(
+ 1512|      1|            "transform_composition_rejects_evidence_count_mismatch",
+ 1513|      1|            &("mismatch", 1_u32),
+ 1514|      1|            fj_test_utils::TestMode::Strict,
+ 1515|      1|            || {
+ 1516|      1|                let ttl = TraceTransformLedger {
+ 1517|      1|                    root_jaxpr: build_program(ProgramSpec::Square),
+ 1518|      1|                    transform_stack: vec![Transform::Jit],
+ 1519|      1|                    transform_evidence: vec![],
+ 1520|      1|                };
+ 1521|      1|                let err = verify_transform_composition(&ttl)
+ 1522|      1|                    .expect_err("evidence mismatch should reject");
+ 1523|      1|                assert!(format!("{err}").contains("cardinality mismatch"));
+ 1524|      1|                Ok(Vec::new())
+ 1525|      1|            },
+ 1526|       |        );
+ 1527|      1|    }
+ 1528|       |
+ 1529|       |    #[test]
+ 1530|      1|    fn transform_composition_rejects_empty_evidence() {
+ 1531|      1|        run_logged_test(
+ 1532|      1|            "transform_composition_rejects_empty_evidence",
+ 1533|      1|            &("empty-evidence", 1_u32),
+ 1534|      1|            fj_test_utils::TestMode::Strict,
+ 1535|      1|            || {
+ 1536|      1|                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+ 1537|      1|                ttl.push_transform(Transform::Jit, "   ");
+ 1538|      1|                let err =
+ 1539|      1|                    verify_transform_composition(&ttl).expect_err("empty evidence should fail");
+ 1540|      1|                assert!(format!("{err}").contains("is empty"));
+ 1541|      1|                Ok(Vec::new())
+ 1542|      1|            },
+ 1543|       |        );
+ 1544|      1|    }
+ 1545|       |
+ 1546|       |    #[test]
+ 1547|      1|    fn ttl_construction_with_empty_stack_is_deterministic() {
+ 1548|      1|        run_logged_test(
+ 1549|      1|            "ttl_construction_with_empty_stack_is_deterministic",
+ 1550|      1|            &("ttl-empty-stack", 0_u32),
+ 1551|      1|            fj_test_utils::TestMode::Strict,
+ 1552|      1|            || {
+ 1553|      1|                let ttl = TraceTransformLedger::new(build_program(ProgramSpec::Add2));
+ 1554|      1|                assert!(ttl.transform_stack.is_empty());
+ 1555|      1|                assert!(ttl.transform_evidence.is_empty());
+ 1556|      1|                let sig_a = ttl.composition_signature();
+ 1557|      1|                let sig_b = ttl.composition_signature();
+ 1558|      1|                assert_eq!(sig_a, sig_b);
+ 1559|      1|                Ok(Vec::new())
+ 1560|      1|            },
+ 1561|       |        );
+ 1562|      1|    }
+ 1563|       |
+ 1564|       |    #[test]
+ 1565|      1|    fn ttl_hash_stability_across_runs() {
+ 1566|      1|        run_logged_test(
+ 1567|      1|            "ttl_hash_stability_across_runs",
+ 1568|      1|            &("ttl-hash", 1_u32),
+ 1569|      1|            fj_test_utils::TestMode::Strict,
+ 1570|      1|            || {
+ 1571|      1|                let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+ 1572|      1|                ttl.push_transform(Transform::Jit, "jit-evidence");
+ 1573|      1|                ttl.push_transform(Transform::Grad, "grad-evidence");
+ 1574|      1|                let proof_a = verify_transform_composition(&ttl)
+ 1575|      1|                    .map_err(|err| format!("proof failed: {err}"))?;
+                                                 ^0                             ^0
+ 1576|      1|                let proof_b = verify_transform_composition(&ttl)
+ 1577|      1|                    .map_err(|err| format!("proof failed: {err}"))?;
+                                                 ^0                             ^0
+ 1578|      1|                assert_eq!(proof_a.stack_hash_hex, proof_b.stack_hash_hex);
+ 1579|      1|                Ok(Vec::new())
+ 1580|      1|            },
+ 1581|       |        );
+ 1582|      1|    }
+ 1583|       |
+ 1584|       |    #[test]
+ 1585|      1|    fn shape_scalar_rank_is_zero() {
+ 1586|      1|        run_logged_test(
+ 1587|      1|            "shape_scalar_rank_is_zero",
+ 1588|      1|            &("shape-scalar", 0_u32),
+ 1589|      1|            fj_test_utils::TestMode::Strict,
+ 1590|      1|            || {
+ 1591|      1|                let scalar = Shape::scalar();
+ 1592|      1|                assert_eq!(scalar.rank(), 0);
+ 1593|      1|                assert_eq!(scalar.element_count(), Some(1));
+ 1594|      1|                Ok(Vec::new())
+ 1595|      1|            },
+ 1596|       |        );
+ 1597|      1|    }
+ 1598|       |
+ 1599|       |    #[test]
+ 1600|      1|    fn vector_constructor_builds_tensor_value() {
+ 1601|      1|        run_logged_test(
+ 1602|      1|            "vector_constructor_builds_tensor_value",
+ 1603|      1|            &("vector", [1_i64, 2, 3]),
+ 1604|      1|            fj_test_utils::TestMode::Strict,
+ 1605|      1|            || {
+ 1606|      1|                let value =
+ 1607|      1|                    Value::vector_i64(&[1, 2, 3]).expect("vector constructor should succeed");
+ 1608|      1|                let tensor = value.as_tensor().expect("expected tensor value");
+ 1609|      1|                assert_eq!(tensor.shape, Shape::vector(3));
+ 1610|      1|                assert_eq!(tensor.len(), 3);
+ 1611|      1|                Ok(Vec::new())
+ 1612|      1|            },
+ 1613|       |        );
+ 1614|      1|    }
+ 1615|       |
+ 1616|       |    #[test]
+ 1617|      1|    fn tensor_slice_axis0_on_rank2_returns_rank1_slice() {
+ 1618|      1|        run_logged_test(
+ 1619|      1|            "tensor_slice_axis0_on_rank2_returns_rank1_slice",
+ 1620|      1|            &("slice-axis0", [2_u32, 3_u32]),
+ 1621|      1|            fj_test_utils::TestMode::Strict,
+ 1622|      1|            || {
+ 1623|      1|                let tensor = TensorValue::new(
+ 1624|      1|                    DType::I64,
+ 1625|      1|                    Shape { dims: vec![2, 3] },
+ 1626|      1|                    vec![
+ 1627|      1|                        Literal::I64(1),
+ 1628|      1|                        Literal::I64(2),
+ 1629|      1|                        Literal::I64(3),
+ 1630|      1|                        Literal::I64(4),
+ 1631|      1|                        Literal::I64(5),
+ 1632|      1|                        Literal::I64(6),
+ 1633|       |                    ],
+ 1634|       |                )
+ 1635|      1|                .expect("rank2 tensor should build");
+ 1636|       |
+ 1637|      1|                let slice = tensor.slice_axis0(1).expect("slice should succeed");
+ 1638|      1|                let Value::Tensor(slice_tensor) = slice else {
+ 1639|      0|                    return Err("slice should be tensor".to_owned());
+ 1640|       |                };
+ 1641|      1|                assert_eq!(slice_tensor.shape, Shape::vector(3));
+ 1642|      1|                assert_eq!(
+ 1643|       |                    slice_tensor.elements,
+ 1644|      1|                    vec![Literal::I64(4), Literal::I64(5), Literal::I64(6)]
+ 1645|       |                );
+ 1646|      1|                Ok(Vec::new())
+ 1647|      1|            },
+ 1648|       |        );
+ 1649|      1|    }
+ 1650|       |
+ 1651|       |    #[test]
+ 1652|      1|    fn stack_axis0_restores_rank2_from_rank1_slices() {
+ 1653|      1|        run_logged_test(
+ 1654|      1|            "stack_axis0_restores_rank2_from_rank1_slices",
+ 1655|      1|            &("stack-axis0", [2_u32, 3_u32]),
+ 1656|      1|            fj_test_utils::TestMode::Strict,
+ 1657|      1|            || {
+ 1658|      1|                let row_a = Value::vector_i64(&[1, 2, 3]).expect("vector should build");
+ 1659|      1|                let row_b = Value::vector_i64(&[4, 5, 6]).expect("vector should build");
+ 1660|      1|                let stacked =
+ 1661|      1|                    TensorValue::stack_axis0(&[row_a, row_b]).expect("stack should succeed");
+ 1662|      1|                assert_eq!(stacked.shape, Shape { dims: vec![2, 3] });
+ 1663|      1|                assert_eq!(
+ 1664|       |                    stacked.elements,
+ 1665|      1|                    vec![
+ 1666|      1|                        Literal::I64(1),
+ 1667|      1|                        Literal::I64(2),
+ 1668|      1|                        Literal::I64(3),
+ 1669|      1|                        Literal::I64(4),
+ 1670|      1|                        Literal::I64(5),
+ 1671|      1|                        Literal::I64(6)
+ 1672|       |                    ]
+ 1673|       |                );
+ 1674|      1|                Ok(Vec::new())
+ 1675|      1|            },
+ 1676|       |        );
+ 1677|      1|    }
+ 1678|       |
+ 1679|       |    #[test]
+ 1680|      1|    fn tensor_new_rejects_wrong_element_count() {
+ 1681|      1|        run_logged_test(
+ 1682|      1|            "tensor_new_rejects_wrong_element_count",
+ 1683|      1|            &("tensor-mismatch", 4_u32),
+ 1684|      1|            fj_test_utils::TestMode::Strict,
+ 1685|      1|            || {
+ 1686|      1|                let err = TensorValue::new(
+ 1687|      1|                    DType::I64,
+ 1688|      1|                    Shape::vector(4),
+ 1689|      1|                    vec![Literal::I64(1), Literal::I64(2)],
+ 1690|       |                )
+ 1691|      1|                .expect_err("shape mismatch should fail");
+ 1692|      1|                assert!(matches!(err, ValueError::ElementCountMismatch { .. }));
+                                      ^0
+ 1693|      1|                Ok(Vec::new())
+ 1694|      1|            },
+ 1695|       |        );
+ 1696|      1|    }
+ 1697|       |
+ 1698|       |    #[test]
+ 1699|      1|    fn prop_jaxpr_generation_is_well_formed() {
+ 1700|      1|        run_logged_test(
+ 1701|      1|            "prop_jaxpr_generation_is_well_formed",
+ 1702|      1|            &(
+ 1703|      1|                "prop-jaxpr-well-formed",
+ 1704|      1|                fj_test_utils::property_test_case_count(),
+ 1705|      1|            ),
+ 1706|      1|            fj_test_utils::TestMode::Strict,
+ 1707|      1|            || {
+ 1708|      1|                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+ 1709|      1|                    fj_test_utils::property_test_case_count(),
+ 1710|       |                ));
+ 1711|      1|                runner
+ 1712|    256|                    .run(&super::proptest_strategies::arb_binary_jaxpr(), |jaxpr| {
+                                   ^1  ^1
+ 1713|    256|                        prop_assert!(jaxpr.validate_well_formed().is_ok());
+ 1714|    256|                        Ok(())
+ 1715|    256|                    })
+ 1716|      1|                    .map_err(|err| err.to_string())?;
+                                                 ^0  ^0          ^0
+ 1717|      1|                Ok(Vec::new())
+ 1718|      1|            },
+ 1719|       |        );
+ 1720|      1|    }
+ 1721|       |
+ 1722|       |    #[test]
+ 1723|      1|    fn prop_fingerprint_uniqueness_for_distinct_jaxprs() {
+ 1724|      1|        run_logged_test(
+ 1725|      1|            "prop_fingerprint_uniqueness_for_distinct_jaxprs",
+ 1726|      1|            &(
+ 1727|      1|                "prop-fingerprint-unique",
+ 1728|      1|                fj_test_utils::property_test_case_count(),
+ 1729|      1|            ),
+ 1730|      1|            fj_test_utils::TestMode::Strict,
+ 1731|      1|            || {
+ 1732|      1|                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+ 1733|      1|                    fj_test_utils::property_test_case_count(),
+ 1734|       |                ));
+ 1735|      1|                let strategy = (
+ 1736|      1|                    super::proptest_strategies::arb_binary_jaxpr(),
+ 1737|      1|                    super::proptest_strategies::arb_binary_jaxpr(),
+ 1738|      1|                );
+ 1739|      1|                runner
+ 1740|    256|                    .run(&strategy, |(lhs, rhs)| {
+                                   ^1  ^1
+ 1741|    256|                        if lhs != rhs {
+ 1742|    133|                            prop_assert_ne!(
+ 1743|    133|                                lhs.canonical_fingerprint(),
+ 1744|    133|                                rhs.canonical_fingerprint()
+ 1745|       |                            );
+ 1746|    123|                        }
+ 1747|    256|                        Ok(())
+ 1748|    256|                    })
+ 1749|      1|                    .map_err(|err| err.to_string())?;
+                                                 ^0  ^0          ^0
+ 1750|      1|                Ok(Vec::new())
+ 1751|      1|            },
+ 1752|       |        );
+ 1753|      1|    }
+ 1754|       |
+ 1755|       |    #[test]
+ 1756|      1|    fn prop_transform_composition_proof_idempotent() {
+ 1757|      1|        run_logged_test(
+ 1758|      1|            "prop_transform_composition_proof_idempotent",
+ 1759|      1|            &(
+ 1760|      1|                "prop-composition-idempotent",
+ 1761|      1|                fj_test_utils::property_test_case_count(),
+ 1762|      1|            ),
+ 1763|      1|            fj_test_utils::TestMode::Strict,
+ 1764|      1|            || {
+ 1765|      1|                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+ 1766|      1|                    fj_test_utils::property_test_case_count(),
+ 1767|       |                ));
+ 1768|      1|                let stack_strategy =
+ 1769|      1|                    proptest::collection::vec(super::proptest_strategies::arb_transform(), 0..=3);
+ 1770|       |
+ 1771|      1|                runner
+ 1772|    314|                    .run(&stack_strategy, |stack| {
+                                   ^1  ^1
+ 1773|    314|                        let grad_count = stack
+ 1774|    314|                            .iter()
+ 1775|    497|                            .filter(|transform| **transform == Transform::Grad)
+                                           ^314
+ 1776|    314|                            .count();
+ 1777|    314|                        let vmap_count = stack
+ 1778|    314|                            .iter()
+ 1779|    497|                            .filter(|transform| **transform == Transform::Vmap)
+                                           ^314
+ 1780|    314|                            .count();
+ 1781|    314|                        prop_assume!(grad_count <= 1 && vmap_count <= 1);
+                                                                      ^289
+ 1782|       |
+ 1783|    256|                        let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
+ 1784|    350|                        for (idx, transform) in stack.iter().enumerate() {
+                                                              ^256         ^256
+ 1785|    350|                            ttl.push_transform(*transform, format!("ev-{idx}"));
+ 1786|    350|                        }
+ 1787|    256|                        let proof_a = verify_transform_composition(&ttl)
+ 1788|    256|                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                                                         ^0                  ^0  ^0           ^0
+ 1789|    256|                        let proof_b = verify_transform_composition(&ttl)
+ 1790|    256|                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                                                         ^0                  ^0  ^0           ^0
+ 1791|    256|                        prop_assert_eq!(proof_a, proof_b);
+ 1792|    256|                        Ok(())
+ 1793|    314|                    })
+ 1794|      1|                    .map_err(|err| err.to_string())?;
+                                                 ^0  ^0          ^0
+ 1795|      1|                Ok(Vec::new())
+ 1796|      1|            },
+ 1797|       |        );
+ 1798|      1|    }
+ 1799|       |
+ 1800|       |    #[test]
+ 1801|      1|    fn test_core_test_log_schema_contract() {
+ 1802|      1|        run_logged_test(
+ 1803|      1|            "test_core_test_log_schema_contract",
+ 1804|      1|            &("schema-contract", 1_u32),
+ 1805|      1|            fj_test_utils::TestMode::Strict,
+ 1806|      1|            || {
+ 1807|      1|                let fixture_id =
+ 1808|      1|                    fj_test_utils::fixture_id_from_json(&(1_u32, 2_u32)).expect("fixture digest");
+ 1809|      1|                let log = fj_test_utils::TestLogV1::unit(
+ 1810|      1|                    fj_test_utils::test_id(module_path!(), "test_core_test_log_schema_contract"),
+ 1811|      1|                    fixture_id,
+ 1812|      1|                    fj_test_utils::TestMode::Strict,
+ 1813|      1|                    fj_test_utils::TestResult::Pass,
+ 1814|       |                );
+ 1815|      1|                assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+ 1816|      1|                Ok(Vec::new())
+ 1817|      1|            },
+ 1818|       |        );
+ 1819|      1|    }
+ 1820|       |}
+
+/data/projects/frankenjax/crates/fj-core/src/proptest_strategies.rs:
+    1|       |use crate::{Atom, DType, Equation, Jaxpr, Literal, Primitive, Shape, Transform, Value, VarId};
+    2|       |use proptest::prelude::*;
+    3|       |use smallvec::smallvec;
+    4|       |use std::collections::BTreeMap;
+    5|       |
+    6|      0|pub fn arb_literal() -> impl Strategy<Value = Literal> {
+    7|      0|    prop_oneof![
+    8|      0|        any::<i64>().prop_map(Literal::I64),
+    9|      0|        any::<bool>().prop_map(Literal::Bool),
+   10|      0|        prop::num::f64::NORMAL.prop_map(Literal::from_f64),
+   11|       |    ]
+   12|      0|}
+   13|       |
+   14|      0|pub fn arb_var_id() -> impl Strategy<Value = VarId> {
+   15|      0|    (1..=1000u32).prop_map(VarId)
+   16|      0|}
+   17|       |
+   18|      0|pub fn arb_atom() -> impl Strategy<Value = Atom> {
+   19|      0|    prop_oneof![
+   20|      0|        arb_var_id().prop_map(Atom::Var),
+   21|      0|        arb_literal().prop_map(Atom::Lit),
+   22|       |    ]
+   23|      0|}
+   24|       |
+   25|      0|pub fn arb_value() -> impl Strategy<Value = Value> {
+   26|      0|    prop_oneof![
+   27|      0|        any::<i64>().prop_map(Value::scalar_i64),
+   28|      0|        prop::num::f64::NORMAL.prop_map(Value::scalar_f64),
+   29|      0|        any::<bool>().prop_map(Value::scalar_bool),
+   30|       |    ]
+   31|      0|}
+   32|       |
+   33|      0|pub fn arb_shape() -> impl Strategy<Value = Shape> {
+   34|      0|    prop_oneof![Just(Shape::scalar()), (1..=16u32).prop_map(Shape::vector),]
+   35|      0|}
+   36|       |
+   37|      1|pub fn arb_primitive() -> impl Strategy<Value = Primitive> {
+   38|      1|    prop_oneof![
+   39|      1|        Just(Primitive::Add),
+   40|      1|        Just(Primitive::Mul),
+   41|      1|        Just(Primitive::Dot),
+   42|      1|        Just(Primitive::Sin),
+   43|      1|        Just(Primitive::Cos),
+   44|      1|        Just(Primitive::ReduceSum),
+   45|       |    ]
+   46|      1|}
+   47|       |
+   48|      3|pub fn arb_transform() -> impl Strategy<Value = Transform> {
+   49|      3|    prop_oneof![
+   50|      3|        Just(Transform::Jit),
+   51|      3|        Just(Transform::Grad),
+   52|      3|        Just(Transform::Vmap),
+   53|       |    ]
+   54|      3|}
+   55|       |
+   56|      0|pub fn arb_dtype() -> impl Strategy<Value = DType> {
+   57|      0|    prop_oneof![
+   58|      0|        Just(DType::F32),
+   59|      0|        Just(DType::F64),
+   60|      0|        Just(DType::I32),
+   61|      0|        Just(DType::I64),
+   62|      0|        Just(DType::Bool),
+   63|       |    ]
+   64|      0|}
+   65|       |
+   66|       |/// Generate a valid single-equation Jaxpr for binary primitives (Add, Mul).
+   67|      3|pub fn arb_binary_jaxpr() -> impl Strategy<Value = Jaxpr> {
+   68|    768|    prop_oneof![Just(Primitive::Add), Just(Primitive::Mul),].prop_map(|prim| {
+                  ^3          ^3                    ^3                     ^3
+   69|    768|        Jaxpr::new(
+   70|    768|            vec![VarId(1), VarId(2)],
+   71|    768|            vec![],
+   72|    768|            vec![VarId(3)],
+   73|    768|            vec![Equation {
+   74|    768|                primitive: prim,
+   75|    768|                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                                                ^0                   ^0
+   76|    768|                outputs: smallvec![VarId(3)],
+                                                 ^0
+   77|    768|                params: BTreeMap::new(),
+   78|       |            }],
+   79|       |        )
+   80|    768|    })
+   81|      3|}
+   82|       |
+   83|       |#[cfg(test)]
+   84|       |mod tests {
+   85|       |    use super::*;
+   86|       |    use crate::{TraceTransformLedger, verify_transform_composition};
+   87|       |
+   88|       |    proptest! {
+   89|       |        #![proptest_config(proptest::test_runner::Config::with_cases(
+   90|       |            fj_test_utils::property_test_case_count()
+   91|       |        ))]
+   92|       |        #[test]
+   93|       |        fn prop_ir_fingerprint_determinism(prim in arb_primitive()) {
+   94|       |            let _seed = fj_test_utils::capture_proptest_seed();
+   95|       |            let jaxpr = Jaxpr::new(
+   96|       |                vec![VarId(1)],
+   97|       |                vec![],
+   98|       |                vec![VarId(2)],
+   99|       |                vec![Equation {
+  100|       |                    primitive: prim,
+  101|       |                    inputs: smallvec![Atom::Var(VarId(1))],
+  102|       |                    outputs: smallvec![VarId(2)],
+  103|       |                    params: BTreeMap::new(),
+  104|       |                }],
+  105|       |            );
+  106|       |            let fp1 = jaxpr.canonical_fingerprint().to_owned();
+  107|       |            let fp2 = jaxpr.canonical_fingerprint().to_owned();
+  108|       |            prop_assert_eq!(fp1, fp2);
+  109|       |        }
+  110|       |
+  111|       |        #[test]
+  112|       |        fn prop_ttl_composition_signature_determinism(transform in arb_transform()) {
+  113|       |            let jaxpr = Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(1)], vec![]);
+  114|       |            let mut ttl = TraceTransformLedger::new(jaxpr);
+  115|       |            ttl.push_transform(transform, "evidence");
+  116|       |            let sig1 = ttl.composition_signature();
+  117|       |            let sig2 = ttl.composition_signature();
+  118|       |            prop_assert_eq!(sig1, sig2);
+  119|       |        }
+  120|       |
+  121|       |        #[test]
+  122|       |        fn prop_ttl_single_transform_composition_valid(transform in arb_transform()) {
+  123|       |            let jaxpr = Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(1)], vec![]);
+  124|       |            let mut ttl = TraceTransformLedger::new(jaxpr);
+  125|       |            ttl.push_transform(transform, "evidence");
+  126|       |            let proof = verify_transform_composition(&ttl);
+  127|       |            prop_assert!(proof.is_ok());
+  128|       |        }
+  129|       |    }
+  130|       |}
+
+/data/projects/frankenjax/crates/fj-test-utils/src/lib.rs:
+    1|       |#![forbid(unsafe_code)]
+    2|       |
+    3|       |use serde::{Deserialize, Serialize};
+    4|       |use sha2::{Digest, Sha256};
+    5|       |use std::process::Command;
+    6|       |use std::time::{SystemTime, UNIX_EPOCH};
+    7|       |
+    8|       |pub const TEST_LOG_SCHEMA_VERSION: &str = "frankenjax.test-log.v1";
+    9|       |
+   10|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+   11|       |#[serde(rename_all = "snake_case")]
+   12|       |pub enum TestMode {
+   13|       |    Strict,
+   14|       |    Hardened,
+   15|       |}
+   16|       |
+   17|       |#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+   18|       |#[serde(rename_all = "snake_case")]
+   19|       |pub enum TestResult {
+   20|       |    Pass,
+   21|       |    Fail,
+   22|       |    Skip,
+   23|       |}
+   24|       |
+   25|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   26|       |pub struct TestLogEnv {
+   27|       |    pub rust_version: String,
+   28|       |    pub os: String,
+   29|       |    pub cargo_target_dir: String,
+   30|       |    pub timestamp_unix_ms: u64,
+   31|       |}
+   32|       |
+   33|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+   34|       |pub struct TestPhaseTimings {
+   35|       |    pub setup_ms: u64,
+   36|       |    pub execute_ms: u64,
+   37|       |    pub verify_ms: u64,
+   38|       |    pub teardown_ms: u64,
+   39|       |}
+   40|       |
+   41|       |#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+   42|       |pub struct TestLogV1 {
+   43|       |    pub schema_version: String,
+   44|       |    pub test_id: String,
+   45|       |    pub fixture_id: String,
+   46|       |    pub seed: Option<u64>,
+   47|       |    pub mode: TestMode,
+   48|       |    pub env: TestLogEnv,
+   49|       |    pub artifact_refs: Vec<String>,
+   50|       |    pub result: TestResult,
+   51|       |    pub duration_ms: u64,
+   52|       |    pub details: Option<String>,
+   53|       |    pub phase_timings: TestPhaseTimings,
+   54|       |}
+   55|       |
+   56|       |impl TestLogV1 {
+   57|       |    #[must_use]
+   58|     27|    pub fn unit(
+   59|     27|        test_id: impl Into<String>,
+   60|     27|        fixture_id: impl Into<String>,
+   61|     27|        mode: TestMode,
+   62|     27|        result: TestResult,
+   63|     27|    ) -> Self {
+   64|     27|        Self {
+   65|     27|            schema_version: TEST_LOG_SCHEMA_VERSION.to_owned(),
+   66|     27|            test_id: test_id.into(),
+   67|     27|            fixture_id: fixture_id.into(),
+   68|     27|            seed: capture_proptest_seed(),
+   69|     27|            mode,
+   70|     27|            env: capture_env(),
+   71|     27|            artifact_refs: Vec::new(),
+   72|     27|            result,
+   73|     27|            duration_ms: 0,
+   74|     27|            details: None,
+   75|     27|            phase_timings: TestPhaseTimings::default(),
+   76|     27|        }
+   77|     27|    }
+   78|       |}
+   79|       |
+   80|       |#[must_use]
+   81|     27|pub fn capture_env() -> TestLogEnv {
+   82|       |    TestLogEnv {
+   83|     27|        rust_version: rust_version(),
+   84|     27|        os: std::env::consts::OS.to_owned(),
+   85|     27|        cargo_target_dir: std::env::var("CARGO_TARGET_DIR")
+   86|     27|            .unwrap_or_else(|_| "<default>".to_owned()),
+                                              ^0          ^0
+   87|     27|        timestamp_unix_ms: now_unix_ms_u64(),
+   88|       |    }
+   89|     27|}
+   90|       |
+   91|     27|pub fn fixture_id_from_json<T: Serialize>(fixture: &T) -> Result<String, serde_json::Error> {
+   92|     27|    let bytes = serde_json::to_vec(fixture)?;
+                                                         ^0
+   93|     27|    let digest = Sha256::digest(&bytes);
+   94|    864|    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+                     ^27           ^27                         ^27
+   95|     27|}
+   96|       |
+   97|       |#[must_use]
+   98|      9|pub fn property_test_case_count() -> u32 {
+   99|      9|    if let Ok(raw) = std::env::var("FJ_PROPTEST_CASES")
+                            ^0
+  100|      0|        && let Ok(parsed) = raw.parse::<u32>()
+  101|      0|        && parsed > 0
+  102|       |    {
+  103|      0|        return parsed;
+  104|      9|    }
+  105|       |
+  106|      9|    if std::env::var_os("CI").is_some() {
+  107|      0|        1024
+  108|       |    } else {
+  109|      9|        256
+  110|       |    }
+  111|      9|}
+  112|       |
+  113|       |#[must_use]
+  114|    283|pub fn capture_proptest_seed() -> Option<u64> {
+  115|    283|    if let Ok(raw) = std::env::var("FJ_PROPTEST_SEED")
+                            ^0
+  116|      0|        && let Ok(seed) = raw.parse::<u64>()
+  117|       |    {
+  118|      0|        return Some(seed);
+  119|    283|    }
+  120|       |
+  121|    283|    if let Ok(raw) = std::env::var("PROPTEST_RNG_SEED")
+                            ^0
+  122|      0|        && let Ok(seed) = raw.parse::<u64>()
+  123|       |    {
+  124|      0|        return Some(seed);
+  125|    283|    }
+  126|       |
+  127|    283|    None
+  128|    283|}
+  129|       |
+  130|       |#[must_use]
+  131|     27|pub fn test_id(module_path: &str, test_name: &str) -> String {
+  132|     27|    format!("{module_path}::{test_name}")
+  133|     27|}
+  134|       |
+  135|     27|fn now_unix_ms_u64() -> u64 {
+  136|     27|    SystemTime::now()
+  137|     27|        .duration_since(UNIX_EPOCH)
+  138|     27|        .ok()
+  139|     27|        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+  140|     27|        .unwrap_or(0)
+  141|     27|}
+  142|       |
+  143|     27|fn rust_version() -> String {
+  144|     27|    let output = Command::new("rustc").arg("--version").output();
+  145|     27|    match output {
+  146|     27|        Ok(result) if result.status.success() => {
+  147|     27|            String::from_utf8_lossy(&result.stdout).trim().to_owned()
+  148|       |        }
+  149|      0|        _ => "rustc <unknown>".to_owned(),
+  150|       |    }
+  151|     27|}
+  152|       |
+  153|       |#[cfg(test)]
+  154|       |mod tests {
+  155|       |    use super::{
+  156|       |        TEST_LOG_SCHEMA_VERSION, TestLogV1, TestMode, TestResult, fixture_id_from_json,
+  157|       |        property_test_case_count, test_id,
+  158|       |    };
+  159|       |
+  160|       |    #[test]
+  161|       |    fn test_fixture_digest_deterministic_json() {
+  162|       |        let fixture = serde_json::json!({
+  163|       |            "a": 1,
+  164|       |            "b": [2, 3, 4]
+  165|       |        });
+  166|       |        let digest_a = fixture_id_from_json(&fixture).expect("digest should build");
+  167|       |        let digest_b = fixture_id_from_json(&fixture).expect("digest should build");
+  168|       |        assert_eq!(digest_a, digest_b);
+  169|       |        assert_eq!(digest_a.len(), 64);
+  170|       |    }
+  171|       |
+  172|       |    #[test]
+  173|       |    fn test_property_case_count_has_default_floor() {
+  174|       |        assert!(property_test_case_count() >= 256);
+  175|       |    }
+  176|       |
+  177|       |    #[test]
+  178|       |    fn test_log_schema_round_trip_serialization() {
+  179|       |        let log = TestLogV1::unit(
+  180|       |            test_id(module_path!(), "test_log_schema_round_trip_serialization"),
+  181|       |            "fixture-id",
+  182|       |            TestMode::Strict,
+  183|       |            TestResult::Pass,
+  184|       |        );
+  185|       |        assert_eq!(log.schema_version, TEST_LOG_SCHEMA_VERSION);
+  186|       |        let encoded = serde_json::to_string(&log).expect("serialize should work");
+  187|       |        let decoded: TestLogV1 = serde_json::from_str(&encoded).expect("deserialize should work");
+  188|       |        assert_eq!(decoded.schema_version, TEST_LOG_SCHEMA_VERSION);
+  189|       |    }
+  190|       |}
+

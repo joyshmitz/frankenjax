@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://frankenjax.dev/schemas/failure_diagnostic.v1.schema.json",
+  "title": "FrankenJAX Failure Diagnostic v1",
+  "description": "Per-failure diagnostic record emitted by CI gates and test infrastructure. Designed for <30s comprehension by a human engineer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "gate",
+    "test",
+    "status",
+    "summary",
+    "detail_path",
+    "replay_cmd",
+    "related_fixtures",
+    "timestamp_unix_ms"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "frankenjax.failure-diagnostic.v1"
+    },
+    "gate": {
+      "type": "string",
+      "description": "Gate that detected the failure (G1..G8 or custom).",
+      "minLength": 1
+    },
+    "test": {
+      "type": "string",
+      "description": "Fully-qualified test name (crate::module::test_name).",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": ["fail", "error", "timeout", "flake"]
+    },
+    "summary": {
+      "type": "string",
+      "description": "One-line human-readable summary of what went wrong.",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "detail_path": {
+      "type": "string",
+      "description": "Relative path to full failure log within the CI run artifacts.",
+      "minLength": 1
+    },
+    "replay_cmd": {
+      "type": "string",
+      "description": "Copy-pasteable command to reproduce this failure locally.",
+      "minLength": 1
+    },
+    "related_fixtures": {
+      "type": "array",
+      "description": "Paths to fixture files relevant to this failure.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "timestamp_unix_ms": {
+      "type": "integer",
+      "description": "When the failure was detected.",
+      "minimum": 0
+    },
+    "env": {
+      "type": "object",
+      "description": "Environment snapshot at failure time.",
+      "additionalProperties": false,
+      "properties": {
+        "rust_version": { "type": "string" },
+        "os": { "type": "string" },
+        "features": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "error_output": {
+      "type": ["string", "null"],
+      "description": "First 500 chars of stderr/panic output, if available."
+    },
+    "root_cause_hint": {
+      "type": ["string", "null"],
+      "description": "Optional automated root-cause classification.",
+      "enum": [null, "assertion_failure", "panic", "timeout", "compilation_error", "missing_fixture", "flaky_timing", "dependency_error"]
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "schema_version": "frankenjax.perf-delta.v1",
+  "packet_id": "FJ-P2C-001",
+  "subsystem": "ir_core",
+  "generated_at": "2026-02-14T23:30:00Z",
+  "benchmark_tool": "criterion 0.5",
+  "optimization_lever": "streaming_cache_key_hasher",
+  "regression_threshold_percent": 5.0,
+  "metrics": [
+    {
+      "benchmark": "dispatch_latency/jit/scalar_add",
+      "before_ns": 2520,
+      "after_ns": 1183,
+      "delta_percent": -53.1,
+      "status": "improved"
+    },
+    {
+      "benchmark": "cache_key_generation/simple/1eq_1t",
+      "before_ns": 856,
+      "after_ns": 253,
+      "delta_percent": -70.4,
+      "status": "improved"
+    },
+    {
+      "benchmark": "cache_key_generation/medium/3eq_2t",
+      "before_ns": 853,
+      "after_ns": 302,
+      "delta_percent": -64.6,
+      "status": "improved"
+    },
+    {
+      "benchmark": "cache_key_generation/large/100eq_1t",
+      "before_ns": 2380,
+      "after_ns": 1640,
+      "delta_percent": -31.1,
+      "status": "improved"
+    },
+    {
+      "benchmark": "cache_key_generation/hardened/unknown_features",
+      "before_ns": 855,
+      "after_ns": 287,
+      "delta_percent": -66.4,
+      "status": "improved"
+    }
+  ],
+  "summary": {
+    "total_benchmarks": 5,
+    "improved": 5,
+    "regressed": 0,
+    "unchanged": 0,
+    "max_improvement_percent": 70.4,
+    "avg_improvement_percent": 57.1
+  },
+  "gate_status": "PASS",
+  "evidence_source": "artifacts/performance/evidence/ir_core/streaming_cache_key_hasher.json",
+  "isomorphism_proof": {
+    "all_tests_pass": true,
+    "oracle_tests": "23/23",
+    "fixture_parity": "68/68",
+    "hash_compatibility": "streaming SHA-256 matches owned-string SHA-256"
+  }
+}

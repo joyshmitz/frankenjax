@@ -93,7 +93,7 @@ Each scenario emits a forensic log at `artifacts/e2e/<scenario>.e2e.json` with r
 
 Budgets are defined in `artifacts/ci/reliability_budgets.v1.json`.
 
-Run full reliability gates (coverage + flake + runtime):
+Run full reliability gates (coverage + flake + runtime + crash triage):
 
 ```bash
 ./scripts/enforce_quality_gates.sh
@@ -109,6 +109,37 @@ Flake detector standalone:
 
 ```bash
 ./scripts/detect_flakes.sh --runs 10
+```
+
+Crash triage gate standalone (fails on open/new `P0` based on crash index):
+
+```bash
+./scripts/enforce_quality_gates.sh --skip-coverage --skip-flake --skip-runtime
+```
+
+## Fuzzing + Crash Triage
+
+Build all fuzz targets:
+
+```bash
+cd crates/fj-conformance/fuzz
+cargo fuzz build
+```
+
+Run one target with seed corpus:
+
+```bash
+cd crates/fj-conformance/fuzz
+cargo fuzz run ir_deserializer corpus/seed/ir_deserializer
+```
+
+Triage a crash artifact (hash + minimize + durability sidecars + index update):
+
+```bash
+./scripts/triage_crash.sh \
+  --target ir_deserializer \
+  --input crates/fj-conformance/fuzz/artifacts/ir_deserializer/crash-<hash> \
+  --bead bd-3dl.7
 ```
 
 ## Durability Commands

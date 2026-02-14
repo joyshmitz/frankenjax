@@ -1,0 +1,15 @@
+{
+  "proof_id": "decode-proof-a461ca7679d18c9b",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/gj_08_ledger_inspection.golden/gj_08_ledger_inspection.golden.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/golden_journeys/gj_08_ledger_inspection.golden.json",
+  "expected_sha256_hex": "1fd647ac7cf726c3a7814a90caf5ef64a6af8ca4eccd0d0ec096ab5c4ca85785",
+  "decoded_sha256_hex": null,
+  "dropped_symbols": [
+    "kind:source:sbn:0:esi:0",
+    "kind:source:sbn:0:esi:1"
+  ],
+  "attempted_symbol_count": 11,
+  "recovered": false,
+  "details": "drop-kind=source count=2; decode failed from retained symbols: decode error: insufficient symbols: have 11, need 11",
+  "generated_at_unix_ms": 1771109495854
+}

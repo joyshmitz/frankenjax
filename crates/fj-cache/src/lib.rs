@@ -94,9 +94,11 @@ pub fn build_cache_key_ref(input: &CacheKeyInputRef<'_>) -> Result<CacheKey, Cac
         });
     }
 
-    let payload = canonical_payload_ref(input);
+    // Stream canonical payload directly into the hasher to avoid allocating
+    // an intermediate String. Each field is written with a separator prefix
+    // to match the original canonical_payload_ref layout for compatibility.
     let mut hasher = Sha256::new();
-    hasher.update(payload.as_bytes());
+    hash_canonical_payload_ref(&mut hasher, input);
     let digest = hasher.finalize();
 
     Ok(CacheKey {
@@ -105,34 +107,48 @@ pub fn build_cache_key_ref(input: &CacheKeyInputRef<'_>) -> Result<CacheKey, Cac
     })
 }
 
-fn canonical_payload_ref(input: &CacheKeyInputRef<'_>) -> String {
-    let transforms = input
-        .transform_stack
-        .iter()
-        .map(|transform| transform.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
+/// Write the canonical payload directly into a Digest, avoiding intermediate
+/// String allocation. Layout matches `canonical_payload_ref` exactly.
+fn hash_canonical_payload_ref(hasher: &mut Sha256, input: &CacheKeyInputRef<'_>) {
+    use std::fmt::Write;
 
-    let compile_options = input
-        .compile_options
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join(";");
+    // mode=<mode>|backend=<backend>|transforms=<t1,t2,...>|compile=<k1=v1;k2=v2>|hook=<hook>|unknown=<u1,u2>|jaxpr=<fp>
+    let mut buf = String::new();
+    let _ = write!(&mut buf, "mode={:?}|backend={}|transforms=", input.mode, input.backend);
+    hasher.update(buf.as_bytes());
 
-    let unknown = input.unknown_incompatible_features.join(",");
+    for (i, t) in input.transform_stack.iter().enumerate() {
+        if i > 0 {
+            hasher.update(b",");
+        }
+        hasher.update(t.as_str().as_bytes());
+    }
 
-    format!(
-        "mode={:?}|backend={}|transforms={}|compile={}|hook={}|unknown={}|jaxpr={}",
-        input.mode,
-        input.backend,
-        transforms,
-        compile_options,
-        input.custom_hook.unwrap_or("none"),
-        unknown,
-        input.jaxpr.canonical_fingerprint(),
-    )
+    hasher.update(b"|compile=");
+    for (i, (key, value)) in input.compile_options.iter().enumerate() {
+        if i > 0 {
+            hasher.update(b";");
+        }
+        hasher.update(key.as_bytes());
+        hasher.update(b"=");
+        hasher.update(value.as_bytes());
+    }
+
+    hasher.update(b"|hook=");
+    hasher.update(input.custom_hook.unwrap_or("none").as_bytes());
+
+    hasher.update(b"|unknown=");
+    for (i, feature) in input.unknown_incompatible_features.iter().enumerate() {
+        if i > 0 {
+            hasher.update(b",");
+        }
+        hasher.update(feature.as_bytes());
+    }
+
+    hasher.update(b"|jaxpr=");
+    hasher.update(input.jaxpr.canonical_fingerprint().as_bytes());
 }
+
 
 fn canonical_payload(input: &CacheKeyInput) -> String {
     let transforms = input
@@ -164,9 +180,11 @@ fn canonical_payload(input: &CacheKeyInput) -> String {
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
+    const HEX_LUT: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("{:02x}", byte));
+    for &byte in bytes {
+        out.push(HEX_LUT[(byte >> 4) as usize] as char);
+        out.push(HEX_LUT[(byte & 0x0f) as usize] as char);
     }
     out
 }
@@ -255,6 +273,45 @@ mod tests {
             Just(Transform::Grad),
             Just(Transform::Vmap),
         ]
+    }
+
+    #[test]
+    fn streaming_hash_matches_owned_hash() {
+        use super::{CacheKeyInputRef, build_cache_key_ref};
+        use fj_core::ProgramSpec;
+
+        // Test with a real program and transforms
+        let jaxpr = fj_core::build_program(ProgramSpec::SquarePlusLinear);
+        let transforms = vec![Transform::Jit, Transform::Grad];
+        let compile_options = BTreeMap::new();
+        let unknown: Vec<String> = vec![];
+
+        let owned_input = CacheKeyInput {
+            mode: CompatibilityMode::Strict,
+            backend: "cpu".to_owned(),
+            jaxpr: jaxpr.clone(),
+            transform_stack: transforms.clone(),
+            compile_options: compile_options.clone(),
+            custom_hook: Some("test-hook".to_owned()),
+            unknown_incompatible_features: unknown.clone(),
+        };
+
+        let ref_input = CacheKeyInputRef {
+            mode: CompatibilityMode::Strict,
+            backend: "cpu",
+            jaxpr: &jaxpr,
+            transform_stack: &transforms,
+            compile_options: &compile_options,
+            custom_hook: Some("test-hook"),
+            unknown_incompatible_features: &unknown,
+        };
+
+        let owned_key = build_cache_key(&owned_input).expect("owned key should succeed");
+        let ref_key = build_cache_key_ref(&ref_input).expect("ref key should succeed");
+        assert_eq!(
+            owned_key, ref_key,
+            "streaming (ref) and owned cache key must produce identical hashes"
+        );
     }
 
     proptest! {
