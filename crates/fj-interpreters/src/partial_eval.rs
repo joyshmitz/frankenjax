@@ -12,7 +12,6 @@
 //!            == eval(original_jaxpr, all_inputs)
 
 use fj_core::{AbstractValue, Atom, DType, Equation, Jaxpr, Shape, Value, VarId};
-use rustc_hash::FxHashSet;
 
 /// Classification of a value during partial evaluation.
 #[derive(Debug, Clone)]
@@ -121,78 +120,112 @@ pub fn partial_eval_jaxpr(
         });
     }
 
-    // Track which variables hold unknown values.
-    let mut unknown_vars: FxHashSet<VarId> = FxHashSet::default();
-    for (var, &is_unknown) in jaxpr.invars.iter().zip(unknowns.iter()) {
-        if is_unknown {
-            unknown_vars.insert(*var);
+    let any_unknown = unknowns.iter().any(|u| *u);
+
+    // Fast path: all-known — everything goes to known jaxpr, no residuals.
+    if !any_unknown {
+        let out_unknowns = vec![false; jaxpr.outvars.len()];
+        return Ok(PartialEvalResult {
+            jaxpr_known: Jaxpr::new(
+                jaxpr.invars.clone(),
+                jaxpr.constvars.clone(),
+                jaxpr.outvars.clone(),
+                jaxpr.equations.clone(),
+            ),
+            known_consts: vec![],
+            jaxpr_unknown: Jaxpr::new(vec![], vec![], vec![], vec![]),
+            out_unknowns,
+            residual_avals: vec![],
+        });
+    }
+
+    // Fast path: all-unknown — everything goes to unknown jaxpr, no residuals.
+    let all_unknown = unknowns.iter().all(|u| *u);
+    if all_unknown {
+        let out_unknowns = vec![true; jaxpr.outvars.len()];
+        return Ok(PartialEvalResult {
+            jaxpr_known: Jaxpr::new(vec![], jaxpr.constvars.clone(), vec![], vec![]),
+            known_consts: vec![],
+            jaxpr_unknown: Jaxpr::new(
+                jaxpr.invars.clone(),
+                vec![],
+                jaxpr.outvars.clone(),
+                jaxpr.equations.clone(),
+            ),
+            out_unknowns,
+            residual_avals: vec![],
+        });
+    }
+
+    // Mixed case: use VarId-indexed bitset for O(1) lookups.
+    let max_var_id = max_var_in_jaxpr(jaxpr);
+    let bitset_len = max_var_id + 1;
+
+    let mut is_unknown_var = vec![false; bitset_len];
+    for (var, &is_unk) in jaxpr.invars.iter().zip(unknowns.iter()) {
+        if is_unk {
+            is_unknown_var[var.0 as usize] = true;
         }
     }
 
     // Classify equations and collect residuals.
-    let mut known_eqns: Vec<Equation> = Vec::new();
-    let mut unknown_eqns: Vec<Equation> = Vec::new();
+    let n_eqns = jaxpr.equations.len();
+    let mut known_eqns: Vec<Equation> = Vec::with_capacity(n_eqns);
+    let mut unknown_eqns: Vec<Equation> = Vec::with_capacity(n_eqns);
     let mut residual_vars: Vec<VarId> = Vec::new();
-    let mut residual_set: FxHashSet<VarId> = FxHashSet::default();
+    let mut is_residual = vec![false; bitset_len];
 
     for eqn in &jaxpr.equations {
         let any_input_unknown = eqn.inputs.iter().any(|atom| match atom {
-            Atom::Var(v) => unknown_vars.contains(v),
+            Atom::Var(v) => is_unknown_var[v.0 as usize],
             Atom::Lit(_) => false,
         });
 
         if any_input_unknown {
-            // This equation goes to the unknown jaxpr.
-            // Mark its outputs as unknown.
             for out_var in &eqn.outputs {
-                unknown_vars.insert(*out_var);
+                is_unknown_var[out_var.0 as usize] = true;
             }
             unknown_eqns.push(eqn.clone());
 
-            // Any known-variable inputs to this equation become residuals.
             for atom in &eqn.inputs {
-                if let Atom::Var(v) = atom
-                    && !unknown_vars.contains(v)
-                    && !residual_set.contains(v)
-                {
-                    residual_vars.push(*v);
-                    residual_set.insert(*v);
+                if let Atom::Var(v) = atom {
+                    let idx = v.0 as usize;
+                    if !is_unknown_var[idx] && !is_residual[idx] {
+                        residual_vars.push(*v);
+                        is_residual[idx] = true;
+                    }
                 }
             }
         } else {
-            // All inputs known — this equation goes to the known jaxpr.
             known_eqns.push(eqn.clone());
-
-            // Check if any outputs are needed as residuals (they might be
-            // consumed by a later unknown equation). We'll handle this in
-            // a second pass.
         }
     }
 
-    // Second pass: identify known-equation outputs that are consumed by unknown equations.
-    let unknown_input_vars: FxHashSet<VarId> = unknown_eqns
-        .iter()
-        .flat_map(|eqn| eqn.inputs.iter())
-        .filter_map(|atom| match atom {
-            Atom::Var(v) => Some(*v),
-            Atom::Lit(_) => None,
-        })
-        .collect();
-
-    for eqn in &known_eqns {
-        for out_var in &eqn.outputs {
-            if unknown_input_vars.contains(out_var) && !residual_set.contains(out_var) {
-                residual_vars.push(*out_var);
-                residual_set.insert(*out_var);
+    // Second pass: identify known-equation outputs consumed by unknown equations.
+    let mut is_unknown_input = vec![false; bitset_len];
+    for eqn in &unknown_eqns {
+        for atom in &eqn.inputs {
+            if let Atom::Var(v) = atom {
+                is_unknown_input[v.0 as usize] = true;
             }
         }
     }
 
-    // Also check if known invars are consumed by unknown equations.
-    for (var, &is_unknown) in jaxpr.invars.iter().zip(unknowns.iter()) {
-        if !is_unknown && unknown_input_vars.contains(var) && !residual_set.contains(var) {
+    for eqn in &known_eqns {
+        for out_var in &eqn.outputs {
+            let idx = out_var.0 as usize;
+            if is_unknown_input[idx] && !is_residual[idx] {
+                residual_vars.push(*out_var);
+                is_residual[idx] = true;
+            }
+        }
+    }
+
+    for (var, &is_unk) in jaxpr.invars.iter().zip(unknowns.iter()) {
+        let idx = var.0 as usize;
+        if !is_unk && is_unknown_input[idx] && !is_residual[idx] {
             residual_vars.push(*var);
-            residual_set.insert(*var);
+            is_residual[idx] = true;
         }
     }
 
@@ -209,7 +242,7 @@ pub fn partial_eval_jaxpr(
         let mut outs: Vec<VarId> = jaxpr
             .outvars
             .iter()
-            .filter(|v| !unknown_vars.contains(v))
+            .filter(|v| !is_unknown_var[v.0 as usize])
             .copied()
             .collect();
         // Append residual outputs.
@@ -244,7 +277,7 @@ pub fn partial_eval_jaxpr(
     let unknown_outvars: Vec<VarId> = jaxpr
         .outvars
         .iter()
-        .filter(|v| unknown_vars.contains(v))
+        .filter(|v| is_unknown_var[v.0 as usize])
         .copied()
         .collect();
 
@@ -254,7 +287,7 @@ pub fn partial_eval_jaxpr(
     let out_unknowns: Vec<bool> = jaxpr
         .outvars
         .iter()
-        .map(|v| unknown_vars.contains(v))
+        .map(|v| is_unknown_var[v.0 as usize])
         .collect();
 
     // Compute residual abstract values.
@@ -282,24 +315,27 @@ pub fn partial_eval_jaxpr(
 ///
 /// Returns the pruned Jaxpr and a mask of which inputs are still needed.
 pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
-    // Backward pass: determine which variables are needed.
-    let mut needed: FxHashSet<VarId> = FxHashSet::default();
+    let max_var = max_var_in_jaxpr(jaxpr);
+    let bitset_len = max_var + 1;
+
+    // Backward pass: determine which variables are needed via indexed bitset.
+    let mut needed = vec![false; bitset_len];
 
     for (var, &used) in jaxpr.outvars.iter().zip(used_outputs.iter()) {
         if used {
-            needed.insert(*var);
+            needed[var.0 as usize] = true;
         }
     }
 
     // Walk equations in reverse, marking inputs of needed equations.
     let mut keep_eqn = vec![false; jaxpr.equations.len()];
     for (i, eqn) in jaxpr.equations.iter().enumerate().rev() {
-        let outputs_needed = eqn.outputs.iter().any(|v| needed.contains(v));
+        let outputs_needed = eqn.outputs.iter().any(|v| needed[v.0 as usize]);
         if outputs_needed {
             keep_eqn[i] = true;
             for atom in &eqn.inputs {
                 if let Atom::Var(v) = atom {
-                    needed.insert(*v);
+                    needed[v.0 as usize] = true;
                 }
             }
         }
@@ -313,7 +349,7 @@ pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
         .map(|(eqn, _)| eqn.clone())
         .collect();
 
-    let used_inputs: Vec<bool> = jaxpr.invars.iter().map(|v| needed.contains(v)).collect();
+    let used_inputs: Vec<bool> = jaxpr.invars.iter().map(|v| needed[v.0 as usize]).collect();
 
     let new_jaxpr = Jaxpr::new(
         jaxpr.invars.clone(),
@@ -323,6 +359,31 @@ pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
     );
 
     (new_jaxpr, used_inputs)
+}
+
+/// Compute the maximum VarId index in a Jaxpr (for bitset sizing).
+fn max_var_in_jaxpr(jaxpr: &Jaxpr) -> usize {
+    let mut max_id: u32 = 0;
+    for v in &jaxpr.invars {
+        max_id = max_id.max(v.0);
+    }
+    for v in &jaxpr.constvars {
+        max_id = max_id.max(v.0);
+    }
+    for v in &jaxpr.outvars {
+        max_id = max_id.max(v.0);
+    }
+    for eqn in &jaxpr.equations {
+        for atom in &eqn.inputs {
+            if let Atom::Var(v) = atom {
+                max_id = max_id.max(v.0);
+            }
+        }
+        for v in &eqn.outputs {
+            max_id = max_id.max(v.0);
+        }
+    }
+    max_id as usize
 }
 
 /// Extract an abstract value (dtype + shape) from a concrete Value.
