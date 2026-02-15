@@ -343,11 +343,8 @@ fn bench_ledger_append(c: &mut Criterion) {
         b.iter(|| {
             let mut ledger = fj_ledger::EvidenceLedger::new();
             let matrix = fj_ledger::LossMatrix::default();
-            let record = fj_ledger::DecisionRecord::from_posterior(
-                CompatibilityMode::Strict,
-                0.3,
-                &matrix,
-            );
+            let record =
+                fj_ledger::DecisionRecord::from_posterior(CompatibilityMode::Strict, 0.3, &matrix);
             ledger.append(fj_ledger::LedgerEntry {
                 decision_id: "bench-key".to_owned(),
                 record,

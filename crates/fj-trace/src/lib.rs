@@ -367,7 +367,13 @@ impl SimpleTraceContext {
         params: &BTreeMap<String, String>,
     ) -> Result<Vec<ShapedArray>, TraceError> {
         match primitive {
-            Primitive::Add | Primitive::Mul => {
+            // Binary elementwise: output shape = broadcast(lhs, rhs)
+            Primitive::Add
+            | Primitive::Sub
+            | Primitive::Mul
+            | Primitive::Max
+            | Primitive::Min
+            | Primitive::Pow => {
                 if inputs.len() != 2 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -386,8 +392,46 @@ impl SimpleTraceContext {
                 let dtype = promote_dtype(inputs[0].dtype, inputs[1].dtype);
                 Ok(vec![ShapedArray { dtype, shape }])
             }
+            // Comparison: output shape = broadcast(lhs, rhs), dtype = Bool
+            Primitive::Eq
+            | Primitive::Ne
+            | Primitive::Lt
+            | Primitive::Le
+            | Primitive::Gt
+            | Primitive::Ge => {
+                if inputs.len() != 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 2 inputs, got {}", inputs.len()),
+                    });
+                }
+                let shape = broadcast_shape(&inputs[0].shape, &inputs[1].shape).ok_or(
+                    TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "cannot broadcast {:?} with {:?}",
+                            inputs[0].shape.dims, inputs[1].shape.dims
+                        ),
+                    },
+                )?;
+                Ok(vec![ShapedArray {
+                    dtype: DType::Bool,
+                    shape,
+                }])
+            }
             Primitive::Dot => infer_dot(inputs),
-            Primitive::Sin | Primitive::Cos => {
+            // Unary elementwise: output shape = input shape
+            Primitive::Neg
+            | Primitive::Abs
+            | Primitive::Exp
+            | Primitive::Log
+            | Primitive::Sqrt
+            | Primitive::Rsqrt
+            | Primitive::Floor
+            | Primitive::Ceil
+            | Primitive::Round
+            | Primitive::Sin
+            | Primitive::Cos => {
                 if inputs.len() != 1 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -396,7 +440,11 @@ impl SimpleTraceContext {
                 }
                 Ok(vec![inputs[0].clone()])
             }
-            Primitive::ReduceSum => infer_reduce_sum(primitive, inputs, params),
+            // Reductions: all use the same reduce shape inference
+            Primitive::ReduceSum
+            | Primitive::ReduceMax
+            | Primitive::ReduceMin
+            | Primitive::ReduceProd => infer_reduce_sum(primitive, inputs, params),
             Primitive::Reshape => infer_reshape(inputs, params),
             Primitive::Slice => infer_slice(inputs, params),
             Primitive::Gather => infer_gather(inputs, params),

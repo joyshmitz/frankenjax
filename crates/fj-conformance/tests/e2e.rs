@@ -406,9 +406,7 @@ fn e2e_p2c001_trace_to_ir_roundtrip() {
             let fp2 = jaxpr.canonical_fingerprint();
             let fp3 = jaxpr.canonical_fingerprint();
             if fp1 != fp2 || fp2 != fp3 {
-                return Err(format!(
-                    "fingerprint unstable: {fp1} vs {fp2} vs {fp3}"
-                ));
+                return Err(format!("fingerprint unstable: {fp1} vs {fp2} vs {fp3}"));
             }
             states.push(json!({
                 "step": "fingerprint_stable",
@@ -650,8 +648,10 @@ fn e2e_p2c001_ir_determinism_under_replay() {
                 let fp = jaxpr.canonical_fingerprint().to_owned();
                 fingerprints.push(fp);
 
-                let ttl =
-                    ledger(ProgramSpec::SquarePlusLinear, &[Transform::Jit, Transform::Grad]);
+                let ttl = ledger(
+                    ProgramSpec::SquarePlusLinear,
+                    &[Transform::Jit, Transform::Grad],
+                );
                 let proof = verify_transform_composition(&ttl)
                     .map_err(|e| format!("composition proof failed at iteration {i}: {e}"))?;
                 proofs.push(format!("{proof:?}"));
@@ -779,9 +779,7 @@ fn e2e_p2c001_large_jaxpr_stress() {
             }));
 
             if fp_ms > 100 {
-                return Err(format!(
-                    "fingerprint took {fp_ms}ms, budget is 100ms"
-                ));
+                return Err(format!("fingerprint took {fp_ms}ms, budget is 100ms"));
             }
 
             // Composition proof still valid with transforms
@@ -799,9 +797,8 @@ fn e2e_p2c001_large_jaxpr_stress() {
 
             // Evaluate to verify correctness
             let eval_start = Instant::now();
-            let result =
-                fj_interpreters::eval_jaxpr(&jaxpr, &[Value::scalar_i64(0)])
-                    .map_err(|e| format!("eval failed: {e}"))?;
+            let result = fj_interpreters::eval_jaxpr(&jaxpr, &[Value::scalar_i64(0)])
+                .map_err(|e| format!("eval failed: {e}"))?;
             let eval_ms = eval_start.elapsed().as_millis();
 
             let output = result[0]
@@ -817,9 +814,7 @@ fn e2e_p2c001_large_jaxpr_stress() {
             }));
 
             if output != n as i64 {
-                return Err(format!(
-                    "expected output {n}, got {output}"
-                ));
+                return Err(format!("expected output {n}, got {output}"));
             }
 
             Ok(ScenarioOutcome {

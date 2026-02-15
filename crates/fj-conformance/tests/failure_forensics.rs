@@ -41,7 +41,10 @@ fn failure_diagnostic_schema_validates_example() {
         serde_json::from_str(&fs::read_to_string(&example_path).unwrap()).unwrap();
 
     let validator = jsonschema::validator_for(&schema).expect("schema should compile");
-    let errors: Vec<String> = validator.iter_errors(&instance).map(|e| e.to_string()).collect();
+    let errors: Vec<String> = validator
+        .iter_errors(&instance)
+        .map(|e| e.to_string())
+        .collect();
     assert!(
         errors.is_empty(),
         "failure_diagnostic example should validate: {}",
@@ -147,7 +150,10 @@ fn synthetic_multi_gate_failure_manifest() {
     )
     .unwrap();
     let validator = jsonschema::validator_for(&schema).expect("run_manifest schema should compile");
-    let errors: Vec<String> = validator.iter_errors(&manifest).map(|e| e.to_string()).collect();
+    let errors: Vec<String> = validator
+        .iter_errors(&manifest)
+        .map(|e| e.to_string())
+        .collect();
     assert!(
         errors.is_empty(),
         "synthetic manifest should validate: {}",
@@ -163,7 +169,10 @@ fn synthetic_multi_gate_failure_manifest() {
         .collect();
     assert!(failed_gates.contains("G1"), "G1 fmt failure present");
     assert!(failed_gates.contains("G2"), "G2 unit test failure present");
-    assert!(failed_gates.contains("G4"), "G4 adversarial failure present");
+    assert!(
+        failed_gates.contains("G4"),
+        "G4 adversarial failure present"
+    );
     assert!(failed_gates.contains("G6"), "G6 perf failure present");
 
     // Verify summary counts are consistent
@@ -270,7 +279,10 @@ fn human_readable_summary_format() {
     assert!(summary.contains("Run ID:"), "summary must show run ID");
     assert!(summary.contains("Branch:"), "summary must show branch");
     assert!(summary.contains("Commit:"), "summary must show commit");
-    assert!(summary.contains("RESULT:"), "summary must show overall result");
+    assert!(
+        summary.contains("RESULT:"),
+        "summary must show overall result"
+    );
     assert!(
         summary.contains("passed") && summary.contains("failed"),
         "summary must show pass/fail counts"
@@ -310,11 +322,7 @@ fn existing_artifacts_have_valid_categories() {
         let e2e_files: Vec<_> = fs::read_dir(&e2e_dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "json")
-            })
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
             .collect();
         assert!(
             !e2e_files.is_empty(),
@@ -346,13 +354,13 @@ fn existing_artifacts_have_valid_categories() {
         &fs::read_to_string(root.join("artifacts/schemas/run_manifest.v1.schema.json")).unwrap(),
     )
     .unwrap();
-    let schema_categories: Vec<&str> = schema["properties"]["artifact_index"]["items"]
-        ["properties"]["category"]["enum"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
+    let schema_categories: Vec<&str> =
+        schema["properties"]["artifact_index"]["items"]["properties"]["category"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
 
     for cat in &valid_categories {
         assert!(

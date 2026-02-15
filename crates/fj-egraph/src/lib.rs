@@ -8,11 +8,33 @@ use std::collections::BTreeMap;
 define_language! {
     pub enum FjLang {
         "add" = Add([Id; 2]),
+        "sub" = Sub([Id; 2]),
         "mul" = Mul([Id; 2]),
+        "neg" = Neg([Id; 1]),
+        "abs" = Abs([Id; 1]),
+        "max" = Max([Id; 2]),
+        "min" = Min([Id; 2]),
+        "pow" = Pow([Id; 2]),
+        "exp" = Exp([Id; 1]),
+        "log" = Log([Id; 1]),
+        "sqrt" = Sqrt([Id; 1]),
+        "rsqrt" = Rsqrt([Id; 1]),
+        "floor" = Floor([Id; 1]),
+        "ceil" = Ceil([Id; 1]),
+        "round" = Round([Id; 1]),
         "sin" = Sin([Id; 1]),
         "cos" = Cos([Id; 1]),
         "reduce_sum" = ReduceSum([Id; 1]),
+        "reduce_max" = ReduceMax([Id; 1]),
+        "reduce_min" = ReduceMin([Id; 1]),
+        "reduce_prod" = ReduceProd([Id; 1]),
         "dot" = Dot([Id; 2]),
+        "eq" = Eq([Id; 2]),
+        "ne" = Ne([Id; 2]),
+        "lt" = Lt([Id; 2]),
+        "le" = Le([Id; 2]),
+        "gt" = Gt([Id; 2]),
+        "ge" = Ge([Id; 2]),
         Num(i64),
         Symbol(egg::Symbol),
     }
@@ -87,11 +109,33 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
 
         let node = match eqn.primitive {
             Primitive::Add => FjLang::Add([input_ids[0], input_ids[1]]),
+            Primitive::Sub => FjLang::Sub([input_ids[0], input_ids[1]]),
             Primitive::Mul => FjLang::Mul([input_ids[0], input_ids[1]]),
+            Primitive::Neg => FjLang::Neg([input_ids[0]]),
+            Primitive::Abs => FjLang::Abs([input_ids[0]]),
+            Primitive::Max => FjLang::Max([input_ids[0], input_ids[1]]),
+            Primitive::Min => FjLang::Min([input_ids[0], input_ids[1]]),
+            Primitive::Pow => FjLang::Pow([input_ids[0], input_ids[1]]),
+            Primitive::Exp => FjLang::Exp([input_ids[0]]),
+            Primitive::Log => FjLang::Log([input_ids[0]]),
+            Primitive::Sqrt => FjLang::Sqrt([input_ids[0]]),
+            Primitive::Rsqrt => FjLang::Rsqrt([input_ids[0]]),
+            Primitive::Floor => FjLang::Floor([input_ids[0]]),
+            Primitive::Ceil => FjLang::Ceil([input_ids[0]]),
+            Primitive::Round => FjLang::Round([input_ids[0]]),
             Primitive::Sin => FjLang::Sin([input_ids[0]]),
             Primitive::Cos => FjLang::Cos([input_ids[0]]),
             Primitive::ReduceSum => FjLang::ReduceSum([input_ids[0]]),
+            Primitive::ReduceMax => FjLang::ReduceMax([input_ids[0]]),
+            Primitive::ReduceMin => FjLang::ReduceMin([input_ids[0]]),
+            Primitive::ReduceProd => FjLang::ReduceProd([input_ids[0]]),
             Primitive::Dot => FjLang::Dot([input_ids[0], input_ids[1]]),
+            Primitive::Eq => FjLang::Eq([input_ids[0], input_ids[1]]),
+            Primitive::Ne => FjLang::Ne([input_ids[0], input_ids[1]]),
+            Primitive::Lt => FjLang::Lt([input_ids[0], input_ids[1]]),
+            Primitive::Le => FjLang::Le([input_ids[0], input_ids[1]]),
+            Primitive::Gt => FjLang::Gt([input_ids[0], input_ids[1]]),
+            Primitive::Ge => FjLang::Ge([input_ids[0], input_ids[1]]),
             Primitive::Reshape
             | Primitive::Slice
             | Primitive::Gather
@@ -140,94 +184,278 @@ pub fn egraph_to_jaxpr(
         }
     }
 
-    fn resolve_or_create(
-        node_idx: usize,
-        node_to_var: &mut BTreeMap<usize, VarId>,
-        next_var: &mut u32,
-    ) -> VarId {
-        if let Some(var) = node_to_var.get(&node_idx) {
-            return *var;
-        }
-        let var = VarId(*next_var);
-        *next_var += 1;
-        node_to_var.insert(node_idx, var);
-        var
-    }
-
     for (idx, node) in expr.as_ref().iter().enumerate() {
         match node {
-            FjLang::Num(_) => {
-                // Literals don't become equations; they become Atom::Lit
-                // Just register the var mapping so other nodes can reference it.
+            FjLang::Num(_) | FjLang::Symbol(_) => {
                 resolve_or_create(idx, &mut node_to_var, &mut next_var);
             }
-            FjLang::Symbol(_) => {
-                // Already mapped or will be created
-                resolve_or_create(idx, &mut node_to_var, &mut next_var);
-            }
-            FjLang::Add([a, b]) => {
-                let out = resolve_or_create(idx, &mut node_to_var, &mut next_var);
-                let a_atom = id_to_atom(*a, &node_to_var, expr);
-                let b_atom = id_to_atom(*b, &node_to_var, expr);
-                equations.push(Equation {
-                    primitive: Primitive::Add,
-                    inputs: smallvec![a_atom, b_atom],
-                    outputs: smallvec![out],
-                    params: BTreeMap::new(),
-                });
-            }
-            FjLang::Mul([a, b]) => {
-                let out = resolve_or_create(idx, &mut node_to_var, &mut next_var);
-                let a_atom = id_to_atom(*a, &node_to_var, expr);
-                let b_atom = id_to_atom(*b, &node_to_var, expr);
-                equations.push(Equation {
-                    primitive: Primitive::Mul,
-                    inputs: smallvec![a_atom, b_atom],
-                    outputs: smallvec![out],
-                    params: BTreeMap::new(),
-                });
-            }
-            FjLang::Sin([a]) => {
-                let out = resolve_or_create(idx, &mut node_to_var, &mut next_var);
-                let a_atom = id_to_atom(*a, &node_to_var, expr);
-                equations.push(Equation {
-                    primitive: Primitive::Sin,
-                    inputs: smallvec![a_atom],
-                    outputs: smallvec![out],
-                    params: BTreeMap::new(),
-                });
-            }
-            FjLang::Cos([a]) => {
-                let out = resolve_or_create(idx, &mut node_to_var, &mut next_var);
-                let a_atom = id_to_atom(*a, &node_to_var, expr);
-                equations.push(Equation {
-                    primitive: Primitive::Cos,
-                    inputs: smallvec![a_atom],
-                    outputs: smallvec![out],
-                    params: BTreeMap::new(),
-                });
-            }
-            FjLang::ReduceSum([a]) => {
-                let out = resolve_or_create(idx, &mut node_to_var, &mut next_var);
-                let a_atom = id_to_atom(*a, &node_to_var, expr);
-                equations.push(Equation {
-                    primitive: Primitive::ReduceSum,
-                    inputs: smallvec![a_atom],
-                    outputs: smallvec![out],
-                    params: BTreeMap::new(),
-                });
-            }
-            FjLang::Dot([a, b]) => {
-                let out = resolve_or_create(idx, &mut node_to_var, &mut next_var);
-                let a_atom = id_to_atom(*a, &node_to_var, expr);
-                let b_atom = id_to_atom(*b, &node_to_var, expr);
-                equations.push(Equation {
-                    primitive: Primitive::Dot,
-                    inputs: smallvec![a_atom, b_atom],
-                    outputs: smallvec![out],
-                    params: BTreeMap::new(),
-                });
-            }
+            // Binary ops
+            FjLang::Add([a, b]) => push_binary(
+                idx,
+                Primitive::Add,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Sub([a, b]) => push_binary(
+                idx,
+                Primitive::Sub,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Mul([a, b]) => push_binary(
+                idx,
+                Primitive::Mul,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Max([a, b]) => push_binary(
+                idx,
+                Primitive::Max,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Min([a, b]) => push_binary(
+                idx,
+                Primitive::Min,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Pow([a, b]) => push_binary(
+                idx,
+                Primitive::Pow,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Dot([a, b]) => push_binary(
+                idx,
+                Primitive::Dot,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Eq([a, b]) => push_binary(
+                idx,
+                Primitive::Eq,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Ne([a, b]) => push_binary(
+                idx,
+                Primitive::Ne,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Lt([a, b]) => push_binary(
+                idx,
+                Primitive::Lt,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Le([a, b]) => push_binary(
+                idx,
+                Primitive::Le,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Gt([a, b]) => push_binary(
+                idx,
+                Primitive::Gt,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Ge([a, b]) => push_binary(
+                idx,
+                Primitive::Ge,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            // Unary ops
+            FjLang::Neg([a]) => push_unary(
+                idx,
+                Primitive::Neg,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Abs([a]) => push_unary(
+                idx,
+                Primitive::Abs,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Exp([a]) => push_unary(
+                idx,
+                Primitive::Exp,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Log([a]) => push_unary(
+                idx,
+                Primitive::Log,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Sqrt([a]) => push_unary(
+                idx,
+                Primitive::Sqrt,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Rsqrt([a]) => push_unary(
+                idx,
+                Primitive::Rsqrt,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Floor([a]) => push_unary(
+                idx,
+                Primitive::Floor,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Ceil([a]) => push_unary(
+                idx,
+                Primitive::Ceil,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Round([a]) => push_unary(
+                idx,
+                Primitive::Round,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Sin([a]) => push_unary(
+                idx,
+                Primitive::Sin,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Cos([a]) => push_unary(
+                idx,
+                Primitive::Cos,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ReduceSum([a]) => push_unary(
+                idx,
+                Primitive::ReduceSum,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ReduceMax([a]) => push_unary(
+                idx,
+                Primitive::ReduceMax,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ReduceMin([a]) => push_unary(
+                idx,
+                Primitive::ReduceMin,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ReduceProd([a]) => push_unary(
+                idx,
+                Primitive::ReduceProd,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
         }
     }
 
@@ -239,6 +467,61 @@ pub fn egraph_to_jaxpr(
     };
 
     Jaxpr::new(invars.to_vec(), vec![], outvars, equations)
+}
+
+fn resolve_or_create(
+    node_idx: usize,
+    node_to_var: &mut BTreeMap<usize, VarId>,
+    next_var: &mut u32,
+) -> VarId {
+    if let Some(var) = node_to_var.get(&node_idx) {
+        return *var;
+    }
+    let var = VarId(*next_var);
+    *next_var += 1;
+    node_to_var.insert(node_idx, var);
+    var
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_binary(
+    idx: usize,
+    prim: Primitive,
+    a: Id,
+    b: Id,
+    node_to_var: &mut BTreeMap<usize, VarId>,
+    next_var: &mut u32,
+    equations: &mut Vec<Equation>,
+    expr: &RecExpr<FjLang>,
+) {
+    let out = resolve_or_create(idx, node_to_var, next_var);
+    let a_atom = id_to_atom(a, node_to_var, expr);
+    let b_atom = id_to_atom(b, node_to_var, expr);
+    equations.push(Equation {
+        primitive: prim,
+        inputs: smallvec![a_atom, b_atom],
+        outputs: smallvec![out],
+        params: BTreeMap::new(),
+    });
+}
+
+fn push_unary(
+    idx: usize,
+    prim: Primitive,
+    a: Id,
+    node_to_var: &mut BTreeMap<usize, VarId>,
+    next_var: &mut u32,
+    equations: &mut Vec<Equation>,
+    expr: &RecExpr<FjLang>,
+) {
+    let out = resolve_or_create(idx, node_to_var, next_var);
+    let a_atom = id_to_atom(a, node_to_var, expr);
+    equations.push(Equation {
+        primitive: prim,
+        inputs: smallvec![a_atom],
+        outputs: smallvec![out],
+        params: BTreeMap::new(),
+    });
 }
 
 fn id_to_atom(id: Id, node_to_var: &BTreeMap<usize, VarId>, expr: &RecExpr<FjLang>) -> Atom {
@@ -296,14 +579,15 @@ pub fn optimize_jaxpr(jaxpr: &Jaxpr) -> Jaxpr {
 }
 
 fn is_egraph_supported_primitive(primitive: Primitive) -> bool {
-    matches!(
+    !matches!(
         primitive,
-        Primitive::Add
-            | Primitive::Mul
-            | Primitive::Sin
-            | Primitive::Cos
-            | Primitive::ReduceSum
-            | Primitive::Dot
+        Primitive::Reshape
+            | Primitive::Slice
+            | Primitive::Gather
+            | Primitive::Scatter
+            | Primitive::Transpose
+            | Primitive::BroadcastInDim
+            | Primitive::Concatenate
     )
 }
 

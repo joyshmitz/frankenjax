@@ -110,19 +110,41 @@ pub fn sample_transform(cursor: &mut ByteCursor<'_>) -> Transform {
 
 #[must_use]
 pub fn sample_primitive(cursor: &mut ByteCursor<'_>) -> Primitive {
-    match cursor.take_u8() % 13 {
+    match cursor.take_u8() % 37 {
         0 => Primitive::Add,
-        1 => Primitive::Mul,
-        2 => Primitive::Dot,
-        3 => Primitive::Sin,
-        4 => Primitive::Cos,
-        5 => Primitive::ReduceSum,
-        6 => Primitive::Reshape,
-        7 => Primitive::Slice,
-        8 => Primitive::Gather,
-        9 => Primitive::Scatter,
-        10 => Primitive::Transpose,
-        11 => Primitive::BroadcastInDim,
+        1 => Primitive::Sub,
+        2 => Primitive::Mul,
+        3 => Primitive::Neg,
+        4 => Primitive::Abs,
+        5 => Primitive::Max,
+        6 => Primitive::Min,
+        7 => Primitive::Pow,
+        8 => Primitive::Exp,
+        9 => Primitive::Log,
+        10 => Primitive::Sqrt,
+        11 => Primitive::Rsqrt,
+        12 => Primitive::Floor,
+        13 => Primitive::Ceil,
+        14 => Primitive::Round,
+        15 => Primitive::Sin,
+        16 => Primitive::Cos,
+        17 => Primitive::Dot,
+        18 => Primitive::Eq,
+        19 => Primitive::Ne,
+        20 => Primitive::Lt,
+        21 => Primitive::Le,
+        22 => Primitive::Gt,
+        23 => Primitive::Ge,
+        24 => Primitive::ReduceSum,
+        25 => Primitive::ReduceMax,
+        26 => Primitive::ReduceMin,
+        27 => Primitive::ReduceProd,
+        28 => Primitive::Reshape,
+        29 => Primitive::Slice,
+        30 => Primitive::Gather,
+        31 => Primitive::Scatter,
+        32 => Primitive::Transpose,
+        33 => Primitive::BroadcastInDim,
         _ => Primitive::Concatenate,
     }
 }
@@ -130,15 +152,16 @@ pub fn sample_primitive(cursor: &mut ByteCursor<'_>) -> Primitive {
 #[must_use]
 pub fn primitive_arity(primitive: Primitive) -> usize {
     match primitive {
-        Primitive::Add | Primitive::Mul | Primitive::Dot | Primitive::Gather | Primitive::Scatter => 2,
-        Primitive::Sin
-        | Primitive::Cos
-        | Primitive::ReduceSum
-        | Primitive::Reshape
-        | Primitive::Slice
-        | Primitive::Transpose
+        Primitive::Add | Primitive::Sub | Primitive::Mul | Primitive::Max | Primitive::Min
+        | Primitive::Pow | Primitive::Dot | Primitive::Gather | Primitive::Scatter
+        | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
+        | Primitive::Gt | Primitive::Ge | Primitive::Concatenate => 2,
+        Primitive::Neg | Primitive::Abs | Primitive::Exp | Primitive::Log
+        | Primitive::Sqrt | Primitive::Rsqrt | Primitive::Floor | Primitive::Ceil
+        | Primitive::Round | Primitive::Sin | Primitive::Cos
+        | Primitive::ReduceSum | Primitive::ReduceMax | Primitive::ReduceMin | Primitive::ReduceProd
+        | Primitive::Reshape | Primitive::Slice | Primitive::Transpose
         | Primitive::BroadcastInDim => 1,
-        Primitive::Concatenate => 2,
     }
 }
 
@@ -352,12 +375,22 @@ pub fn sample_primitive_params(
         Primitive::Concatenate => {
             params.insert("dimension".to_owned(), cursor.take_usize(3).to_string());
         }
-        Primitive::Add
-        | Primitive::Mul
-        | Primitive::Dot
-        | Primitive::Sin
-        | Primitive::Cos
-        | Primitive::Scatter => {}
+        Primitive::ReduceMax | Primitive::ReduceMin | Primitive::ReduceProd => {
+            if cursor.take_bool() {
+                let axis_count = 1 + cursor.take_usize(2);
+                let axes = (0..axis_count)
+                    .map(|_| cursor.take_usize(3).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                params.insert("axes".to_owned(), axes);
+            }
+        }
+        Primitive::Add | Primitive::Sub | Primitive::Mul | Primitive::Neg | Primitive::Abs
+        | Primitive::Max | Primitive::Min | Primitive::Pow | Primitive::Exp | Primitive::Log
+        | Primitive::Sqrt | Primitive::Rsqrt | Primitive::Floor | Primitive::Ceil
+        | Primitive::Round | Primitive::Sin | Primitive::Cos | Primitive::Dot
+        | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
+        | Primitive::Gt | Primitive::Ge | Primitive::Scatter => {}
     }
 
     params

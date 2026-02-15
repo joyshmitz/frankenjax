@@ -62,11 +62,7 @@ fn build_chain_jaxpr(n: usize) -> Jaxpr {
     )
 }
 
-fn dispatch_and_get_result(
-    spec: ProgramSpec,
-    transforms: &[Transform],
-    args: Vec<Value>,
-) -> Value {
+fn dispatch_and_get_result(spec: ProgramSpec, transforms: &[Transform], args: Vec<Value>) -> Value {
     let ledger = make_ledger(spec, transforms);
     let req = fj_dispatch::DispatchRequest {
         mode: CompatibilityMode::Strict,
@@ -107,9 +103,9 @@ fn oracle_jaxpr_construction_equation_counts() {
             expected_eqn_count,
             "oracle mismatch for {description}: expected {expected_eqn_count} equations"
         );
-        jaxpr
-            .validate_well_formed()
-            .unwrap_or_else(|err| panic!("build_program({description}) should produce valid Jaxpr: {err:?}"));
+        jaxpr.validate_well_formed().unwrap_or_else(|err| {
+            panic!("build_program({description}) should produce valid Jaxpr: {err:?}")
+        });
     }
 }
 
@@ -200,10 +196,7 @@ fn oracle_transform_composition_rules() {
 /// Oracle comparison point 3b: Transform composition should reject double-grad.
 #[test]
 fn oracle_composition_rejects_double_grad() {
-    let ledger = make_ledger(
-        ProgramSpec::Square,
-        &[Transform::Grad, Transform::Grad],
-    );
+    let ledger = make_ledger(ProgramSpec::Square, &[Transform::Grad, Transform::Grad]);
     let result = verify_transform_composition(&ledger);
     assert!(
         result.is_err(),
@@ -243,8 +236,8 @@ fn oracle_eval_jaxpr_analytical_correctness() {
 
     // add_one(10) = 11
     let jaxpr = build_program(ProgramSpec::AddOne);
-    let result = fj_interpreters::eval_jaxpr(&jaxpr, &[Value::scalar_i64(10)])
-        .expect("eval should succeed");
+    let result =
+        fj_interpreters::eval_jaxpr(&jaxpr, &[Value::scalar_i64(10)]).expect("eval should succeed");
     let val = result[0].as_scalar_literal().and_then(|l| l.as_i64());
     assert_eq!(val, Some(11), "add_one(10) should equal 11");
 }
@@ -470,7 +463,10 @@ fn metamorphic_equation_ordering_stability() {
 #[test]
 fn metamorphic_eval_determinism_50x() {
     let cases: Vec<(ProgramSpec, Vec<Value>)> = vec![
-        (ProgramSpec::Add2, vec![Value::scalar_i64(3), Value::scalar_i64(5)]),
+        (
+            ProgramSpec::Add2,
+            vec![Value::scalar_i64(3), Value::scalar_i64(5)],
+        ),
         (ProgramSpec::Square, vec![Value::scalar_i64(7)]),
         (ProgramSpec::SquarePlusLinear, vec![Value::scalar_i64(4)]),
         (ProgramSpec::AddOne, vec![Value::scalar_i64(99)]),
@@ -508,10 +504,10 @@ fn metamorphic_eval_determinism_50x() {
 #[test]
 fn adversarial_empty_jaxpr() {
     let jaxpr = Jaxpr::new(
-        vec![VarId(1)],    // in: v1
-        vec![],            // no constvars
-        vec![VarId(1)],    // out: v1 (identity)
-        vec![],            // no equations
+        vec![VarId(1)], // in: v1
+        vec![],         // no constvars
+        vec![VarId(1)], // out: v1 (identity)
+        vec![],         // no equations
     );
 
     // Should be well-formed (identity function)
@@ -577,7 +573,7 @@ fn adversarial_double_vmap() {
     // Our engine currently limits vmap count, but composition verification
     // should either pass or return a specific UnsupportedSequence error
     match result {
-        Ok(_) => {} // pass
+        Ok(_) => {}                                                      // pass
         Err(TransformCompositionError::UnsupportedSequence { .. }) => {} // acceptable
         Err(other) => panic!("unexpected error for vmap(vmap(f)): {other:?}"),
     }

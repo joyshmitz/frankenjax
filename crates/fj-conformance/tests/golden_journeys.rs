@@ -14,8 +14,7 @@
 
 use fj_core::{
     Atom, CompatibilityMode, Equation, Jaxpr, Literal, Primitive, ProgramSpec,
-    TraceTransformLedger, Transform, Value, VarId, build_program,
-    verify_transform_composition,
+    TraceTransformLedger, Transform, Value, VarId, build_program, verify_transform_composition,
 };
 use fj_dispatch::{DispatchRequest, dispatch};
 use serde::Serialize;
@@ -71,11 +70,7 @@ fn make_ledger(spec: ProgramSpec, transforms: &[Transform]) -> TraceTransformLed
     ledger
 }
 
-fn make_request(
-    spec: ProgramSpec,
-    transforms: &[Transform],
-    args: Vec<Value>,
-) -> DispatchRequest {
+fn make_request(spec: ProgramSpec, transforms: &[Transform], args: Vec<Value>) -> DispatchRequest {
     DispatchRequest {
         mode: CompatibilityMode::Strict,
         ledger: make_ledger(spec, transforms),
@@ -125,9 +120,7 @@ fn golden_journey_01_basic_jit_transform() {
     .expect("jit dispatch should succeed");
 
     // Assert output correctness
-    let output_val = resp.outputs[0]
-        .as_scalar_literal()
-        .and_then(|l| l.as_i64());
+    let output_val = resp.outputs[0].as_scalar_literal().and_then(|l| l.as_i64());
     assertions.push(JourneyAssertion {
         name: "output_equals_8".into(),
         passed: output_val == Some(8),
@@ -280,7 +273,11 @@ fn golden_journey_03_batched_computation() {
     assertions.push(JourneyAssertion {
         name: "output_length_matches_input".into(),
         passed: vmap_values.len() == input_data.len(),
-        detail: format!("output_len={}, input_len={}", vmap_values.len(), input_data.len()),
+        detail: format!(
+            "output_len={}, input_len={}",
+            vmap_values.len(),
+            input_data.len()
+        ),
     });
 
     let all_passed = assertions.iter().all(|a| a.passed);
@@ -360,9 +357,10 @@ fn golden_journey_04_transform_composition() {
     });
 
     // Composition proofs are valid for accepted orderings
-    let proof_jg = verify_transform_composition(
-        &make_ledger(ProgramSpec::Square, &[Transform::Jit, Transform::Grad]),
-    );
+    let proof_jg = verify_transform_composition(&make_ledger(
+        ProgramSpec::Square,
+        &[Transform::Jit, Transform::Grad],
+    ));
     assertions.push(JourneyAssertion {
         name: "composition_proof_jit_grad_valid".into(),
         passed: proof_jg.is_ok(),
@@ -418,7 +416,10 @@ fn golden_journey_05_cache_hit_miss() {
         passed: all_same,
         detail: format!(
             "unique_keys={}",
-            cache_keys.iter().collect::<std::collections::HashSet<_>>().len()
+            cache_keys
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
         ),
     });
 
@@ -432,7 +433,10 @@ fn golden_journey_05_cache_hit_miss() {
     assertions.push(JourneyAssertion {
         name: "different_program_different_key".into(),
         passed: resp_other.cache_key != cache_keys[0],
-        detail: format!("add2_key={}, square_key={}", cache_keys[0], resp_other.cache_key),
+        detail: format!(
+            "add2_key={}, square_key={}",
+            cache_keys[0], resp_other.cache_key
+        ),
     });
 
     // Different transforms should produce different cache keys
@@ -445,7 +449,10 @@ fn golden_journey_05_cache_hit_miss() {
     assertions.push(JourneyAssertion {
         name: "different_transform_different_key".into(),
         passed: resp_grad.cache_key != resp_other.cache_key,
-        detail: format!("jit_key={}, grad_key={}", resp_other.cache_key, resp_grad.cache_key),
+        detail: format!(
+            "jit_key={}, grad_key={}",
+            resp_other.cache_key, resp_grad.cache_key
+        ),
     });
 
     let all_passed = assertions.iter().all(|a| a.passed);
@@ -521,7 +528,10 @@ fn golden_journey_06_error_recovery() {
     assertions.push(JourneyAssertion {
         name: "error_message_mentions_feature_name".into(),
         passed: err_msg.contains("future.feature.v99"),
-        detail: format!("message includes feature name: {}", err_msg.contains("future.feature.v99")),
+        detail: format!(
+            "message includes feature name: {}",
+            err_msg.contains("future.feature.v99")
+        ),
     });
 
     // 6d: wrong arity — add2 expects 2 args, give 1
@@ -647,10 +657,26 @@ fn golden_journey_08_ledger_inspection() {
 
     // Run multiple dispatches and collect evidence ledgers
     let dispatches: Vec<(ProgramSpec, &[Transform], Vec<Value>)> = vec![
-        (ProgramSpec::Add2, &[Transform::Jit][..], vec![Value::scalar_i64(1), Value::scalar_i64(2)]),
-        (ProgramSpec::Square, &[Transform::Grad][..], vec![Value::scalar_f64(4.0)]),
-        (ProgramSpec::AddOne, &[Transform::Vmap][..], vec![Value::vector_i64(&[1, 2, 3]).unwrap()]),
-        (ProgramSpec::Square, &[Transform::Jit, Transform::Grad][..], vec![Value::scalar_f64(5.0)]),
+        (
+            ProgramSpec::Add2,
+            &[Transform::Jit][..],
+            vec![Value::scalar_i64(1), Value::scalar_i64(2)],
+        ),
+        (
+            ProgramSpec::Square,
+            &[Transform::Grad][..],
+            vec![Value::scalar_f64(4.0)],
+        ),
+        (
+            ProgramSpec::AddOne,
+            &[Transform::Vmap][..],
+            vec![Value::vector_i64(&[1, 2, 3]).unwrap()],
+        ),
+        (
+            ProgramSpec::Square,
+            &[Transform::Jit, Transform::Grad][..],
+            vec![Value::scalar_f64(5.0)],
+        ),
     ];
 
     let mut all_ledgers = Vec::new();

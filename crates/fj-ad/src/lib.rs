@@ -145,10 +145,60 @@ fn backward(
 fn vjp(primitive: Primitive, inputs: &[Value], g: f64) -> Result<Vec<f64>, AdError> {
     match primitive {
         Primitive::Add => Ok(vec![g, g]),
+        Primitive::Sub => Ok(vec![g, -g]),
         Primitive::Mul => {
             let a = to_f64(&inputs[0])?;
             let b = to_f64(&inputs[1])?;
             Ok(vec![g * b, g * a])
+        }
+        Primitive::Neg => Ok(vec![-g]),
+        Primitive::Abs => {
+            let x = to_f64(&inputs[0])?;
+            Ok(vec![if x >= 0.0 { g } else { -g }])
+        }
+        Primitive::Max => {
+            let a = to_f64(&inputs[0])?;
+            let b = to_f64(&inputs[1])?;
+            if a >= b {
+                Ok(vec![g, 0.0])
+            } else {
+                Ok(vec![0.0, g])
+            }
+        }
+        Primitive::Min => {
+            let a = to_f64(&inputs[0])?;
+            let b = to_f64(&inputs[1])?;
+            if a <= b {
+                Ok(vec![g, 0.0])
+            } else {
+                Ok(vec![0.0, g])
+            }
+        }
+        Primitive::Pow => {
+            let a = to_f64(&inputs[0])?;
+            let b = to_f64(&inputs[1])?;
+            // d/da(a^b) = b * a^(b-1), d/db(a^b) = a^b * ln(a)
+            Ok(vec![g * b * a.powf(b - 1.0), g * a.powf(b) * a.ln()])
+        }
+        Primitive::Exp => {
+            let x = to_f64(&inputs[0])?;
+            Ok(vec![g * x.exp()])
+        }
+        Primitive::Log => {
+            let x = to_f64(&inputs[0])?;
+            Ok(vec![g / x])
+        }
+        Primitive::Sqrt => {
+            let x = to_f64(&inputs[0])?;
+            Ok(vec![g / (2.0 * x.sqrt())])
+        }
+        Primitive::Rsqrt => {
+            let x = to_f64(&inputs[0])?;
+            Ok(vec![-0.5 * g * x.powf(-1.5)])
+        }
+        Primitive::Floor | Primitive::Ceil | Primitive::Round => {
+            // Gradient is zero almost everywhere (piecewise constant)
+            Ok(vec![0.0])
         }
         Primitive::Sin => {
             let x = to_f64(&inputs[0])?;
@@ -162,12 +212,28 @@ fn vjp(primitive: Primitive, inputs: &[Value], g: f64) -> Result<Vec<f64>, AdErr
             // For scalar input, cotangent is just g
             Ok(vec![g])
         }
+        Primitive::ReduceMax | Primitive::ReduceMin => {
+            // Subgradient: pass gradient to the argmax/argmin element
+            // For scalar, just pass through
+            Ok(vec![g])
+        }
+        Primitive::ReduceProd => {
+            // For scalar input, gradient is just g
+            Ok(vec![g])
+        }
         Primitive::Dot => {
             // rank-1 dot(a,b) = sum(a*b), cotangents: (g*b, g*a)
             let a = to_f64(&inputs[0])?;
             let b = to_f64(&inputs[1])?;
             Ok(vec![g * b, g * a])
         }
+        // Comparison ops have zero gradient (non-differentiable)
+        Primitive::Eq
+        | Primitive::Ne
+        | Primitive::Lt
+        | Primitive::Le
+        | Primitive::Gt
+        | Primitive::Ge => Ok(vec![0.0, 0.0]),
         Primitive::Reshape
         | Primitive::Slice
         | Primitive::Gather

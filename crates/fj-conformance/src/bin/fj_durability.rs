@@ -221,12 +221,8 @@ fn cmd_batch(args: Vec<String>) -> Result<(), String> {
         let proof = output_dir.join(format!("{stem}.proof.json"));
 
         let pipeline_result = (|| -> Result<(), String> {
-            encode_artifact_to_sidecar(
-                &artifact,
-                &sidecar,
-                &SidecarConfig::default(),
-            )
-            .map_err(|e| e.to_string())?;
+            encode_artifact_to_sidecar(&artifact, &sidecar, &SidecarConfig::default())
+                .map_err(|e| e.to_string())?;
 
             scrub_sidecar(&sidecar, &artifact, &report).map_err(|e| e.to_string())?;
 
@@ -281,7 +277,9 @@ fn cmd_batch(args: Vec<String>) -> Result<(), String> {
     }
 
     if fail_count > 0 {
-        Err(format!("{fail_count} artifact(s) failed durability pipeline"))
+        Err(format!(
+            "{fail_count} artifact(s) failed durability pipeline"
+        ))
     } else {
         Ok(())
     }
@@ -295,9 +293,7 @@ fn cmd_verify_only(args: Vec<String>) -> Result<(), String> {
         .map_err(|e| format!("failed to read dir: {e}"))?
         .filter_map(Result::ok)
         .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "json")
+            e.path().extension().is_some_and(|ext| ext == "json")
                 && !e.file_name().to_string_lossy().contains(".sidecar.")
                 && !e.file_name().to_string_lossy().contains(".scrub.")
                 && !e.file_name().to_string_lossy().contains(".proof.")
@@ -379,7 +375,9 @@ fn cmd_verify_only(args: Vec<String>) -> Result<(), String> {
     }
 
     if fail_count > 0 {
-        Err(format!("{fail_count} artifact(s) failed integrity verification"))
+        Err(format!(
+            "{fail_count} artifact(s) failed integrity verification"
+        ))
     } else {
         Ok(())
     }

@@ -114,7 +114,11 @@ fn hash_canonical_payload_ref(hasher: &mut Sha256, input: &CacheKeyInputRef<'_>)
 
     // mode=<mode>|backend=<backend>|transforms=<t1,t2,...>|compile=<k1=v1;k2=v2>|hook=<hook>|unknown=<u1,u2>|jaxpr=<fp>
     let mut buf = String::new();
-    let _ = write!(&mut buf, "mode={:?}|backend={}|transforms=", input.mode, input.backend);
+    let _ = write!(
+        &mut buf,
+        "mode={:?}|backend={}|transforms=",
+        input.mode, input.backend
+    );
     hasher.update(buf.as_bytes());
 
     for (i, t) in input.transform_stack.iter().enumerate() {
@@ -148,7 +152,6 @@ fn hash_canonical_payload_ref(hasher: &mut Sha256, input: &CacheKeyInputRef<'_>)
     hasher.update(b"|jaxpr=");
     hasher.update(input.jaxpr.canonical_fingerprint().as_bytes());
 }
-
 
 fn canonical_payload(input: &CacheKeyInput) -> String {
     let transforms = input
