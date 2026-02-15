@@ -53,3 +53,7 @@ perf.data.*
 # Codex build artifacts
 target-codex*/
 target_*/
+
+# Ephemeral files (agent-generated, build artifacts, test detritus)
+ci-artifacts/
+test_meminfo
