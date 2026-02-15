@@ -355,3 +355,195 @@ Execution-path narratives in this section are expected to be validated and cross
 - `bd-3dl.12.7` (E2E scenario scripts + replay/forensics),
 - `bd-3dl.23.10` (unit/E2E test corpus and logging evidence crosswalk),
 - `bd-3dl.23.11` (EXISTING_JAX_STRUCTURE expansion draft integration).
+
+## 14. Concurrency/Lifecycle Semantics and Ordering Guarantees (DOC-PASS-06)
+
+### 14.1 Current Concurrency Model (Code-Anchored)
+
+Current Rust execution in the scoped transform path is intentionally single-threaded and sequencing-driven. No direct `Arc`/`Mutex`/`RwLock`/thread-spawn primitives are present in `fj-trace`, `fj-interpreters`, `fj-dispatch`, `fj-cache`, `fj-ledger`, `fj-runtime`, or `fj-conformance::durability`.
+
+| Component | Lifecycle contract | Ordering guarantee | Code anchors |
+|---|---|---|---|
+| Trace frame lifecycle | nested traces are explicit stack frames; root frame is non-popable; finalize requires exactly one frame | strict LIFO frame discipline | `fj-trace::SimpleTraceContext::{push_subtrace,pop_subtrace,finalize}` |
+| Trace materialization | each primitive appends one equation to active frame and updates `last_output_ids` | equation insertion order is preserved from trace execution | `fj-trace::TraceContext::process_primitive` |
+| IR interpreter lifecycle | env is initialized as `constvars -> invars`, then equations evaluated, then outvars resolved | equation execution is source order; each equation writes its outputs before next equation | `fj-interpreters::eval_jaxpr_with_consts` |
+| Partial-eval staging lifecycle | classify equations known/unknown, then produce known/unknown sub-jaxprs plus residual bridge | unknown inputs are ordered as `residuals ++ unknown_inputs` | `fj-interpreters::partial_eval_jaxpr` |
+| Staged execution lifecycle | `stage_jaxpr` computes residuals first; `execute_staged` feeds residuals before dynamic args | known-first then unknown execution ordering is fixed | `fj-interpreters::staging::{stage_jaxpr,execute_staged}` |
+| Transform stack lifecycle | stack/evidence are verified before execution; recursion peels `head` then `tail` | transform application order is exact ledger order (`head -> tail`) | `fj-core::verify_transform_composition`, `fj-dispatch::execute_with_transforms` |
+| Vectorized transform lifecycle | each mapped slice is evaluated, collected, then stacked | `vmap` preserves axis-0 iteration order (`0..lead_len`) and output slot order | `fj-dispatch::execute_vmap` |
+| Cache identity lifecycle | canonical payload streamed in fixed field order, then SHA-256 hashed | transform order and `compile_options` lexical order are part of deterministic key material | `fj-cache::build_cache_key_ref`, `fj-cache::hash_canonical_payload_ref` |
+| Decision/evidence lifecycle | one `DecisionRecord` computed per dispatch and appended to ledger | entry append order equals dispatch completion order | `fj-dispatch::dispatch`, `fj-ledger::EvidenceLedger::append` |
+| Durability lifecycle | sidecar generation, scrub integrity check, and decode-proof are separate explicit phases | symbol records are normalized (`sort_by_key(sbn,esi)`), then decode checks are deterministic over selected records | `fj-conformance::durability::{encode_artifact_to_sidecar,scrub_sidecar,generate_decode_proof}` |
+
+### 14.2 Ordering and Lifecycle Invariants (Operational Form)
+
+1. Transform/evidence cardinality must match before dispatch; mismatch is a hard error.
+2. Transform evidence entries must be non-empty; empty evidence is rejected.
+3. Current engine allows at most one `grad` and at most one `vmap` per stack.
+4. Transform execution is order-sensitive by construction: `execute_with_transforms` applies transforms in stack order and recurses on the tail.
+5. `vmap` requires consistent leading-axis length for mapped tensors and preserves mapped-element order in output stacking.
+6. `grad` on nested tail transforms currently uses finite-difference fallback; this is an explicit lifecycle fork, not implicit behavior.
+7. Jaxpr execution depends on equation order; reordering equations changes def-use timing and is not semantics-preserving by default.
+8. Cache keys are deterministic only if canonical field order is preserved (`mode`, `backend`, `transforms`, `compile`, `hook`, `unknown`, `jaxpr`) and `compile_options` remains ordered.
+9. Trace finalization is valid only when all nested subtraces are closed; otherwise finalization rejects with `NestedTraceNotClosed`.
+10. Durability acceptance is fail-closed: scrub mismatch or decode-proof failure blocks artifact acceptance.
+
+### 14.3 Race/Regression Surfaces (If Parallelism or Refactors Are Introduced)
+
+| Surface | Why risky | Regression mode |
+|---|---|---|
+| Parallelizing equation evaluation in interpreter | env writes are currently sequential and dependency-ordered | use-before-define or output drift |
+| Parallelizing `vmap` slice execution without stable join order | output tensor assembly assumes index-stable ordering | batch permutation drift |
+| Replacing ordered maps in cache key material | hash payload currently depends on deterministic map iteration | cache key nondeterminism/collision-like misses |
+| Relaxing trace frame lifecycle checks | nested frame closure is currently explicit | leaked/ambiguous trace state at finalize |
+| Concurrent writes to sidecar/scrub/proof outputs | durability artifacts are consumed as consistent triplets | torn or mismatched evidence bundles |
+| Introducing async cancellation into execution path | `asupersync` bridge is optional and currently observational | partially applied execution without deterministic ledger semantics |
+
+### 14.4 Existing Test Coverage and Remaining Gaps
+
+Coverage already present for lifecycle/ordering contracts:
+- transform ordering behavior: `fj-dispatch` test `transform_order_is_explicit`.
+- transform stack admissibility and evidence shape: `fj-core` transform composition tests (double `grad`/`vmap` rejection, evidence-cardinality checks).
+- trace frame closure lifecycle: `fj-trace` test `finalize_rejects_unclosed_subtrace`.
+- staging lifecycle equivalence and split behavior: `fj-interpreters` staging/partial-eval roundtrip tests.
+- durability phase behavior: `fj-conformance::durability` unit tests for sidecar/scrub/proof workflow.
+
+Current gap to track:
+- No explicit multi-threaded execution tests exist in this slice because execution is deliberately single-threaded. If parallelism is introduced in interpreter/dispatch/vmap/durability paths, ordering invariants above must be re-proven with dedicated concurrent regression tests before promoting behavior to `S0`/`S1` contracts.
+
+## 15. Error Taxonomy, Failure Modes, and Recovery Semantics (DOC-PASS-07)
+
+### 15.1 Error Taxonomy by Boundary
+
+| Boundary | Error surface | Trigger class | User-visible contract |
+|---|---|---|---|
+| Tensor/value model | `fj-core::ValueError` | shape overflow, element-count mismatch, invalid axis slicing/stacking | deterministic structural error text (`shape`, `expected`, `actual`) |
+| IR well-formedness | `fj-core::JaxprValidationError` | duplicate bindings, unbound input vars, output shadowing, unknown outvars | fail-closed IR validation rejection |
+| Transform composition proof | `fj-core::TransformCompositionError` | transform/evidence cardinality mismatch, empty evidence, unsupported stack sequence | reject dispatch before execution |
+| Primitive semantics | `fj-lax::EvalError` | arity/type/shape mismatches, unsupported primitive behavior | primitive-specific failure with explicit primitive name |
+| Interpreter execution | `fj-interpreters::InterpreterError` | input/const arity mismatch, missing variable, invalid primitive output arity | deterministic execution failure (no silent coercion) |
+| Partial evaluation split | `fj-interpreters::PartialEvalError` | unknown-mask length mismatch, undefined var, residual mismatch | staging split fails before runtime execution |
+| Staging orchestration | `fj-interpreters::StagingError` | wrapped partial-eval/known-eval/unknown-eval failures | phase-attributed staging failure (`partial eval`, `known eval`, `unknown eval`) |
+| Dispatch integration | `fj-dispatch::DispatchError` | wrapped cache/interpreter/transform-invariant/transform-execution failures | top-level dispatch error channel with boundary prefix |
+| Cache key compatibility gate | `fj-cache::CacheKeyError::UnknownIncompatibleFeatures` | strict-mode unknown incompatible metadata | strict-mode fail-closed cache admission rejection |
+| Durability evidence pipeline | `fj-conformance::durability::DurabilityError` | IO/JSON/config/encode/decode/integrity failures | scrub/proof integrity failures block artifact acceptance |
+
+### 15.2 Failure-Mode Matrix (Trigger -> Impact -> Recovery)
+
+| Trigger | Primary error type | Impact | Recovery law (strict) | Recovery law (hardened) |
+|---|---|---|---|---|
+| Transform evidence count != transform count | `TransformCompositionError::EvidenceCountMismatch` | request not executable | reject request | reject request |
+| Empty transform evidence element | `TransformCompositionError::EmptyEvidence` | unprovable stack provenance | reject request | reject request |
+| Unsupported transform sequence (e.g., double `grad`) | `TransformCompositionError::UnsupportedSequence` | undefined transform semantics | reject request | reject request |
+| Strict mode receives unknown incompatible cache features | `CacheKeyError::UnknownIncompatibleFeatures` | cache identity cannot be trusted | fail-closed before dispatch | permitted (but features included in key payload) |
+| Primitive receives wrong arity/type/shape | `EvalError::{ArityMismatch,TypeMismatch,ShapeMismatch}` | primitive semantics undefined | fail evaluation and bubble to dispatch | fail evaluation and bubble to dispatch |
+| Interpreter missing bound variable or arity mismatch | `InterpreterError::{MissingVariable,InputArity,ConstArity}` | program cannot evaluate deterministically | fail evaluation | fail evaluation |
+| `grad` receives non-scalar input/output in current engine constraints | `TransformExecutionError::{NonScalarGradientInput,NonScalarGradientOutput}` | gradient path invalid | fail transform execution | fail transform execution |
+| `vmap` leading-dimension mismatch or empty mapped axis | `TransformExecutionError::{VmapMismatchedLeadingDimension,EmptyVmapOutput,...}` | batch semantics invalid | fail transform execution | fail transform execution |
+| Staging split metadata inconsistent with input mask | `PartialEvalError::InputMaskMismatch` / `StagingError::PartialEval` | staged execution plan invalid | reject staging | reject staging |
+| Durability scrub hash mismatch or decode-proof failure | `DurabilityError::Integrity` / `DurabilityError::Decode` | artifact trust lost | block release/acceptance | block release/acceptance |
+
+### 15.3 User-Facing Error Semantics
+
+User-visible behavior in the current Rust slice is deterministic and boundary-tagged:
+- Dispatch errors are wrapped with explicit boundary prefixes (`cache key error`, `interpreter error`, `transform invariant error`, `transform execution error`) via `fj-dispatch::DispatchError`.
+- Primitive and interpreter errors include expected/actual details and primitive names, enabling replay and fixture triage without ambiguous messages.
+- Staging and durability errors preserve phase context (`partial eval`, `known eval`, `unknown eval`, `encode`, `decode`, `integrity`) for direct failure localization.
+- Strict/hardened divergence is explicit at the cache-compatibility gate: strict rejects unknown incompatible metadata; hardened accepts and hashes it as canonical key material.
+
+### 15.4 Recovery and Fail-Closed Rules
+
+| Error family | Default posture | Allowed recovery |
+|---|---|---|
+| IR/transform proof violations | fail-closed | none without explicit contract change and new parity evidence |
+| Primitive/interpreter/staging semantic violations | fail-closed | fix inputs/program shape; no implicit semantic patching |
+| Cache compatibility gate failures | fail-closed in strict | hardened-mode continuation only via explicit compatibility path |
+| Cache read corruption (runtime branch) | bounded recovery | bypass cache and re-evaluate, do not write poisoned entries |
+| Durability integrity/proof failures | fail-closed | regenerate sidecar/proof artifacts and re-verify |
+
+### 15.5 Coverage and Audit Hooks
+
+Coverage currently present for error semantics and fail-closed behavior:
+- `fj-core`: validation and transform-composition rejection tests (duplicate/unbound/shadowing/evidence mismatch/double transform cases).
+- `fj-dispatch`: strict-mode unknown-feature fail-closed test and transform-order/transform-execution error-path tests.
+- `fj-interpreters`: arity/missing-variable/staging/partial-eval error tests.
+- `fj-lax`: arity/type/shape mismatch tests for primitive evaluation.
+- `fj-conformance::durability`: scrub/proof error-path tests and integrity checks.
+
+Outstanding gap:
+- A single consolidated cross-crate “error taxonomy conformance” suite is not yet present. Current guarantees are distributed across crate-local tests and should be unified in `fj-conformance` for regression-proof, packet-level enforcement.
+
+## 16. Security/Compatibility Edge Cases and Undefined Zones (DOC-PASS-08)
+
+### 16.1 Security/Compatibility Edge-Case Matrix
+
+| Edge case | Threat class | Strict behavior | Hardened behavior | Current anchor |
+|---|---|---|---|---|
+| Unknown incompatible cache metadata | cache confusion / compatibility drift | fail-closed key rejection | allowed but included in canonical key payload | `fj-cache::{build_cache_key,build_cache_key_ref}` |
+| Transform/evidence cardinality mismatch | transform-order abuse / provenance loss | reject before execution | reject before execution | `fj-core::verify_transform_composition` |
+| Empty transform evidence string | provenance tamper / unverifiable ledger | reject before execution | reject before execution | `fj-core::verify_transform_composition` |
+| Repeated `grad` or repeated `vmap` in stack | unsupported composition regime | reject as unsupported sequence | reject as unsupported sequence | `fj-core::verify_transform_composition` |
+| Malformed Jaxpr def-use graph | malformed graph signature | fail validation | fail validation | `fj-core::Jaxpr::validate_well_formed` |
+| Missing variable during evaluation | runtime graph corruption | fail interpreter | fail interpreter | `fj-interpreters::eval_jaxpr_with_consts` |
+| `vmap` leading-axis mismatch across mapped args | batch-axis contract violation | fail transform execution | fail transform execution | `fj-dispatch::execute_vmap` |
+| Durability scrub hash mismatch | artifact tamper/corruption | block artifact acceptance | block artifact acceptance | `fj-conformance::durability::scrub_sidecar` |
+| Decode-proof failure under symbol loss | insufficient durability evidence | block artifact acceptance | block artifact acceptance | `fj-conformance::durability::generate_decode_proof` |
+| Unknown symbol kind in sidecar | malformed sidecar payload | decode failure | decode failure | `fj-conformance::durability::decode_from_sidecar_records` |
+| Nested subtrace left open at finalize | trace lifecycle ambiguity | fail-closed finalize | fail-closed finalize | `fj-trace::SimpleTraceContext::finalize` |
+
+### 16.2 Explicit Undefined/Implementation-Defined Zones (Current Slice)
+
+The following zones are intentionally bounded and must be treated as non-parity-complete until corresponding packet work closes:
+
+1. Transform multiplicity scope is limited: current engine supports at most one `grad` and one `vmap` in a transform stack.
+2. Nested-tail `grad` semantics currently use finite-difference fallback, not full symbolic composition in every transform-order scenario.
+3. `vmap` semantics are presently constrained to leading-axis mapping requirements encoded in `execute_vmap`.
+4. Primitive coverage is incomplete for the full legacy surface; unsupported LAX behaviors explicitly raise `EvalError::Unsupported`.
+5. Partial-eval residual abstract values are currently coarse (`F64` scalar placeholders), so residual-type metadata is not yet a full fidelity mirror of all source values.
+6. No stabilized top-level facade crate exists yet; workspace `pub` APIs are not final user-contract guarantees by default.
+
+### 16.3 Hardened-Mode Rationale at Compatibility-Sensitive Boundaries
+
+| Boundary | Hardened rationale | Constraint |
+|---|---|---|
+| Cache metadata compatibility | preserve forward progress for unknown feature fields while preserving deterministic key derivation | unknown fields must still be part of canonical hash payload |
+| Dispatch/runtime error channel | add diagnostics context without silently changing transform semantics | no fail-open transform execution on invariant violations |
+| Durability verification | preserve operational safety under hostile/partial artifact conditions | scrub/proof failures remain release blockers |
+
+### 16.4 Mitigation Notes and Follow-On Enforcement Hooks
+
+- Keep fail-closed behavior as the default for graph validity, transform proofing, and durability integrity.
+- Treat hardened-path continuations as explicit policy exceptions, never silent defaults.
+- Back every compatibility-sensitive exception with differential fixtures and ledger evidence.
+- Route undefined-zone closure work through packet beads (`FJ-P2C-002/003/004/008`) and conformance gates (`G3`, `G4`, `G8`) before promoting surfaces to stable compatibility claims.
+
+## 17. Pass-A Closure Crosswalk (DOC-PASS-10)
+
+### 17.1 Gap-Matrix Coverage Mapping
+
+Gap-matrix source: `artifacts/docs/bd-3dl.23.1_gap_matrix.v1.md`
+
+| Pass-A objective | Coverage in this document | Evidence/anchor style |
+|---|---|---|
+| subsystem topology and boundary decomposition | sections `2`, `8`, `10`, `11` | legacy anchor tables + crate boundary matrix + layering constraints |
+| ownership and dependency clarity | sections `8.1`, `8.2`, `8.3`, `9` | explicit crate owners, dependency direction map, hidden coupling register |
+| execution/control-flow narratives | section `13` | ordered workflow traces with branch/failure tables |
+| lifecycle and ordering semantics | section `14` | code-anchored lifecycle matrix + invariants + regression surfaces |
+| failure/error/recovery semantics | section `15` | boundary taxonomy + trigger/impact/recovery matrix |
+| security/compatibility edge-case treatment | section `16` | strict/hardened edge-case matrix + undefined-zone declarations |
+
+### 17.2 Structural Claim Traceability Index
+
+| Structural claim class | Primary anchor families |
+|---|---|
+| transform API and composition structure | `jax/_src/api.py`, `jax/_src/interpreters/{partial_eval,ad,batching}.py`, `fj-core`, `fj-dispatch` |
+| IR/tracing structure | `jax/_src/core.py`, `fj-trace`, `fj-core` |
+| cache/compile structure | `jax/_src/{cache_key,compiler,compilation_cache}.py`, `fj-cache`, `fj-dispatch` |
+| runtime/backend boundary structure | `jax/_src/{dispatch,xla_bridge,ffi}.py`, `fj-runtime`, `fj-conformance::durability` |
+| workspace topology structure | `Cargo.toml` workspace graph + crate-level public surfaces |
+
+### 17.3 Pass-A Acceptance Readout
+
+- Material expansion: structure coverage now spans topology, dependency direction, lifecycle ordering, error/recovery, and security/compatibility edge cases in one integrated draft.
+- Topology/ownership/dependency clarity: crate ownership and dependency direction are explicit and cycle-checked.
+- Source-anchored reviewability: every major structural claim is tied to concrete legacy or Rust anchor families above, with sectioned matrices suitable for independent review.
