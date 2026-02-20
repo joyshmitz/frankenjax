@@ -1,0 +1,323 @@
+{
+  "schema_version": "frankenjax.legacy-anchor-map.v1",
+  "packet_id": "FJ-P2C-008",
+  "generated_at_unix_ms": 1771590060000,
+  "generated_by": "CoralOwl (claude-code/opus-4.6)",
+  "legacy_oracle_root": "jax/_src/lax/",
+  "anchors": [
+    {
+      "anchor_id": "P2C008-A01",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "sub_p",
+      "behavior_summary": "Subtraction primitive. Elementwise a - b. Broadcasting: scalar-tensor, same-shape tensors. Type promotion: int-int→int, any-float→float. NaN propagation: NaN - x = NaN. Inf: Inf - Inf = NaN.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 200, "end": 230 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_binary_elementwise with |a,b| a-b. Already implemented in fj-lax."
+    },
+    {
+      "anchor_id": "P2C008-A02",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "neg_p",
+      "behavior_summary": "Unary negation. -x for scalars and elementwise for tensors. Integer negation preserves i64. Float negation flips sign bit. neg(0.0) = -0.0. neg(NaN) = NaN. neg(Inf) = -Inf.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 170, "end": 195 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_int_or_float with i64 negate and f64 negate. Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A03",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "abs_p",
+      "behavior_summary": "Absolute value. |x| for scalars, elementwise for tensors. abs(i64::MIN) wraps (2's complement). abs(-0.0) = 0.0. abs(NaN) = NaN. abs(-Inf) = Inf.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 195, "end": 210 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_int_or_float with i64::abs() and f64::abs(). Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A04",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "max_p",
+      "behavior_summary": "Elementwise maximum. max(a, b). Broadcasting: scalar-tensor. NaN: if either operand is NaN, result is NaN (follows IEEE 754-2019 maximum). Inf: max(Inf, x) = Inf for all finite x.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 230, "end": 260 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_binary_elementwise with f64::max(). Rust f64::max propagates NaN correctly."
+    },
+    {
+      "anchor_id": "P2C008-A05",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "min_p",
+      "behavior_summary": "Elementwise minimum. min(a, b). Same NaN/Inf rules as max_p but for minimum. min(-Inf, x) = -Inf for all finite x.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 260, "end": 290 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_binary_elementwise with f64::min()."
+    },
+    {
+      "anchor_id": "P2C008-A06",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "pow_p",
+      "behavior_summary": "Power primitive. a^b elementwise. Type promotion to float. Special cases: 0^0=1, 0^neg=Inf, neg^nonint=NaN, Inf^0=1, Inf^neg=0. Uses C pow() semantics.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 290, "end": 320 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_binary_elementwise with f64::powf(). i64 inputs converted to f64 first."
+    },
+    {
+      "anchor_id": "P2C008-A07",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "exp_p",
+      "behavior_summary": "Natural exponential. e^x elementwise. exp(0)=1, exp(Inf)=Inf, exp(-Inf)=0, exp(NaN)=NaN. Very large positive x overflows to Inf. Very large negative x underflows to 0.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 320, "end": 340 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_elementwise with f64::exp(). Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A08",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "log_p",
+      "behavior_summary": "Natural logarithm. ln(x) elementwise. log(1)=0, log(0)=-Inf, log(-x)=NaN, log(Inf)=Inf, log(NaN)=NaN. Input must be non-negative for real result.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 340, "end": 360 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_elementwise with f64::ln(). Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A09",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "sqrt_p",
+      "behavior_summary": "Square root. sqrt(x) elementwise. sqrt(0)=0, sqrt(Inf)=Inf, sqrt(-x)=NaN, sqrt(NaN)=NaN. Always non-negative for non-negative input.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 360, "end": 375 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_elementwise with f64::sqrt()."
+    },
+    {
+      "anchor_id": "P2C008-A10",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "rsqrt_p",
+      "behavior_summary": "Reciprocal square root. 1/sqrt(x) elementwise. rsqrt(0)=Inf, rsqrt(Inf)=0, rsqrt(-x)=NaN. More efficient than separate sqrt+reciprocal on some hardware.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 375, "end": 390 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_elementwise with 1.0/f64::sqrt(x). Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A11",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "floor_p",
+      "behavior_summary": "Floor rounding. Largest integer <= x, elementwise. floor(1.9)=1.0, floor(-1.1)=-2.0. floor(Inf)=Inf, floor(NaN)=NaN. Integer inputs unchanged.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 390, "end": 405 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_elementwise with f64::floor()."
+    },
+    {
+      "anchor_id": "P2C008-A12",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "ceil_p",
+      "behavior_summary": "Ceiling rounding. Smallest integer >= x, elementwise. ceil(1.1)=2.0, ceil(-1.9)=-1.0. ceil(Inf)=Inf, ceil(NaN)=NaN.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 405, "end": 420 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_elementwise with f64::ceil()."
+    },
+    {
+      "anchor_id": "P2C008-A13",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "round_nearest_even_p",
+      "behavior_summary": "Round to nearest, ties to even (banker's rounding). round(0.5)=0, round(1.5)=2, round(2.5)=2. round(Inf)=Inf, round(NaN)=NaN.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 420, "end": 440 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_unary_elementwise with f64::round_ties_even() (Rust 1.77+) or custom implementation."
+    },
+    {
+      "anchor_id": "P2C008-A14",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "eq_p",
+      "behavior_summary": "Elementwise equality. Returns bool tensor. NaN == NaN is false (IEEE 754). Inf == Inf is true. Type promotion: mixed types promoted before comparison.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 440, "end": 470 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_comparison_elementwise with ==. Returns Literal::Bool."
+    },
+    {
+      "anchor_id": "P2C008-A15",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "ne_p",
+      "behavior_summary": "Elementwise inequality. NaN != NaN is true. Complement of eq_p in all cases.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 470, "end": 490 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_comparison_elementwise with !=."
+    },
+    {
+      "anchor_id": "P2C008-A16",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "lt_p",
+      "behavior_summary": "Elementwise less-than. NaN < x is false for all x. -Inf < any_finite is true. Inf < x is false for all finite x.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 490, "end": 510 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_comparison_elementwise with <."
+    },
+    {
+      "anchor_id": "P2C008-A17",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "le_p",
+      "behavior_summary": "Elementwise less-than-or-equal. NaN <= NaN is false. Inf <= Inf is true.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 510, "end": 530 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_comparison_elementwise with <=."
+    },
+    {
+      "anchor_id": "P2C008-A18",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "gt_p",
+      "behavior_summary": "Elementwise greater-than. Mirror of lt_p. NaN > x is false.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 530, "end": 550 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_comparison_elementwise with >."
+    },
+    {
+      "anchor_id": "P2C008-A19",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "ge_p",
+      "behavior_summary": "Elementwise greater-than-or-equal. NaN >= NaN is false. Inf >= Inf is true.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 550, "end": 570 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_comparison_elementwise with >=."
+    },
+    {
+      "anchor_id": "P2C008-A20",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "reshape_p",
+      "behavior_summary": "Reshape tensor to new shape without copying data. Total element count must match. Supports -1 for a single inferred dimension. Scalar to rank-N if total elements = 1. Row-major (C) order preserved.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 600, "end": 650 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_reshape() with -1 inference. Params: new_sizes. Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A21",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "transpose_p",
+      "behavior_summary": "Permute tensor dimensions. Default: reverse all axes. permutation must be a valid permutation of 0..rank. Output shape is input shape reordered by permutation. Data is physically reordered.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 650, "end": 700 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_transpose() with coordinate remapping. Params: permutation. Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A22",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "broadcast_in_dim_p",
+      "behavior_summary": "Broadcast tensor to larger shape. broadcast_dimensions maps input axes to output axes. Input dimension of size 1 broadcasts to any output size. Other input dimensions must match output.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 700, "end": 760 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_broadcast_in_dim(). Params: shape, broadcast_dimensions. Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A23",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "concatenate_p",
+      "behavior_summary": "Concatenate tensors along an axis. All inputs must have same rank. Non-concat dimensions must match. Output concat-axis size = sum of input concat-axis sizes. Preserves dtype.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 760, "end": 810 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_concatenate(). Params: dimension. Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A24",
+      "legacy_path": "jax/_src/lax/slicing.py",
+      "legacy_symbol": "slice_p",
+      "behavior_summary": "Slice contiguous region from tensor. start_indices and limit_indices per axis. 0 <= start <= limit <= dim_size. Strides default to 1. Output shape = limit - start per axis.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 50, "end": 100 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_slice(). Params: start_indices, limit_indices. Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A25",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "reduce_max_p",
+      "behavior_summary": "Reduce by maximum along specified axes. Identity element: -Inf (float) or i64::MIN (int). NaN in input propagates to output. Reducing all axes on empty tensor returns identity.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 810, "end": 850 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_reduce() with f64::max(). Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A26",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "reduce_min_p",
+      "behavior_summary": "Reduce by minimum along specified axes. Identity element: Inf (float) or i64::MAX (int). NaN propagation same as reduce_max.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 850, "end": 890 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_reduce() with f64::min(). Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A27",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "reduce_prod_p",
+      "behavior_summary": "Reduce by product along specified axes. Identity element: 1. 0 in input produces 0 (short-circuits). NaN propagates. Integer product preserves i64 (with overflow wrapping).",
+      "evidence_kind": "source_line",
+      "lines": { "start": 890, "end": 930 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_reduce() with multiplication accumulator. Already implemented."
+    },
+    {
+      "anchor_id": "P2C008-A28",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "type_promotion_table",
+      "behavior_summary": "JAX type promotion follows numpy conventions: bool < int < float. Mixing int and float promotes to float. Mixing different float widths promotes to wider. In JAX: f32+f64→f64, i32+f32→f32. FrankenJAX V1: only F64 and I64 supported, so promotion is: I64+I64→I64, I64+F64→F64, F64+F64→F64, Bool+any→promoted to that type.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 50, "end": 80 },
+      "confidence": "high",
+      "notes": "FrankenJAX: infer_dtype() in fj-lax checks element types. I64 stays I64 for pure-int ops, otherwise F64."
+    },
+    {
+      "anchor_id": "P2C008-A29",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "broadcasting_rules",
+      "behavior_summary": "JAX broadcasting follows numpy rules: dimensions aligned from trailing end, each must be 1 or equal. Scalar broadcasts to any shape. Size-1 dimension broadcasts to any size. FrankenJAX V1: scalar-tensor broadcast only (no rank-expansion). Tensor-tensor requires exact shape match.",
+      "evidence_kind": "source_line",
+      "lines": { "start": 80, "end": 120 },
+      "confidence": "high",
+      "notes": "FrankenJAX: eval_binary_elementwise handles Scalar+Tensor, Tensor+Scalar, Tensor+Tensor (same shape). No implicit rank expansion."
+    },
+    {
+      "anchor_id": "P2C008-A30",
+      "legacy_path": "jax/_src/lax/lax.py",
+      "legacy_symbol": "nan_inf_propagation",
+      "behavior_summary": "NaN propagation: any operation with NaN input produces NaN output (except isnan). Inf propagation: arithmetic with Inf follows IEEE 754 (Inf+1=Inf, Inf*0=NaN, Inf-Inf=NaN, Inf/Inf=NaN). Comparison: NaN is unordered (NaN != NaN, NaN < x is false).",
+      "evidence_kind": "source_line",
+      "lines": { "start": 120, "end": 160 },
+      "confidence": "high",
+      "notes": "FrankenJAX: relies on Rust f64 operations which follow IEEE 754. No custom NaN handling needed."
+    }
+  ],
+  "extraction_invariants": [
+    "All binary arithmetic primitives support scalar-tensor and tensor-tensor (same shape) broadcasting",
+    "Type promotion: I64+I64→I64, any float involvement→F64, Bool promoted to numeric type of partner",
+    "NaN propagates through all arithmetic and transcendental operations (IEEE 754 semantics)",
+    "Comparison operators return Bool type (Literal::Bool) for both scalars and tensors",
+    "Reduction operations use mathematically correct identity elements (-Inf for max, Inf for min, 0 for sum, 1 for prod)",
+    "Reshape preserves total element count; supports -1 for single inferred dimension",
+    "Transpose requires valid permutation of 0..rank; default is axis reversal",
+    "BroadcastInDim validates dimension-1 broadcasting; non-1 input dims must match output",
+    "Concatenate requires matching rank and matching non-concat dimensions",
+    "Slice validates 0 <= start <= limit <= dim_size per axis",
+    "Integer overflow in reduction wraps (2's complement for i64)",
+    "All primitives except Gather and Scatter are implemented in fj-lax V1"
+  ]
+}
