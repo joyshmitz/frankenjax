@@ -9,7 +9,7 @@ fj-lax = { path = "../fj-lax" }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"
 fj-test-utils = { path = "../fj-test-utils" }
 proptest = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }

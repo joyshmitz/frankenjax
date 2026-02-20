@@ -232,7 +232,7 @@ fn e2e_p2c003_jit_constant_folding() {
                 "step": "staged",
                 "known_equations": staged.jaxpr_known.equations.len(),
                 "unknown_equations": staged.jaxpr_unknown.equations.len(),
-                "has_residuals": staged.residuals.is_some(),
+                "has_residuals": !staged.residuals.is_empty(),
                 "all_folded": staged.jaxpr_unknown.equations.is_empty(),
             }));
 
@@ -330,7 +330,7 @@ fn e2e_p2c003_jit_mixed_known_unknown() {
                 "unknown_primitives": staged.jaxpr_unknown.equations.iter()
                     .map(|e| e.primitive.as_str())
                     .collect::<Vec<_>>(),
-                "has_residuals": staged.residuals.is_some(),
+                "has_residuals": !staged.residuals.is_empty(),
             }));
 
             // Verify: neg(a) folded into known, mul remains in unknown
@@ -678,7 +678,7 @@ fn e2e_p2c003_nested_jit() {
                 "step": "inner_staged",
                 "known_eqns": inner_staged.jaxpr_known.equations.len(),
                 "unknown_eqns": inner_staged.jaxpr_unknown.equations.len(),
-                "residuals_present": inner_staged.residuals.is_some(),
+                "residuals_present": !inner_staged.residuals.is_empty(),
             }));
 
             // Outer JIT: stage the residual jaxpr with b=known too
@@ -687,10 +687,7 @@ fn e2e_p2c003_nested_jit() {
                 &inner_staged.jaxpr_unknown,
                 &vec![false; inner_staged.jaxpr_unknown.invars.len()],
                 &{
-                    let mut inputs = Vec::new();
-                    if let Some(ref residuals) = inner_staged.residuals {
-                        inputs.extend(residuals.iter().cloned());
-                    }
+                    let mut inputs: Vec<Value> = inner_staged.residuals.clone();
                     inputs.push(Value::scalar_i64(4));
                     inputs
                 },

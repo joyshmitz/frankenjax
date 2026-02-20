@@ -21,7 +21,7 @@ version = "0.1.0"
 license = "MIT"
 
 [workspace.dependencies]
-smallvec = { version = "1.13", features = ["serde"] }
-rustc-hash = "2.1"
-proptest = "1.6"
-egg = "0.9"
+smallvec = { version = "1.15", features = ["serde"] }
+rustc-hash = "2.1.1"
+proptest = "1.9"
+egg = "0.11"
