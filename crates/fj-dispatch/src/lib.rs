@@ -44,7 +44,8 @@ impl EffectContext {
     }
 
     /// Record observation of a named effect. Returns the token with its
-    /// sequence number in the observation order.
+    /// sequence number in the observation order. If the same effect name
+    /// was already observed, overwrites the previous entry (BTreeMap parity).
     pub fn thread_token(&mut self, effect_name: &str) -> EffectToken {
         let name = effect_name.to_owned();
         let token = EffectToken {
@@ -52,7 +53,12 @@ impl EffectContext {
             sequence_number: self.next_sequence,
         };
         self.next_sequence += 1;
-        self.tokens.push(token.clone());
+        // Overwrite existing entry with same name (preserves BTreeMap semantics).
+        if let Some(pos) = self.tokens.iter().position(|t| t.effect_name == token.effect_name) {
+            self.tokens[pos] = token.clone();
+        } else {
+            self.tokens.push(token.clone());
+        }
         token
     }
 

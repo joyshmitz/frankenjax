@@ -1,5 +1,10 @@
 #![forbid(unsafe_code)]
 
+pub mod backend;
+pub mod eviction;
+pub mod persistence;
+pub mod stability;
+
 use fj_core::{CompatibilityMode, Jaxpr, Transform};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -182,7 +187,7 @@ fn canonical_payload(input: &CacheKeyInput) -> String {
     )
 }
 
-fn bytes_to_hex(bytes: &[u8]) -> String {
+pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
     const HEX_LUT: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {
@@ -190,6 +195,18 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
         out.push(HEX_LUT[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+/// Compute SHA-256 hex digest of arbitrary bytes (used by submodules).
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+    bytes_to_hex(&sha256_bytes(data))
+}
+
+/// Compute raw SHA-256 digest bytes.
+pub(crate) fn sha256_bytes(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
 }
 
 #[cfg(test)]
