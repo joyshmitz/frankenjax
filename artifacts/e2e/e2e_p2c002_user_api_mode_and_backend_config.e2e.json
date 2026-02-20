@@ -1,0 +1,54 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_p2c002_user_api_mode_and_backend_config",
+  "test_id": "e2e_p2c002::e2e_p2c002_user_api_mode_and_backend_config",
+  "packet_id": "P2C-002",
+  "fixture_id": "4efef35bd9358163b85260d1c0e263a0e2021b3db1e373c30fde46609f5ba93d",
+  "seed": null,
+  "mode": "strict",
+  "ts_utc_unix_ms": 1771580856950,
+  "env": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_toolchain": "nightly-x86_64-unknown-linux-gnu"
+  },
+  "artifact_refs": [],
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c002 -- e2e_p2c002_user_api_mode_and_backend_config --exact --nocapture",
+  "input_capture": {
+    "description": "Verify mode/backend configuration flows through API correctly",
+    "modes": [
+      "strict",
+      "hardened"
+    ]
+  },
+  "intermediate_states": [
+    {
+      "output": 7,
+      "step": "strict_mode_call"
+    },
+    {
+      "output": 7,
+      "step": "hardened_mode_call"
+    },
+    {
+      "expected": 6.0,
+      "gradient": 6.0,
+      "step": "hardened_grad_call"
+    },
+    {
+      "expected": 8.0,
+      "output": 8.0,
+      "step": "composed_hardened_call"
+    }
+  ],
+  "output_capture": {
+    "composed_hardened": 8.0,
+    "hardened_grad": 6.0,
+    "hardened_output": 7,
+    "modes_consistent": true,
+    "strict_output": 7
+  },
+  "result": "pass",
+  "duration_ms": 0,
+  "details": null
+}

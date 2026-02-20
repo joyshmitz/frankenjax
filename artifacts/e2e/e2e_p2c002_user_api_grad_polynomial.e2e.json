@@ -1,0 +1,51 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_p2c002_user_api_grad_polynomial",
+  "test_id": "e2e_p2c002::e2e_p2c002_user_api_grad_polynomial",
+  "packet_id": "P2C-002",
+  "fixture_id": "083c1c0484659c1049e48b57e4aad2b3d3b44e1a2deaab6d9351016d013dacf8",
+  "seed": null,
+  "mode": "strict",
+  "ts_utc_unix_ms": 1771580856950,
+  "env": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_toolchain": "nightly-x86_64-unknown-linux-gnu"
+  },
+  "artifact_refs": [],
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c002 -- e2e_p2c002_user_api_grad_polynomial --exact --nocapture",
+  "input_capture": {
+    "description": "grad(x^2)(2.0) = 4.0, verified through public API",
+    "expected_gradient": 4.0,
+    "input": 2.0,
+    "program": "Square"
+  },
+  "intermediate_states": [
+    {
+      "gradient": 4.0,
+      "step": "grad_api_call_complete"
+    },
+    {
+      "actual": 4.0,
+      "delta": 0.0,
+      "expected": 4.0,
+      "step": "analytical_comparison",
+      "tolerance": 0.001
+    },
+    {
+      "expected_value": 4.0,
+      "gradient": 4.0,
+      "step": "value_and_grad_cross_check",
+      "value": 4.0
+    }
+  ],
+  "output_capture": {
+    "delta": 0.0,
+    "expected": 4.0,
+    "gradient": 4.0,
+    "value_and_grad_consistent": true
+  },
+  "result": "pass",
+  "duration_ms": 0,
+  "details": null
+}

@@ -1,0 +1,73 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_p2c002_user_api_vmap_batch",
+  "test_id": "e2e_p2c002::e2e_p2c002_user_api_vmap_batch",
+  "packet_id": "P2C-002",
+  "fixture_id": "35b2640085a728f18cd7443ad02c080b7fc2466071c438d6f16536d428c6da09",
+  "seed": null,
+  "mode": "strict",
+  "ts_utc_unix_ms": 1771580856950,
+  "env": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_toolchain": "nightly-x86_64-unknown-linux-gnu"
+  },
+  "artifact_refs": [],
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c002 -- e2e_p2c002_user_api_vmap_batch --exact --nocapture",
+  "input_capture": {
+    "batch": [
+      10,
+      20,
+      30,
+      40,
+      50
+    ],
+    "description": "vmap(add_one)([10,20,30,40,50]) = [11,21,31,41,51]",
+    "expected": [
+      11,
+      21,
+      31,
+      41,
+      51
+    ],
+    "program": "AddOne"
+  },
+  "intermediate_states": [
+    {
+      "output": [
+        11,
+        21,
+        31,
+        41,
+        51
+      ],
+      "output_len": 5,
+      "step": "vmap_api_call_complete"
+    },
+    {
+      "all_match": true,
+      "step": "elementwise_comparison_passed"
+    }
+  ],
+  "output_capture": {
+    "all_match": true,
+    "batch_size": 5,
+    "expected": [
+      11,
+      21,
+      31,
+      41,
+      51
+    ],
+    "output": [
+      11,
+      21,
+      31,
+      41,
+      51
+    ]
+  },
+  "result": "pass",
+  "duration_ms": 0,
+  "details": null
+}
