@@ -1,0 +1,78 @@
+{
+  "schema_version": "frankenjax.perf-delta.v1",
+  "packet_id": "FJ-P2C-004",
+  "subsystem": "dispatch_ad",
+  "generated_at": "2026-02-20T11:15:00Z",
+  "benchmark_tool": "criterion 0.8",
+  "optimization_description": "Iterative Jit-skip + Vec effect tokens + inlined posterior",
+  "deltas": [
+    {
+      "benchmark": "dispatch_latency/jit/scalar_add",
+      "before_ns": 1820,
+      "after_ns": 1390,
+      "delta_pct": -23.6,
+      "status": "improved"
+    },
+    {
+      "benchmark": "dispatch_latency/jit/scalar_square_plus_linear",
+      "before_ns": 2330,
+      "after_ns": 1910,
+      "delta_pct": -18.0,
+      "status": "improved"
+    },
+    {
+      "benchmark": "dispatch_latency/jit/vector_add_one",
+      "before_ns": 2140,
+      "after_ns": 1730,
+      "delta_pct": -19.2,
+      "status": "improved"
+    },
+    {
+      "benchmark": "dispatch_latency/grad/scalar_square",
+      "before_ns": 2100,
+      "after_ns": 1760,
+      "delta_pct": -16.2,
+      "status": "improved"
+    },
+    {
+      "benchmark": "dispatch_latency/vmap/vector_add_one",
+      "before_ns": 2530,
+      "after_ns": 2100,
+      "delta_pct": -17.0,
+      "status": "improved"
+    },
+    {
+      "benchmark": "dispatch_latency/vmap/rank2_add_one",
+      "before_ns": 3850,
+      "after_ns": 2940,
+      "delta_pct": -23.6,
+      "status": "improved"
+    },
+    {
+      "benchmark": "dispatch_latency/jit_grad/scalar_square",
+      "before_ns": 2210,
+      "after_ns": 1600,
+      "delta_pct": -27.6,
+      "status": "improved"
+    },
+    {
+      "benchmark": "dispatch_latency/vmap_grad/vector_square",
+      "before_ns": 2880,
+      "after_ns": 2310,
+      "delta_pct": -19.8,
+      "status": "improved"
+    }
+  ],
+  "summary": {
+    "total_benchmarks": 8,
+    "improved": 8,
+    "regressed": 0,
+    "unchanged": 0,
+    "avg_improvement_pct": 20.6
+  },
+  "targets_met": {
+    "jit_scalar_under_2us": true,
+    "grad_simple_under_5us": true,
+    "depth3_under_4us": true
+  }
+}

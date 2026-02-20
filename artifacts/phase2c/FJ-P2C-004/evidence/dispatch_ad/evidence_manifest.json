@@ -1,0 +1,143 @@
+{
+  "schema_version": "frankenjax.evidence-manifest.v1",
+  "packet_id": "FJ-P2C-004",
+  "subsystem": "dispatch_ad",
+  "generated_at": "2026-02-20T11:15:00Z",
+  "author": "CoralOwl",
+  "artifacts": {
+    "conformance_report": {
+      "path": "conformance_report.json",
+      "description": "70-test conformance report: oracle, metamorphic, adversarial, e2e, unit, integration, JVP",
+      "status": "complete"
+    },
+    "three_way_comparison": {
+      "path": "three_way_comparison.json",
+      "description": "Analytical vs VJP vs JVP gradient comparison for 4 function families (17 test points)",
+      "status": "complete"
+    },
+    "risk_note": {
+      "path": "risk_note.md",
+      "description": "5-threat risk analysis with residual risk ratings and mitigation evidence",
+      "status": "complete"
+    },
+    "invariant_checklist": {
+      "path": "invariant_checklist.md",
+      "description": "6 verified invariants with test evidence references",
+      "status": "complete"
+    },
+    "perf_delta": {
+      "path": "perf_delta.json",
+      "description": "Criterion benchmark delta from iterative Jit-skip + Vec effect token optimization",
+      "status": "complete"
+    },
+    "durability_sidecars": {
+      "path": "durability/",
+      "description": "RaptorQ sidecars for evidence bundle",
+      "status": "partial",
+      "known_issue": "Pre-existing RaptorQ decoder bug prevents scrub/proof for small files (bd-3dl.9 residual)"
+    }
+  },
+  "parity_gates": {
+    "G1_format": {
+      "status": "PASS",
+      "evidence": "cargo fmt --check passes; cargo clippy -D warnings clean"
+    },
+    "G2_unit_tests": {
+      "status": "PASS",
+      "evidence": "282 workspace tests pass (0 failures); 70 P2C-004-specific tests",
+      "test_counts": {
+        "dispatch_unit": 11,
+        "dispatch_p2c004_suite": 31,
+        "dispatch_ad_oracle": 16,
+        "e2e_p2c004": 6,
+        "jvp_unit": 6
+      }
+    },
+    "G3_oracle": {
+      "status": "PASS",
+      "evidence": "5/5 oracle tests pass (three-way gradient comparison)",
+      "tests": [
+        "oracle_grad_square_three_way",
+        "oracle_grad_sin_three_way",
+        "oracle_grad_exp_three_way",
+        "oracle_grad_polynomial_three_way",
+        "oracle_dispatch_jit_identity"
+      ]
+    },
+    "G4_adversarial": {
+      "status": "PASS",
+      "evidence": "7/7 adversarial tests pass + 4 E2E adversarial cases",
+      "tests": [
+        "adversarial_grad_nonsalar_input",
+        "adversarial_grad_empty_args",
+        "adversarial_vmap_mismatched_dims",
+        "adversarial_vmap_scalar_input",
+        "adversarial_double_grad_rejected",
+        "adversarial_double_vmap_rejected",
+        "adversarial_evidence_mismatch"
+      ]
+    },
+    "G5_metamorphic": {
+      "status": "PASS",
+      "evidence": "4/4 metamorphic tests pass",
+      "tests": [
+        "metamorphic_grad_linearity",
+        "metamorphic_grad_constant_is_zero",
+        "metamorphic_ad_matches_finite_diff",
+        "metamorphic_effect_token_ordering"
+      ]
+    },
+    "G6_performance": {
+      "status": "PASS",
+      "evidence": "8/8 benchmarks improved (avg 20.6%), 0 regressions. All targets met.",
+      "targets": {
+        "jit_scalar_under_2us": "1.39us (PASS)",
+        "grad_simple_under_5us": "1.76us (PASS)",
+        "depth3_under_4us": "1.60us (PASS)"
+      }
+    },
+    "G7_e2e": {
+      "status": "PASS",
+      "evidence": "6/6 E2E scenarios pass with forensic JSON logging",
+      "tests": [
+        "e2e_p2c004_full_dispatch_pipeline",
+        "e2e_p2c004_transform_composition_matrix",
+        "e2e_p2c004_strict_hardened_divergence",
+        "e2e_p2c004_evidence_ledger_audit_trail",
+        "e2e_p2c004_dispatch_under_load",
+        "e2e_p2c004_adversarial_dispatch_inputs"
+      ]
+    },
+    "G8_three_way_comparison": {
+      "status": "PASS",
+      "evidence": "4/4 function families tested, 17 test points, max error 0.0",
+      "functions": ["x^2", "sin(x)", "exp(x)", "x^2+2x"]
+    },
+    "G9_property_tests": {
+      "status": "PASS",
+      "evidence": "6 property tests with 256+ cases each",
+      "tests": [
+        "prop_dispatch_deterministic",
+        "prop_cache_key_stability",
+        "prop_ledger_always_populated",
+        "prop_grad_is_2x_for_square",
+        "prop_jit_is_identity",
+        "prop_jvp_matches_vjp"
+      ]
+    },
+    "G10_durability": {
+      "status": "PARTIAL",
+      "evidence": "Sidecars generated; scrub/decode-proof blocked by known RaptorQ issue",
+      "known_issue": "Pre-existing upstream decoder bug (bd-3dl.9 residual)"
+    }
+  },
+  "overall_assessment": {
+    "gates_passed": 9,
+    "gates_partial": 1,
+    "gates_failed": 0,
+    "verdict": "PASS_WITH_KNOWN_ISSUES",
+    "known_issues": [
+      "G10 durability scrub blocked by pre-existing RaptorQ small-file decode bug"
+    ]
+  }
+}

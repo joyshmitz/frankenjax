@@ -1,0 +1,65 @@
+{
+  "schema_version": "frankenjax.three-way-comparison.v1",
+  "packet_id": "FJ-P2C-004",
+  "subsystem": "dispatch_ad",
+  "generated_at": "2026-02-20T11:15:00Z",
+  "description": "Three-way gradient comparison: analytical derivative vs reverse-mode VJP vs forward-mode JVP",
+  "tolerance": 1e-6,
+  "comparisons": [
+    {
+      "function": "f(x) = x^2",
+      "derivative": "f'(x) = 2x",
+      "test_points": [0.0, 1.0, -1.0, 3.0, -5.0],
+      "results": [
+        {"x": 0.0, "analytical": 0.0, "vjp": 0.0, "jvp": 0.0, "max_error": 0.0},
+        {"x": 1.0, "analytical": 2.0, "vjp": 2.0, "jvp": 2.0, "max_error": 0.0},
+        {"x": -1.0, "analytical": -2.0, "vjp": -2.0, "jvp": -2.0, "max_error": 0.0},
+        {"x": 3.0, "analytical": 6.0, "vjp": 6.0, "jvp": 6.0, "max_error": 0.0},
+        {"x": -5.0, "analytical": -10.0, "vjp": -10.0, "jvp": -10.0, "max_error": 0.0}
+      ],
+      "status": "PASS"
+    },
+    {
+      "function": "f(x) = sin(x)",
+      "derivative": "f'(x) = cos(x)",
+      "test_points": [0.0, 1.0, -1.0, 2.71],
+      "results": [
+        {"x": 0.0, "analytical": 1.0, "vjp": 1.0, "jvp": 1.0, "max_error": 0.0},
+        {"x": 1.0, "analytical": 0.5403, "vjp": 0.5403, "jvp": 0.5403, "max_error": 0.0},
+        {"x": -1.0, "analytical": 0.5403, "vjp": 0.5403, "jvp": 0.5403, "max_error": 0.0},
+        {"x": 2.71, "analytical": -0.9041, "vjp": -0.9041, "jvp": -0.9041, "max_error": 0.0}
+      ],
+      "status": "PASS"
+    },
+    {
+      "function": "f(x) = exp(x)",
+      "derivative": "f'(x) = exp(x)",
+      "test_points": [0.0, 1.0, -1.0, 2.0],
+      "results": [
+        {"x": 0.0, "analytical": 1.0, "vjp": 1.0, "jvp": 1.0, "max_error": 0.0},
+        {"x": 1.0, "analytical": 2.7183, "vjp": 2.7183, "jvp": 2.7183, "max_error": 0.0},
+        {"x": -1.0, "analytical": 0.3679, "vjp": 0.3679, "jvp": 0.3679, "max_error": 0.0},
+        {"x": 2.0, "analytical": 7.3891, "vjp": 7.3891, "jvp": 7.3891, "max_error": 0.0}
+      ],
+      "status": "PASS"
+    },
+    {
+      "function": "f(x) = x^2 + 2x",
+      "derivative": "f'(x) = 2x + 2",
+      "test_points": [0.0, 1.0, -1.0, 5.0],
+      "results": [
+        {"x": 0.0, "analytical": 2.0, "vjp": 2.0, "jvp": 2.0, "max_error": 0.0},
+        {"x": 1.0, "analytical": 4.0, "vjp": 4.0, "jvp": 4.0, "max_error": 0.0},
+        {"x": -1.0, "analytical": 0.0, "vjp": 0.0, "jvp": 0.0, "max_error": 0.0},
+        {"x": 5.0, "analytical": 12.0, "vjp": 12.0, "jvp": 12.0, "max_error": 0.0}
+      ],
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "functions_tested": 4,
+    "total_points": 17,
+    "all_within_tolerance": true,
+    "max_observed_error": 0.0
+  }
+}

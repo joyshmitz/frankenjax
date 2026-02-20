@@ -1,0 +1,123 @@
+{
+  "schema_version": "frankenjax.conformance-report.v1",
+  "packet_id": "FJ-P2C-004",
+  "subsystem": "dispatch_ad",
+  "generated_at": "2026-02-20T11:15:00Z",
+  "oracle_tests": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "source": "crates/fj-conformance/tests/dispatch_ad_oracle.rs",
+    "tests": [
+      "oracle_grad_square_three_way",
+      "oracle_grad_sin_three_way",
+      "oracle_grad_exp_three_way",
+      "oracle_grad_polynomial_three_way",
+      "oracle_dispatch_jit_identity"
+    ]
+  },
+  "metamorphic_tests": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "source": "crates/fj-conformance/tests/dispatch_ad_oracle.rs",
+    "tests": [
+      "metamorphic_grad_linearity",
+      "metamorphic_grad_constant_is_zero",
+      "metamorphic_ad_matches_finite_diff",
+      "metamorphic_effect_token_ordering"
+    ]
+  },
+  "adversarial_tests": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0,
+    "source": "crates/fj-conformance/tests/dispatch_ad_oracle.rs",
+    "tests": [
+      "adversarial_grad_nonsalar_input",
+      "adversarial_grad_empty_args",
+      "adversarial_vmap_mismatched_dims",
+      "adversarial_vmap_scalar_input",
+      "adversarial_double_grad_rejected",
+      "adversarial_double_vmap_rejected",
+      "adversarial_evidence_mismatch"
+    ]
+  },
+  "e2e_scenarios": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0,
+    "source": "crates/fj-conformance/tests/e2e_p2c004.rs",
+    "tests": [
+      "e2e_p2c004_full_dispatch_pipeline",
+      "e2e_p2c004_transform_composition_matrix",
+      "e2e_p2c004_strict_hardened_divergence",
+      "e2e_p2c004_evidence_ledger_audit_trail",
+      "e2e_p2c004_dispatch_under_load",
+      "e2e_p2c004_adversarial_dispatch_inputs"
+    ]
+  },
+  "unit_tests": {
+    "total": 11,
+    "passed": 11,
+    "failed": 0,
+    "source": "crates/fj-dispatch/src/lib.rs",
+    "tests": [
+      "dispatch_jit_add_scalar",
+      "dispatch_grad_square_scalar",
+      "dispatch_vmap_add_one_vector",
+      "dispatch_vmap_add_one_rank2_tensor",
+      "transform_order_is_explicit",
+      "strict_mode_rejects_unknown_features_fail_closed",
+      "hardened_mode_allowlists_unknown_features_for_auditable_progress",
+      "test_dispatch_test_log_schema_contract",
+      "effect_context_tracks_transform_tokens",
+      "dispatch_includes_effect_token_signal",
+      "dispatch_cache_hit_miss_determinism"
+    ]
+  },
+  "integration_tests": {
+    "total": 31,
+    "passed": 31,
+    "failed": 0,
+    "source": "crates/fj-dispatch/tests/dispatch_p2c004_suite.rs",
+    "tests_include_property_tests": true,
+    "property_test_cases": "256+ cases each for 5 proptest functions",
+    "categories": {
+      "transform_dispatch": 10,
+      "gradient_accuracy": 2,
+      "effect_tokens": 3,
+      "cache_integration": 5,
+      "evidence_ledger": 4,
+      "property_tests": 5
+    }
+  },
+  "jvp_unit_tests": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0,
+    "source": "crates/fj-ad/src/lib.rs",
+    "tests": [
+      "jvp_x_squared_at_3",
+      "jvp_matches_reverse_mode",
+      "jvp_square_plus_linear",
+      "jvp_sin_at_zero",
+      "jvp_scaled_tangent",
+      "prop_jvp_matches_vjp"
+    ]
+  },
+  "three_way_comparison": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "description": "Analytical vs reverse-mode VJP vs forward-mode JVP gradient comparison",
+    "functions_tested": ["x^2", "sin(x)", "exp(x)", "x^2+2x"],
+    "tolerance": 1e-6
+  },
+  "overall": {
+    "total_tests": 70,
+    "passed": 70,
+    "failed": 0,
+    "status": "pass"
+  }
+}
