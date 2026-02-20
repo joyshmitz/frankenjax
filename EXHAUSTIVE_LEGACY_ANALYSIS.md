@@ -27,14 +27,16 @@ Project contracts:
 - `/data/projects/frankenjax/FEATURE_PARITY.md`
 
 Important specification gap:
-- the comprehensive spec currently defines sections `0-13` and then jumps to `21`; detailed sections for crate contracts/conformance matrix/threat matrix/perf budgets/CI/RaptorQ envelope are missing and must be backfilled before release governance is trustworthy.
+- the comprehensive spec currently defines sections `0-16` (Milestones, Acceptance Gates, Residual Risks); performance budgets and gate topology require empirical calibration and are not yet expressed as numeric thresholds in the spec. Backfill of explicit budget sections is required before release governance is trustworthy.
 
 ## 2. Quantitative Legacy Inventory (Measured)
 
-- Total files: `1830`
-- Python: `1005`
-- Native: `cc=123`, `h=90`, `c=2`, `cu=1`
-- Test-like files: `312`
+Note: counts below are snapshot approximations from the legacy tree at extraction time and may drift with legacy version updates.
+
+- Total files (excluding .git): `~2000`
+- Python: `~1005`
+- Native: `cc=~123`, `h=~90`, `c=~2`, `cu=~1`
+- Test-like files (matching `*test*`): `~305`
 
 High-density zones:
 - `jax/_src/pallas` (69 files)
@@ -49,7 +51,7 @@ High-density zones:
 |---|---|---|---|---|
 | `jax/_src/core.py` | `Trace`/`Tracer`/`Jaxpr` typing and construction invariants | `fj-core` | `tests/jaxpr_util_test.py`, `tests/jaxpr_effects_test.py` | IR schema and typing law ledger |
 | `jax/_src/interpreters/partial_eval.py` | trace-to-jaxpr construction, residual and leak constraints | `fj-interpreters` | `tests/api_test.py`, `tests/extend_test.py` | partial-eval state machine + residual contract |
-| `jax/interpreters/{ad,batching,pxla,mlir}.py` | transform composition semantics | `fj-interpreters`, `fj-dispatch` | transform suites in `tests/*` | composition equivalence matrix |
+| `jax/_src/interpreters/{ad,batching,pxla,mlir}.py` | transform composition semantics | `fj-interpreters`, `fj-dispatch` | transform suites in `tests/*` | composition equivalence matrix |
 | `jax/_src/api.py` | jit/grad/vmap observable API contracts | `fj-dispatch` | `tests/api_test.py` | API decision table and error-surface map |
 | `jax/_src/lax/*` | primitive semantics under transforms | `fj-lax` | `tests/lax_test.py`, `tests/lax_numpy_test.py` | primitive contract corpus |
 | `jax/_src/dispatch.py` | runtime token/effect sequencing | `fj-dispatch`, `fj-runtime` | `tests/xla_interpreter_test.py` | effect-token sequencing ledger |
@@ -87,10 +89,10 @@ Decision law (runtime):
 | Threat | Strict mode | Hardened mode | Required ledger artifact |
 |---|---|---|---|
 | malformed trace graph | fail-closed | fail-closed with bounded diagnostics | trace incident ledger |
-| cache poisoning/collision risk | strict key checks | stricter admission and audit | cache integrity report |
+| cache poisoning/collision risk | strict key checks | include unknown features in canonical hash payload (deterministic differentiation) | cache integrity report |
 | backend confusion | fail unknown backend/protocol | fail unknown backend/protocol | backend decision ledger |
 | callback lifetime hazard | fail invalid lifecycle state | quarantine and fail with trace | ffi lifecycle report |
-| unknown incompatible runtime metadata | fail-closed | fail-closed | compatibility drift report |
+| unknown incompatible runtime metadata | fail-closed | accept and include in canonical key material (per `fj-cache` implementation) | compatibility drift report |
 
 Source-anchored foundation artifacts for this doctrine:
 - `artifacts/phase2c/FJ-P2C-FOUNDATION/security_threat_matrix.md`
@@ -128,7 +130,7 @@ Primary hotspots:
 - cache lookup and serialization path
 
 Current governance state:
-- comprehensive spec now includes sections 14-20 with explicit budgets and gate topology; next step is empirical calibration.
+- comprehensive spec sections 14-16 cover milestones, acceptance gates, and residual risks; performance budgets remain provisional and require empirical calibration against first benchmark cycle.
 
 Provisional Phase-2 budgets (must be ratified into spec):
 - transform composition overhead regression <= +10%
@@ -180,7 +182,7 @@ Definition of done for Phase-2:
 
 ## 11. Residual Gaps and Risks
 
-- sections 14-20 now exist; top non-code risk is uncalibrated budget thresholds until first benchmark cycle lands.
+- comprehensive spec sections 14-16 exist (milestones, gates, risks); top non-code risk is uncalibrated budget thresholds until first benchmark cycle lands.
 - `PROPOSED_ARCHITECTURE.md` crate map formatting has literal `\n`; normalize before automation.
 - backend and FFI boundaries remain highest regression risk until corpus breadth increases.
 

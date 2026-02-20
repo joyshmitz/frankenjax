@@ -121,6 +121,7 @@ Deferred but tracked:
 | Crate | Owns | Depends on (normal) | Boundary contract |
 |---|---|---|---|
 | `fj-core` | canonical IR (`Jaxpr`), TTL (`TraceTransformLedger`), transforms/types | none | root semantic model; no runtime/backend side effects |
+| `fj-trace` | trace context, shape inference, Jaxpr materialization from traces | `fj-core` | trace-to-IR boundary; tracer lifecycle and abstract value management |
 | `fj-lax` | primitive eval semantics (`eval_primitive`) | `fj-core` | pure primitive semantics over core values |
 | `fj-interpreters` | IR interpreter (`eval_jaxpr`) | `fj-core`, `fj-lax` | executes canonical IR without transform orchestration |
 | `fj-ad` | autodiff path (`grad_first`, tape/backward logic) | `fj-core`, `fj-lax` | gradient semantics; consumes IR/value model |
@@ -136,6 +137,7 @@ Deferred but tracked:
 
 Normal dependency edges (from `cargo metadata --no-deps --format-version 1`):
 
+- `fj-trace -> fj-core`
 - `fj-lax -> fj-core`
 - `fj-interpreters -> fj-core`, `fj-interpreters -> fj-lax`
 - `fj-ad -> fj-core`, `fj-ad -> fj-lax`
@@ -155,7 +157,7 @@ Cycle check:
 | Layer | Crates | Allowed outbound edges | Forbidden patterns |
 |---|---|---|---|
 | `L0 model` | `fj-core` | none | any dependency on higher execution/runtime/harness layers |
-| `L1 semantics` | `fj-lax`, `fj-cache`, `fj-ledger` | `-> fj-core` | cross-calls into dispatch/harness |
+| `L1 semantics` | `fj-trace`, `fj-lax`, `fj-cache`, `fj-ledger` | `-> fj-core` | cross-calls into dispatch/harness |
 | `L2 execution` | `fj-interpreters`, `fj-ad`, `fj-dispatch` | `-> L0/L1` | reverse dependency from `fj-core` into execution |
 | `L3 ops/harness` | `fj-runtime`, `fj-egraph`, `fj-conformance` | `-> L0/L2` (as needed) | production execution paths depending on conformance harness |
 
@@ -256,7 +258,7 @@ Boundary clarification:
 | Tracer/Jaxpr graph (`core.py`) | `fj-core` (`Jaxpr`, `Equation`, `VarId`, `TraceTransformLedger`) | invars/outvars, equation edges, transform list | var def-use integrity, deterministic fingerprint/signature |
 | Partial-eval state (`partial_eval.py`) | `fj-interpreters` + `fj-core` | trace-to-jaxpr boundary, residual equation ordering | stable lowering order and explicit residual handling |
 | AD tape/linearization (`ad.py`) | `fj-ad` | primal values, tangent/cotangent propagation | gradient path consistency and scalar-output constraints |
-| Batching state (`batching.py`) | `fj-dispatch` + `fj-interpreters` (current slice) | mapped axis semantics and batched argument slicing | vmap order semantics and output-shape consistency |
+| Batching state (`batching.py`) | `fj-dispatch` (current slice; `execute_vmap`) | mapped axis semantics and batched argument slicing | vmap order semantics and output-shape consistency |
 | Cache identity and lifecycle (`cache_key.py`, `compiler.py`) | `fj-cache` + `fj-dispatch` | key input bundle, backend/options metadata, lookup/write path | strict fail-closed on unknown incompatibilities |
 | Dispatch/runtime envelope (`dispatch.py`, bridge bands) | `fj-dispatch`, `fj-runtime` | request, transform stack, admission decision state | transform order preservation and policy traceability |
 
@@ -628,12 +630,12 @@ Pass-A structure specialist note:
 
 | Subsystem | Function | Complexity | Key dimensions | Code anchor |
 |---|---|---|---|---|
-| IR validation | `Jaxpr::validate_well_formed` | O((V + E) * log V) | V = variables, E = equations | `fj-core/src/lib.rs:650-705` |
+| IR validation | `Jaxpr::validate_well_formed` | O((V + E * K) * log V) | V = variables, E = equations, K = avg arity | `fj-core/src/lib.rs:650-705` |
 | Canonical fingerprint | `Jaxpr::canonical_fingerprint` | O(E) amortized O(1) | E = equations (cached via OnceLock) | `fj-core/src/lib.rs:620-648` |
 | Transform composition proof | `verify_transform_composition` | O(S) | S = transform stack depth (typically <= 3) | `fj-core/src/lib.rs:947-997` |
 | Trace materialization | `SimpleTraceContext::process_primitive` | O(K * log T) | K = input arity, T = tracer count | `fj-trace/src/lib.rs:576-603` |
 | Shape inference (elementwise) | `infer_primitive_output_avals` | O(max(R1, R2)) | R = tensor rank | `fj-trace/src/lib.rs:369-394` |
-| Jaxpr building from trace | `build_closed_jaxpr` | O(E * K * log E) | E = equations, K = avg arity | `fj-trace/src/lib.rs:458-572` |
+| Jaxpr building from trace | `build_closed_jaxpr` | O(E * K * log V) | E = equations, K = avg arity, V = tracers | `fj-trace/src/lib.rs:458-572` |
 | Primitive eval (elementwise) | `eval_primitive` (Add, Sub, Mul, etc.) | O(N) | N = total tensor elements | `fj-lax/src/lib.rs:85-229` |
 | Primitive eval (dot product) | `eval_primitive` (Dot) | O(N) | N = vector length | `fj-lax/src/lib.rs:277-347` |
 | Primitive eval (transpose) | `eval_transpose` | O(N * R) | N = elements, R = rank | `fj-lax/src/lib.rs:548-636` |
@@ -737,7 +739,7 @@ Pass-A structure specialist note:
 | `trace_to_jaxpr` tracer accumulation | O(ops) with all tracers stored | `build_closed_jaxpr` | O(E * K * log E) | BTreeMap overhead vs Python dict; similar growth pattern |
 | `linearize_jaxpr` with weakref cache | O(ops) cached | `forward_with_tape` + `backward` | O(E * K_max + E * K * log V) | no linearization caching yet; tape approach is direct |
 | `cache_key.get` with deepcopy | O(S + C) | `hash_canonical_payload_ref` streaming | O(E + S + C) | streaming hash avoids deepcopy; string fingerprint substitutes for IR serialization |
-| `dce_jaxpr` reverse pass | O(E * K) | `dead_code_eliminate` | O(E * K) | similar reverse-pass pattern |
+| `dce_jaxpr` reverse pass | O(E * K) | `fj-interpreters::dce_jaxpr` (in `partial_eval.rs:317`) | O(E * K) | similar reverse-pass pattern |
 | `process_call` residual forwarding | O(n * m) with substitution | `partial_eval_jaxpr` single-pass | O(E * K) | no nested call splitting yet; simpler but less optimized |
 
 ### 20.6 Performance Budget Crosswalk
