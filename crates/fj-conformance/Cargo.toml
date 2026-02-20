@@ -19,6 +19,7 @@ fj-backend-cpu = { path = "../fj-backend-cpu" }
 fj-cache = { path = "../fj-cache" }
 fj-ffi = { path = "../fj-ffi" }
 fj-interpreters = { path = "../fj-interpreters" }
+fj-lax = { path = "../fj-lax" }
 fj-runtime = { path = "../fj-runtime" }
 fj-test-utils = { path = "../fj-test-utils" }
 jsonschema = "0.42"
