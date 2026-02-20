@@ -1,0 +1,376 @@
+{
+  "schema_version": "frankenjax.legacy-anchor-map.v1",
+  "packet_id": "FJ-P2C-002",
+  "generated_at_unix_ms": 1740038400000,
+  "generated_by": "CoralOwl",
+  "legacy_oracle_root": "jax",
+  "anchors": [
+    {
+      "anchor_id": "p2c002.api.jit",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "jit",
+      "behavior_summary": "Top-level JIT compilation entry point. Wraps a Python callable into a staged compilation pipeline: trace -> lower (StableHLO) -> compile (XLA) -> cache -> execute. Accepts static_argnums to exclude args from tracing (treated as compile-time constants, triggering retrace on value change), donate_argnums for buffer donation hints, and device/backend for placement. Returns a JitWrapped (stages.Wrapped subclass) callable that lazily traces on first invocation and caches compiled artifacts keyed by abstract arg signature.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 60,
+        "end": 130
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX maps jit to Transform::Jit in the transform stack; execute_with_transforms treats Jit as identity pass-through to interpreter (fj-dispatch/src/lib.rs:198). Legacy jit() delegates to stages.jit() which returns JitWrapped. The staging pipeline (Traced -> Lowered -> Compiled) is documented in P2C-003 anchor map. Static_argnums and donate_argnums not yet exposed in FrankenJAX."
+    },
+    {
+      "anchor_id": "p2c002.api.jit.static_argnums",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "jit",
+      "behavior_summary": "static_argnums parameter (tuple of ints or single int): marks positional arguments as compile-time constants. Static args are excluded from abstract tracing; their concrete values become part of the cache key. Changing a static arg forces full retrace and recompilation. Implemented via argnums_partial() which creates a closure capturing static values and passes only dynamic args to the tracer.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 73,
+        "end": 95
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX does not yet expose static_argnums; all arguments are currently traced. The cache key in fj-cache includes the full Jaxpr fingerprint (which changes if static arg values change the traced graph). Legacy behavior: static_argnums accepts int or Sequence[int]; normalized to tuple internally."
+    },
+    {
+      "anchor_id": "p2c002.api.jit.donate_argnums",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "jit",
+      "behavior_summary": "donate_argnums parameter: marks input buffers eligible for reuse by the XLA compiler, reducing peak memory. Implemented via donation_vector() which produces a boolean mask. Donated buffers become invalid after the call returns. Attempting to read a donated buffer raises InvalidInputException at runtime.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 96,
+        "end": 110
+      },
+      "confidence": "medium",
+      "notes": "FrankenJAX does not model buffer donation. Memory management is deferred to Phase-2C backend integration. Legacy donation is an optimization hint, not a semantic requirement; FrankenJAX parity is not affected by omitting it in strict mode."
+    },
+    {
+      "anchor_id": "p2c002.api.grad",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "grad",
+      "behavior_summary": "Reverse-mode automatic differentiation entry point. Returns a function that computes the gradient of fun with respect to positional arguments specified by argnums (default 0). Requires fun to return a scalar (or scalar + aux when has_aux=True). Internally constructs a VJP (vector-Jacobian product) by tracing fun, building the backward pass via ad.py:backward_pass, and seeding with a ones cotangent. Parameters: argnums (int|Sequence[int]), has_aux (bool), holomorphic (bool for complex differentiation), allow_int (bool, permits integer inputs to pass through undifferentiated), reduce_axes (tuple for collective reduction in multi-device).",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1300,
+        "end": 1400
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX maps to Transform::Grad + fj_ad::grad_first() (fj-ad/src/lib.rs:271). Current engine: scalar-to-scalar only, argnums always 0, no has_aux/holomorphic/allow_int/reduce_axes. Legacy grad wraps _vjp_pullback internally. FrankenJAX uses tape-based forward+reverse with VJP rules for 27+ primitives."
+    },
+    {
+      "anchor_id": "p2c002.api.grad.argnums",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "grad",
+      "behavior_summary": "argnums parameter: specifies which positional arguments to differentiate with respect to. Default 0 (first arg). Accepts int or tuple of ints. For multi-arg grad, returns a tuple of gradients corresponding to each argnum position. Non-selected arguments are treated as constants through the AD pass (no cotangent accumulation). Normalized via _ensure_index_tuple() to canonical tuple form.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1310,
+        "end": 1330
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX currently hardcodes argnums=0 in execute_grad (fj-dispatch/src/lib.rs:216-218); extending to multi-arg grad requires args[i].as_f64_scalar() check per argnum and per-arg cotangent seeding in fj-ad."
+    },
+    {
+      "anchor_id": "p2c002.api.grad.has_aux",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "grad",
+      "behavior_summary": "has_aux parameter (default False): when True, fun is expected to return (scalar_loss, auxiliary_data). grad differentiates only with respect to scalar_loss and returns (gradient, auxiliary_data). The auxiliary output is not differentiated through; it passes through the transform untouched. Implemented by wrapping fun output splitting before the backward pass.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1335,
+        "end": 1365
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX does not yet support has_aux; grad_first expects single scalar output (fj-dispatch/src/lib.rs:54-55 error message). Adding has_aux requires output tuple splitting in execute_grad before invoking fj_ad."
+    },
+    {
+      "anchor_id": "p2c002.api.vmap",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "vmap",
+      "behavior_summary": "Vectorizing map (auto-batching) entry point. Maps fun over a leading batch dimension of its inputs, producing batched outputs. Parameters: in_axes (int|None|Sequence, default 0) specifies which axis of each input to map over (None means broadcast), out_axes (int|Sequence, default 0) specifies output batch axis placement, axis_name (Hashable, for collective operations like psum), axis_size (int, optional explicit batch size). Internally delegates to batching.batch() which produces a batched Jaxpr via batch_subtrace().",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1500,
+        "end": 1600
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX maps to Transform::Vmap + execute_vmap (fj-dispatch/src/lib.rs:262-352). Current engine: leading-axis-only (in_axes=0 or broadcast), no out_axes remapping, no axis_name, no axis_size. Implementation iterates over leading dimension with slice/execute/stack pattern."
+    },
+    {
+      "anchor_id": "p2c002.api.vmap.in_axes",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "vmap",
+      "behavior_summary": "in_axes parameter: controls how each input argument is mapped. int means map over that axis; None means broadcast (replicate across batch). Supports pytree-matching: in_axes can be a pytree with the same structure as inputs, specifying per-leaf axis mapping. Example: in_axes=(0, None, {'a': 0, 'b': 1}) maps first arg on axis 0, broadcasts second, maps dict leaf 'a' on axis 0 and 'b' on axis 1. All mapped dimensions must have the same size (or axis_size must be specified).",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1515,
+        "end": 1545
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX simplifies: first arg must be tensor with rank>=1 (sliced on axis 0), remaining tensor args must match leading dim or are scalar-broadcast (fj-dispatch/src/lib.rs:274-326). No pytree-matching in_axes, no arbitrary axis selection. Legacy validates axis consistency via _mapped_axis_size()."
+    },
+    {
+      "anchor_id": "p2c002.api.value_and_grad",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "value_and_grad",
+      "behavior_summary": "Combined forward+backward evaluation: returns (fun(x), grad(fun)(x)) in a single pass. Avoids redundant forward evaluation by sharing the primal trace with the backward pass. Parameters mirror grad(): argnums, has_aux, holomorphic. When has_aux=True, returns ((scalar_loss, aux), gradient). Internally uses _vjp_pullback with retained primals to produce both outputs efficiently.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1420,
+        "end": 1500
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX does not yet expose value_and_grad as a separate transform. Can be composed from execute_jit + execute_grad but without the single-pass optimization. Efficient implementation would require modifying fj_ad::grad_first to return both primal output and gradient."
+    },
+    {
+      "anchor_id": "p2c002.api.jacfwd",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "jacfwd",
+      "behavior_summary": "Forward-mode Jacobian computation. Computes the full Jacobian matrix by pushing tangent vectors through the forward pass. More efficient than jacrev when output dimension exceeds input dimension. Internally implemented via jvp (Jacobian-vector product) with standard basis tangent vectors, optionally vectorized via vmap. Parameters: argnums, has_aux, holomorphic.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1700,
+        "end": 1780
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX does not implement forward-mode AD. jacfwd is deferred to Phase-2C. Would require forward-mode tangent propagation rules per primitive in fj-ad, distinct from the current reverse-mode VJP rules."
+    },
+    {
+      "anchor_id": "p2c002.api.jacrev",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "jacrev",
+      "behavior_summary": "Reverse-mode Jacobian computation. Computes the full Jacobian matrix by pulling cotangent vectors through the backward pass. More efficient than jacfwd when input dimension exceeds output dimension. Implemented as vmap(grad(fun), ...) composition: maps grad over each output component using standard basis cotangent vectors. Parameters: argnums, has_aux, holomorphic.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 1600,
+        "end": 1700
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX can approximate jacrev via manual vmap(grad(f)) composition through the existing transform stack. Not yet exposed as a standalone API. Full implementation would compose Transform::Vmap + Transform::Grad in the ledger."
+    },
+    {
+      "anchor_id": "p2c002.api.make_jaxpr",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "make_jaxpr",
+      "behavior_summary": "Staging-only API: traces fun with abstract argument shapes and returns the resulting ClosedJaxpr without executing it. Internally calls jit(fun).trace(*args) then converts invars back to constvars via convert_invars_to_constvars. Parameters: static_argnums, axis_env, return_shape. Returns ClosedJaxpr (or (ClosedJaxpr, shape_info) if return_shape=True).",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 2471,
+        "end": 2553
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX equivalent: fj_core::build_program(ProgramSpec) produces a Jaxpr from predefined program specs. User-defined function tracing via fj-trace::build_closed_jaxpr() is the staging analog. Line numbers align with P2C-003 anchor p2c003.api.make_jaxpr."
+    },
+    {
+      "anchor_id": "p2c002.api_util.argnums_partial",
+      "legacy_path": "jax/_src/api_util.py",
+      "legacy_symbol": "argnums_partial",
+      "behavior_summary": "Argument normalization utility: given a function and static_argnums tuple, returns a new function that accepts only the dynamic (non-static) arguments. Static argument values are captured in a closure. Used by jit() and grad() to separate traced arguments from compile-time constants. Handles negative indices (counts from end), deduplication, and sorting.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 50,
+        "end": 85
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX does not use argnums_partial; DispatchRequest.args contains all arguments and the full Jaxpr includes all invars. Static arg separation would need to happen before Jaxpr construction (at tracing time in fj-trace)."
+    },
+    {
+      "anchor_id": "p2c002.api_util.flatten_fun",
+      "legacy_path": "jax/_src/api_util.py",
+      "legacy_symbol": "flatten_fun",
+      "behavior_summary": "Wraps a function to accept and return flat (non-pytree) argument lists. Input pytrees are flattened via tree_util.tree_flatten before tracing; output pytrees are reconstructed via tree_util.tree_unflatten after evaluation. Carries PyTreeDef metadata for both input and output structures. Essential for all transforms since Jaxpr operates on flat variable lists.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 100,
+        "end": 140
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX uses flat Vec<Value> argument lists throughout (DispatchRequest.args, Jaxpr.invars). No pytree wrapper needed since all current programs are manually constructed with flat args. Full pytree support deferred."
+    },
+    {
+      "anchor_id": "p2c002.api_util.donation_vector",
+      "legacy_path": "jax/_src/api_util.py",
+      "legacy_symbol": "donation_vector",
+      "behavior_summary": "Converts donate_argnums (tuple of ints) into a boolean donation mask of length num_args. True at position i means argument i's buffer may be reused by the compiled computation. Validates that donated indices are within bounds and not duplicated.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 200,
+        "end": 230
+      },
+      "confidence": "medium",
+      "notes": "FrankenJAX does not model donation; no equivalent exists. Buffer reuse is a backend optimization concern. Semantic parity unaffected since donation is an optional performance hint."
+    },
+    {
+      "anchor_id": "p2c002.tree_util.tree_flatten",
+      "legacy_path": "jax/_src/tree_util.py",
+      "legacy_symbol": "tree_flatten",
+      "behavior_summary": "Recursively flattens a pytree (nested dicts, lists, tuples, namedtuples, dataclasses) into a pair (leaves, PyTreeDef). Leaves are extracted in canonical traversal order (deterministic across invocations). PyTreeDef records the structural skeleton for later reconstruction. Custom node types can be registered via register_pytree_node. O(K) where K = total leaf count.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 150,
+        "end": 200
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX uses flat Vec<Value> directly; no pytree flattening needed for current program specs. Full pytree support would require a TreeDef type in fj-core and flatten/unflatten utilities."
+    },
+    {
+      "anchor_id": "p2c002.tree_util.tree_unflatten",
+      "legacy_path": "jax/_src/tree_util.py",
+      "legacy_symbol": "tree_unflatten",
+      "behavior_summary": "Reconstructs a pytree from a PyTreeDef and flat leaf list. Exact inverse of tree_flatten: tree_unflatten(treedef, tree_flatten(pytree)[0]) == pytree. Validates that leaf count matches treedef expectation. O(K) complexity.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 200,
+        "end": 250
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX defers pytree reconstruction. Vec<Value> outputs are returned directly from dispatch(). Reconstruction would be the caller's responsibility."
+    },
+    {
+      "anchor_id": "p2c002.traceback_util.filtering",
+      "legacy_path": "jax/_src/traceback_util.py",
+      "legacy_symbol": "filtering_tracebacks",
+      "behavior_summary": "Context manager and global flag that controls whether JAX internal frames are filtered from user-visible tracebacks. When enabled (default), tracebacks show only user code frames, hiding JAX implementation internals. Configurable via jax.config.jax_traceback_filtering. Error classes inherit _JAXErrorMixin which appends documentation URLs to error messages.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 50,
+        "end": 120
+      },
+      "confidence": "medium",
+      "notes": "FrankenJAX uses Rust error types with Display impls (fj-dispatch/src/lib.rs:45-86) providing deterministic, structured error messages. No traceback filtering needed since errors propagate via Result<T, E> without Python stack frames. Error messages are boundary-tagged (cache/interpreter/transform prefix)."
+    },
+    {
+      "anchor_id": "p2c002.errors.concretization",
+      "legacy_path": "jax/_src/errors.py",
+      "legacy_symbol": "ConcretizationTypeError",
+      "behavior_summary": "Raised when a traced abstract value is used in a context requiring a concrete Python value (e.g., if-statement condition, array indexing, print). Common trigger: using a jit-traced variable in a Python control flow branch. Error message includes the tracer's origin (which transform created it), the operation that required concretization, and a suggestion to use static_argnums or lax.cond.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 47,
+        "end": 130
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX does not have tracers in the Python sense; programs are pre-constructed Jaxprs. The equivalent failure mode is a type/shape mismatch at Jaxpr validation time (fj-core validate_well_formed). The ConcretizationTypeError pattern is important for API parity if FrankenJAX later supports dynamic tracing."
+    },
+    {
+      "anchor_id": "p2c002.errors.tracer_leak",
+      "legacy_path": "jax/_src/errors.py",
+      "legacy_symbol": "UnexpectedTracerError",
+      "behavior_summary": "Raised when a tracer object escapes its transform scope (e.g., stored in a global variable during jit-traced execution and accessed later). Detects tracer leaks by checking tracer validity at scope exit. Error includes tracer origin, scope information, and suggestions for fixing the leak.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 526,
+        "end": 600
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX's Jaxpr-first design prevents tracer leaks structurally: all variables are bound within Jaxpr scope and cannot escape. The equivalent safety property is enforced by validate_well_formed checking that all referenced VarIds are defined within the Jaxpr. No runtime leak detection needed."
+    },
+    {
+      "anchor_id": "p2c002.transform_stacking.jit_grad",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "jit",
+      "behavior_summary": "jit(grad(f)) composition: grad(f) builds a reverse-AD backward pass producing a gradient function, then jit compiles and caches that gradient function. The resulting compiled gradient function has the same cache semantics as any jit-wrapped function. This is the standard pattern for efficient gradient computation.",
+      "evidence_kind": "doc_note",
+      "lines": {
+        "start": 60,
+        "end": 130
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX: transform_stack=[Transform::Jit, Transform::Grad] in TraceTransformLedger. execute_with_transforms peels Jit (pass-through) then dispatches to execute_grad. Verified by dispatch tests (fj-dispatch/src/lib.rs:416-432)."
+    },
+    {
+      "anchor_id": "p2c002.transform_stacking.vmap_grad",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "vmap",
+      "behavior_summary": "vmap(grad(f)) composition: maps gradient computation over a batch dimension. Each batch element gets its own gradient evaluation. Requires f to produce scalar output per element. This is semantically equivalent to computing per-example gradients and is the standard pattern for batched training. Legacy implements via batching.batch(ad.backward_pass(f)).",
+      "evidence_kind": "test_case",
+      "lines": {
+        "start": 1500,
+        "end": 1600
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX: transform_stack=[Transform::Vmap, Transform::Grad]. execute_vmap slices inputs, then per-slice calls execute_grad (finite-diff fallback since tail is non-empty). Verified by transform_order_is_explicit test (fj-dispatch/src/lib.rs:496-536) which confirms vmap(grad) works and grad(vmap) fails."
+    },
+    {
+      "anchor_id": "p2c002.transform_stacking.grad_vmap_invalid",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "grad",
+      "behavior_summary": "grad(vmap(f)) composition with vector input: fails because vmap produces a batched (non-scalar) output, violating grad's scalar output requirement. Legacy raises TypeError with message about non-scalar output. This is an expected failure mode, not a bug. The correct pattern is vmap(grad(f)) for per-example gradients.",
+      "evidence_kind": "test_case",
+      "lines": {
+        "start": 1300,
+        "end": 1400
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX: transform_stack=[Transform::Grad, Transform::Vmap] fails with NonScalarGradientInput because grad peels first and requires scalar first arg, but receives a vector. Verified by test at fj-dispatch/src/lib.rs:519-536."
+    },
+    {
+      "anchor_id": "p2c002.transform_stacking.jit_vmap",
+      "legacy_path": "jax/_src/api.py",
+      "legacy_symbol": "jit",
+      "behavior_summary": "jit(vmap(f)) composition: vmap vectorizes f into a batched version, then jit compiles the entire batched computation as a single program. More efficient than vmap(jit(f)) because compilation happens once for the full batch rather than per-element. Standard pattern for production batched inference.",
+      "evidence_kind": "doc_note",
+      "lines": {
+        "start": 60,
+        "end": 130
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX: transform_stack=[Transform::Jit, Transform::Vmap]. Jit passes through, then execute_vmap handles batching. Current implementation iterates per-element (no vectorized compilation), so jit(vmap) and vmap(jit) have identical performance characteristics in FrankenJAX."
+    },
+    {
+      "anchor_id": "p2c002.dispatch.request_normalization",
+      "legacy_path": "jax/_src/dispatch.py",
+      "legacy_symbol": "apply_primitive",
+      "behavior_summary": "Legacy dispatch normalizes arguments before execution: pytree-flatten inputs, validate abstract types match Jaxpr signature, check effects ordering, resolve backend placement. The dispatch loop routes through the transform stack in LIFO order (outermost transform executes first). Each transform may recursively invoke dispatch for inner transforms.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 84,
+        "end": 174
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX equivalent: dispatch() in fj-dispatch/src/lib.rs:135-186 validates composition proof, generates cache key, then calls execute_with_transforms which recursively peels transforms via split_first (fj-dispatch/src/lib.rs:193-201). Request normalization is structural (BTreeMap for compile_options ensures deterministic iteration)."
+    },
+    {
+      "anchor_id": "p2c002.cache.key_identity",
+      "legacy_path": "jax/_src/cache_key.py",
+      "legacy_symbol": "get",
+      "behavior_summary": "Cache key generation: combines mode, backend+version, Jaxpr canonical fingerprint, transform stack, compile_options (sorted), custom_hook, and unknown_incompatible_features into a deterministic hash. Strict mode: unknown_incompatible_features must be empty (fail-closed). Hardened mode: unknown features included in hash (accept-and-audit). Key stability across program restarts requires deterministic serialization of all components.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 75,
+        "end": 149
+      },
+      "confidence": "high",
+      "notes": "FrankenJAX: fj-cache/src/lib.rs build_cache_key_ref() produces 'fjx-<sha256>' keys. Streaming hash avoids full string allocation. Strict mode validation at fj-dispatch/src/lib.rs:539-561 (test). Hardened mode at fj-dispatch/src/lib.rs:563-578 (test)."
+    },
+    {
+      "anchor_id": "p2c002.composition.verify_transform_composition",
+      "legacy_path": "jax/_src/core.py",
+      "legacy_symbol": "trace_stack_validation",
+      "behavior_summary": "Legacy trace stack validation is implicit: transform nesting is checked during trace construction when each new transform pushes a trace level. Invalid nesting (e.g., using a tracer from a higher level) raises an error during trace processing. FrankenJAX makes this explicit via verify_transform_composition which validates the full stack before any execution begins.",
+      "evidence_kind": "source_line",
+      "lines": {
+        "start": 800,
+        "end": 900
+      },
+      "confidence": "medium",
+      "notes": "FrankenJAX: fj-core/src/lib.rs:947-997 verify_transform_composition(). Checks: evidence cardinality matches transform count, all evidence strings non-empty, no duplicate transforms of same type (at most one Grad, one Vmap). Returns TransformCompositionProof with stack_signature and stack_hash_hex."
+    }
+  ],
+  "extraction_invariants": [
+    "jit() must be idempotent: jit(jit(f)) behaves identically to jit(f); inner jit is a no-op.",
+    "grad() requires scalar output from the differentiated function; non-scalar output must raise a clear error before any backward pass begins.",
+    "vmap() mapped arguments must have consistent leading dimension length; mismatched dimensions must raise VmapMismatchedLeadingDimension before any slice evaluation.",
+    "Transform stacking order is semantic: vmap(grad(f)) computes per-example gradients, while grad(vmap(f)) attempts to differentiate a batched function (fails for non-scalar batch output).",
+    "Static arguments (static_argnums) are part of the cache identity; changing a static arg value must invalidate the cached compilation.",
+    "Pytree flattening must be deterministic: tree_flatten(x) always produces leaves in the same canonical order for structurally identical pytrees.",
+    "Pytree round-trip must be exact: tree_unflatten(tree_flatten(x)) == x for all valid pytrees.",
+    "Cache key generation must be deterministic across program restarts: identical (mode, backend, jaxpr, transforms, options) must produce identical keys.",
+    "Strict mode must reject unknown incompatible features with a fail-closed CacheKeyError before any execution begins.",
+    "Hardened mode must include unknown features in the canonical hash payload and proceed with execution.",
+    "value_and_grad() must produce outputs semantically identical to (f(x), grad(f)(x)); single-pass optimization is permitted but must not change semantics.",
+    "All transform error messages must be boundary-tagged with the failing subsystem (cache, interpreter, transform invariant, or transform execution).",
+    "Argument normalization (argnums_partial, flatten_fun) must happen before tracing; the tracer must never see static arguments or pytree structure.",
+    "Transform composition proof must be validated before cache key generation and before any execution begins."
+  ]
+}
