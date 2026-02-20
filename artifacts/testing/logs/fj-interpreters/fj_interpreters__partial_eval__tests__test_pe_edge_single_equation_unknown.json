@@ -5,10 +5,10 @@
   "seed": null,
   "mode": "strict",
   "env": {
-    "rust_version": "rustc 1.95.0-nightly (a423f68a0 2026-02-13)",
+    "rust_version": "rustc 1.95.0-nightly (7f99507f5 2026-02-19)",
     "os": "linux",
     "cargo_target_dir": "/data/tmp/cargo-target",
-    "timestamp_unix_ms": 1771117603475
+    "timestamp_unix_ms": 1771576674015
   },
   "artifact_refs": [
     "packet:FJ-P2C-003",

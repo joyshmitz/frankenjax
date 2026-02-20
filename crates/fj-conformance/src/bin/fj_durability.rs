@@ -3,7 +3,6 @@
 use fj_conformance::durability::{
     SidecarConfig, encode_artifact_to_sidecar, generate_decode_proof, scrub_sidecar,
 };
-use serde_json;
 use std::path::PathBuf;
 
 fn main() {

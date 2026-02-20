@@ -306,7 +306,7 @@ fn oracle_staging_pipeline_equivalence() {
     {
         let jaxpr = build_program(ProgramSpec::Square);
         let x = Value::scalar_i64(5);
-        let full = fj_interpreters::eval_jaxpr(&jaxpr, &[x.clone()]).unwrap();
+        let full = fj_interpreters::eval_jaxpr(&jaxpr, std::slice::from_ref(&x)).unwrap();
         let staged = stage_jaxpr(&jaxpr, &[false], &[x]).unwrap();
         let result = execute_staged(&staged, &[]).unwrap();
         assert_eq!(result, full, "staging square(5) should match full eval");
@@ -316,7 +316,7 @@ fn oracle_staging_pipeline_equivalence() {
     {
         let jaxpr = build_program(ProgramSpec::AddOne);
         let x = Value::scalar_i64(99);
-        let full = fj_interpreters::eval_jaxpr(&jaxpr, &[x.clone()]).unwrap();
+        let full = fj_interpreters::eval_jaxpr(&jaxpr, std::slice::from_ref(&x)).unwrap();
         let staged = stage_jaxpr(&jaxpr, &[true], &[]).unwrap();
         let result = execute_staged(&staged, &[x]).unwrap();
         assert_eq!(result, full, "staging add_one(99) should match full eval");
@@ -495,12 +495,12 @@ fn metamorphic_staging_determinism_50x() {
     let a = Value::scalar_i64(5);
     let b = Value::scalar_i64(3);
 
-    let reference_staged = stage_jaxpr(&jaxpr, &[false, true], &[a.clone()]).unwrap();
-    let reference_result = execute_staged(&reference_staged, &[b.clone()]).unwrap();
+    let reference_staged = stage_jaxpr(&jaxpr, &[false, true], std::slice::from_ref(&a)).unwrap();
+    let reference_result = execute_staged(&reference_staged, std::slice::from_ref(&b)).unwrap();
 
     for i in 0..50 {
-        let staged = stage_jaxpr(&jaxpr, &[false, true], &[a.clone()]).unwrap();
-        let result = execute_staged(&staged, &[b.clone()]).unwrap();
+        let staged = stage_jaxpr(&jaxpr, &[false, true], std::slice::from_ref(&a)).unwrap();
+        let result = execute_staged(&staged, std::slice::from_ref(&b)).unwrap();
         assert_eq!(
             result, reference_result,
             "staging result diverged on iteration {i}"
@@ -562,8 +562,9 @@ fn adversarial_pe_nothing_foldable() {
 
     // The unknown jaxpr should evaluate correctly
     let x = Value::scalar_i64(3);
-    let full = fj_interpreters::eval_jaxpr(&jaxpr, &[x.clone()]).unwrap();
-    let residual_result = fj_interpreters::eval_jaxpr(&pe.jaxpr_unknown, &[x]).unwrap();
+    let full = fj_interpreters::eval_jaxpr(&jaxpr, std::slice::from_ref(&x)).unwrap();
+    let residual_result =
+        fj_interpreters::eval_jaxpr(&pe.jaxpr_unknown, std::slice::from_ref(&x)).unwrap();
     assert_eq!(residual_result, full);
 }
 
