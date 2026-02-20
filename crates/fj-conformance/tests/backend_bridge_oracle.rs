@@ -49,7 +49,7 @@ fn oracle_cpu_backend_matches_all_programs() {
         (ProgramSpec::Add2, vec![Value::scalar_i64(5), Value::scalar_i64(3)]),
         (ProgramSpec::Square, vec![Value::scalar_f64(4.0)]),
         (ProgramSpec::AddOne, vec![Value::scalar_i64(99)]),
-        (ProgramSpec::SinX, vec![Value::scalar_f64(1.5707963)]),
+        (ProgramSpec::SinX, vec![Value::scalar_f64(std::f64::consts::FRAC_PI_2)]),
         (ProgramSpec::CosX, vec![Value::scalar_f64(0.0)]),
     ];
 

@@ -98,7 +98,7 @@ fn oracle_ffi_double_matches_rust() {
     let reg = make_registry();
     let call = FfiCall::new("double");
 
-    for val in [0.0, 1.0, -1.0, 3.14, f64::MIN_POSITIVE, f64::MAX / 2.0] {
+    for val in [0.0, 1.0, -1.0, std::f64::consts::PI, f64::MIN_POSITIVE, f64::MAX / 2.0] {
         let input = FfiBuffer::new(val.to_ne_bytes().to_vec(), vec![], DType::F64).unwrap();
         let mut outputs = [FfiBuffer::zeroed(vec![], DType::F64).unwrap()];
         call.invoke(&reg, &[input], &mut outputs).unwrap();
