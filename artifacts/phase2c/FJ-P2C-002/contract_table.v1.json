@@ -1,0 +1,612 @@
+{
+  "schema_version": "frankenjax.contract-table.v1",
+  "packet_id": "FJ-P2C-002",
+  "generated_at_unix_ms": 1740038400000,
+  "mode_matrix": [
+    {
+      "mode": "strict",
+      "contract_rows": [
+        {
+          "row_id": "p2c002.strict.inv001",
+          "title": "jit semantic transparency",
+          "preconditions": [
+            "Valid Jaxpr with well-typed inputs",
+            "Transform::Jit in transform stack"
+          ],
+          "guarantees": [
+            "jit(f)(args) produces identical outputs to f(args) for all valid inputs",
+            "Jit is a semantic identity: execute_with_transforms peels Jit and recurses on tail",
+            "jit(jit(f)) == jit(f): nested Jit adds no observable behavior",
+            "legacy_anchor=p2c002.api.jit"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "jit_semantic_divergence"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "transform_stack",
+              "jaxpr_fingerprint"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c002.strict.inv002",
+          "title": "grad scalar output requirement",
+          "preconditions": [
+            "Transform::Grad in transform stack",
+            "At least one argument provided"
+          ],
+          "guarantees": [
+            "First argument must be f64 scalar; NonScalarGradientInput raised otherwise",
+            "Function output must be scalar; NonScalarGradientOutput raised otherwise",
+            "Gradient is computed via reverse-mode AD (fj_ad::grad_first) for innermost grad",
+            "Gradient of f(x)=x^2 at x=a is 2a within floating-point tolerance",
+            "legacy_anchor=p2c002.api.grad"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "grad_non_scalar"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "arg_type",
+              "output_type"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c002.strict.inv003",
+          "title": "vmap leading-dimension consistency",
+          "preconditions": [
+            "Transform::Vmap in transform stack",
+            "At least one argument provided",
+            "First argument is tensor with rank >= 1"
+          ],
+          "guarantees": [
+            "All tensor arguments must have matching leading dimension length",
+            "VmapMismatchedLeadingDimension raised if any tensor arg has different leading dim",
+            "Scalar arguments are broadcast (replicated) across all mapped iterations",
+            "Empty leading dimension (length 0) raises EmptyVmapOutput",
+            "Output arity is consistent across all mapped iterations",
+            "legacy_anchor=p2c002.api.vmap.in_axes"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "vmap_dimension_mismatch"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "expected_leading_dim",
+              "actual_leading_dim",
+              "arg_index"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c002.strict.inv004",
+          "title": "Transform stacking order semantics",
+          "preconditions": [
+            "Transform stack contains 2+ transforms",
+            "Composition proof passes verify_transform_composition"
+          ],
+          "guarantees": [
+            "Transforms are peeled LIFO: outermost transform executes first via split_first",
+            "vmap(grad(f)) maps gradient over batch: each batch element gets independent grad",
+            "jit(grad(f)) compiles gradient function: Jit passes through, Grad computes derivative",
+            "jit(vmap(f)) compiles batched function: Jit passes through, Vmap iterates slices",
+            "grad(vmap(f)) with vector input fails: grad receives non-scalar from vmap",
+            "legacy_anchor=p2c002.transform_stacking.jit_grad"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "transform_order_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "transform_stack",
+              "stack_hash_hex"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c002.strict.inv005",
+          "title": "Transform composition proof validation",
+          "preconditions": [
+            "TraceTransformLedger with transform_stack and transform_evidence"
+          ],
+          "guarantees": [
+            "Evidence cardinality must match transform count exactly",
+            "All evidence strings must be non-empty",
+            "At most one Grad transform per stack",
+            "At most one Vmap transform per stack",
+            "Composition proof includes stack_signature and stack_hash_hex",
+            "Proof validation happens before cache key generation and before any execution",
+            "legacy_anchor=p2c002.composition.verify_transform_composition"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "composition_proof_failure"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "transform_count",
+              "evidence_count"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.strict.inv006",
+          "title": "Cache key determinism",
+          "preconditions": [
+            "DispatchRequest with mode, backend, jaxpr, transforms, compile_options"
+          ],
+          "guarantees": [
+            "Identical inputs produce identical cache keys across invocations",
+            "Cache key format is 'fjx-<sha256-hex>'",
+            "BTreeMap iteration order for compile_options is deterministic (lexicographic)",
+            "Jaxpr canonical fingerprint is stable across program restarts",
+            "Unknown incompatible features in strict mode cause fail-closed CacheKeyError before execution",
+            "legacy_anchor=p2c002.cache.key_identity"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "cache_key_nondeterminism"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "cache_key",
+              "jaxpr_fingerprint"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.strict.inv007",
+          "title": "Empty argument list rejection",
+          "preconditions": [
+            "Transform requires arguments (Grad or Vmap)"
+          ],
+          "guarantees": [
+            "EmptyArgumentList error raised before any transform logic executes",
+            "Error message includes the transform name that requires arguments",
+            "legacy_anchor=p2c002.api.grad"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "empty_argument_list"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "transform"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c002.strict.inv008",
+          "title": "Error boundary tagging",
+          "preconditions": [
+            "Any error occurs during dispatch pipeline"
+          ],
+          "guarantees": [
+            "All errors are wrapped in DispatchError with subsystem prefix",
+            "Cache errors wrapped as DispatchError::Cache(CacheKeyError)",
+            "Interpreter errors wrapped as DispatchError::Interpreter(InterpreterError)",
+            "Composition errors wrapped as DispatchError::TransformInvariant(TransformCompositionError)",
+            "Runtime errors wrapped as DispatchError::TransformExecution(TransformExecutionError)",
+            "legacy_anchor=p2c002.traceback_util.filtering"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "error_boundary_leak"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "error_boundary",
+              "inner_error"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.strict.inv009",
+          "title": "Evidence ledger append on every dispatch",
+          "preconditions": [
+            "Dispatch completes successfully"
+          ],
+          "guarantees": [
+            "Exactly one LedgerEntry appended per successful dispatch call",
+            "Entry includes: eqn_count signal, transform_depth signal, transform_stack_hash signal",
+            "decision_id matches the computed cache key string",
+            "legacy_anchor=p2c002.dispatch.request_normalization"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "ledger_append_failure"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "decision_id",
+              "signal_count"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.strict.inv010",
+          "title": "Vmap output stacking correctness",
+          "preconditions": [
+            "Vmap executes over L mapped iterations",
+            "Each iteration produces consistent output arity"
+          ],
+          "guarantees": [
+            "Output tensors are stacked along axis 0 via TensorValue::stack_axis0",
+            "Output shape is [L, ...inner_shape] for each output position",
+            "VmapInconsistentOutputArity raised if any iteration produces different output count",
+            "legacy_anchor=p2c002.api.vmap"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "vmap_output_stacking_failure"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "expected_arity",
+              "actual_arity",
+              "iteration_index"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c002.strict.inv011",
+          "title": "Grad finite-difference fallback for nested transforms",
+          "preconditions": [
+            "Transform::Grad with non-empty tail (remaining transforms after Grad)"
+          ],
+          "guarantees": [
+            "Finite-difference gradient computed with epsilon=1e-6",
+            "Central difference formula: (f(x+eps) - f(x-eps)) / (2*eps)",
+            "Both f(x+eps) and f(x-eps) must produce scalar outputs",
+            "Fallback activates only when symbolic AD cannot handle the full stack",
+            "legacy_anchor=p2c002.api.grad"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "grad_finite_diff_failure"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "epsilon",
+              "tail_transforms"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.strict.inv012",
+          "title": "Strict mode unknown feature rejection",
+          "preconditions": [
+            "DispatchRequest with mode=Strict",
+            "unknown_incompatible_features is non-empty"
+          ],
+          "guarantees": [
+            "CacheKeyError::UnknownIncompatibleFeatures raised immediately",
+            "No execution occurs; no cache entry created",
+            "Error includes the list of unknown feature strings",
+            "legacy_anchor=p2c002.cache.key_identity"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "strict_unknown_features"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "unknown_features"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        }
+      ]
+    },
+    {
+      "mode": "hardened",
+      "contract_rows": [
+        {
+          "row_id": "p2c002.hardened.inv013",
+          "title": "Unknown feature inclusion in hardened cache key",
+          "preconditions": [
+            "DispatchRequest with mode=Hardened",
+            "unknown_incompatible_features is non-empty"
+          ],
+          "guarantees": [
+            "Unknown features are included in the canonical hash payload",
+            "Execution proceeds normally with auditable cache key",
+            "Different unknown feature sets produce different cache keys",
+            "Audit trail preserves the exact unknown feature strings"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_unknown_features_included"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "unknown_features",
+              "cache_key"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.hardened.inv014",
+          "title": "Non-scalar grad output auto-reduction",
+          "preconditions": [
+            "Transform::Grad produces non-scalar output in hardened mode"
+          ],
+          "guarantees": [
+            "Non-scalar gradient output is automatically reduced via sum to scalar",
+            "Reduction logged to evidence ledger with original output shape",
+            "Resulting scalar gradient is semantically equivalent to sum(grad_vector)",
+            "No silent data loss: full gradient vector available in audit log"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_grad_auto_reduce"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "original_output_shape",
+              "reduced_value"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.hardened.inv015",
+          "title": "Mismatched in_axes clamping",
+          "preconditions": [
+            "Vmap receives tensor args with differing leading dimensions in hardened mode"
+          ],
+          "guarantees": [
+            "Leading dimension clamped to minimum across all mapped tensor args",
+            "Excess elements in longer tensors are silently truncated",
+            "Clamping event logged with original and clamped dimensions",
+            "Output corresponds to clamped (minimum) batch size"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_vmap_dim_clamp"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "original_dims",
+              "clamped_dim"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.hardened.inv016",
+          "title": "Unknown keyword argument tolerance",
+          "preconditions": [
+            "DispatchRequest contains unrecognized compile_options keys in hardened mode"
+          ],
+          "guarantees": [
+            "Unknown compile_options keys are ignored (not used in computation)",
+            "Unknown keys are still included in cache key hash for auditability",
+            "Warning logged with list of ignored keys",
+            "Execution proceeds with only recognized options applied"
+          ],
+          "failure_behavior": {
+            "policy": "warn_and_continue",
+            "reason_code": "hardened_unknown_compile_options"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "unknown_keys",
+              "recognized_keys"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c002.hardened.inv017",
+          "title": "Recursive JIT identity collapse",
+          "preconditions": [
+            "Transform stack contains multiple Transform::Jit entries"
+          ],
+          "guarantees": [
+            "All JIT transforms beyond the first are treated as identity (pass-through)",
+            "Collapse logged with nesting depth count",
+            "Semantics unchanged: jit(jit(f)) == jit(f) == f for interpreter execution"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_recursive_jit_collapse"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "jit_nesting_depth"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    }
+  ],
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "allowlisted_repair"
+  },
+  "invariants": [
+    {
+      "invariant_id": "p2c002.strict.inv001",
+      "statement": "JIT is a semantic identity: jit(f)(args) produces outputs identical to f(args) for all well-typed inputs.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-002/legacy_anchor_map.v1.json",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv002",
+      "statement": "grad requires scalar first argument and scalar function output; non-scalar triggers deterministic error before any AD computation.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-002/legacy_anchor_map.v1.json",
+        "crates/fj-dispatch/src/lib.rs",
+        "crates/fj-ad/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv003",
+      "statement": "vmap requires all mapped tensor arguments to have matching leading dimension; mismatches raise VmapMismatchedLeadingDimension.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-002/legacy_anchor_map.v1.json",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv004",
+      "statement": "Transform stacking follows LIFO order: outermost transform executes first. vmap(grad(f)) computes per-example gradients; grad(vmap(f)) fails for non-scalar batch output.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-002/legacy_anchor_map.v1.json",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv005",
+      "statement": "Transform composition proof must be validated (evidence cardinality, non-empty evidence, transform uniqueness) before cache key generation and execution.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-002/legacy_anchor_map.v1.json",
+        "crates/fj-core/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv006",
+      "statement": "Cache key generation is deterministic: identical (mode, backend, jaxpr, transforms, options) always produces the same 'fjx-<sha256>' key.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-002/legacy_anchor_map.v1.json",
+        "crates/fj-cache/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv007",
+      "statement": "All dispatch errors are boundary-tagged with their originating subsystem (cache, interpreter, transform invariant, or transform execution).",
+      "proof_artifact_refs": [
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv008",
+      "statement": "Exactly one evidence ledger entry is appended per successful dispatch call with eqn_count, transform_depth, and stack_hash signals.",
+      "proof_artifact_refs": [
+        "crates/fj-dispatch/src/lib.rs",
+        "crates/fj-ledger/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv009",
+      "statement": "Vmap output stacking preserves iteration order: output[i] corresponds to the i-th mapped iteration's result, stacked along axis 0.",
+      "proof_artifact_refs": [
+        "artifacts/phase2c/FJ-P2C-002/legacy_anchor_map.v1.json",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv010",
+      "statement": "Finite-difference fallback uses central difference with epsilon=1e-6 and requires both perturbed evaluations to produce scalar output.",
+      "proof_artifact_refs": [
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.strict.inv011",
+      "statement": "Strict mode rejects unknown incompatible features before any execution or cache entry creation.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    },
+    {
+      "invariant_id": "p2c002.hardened.inv012",
+      "statement": "Hardened mode includes unknown features in the canonical hash and proceeds with execution, producing an auditable cache key.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs",
+        "crates/fj-dispatch/src/lib.rs"
+      ]
+    }
+  ]
+}
