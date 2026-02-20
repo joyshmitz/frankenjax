@@ -112,19 +112,26 @@ pub fn build_cache_key_ref(input: &CacheKeyInputRef<'_>) -> Result<CacheKey, Cac
     })
 }
 
+/// Map CompatibilityMode to its Debug string representation (matching canonical_payload format).
+#[inline]
+fn mode_str(mode: CompatibilityMode) -> &'static str {
+    match mode {
+        CompatibilityMode::Strict => "Strict",
+        CompatibilityMode::Hardened => "Hardened",
+    }
+}
+
 /// Write the canonical payload directly into a Digest, avoiding intermediate
 /// String allocation. Layout matches `canonical_payload_ref` exactly.
+#[inline]
 fn hash_canonical_payload_ref(hasher: &mut Sha256, input: &CacheKeyInputRef<'_>) {
-    use std::fmt::Write;
-
     // mode=<mode>|backend=<backend>|transforms=<t1,t2,...>|compile=<k1=v1;k2=v2>|hook=<hook>|unknown=<u1,u2>|jaxpr=<fp>
-    let mut buf = String::new();
-    let _ = write!(
-        &mut buf,
-        "mode={:?}|backend={}|transforms=",
-        input.mode, input.backend
-    );
-    hasher.update(buf.as_bytes());
+    // Zero-allocation: hash each component directly into the SHA-256 state.
+    hasher.update(b"mode=");
+    hasher.update(mode_str(input.mode).as_bytes());
+    hasher.update(b"|backend=");
+    hasher.update(input.backend.as_bytes());
+    hasher.update(b"|transforms=");
 
     for (i, t) in input.transform_stack.iter().enumerate() {
         if i > 0 {

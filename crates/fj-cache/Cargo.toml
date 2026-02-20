@@ -8,5 +8,10 @@ fj-core = { path = "../fj-core" }
 sha2 = "0.10.9"
 
 [dev-dependencies]
+criterion = "0.8"
 fj-test-utils = { path = "../fj-test-utils" }
 proptest = { workspace = true }
+
+[[bench]]
+name = "cache_baseline"
+harness = false
