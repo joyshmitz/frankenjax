@@ -25,9 +25,12 @@ pub struct EffectToken {
 /// V1 scope: tracking only — records which effects were observed and in what
 /// order. No execution ordering is enforced (effects modeled via evidence
 /// ledger signals rather than runtime token threading).
+///
+/// Uses a Vec instead of BTreeMap since transform stacks are small (typically
+/// 1-3 elements) and insertion-order tracking eliminates the need for sorting.
 #[derive(Debug, Clone)]
 pub struct EffectContext {
-    tokens: BTreeMap<String, EffectToken>,
+    tokens: Vec<EffectToken>,
     next_sequence: u64,
 }
 
@@ -35,7 +38,7 @@ impl EffectContext {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            tokens: BTreeMap::new(),
+            tokens: Vec::new(),
             next_sequence: 0,
         }
     }
@@ -43,21 +46,21 @@ impl EffectContext {
     /// Record observation of a named effect. Returns the token with its
     /// sequence number in the observation order.
     pub fn thread_token(&mut self, effect_name: &str) -> EffectToken {
+        let name = effect_name.to_owned();
         let token = EffectToken {
-            effect_name: effect_name.to_owned(),
+            effect_name: name,
             sequence_number: self.next_sequence,
         };
         self.next_sequence += 1;
-        self.tokens.insert(effect_name.to_owned(), token.clone());
+        self.tokens.push(token.clone());
         token
     }
 
     /// Finalize and return all observed effect tokens in sequence order.
+    /// Tokens are already in insertion order, so no sorting needed.
     #[must_use]
     pub fn finalize(self) -> Vec<EffectToken> {
-        let mut tokens: Vec<EffectToken> = self.tokens.into_values().collect();
-        tokens.sort_by_key(|t| t.sequence_number);
-        tokens
+        self.tokens
     }
 
     /// Number of distinct effects observed.
@@ -266,12 +269,20 @@ fn execute_with_transforms(
     transforms: &[Transform],
     args: &[Value],
 ) -> Result<Vec<Value>, DispatchError> {
-    let Some((head, tail)) = transforms.split_first() else {
+    // Skip leading Jit transforms (no-op pass-through) to find the first
+    // non-Jit transform, avoiding recursive stack frames for Jit chains.
+    let non_jit_start = transforms
+        .iter()
+        .position(|t| *t != Transform::Jit)
+        .unwrap_or(transforms.len());
+
+    let remaining = &transforms[non_jit_start..];
+    let Some((head, tail)) = remaining.split_first() else {
         return eval_jaxpr(root_jaxpr, args).map_err(DispatchError::from);
     };
 
     match head {
-        Transform::Jit => execute_with_transforms(root_jaxpr, tail, args),
+        Transform::Jit => unreachable!("Jit transforms were skipped above"),
         Transform::Grad => execute_grad(root_jaxpr, tail, args),
         Transform::Vmap => execute_vmap(root_jaxpr, tail, args),
     }
@@ -427,6 +438,7 @@ fn execute_vmap(
     Ok(outputs)
 }
 
+#[inline]
 fn heuristic_posterior_abandoned(ledger: &TraceTransformLedger) -> f64 {
     let eqn_factor = ledger.root_jaxpr.equations.len() as f64;
     let depth_factor = ledger.transform_stack.len() as f64;

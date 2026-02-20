@@ -1,0 +1,74 @@
+{
+  "optimization_name": "iterative_transform_execution_and_effect_token_pooling",
+  "date": "2026-02-20",
+  "description": "Three optimizations applied: (1) iterative Jit-skip in execute_with_transforms avoids recursive frames for Jit chains, (2) EffectContext uses Vec instead of BTreeMap eliminating sort overhead and double String::to_owned, (3) heuristic_posterior_abandoned inlined",
+  "benchmarks": {
+    "dispatch_latency/jit/scalar_add": {
+      "before_us": 1.82,
+      "after_us": 1.39,
+      "delta_pct": -23.6
+    },
+    "dispatch_latency/jit/scalar_square_plus_linear": {
+      "before_us": 2.33,
+      "after_us": 1.91,
+      "delta_pct": -18.0
+    },
+    "dispatch_latency/jit/vector_add_one": {
+      "before_us": 2.14,
+      "after_us": 1.73,
+      "delta_pct": -19.2
+    },
+    "dispatch_latency/grad/scalar_square": {
+      "before_us": 2.10,
+      "after_us": 1.76,
+      "delta_pct": -16.2
+    },
+    "dispatch_latency/vmap/vector_add_one": {
+      "before_us": 2.53,
+      "after_us": 2.10,
+      "delta_pct": -17.0
+    },
+    "dispatch_latency/vmap/rank2_add_one": {
+      "before_us": 3.85,
+      "after_us": 2.94,
+      "delta_pct": -23.6
+    },
+    "dispatch_latency/jit_grad/scalar_square": {
+      "before_us": 2.21,
+      "after_us": 1.60,
+      "delta_pct": -27.6
+    },
+    "dispatch_latency/vmap_grad/vector_square": {
+      "before_us": 2.88,
+      "after_us": 2.31,
+      "delta_pct": -19.8
+    }
+  },
+  "isomorphism_proof": {
+    "gradient_values_unchanged": true,
+    "effect_ordering_preserved": true,
+    "transform_composition_proofs_identical": true,
+    "workspace_tests_passing": 282,
+    "test_failures": 0
+  },
+  "optimizations_applied": [
+    {
+      "name": "iterative_jit_skip",
+      "file": "crates/fj-dispatch/src/lib.rs",
+      "function": "execute_with_transforms",
+      "description": "Skip leading Jit transforms iteratively instead of recursing through each one. Jit is a no-op pass-through, so the entire Jit chain can be skipped in O(1)."
+    },
+    {
+      "name": "effect_context_vec_storage",
+      "file": "crates/fj-dispatch/src/lib.rs",
+      "struct": "EffectContext",
+      "description": "Replace BTreeMap<String, EffectToken> with Vec<EffectToken>. Tokens are already tracked in insertion order, eliminating BTreeMap overhead and the need for post-sort in finalize(). Single String::to_owned() per token instead of two."
+    },
+    {
+      "name": "inline_heuristic_posterior",
+      "file": "crates/fj-dispatch/src/lib.rs",
+      "function": "heuristic_posterior_abandoned",
+      "description": "Mark heuristic_posterior_abandoned as #[inline] to avoid function call overhead for this simple arithmetic computation."
+    }
+  ]
+}
