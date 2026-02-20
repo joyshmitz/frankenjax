@@ -469,3 +469,263 @@ Provisional budgets from section 8 (pending empirical calibration):
 - peak RSS regression: <= +10%
 
 These budgets apply to the Rust implementation relative to equivalent legacy workload classes and must be validated against hotspot families H1-H5 above.
+
+## 21. Concurrency, Lifecycle Semantics, and Ordering Guarantees (DOC-PASS-06)
+
+### 21.1 Legacy Threading Architecture
+
+Legacy JAX uses thread-local state as its primary concurrency mechanism. Trace state, JIT compilation context, and runtime token ordering are all bound to thread-local storage.
+
+| Mechanism | Location | Purpose | Thread-safety model |
+|---|---|---|---|
+| `TracingContext(threading.local)` | `jax/_src/core.py:1303-1346` | trace state per thread | thread-local isolation; no cross-thread sharing |
+| `_initialize_jax_jit_thread_local_state` | `jax/_src/core.py:1446-1478` | C++ JIT state init callback | spawned threads start with None state; explicit init required |
+| `RuntimeTokenSet(threading.local)` | `jax/_src/dispatch.py:118-150` | ordered effect token management | per-thread token dicts; device ordering may vary across threads |
+| `_backend_lock = threading.Lock()` | `jax/_src/xla_bridge.py:265` | backend registration guard | mutex protects global backend registry |
+| `_plugin_lock = threading.Lock()` | `jax/_src/xla_bridge.py:267` | plugin initialization guard | mutex protects plugin init |
+| `_cache_initialized_mutex` | `jax/_src/compilation_cache.py:60` | compilation cache init guard | double-checked locking pattern (lines 75-80) |
+
+### 21.2 Trace Lifecycle Ordering
+
+Legacy trace lifecycle is strictly sequential within a thread:
+
+1. `trace_state` initialized (thread-local).
+2. Trace context pushed via `TracingContext`.
+3. Equations appended in execution order.
+4. Trace finalized by converting to Jaxpr.
+5. `reset_trace_state()` cleans up with `trace_state_clean()` check (`core.py:1460-1463`).
+
+Non-negotiable ordering: equation append order equals execution order; reordering is not semantics-preserving.
+
+### 21.3 Effect Token Ordering
+
+Runtime effect ordering (`dispatch.py:118-150`) uses per-device token dicts. The legacy code acknowledges ordering fragility:
+- Comment at line 140-142: "The order of devices may change... This might still be buggy in a multi-process SPMD scenario."
+- Token assignment order equals device enumeration order, not user-specified order.
+
+### 21.4 Cache Concurrency and Memoization
+
+Legacy uses `@cache()`, `@weakref_lru_cache`, and `@functools.lru_cache` extensively across core modules (`core.py:1756, 2145, 2173, 2341, 3165`). These caches are:
+- Thread-safe by default (CPython GIL provides implicit synchronization for dict operations).
+- Not explicitly designed for multi-threaded contention (no fine-grained locking on cache read/write paths beyond the compilation cache mutex).
+
+### 21.5 Fork Incompatibility
+
+Legacy JAX explicitly warns about fork safety (`xla_bridge.py:150-154`):
+- `os.fork()` is incompatible with JAX's multithreaded runtime and will likely deadlock.
+- `_at_fork()` handler detects fork usage and issues warning.
+- FrankenJAX can inherit this constraint or choose to enforce fail-closed on fork detection.
+
+### 21.6 Porting Implications
+
+FrankenJAX current Rust execution is single-threaded by design (`EXISTING_JAX_STRUCTURE.md` section 14). If parallelism is introduced:
+- Trace state must remain thread-isolated (no shared mutable trace frames).
+- Effect token ordering must be made explicit and deterministic.
+- Cache paths must use explicit synchronization (not GIL-equivalent).
+- Fork detection should be fail-closed in both strict and hardened modes.
+
+## 22. Error Taxonomy, Failure Modes, and Recovery Semantics (DOC-PASS-07)
+
+### 22.1 Legacy Error Class Hierarchy
+
+| Error class | Base | Location | Trigger domain |
+|---|---|---|---|
+| `_JAXErrorMixin` | (mixin) | `jax/_src/errors.py:22-33` | base mixin providing error page links |
+| `JAXTypeError` | `TypeError` | `jax/_src/errors.py:37` | type-level violations in JAX context |
+| `JAXIndexError` | `IndexError` | `jax/_src/errors.py:42` | index-level violations |
+| `ConcretizationTypeError` | `JAXTypeError` | `jax/_src/errors.py:47-130` | tracer vs concrete value conflicts (extensive docs) |
+| `NonConcreteBooleanIndexError` | `JAXIndexError` | `jax/_src/errors.py:138` | boolean masking in JIT contexts |
+| `TracerArrayConversionError` | `JAXTypeError` | `jax/_src/errors.py:230` | array conversion from tracers |
+| `TracerIntegerConversionError` | `JAXTypeError` | `jax/_src/errors.py:318` | integer conversion from tracers |
+| `TracerBoolConversionError` | `ConcretizationTypeError` | `jax/_src/errors.py:414` | boolean conversion from tracers |
+| `UnexpectedTracerError` | `JAXTypeError` | `jax/_src/errors.py:526` | tracer leaked outside transform scope |
+| `KeyReuseError` | `JAXTypeError` | `jax/_src/errors.py:661` | PRNG key reuse detection |
+| `JaxprTypeError` | `TypeError` | `jax/_src/core.py:3240` | Jaxpr well-formedness validation |
+| `ShardingTypeError` | `Exception` | `jax/_src/core.py:2038` | sharding inconsistency |
+| `SpecMatchError` | `Exception` | `jax/_src/interpreters/batching.py:791` | batch spec mismatches |
+| `TypePromotionError` | `ValueError` | `jax/_src/dtypes.py:725` | dtype promotion conflicts |
+| `JaxValueError` | `ValueError` | `jax/_src/error_check.py:42` | runtime value checks |
+
+### 22.2 Jaxpr Validation Error Surface
+
+The `JaxprTypeError` in `core.py:3247-3428` covers comprehensive IR validation:
+- Variable binding violations (lines 3313, 3334): duplicate or unbound vars.
+- Call primitive parameter mismatches (lines 3466, 3475): incorrect call_jaxpr params.
+- Map primitive parameter validation (lines 3494-3510): axis/in_axes shape checks.
+- Effect consistency checks (lines 3394-3414): effect set mismatch between jaxpr declaration and equation effects.
+
+### 22.3 Legacy Failure Modes
+
+| Failure mode | Error type | Recovery | User visibility |
+|---|---|---|---|
+| Tracer escapes transform scope | `UnexpectedTracerError` | none; program terminates | direct error with scope context |
+| Concrete value required in JIT | `ConcretizationTypeError` | restructure code to avoid data-dependent control flow | direct error with detailed guidance |
+| AD rule not implemented | `NotImplementedError` (`ad.py:324-326`) | none for that primitive | blocks gradient computation |
+| Batch spec mismatch | `SpecMatchError` | fix input shapes/axes | blocks vmap execution |
+| Jaxpr validation failure | `JaxprTypeError` | fix program construction | blocks lowering/execution |
+| PRNG key reused | `KeyReuseError` | use `jax.random.split` | direct warning/error |
+
+### 22.4 Legacy-to-Rust Error Correspondence
+
+| Legacy error | Rust equivalent | Parity status |
+|---|---|---|
+| `JaxprTypeError` | `fj-core::JaxprValidationError` | covered (binding, arity, shape checks) |
+| `ConcretizationTypeError` | not applicable (no tracer-level concretization yet) | deferred |
+| `UnexpectedTracerError` | not applicable (no tracer leak detection yet) | deferred |
+| AD `NotImplementedError` | `fj-ad::AdError` | partially covered (scalar constraints) |
+| `SpecMatchError` (batching) | `fj-dispatch::TransformExecutionError` | covered (vmap shape checks) |
+| cache key incompatibility | `fj-cache::CacheKeyError::UnknownIncompatibleFeatures` | covered (strict mode) |
+
+## 23. Security and Compatibility Edge Cases (DOC-PASS-08)
+
+### 23.1 Legacy Undefined Behavior Zones
+
+| Zone | Location | Description | Risk level |
+|---|---|---|---|
+| Tracer const assertion disabled | `core.py:265` | TODO: "assert not any(isinstance(c, Tracer) for c in consts)" — validation bypassed | medium; const contamination possible |
+| Jaxpr context hack | `core.py:317, 351` | TODO: "remove this hack when we add contexts to jaxpr" | medium; jaxpr metadata incomplete |
+| JIT disable path | `dispatch.py:87-93` | TODO about primitive application when JIT disabled | low; debug path only |
+| Multi-process SPMD token ordering | `dispatch.py:140-142` | "This might still be buggy in a multi-process SPMD scenario" | high; ordering corruption possible |
+| AD pmap with out_axes=None | `ad.py:1268` | "autodiff of pmap functions with out_axes=None is not supported" | medium; silent failure possible |
+| Tracer leak false positives | `core.py:1472-1492` | `TRACER_LEAK_DEBUGGER_WARNING` — leak detection produces false positives under debuggers | low; diagnostic only |
+| Partial-eval constant pruning | `partial_eval.py:149` | "Think twice before changing this constant argument pruning!" — fragile optimization | medium; behavioral change risk |
+
+### 23.2 Legacy Compatibility-Sensitive Surfaces
+
+| Surface | Risk | Legacy handling |
+|---|---|---|
+| Cache key with unknown metadata | cache confusion | no explicit fail-closed; metadata silently included in hash |
+| Transform composition ordering | semantic drift | verified but only for documented compositions |
+| Backend version drift | compilation mismatch | backend version included in cache key material |
+| Plugin registration order | undefined execution order | mutex-guarded but order-dependent |
+| Fork after JAX init | deadlock | warning issued but not fail-closed |
+
+### 23.3 FrankenJAX Strict/Hardened Posture for Legacy Edge Cases
+
+FrankenJAX strengthens the legacy posture at each edge case:
+- Unknown cache metadata: strict fail-closed (vs legacy silent inclusion).
+- Transform ordering: explicit composition proof required before execution.
+- Fork detection: can choose fail-closed in strict mode.
+- Tracer const validation: can enable the assertion that legacy bypasses.
+- AD undefined primitives: explicit `EvalError::Unsupported` instead of `NotImplementedError`.
+
+## 24. Unit/E2E Test Corpus and Logging Evidence Crosswalk (DOC-PASS-09)
+
+### 24.1 Legacy Test Corpus Inventory
+
+Total test files: 155+ in `tests/` directory.
+
+| Test file | Lines | Approx test count | Coverage domain |
+|---|---|---|---|
+| `tests/pjit_test.py` | 11,166 | ~180 | partitioned JIT |
+| `tests/api_test.py` | 7,983 | ~515 | core API (jit, grad, vmap) |
+| `tests/lax_numpy_test.py` | 6,531 | ~200 | NumPy compatibility |
+| `tests/shard_map_test.py` | 5,626 | ~150 | sharding operations |
+| `tests/lax_test.py` | 5,433 | ~300 | LAX primitive operations |
+| `tests/custom_api_test.py` | 4,922 | ~227 | custom primitives and transforms |
+| `tests/batching_test.py` | 2,300+ | ~4 (parameterized) | vectorization/vmap |
+| `tests/core_test.py` | 1,800+ | ~33 | core tracing and Jaxpr validation |
+| `tests/jaxpr_effects_test.py` | 1,139 | ~50 | effects system and ordering |
+
+### 24.2 Legacy Test Organization Patterns
+
+Tests use `absltest` framework with:
+- `jtu.request_cpu_devices(N)` for multi-device setup.
+- Parameterized test methods via `@jtu.sample_product`.
+- Threading-aware test setup (`import threading` in api_test.py:36).
+- Custom effect classes for isolated testing (`jaxpr_effects_test.py:49-74`).
+
+Subdirectory specialization:
+- `tests/config/` — configuration tests.
+- `tests/mosaic/` — GPU-specific Pallas/Mosaic tests (11+ files).
+
+### 24.3 Legacy-to-FrankenJAX Test Mapping
+
+| Legacy oracle family | Legacy anchor | FrankenJAX anchor | Coverage status |
+|---|---|---|---|
+| API transform contracts | `tests/api_test.py` | `fj-dispatch` + `fj-conformance/tests/e2e.rs` | partial (jit/grad/vmap covered) |
+| Jaxpr construction/validation | `tests/core_test.py`, `tests/jaxpr_effects_test.py` | `fj-core` + `fj-conformance/tests/ir_core_oracle.rs` | strong (validation suite present) |
+| Primitive semantics | `tests/lax_test.py` | `fj-lax` inline tests + `fj-conformance/tests/transforms.rs` | partial (25+ primitives covered; shape ops new) |
+| AD correctness | `tests/lax_autodiff_test.py` | `fj-ad` inline tests | partial (scalar grad covered) |
+| Batching semantics | `tests/batching_test.py` | `fj-dispatch` vmap tests | partial (leading-axis vmap covered) |
+| Cache behavior | `tests/compilation_cache_test.py`, `tests/cache_key_test.py` | `fj-cache` + `fj-dispatch` strict mode tests | partial (key derivation covered; lifecycle gap) |
+| Partial eval/staging | `tests/api_test.py` (staging portions) | `fj-conformance/tests/pe_staging_oracle.rs`, `fj-conformance/tests/e2e_p2c003.rs` | strong (roundtrip + metamorphic) |
+
+### 24.4 Coverage Gaps (Legacy Oracle)
+
+| Priority | Gap | Impact |
+|---|---|---|
+| P0 | No FrankenJAX test parity for legacy `api_test.py` ~515 tests | transform API behavior coverage incomplete |
+| P0 | No FrankenJAX test parity for `lax_test.py` ~300 tests | primitive coverage relies on inline tests only |
+| P1 | No effect system test equivalent (no effects model in Rust yet) | effects ordering untested |
+| P1 | Multi-device test infrastructure missing | single-device only |
+| P2 | NumPy compatibility layer (`lax_numpy_test.py`) entirely deferred | out of scope for V1 |
+
+## 25. Pass-B Closure Crosswalk (DOC-PASS-11)
+
+### 25.1 Section Coverage Mapping
+
+| DOC-PASS objective | Section in this document | Content type |
+|---|---|---|
+| Legacy complexity characterization | 20 (DOC-PASS-05) | complexity tables, memory growth, hotspot families |
+| Concurrency/lifecycle semantics | 21 (DOC-PASS-06) | threading architecture, trace lifecycle, fork incompatibility |
+| Error taxonomy and failure modes | 22 (DOC-PASS-07) | error hierarchy, failure modes, legacy-to-Rust correspondence |
+| Security/compatibility edge cases | 23 (DOC-PASS-08) | undefined zones, compatibility surfaces, hardened posture |
+| Test corpus and logging crosswalk | 24 (DOC-PASS-09) | legacy test inventory, coverage mapping, priority gaps |
+| Data model and invariant mapping | 18 (DOC-PASS-03) | canonical data model, state transitions, violation semantics |
+| Execution-path narratives | 19 (DOC-PASS-04) | end-to-end workflows with branch handling |
+
+### 25.2 Expansion Completeness Assessment
+
+Pass-B expansion adds sections 20-25, bringing total DOC-PASS-integrated content to 8 sections (18-25). Combined with the original sections 0-17, the document now covers:
+- Quantitative legacy inventory and subsystem extraction (sections 0-12).
+- Phase-2C contracts, budgets, and governance (sections 13-17).
+- Deep behavior analysis: data model, execution paths, complexity, concurrency, errors, security, testing (sections 18-24).
+- Closure crosswalk and confidence annotations (sections 25-26).
+
+### 25.3 Remaining Gaps for Pass-C
+
+- No legacy profiling data (empirical benchmarks not yet collected).
+- No formal proof artifacts for invariant obligations (section 4 obligations remain contractual).
+- Effect system documentation deferred (no effects model in Rust yet).
+- Multi-device/distributed semantics deferred (out of V1 scope).
+
+## 26. Section-Level Confidence Annotations (DOC-PASS-14)
+
+Confidence scale:
+- `High`: directly validated against repository sources with low interpretation risk.
+- `Medium-High`: source-anchored synthesis with limited inference.
+- `Medium`: source-anchored but sensitive to fixture churn or implementation changes.
+
+| Section | Confidence | Basis | Revalidation trigger |
+|---|---|---|---|
+| `0. Mission and Completion Criteria` | `High` | project-level contract, stable | mission statement revision |
+| `1. Source-of-Truth Crosswalk` | `High` | path references validated | path relocation or legacy refresh |
+| `2. Quantitative Legacy Inventory` | `High` | measured file counts | legacy snapshot update |
+| `3. Subsystem Extraction Matrix` | `Medium-High` | legacy-to-crate mapping is analytical | crate boundary changes |
+| `4. Alien-Artifact Invariant Ledger` | `Medium` | formal obligations declared, not yet proven | proof artifact generation |
+| `5. Native/XLA/FFI Boundary Register` | `Medium-High` | source-anchored boundary map | backend/FFI surface changes |
+| `6. Compatibility and Security Doctrine` | `Medium-High` | doctrine is stable; enforcement evolving | strict/hardened policy revision |
+| `7. Conformance Program` | `Medium` | fixture families defined but corpus growing | fixture family additions |
+| `8. Extreme Optimization Program` | `Medium` | budgets provisional, pending calibration | first benchmark cycle |
+| `9. RaptorQ-Everywhere Artifact Contract` | `High` | implemented and tested in `fj-conformance` | durability schema changes |
+| `10. Phase-2 Execution Backlog` | `Medium` | backlog reflects current priorities | bead graph evolution |
+| `11. Residual Gaps and Risks` | `Medium` | risk assessment current at writing time | gap resolution or new risks |
+| `12. Deep-Pass Hotspot Inventory` | `High` | measured from legacy tree | legacy snapshot update |
+| `13. Phase-2C Extraction Payload Contract` | `High` | stable contract template | ticket format changes |
+| `14. Strict/Hardened Compatibility Drift Budgets` | `Medium` | budgets defined but uncalibrated | empirical calibration |
+| `15. Extreme-Software-Optimization Execution Law` | `Medium-High` | governance loop defined; sentinel workloads pending | workload availability |
+| `16. RaptorQ Evidence Topology` | `High` | naming and failure choreography implemented | schema revision |
+| `17. Phase-2C Exit Checklist` | `Medium-High` | checklist reflects current exit criteria | criteria revision |
+| `18. Data Model, State, and Invariant Mapping` | `Medium-High` | source-anchored across legacy and Rust | IR/runtime model expansion |
+| `19. Execution-Path Tracing and Control-Flow Narratives` | `Medium` | narratives depend on evolving orchestration | dispatch/runtime flow rewrites |
+| `20. Complexity, Performance, and Memory Characterization` | `Medium-High` | complexity classes from code-level analysis | algorithm changes or new hotspots |
+| `21. Concurrency/Lifecycle Semantics` | `Medium-High` | anchored to concrete threading primitives | parallelism introduction |
+| `22. Error Taxonomy, Failure Modes, and Recovery` | `Medium-High` | error classes anchored to source definitions | new error domains |
+| `23. Security/Compatibility Edge Cases` | `Medium` | undefined zones documented but expected to shrink | edge case resolution |
+| `24. Unit/E2E Test Corpus Crosswalk` | `Medium` | mapped to current test corpus, actively growing | new tests or renamed scenarios |
+| `25. Pass-B Closure Crosswalk` | `Medium-High` | internally consistent with all preceding sections | future pass additions |
+
+Pass-B expansion note:
+- This confidence table should be refreshed when bead `bd-3dl.23.14` (final consistency/sign-off) runs.
+- Sections marked `Medium` are highest priority for revalidation during Pass-C deep dive.
