@@ -85,7 +85,7 @@ fn forward_with_tape(jaxpr: &Jaxpr, args: &[Value]) -> Result<ForwardResult, AdE
             }
         }
 
-        let output = eval_primitive(eqn.primitive, &resolved)
+        let output = eval_primitive(eqn.primitive, &resolved, &eqn.params)
             .map_err(|e| AdError::EvalFailed(e.to_string()))?;
 
         let out_var = eqn.outputs[0];
@@ -359,9 +359,11 @@ mod tests {
 
         // Numerical (finite-diff)
         let eps = 1e-6;
+        let no_p = BTreeMap::new();
         let plus = fj_lax::eval_primitive(
             Primitive::Mul,
             &[Value::scalar_f64(x + eps), Value::scalar_f64(x + eps)],
+            &no_p,
         )
         .unwrap()
         .as_f64_scalar()
@@ -369,6 +371,7 @@ mod tests {
         let minus = fj_lax::eval_primitive(
             Primitive::Mul,
             &[Value::scalar_f64(x - eps), Value::scalar_f64(x - eps)],
+            &no_p,
         )
         .unwrap()
         .as_f64_scalar()

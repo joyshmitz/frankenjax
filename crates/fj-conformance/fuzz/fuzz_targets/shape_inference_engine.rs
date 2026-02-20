@@ -16,7 +16,8 @@ fuzz_target!(|data: &[u8]| {
     for _ in 0..runtime_arity {
         runtime_inputs.push(common::sample_value(&mut cursor));
     }
-    let _ = eval_primitive(primitive, &runtime_inputs);
+    let params = sample_primitive_params(&mut cursor, primitive);
+    let _ = eval_primitive(primitive, &runtime_inputs, &params);
 
     let trace_arity = if cursor.take_bool() {
         runtime_arity

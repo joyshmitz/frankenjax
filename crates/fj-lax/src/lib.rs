@@ -1177,13 +1177,19 @@ fn infer_dtype(elements: &[Literal]) -> DType {
 #[cfg(test)]
 mod tests {
     use super::{EvalError, eval_primitive};
-    use fj_core::{Primitive, Value};
+    use fj_core::{DType, Primitive, Value};
+    use std::collections::BTreeMap;
+
+    fn no_params() -> BTreeMap<String, String> {
+        BTreeMap::new()
+    }
 
     #[test]
     fn add_i64_scalars() {
         let out = eval_primitive(
             Primitive::Add,
             &[Value::scalar_i64(2), Value::scalar_i64(5)],
+            &no_params(),
         );
         assert_eq!(out, Ok(Value::scalar_i64(7)));
     }
@@ -1191,7 +1197,7 @@ mod tests {
     #[test]
     fn add_vector_and_scalar_broadcasts() {
         let input = Value::vector_i64(&[1, 2, 3]).expect("vector value should build");
-        let out = eval_primitive(Primitive::Add, &[input, Value::scalar_i64(2)])
+        let out = eval_primitive(Primitive::Add, &[input, Value::scalar_i64(2)], &no_params())
             .expect("broadcasted add should succeed");
 
         let expected = Value::vector_i64(&[3, 4, 5]).expect("vector value should build");
@@ -1203,6 +1209,7 @@ mod tests {
         let out = eval_primitive(
             Primitive::Sub,
             &[Value::scalar_i64(10), Value::scalar_i64(3)],
+            &no_params(),
         );
         assert_eq!(out, Ok(Value::scalar_i64(7)));
     }
@@ -1212,6 +1219,7 @@ mod tests {
         let out = eval_primitive(
             Primitive::Sub,
             &[Value::scalar_f64(5.5), Value::scalar_f64(2.0)],
+            &no_params(),
         )
         .unwrap();
         let v = out.as_f64_scalar().unwrap();
@@ -1220,26 +1228,28 @@ mod tests {
 
     #[test]
     fn neg_i64_scalar() {
-        let out = eval_primitive(Primitive::Neg, &[Value::scalar_i64(7)]);
+        let out = eval_primitive(Primitive::Neg, &[Value::scalar_i64(7)], &no_params());
         assert_eq!(out, Ok(Value::scalar_i64(-7)));
     }
 
     #[test]
     fn neg_f64_scalar() {
-        let out = eval_primitive(Primitive::Neg, &[Value::scalar_f64(3.5)]).unwrap();
+        let out =
+            eval_primitive(Primitive::Neg, &[Value::scalar_f64(3.5)], &no_params()).unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - (-3.5)).abs() < 1e-10);
     }
 
     #[test]
     fn abs_negative_i64() {
-        let out = eval_primitive(Primitive::Abs, &[Value::scalar_i64(-42)]);
+        let out = eval_primitive(Primitive::Abs, &[Value::scalar_i64(-42)], &no_params());
         assert_eq!(out, Ok(Value::scalar_i64(42)));
     }
 
     #[test]
     fn abs_negative_f64() {
-        let out = eval_primitive(Primitive::Abs, &[Value::scalar_f64(-3.14)]).unwrap();
+        let out =
+            eval_primitive(Primitive::Abs, &[Value::scalar_f64(-3.14)], &no_params()).unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - 3.14).abs() < 1e-10);
     }
@@ -1249,6 +1259,7 @@ mod tests {
         let out = eval_primitive(
             Primitive::Max,
             &[Value::scalar_i64(3), Value::scalar_i64(7)],
+            &no_params(),
         );
         assert_eq!(out, Ok(Value::scalar_i64(7)));
     }
@@ -1258,56 +1269,67 @@ mod tests {
         let out = eval_primitive(
             Primitive::Min,
             &[Value::scalar_i64(3), Value::scalar_i64(7)],
+            &no_params(),
         );
         assert_eq!(out, Ok(Value::scalar_i64(3)));
     }
 
     #[test]
     fn exp_scalar() {
-        let out = eval_primitive(Primitive::Exp, &[Value::scalar_f64(1.0)]).unwrap();
+        let out =
+            eval_primitive(Primitive::Exp, &[Value::scalar_f64(1.0)], &no_params()).unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - std::f64::consts::E).abs() < 1e-10);
     }
 
     #[test]
     fn log_scalar() {
-        let out =
-            eval_primitive(Primitive::Log, &[Value::scalar_f64(std::f64::consts::E)]).unwrap();
+        let out = eval_primitive(
+            Primitive::Log,
+            &[Value::scalar_f64(std::f64::consts::E)],
+            &no_params(),
+        )
+        .unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn sqrt_scalar() {
-        let out = eval_primitive(Primitive::Sqrt, &[Value::scalar_f64(9.0)]).unwrap();
+        let out =
+            eval_primitive(Primitive::Sqrt, &[Value::scalar_f64(9.0)], &no_params()).unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - 3.0).abs() < 1e-10);
     }
 
     #[test]
     fn rsqrt_scalar() {
-        let out = eval_primitive(Primitive::Rsqrt, &[Value::scalar_f64(4.0)]).unwrap();
+        let out =
+            eval_primitive(Primitive::Rsqrt, &[Value::scalar_f64(4.0)], &no_params()).unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - 0.5).abs() < 1e-10);
     }
 
     #[test]
     fn floor_scalar() {
-        let out = eval_primitive(Primitive::Floor, &[Value::scalar_f64(3.7)]).unwrap();
+        let out =
+            eval_primitive(Primitive::Floor, &[Value::scalar_f64(3.7)], &no_params()).unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - 3.0).abs() < 1e-10);
     }
 
     #[test]
     fn ceil_scalar() {
-        let out = eval_primitive(Primitive::Ceil, &[Value::scalar_f64(3.2)]).unwrap();
+        let out =
+            eval_primitive(Primitive::Ceil, &[Value::scalar_f64(3.2)], &no_params()).unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - 4.0).abs() < 1e-10);
     }
 
     #[test]
     fn round_scalar() {
-        let out = eval_primitive(Primitive::Round, &[Value::scalar_f64(3.5)]).unwrap();
+        let out =
+            eval_primitive(Primitive::Round, &[Value::scalar_f64(3.5)], &no_params()).unwrap();
         let v = out.as_f64_scalar().unwrap();
         assert!((v - 4.0).abs() < 1e-10);
     }
@@ -1317,6 +1339,7 @@ mod tests {
         let out = eval_primitive(
             Primitive::Pow,
             &[Value::scalar_f64(2.0), Value::scalar_f64(3.0)],
+            &no_params(),
         )
         .unwrap();
         let v = out.as_f64_scalar().unwrap();
@@ -1325,34 +1348,41 @@ mod tests {
 
     #[test]
     fn eq_i64_scalars() {
-        let out = eval_primitive(Primitive::Eq, &[Value::scalar_i64(3), Value::scalar_i64(3)]);
+        let p = no_params();
+        let out = eval_primitive(Primitive::Eq, &[Value::scalar_i64(3), Value::scalar_i64(3)], &p);
         assert_eq!(out, Ok(Value::scalar_bool(true)));
 
-        let out = eval_primitive(Primitive::Eq, &[Value::scalar_i64(3), Value::scalar_i64(4)]);
+        let out = eval_primitive(Primitive::Eq, &[Value::scalar_i64(3), Value::scalar_i64(4)], &p);
         assert_eq!(out, Ok(Value::scalar_bool(false)));
     }
 
     #[test]
     fn ne_i64_scalars() {
-        let out = eval_primitive(Primitive::Ne, &[Value::scalar_i64(3), Value::scalar_i64(4)]);
+        let out = eval_primitive(
+            Primitive::Ne,
+            &[Value::scalar_i64(3), Value::scalar_i64(4)],
+            &no_params(),
+        );
         assert_eq!(out, Ok(Value::scalar_bool(true)));
     }
 
     #[test]
     fn lt_i64_scalars() {
-        let out = eval_primitive(Primitive::Lt, &[Value::scalar_i64(3), Value::scalar_i64(5)]);
+        let p = no_params();
+        let out = eval_primitive(Primitive::Lt, &[Value::scalar_i64(3), Value::scalar_i64(5)], &p);
         assert_eq!(out, Ok(Value::scalar_bool(true)));
 
-        let out = eval_primitive(Primitive::Lt, &[Value::scalar_i64(5), Value::scalar_i64(3)]);
+        let out = eval_primitive(Primitive::Lt, &[Value::scalar_i64(5), Value::scalar_i64(3)], &p);
         assert_eq!(out, Ok(Value::scalar_bool(false)));
     }
 
     #[test]
     fn le_ge_i64_scalars() {
-        let out = eval_primitive(Primitive::Le, &[Value::scalar_i64(3), Value::scalar_i64(3)]);
+        let p = no_params();
+        let out = eval_primitive(Primitive::Le, &[Value::scalar_i64(3), Value::scalar_i64(3)], &p);
         assert_eq!(out, Ok(Value::scalar_bool(true)));
 
-        let out = eval_primitive(Primitive::Ge, &[Value::scalar_i64(3), Value::scalar_i64(3)]);
+        let out = eval_primitive(Primitive::Ge, &[Value::scalar_i64(3), Value::scalar_i64(3)], &p);
         assert_eq!(out, Ok(Value::scalar_bool(true)));
     }
 
@@ -1361,6 +1391,7 @@ mod tests {
         let out = eval_primitive(
             Primitive::Gt,
             &[Value::scalar_f64(3.5), Value::scalar_f64(2.0)],
+            &no_params(),
         );
         assert_eq!(out, Ok(Value::scalar_bool(true)));
     }
@@ -1369,7 +1400,7 @@ mod tests {
     fn comparison_on_vectors() {
         let lhs = Value::vector_i64(&[1, 2, 3]).unwrap();
         let rhs = Value::vector_i64(&[2, 2, 1]).unwrap();
-        let out = eval_primitive(Primitive::Lt, &[lhs, rhs]).unwrap();
+        let out = eval_primitive(Primitive::Lt, &[lhs, rhs], &no_params()).unwrap();
         if let Value::Tensor(t) = &out {
             assert_eq!(t.elements.len(), 3);
             assert_eq!(t.elements[0], fj_core::Literal::Bool(true));
@@ -1383,28 +1414,28 @@ mod tests {
     #[test]
     fn reduce_max_vector() {
         let input = Value::vector_i64(&[3, 7, 2, 9, 1]).unwrap();
-        let out = eval_primitive(Primitive::ReduceMax, &[input]).unwrap();
+        let out = eval_primitive(Primitive::ReduceMax, &[input], &no_params()).unwrap();
         assert_eq!(out, Value::scalar_i64(9));
     }
 
     #[test]
     fn reduce_min_vector() {
         let input = Value::vector_i64(&[3, 7, 2, 9, 1]).unwrap();
-        let out = eval_primitive(Primitive::ReduceMin, &[input]).unwrap();
+        let out = eval_primitive(Primitive::ReduceMin, &[input], &no_params()).unwrap();
         assert_eq!(out, Value::scalar_i64(1));
     }
 
     #[test]
     fn reduce_prod_vector() {
         let input = Value::vector_i64(&[2, 3, 4]).unwrap();
-        let out = eval_primitive(Primitive::ReduceProd, &[input]).unwrap();
+        let out = eval_primitive(Primitive::ReduceProd, &[input], &no_params()).unwrap();
         assert_eq!(out, Value::scalar_i64(24));
     }
 
     #[test]
     fn neg_vector() {
         let input = Value::vector_i64(&[1, -2, 3]).unwrap();
-        let out = eval_primitive(Primitive::Neg, &[input]).unwrap();
+        let out = eval_primitive(Primitive::Neg, &[input], &no_params()).unwrap();
         let expected = Value::vector_i64(&[-1, 2, -3]).unwrap();
         assert_eq!(out, expected);
     }
@@ -1413,13 +1444,15 @@ mod tests {
     fn dot_vector_works() {
         let lhs = Value::vector_i64(&[1, 2, 3]).expect("vector value should build");
         let rhs = Value::vector_i64(&[4, 5, 6]).expect("vector value should build");
-        let out = eval_primitive(Primitive::Dot, &[lhs, rhs]).expect("dot should succeed");
+        let out =
+            eval_primitive(Primitive::Dot, &[lhs, rhs], &no_params()).expect("dot should succeed");
         assert_eq!(out, Value::scalar_i64(32));
     }
 
     #[test]
     fn reduce_sum_requires_single_argument() {
-        let err = eval_primitive(Primitive::ReduceSum, &[]).expect_err("should fail");
+        let err =
+            eval_primitive(Primitive::ReduceSum, &[], &no_params()).expect_err("should fail");
         assert_eq!(
             err,
             EvalError::ArityMismatch {
@@ -1428,6 +1461,121 @@ mod tests {
                 actual: 0,
             }
         );
+    }
+
+    // --- Shape manipulation tests ---
+
+    #[test]
+    fn reshape_vector_to_matrix() {
+        let input = Value::vector_i64(&[1, 2, 3, 4, 5, 6]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("new_shape".into(), "2,3".into());
+        let out = eval_primitive(Primitive::Reshape, &[input], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![2, 3]);
+            assert_eq!(t.elements.len(), 6);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn reshape_with_inferred_dim() {
+        let input = Value::vector_i64(&[1, 2, 3, 4, 5, 6]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("new_shape".into(), "2,-1".into());
+        let out = eval_primitive(Primitive::Reshape, &[input], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![2, 3]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn transpose_2d() {
+        // [[1,2,3],[4,5,6]] -> [[1,4],[2,5],[3,6]]
+        let input = fj_core::TensorValue::new(
+            DType::I64,
+            fj_core::Shape { dims: vec![2, 3] },
+            vec![
+                fj_core::Literal::I64(1),
+                fj_core::Literal::I64(2),
+                fj_core::Literal::I64(3),
+                fj_core::Literal::I64(4),
+                fj_core::Literal::I64(5),
+                fj_core::Literal::I64(6),
+            ],
+        )
+        .unwrap();
+        let out =
+            eval_primitive(Primitive::Transpose, &[Value::Tensor(input)], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![3, 2]);
+            assert_eq!(t.elements[0], fj_core::Literal::I64(1));
+            assert_eq!(t.elements[1], fj_core::Literal::I64(4));
+            assert_eq!(t.elements[2], fj_core::Literal::I64(2));
+            assert_eq!(t.elements[3], fj_core::Literal::I64(5));
+            assert_eq!(t.elements[4], fj_core::Literal::I64(3));
+            assert_eq!(t.elements[5], fj_core::Literal::I64(6));
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn broadcast_in_dim_scalar_to_vector() {
+        let mut params = BTreeMap::new();
+        params.insert("shape".into(), "3".into());
+        let out = eval_primitive(
+            Primitive::BroadcastInDim,
+            &[Value::scalar_i64(5)],
+            &params,
+        )
+        .unwrap();
+        let expected = Value::vector_i64(&[5, 5, 5]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn broadcast_in_dim_vector_to_matrix() {
+        let input = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("shape".into(), "2,3".into());
+        params.insert("broadcast_dimensions".into(), "1".into());
+        let out = eval_primitive(Primitive::BroadcastInDim, &[input], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![2, 3]);
+            // Row 0: [1,2,3], Row 1: [1,2,3]
+            assert_eq!(t.elements[0], fj_core::Literal::I64(1));
+            assert_eq!(t.elements[1], fj_core::Literal::I64(2));
+            assert_eq!(t.elements[2], fj_core::Literal::I64(3));
+            assert_eq!(t.elements[3], fj_core::Literal::I64(1));
+            assert_eq!(t.elements[4], fj_core::Literal::I64(2));
+            assert_eq!(t.elements[5], fj_core::Literal::I64(3));
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn concatenate_vectors() {
+        let a = Value::vector_i64(&[1, 2]).unwrap();
+        let b = Value::vector_i64(&[3, 4, 5]).unwrap();
+        let out = eval_primitive(Primitive::Concatenate, &[a, b], &no_params()).unwrap();
+        let expected = Value::vector_i64(&[1, 2, 3, 4, 5]).unwrap();
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn slice_vector() {
+        let input = Value::vector_i64(&[10, 20, 30, 40, 50]).unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("start_indices".into(), "1".into());
+        params.insert("limit_indices".into(), "4".into());
+        let out = eval_primitive(Primitive::Slice, &[input], &params).unwrap();
+        let expected = Value::vector_i64(&[20, 30, 40]).unwrap();
+        assert_eq!(out, expected);
     }
 
     #[test]

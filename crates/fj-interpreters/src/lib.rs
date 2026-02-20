@@ -116,7 +116,7 @@ pub fn eval_jaxpr_with_consts(
             }
         }
 
-        let output = eval_primitive(eqn.primitive, &resolved)?;
+        let output = eval_primitive(eqn.primitive, &resolved, &eqn.params)?;
         env.insert(eqn.outputs[0], output);
     }
 
