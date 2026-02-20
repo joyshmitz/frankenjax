@@ -1,0 +1,361 @@
+{
+  "schema_version": "frankenjax.contract-table.v1",
+  "packet_id": "FJ-P2C-005",
+  "generated_at_unix_ms": 1771589100000,
+  "mode_matrix": [
+    {
+      "mode": "strict",
+      "contract_rows": [
+        {
+          "row_id": "p2c005.strict.inv001",
+          "title": "Cache key determinism: identical CacheKeyInput produces identical CacheKey",
+          "preconditions": [
+            "CacheKeyInputRef contains (mode, backend, jaxpr, transform_stack, compile_options, custom_hook, unknown_incompatible_features)"
+          ],
+          "guarantees": [
+            "build_cache_key_ref() returns identical CacheKey for identical inputs across calls",
+            "SHA-256 hash is computed over canonical_payload layout: mode|backend|transforms|compile|hook|unknown|jaxpr",
+            "CacheKey.as_string() returns 'fjx-{hex_digest}'",
+            "legacy_anchor=P2C005-A01 (cache_key.get), P2C005-A02 (_hash_computation)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "cache_key_nondeterministic"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "cache_key_a",
+              "cache_key_b"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c005.strict.inv002",
+          "title": "Cache key collision resistance: distinct configurations produce distinct keys",
+          "preconditions": [
+            "Two CacheKeyInputRef values differ in at least one field"
+          ],
+          "guarantees": [
+            "SHA-256 collision probability < 2^-128 for distinct canonical payloads",
+            "Each field is separated by '|' delimiter in canonical payload to prevent cross-field confusion",
+            "Transforms joined by ',' prevent aliasing between transform sequences",
+            "legacy_anchor=P2C005-A02 (_hash_computation), P2C005-A03 (CacheKey)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "cache_key_collision"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "key_a",
+              "key_b"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c005.strict.inv003",
+          "title": "Strict mode rejects unknown incompatible features at cache key time",
+          "preconditions": [
+            "mode == Strict",
+            "unknown_incompatible_features is non-empty"
+          ],
+          "guarantees": [
+            "build_cache_key_ref returns Err(CacheKeyError::UnknownIncompatibleFeatures)",
+            "Error contains the full list of rejected feature strings",
+            "No SHA-256 computation is performed (early return)",
+            "legacy_anchor=P2C005-A01 (get), P2C005-A10 (_hash_xla_flags)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "unknown_incompatible_features_rejected"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "feature_list"
+            ]
+          },
+          "compatibility_tier": "jax-observable"
+        },
+        {
+          "row_id": "p2c005.strict.inv004",
+          "title": "Cache key includes all semantically relevant inputs",
+          "preconditions": [
+            "CacheKeyInputRef populated from DispatchRequest"
+          ],
+          "guarantees": [
+            "Canonical payload includes: mode, backend, transform_stack, compile_options, custom_hook, unknown_features, jaxpr_fingerprint",
+            "Jaxpr fingerprint computed via canonical_fingerprint() (OnceLock-cached, deterministic)",
+            "Compile options sorted by BTreeMap key ordering",
+            "legacy_anchor=P2C005-A02 (_hash_computation), P2C005-A10 (_hash_xla_flags), P2C005-A11 (_hash_devices)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "cache_key_incomplete"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "missing_field"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c005.strict.inv005",
+          "title": "Streaming and owned cache key builders produce identical results",
+          "preconditions": [
+            "Equivalent CacheKeyInput and CacheKeyInputRef with identical field values"
+          ],
+          "guarantees": [
+            "build_cache_key(&owned) == build_cache_key_ref(&ref_input) for any valid input",
+            "hash_canonical_payload_ref streams same bytes as canonical_payload allocates",
+            "Field separator '|' and sub-field separators (',' ';') identical in both paths",
+            "legacy_anchor=P2C005-A02 (_hash_computation)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "streaming_owned_hash_divergence"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "owned_key",
+              "ref_key"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c005.strict.inv006",
+          "title": "Cache key namespace provides version isolation",
+          "preconditions": [
+            "Cache key generated successfully"
+          ],
+          "guarantees": [
+            "CacheKey.namespace == 'fjx' (constant across all configurations)",
+            "as_string() returns 'fjx-{64-char-hex}' format",
+            "Namespace separates FrankenJAX keys from legacy JAX keys (no namespace prefix in JAX)",
+            "legacy_anchor=P2C005-A03 (CacheKey), P2C005-A18 (_version_hash)"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "cache_key_namespace_violation"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "cache_key"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c005.strict.inv007",
+          "title": "Compatibility matrix row captures mode, backend, and feature vectors",
+          "preconditions": [
+            "CacheKeyInput populated"
+          ],
+          "guarantees": [
+            "compatibility_matrix_row() returns 'mode={mode},backend={backend},unknown_features={features}'",
+            "Format is human-readable and machine-parseable",
+            "Includes unknown_features for hardened audit trail"
+          ],
+          "failure_behavior": {
+            "policy": "fail_closed",
+            "reason_code": "compatibility_row_malformed"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "matrix_row"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    },
+    {
+      "mode": "hardened",
+      "contract_rows": [
+        {
+          "row_id": "p2c005.hardened.inv008",
+          "title": "Unknown features included in hash without rejection",
+          "preconditions": [
+            "mode == Hardened",
+            "unknown_incompatible_features is non-empty"
+          ],
+          "guarantees": [
+            "Features are hashed into the canonical payload (affecting key)",
+            "No CacheKeyError is returned",
+            "Cache key differentiates between requests with vs without unknown features",
+            "legacy_anchor=P2C005-A01 (get), P2C005-A10 (_hash_xla_flags)"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_unknown_features_included"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "feature_list",
+              "cache_key"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c005.hardened.inv009",
+          "title": "Cache miss fallback to fresh computation",
+          "preconditions": [
+            "Cache lookup returns None (miss)"
+          ],
+          "guarantees": [
+            "Computation proceeds without cached artifact",
+            "Output is identical to uncached execution path",
+            "Cache miss logged for telemetry",
+            "legacy_anchor=P2C005-A05 (_read_from_cache), P2C005-A13 (get_executable)"
+          ],
+          "failure_behavior": {
+            "policy": "warn_and_continue",
+            "reason_code": "hardened_cache_miss"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "cache_key"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        },
+        {
+          "row_id": "p2c005.hardened.inv010",
+          "title": "Cache corruption detection and eviction",
+          "preconditions": [
+            "Cache lookup returns corrupted artifact (SHA-256 mismatch)"
+          ],
+          "guarantees": [
+            "Corrupted entry is evicted from cache",
+            "Fresh computation proceeds (same as cache miss)",
+            "Corruption event logged to evidence ledger",
+            "legacy_anchor=P2C005-A05 (_read_from_cache)"
+          ],
+          "failure_behavior": {
+            "policy": "allowlisted_repair",
+            "reason_code": "hardened_cache_corruption_evicted"
+          },
+          "observability": {
+            "log_fields": [
+              "packet_id",
+              "mode",
+              "invariant_id",
+              "reason_code",
+              "cache_key",
+              "expected_sha256",
+              "actual_sha256"
+            ]
+          },
+          "compatibility_tier": "internal-only"
+        }
+      ]
+    }
+  ],
+  "unknown_feature_policy": {
+    "strict": "fail_closed",
+    "hardened": "allowlisted_repair"
+  },
+  "invariants": [
+    {
+      "invariant_id": "p2c005.strict.inv001",
+      "statement": "Cache key is deterministic: identical CacheKeyInput produces identical CacheKey across calls.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs:52-68 (build_cache_key)",
+        "crates/fj-cache/src/lib.rs:90-108 (build_cache_key_ref)",
+        "crates/fj-cache/src/lib.rs:244-258 (cache_key_is_stable_for_identical_inputs test)"
+      ]
+    },
+    {
+      "invariant_id": "p2c005.strict.inv002",
+      "statement": "Distinct configurations produce distinct cache keys (SHA-256 collision resistance < 2^-128).",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs:156-183 (canonical_payload)",
+        "crates/fj-cache/src/lib.rs:112-154 (hash_canonical_payload_ref)"
+      ]
+    },
+    {
+      "invariant_id": "p2c005.strict.inv003",
+      "statement": "Strict mode rejects unknown incompatible features with CacheKeyError before hashing.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs:53-57 (strict check in build_cache_key)",
+        "crates/fj-cache/src/lib.rs:207-225 (strict_mode_rejects_unknown_features test)"
+      ]
+    },
+    {
+      "invariant_id": "p2c005.strict.inv004",
+      "statement": "Cache key includes all semantically relevant inputs: mode, backend, transform_stack, compile_options, custom_hook, unknown_features, jaxpr_fingerprint.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs:112-154 (hash_canonical_payload_ref)",
+        "crates/fj-cache/src/lib.rs:156-183 (canonical_payload)"
+      ]
+    },
+    {
+      "invariant_id": "p2c005.strict.inv005",
+      "statement": "Streaming (build_cache_key_ref) and owned (build_cache_key) builders produce identical hashes.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs:282-318 (streaming_hash_matches_owned_hash test)"
+      ]
+    },
+    {
+      "invariant_id": "p2c005.strict.inv006",
+      "statement": "Cache key uses 'fjx-' namespace prefix for version isolation.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs:64-67 (namespace constant)",
+        "crates/fj-cache/src/lib.rs:26-28 (as_string format)"
+      ]
+    },
+    {
+      "invariant_id": "p2c005.hardened.inv008",
+      "statement": "Hardened mode includes unknown features in cache key hash without rejection.",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs:90-108 (no early return for Hardened)",
+        "crates/fj-cache/src/lib.rs:228-241 (hardened_mode_accepts_unknown_features test)"
+      ]
+    },
+    {
+      "invariant_id": "p2c005.property.inv007",
+      "statement": "Cache key stability holds across random inputs (proptest 256+ cases).",
+      "proof_artifact_refs": [
+        "crates/fj-cache/src/lib.rs:320-343 (prop_cache_key_stability)"
+      ]
+    }
+  ]
+}
