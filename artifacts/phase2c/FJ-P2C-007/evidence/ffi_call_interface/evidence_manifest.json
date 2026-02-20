@@ -1,0 +1,76 @@
+{
+  "schema_version": "frankenjax.evidence-manifest.v1",
+  "packet_id": "FJ-P2C-007",
+  "subsystem": "ffi_call_interface",
+  "generated_at": "2026-02-20T12:36:00Z",
+  "parity_gates": [
+    {
+      "gate_id": "G1",
+      "name": "Artifact format compliance",
+      "status": "PASS",
+      "evidence": "legacy_anchor_map.v1.json, contract_table.v1.json, security_threat_matrix.md — all schema-validated"
+    },
+    {
+      "gate_id": "G2",
+      "name": "Unit tests",
+      "status": "PASS",
+      "evidence": "49 unit tests in fj-ffi covering buffer, registry, call dispatch, callback, marshal, integration, adversarial, property tests"
+    },
+    {
+      "gate_id": "G3",
+      "name": "Oracle/differential conformance",
+      "status": "PASS",
+      "evidence": "5 oracle tests: FFI double, sum3, negate_vec match Rust computation; Value roundtrip preserves data; error propagation is structured"
+    },
+    {
+      "gate_id": "G4",
+      "name": "Adversarial validation",
+      "status": "PASS",
+      "evidence": "6 adversarial tests: unregistered target, duplicate reg, buffer mismatch, concurrent FFI (8 threads), callback error, callback arity"
+    },
+    {
+      "gate_id": "G5",
+      "name": "Metamorphic properties",
+      "status": "PASS",
+      "evidence": "4 metamorphic tests: marshal identity, error-no-corrupt, empty noop, double composition"
+    },
+    {
+      "gate_id": "G6",
+      "name": "Performance targets",
+      "status": "PASS",
+      "evidence": "All 8 benchmarks under target. Scalar roundtrip=92ns (<500ns), 1K tensor=880ns (<2µs), registry=37ns (<100ns)"
+    },
+    {
+      "gate_id": "G7",
+      "name": "E2E scenarios",
+      "status": "PASS",
+      "evidence": "6 E2E scenarios: basic call, buffer lifecycle, error propagation, custom op dispatch, adversarial clean errors, callback pipeline"
+    },
+    {
+      "gate_id": "G8",
+      "name": "Property tests",
+      "status": "PASS",
+      "evidence": "prop_f64_scalar_roundtrip, prop_i64_scalar_roundtrip, prop_buffer_size_matches_checked, prop_zeroed_buffer_is_zero (256+ cases each)"
+    },
+    {
+      "gate_id": "G9",
+      "name": "Risk analysis",
+      "status": "PASS",
+      "evidence": "8-threat risk note with mitigation evidence. 10 invariants verified. Unsafe audit: 1 block in call.rs with SAFETY comment."
+    },
+    {
+      "gate_id": "G10",
+      "name": "Durability (RaptorQ)",
+      "status": "PASS",
+      "evidence": "conformance_report sidecar, perf_delta sidecar"
+    }
+  ],
+  "overall_verdict": "PASS",
+  "known_issues": [
+    "No dynamic library loading (V1 static linking only)",
+    "No vmap/grad support for FFI calls (V1 raises TransformExecutionError)",
+    "Complex types (complex64/128) not supported at FFI boundary",
+    "Segfault in external code is unrecoverable (process abort)",
+    "V1 supports only F64, I64, Bool at the marshal boundary (F32/I32 marshal returns UnsupportedDtype)"
+  ]
+}

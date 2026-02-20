@@ -1,0 +1,61 @@
+{
+  "schema_version": "frankenjax.conformance-report.v1",
+  "packet_id": "FJ-P2C-007",
+  "subsystem": "ffi_call_interface",
+  "generated_at": "2026-02-20T12:36:00Z",
+  "test_suites": [
+    {
+      "suite": "fj-ffi unit tests",
+      "test_count": 49,
+      "passed": 49,
+      "failed": 0,
+      "categories": {
+        "buffer": 10,
+        "registry": 6,
+        "call_dispatch": 6,
+        "callback": 6,
+        "marshal": 7,
+        "integration": 2,
+        "adversarial": 4,
+        "lifecycle": 1,
+        "error_display": 2,
+        "schema_contract": 1,
+        "property_tests": 4
+      }
+    },
+    {
+      "suite": "ffi_oracle conformance",
+      "test_count": 15,
+      "passed": 15,
+      "failed": 0,
+      "categories": {
+        "oracle": 5,
+        "metamorphic": 4,
+        "adversarial": 6
+      }
+    },
+    {
+      "suite": "e2e_p2c007",
+      "test_count": 6,
+      "passed": 6,
+      "failed": 0,
+      "categories": {
+        "basic_call": 1,
+        "buffer_lifecycle": 1,
+        "error_propagation": 1,
+        "custom_op_dispatch": 1,
+        "adversarial_clean_errors": 1,
+        "callback_pipeline": 1
+      }
+    }
+  ],
+  "total_tests": 70,
+  "total_passed": 70,
+  "total_failed": 0,
+  "unsafe_audit": {
+    "unsafe_blocks": 1,
+    "location": "crates/fj-ffi/src/call.rs:FfiCall::invoke()",
+    "safety_comment": "fn_ptr non-null (validated at registration), buffer pointers valid and scoped, counts match array lengths",
+    "crate_lint": "#![deny(unsafe_code)] with #[allow(unsafe_code)] on invoke() only"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schema_version": "frankenjax.sidecar.v1",
+  "artifact_path": "artifacts/phase2c/FJ-P2C-007/evidence/ffi_call_interface/conformance_report.json",
+  "artifact_sha256_hex": "8c960e29800b14ee2372c8fc983207c5ce77358ad9af6f11ecec044ff19c579d",
+  "artifact_size": 1548,
+  "generated_at_unix_ms": 1771591024893,
+  "object_id_high": 10130299983221167342,
+  "object_id_low": 2554324925883221957,
+  "symbol_size": 256,
+  "max_block_size": 1048576,
+  "repair_overhead": 1.1,
+  "source_blocks": 1,
+  "symbols_per_block": 7,
+  "total_symbols": 8,
+  "source_symbols": 7,
+  "repair_symbols": 1,
+  "symbols": [
+    {
+      "sbn": 0,
+      "esi": 0,
+      "kind": "source",
+      "data_b64": "ewogICJzY2hlbWFfdmVyc2lvbiI6ICJmcmFua2VuamF4LmNvbmZvcm1hbmNlLXJlcG9ydC52MSIsCiAgInBhY2tldF9pZCI6ICJGSi1QMkMtMDA3IiwKICAic3Vic3lzdGVtIjogImZmaV9jYWxsX2ludGVyZmFjZSIsCiAgImdlbmVyYXRlZF9hdCI6ICIyMDI2LTAyLTIwVDEyOjM2OjAwWiIsCiAgInRlc3Rfc3VpdGVzIjogWwogICAgewogICAgICAic3VpdGUiOiAiZmotZmZpIHVuaXQgdGVzdHMiLAogICAgICAidGVzdF9jb3VudCI6IDQ5LAogICAgIA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 1,
+      "kind": "source",
+      "data_b64": "ICJwYXNzZWQiOiA0OSwKICAgICAgImZhaWxlZCI6IDAsCiAgICAgICJjYXRlZ29yaWVzIjogewogICAgICAgICJidWZmZXIiOiAxMCwKICAgICAgICAicmVnaXN0cnkiOiA2LAogICAgICAgICJjYWxsX2Rpc3BhdGNoIjogNiwKICAgICAgICAiY2FsbGJhY2siOiA2LAogICAgICAgICJtYXJzaGFsIjogNywKICAgICAgICAiaW50ZWdyYXRpb24iOiAyLAogICAgICAgICJhZHZlcnNhcmlhbCI6IDQsCiAgICAgICAgImxpZmVjeWNsZSI6IDEsCiAgICAgIA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 2,
+      "kind": "source",
+      "data_b64": "ICAiZXJyb3JfZGlzcGxheSI6IDIsCiAgICAgICAgInNjaGVtYV9jb250cmFjdCI6IDEsCiAgICAgICAgInByb3BlcnR5X3Rlc3RzIjogNAogICAgICB9CiAgICB9LAogICAgewogICAgICAic3VpdGUiOiAiZmZpX29yYWNsZSBjb25mb3JtYW5jZSIsCiAgICAgICJ0ZXN0X2NvdW50IjogMTUsCiAgICAgICJwYXNzZWQiOiAxNSwKICAgICAgImZhaWxlZCI6IDAsCiAgICAgICJjYXRlZ29yaWVzIjogewogICAgICAgICJvcmFjbGUiOiA1LAogICAgICAgIA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 3,
+      "kind": "source",
+      "data_b64": "Im1ldGFtb3JwaGljIjogNCwKICAgICAgICAiYWR2ZXJzYXJpYWwiOiA2CiAgICAgIH0KICAgIH0sCiAgICB7CiAgICAgICJzdWl0ZSI6ICJlMmVfcDJjMDA3IiwKICAgICAgInRlc3RfY291bnQiOiA2LAogICAgICAicGFzc2VkIjogNiwKICAgICAgImZhaWxlZCI6IDAsCiAgICAgICJjYXRlZ29yaWVzIjogewogICAgICAgICJiYXNpY19jYWxsIjogMSwKICAgICAgICAiYnVmZmVyX2xpZmVjeWNsZSI6IDEsCiAgICAgICAgImVycm9yX3Byb3BhZ2F0aQ=="
+    },
+    {
+      "sbn": 0,
+      "esi": 4,
+      "kind": "source",
+      "data_b64": "b24iOiAxLAogICAgICAgICJjdXN0b21fb3BfZGlzcGF0Y2giOiAxLAogICAgICAgICJhZHZlcnNhcmlhbF9jbGVhbl9lcnJvcnMiOiAxLAogICAgICAgICJjYWxsYmFja19waXBlbGluZSI6IDEKICAgICAgfQogICAgfQogIF0sCiAgInRvdGFsX3Rlc3RzIjogNzAsCiAgInRvdGFsX3Bhc3NlZCI6IDcwLAogICJ0b3RhbF9mYWlsZWQiOiAwLAogICJ1bnNhZmVfYXVkaXQiOiB7CiAgICAidW5zYWZlX2Jsb2NrcyI6IDEsCiAgICAibG9jYXRpb24iOiAiYw=="
+    },
+    {
+      "sbn": 0,
+      "esi": 5,
+      "kind": "source",
+      "data_b64": "cmF0ZXMvZmotZmZpL3NyYy9jYWxsLnJzOkZmaUNhbGw6Omludm9rZSgpIiwKICAgICJzYWZldHlfY29tbWVudCI6ICJmbl9wdHIgbm9uLW51bGwgKHZhbGlkYXRlZCBhdCByZWdpc3RyYXRpb24pLCBidWZmZXIgcG9pbnRlcnMgdmFsaWQgYW5kIHNjb3BlZCwgY291bnRzIG1hdGNoIGFycmF5IGxlbmd0aHMiLAogICAgImNyYXRlX2xpbnQiOiAiIyFbZGVueSh1bnNhZmVfY29kZSldIHdpdGggI1thbGxvdyh1bnNhZmVfY29kZSldIG9uIGludm9rZSgpIA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 6,
+      "kind": "source",
+      "data_b64": "b25seSIKICB9Cn0KAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 7,
+      "kind": "repair",
+      "data_b64": "Y1g/1DoByrMtaDvUopGuMSUQVt6E3+csRI7oMnERsH9Kg9Y/gqgc50rV/i/vxKsuM2KUHozf4L9TGCly4Ehkr+u5XOSOlSlNNwq/9vpLlPQnTj33KARqi5W2MzmdZldsbVem+80DNIYoIq8G9aITJu+z/b3mZAvUihRrqhkFD/tufiLjFUAP5KfHog7ElXhOf3FNEjVHgBNLrGCx7zxfXfhSal+yU4hTxjwdfU1FoJn5cCwQRVlTBBwHXh20gDt8wlsgUBxiORhm65hPArlGDS12OBMQe78YNVq1rRMuEN1gUQ+JTPYzznKrC4OA5amI4lJ79PUbMCGCdUwMXDSTIQ=="
+    }
+  ]
+}
