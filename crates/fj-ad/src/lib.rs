@@ -2228,6 +2228,105 @@ mod tests {
         assert_grad_matches(Primitive::Abs, -2.0, 1e-4);
     }
 
+    // ── Binary VJP numerical gradient verification ──────────────
+    fn numerical_grad_binary(prim: Primitive, a: f64, b: f64) -> (f64, f64) {
+        let eps = 1e-6;
+        let no_p = BTreeMap::new();
+        // d/da
+        let fa_plus = eval_primitive(
+            prim,
+            &[Value::scalar_f64(a + eps), Value::scalar_f64(b)],
+            &no_p,
+        )
+        .unwrap()
+        .as_f64_scalar()
+        .unwrap();
+        let fa_minus = eval_primitive(
+            prim,
+            &[Value::scalar_f64(a - eps), Value::scalar_f64(b)],
+            &no_p,
+        )
+        .unwrap()
+        .as_f64_scalar()
+        .unwrap();
+        let da = (fa_plus - fa_minus) / (2.0 * eps);
+
+        // d/db
+        let fb_plus = eval_primitive(
+            prim,
+            &[Value::scalar_f64(a), Value::scalar_f64(b + eps)],
+            &no_p,
+        )
+        .unwrap()
+        .as_f64_scalar()
+        .unwrap();
+        let fb_minus = eval_primitive(
+            prim,
+            &[Value::scalar_f64(a), Value::scalar_f64(b - eps)],
+            &no_p,
+        )
+        .unwrap()
+        .as_f64_scalar()
+        .unwrap();
+        let db = (fb_plus - fb_minus) / (2.0 * eps);
+
+        (da, db)
+    }
+
+    fn assert_binary_grad_matches(prim: Primitive, a: f64, b: f64, tol: f64) {
+        let jaxpr = make_binary_jaxpr(prim);
+        let grads =
+            grad_jaxpr(&jaxpr, &[Value::scalar_f64(a), Value::scalar_f64(b)]).unwrap();
+        let sym_da = to_f64(&grads[0]).unwrap();
+        let sym_db = to_f64(&grads[1]).unwrap();
+        let (num_da, num_db) = numerical_grad_binary(prim, a, b);
+        assert!(
+            (sym_da - num_da).abs() < tol,
+            "d/da {:?}({a},{b}): symbolic={sym_da}, numerical={num_da}",
+            prim
+        );
+        assert!(
+            (sym_db - num_db).abs() < tol,
+            "d/db {:?}({a},{b}): symbolic={sym_db}, numerical={num_db}",
+            prim
+        );
+    }
+
+    #[test]
+    fn vjp_vs_numerical_add() {
+        assert_binary_grad_matches(Primitive::Add, 3.0, 5.0, 1e-4);
+    }
+
+    #[test]
+    fn vjp_vs_numerical_sub() {
+        assert_binary_grad_matches(Primitive::Sub, 7.0, 3.0, 1e-4);
+    }
+
+    #[test]
+    fn vjp_vs_numerical_mul() {
+        assert_binary_grad_matches(Primitive::Mul, 3.0, 4.0, 1e-4);
+    }
+
+    #[test]
+    fn vjp_vs_numerical_div() {
+        assert_binary_grad_matches(Primitive::Div, 6.0, 3.0, 1e-4);
+    }
+
+    #[test]
+    fn vjp_vs_numerical_pow() {
+        assert_binary_grad_matches(Primitive::Pow, 2.0, 3.0, 1e-3);
+    }
+
+    #[test]
+    fn vjp_vs_numerical_atan2() {
+        assert_binary_grad_matches(Primitive::Atan2, 1.0, 2.0, 1e-4);
+    }
+
+    #[test]
+    fn vjp_vs_numerical_rem() {
+        assert_binary_grad_matches(Primitive::Rem, 7.0, 3.0, 1e-4);
+    }
+
     mod proptest_tests {
         use super::*;
         use fj_interpreters::eval_jaxpr;
