@@ -1015,10 +1015,17 @@ fn vjp(
                 &gather_params,
             )
             .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            // Grad w.r.t. operand: g with zeroed-out scattered positions.
-            // Scatter overwrites operand[idx,:] = updates[i,:], so the operand
-            // gradient at those positions is zero (operand had no influence there).
-            let grad_operand = zero_scattered_positions(g, indices)?;
+            
+            // Grad w.r.t. operand depends on the scatter mode.
+            let mode = params.get("mode").map(|s| s.as_str()).unwrap_or("overwrite");
+            let grad_operand = if mode == "add" {
+                // If it was an add, the operand passes gradient 1.0 everywhere.
+                g.clone()
+            } else {
+                // If overwrite, operand gradient at scattered positions is zero.
+                zero_scattered_positions(g, indices)?
+            };
+            
             Ok(vec![grad_operand, grad_updates])
         }
     }
