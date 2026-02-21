@@ -542,13 +542,20 @@ fn vjp(
             match input {
                 Value::Scalar(_) => Ok(vec![g.clone()]),
                 Value::Tensor(t) => {
-                    // If g is scalar (full reduction), broadcast to input shape
                     let g_scalar = match g.as_f64_scalar() {
                         Some(v) => v,
                         None => {
-                            // g is already a tensor from partial reduction
-                            // Just broadcast g to input shape
-                            return Ok(vec![broadcast_g_to_shape(g, &t.shape)?]);
+                            let kept_axes = if let Some(axes_str) = params.get("axes") {
+                                let reduced_axes: Vec<usize> = axes_str
+                                    .split(',')
+                                    .filter_map(|s| s.trim().parse().ok())
+                                    .collect();
+                                let rank = t.shape.rank();
+                                (0..rank).filter(|a| !reduced_axes.contains(a)).collect::<Vec<_>>()
+                            } else {
+                                vec![]
+                            };
+                            return Ok(vec![broadcast_g_to_shape_with_axes(g, &t.shape, &kept_axes)?]);
                         }
                     };
                     let elements = vec![Literal::from_f64(g_scalar); t.elements.len()];
@@ -1086,6 +1093,20 @@ fn zero_scattered_positions(g: &Value, indices: &Value) -> Result<Value, AdError
 }
 
 fn broadcast_g_to_shape(g: &Value, target_shape: &Shape) -> Result<Value, AdError> {
+    let out_rank = target_shape.rank();
+    let in_rank = match g {
+        Value::Scalar(_) => 0,
+        Value::Tensor(t) => t.shape.rank(),
+    };
+    let kept_axes: Vec<usize> = if in_rank > out_rank {
+        vec![]
+    } else {
+        (out_rank - in_rank..out_rank).collect()
+    };
+    broadcast_g_to_shape_with_axes(g, target_shape, &kept_axes)
+}
+
+fn broadcast_g_to_shape_with_axes(g: &Value, target_shape: &Shape, broadcast_dimensions: &[usize]) -> Result<Value, AdError> {
     let g_scalar = g.as_f64_scalar();
     if let Some(v) = g_scalar {
         let count = target_shape.element_count().unwrap_or(1) as usize;
@@ -1106,6 +1127,16 @@ fn broadcast_g_to_shape(g: &Value, target_shape: &Shape) -> Result<Value, AdErro
             .collect::<Vec<_>>()
             .join(","),
     );
+    if !broadcast_dimensions.is_empty() {
+        params.insert(
+            "broadcast_dimensions".to_owned(),
+            broadcast_dimensions
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
     eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(g), &params)
         .map_err(|e| AdError::EvalFailed(e.to_string()))
 }
