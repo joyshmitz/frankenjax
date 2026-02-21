@@ -2082,6 +2082,162 @@ mod tests {
         );
     }
 
+    // ── Composition gradient tests ─────────────────────────────
+    // Test gradient through chains of operations (where real bugs hide)
+
+    #[test]
+    fn grad_exp_of_sin() {
+        // f(x) = exp(sin(x)), f'(x) = cos(x) * exp(sin(x))
+        use fj_core::{Equation, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Sin,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Exp,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let x = 1.0;
+        let sym = grad_first(&jaxpr, &[Value::scalar_f64(x)]).unwrap();
+        let expected = x.cos() * x.sin().exp();
+        assert!(
+            (sym - expected).abs() < 1e-8,
+            "grad(exp(sin(x))) at x=1: sym={sym}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn grad_mul_of_sin_cos() {
+        // f(x) = sin(x) * cos(x), f'(x) = cos²(x) - sin²(x)
+        use fj_core::{Equation, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Sin,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Cos,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(3))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let x = 0.7;
+        let sym = grad_first(&jaxpr, &[Value::scalar_f64(x)]).unwrap();
+        let expected = x.cos().powi(2) - x.sin().powi(2);
+        assert!(
+            (sym - expected).abs() < 1e-8,
+            "grad(sin(x)*cos(x)) at x=0.7: sym={sym}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn grad_log_of_square_plus_one() {
+        // f(x) = log(x² + 1), f'(x) = 2x / (x² + 1)
+        use fj_core::{Equation, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Square,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Lit(Literal::from_f64(1.0))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(VarId(3))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let x = 2.0;
+        let sym = grad_first(&jaxpr, &[Value::scalar_f64(x)]).unwrap();
+        let expected = 2.0 * x / (x * x + 1.0);
+        assert!(
+            (sym - expected).abs() < 1e-8,
+            "grad(log(x²+1)) at x=2: sym={sym}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn grad_tanh_of_mul() {
+        // f(x) = tanh(2x), f'(x) = 2 * (1 - tanh²(2x))
+        use fj_core::{Equation, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::from_f64(2.0))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Tanh,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let x = 0.5;
+        let sym = grad_first(&jaxpr, &[Value::scalar_f64(x)]).unwrap();
+        let t = (2.0 * x).tanh();
+        let expected = 2.0 * (1.0 - t * t);
+        assert!(
+            (sym - expected).abs() < 1e-8,
+            "grad(tanh(2x)) at x=0.5: sym={sym}, expected={expected}"
+        );
+    }
+
     // ── Systematic numerical gradient verification ──────────────
     // Compares VJP-computed gradients against central finite differences
     // for every differentiable unary primitive at a representative point.
