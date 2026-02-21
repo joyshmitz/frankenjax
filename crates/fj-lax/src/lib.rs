@@ -1664,6 +1664,117 @@ mod tests {
         .unwrap();
         assert_eq!(out, on_false);
     }
+
+    // ===================================================================
+    // Scatter mode="add" tests
+    // ===================================================================
+
+    #[test]
+    fn scatter_add_mode_accumulates() {
+        // operand: [0.0, 0.0, 0.0] (shape [3])
+        // indices: [1, 1]  (duplicate index)
+        // updates: [10.0, 20.0]
+        // With mode="add", index 1 should accumulate: 0 + 10 + 20 = 30
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(3),
+                vec![
+                    Literal::from_f64(0.0),
+                    Literal::from_f64(0.0),
+                    Literal::from_f64(0.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let indices = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape::vector(2),
+                vec![Literal::I64(1), Literal::I64(1)],
+            )
+            .unwrap(),
+        );
+        let updates = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(2),
+                vec![Literal::from_f64(10.0), Literal::from_f64(20.0)],
+            )
+            .unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("mode".into(), "add".into());
+
+        let out = eval_primitive(Primitive::Scatter, &[operand, indices, updates], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals[0], 0.0);
+            assert_eq!(vals[1], 30.0); // 10 + 20 accumulated
+            assert_eq!(vals[2], 0.0);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn scatter_add_preserves_existing_values() {
+        // operand: [100.0, 200.0, 300.0]
+        // indices: [0]
+        // updates: [5.0]
+        // mode="add": result[0] = 100 + 5 = 105
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(3),
+                vec![
+                    Literal::from_f64(100.0),
+                    Literal::from_f64(200.0),
+                    Literal::from_f64(300.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let indices = Value::Tensor(
+            TensorValue::new(DType::I64, Shape::vector(1), vec![Literal::I64(0)]).unwrap(),
+        );
+        let updates = Value::Tensor(
+            TensorValue::new(DType::F64, Shape::vector(1), vec![Literal::from_f64(5.0)]).unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("mode".into(), "add".into());
+
+        let out = eval_primitive(Primitive::Scatter, &[operand, indices, updates], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![105.0, 200.0, 300.0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    // ===================================================================
+    // Concatenate edge cases
+    // ===================================================================
+
+    #[test]
+    fn concatenate_single_input() {
+        let a = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let out = eval_primitive(Primitive::Concatenate, &[a.clone()], &no_params()).unwrap();
+        assert_eq!(out, a);
+    }
+
+    #[test]
+    fn concatenate_three_inputs() {
+        let a = Value::vector_i64(&[1]).unwrap();
+        let b = Value::vector_i64(&[2, 3]).unwrap();
+        let c = Value::vector_i64(&[4, 5, 6]).unwrap();
+        let out = eval_primitive(Primitive::Concatenate, &[a, b, c], &no_params()).unwrap();
+        let expected = Value::vector_i64(&[1, 2, 3, 4, 5, 6]).unwrap();
+        assert_eq!(out, expected);
+    }
 }
 
 #[cfg(test)]
