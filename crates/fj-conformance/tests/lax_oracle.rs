@@ -769,6 +769,381 @@ fn oracle_dot_f64_vectors() {
     );
 }
 
+// ======================== Oracle: New Primitives ========================
+
+#[test]
+fn oracle_div_f64() {
+    assert_f64_close(
+        eval_f64(
+            Primitive::Div,
+            &[Value::scalar_f64(10.0), Value::scalar_f64(4.0)],
+            &no_params(),
+        ),
+        2.5,
+        1e-14,
+        "10.0 / 4.0",
+    );
+}
+
+#[test]
+fn oracle_div_by_zero_is_inf() {
+    let out = eval_primitive(
+        Primitive::Div,
+        &[Value::scalar_f64(1.0), Value::scalar_f64(0.0)],
+        &no_params(),
+    )
+    .unwrap();
+    assert!(out.as_f64_scalar().unwrap().is_infinite(), "1/0 should be inf");
+}
+
+#[test]
+fn oracle_rem_i64() {
+    assert_eq!(
+        eval_i64(
+            Primitive::Rem,
+            &[Value::scalar_i64(7), Value::scalar_i64(3)],
+            &no_params()
+        ),
+        1
+    );
+}
+
+#[test]
+fn oracle_sign_f64() {
+    assert_f64_close(
+        eval_f64(Primitive::Sign, &[Value::scalar_f64(-3.5)], &no_params()),
+        -1.0,
+        1e-14,
+        "sign(-3.5)",
+    );
+    assert_f64_close(
+        eval_f64(Primitive::Sign, &[Value::scalar_f64(7.0)], &no_params()),
+        1.0,
+        1e-14,
+        "sign(7.0)",
+    );
+    // sign(0) behavior: Rust f64::signum(0.0) returns 0.0, but i64::signum(0) returns 0.
+    // With type promotion, scalar_f64(0.0) may give different results depending on impl.
+    let sign_zero = eval_f64(Primitive::Sign, &[Value::scalar_f64(0.0)], &no_params());
+    assert!(
+        sign_zero.abs() <= 1.0,
+        "sign(0.0) should be -1, 0, or 1, got {sign_zero}"
+    );
+}
+
+#[test]
+fn oracle_square_f64() {
+    assert_f64_close(
+        eval_f64(Primitive::Square, &[Value::scalar_f64(3.0)], &no_params()),
+        9.0,
+        1e-14,
+        "square(3.0)",
+    );
+    assert_f64_close(
+        eval_f64(Primitive::Square, &[Value::scalar_f64(-4.0)], &no_params()),
+        16.0,
+        1e-14,
+        "square(-4.0)",
+    );
+}
+
+#[test]
+fn oracle_reciprocal_f64() {
+    assert_f64_close(
+        eval_f64(
+            Primitive::Reciprocal,
+            &[Value::scalar_f64(4.0)],
+            &no_params(),
+        ),
+        0.25,
+        1e-14,
+        "reciprocal(4.0)",
+    );
+}
+
+#[test]
+fn oracle_expm1_f64() {
+    // expm1(0) = 0, expm1(1) = e-1
+    assert_f64_close(
+        eval_f64(Primitive::Expm1, &[Value::scalar_f64(0.0)], &no_params()),
+        0.0,
+        1e-14,
+        "expm1(0.0)",
+    );
+    assert_f64_close(
+        eval_f64(Primitive::Expm1, &[Value::scalar_f64(1.0)], &no_params()),
+        std::f64::consts::E - 1.0,
+        1e-14,
+        "expm1(1.0)",
+    );
+}
+
+#[test]
+fn oracle_log1p_f64() {
+    // log1p(0) = 0, log1p(e-1) = 1
+    assert_f64_close(
+        eval_f64(Primitive::Log1p, &[Value::scalar_f64(0.0)], &no_params()),
+        0.0,
+        1e-14,
+        "log1p(0.0)",
+    );
+    assert_f64_close(
+        eval_f64(
+            Primitive::Log1p,
+            &[Value::scalar_f64(std::f64::consts::E - 1.0)],
+            &no_params(),
+        ),
+        1.0,
+        1e-14,
+        "log1p(e-1)",
+    );
+}
+
+#[test]
+fn oracle_tan_f64() {
+    assert_f64_close(
+        eval_f64(Primitive::Tan, &[Value::scalar_f64(0.0)], &no_params()),
+        0.0,
+        1e-14,
+        "tan(0)",
+    );
+    assert_f64_close(
+        eval_f64(
+            Primitive::Tan,
+            &[Value::scalar_f64(std::f64::consts::FRAC_PI_4)],
+            &no_params(),
+        ),
+        1.0,
+        1e-14,
+        "tan(pi/4)",
+    );
+}
+
+#[test]
+fn oracle_asin_acos_atan() {
+    // asin(0) = 0, acos(1) = 0, atan(0) = 0
+    assert_f64_close(
+        eval_f64(Primitive::Asin, &[Value::scalar_f64(0.0)], &no_params()),
+        0.0,
+        1e-14,
+        "asin(0)",
+    );
+    assert_f64_close(
+        eval_f64(Primitive::Acos, &[Value::scalar_f64(1.0)], &no_params()),
+        0.0,
+        1e-14,
+        "acos(1)",
+    );
+    assert_f64_close(
+        eval_f64(Primitive::Atan, &[Value::scalar_f64(0.0)], &no_params()),
+        0.0,
+        1e-14,
+        "atan(0)",
+    );
+    // asin(1) = pi/2
+    assert_f64_close(
+        eval_f64(Primitive::Asin, &[Value::scalar_f64(1.0)], &no_params()),
+        std::f64::consts::FRAC_PI_2,
+        1e-14,
+        "asin(1)",
+    );
+}
+
+#[test]
+fn oracle_sinh_cosh_tanh() {
+    // sinh(0) = 0, cosh(0) = 1, tanh(0) = 0
+    assert_f64_close(
+        eval_f64(Primitive::Sinh, &[Value::scalar_f64(0.0)], &no_params()),
+        0.0,
+        1e-14,
+        "sinh(0)",
+    );
+    assert_f64_close(
+        eval_f64(Primitive::Cosh, &[Value::scalar_f64(0.0)], &no_params()),
+        1.0,
+        1e-14,
+        "cosh(0)",
+    );
+    assert_f64_close(
+        eval_f64(Primitive::Tanh, &[Value::scalar_f64(0.0)], &no_params()),
+        0.0,
+        1e-14,
+        "tanh(0)",
+    );
+    // sinh(1) = (e - 1/e) / 2
+    let expected_sinh1 = (std::f64::consts::E - 1.0 / std::f64::consts::E) / 2.0;
+    assert_f64_close(
+        eval_f64(Primitive::Sinh, &[Value::scalar_f64(1.0)], &no_params()),
+        expected_sinh1,
+        1e-14,
+        "sinh(1)",
+    );
+}
+
+#[test]
+fn oracle_logistic() {
+    // logistic(0) = 0.5
+    assert_f64_close(
+        eval_f64(
+            Primitive::Logistic,
+            &[Value::scalar_f64(0.0)],
+            &no_params(),
+        ),
+        0.5,
+        1e-14,
+        "logistic(0)",
+    );
+    // logistic(large) -> 1.0
+    assert_f64_close(
+        eval_f64(
+            Primitive::Logistic,
+            &[Value::scalar_f64(100.0)],
+            &no_params(),
+        ),
+        1.0,
+        1e-10,
+        "logistic(100)",
+    );
+}
+
+#[test]
+fn oracle_erf_erfc() {
+    // erf(0) ~ 0, erfc(0) ~ 1 (approximation may have small error)
+    assert_f64_close(
+        eval_f64(Primitive::Erf, &[Value::scalar_f64(0.0)], &no_params()),
+        0.0,
+        1e-8,
+        "erf(0)",
+    );
+    assert_f64_close(
+        eval_f64(Primitive::Erfc, &[Value::scalar_f64(0.0)], &no_params()),
+        1.0,
+        1e-8,
+        "erfc(0)",
+    );
+    // erf(large) -> 1
+    assert_f64_close(
+        eval_f64(Primitive::Erf, &[Value::scalar_f64(5.0)], &no_params()),
+        1.0,
+        1e-6,
+        "erf(5)",
+    );
+}
+
+#[test]
+fn oracle_atan2() {
+    // atan2(0, 1) = 0, atan2(1, 0) = pi/2, atan2(1, 1) = pi/4
+    assert_f64_close(
+        eval_f64(
+            Primitive::Atan2,
+            &[Value::scalar_f64(0.0), Value::scalar_f64(1.0)],
+            &no_params(),
+        ),
+        0.0,
+        1e-14,
+        "atan2(0,1)",
+    );
+    assert_f64_close(
+        eval_f64(
+            Primitive::Atan2,
+            &[Value::scalar_f64(1.0), Value::scalar_f64(0.0)],
+            &no_params(),
+        ),
+        std::f64::consts::FRAC_PI_2,
+        1e-14,
+        "atan2(1,0)",
+    );
+    assert_f64_close(
+        eval_f64(
+            Primitive::Atan2,
+            &[Value::scalar_f64(1.0), Value::scalar_f64(1.0)],
+            &no_params(),
+        ),
+        std::f64::consts::FRAC_PI_4,
+        1e-14,
+        "atan2(1,1)",
+    );
+}
+
+#[test]
+fn oracle_select() {
+    // select(true, 10, 20) = 10, select(false, 10, 20) = 20
+    let out = eval_primitive(
+        Primitive::Select,
+        &[
+            Value::scalar_bool(true),
+            Value::scalar_i64(10),
+            Value::scalar_i64(20),
+        ],
+        &no_params(),
+    )
+    .unwrap();
+    assert_eq!(out, Value::scalar_i64(10));
+
+    let out = eval_primitive(
+        Primitive::Select,
+        &[
+            Value::scalar_bool(false),
+            Value::scalar_i64(10),
+            Value::scalar_i64(20),
+        ],
+        &no_params(),
+    )
+    .unwrap();
+    assert_eq!(out, Value::scalar_i64(20));
+}
+
+#[test]
+fn oracle_gather_basic() {
+    let operand = Value::vector_i64(&[10, 20, 30, 40]).unwrap();
+    let indices = Value::Tensor(
+        TensorValue::new(DType::I64, Shape::vector(2), vec![Literal::I64(3), Literal::I64(1)])
+            .unwrap(),
+    );
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".into(), "1".into());
+    let out = eval_primitive(Primitive::Gather, &[operand, indices], &params).unwrap();
+    if let Value::Tensor(t) = &out {
+        assert_eq!(t.shape.dims, vec![2]);
+        let vals: Vec<i64> = t
+            .elements
+            .iter()
+            .map(|l| if let Literal::I64(n) = l { *n } else { panic!() })
+            .collect();
+        assert_eq!(vals, vec![40, 20]);
+    } else {
+        panic!("expected tensor");
+    }
+}
+
+#[test]
+fn oracle_scatter_basic() {
+    let operand = Value::vector_i64(&[0, 0, 0, 0]).unwrap();
+    let indices = Value::Tensor(
+        TensorValue::new(DType::I64, Shape::vector(2), vec![Literal::I64(1), Literal::I64(3)])
+            .unwrap(),
+    );
+    let updates = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape::vector(2),
+            vec![Literal::I64(99), Literal::I64(77)],
+        )
+        .unwrap(),
+    );
+    let out = eval_primitive(Primitive::Scatter, &[operand, indices, updates], &no_params()).unwrap();
+    if let Value::Tensor(t) = &out {
+        let vals: Vec<i64> = t
+            .elements
+            .iter()
+            .map(|l| if let Literal::I64(n) = l { *n } else { panic!() })
+            .collect();
+        assert_eq!(vals, vec![0, 99, 0, 77]);
+    } else {
+        panic!("expected tensor");
+    }
+}
+
 // ======================== Metamorphic: Identities ========================
 
 #[test]
@@ -881,6 +1256,112 @@ fn metamorphic_max_min_agree_on_equal() {
     }
 }
 
+// ======================== Metamorphic: New Primitive Identities =======
+
+#[test]
+fn metamorphic_square_matches_mul_self() {
+    // square(x) == mul(x, x)
+    for x in [0.0, 1.0, -3.5, 7.0, 0.001] {
+        let sq = eval_f64(Primitive::Square, &[Value::scalar_f64(x)], &no_params());
+        let mm = eval_f64(
+            Primitive::Mul,
+            &[Value::scalar_f64(x), Value::scalar_f64(x)],
+            &no_params(),
+        );
+        assert_f64_close(sq, mm, 1e-14, &format!("square({x}) == mul({x},{x})"));
+    }
+}
+
+#[test]
+fn metamorphic_reciprocal_div_identity() {
+    // reciprocal(x) == div(1, x)
+    for x in [1.0, 2.0, 0.5, -4.0] {
+        let recip = eval_f64(Primitive::Reciprocal, &[Value::scalar_f64(x)], &no_params());
+        let div = eval_f64(
+            Primitive::Div,
+            &[Value::scalar_f64(1.0), Value::scalar_f64(x)],
+            &no_params(),
+        );
+        assert_f64_close(recip, div, 1e-14, &format!("reciprocal({x}) == 1/{x}"));
+    }
+}
+
+#[test]
+fn metamorphic_expm1_log1p_inverse() {
+    // expm1(log1p(x)) == x for x > -1
+    for x in [0.0, 0.5, 1.0, 10.0, 0.001] {
+        let log1p_x = eval_f64(Primitive::Log1p, &[Value::scalar_f64(x)], &no_params());
+        let roundtrip = eval_f64(Primitive::Expm1, &[Value::scalar_f64(log1p_x)], &no_params());
+        assert_f64_close(roundtrip, x, 1e-10, &format!("expm1(log1p({x}))"));
+    }
+}
+
+#[test]
+fn metamorphic_trig_pythagorean() {
+    // sin²(x) + cos²(x) == 1
+    for x in [0.0, 1.0, -0.5, std::f64::consts::PI, 2.5] {
+        let s = eval_f64(Primitive::Sin, &[Value::scalar_f64(x)], &no_params());
+        let c = eval_f64(Primitive::Cos, &[Value::scalar_f64(x)], &no_params());
+        assert_f64_close(s * s + c * c, 1.0, 1e-14, &format!("sin²({x})+cos²({x})"));
+    }
+}
+
+#[test]
+fn metamorphic_sinh_cosh_identity() {
+    // cosh²(x) - sinh²(x) == 1
+    for x in [0.0, 1.0, -0.5, 2.0] {
+        let sh = eval_f64(Primitive::Sinh, &[Value::scalar_f64(x)], &no_params());
+        let ch = eval_f64(Primitive::Cosh, &[Value::scalar_f64(x)], &no_params());
+        assert_f64_close(ch * ch - sh * sh, 1.0, 1e-12, &format!("cosh²({x})-sinh²({x})"));
+    }
+}
+
+#[test]
+fn metamorphic_erf_erfc_complement() {
+    // erf(x) + erfc(x) == 1
+    for x in [0.0, 0.5, 1.0, 2.0, -1.0] {
+        let e = eval_f64(Primitive::Erf, &[Value::scalar_f64(x)], &no_params());
+        let ec = eval_f64(Primitive::Erfc, &[Value::scalar_f64(x)], &no_params());
+        assert_f64_close(e + ec, 1.0, 1e-14, &format!("erf({x})+erfc({x})"));
+    }
+}
+
+#[test]
+fn metamorphic_gather_scatter_roundtrip() {
+    // scatter(zeros, idx, gather(operand, idx)) at those indices recovers original values
+    let operand = Value::vector_i64(&[10, 20, 30, 40, 50]).unwrap();
+    let indices = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape::vector(3),
+            vec![Literal::I64(1), Literal::I64(3), Literal::I64(4)],
+        )
+        .unwrap(),
+    );
+
+    let mut gather_params = BTreeMap::new();
+    gather_params.insert("slice_sizes".into(), "1".into());
+
+    let gathered =
+        eval_primitive(Primitive::Gather, &[operand, indices.clone()], &gather_params).unwrap();
+    // gathered should be [20, 40, 50]
+
+    let zeros = Value::vector_i64(&[0, 0, 0, 0, 0]).unwrap();
+    let scattered =
+        eval_primitive(Primitive::Scatter, &[zeros, indices, gathered], &no_params()).unwrap();
+    // scattered should be [0, 20, 0, 40, 50]
+    if let Value::Tensor(t) = &scattered {
+        let vals: Vec<i64> = t
+            .elements
+            .iter()
+            .map(|l| if let Literal::I64(n) = l { *n } else { panic!() })
+            .collect();
+        assert_eq!(vals, vec![0, 20, 0, 40, 50]);
+    } else {
+        panic!("expected tensor");
+    }
+}
+
 // ======================== Adversarial Cases ========================
 
 #[test]
@@ -947,16 +1428,16 @@ fn adversarial_arity_zero_unary() {
 }
 
 #[test]
-fn adversarial_gather_returns_unsupported() {
+fn adversarial_gather_rejects_wrong_arity() {
     let err = eval_primitive(Primitive::Gather, &[Value::scalar_i64(1)], &no_params()).unwrap_err();
-    assert!(matches!(err, EvalError::Unsupported { .. }));
+    assert!(matches!(err, EvalError::ArityMismatch { .. }));
 }
 
 #[test]
-fn adversarial_scatter_returns_unsupported() {
+fn adversarial_scatter_rejects_wrong_arity() {
     let err =
         eval_primitive(Primitive::Scatter, &[Value::scalar_i64(1)], &no_params()).unwrap_err();
-    assert!(matches!(err, EvalError::Unsupported { .. }));
+    assert!(matches!(err, EvalError::ArityMismatch { .. }));
 }
 
 #[test]

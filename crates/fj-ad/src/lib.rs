@@ -560,21 +560,96 @@ fn vjp(
             }
         }
         Primitive::ReduceMax | Primitive::ReduceMin => {
-            // Subgradient: pass gradient to argmax/argmin element(s)
+            // Subgradient: pass gradient only to argmax/argmin element(s)
             let input = &inputs[0];
             match input {
                 Value::Scalar(_) => Ok(vec![g.clone()]),
-                Value::Tensor(_) => {
-                    // For simplicity, pass g through (same as ReduceSum for scalar case)
-                    Ok(vec![g.clone()])
+                Value::Tensor(t) => {
+                    // Full reduction: find the extremal value, create indicator mask
+                    let output_val = eval_primitive(primitive, inputs, params)
+                        .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+                    let extremal = output_val
+                        .as_f64_scalar()
+                        .ok_or_else(|| AdError::EvalFailed("non-scalar reduce output".into()))?;
+                    let g_scalar = g
+                        .as_f64_scalar()
+                        .ok_or_else(|| AdError::EvalFailed("non-scalar gradient".into()))?;
+
+                    // Count how many elements equal the extremal value (for tie-breaking)
+                    let count = t
+                        .elements
+                        .iter()
+                        .filter(|lit| {
+                            lit.as_f64()
+                                .is_some_and(|v| (v - extremal).abs() < f64::EPSILON)
+                        })
+                        .count();
+                    let share = if count > 0 {
+                        g_scalar / count as f64
+                    } else {
+                        0.0
+                    };
+
+                    let elements: Vec<Literal> = t
+                        .elements
+                        .iter()
+                        .map(|lit| {
+                            let v = lit.as_f64().unwrap_or(0.0);
+                            if (v - extremal).abs() < f64::EPSILON {
+                                Literal::from_f64(share)
+                            } else {
+                                Literal::from_f64(0.0)
+                            }
+                        })
+                        .collect();
+
+                    Ok(vec![Value::Tensor(
+                        TensorValue::new(DType::F64, t.shape.clone(), elements)
+                            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                    )])
                 }
             }
         }
         Primitive::ReduceProd => {
+            // VJP of prod(x) wrt x_i = prod(x) / x_i * g
             let input = &inputs[0];
             match input {
                 Value::Scalar(_) => Ok(vec![g.clone()]),
-                Value::Tensor(_) => Ok(vec![g.clone()]),
+                Value::Tensor(t) => {
+                    let output_val = eval_primitive(primitive, inputs, params)
+                        .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+                    let prod_val = output_val
+                        .as_f64_scalar()
+                        .ok_or_else(|| AdError::EvalFailed("non-scalar reduce output".into()))?;
+                    let g_scalar = g
+                        .as_f64_scalar()
+                        .ok_or_else(|| AdError::EvalFailed("non-scalar gradient".into()))?;
+
+                    let elements: Vec<Literal> = t
+                        .elements
+                        .iter()
+                        .map(|lit| {
+                            let v = lit.as_f64().unwrap_or(1.0);
+                            if v.abs() < f64::EPSILON {
+                                // Handle zero: recompute product excluding this element
+                                let partial_prod: f64 = t
+                                    .elements
+                                    .iter()
+                                    .filter(|l| !std::ptr::eq(*l, lit))
+                                    .map(|l| l.as_f64().unwrap_or(1.0))
+                                    .product();
+                                Literal::from_f64(g_scalar * partial_prod)
+                            } else {
+                                Literal::from_f64(g_scalar * prod_val / v)
+                            }
+                        })
+                        .collect();
+
+                    Ok(vec![Value::Tensor(
+                        TensorValue::new(DType::F64, t.shape.clone(), elements)
+                            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                    )])
+                }
             }
         }
         Primitive::Dot => {
@@ -647,7 +722,8 @@ fn vjp(
             Ok(vec![transposed_g])
         }
         Primitive::BroadcastInDim => {
-            // VJP of broadcast_in_dim: reduce_sum g along broadcast axes
+            // VJP of broadcast_in_dim: reduce_sum g along broadcast axes,
+            // then reshape to the original input shape.
             let input = &inputs[0];
             let input_shape = match input {
                 Value::Scalar(_) => Shape::scalar(),
@@ -663,21 +739,279 @@ fn vjp(
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
                 return Ok(vec![reduced]);
             }
-            // Otherwise, just pass g through (simplified)
-            Ok(vec![g.clone()])
+
+            // Parse broadcast_dimensions: which output axes correspond to input axes
+            let out_rank = match g {
+                Value::Scalar(_) => 0,
+                Value::Tensor(t) => t.shape.rank(),
+            };
+
+            let broadcast_dims: Vec<usize> = if let Some(bd_str) =
+                params.get("broadcast_dimensions")
+            {
+                bd_str
+                    .split(',')
+                    .filter_map(|v| v.trim().parse().ok())
+                    .collect()
+            } else {
+                // Default: input axes map to trailing output axes
+                let in_rank = input_shape.rank();
+                (out_rank - in_rank..out_rank).collect()
+            };
+
+            // Determine which output axes are "broadcast axes" that need reduction:
+            // 1. Output axes not mapped from any input axis
+            // 2. Output axes mapped from a size-1 input dim (implicit broadcast)
+            let mut reduce_axes: Vec<usize> = Vec::new();
+            for out_axis in 0..out_rank {
+                if let Some(pos) = broadcast_dims.iter().position(|&d| d == out_axis) {
+                    // This output axis maps to input axis `pos`
+                    if input_shape.dims[pos] == 1 {
+                        // Size-1 input dim was broadcast
+                        reduce_axes.push(out_axis);
+                    }
+                } else {
+                    // This output axis has no input correspondence — was broadcast
+                    reduce_axes.push(out_axis);
+                }
+            }
+
+            // If no axes need reduction, g passes through directly
+            if reduce_axes.is_empty() {
+                return Ok(vec![g.clone()]);
+            }
+
+            // Reduce g along broadcast axes (one axis at a time, from highest to lowest
+            // to keep axis indices stable)
+            let mut current = g.clone();
+            for &axis in reduce_axes.iter().rev() {
+                let mut reduce_params = BTreeMap::new();
+                reduce_params.insert("axes".into(), axis.to_string());
+                current = eval_primitive(
+                    Primitive::ReduceSum,
+                    std::slice::from_ref(&current),
+                    &reduce_params,
+                )
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            }
+
+            // Reshape to original input shape if needed
+            let current_shape = match &current {
+                Value::Scalar(_) => Shape::scalar(),
+                Value::Tensor(t) => t.shape.clone(),
+            };
+            if current_shape != input_shape {
+                let mut reshape_params = BTreeMap::new();
+                reshape_params.insert(
+                    "shape".into(),
+                    input_shape
+                        .dims
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(","),
+                );
+                current = eval_primitive(
+                    Primitive::Reshape,
+                    std::slice::from_ref(&current),
+                    &reshape_params,
+                )
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            }
+
+            Ok(vec![current])
         }
         Primitive::Slice => {
-            // VJP of slice: scatter-add g into zeros at slice start
-            // Simplified: pass g through
-            Ok(vec![g.clone()])
+            // VJP of slice: embed g into a zero tensor at the slice offsets
+            let input = &inputs[0];
+            match input {
+                Value::Scalar(_) => Ok(vec![g.clone()]),
+                Value::Tensor(t) => {
+                    // Parse start indices from params
+                    let starts: Vec<usize> = params
+                        .get("start_indices")
+                        .map(|s| {
+                            s.split(',')
+                                .filter_map(|v| v.trim().parse().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    // Create zero tensor of original shape
+                    let total = t.elements.len();
+                    let mut result_elements = vec![Literal::from_f64(0.0); total];
+
+                    // Get the gradient tensor elements
+                    let g_elements: Vec<f64> = match g {
+                        Value::Scalar(lit) => vec![lit.as_f64().unwrap_or(0.0)],
+                        Value::Tensor(gt) => gt
+                            .elements
+                            .iter()
+                            .map(|l| l.as_f64().unwrap_or(0.0))
+                            .collect(),
+                    };
+
+                    // For 1D case (most common in current usage)
+                    let start = starts.first().copied().unwrap_or(0);
+                    for (i, &gval) in g_elements.iter().enumerate() {
+                        let target = start + i;
+                        if target < total {
+                            result_elements[target] = Literal::from_f64(gval);
+                        }
+                    }
+
+                    Ok(vec![Value::Tensor(
+                        TensorValue::new(DType::F64, t.shape.clone(), result_elements)
+                            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                    )])
+                }
+            }
         }
         Primitive::Concatenate => {
-            // VJP of concatenate: split g via slices
-            // Simplified: return g for each input
-            Ok(inputs.iter().map(|_| g.clone()).collect())
+            // VJP of concatenate: split g into slices for each input
+            let mut grad_inputs = Vec::with_capacity(inputs.len());
+            let mut offset = 0_usize;
+            for inp in inputs {
+                let inp_len = match inp {
+                    Value::Scalar(_) => 1,
+                    Value::Tensor(t) => t.elements.len(),
+                };
+                match g {
+                    Value::Tensor(gt) => {
+                        let slice_elements: Vec<Literal> = gt.elements[offset..offset + inp_len]
+                            .iter()
+                            .map(|l| Literal::from_f64(l.as_f64().unwrap_or(0.0)))
+                            .collect();
+                        let grad_shape = match inp {
+                            Value::Scalar(_) => Shape::scalar(),
+                            Value::Tensor(t) => t.shape.clone(),
+                        };
+                        grad_inputs.push(Value::Tensor(
+                            TensorValue::new(DType::F64, grad_shape, slice_elements)
+                                .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                        ));
+                    }
+                    Value::Scalar(_) => {
+                        grad_inputs.push(g.clone());
+                    }
+                }
+                offset += inp_len;
+            }
+            Ok(grad_inputs)
         }
-        Primitive::Gather | Primitive::Scatter => Err(AdError::UnsupportedPrimitive(primitive)),
+        Primitive::Gather => {
+            // VJP of gather: scatter the gradient back into a zero tensor
+            // of the original operand shape.
+            let operand = &inputs[0];
+            let indices = &inputs[1];
+            let operand_shape = match operand {
+                Value::Scalar(_) => Shape::scalar(),
+                Value::Tensor(t) => t.shape.clone(),
+            };
+            // Create zero tensor of original operand shape
+            let total: usize = operand_shape.dims.iter().map(|d| *d as usize).product();
+            let zero_elements = vec![Literal::from_f64(0.0); total];
+            let zero_operand = Value::Tensor(
+                TensorValue::new(DType::F64, operand_shape, zero_elements)
+                    .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+            );
+            // Scatter gradient into the zero tensor at the gathered indices
+            let scattered = eval_primitive(
+                Primitive::Scatter,
+                &[zero_operand, indices.clone(), g.clone()],
+                &BTreeMap::new(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            // Gradient w.r.t. operand is the scattered result; indices have no gradient
+            Ok(vec![scattered])
+        }
+        Primitive::Scatter => {
+            // VJP of scatter: gradient of operand = g with scattered positions zeroed out,
+            // gradient of updates = gather g at the scattered indices.
+            let indices = &inputs[1];
+            // Build slice_sizes for gather: [1, g.dims[1], g.dims[2], ...]
+            let g_shape = match g {
+                Value::Tensor(t) => &t.shape,
+                Value::Scalar(_) => {
+                    return Err(AdError::EvalFailed(
+                        "scatter VJP requires tensor gradient".into(),
+                    ))
+                }
+            };
+            let mut gather_params = BTreeMap::new();
+            let slice_sizes_str = std::iter::once("1".to_owned())
+                .chain(g_shape.dims[1..].iter().map(|d| d.to_string()))
+                .collect::<Vec<_>>()
+                .join(",");
+            gather_params.insert("slice_sizes".to_owned(), slice_sizes_str);
+            // Grad w.r.t. updates: gather from g at the scatter indices
+            let grad_updates = eval_primitive(
+                Primitive::Gather,
+                &[g.clone(), indices.clone()],
+                &gather_params,
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            // Grad w.r.t. operand: g with zeroed-out scattered positions.
+            // Scatter overwrites operand[idx,:] = updates[i,:], so the operand
+            // gradient at those positions is zero (operand had no influence there).
+            let grad_operand = zero_scattered_positions(g, indices)?;
+            Ok(vec![grad_operand, grad_updates])
+        }
     }
+}
+
+/// Zero out the slices in `g` at the positions indicated by `indices`.
+/// Used in Scatter VJP: the operand gradient must be zero at positions
+/// where scatter overwrote the operand's values.
+fn zero_scattered_positions(g: &Value, indices: &Value) -> Result<Value, AdError> {
+    let g_tensor = match g {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => return Ok(Value::Scalar(Literal::from_f64(0.0))),
+    };
+
+    let index_vals: Vec<usize> = match indices {
+        Value::Scalar(lit) => {
+            vec![lit
+                .as_f64()
+                .ok_or_else(|| AdError::EvalFailed("non-numeric index".into()))?
+                as usize]
+        }
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|lit| {
+                lit.as_f64()
+                    .ok_or_else(|| AdError::EvalFailed("non-numeric index".into()))
+                    .map(|v| v as usize)
+            })
+            .collect::<Result<_, _>>()?,
+    };
+
+    let rank = g_tensor.shape.rank();
+    if rank == 0 {
+        return Ok(Value::Scalar(Literal::from_f64(0.0)));
+    }
+
+    let dims = &g_tensor.shape.dims;
+    // Elements per axis-0 slice: product of dims[1..]
+    let slice_elems: usize = dims[1..].iter().map(|d| *d as usize).product::<usize>().max(1);
+
+    let mut elements = g_tensor.elements.clone();
+    for &idx in &index_vals {
+        if idx < dims[0] as usize {
+            let base = idx * slice_elems;
+            for j in 0..slice_elems {
+                if base + j < elements.len() {
+                    elements[base + j] = Literal::from_f64(0.0);
+                }
+            }
+        }
+    }
+
+    Ok(Value::Tensor(
+        TensorValue::new(g_tensor.dtype, g_tensor.shape.clone(), elements)
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+    ))
 }
 
 fn broadcast_g_to_shape(g: &Value, target_shape: &Shape) -> Result<Value, AdError> {
@@ -958,7 +1292,9 @@ fn jvp_rule(primitive: Primitive, primals: &[Value], tangents: &[f64]) -> Result
         Primitive::Reshape | Primitive::Transpose | Primitive::BroadcastInDim => Ok(tangents[0]),
         Primitive::Slice => Ok(tangents[0]),
         Primitive::Concatenate => Ok(tangents.iter().sum()),
-        Primitive::Gather | Primitive::Scatter => Err(AdError::UnsupportedPrimitive(primitive)),
+        // Gather/Scatter: tangent passes through the same indexing
+        Primitive::Gather => Ok(tangents[0]),
+        Primitive::Scatter => Ok(tangents.iter().sum()),
     }
 }
 
@@ -1201,6 +1537,296 @@ mod tests {
                 params: BTreeMap::new(),
             }],
         )
+    }
+
+    // ── Tensor VJP tests ─────────────────────────────────────────
+
+    #[test]
+    fn vjp_reduce_max_selects_argmax() {
+        // reduce_max([1,5,3]) = 5, gradient should go to index 1
+        use fj_core::{DType, Literal, Shape, TensorValue};
+
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape::vector(3),
+                vec![Literal::I64(1), Literal::I64(5), Literal::I64(3)],
+            )
+            .unwrap(),
+        );
+        let g = Value::scalar_f64(1.0);
+        let params = BTreeMap::new();
+        let grads = vjp(Primitive::ReduceMax, &[input], &g, &params).unwrap();
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert!((vals[0] - 0.0).abs() < 1e-10, "non-max should be 0");
+            assert!((vals[1] - 1.0).abs() < 1e-10, "max should get gradient");
+            assert!((vals[2] - 0.0).abs() < 1e-10, "non-max should be 0");
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    #[test]
+    fn vjp_reduce_prod_correct() {
+        // reduce_prod([2,3,4]) = 24
+        // grad wrt x_0 = 24/2 = 12, x_1 = 24/3 = 8, x_2 = 24/4 = 6
+        use fj_core::{DType, Literal, Shape, TensorValue};
+
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape::vector(3),
+                vec![Literal::I64(2), Literal::I64(3), Literal::I64(4)],
+            )
+            .unwrap(),
+        );
+        let g = Value::scalar_f64(1.0);
+        let params = BTreeMap::new();
+        let grads = vjp(Primitive::ReduceProd, &[input], &g, &params).unwrap();
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert!((vals[0] - 12.0).abs() < 1e-10, "got {}", vals[0]);
+            assert!((vals[1] - 8.0).abs() < 1e-10, "got {}", vals[1]);
+            assert!((vals[2] - 6.0).abs() < 1e-10, "got {}", vals[2]);
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    #[test]
+    fn vjp_reduce_min_selects_argmin() {
+        use fj_core::{DType, Literal, Shape, TensorValue};
+
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape::vector(3),
+                vec![Literal::I64(5), Literal::I64(1), Literal::I64(3)],
+            )
+            .unwrap(),
+        );
+        let g = Value::scalar_f64(2.0);
+        let params = BTreeMap::new();
+        let grads = vjp(Primitive::ReduceMin, &[input], &g, &params).unwrap();
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert!((vals[0] - 0.0).abs() < 1e-10);
+            assert!((vals[1] - 2.0).abs() < 1e-10, "min should get gradient");
+            assert!((vals[2] - 0.0).abs() < 1e-10);
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    // ── BroadcastInDim VJP tests ───────────────────────────────
+
+    #[test]
+    fn vjp_broadcast_scalar_to_vector() {
+        // BroadcastInDim: scalar -> [3] sums all gradient elements
+        use fj_core::{DType, Literal, Shape, TensorValue};
+
+        let input = Value::scalar_f64(2.0);
+        let mut params = BTreeMap::new();
+        params.insert("shape".into(), "3".into());
+
+        // Gradient is a [3] tensor
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(3),
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let grads = vjp(Primitive::BroadcastInDim, &[input], &g, &params).unwrap();
+        let grad_val = grads[0].as_f64_scalar().unwrap();
+        assert!(
+            (grad_val - 6.0).abs() < 1e-10,
+            "scalar broadcast VJP should sum all: got {grad_val}"
+        );
+    }
+
+    #[test]
+    fn vjp_broadcast_vector_to_matrix() {
+        // BroadcastInDim: [3] -> [2,3] with broadcast_dimensions=1
+        // Output axes: 0 (broadcast), 1 (maps to input axis 0)
+        // VJP should sum along axis 0
+        use fj_core::{DType, Literal, Shape, TensorValue};
+
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(3),
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("shape".into(), "2,3".into());
+        params.insert("broadcast_dimensions".into(), "1".into());
+
+        // Gradient is a [2,3] tensor
+        // Row 0: [1,2,3], Row 1: [4,5,6]
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(4.0),
+                    Literal::from_f64(5.0),
+                    Literal::from_f64(6.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let grads = vjp(Primitive::BroadcastInDim, &[input], &g, &params).unwrap();
+        // Sum along axis 0: [1+4, 2+5, 3+6] = [5, 7, 9]
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(t.shape.dims, vec![3], "shape should be [3]");
+            assert!((vals[0] - 5.0).abs() < 1e-10, "got {}", vals[0]);
+            assert!((vals[1] - 7.0).abs() < 1e-10, "got {}", vals[1]);
+            assert!((vals[2] - 9.0).abs() < 1e-10, "got {}", vals[2]);
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    #[test]
+    fn vjp_broadcast_no_broadcast_passthrough() {
+        // BroadcastInDim where input shape matches output shape (no actual broadcast)
+        // Gradient should pass through unchanged
+        use fj_core::{DType, Literal, Shape, TensorValue};
+
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(3),
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("shape".into(), "3".into());
+        params.insert("broadcast_dimensions".into(), "0".into());
+
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(3),
+                vec![
+                    Literal::from_f64(10.0),
+                    Literal::from_f64(20.0),
+                    Literal::from_f64(30.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let grads = vjp(Primitive::BroadcastInDim, &[input], &g, &params).unwrap();
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert!((vals[0] - 10.0).abs() < 1e-10);
+            assert!((vals[1] - 20.0).abs() < 1e-10);
+            assert!((vals[2] - 30.0).abs() < 1e-10);
+        } else {
+            panic!("expected tensor gradient");
+        }
+    }
+
+    #[test]
+    fn vjp_scatter_zeros_overwritten_positions() {
+        // Scatter overwrites operand[1,:] with updates[0,:].
+        // The operand gradient should be zero at the overwritten positions.
+        use fj_core::{DType, Literal, Shape, TensorValue};
+
+        // operand: [[1,2],[3,4],[5,6]] shape [3,2]
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3, 2] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(4.0),
+                    Literal::from_f64(5.0),
+                    Literal::from_f64(6.0),
+                ],
+            )
+            .unwrap(),
+        );
+        // indices: [1] — scatter at index 1
+        let indices = Value::Tensor(
+            TensorValue::new(DType::I64, Shape::vector(1), vec![Literal::I64(1)]).unwrap(),
+        );
+        // updates: [[10,20]] shape [1,2]
+        let updates = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![1, 2] },
+                vec![Literal::from_f64(10.0), Literal::from_f64(20.0)],
+            )
+            .unwrap(),
+        );
+
+        // g = [[1,1],[1,1],[1,1]] (uniform gradient)
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3, 2] },
+                vec![Literal::from_f64(1.0); 6],
+            )
+            .unwrap(),
+        );
+
+        let params = BTreeMap::new();
+        let grads =
+            vjp(Primitive::Scatter, &[operand, indices, updates], &g, &params).unwrap();
+
+        // grad_operand should be [[1,1],[0,0],[1,1]] — zeroed at index 1
+        if let Value::Tensor(t) = &grads[0] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals.len(), 6);
+            assert!((vals[0] - 1.0).abs() < 1e-10, "row 0 should pass through");
+            assert!((vals[1] - 1.0).abs() < 1e-10, "row 0 should pass through");
+            assert!(vals[2].abs() < 1e-10, "row 1 should be zeroed");
+            assert!(vals[3].abs() < 1e-10, "row 1 should be zeroed");
+            assert!((vals[4] - 1.0).abs() < 1e-10, "row 2 should pass through");
+            assert!((vals[5] - 1.0).abs() < 1e-10, "row 2 should pass through");
+        } else {
+            panic!("expected tensor gradient for operand");
+        }
+
+        // grad_updates should be [[1,1]] — gathered from g at index 1
+        if let Value::Tensor(t) = &grads[1] {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals.len(), 2);
+            assert!((vals[0] - 1.0).abs() < 1e-10);
+            assert!((vals[1] - 1.0).abs() < 1e-10);
+        } else {
+            panic!("expected tensor gradient for updates");
+        }
     }
 
     // ── Forward-mode JVP tests ──────────────────────────────────

@@ -193,19 +193,16 @@ fn oracle_transform_composition_rules() {
     );
 }
 
-/// Oracle comparison point 3b: Transform composition should reject double-grad.
+/// Oracle comparison point 3b: Transform composition allows double-grad
+/// (dispatch handles it via finite-diff fallback).
 #[test]
-fn oracle_composition_rejects_double_grad() {
+fn oracle_composition_allows_double_grad() {
     let ledger = make_ledger(ProgramSpec::Square, &[Transform::Grad, Transform::Grad]);
     let result = verify_transform_composition(&ledger);
     assert!(
-        result.is_err(),
-        "grad(grad(f)) should be rejected by composition verifier"
+        result.is_ok(),
+        "grad(grad(f)) should pass composition verification: {result:?}"
     );
-    match result.unwrap_err() {
-        TransformCompositionError::UnsupportedSequence { .. } => {}
-        other => panic!("expected UnsupportedSequence, got {other:?}"),
-    }
 }
 
 /// Oracle comparison point 4: eval_jaxpr results — verify interpreter produces
@@ -569,14 +566,10 @@ fn adversarial_repeated_jit_transforms() {
 fn adversarial_double_vmap() {
     let ledger = make_ledger(ProgramSpec::AddOne, &[Transform::Vmap, Transform::Vmap]);
     let result = verify_transform_composition(&ledger);
-    // In JAX, vmap(vmap(f)) is valid (nested vectorization)
-    // Our engine currently limits vmap count, but composition verification
-    // should either pass or return a specific UnsupportedSequence error
-    match result {
-        Ok(_) => {}                                                      // pass
-        Err(TransformCompositionError::UnsupportedSequence { .. }) => {} // acceptable
-        Err(other) => panic!("unexpected error for vmap(vmap(f)): {other:?}"),
-    }
+    assert!(
+        result.is_ok(),
+        "vmap(vmap(f)) should pass composition verification: {result:?}"
+    );
 }
 
 /// Adversarial case 4: Maximum supported equation count (stress test).

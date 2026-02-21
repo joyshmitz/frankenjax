@@ -513,6 +513,73 @@ mod tests {
     }
 
     #[test]
+    fn log_domain_posterior_bayes_factor_starts_at_one() {
+        let ldp = super::LogDomainPosterior::new(0.5);
+        assert!((ldp.bayes_factor() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn log_domain_posterior_bayes_factor_grows_with_evidence() {
+        let mut ldp = super::LogDomainPosterior::new(0.5);
+        ldp.update(1.0); // log-likelihood = 1.0
+        let bf = ldp.bayes_factor();
+        assert!((bf - 1.0_f64.exp()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn log_domain_posterior_extreme_prior_near_zero() {
+        let ldp = super::LogDomainPosterior::new(0.001);
+        let p = ldp.posterior_abandoned();
+        assert!(p < 0.01, "near-zero prior should yield low posterior: {p}");
+    }
+
+    #[test]
+    fn log_domain_posterior_extreme_prior_near_one() {
+        let ldp = super::LogDomainPosterior::new(0.999);
+        let p = ldp.posterior_abandoned();
+        assert!(p > 0.99, "near-one prior should yield high posterior: {p}");
+    }
+
+    #[test]
+    fn calibration_report_empty_returns_zero_ece() {
+        let report = super::CalibrationReport::new(10);
+        assert!((report.compute_ece()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn calibration_report_poor_calibration_has_high_ece() {
+        let mut report = super::CalibrationReport::new(10);
+        // Predict 0.9 but never observe true → poor calibration
+        for _ in 0..100 {
+            report.observe(0.9, false);
+        }
+        let ece = report.compute_ece();
+        assert!(ece > 0.5, "ECE should be high for poor calibration: {ece}");
+    }
+
+    #[test]
+    fn conformal_predictor_exact_min_size_calibrates() {
+        let mut cp = super::ConformalPredictor::new(0.9, 5);
+        for i in 1..=5 {
+            cp.observe(i as f64 * 0.1);
+        }
+        assert!(cp.is_calibrated());
+        assert!(cp.prediction_threshold().is_some());
+    }
+
+    #[test]
+    fn log_sum_exp_handles_neg_infinity() {
+        let result = super::log_sum_exp(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        assert_eq!(result, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn log_sum_exp_one_neg_infinity() {
+        let result = super::log_sum_exp(f64::NEG_INFINITY, 0.0);
+        assert!((result - 0.0).abs() < 1e-10, "log(0 + 1) = 0: got {result}");
+    }
+
+    #[test]
     fn test_ledger_test_log_schema_contract() {
         let fixture_id =
             fj_test_utils::fixture_id_from_json(&("ledger", "loss-matrix")).expect("digest");

@@ -88,6 +88,7 @@ impl std::error::Error for StagingError {}
 /// Construct a Jaxpr from a program spec (FrankenJAX equivalent of `jax.make_jaxpr`).
 ///
 /// Returns a valid Jaxpr with correct input/output types.
+#[must_use]
 pub fn make_jaxpr(spec: ProgramSpec) -> Jaxpr {
     build_program(spec)
 }

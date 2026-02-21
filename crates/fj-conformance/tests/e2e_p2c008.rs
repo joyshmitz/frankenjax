@@ -427,9 +427,9 @@ fn e2e_error_paths() {
     let err = eval_primitive(Primitive::Add, &[a, b], &p).unwrap_err();
     assert!(matches!(err, EvalError::ShapeMismatch { .. }));
 
-    // Unsupported primitive
+    // Wrong arity for gather (needs 2 inputs)
     let err = eval_primitive(Primitive::Gather, &[Value::scalar_i64(1)], &p).unwrap_err();
-    assert!(matches!(err, EvalError::Unsupported { .. }));
+    assert!(matches!(err, EvalError::ArityMismatch { .. }));
 }
 
 // ======================== Scenario 6: Broadcasting Pipeline ========================

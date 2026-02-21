@@ -241,7 +241,17 @@ impl CacheManager {
         )))
     }
 
+    /// Create a cache manager with TTL + LRU eviction wrapping an in-memory backend.
+    #[must_use]
+    pub fn in_memory_with_ttl_eviction(config: eviction::TtlLruConfig) -> Self {
+        Self::new(Box::new(eviction::TtlLruCache::new(
+            backend::InMemoryCache::new(),
+            config,
+        )))
+    }
+
     /// Look up cached data by key. Verifies integrity on file-backed caches.
+    #[must_use]
     pub fn get(&self, key: &CacheKey) -> CacheLookup {
         match self.backend.get(key) {
             Some(artifact) => {
@@ -279,6 +289,7 @@ impl CacheManager {
     }
 
     /// Return current cache statistics.
+    #[must_use]
     pub fn stats(&self) -> backend::CacheStats {
         self.backend.stats()
     }

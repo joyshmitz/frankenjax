@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use fj_dispatch::DispatchError;
+use fj_dispatch::{DispatchError, TransformExecutionError};
 
 #[derive(Debug)]
 pub enum ApiError {
@@ -50,19 +50,24 @@ impl From<DispatchError> for ApiError {
             DispatchError::TransformInvariant(e) => Self::InvalidComposition {
                 detail: e.to_string(),
             },
-            DispatchError::TransformExecution(e) => {
-                let msg = e.to_string();
-                if msg.contains("scalar") {
-                    Self::GradRequiresScalar { detail: msg }
-                } else if msg.contains("leading-dimension mismatch") {
-                    Self::VmapDimensionMismatch {
-                        expected: 0,
-                        actual: 0,
+            DispatchError::TransformExecution(ref e) => match e {
+                TransformExecutionError::VmapMismatchedLeadingDimension {
+                    expected,
+                    actual,
+                } => Self::VmapDimensionMismatch {
+                    expected: *expected,
+                    actual: *actual,
+                },
+                TransformExecutionError::NonScalarGradientInput
+                | TransformExecutionError::NonScalarGradientOutput => {
+                    Self::GradRequiresScalar {
+                        detail: e.to_string(),
                     }
-                } else {
-                    Self::EvalError { detail: msg }
                 }
-            }
+                _ => Self::EvalError {
+                    detail: e.to_string(),
+                },
+            },
         }
     }
 }

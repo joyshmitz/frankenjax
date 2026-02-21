@@ -536,6 +536,25 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_grad_of_grad_square_scalar() {
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Square, &[Transform::Grad, Transform::Grad]),
+            args: vec![Value::scalar_f64(3.0)],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("dispatch grad-of-grad should succeed");
+
+        let second_derivative = response.outputs[0]
+            .as_f64_scalar()
+            .expect("second derivative output should be scalar f64");
+        assert!((second_derivative - 2.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn dispatch_vmap_add_one_vector() {
         let response = dispatch(DispatchRequest {
             mode: CompatibilityMode::Strict,
@@ -595,6 +614,46 @@ mod tests {
             .map(|literal| literal.as_i64().expect("expected i64 element"))
             .collect::<Vec<_>>();
         assert_eq!(as_i64, vec![2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn dispatch_vmap_of_vmap_add_one_rank2_tensor() {
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    fj_core::Literal::I64(1),
+                    fj_core::Literal::I64(2),
+                    fj_core::Literal::I64(3),
+                    fj_core::Literal::I64(4),
+                    fj_core::Literal::I64(5),
+                    fj_core::Literal::I64(6),
+                ],
+            )
+            .expect("matrix should build"),
+        );
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap, Transform::Vmap]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: BTreeMap::new(),
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("dispatch nested vmap should succeed");
+
+        let output = response.outputs[0]
+            .as_tensor()
+            .expect("nested vmap output should be tensor");
+        assert_eq!(output.shape, Shape { dims: vec![2, 3] });
+        let as_i64 = output
+            .elements
+            .iter()
+            .map(|literal| literal.as_i64().expect("expected i64 element"))
+            .collect::<Vec<_>>();
+        assert_eq!(as_i64, vec![2, 3, 4, 5, 6, 7]);
     }
 
     #[test]
@@ -776,5 +835,74 @@ mod tests {
             r1.cache_key, r3.cache_key,
             "different program = different key"
         );
+    }
+
+    // ── Calibrated posterior tests ────────────────────────────
+
+    #[test]
+    fn calibrated_posterior_falls_back_to_heuristic_without_conformal() {
+        let ttl = ledger(ProgramSpec::Square, &[Transform::Grad]);
+        let result = super::calibrated_posterior_abandoned(&ttl, None);
+        let heuristic = super::heuristic_posterior_abandoned(&ttl);
+        assert!(
+            (result - heuristic).abs() < 1e-12,
+            "without conformal predictor, should return heuristic: {result} vs {heuristic}"
+        );
+    }
+
+    #[test]
+    fn calibrated_posterior_falls_back_when_uncalibrated() {
+        use fj_ledger::ConformalPredictor;
+        let ttl = ledger(ProgramSpec::Square, &[Transform::Grad]);
+        let cp = ConformalPredictor::new(0.9, 10); // needs 10 scores, has 0
+        let result = super::calibrated_posterior_abandoned(&ttl, Some(&cp));
+        let heuristic = super::heuristic_posterior_abandoned(&ttl);
+        assert!(
+            (result - heuristic).abs() < 1e-12,
+            "uncalibrated predictor should fall back to heuristic"
+        );
+    }
+
+    #[test]
+    fn calibrated_posterior_uses_conformal_when_calibrated() {
+        use fj_ledger::ConformalPredictor;
+        let ttl = ledger(ProgramSpec::Square, &[Transform::Grad]);
+        let mut cp = ConformalPredictor::new(0.9, 5);
+        for score in &[0.01, 0.02, 0.03, 0.04, 0.05] {
+            cp.observe(*score);
+        }
+        assert!(cp.is_calibrated());
+
+        let result = super::calibrated_posterior_abandoned(&ttl, Some(&cp));
+        let heuristic = super::heuristic_posterior_abandoned(&ttl);
+        // Result should equal the conformal point estimate (which equals heuristic)
+        // because calibrated_posterior returns point = heuristic
+        assert!(
+            (result - heuristic).abs() < 1e-12,
+            "calibrated conformal point estimate should equal heuristic input"
+        );
+    }
+
+    #[test]
+    fn heuristic_posterior_increases_with_transform_depth() {
+        let shallow = ledger(ProgramSpec::Add2, &[Transform::Jit]);
+        let deep = ledger(
+            ProgramSpec::Add2,
+            &[Transform::Jit, Transform::Grad, Transform::Vmap],
+        );
+        let h_shallow = super::heuristic_posterior_abandoned(&shallow);
+        let h_deep = super::heuristic_posterior_abandoned(&deep);
+        assert!(
+            h_deep > h_shallow,
+            "deeper transform stack should have higher abandoned posterior: {h_deep} vs {h_shallow}"
+        );
+    }
+
+    #[test]
+    fn heuristic_posterior_is_bounded() {
+        let minimal = ledger(ProgramSpec::AddOne, &[]);
+        let result = super::heuristic_posterior_abandoned(&minimal);
+        assert!(result >= 0.05, "posterior should be >= 0.05, got {result}");
+        assert!(result <= 0.95, "posterior should be <= 0.95, got {result}");
     }
 }

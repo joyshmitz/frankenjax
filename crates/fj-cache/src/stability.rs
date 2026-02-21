@@ -32,7 +32,7 @@ pub fn golden_key_refs() -> Vec<GoldenKeyRef> {
     vec![
         GoldenKeyRef {
             description: "empty program, strict mode, no transforms",
-            expected_digest_hex: "", // filled by capture_golden_keys()
+            expected_digest_hex: "b46e4618da22175a5f6b387b7a466be89c100263173cb4203e43b31756066cf9",
             input: CacheKeyInput {
                 mode: CompatibilityMode::Strict,
                 backend: "cpu".to_owned(),
@@ -45,7 +45,7 @@ pub fn golden_key_refs() -> Vec<GoldenKeyRef> {
         },
         GoldenKeyRef {
             description: "empty program, hardened mode, jit transform",
-            expected_digest_hex: "",
+            expected_digest_hex: "2631f1bb02ed6a0e66969d3826d43fbe4fd1a80e67fbc2f64a8873dba118c3e9",
             input: CacheKeyInput {
                 mode: CompatibilityMode::Hardened,
                 backend: "cpu".to_owned(),
@@ -58,7 +58,7 @@ pub fn golden_key_refs() -> Vec<GoldenKeyRef> {
         },
         GoldenKeyRef {
             description: "empty program, strict mode, custom hook",
-            expected_digest_hex: "",
+            expected_digest_hex: "5a5f9f3067b01c0cc4b4adc12c891db9d3e647c7ce7f03618c303b8241ade71c",
             input: CacheKeyInput {
                 mode: CompatibilityMode::Strict,
                 backend: "cpu".to_owned(),
@@ -134,6 +134,25 @@ mod tests {
                 64,
                 "SHA-256 hex digest should be 64 chars: {}",
                 g.description
+            );
+        }
+    }
+
+    #[test]
+    fn golden_refs_match_hardcoded_digests() {
+        // Regression gate: if the cache key format changes, these will fail,
+        // signaling that a namespace version bump is needed.
+        for g in golden_key_refs() {
+            assert!(
+                !g.expected_digest_hex.is_empty(),
+                "golden ref '{}' has empty expected_digest_hex — must be filled",
+                g.description
+            );
+            let key = build_cache_key(&g.input).expect("golden ref should produce valid key");
+            assert_eq!(
+                key.digest_hex, g.expected_digest_hex,
+                "cache key drift detected for '{}': expected={}, actual={}",
+                g.description, g.expected_digest_hex, key.digest_hex
             );
         }
     }

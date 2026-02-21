@@ -206,6 +206,24 @@ mod tests {
         assert!(matches!(err, ApiError::GradRequiresScalar { .. }));
     }
 
+    #[test]
+    fn vmap_dimension_mismatch_preserves_info() {
+        let jaxpr = build_program(ProgramSpec::Add2);
+        let err = vmap(jaxpr)
+            .call(vec![
+                Value::vector_i64(&[1, 2, 3]).expect("vec3"),
+                Value::vector_i64(&[1, 2]).expect("vec2"),
+            ])
+            .expect_err("vmap with mismatched leading dims should fail");
+        match err {
+            ApiError::VmapDimensionMismatch { expected, actual } => {
+                assert_eq!(expected, 3, "expected leading dim should be 3");
+                assert_eq!(actual, 2, "actual leading dim should be 2");
+            }
+            other => panic!("expected VmapDimensionMismatch, got: {other:?}"),
+        }
+    }
+
     // --- Mode configuration tests ---
 
     #[test]

@@ -129,6 +129,7 @@ impl BackendRegistry {
     }
 
     /// Look up a backend by name. Returns None if not found.
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&dyn Backend> {
         self.backends
             .iter()
@@ -138,11 +139,13 @@ impl BackendRegistry {
 
     /// Return the highest-priority (first) backend.
     /// Legacy anchor: P2C006-A04 (default_backend).
+    #[must_use]
     pub fn default_backend(&self) -> Option<&dyn Backend> {
         self.backends.first().map(|b| b.as_ref())
     }
 
     /// List all registered backend names.
+    #[must_use]
     pub fn available_backends(&self) -> Vec<&str> {
         self.backends.iter().map(|b| b.name()).collect()
     }

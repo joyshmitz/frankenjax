@@ -16,7 +16,8 @@ use arithmetic::{
 use comparison::eval_comparison;
 use reduction::eval_reduce_axes;
 use tensor_ops::{
-    eval_broadcast_in_dim, eval_concatenate, eval_reshape, eval_slice, eval_transpose,
+    eval_broadcast_in_dim, eval_concatenate, eval_gather, eval_reshape, eval_scatter, eval_slice,
+    eval_transpose,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,18 +222,15 @@ pub fn eval_primitive(
         Primitive::BroadcastInDim => eval_broadcast_in_dim(inputs, params),
         Primitive::Concatenate => eval_concatenate(inputs, params),
         Primitive::Slice => eval_slice(inputs, params),
-        // Not yet implemented
-        Primitive::Gather | Primitive::Scatter => Err(EvalError::Unsupported {
-            primitive,
-            detail: "runtime kernel not implemented yet for this primitive".to_owned(),
-        }),
+        Primitive::Gather => eval_gather(inputs, params),
+        Primitive::Scatter => eval_scatter(inputs, params),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{EvalError, eval_primitive};
-    use fj_core::{DType, Primitive, Value};
+    use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
     use std::collections::BTreeMap;
 
     fn no_params() -> BTreeMap<String, String> {
@@ -1223,17 +1221,163 @@ mod tests {
     }
 
     #[test]
-    fn gather_unsupported() {
+    fn gather_wrong_arity_rejected() {
         let err =
             eval_primitive(Primitive::Gather, &[Value::scalar_i64(1)], &no_params()).unwrap_err();
+        assert!(matches!(err, EvalError::ArityMismatch { .. }));
+    }
+
+    #[test]
+    fn gather_scalar_operand_rejected() {
+        let indices = Value::Tensor(
+            TensorValue::new(DType::I64, Shape::vector(1), vec![Literal::I64(0)]).unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".into(), "1".into());
+        let err =
+            eval_primitive(Primitive::Gather, &[Value::scalar_i64(1), indices], &params)
+                .unwrap_err();
         assert!(matches!(err, EvalError::Unsupported { .. }));
     }
 
     #[test]
-    fn scatter_unsupported() {
+    fn gather_1d_indices_from_2d() {
+        // operand: [[10,20],[30,40],[50,60]] (shape [3,2])
+        // indices: [2, 0] — gather rows 2 and 0
+        // slice_sizes: 1,2
+        // result: [[50,60],[10,20]] (shape [2,2])
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![3, 2] },
+                vec![
+                    Literal::I64(10),
+                    Literal::I64(20),
+                    Literal::I64(30),
+                    Literal::I64(40),
+                    Literal::I64(50),
+                    Literal::I64(60),
+                ],
+            )
+            .unwrap(),
+        );
+        let indices = Value::Tensor(
+            TensorValue::new(DType::I64, Shape::vector(2), vec![Literal::I64(2), Literal::I64(0)])
+                .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".into(), "1,2".into());
+
+        let out = eval_primitive(Primitive::Gather, &[operand, indices], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![2, 2]);
+            let vals: Vec<i64> = t
+                .elements
+                .iter()
+                .map(|l| if let Literal::I64(n) = l { *n } else { panic!() })
+                .collect();
+            assert_eq!(vals, vec![50, 60, 10, 20]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn gather_out_of_bounds_rejected() {
+        let operand = Value::vector_i64(&[1, 2, 3]).unwrap();
+        let indices = Value::Tensor(
+            TensorValue::new(DType::I64, Shape::vector(1), vec![Literal::I64(5)]).unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".into(), "1".into());
+        let err = eval_primitive(Primitive::Gather, &[operand, indices], &params).unwrap_err();
+        assert!(matches!(err, EvalError::Unsupported { .. }));
+    }
+
+    #[test]
+    fn scatter_1d_indices_into_2d() {
+        // operand: [[0,0],[0,0],[0,0]] (shape [3,2])
+        // indices: [1, 0]
+        // updates: [[10,20],[30,40]] (shape [2,2])
+        // result:  [[30,40],[10,20],[0,0]]
+        let operand = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![3, 2] },
+                vec![Literal::I64(0); 6],
+            )
+            .unwrap(),
+        );
+        let indices = Value::Tensor(
+            TensorValue::new(DType::I64, Shape::vector(2), vec![Literal::I64(1), Literal::I64(0)])
+                .unwrap(),
+        );
+        let updates = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(10),
+                    Literal::I64(20),
+                    Literal::I64(30),
+                    Literal::I64(40),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let out =
+            eval_primitive(Primitive::Scatter, &[operand, indices, updates], &no_params()).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![3, 2]);
+            let vals: Vec<i64> = t
+                .elements
+                .iter()
+                .map(|l| if let Literal::I64(n) = l { *n } else { panic!() })
+                .collect();
+            assert_eq!(vals, vec![30, 40, 10, 20, 0, 0]);
+        } else {
+            panic!("expected tensor");
+        }
+    }
+
+    #[test]
+    fn scatter_scalar_operand_rejected() {
         let err =
             eval_primitive(Primitive::Scatter, &[Value::scalar_i64(1)], &no_params()).unwrap_err();
-        assert!(matches!(err, EvalError::Unsupported { .. }));
+        assert!(matches!(err, EvalError::ArityMismatch { .. }));
+    }
+
+    #[test]
+    fn gather_1d_simple() {
+        // operand: [10, 20, 30, 40, 50] (shape [5])
+        // indices: [3, 1, 4]
+        // slice_sizes: 1
+        // result: [40, 20, 50]
+        let operand = Value::vector_i64(&[10, 20, 30, 40, 50]).unwrap();
+        let indices = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape::vector(3),
+                vec![Literal::I64(3), Literal::I64(1), Literal::I64(4)],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".into(), "1".into());
+
+        let out = eval_primitive(Primitive::Gather, &[operand, indices], &params).unwrap();
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.shape.dims, vec![3]);
+            let vals: Vec<i64> = t
+                .elements
+                .iter()
+                .map(|l| if let Literal::I64(n) = l { *n } else { panic!() })
+                .collect();
+            assert_eq!(vals, vec![40, 20, 50]);
+        } else {
+            panic!("expected tensor");
+        }
     }
 
     // ===================================================================

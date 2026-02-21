@@ -951,9 +951,6 @@ pub enum TransformCompositionError {
         index: usize,
         transform: Transform,
     },
-    UnsupportedSequence {
-        detail: String,
-    },
 }
 
 impl std::fmt::Display for TransformCompositionError {
@@ -976,9 +973,6 @@ impl std::fmt::Display for TransformCompositionError {
                     index,
                     transform.as_str()
                 )
-            }
-            Self::UnsupportedSequence { detail } => {
-                write!(f, "unsupported transform sequence: {detail}")
             }
         }
     }
@@ -1003,28 +997,6 @@ pub fn verify_transform_composition(
                 transform: *transform,
             });
         }
-    }
-
-    let grad_count = ledger
-        .transform_stack
-        .iter()
-        .filter(|transform| **transform == Transform::Grad)
-        .count();
-    if grad_count > 1 {
-        return Err(TransformCompositionError::UnsupportedSequence {
-            detail: "current engine supports at most one grad transform".to_owned(),
-        });
-    }
-
-    let vmap_count = ledger
-        .transform_stack
-        .iter()
-        .filter(|transform| **transform == Transform::Vmap)
-        .count();
-    if vmap_count > 1 {
-        return Err(TransformCompositionError::UnsupportedSequence {
-            detail: "current engine supports at most one vmap transform".to_owned(),
-        });
     }
 
     let stack_signature = ledger.composition_signature();
@@ -1522,13 +1494,21 @@ mod tests {
     fn transform_composition_valid_double_compositions() {
         run_logged_test(
             "transform_composition_valid_double_compositions",
-            &["jit+grad", "jit+vmap", "vmap+grad"],
+            &[
+                "jit+grad",
+                "jit+vmap",
+                "vmap+grad",
+                "grad+grad",
+                "vmap+vmap",
+            ],
             fj_test_utils::TestMode::Strict,
             || {
                 let stacks = [
                     [Transform::Jit, Transform::Grad],
                     [Transform::Jit, Transform::Vmap],
                     [Transform::Vmap, Transform::Grad],
+                    [Transform::Grad, Transform::Grad],
+                    [Transform::Vmap, Transform::Vmap],
                 ];
                 for stack in stacks {
                     let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
@@ -1563,36 +1543,38 @@ mod tests {
     }
 
     #[test]
-    fn transform_composition_rejects_double_grad() {
+    fn transform_composition_allows_double_grad() {
         run_logged_test(
-            "transform_composition_rejects_double_grad",
+            "transform_composition_allows_double_grad",
             &["grad", "grad"],
             fj_test_utils::TestMode::Strict,
             || {
                 let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
                 ttl.push_transform(Transform::Grad, "g1");
                 ttl.push_transform(Transform::Grad, "g2");
-                let err =
-                    verify_transform_composition(&ttl).expect_err("double grad should reject");
-                assert!(format!("{err}").contains("at most one grad"));
+                let proof =
+                    verify_transform_composition(&ttl).expect("double grad should validate");
+                assert_eq!(proof.transform_count, 2);
+                assert_eq!(proof.evidence_count, 2);
                 Ok(Vec::new())
             },
         );
     }
 
     #[test]
-    fn transform_composition_rejects_double_vmap() {
+    fn transform_composition_allows_double_vmap() {
         run_logged_test(
-            "transform_composition_rejects_double_vmap",
+            "transform_composition_allows_double_vmap",
             &["vmap", "vmap"],
             fj_test_utils::TestMode::Strict,
             || {
                 let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
                 ttl.push_transform(Transform::Vmap, "v1");
                 ttl.push_transform(Transform::Vmap, "v2");
-                let err =
-                    verify_transform_composition(&ttl).expect_err("double vmap should reject");
-                assert!(format!("{err}").contains("at most one vmap"));
+                let proof =
+                    verify_transform_composition(&ttl).expect("double vmap should validate");
+                assert_eq!(proof.transform_count, 2);
+                assert_eq!(proof.evidence_count, 2);
                 Ok(Vec::new())
             },
         );

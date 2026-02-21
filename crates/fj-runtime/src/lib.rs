@@ -24,8 +24,25 @@ impl RuntimeAdmissionModel {
 
     #[must_use]
     pub fn decide(&self, posterior_abandoned: f64) -> DecisionAction {
-        let _mode = self.mode;
-        recommend_action(posterior_abandoned, &self.loss_matrix)
+        let matrix = self.effective_loss_matrix();
+        recommend_action(posterior_abandoned, &matrix)
+    }
+
+    /// Return the loss matrix adjusted for the compatibility mode.
+    /// - Strict: uses the configured matrix as-is (conservative, high kill_if_useful cost).
+    /// - Hardened: reduces kill_if_useful and increases keep_if_abandoned, making the
+    ///   model more aggressive about reclaiming resources from suspected-abandoned work.
+    #[must_use]
+    fn effective_loss_matrix(&self) -> LossMatrix {
+        match self.mode {
+            CompatibilityMode::Strict => self.loss_matrix.clone(),
+            CompatibilityMode::Hardened => LossMatrix {
+                keep_if_useful: self.loss_matrix.keep_if_useful,
+                kill_if_useful: self.loss_matrix.kill_if_useful / 2,
+                keep_if_abandoned: self.loss_matrix.keep_if_abandoned.saturating_mul(2).min(100),
+                kill_if_abandoned: self.loss_matrix.kill_if_abandoned,
+            },
+        }
     }
 }
 
@@ -54,6 +71,7 @@ pub mod frankentui_bridge {
         pub confidence_percent: u8,
     }
 
+    #[must_use]
     pub fn render_status_card(card: &StatusCard) -> String {
         let _type_check = std::any::type_name::<ftui::Style>();
 
@@ -81,6 +99,24 @@ mod tests {
     fn runtime_admission_kills_at_high_abandoned_probability() {
         let model = RuntimeAdmissionModel::new(CompatibilityMode::Strict);
         assert_eq!(model.decide(0.95), DecisionAction::Kill);
+    }
+
+    #[test]
+    fn hardened_mode_kills_at_lower_threshold_than_strict() {
+        // Find a posterior value where Strict keeps but Hardened kills,
+        // demonstrating that mode influences the decision.
+        let strict = RuntimeAdmissionModel::new(CompatibilityMode::Strict);
+        let hardened = RuntimeAdmissionModel::new(CompatibilityMode::Hardened);
+
+        // At moderate posterior (around 0.6), hardened should be more aggressive.
+        // Strict default: kill_if_useful=100, keep_if_abandoned=30
+        // Hardened:        kill_if_useful=50,  keep_if_abandoned=60
+        // expected_loss_keep(0.6, strict) = 0.4*0 + 0.6*30 = 18.0
+        // expected_loss_kill(0.6, strict) = 0.4*100 + 0.6*1 = 40.6 → Keep
+        // expected_loss_keep(0.6, hardened) = 0.4*0 + 0.6*60 = 36.0
+        // expected_loss_kill(0.6, hardened) = 0.4*50 + 0.6*1 = 20.6 → Kill
+        assert_eq!(strict.decide(0.6), DecisionAction::Keep);
+        assert_eq!(hardened.decide(0.6), DecisionAction::Kill);
     }
 
     #[test]

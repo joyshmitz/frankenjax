@@ -110,7 +110,8 @@ pub fn sample_transform(cursor: &mut ByteCursor<'_>) -> Transform {
 
 #[must_use]
 pub fn sample_primitive(cursor: &mut ByteCursor<'_>) -> Primitive {
-    match cursor.take_u8() % 37 {
+    // All 44 LAX primitives covered (indices 0..=43, modulo 44).
+    match cursor.take_u8() % 44 {
         0 => Primitive::Add,
         1 => Primitive::Sub,
         2 => Primitive::Mul,
@@ -128,37 +129,71 @@ pub fn sample_primitive(cursor: &mut ByteCursor<'_>) -> Primitive {
         14 => Primitive::Round,
         15 => Primitive::Sin,
         16 => Primitive::Cos,
-        17 => Primitive::Dot,
-        18 => Primitive::Eq,
-        19 => Primitive::Ne,
-        20 => Primitive::Lt,
-        21 => Primitive::Le,
-        22 => Primitive::Gt,
-        23 => Primitive::Ge,
-        24 => Primitive::ReduceSum,
-        25 => Primitive::ReduceMax,
-        26 => Primitive::ReduceMin,
-        27 => Primitive::ReduceProd,
-        28 => Primitive::Reshape,
-        29 => Primitive::Slice,
-        30 => Primitive::Gather,
-        31 => Primitive::Scatter,
-        32 => Primitive::Transpose,
-        33 => Primitive::BroadcastInDim,
-        _ => Primitive::Concatenate,
+        17 => Primitive::Tan,
+        18 => Primitive::Asin,
+        19 => Primitive::Acos,
+        20 => Primitive::Atan,
+        21 => Primitive::Sinh,
+        22 => Primitive::Cosh,
+        23 => Primitive::Tanh,
+        24 => Primitive::Expm1,
+        25 => Primitive::Log1p,
+        26 => Primitive::Sign,
+        27 => Primitive::Square,
+        28 => Primitive::Reciprocal,
+        29 => Primitive::Logistic,
+        30 => Primitive::Erf,
+        31 => Primitive::Erfc,
+        32 => Primitive::Div,
+        33 => Primitive::Rem,
+        34 => Primitive::Atan2,
+        35 => Primitive::Select,
+        36 => Primitive::Dot,
+        37 => Primitive::Eq,
+        38 => Primitive::Ne,
+        39 => Primitive::Lt,
+        40 => Primitive::Le,
+        41 => Primitive::Gt,
+        42 => Primitive::Ge,
+        // Remaining: reductions + shape ops (index 43 catches them all via _)
+        _ => {
+            // Distribute among remaining primitives using a second byte
+            match cursor.take_u8() % 11 {
+                0 => Primitive::ReduceSum,
+                1 => Primitive::ReduceMax,
+                2 => Primitive::ReduceMin,
+                3 => Primitive::ReduceProd,
+                4 => Primitive::Reshape,
+                5 => Primitive::Slice,
+                6 => Primitive::Gather,
+                7 => Primitive::Scatter,
+                8 => Primitive::Transpose,
+                9 => Primitive::BroadcastInDim,
+                _ => Primitive::Concatenate,
+            }
+        }
     }
 }
 
 #[must_use]
 pub fn primitive_arity(primitive: Primitive) -> usize {
     match primitive {
+        // Binary ops
         Primitive::Add | Primitive::Sub | Primitive::Mul | Primitive::Max | Primitive::Min
-        | Primitive::Pow | Primitive::Dot | Primitive::Gather | Primitive::Scatter
+        | Primitive::Pow | Primitive::Div | Primitive::Rem | Primitive::Atan2
+        | Primitive::Dot | Primitive::Gather
         | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
         | Primitive::Gt | Primitive::Ge | Primitive::Concatenate => 2,
+        // Ternary ops
+        Primitive::Select | Primitive::Scatter => 3,
+        // Unary ops
         Primitive::Neg | Primitive::Abs | Primitive::Exp | Primitive::Log
         | Primitive::Sqrt | Primitive::Rsqrt | Primitive::Floor | Primitive::Ceil
-        | Primitive::Round | Primitive::Sin | Primitive::Cos
+        | Primitive::Round | Primitive::Sin | Primitive::Cos | Primitive::Tan
+        | Primitive::Asin | Primitive::Acos | Primitive::Atan
+        | Primitive::Sinh | Primitive::Cosh | Primitive::Tanh
+        | Primitive::Expm1 | Primitive::Log1p | Primitive::Sign | Primitive::Square
+        | Primitive::Reciprocal | Primitive::Logistic | Primitive::Erf | Primitive::Erfc
         | Primitive::ReduceSum | Primitive::ReduceMax | Primitive::ReduceMin | Primitive::ReduceProd
         | Primitive::Reshape | Primitive::Slice | Primitive::Transpose
         | Primitive::BroadcastInDim => 1,
@@ -388,7 +423,13 @@ pub fn sample_primitive_params(
         Primitive::Add | Primitive::Sub | Primitive::Mul | Primitive::Neg | Primitive::Abs
         | Primitive::Max | Primitive::Min | Primitive::Pow | Primitive::Exp | Primitive::Log
         | Primitive::Sqrt | Primitive::Rsqrt | Primitive::Floor | Primitive::Ceil
-        | Primitive::Round | Primitive::Sin | Primitive::Cos | Primitive::Dot
+        | Primitive::Round | Primitive::Sin | Primitive::Cos | Primitive::Tan
+        | Primitive::Asin | Primitive::Acos | Primitive::Atan
+        | Primitive::Sinh | Primitive::Cosh | Primitive::Tanh
+        | Primitive::Expm1 | Primitive::Log1p | Primitive::Sign | Primitive::Square
+        | Primitive::Reciprocal | Primitive::Logistic | Primitive::Erf | Primitive::Erfc
+        | Primitive::Div | Primitive::Rem | Primitive::Atan2 | Primitive::Select
+        | Primitive::Dot
         | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
         | Primitive::Gt | Primitive::Ge | Primitive::Scatter => {}
     }

@@ -7,35 +7,35 @@ use fj_dispatch::{DispatchRequest, dispatch};
 
 use crate::errors::ApiError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct JitWrapped {
     jaxpr: Jaxpr,
     backend: String,
     mode: CompatibilityMode,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GradWrapped {
     jaxpr: Jaxpr,
     backend: String,
     mode: CompatibilityMode,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VmapWrapped {
     jaxpr: Jaxpr,
     backend: String,
     mode: CompatibilityMode,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ValueAndGradWrapped {
     jaxpr: Jaxpr,
     backend: String,
     mode: CompatibilityMode,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComposedTransform {
     jaxpr: Jaxpr,
     transforms: Vec<Transform>,
@@ -43,6 +43,7 @@ pub struct ComposedTransform {
     mode: CompatibilityMode,
 }
 
+#[must_use]
 pub fn jit(jaxpr: Jaxpr) -> JitWrapped {
     JitWrapped {
         jaxpr,
@@ -51,6 +52,7 @@ pub fn jit(jaxpr: Jaxpr) -> JitWrapped {
     }
 }
 
+#[must_use]
 pub fn grad(jaxpr: Jaxpr) -> GradWrapped {
     GradWrapped {
         jaxpr,
@@ -59,6 +61,7 @@ pub fn grad(jaxpr: Jaxpr) -> GradWrapped {
     }
 }
 
+#[must_use]
 pub fn vmap(jaxpr: Jaxpr) -> VmapWrapped {
     VmapWrapped {
         jaxpr,
@@ -67,6 +70,7 @@ pub fn vmap(jaxpr: Jaxpr) -> VmapWrapped {
     }
 }
 
+#[must_use]
 pub fn value_and_grad(jaxpr: Jaxpr) -> ValueAndGradWrapped {
     ValueAndGradWrapped {
         jaxpr,
@@ -103,6 +107,7 @@ fn dispatch_with(
 }
 
 /// Compose transforms: `jit(grad(f))` becomes `jit(jaxpr).compose_grad()`.
+#[must_use]
 pub fn compose(jaxpr: Jaxpr, transforms: Vec<Transform>) -> ComposedTransform {
     ComposedTransform {
         jaxpr,
@@ -113,11 +118,13 @@ pub fn compose(jaxpr: Jaxpr, transforms: Vec<Transform>) -> ComposedTransform {
 }
 
 impl JitWrapped {
+    #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = backend.to_owned();
         self
     }
 
+    #[must_use]
     pub fn with_mode(mut self, mode: CompatibilityMode) -> Self {
         self.mode = mode;
         self
@@ -134,6 +141,7 @@ impl JitWrapped {
     }
 
     /// Compose: `jit(grad(f))`.
+    #[must_use]
     pub fn compose_grad(self) -> ComposedTransform {
         ComposedTransform {
             jaxpr: self.jaxpr,
@@ -144,6 +152,7 @@ impl JitWrapped {
     }
 
     /// Compose: `jit(vmap(f))`.
+    #[must_use]
     pub fn compose_vmap(self) -> ComposedTransform {
         ComposedTransform {
             jaxpr: self.jaxpr,
@@ -155,11 +164,13 @@ impl JitWrapped {
 }
 
 impl GradWrapped {
+    #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = backend.to_owned();
         self
     }
 
+    #[must_use]
     pub fn with_mode(mut self, mode: CompatibilityMode) -> Self {
         self.mode = mode;
         self
@@ -177,11 +188,13 @@ impl GradWrapped {
 }
 
 impl VmapWrapped {
+    #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = backend.to_owned();
         self
     }
 
+    #[must_use]
     pub fn with_mode(mut self, mode: CompatibilityMode) -> Self {
         self.mode = mode;
         self
@@ -198,6 +211,7 @@ impl VmapWrapped {
     }
 
     /// Compose: `vmap(grad(f))`.
+    #[must_use]
     pub fn compose_grad(self) -> ComposedTransform {
         ComposedTransform {
             jaxpr: self.jaxpr,
@@ -209,11 +223,13 @@ impl VmapWrapped {
 }
 
 impl ComposedTransform {
+    #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = backend.to_owned();
         self
     }
 
+    #[must_use]
     pub fn with_mode(mut self, mode: CompatibilityMode) -> Self {
         self.mode = mode;
         self
@@ -231,11 +247,13 @@ impl ComposedTransform {
 }
 
 impl ValueAndGradWrapped {
+    #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = backend.to_owned();
         self
     }
 
+    #[must_use]
     pub fn with_mode(mut self, mode: CompatibilityMode) -> Self {
         self.mode = mode;
         self

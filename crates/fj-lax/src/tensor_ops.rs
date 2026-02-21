@@ -588,3 +588,241 @@ pub(crate) fn eval_slice(
         }
     }
 }
+
+/// Gather: index into an operand tensor using an indices tensor.
+///
+/// Simplified semantics (1-D index gather):
+///   operand: tensor of any rank
+///   indices: 1-D integer tensor of gather indices (into axis 0 of operand)
+///   params:  `slice_sizes` — comma-separated sizes for each axis of the gathered slice
+///
+/// For each index i in `indices`, extracts a slice of shape `slice_sizes` starting
+/// at position `[indices[i], 0, 0, ...]` from `operand`.
+/// Output shape: `[num_indices] ++ slice_sizes[1..]` (the leading axis is replaced by
+/// the number of gathered indices, remaining axes keep their slice sizes).
+pub(crate) fn eval_gather(
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    let primitive = Primitive::Gather;
+    if inputs.len() != 2 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 2,
+            actual: inputs.len(),
+        });
+    }
+
+    let operand = match &inputs[0] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "cannot gather from a scalar".into(),
+            })
+        }
+    };
+
+    let slice_sizes = parse_usize_param(primitive, "slice_sizes", params)?;
+    if slice_sizes.len() != operand.shape.rank() {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "slice_sizes length {} must equal operand rank {}",
+                slice_sizes.len(),
+                operand.shape.rank()
+            ),
+        });
+    }
+
+    // Extract indices as flat i64 values
+    let index_vals: Vec<usize> = match &inputs[1] {
+        Value::Scalar(lit) => {
+            vec![lit_to_usize(lit, primitive)?]
+        }
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|lit| lit_to_usize(lit, primitive))
+            .collect::<Result<_, _>>()?,
+    };
+
+    let num_indices = index_vals.len();
+    let rank = operand.shape.rank();
+
+    // Compute operand strides (row-major)
+    let op_dims = &operand.shape.dims;
+    let mut op_strides = vec![1_usize; rank];
+    for i in (0..rank.saturating_sub(1)).rev() {
+        op_strides[i] = op_strides[i + 1] * op_dims[i + 1] as usize;
+    }
+
+    // Output shape: [num_indices, slice_sizes[1], slice_sizes[2], ...]
+    let mut out_dims: Vec<u32> = vec![num_indices as u32];
+    for &s in &slice_sizes[1..] {
+        out_dims.push(s as u32);
+    }
+
+    // Number of elements per gathered slice (product of slice_sizes[1..])
+    let slice_elems: usize = slice_sizes[1..].iter().product::<usize>().max(1);
+
+    let total = num_indices * slice_elems;
+    let mut elements = Vec::with_capacity(total);
+
+    for &idx in &index_vals {
+        if idx >= op_dims[0] as usize {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "gather index {} out of bounds for axis 0 dim {}",
+                    idx, op_dims[0]
+                ),
+            });
+        }
+
+        // Base offset for this index along axis 0
+        let base_offset = idx * op_strides[0];
+
+        // Iterate over all positions within the slice (axes 1..rank)
+        let mut slice_coords = vec![0_usize; rank.saturating_sub(1)];
+        for _ in 0..slice_elems {
+            let mut flat = base_offset;
+            for (ax, &coord) in slice_coords.iter().enumerate() {
+                flat += coord * op_strides[ax + 1];
+            }
+            elements.push(operand.elements[flat]);
+
+            // Increment slice coordinates
+            if rank > 1 {
+                for ax in (0..rank - 1).rev() {
+                    slice_coords[ax] += 1;
+                    if slice_coords[ax] < slice_sizes[ax + 1] {
+                        break;
+                    }
+                    slice_coords[ax] = 0;
+                }
+            }
+        }
+    }
+
+    Ok(Value::Tensor(TensorValue::new(
+        operand.dtype,
+        Shape { dims: out_dims },
+        elements,
+    )?))
+}
+
+/// Scatter: update positions in an operand tensor using indices and update values.
+///
+/// Simplified semantics (1-D index scatter):
+///   operand: tensor to scatter into (cloned, not mutated)
+///   indices: 1-D integer tensor of scatter indices (into axis 0 of operand)
+///   updates: tensor of values to scatter; shape = [num_indices] ++ operand.shape[1..]
+///
+/// For each index i in `indices`, overwrites the slice at `operand[indices[i], ...]`
+/// with the corresponding slice from `updates[i, ...]`.
+pub(crate) fn eval_scatter(
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    let primitive = Primitive::Scatter;
+    let _ = params; // No params needed for basic scatter
+    if inputs.len() != 3 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 3,
+            actual: inputs.len(),
+        });
+    }
+
+    let operand = match &inputs[0] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "cannot scatter into a scalar".into(),
+            })
+        }
+    };
+
+    let index_vals: Vec<usize> = match &inputs[1] {
+        Value::Scalar(lit) => vec![lit_to_usize(lit, primitive)?],
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|lit| lit_to_usize(lit, primitive))
+            .collect::<Result<_, _>>()?,
+    };
+
+    let updates = match &inputs[2] {
+        Value::Tensor(t) => t,
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "updates must be a tensor".into(),
+            })
+        }
+    };
+
+    let rank = operand.shape.rank();
+    let op_dims = &operand.shape.dims;
+
+    // Compute operand strides (row-major)
+    let mut op_strides = vec![1_usize; rank];
+    for i in (0..rank.saturating_sub(1)).rev() {
+        op_strides[i] = op_strides[i + 1] * op_dims[i + 1] as usize;
+    }
+
+    // Number of elements per slice (product of dims[1..])
+    let slice_elems: usize = op_dims[1..].iter().map(|d| *d as usize).product::<usize>().max(1);
+
+    // Clone operand elements to create output
+    let mut result_elements = operand.elements.clone();
+
+    for (i, &idx) in index_vals.iter().enumerate() {
+        if idx >= op_dims[0] as usize {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "scatter index {} out of bounds for axis 0 dim {}",
+                    idx, op_dims[0]
+                ),
+            });
+        }
+
+        let base_offset = idx * op_strides[0];
+        let update_offset = i * slice_elems;
+
+        for j in 0..slice_elems {
+            if update_offset + j < updates.elements.len() {
+                result_elements[base_offset + j] = updates.elements[update_offset + j];
+            }
+        }
+    }
+
+    Ok(Value::Tensor(TensorValue::new(
+        operand.dtype,
+        operand.shape.clone(),
+        result_elements,
+    )?))
+}
+
+fn lit_to_usize(lit: &Literal, primitive: Primitive) -> Result<usize, EvalError> {
+    match lit {
+        Literal::I64(n) => {
+            if *n >= 0 {
+                Ok(*n as usize)
+            } else {
+                Err(EvalError::Unsupported {
+                    primitive,
+                    detail: format!("negative index {n}"),
+                })
+            }
+        }
+        Literal::Bool(b) => Ok(if *b { 1 } else { 0 }),
+        Literal::F64Bits(_) => Err(EvalError::Unsupported {
+            primitive,
+            detail: "float indices not supported".into(),
+        }),
+    }
+}

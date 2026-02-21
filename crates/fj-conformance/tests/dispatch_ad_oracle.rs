@@ -12,8 +12,8 @@
 
 use fj_ad::{grad_first, jvp_grad_first};
 use fj_core::{
-    Atom, CompatibilityMode, Equation, Jaxpr, Primitive, ProgramSpec, TraceTransformLedger,
-    Transform, Value, VarId, build_program,
+    Atom, CompatibilityMode, DType, Equation, Jaxpr, Literal, Primitive, ProgramSpec, Shape,
+    TensorValue, TraceTransformLedger, Transform, Value, VarId, build_program,
 };
 use fj_dispatch::{
     DispatchError, DispatchRequest, EffectContext, TransformExecutionError, dispatch,
@@ -421,14 +421,14 @@ fn adversarial_vmap_scalar_input() {
     log_oracle("adversarial_vmap_scalar_input", &("scalar_vmap",));
 }
 
-/// Adversarial: double grad rejected by composition proof.
+/// Double grad produces correct second derivative via finite-diff fallback.
 #[test]
-fn adversarial_double_grad_rejected() {
+fn adversarial_double_grad_succeeds() {
     let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::Square));
     ttl.push_transform(Transform::Grad, "grad-1".to_owned());
     ttl.push_transform(Transform::Grad, "grad-2".to_owned());
 
-    let err = dispatch(DispatchRequest {
+    let response = dispatch(DispatchRequest {
         mode: CompatibilityMode::Strict,
         ledger: ttl,
         args: vec![Value::scalar_f64(3.0)],
@@ -437,17 +437,70 @@ fn adversarial_double_grad_rejected() {
         custom_hook: None,
         unknown_incompatible_features: vec![],
     })
-    .unwrap_err();
+    .expect("grad(grad(x^2)) should succeed via finite-diff fallback");
+
+    // d²/dx²(x²) = 2.0 for all x
+    let second_derivative = response.outputs[0]
+        .as_f64_scalar()
+        .expect("second derivative should be scalar f64");
     assert!(
-        matches!(err, DispatchError::TransformInvariant(_)),
-        "double grad should fail composition proof, got: {err:?}"
+        (second_derivative - 2.0).abs() < 1e-3,
+        "expected second derivative ≈ 2.0, got {second_derivative}"
     );
-    log_oracle("adversarial_double_grad_rejected", &("double_grad",));
+    log_oracle("adversarial_double_grad_succeeds", &("double_grad",));
 }
 
-/// Adversarial: double vmap rejected by composition proof.
+/// Double vmap succeeds with rank-2 input (outer peels rows, inner peels elements).
 #[test]
-fn adversarial_double_vmap_rejected() {
+fn adversarial_double_vmap_succeeds() {
+    let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::AddOne));
+    ttl.push_transform(Transform::Vmap, "vmap-1".to_owned());
+    ttl.push_transform(Transform::Vmap, "vmap-2".to_owned());
+
+    // Rank-2 tensor: outer vmap peels rows → rank-1, inner vmap peels elements → scalar
+    let matrix = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape { dims: vec![2, 3] },
+            vec![
+                Literal::I64(1),
+                Literal::I64(2),
+                Literal::I64(3),
+                Literal::I64(4),
+                Literal::I64(5),
+                Literal::I64(6),
+            ],
+        )
+        .expect("matrix should build"),
+    );
+
+    let response = dispatch(DispatchRequest {
+        mode: CompatibilityMode::Strict,
+        ledger: ttl,
+        args: vec![matrix],
+        backend: "cpu".to_owned(),
+        compile_options: BTreeMap::new(),
+        custom_hook: None,
+        unknown_incompatible_features: vec![],
+    })
+    .expect("vmap(vmap(add_one)) with rank-2 input should succeed");
+
+    let output = response.outputs[0]
+        .as_tensor()
+        .expect("nested vmap output should be tensor");
+    assert_eq!(output.shape, Shape { dims: vec![2, 3] });
+    let as_i64: Vec<i64> = output
+        .elements
+        .iter()
+        .map(|lit| lit.as_i64().expect("expected i64"))
+        .collect();
+    assert_eq!(as_i64, vec![2, 3, 4, 5, 6, 7]);
+    log_oracle("adversarial_double_vmap_succeeds", &("double_vmap",));
+}
+
+/// Double vmap with rank-1 input fails at execution time (inner vmap gets scalars).
+#[test]
+fn adversarial_double_vmap_rank1_fails() {
     let mut ttl = TraceTransformLedger::new(build_program(ProgramSpec::AddOne));
     ttl.push_transform(Transform::Vmap, "vmap-1".to_owned());
     ttl.push_transform(Transform::Vmap, "vmap-2".to_owned());
@@ -463,10 +516,10 @@ fn adversarial_double_vmap_rejected() {
     })
     .unwrap_err();
     assert!(
-        matches!(err, DispatchError::TransformInvariant(_)),
-        "double vmap should fail composition proof, got: {err:?}"
+        matches!(err, DispatchError::TransformExecution(_)),
+        "double vmap with rank-1 input should fail at execution, got: {err:?}"
     );
-    log_oracle("adversarial_double_vmap_rejected", &("double_vmap",));
+    log_oracle("adversarial_double_vmap_rank1_fails", &("double_vmap_rank1",));
 }
 
 /// Adversarial: evidence count mismatch rejected.

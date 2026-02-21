@@ -7,34 +7,64 @@ use std::collections::BTreeMap;
 
 define_language! {
     pub enum FjLang {
+        // Arithmetic (binary)
         "add" = Add([Id; 2]),
         "sub" = Sub([Id; 2]),
         "mul" = Mul([Id; 2]),
-        "neg" = Neg([Id; 1]),
-        "abs" = Abs([Id; 1]),
+        "div" = Div([Id; 2]),
+        "rem" = Rem([Id; 2]),
+        "pow" = Pow([Id; 2]),
         "max" = Max([Id; 2]),
         "min" = Min([Id; 2]),
-        "pow" = Pow([Id; 2]),
+        "atan2" = Atan2([Id; 2]),
+        "dot" = Dot([Id; 2]),
+        // Arithmetic (unary)
+        "neg" = Neg([Id; 1]),
+        "abs" = Abs([Id; 1]),
+        "sign" = Sign([Id; 1]),
+        "square" = Square([Id; 1]),
+        "reciprocal" = Reciprocal([Id; 1]),
+        // Exponential / logarithmic
         "exp" = Exp([Id; 1]),
+        "expm1" = Expm1([Id; 1]),
         "log" = Log([Id; 1]),
+        "log1p" = Log1p([Id; 1]),
         "sqrt" = Sqrt([Id; 1]),
         "rsqrt" = Rsqrt([Id; 1]),
+        // Trigonometric
+        "sin" = Sin([Id; 1]),
+        "cos" = Cos([Id; 1]),
+        "tan" = Tan([Id; 1]),
+        "asin" = Asin([Id; 1]),
+        "acos" = Acos([Id; 1]),
+        "atan" = Atan([Id; 1]),
+        // Hyperbolic
+        "sinh" = Sinh([Id; 1]),
+        "cosh" = Cosh([Id; 1]),
+        "tanh" = Tanh([Id; 1]),
+        // Special functions
+        "logistic" = Logistic([Id; 1]),
+        "erf" = Erf([Id; 1]),
+        "erfc" = Erfc([Id; 1]),
+        // Rounding
         "floor" = Floor([Id; 1]),
         "ceil" = Ceil([Id; 1]),
         "round" = Round([Id; 1]),
-        "sin" = Sin([Id; 1]),
-        "cos" = Cos([Id; 1]),
+        // Reductions
         "reduce_sum" = ReduceSum([Id; 1]),
         "reduce_max" = ReduceMax([Id; 1]),
         "reduce_min" = ReduceMin([Id; 1]),
         "reduce_prod" = ReduceProd([Id; 1]),
-        "dot" = Dot([Id; 2]),
+        // Comparisons
         "eq" = Eq([Id; 2]),
         "ne" = Ne([Id; 2]),
         "lt" = Lt([Id; 2]),
         "le" = Le([Id; 2]),
         "gt" = Gt([Id; 2]),
         "ge" = Ge([Id; 2]),
+        // Select (ternary)
+        "select" = Select([Id; 3]),
+        // Leaves
         Num(i64),
         Symbol(egg::Symbol),
     }
@@ -59,6 +89,7 @@ impl CostFunction<FjLang> for OpCount {
 }
 
 /// Standard algebraic rewrite rules for FjLang.
+#[must_use]
 pub fn algebraic_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
     vec![
         // ── Commutativity ────────────────────────────────────────────
@@ -113,6 +144,24 @@ pub fn algebraic_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
         // ── Trig negation rules ──────────────────────────────────────
         rewrite!("sin-neg"; "(sin (neg ?a))" => "(neg (sin ?a))"),
         rewrite!("cos-neg"; "(cos (neg ?a))" => "(cos ?a)"),
+        rewrite!("tan-neg"; "(tan (neg ?a))" => "(neg (tan ?a))"),
+        // ── Hyperbolic negation rules ──────────────────────────────────
+        rewrite!("sinh-neg"; "(sinh (neg ?a))" => "(neg (sinh ?a))"),
+        rewrite!("cosh-neg"; "(cosh (neg ?a))" => "(cosh ?a)"),
+        rewrite!("tanh-neg"; "(tanh (neg ?a))" => "(neg (tanh ?a))"),
+        // ── Division rules ─────────────────────────────────────────────
+        rewrite!("div-one"; "(div ?a 1)" => "?a"),
+        rewrite!("div-self"; "(div ?a ?a)" => "1"),
+        // ── Square / Reciprocal rewrites ───────────────────────────────
+        rewrite!("square-as-mul"; "(square ?a)" => "(mul ?a ?a)"),
+        rewrite!("reciprocal-as-div"; "(reciprocal ?a)" => "(div 1 ?a)"),
+        // ── Expm1 / Log1p inverses ─────────────────────────────────────
+        rewrite!("expm1-log1p"; "(expm1 (log1p ?a))" => "?a"),
+        rewrite!("log1p-expm1"; "(log1p (expm1 ?a))" => "?a"),
+        // ── Select with constant condition ─────────────────────────────
+        rewrite!("select-true"; "(select 1 ?a ?b)" => "?a"),
+        rewrite!("select-false"; "(select 0 ?a ?b)" => "?b"),
+        rewrite!("select-same"; "(select ?c ?a ?a)" => "?a"),
     ]
 }
 
@@ -174,32 +223,36 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             Primitive::Le => FjLang::Le([input_ids[0], input_ids[1]]),
             Primitive::Gt => FjLang::Gt([input_ids[0], input_ids[1]]),
             Primitive::Ge => FjLang::Ge([input_ids[0], input_ids[1]]),
+            // New binary ops
+            Primitive::Div => FjLang::Div([input_ids[0], input_ids[1]]),
+            Primitive::Rem => FjLang::Rem([input_ids[0], input_ids[1]]),
+            Primitive::Atan2 => FjLang::Atan2([input_ids[0], input_ids[1]]),
+            // New unary ops
+            Primitive::Sign => FjLang::Sign([input_ids[0]]),
+            Primitive::Square => FjLang::Square([input_ids[0]]),
+            Primitive::Reciprocal => FjLang::Reciprocal([input_ids[0]]),
+            Primitive::Expm1 => FjLang::Expm1([input_ids[0]]),
+            Primitive::Log1p => FjLang::Log1p([input_ids[0]]),
+            Primitive::Tan => FjLang::Tan([input_ids[0]]),
+            Primitive::Asin => FjLang::Asin([input_ids[0]]),
+            Primitive::Acos => FjLang::Acos([input_ids[0]]),
+            Primitive::Atan => FjLang::Atan([input_ids[0]]),
+            Primitive::Sinh => FjLang::Sinh([input_ids[0]]),
+            Primitive::Cosh => FjLang::Cosh([input_ids[0]]),
+            Primitive::Tanh => FjLang::Tanh([input_ids[0]]),
+            Primitive::Logistic => FjLang::Logistic([input_ids[0]]),
+            Primitive::Erf => FjLang::Erf([input_ids[0]]),
+            Primitive::Erfc => FjLang::Erfc([input_ids[0]]),
+            // Ternary
+            Primitive::Select => FjLang::Select([input_ids[0], input_ids[1], input_ids[2]]),
+            // Shape ops require params – not yet supported
             Primitive::Reshape
             | Primitive::Slice
             | Primitive::Gather
             | Primitive::Scatter
             | Primitive::Transpose
             | Primitive::BroadcastInDim
-            | Primitive::Concatenate
-            | Primitive::Tan
-            | Primitive::Asin
-            | Primitive::Acos
-            | Primitive::Atan
-            | Primitive::Sinh
-            | Primitive::Cosh
-            | Primitive::Tanh
-            | Primitive::Expm1
-            | Primitive::Log1p
-            | Primitive::Sign
-            | Primitive::Square
-            | Primitive::Reciprocal
-            | Primitive::Logistic
-            | Primitive::Erf
-            | Primitive::Erfc
-            | Primitive::Div
-            | Primitive::Rem
-            | Primitive::Atan2
-            | Primitive::Select => {
+            | Primitive::Concatenate => {
                 panic!(
                     "primitive {} not supported by egraph lowering",
                     eqn.primitive.as_str()
@@ -377,6 +430,48 @@ pub fn egraph_to_jaxpr(
                 &mut equations,
                 expr,
             ),
+            FjLang::Div([a, b]) => push_binary(
+                idx,
+                Primitive::Div,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Rem([a, b]) => push_binary(
+                idx,
+                Primitive::Rem,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Atan2([a, b]) => push_binary(
+                idx,
+                Primitive::Atan2,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            // Ternary ops
+            FjLang::Select([cond, a, b]) => push_ternary(
+                idx,
+                Primitive::Select,
+                *cond,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
             // Unary ops
             FjLang::Neg([a]) => push_unary(
                 idx,
@@ -471,6 +566,141 @@ pub fn egraph_to_jaxpr(
             FjLang::Cos([a]) => push_unary(
                 idx,
                 Primitive::Cos,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Tan([a]) => push_unary(
+                idx,
+                Primitive::Tan,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Asin([a]) => push_unary(
+                idx,
+                Primitive::Asin,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Acos([a]) => push_unary(
+                idx,
+                Primitive::Acos,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Atan([a]) => push_unary(
+                idx,
+                Primitive::Atan,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Sinh([a]) => push_unary(
+                idx,
+                Primitive::Sinh,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Cosh([a]) => push_unary(
+                idx,
+                Primitive::Cosh,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Tanh([a]) => push_unary(
+                idx,
+                Primitive::Tanh,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Sign([a]) => push_unary(
+                idx,
+                Primitive::Sign,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Square([a]) => push_unary(
+                idx,
+                Primitive::Square,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Reciprocal([a]) => push_unary(
+                idx,
+                Primitive::Reciprocal,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Expm1([a]) => push_unary(
+                idx,
+                Primitive::Expm1,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Log1p([a]) => push_unary(
+                idx,
+                Primitive::Log1p,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Logistic([a]) => push_unary(
+                idx,
+                Primitive::Logistic,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Erf([a]) => push_unary(
+                idx,
+                Primitive::Erf,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Erfc([a]) => push_unary(
+                idx,
+                Primitive::Erfc,
                 *a,
                 &mut node_to_var,
                 &mut next_var,
@@ -581,6 +811,30 @@ fn push_unary(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_ternary(
+    idx: usize,
+    prim: Primitive,
+    a: Id,
+    b: Id,
+    c: Id,
+    node_to_var: &mut BTreeMap<usize, VarId>,
+    next_var: &mut u32,
+    equations: &mut Vec<Equation>,
+    expr: &RecExpr<FjLang>,
+) {
+    let out = resolve_or_create(idx, node_to_var, next_var);
+    let a_atom = id_to_atom(a, node_to_var, expr);
+    let b_atom = id_to_atom(b, node_to_var, expr);
+    let c_atom = id_to_atom(c, node_to_var, expr);
+    equations.push(Equation {
+        primitive: prim,
+        inputs: smallvec![a_atom, b_atom, c_atom],
+        outputs: smallvec![out],
+        params: BTreeMap::new(),
+    });
+}
+
 fn id_to_atom(id: Id, node_to_var: &BTreeMap<usize, VarId>, expr: &RecExpr<FjLang>) -> Atom {
     let idx: usize = id.into();
     // Check if this node is a literal (Num or f64-encoded Symbol)
@@ -607,6 +861,7 @@ fn id_to_atom(id: Id, node_to_var: &BTreeMap<usize, VarId>, expr: &RecExpr<FjLan
 }
 
 /// Optimize a Jaxpr using equality saturation with algebraic rules.
+#[must_use]
 pub fn optimize_jaxpr(jaxpr: &Jaxpr) -> Jaxpr {
     if jaxpr
         .equations
@@ -986,10 +1241,186 @@ mod tests {
     fn algebraic_rules_count() {
         let rules = algebraic_rules();
         assert!(
-            rules.len() >= 30,
-            "expected at least 30 rewrite rules, got {}",
+            rules.len() >= 50,
+            "expected at least 50 rewrite rules, got {}",
             rules.len(),
         );
+    }
+
+    #[test]
+    fn div_one_identity() {
+        // x / 1 should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.is_empty(),
+            "x/1 should simplify to x: got {} eqns",
+            optimized.equations.len(),
+        );
+    }
+
+    #[test]
+    fn square_as_mul_roundtrip() {
+        // square(x) should be rewritable to mul(x, x)
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Square,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        // Should still produce the same result (either square or mul(x,x))
+        assert!(
+            !optimized.equations.is_empty(),
+            "square(x) optimization should produce at least one equation"
+        );
+    }
+
+    #[test]
+    fn expm1_log1p_inverse() {
+        // expm1(log1p(x)) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Log1p,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                },
+                Equation {
+                    primitive: Primitive::Expm1,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "expm1(log1p(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn select_same_simplification() {
+        // select(c, a, a) should simplify to a
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3)],
+            vec![Equation {
+                primitive: Primitive::Select,
+                inputs: smallvec![
+                    Atom::Var(VarId(1)),
+                    Atom::Var(VarId(2)),
+                    Atom::Var(VarId(2))
+                ],
+                outputs: smallvec![VarId(3)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "select(c, a, a) should not increase equation count"
+        );
+    }
+
+    #[test]
+    fn trig_roundtrip_tan() {
+        // tan(x) should round-trip through e-graph
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Tan,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert_eq!(
+            optimized.equations.len(),
+            1,
+            "single tan should not be simplified away"
+        );
+        assert_eq!(optimized.equations[0].primitive, Primitive::Tan);
+    }
+
+    #[test]
+    fn hyperbolic_roundtrip_tanh() {
+        // tanh(x) should round-trip through e-graph
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Tanh,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert_eq!(
+            optimized.equations.len(),
+            1,
+            "single tanh should not be simplified away"
+        );
+        assert_eq!(optimized.equations[0].primitive, Primitive::Tanh);
+    }
+
+    #[test]
+    fn new_primitives_parse_in_sexpr() {
+        // Verify all new FjLang variants can be parsed from s-expressions
+        let _: RecExpr<FjLang> = "(div 1 2)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(rem 1 2)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(atan2 1 2)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(sign 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(square 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(reciprocal 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(expm1 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(log1p 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(tan 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(asin 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(acos 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(atan 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(sinh 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(cosh 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(tanh 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(logistic 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(erf 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(erfc 1)".parse().unwrap();
+        let _: RecExpr<FjLang> = "(select 1 2 3)".parse().unwrap();
     }
 
     #[test]

@@ -79,6 +79,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "cache_persistence_format"
+path = "fuzz_targets/fuzz_target_1.rs"
+test = false
+doc = false
+bench = false
+
 # Keep fuzzing package separate from the workspace package graph.
 [workspace]
 members = ["."]
