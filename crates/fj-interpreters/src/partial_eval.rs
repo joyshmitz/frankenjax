@@ -428,7 +428,9 @@ pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
 /// Infer the output abstract value of an equation from the first input's aval.
 ///
 /// For most element-wise primitives the output type/shape matches the input.
-/// Comparison primitives always output Bool. Reductions reduce to scalar.
+/// Comparison primitives always output Bool. Reductions honour the "axes" param.
+/// Shape-manipulation ops (Reshape, Slice, Transpose) parse their params.
+/// Dot always produces a scalar.
 fn infer_equation_output_aval(eqn: &Equation, first_input: &AbstractValue) -> AbstractValue {
     use fj_core::Primitive::*;
     match eqn.primitive {
@@ -437,11 +439,138 @@ fn infer_equation_output_aval(eqn: &Equation, first_input: &AbstractValue) -> Ab
             dtype: DType::Bool,
             shape: first_input.shape.clone(),
         },
-        // Reductions collapse to scalar (full reduction default)
-        ReduceSum | ReduceMax | ReduceMin | ReduceProd => AbstractValue {
+        // Reductions: honour "axes" param when present
+        ReduceSum | ReduceMax | ReduceMin | ReduceProd => {
+            let reduced_shape = match eqn.params.get("axes") {
+                Some(axes_str) if !axes_str.trim().is_empty() => {
+                    let axes: Vec<usize> = axes_str
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<usize>().ok())
+                        .collect();
+                    let remaining: Vec<u32> = first_input
+                        .shape
+                        .dims
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !axes.contains(i))
+                        .map(|(_, &d)| d)
+                        .collect();
+                    if remaining.is_empty() {
+                        Shape::scalar()
+                    } else {
+                        Shape { dims: remaining }
+                    }
+                }
+                _ => Shape::scalar(),
+            };
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape: reduced_shape,
+            }
+        }
+        // Dot product always produces a scalar
+        Dot => AbstractValue {
             dtype: first_input.dtype,
             shape: Shape::scalar(),
         },
+        // Reshape: parse "new_shape" param
+        Reshape => {
+            let shape = eqn
+                .params
+                .get("new_shape")
+                .map(|s| {
+                    let dims: Vec<u32> = s
+                        .split(',')
+                        .filter_map(|d| d.trim().parse::<u32>().ok())
+                        .collect();
+                    Shape { dims }
+                })
+                .unwrap_or_else(|| first_input.shape.clone());
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape,
+            }
+        }
+        // Slice: shape = limit_indices - start_indices
+        Slice => {
+            let shape = match (
+                eqn.params.get("start_indices"),
+                eqn.params.get("limit_indices"),
+            ) {
+                (Some(starts), Some(limits)) => {
+                    let start_vals: Vec<u32> = starts
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<u32>().ok())
+                        .collect();
+                    let limit_vals: Vec<u32> = limits
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<u32>().ok())
+                        .collect();
+                    let dims: Vec<u32> = start_vals
+                        .iter()
+                        .zip(limit_vals.iter())
+                        .map(|(&s, &l)| l.saturating_sub(s))
+                        .collect();
+                    Shape { dims }
+                }
+                _ => first_input.shape.clone(),
+            };
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape,
+            }
+        }
+        // Transpose: permute dims according to "permutation" param
+        Transpose => {
+            let shape = eqn
+                .params
+                .get("permutation")
+                .map(|s| {
+                    let perm: Vec<usize> = s
+                        .split(',')
+                        .filter_map(|p| p.trim().parse::<usize>().ok())
+                        .collect();
+                    let dims: Vec<u32> = perm
+                        .iter()
+                        .filter_map(|&i| first_input.shape.dims.get(i).copied())
+                        .collect();
+                    Shape { dims }
+                })
+                .unwrap_or_else(|| {
+                    // Default: reverse dims
+                    let mut dims = first_input.shape.dims.clone();
+                    dims.reverse();
+                    Shape { dims }
+                });
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape,
+            }
+        }
+        // BroadcastInDim: parse "shape" param for target shape
+        BroadcastInDim => {
+            let shape = eqn
+                .params
+                .get("shape")
+                .map(|s| {
+                    let dims: Vec<u32> = s
+                        .split(',')
+                        .filter_map(|d| d.trim().parse::<u32>().ok())
+                        .collect();
+                    Shape { dims }
+                })
+                .unwrap_or_else(|| first_input.shape.clone());
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape,
+            }
+        }
+        // Concatenate: sum along concat dimension
+        Concatenate => {
+            // Without access to all inputs, we can only approximate.
+            // The dtype is correct; the shape is best-effort from first input.
+            first_input.clone()
+        }
         // Most element-wise ops preserve dtype and shape
         _ => first_input.clone(),
     }
@@ -1636,6 +1765,436 @@ mod tests {
             fj_test_utils::TestResult::Pass,
         );
         assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Category 6b: Typed PE — axis-aware reductions, Dot, shape ops
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_pe_typed_reduce_axis0_preserves_reduced_shape() {
+        run_logged_test(
+            "test_pe_typed_reduce_axis0_preserves_reduced_shape",
+            &("pe", "typed", "reduce_axis0"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, F64, [3,4]) -> reduce_sum(a, axes="0") = v2([4])
+                //   -> mul(v2, b(unknown)) = v3
+                // Residual v2 should have shape [4], not scalar
+                let mut reduce_params = BTreeMap::new();
+                reduce_params.insert("axes".to_owned(), "0".to_owned());
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::ReduceSum,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(3)],
+                            params: reduce_params,
+                        },
+                        Equation {
+                            primitive: Primitive::Mul,
+                            inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![3, 4] },
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![4] },
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                assert!(!result.residual_avals.is_empty(), "should have residuals");
+                assert_eq!(
+                    result.residual_avals[0].shape.dims,
+                    vec![4],
+                    "axis-0 reduction of [3,4] should produce shape [4]"
+                );
+                assert_eq!(result.residual_avals[0].dtype, DType::F64);
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_reduce_axis1_preserves_reduced_shape() {
+        run_logged_test(
+            "test_pe_typed_reduce_axis1_preserves_reduced_shape",
+            &("pe", "typed", "reduce_axis1"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, I64, [2,3]) -> reduce_max(a, axes="1") = v2([2])
+                //   -> add(v2, b(unknown)) = v3
+                let mut reduce_params = BTreeMap::new();
+                reduce_params.insert("axes".to_owned(), "1".to_owned());
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::ReduceMax,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(3)],
+                            params: reduce_params,
+                        },
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![2, 3] },
+                    },
+                    AbstractValue {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![2] },
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                assert!(!result.residual_avals.is_empty());
+                assert_eq!(
+                    result.residual_avals[0].shape.dims,
+                    vec![2],
+                    "axis-1 reduction of [2,3] should produce shape [2]"
+                );
+                assert_eq!(result.residual_avals[0].dtype, DType::I64);
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_full_reduce_still_produces_scalar() {
+        run_logged_test(
+            "test_pe_typed_full_reduce_still_produces_scalar",
+            &("pe", "typed", "full_reduce"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // No axes param: full reduction to scalar (backwards compat)
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::ReduceSum,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(3)],
+                            params: BTreeMap::new(),
+                        },
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![3, 4] },
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::scalar(),
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                assert!(!result.residual_avals.is_empty());
+                assert!(
+                    result.residual_avals[0].shape.dims.is_empty(),
+                    "full reduction should produce scalar shape"
+                );
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_dot_produces_scalar() {
+        run_logged_test(
+            "test_pe_typed_dot_produces_scalar",
+            &("pe", "typed", "dot_scalar"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, F64, [3]) dot b_known -> v2(scalar) -> add(v2, c(unknown)) = v3
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2), VarId(5)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Dot,
+                            inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                            outputs: smallvec![VarId(3)],
+                            params: BTreeMap::new(),
+                        },
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(5))],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::vector(3),
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::vector(3),
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::scalar(),
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, false, true], Some(&in_avals))
+                        .unwrap();
+                assert!(!result.residual_avals.is_empty());
+                assert!(
+                    result.residual_avals[0].shape.dims.is_empty(),
+                    "dot product should produce scalar residual"
+                );
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_reshape_propagates_new_shape() {
+        run_logged_test(
+            "test_pe_typed_reshape_propagates_new_shape",
+            &("pe", "typed", "reshape"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, F64, [6]) -> reshape(a, new_shape="2,3") = v2([2,3])
+                //   -> add(v2, b(unknown)) = v3
+                let mut reshape_params = BTreeMap::new();
+                reshape_params.insert("new_shape".to_owned(), "2,3".to_owned());
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Reshape,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(3)],
+                            params: reshape_params,
+                        },
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::vector(6),
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![2, 3] },
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                assert!(!result.residual_avals.is_empty());
+                assert_eq!(
+                    result.residual_avals[0].shape.dims,
+                    vec![2, 3],
+                    "reshape residual should have new shape [2,3]"
+                );
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_slice_computes_shape_from_params() {
+        run_logged_test(
+            "test_pe_typed_slice_computes_shape_from_params",
+            &("pe", "typed", "slice"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, I64, [4,6]) -> slice(a, start="1,2", limit="3,5") = v2([2,3])
+                //   -> add(v2, b(unknown)) = v3
+                let mut slice_params = BTreeMap::new();
+                slice_params.insert("start_indices".to_owned(), "1,2".to_owned());
+                slice_params.insert("limit_indices".to_owned(), "3,5".to_owned());
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Slice,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(3)],
+                            params: slice_params,
+                        },
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![4, 6] },
+                    },
+                    AbstractValue {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![2, 3] },
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                assert!(!result.residual_avals.is_empty());
+                assert_eq!(
+                    result.residual_avals[0].shape.dims,
+                    vec![2, 3],
+                    "slice [1:3, 2:5] should produce shape [2,3]"
+                );
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_transpose_permutes_shape() {
+        run_logged_test(
+            "test_pe_typed_transpose_permutes_shape",
+            &("pe", "typed", "transpose"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, F64, [2,3]) -> transpose(a, perm="1,0") = v2([3,2])
+                //   -> add(v2, b(unknown)) = v3
+                let mut transpose_params = BTreeMap::new();
+                transpose_params.insert("permutation".to_owned(), "1,0".to_owned());
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Transpose,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(3)],
+                            params: transpose_params,
+                        },
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![2, 3] },
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![3, 2] },
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                assert!(!result.residual_avals.is_empty());
+                assert_eq!(
+                    result.residual_avals[0].shape.dims,
+                    vec![3, 2],
+                    "transpose [2,3] with perm [1,0] should produce [3,2]"
+                );
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_typed_broadcast_in_dim_uses_target_shape() {
+        run_logged_test(
+            "test_pe_typed_broadcast_in_dim_uses_target_shape",
+            &("pe", "typed", "broadcast"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // a(known, F64, [3]) -> broadcast_in_dim(a, shape="2,3") = v2([2,3])
+                //   -> add(v2, b(unknown)) = v3
+                let mut bcast_params = BTreeMap::new();
+                bcast_params.insert("shape".to_owned(), "2,3".to_owned());
+                bcast_params.insert("broadcast_dimensions".to_owned(), "1".to_owned());
+                let jaxpr = Jaxpr::new(
+                    vec![VarId(1), VarId(2)],
+                    vec![],
+                    vec![VarId(4)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::BroadcastInDim,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(3)],
+                            params: bcast_params,
+                        },
+                        Equation {
+                            primitive: Primitive::Add,
+                            inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                            outputs: smallvec![VarId(4)],
+                            params: BTreeMap::new(),
+                        },
+                    ],
+                );
+                let in_avals = vec![
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::vector(3),
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![2, 3] },
+                    },
+                ];
+                let result =
+                    partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
+                assert!(!result.residual_avals.is_empty());
+                assert_eq!(
+                    result.residual_avals[0].shape.dims,
+                    vec![2, 3],
+                    "broadcast_in_dim should use target shape [2,3]"
+                );
+                Ok(vec![])
+            },
+        );
     }
 
     // ══════════════════════════════════════════════════════════════════
