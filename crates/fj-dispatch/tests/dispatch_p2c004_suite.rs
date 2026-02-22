@@ -577,3 +577,107 @@ mod proptest_tests {
         }
     }
 }
+
+// ── Higher-rank tensor tests ──────────────────────────────────────
+
+#[test]
+fn jit_rank2_add2() {
+    let a = Value::vector_i64(&[1, 2, 3, 4]).unwrap();
+    let b = Value::vector_i64(&[10, 20, 30, 40]).unwrap();
+    let r = dispatch(make_request(
+        ProgramSpec::Add2,
+        &[Transform::Jit],
+        vec![a, b],
+    ))
+    .unwrap();
+    let expected = Value::vector_i64(&[11, 22, 33, 44]).unwrap();
+    assert_eq!(r.outputs, vec![expected]);
+}
+
+#[test]
+fn jit_add_one_vector() {
+    let a = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+    let r = dispatch(make_request(
+        ProgramSpec::AddOne,
+        &[Transform::Jit],
+        vec![a],
+    ))
+    .unwrap();
+    if let Value::Tensor(t) = &r.outputs[0] {
+        let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+        assert!((vals[0] - 2.0).abs() < 1e-10);
+        assert!((vals[1] - 3.0).abs() < 1e-10);
+        assert!((vals[2] - 4.0).abs() < 1e-10);
+    } else {
+        panic!("expected tensor output");
+    }
+}
+
+#[test]
+fn vmap_square_over_vector() {
+    let a = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+    let r = dispatch(make_request(
+        ProgramSpec::Square,
+        &[Transform::Vmap],
+        vec![a],
+    ))
+    .unwrap();
+    if let Value::Tensor(t) = &r.outputs[0] {
+        let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+        assert!((vals[0] - 1.0).abs() < 1e-10);
+        assert!((vals[1] - 4.0).abs() < 1e-10);
+        assert!((vals[2] - 9.0).abs() < 1e-10);
+    } else {
+        panic!("expected tensor output");
+    }
+}
+
+#[test]
+fn vmap_add_one_over_vector() {
+    let a = Value::vector_i64(&[10, 20, 30]).unwrap();
+    let r = dispatch(make_request(
+        ProgramSpec::AddOne,
+        &[Transform::Vmap],
+        vec![a],
+    ))
+    .unwrap();
+    if let Value::Tensor(t) = &r.outputs[0] {
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(vals, vec![11, 21, 31]);
+    } else {
+        panic!("expected tensor output");
+    }
+}
+
+#[test]
+fn grad_sin_vector_input() {
+    // grad(sin)(x) = cos(x) for each element
+    let r = dispatch(make_request(
+        ProgramSpec::SinX,
+        &[Transform::Grad],
+        vec![Value::scalar_f64(0.0)],
+    ))
+    .unwrap();
+    let deriv = r.outputs[0].as_f64_scalar().unwrap();
+    // cos(0) = 1
+    assert!(
+        (deriv - 1.0).abs() < 1e-3,
+        "d/dx sin(0) should be ~1.0, got {deriv}"
+    );
+}
+
+#[test]
+fn jit_grad_square() {
+    // jit(grad(square))(3.0) = 6.0
+    let r = dispatch(make_request(
+        ProgramSpec::Square,
+        &[Transform::Jit, Transform::Grad],
+        vec![Value::scalar_f64(3.0)],
+    ))
+    .unwrap();
+    let deriv = r.outputs[0].as_f64_scalar().unwrap();
+    assert!(
+        (deriv - 6.0).abs() < 1e-3,
+        "jit(grad(x²))(3) should be ~6.0, got {deriv}"
+    );
+}
