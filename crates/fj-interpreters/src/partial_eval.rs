@@ -571,6 +571,43 @@ fn infer_equation_output_aval(eqn: &Equation, first_input: &AbstractValue) -> Ab
             // The dtype is correct; the shape is best-effort from first input.
             first_input.clone()
         }
+        // DynamicSlice: output shape = slice_sizes param
+        DynamicSlice => {
+            let shape = eqn
+                .params
+                .get("slice_sizes")
+                .map(|s| {
+                    let dims: Vec<u32> = s
+                        .split(',')
+                        .filter_map(|d| d.trim().parse::<u32>().ok())
+                        .collect();
+                    Shape { dims }
+                })
+                .unwrap_or_else(|| first_input.shape.clone());
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape,
+            }
+        }
+        // Clamp: output shape matches first input
+        Clamp => first_input.clone(),
+        // Iota: output from params (no real input to infer from)
+        Iota => {
+            let length = eqn
+                .params
+                .get("length")
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(0);
+            let dtype_str = eqn.params.get("dtype").map(String::as_str).unwrap_or("I64");
+            let dtype = match dtype_str {
+                "F64" | "f64" => DType::F64,
+                _ => DType::I64,
+            };
+            AbstractValue {
+                dtype,
+                shape: Shape::vector(length),
+            }
+        }
         // Most element-wise ops preserve dtype and shape
         _ => first_input.clone(),
     }

@@ -64,6 +64,8 @@ define_language! {
         "ge" = Ge([Id; 2]),
         // Select (ternary)
         "select" = Select([Id; 3]),
+        // Clamp (ternary)
+        "clamp" = Clamp([Id; 3]),
         // Leaves
         Num(i64),
         Symbol(egg::Symbol),
@@ -189,6 +191,11 @@ pub fn algebraic_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
         // ── Max / Min absorption ──────────────────────────────────────
         rewrite!("max-min-absorb"; "(max ?a (min ?a ?b))" => "?a"),
         rewrite!("min-max-absorb"; "(min ?a (max ?a ?b))" => "?a"),
+        // ── Clamp rules ─────────────────────────────────────────────────
+        // clamp(x, lo, hi) = min(max(x, lo), hi)
+        rewrite!("clamp-to-minmax"; "(clamp ?x ?lo ?hi)" => "(min (max ?x ?lo) ?hi)"),
+        // clamp(x, x, x) = x (identity)
+        rewrite!("clamp-same"; "(clamp ?a ?a ?a)" => "?a"),
     ]
 }
 
@@ -275,14 +282,18 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             Primitive::Erfc => FjLang::Erfc([input_ids[0]]),
             // Ternary
             Primitive::Select => FjLang::Select([input_ids[0], input_ids[1], input_ids[2]]),
+            // Clamp (ternary)
+            Primitive::Clamp => FjLang::Clamp([input_ids[0], input_ids[1], input_ids[2]]),
             // Shape ops require params – not yet supported
             Primitive::Reshape
             | Primitive::Slice
+            | Primitive::DynamicSlice
             | Primitive::Gather
             | Primitive::Scatter
             | Primitive::Transpose
             | Primitive::BroadcastInDim
-            | Primitive::Concatenate => {
+            | Primitive::Concatenate
+            | Primitive::Iota => {
                 panic!(
                     "primitive {} not supported by egraph lowering",
                     eqn.primitive.as_str()
@@ -504,6 +515,17 @@ pub fn egraph_to_jaxpr(
                 *cond,
                 *a,
                 *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Clamp([x, lo, hi]) => push_ternary(
+                idx,
+                Primitive::Clamp,
+                *x,
+                *lo,
+                *hi,
                 &mut node_to_var,
                 &mut next_var,
                 &mut equations,
@@ -961,11 +983,13 @@ fn is_egraph_supported_primitive(primitive: Primitive) -> bool {
         primitive,
         Primitive::Reshape
             | Primitive::Slice
+            | Primitive::DynamicSlice
             | Primitive::Gather
             | Primitive::Scatter
             | Primitive::Transpose
             | Primitive::BroadcastInDim
             | Primitive::Concatenate
+            | Primitive::Iota
     )
 }
 

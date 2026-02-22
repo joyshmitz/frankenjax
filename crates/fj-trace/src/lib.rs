@@ -491,6 +491,53 @@ impl SimpleTraceContext {
                 }])
             }
             Primitive::Concatenate => infer_concatenate(inputs, params),
+            Primitive::DynamicSlice => {
+                // Output shape = slice_sizes param
+                if inputs.is_empty() {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "expected at least 1 input".to_owned(),
+                    });
+                }
+                let slice_sizes = if let Some(raw) = params.get("slice_sizes") {
+                    parse_u32_list(primitive, "slice_sizes", raw)?
+                } else {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "missing required param 'slice_sizes'".to_owned(),
+                    });
+                };
+                Ok(vec![ShapedArray {
+                    dtype: inputs[0].dtype,
+                    shape: Shape { dims: slice_sizes },
+                }])
+            }
+            Primitive::Clamp => {
+                // clamp(x, lo, hi): 3 inputs, output shape matches first
+                if inputs.len() != 3 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 3 inputs, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![inputs[0].clone()])
+            }
+            Primitive::Iota => {
+                // Iota: no inputs, output shape from params
+                let length = params
+                    .get("length")
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(0);
+                let dtype_str = params.get("dtype").map(String::as_str).unwrap_or("I64");
+                let dtype = match dtype_str {
+                    "F64" | "f64" => DType::F64,
+                    _ => DType::I64,
+                };
+                Ok(vec![ShapedArray {
+                    dtype,
+                    shape: Shape::vector(length),
+                }])
+            }
         }
     }
 
