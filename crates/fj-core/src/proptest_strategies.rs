@@ -125,6 +125,7 @@ pub fn arb_binary_jaxpr() -> impl Strategy<Value = Jaxpr> {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             }],
         )
@@ -152,6 +153,7 @@ mod tests {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    effects: vec![],
                     sub_jaxprs: vec![],
                 }],
             );

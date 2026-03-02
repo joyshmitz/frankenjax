@@ -345,6 +345,7 @@ mod tests {
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::Mul,
@@ -352,6 +353,7 @@ mod tests {
                     outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
             ],
         )
@@ -370,6 +372,7 @@ mod tests {
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::Mul,
@@ -377,6 +380,7 @@ mod tests {
                     outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
             ],
         )

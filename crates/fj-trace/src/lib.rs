@@ -993,6 +993,7 @@ impl SimpleTraceContext {
                 inputs: in_atoms,
                 outputs: out_vars,
                 params: eqn.params.clone(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             });
         }

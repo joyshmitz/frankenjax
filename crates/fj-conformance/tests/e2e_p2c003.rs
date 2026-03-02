@@ -162,6 +162,7 @@ fn build_chain_jaxpr(n: usize) -> Jaxpr {
             outputs: smallvec![output_var],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
+            effects: vec![],
         });
     }
     Jaxpr::new(
@@ -185,6 +186,7 @@ fn make_neg_mul_jaxpr() -> Jaxpr {
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             },
             Equation {
                 primitive: Primitive::Mul,
@@ -192,6 +194,7 @@ fn make_neg_mul_jaxpr() -> Jaxpr {
                 outputs: smallvec![VarId(4)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             },
         ],
     )

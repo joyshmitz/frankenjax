@@ -44,6 +44,7 @@ fn make_neg_mul_jaxpr() -> Jaxpr {
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             },
             Equation {
                 primitive: Primitive::Mul,
@@ -51,6 +52,7 @@ fn make_neg_mul_jaxpr() -> Jaxpr {
                 outputs: smallvec![VarId(4)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             },
         ],
     )
@@ -69,6 +71,7 @@ fn make_multi_output_jaxpr() -> Jaxpr {
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             },
             Equation {
                 primitive: Primitive::Neg,
@@ -76,6 +79,7 @@ fn make_multi_output_jaxpr() -> Jaxpr {
                 outputs: smallvec![VarId(4)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             },
         ],
     )
@@ -93,6 +97,7 @@ fn build_add_chain_jaxpr(n: usize) -> Jaxpr {
             outputs: smallvec![output_var],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
+            effects: vec![],
         });
     }
     Jaxpr::new(

@@ -188,6 +188,7 @@ mod tests {
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
         let outputs =
@@ -208,6 +209,7 @@ mod tests {
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
         let err = eval_jaxpr_with_consts(&jaxpr, &[], &[Value::scalar_i64(7)])
@@ -278,6 +280,7 @@ mod tests {
                         outputs: smallvec![VarId(2)],
                         params: BTreeMap::new(),
                         sub_jaxprs: vec![],
+                        effects: vec![],
                     }],
                 );
                 let out = eval_jaxpr(&jaxpr, &[Value::scalar_f64(x)])

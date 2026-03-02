@@ -372,6 +372,7 @@ fn adversarial_large_program_bounded_time() {
             outputs: smallvec::smallvec![out_var],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
+            effects: vec![],
         });
     }
     let jaxpr = Jaxpr::new(inputs, vec![], vec![VarId(101)], equations);

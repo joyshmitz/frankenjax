@@ -55,6 +55,7 @@ fn make_sin_jaxpr() -> Jaxpr {
             outputs: smallvec::smallvec![VarId(2)],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
+            effects: vec![],
         }],
     )
 }
@@ -70,6 +71,7 @@ fn make_exp_jaxpr() -> Jaxpr {
             outputs: smallvec::smallvec![VarId(2)],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
+            effects: vec![],
         }],
     )
 }
@@ -268,6 +270,7 @@ fn metamorphic_grad_constant_is_zero() {
             outputs: smallvec::smallvec![VarId(2)],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
+            effects: vec![],
         }],
     );
     let grad = grad_first(&jaxpr, &[Value::scalar_f64(2.5)]).unwrap();

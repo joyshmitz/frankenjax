@@ -18,6 +18,7 @@ fn build_chain_jaxpr(n: usize) -> Jaxpr {
             inputs: smallvec::smallvec![Atom::Var(input_var), Atom::Lit(Literal::I64(1))],
             outputs: smallvec::smallvec![output_var],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         });
     }
@@ -41,6 +42,7 @@ fn make_neg_mul_jaxpr() -> Jaxpr {
                 inputs: smallvec::smallvec![Atom::Var(VarId(1))],
                 outputs: smallvec::smallvec![VarId(3)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             },
             Equation {
@@ -48,6 +50,7 @@ fn make_neg_mul_jaxpr() -> Jaxpr {
                 inputs: smallvec::smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
                 outputs: smallvec::smallvec![VarId(4)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             },
         ],

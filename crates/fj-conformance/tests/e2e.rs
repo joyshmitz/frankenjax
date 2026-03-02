@@ -734,6 +734,7 @@ fn build_chain_jaxpr(n: usize) -> Jaxpr {
             outputs: smallvec::smallvec![output_var],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
+            effects: vec![],
         });
     }
     Jaxpr::new(

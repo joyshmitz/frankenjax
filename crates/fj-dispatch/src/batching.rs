@@ -1491,6 +1491,7 @@ mod tests {
                 ],
                 outputs: smallvec![VarId(1)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             }],
         );
@@ -1517,6 +1518,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(0))],
                 outputs: smallvec![VarId(1)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             }],
         );
@@ -1588,6 +1590,7 @@ mod tests {
                 inputs: smallvec![Atom::Var(VarId(0))],
                 outputs: smallvec![VarId(1)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             }],
         );

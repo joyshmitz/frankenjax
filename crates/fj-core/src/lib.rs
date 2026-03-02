@@ -721,6 +721,8 @@ pub struct Equation {
     pub inputs: SmallVec<[Atom; 4]>,
     pub outputs: SmallVec<[VarId; 2]>,
     pub params: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<String>,
     /// Nested sub-jaxprs for control flow primitives (Cond branches, Scan/While bodies).
     /// For Cond: [true_branch, false_branch]. For Scan/While: [body].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -732,6 +734,8 @@ pub struct Jaxpr {
     pub invars: Vec<VarId>,
     pub constvars: Vec<VarId>,
     pub outvars: Vec<VarId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<String>,
     pub equations: Vec<Equation>,
     #[serde(skip)]
     fingerprint_cache: std::sync::OnceLock<String>,
@@ -743,6 +747,7 @@ impl Clone for Jaxpr {
             invars: self.invars.clone(),
             constvars: self.constvars.clone(),
             outvars: self.outvars.clone(),
+            effects: self.effects.clone(),
             equations: self.equations.clone(),
             fingerprint_cache: std::sync::OnceLock::new(),
         }
@@ -754,6 +759,7 @@ impl PartialEq for Jaxpr {
         self.invars == other.invars
             && self.constvars == other.constvars
             && self.outvars == other.outvars
+            && self.effects == other.effects
             && self.equations == other.equations
     }
 }
@@ -815,6 +821,7 @@ impl Jaxpr {
             invars,
             constvars,
             outvars,
+            effects: Vec::new(),
             equations,
             fingerprint_cache: std::sync::OnceLock::new(),
         }
@@ -827,6 +834,9 @@ impl Jaxpr {
             write_var_list(&mut out, "in", &self.invars);
             write_var_list(&mut out, "const", &self.constvars);
             write_var_list(&mut out, "out", &self.outvars);
+            if !self.effects.is_empty() {
+                write_effect_list(&mut out, "effects", &self.effects);
+            }
 
             for eqn in &self.equations {
                 let _ = write!(&mut out, "eqn:{}(", eqn.primitive.as_str());
@@ -844,6 +854,9 @@ impl Jaxpr {
                     let _ = write!(&mut out, "{key}={value};");
                 }
                 out.push('}');
+                if !eqn.effects.is_empty() {
+                    write_effect_list(&mut out, "eqn_effects", &eqn.effects);
+                }
                 out.push('|');
             }
 
@@ -913,6 +926,14 @@ fn write_var_list(out: &mut String, label: &str, vars: &[VarId]) {
     let _ = write!(out, "{label}=[");
     for var in vars {
         let _ = write!(out, "v{},", var.0);
+    }
+    out.push(']');
+}
+
+fn write_effect_list(out: &mut String, label: &str, effects: &[String]) {
+    let _ = write!(out, "{label}=[");
+    for effect in effects {
+        let _ = write!(out, "{effect},");
     }
     out.push(']');
 }
@@ -1020,6 +1041,7 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             }],
         ),
@@ -1032,6 +1054,7 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             }],
         ),
@@ -1045,6 +1068,7 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                     inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    effects: vec![],
                     sub_jaxprs: vec![],
                 },
                 Equation {
@@ -1052,6 +1076,7 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                     inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    effects: vec![],
                     sub_jaxprs: vec![],
                 },
                 Equation {
@@ -1059,6 +1084,7 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                     inputs: smallvec![Atom::Var(VarId(2)), Atom::Var(VarId(3))],
                     outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
+                    effects: vec![],
                     sub_jaxprs: vec![],
                 },
             ],
@@ -1072,6 +1098,7 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                 inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
+                effects: vec![],
                 sub_jaxprs: vec![],
             }],
         ),
@@ -1138,6 +1165,7 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                     inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
+                    effects: vec![],
                     sub_jaxprs: vec![],
                 },
                 Equation {
@@ -1145,6 +1173,7 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                     inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(2))],
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
+                    effects: vec![],
                     sub_jaxprs: vec![],
                 },
             ],
@@ -1162,6 +1191,7 @@ fn unary_program(primitive: Primitive) -> Jaxpr {
             inputs: smallvec![Atom::Var(VarId(1))],
             outputs: smallvec![VarId(2)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         }],
     )
@@ -1177,6 +1207,7 @@ fn binary_program(primitive: Primitive) -> Jaxpr {
             inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
             outputs: smallvec![VarId(3)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         }],
     )
@@ -1196,6 +1227,7 @@ fn ternary_program(primitive: Primitive) -> Jaxpr {
             ],
             outputs: smallvec![VarId(4)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         }],
     )
@@ -1474,6 +1506,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(1))],
             outputs: smallvec![VarId(5)],
             params: reshape_params,
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1485,6 +1518,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(5))],
             outputs: smallvec![VarId(6)],
             params: slice_params,
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1495,6 +1529,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(5)), Atom::Var(VarId(2))],
             outputs: smallvec![VarId(7)],
             params: gather_params,
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1505,6 +1540,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(5))],
             outputs: smallvec![VarId(8)],
             params: transpose_params,
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1516,6 +1552,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(6))],
             outputs: smallvec![VarId(9)],
             params: broadcast_params,
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1526,6 +1563,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(8)), Atom::Var(VarId(8))],
             outputs: smallvec![VarId(10)],
             params: concat_params,
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1538,6 +1576,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(10)), Atom::Var(VarId(4))],
             outputs: smallvec![VarId(18)],
             params: pad_params,
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1546,6 +1585,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(18)), Atom::Var(VarId(2))],
             outputs: smallvec![VarId(11)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1556,6 +1596,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(11))],
             outputs: smallvec![VarId(12)],
             params: reduce_params,
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1564,6 +1605,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(12))],
             outputs: smallvec![VarId(13)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         });
         equations.push(Equation {
@@ -1571,6 +1613,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(13))],
             outputs: smallvec![VarId(14)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         });
         equations.push(Equation {
@@ -1578,6 +1621,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(14)), Atom::Var(VarId(12))],
             outputs: smallvec![VarId(15)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         });
         equations.push(Equation {
@@ -1585,6 +1629,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(15)), Atom::Var(VarId(15))],
             outputs: smallvec![VarId(16)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         });
         equations.push(Equation {
@@ -1592,6 +1637,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(8)), Atom::Var(VarId(3))],
             outputs: smallvec![VarId(17)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         });
         equations.push(Equation {
@@ -1599,6 +1645,7 @@ mod tests {
             inputs: smallvec![Atom::Var(VarId(16)), Atom::Var(VarId(17))],
             outputs: smallvec![VarId(24)],
             params: BTreeMap::new(),
+            effects: vec![],
             sub_jaxprs: vec![],
         });
 
@@ -1666,6 +1713,7 @@ mod tests {
                         inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
                         outputs: smallvec![VarId(3)],
                         params: BTreeMap::new(),
+                        effects: vec![],
                         sub_jaxprs: vec![],
                     }],
                 );
@@ -1795,6 +1843,108 @@ mod tests {
                 assert_eq!(
                     jaxpr.canonical_fingerprint(),
                     decoded.canonical_fingerprint()
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_effects_default_empty() {
+        run_logged_test(
+            "jaxpr_effects_default_empty",
+            &("effects-default-empty", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = build_program(ProgramSpec::Square);
+                assert!(jaxpr.effects.is_empty());
+                assert!(jaxpr.equations.iter().all(|eqn| eqn.effects.is_empty()));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_effects_serde_skip_when_empty_and_backcompat() {
+        run_logged_test(
+            "jaxpr_effects_serde_skip_when_empty_and_backcompat",
+            &("effects-serde-backcompat", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+                let encoded = serde_json::to_string(&jaxpr)
+                    .map_err(|err| format!("serialize failed: {err}"))?;
+                assert!(!encoded.contains("\"effects\":"));
+
+                let mut value =
+                    serde_json::to_value(&jaxpr).map_err(|err| format!("to_value failed: {err}"))?;
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.remove("effects");
+                    if let Some(serde_json::Value::Array(eqns)) = map.get_mut("equations") {
+                        for eqn in eqns {
+                            if let serde_json::Value::Object(eq_map) = eqn {
+                                eq_map.remove("effects");
+                            }
+                        }
+                    }
+                }
+                let decoded: Jaxpr =
+                    serde_json::from_value(value).map_err(|err| format!("decode failed: {err}"))?;
+                assert!(decoded.effects.is_empty());
+                assert!(decoded.equations.iter().all(|eqn| eqn.effects.is_empty()));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_effects_serde_roundtrip_with_non_empty_effects() {
+        run_logged_test(
+            "jaxpr_effects_serde_roundtrip_with_non_empty_effects",
+            &("effects-serde-roundtrip", 2_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut jaxpr = build_program(ProgramSpec::Square);
+                jaxpr.effects.push("global_io".to_owned());
+                jaxpr.equations[0].effects.push("eqn_debug".to_owned());
+
+                let encoded = serde_json::to_string(&jaxpr)
+                    .map_err(|err| format!("serialize failed: {err}"))?;
+                assert!(encoded.contains("\"effects\":[\"global_io\"]"));
+                assert!(encoded.contains("\"effects\":[\"eqn_debug\"]"));
+
+                let decoded: Jaxpr = serde_json::from_str(&encoded)
+                    .map_err(|err| format!("decode failed: {err}"))?;
+                assert_eq!(decoded.effects, vec!["global_io".to_owned()]);
+                assert_eq!(decoded.equations[0].effects, vec!["eqn_debug".to_owned()]);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn canonical_fingerprint_changes_when_effects_change() {
+        run_logged_test(
+            "canonical_fingerprint_changes_when_effects_change",
+            &("effects-fingerprint", 2_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let base = build_program(ProgramSpec::SquarePlusLinear);
+
+                let mut with_jaxpr_effect = base.clone();
+                with_jaxpr_effect.effects.push("global_io".to_owned());
+                assert_ne!(
+                    base.canonical_fingerprint(),
+                    with_jaxpr_effect.canonical_fingerprint()
+                );
+
+                let mut with_eqn_effect = base.clone();
+                with_eqn_effect.equations[0]
+                    .effects
+                    .push("eqn_debug".to_owned());
+                assert_ne!(
+                    base.canonical_fingerprint(),
+                    with_eqn_effect.canonical_fingerprint()
                 );
                 Ok(Vec::new())
             },
@@ -2337,6 +2487,7 @@ mod tests {
                         inputs: smallvec![Atom::Var(VarId(99)), Atom::Lit(Literal::I64(1))],
                         outputs: smallvec![VarId(1)],
                         params: BTreeMap::new(),
+                        effects: vec![],
                         sub_jaxprs: vec![],
                     }],
                 );
@@ -2355,6 +2506,7 @@ mod tests {
                         inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
                         outputs: smallvec![VarId(1)],
                         params: BTreeMap::new(),
+                        effects: vec![],
                         sub_jaxprs: vec![],
                     }],
                 );
@@ -2424,6 +2576,7 @@ mod tests {
                             inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::Bool(true))],
                             outputs: smallvec![VarId(2)],
                             params: BTreeMap::new(),
+                            effects: vec![],
                             sub_jaxprs: vec![],
                         },
                         Equation {
@@ -2434,6 +2587,7 @@ mod tests {
                             ],
                             outputs: smallvec![VarId(3)],
                             params: BTreeMap::new(),
+                            effects: vec![],
                             sub_jaxprs: vec![],
                         },
                     ],

@@ -3089,7 +3089,10 @@ pub fn jvp_grad_first(jaxpr: &Jaxpr, args: &[Value]) -> Result<f64, AdError> {
 }
 
 /// Compute gradients of a Jaxpr with respect to all inputs (tensor-aware).
-pub fn grad_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, AdError> {
+fn value_and_grad_jaxpr_inner(
+    jaxpr: &Jaxpr,
+    args: &[Value],
+) -> Result<(Vec<Value>, Vec<Value>, usize), AdError> {
     let (outputs, tape, env) = forward_with_tape(jaxpr, args)?;
 
     let output_val = outputs.first().ok_or(AdError::NonScalarGradientOutput)?;
@@ -3101,7 +3104,23 @@ pub fn grad_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, AdError> 
 
     let seed = Value::scalar_f64(1.0);
     let output_var = jaxpr.outvars[0];
-    backward(&tape, output_var, seed, jaxpr, &env)
+    let grads = backward(&tape, output_var, seed, jaxpr, &env)?;
+    Ok((outputs, grads, tape.entries.len()))
+}
+
+/// Compute gradients of a Jaxpr with respect to all inputs (tensor-aware).
+pub fn grad_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, AdError> {
+    let (_, grads, _) = value_and_grad_jaxpr_inner(jaxpr, args)?;
+    Ok(grads)
+}
+
+/// Compute both value outputs and gradients in one shared forward pass.
+pub fn value_and_grad_jaxpr(
+    jaxpr: &Jaxpr,
+    args: &[Value],
+) -> Result<(Vec<Value>, Vec<Value>), AdError> {
+    let (values, grads, _) = value_and_grad_jaxpr_inner(jaxpr, args)?;
+    Ok((values, grads))
 }
 
 /// Compute gradient with respect to the first input only (convenience wrapper).
@@ -3148,6 +3167,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
         let grads = grad_jaxpr(&jaxpr, &[Value::scalar_f64(0.0)]).expect("grad should succeed");
@@ -3175,6 +3195,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
         let grads = grad_jaxpr(&jaxpr, &[Value::scalar_f64(0.0)]).expect("grad should succeed");
@@ -3266,6 +3287,77 @@ mod tests {
     }
 
     #[test]
+    fn value_and_grad_matches_separate_paths_single_input() {
+        let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+        let args = vec![Value::scalar_f64(3.0)];
+
+        let (value, grad) =
+            value_and_grad_jaxpr(&jaxpr, &args).expect("value_and_grad should succeed");
+        let separate_grad = grad_jaxpr(&jaxpr, &args).expect("grad should succeed");
+
+        assert_eq!(value.len(), 1);
+        let value_scalar = to_f64(&value[0]).expect("value should be scalar");
+        assert!(
+            (value_scalar - 15.0).abs() < 1e-10,
+            "value = {value_scalar}"
+        );
+        assert_eq!(grad, separate_grad);
+    }
+
+    #[test]
+    fn value_and_grad_matches_separate_paths_multi_input() {
+        let jaxpr = build_program(ProgramSpec::Add2);
+        let args = vec![Value::scalar_f64(6.0), Value::scalar_f64(3.0)];
+
+        let (value, grad) =
+            value_and_grad_jaxpr(&jaxpr, &args).expect("value_and_grad should succeed");
+        let separate_grad = grad_jaxpr(&jaxpr, &args).expect("grad should succeed");
+
+        assert_eq!(value.len(), 1);
+        let value_scalar = to_f64(&value[0]).expect("value should be scalar");
+        assert!((value_scalar - 9.0).abs() < 1e-10, "value = {value_scalar}");
+        assert_eq!(grad, separate_grad);
+    }
+
+    #[test]
+    fn value_and_grad_returns_all_outputs() {
+        let jaxpr = build_program(ProgramSpec::AddOneMulTwo);
+        let args = vec![Value::scalar_f64(4.0)];
+
+        let (values, grads) =
+            value_and_grad_jaxpr(&jaxpr, &args).expect("value_and_grad should succeed");
+
+        assert_eq!(values.len(), 2, "expected both outputs from AddOneMulTwo");
+        let first = to_f64(&values[0]).expect("first output scalar");
+        let second = to_f64(&values[1]).expect("second output scalar");
+        assert!((first - 5.0).abs() < 1e-10, "first output = {first}");
+        assert!((second - 8.0).abs() < 1e-10, "second output = {second}");
+
+        assert_eq!(grads.len(), 1);
+        let g = to_f64(&grads[0]).expect("gradient should be scalar");
+        assert!((g - 1.0).abs() < 1e-10, "gradient = {g}");
+    }
+
+    #[test]
+    fn value_and_grad_shares_forward_pass() {
+        let jaxpr = build_program(ProgramSpec::SquarePlusLinear);
+        let args = vec![Value::scalar_f64(2.0)];
+
+        let (_, _, forward_steps) = value_and_grad_jaxpr_inner(&jaxpr, &args)
+            .expect("value_and_grad internals should succeed");
+        let separate_forward_steps = jaxpr.equations.len() * 2;
+        assert_eq!(
+            forward_steps,
+            jaxpr.equations.len(),
+            "shared forward should execute one equation pass"
+        );
+        assert!(
+            forward_steps < separate_forward_steps,
+            "shared forward should do fewer steps than separate value + grad forward passes"
+        );
+    }
+
+    #[test]
     fn grad_reciprocal_at_2() {
         let jaxpr = make_unary_jaxpr(Primitive::Reciprocal);
         let g = grad_first(&jaxpr, &[Value::scalar_f64(2.0)]).unwrap();
@@ -3298,6 +3390,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         )
     }
@@ -3315,6 +3408,7 @@ mod tests {
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         )
     }
@@ -3678,6 +3772,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
         let result = jvp(&jaxpr, &[Value::scalar_f64(0.0)], &[Value::scalar_f64(1.0)])
@@ -3719,6 +3814,7 @@ mod tests {
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::Exp,
@@ -3726,6 +3822,7 @@ mod tests {
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
             ],
         );
@@ -3756,6 +3853,7 @@ mod tests {
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::Cos,
@@ -3763,6 +3861,7 @@ mod tests {
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::Mul,
@@ -3770,6 +3869,7 @@ mod tests {
                     outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
             ],
         );
@@ -3800,6 +3900,7 @@ mod tests {
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::Add,
@@ -3807,6 +3908,7 @@ mod tests {
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::Log,
@@ -3814,6 +3916,7 @@ mod tests {
                     outputs: smallvec![VarId(4)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
             ],
         );
@@ -3844,6 +3947,7 @@ mod tests {
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::Tanh,
@@ -3851,6 +3955,7 @@ mod tests {
                     outputs: smallvec![VarId(3)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
             ],
         );
@@ -3881,6 +3986,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
 
@@ -3907,6 +4013,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
 
@@ -3931,6 +4038,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
 
@@ -3956,6 +4064,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
 
@@ -3984,6 +4093,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
 
@@ -4003,6 +4113,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
 
@@ -4029,6 +4140,7 @@ mod tests {
                 outputs: smallvec![VarId(1)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
 
@@ -5494,6 +5606,7 @@ mod tests {
                 outputs: smallvec![VarId(2)],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
+                effects: vec![],
             }],
         );
 
@@ -5545,14 +5658,24 @@ mod tests {
         let dx = Value::vector_f64(&[1.0, 1.0, 1.0]).expect("vector");
 
         // Neg: output shape = input shape
-        let tangent_out =
-            jvp_rule(Primitive::Neg, &[x.clone()], &[dx.clone()], &params).expect("jvp");
+        let tangent_out = jvp_rule(
+            Primitive::Neg,
+            std::slice::from_ref(&x),
+            std::slice::from_ref(&dx),
+            &params,
+        )
+        .expect("jvp");
         let t = tangent_out.as_tensor().expect("should be tensor");
         assert_eq!(t.shape.dims, vec![3]);
 
         // Exp: output shape = input shape
-        let tangent_out =
-            jvp_rule(Primitive::Exp, &[x.clone()], &[dx.clone()], &params).expect("jvp");
+        let tangent_out = jvp_rule(
+            Primitive::Exp,
+            std::slice::from_ref(&x),
+            std::slice::from_ref(&dx),
+            &params,
+        )
+        .expect("jvp");
         let t = tangent_out.as_tensor().expect("should be tensor");
         assert_eq!(t.shape.dims, vec![3]);
 
@@ -5687,6 +5810,7 @@ mod tests {
                     outputs: smallvec![VarId(2)],
                     params: BTreeMap::new(),
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
                 Equation {
                     primitive: Primitive::ReduceSum,
@@ -5694,6 +5818,7 @@ mod tests {
                     outputs: smallvec![VarId(3)],
                     params: reduce_params,
                     sub_jaxprs: vec![],
+                    effects: vec![],
                 },
             ],
         );
