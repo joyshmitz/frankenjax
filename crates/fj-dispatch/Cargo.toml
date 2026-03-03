@@ -12,6 +12,7 @@ fj-interpreters = { path = "../fj-interpreters" }
 fj-lax = { path = "../fj-lax" }
 fj-ledger = { path = "../fj-ledger" }
 fj-runtime = { path = "../fj-runtime" }
+fj-trace = { path = "../fj-trace" }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]

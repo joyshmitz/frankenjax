@@ -2,7 +2,7 @@
 
 //! Tracing and abstract-value machinery for FJ-P2C-001.
 
-use fj_core::{Atom, DType, Equation, Jaxpr, Primitive, Shape, Value, VarId};
+use fj_core::{Atom, DType, Equation, Jaxpr, Primitive, Shape, Transform, Value, VarId};
 use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -59,6 +59,8 @@ impl ShapedArray {
                     fj_core::Literal::U32(_) => DType::U32,
                     fj_core::Literal::U64(_) => DType::U64,
                     fj_core::Literal::Bool(_) => DType::Bool,
+                    fj_core::Literal::BF16Bits(_) => DType::BF16,
+                    fj_core::Literal::F16Bits(_) => DType::F16,
                     fj_core::Literal::F64Bits(_) => DType::F64,
                     fj_core::Literal::Complex64Bits(..) => DType::Complex64,
                     fj_core::Literal::Complex128Bits(..) => DType::Complex128,
@@ -246,6 +248,22 @@ struct TraceFrame {
     last_output_ids: Vec<TracerId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedTraceFrameSummary {
+    pub transform: Transform,
+    pub trace_id: u64,
+    pub depth: usize,
+    pub equation_count: usize,
+    pub invar_count: usize,
+    pub outvar_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedTraceSummary {
+    pub max_depth: usize,
+    pub frames: Vec<NestedTraceFrameSummary>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SimpleTraceContext {
     next_tracer_id: u32,
@@ -296,6 +314,16 @@ impl SimpleTraceContext {
             .unwrap_or(1)
     }
 
+    #[must_use]
+    pub fn nesting_depth(&self) -> usize {
+        self.frame_stack.len()
+    }
+
+    #[must_use]
+    pub fn next_tracer_id_hint(&self) -> u32 {
+        self.next_tracer_id
+    }
+
     pub fn bind_input(&mut self, aval: ShapedArray) -> TracerId {
         let tracer_id = self.allocate_tracer(aval);
         self.active_frame_mut().in_ids.push(tracer_id);
@@ -340,6 +368,17 @@ impl SimpleTraceContext {
             .pop()
             .ok_or(TraceError::CompositionViolation)?;
         Ok(frame.trace_id)
+    }
+
+    pub fn pop_subtrace_closed(&mut self) -> Result<ClosedJaxpr, TraceError> {
+        if self.frame_stack.len() <= 1 {
+            return Err(TraceError::CompositionViolation);
+        }
+        let frame = self
+            .frame_stack
+            .pop()
+            .ok_or(TraceError::CompositionViolation)?;
+        self.build_closed_jaxpr(frame)
     }
 
     fn active_frame(&self) -> &TraceFrame {
@@ -564,7 +603,10 @@ impl SimpleTraceContext {
             Primitive::ReduceSum
             | Primitive::ReduceMax
             | Primitive::ReduceMin
-            | Primitive::ReduceProd => infer_reduce_sum(primitive, inputs, params),
+            | Primitive::ReduceProd
+            | Primitive::ReduceAnd
+            | Primitive::ReduceOr
+            | Primitive::ReduceXor => infer_reduce_sum(primitive, inputs, params),
             Primitive::Reshape => infer_reshape(inputs, params),
             Primitive::Slice => infer_slice(inputs, params),
             Primitive::Gather => infer_gather(inputs, params),
@@ -1020,7 +1062,7 @@ impl SimpleTraceContext {
         }
     }
 
-    fn build_closed_jaxpr(mut self, frame: TraceFrame) -> Result<ClosedJaxpr, TraceError> {
+    fn build_closed_jaxpr(&mut self, frame: TraceFrame) -> Result<ClosedJaxpr, TraceError> {
         let mut tracer_to_var: BTreeMap<TracerId, VarId> = BTreeMap::new();
         let mut next_var = 1_u32;
 
@@ -1859,7 +1901,7 @@ fn broadcast_shape(lhs: &Shape, rhs: &Shape) -> Option<Shape> {
 }
 
 fn promote_dtype(lhs: DType, rhs: DType) -> DType {
-    use DType::{Bool, Complex64, Complex128, F32, F64, I32, I64, U32, U64};
+    use DType::{BF16, Bool, Complex64, Complex128, F16, F32, F64, I32, I64, U32, U64};
 
     match (lhs, rhs) {
         (Complex128, _) | (_, Complex128) => Complex128,
@@ -1868,6 +1910,9 @@ fn promote_dtype(lhs: DType, rhs: DType) -> DType {
         (U32, F32) | (F32, U32) => F64,
         (F64, _) | (_, F64) => F64,
         (F32, _) | (_, F32) => F32,
+        (F16, F16) => F16,
+        (BF16, BF16) => BF16,
+        (F16, _) | (_, F16) | (BF16, _) | (_, BF16) => F32,
         (I32, U32) | (U32, I32) => I64,
         (I64, U32) | (U32, I64) => I64,
         (I64, _) | (_, I64) => I64,
@@ -2217,6 +2262,43 @@ where
         .into_inner();
 
     ctx_inner.finalize()
+}
+
+/// Build a nested trace-frame summary for a composed transform stack.
+///
+/// This opens one subtrace per transform (outer-to-inner), then closes them
+/// (inner-to-outer) to verify stack discipline.
+pub fn simulate_nested_trace_contexts(
+    transforms: &[Transform],
+    args: &[Value],
+) -> Result<NestedTraceSummary, TraceError> {
+    let in_avals: Vec<ShapedArray> = args.iter().map(ShapedArray::from_value).collect();
+    let mut ctx = SimpleTraceContext::with_inputs(in_avals.clone());
+    let mut opened = Vec::with_capacity(transforms.len());
+
+    for transform in transforms {
+        let trace_id = ctx.push_subtrace(in_avals.clone());
+        opened.push((*transform, trace_id, ctx.nesting_depth()));
+    }
+
+    let mut frames = Vec::with_capacity(opened.len());
+    for (transform, trace_id, depth) in opened.into_iter().rev() {
+        let closed = ctx.pop_subtrace_closed()?;
+        frames.push(NestedTraceFrameSummary {
+            transform,
+            trace_id,
+            depth,
+            equation_count: closed.jaxpr.equations.len(),
+            invar_count: closed.jaxpr.invars.len(),
+            outvar_count: closed.jaxpr.outvars.len(),
+        });
+    }
+    frames.reverse();
+
+    Ok(NestedTraceSummary {
+        max_depth: transforms.len() + 1,
+        frames,
+    })
 }
 
 #[cfg(test)]
@@ -2833,6 +2915,56 @@ mod tests {
                         Ok(())
                     })
                     .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_reduce_and_shape() {
+        run_logged_test(
+            "test_infer_reduce_and_shape",
+            fj_test_utils::fixture_id_from_json(&("reduce-and-shape", [2_u32, 3_u32, 4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::Bool,
+                    shape: Shape {
+                        dims: vec![2, 3, 4],
+                    },
+                }]);
+                let mut params = BTreeMap::new();
+                params.insert("axes".to_owned(), "1".to_owned());
+                let out = ctx
+                    .process_primitive(Primitive::ReduceAnd, &[TracerId(1)], params)
+                    .expect("reduce_and inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.dtype, DType::Bool);
+                assert_eq!(aval.shape, Shape { dims: vec![2, 4] });
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_reduce_or_full_reduce() {
+        run_logged_test(
+            "test_infer_reduce_or_full_reduce",
+            fj_test_utils::fixture_id_from_json(&("reduce-or-full", [2_u32, 2_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::Bool,
+                    shape: Shape { dims: vec![2, 2] },
+                }]);
+                let out = ctx
+                    .process_primitive(Primitive::ReduceOr, &[TracerId(1)], BTreeMap::new())
+                    .expect("reduce_or inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.dtype, DType::Bool);
+                assert_eq!(aval.shape, Shape::scalar());
                 Ok(Vec::new())
             },
         );

@@ -13,6 +13,7 @@ use fj_ledger::{
 };
 use fj_runtime::backend::{Backend, BackendError, BackendRegistry};
 use fj_runtime::device::{DeviceId, DevicePlacement};
+use fj_trace::simulate_nested_trace_contexts;
 use std::collections::BTreeMap;
 
 // ── Effect Token System ────────────────────────────────────────────
@@ -335,6 +336,13 @@ impl From<TransformExecutionError> for DispatchError {
 
 pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchError> {
     let composition_proof = verify_transform_composition(&request.ledger)?;
+    let nested_trace_summary = simulate_nested_trace_contexts(
+        &request.ledger.transform_stack,
+        &request.args,
+    )
+    .map_err(|err| {
+        TransformExecutionError::TensorBuild(format!("nested trace simulation failed: {err}"))
+    })?;
 
     let cache_key = build_cache_key_ref(&CacheKeyInputRef {
         mode: request.mode,
@@ -370,6 +378,19 @@ pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchEr
         .map(|token| format!("{}:{}", token.sequence_number, token.effect_name))
         .collect::<Vec<_>>()
         .join(",");
+    let nested_trace_frame_trace = nested_trace_summary
+        .frames
+        .iter()
+        .map(|frame| {
+            format!(
+                "{}:{}@{}",
+                frame.transform.as_str(),
+                frame.trace_id,
+                frame.depth
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
 
     let mut evidence_ledger = EvidenceLedger::new();
     let posterior_abandoned = heuristic_posterior_abandoned(&request.ledger);
@@ -394,6 +415,14 @@ pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchEr
                 signal_name: "transform_stack_hash".to_owned(),
                 log_likelihood_delta: (composition_proof.transform_count as f64 + 1.0).ln(),
                 detail: composition_proof.stack_hash_hex,
+            },
+            EvidenceSignal {
+                signal_name: "nested_trace_depth".to_owned(),
+                log_likelihood_delta: nested_trace_summary.max_depth as f64 * 0.05,
+                detail: format!(
+                    "max_depth={},frames={}",
+                    nested_trace_summary.max_depth, nested_trace_frame_trace
+                ),
             },
             EvidenceSignal {
                 signal_name: "effect_token_count".to_owned(),

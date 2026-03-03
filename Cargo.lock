@@ -660,6 +660,7 @@ dependencies = [
  "fj-ledger",
  "fj-runtime",
  "fj-test-utils",
+ "fj-trace",
  "proptest",
  "rustc-hash",
  "serde_json",

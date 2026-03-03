@@ -1,0 +1,38 @@
+{
+  "schema_version": "frankenjax.testing.log.v1",
+  "generated_at_unix_ms": 0,
+  "records": [
+    {
+      "test_name": "e2e_nested_traces_oracle",
+      "nesting_depth": 3,
+      "transforms": ["jit", "grad"],
+      "inner_vars": 1,
+      "outer_vars": 1,
+      "pass": true
+    },
+    {
+      "test_name": "e2e_nested_traces_oracle",
+      "nesting_depth": 3,
+      "transforms": ["vmap", "grad"],
+      "inner_vars": 1,
+      "outer_vars": 1,
+      "pass": true
+    },
+    {
+      "test_name": "e2e_nested_traces_oracle",
+      "nesting_depth": 3,
+      "transforms": ["grad", "grad"],
+      "inner_vars": 1,
+      "outer_vars": 1,
+      "pass": true
+    },
+    {
+      "test_name": "e2e_nested_traces_oracle",
+      "nesting_depth": 3,
+      "transforms": ["vmap", "jit"],
+      "inner_vars": 1,
+      "outer_vars": 1,
+      "pass": true
+    }
+  ]
+}
