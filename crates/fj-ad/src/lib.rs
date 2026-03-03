@@ -1396,6 +1396,11 @@ fn vjp(
                         .get("axis")
                         .and_then(|s| s.trim().parse().ok())
                         .unwrap_or(rank - 1);
+                    if axis >= rank {
+                        return Err(AdError::EvalFailed(format!(
+                            "sort VJP axis {axis} out of bounds for rank {rank}"
+                        )));
+                    }
 
                     let x_vals: Vec<f64> = xt
                         .elements
@@ -1416,6 +1421,12 @@ fn vjp(
                     let axis_dim = dims[axis];
                     let axis_stride = strides[axis];
                     let total = x_vals.len();
+                    if g_vals.len() != total {
+                        return Err(AdError::EvalFailed(format!(
+                            "sort VJP gradient size mismatch: expected {total}, got {}",
+                            g_vals.len()
+                        )));
+                    }
                     let outer_count = total / axis_dim;
 
                     let mut result = vec![0.0_f64; total];
@@ -1451,11 +1462,40 @@ fn vjp(
                             });
                         }
 
-                        // Inverse permutation: unsort the gradient
-                        for (sorted_pos, &(orig_idx, _)) in indexed.iter().enumerate() {
-                            let g_flat = base + sorted_pos * axis_stride;
-                            let result_flat = base + orig_idx * axis_stride;
-                            result[result_flat] = g_vals[g_flat];
+                        // Inverse permutation: unsort the gradient.
+                        // For tied values, use the symmetric subgradient by averaging the
+                        // tied gradient slice before routing back.
+                        let mut sorted_pos = 0usize;
+                        while sorted_pos < axis_dim {
+                            let group_start = sorted_pos;
+                            let current_val = indexed[group_start].1;
+                            sorted_pos += 1;
+
+                            while sorted_pos < axis_dim {
+                                let next_val = indexed[sorted_pos].1;
+                                let same_bucket = current_val.partial_cmp(&next_val).is_none()
+                                    || matches!(
+                                        current_val.partial_cmp(&next_val),
+                                        Some(std::cmp::Ordering::Equal)
+                                    );
+                                if !same_bucket {
+                                    break;
+                                }
+                                sorted_pos += 1;
+                            }
+
+                            let group_end = sorted_pos;
+                            let mut grad_sum = 0.0_f64;
+                            for pos in group_start..group_end {
+                                let g_flat = base + pos * axis_stride;
+                                grad_sum += g_vals[g_flat];
+                            }
+                            let grad_share = grad_sum / (group_end - group_start) as f64;
+
+                            for &(orig_idx, _) in indexed.iter().take(group_end).skip(group_start) {
+                                let result_flat = base + orig_idx * axis_stride;
+                                result[result_flat] = grad_share;
+                            }
                         }
                     }
 
@@ -5078,6 +5118,132 @@ mod tests {
         assert!((result[0] - 10.0).abs() < 1e-10);
         assert!((result[1] - 20.0).abs() < 1e-10);
         assert!((result[2] - 30.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn sort_vjp_descending_unscrambles_gradient() {
+        // x = [1, 3, 2], descending sort => [3, 2, 1], permutation [1, 2, 0]
+        // g sorted = [7, 8, 9] => grad_x = [9, 7, 8]
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(2.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(7.0),
+                    Literal::from_f64(8.0),
+                    Literal::from_f64(9.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("descending".to_string(), "true".to_string());
+
+        let grads = vjp(Primitive::Sort, &[x], &g, &params).unwrap();
+        let result: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert_eq!(result, vec![9.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn sort_vjp_averages_tied_gradients() {
+        // x = [2, 1, 1], sorted = [1, 1, 2]
+        // g(sorted) = [3, 9, 6]
+        // Tied 1s share mean gradient (3+9)/2 = 6
+        // grad_x = [6, 6, 6]
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(9.0),
+                    Literal::from_f64(6.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let grads = vjp(Primitive::Sort, &[x], &g, &BTreeMap::new()).unwrap();
+        let result: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert_eq!(result, vec![6.0, 6.0, 6.0]);
+    }
+
+    #[test]
+    fn sort_vjp_axis0_unscrambles_each_column() {
+        // x shape [3, 2], axis=0 (column-wise sort)
+        // col0: [3,1,2] -> permutation [1,2,0], g col0 [10,30,50] -> [50,10,30]
+        // col1: [1,2,3] -> identity,          g col1 [20,40,60] -> [20,40,60]
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3, 2] },
+                vec![
+                    Literal::from_f64(3.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3, 2] },
+                vec![
+                    Literal::from_f64(10.0),
+                    Literal::from_f64(20.0),
+                    Literal::from_f64(30.0),
+                    Literal::from_f64(40.0),
+                    Literal::from_f64(50.0),
+                    Literal::from_f64(60.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut params = BTreeMap::new();
+        params.insert("axis".to_string(), "0".to_string());
+
+        let grads = vjp(Primitive::Sort, &[x], &g, &params).unwrap();
+        let result: Vec<f64> = match &grads[0] {
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        };
+        assert_eq!(result, vec![50.0, 20.0, 10.0, 40.0, 30.0, 60.0]);
     }
 
     #[test]
