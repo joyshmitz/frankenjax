@@ -18,7 +18,7 @@ use arithmetic::{
 };
 
 use comparison::eval_comparison;
-use reduction::{eval_cumulative, eval_reduce_axes};
+use reduction::{eval_cumulative, eval_reduce_axes, eval_reduce_bitwise_axes};
 use tensor_ops::{
     eval_argsort, eval_broadcast_in_dim, eval_concatenate, eval_conv, eval_dynamic_slice,
     eval_dynamic_update_slice, eval_expand_dims, eval_gather, eval_iota, eval_one_hot, eval_pad,
@@ -258,6 +258,33 @@ pub fn eval_primitive(
             1.0,
             |a, b| a * b,
             |a, b| a * b,
+        ),
+        Primitive::ReduceAnd => eval_reduce_bitwise_axes(
+            primitive,
+            inputs,
+            params,
+            -1_i64,
+            true,
+            |a, b| a & b,
+            |a, b| a && b,
+        ),
+        Primitive::ReduceOr => eval_reduce_bitwise_axes(
+            primitive,
+            inputs,
+            params,
+            0_i64,
+            false,
+            |a, b| a | b,
+            |a, b| a || b,
+        ),
+        Primitive::ReduceXor => eval_reduce_bitwise_axes(
+            primitive,
+            inputs,
+            params,
+            0_i64,
+            false,
+            |a, b| a ^ b,
+            |a, b| a ^ b,
         ),
         // Clamp: clamp(x, lo, hi) = min(max(x, lo), hi)
         Primitive::Clamp => eval_clamp(primitive, inputs),
@@ -2092,6 +2119,97 @@ mod tests {
         let mut p = BTreeMap::new();
         p.insert("axes".into(), axes.into());
         p
+    }
+
+    fn bool_tensor(dims: &[u32], elements: &[bool]) -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                DType::Bool,
+                Shape {
+                    dims: dims.to_vec(),
+                },
+                elements.iter().copied().map(Literal::Bool).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn i64_tensor(dims: &[u32], elements: &[i64]) -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: dims.to_vec(),
+                },
+                elements.iter().copied().map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn test_reduce_and_all_true() {
+        let input = bool_tensor(&[3], &[true, true, true]);
+        let out = eval_primitive(Primitive::ReduceAnd, &[input], &no_params()).unwrap();
+        assert_eq!(out, Value::scalar_bool(true));
+    }
+
+    #[test]
+    fn test_reduce_and_one_false() {
+        let input = bool_tensor(&[3], &[true, false, true]);
+        let out = eval_primitive(Primitive::ReduceAnd, &[input], &no_params()).unwrap();
+        assert_eq!(out, Value::scalar_bool(false));
+    }
+
+    #[test]
+    fn test_reduce_or_all_false() {
+        let input = bool_tensor(&[3], &[false, false, false]);
+        let out = eval_primitive(Primitive::ReduceOr, &[input], &no_params()).unwrap();
+        assert_eq!(out, Value::scalar_bool(false));
+    }
+
+    #[test]
+    fn test_reduce_or_one_true() {
+        let input = bool_tensor(&[3], &[false, true, false]);
+        let out = eval_primitive(Primitive::ReduceOr, &[input], &no_params()).unwrap();
+        assert_eq!(out, Value::scalar_bool(true));
+    }
+
+    #[test]
+    fn test_reduce_xor_even() {
+        let input = bool_tensor(&[4], &[true, false, true, false]);
+        let out = eval_primitive(Primitive::ReduceXor, &[input], &no_params()).unwrap();
+        assert_eq!(out, Value::scalar_bool(false));
+    }
+
+    #[test]
+    fn test_reduce_xor_odd() {
+        let input = bool_tensor(&[4], &[true, false, true, true]);
+        let out = eval_primitive(Primitive::ReduceXor, &[input], &no_params()).unwrap();
+        assert_eq!(out, Value::scalar_bool(true));
+    }
+
+    #[test]
+    fn test_reduce_and_axis() {
+        let input = bool_tensor(&[2, 3], &[true, true, false, false, true, true]);
+        let out = eval_primitive(Primitive::ReduceAnd, &[input], &axes_params("0")).unwrap();
+        let expected = bool_tensor(&[3], &[false, true, false]);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_reduce_or_axis() {
+        let input = bool_tensor(&[2, 3], &[false, false, true, false, false, false]);
+        let out = eval_primitive(Primitive::ReduceOr, &[input], &axes_params("1")).unwrap();
+        let expected = bool_tensor(&[2], &[true, false]);
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn test_reduce_xor_integer() {
+        let input = i64_tensor(&[3], &[1, 3, 2]);
+        let out = eval_primitive(Primitive::ReduceXor, &[input], &no_params()).unwrap();
+        assert_eq!(out, Value::scalar_i64(0));
     }
 
     #[test]
@@ -4818,6 +4936,96 @@ mod tests {
         )
         .unwrap();
         assert_eq!(popcnt, Value::scalar_i64(3));
+    }
+
+    #[test]
+    fn e2e_bitwise_reductions_oracle() {
+        let reduce_and = eval_primitive(
+            Primitive::ReduceAnd,
+            &[bool_tensor(&[3], &[true, true, true])],
+            &no_params(),
+        )
+        .unwrap();
+        let reduce_or = eval_primitive(
+            Primitive::ReduceOr,
+            &[bool_tensor(&[3], &[false, true, false])],
+            &no_params(),
+        )
+        .unwrap();
+        let reduce_xor = eval_primitive(
+            Primitive::ReduceXor,
+            &[i64_tensor(&[3], &[1, 3, 2])],
+            &no_params(),
+        )
+        .unwrap();
+
+        let and_actual = reduce_and.as_bool_scalar().expect("bool output");
+        let or_actual = reduce_or.as_bool_scalar().expect("bool output");
+        let xor_actual = reduce_xor.as_i64_scalar().expect("i64 output");
+
+        let and_expected = true;
+        let or_expected = true;
+        let xor_expected = 0_i64;
+
+        let and_pass = and_actual == and_expected;
+        let or_pass = or_actual == or_expected;
+        let xor_pass = xor_actual == xor_expected;
+        let all_passed = and_pass && or_pass && xor_pass;
+
+        let case_logs = format!(
+            concat!(
+                "[",
+                "{{\"test_name\":\"test_reduce_and_all_true\",\"reduction\":\"reduce_and\",",
+                "\"input_dtype\":\"Bool\",\"input_shape\":[3],\"axis\":null,",
+                "\"expected\":{},\"actual\":{},\"pass\":{}}},",
+                "{{\"test_name\":\"test_reduce_or_one_true\",\"reduction\":\"reduce_or\",",
+                "\"input_dtype\":\"Bool\",\"input_shape\":[3],\"axis\":null,",
+                "\"expected\":{},\"actual\":{},\"pass\":{}}},",
+                "{{\"test_name\":\"test_reduce_xor_integer\",\"reduction\":\"reduce_xor\",",
+                "\"input_dtype\":\"I64\",\"input_shape\":[3],\"axis\":null,",
+                "\"expected\":{},\"actual\":{},\"pass\":{}}}",
+                "]"
+            ),
+            and_expected,
+            and_actual,
+            and_pass,
+            or_expected,
+            or_actual,
+            or_pass,
+            xor_expected,
+            xor_actual,
+            xor_pass
+        );
+
+        let generated_at_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let forensic_log = format!(
+            concat!(
+                "{{",
+                "\"scenario\":\"e2e_bitwise_reductions_oracle\",",
+                "\"generated_at_unix\":{},",
+                "\"all_passed\":{},",
+                "\"cases\":{}",
+                "}}"
+            ),
+            generated_at_unix, all_passed, case_logs
+        );
+
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts");
+        let e2e_path = root.join("e2e/e2e_bitwise_reductions.e2e.json");
+        let test_log_path = root.join("testing/logs/fj-lax/e2e_bitwise_reductions_oracle.json");
+
+        if let Some(parent) = e2e_path.parent() {
+            std::fs::create_dir_all(parent).expect("create e2e artifact dir");
+        }
+        if let Some(parent) = test_log_path.parent() {
+            std::fs::create_dir_all(parent).expect("create test log dir");
+        }
+        std::fs::write(&e2e_path, forensic_log).expect("write e2e forensic log");
+        std::fs::write(&test_log_path, case_logs).expect("write test case logs");
+
+        assert!(all_passed);
     }
 
     #[test]

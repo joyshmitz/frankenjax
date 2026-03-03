@@ -406,7 +406,10 @@ pub fn apply_batch_rule(
         Primitive::ReduceSum
         | Primitive::ReduceMax
         | Primitive::ReduceMin
-        | Primitive::ReduceProd => batch_reduce(primitive, inputs, params),
+        | Primitive::ReduceProd
+        | Primitive::ReduceAnd
+        | Primitive::ReduceOr
+        | Primitive::ReduceXor => batch_reduce(primitive, inputs, params),
 
         // ── Dot product ────────────────────────────────────────
         Primitive::Dot => batch_dot(inputs, params),

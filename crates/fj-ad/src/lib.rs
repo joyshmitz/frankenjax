@@ -826,6 +826,10 @@ fn vjp(
                 }
             }
         }
+        Primitive::ReduceAnd | Primitive::ReduceOr | Primitive::ReduceXor => {
+            // Bitwise reductions are non-differentiable.
+            Ok(vec![zeros_like(&inputs[0])])
+        }
         Primitive::Dot => {
             let a = &inputs[0];
             let b = &inputs[1];
@@ -3094,6 +3098,11 @@ fn jvp_rule(
         Primitive::ReduceProd => {
             // For reduce_prod, tangent = sum(prod/x_i * dx_i) — simplified as pass-through
             ep_p(Primitive::ReduceSum, &[tangents[0].clone()], params)
+        }
+        Primitive::ReduceAnd | Primitive::ReduceOr | Primitive::ReduceXor => {
+            // Bitwise reductions are non-differentiable: tangent is structurally zero.
+            let primal_out = ep_p(primitive, primals, params)?;
+            Ok(zeros_like(&primal_out))
         }
 
         // ── Dot: product rule for matrix/vector multiply ──

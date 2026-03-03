@@ -157,18 +157,21 @@ pub fn sample_primitive(cursor: &mut ByteCursor<'_>) -> Primitive {
         // Remaining: reductions + shape ops (index 43 catches them all via _)
         _ => {
             // Distribute among remaining primitives using a second byte
-            match cursor.take_u8() % 12 {
+            match cursor.take_u8() % 15 {
                 0 => Primitive::ReduceSum,
                 1 => Primitive::ReduceMax,
                 2 => Primitive::ReduceMin,
                 3 => Primitive::ReduceProd,
-                4 => Primitive::Reshape,
-                5 => Primitive::Slice,
-                6 => Primitive::Gather,
-                7 => Primitive::Scatter,
-                8 => Primitive::Transpose,
-                9 => Primitive::BroadcastInDim,
-                10 => Primitive::Concatenate,
+                4 => Primitive::ReduceAnd,
+                5 => Primitive::ReduceOr,
+                6 => Primitive::ReduceXor,
+                7 => Primitive::Reshape,
+                8 => Primitive::Slice,
+                9 => Primitive::Gather,
+                10 => Primitive::Scatter,
+                11 => Primitive::Transpose,
+                12 => Primitive::BroadcastInDim,
+                13 => Primitive::Concatenate,
                 _ => Primitive::Pad,
             }
         }
@@ -237,6 +240,9 @@ pub fn primitive_arity(primitive: Primitive) -> usize {
         | Primitive::ReduceMax
         | Primitive::ReduceMin
         | Primitive::ReduceProd
+        | Primitive::ReduceAnd
+        | Primitive::ReduceOr
+        | Primitive::ReduceXor
         | Primitive::Reshape
         | Primitive::Slice
         | Primitive::Transpose
@@ -399,7 +405,13 @@ pub fn sample_primitive_params(
     let mut params = BTreeMap::new();
 
     match primitive {
-        Primitive::ReduceSum => {
+        Primitive::ReduceSum
+        | Primitive::ReduceMax
+        | Primitive::ReduceMin
+        | Primitive::ReduceProd
+        | Primitive::ReduceAnd
+        | Primitive::ReduceOr
+        | Primitive::ReduceXor => {
             if cursor.take_bool() {
                 let axis_count = 1 + cursor.take_usize(2);
                 let axes = (0..axis_count)
@@ -497,16 +509,6 @@ pub fn sample_primitive_params(
             params.insert("padding_low".to_owned(), lows);
             params.insert("padding_high".to_owned(), highs);
             params.insert("padding_interior".to_owned(), interiors);
-        }
-        Primitive::ReduceMax | Primitive::ReduceMin | Primitive::ReduceProd => {
-            if cursor.take_bool() {
-                let axis_count = 1 + cursor.take_usize(2);
-                let axes = (0..axis_count)
-                    .map(|_| cursor.take_usize(3).to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                params.insert("axes".to_owned(), axes);
-            }
         }
         Primitive::Iota => {
             params.insert("length".to_owned(), (1 + cursor.take_usize(8)).to_string());

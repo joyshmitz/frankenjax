@@ -276,6 +276,194 @@ pub(crate) fn eval_reduce_axes(
     }
 }
 
+/// Axis-aware bitwise reduction over bool/i64 tensors.
+///
+/// If `axes` is omitted, performs a full reduction to scalar.
+pub(crate) fn eval_reduce_bitwise_axes(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &std::collections::BTreeMap<String, String>,
+    int_init: i64,
+    bool_init: bool,
+    int_op: impl Fn(i64, i64) -> i64,
+    bool_op: impl Fn(bool, bool) -> bool,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    let reduce_all = !matches!(params.get("axes"), Some(s) if !s.trim().is_empty());
+
+    match &inputs[0] {
+        Value::Scalar(literal) => Ok(Value::Scalar(*literal)),
+        Value::Tensor(tensor) => {
+            let rank = tensor.shape.rank();
+            if rank == 0 {
+                return Ok(Value::Scalar(tensor.elements[0]));
+            }
+
+            let mut axes_sorted = if reduce_all {
+                Vec::new()
+            } else {
+                let raw_axes = params.get("axes").ok_or(EvalError::Unsupported {
+                    primitive,
+                    detail: "missing axes parameter".to_owned(),
+                })?;
+                raw_axes
+                    .split(',')
+                    .map(|s| {
+                        s.trim()
+                            .parse::<usize>()
+                            .map_err(|_| EvalError::Unsupported {
+                                primitive,
+                                detail: format!("invalid axis value: {}", s.trim()),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+
+            for &axis in &axes_sorted {
+                if axis >= rank {
+                    return Err(EvalError::Unsupported {
+                        primitive,
+                        detail: format!("axis {} out of bounds for rank {}", axis, rank),
+                    });
+                }
+            }
+            axes_sorted.sort_unstable();
+            axes_sorted.dedup();
+
+            let reduce_all_axes = reduce_all || axes_sorted.len() == rank;
+
+            match tensor.dtype {
+                DType::Bool => {
+                    if reduce_all_axes {
+                        let mut acc = bool_init;
+                        for literal in &tensor.elements {
+                            let val = match literal {
+                                Literal::Bool(v) => *v,
+                                _ => {
+                                    return Err(EvalError::TypeMismatch {
+                                        primitive,
+                                        detail: "expected bool tensor",
+                                    });
+                                }
+                            };
+                            acc = bool_op(acc, val);
+                        }
+                        return Ok(Value::scalar_bool(acc));
+                    }
+
+                    let out_dims: Vec<u32> = tensor
+                        .shape
+                        .dims
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !axes_sorted.contains(i))
+                        .map(|(_, d)| *d)
+                        .collect();
+                    let out_count: usize = out_dims.iter().map(|d| *d as usize).product();
+                    if out_count == 0 {
+                        return Ok(Value::Tensor(TensorValue::new(
+                            DType::Bool,
+                            Shape { dims: out_dims },
+                            vec![],
+                        )?));
+                    }
+
+                    let strides = compute_strides(&tensor.shape.dims);
+                    let kept_axes: Vec<usize> =
+                        (0..rank).filter(|i| !axes_sorted.contains(i)).collect();
+                    let mut result = vec![bool_init; out_count];
+                    for flat_idx in 0..tensor.elements.len() {
+                        let multi = flat_to_multi(flat_idx, &strides, &tensor.shape.dims);
+                        let out_idx = multi_to_out_flat(&multi, &kept_axes, &out_dims);
+                        let val = match tensor.elements[flat_idx] {
+                            Literal::Bool(v) => v,
+                            _ => {
+                                return Err(EvalError::TypeMismatch {
+                                    primitive,
+                                    detail: "expected bool tensor",
+                                });
+                            }
+                        };
+                        result[out_idx] = bool_op(result[out_idx], val);
+                    }
+
+                    let elements = result.into_iter().map(Literal::Bool).collect();
+                    Ok(Value::Tensor(TensorValue::new(
+                        DType::Bool,
+                        Shape { dims: out_dims },
+                        elements,
+                    )?))
+                }
+                DType::I64 => {
+                    if reduce_all_axes {
+                        let mut acc = int_init;
+                        for literal in &tensor.elements {
+                            let val = literal.as_i64().ok_or(EvalError::TypeMismatch {
+                                primitive,
+                                detail: "expected i64 tensor",
+                            })?;
+                            acc = int_op(acc, val);
+                        }
+                        return Ok(Value::scalar_i64(acc));
+                    }
+
+                    let out_dims: Vec<u32> = tensor
+                        .shape
+                        .dims
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !axes_sorted.contains(i))
+                        .map(|(_, d)| *d)
+                        .collect();
+                    let out_count: usize = out_dims.iter().map(|d| *d as usize).product();
+                    if out_count == 0 {
+                        return Ok(Value::Tensor(TensorValue::new(
+                            DType::I64,
+                            Shape { dims: out_dims },
+                            vec![],
+                        )?));
+                    }
+
+                    let strides = compute_strides(&tensor.shape.dims);
+                    let kept_axes: Vec<usize> =
+                        (0..rank).filter(|i| !axes_sorted.contains(i)).collect();
+                    let mut result = vec![int_init; out_count];
+                    for flat_idx in 0..tensor.elements.len() {
+                        let multi = flat_to_multi(flat_idx, &strides, &tensor.shape.dims);
+                        let out_idx = multi_to_out_flat(&multi, &kept_axes, &out_dims);
+                        let val =
+                            tensor.elements[flat_idx]
+                                .as_i64()
+                                .ok_or(EvalError::TypeMismatch {
+                                    primitive,
+                                    detail: "expected i64 tensor",
+                                })?;
+                        result[out_idx] = int_op(result[out_idx], val);
+                    }
+
+                    let elements = result.into_iter().map(Literal::I64).collect();
+                    Ok(Value::Tensor(TensorValue::new(
+                        DType::I64,
+                        Shape { dims: out_dims },
+                        elements,
+                    )?))
+                }
+                _ => Err(EvalError::TypeMismatch {
+                    primitive,
+                    detail: "bitwise reduction expects bool or i64 tensor",
+                }),
+            }
+        }
+    }
+}
+
 fn compute_strides(dims: &[u32]) -> Vec<usize> {
     let mut strides = vec![1_usize; dims.len()];
     for i in (0..dims.len().saturating_sub(1)).rev() {
