@@ -323,7 +323,8 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::BitwiseXor
             | Primitive::BitwiseNot
             | Primitive::ShiftLeft
-            | Primitive::ShiftRight
+            | Primitive::ShiftRightArithmetic
+            | Primitive::ShiftRightLogical
             | Primitive::ReduceWindow
             | Primitive::PopulationCount
             | Primitive::CountLeadingZeros

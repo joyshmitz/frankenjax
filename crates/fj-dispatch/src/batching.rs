@@ -382,7 +382,8 @@ pub fn apply_batch_rule(
         | Primitive::BitwiseOr
         | Primitive::BitwiseXor
         | Primitive::ShiftLeft
-        | Primitive::ShiftRight => batch_binary_elementwise(primitive, inputs, params),
+        | Primitive::ShiftRightArithmetic
+        | Primitive::ShiftRightLogical => batch_binary_elementwise(primitive, inputs, params),
 
         Primitive::BitwiseNot => batch_unary_elementwise(primitive, inputs, params),
 

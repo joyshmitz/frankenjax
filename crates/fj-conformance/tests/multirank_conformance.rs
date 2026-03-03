@@ -5,8 +5,13 @@
 
 use fj_conformance::{
     ComparatorKind, FixtureFamily, FixtureMode, FixtureProgram, FixtureTransform, FixtureValue,
-    TransformFixtureBundle, TransformFixtureCase,
+    HarnessConfig, TransformFixtureBundle, TransformFixtureCase, run_transform_fixture_bundle,
 };
+use serde_json::json;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn make_lax_case(
     case_id: &str,
@@ -96,10 +101,16 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             vec![FixtureTransform::Jit],
             FixtureFamily::Lax,
             vec![
-                FixtureValue::VectorF64 { values: vec![1.0, 2.0, 3.0] },
-                FixtureValue::VectorF64 { values: vec![4.0, 5.0, 6.0] },
+                FixtureValue::VectorF64 {
+                    values: vec![1.0, 2.0, 3.0],
+                },
+                FixtureValue::VectorF64 {
+                    values: vec![4.0, 5.0, 6.0],
+                },
             ],
-            vec![FixtureValue::VectorF64 { values: vec![5.0, 7.0, 9.0] }],
+            vec![FixtureValue::VectorF64 {
+                values: vec![5.0, 7.0, 9.0],
+            }],
         ),
         // 7. Single-element vector
         make_lax_case(
@@ -119,8 +130,12 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             FixtureProgram::LaxNeg,
             vec![FixtureTransform::Jit],
             FixtureFamily::Lax,
-            vec![FixtureValue::VectorF64 { values: (0..1024).map(|i| i as f64).collect() }],
-            vec![FixtureValue::VectorF64 { values: (0..1024).map(|i| -(i as f64)).collect() }],
+            vec![FixtureValue::VectorF64 {
+                values: (0..1024).map(|i| i as f64).collect(),
+            }],
+            vec![FixtureValue::VectorF64 {
+                values: (0..1024).map(|i| -(i as f64)).collect(),
+            }],
         ),
         // 9. Vector dot product
         make_lax_case(
@@ -129,8 +144,12 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             vec![FixtureTransform::Jit],
             FixtureFamily::Lax,
             vec![
-                FixtureValue::VectorF64 { values: vec![1.0, 2.0, 3.0] },
-                FixtureValue::VectorF64 { values: vec![4.0, 5.0, 6.0] },
+                FixtureValue::VectorF64 {
+                    values: vec![1.0, 2.0, 3.0],
+                },
+                FixtureValue::VectorF64 {
+                    values: vec![4.0, 5.0, 6.0],
+                },
             ],
             vec![FixtureValue::ScalarF64 { value: 32.0 }],
         ),
@@ -140,7 +159,9 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             FixtureProgram::ReduceSumVec,
             vec![FixtureTransform::Jit],
             FixtureFamily::Lax,
-            vec![FixtureValue::VectorF64 { values: vec![1.0, 2.0, 3.0, 4.0] }],
+            vec![FixtureValue::VectorF64 {
+                values: vec![1.0, 2.0, 3.0, 4.0],
+            }],
             vec![FixtureValue::ScalarF64 { value: 10.0 }],
         ),
         // ════════════════════════════════════════════════════════
@@ -185,19 +206,15 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             vec![FixtureValue::TensorF64 {
                 shape: vec![4, 4],
                 values: vec![
-                    1.1, 2.9, 3.5, 4.0,
-                    -1.1, -2.9, -3.5, -4.0,
-                    0.0, 0.5, -0.5, 99.99,
-                    -99.99, 0.001, -0.001, 1e10,
+                    1.1, 2.9, 3.5, 4.0, -1.1, -2.9, -3.5, -4.0, 0.0, 0.5, -0.5, 99.99, -99.99,
+                    0.001, -0.001, 1e10,
                 ],
             }],
             vec![FixtureValue::TensorF64 {
                 shape: vec![4, 4],
                 values: vec![
-                    1.0, 2.0, 3.0, 4.0,
-                    -2.0, -3.0, -4.0, -4.0,
-                    0.0, 0.0, -1.0, 99.0,
-                    -100.0, 0.0, -1.0, 1e10,
+                    1.0, 2.0, 3.0, 4.0, -2.0, -3.0, -4.0, -4.0, 0.0, 0.0, -1.0, 99.0, -100.0, 0.0,
+                    -1.0, 1e10,
                 ],
             }],
         ),
@@ -282,7 +299,14 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             FixtureFamily::Lax,
             vec![FixtureValue::TensorF64 {
                 shape: vec![3, 2],
-                values: vec![0.0, std::f64::consts::FRAC_PI_2, std::f64::consts::PI, 0.0, 1.0, 2.0],
+                values: vec![
+                    0.0,
+                    std::f64::consts::FRAC_PI_2,
+                    std::f64::consts::PI,
+                    0.0,
+                    1.0,
+                    2.0,
+                ],
             }],
             vec![FixtureValue::TensorF64 {
                 shape: vec![3, 2],
@@ -358,7 +382,9 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             FixtureFamily::Lax,
             vec![FixtureValue::TensorF64 {
                 shape: vec![2, 3, 4],
-                values: (0..24).map(|i| if i % 2 == 0 { i as f64 } else { -(i as f64) }).collect(),
+                values: (0..24)
+                    .map(|i| if i % 2 == 0 { i as f64 } else { -(i as f64) })
+                    .collect(),
             }],
             vec![FixtureValue::TensorF64 {
                 shape: vec![2, 3, 4],
@@ -389,17 +415,24 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             vec![FixtureValue::TensorF64 {
                 shape: vec![3, 2, 2],
                 values: vec![
-                    0.0, 1.0, -1.0, 0.5,
-                    -0.5, 2.0, -2.0, 0.0,
-                    1.0, -1.0, 0.0, 0.5,
+                    0.0, 1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 0.0, 1.0, -1.0, 0.0, 0.5,
                 ],
             }],
             vec![FixtureValue::TensorF64 {
                 shape: vec![3, 2, 2],
                 values: vec![
-                    1.0, std::f64::consts::E, (-1.0_f64).exp(), (0.5_f64).exp(),
-                    (-0.5_f64).exp(), (2.0_f64).exp(), (-2.0_f64).exp(), 1.0,
-                    std::f64::consts::E, (-1.0_f64).exp(), 1.0, (0.5_f64).exp(),
+                    1.0,
+                    std::f64::consts::E,
+                    (-1.0_f64).exp(),
+                    (0.5_f64).exp(),
+                    (-0.5_f64).exp(),
+                    (2.0_f64).exp(),
+                    (-2.0_f64).exp(),
+                    1.0,
+                    std::f64::consts::E,
+                    (-1.0_f64).exp(),
+                    1.0,
+                    (0.5_f64).exp(),
                 ],
             }],
         ),
@@ -765,8 +798,12 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             FixtureProgram::ReduceSumVec,
             vec![FixtureTransform::Grad],
             FixtureFamily::Grad,
-            vec![FixtureValue::VectorF64 { values: vec![1.0, 2.0, 3.0] }],
-            vec![FixtureValue::VectorF64 { values: vec![1.0, 1.0, 1.0] }],
+            vec![FixtureValue::VectorF64 {
+                values: vec![1.0, 2.0, 3.0],
+            }],
+            vec![FixtureValue::VectorF64 {
+                values: vec![1.0, 1.0, 1.0],
+            }],
         ),
         // ════════════════════════════════════════════════════════
         // Additional unary ops on rank-2
@@ -844,7 +881,12 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
             // erf values computed by reference
             vec![FixtureValue::TensorF64 {
                 shape: vec![2, 2],
-                values: vec![0.0, 0.842700792949715, -0.842700792949715, 0.9999779095030014],
+                values: vec![
+                    0.0,
+                    0.842700792949715,
+                    -0.842700792949715,
+                    0.9999779095030014,
+                ],
             }],
         ),
         // ════════════════════════════════════════════════════════
@@ -955,6 +997,39 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
                 ],
             }],
         ),
+        // 55. Matrix broadcasting [4,1] + [1,4] -> [4,4]
+        make_lax_case(
+            "r2_add_broadcast_4x1_1x4",
+            FixtureProgram::Add2,
+            vec![FixtureTransform::Jit],
+            FixtureFamily::Lax,
+            vec![
+                FixtureValue::TensorF64 {
+                    shape: vec![4, 1],
+                    values: vec![1.0, 2.0, 3.0, 4.0],
+                },
+                FixtureValue::TensorF64 {
+                    shape: vec![1, 4],
+                    values: vec![10.0, 20.0, 30.0, 40.0],
+                },
+            ],
+            vec![FixtureValue::TensorF64 {
+                shape: vec![4, 4],
+                values: vec![
+                    11.0, 21.0, 31.0, 41.0, 12.0, 22.0, 32.0, 42.0, 13.0, 23.0, 33.0, 43.0, 14.0,
+                    24.0, 34.0, 44.0,
+                ],
+            }],
+        ),
+        // 56. Empty vector edge case (shape [0])
+        make_lax_case(
+            "r1_neg_empty",
+            FixtureProgram::LaxNeg,
+            vec![FixtureTransform::Jit],
+            FixtureFamily::Lax,
+            vec![FixtureValue::VectorF64 { values: vec![] }],
+            vec![FixtureValue::VectorF64 { values: vec![] }],
+        ),
     ];
 
     TransformFixtureBundle {
@@ -962,6 +1037,17 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
         generated_by: "multirank_conformance".to_owned(),
         generated_at_unix_ms: 0,
         cases,
+    }
+}
+
+fn fixture_shape(value: &FixtureValue) -> Vec<u32> {
+    match value {
+        FixtureValue::ScalarF64 { .. } | FixtureValue::ScalarI64 { .. } => Vec::new(),
+        FixtureValue::VectorF64 { values } => vec![values.len() as u32],
+        FixtureValue::VectorI64 { values } => vec![values.len() as u32],
+        FixtureValue::TensorF64 { shape, .. }
+        | FixtureValue::TensorI64 { shape, .. }
+        | FixtureValue::TensorBool { shape, .. } => shape.clone(),
     }
 }
 
@@ -1043,6 +1129,64 @@ fn test_fixture_rank4_batch_matrix() {
 }
 
 #[test]
+fn test_fixture_shape_mismatch_detected() {
+    let expected = FixtureValue::TensorF64 {
+        shape: vec![2, 2],
+        values: vec![1.0, 2.0, 3.0, 4.0],
+    };
+    let actual = FixtureValue::TensorF64 {
+        shape: vec![4],
+        values: vec![1.0, 2.0, 3.0, 4.0],
+    }
+    .to_runtime_value()
+    .expect("runtime conversion should succeed");
+    assert!(
+        !expected.approx_matches(&actual, 1e-6, 1e-6),
+        "shape mismatch should not compare as matched"
+    );
+}
+
+#[test]
+fn test_fixture_broadcast_shapes() {
+    let bundle = build_multirank_fixture_bundle();
+    let has_broadcast_pattern = bundle.cases.iter().any(|case| {
+        let shapes: Vec<Vec<u32>> = case.args.iter().map(fixture_shape).collect();
+        shapes.as_slice() == [vec![4, 1], vec![1, 4]]
+    });
+    assert!(
+        has_broadcast_pattern,
+        "expected at least one [4,1] + [1,4] broadcast fixture"
+    );
+}
+
+#[test]
+fn test_fixture_empty_tensor() {
+    let bundle = build_multirank_fixture_bundle();
+    let has_empty = bundle
+        .cases
+        .iter()
+        .any(|case| case.args.iter().any(|arg| fixture_shape(arg) == vec![0]));
+    assert!(has_empty, "expected at least one shape [0] fixture case");
+}
+
+#[test]
+fn prop_fixture_covers_all_ranks_0_to_4() {
+    let bundle = build_multirank_fixture_bundle();
+    let mut seen = [false; 5];
+    for case in &bundle.cases {
+        for rank in case.args.iter().map(FixtureValue::rank) {
+            if rank <= 4 {
+                seen[rank] = true;
+            }
+        }
+    }
+    assert!(
+        seen.into_iter().all(|present| present),
+        "fixture bundle should include ranks 0..=4"
+    );
+}
+
+#[test]
 fn test_fixture_serializable() {
     let bundle = build_multirank_fixture_bundle();
     let json = serde_json::to_string_pretty(&bundle).expect("serialization failed");
@@ -1086,8 +1230,9 @@ fn test_fixture_args_runtime_conversion() {
     let bundle = build_multirank_fixture_bundle();
     for case in &bundle.cases {
         for (i, arg) in case.args.iter().enumerate() {
-            arg.to_runtime_value()
-                .unwrap_or_else(|e| panic!("case {} arg[{i}] conversion failed: {e}", case.case_id));
+            arg.to_runtime_value().unwrap_or_else(|e| {
+                panic!("case {} arg[{i}] conversion failed: {e}", case.case_id)
+            });
         }
     }
 }
@@ -1097,8 +1242,9 @@ fn test_fixture_expected_runtime_conversion() {
     let bundle = build_multirank_fixture_bundle();
     for case in &bundle.cases {
         for (i, exp) in case.expected.iter().enumerate() {
-            exp.to_runtime_value()
-                .unwrap_or_else(|e| panic!("case {} expected[{i}] conversion failed: {e}", case.case_id));
+            exp.to_runtime_value().unwrap_or_else(|e| {
+                panic!("case {} expected[{i}] conversion failed: {e}", case.case_id)
+            });
         }
     }
 }
@@ -1111,9 +1257,13 @@ fn test_fixture_tensor_shape_consistency() {
             if let FixtureValue::TensorF64 { shape, values } = arg {
                 let expected_len: u32 = shape.iter().product();
                 assert_eq!(
-                    values.len() as u32, expected_len,
+                    values.len() as u32,
+                    expected_len,
                     "case {} arg shape {:?} expects {} elements, got {}",
-                    case.case_id, shape, expected_len, values.len()
+                    case.case_id,
+                    shape,
+                    expected_len,
+                    values.len()
                 );
             }
         }
@@ -1121,9 +1271,13 @@ fn test_fixture_tensor_shape_consistency() {
             if let FixtureValue::TensorF64 { shape, values } = exp {
                 let expected_len: u32 = shape.iter().product();
                 assert_eq!(
-                    values.len() as u32, expected_len,
+                    values.len() as u32,
+                    expected_len,
                     "case {} expected shape {:?} expects {} elements, got {}",
-                    case.case_id, shape, expected_len, values.len()
+                    case.case_id,
+                    shape,
+                    expected_len,
+                    values.len()
                 );
             }
         }
@@ -1145,7 +1299,7 @@ fn test_fixture_singleton_dimensions() {
         .iter()
         .filter(|c| {
             c.args.iter().any(|a| match a {
-                FixtureValue::TensorF64 { shape, .. } => shape.iter().any(|&d| d == 1),
+                FixtureValue::TensorF64 { shape, .. } => shape.contains(&1),
                 _ => false,
             })
         })
@@ -1153,5 +1307,86 @@ fn test_fixture_singleton_dimensions() {
     assert!(
         singleton_count >= 3,
         "need >=3 singleton-dim cases, got {singleton_count}"
+    );
+}
+
+#[test]
+fn e2e_multirank_fixture_sweep() {
+    let cfg = HarnessConfig::default_paths();
+    let bundle = build_multirank_fixture_bundle();
+    let report = run_transform_fixture_bundle(&cfg, &bundle);
+    let report_by_case: HashMap<&str, bool> = report
+        .reports
+        .iter()
+        .map(|case_report| (case_report.case_id.as_str(), case_report.matched))
+        .collect();
+
+    let mut rank_passes: HashMap<usize, (usize, usize)> = HashMap::new();
+    let entries: Vec<serde_json::Value> = bundle
+        .cases
+        .iter()
+        .map(|case| {
+            let input_shapes: Vec<Vec<u32>> = case.args.iter().map(fixture_shape).collect();
+            let output_shape = case.expected.first().map_or_else(Vec::new, fixture_shape);
+            let rank = input_shapes.iter().map(Vec::len).max().unwrap_or(0);
+            let matched = *report_by_case
+                .get(case.case_id.as_str())
+                .expect("case report should exist");
+            let stat = rank_passes.entry(rank).or_insert((0, 0));
+            stat.0 += 1;
+            if matched {
+                stat.1 += 1;
+            }
+            json!({
+                "rank": rank,
+                "primitive": format!("{:?}", case.program),
+                "input_shapes": input_shapes,
+                "output_shape": output_shape,
+                "oracle_match": matched,
+                "abs_error": serde_json::Value::Null,
+                "pass": matched
+            })
+        })
+        .collect();
+
+    let mut rank_summary: HashMap<String, serde_json::Value> = HashMap::new();
+    for (rank, (total, passed)) in rank_passes {
+        rank_summary.insert(
+            rank.to_string(),
+            json!({
+                "total": total,
+                "passed": passed,
+                "pass_rate": if total == 0 { 0.0 } else { passed as f64 / total as f64 }
+            }),
+        );
+    }
+
+    let forensic_log = json!({
+        "scenario": "e2e_multirank_fixture_sweep",
+        "generated_at_unix_ms": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_millis(),
+        "total_cases": report.total_cases,
+        "matched_cases": report.matched_cases,
+        "mismatched_cases": report.mismatched_cases,
+        "rank_summary": rank_summary,
+        "entries": entries
+    });
+
+    let output_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../artifacts/e2e/e2e_multirank_fixtures.e2e.json");
+    fs::create_dir_all(output_path.parent().expect("output parent should exist"))
+        .expect("should create artifacts/e2e");
+    fs::write(
+        &output_path,
+        serde_json::to_string_pretty(&forensic_log).expect("forensic log should serialize"),
+    )
+    .expect("should write forensic log");
+
+    assert_eq!(
+        report.total_cases,
+        bundle.cases.len(),
+        "report should include every multirank fixture case"
     );
 }

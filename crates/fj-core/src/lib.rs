@@ -163,7 +163,8 @@ pub enum Primitive {
     BitwiseXor,
     BitwiseNot,
     ShiftLeft,
-    ShiftRight,
+    ShiftRightArithmetic,
+    ShiftRightLogical,
     // Windowed reduction (pooling)
     ReduceWindow,
     // Integer intrinsics
@@ -257,7 +258,8 @@ impl Primitive {
             Self::BitwiseXor => "bitwise_xor",
             Self::BitwiseNot => "bitwise_not",
             Self::ShiftLeft => "shift_left",
-            Self::ShiftRight => "shift_right",
+            Self::ShiftRightArithmetic => "shift_right_arithmetic",
+            Self::ShiftRightLogical => "shift_right_logical",
             Self::ReduceWindow => "reduce_window",
             Self::PopulationCount => "population_count",
             Self::CountLeadingZeros => "count_leading_zeros",
@@ -1876,8 +1878,8 @@ mod tests {
                     .map_err(|err| format!("serialize failed: {err}"))?;
                 assert!(!encoded.contains("\"effects\":"));
 
-                let mut value =
-                    serde_json::to_value(&jaxpr).map_err(|err| format!("to_value failed: {err}"))?;
+                let mut value = serde_json::to_value(&jaxpr)
+                    .map_err(|err| format!("to_value failed: {err}"))?;
                 if let serde_json::Value::Object(map) = &mut value {
                     map.remove("effects");
                     if let Some(serde_json::Value::Array(eqns)) = map.get_mut("equations") {
@@ -2839,9 +2841,9 @@ mod tests {
 
     #[test]
     fn test_literal_complex128_roundtrip() {
-        let lit = Literal::from_complex128(3.14_f64, -2.71_f64);
+        let lit = Literal::from_complex128(std::f64::consts::PI, -2.71_f64);
         let (re, im) = lit.as_complex128().unwrap();
-        assert_eq!(re, 3.14_f64);
+        assert_eq!(re, std::f64::consts::PI);
         assert_eq!(im, -2.71_f64);
     }
 

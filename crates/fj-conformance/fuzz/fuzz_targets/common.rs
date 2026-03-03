@@ -1,8 +1,7 @@
 #![allow(dead_code)]
 
 use fj_core::{
-    CompatibilityMode, DType, Literal, Primitive, ProgramSpec, Shape, TensorValue, Transform,
-    Value,
+    CompatibilityMode, DType, Literal, Primitive, ProgramSpec, Shape, TensorValue, Transform, Value,
 };
 use std::collections::BTreeMap;
 
@@ -180,33 +179,86 @@ pub fn sample_primitive(cursor: &mut ByteCursor<'_>) -> Primitive {
 pub fn primitive_arity(primitive: Primitive) -> usize {
     match primitive {
         // Binary ops
-        Primitive::Add | Primitive::Sub | Primitive::Mul | Primitive::Max | Primitive::Min
-        | Primitive::Pow | Primitive::Div | Primitive::Rem | Primitive::Atan2
-        | Primitive::Dot | Primitive::Gather
-        | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
-        | Primitive::Gt | Primitive::Ge | Primitive::Concatenate | Primitive::Pad
-        | Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor
-        | Primitive::ShiftLeft | Primitive::ShiftRight => 2,
+        Primitive::Add
+        | Primitive::Sub
+        | Primitive::Mul
+        | Primitive::Max
+        | Primitive::Min
+        | Primitive::Pow
+        | Primitive::Div
+        | Primitive::Rem
+        | Primitive::Atan2
+        | Primitive::Dot
+        | Primitive::Gather
+        | Primitive::Eq
+        | Primitive::Ne
+        | Primitive::Lt
+        | Primitive::Le
+        | Primitive::Gt
+        | Primitive::Ge
+        | Primitive::Concatenate
+        | Primitive::Pad
+        | Primitive::BitwiseAnd
+        | Primitive::BitwiseOr
+        | Primitive::BitwiseXor
+        | Primitive::ShiftLeft
+        | Primitive::ShiftRightArithmetic
+        | Primitive::ShiftRightLogical => 2,
         // Ternary ops
         Primitive::Select | Primitive::Scatter | Primitive::Clamp => 3,
         // Unary ops
-        Primitive::Neg | Primitive::Abs | Primitive::Exp | Primitive::Log
-        | Primitive::Sqrt | Primitive::Rsqrt | Primitive::Floor | Primitive::Ceil
-        | Primitive::Round | Primitive::Sin | Primitive::Cos | Primitive::Tan
-        | Primitive::Asin | Primitive::Acos | Primitive::Atan
-        | Primitive::Sinh | Primitive::Cosh | Primitive::Tanh
-        | Primitive::Expm1 | Primitive::Log1p | Primitive::Sign | Primitive::Square
-        | Primitive::Reciprocal | Primitive::Logistic | Primitive::Erf | Primitive::Erfc
-        | Primitive::ReduceSum | Primitive::ReduceMax | Primitive::ReduceMin | Primitive::ReduceProd
-        | Primitive::Reshape | Primitive::Slice | Primitive::Transpose
-        | Primitive::BroadcastInDim | Primitive::DynamicSlice | Primitive::BitwiseNot | Primitive::ReduceWindow
-        | Primitive::PopulationCount | Primitive::CountLeadingZeros => 1,
+        Primitive::Neg
+        | Primitive::Abs
+        | Primitive::Exp
+        | Primitive::Log
+        | Primitive::Sqrt
+        | Primitive::Rsqrt
+        | Primitive::Floor
+        | Primitive::Ceil
+        | Primitive::Round
+        | Primitive::Sin
+        | Primitive::Cos
+        | Primitive::Tan
+        | Primitive::Asin
+        | Primitive::Acos
+        | Primitive::Atan
+        | Primitive::Sinh
+        | Primitive::Cosh
+        | Primitive::Tanh
+        | Primitive::Expm1
+        | Primitive::Log1p
+        | Primitive::Sign
+        | Primitive::Square
+        | Primitive::Reciprocal
+        | Primitive::Logistic
+        | Primitive::Erf
+        | Primitive::Erfc
+        | Primitive::ReduceSum
+        | Primitive::ReduceMax
+        | Primitive::ReduceMin
+        | Primitive::ReduceProd
+        | Primitive::Reshape
+        | Primitive::Slice
+        | Primitive::Transpose
+        | Primitive::BroadcastInDim
+        | Primitive::DynamicSlice
+        | Primitive::BitwiseNot
+        | Primitive::ReduceWindow
+        | Primitive::PopulationCount
+        | Primitive::CountLeadingZeros => 1,
         // Nullary ops
         Primitive::Iota => 0,
         // Other primitives with variable or unspecified arity
-        Primitive::DynamicUpdateSlice | Primitive::OneHot | Primitive::Cumsum | Primitive::Cumprod
-        | Primitive::Sort | Primitive::Argsort | Primitive::Conv | Primitive::Cond
-        | Primitive::Scan | Primitive::While => 1, // Default placeholder
+        Primitive::DynamicUpdateSlice
+        | Primitive::OneHot
+        | Primitive::Cumsum
+        | Primitive::Cumprod
+        | Primitive::Sort
+        | Primitive::Argsort
+        | Primitive::Conv
+        | Primitive::Cond
+        | Primitive::Scan
+        | Primitive::While => 1, // Default placeholder
     }
 }
 
@@ -465,18 +517,51 @@ pub fn sample_primitive_params(
             };
             params.insert("dtype".to_owned(), dtype.to_owned());
         }
-        Primitive::Add | Primitive::Sub | Primitive::Mul | Primitive::Neg | Primitive::Abs
-        | Primitive::Max | Primitive::Min | Primitive::Pow | Primitive::Exp | Primitive::Log
-        | Primitive::Sqrt | Primitive::Rsqrt | Primitive::Floor | Primitive::Ceil
-        | Primitive::Round | Primitive::Sin | Primitive::Cos | Primitive::Tan
-        | Primitive::Asin | Primitive::Acos | Primitive::Atan
-        | Primitive::Sinh | Primitive::Cosh | Primitive::Tanh
-        | Primitive::Expm1 | Primitive::Log1p | Primitive::Sign | Primitive::Square
-        | Primitive::Reciprocal | Primitive::Logistic | Primitive::Erf | Primitive::Erfc
-        | Primitive::Div | Primitive::Rem | Primitive::Atan2 | Primitive::Select
+        Primitive::Add
+        | Primitive::Sub
+        | Primitive::Mul
+        | Primitive::Neg
+        | Primitive::Abs
+        | Primitive::Max
+        | Primitive::Min
+        | Primitive::Pow
+        | Primitive::Exp
+        | Primitive::Log
+        | Primitive::Sqrt
+        | Primitive::Rsqrt
+        | Primitive::Floor
+        | Primitive::Ceil
+        | Primitive::Round
+        | Primitive::Sin
+        | Primitive::Cos
+        | Primitive::Tan
+        | Primitive::Asin
+        | Primitive::Acos
+        | Primitive::Atan
+        | Primitive::Sinh
+        | Primitive::Cosh
+        | Primitive::Tanh
+        | Primitive::Expm1
+        | Primitive::Log1p
+        | Primitive::Sign
+        | Primitive::Square
+        | Primitive::Reciprocal
+        | Primitive::Logistic
+        | Primitive::Erf
+        | Primitive::Erfc
+        | Primitive::Div
+        | Primitive::Rem
+        | Primitive::Atan2
+        | Primitive::Select
         | Primitive::Dot
-        | Primitive::Eq | Primitive::Ne | Primitive::Lt | Primitive::Le
-        | Primitive::Gt | Primitive::Ge | Primitive::Scatter | Primitive::Clamp => {}
+        | Primitive::Eq
+        | Primitive::Ne
+        | Primitive::Lt
+        | Primitive::Le
+        | Primitive::Gt
+        | Primitive::Ge
+        | Primitive::Scatter
+        | Primitive::Clamp => {}
     }
 
     params

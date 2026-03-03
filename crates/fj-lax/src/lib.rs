@@ -315,7 +315,10 @@ pub fn eval_primitive(
         Primitive::BitwiseXor => eval_bitwise_binary(primitive, inputs, |a, b| a ^ b),
         Primitive::BitwiseNot => eval_bitwise_unary(primitive, inputs, |a| !a),
         Primitive::ShiftLeft => eval_bitwise_binary(primitive, inputs, |a, b| a << b),
-        Primitive::ShiftRight => eval_bitwise_binary(primitive, inputs, |a, b| a >> b),
+        Primitive::ShiftRightArithmetic => eval_bitwise_binary(primitive, inputs, |a, b| a >> b),
+        Primitive::ShiftRightLogical => {
+            eval_bitwise_binary(primitive, inputs, |a, b| ((a as u64) >> b) as i64)
+        }
         // Windowed reduction (pooling)
         Primitive::ReduceWindow => eval_reduce_window(primitive, inputs, params),
         // Integer intrinsics
@@ -4567,11 +4570,108 @@ mod tests {
     }
 
     #[test]
-    fn shift_right_scalar() {
+    fn shift_right_arithmetic_scalar() {
         let a = Value::scalar_i64(16);
         let b = Value::scalar_i64(2);
-        let out = eval_primitive(Primitive::ShiftRight, &[a, b], &no_params()).unwrap();
+        let out = eval_primitive(Primitive::ShiftRightArithmetic, &[a, b], &no_params()).unwrap();
         assert_eq!(out.as_i64_scalar().unwrap(), 4);
+    }
+
+    #[test]
+    fn shift_right_logical_scalar() {
+        let a = Value::scalar_i64(16);
+        let b = Value::scalar_i64(2);
+        let out = eval_primitive(Primitive::ShiftRightLogical, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 4);
+    }
+
+    #[test]
+    fn shift_right_arithmetic_negative_preserves_sign() {
+        let a = Value::scalar_i64(-8);
+        let b = Value::scalar_i64(2);
+        let out = eval_primitive(Primitive::ShiftRightArithmetic, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), -2);
+    }
+
+    #[test]
+    fn shift_right_logical_negative_zero_fills() {
+        let a = Value::scalar_i64(-8);
+        let b = Value::scalar_i64(2);
+        let out = eval_primitive(Primitive::ShiftRightLogical, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_i64_scalar().unwrap(), 4_611_686_018_427_387_902);
+    }
+
+    #[test]
+    fn shift_right_arithmetic_vs_logical() {
+        let sra_positive = eval_primitive(
+            Primitive::ShiftRightArithmetic,
+            &[Value::scalar_i64(16), Value::scalar_i64(2)],
+            &no_params(),
+        )
+        .unwrap();
+        let srl_positive = eval_primitive(
+            Primitive::ShiftRightLogical,
+            &[Value::scalar_i64(16), Value::scalar_i64(2)],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(
+            sra_positive.as_i64_scalar().unwrap(),
+            srl_positive.as_i64_scalar().unwrap()
+        );
+
+        let sra_negative = eval_primitive(
+            Primitive::ShiftRightArithmetic,
+            &[Value::scalar_i64(-8), Value::scalar_i64(2)],
+            &no_params(),
+        )
+        .unwrap();
+        let srl_negative = eval_primitive(
+            Primitive::ShiftRightLogical,
+            &[Value::scalar_i64(-8), Value::scalar_i64(2)],
+            &no_params(),
+        )
+        .unwrap();
+        assert_ne!(
+            sra_negative.as_i64_scalar().unwrap(),
+            srl_negative.as_i64_scalar().unwrap()
+        );
+    }
+
+    #[test]
+    fn shift_right_by_zero_is_identity() {
+        let sra = eval_primitive(
+            Primitive::ShiftRightArithmetic,
+            &[Value::scalar_i64(-8), Value::scalar_i64(0)],
+            &no_params(),
+        )
+        .unwrap();
+        let srl = eval_primitive(
+            Primitive::ShiftRightLogical,
+            &[Value::scalar_i64(-8), Value::scalar_i64(0)],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(sra.as_i64_scalar().unwrap(), -8);
+        assert_eq!(srl.as_i64_scalar().unwrap(), -8);
+    }
+
+    #[test]
+    fn shift_right_full_width() {
+        let sra = eval_primitive(
+            Primitive::ShiftRightArithmetic,
+            &[Value::scalar_i64(-8), Value::scalar_i64(32)],
+            &no_params(),
+        )
+        .unwrap();
+        let srl = eval_primitive(
+            Primitive::ShiftRightLogical,
+            &[Value::scalar_i64(-8), Value::scalar_i64(32)],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(sra.as_i64_scalar().unwrap(), -1);
+        assert_eq!(srl.as_i64_scalar().unwrap(), 4_294_967_295);
     }
 
     #[test]
@@ -4910,7 +5010,8 @@ mod tests {
             .unwrap(),
         );
         let params = BTreeMap::new(); // no dimensions param — squeeze all size-1, which is none
-        let out = eval_primitive(Primitive::Squeeze, &[input.clone()], &params).unwrap();
+        let out =
+            eval_primitive(Primitive::Squeeze, std::slice::from_ref(&input), &params).unwrap();
         assert_eq!(out, input);
     }
 
@@ -5411,22 +5512,30 @@ mod prop_tests {
 
     #[test]
     fn test_cbrt_perfect_cube() {
-        let result = eval_primitive(Primitive::Cbrt, &[Value::scalar_f64(27.0)], &BTreeMap::new())
-            .unwrap();
+        let result = eval_primitive(
+            Primitive::Cbrt,
+            &[Value::scalar_f64(27.0)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!((result.as_f64_scalar().unwrap() - 3.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_cbrt_negative() {
-        let result = eval_primitive(Primitive::Cbrt, &[Value::scalar_f64(-8.0)], &BTreeMap::new())
-            .unwrap();
+        let result = eval_primitive(
+            Primitive::Cbrt,
+            &[Value::scalar_f64(-8.0)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert!((result.as_f64_scalar().unwrap() - (-2.0)).abs() < 1e-10);
     }
 
     #[test]
     fn test_cbrt_zero() {
-        let result = eval_primitive(Primitive::Cbrt, &[Value::scalar_f64(0.0)], &BTreeMap::new())
-            .unwrap();
+        let result =
+            eval_primitive(Primitive::Cbrt, &[Value::scalar_f64(0.0)], &BTreeMap::new()).unwrap();
         assert!((result.as_f64_scalar().unwrap()).abs() < 1e-10);
     }
 
@@ -5434,9 +5543,12 @@ mod prop_tests {
 
     #[test]
     fn test_is_finite_normal() {
-        let result =
-            eval_primitive(Primitive::IsFinite, &[Value::scalar_f64(1.0)], &BTreeMap::new())
-                .unwrap();
+        let result = eval_primitive(
+            Primitive::IsFinite,
+            &[Value::scalar_f64(1.0)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(result, Value::Scalar(Literal::Bool(true)));
     }
 
@@ -5477,8 +5589,7 @@ mod prop_tests {
             )
             .unwrap(),
         );
-        let result =
-            eval_primitive(Primitive::IsFinite, &[tensor], &BTreeMap::new()).unwrap();
+        let result = eval_primitive(Primitive::IsFinite, &[tensor], &BTreeMap::new()).unwrap();
         match result {
             Value::Tensor(t) => {
                 assert_eq!(t.dtype, DType::Bool);

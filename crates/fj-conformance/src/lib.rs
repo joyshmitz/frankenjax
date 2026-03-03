@@ -370,9 +370,14 @@ impl FixtureValue {
             Self::VectorI64 { values } => Value::vector_i64(values)
                 .map_err(|err| format!("vector_i64 conversion failed: {err}")),
             Self::TensorF64 { shape, values } => {
-                let elements: Vec<fj_core::Literal> =
-                    values.iter().copied().map(fj_core::Literal::from_f64).collect();
-                let s = fj_core::Shape { dims: shape.clone() };
+                let elements: Vec<fj_core::Literal> = values
+                    .iter()
+                    .copied()
+                    .map(fj_core::Literal::from_f64)
+                    .collect();
+                let s = fj_core::Shape {
+                    dims: shape.clone(),
+                };
                 fj_core::TensorValue::new(fj_core::DType::F64, s, elements)
                     .map(Value::Tensor)
                     .map_err(|e| format!("tensor_f64 conversion failed: {e}"))
@@ -380,7 +385,9 @@ impl FixtureValue {
             Self::TensorI64 { shape, values } => {
                 let elements: Vec<fj_core::Literal> =
                     values.iter().copied().map(fj_core::Literal::I64).collect();
-                let s = fj_core::Shape { dims: shape.clone() };
+                let s = fj_core::Shape {
+                    dims: shape.clone(),
+                };
                 fj_core::TensorValue::new(fj_core::DType::I64, s, elements)
                     .map(Value::Tensor)
                     .map_err(|e| format!("tensor_i64 conversion failed: {e}"))
@@ -388,7 +395,9 @@ impl FixtureValue {
             Self::TensorBool { shape, values } => {
                 let elements: Vec<fj_core::Literal> =
                     values.iter().copied().map(fj_core::Literal::Bool).collect();
-                let s = fj_core::Shape { dims: shape.clone() };
+                let s = fj_core::Shape {
+                    dims: shape.clone(),
+                };
                 fj_core::TensorValue::new(fj_core::DType::Bool, s, elements)
                     .map(Value::Tensor)
                     .map_err(|e| format!("tensor_bool conversion failed: {e}"))
@@ -447,9 +456,11 @@ impl FixtureValue {
             Self::TensorBool { shape, values } => actual.as_tensor().is_some_and(|tensor| {
                 tensor.shape.dims == *shape
                     && tensor.elements.len() == values.len()
-                    && tensor.elements.iter().zip(values.iter()).all(|(a, e)| {
-                        matches!(a, fj_core::Literal::Bool(b) if *b == *e)
-                    })
+                    && tensor
+                        .elements
+                        .iter()
+                        .zip(values.iter())
+                        .all(|(a, e)| matches!(a, fj_core::Literal::Bool(b) if *b == *e))
             }),
         }
     }
@@ -1411,8 +1422,9 @@ fn value_shape_fingerprint(expected: &FixtureValue) -> String {
         FixtureValue::ScalarF64 { .. } | FixtureValue::ScalarI64 { .. } => "scalar".to_owned(),
         FixtureValue::VectorF64 { values } => format!("vector:{}", values.len()),
         FixtureValue::VectorI64 { values } => format!("vector:{}", values.len()),
-        FixtureValue::TensorF64 { shape, .. }
-        | FixtureValue::TensorI64 { shape, .. } => format!("tensor:{shape:?}"),
+        FixtureValue::TensorF64 { shape, .. } | FixtureValue::TensorI64 { shape, .. } => {
+            format!("tensor:{shape:?}")
+        }
         FixtureValue::TensorBool { shape, .. } => format!("tensor:{shape:?}"),
     }
 }

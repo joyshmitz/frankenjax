@@ -88,6 +88,13 @@ pub fn arb_primitive() -> impl Strategy<Value = Primitive> {
         Just(Primitive::ReduceMin),
         Just(Primitive::ReduceProd),
         Just(Primitive::Pad),
+        Just(Primitive::BitwiseAnd),
+        Just(Primitive::BitwiseOr),
+        Just(Primitive::BitwiseXor),
+        Just(Primitive::BitwiseNot),
+        Just(Primitive::ShiftLeft),
+        Just(Primitive::ShiftRightArithmetic),
+        Just(Primitive::ShiftRightLogical),
         Just(Primitive::PopulationCount),
         Just(Primitive::CountLeadingZeros),
     ]
@@ -136,6 +143,7 @@ pub fn arb_binary_jaxpr() -> impl Strategy<Value = Jaxpr> {
 mod tests {
     use super::*;
     use crate::{TraceTransformLedger, verify_transform_composition};
+    use proptest::strategy::ValueTree;
 
     proptest! {
         #![proptest_config(proptest::test_runner::Config::with_cases(
@@ -203,5 +211,31 @@ mod tests {
             let deser: Literal = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(lit, deser);
         }
+    }
+
+    #[test]
+    fn test_shift_right_arithmetic_in_proptest() {
+        let mut runner = proptest::test_runner::TestRunner::default();
+        let strategy = arb_primitive();
+        let found = (0..1_024).any(|_| {
+            strategy
+                .new_tree(&mut runner)
+                .map(|tree| tree.current() == Primitive::ShiftRightArithmetic)
+                .unwrap_or(false)
+        });
+        assert!(found, "arb_primitive should generate ShiftRightArithmetic");
+    }
+
+    #[test]
+    fn test_shift_right_logical_in_proptest() {
+        let mut runner = proptest::test_runner::TestRunner::default();
+        let strategy = arb_primitive();
+        let found = (0..1_024).any(|_| {
+            strategy
+                .new_tree(&mut runner)
+                .map(|tree| tree.current() == Primitive::ShiftRightLogical)
+                .unwrap_or(false)
+        });
+        assert!(found, "arb_primitive should generate ShiftRightLogical");
     }
 }

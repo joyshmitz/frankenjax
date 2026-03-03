@@ -870,7 +870,8 @@ impl SimpleTraceContext {
             | Primitive::BitwiseOr
             | Primitive::BitwiseXor
             | Primitive::ShiftLeft
-            | Primitive::ShiftRight => {
+            | Primitive::ShiftRightArithmetic
+            | Primitive::ShiftRightLogical => {
                 if inputs.len() != 2 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -2473,6 +2474,72 @@ mod tests {
                     .expect_err("select mismatch should fail");
                 let detail = err.to_string();
                 assert!(detail.contains("select requires matching shapes"));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_shift_right_arithmetic_shape() {
+        run_logged_test(
+            "test_infer_shift_right_arithmetic_shape",
+            fj_test_utils::fixture_id_from_json(&("shift-right-arithmetic-shape", [8_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![8] },
+                    },
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![8] },
+                    },
+                ]);
+                let out = ctx
+                    .process_primitive(
+                        Primitive::ShiftRightArithmetic,
+                        &[TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    )
+                    .expect("shift-right arithmetic inference");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.dtype, DType::I64);
+                assert_eq!(aval.shape, Shape { dims: vec![8] });
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_shift_right_logical_shape() {
+        run_logged_test(
+            "test_infer_shift_right_logical_shape",
+            fj_test_utils::fixture_id_from_json(&("shift-right-logical-shape", [8_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![8] },
+                    },
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![8] },
+                    },
+                ]);
+                let out = ctx
+                    .process_primitive(
+                        Primitive::ShiftRightLogical,
+                        &[TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    )
+                    .expect("shift-right logical inference");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.dtype, DType::I64);
+                assert_eq!(aval.shape, Shape { dims: vec![8] });
                 Ok(Vec::new())
             },
         );
