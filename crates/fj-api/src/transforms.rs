@@ -91,6 +91,26 @@ fn build_ledger(jaxpr: Jaxpr, transforms: &[Transform]) -> TraceTransformLedger 
     ledger
 }
 
+fn dispatch_with_options(
+    jaxpr: Jaxpr,
+    transforms: &[Transform],
+    args: Vec<Value>,
+    backend: &str,
+    mode: CompatibilityMode,
+    compile_options: BTreeMap<String, String>,
+) -> Result<Vec<Value>, ApiError> {
+    let response = dispatch(DispatchRequest {
+        mode,
+        ledger: build_ledger(jaxpr, transforms),
+        args,
+        backend: backend.to_owned(),
+        compile_options,
+        custom_hook: None,
+        unknown_incompatible_features: vec![],
+    })?;
+    Ok(response.outputs)
+}
+
 fn dispatch_with(
     jaxpr: Jaxpr,
     transforms: &[Transform],
@@ -98,16 +118,7 @@ fn dispatch_with(
     backend: &str,
     mode: CompatibilityMode,
 ) -> Result<Vec<Value>, ApiError> {
-    let response = dispatch(DispatchRequest {
-        mode,
-        ledger: build_ledger(jaxpr, transforms),
-        args,
-        backend: backend.to_owned(),
-        compile_options: BTreeMap::new(),
-        custom_hook: None,
-        unknown_incompatible_features: vec![],
-    })?;
-    Ok(response.outputs)
+    dispatch_with_options(jaxpr, transforms, args, backend, mode, BTreeMap::new())
 }
 
 /// Compose transforms: `jit(grad(f))` becomes `jit(jaxpr).compose_grad()`.
@@ -293,20 +304,29 @@ impl ValueAndGradWrapped {
     }
 
     pub fn call(&self, args: Vec<Value>) -> Result<(Vec<Value>, Vec<Value>), ApiError> {
-        let value = dispatch_with(
-            self.jaxpr.clone(),
-            &[Transform::Jit],
-            args.clone(),
-            &self.backend,
-            self.mode,
-        )?;
-        let gradient = dispatch_with(
+        let mut compile_options = BTreeMap::new();
+        compile_options.insert("value_and_grad".to_owned(), "true".to_owned());
+        let outputs = dispatch_with_options(
             self.jaxpr.clone(),
             &[Transform::Grad],
             args,
             &self.backend,
             self.mode,
+            compile_options,
         )?;
-        Ok((value, gradient))
+        let value_len = self.jaxpr.outvars.len();
+        if outputs.len() < value_len + 1 {
+            return Err(ApiError::EvalError {
+                detail: format!(
+                    "value_and_grad expected at least {} outputs, got {}",
+                    value_len + 1,
+                    outputs.len()
+                ),
+            });
+        }
+
+        let values = outputs[..value_len].to_vec();
+        let gradients = outputs[value_len..].to_vec();
+        Ok((values, gradients))
     }
 }

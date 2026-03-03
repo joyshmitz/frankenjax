@@ -103,6 +103,8 @@ mod tests {
         let (value, gradient) = value_and_grad(jaxpr)
             .call(vec![Value::scalar_f64(4.0)])
             .expect("value_and_grad should succeed");
+        assert_eq!(value.len(), 1);
+        assert_eq!(gradient.len(), 1);
 
         let val = value[0].as_f64_scalar().expect("value should be scalar");
         assert!((val - 16.0).abs() < 1e-6);

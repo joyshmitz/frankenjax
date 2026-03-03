@@ -209,6 +209,14 @@ fn parse_vmap_out_axes(opts: &BTreeMap<String, String>, num_outputs: usize) -> V
     }
 }
 
+fn wants_value_and_grad(opts: &BTreeMap<String, String>) -> bool {
+    opts.get("value_and_grad").is_some_and(|raw| {
+        raw.eq_ignore_ascii_case("true")
+            || raw.eq_ignore_ascii_case("1")
+            || raw.eq_ignore_ascii_case("yes")
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispatchResponse {
     pub outputs: Vec<Value>,
@@ -468,7 +476,7 @@ fn execute_with_transforms(
 
     match head {
         Transform::Jit => unreachable!("Jit transforms were skipped above"),
-        Transform::Grad => execute_grad(root_jaxpr, tail, args, backend, device),
+        Transform::Grad => execute_grad(root_jaxpr, tail, args, backend, device, compile_options),
         Transform::Vmap => execute_vmap(root_jaxpr, tail, args, backend, device, compile_options),
     }
 }
@@ -479,6 +487,7 @@ fn execute_grad(
     args: &[Value],
     backend: &dyn Backend,
     device: DeviceId,
+    compile_options: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, DispatchError> {
     if args.is_empty() {
         return Err(TransformExecutionError::EmptyArgumentList {
@@ -497,12 +506,27 @@ fn execute_grad(
         return execute_grad_finite_diff(root_jaxpr, tail, args, backend, device);
     }
 
-    // Tensor-aware AD: grad_jaxpr returns Value gradients for all inputs
+    if wants_value_and_grad(compile_options) {
+        // Shared forward pass for value_and_grad mode.
+        let (mut values, grads) =
+            fj_ad::value_and_grad_jaxpr(root_jaxpr, args).map_err(|e| match e {
+                fj_ad::AdError::NonScalarGradientOutput => {
+                    TransformExecutionError::NonScalarGradientOutput
+                }
+                other => TransformExecutionError::TensorBuild(format!("AD error: {other}")),
+            })?;
+        // Match current API behavior: gradient defaults to the first argument.
+        let first_grad = grads.into_iter().next().unwrap_or(Value::scalar_f64(0.0));
+        values.push(first_grad);
+        return Ok(values);
+    }
+
+    // Tensor-aware AD: grad_jaxpr returns Value gradients for all inputs.
     let grads = fj_ad::grad_jaxpr(root_jaxpr, args).map_err(|e| match e {
         fj_ad::AdError::NonScalarGradientOutput => TransformExecutionError::NonScalarGradientOutput,
         other => TransformExecutionError::TensorBuild(format!("AD error: {other}")),
     })?;
-    // Return gradient of first input (matches JAX's default grad behavior)
+    // Return gradient of first input (matches JAX's default grad behavior).
     Ok(vec![
         grads.into_iter().next().unwrap_or(Value::scalar_f64(0.0)),
     ])
@@ -927,6 +951,32 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_value_and_grad_mode_square_scalar() {
+        let mut compile_options = BTreeMap::new();
+        compile_options.insert("value_and_grad".to_owned(), "true".to_owned());
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::Square, &[Transform::Grad]),
+            args: vec![Value::scalar_f64(3.0)],
+            backend: "cpu".to_owned(),
+            compile_options,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("dispatch value_and_grad should succeed");
+
+        assert_eq!(response.outputs.len(), 2, "expected [value, grad]");
+        let value = response.outputs[0]
+            .as_f64_scalar()
+            .expect("value output should be scalar f64");
+        let derivative = response.outputs[1]
+            .as_f64_scalar()
+            .expect("grad output should be scalar f64");
+        assert!((value - 9.0).abs() < 1e-6);
+        assert!((derivative - 6.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn dispatch_grad_of_grad_square_scalar() {
         let response = dispatch(DispatchRequest {
             mode: CompatibilityMode::Strict,
@@ -1281,6 +1331,33 @@ mod tests {
         assert_ne!(
             r1.cache_key, r3.cache_key,
             "different program = different key"
+        );
+    }
+
+    #[test]
+    fn dispatch_value_and_grad_mode_changes_cache_key() {
+        let make_request = |value_and_grad: bool| {
+            let mut compile_options = BTreeMap::new();
+            if value_and_grad {
+                compile_options.insert("value_and_grad".to_owned(), "true".to_owned());
+            }
+            DispatchRequest {
+                mode: CompatibilityMode::Strict,
+                ledger: ledger(ProgramSpec::Square, &[Transform::Grad]),
+                args: vec![Value::scalar_f64(3.0)],
+                backend: "cpu".to_owned(),
+                compile_options,
+                custom_hook: None,
+                unknown_incompatible_features: vec![],
+            }
+        };
+
+        let plain_grad = dispatch(make_request(false)).expect("plain grad dispatch");
+        let value_and_grad = dispatch(make_request(true)).expect("value_and_grad dispatch");
+
+        assert_ne!(
+            plain_grad.cache_key, value_and_grad.cache_key,
+            "value_and_grad mode must use a distinct cache identity from plain grad"
         );
     }
 
