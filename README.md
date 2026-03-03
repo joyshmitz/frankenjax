@@ -31,26 +31,35 @@ This project applies four disciplines for meaningful changes:
 
 ## Workspace Crates
 
-- `fj-core`
-- `fj-lax`
-- `fj-interpreters`
-- `fj-cache`
-- `fj-ledger`
-- `fj-dispatch`
-- `fj-runtime`
-- `fj-conformance`
+- `fj-core` — canonical IR, core value/types, primitive definitions
+- `fj-trace` — tracing context, tracer model, primitive shape inference
+- `fj-interpreters` — scoped primitive interpreter and environment model
+- `fj-dispatch` — transform-order-sensitive dispatch and composition checks
+- `fj-lax` — LAX primitive evaluation and shape-aware tensor behavior
+- `fj-cache` — deterministic cache keys and strict/hardened cache policy gates
+- `fj-runtime` — runtime value model and execution surfaces
+- `fj-conformance` — fixture harness, oracle capture pipeline, parity reporting
+- `fj-ledger` — decision/evidence ledger and audit primitives
+- `fj-ad` — automatic differentiation (VJP/JVP and transform wiring)
+- `fj-egraph` — e-graph rewrite and equality-saturation optimization scaffolding
+- `fj-test-utils` — shared fixtures, deterministic testing helpers, logging contracts
+- `fj-api` — user-facing API composition layer
+- `fj-backend-cpu` — CPU backend execution plumbing
+- `fj-ffi` — FFI surface and interop boundaries
 
 ## Current Status
 
 Implemented foundation + differential harness slice:
 
-- canonical IR + tensor-aware runtime value model
+- 15-crate Rust workspace with end-to-end trace → dispatch → runtime pipeline
+- canonical IR + tensor-aware runtime value model with transform ledger evidence
 - transform composition proof checks and order-sensitive dispatch execution
-- scoped primitive interpreter path (`add`, `mul`, `dot`, `sin`, `cos`, `reduce_sum` subset)
+- `Primitive` enum currently defines **87** operations in `fj-core`
 - deterministic cache-key module with strict/hardened gate behavior
 - decision/evidence ledger primitives with loss-matrix actions
-- transform fixture bundle runner for `jit`/`grad`/`vmap`
-- RaptorQ sidecar + scrub + decode-proof pipeline for long-lived artifacts
+- conformance fixture bundle runner for `jit`/`grad`/`vmap`, including multi-rank fixture families
+- durability pipeline (`generate` / `scrub` / `proof` / `pipeline`) for long-lived artifacts
+- test surface currently includes **1200+** `#[test]` cases across workspace crates, plus proptest/property suites
 
 ## Fixture Capture
 
