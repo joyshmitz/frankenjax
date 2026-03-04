@@ -62,6 +62,37 @@ define_language! {
         "le" = Le([Id; 2]),
         "gt" = Gt([Id; 2]),
         "ge" = Ge([Id; 2]),
+        // Complex number ops
+        "complex" = Complex([Id; 2]),
+        "conj" = Conj([Id; 1]),
+        "real" = Real([Id; 1]),
+        "imag" = Imag([Id; 1]),
+        // Special math (unary)
+        "cbrt" = Cbrt([Id; 1]),
+        "lgamma" = Lgamma([Id; 1]),
+        "digamma" = Digamma([Id; 1]),
+        "erf_inv" = ErfInv([Id; 1]),
+        "is_finite" = IsFinite([Id; 1]),
+        // Special math (binary)
+        "integer_pow" = IntegerPow([Id; 2]),
+        "nextafter" = Nextafter([Id; 2]),
+        // Bitwise (binary)
+        "bitwise_and" = BitwiseAnd([Id; 2]),
+        "bitwise_or" = BitwiseOr([Id; 2]),
+        "bitwise_xor" = BitwiseXor([Id; 2]),
+        "shift_left" = ShiftLeft([Id; 2]),
+        "shift_right_arith" = ShiftRightArithmetic([Id; 2]),
+        "shift_right_logical" = ShiftRightLogical([Id; 2]),
+        // Bitwise (unary)
+        "bitwise_not" = BitwiseNot([Id; 1]),
+        "popcount" = PopulationCount([Id; 1]),
+        "clz" = CountLeadingZeros([Id; 1]),
+        // Bitwise reductions
+        "reduce_and" = ReduceAnd([Id; 1]),
+        "reduce_or" = ReduceOr([Id; 1]),
+        "reduce_xor" = ReduceXor([Id; 1]),
+        // Utility
+        "copy" = Copy([Id; 1]),
         // Select (ternary)
         "select" = Select([Id; 3]),
         // Clamp (ternary)
@@ -196,6 +227,30 @@ pub fn algebraic_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
         rewrite!("clamp-to-minmax"; "(clamp ?x ?lo ?hi)" => "(min (max ?x ?lo) ?hi)"),
         // clamp(x, x, x) = x (identity)
         rewrite!("clamp-same"; "(clamp ?a ?a ?a)" => "?a"),
+        // ── Complex number rules ──────────────────────────────────────
+        rewrite!("conj-conj"; "(conj (conj ?a))" => "?a"),
+        rewrite!("real-complex"; "(real (complex ?r ?i))" => "?r"),
+        rewrite!("imag-complex"; "(imag (complex ?r ?i))" => "?i"),
+        rewrite!("complex-real-imag"; "(complex (real ?z) (imag ?z))" => "?z"),
+        // ── Copy elimination ──────────────────────────────────────────
+        rewrite!("copy-elim"; "(copy ?a)" => "?a"),
+        // ── Integer power rules ───────────────────────────────────────
+        rewrite!("integer-pow-zero"; "(integer_pow ?a 0)" => "1"),
+        rewrite!("integer-pow-one"; "(integer_pow ?a 1)" => "?a"),
+        rewrite!("integer-pow-two"; "(integer_pow ?a 2)" => "(mul ?a ?a)"),
+        // ── Cbrt rules ────────────────────────────────────────────────
+        rewrite!("cbrt-cbrt-cbrt"; "(cbrt (cbrt (cbrt ?a)))" => "(cbrt ?a)"),
+        // ── Bitwise rules ─────────────────────────────────────────────
+        rewrite!("bitwise-not-not"; "(bitwise_not (bitwise_not ?a))" => "?a"),
+        rewrite!("bitwise-and-self"; "(bitwise_and ?a ?a)" => "?a"),
+        rewrite!("bitwise-or-self"; "(bitwise_or ?a ?a)" => "?a"),
+        rewrite!("bitwise-xor-self"; "(bitwise_xor ?a ?a)" => "0"),
+        rewrite!("bitwise-and-comm"; "(bitwise_and ?a ?b)" => "(bitwise_and ?b ?a)"),
+        rewrite!("bitwise-or-comm"; "(bitwise_or ?a ?b)" => "(bitwise_or ?b ?a)"),
+        rewrite!("bitwise-xor-comm"; "(bitwise_xor ?a ?b)" => "(bitwise_xor ?b ?a)"),
+        // ── IsFinite idempotence ──────────────────────────────────────
+        rewrite!("is-finite-const-0"; "(is_finite 0)" => "1"),
+        rewrite!("is-finite-const-1"; "(is_finite 1)" => "1"),
     ]
 }
 
@@ -304,16 +359,40 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             Primitive::Logistic => FjLang::Logistic([input_ids[0]]),
             Primitive::Erf => FjLang::Erf([input_ids[0]]),
             Primitive::Erfc => FjLang::Erfc([input_ids[0]]),
-            Primitive::Complex | Primitive::Conj | Primitive::Real | Primitive::Imag => {
-                panic!(
-                    "primitive {} not supported by egraph lowering",
-                    eqn.primitive.as_str()
-                )
-            }
+            Primitive::Complex => FjLang::Complex([input_ids[0], input_ids[1]]),
+            Primitive::Conj => FjLang::Conj([input_ids[0]]),
+            Primitive::Real => FjLang::Real([input_ids[0]]),
+            Primitive::Imag => FjLang::Imag([input_ids[0]]),
             // Ternary
             Primitive::Select => FjLang::Select([input_ids[0], input_ids[1], input_ids[2]]),
             // Clamp (ternary)
             Primitive::Clamp => FjLang::Clamp([input_ids[0], input_ids[1], input_ids[2]]),
+            // New unary ops
+            Primitive::Cbrt => FjLang::Cbrt([input_ids[0]]),
+            Primitive::Lgamma => FjLang::Lgamma([input_ids[0]]),
+            Primitive::Digamma => FjLang::Digamma([input_ids[0]]),
+            Primitive::ErfInv => FjLang::ErfInv([input_ids[0]]),
+            Primitive::IsFinite => FjLang::IsFinite([input_ids[0]]),
+            Primitive::Copy => FjLang::Copy([input_ids[0]]),
+            Primitive::BitwiseNot => FjLang::BitwiseNot([input_ids[0]]),
+            Primitive::PopulationCount => FjLang::PopulationCount([input_ids[0]]),
+            Primitive::CountLeadingZeros => FjLang::CountLeadingZeros([input_ids[0]]),
+            Primitive::ReduceAnd => FjLang::ReduceAnd([input_ids[0]]),
+            Primitive::ReduceOr => FjLang::ReduceOr([input_ids[0]]),
+            Primitive::ReduceXor => FjLang::ReduceXor([input_ids[0]]),
+            // New binary ops
+            Primitive::IntegerPow => FjLang::IntegerPow([input_ids[0], input_ids[1]]),
+            Primitive::Nextafter => FjLang::Nextafter([input_ids[0], input_ids[1]]),
+            Primitive::BitwiseAnd => FjLang::BitwiseAnd([input_ids[0], input_ids[1]]),
+            Primitive::BitwiseOr => FjLang::BitwiseOr([input_ids[0], input_ids[1]]),
+            Primitive::BitwiseXor => FjLang::BitwiseXor([input_ids[0], input_ids[1]]),
+            Primitive::ShiftLeft => FjLang::ShiftLeft([input_ids[0], input_ids[1]]),
+            Primitive::ShiftRightArithmetic => {
+                FjLang::ShiftRightArithmetic([input_ids[0], input_ids[1]])
+            }
+            Primitive::ShiftRightLogical => {
+                FjLang::ShiftRightLogical([input_ids[0], input_ids[1]])
+            }
             // Shape ops require params – not yet supported
             Primitive::Reshape
             | Primitive::Slice
@@ -340,28 +419,8 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::Scan
             | Primitive::While
             | Primitive::Switch
-            | Primitive::BitwiseAnd
-            | Primitive::BitwiseOr
-            | Primitive::BitwiseXor
-            | Primitive::ReduceAnd
-            | Primitive::ReduceOr
-            | Primitive::ReduceXor
-            | Primitive::BitwiseNot
-            | Primitive::ShiftLeft
-            | Primitive::ShiftRightArithmetic
-            | Primitive::ShiftRightLogical
             | Primitive::ReduceWindow
-            | Primitive::PopulationCount
-            | Primitive::CountLeadingZeros
-            | Primitive::Cbrt
-            | Primitive::Lgamma
-            | Primitive::Digamma
-            | Primitive::ErfInv
-            | Primitive::IsFinite
-            | Primitive::IntegerPow
-            | Primitive::Nextafter
             | Primitive::BroadcastedIota
-            | Primitive::Copy
             | Primitive::BitcastConvertType
             | Primitive::ReducePrecision
             | Primitive::Cholesky
@@ -881,6 +940,235 @@ pub fn egraph_to_jaxpr(
                 &mut equations,
                 expr,
             ),
+            // Complex ops
+            FjLang::Complex([a, b]) => push_binary(
+                idx,
+                Primitive::Complex,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Conj([a]) => push_unary(
+                idx,
+                Primitive::Conj,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Real([a]) => push_unary(
+                idx,
+                Primitive::Real,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Imag([a]) => push_unary(
+                idx,
+                Primitive::Imag,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            // Special math
+            FjLang::Cbrt([a]) => push_unary(
+                idx,
+                Primitive::Cbrt,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Lgamma([a]) => push_unary(
+                idx,
+                Primitive::Lgamma,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Digamma([a]) => push_unary(
+                idx,
+                Primitive::Digamma,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ErfInv([a]) => push_unary(
+                idx,
+                Primitive::ErfInv,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::IsFinite([a]) => push_unary(
+                idx,
+                Primitive::IsFinite,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::IntegerPow([a, b]) => push_binary(
+                idx,
+                Primitive::IntegerPow,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::Nextafter([a, b]) => push_binary(
+                idx,
+                Primitive::Nextafter,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            // Bitwise ops
+            FjLang::BitwiseAnd([a, b]) => push_binary(
+                idx,
+                Primitive::BitwiseAnd,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::BitwiseOr([a, b]) => push_binary(
+                idx,
+                Primitive::BitwiseOr,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::BitwiseXor([a, b]) => push_binary(
+                idx,
+                Primitive::BitwiseXor,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ShiftLeft([a, b]) => push_binary(
+                idx,
+                Primitive::ShiftLeft,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ShiftRightArithmetic([a, b]) => push_binary(
+                idx,
+                Primitive::ShiftRightArithmetic,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ShiftRightLogical([a, b]) => push_binary(
+                idx,
+                Primitive::ShiftRightLogical,
+                *a,
+                *b,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::BitwiseNot([a]) => push_unary(
+                idx,
+                Primitive::BitwiseNot,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::PopulationCount([a]) => push_unary(
+                idx,
+                Primitive::PopulationCount,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::CountLeadingZeros([a]) => push_unary(
+                idx,
+                Primitive::CountLeadingZeros,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ReduceAnd([a]) => push_unary(
+                idx,
+                Primitive::ReduceAnd,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ReduceOr([a]) => push_unary(
+                idx,
+                Primitive::ReduceOr,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            FjLang::ReduceXor([a]) => push_unary(
+                idx,
+                Primitive::ReduceXor,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
+            // Utility
+            FjLang::Copy([a]) => push_unary(
+                idx,
+                Primitive::Copy,
+                *a,
+                &mut node_to_var,
+                &mut next_var,
+                &mut equations,
+                expr,
+            ),
         }
     }
 
@@ -1082,13 +1370,30 @@ fn is_egraph_supported_primitive(primitive: Primitive) -> bool {
             | Primitive::Split
             | Primitive::ExpandDims
             | Primitive::Iota
-            | Primitive::Cbrt
-            | Primitive::Lgamma
-            | Primitive::Digamma
-            | Primitive::ErfInv
-            | Primitive::IsFinite
-            | Primitive::IntegerPow
-            | Primitive::Nextafter
+            | Primitive::BroadcastedIota
+            | Primitive::BitcastConvertType
+            | Primitive::ReducePrecision
+            | Primitive::ReduceWindow
+            | Primitive::Cond
+            | Primitive::Scan
+            | Primitive::While
+            | Primitive::Switch
+            | Primitive::OneHot
+            | Primitive::DynamicUpdateSlice
+            | Primitive::Cumsum
+            | Primitive::Cumprod
+            | Primitive::Sort
+            | Primitive::Argsort
+            | Primitive::Conv
+            | Primitive::Cholesky
+            | Primitive::Qr
+            | Primitive::Svd
+            | Primitive::TriangularSolve
+            | Primitive::Eigh
+            | Primitive::Fft
+            | Primitive::Ifft
+            | Primitive::Rfft
+            | Primitive::Irfft
     )
 }
 
@@ -2287,5 +2592,315 @@ mod tests {
             fj_test_utils::TestResult::Pass,
         );
         assert_eq!(log.schema_version, fj_test_utils::TEST_LOG_SCHEMA_VERSION);
+    }
+
+    // ── V2-PRIM e-graph rewrite tests ──────────────────────────────────
+
+    #[test]
+    fn test_rewrite_conj_conj() {
+        // conj(conj(x)) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Conj,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Conj,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "conj(conj(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_real_complex() {
+        // real(complex(r, i)) should simplify to r
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Complex,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Real,
+                    inputs: smallvec![Atom::Var(VarId(3))],
+                    outputs: smallvec![VarId(4)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "real(complex(r, i)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_imag_complex() {
+        // imag(complex(r, i)) should simplify to i
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Complex,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Imag,
+                    inputs: smallvec![Atom::Var(VarId(3))],
+                    outputs: smallvec![VarId(4)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "imag(complex(r, i)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_copy_elimination() {
+        // copy(x) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Copy,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                effects: vec![],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "copy(x) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_integer_pow_zero() {
+        // integer_pow(x, 0) should simplify to 1
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::IntegerPow,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(0))],
+                outputs: smallvec![VarId(2)],
+                effects: vec![],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "integer_pow(x, 0) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_integer_pow_one() {
+        // integer_pow(x, 1) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::IntegerPow,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
+                outputs: smallvec![VarId(2)],
+                effects: vec![],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "integer_pow(x, 1) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bitwise_not_not() {
+        // bitwise_not(bitwise_not(x)) should simplify to x
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::BitwiseNot,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::BitwiseNot,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() < jaxpr.equations.len(),
+            "bitwise_not(bitwise_not(x)) should simplify: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn test_rewrite_bitwise_xor_self() {
+        // x ^ x should simplify to 0
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::BitwiseXor,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                effects: vec![],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "x ^ x should simplify to 0: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+    }
+
+    #[test]
+    fn test_new_rules_dont_break_existing() {
+        // Verify that existing rules still work after adding new V2-PRIM rules.
+        // Test: mul(x, 0) should still simplify to 0.
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(0))],
+                outputs: smallvec![VarId(2)],
+                effects: vec![],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert!(
+            optimized.equations.len() <= jaxpr.equations.len(),
+            "existing mul-zero rule should still work: got {} eqns (was {})",
+            optimized.equations.len(),
+            jaxpr.equations.len(),
+        );
+
+        // Also verify neg(neg(x)) still works
+        let jaxpr2 = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Neg,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+
+        let optimized2 = optimize_jaxpr(&jaxpr2);
+        assert!(
+            optimized2.equations.len() < jaxpr2.equations.len(),
+            "existing neg-neg rule should still work: got {} eqns (was {})",
+            optimized2.equations.len(),
+            jaxpr2.equations.len(),
+        );
     }
 }

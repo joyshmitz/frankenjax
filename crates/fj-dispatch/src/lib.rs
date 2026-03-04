@@ -217,6 +217,14 @@ fn wants_value_and_grad(opts: &BTreeMap<String, String>) -> bool {
     })
 }
 
+fn wants_egraph_optimize(opts: &BTreeMap<String, String>) -> bool {
+    opts.get("egraph_optimize").is_some_and(|raw| {
+        raw.eq_ignore_ascii_case("true")
+            || raw.eq_ignore_ascii_case("1")
+            || raw.eq_ignore_ascii_case("yes")
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct DispatchResponse {
     pub outputs: Vec<Value>,
@@ -366,12 +374,19 @@ pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchEr
     let mut effect_ctx = EffectContext::new();
     thread_jaxpr_effect_tokens(&mut effect_ctx, &request.ledger.root_jaxpr);
 
+    // Optionally run e-graph equality saturation to simplify the Jaxpr.
+    let exec_jaxpr = if wants_egraph_optimize(&request.compile_options) {
+        fj_egraph::optimize_jaxpr(&request.ledger.root_jaxpr)
+    } else {
+        request.ledger.root_jaxpr.clone()
+    };
+
     let backend_registry = BackendRegistry::new(vec![Box::new(fj_backend_cpu::CpuBackend::new())]);
     let requested_backend = (!request.backend.is_empty()).then_some(request.backend.as_str());
     let (backend, device, _fell_back) =
         backend_registry.resolve_with_fallback(&DevicePlacement::Default, requested_backend)?;
     let outputs = execute_with_transforms(
-        &request.ledger.root_jaxpr,
+        &exec_jaxpr,
         &request.ledger.transform_stack,
         &request.args,
         backend,

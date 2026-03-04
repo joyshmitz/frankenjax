@@ -55,11 +55,19 @@ Implemented foundation + differential harness slice:
 - canonical IR + tensor-aware runtime value model with transform ledger evidence
 - transform composition proof checks and order-sensitive dispatch execution
 - `Primitive` enum currently defines **87** operations in `fj-core`
+- 11 DTypes (BF16, F16, F32, F64, I32, I64, U32, U64, Bool, Complex64, Complex128) with type promotion
+- tape-based reverse-mode AD: 68/77 primitives with VJP+JVP rules, Jacobian/Hessian, value_and_grad
+- vmap with per-primitive batching rules, in_axes/out_axes, BatchTrace interpreter
+- e-graph equality saturation optimizer (80+ algebraic rewrite rules) wired into dispatch
+- ThreeFry2x32 RNG with key/split/fold_in/uniform/normal/bernoulli/categorical
+- control flow: cond, scan, while_loop, fori_loop, switch
+- tracing: make_jaxpr from Rust closures, nested trace contexts
+- CPU parallel backend with dependency-wave executor
 - deterministic cache-key module with strict/hardened gate behavior
 - decision/evidence ledger primitives with loss-matrix actions
 - conformance fixture bundle runner for `jit`/`grad`/`vmap`, including multi-rank fixture families
 - durability pipeline (`generate` / `scrub` / `proof` / `pipeline`) for long-lived artifacts
-- test surface currently includes **1200+** `#[test]` cases across workspace crates, plus proptest/property suites
+- test surface currently includes **1500+** `#[test]` cases across workspace crates, plus proptest/property suites
 
 ## Fixture Capture
 

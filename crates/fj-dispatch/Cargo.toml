@@ -8,6 +8,7 @@ fj-ad = { path = "../fj-ad" }
 fj-backend-cpu = { path = "../fj-backend-cpu" }
 fj-cache = { path = "../fj-cache" }
 fj-core = { path = "../fj-core" }
+fj-egraph = { path = "../fj-egraph" }
 fj-interpreters = { path = "../fj-interpreters" }
 fj-lax = { path = "../fj-lax" }
 fj-ledger = { path = "../fj-ledger" }

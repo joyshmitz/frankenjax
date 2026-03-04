@@ -1527,3 +1527,55 @@ fn jit_grad_square() {
         "jit(grad(x²))(3) should be ~6.0, got {deriv}"
     );
 }
+
+// ── E-graph Optimization via Dispatch ────────────────────────────────
+
+#[test]
+fn egraph_optimized_jit_add() {
+    let mut compile_options = BTreeMap::new();
+    compile_options.insert("egraph_optimize".to_owned(), "true".to_owned());
+    let r = dispatch(DispatchRequest {
+        mode: CompatibilityMode::Strict,
+        ledger: ledger(ProgramSpec::Add2, &[Transform::Jit]),
+        args: vec![Value::scalar_i64(10), Value::scalar_i64(20)],
+        backend: "cpu".to_owned(),
+        compile_options,
+        custom_hook: None,
+        unknown_incompatible_features: vec![],
+    })
+    .unwrap();
+    assert_eq!(r.outputs, vec![Value::scalar_i64(30)]);
+}
+
+#[test]
+fn egraph_optimized_square() {
+    let mut compile_options = BTreeMap::new();
+    compile_options.insert("egraph_optimize".to_owned(), "true".to_owned());
+    let r = dispatch(DispatchRequest {
+        mode: CompatibilityMode::Strict,
+        ledger: ledger(ProgramSpec::Square, &[Transform::Jit]),
+        args: vec![Value::scalar_f64(5.0)],
+        backend: "cpu".to_owned(),
+        compile_options,
+        custom_hook: None,
+        unknown_incompatible_features: vec![],
+    })
+    .unwrap();
+    let out = r.outputs[0].as_f64_scalar().unwrap();
+    assert!(
+        (out - 25.0).abs() < 1e-10,
+        "egraph-optimized square(5) should be 25.0, got {out}"
+    );
+}
+
+#[test]
+fn egraph_optimize_flag_off_by_default() {
+    // Without egraph_optimize, dispatch should still work identically.
+    let r_default = dispatch(make_request(
+        ProgramSpec::Add2,
+        &[Transform::Jit],
+        vec![Value::scalar_i64(7), Value::scalar_i64(3)],
+    ))
+    .unwrap();
+    assert_eq!(r_default.outputs, vec![Value::scalar_i64(10)]);
+}

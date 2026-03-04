@@ -356,7 +356,7 @@ fn e2e_p2c004_evidence_ledger_audit_trail() {
 
                 assert_eq!(r.evidence_ledger.len(), 1);
                 let entry = &r.evidence_ledger.entries()[0];
-                assert_eq!(entry.signals.len(), 4);
+                assert_eq!(entry.signals.len(), 6);
                 assert_eq!(entry.decision_id, r.cache_key);
 
                 states.push(json!({
