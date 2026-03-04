@@ -1,0 +1,65 @@
+{
+  "test_name": "threat_model_review",
+  "generated_at_unix_ms": 1772498537493,
+  "pass": true,
+  "checks": [
+    {
+      "area": "dtypes",
+      "threat": "Complex numeric edge-case abuse (NaN/Inf propagation, zero-divisor, invalid comparisons)",
+      "documented": true,
+      "mitigated": true,
+      "risk_level": "Medium",
+      "pass": true
+    },
+    {
+      "area": "rng",
+      "threat": "RNG key lifecycle misuse (reused keys, weak seeds, non-deterministic output drift)",
+      "documented": true,
+      "mitigated": true,
+      "risk_level": "Medium",
+      "pass": true
+    },
+    {
+      "area": "control_flow",
+      "threat": "Control-flow safety hazards (non-boolean condition, unbounded iteration, deep nesting pressure)",
+      "documented": true,
+      "mitigated": true,
+      "risk_level": "Medium-High",
+      "pass": true
+    },
+    {
+      "area": "effects",
+      "threat": "Effect-token misuse / sequencing bypass",
+      "documented": true,
+      "mitigated": true,
+      "risk_level": "Medium",
+      "pass": true
+    },
+    {
+      "area": "custom_derivatives",
+      "threat": "Custom-derivative rule abuse (malicious gradients, recursion, type mismatch)",
+      "documented": true,
+      "mitigated": true,
+      "risk_level": "Medium",
+      "pass": true
+    },
+    {
+      "area": "adversarial_fixtures",
+      "threat": "ADV-007,ADV-008,ADV-009,ADV-010,ADV-011",
+      "documented": true,
+      "mitigated": true,
+      "risk_level": "n/a",
+      "pass": true,
+      "missing": []
+    },
+    {
+      "area": "stale_entries",
+      "threat": "v1-stale-threat-vectors",
+      "documented": true,
+      "mitigated": true,
+      "risk_level": "n/a",
+      "pass": true,
+      "matches": []
+    }
+  ]
+}

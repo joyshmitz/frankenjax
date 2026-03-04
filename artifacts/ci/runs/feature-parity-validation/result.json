@@ -1,0 +1,118 @@
+{
+  "test_name": "feature_parity_validation",
+  "generated_at_unix_ms": 1772498374369,
+  "checks": [
+    {
+      "test_name": "test_feature_parity_status_tokens_valid",
+      "feature": "matrix",
+      "claimed_status": "valid_status_tokens",
+      "actual_status": "none_invalid",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_required_rows_present",
+      "feature": "matrix",
+      "claimed_status": "all_required_rows_present",
+      "actual_status": "none_missing",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_all_primitives_listed",
+      "feature": "Primitive semantics (implemented subset)",
+      "claimed_status": "87",
+      "actual_status": "87",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_all_transforms_listed",
+      "feature": "`jit` transform semantics (current fixture families)",
+      "claimed_status": "row_present",
+      "actual_status": "present",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_all_transforms_listed",
+      "feature": "`grad` transform semantics (current fixture families)",
+      "claimed_status": "row_present",
+      "actual_status": "present",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_all_transforms_listed",
+      "feature": "`vmap` transform semantics (current fixture families)",
+      "claimed_status": "row_present",
+      "actual_status": "present",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_no_false_claims",
+      "feature": "Primitive semantics (full V1-scoped surface)",
+      "claimed_status": "status != parity_green",
+      "actual_status": "parity_gap",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_no_false_claims",
+      "feature": "Conformance harness + transform bundle runner (V1 acceptance scope)",
+      "claimed_status": "status != parity_green",
+      "actual_status": "parity_gap",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_no_false_claims",
+      "feature": "RNG determinism vs JAX oracle",
+      "claimed_status": "status != parity_green",
+      "actual_status": "parity_gap",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_no_false_claims",
+      "feature": "DType system expansion (BF16/F16/U32/U64 and promotion rules)",
+      "claimed_status": "status != parity_green",
+      "actual_status": "parity_gap",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_no_false_claims",
+      "feature": "Vmap batching completeness (`in_axes`/`out_axes`, broader primitive surface)",
+      "claimed_status": "status != parity_green",
+      "actual_status": "parity_gap",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_no_false_claims",
+      "feature": "AD completeness (custom rules, remaining VJP/JVP parity gaps)",
+      "claimed_status": "status != parity_green",
+      "actual_status": "parity_gap",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_no_false_claims",
+      "feature": "Control flow completion (`while`/`scan`/`fori` + transform interactions)",
+      "claimed_status": "status != parity_green",
+      "actual_status": "parity_gap",
+      "match": true,
+      "pass": true
+    },
+    {
+      "test_name": "test_feature_parity_no_false_claims",
+      "feature": "Special/missing primitive backlog (beyond current subset)",
+      "claimed_status": "status != parity_green",
+      "actual_status": "parity_gap",
+      "match": true,
+      "pass": true
+    }
+  ]
+}

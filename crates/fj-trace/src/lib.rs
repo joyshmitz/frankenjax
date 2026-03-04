@@ -2793,6 +2793,223 @@ mod tests {
     }
 
     #[test]
+    fn test_infer_rev_shape() {
+        run_logged_test(
+            "test_infer_rev_shape",
+            fj_test_utils::fixture_id_from_json(&("rev-shape", [2_u32, 3_u32, 4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape {
+                        dims: vec![2, 3, 4],
+                    },
+                }]);
+                let mut params = BTreeMap::new();
+                params.insert("dimensions".to_owned(), "1".to_owned());
+                let out = ctx
+                    .process_primitive(Primitive::Rev, &[TracerId(1)], params)
+                    .expect("rev inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(
+                    aval.shape,
+                    Shape {
+                        dims: vec![2, 3, 4]
+                    }
+                );
+                assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_squeeze_shape() {
+        run_logged_test(
+            "test_infer_squeeze_shape",
+            fj_test_utils::fixture_id_from_json(&("squeeze-shape", [1_u32, 3_u32, 1_u32, 4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape {
+                        dims: vec![1, 3, 1, 4],
+                    },
+                }]);
+                let mut params = BTreeMap::new();
+                params.insert("dimensions".to_owned(), "0,2".to_owned());
+                let out = ctx
+                    .process_primitive(Primitive::Squeeze, &[TracerId(1)], params)
+                    .expect("squeeze inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.shape, Shape { dims: vec![3, 4] });
+                assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_split_shapes() {
+        run_logged_test(
+            "test_infer_split_shapes",
+            fj_test_utils::fixture_id_from_json(&("split-shape", [8_u32])).expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape::vector(8),
+                }]);
+                let mut params = BTreeMap::new();
+                params.insert("axis".to_owned(), "0".to_owned());
+                params.insert("num_sections".to_owned(), "4".to_owned());
+                let out = ctx
+                    .process_primitive(Primitive::Split, &[TracerId(1)], params)
+                    .expect("split inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.shape, Shape { dims: vec![4, 2] });
+                assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_expand_dims_shape() {
+        run_logged_test(
+            "test_infer_expand_dims_shape",
+            fj_test_utils::fixture_id_from_json(&("expand-dims-shape", [3_u32, 4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape { dims: vec![3, 4] },
+                }]);
+                let mut params = BTreeMap::new();
+                params.insert("axis".to_owned(), "1".to_owned());
+                let out = ctx
+                    .process_primitive(Primitive::ExpandDims, &[TracerId(1)], params)
+                    .expect("expand_dims inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(
+                    aval.shape,
+                    Shape {
+                        dims: vec![3, 1, 4]
+                    }
+                );
+                assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_cbrt_shape() {
+        run_logged_test(
+            "test_infer_cbrt_shape",
+            fj_test_utils::fixture_id_from_json(&("cbrt-shape", [6_u32])).expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape::vector(6),
+                }]);
+                let out = ctx
+                    .process_primitive(Primitive::Cbrt, &[TracerId(1)], BTreeMap::new())
+                    .expect("cbrt inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.shape, Shape::vector(6));
+                assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_is_finite_shape() {
+        run_logged_test(
+            "test_infer_is_finite_shape",
+            fj_test_utils::fixture_id_from_json(&("is-finite-shape", [2_u32, 3_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape { dims: vec![2, 3] },
+                }]);
+                let out = ctx
+                    .process_primitive(Primitive::IsFinite, &[TracerId(1)], BTreeMap::new())
+                    .expect("is_finite inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.shape, Shape { dims: vec![2, 3] });
+                assert_eq!(aval.dtype, DType::Bool);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_integer_pow_shape() {
+        run_logged_test(
+            "test_infer_integer_pow_shape",
+            fj_test_utils::fixture_id_from_json(&("integer-pow-shape", [4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape::vector(4),
+                }]);
+                let mut params = BTreeMap::new();
+                params.insert("exponent".to_owned(), "3".to_owned());
+                let out = ctx
+                    .process_primitive(Primitive::IntegerPow, &[TracerId(1)], params)
+                    .expect("integer_pow inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.shape, Shape::vector(4));
+                assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn test_infer_nextafter_shape() {
+        run_logged_test(
+            "test_infer_nextafter_shape",
+            fj_test_utils::fixture_id_from_json(&("nextafter-shape", [5_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape::vector(5),
+                    },
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape::vector(5),
+                    },
+                ]);
+                let out = ctx
+                    .process_primitive(
+                        Primitive::Nextafter,
+                        &[TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    )
+                    .expect("nextafter inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(aval.shape, Shape::vector(5));
+                assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
     fn trace_to_jaxpr_validates_in_and_out_avals() {
         run_logged_test(
             "trace_to_jaxpr_validates_in_and_out_avals",
@@ -2998,6 +3215,478 @@ mod tests {
                     })
                     .map_err(|err| err.to_string())?;
                 Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn prop_all_primitives_have_shape_rule() {
+        run_logged_test(
+            "prop_all_primitives_have_shape_rule",
+            fj_test_utils::fixture_id_from_json(&("prop-all-v2-shape-rules", 1_u32))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut cases = vec![
+                    (
+                        Primitive::Rev,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape {
+                                dims: vec![2, 3, 4],
+                            },
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("dimensions".to_owned(), "1".to_owned());
+                            p
+                        },
+                    ),
+                    (
+                        Primitive::Squeeze,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape {
+                                dims: vec![1, 3, 1, 4],
+                            },
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("dimensions".to_owned(), "0,2".to_owned());
+                            p
+                        },
+                    ),
+                    (
+                        Primitive::Split,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape::vector(8),
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("axis".to_owned(), "0".to_owned());
+                            p.insert("num_sections".to_owned(), "4".to_owned());
+                            p
+                        },
+                    ),
+                    (
+                        Primitive::ExpandDims,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape { dims: vec![3, 4] },
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("axis".to_owned(), "1".to_owned());
+                            p
+                        },
+                    ),
+                    (
+                        Primitive::Cbrt,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape::vector(5),
+                        }],
+                        vec![TracerId(1)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::IsFinite,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape::vector(5),
+                        }],
+                        vec![TracerId(1)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::IntegerPow,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape::vector(5),
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("exponent".to_owned(), "3".to_owned());
+                            p
+                        },
+                    ),
+                    (
+                        Primitive::Nextafter,
+                        vec![
+                            ShapedArray {
+                                dtype: DType::F64,
+                                shape: Shape::vector(5),
+                            },
+                            ShapedArray {
+                                dtype: DType::F64,
+                                shape: Shape::vector(5),
+                            },
+                        ],
+                        vec![TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::ShiftRightArithmetic,
+                        vec![
+                            ShapedArray {
+                                dtype: DType::I64,
+                                shape: Shape::vector(5),
+                            },
+                            ShapedArray {
+                                dtype: DType::I64,
+                                shape: Shape::vector(5),
+                            },
+                        ],
+                        vec![TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::ShiftRightLogical,
+                        vec![
+                            ShapedArray {
+                                dtype: DType::I64,
+                                shape: Shape::vector(5),
+                            },
+                            ShapedArray {
+                                dtype: DType::I64,
+                                shape: Shape::vector(5),
+                            },
+                        ],
+                        vec![TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::ReduceAnd,
+                        vec![ShapedArray {
+                            dtype: DType::Bool,
+                            shape: Shape {
+                                dims: vec![2, 3, 4],
+                            },
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("axes".to_owned(), "1".to_owned());
+                            p
+                        },
+                    ),
+                    (
+                        Primitive::ReduceOr,
+                        vec![ShapedArray {
+                            dtype: DType::Bool,
+                            shape: Shape {
+                                dims: vec![2, 3, 4],
+                            },
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("axes".to_owned(), "0,2".to_owned());
+                            p
+                        },
+                    ),
+                    (
+                        Primitive::ReduceXor,
+                        vec![ShapedArray {
+                            dtype: DType::Bool,
+                            shape: Shape {
+                                dims: vec![2, 3, 4],
+                            },
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("axes".to_owned(), "2".to_owned());
+                            p
+                        },
+                    ),
+                    (
+                        Primitive::Complex,
+                        vec![
+                            ShapedArray {
+                                dtype: DType::F64,
+                                shape: Shape { dims: vec![2, 4] },
+                            },
+                            ShapedArray {
+                                dtype: DType::F64,
+                                shape: Shape { dims: vec![2, 4] },
+                            },
+                        ],
+                        vec![TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::Conj,
+                        vec![ShapedArray {
+                            dtype: DType::Complex128,
+                            shape: Shape { dims: vec![2, 4] },
+                        }],
+                        vec![TracerId(1)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::Real,
+                        vec![ShapedArray {
+                            dtype: DType::Complex128,
+                            shape: Shape { dims: vec![2, 4] },
+                        }],
+                        vec![TracerId(1)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::Imag,
+                        vec![ShapedArray {
+                            dtype: DType::Complex128,
+                            shape: Shape { dims: vec![2, 4] },
+                        }],
+                        vec![TracerId(1)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::Copy,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape { dims: vec![2, 4] },
+                        }],
+                        vec![TracerId(1)],
+                        BTreeMap::new(),
+                    ),
+                    (
+                        Primitive::BitcastConvertType,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape::vector(4),
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("new_dtype".to_owned(), "i64".to_owned());
+                            p
+                        },
+                    ),
+                    (Primitive::BroadcastedIota, vec![], vec![], {
+                        let mut p = BTreeMap::new();
+                        p.insert("shape".to_owned(), "2,3".to_owned());
+                        p.insert("dimension".to_owned(), "1".to_owned());
+                        p.insert("dtype".to_owned(), "i64".to_owned());
+                        p
+                    }),
+                    (
+                        Primitive::ReducePrecision,
+                        vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape::vector(4),
+                        }],
+                        vec![TracerId(1)],
+                        {
+                            let mut p = BTreeMap::new();
+                            p.insert("exponent_bits".to_owned(), "8".to_owned());
+                            p.insert("mantissa_bits".to_owned(), "7".to_owned());
+                            p
+                        },
+                    ),
+                ];
+
+                for (primitive, in_avals, tracer_ids, params) in cases.drain(..) {
+                    let mut ctx = if in_avals.is_empty() {
+                        SimpleTraceContext::new()
+                    } else {
+                        SimpleTraceContext::with_inputs(in_avals)
+                    };
+                    let out = ctx
+                        .process_primitive(primitive, &tracer_ids, params)
+                        .map_err(|err| {
+                            format!("shape inference failed for {:?}: {err}", primitive)
+                        })?;
+                    let _ = ctx
+                        .tracer_aval(out[0])
+                        .map_err(|err| format!("missing output aval for {:?}: {err}", primitive))?;
+                }
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn prop_shape_inference_deterministic() {
+        run_logged_test(
+            "prop_shape_inference_deterministic",
+            fj_test_utils::fixture_id_from_json(&(
+                "prop-shape-deterministic",
+                fj_test_utils::property_test_case_count(),
+            ))
+            .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut runner = TestRunner::new(ProptestConfig::with_cases(
+                    fj_test_utils::property_test_case_count(),
+                ));
+                let strategy = (proptest::collection::vec(1_u32..=5_u32, 1..=4), 0_u8..=1_u8);
+                runner
+                    .run(&strategy, |(dims, axis_sel)| {
+                        let mut ctx_a = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape { dims: dims.clone() },
+                        }]);
+                        let mut ctx_b = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                            dtype: DType::F64,
+                            shape: Shape { dims: dims.clone() },
+                        }]);
+
+                        let mut params = BTreeMap::new();
+                        let axis = usize::from(axis_sel) % dims.len();
+                        params.insert("axis".to_owned(), axis.to_string());
+
+                        let primitive = if axis_sel % 2 == 0 {
+                            Primitive::ExpandDims
+                        } else {
+                            Primitive::Squeeze
+                        };
+                        if primitive == Primitive::Squeeze {
+                            // Ensure squeeze has at least one singleton axis.
+                            let mut singleton_dims = dims.clone();
+                            singleton_dims[axis] = 1;
+                            ctx_a = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                                dtype: DType::F64,
+                                shape: Shape {
+                                    dims: singleton_dims.clone(),
+                                },
+                            }]);
+                            ctx_b = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                                dtype: DType::F64,
+                                shape: Shape {
+                                    dims: singleton_dims,
+                                },
+                            }]);
+                            params.clear();
+                            params.insert("dimensions".to_owned(), axis.to_string());
+                        }
+
+                        let out_a = ctx_a
+                            .process_primitive(primitive, &[TracerId(1)], params.clone())
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                        let out_b = ctx_b
+                            .process_primitive(primitive, &[TracerId(1)], params)
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                        let aval_a = ctx_a
+                            .tracer_aval(out_a[0])
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+                        let aval_b = ctx_b
+                            .tracer_aval(out_b[0])
+                            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+
+                        prop_assert_eq!(aval_a.shape.clone(), aval_b.shape.clone());
+                        prop_assert_eq!(aval_a.dtype, aval_b.dtype);
+                        Ok(())
+                    })
+                    .map_err(|err| err.to_string())?;
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn e2e_shape_inference_all_v2_prims() {
+        run_logged_test(
+            "e2e_shape_inference_all_v2_prims",
+            fj_test_utils::fixture_id_from_json(&("e2e-v2-shape-inference", 1_u32))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut records = Vec::new();
+
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape { dims: vec![2, 3] },
+                }]);
+                let rev_out = ctx
+                    .process_primitive(Primitive::Rev, &[TracerId(1)], BTreeMap::new())
+                    .map_err(|err| err.to_string())?;
+                let rev_aval = ctx
+                    .tracer_aval(rev_out[0])
+                    .map_err(|err| format!("missing rev aval: {err}"))?;
+                records.push(serde_json::json!({
+                    "primitive": "rev",
+                    "input_shapes": [[2, 3]],
+                    "inferred_output_shape": rev_aval.shape.dims,
+                    "expected_shape": [2, 3],
+                    "match": rev_aval.shape == Shape { dims: vec![2, 3] },
+                }));
+
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape::vector(4),
+                }]);
+                let mut bitcast_params = BTreeMap::new();
+                bitcast_params.insert("new_dtype".to_owned(), "i64".to_owned());
+                let bitcast_out = ctx
+                    .process_primitive(
+                        Primitive::BitcastConvertType,
+                        &[TracerId(1)],
+                        bitcast_params,
+                    )
+                    .map_err(|err| err.to_string())?;
+                let bitcast_aval = ctx
+                    .tracer_aval(bitcast_out[0])
+                    .map_err(|err| format!("missing bitcast aval: {err}"))?;
+                records.push(serde_json::json!({
+                    "primitive": "bitcast_convert_type",
+                    "input_shapes": [[4]],
+                    "inferred_output_shape": bitcast_aval.shape.dims,
+                    "expected_shape": [4],
+                    "match": bitcast_aval.shape == Shape::vector(4),
+                }));
+
+                let mut ctx = SimpleTraceContext::new();
+                let mut bcast_iota_params = BTreeMap::new();
+                bcast_iota_params.insert("shape".to_owned(), "2,3".to_owned());
+                bcast_iota_params.insert("dimension".to_owned(), "1".to_owned());
+                bcast_iota_params.insert("dtype".to_owned(), "i64".to_owned());
+                let bcast_iota_out = ctx
+                    .process_primitive(Primitive::BroadcastedIota, &[], bcast_iota_params)
+                    .map_err(|err| err.to_string())?;
+                let bcast_iota_aval = ctx
+                    .tracer_aval(bcast_iota_out[0])
+                    .map_err(|err| format!("missing broadcasted_iota aval: {err}"))?;
+                records.push(serde_json::json!({
+                    "primitive": "broadcasted_iota",
+                    "input_shapes": [],
+                    "inferred_output_shape": bcast_iota_aval.shape.dims,
+                    "expected_shape": [2, 3],
+                    "match": bcast_iota_aval.shape == Shape { dims: vec![2, 3] },
+                }));
+
+                let all_match = records.iter().all(|row| {
+                    row.get("match")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false)
+                });
+                if !all_match {
+                    return Err(
+                        "one or more V2 primitive shape-inference checks mismatched".to_owned()
+                    );
+                }
+
+                let log_path = repo_root()
+                    .join("artifacts")
+                    .join("e2e")
+                    .join("e2e_v2_shape_inference.e2e.json");
+                if let Some(parent) = log_path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|err| format!("failed to create e2e log dir: {err}"))?;
+                }
+                let payload = serde_json::to_string_pretty(&records)
+                    .map_err(|err| format!("failed to serialize e2e log: {err}"))?;
+                fs::write(&log_path, payload)
+                    .map_err(|err| format!("failed to write e2e log: {err}"))?;
+
+                Ok(vec![log_path.display().to_string()])
             },
         );
     }

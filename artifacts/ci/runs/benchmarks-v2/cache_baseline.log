@@ -1,0 +1,193 @@
+  [2m2026-03-03T01:25:41.473462Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at ubuntu@109.123.245.77 (6 slots, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:287 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:25:46.715291Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mStarting remote compilation pipeline for frankenjax (hash: bc71899b694c6186)[0m
+    [2;3mat[0m rch/src/hook.rs:4169 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:25:46.715350Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mPrepared dependency sync manifest for 16 roots[0m
+    [2;3mat[0m rch/src/hook.rs:4191 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:03.422729Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mrepo_updater status-no-fetch transport failure on vmi1227854 attempt 1/3: SSH command timed out after 12s[0m
+    [2;3mat[0m rch/src/hook.rs:2849 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:15.674581Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mrepo_updater status-no-fetch transport failure on vmi1227854 attempt 2/3: SSH command timed out after 12s[0m
+    [2;3mat[0m rch/src/hook.rs:2849 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:28.177296Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mrepo_updater status-no-fetch transport failure on vmi1227854 attempt 3/3: SSH command timed out after 12s[0m
+    [2;3mat[0m rch/src/hook.rs:2849 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:28.177328Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSyncing project to worker vmi1227854...[0m
+    [2;3mat[0m rch/src/hook.rs:4215 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:28.177360Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax -> /data/projects/frankenjax on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:30.510145Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2332ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:30.510191Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-ad -> /data/projects/frankenjax/crates/fj-ad on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:32.357931Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1847ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:32.357986Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-api -> /data/projects/frankenjax/crates/fj-api on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:34.210530Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1852ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:34.210594Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-backend-cpu -> /data/projects/frankenjax/crates/fj-backend-cpu on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:36.080288Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1869ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:36.080353Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-cache -> /data/projects/frankenjax/crates/fj-cache on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:37.936029Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1855ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:37.936114Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-conformance -> /data/projects/frankenjax/crates/fj-conformance on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:39.808828Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1872ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:39.808874Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-core -> /data/projects/frankenjax/crates/fj-core on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:41.675177Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1866ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:41.675230Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-dispatch -> /data/projects/frankenjax/crates/fj-dispatch on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:43.508134Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1832ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:43.508192Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-egraph -> /data/projects/frankenjax/crates/fj-egraph on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:45.383388Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1875ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:45.383446Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-ffi -> /data/projects/frankenjax/crates/fj-ffi on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:47.166832Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1783ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:47.166879Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-interpreters -> /data/projects/frankenjax/crates/fj-interpreters on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:49.029724Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1862ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:49.029801Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-lax -> /data/projects/frankenjax/crates/fj-lax on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:50.912069Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1882ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:50.912125Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-ledger -> /data/projects/frankenjax/crates/fj-ledger on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:52.727229Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1815ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:52.727280Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-runtime -> /data/projects/frankenjax/crates/fj-runtime on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:54.565592Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1838ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:54.565649Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-test-utils -> /data/projects/frankenjax/crates/fj-test-utils on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:56.412366Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1846ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:56.412424Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/frankenjax/crates/fj-trace -> /data/projects/frankenjax/crates/fj-trace on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:927 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:58.300963Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1888ms[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:26:58.300994Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSync complete: 3178 files, 106285 bytes in 30114ms[0m
+    [2;3mat[0m rch/src/hook.rs:4361 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:27:04.678547Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mExecuting command remotely: cargo bench -p fj-cache --bench cache_baseline -- --sample-size 50[0m
+    [2;3mat[0m rch/src/hook.rs:4388 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:27:04.678565Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo bench, [1;32mtimeout_secs[0m[32m: 300[0m
+    [2;3mat[0m rch/src/transfer.rs:688 [2;3mon[0m ThreadId(1)
+
+   Compiling fj-cache v0.1.0 (/data/projects/frankenjax/crates/fj-cache)
+    Finished `bench` profile [optimized] target(s) in 1.00s
+     Running benches/cache_baseline.rs (target/release/deps/cache_baseline-6437dd7fd177e3d9)
+Gnuplot not found, using plotters backend
+Benchmarking cache_key/owned/empty_program
+Benchmarking cache_key/owned/empty_program: Warming up for 3.0000 s
+Benchmarking cache_key/owned/empty_program: Collecting 50 samples in estimated 5.0002 s (19M iterations)
+Benchmarking cache_key/owned/empty_program: Analyzing
+cache_key/owned/empty_program
+                        time:   [242.91 ns 247.85 ns 253.39 ns]
+
+Benchmarking cache_key/owned/10eqn_program
+Benchmarking cache_key/owned/10eqn_program: Warming up for 3.0000 s
+Benchmarking cache_key/owned/10eqn_program: Collecting 50 samples in estimated 5.0001 s (15M iterations)
+Benchmarking cache_key/owned/10eqn_program: Analyzing
+cache_key/owned/10eqn_program
+                        time:   [359.85 ns 369.59 ns 380.23 ns]
+Found 2 outliers among 50 measurements (4.00%)
+  2 (4.00%) high mild
+
+Benchmarking cache_key/streaming/10eqn_program
+Benchmarking cache_key/streaming/10eqn_program: Warming up for 3.0000 s
+Benchmarking cache_key/streaming/10eqn_program: Collecting 50 samples in estimated 5.0002 s (27M iterations)
+Benchmarking cache_key/streaming/10eqn_program: Analyzing
+cache_key/streaming/10eqn_program
+                        time:   [192.72 ns 197.42 ns 202.82 ns]
+
+Benchmarking cache_lookup/hit/in_memory
+Benchmarking cache_lookup/hit/in_memory: Warming up for 3.0000 s
+Benchmarking cache_lookup/hit/in_memory: Collecting 50 samples in estimated 5.0001 s (19M iterations)
+Benchmarking cache_lookup/hit/in_memory: Analyzing
+cache_lookup/hit/in_memory
+                        time:   [282.57 ns 294.46 ns 307.24 ns]
+Found 3 outliers among 50 measurements (6.00%)
+  2 (4.00%) high mild
+  1 (2.00%) high severe
+
+Benchmarking cache_lookup/miss/in_memory
+Benchmarking cache_lookup/miss/in_memory: Warming up for 3.0000 s
+Benchmarking cache_lookup/miss/in_memory: Collecting 50 samples in estimated 5.0000 s (91M iterations)
+Benchmarking cache_lookup/miss/in_memory: Analyzing
+cache_lookup/miss/in_memory
+                        time:   [49.791 ns 51.221 ns 52.552 ns]
+
+Benchmarking compatibility_matrix_row
+Benchmarking compatibility_matrix_row: Warming up for 3.0000 s
+Benchmarking compatibility_matrix_row: Collecting 50 samples in estimated 5.0000 s (73M iterations)
+Benchmarking compatibility_matrix_row: Analyzing
+compatibility_matrix_row
+                        time:   [71.282 ns 74.255 ns 76.803 ns]
+
+  [2m2026-03-03T01:28:06.895839Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRemote command finished: exit=0 in 62217ms[0m
+    [2;3mat[0m rch/src/hook.rs:4509 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:28:11.897090Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook.rs:4558 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:28:11.897117Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/frankenjax on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1541 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:28:14.199573Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2302ms (3609 files, 2603 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:1580 [2;3mon[0m ThreadId(1)
+
+  [2m2026-03-03T01:28:14.199591Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mArtifacts retrieved: 3609 files, 2603 bytes in 2302ms[0m
+    [2;3mat[0m rch/src/hook.rs:4591 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1227854 (160.3s)

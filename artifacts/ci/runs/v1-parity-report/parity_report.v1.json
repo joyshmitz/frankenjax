@@ -1,0 +1,1016 @@
+{
+  "schema_version": "frankenjax.parity-report.v1",
+  "timestamp": "1772498910",
+  "fj_version": "0.1.0",
+  "oracle_version": "jax-0.9.0.1",
+  "mode": "strict",
+  "families": {
+    "grad": {
+      "total": 19,
+      "matched": 19,
+      "mismatched": 0,
+      "cases": [
+        {
+          "case_id": "grad_square_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_square_plus_linear_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_sin_x_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_cos_x_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_square_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_square_plus_linear_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_sin_x_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_cos_x_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_square_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_square_plus_linear_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_sin_x_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_cos_x_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_square_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "grad_square_plus_linear_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "grad_sin_x_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "grad_cos_x_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "grad_nested_square_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_nested_square_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_nested_square_f64_2",
+          "matched": true
+        }
+      ]
+    },
+    "jit": {
+      "total": 49,
+      "matched": 49,
+      "mismatched": 0,
+      "cases": [
+        {
+          "case_id": "jit_identity_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_identity_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_identity_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "jit_identity_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "jit_identity_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "jit_identity_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "jit_add2_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_add2_i64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_add2_i64_2",
+          "matched": true
+        },
+        {
+          "case_id": "jit_add2_i64_3",
+          "matched": true
+        },
+        {
+          "case_id": "jit_add2_i64_4",
+          "matched": true
+        },
+        {
+          "case_id": "jit_add2_i64_5",
+          "matched": true
+        },
+        {
+          "case_id": "jit_add2_i64_6",
+          "matched": true
+        },
+        {
+          "case_id": "jit_add2_i64_7",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_plus_linear_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_plus_linear_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_plus_linear_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_plus_linear_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_plus_linear_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "jit_square_plus_linear_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "jit_sin_x_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_cos_x_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_sin_x_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_cos_x_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_sin_x_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "jit_cos_x_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "jit_sin_x_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "jit_cos_x_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "jit_sin_x_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "jit_cos_x_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "jit_sin_x_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "jit_cos_x_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "jit_dot3_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_dot3_i64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_dot3_i64_2",
+          "matched": true
+        },
+        {
+          "case_id": "jit_dot3_i64_3",
+          "matched": true
+        },
+        {
+          "case_id": "jit_reduce_sum_vec_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_reduce_sum_vec_i64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_reduce_sum_vec_i64_2",
+          "matched": true
+        },
+        {
+          "case_id": "jit_reduce_sum_vec_i64_3",
+          "matched": true
+        },
+        {
+          "case_id": "jit_vmap_add_one_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "jit_vmap_add_one_i64_1",
+          "matched": true
+        },
+        {
+          "case_id": "jit_vmap_add_one_i64_2",
+          "matched": true
+        }
+      ]
+    },
+    "lax": {
+      "total": 165,
+      "matched": 165,
+      "mismatched": 0,
+      "cases": [
+        {
+          "case_id": "lax_neg_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_neg_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_neg_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_neg_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_neg_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_neg_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "lax_abs_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_abs_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_abs_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_abs_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_abs_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_abs_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "lax_exp_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_exp_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_exp_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_exp_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sqrt_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sqrt_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sqrt_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sqrt_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sqrt_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rsqrt_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rsqrt_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rsqrt_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rsqrt_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rsqrt_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_floor_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_floor_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_floor_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_floor_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_floor_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_ceil_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_ceil_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_ceil_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_ceil_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_ceil_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_round_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_round_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_round_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_round_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_round_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tan_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tan_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tan_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tan_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tan_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_asin_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_asin_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_asin_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_asin_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_asin_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_acos_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_acos_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_acos_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_acos_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_acos_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sinh_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sinh_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sinh_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sinh_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_cosh_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_cosh_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_cosh_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_cosh_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tanh_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tanh_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tanh_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tanh_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_tanh_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_expm1_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_expm1_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_expm1_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_expm1_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_expm1_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log1p_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log1p_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log1p_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log1p_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_log1p_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sign_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sign_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sign_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sign_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sign_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_square_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_square_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_square_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_square_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_square_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_square_f64_5",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reciprocal_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reciprocal_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reciprocal_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reciprocal_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reciprocal_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_logistic_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_logistic_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_logistic_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_logistic_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_logistic_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erf_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erf_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erf_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erf_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erf_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erfc_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erfc_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erfc_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erfc_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_erfc_f64_4",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sub_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sub_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sub_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_sub_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_mul_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_mul_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_mul_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_mul_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_div_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_div_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_div_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_div_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rem_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rem_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rem_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rem_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_pow_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_pow_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_pow_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan2_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan2_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan2_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_atan2_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_max_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_max_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_max_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_max_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_min_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_min_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_min_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_min_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_clamp_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_clamp_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_clamp_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_clamp_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_max_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_min_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_prod_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_max_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_min_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_prod_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_max_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_min_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reduce_prod_f64_2",
+          "matched": true
+        }
+      ]
+    },
+    "random": {
+      "total": 0,
+      "matched": 0,
+      "mismatched": 0,
+      "cases": []
+    },
+    "vmap": {
+      "total": 9,
+      "matched": 9,
+      "mismatched": 0,
+      "cases": [
+        {
+          "case_id": "vmap_add_one_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_add_one_i64_1",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_add_one_i64_2",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_grad_square_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_sin_x_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_grad_square_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_sin_x_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_grad_square_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_sin_x_f64_2",
+          "matched": true
+        }
+      ]
+    }
+  },
+  "summary": {
+    "total": 242,
+    "pass_rate": 1.0,
+    "gate": "pass"
+  }
+}

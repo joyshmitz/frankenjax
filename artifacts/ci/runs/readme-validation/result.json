@@ -1,0 +1,36 @@
+{
+  "test_name": "readme_validation",
+  "generated_at_unix_ms": 1772497518911,
+  "checks": [
+    {
+      "section": "Workspace Crates",
+      "valid": true,
+      "issue": "",
+      "pass": true
+    },
+    {
+      "section": "Workspace Crates",
+      "valid": true,
+      "issue": "",
+      "pass": true
+    },
+    {
+      "section": "Workspace Crates",
+      "valid": true,
+      "issue": "",
+      "pass": true
+    },
+    {
+      "section": "Current Status",
+      "valid": true,
+      "issue": "",
+      "pass": true
+    },
+    {
+      "section": "Current Status",
+      "valid": true,
+      "issue": "",
+      "pass": true
+    }
+  ]
+}
