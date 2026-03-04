@@ -38,6 +38,16 @@ pub struct ValueAndGradWrapped {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct JacobianWrapped {
+    jaxpr: Jaxpr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HessianWrapped {
+    jaxpr: Jaxpr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ComposedTransform {
     jaxpr: Jaxpr,
     transforms: Vec<Transform>,
@@ -81,6 +91,16 @@ pub fn value_and_grad(jaxpr: Jaxpr) -> ValueAndGradWrapped {
         backend: "cpu".to_owned(),
         mode: CompatibilityMode::Strict,
     }
+}
+
+#[must_use]
+pub fn jacobian(jaxpr: Jaxpr) -> JacobianWrapped {
+    JacobianWrapped { jaxpr }
+}
+
+#[must_use]
+pub fn hessian(jaxpr: Jaxpr) -> HessianWrapped {
+    HessianWrapped { jaxpr }
 }
 
 fn build_ledger(jaxpr: Jaxpr, transforms: &[Transform]) -> TraceTransformLedger {
@@ -328,5 +348,17 @@ impl ValueAndGradWrapped {
         let values = outputs[..value_len].to_vec();
         let gradients = outputs[value_len..].to_vec();
         Ok((values, gradients))
+    }
+}
+
+impl JacobianWrapped {
+    pub fn call(&self, args: Vec<Value>) -> Result<Value, ApiError> {
+        fj_ad::jacobian_jaxpr(&self.jaxpr, &args).map_err(ApiError::from)
+    }
+}
+
+impl HessianWrapped {
+    pub fn call(&self, args: Vec<Value>) -> Result<Value, ApiError> {
+        fj_ad::hessian_jaxpr(&self.jaxpr, &args).map_err(ApiError::from)
     }
 }

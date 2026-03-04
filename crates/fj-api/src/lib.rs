@@ -6,9 +6,10 @@ pub mod transforms;
 pub use errors::ApiError;
 pub use fj_ad::{clear_custom_derivative_rules, register_custom_jvp, register_custom_vjp};
 pub use transforms::{
-    ComposedTransform, GradWrapped, JitWrapped, ValueAndGradWrapped, VmapWrapped,
+    ComposedTransform, GradWrapped, HessianWrapped, JacobianWrapped, JitWrapped,
+    ValueAndGradWrapped, VmapWrapped,
 };
-pub use transforms::{compose, grad, jit, value_and_grad, vmap};
+pub use transforms::{compose, grad, hessian, jacobian, jit, value_and_grad, vmap};
 
 // Re-export make_jaxpr tracing API from fj-trace
 pub use fj_trace::{TracerRef, make_jaxpr, make_jaxpr_fallible};
@@ -284,5 +285,81 @@ mod tests {
         assert!((derivative - 7.0).abs() < 1e-10);
 
         clear_custom_derivative_rules();
+    }
+
+    #[test]
+    fn jacobian_two_outputs_two_inputs() {
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3), VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: vec![Atom::Var(VarId(1)), Atom::Var(VarId(2))].into(),
+                    outputs: vec![VarId(3)].into(),
+                    params: std::collections::BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: vec![Atom::Var(VarId(1)), Atom::Var(VarId(2))].into(),
+                    outputs: vec![VarId(4)].into(),
+                    params: std::collections::BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+
+        let jac = jacobian(jaxpr)
+            .call(vec![Value::scalar_f64(2.0), Value::scalar_f64(3.0)])
+            .expect("jacobian should succeed");
+        let tensor = jac.as_tensor().expect("jacobian should return tensor");
+        assert_eq!(tensor.shape.dims, vec![2, 2]);
+        let values = tensor.to_f64_vec().expect("f64 tensor");
+        assert!((values[0] - 1.0).abs() < 1e-10);
+        assert!((values[1] - 1.0).abs() < 1e-10);
+        assert!((values[2] - 3.0).abs() < 1e-10);
+        assert!((values[3] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn hessian_matches_quadratic_cross_term() {
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: vec![Atom::Var(VarId(1)), Atom::Var(VarId(1))].into(),
+                    outputs: vec![VarId(3)].into(),
+                    params: std::collections::BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: vec![Atom::Var(VarId(3)), Atom::Var(VarId(2))].into(),
+                    outputs: vec![VarId(4)].into(),
+                    params: std::collections::BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+
+        let hes = hessian(jaxpr)
+            .call(vec![Value::scalar_f64(2.0), Value::scalar_f64(3.0)])
+            .expect("hessian should succeed");
+        let tensor = hes.as_tensor().expect("hessian should return tensor");
+        assert_eq!(tensor.shape.dims, vec![2, 2]);
+        let values = tensor.to_f64_vec().expect("f64 tensor");
+        assert!((values[0] - 6.0).abs() < 1e-3);
+        assert!((values[1] - 4.0).abs() < 1e-3);
+        assert!((values[2] - 4.0).abs() < 1e-3);
+        assert!(values[3].abs() < 1e-3);
     }
 }

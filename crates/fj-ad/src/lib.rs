@@ -3326,6 +3326,252 @@ pub fn grad_first(jaxpr: &Jaxpr, args: &[Value]) -> Result<f64, AdError> {
     to_f64(&grads[0])
 }
 
+fn flatten_value_to_f64(value: &Value) -> Result<Vec<f64>, AdError> {
+    match value {
+        Value::Scalar(_) => value
+            .as_f64_scalar()
+            .map(|v| vec![v])
+            .ok_or_else(|| AdError::EvalFailed("expected scalar convertible to f64".to_owned())),
+        Value::Tensor(tensor) => tensor
+            .to_f64_vec()
+            .ok_or_else(|| AdError::EvalFailed("expected tensor convertible to f64".to_owned())),
+    }
+}
+
+fn flatten_values_to_f64(values: &[Value]) -> Result<Vec<f64>, AdError> {
+    let mut out = Vec::new();
+    for value in values {
+        out.extend(flatten_value_to_f64(value)?);
+    }
+    Ok(out)
+}
+
+fn value_from_flat_like(template: &Value, flat_values: &[f64]) -> Result<Value, AdError> {
+    match template {
+        Value::Scalar(_) => {
+            if flat_values.len() != 1 {
+                return Err(AdError::EvalFailed(format!(
+                    "scalar reconstruction expected 1 value, got {}",
+                    flat_values.len()
+                )));
+            }
+            Ok(Value::scalar_f64(flat_values[0]))
+        }
+        Value::Tensor(tensor) => {
+            if flat_values.len() != tensor.len() {
+                return Err(AdError::EvalFailed(format!(
+                    "tensor reconstruction expected {} values, got {}",
+                    tensor.len(),
+                    flat_values.len()
+                )));
+            }
+            let elements = flat_values
+                .iter()
+                .copied()
+                .map(Literal::from_f64)
+                .collect::<Vec<_>>();
+            TensorValue::new(DType::F64, tensor.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))
+        }
+    }
+}
+
+fn reconstruct_args_from_flat(
+    templates: &[Value],
+    flat_args: &[Vec<f64>],
+) -> Result<Vec<Value>, AdError> {
+    if templates.len() != flat_args.len() {
+        return Err(AdError::EvalFailed(format!(
+            "argument reconstruction expected {} arg vectors, got {}",
+            templates.len(),
+            flat_args.len()
+        )));
+    }
+    templates
+        .iter()
+        .zip(flat_args.iter())
+        .map(|(template, flat)| value_from_flat_like(template, flat))
+        .collect()
+}
+
+fn basis_value_like(template: &Value, basis_index: usize) -> Result<Value, AdError> {
+    match template {
+        Value::Scalar(_) => {
+            if basis_index != 0 {
+                return Err(AdError::EvalFailed(format!(
+                    "scalar basis index out of range: {basis_index}"
+                )));
+            }
+            Ok(Value::scalar_f64(1.0))
+        }
+        Value::Tensor(tensor) => {
+            if basis_index >= tensor.len() {
+                return Err(AdError::EvalFailed(format!(
+                    "tensor basis index out of range: {basis_index} >= {}",
+                    tensor.len()
+                )));
+            }
+            let mut elements = vec![Literal::from_f64(0.0); tensor.len()];
+            elements[basis_index] = Literal::from_f64(1.0);
+            TensorValue::new(DType::F64, tensor.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))
+        }
+    }
+}
+
+fn global_basis_to_arg_index(lengths: &[usize], mut index: usize) -> Option<(usize, usize)> {
+    for (arg_idx, len) in lengths.iter().copied().enumerate() {
+        if index < len {
+            return Some((arg_idx, index));
+        }
+        index = index.saturating_sub(len);
+    }
+    None
+}
+
+fn matrix_value(rows: usize, cols: usize, entries: Vec<f64>) -> Result<Value, AdError> {
+    let rows_u32 = u32::try_from(rows)
+        .map_err(|_| AdError::EvalFailed(format!("row count too large for shape: {rows}")))?;
+    let cols_u32 = u32::try_from(cols)
+        .map_err(|_| AdError::EvalFailed(format!("column count too large for shape: {cols}")))?;
+    let elements = entries
+        .into_iter()
+        .map(Literal::from_f64)
+        .collect::<Vec<_>>();
+    TensorValue::new(
+        DType::F64,
+        Shape {
+            dims: vec![rows_u32, cols_u32],
+        },
+        elements,
+    )
+    .map(Value::Tensor)
+    .map_err(|e| AdError::EvalFailed(e.to_string()))
+}
+
+/// Compute Jacobian matrix of all outputs with respect to all inputs.
+///
+/// Output layout is row-major `[output_dim, input_dim]`, where both dimensions
+/// are flattened over all output/input values in argument order.
+pub fn jacobian_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Value, AdError> {
+    if args.is_empty() {
+        return Err(AdError::InputArity {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let input_lengths = args
+        .iter()
+        .map(flatten_value_to_f64)
+        .map(|res| res.map(|flat| flat.len()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let input_dim = input_lengths.iter().sum::<usize>();
+    if input_dim == 0 {
+        return Err(AdError::EvalFailed(
+            "jacobian requires at least one differentiable input dimension".to_owned(),
+        ));
+    }
+
+    let zero_tangents = args.iter().map(zeros_like).collect::<Vec<_>>();
+    let mut output_dim = None::<usize>;
+    let mut jacobian = Vec::<f64>::new();
+
+    for basis_idx in 0..input_dim {
+        let (arg_idx, local_idx) = global_basis_to_arg_index(&input_lengths, basis_idx)
+            .ok_or_else(|| {
+                AdError::EvalFailed(format!("unable to resolve basis index {basis_idx}"))
+            })?;
+        let mut tangents = zero_tangents.clone();
+        tangents[arg_idx] = basis_value_like(&args[arg_idx], local_idx)?;
+
+        let jvp_result = jvp(jaxpr, args, &tangents)?;
+        let tangent_flat = flatten_values_to_f64(&jvp_result.tangents)?;
+        let current_output_dim = tangent_flat.len();
+
+        if let Some(expected) = output_dim {
+            if expected != current_output_dim {
+                return Err(AdError::EvalFailed(format!(
+                    "inconsistent Jacobian output dimension: expected {expected}, got {current_output_dim}"
+                )));
+            }
+        } else {
+            output_dim = Some(current_output_dim);
+            jacobian.resize(current_output_dim * input_dim, 0.0);
+        }
+
+        for (row, value) in tangent_flat.into_iter().enumerate() {
+            jacobian[row * input_dim + basis_idx] = value;
+        }
+    }
+
+    matrix_value(output_dim.unwrap_or(0), input_dim, jacobian)
+}
+
+/// Compute Hessian matrix of a scalar-output function with respect to all inputs.
+///
+/// Uses central-difference directional derivatives of `grad_jaxpr` with
+/// epsilon `1e-5`. Output is row-major `[input_dim, input_dim]`.
+pub fn hessian_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Value, AdError> {
+    if args.is_empty() {
+        return Err(AdError::InputArity {
+            expected: 1,
+            actual: 0,
+        });
+    }
+
+    let base_flat_args = args
+        .iter()
+        .map(flatten_value_to_f64)
+        .collect::<Result<Vec<_>, _>>()?;
+    let input_lengths = base_flat_args.iter().map(Vec::len).collect::<Vec<_>>();
+    let input_dim = input_lengths.iter().sum::<usize>();
+    if input_dim == 0 {
+        return Err(AdError::EvalFailed(
+            "hessian requires at least one differentiable input dimension".to_owned(),
+        ));
+    }
+
+    let epsilon = 1e-5_f64;
+    let mut hessian = vec![0.0; input_dim * input_dim];
+
+    for basis_idx in 0..input_dim {
+        let (arg_idx, local_idx) = global_basis_to_arg_index(&input_lengths, basis_idx)
+            .ok_or_else(|| {
+                AdError::EvalFailed(format!("unable to resolve basis index {basis_idx}"))
+            })?;
+
+        let mut plus_flat = base_flat_args.clone();
+        plus_flat[arg_idx][local_idx] += epsilon;
+        let plus_args = reconstruct_args_from_flat(args, &plus_flat)?;
+        let plus_grad = grad_jaxpr(jaxpr, &plus_args)?;
+        let plus_flat_grad = flatten_values_to_f64(&plus_grad)?;
+
+        let mut minus_flat = base_flat_args.clone();
+        minus_flat[arg_idx][local_idx] -= epsilon;
+        let minus_args = reconstruct_args_from_flat(args, &minus_flat)?;
+        let minus_grad = grad_jaxpr(jaxpr, &minus_args)?;
+        let minus_flat_grad = flatten_values_to_f64(&minus_grad)?;
+
+        if plus_flat_grad.len() != input_dim || minus_flat_grad.len() != input_dim {
+            return Err(AdError::EvalFailed(format!(
+                "gradient dimension mismatch for Hessian: expected {input_dim}, got plus={} minus={}",
+                plus_flat_grad.len(),
+                minus_flat_grad.len()
+            )));
+        }
+
+        for row in 0..input_dim {
+            hessian[row * input_dim + basis_idx] =
+                (plus_flat_grad[row] - minus_flat_grad[row]) / (2.0 * epsilon);
+        }
+    }
+
+    matrix_value(input_dim, input_dim, hessian)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6227,6 +6473,135 @@ mod tests {
         assert!(
             (tangent_val - 12.0).abs() < 1e-10,
             "tangent = {tangent_val}"
+        );
+    }
+
+    #[test]
+    fn test_jacobian_two_outputs_two_inputs() {
+        use fj_core::{Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3), VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+
+        let jac = jacobian_jaxpr(&jaxpr, &[Value::scalar_f64(2.0), Value::scalar_f64(3.0)])
+            .expect("jacobian should succeed");
+        let tensor = jac.as_tensor().expect("jacobian should return tensor");
+        assert_eq!(tensor.shape.dims, vec![2, 2]);
+        let vals = tensor.to_f64_vec().expect("f64 elements");
+        assert!((vals[0] - 1.0).abs() < 1e-10);
+        assert!((vals[1] - 1.0).abs() < 1e-10);
+        assert!((vals[2] - 3.0).abs() < 1e-10);
+        assert!((vals[3] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_hessian_x2y() {
+        use fj_core::{Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+
+        let hessian = hessian_jaxpr(&jaxpr, &[Value::scalar_f64(2.0), Value::scalar_f64(3.0)])
+            .expect("hessian should succeed");
+        let tensor = hessian.as_tensor().expect("hessian should return tensor");
+        assert_eq!(tensor.shape.dims, vec![2, 2]);
+        let vals = tensor.to_f64_vec().expect("f64 elements");
+        assert!((vals[0] - 6.0).abs() < 1e-3);
+        assert!((vals[1] - 4.0).abs() < 1e-3);
+        assert!((vals[2] - 4.0).abs() < 1e-3);
+        assert!(vals[3].abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_hessian_is_symmetric_for_quadratic() {
+        use fj_core::{Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(5)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(4))],
+                    outputs: smallvec![VarId(5)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+
+        let hessian = hessian_jaxpr(&jaxpr, &[Value::scalar_f64(1.5), Value::scalar_f64(2.0)])
+            .expect("hessian should succeed");
+        let tensor = hessian.as_tensor().expect("hessian should return tensor");
+        let vals = tensor.to_f64_vec().expect("f64 elements");
+        assert_eq!(tensor.shape.dims, vec![2, 2]);
+        assert!(
+            (vals[1] - vals[2]).abs() < 1e-3,
+            "hessian should be symmetric: {:?}",
+            vals
         );
     }
 }

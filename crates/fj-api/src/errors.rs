@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use fj_ad::AdError;
 use fj_dispatch::{DispatchError, TransformExecutionError};
 
 #[derive(Debug)]
@@ -67,6 +68,19 @@ impl From<DispatchError> for ApiError {
                 _ => Self::EvalError {
                     detail: e.to_string(),
                 },
+            },
+        }
+    }
+}
+
+impl From<AdError> for ApiError {
+    fn from(err: AdError) -> Self {
+        match err {
+            AdError::NonScalarGradientOutput => Self::GradRequiresScalar {
+                detail: "jacobian/hessian requires differentiable scalar outputs".to_owned(),
+            },
+            other => Self::EvalError {
+                detail: other.to_string(),
             },
         }
     }
