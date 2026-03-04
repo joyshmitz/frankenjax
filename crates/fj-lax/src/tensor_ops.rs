@@ -209,7 +209,11 @@ fn literal_to_bytes(
     Ok(bytes)
 }
 
-fn bytes_to_literal(primitive: Primitive, dtype: DType, bytes: &[u8]) -> Result<Literal, EvalError> {
+fn bytes_to_literal(
+    primitive: Primitive,
+    dtype: DType,
+    bytes: &[u8],
+) -> Result<Literal, EvalError> {
     match dtype {
         DType::I64 => {
             let array = <[u8; 8]>::try_from(bytes).map_err(|_| EvalError::Unsupported {
@@ -1831,9 +1835,7 @@ pub(crate) fn eval_broadcasted_iota(
     let mut elements = Vec::with_capacity(total);
     for flat in 0..total {
         let axis_index = (flat / stride) % axis_extent;
-        elements.push(literal_from_index_for_dtype(
-            primitive, dtype, axis_index,
-        )?);
+        elements.push(literal_from_index_for_dtype(primitive, dtype, axis_index)?);
     }
 
     Ok(Value::Tensor(TensorValue::new(

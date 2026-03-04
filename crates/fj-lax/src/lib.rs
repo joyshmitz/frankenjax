@@ -20,11 +20,11 @@ use arithmetic::{
 use comparison::eval_comparison;
 use reduction::{eval_cumulative, eval_reduce_axes, eval_reduce_bitwise_axes};
 use tensor_ops::{
-    eval_argsort, eval_broadcast_in_dim, eval_concatenate, eval_conv, eval_dynamic_slice,
-    eval_dynamic_update_slice, eval_expand_dims, eval_gather, eval_iota, eval_one_hot, eval_pad,
+    eval_argsort, eval_bitcast_convert_type, eval_broadcast_in_dim, eval_broadcasted_iota,
+    eval_concatenate, eval_conv, eval_copy, eval_dynamic_slice, eval_dynamic_update_slice,
+    eval_expand_dims, eval_gather, eval_iota, eval_one_hot, eval_pad, eval_reduce_precision,
     eval_reshape, eval_rev, eval_scatter, eval_slice, eval_sort, eval_split, eval_squeeze,
-    eval_transpose, eval_bitcast_convert_type, eval_broadcasted_iota, eval_copy,
-    eval_reduce_precision,
+    eval_transpose,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5582,7 +5582,10 @@ mod tests {
         let copied_ptr = copied.as_tensor().unwrap().elements.as_ptr();
 
         assert_eq!(copied, input);
-        assert_ne!(input_ptr, copied_ptr, "copy should allocate independent storage");
+        assert_ne!(
+            input_ptr, copied_ptr,
+            "copy should allocate independent storage"
+        );
     }
 
     #[test]
@@ -5608,8 +5611,14 @@ mod tests {
         .expect("i64 -> f64 bitcast should succeed");
 
         match (input, round_trip) {
-            (Value::Scalar(Literal::F64Bits(expected)), Value::Scalar(Literal::F64Bits(actual))) => {
-                assert_eq!(actual, expected, "bitcast round trip must preserve exact bits");
+            (
+                Value::Scalar(Literal::F64Bits(expected)),
+                Value::Scalar(Literal::F64Bits(actual)),
+            ) => {
+                assert_eq!(
+                    actual, expected,
+                    "bitcast round trip must preserve exact bits"
+                );
             }
             other => panic!("unexpected round-trip payload: {other:?}"),
         }

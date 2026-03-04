@@ -548,12 +548,13 @@ impl SimpleTraceContext {
                         detail: format!("expected 1 input, got {}", inputs.len()),
                     });
                 }
-                let raw_dtype = params.get("new_dtype").ok_or_else(|| {
-                    TraceError::MissingPrimitiveParam {
-                        primitive,
-                        key: "new_dtype",
-                    }
-                })?;
+                let raw_dtype =
+                    params
+                        .get("new_dtype")
+                        .ok_or(TraceError::MissingPrimitiveParam {
+                            primitive,
+                            key: "new_dtype",
+                        })?;
                 let dtype = parse_dtype_name(primitive, "new_dtype", raw_dtype)?;
                 Ok(vec![ShapedArray {
                     dtype,
@@ -821,12 +822,12 @@ impl SimpleTraceContext {
                         detail: format!("expected 0 inputs, got {}", inputs.len()),
                     });
                 }
-                let raw_shape = params.get("shape").ok_or_else(|| {
-                    TraceError::MissingPrimitiveParam {
+                let raw_shape = params
+                    .get("shape")
+                    .ok_or(TraceError::MissingPrimitiveParam {
                         primitive,
                         key: "shape",
-                    }
-                })?;
+                    })?;
                 let dims = parse_u32_list(primitive, "shape", raw_shape)?;
                 let rank = dims.len();
                 let dimension = params
@@ -3439,7 +3440,8 @@ mod tests {
     fn test_infer_bitcast_convert_type_shape() {
         run_logged_test(
             "test_infer_bitcast_convert_type_shape",
-            fj_test_utils::fixture_id_from_json(&("bitcast-shape", [4_u32])).expect("fixture digest"),
+            fj_test_utils::fixture_id_from_json(&("bitcast-shape", [4_u32]))
+                .expect("fixture digest"),
             fj_test_utils::TestMode::Strict,
             || {
                 let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {

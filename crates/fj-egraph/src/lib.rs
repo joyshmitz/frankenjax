@@ -356,7 +356,11 @@ pub fn jaxpr_to_egraph(jaxpr: &Jaxpr) -> (RecExpr<FjLang>, BTreeMap<VarId, Id>) 
             | Primitive::Cbrt
             | Primitive::IsFinite
             | Primitive::IntegerPow
-            | Primitive::Nextafter => {
+            | Primitive::Nextafter
+            | Primitive::BroadcastedIota
+            | Primitive::Copy
+            | Primitive::BitcastConvertType
+            | Primitive::ReducePrecision => {
                 panic!(
                     "primitive {} not supported by egraph lowering",
                     eqn.primitive.as_str()

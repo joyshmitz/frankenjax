@@ -358,7 +358,10 @@ pub fn apply_batch_rule(
         | Primitive::Imag
         | Primitive::Cbrt
         | Primitive::IsFinite
-        | Primitive::IntegerPow => batch_unary_elementwise(primitive, inputs, params),
+        | Primitive::IntegerPow
+        | Primitive::Copy
+        | Primitive::BitcastConvertType
+        | Primitive::ReducePrecision => batch_unary_elementwise(primitive, inputs, params),
 
         // ── Binary elementwise ─────────────────────────────────
         Primitive::Add
@@ -432,6 +435,7 @@ pub fn apply_batch_rule(
 
         // ── Index generation ───────────────────────────────────
         Primitive::Iota => batch_iota(inputs, params),
+        Primitive::BroadcastedIota => batch_broadcasted_iota(inputs, params),
 
         // ── Encoding ───────────────────────────────────────────
         Primitive::OneHot => batch_passthrough_leading(primitive, inputs, params),
@@ -1220,10 +1224,25 @@ fn batch_iota(
     inputs: &[BatchTracer],
     params: &BTreeMap<String, String>,
 ) -> Result<BatchTracer, BatchError> {
-    // Iota doesn't depend on inputs (it generates indices), so it's always unbatched
-    let result = eval_primitive(Primitive::Iota, &[], params)
-        .map_err(|e| BatchError::EvalError(e.to_string()))?;
-    let _ = inputs; // Iota takes no value inputs
+    batch_nullary(Primitive::Iota, inputs, params)
+}
+
+fn batch_broadcasted_iota(
+    inputs: &[BatchTracer],
+    params: &BTreeMap<String, String>,
+) -> Result<BatchTracer, BatchError> {
+    batch_nullary(Primitive::BroadcastedIota, inputs, params)
+}
+
+fn batch_nullary(
+    primitive: Primitive,
+    inputs: &[BatchTracer],
+    params: &BTreeMap<String, String>,
+) -> Result<BatchTracer, BatchError> {
+    // Nullary primitives do not depend on value inputs, so they stay unbatched.
+    let result =
+        eval_primitive(primitive, &[], params).map_err(|e| BatchError::EvalError(e.to_string()))?;
+    let _ = inputs;
     Ok(BatchTracer::unbatched(result))
 }
 

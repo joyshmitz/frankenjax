@@ -1355,11 +1355,34 @@ fn vjp(
             // Iota has no inputs, so no gradients to propagate.
             Ok(vec![])
         }
+        Primitive::BroadcastedIota => {
+            // BroadcastedIota has no differentiable inputs (discrete indices).
+            Ok(inputs.iter().map(zeros_like).collect())
+        }
         Primitive::OneHot => {
             // OneHot is not differentiable w.r.t. its indices (discrete).
             // Return zero gradient for the single input.
             Ok(vec![Value::scalar_f64(0.0)])
         }
+        Primitive::Copy => Ok(vec![g.clone()]),
+        Primitive::BitcastConvertType => {
+            if inputs.len() != 1 {
+                return Err(AdError::InputArity {
+                    expected: 1,
+                    actual: inputs.len(),
+                });
+            }
+            let mut inverse_params = BTreeMap::new();
+            inverse_params.insert("new_dtype".to_owned(), format!("{:?}", inputs[0].dtype()));
+            let grad_input = eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(g),
+                &inverse_params,
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            Ok(vec![grad_input])
+        }
+        Primitive::ReducePrecision => Ok(vec![g.clone()]),
         Primitive::DynamicUpdateSlice => {
             // VJP: g_operand = g with update region zeroed out,
             //       g_update = slice of g at the start positions.
@@ -3173,7 +3196,15 @@ fn jvp_rule(
             _ => ep_p(Primitive::Pad, tangents, params),
         },
         Primitive::Iota => Ok(Value::scalar_f64(0.0)),
+        Primitive::BroadcastedIota => Ok(Value::scalar_f64(0.0)),
         Primitive::OneHot => Ok(Value::scalar_f64(0.0)),
+        Primitive::Copy => Ok(tangents[0].clone()),
+        Primitive::BitcastConvertType => ep_p(
+            Primitive::BitcastConvertType,
+            &[tangents[0].clone()],
+            params,
+        ),
+        Primitive::ReducePrecision => Ok(tangents[0].clone()),
         Primitive::DynamicUpdateSlice => ep_p(Primitive::DynamicUpdateSlice, tangents, params),
         Primitive::Cumsum => ep_p(Primitive::Cumsum, &[tangents[0].clone()], params),
         Primitive::Cumprod => ep_p(Primitive::Cumsum, &[tangents[0].clone()], params),
