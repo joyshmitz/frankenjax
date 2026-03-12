@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/gj_07_large_program.golden/gj_07_large_program.golden.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/golden_journeys/gj_07_large_program.golden.json",
+  "expected_sha256_hex": "52d45c311594a2cce0c37a8c2314e65e4cf70309defaf2005146d494dac4be1a",
+  "decoded_sha256_hex": "52d45c311594a2cce0c37a8c2314e65e4cf70309defaf2005146d494dac4be1a",
+  "decoded_matches_expected": true,
+  "total_symbols": 6,
+  "source_symbols": 5,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312741102
+}

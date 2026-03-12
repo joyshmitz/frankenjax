@@ -1,0 +1,43 @@
+{
+  "schema_version": "frankenjax.sidecar.v1",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c002_user_api_mode_and_backend_configuration.e2e.json",
+  "artifact_sha256_hex": "e0be9fe5c40317a5d28e129ab023c031c26bc6f52655b9e89e1f3534c25574b7",
+  "artifact_size": 524,
+  "generated_at_unix_ms": 1773312740561,
+  "object_id_high": 16194557119255746469,
+  "object_id_low": 15172084650247176241,
+  "symbol_size": 256,
+  "max_block_size": 1048576,
+  "repair_overhead": 1.1,
+  "source_blocks": 1,
+  "symbols_per_block": 3,
+  "total_symbols": 4,
+  "source_symbols": 3,
+  "repair_symbols": 1,
+  "symbols": [
+    {
+      "sbn": 0,
+      "esi": 0,
+      "kind": "source",
+      "data_b64": "ewogICJzY2hlbWFfdmVyc2lvbiI6ICJmcmFua2VuamF4LmUyZS5sb2cudjEiLAogICJzY2VuYXJpb19pZCI6ICJlMmVfcDJjMDAyX3VzZXJfYXBpX21vZGVfYW5kX2JhY2tlbmRfY29uZmlndXJhdGlvbiIsCiAgInBhY2tldF9pZCI6ICJQMkMtMDAyIiwKICAicmVzdWx0IjogInBhc3MiLAogICJkdXJhdGlvbl9tcyI6IDIzMiwKICAiZGV0YWlscyI6ICJzY2VuYXJpbyBkaWQgbm90IGVtaXQgZm9yZW5zaWMgbG9nOyBzZWUgc3Rkb3V0IGxvZyIsCiAgIg=="
+    },
+    {
+      "sbn": 0,
+      "esi": 1,
+      "kind": "source",
+      "data_b64": "cmVwbGF5X2NvbW1hbmQiOiAiY2FyZ28gdGVzdCAtcCBmai1jb25mb3JtYW5jZSAtLXRlc3QgZTJlX3AyYzAwMiAtLSBlMmVfcDJjMDAyX3VzZXJfYXBpX21vZGVfYW5kX2JhY2tlbmRfY29uZmlndXJhdGlvbiAtLWV4YWN0IC0tbm9jYXB0dXJlIiwKICAiYXJ0aWZhY3RfcmVmcyI6IFsiL2RhdGEvcHJvamVjdHMvZnJhbmtlbmpheC9hcnRpZmFjdHMvZTJlL2UyZV9wMmMwMDJfdXNlcl9hcGlfbW9kZV9hbmRfYmFja2VuZF9jb25maWd1cmF0aW9uLnN0ZA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 2,
+      "kind": "source",
+      "data_b64": "b3V0LmxvZyJdCn0KAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 3,
+      "kind": "repair",
+      "data_b64": "b+FDHJILSxYcjTvZWwm922uelX4+yZJVl3b3YArsw95hzgZC2FjCB9y4HBE14xsmJiFro2vgdt/DobtCSiLgA0AGOwrktZ/AqnRCLh/qfjxbdiAfckjaS5Oe3UhLcvjdwN80lXvkzdaUILkZNfk9gtfrgU+ZYiomTDQYinRrSEBnRpL3FLcT/ebWFvqJQEtQFJYh+UL9COs8/CpiV9fGwyELDBgUS354ikoMp8OggVv4i/y8U3OqTqQl7G1+g2tHllX/olfFgmlr86LJdoKc/F9dCRZeKsLgln6BnEdezAf1opT9ErdeVOsV84K6CX5fETF32p6ClrS0b5Iy9z1LQw=="
+    }
+  ]
+}

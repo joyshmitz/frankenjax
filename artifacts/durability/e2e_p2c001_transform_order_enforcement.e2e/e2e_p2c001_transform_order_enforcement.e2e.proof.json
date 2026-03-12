@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-00847ff7f5fc252e",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c001_transform_order_enforcement.e2e/e2e_p2c001_transform_order_enforcement.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c001_transform_order_enforcement.e2e.json",
+  "expected_sha256_hex": "99708dedc58e7994346efcedaf8ae21cb41942aaf7c6a21d12b82dbd8589f0e8",
+  "decoded_sha256_hex": "99708dedc58e7994346efcedaf8ae21cb41942aaf7c6a21d12b82dbd8589f0e8",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:5"
+  ],
+  "attempted_symbol_count": 5,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740004
+}

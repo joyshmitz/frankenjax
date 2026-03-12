@@ -1,0 +1,10 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_edge_cases_comparison_with_nan",
+  "packet_id": "UNSPECIFIED",
+  "result": "pass",
+  "duration_ms": 209,
+  "details": "scenario did not emit forensic log; see stdout log",
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c008 -- e2e_edge_cases_comparison_with_nan --exact --nocapture",
+  "artifact_refs": ["/data/projects/frankenjax/artifacts/e2e/e2e_edge_cases_comparison_with_nan.stdout.log"]
+}

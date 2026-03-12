@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/reliability_budgets.v1/reliability_budgets.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/reliability_budgets.v1.json",
+  "expected_sha256_hex": "1b772c4d901831343d5b3fa4e1a99ebd4993cabc0a7e30e046ce8793c4d36e23",
+  "decoded_sha256_hex": "1b772c4d901831343d5b3fa4e1a99ebd4993cabc0a7e30e046ce8793c4d36e23",
+  "decoded_matches_expected": true,
+  "total_symbols": 7,
+  "source_symbols": 6,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312742119
+}

@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_device_routing_via_registry.e2e/e2e_device_routing_via_registry.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_device_routing_via_registry.e2e.json",
+  "expected_sha256_hex": "8ce50dac6090d08df92deb70f12b1cc0a1f9660f3e90336f42b1882530559ad2",
+  "decoded_sha256_hex": "8ce50dac6090d08df92deb70f12b1cc0a1f9660f3e90336f42b1882530559ad2",
+  "decoded_matches_expected": true,
+  "total_symbols": 3,
+  "source_symbols": 2,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740742
+}

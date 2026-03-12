@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/coverage_report.v1/coverage_report.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/coverage_report.v1.json",
+  "expected_sha256_hex": "57c0c11178530ae637311f65ec85eed0eb04f230a23f40a5a051dbc702f38558",
+  "decoded_sha256_hex": "57c0c11178530ae637311f65ec85eed0eb04f230a23f40a5a051dbc702f38558",
+  "decoded_matches_expected": true,
+  "total_symbols": 10,
+  "source_symbols": 9,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312742070
+}

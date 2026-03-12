@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/flake_report.v1/flake_report.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/flake_report.v1.json",
+  "expected_sha256_hex": "99c064d077711618f2196610f23abf603c682da2a7d4b5d37d3b6375bb4dfc13",
+  "decoded_sha256_hex": "99c064d077711618f2196610f23abf603c682da2a7d4b5d37d3b6375bb4dfc13",
+  "decoded_matches_expected": true,
+  "total_symbols": 3,
+  "source_symbols": 2,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312741136
+}

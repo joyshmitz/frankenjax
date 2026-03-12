@@ -1,0 +1,43 @@
+{
+  "schema_version": "frankenjax.sidecar.v1",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_parity_report_final.e2e.json",
+  "artifact_sha256_hex": "31268df5f5104d3ebe2909b6f532075c87946b62822c03f1978082911c4f82b0",
+  "artifact_size": 650,
+  "generated_at_unix_ms": 1773312740375,
+  "object_id_high": 3541674244491463998,
+  "object_id_low": 13702494022653839196,
+  "symbol_size": 256,
+  "max_block_size": 1048576,
+  "repair_overhead": 1.1,
+  "source_blocks": 1,
+  "symbols_per_block": 3,
+  "total_symbols": 4,
+  "source_symbols": 3,
+  "repair_symbols": 1,
+  "symbols": [
+    {
+      "sbn": 0,
+      "esi": 0,
+      "kind": "source",
+      "data_b64": "ewogICJ0b3RhbF9jYXNlcyI6IDM2MiwKICAibWF0Y2hlZCI6IDM2MiwKICAibWlzbWF0Y2hlZCI6IDAsCiAgInBhc3NfcmF0ZSI6IDEuMCwKICAicGVyX2ZhbWlseSI6IHsKICAgICJjb250cm9sX2Zsb3ciOiB7CiAgICAgICJ0b3RhbCI6IDExLAogICAgICAibWF0Y2hlZCI6IDExLAogICAgICAibWlzbWF0Y2hlZCI6IDAKICAgIH0sCiAgICAiZ3JhZCI6IHsKICAgICAgInRvdGFsIjogNTgsCiAgICAgICJtYXRjaGVkIjogNTgsCiAgICAgICJtaXNtYQ=="
+    },
+    {
+      "sbn": 0,
+      "esi": 1,
+      "kind": "source",
+      "data_b64": "dGNoZWQiOiAwCiAgICB9LAogICAgImppdCI6IHsKICAgICAgInRvdGFsIjogNTUsCiAgICAgICJtYXRjaGVkIjogNTUsCiAgICAgICJtaXNtYXRjaGVkIjogMAogICAgfSwKICAgICJsYXgiOiB7CiAgICAgICJ0b3RhbCI6IDIwNCwKICAgICAgIm1hdGNoZWQiOiAyMDQsCiAgICAgICJtaXNtYXRjaGVkIjogMAogICAgfSwKICAgICJyYW5kb20iOiB7CiAgICAgICJ0b3RhbCI6IDI1LAogICAgICAibWF0Y2hlZCI6IDI1LAogICAgICAibWlzbWF0Y2hlZA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 2,
+      "kind": "source",
+      "data_b64": "IjogMAogICAgfSwKICAgICJ2bWFwIjogewogICAgICAidG90YWwiOiA5LAogICAgICAibWF0Y2hlZCI6IDksCiAgICAgICJtaXNtYXRjaGVkIjogMAogICAgfQogIH0sCiAgImdhdGVfc3RhdHVzIjogInBhc3MiLAogICJwYXNzIjogdHJ1ZQp9AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 3,
+      "kind": "repair",
+      "data_b64": "KiE2Zui7dfAESM0fZntJ3MOZChtqQeuspcrgB0BODOY3oeUceI8MGc0v4Jn4WIzcuWZ1lEeUo/AV1gFxB4SooDxmJCRT8ONoPYCiM70kqVJAKQSN3AlNv/VmoX4ypDwDemkdF6EztAXHK7gacIdszxoy6J5ZQqEqSOCsoFy7M6nqHKDYFEzQJMMUAIIUS1+OgikLp95h1qqtgUCCKmhoS1CzJT2zFEs1G8PA9MZI1uAKP0CC0fqlKioqKoP3JVMp+LMLePb4gUCCKnYbKmFL+EsUcgPNSPfV5zwqvOhLGyphsxRLX+QX3QOsXiNg5zwqvOhLGyphsyU9s37eHmcX3Q=="
+    }
+  ]
+}

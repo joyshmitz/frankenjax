@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c001_transform_stack_composition.e2e/e2e_p2c001_transform_stack_composition.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c001_transform_stack_composition.e2e.json",
+  "expected_sha256_hex": "ebbcbd1016ffe71438419bb082e4999fc848e153fca606d09a8b0707239e3a37",
+  "decoded_sha256_hex": "ebbcbd1016ffe71438419bb082e4999fc848e153fca606d09a8b0707239e3a37",
+  "decoded_matches_expected": true,
+  "total_symbols": 8,
+  "source_symbols": 7,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740017
+}

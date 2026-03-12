@@ -1,0 +1,10 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_composition_add_mul_reduce",
+  "packet_id": "UNSPECIFIED",
+  "result": "pass",
+  "duration_ms": 217,
+  "details": "scenario did not emit forensic log; see stdout log",
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c008 -- e2e_composition_add_mul_reduce --exact --nocapture",
+  "artifact_refs": ["/data/projects/frankenjax/artifacts/e2e/e2e_composition_add_mul_reduce.stdout.log"]
+}

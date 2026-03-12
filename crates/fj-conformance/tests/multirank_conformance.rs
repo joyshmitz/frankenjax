@@ -1045,7 +1045,9 @@ fn build_multirank_fixture_bundle() -> TransformFixtureBundle {
 
 fn fixture_shape(value: &FixtureValue) -> Vec<u32> {
     match value {
-        FixtureValue::ScalarF64 { .. } | FixtureValue::ScalarI64 { .. } => Vec::new(),
+        FixtureValue::ScalarF64 { .. }
+        | FixtureValue::ScalarI64 { .. }
+        | FixtureValue::ScalarBool { .. } => Vec::new(),
         FixtureValue::VectorF64 { values } => vec![values.len() as u32],
         FixtureValue::VectorI64 { values } => vec![values.len() as u32],
         FixtureValue::TensorF64 { shape, .. }

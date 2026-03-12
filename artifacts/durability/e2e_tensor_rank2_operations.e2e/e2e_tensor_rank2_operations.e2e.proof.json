@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-806c448f925573a8",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_tensor_rank2_operations.e2e/e2e_tensor_rank2_operations.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_tensor_rank2_operations.e2e.json",
+  "expected_sha256_hex": "45d827f939d3b1375cc4adea496340a7816ccc9b156665f8be665fae11e1d3c0",
+  "decoded_sha256_hex": "45d827f939d3b1375cc4adea496340a7816ccc9b156665f8be665fae11e1d3c0",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740998
+}

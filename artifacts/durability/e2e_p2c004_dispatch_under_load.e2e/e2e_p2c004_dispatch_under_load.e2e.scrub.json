@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c004_dispatch_under_load.e2e/e2e_p2c004_dispatch_under_load.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c004_dispatch_under_load.e2e.json",
+  "expected_sha256_hex": "456c6939db9b3fb7b3aa47da47a36e98949395766414a30998ddb8b8c3d9d966",
+  "decoded_sha256_hex": "456c6939db9b3fb7b3aa47da47a36e98949395766414a30998ddb8b8c3d9d966",
+  "decoded_matches_expected": true,
+  "total_symbols": 5,
+  "source_symbols": 4,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740253
+}

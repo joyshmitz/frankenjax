@@ -1,0 +1,15 @@
+{
+  "proof_id": "decode-proof-933bb328418a7a31",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/coverage_raw_llvmcov.v1/coverage_raw_llvmcov.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/coverage_raw_llvmcov.v1.json",
+  "expected_sha256_hex": "67c5b60094716acb11e9382a20bc5f856e46fb6cbe569c473f0349549df2d278",
+  "decoded_sha256_hex": "67c5b60094716acb11e9382a20bc5f856e46fb6cbe569c473f0349549df2d278",
+  "dropped_symbols": [
+    "kind:source:sbn:0:esi:0",
+    "kind:source:sbn:0:esi:1"
+  ],
+  "attempted_symbol_count": 782,
+  "recovered": true,
+  "details": "drop-kind=source count=2; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312742054
+}

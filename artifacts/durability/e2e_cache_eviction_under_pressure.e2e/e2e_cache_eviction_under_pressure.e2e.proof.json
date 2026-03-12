@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-c442464c2a9be524",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_cache_eviction_under_pressure.e2e/e2e_cache_eviction_under_pressure.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_cache_eviction_under_pressure.e2e.json",
+  "expected_sha256_hex": "7827cf690e5b92f2baa7792049a930081b7514791576eb5a4e911016c87809d5",
+  "decoded_sha256_hex": "7827cf690e5b92f2baa7792049a930081b7514791576eb5a4e911016c87809d5",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740579
+}

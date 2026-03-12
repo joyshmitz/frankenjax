@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-9c2d79a20a12080a",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/reliability_budgets.v1/reliability_budgets.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/reliability_budgets.v1.json",
+  "expected_sha256_hex": "1b772c4d901831343d5b3fa4e1a99ebd4993cabc0a7e30e046ce8793c4d36e23",
+  "decoded_sha256_hex": "1b772c4d901831343d5b3fa4e1a99ebd4993cabc0a7e30e046ce8793c4d36e23",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:6"
+  ],
+  "attempted_symbol_count": 6,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312742120
+}

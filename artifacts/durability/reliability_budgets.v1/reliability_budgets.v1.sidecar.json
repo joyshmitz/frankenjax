@@ -3,7 +3,7 @@
   "artifact_path": "/data/projects/frankenjax/artifacts/ci/reliability_budgets.v1.json",
   "artifact_sha256_hex": "1b772c4d901831343d5b3fa4e1a99ebd4993cabc0a7e30e046ce8793c4d36e23",
   "artifact_size": 1309,
-  "generated_at_unix_ms": 1771109496671,
+  "generated_at_unix_ms": 1773312742117,
   "object_id_high": 1979099272894230836,
   "object_id_low": 4421197436587450045,
   "symbol_size": 256,
@@ -55,7 +55,7 @@
       "sbn": 0,
       "esi": 6,
       "kind": "repair",
-      "data_b64": "XSuVmK9MgZHN9/4ZbzOYr6CqfgWSyJONaa6Y+mWQichatYmhYzAJe3xJW20Zm97+j4yb+hdRIwed4hHe1wllj/TFZMq+sme9DXT1MmOCWSghBjGR8R+23h7gNnKO4Yf6M4TphA8DafZec2Z9rsk9tSSzeYT+ukN6XW2rpb7g6xEZOoKwv1ypXiUgYjeZETAx8MGyYeuH+f8ogj+NSc3uWzgptgEuV2RTlaYh+j9W/IVp46+vmh7HoiHHGd2knx5ek/O4NkCB8TLKmKWzlk9q1Fsso/ou1I3UtBPV4TGeY/QzpIvXZiYnO+D92OtoM3y4hOm1JGzyWEN8H4nWjxut6Q=="
+      "data_b64": "53Q3ThIol6UldZuVOUTJ7OtYmn/b2NDaOYlJK7Z67IoohX9QyLic9fd8thazKqTKznF8OlZYRCxu3qTY8h7p3S8alFJLC/xiYTDBrfiqs/aBWlk53Tx3gNYgE0alVOLBzeTtiVGkfhGWvBDAMSAxY0mjjBQ601/HDfOrrcNR7URoOz9WRbTHcPtOn5duOMzThl8Gw5om9cKvV+aPt2xn7fIIkFkuOsrWt6ZmitDI7Srk0wXWVqY0a1MVKhwhgJ1glCkwvJchaR2mEDzj9mcC2jKrstqrzzi73clGdQbcfbkxkOgRh4qh8QvX8JciRrwXjsSuntIMZClaA6IQUXsaeQ=="
     }
   ]
 }

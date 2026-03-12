@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c004_strict_hardened_divergence.e2e/e2e_p2c004_strict_hardened_divergence.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c004_strict_hardened_divergence.e2e.json",
+  "expected_sha256_hex": "3b0dff4106ab8ee6e55fd91ccca801b9709290f4c1bb1f1f25922de980ab2375",
+  "decoded_sha256_hex": "3b0dff4106ab8ee6e55fd91ccca801b9709290f4c1bb1f1f25922de980ab2375",
+  "decoded_matches_expected": true,
+  "total_symbols": 6,
+  "source_symbols": 5,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740299
+}

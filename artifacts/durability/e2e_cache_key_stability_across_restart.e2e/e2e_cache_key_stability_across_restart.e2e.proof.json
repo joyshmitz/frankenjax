@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-2f1fc39191d5f7f6",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_cache_key_stability_across_restart.e2e/e2e_cache_key_stability_across_restart.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_cache_key_stability_across_restart.e2e.json",
+  "expected_sha256_hex": "e5b430da2599f273ce0145505d911dfe97a9cb6753ad1b9859e89b732c36aeb9",
+  "decoded_sha256_hex": "e5b430da2599f273ce0145505d911dfe97a9cb6753ad1b9859e89b732c36aeb9",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740624
+}

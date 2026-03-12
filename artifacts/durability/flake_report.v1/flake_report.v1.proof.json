@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-e248db71d4d995d0",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/flake_report.v1/flake_report.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/flake_report.v1.json",
+  "expected_sha256_hex": "99c064d077711618f2196610f23abf603c682da2a7d4b5d37d3b6375bb4dfc13",
+  "decoded_sha256_hex": "99c064d077711618f2196610f23abf603c682da2a7d4b5d37d3b6375bb4dfc13",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312741137
+}

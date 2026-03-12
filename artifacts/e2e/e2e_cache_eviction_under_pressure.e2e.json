@@ -1,0 +1,10 @@
+{
+  "schema_version": "frankenjax.e2e.log.v1",
+  "scenario_id": "e2e_cache_eviction_under_pressure",
+  "packet_id": "UNSPECIFIED",
+  "result": "pass",
+  "duration_ms": 282,
+  "details": "scenario did not emit forensic log; see stdout log",
+  "replay_command": "cargo test -p fj-conformance --test e2e_p2c005 -- e2e_cache_eviction_under_pressure --exact --nocapture",
+  "artifact_refs": ["/data/projects/frankenjax/artifacts/e2e/e2e_cache_eviction_under_pressure.stdout.log"]
+}

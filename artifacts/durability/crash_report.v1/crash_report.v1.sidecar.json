@@ -1,11 +1,11 @@
 {
   "schema_version": "frankenjax.sidecar.v1",
   "artifact_path": "/data/projects/frankenjax/artifacts/ci/crash_report.v1.json",
-  "artifact_sha256_hex": "6ced2373407f1e179f231b3d922dac5fba39ed33870aa7868fee4322c0b665a5",
+  "artifact_sha256_hex": "f92d86107afc48bdfd8d28811ecd4a1094882007d5d9440f74692e7c30a334d2",
   "artifact_size": 384,
-  "generated_at_unix_ms": 1771109496656,
-  "object_id_high": 7848968703486926359,
-  "object_id_low": 11467039027474836575,
+  "generated_at_unix_ms": 1773312742101,
+  "object_id_high": 17955154694736988349,
+  "object_id_low": 18270303798344632848,
   "symbol_size": 256,
   "max_block_size": 1048576,
   "repair_overhead": 1.1,
@@ -19,7 +19,7 @@
       "sbn": 0,
       "esi": 0,
       "kind": "source",
-      "data_b64": "ewogICJzY2hlbWFfdmVyc2lvbiI6ICJmcmFua2VuamF4LmNyYXNoLXJlcG9ydC52MSIsCiAgImdlbmVyYXRlZF9hdF91bml4X21zIjogMTc3MTEwMjMwNDgyNywKICAiaW5kZXhfcGF0aCI6ICIvZGF0YS9wcm9qZWN0cy9mcmFua2VuamF4L2NyYXRlcy9mai1jb25mb3JtYW5jZS9mdXp6L2NvcnB1cy9jcmFzaGVzL2luZGV4LnYxLmpzb25sIiwKICAiaW5kZXhfZXhpc3RzIjogdHJ1ZSwKICAibWF4X29wZW5fcDAiOiAwLAogICJvcGVuX3AwX2NvdW50Ig=="
+      "data_b64": "ewogICJzY2hlbWFfdmVyc2lvbiI6ICJmcmFua2VuamF4LmNyYXNoLXJlcG9ydC52MSIsCiAgImdlbmVyYXRlZF9hdF91bml4X21zIjogMTc3MzI5NDQyMDc5MSwKICAiaW5kZXhfcGF0aCI6ICIvZGF0YS9wcm9qZWN0cy9mcmFua2VuamF4L2NyYXRlcy9mai1jb25mb3JtYW5jZS9mdXp6L2NvcnB1cy9jcmFzaGVzL2luZGV4LnYxLmpzb25sIiwKICAiaW5kZXhfZXhpc3RzIjogdHJ1ZSwKICAibWF4X29wZW5fcDAiOiAwLAogICJvcGVuX3AwX2NvdW50Ig=="
     },
     {
       "sbn": 0,
@@ -31,7 +31,7 @@
       "sbn": 0,
       "esi": 2,
       "kind": "repair",
-      "data_b64": "QSoQDChTQ0oDDAgzKQocLAcKGX1KEABcUhUcHgBCYEFYDAgcDgQGcgJVLwcTB0YTQgAWKnt9Dm1FTkccBAM6Cy8EGgAFXjYQPh4bR0kCCxdsbB06EhMSW0hXWXN6EH9QDA0LFxwsUltUM38WKgIPRhEVElwVFk1QRRcGBkpsD2tua2VuamF4L2NyYXRlcy9mai1jb25mb3JtYW5jZS9mdXp6L2NvcnB1cy9jcmFzaGVzL2luZGV4LnYxLmpzb25sIiwKICAiaW5kZXhfZXhpc3RzIjogdHJ1ZSwKICAibWF4X29wZW5fcDAiOiAwLAogICJvcGVuX3AwX2NvdW50Ig=="
+      "data_b64": "glQgGFCmhpQGGBBmUhQ4WA4UMvqUIAC4pCo4PACEwIKwGBA4HAgM5ASqXg4mDowmhAAsVPb6HNqKnI44CAZ0Fl4INAAKvGwgfDw2jpIEFi7Y3DxmKCggvo64vub0IP6gGBoWLjhYpLaoZv4sVAQejCIqJLgqLJqgii4MDJTYHtbc1src1MLwXsbkwujK5l7M1FrG3tzM3uTawtzGyl7M6vT0Xsbe5ODq5l7G5MLm0MrmXtLcyMrwXOxiXNTm3tzYRFgUQEBE0tzIyvC+yvDS5ujmRHRA6OTqylgUQEBE2sLwvt7gyty+4GBEdEBgWBRAQETe4MrcvuBgvsbe6tzoRA=="
     }
   ]
 }

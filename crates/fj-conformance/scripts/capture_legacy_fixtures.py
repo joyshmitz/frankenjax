@@ -111,6 +111,21 @@ class RandomCase:
     expected_values: list[float] = field(default_factory=list)
 
 
+def fixture_value_bool(value: bool) -> dict[str, Any]:
+    """Encode a boolean value as a scalar_bool fixture."""
+    return {"kind": "scalar_bool", "value": value}
+
+
+def fixture_value_tensor_f64(shape: list[int], values: list[float]) -> dict[str, Any]:
+    """Encode a multi-rank f64 tensor fixture."""
+    return {"kind": "tensor_f64", "shape": shape, "values": values}
+
+
+def fixture_value_tensor_i64(shape: list[int], values: list[int]) -> dict[str, Any]:
+    """Encode a multi-rank i64 tensor fixture."""
+    return {"kind": "tensor_i64", "shape": shape, "values": values}
+
+
 def fixture_value(value: Any) -> dict[str, Any]:
     if isinstance(value, bool):
         return {"kind": "scalar_i64", "value": int(value)}
@@ -511,6 +526,37 @@ class CaseBuilder:
         )
         _log(family, case_id, "ok")
 
+    def add_raw(
+        self,
+        case_id: str,
+        family: str,
+        program: str,
+        transforms: list[str],
+        args: list[dict[str, Any]],
+        expected: list[dict[str, Any]],
+        *,
+        atol: float,
+        rtol: float,
+        comparator: str = "exact",
+    ) -> None:
+        """Add a case with pre-encoded fixture values (e.g. for booleans)."""
+        self._counts[family] = self._counts.get(family, 0) + 1
+        self.cases.append(
+            Case(
+                case_id=case_id,
+                family=family,
+                mode="strict",
+                program=program,
+                transforms=transforms,
+                args=args,
+                expected=expected,
+                atol=atol,
+                rtol=rtol,
+                comparator=comparator,
+            )
+        )
+        _log(family, case_id, "ok")
+
     def summary(self) -> dict[str, int]:
         return dict(self._counts)
 
@@ -593,6 +639,86 @@ def build_grad_cases(cb: CaseBuilder) -> None:
         cb.add(
             f"grad_cos_x_f64_{idx}", "grad", "cos_x", ["grad"],
             [x], [-math.sin(x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad of lax unary primitives (AD coverage expansion)
+    # grad(exp(x)) = exp(x)
+    for idx, x in enumerate([-1.0, 0.0, 0.5, 1.0]):
+        cb.add(
+            f"grad_lax_exp_f64_{idx}", "grad", "lax_exp", ["grad"],
+            [x], [math.exp(x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(log(x)) = 1/x
+    for idx, x in enumerate([0.5, 1.0, 2.0, 4.0]):
+        cb.add(
+            f"grad_lax_log_f64_{idx}", "grad", "lax_log", ["grad"],
+            [x], [1.0 / x], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(sqrt(x)) = 1/(2*sqrt(x))
+    for idx, x in enumerate([0.25, 1.0, 4.0]):
+        cb.add(
+            f"grad_lax_sqrt_f64_{idx}", "grad", "lax_sqrt", ["grad"],
+            [x], [0.5 / math.sqrt(x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(tanh(x)) = 1 - tanh(x)^2
+    for idx, x in enumerate([-1.0, 0.0, 0.5, 1.0]):
+        t = math.tanh(x)
+        cb.add(
+            f"grad_lax_tanh_f64_{idx}", "grad", "lax_tanh", ["grad"],
+            [x], [1.0 - t * t], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(neg(x)) = -1
+    for idx, x in enumerate([-1.0, 0.0, 1.0]):
+        cb.add(
+            f"grad_lax_neg_f64_{idx}", "grad", "lax_neg", ["grad"],
+            [x], [-1.0], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(x^2) via lax_square = 2x
+    for idx, x in enumerate([-1.0, 0.0, 0.5, 2.0]):
+        cb.add(
+            f"grad_lax_square_f64_{idx}", "grad", "lax_square", ["grad"],
+            [x], [2.0 * x], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(reciprocal(x)) = -1/x^2
+    for idx, x in enumerate([0.5, 1.0, 2.0]):
+        cb.add(
+            f"grad_lax_reciprocal_f64_{idx}", "grad", "lax_reciprocal", ["grad"],
+            [x], [-1.0 / (x * x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(tan(x)) = 1 + tan(x)^2 = sec^2(x)
+    for idx, x in enumerate([-0.5, 0.0, 0.5, 1.0]):
+        t = math.tan(x)
+        cb.add(
+            f"grad_lax_tan_f64_{idx}", "grad", "lax_tan", ["grad"],
+            [x], [1.0 + t * t], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(atan(x)) = 1/(1+x^2)
+    for idx, x in enumerate([-1.0, 0.0, 0.5, 1.0]):
+        cb.add(
+            f"grad_lax_atan_f64_{idx}", "grad", "lax_atan", ["grad"],
+            [x], [1.0 / (1.0 + x * x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(sinh(x)) = cosh(x)
+    for idx, x in enumerate([-1.0, 0.0, 0.5]):
+        cb.add(
+            f"grad_lax_sinh_f64_{idx}", "grad", "lax_sinh", ["grad"],
+            [x], [math.cosh(x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(cosh(x)) = sinh(x)
+    for idx, x in enumerate([-1.0, 0.0, 0.5]):
+        cb.add(
+            f"grad_lax_cosh_f64_{idx}", "grad", "lax_cosh", ["grad"],
+            [x], [math.sinh(x)], atol=1e-6, rtol=1e-6,
         )
 
     # nested grad: grad(grad(x^3)) = 6x, but we approximate via grad(square) = 2x
@@ -763,11 +889,100 @@ def build_lax_cases(cb: CaseBuilder) -> None:
                 [a, b], [result], atol=1e-6, rtol=1e-6,
             )
 
-    # NOTE: Comparison ops (eq, ne, lt, le, gt, ge) and select (which needs
-    # boolean cond) return Bool values. The current FixtureValue enum doesn't
-    # support Bool. These will be added when DTYPE beads introduce Bool fixtures.
+    # ── Multi-rank tensor ops (rank-2) ──
+    # Unary ops on 2x3 tensors
+    _tensor_2x3_f64 = [1.0, -0.5, 2.0, 0.5, -1.0, 3.0]
+    _tensor_2x3_positive = [0.5, 1.0, 2.0, 0.1, 3.0, 4.0]
+    _tensor_shape = [2, 3]
 
-    # ── Ternary: clamp (uses f64 inputs, no booleans needed) ──
+    tensor_unary_cases = [
+        ("neg", "lax_neg", lambda x: -x, _tensor_2x3_f64),
+        ("abs", "lax_abs", lambda x: abs(x), _tensor_2x3_f64),
+        ("square", "lax_square", lambda x: x * x, _tensor_2x3_f64),
+        ("exp", "lax_exp", lambda x: math.exp(x), [0.0, 0.5, 1.0, -0.5, -1.0, 0.1]),
+        ("sqrt", "lax_sqrt", lambda x: math.sqrt(x), _tensor_2x3_positive),
+    ]
+
+    for name, program, fn, vals in tensor_unary_cases:
+        expected = [fn(v) for v in vals]
+        cb.add_raw(
+            f"lax_{name}_tensor2x3_f64_0", "lax", program, ["jit"],
+            [fixture_value_tensor_f64(_tensor_shape, vals)],
+            [fixture_value_tensor_f64(_tensor_shape, expected)],
+            atol=1e-6, rtol=1e-6, comparator="approx_atol_rtol",
+        )
+
+    # Binary ops on 2x3 tensors
+    _tensor_2x3_lhs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    _tensor_2x3_rhs = [6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+
+    tensor_binary_cases = [
+        ("sub", "lax_sub", lambda a, b: a - b),
+        ("mul", "lax_mul", lambda a, b: a * b),
+        ("max", "lax_max", lambda a, b: max(a, b)),
+        ("min", "lax_min", lambda a, b: min(a, b)),
+    ]
+
+    for name, program, fn in tensor_binary_cases:
+        expected = [fn(a, b) for a, b in zip(_tensor_2x3_lhs, _tensor_2x3_rhs)]
+        cb.add_raw(
+            f"lax_{name}_tensor2x3_f64_0", "lax", program, ["jit"],
+            [fixture_value_tensor_f64(_tensor_shape, _tensor_2x3_lhs),
+             fixture_value_tensor_f64(_tensor_shape, _tensor_2x3_rhs)],
+            [fixture_value_tensor_f64(_tensor_shape, expected)],
+            atol=1e-6, rtol=1e-6, comparator="approx_atol_rtol",
+        )
+
+    # Comparison ops on 2x3 tensors (return TensorBool)
+    tensor_cmp_cases = [
+        ("eq", "lax_eq", lambda a, b: a == b),
+        ("lt", "lax_lt", lambda a, b: a < b),
+    ]
+    for name, program, fn in tensor_cmp_cases:
+        expected_bools = [fn(a, b) for a, b in zip(_tensor_2x3_lhs, _tensor_2x3_rhs)]
+        cb.add_raw(
+            f"lax_{name}_tensor2x3_f64_0", "lax", program, ["jit"],
+            [fixture_value_tensor_f64(_tensor_shape, _tensor_2x3_lhs),
+             fixture_value_tensor_f64(_tensor_shape, _tensor_2x3_rhs)],
+            [{"kind": "tensor_bool", "shape": _tensor_shape, "values": expected_bools}],
+            atol=0.0, rtol=0.0, comparator="exact",
+        )
+
+    # ── Comparison ops (return Bool) ──
+    _comparison_cases = [
+        ("eq", "lax_eq", lambda a, b: a == b),
+        ("ne", "lax_ne", lambda a, b: a != b),
+        ("lt", "lax_lt", lambda a, b: a < b),
+        ("le", "lax_le", lambda a, b: a <= b),
+        ("gt", "lax_gt", lambda a, b: a > b),
+        ("ge", "lax_ge", lambda a, b: a >= b),
+    ]
+
+    comparison_pairs = [(1.0, 2.0), (2.0, 2.0), (3.0, 1.0), (-0.5, 0.5)]
+    for name, program, fn in _comparison_cases:
+        for idx, (a, b) in enumerate(comparison_pairs):
+            result = fn(a, b)
+            cb.add_raw(
+                f"lax_{name}_f64_{idx}", "lax", program, ["jit"],
+                [fixture_value(a), fixture_value(b)],
+                [fixture_value_bool(result)],
+                atol=0.0, rtol=0.0, comparator="exact",
+            )
+
+    # ── Select (cond, on_true, on_false) -> on_true if cond else on_false ──
+    select_cases = [
+        (True, 10.0, 20.0, 10.0),
+        (False, 10.0, 20.0, 20.0),
+        (True, -1.5, 3.5, -1.5),
+        (False, 0.0, 99.0, 99.0),
+    ]
+    for idx, (cond, on_true, on_false, expected) in enumerate(select_cases):
+        cb.add_raw(
+            f"lax_select_f64_{idx}", "lax", "lax_select", ["jit"],
+            [fixture_value_bool(cond), fixture_value(on_true), fixture_value(on_false)],
+            [fixture_value(expected)],
+            atol=0.0, rtol=0.0, comparator="exact",
+        )
 
     # ── Ternary: clamp ──
     clamp_cases = [

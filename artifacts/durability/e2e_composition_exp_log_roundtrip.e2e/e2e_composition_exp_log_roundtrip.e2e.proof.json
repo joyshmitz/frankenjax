@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-38dc623a753d53c7",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_composition_exp_log_roundtrip.e2e/e2e_composition_exp_log_roundtrip.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_composition_exp_log_roundtrip.e2e.json",
+  "expected_sha256_hex": "dcf734c8cab6944ef0254f20401a63a70cde9eef301bd507b71ef2cd67242b8b",
+  "decoded_sha256_hex": "dcf734c8cab6944ef0254f20401a63a70cde9eef301bd507b71ef2cd67242b8b",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740924
+}

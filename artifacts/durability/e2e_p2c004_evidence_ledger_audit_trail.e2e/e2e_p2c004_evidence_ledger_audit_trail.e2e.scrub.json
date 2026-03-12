@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c004_evidence_ledger_audit_trail.e2e/e2e_p2c004_evidence_ledger_audit_trail.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c004_evidence_ledger_audit_trail.e2e.json",
+  "expected_sha256_hex": "960fb3af172002320520d82bc2ade69e061961f08e70723d9b674ad5cbc7e44e",
+  "decoded_sha256_hex": "960fb3af172002320520d82bc2ade69e061961f08e70723d9b674ad5cbc7e44e",
+  "decoded_matches_expected": true,
+  "total_symbols": 8,
+  "source_symbols": 7,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740268
+}

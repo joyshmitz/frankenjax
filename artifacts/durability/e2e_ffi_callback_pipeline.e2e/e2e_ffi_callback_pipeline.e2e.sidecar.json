@@ -1,0 +1,37 @@
+{
+  "schema_version": "frankenjax.sidecar.v1",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_ffi_callback_pipeline.e2e.json",
+  "artifact_sha256_hex": "3ee62ed78288ba6ef8ab0b7bc7f8c6b1d41952717e26d799ba758eab01f44ca1",
+  "artifact_size": 453,
+  "generated_at_unix_ms": 1773312740799,
+  "object_id_high": 4532361578137827950,
+  "object_id_low": 17918428168687503025,
+  "symbol_size": 256,
+  "max_block_size": 1048576,
+  "repair_overhead": 1.1,
+  "source_blocks": 1,
+  "symbols_per_block": 2,
+  "total_symbols": 3,
+  "source_symbols": 2,
+  "repair_symbols": 1,
+  "symbols": [
+    {
+      "sbn": 0,
+      "esi": 0,
+      "kind": "source",
+      "data_b64": "ewogICJzY2hlbWFfdmVyc2lvbiI6ICJmcmFua2VuamF4LmUyZS5sb2cudjEiLAogICJzY2VuYXJpb19pZCI6ICJlMmVfZmZpX2NhbGxiYWNrX3BpcGVsaW5lIiwKICAicGFja2V0X2lkIjogIlVOU1BFQ0lGSUVEIiwKICAicmVzdWx0IjogInBhc3MiLAogICJkdXJhdGlvbl9tcyI6IDIxMywKICAiZGV0YWlscyI6ICJzY2VuYXJpbyBkaWQgbm90IGVtaXQgZm9yZW5zaWMgbG9nOyBzZWUgc3Rkb3V0IGxvZyIsCiAgInJlcGxheV9jb21tYW5kIjogImNhcg=="
+    },
+    {
+      "sbn": 0,
+      "esi": 1,
+      "kind": "source",
+      "data_b64": "Z28gdGVzdCAtcCBmai1jb25mb3JtYW5jZSAtLXRlc3QgZTJlX3AyYzAwNyAtLSBlMmVfZmZpX2NhbGxiYWNrX3BpcGVsaW5lIC0tZXhhY3QgLS1ub2NhcHR1cmUiLAogICJhcnRpZmFjdF9yZWZzIjogWyIvZGF0YS9wcm9qZWN0cy9mcmFua2VuamF4L2FydGlmYWN0cy9lMmUvZTJlX2ZmaV9jYWxsYmFja19waXBlbGluZS5zdGRvdXQubG9nIl0KfQoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 2,
+      "kind": "repair",
+      "data_b64": "OMoAqI4ALpCQOoJyOJAiOA4SAqCugpgKLoKGjCIWMiqwlq6udLy8GK48giIeAlSKJI5YCgYOfCIQBmYWCoKi/qQYhABmHhAY/pyYEigGBC6W5LoOPgwaMjQgoJJQGFQEoIYEMiI6chAOrMqkjmZ64tTKMNbSWkhghgb0pJ6QLgwODIYkoLackioeMiS0BtakqJYEKCIqDowUuHSELCC+/qiutObSgpicDAguFGw4NKS+mJY6DJY6KiwMNKiUChaOmGT8ut7a0uhAzN7kytzm0sZA2N7OdkDmyspA5ujI3uroQNjezkRYFEBAROTK4NjC8r7G3trawtzIRHRARMbC5A=="
+    }
+  ]
+}

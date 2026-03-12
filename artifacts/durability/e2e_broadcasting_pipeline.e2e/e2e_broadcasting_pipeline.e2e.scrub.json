@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_broadcasting_pipeline.e2e/e2e_broadcasting_pipeline.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_broadcasting_pipeline.e2e.json",
+  "expected_sha256_hex": "990125e2c62d8b626da8a847a5430bceede18a846b8c6e8df5e2680551e6688f",
+  "decoded_sha256_hex": "990125e2c62d8b626da8a847a5430bceede18a846b8c6e8df5e2680551e6688f",
+  "decoded_matches_expected": true,
+  "total_symbols": 3,
+  "source_symbols": 2,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740892
+}

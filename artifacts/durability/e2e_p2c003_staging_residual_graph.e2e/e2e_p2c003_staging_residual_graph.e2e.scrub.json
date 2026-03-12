@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c003_staging_residual_graph.e2e/e2e_p2c003_staging_residual_graph.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c003_staging_residual_graph.e2e.json",
+  "expected_sha256_hex": "46f41e7c1131af8105cffb4eb4d427ce8848491193b8a59ce57c4e1c180be7fb",
+  "decoded_sha256_hex": "46f41e7c1131af8105cffb4eb4d427ce8848491193b8a59ce57c4e1c180be7fb",
+  "decoded_matches_expected": true,
+  "total_symbols": 13,
+  "source_symbols": 11,
+  "repair_symbols": 2,
+  "generated_at_unix_ms": 1773312740209
+}

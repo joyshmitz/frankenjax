@@ -1,57 +1,57 @@
 {
   "schema_version": "frankenjax.reliability-gate-report.v1",
-  "generated_at_unix_ms": 1771122025780,
-  "run_id": "smoke-failure-g4",
-  "budgets_path": "/data/tmp/tmp.APQ4WYlmdL",
+  "generated_at_unix_ms": 1773296054149,
+  "run_id": "20260312-014357-aeb4648",
+  "budgets_path": "/data/projects/frankenjax/artifacts/ci/reliability_budgets.v1.json",
   "artifact_root": "/data/projects/frankenjax/ci-artifacts",
-  "full_pipeline_duration_ms": 89,
+  "full_pipeline_duration_ms": 1816910,
   "gate_summary": {
-    "passed": 0,
+    "passed": 5,
     "failed": 1,
-    "skipped": 7
+    "skipped": 2
   },
   "gate_results": [
     {
       "gate_id": "G1",
       "name": "fmt_lint",
-      "status": "skipped",
-      "duration_ms": 0,
+      "status": "pass",
+      "duration_ms": 52523,
       "failure_count": 0
     },
     {
       "gate_id": "G2",
       "name": "unit_property_tests",
-      "status": "skipped",
-      "duration_ms": 0,
+      "status": "pass",
+      "duration_ms": 85521,
       "failure_count": 0
     },
     {
       "gate_id": "G3",
       "name": "differential_conformance",
-      "status": "skipped",
-      "duration_ms": 0,
+      "status": "pass",
+      "duration_ms": 44793,
       "failure_count": 0
     },
     {
       "gate_id": "G4",
       "name": "adversarial_crash_regression",
-      "status": "fail",
-      "duration_ms": 26,
-      "failure_count": 1
+      "status": "pass",
+      "duration_ms": 614,
+      "failure_count": 0
     },
     {
       "gate_id": "G5",
       "name": "e2e_scenarios",
-      "status": "skipped",
-      "duration_ms": 0,
+      "status": "pass",
+      "duration_ms": 1617748,
       "failure_count": 0
     },
     {
       "gate_id": "G6",
       "name": "performance_regression",
-      "status": "skipped",
-      "duration_ms": 0,
-      "failure_count": 0
+      "status": "fail",
+      "duration_ms": 14993,
+      "failure_count": 1
     },
     {
       "gate_id": "G7",
@@ -71,15 +71,15 @@
   "failures": [
     {
       "schema_version": "frankenjax.failure-diagnostic.v1",
-      "gate": "G4",
-      "test": "adversarial_crash_regression",
+      "gate": "G6",
+      "test": "performance_regression",
       "status": "fail",
-      "summary": "open P0 count exceeded: open=0, max=-1",
-      "detail_path": "ci-artifacts/smoke-failure-g4/G4/adversarial_crash_regression.log",
-      "replay_cmd": "jq -s 'map(select(.severity==\"P0\" and ((.status // \"open\") != \"closed\") and ((.status // \"open\") != \"resolved\"))) | length' crates/fj-conformance/fuzz/corpus/crashes/index.v1.jsonl",
+      "summary": "Compiling tinytemplate v1.2.1 Compiling fj-test-utils v0.1.0 (/data/projects/frankenjax/crates/fj-test-utils) Compiling egg v0.11.0 Compiling half v2.7.1 Compiling ppv-lite86 v0.2.21 Compiling fj-core",
+      "detail_path": "ci-artifacts/20260312-014357-aeb4648/G6/performance_regression.log",
+      "replay_cmd": "./scripts/check_perf_regression.sh --budgets artifacts/ci/reliability_budgets.v1.json",
       "related_fixtures": [],
-      "timestamp_unix_ms": 1771122025715,
-      "error_output": "open P0 count exceeded: open=0, max=-1",
+      "timestamp_unix_ms": 1773296054086,
+      "error_output": "ata/tmp/cargo-target/release/deps/dispatch_baseline-77b4a32874891847)\nBenchmarking dispatch_latency/jit/scalar_add\n\nthread 'main' (2259605) panicked at /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/criterion-0.8.2/src/analysis/mod.rs:56:13:\nBaseline 'main' must exist before comparison is allowed; try --save-baseline main\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nerror: bench failed, to rerun pass `-p fj-dispatch --bench dispatch_baseline`",
       "root_cause_hint": "dependency_error"
     }
   ],

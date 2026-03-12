@@ -8,8 +8,8 @@ FrankenJAX: `0.1.0` | Oracle: `jax-0.9.0.1`
 
 | Metric | Value |
 |---|---|
-| Total Cases | 273 |
-| Matched | 273 |
+| Total Cases | 362 |
+| Matched | 362 |
 | Mismatched | 0 |
 | Pass Rate | 100.00% |
 | Gate | **pass** |
@@ -19,10 +19,11 @@ FrankenJAX: `0.1.0` | Oracle: `jax-0.9.0.1`
 | Family | Total | Matched | Mismatched |
 |---|---|---|---|
 | jit | 55 | 55 | 0 |
-| grad | 19 | 19 | 0 |
+| grad | 58 | 58 | 0 |
 | vmap | 9 | 9 | 0 |
-| lax | 165 | 165 | 0 |
+| lax | 204 | 204 | 0 |
 | random | 25 | 25 | 0 |
+| control_flow | 11 | 11 | 0 |
 
 ## Per-Primitive Breakdown
 
@@ -30,45 +31,54 @@ FrankenJAX: `0.1.0` | Oracle: `jax-0.9.0.1`
 |---|---|---|---|
 | Add2 | 8 | 8 | 0 |
 | AddOne | 12 | 12 | 0 |
+| CondSelect | 6 | 6 | 0 |
 | CosX | 10 | 10 | 0 |
 | Dot3 | 4 | 4 | 0 |
-| LaxAbs | 6 | 6 | 0 |
+| LaxAbs | 7 | 7 | 0 |
 | LaxAcos | 5 | 5 | 0 |
 | LaxAsin | 5 | 5 | 0 |
-| LaxAtan | 6 | 6 | 0 |
+| LaxAtan | 10 | 10 | 0 |
 | LaxAtan2 | 4 | 4 | 0 |
 | LaxCeil | 5 | 5 | 0 |
 | LaxClamp | 4 | 4 | 0 |
-| LaxCosh | 4 | 4 | 0 |
+| LaxCosh | 7 | 7 | 0 |
 | LaxDiv | 4 | 4 | 0 |
+| LaxEq | 5 | 5 | 0 |
 | LaxErf | 5 | 5 | 0 |
 | LaxErfc | 5 | 5 | 0 |
-| LaxExp | 4 | 4 | 0 |
+| LaxExp | 9 | 9 | 0 |
 | LaxExpm1 | 5 | 5 | 0 |
 | LaxFloor | 5 | 5 | 0 |
-| LaxLog | 5 | 5 | 0 |
+| LaxGe | 4 | 4 | 0 |
+| LaxGt | 4 | 4 | 0 |
+| LaxLe | 4 | 4 | 0 |
+| LaxLog | 9 | 9 | 0 |
 | LaxLog1p | 5 | 5 | 0 |
 | LaxLogistic | 5 | 5 | 0 |
-| LaxMax | 4 | 4 | 0 |
-| LaxMin | 4 | 4 | 0 |
-| LaxMul | 4 | 4 | 0 |
-| LaxNeg | 6 | 6 | 0 |
+| LaxLt | 5 | 5 | 0 |
+| LaxMax | 5 | 5 | 0 |
+| LaxMin | 5 | 5 | 0 |
+| LaxMul | 5 | 5 | 0 |
+| LaxNe | 4 | 4 | 0 |
+| LaxNeg | 10 | 10 | 0 |
 | LaxPow | 3 | 3 | 0 |
-| LaxReciprocal | 5 | 5 | 0 |
+| LaxReciprocal | 8 | 8 | 0 |
 | LaxReduceMax | 3 | 3 | 0 |
 | LaxReduceMin | 3 | 3 | 0 |
 | LaxReduceProd | 3 | 3 | 0 |
 | LaxRem | 4 | 4 | 0 |
 | LaxRound | 5 | 5 | 0 |
 | LaxRsqrt | 5 | 5 | 0 |
+| LaxSelect | 4 | 4 | 0 |
 | LaxSign | 5 | 5 | 0 |
-| LaxSinh | 4 | 4 | 0 |
-| LaxSqrt | 5 | 5 | 0 |
-| LaxSquare | 6 | 6 | 0 |
-| LaxSub | 4 | 4 | 0 |
-| LaxTan | 5 | 5 | 0 |
-| LaxTanh | 5 | 5 | 0 |
+| LaxSinh | 7 | 7 | 0 |
+| LaxSqrt | 9 | 9 | 0 |
+| LaxSquare | 11 | 11 | 0 |
+| LaxSub | 5 | 5 | 0 |
+| LaxTan | 9 | 9 | 0 |
+| LaxTanh | 9 | 9 | 0 |
 | ReduceSumVec | 4 | 4 | 0 |
+| ScanAdd | 5 | 5 | 0 |
 | SinX | 16 | 16 | 0 |
 | Square | 19 | 19 | 0 |
 | SquarePlusLinear | 10 | 10 | 0 |

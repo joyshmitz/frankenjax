@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-2b03a57069a6ecfc",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_all_primitives_tensor_rank1.e2e/e2e_all_primitives_tensor_rank1.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_all_primitives_tensor_rank1.e2e.json",
+  "expected_sha256_hex": "39bf8a29634a58cad6b9a2316c122864bb8ad328cf03e61c84fd05d147b309a1",
+  "decoded_sha256_hex": "39bf8a29634a58cad6b9a2316c122864bb8ad328cf03e61c84fd05d147b309a1",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740878
+}

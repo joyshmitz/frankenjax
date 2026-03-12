@@ -1,0 +1,15 @@
+{
+  "proof_id": "decode-proof-95e5714a78fdd754",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/reliability_gate_report.v1/reliability_gate_report.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/reliability_gate_report.v1.json",
+  "expected_sha256_hex": "df5e327a9ed6215af2fe6a07b83a5b6cf7579a2393804884dd6c23e5967bf659",
+  "decoded_sha256_hex": "df5e327a9ed6215af2fe6a07b83a5b6cf7579a2393804884dd6c23e5967bf659",
+  "dropped_symbols": [
+    "kind:source:sbn:0:esi:0",
+    "kind:source:sbn:0:esi:1"
+  ],
+  "attempted_symbol_count": 12,
+  "recovered": true,
+  "details": "drop-kind=source count=2; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312741154
+}

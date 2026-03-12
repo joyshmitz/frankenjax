@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-e07fd1aed6d3fd61",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_edge_cases_nan_inf.e2e/e2e_edge_cases_nan_inf.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_edge_cases_nan_inf.e2e.json",
+  "expected_sha256_hex": "8e4532e2b87f7319f2ec01aab13d1669e97371d21fa5f9ccb7bc0b1034af277a",
+  "decoded_sha256_hex": "8e4532e2b87f7319f2ec01aab13d1669e97371d21fa5f9ccb7bc0b1034af277a",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740968
+}

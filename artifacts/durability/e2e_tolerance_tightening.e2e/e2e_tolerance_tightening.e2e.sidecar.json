@@ -1,0 +1,31 @@
+{
+  "schema_version": "frankenjax.sidecar.v1",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_tolerance_tightening.e2e.json",
+  "artifact_sha256_hex": "1090677855537c50448159ab40b42c4fb568fb1b4846a43bc710a7e178900ef6",
+  "artifact_size": 159,
+  "generated_at_unix_ms": 1773312740527,
+  "object_id_high": 1193567667778452560,
+  "object_id_low": 4936325258634603599,
+  "symbol_size": 256,
+  "max_block_size": 1048576,
+  "repair_overhead": 1.1,
+  "source_blocks": 1,
+  "symbols_per_block": 1,
+  "total_symbols": 2,
+  "source_symbols": 1,
+  "repair_symbols": 1,
+  "symbols": [
+    {
+      "sbn": 0,
+      "esi": 0,
+      "kind": "source",
+      "data_b64": "ewogICJmYWlsZWQiOiAwLAogICJmaXh0dXJlX2ZhbWlseSI6ICJ0cmFuc2Zvcm1zIiwKICAicGFzc2VkIjogMjQyLAogICJzY2VuYXJpbyI6ICJlMmVfdG9sZXJhbmNlX3RpZ2h0ZW5pbmciLAogICJ0aW1lc3RhbXAiOiAxNzcyNjUxMjg0LAogICJ0b3RhbF9jYXNlcyI6IDI0Mgp9AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    {
+      "sbn": 0,
+      "esi": 1,
+      "kind": "repair",
+      "data_b64": "6uRnZ1P1s2MR28FTPmfa3+RnZ1P1Y8R8ZiDb5fWzC2MR3lM+Z1N8ILMlOvU/IAs6U9/kZ2dTFLM6OtvBUz5n7rLu3+RnZ1M6h9slsyBjP1M+Z1Pb7tvlfD8R2yCzJYfb5Xxj73l82yVjJe9T3+RnZ1N8YwvbOnyzCxRTPmfAnJzuhqjA7gqy3+RnZ1N8P3yzEeWHszrbOlM+Z+6y7uS2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    }
+  ]
+}

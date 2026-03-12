@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-a21014f7dbb6dd02",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/coverage_report.v1/coverage_report.v1.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/ci/coverage_report.v1.json",
+  "expected_sha256_hex": "57c0c11178530ae637311f65ec85eed0eb04f230a23f40a5a051dbc702f38558",
+  "decoded_sha256_hex": "57c0c11178530ae637311f65ec85eed0eb04f230a23f40a5a051dbc702f38558",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:9"
+  ],
+  "attempted_symbol_count": 9,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312742072
+}

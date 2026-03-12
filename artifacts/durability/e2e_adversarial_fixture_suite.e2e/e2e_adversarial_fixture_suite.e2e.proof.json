@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-5602ba3bc66eb863",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_adversarial_fixture_suite.e2e/e2e_adversarial_fixture_suite.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_adversarial_fixture_suite.e2e.json",
+  "expected_sha256_hex": "904936dc8e3ba18d75ff5dd6232b636829b468e21dabd75f3757a76a26e93c88",
+  "decoded_sha256_hex": "904936dc8e3ba18d75ff5dd6232b636829b468e21dabd75f3757a76a26e93c88",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740848
+}

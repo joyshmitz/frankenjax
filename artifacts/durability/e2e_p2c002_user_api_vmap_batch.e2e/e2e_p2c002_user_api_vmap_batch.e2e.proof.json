@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-d24e41c0546d727f",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c002_user_api_vmap_batch.e2e/e2e_p2c002_user_api_vmap_batch.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c002_user_api_vmap_batch.e2e.json",
+  "expected_sha256_hex": "24b23bdfb54618aab6cc1f01597ac5a9eefbea708121a7eb8b0418d0c795393e",
+  "decoded_sha256_hex": "24b23bdfb54618aab6cc1f01597ac5a9eefbea708121a7eb8b0418d0c795393e",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:6"
+  ],
+  "attempted_symbol_count": 6,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740132
+}

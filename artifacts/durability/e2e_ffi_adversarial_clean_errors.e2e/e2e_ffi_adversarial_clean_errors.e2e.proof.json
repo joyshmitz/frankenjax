@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-e5e6300109e0aa18",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_ffi_adversarial_clean_errors.e2e/e2e_ffi_adversarial_clean_errors.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_ffi_adversarial_clean_errors.e2e.json",
+  "expected_sha256_hex": "03c33198c5469675b59e7e97052d07a385a8b1e3ed8e54ba27b5f9923a1358a0",
+  "decoded_sha256_hex": "03c33198c5469675b59e7e97052d07a385a8b1e3ed8e54ba27b5f9923a1358a0",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740758
+}

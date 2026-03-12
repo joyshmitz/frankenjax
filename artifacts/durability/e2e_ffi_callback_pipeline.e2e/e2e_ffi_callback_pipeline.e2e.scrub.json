@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_ffi_callback_pipeline.e2e/e2e_ffi_callback_pipeline.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_ffi_callback_pipeline.e2e.json",
+  "expected_sha256_hex": "3ee62ed78288ba6ef8ab0b7bc7f8c6b1d41952717e26d799ba758eab01f44ca1",
+  "decoded_sha256_hex": "3ee62ed78288ba6ef8ab0b7bc7f8c6b1d41952717e26d799ba758eab01f44ca1",
+  "decoded_matches_expected": true,
+  "total_symbols": 3,
+  "source_symbols": 2,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740801
+}

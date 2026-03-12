@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-98eb493052546861",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c004_evidence_ledger_audit_trail.e2e/e2e_p2c004_evidence_ledger_audit_trail.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c004_evidence_ledger_audit_trail.e2e.json",
+  "expected_sha256_hex": "960fb3af172002320520d82bc2ade69e061961f08e70723d9b674ad5cbc7e44e",
+  "decoded_sha256_hex": "960fb3af172002320520d82bc2ade69e061961f08e70723d9b674ad5cbc7e44e",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:7"
+  ],
+  "attempted_symbol_count": 7,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740269
+}

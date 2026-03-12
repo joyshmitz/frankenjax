@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-f7c1250921fe8182",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c001_strict_vs_hardened_mode_split.e2e/e2e_p2c001_strict_vs_hardened_mode_split.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c001_strict_vs_hardened_mode_split.e2e.json",
+  "expected_sha256_hex": "894ce4734b58436f2c5830fcfa4cb21be0191f9aea1925664cb86ea60a4f935a",
+  "decoded_sha256_hex": "894ce4734b58436f2c5830fcfa4cb21be0191f9aea1925664cb86ea60a4f935a",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:7"
+  ],
+  "attempted_symbol_count": 7,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312739974
+}

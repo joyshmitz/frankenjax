@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-0d8d4bb488c7e007",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_ffi_error_propagation.e2e/e2e_ffi_error_propagation.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_ffi_error_propagation.e2e.json",
+  "expected_sha256_hex": "46be6f4c5e7f284d7d3cddb2f3361c59434c892152441fdf80bb3dfc0b38885d",
+  "decoded_sha256_hex": "46be6f4c5e7f284d7d3cddb2f3361c59434c892152441fdf80bb3dfc0b38885d",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740833
+}

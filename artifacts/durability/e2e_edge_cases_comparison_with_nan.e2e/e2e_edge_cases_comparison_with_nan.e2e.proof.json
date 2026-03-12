@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-b2fb93c4a86db642",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_edge_cases_comparison_with_nan.e2e/e2e_edge_cases_comparison_with_nan.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_edge_cases_comparison_with_nan.e2e.json",
+  "expected_sha256_hex": "026c82351ffa00999f5de39243fb355cf58552cef491f0fd2e72897b6f36f8fb",
+  "decoded_sha256_hex": "026c82351ffa00999f5de39243fb355cf58552cef491f0fd2e72897b6f36f8fb",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:2"
+  ],
+  "attempted_symbol_count": 2,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740953
+}

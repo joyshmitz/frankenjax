@@ -359,6 +359,7 @@ impl FixtureTransform {
 pub enum FixtureValue {
     ScalarF64 { value: f64 },
     ScalarI64 { value: i64 },
+    ScalarBool { value: bool },
     VectorF64 { values: Vec<f64> },
     VectorI64 { values: Vec<i64> },
     TensorF64 { shape: Vec<u32>, values: Vec<f64> },
@@ -371,6 +372,7 @@ impl FixtureValue {
         match self {
             Self::ScalarF64 { value } => Ok(Value::scalar_f64(*value)),
             Self::ScalarI64 { value } => Ok(Value::scalar_i64(*value)),
+            Self::ScalarBool { value } => Ok(Value::scalar_bool(*value)),
             Self::VectorF64 { values } => Value::vector_f64(values)
                 .map_err(|err| format!("vector_f64 conversion failed: {err}")),
             Self::VectorI64 { values } => Value::vector_i64(values)
@@ -419,6 +421,9 @@ impl FixtureValue {
             Self::ScalarI64 { value } => actual
                 .as_scalar_literal()
                 .and_then(fj_core::Literal::as_i64)
+                .is_some_and(|actual_value| actual_value == *value),
+            Self::ScalarBool { value } => actual
+                .as_bool_scalar()
                 .is_some_and(|actual_value| actual_value == *value),
             Self::VectorF64 { values } => actual
                 .as_tensor()
@@ -475,7 +480,7 @@ impl FixtureValue {
     #[must_use]
     pub fn rank(&self) -> usize {
         match self {
-            Self::ScalarF64 { .. } | Self::ScalarI64 { .. } => 0,
+            Self::ScalarF64 { .. } | Self::ScalarI64 { .. } | Self::ScalarBool { .. } => 0,
             Self::VectorF64 { .. } | Self::VectorI64 { .. } => 1,
             Self::TensorF64 { shape, .. }
             | Self::TensorI64 { shape, .. }
@@ -817,7 +822,7 @@ pub fn fixture_value_dtype(value: &FixtureValue) -> fj_core::DType {
         FixtureValue::ScalarI64 { .. }
         | FixtureValue::VectorI64 { .. }
         | FixtureValue::TensorI64 { .. } => fj_core::DType::I64,
-        FixtureValue::TensorBool { .. } => fj_core::DType::Bool,
+        FixtureValue::ScalarBool { .. } | FixtureValue::TensorBool { .. } => fj_core::DType::Bool,
     }
 }
 
@@ -1416,6 +1421,7 @@ fn record_fixture_comparison(
             }
         }
         FixtureValue::ScalarI64 { .. }
+        | FixtureValue::ScalarBool { .. }
         | FixtureValue::VectorI64 { .. }
         | FixtureValue::TensorI64 { .. }
         | FixtureValue::TensorBool { .. } => {
@@ -1426,7 +1432,9 @@ fn record_fixture_comparison(
 
 fn value_shape_fingerprint(expected: &FixtureValue) -> String {
     match expected {
-        FixtureValue::ScalarF64 { .. } | FixtureValue::ScalarI64 { .. } => "scalar".to_owned(),
+        FixtureValue::ScalarF64 { .. }
+        | FixtureValue::ScalarI64 { .. }
+        | FixtureValue::ScalarBool { .. } => "scalar".to_owned(),
         FixtureValue::VectorF64 { values } => format!("vector:{}", values.len()),
         FixtureValue::VectorI64 { values } => format!("vector:{}", values.len()),
         FixtureValue::TensorF64 { shape, .. } | FixtureValue::TensorI64 { shape, .. } => {
@@ -1456,7 +1464,7 @@ fn value_type_fingerprint(expected: &FixtureValue) -> &'static str {
         FixtureValue::ScalarI64 { .. }
         | FixtureValue::VectorI64 { .. }
         | FixtureValue::TensorI64 { .. } => "i64",
-        FixtureValue::TensorBool { .. } => "bool",
+        FixtureValue::ScalarBool { .. } | FixtureValue::TensorBool { .. } => "bool",
     }
 }
 

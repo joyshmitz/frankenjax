@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-36311555bc8a4cbf",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/gj_02_gradient_computation.golden/gj_02_gradient_computation.golden.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/golden_journeys/gj_02_gradient_computation.golden.json",
+  "expected_sha256_hex": "e3d928e9008f150f6fbb0bb09c38a7c5617cdf7e7a1374529eb8988de0efa43d",
+  "decoded_sha256_hex": "e3d928e9008f150f6fbb0bb09c38a7c5617cdf7e7a1374529eb8988de0efa43d",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:5"
+  ],
+  "attempted_symbol_count": 5,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312741029
+}

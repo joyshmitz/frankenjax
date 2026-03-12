@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_edge_cases_comparison_with_nan.e2e/e2e_edge_cases_comparison_with_nan.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_edge_cases_comparison_with_nan.e2e.json",
+  "expected_sha256_hex": "026c82351ffa00999f5de39243fb355cf58552cef491f0fd2e72897b6f36f8fb",
+  "decoded_sha256_hex": "026c82351ffa00999f5de39243fb355cf58552cef491f0fd2e72897b6f36f8fb",
+  "decoded_matches_expected": true,
+  "total_symbols": 3,
+  "source_symbols": 2,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740952
+}

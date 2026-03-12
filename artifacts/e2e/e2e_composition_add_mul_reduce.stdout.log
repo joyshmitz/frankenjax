@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/e2e_p2c008.rs (/data/tmp/cargo-target/debug/deps/e2e_p2c008-1bcdfefebe74b678)
+
+running 1 test
+test e2e_composition_add_mul_reduce ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+

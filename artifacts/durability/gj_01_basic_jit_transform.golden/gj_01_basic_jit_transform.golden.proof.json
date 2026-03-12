@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-7287b12becfecb87",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/gj_01_basic_jit_transform.golden/gj_01_basic_jit_transform.golden.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/golden_journeys/gj_01_basic_jit_transform.golden.json",
+  "expected_sha256_hex": "5121ffb2e553a902005f6c5eca0149ade7bfffe6252e3a80baf194e93a93b65c",
+  "decoded_sha256_hex": "5121ffb2e553a902005f6c5eca0149ade7bfffe6252e3a80baf194e93a93b65c",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:5"
+  ],
+  "attempted_symbol_count": 5,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312741014
+}

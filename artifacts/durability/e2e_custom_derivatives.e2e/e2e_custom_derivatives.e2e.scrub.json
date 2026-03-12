@@ -1,0 +1,11 @@
+{
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_custom_derivatives.e2e/e2e_custom_derivatives.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_custom_derivatives.e2e.json",
+  "expected_sha256_hex": "c3d71d4611950af7df8db3c9f3281a66ec10f68aad97cbd9606eea3b17cda6d4",
+  "decoded_sha256_hex": "c3d71d4611950af7df8db3c9f3281a66ec10f68aad97cbd9606eea3b17cda6d4",
+  "decoded_matches_expected": true,
+  "total_symbols": 3,
+  "source_symbols": 2,
+  "repair_symbols": 1,
+  "generated_at_unix_ms": 1773312740445
+}

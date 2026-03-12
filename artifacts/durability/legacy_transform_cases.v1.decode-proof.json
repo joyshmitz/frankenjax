@@ -1,14 +1,14 @@
 {
-  "proof_id": "decode-proof-c750fa79975f6714",
+  "proof_id": "decode-proof-49817325a9a12a6a",
   "sidecar_path": "artifacts/durability/legacy_transform_cases.v1.sidecar.json",
   "artifact_path": "crates/fj-conformance/fixtures/transforms/legacy_transform_cases.v1.json",
-  "expected_sha256_hex": "bdc5551e37ffbcacee2c22aaa3aa34b0ac80aa3259f43344a80dbd7858f5d639",
-  "decoded_sha256_hex": "bdc5551e37ffbcacee2c22aaa3aa34b0ac80aa3259f43344a80dbd7858f5d639",
+  "expected_sha256_hex": "6a67a673c4a89280a3f5170578d5eb9f22f34bb1d5ba04c07a7999bb3a2bd483",
+  "decoded_sha256_hex": "6a67a673c4a89280a3f5170578d5eb9f22f34bb1d5ba04c07a7999bb3a2bd483",
   "dropped_symbols": [
     "kind:source:sbn:0:esi:0"
   ],
-  "attempted_symbol_count": 619,
+  "attempted_symbol_count": 651,
   "recovered": true,
   "details": "drop-kind=source count=1; recovered successfully from retained symbols",
-  "generated_at_unix_ms": 1773293149107
+  "generated_at_unix_ms": 1773293817663
 }

@@ -1,12 +1,17 @@
 {
-  "total_cases": 273,
-  "matched": 273,
+  "total_cases": 362,
+  "matched": 362,
   "mismatched": 0,
   "pass_rate": 1.0,
   "per_family": {
+    "control_flow": {
+      "total": 11,
+      "matched": 11,
+      "mismatched": 0
+    },
     "grad": {
-      "total": 19,
-      "matched": 19,
+      "total": 58,
+      "matched": 58,
       "mismatched": 0
     },
     "jit": {
@@ -15,8 +20,8 @@
       "mismatched": 0
     },
     "lax": {
-      "total": 165,
-      "matched": 165,
+      "total": 204,
+      "matched": 204,
       "mismatched": 0
     },
     "random": {

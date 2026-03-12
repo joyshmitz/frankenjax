@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-8da1626524f97d4e",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c002_user_api_grad_polynomial.e2e/e2e_p2c002_user_api_grad_polynomial.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c002_user_api_grad_polynomial.e2e.json",
+  "expected_sha256_hex": "b798632e8ac15217c83d392a4646dde836a966b9ef416bae92ccb67ffda24a94",
+  "decoded_sha256_hex": "b798632e8ac15217c83d392a4646dde836a966b9ef416bae92ccb67ffda24a94",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:6"
+  ],
+  "attempted_symbol_count": 6,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740067
+}

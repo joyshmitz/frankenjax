@@ -1,0 +1,14 @@
+{
+  "proof_id": "decode-proof-29ffaca08251efe1",
+  "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c004_transform_composition_matrix.e2e/e2e_p2c004_transform_composition_matrix.e2e.sidecar.json",
+  "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c004_transform_composition_matrix.e2e.json",
+  "expected_sha256_hex": "6f6e8c7178594e883b9fec0cea38627428f4ee87cae3183ad2dc40f7e69537e5",
+  "decoded_sha256_hex": "6f6e8c7178594e883b9fec0cea38627428f4ee87cae3183ad2dc40f7e69537e5",
+  "dropped_symbols": [
+    "kind:repair:sbn:0:esi:8"
+  ],
+  "attempted_symbol_count": 8,
+  "recovered": true,
+  "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
+  "generated_at_unix_ms": 1773312740315
+}
