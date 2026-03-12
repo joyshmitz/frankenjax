@@ -1537,6 +1537,102 @@ def build_lax_cases(cb: CaseBuilder) -> None:
             [x], [expected], atol=1e-12, rtol=1e-12,
         )
 
+    # ── Shape manipulation: reshape [6] → [2,3] ──
+    cb.add_raw(
+        "lax_reshape_6to2x3_i64_0", "lax", "lax_reshape6_to2x3", ["jit"],
+        [{"kind": "vector_i64", "values": [1, 2, 3, 4, 5, 6]}],
+        [fixture_value_tensor_i64([2, 3], [1, 2, 3, 4, 5, 6])],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    cb.add_raw(
+        "lax_reshape_6to2x3_i64_1", "lax", "lax_reshape6_to2x3", ["jit"],
+        [{"kind": "vector_i64", "values": [10, 20, 30, 40, 50, 60]}],
+        [fixture_value_tensor_i64([2, 3], [10, 20, 30, 40, 50, 60])],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Shape manipulation: reshape [6] → [3,2] ──
+    cb.add_raw(
+        "lax_reshape_6to3x2_i64_0", "lax", "lax_reshape6_to3x2", ["jit"],
+        [{"kind": "vector_i64", "values": [1, 2, 3, 4, 5, 6]}],
+        [fixture_value_tensor_i64([3, 2], [1, 2, 3, 4, 5, 6])],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Shape manipulation: slice [1:4] from 5-element vector ──
+    cb.add_raw(
+        "lax_slice1to4_i64_0", "lax", "lax_slice1_to4", ["jit"],
+        [{"kind": "vector_i64", "values": [10, 20, 30, 40, 50]}],
+        [{"kind": "vector_i64", "values": [20, 30, 40]}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    cb.add_raw(
+        "lax_slice1to4_i64_1", "lax", "lax_slice1_to4", ["jit"],
+        [{"kind": "vector_i64", "values": [5, 4, 3, 2, 1]}],
+        [{"kind": "vector_i64", "values": [4, 3, 2]}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Shape manipulation: transpose [2,3] → [3,2] (reverse axes) ──
+    # Input: [[1,2,3],[4,5,6]] → output: [[1,4],[2,5],[3,6]]
+    cb.add_raw(
+        "lax_transpose_2x3_i64_0", "lax", "lax_transpose2x3", ["jit"],
+        [fixture_value_tensor_i64([2, 3], [1, 2, 3, 4, 5, 6])],
+        [fixture_value_tensor_i64([3, 2], [1, 4, 2, 5, 3, 6])],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    cb.add_raw(
+        "lax_transpose_2x3_f64_0", "lax", "lax_transpose2x3", ["jit"],
+        [fixture_value_tensor_f64([2, 3], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])],
+        [fixture_value_tensor_f64([3, 2], [1.0, 4.0, 2.0, 5.0, 3.0, 6.0])],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Shape manipulation: rev (reverse along axis 0) ──
+    cb.add_raw(
+        "lax_rev_axis0_i64_0", "lax", "lax_rev", ["jit"],
+        [{"kind": "vector_i64", "values": [1, 2, 3, 4, 5]}],
+        [{"kind": "vector_i64", "values": [5, 4, 3, 2, 1]}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    cb.add_raw(
+        "lax_rev_axis0_i64_1", "lax", "lax_rev", ["jit"],
+        [{"kind": "vector_i64", "values": [10, 20, 30]}],
+        [{"kind": "vector_i64", "values": [30, 20, 10]}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Shape manipulation: squeeze (remove size-1 dim at axis 0) ──
+    # Input: tensor [1,3] with values [10,20,30] → output: vector [10,20,30]
+    cb.add_raw(
+        "lax_squeeze_1x3_i64_0", "lax", "lax_squeeze", ["jit"],
+        [fixture_value_tensor_i64([1, 3], [10, 20, 30])],
+        [{"kind": "vector_i64", "values": [10, 20, 30]}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    cb.add_raw(
+        "lax_squeeze_1x5_f64_0", "lax", "lax_squeeze", ["jit"],
+        [fixture_value_tensor_f64([1, 5], [1.0, 2.0, 3.0, 4.0, 5.0])],
+        [{"kind": "vector_f64", "values": [1.0, 2.0, 3.0, 4.0, 5.0]}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Shape manipulation: concatenate (two vectors along axis 0) ──
+    cb.add_raw(
+        "lax_concatenate_i64_0", "lax", "lax_concatenate", ["jit"],
+        [{"kind": "vector_i64", "values": [1, 2]},
+         {"kind": "vector_i64", "values": [3, 4, 5]}],
+        [{"kind": "vector_i64", "values": [1, 2, 3, 4, 5]}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    cb.add_raw(
+        "lax_concatenate_f64_0", "lax", "lax_concatenate", ["jit"],
+        [{"kind": "vector_f64", "values": [1.0, 2.0]},
+         {"kind": "vector_f64", "values": [3.0, 4.0]}],
+        [{"kind": "vector_f64", "values": [1.0, 2.0, 3.0, 4.0]}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
 
 # ── Oracle-based capture (with real JAX) ─────────────────────────
 

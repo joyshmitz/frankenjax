@@ -1,11 +1,11 @@
 {
   "version": "frankenjax.v1-comprehensive-parity.v1",
-  "timestamp": "1773345517",
+  "timestamp": "1773346260",
   "fj_version": "0.1.0",
   "jax_version": "jax-0.9.0.1",
   "mode": "strict",
   "summary": {
-    "total": 546,
+    "total": 559,
     "pass_rate": 1.0,
     "gate": "pass"
   },
@@ -732,8 +732,8 @@
       ]
     },
     "lax": {
-      "total": 293,
-      "matched": 293,
+      "total": 306,
+      "matched": 306,
       "mismatched": 0,
       "cases": [
         {
@@ -1907,6 +1907,58 @@
         {
           "case_id": "lax_integer_pow_neg1_f64_3",
           "matched": true
+        },
+        {
+          "case_id": "lax_reshape_6to2x3_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reshape_6to2x3_i64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_reshape_6to3x2_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_slice1to4_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_slice1to4_i64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_transpose_2x3_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_transpose_2x3_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rev_axis0_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_rev_axis0_i64_1",
+          "matched": true
+        },
+        {
+          "case_id": "lax_squeeze_1x3_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_squeeze_1x5_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_concatenate_i64_0",
+          "matched": true
+        },
+        {
+          "case_id": "lax_concatenate_f64_0",
+          "matched": true
         }
       ]
     },
@@ -2492,6 +2544,15 @@
         "lax_clamp_f64_3"
       ]
     },
+    "LaxConcatenate": {
+      "total": 2,
+      "matched": 2,
+      "mismatched": 0,
+      "cases": [
+        "lax_concatenate_i64_0",
+        "lax_concatenate_f64_0"
+      ]
+    },
     "LaxCosh": {
       "total": 7,
       "matched": 7,
@@ -3013,6 +3074,32 @@
         "lax_rem_f64_3"
       ]
     },
+    "LaxReshape6To2x3": {
+      "total": 2,
+      "matched": 2,
+      "mismatched": 0,
+      "cases": [
+        "lax_reshape_6to2x3_i64_0",
+        "lax_reshape_6to2x3_i64_1"
+      ]
+    },
+    "LaxReshape6To3x2": {
+      "total": 1,
+      "matched": 1,
+      "mismatched": 0,
+      "cases": [
+        "lax_reshape_6to3x2_i64_0"
+      ]
+    },
+    "LaxRev": {
+      "total": 2,
+      "matched": 2,
+      "mismatched": 0,
+      "cases": [
+        "lax_rev_axis0_i64_0",
+        "lax_rev_axis0_i64_1"
+      ]
+    },
     "LaxRound": {
       "total": 5,
       "matched": 5,
@@ -3077,6 +3164,15 @@
         "lax_sinh_f64_3"
       ]
     },
+    "LaxSlice1To4": {
+      "total": 2,
+      "matched": 2,
+      "mismatched": 0,
+      "cases": [
+        "lax_slice1to4_i64_0",
+        "lax_slice1to4_i64_1"
+      ]
+    },
     "LaxSort": {
       "total": 4,
       "matched": 4,
@@ -3123,6 +3219,15 @@
         "lax_square_f64_4",
         "lax_square_f64_5",
         "lax_square_tensor2x3_f64_0"
+      ]
+    },
+    "LaxSqueeze": {
+      "total": 2,
+      "matched": 2,
+      "mismatched": 0,
+      "cases": [
+        "lax_squeeze_1x3_i64_0",
+        "lax_squeeze_1x5_f64_0"
       ]
     },
     "LaxSub": {
@@ -3175,6 +3280,15 @@
         "lax_tanh_f64_2",
         "lax_tanh_f64_3",
         "lax_tanh_f64_4"
+      ]
+    },
+    "LaxTranspose2x3": {
+      "total": 2,
+      "matched": 2,
+      "mismatched": 0,
+      "cases": [
+        "lax_transpose_2x3_i64_0",
+        "lax_transpose_2x3_f64_0"
       ]
     },
     "ReduceSumVec": {

@@ -1220,6 +1220,14 @@ pub enum ProgramSpec {
     LaxIntegerPow2,
     LaxIntegerPow3,
     LaxIntegerPowNeg1,
+    // Lax shape manipulation primitives (tensor → tensor)
+    LaxReshape6To2x3,
+    LaxReshape6To3x2,
+    LaxSlice1To4,
+    LaxTranspose2x3,
+    LaxRev,
+    LaxSqueeze,
+    LaxConcatenate,
     // Utility programs for testing
     Identity,
     AddOneMulTwo,
@@ -1421,6 +1429,124 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                     inputs: smallvec![Atom::Var(VarId(1))],
                     outputs: smallvec![VarId(2)],
                     params,
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
+        ProgramSpec::LaxReshape6To2x3 => {
+            let mut params = BTreeMap::new();
+            params.insert("new_shape".to_owned(), "2,3".to_owned());
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Reshape,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params,
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
+        ProgramSpec::LaxReshape6To3x2 => {
+            let mut params = BTreeMap::new();
+            params.insert("new_shape".to_owned(), "3,2".to_owned());
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Reshape,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params,
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
+        ProgramSpec::LaxSlice1To4 => {
+            let mut params = BTreeMap::new();
+            params.insert("start_indices".to_owned(), "1".to_owned());
+            params.insert("limit_indices".to_owned(), "4".to_owned());
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Slice,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params,
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
+        ProgramSpec::LaxTranspose2x3 => {
+            // Default transpose (no permutation param) reverses axes
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Transpose,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
+        ProgramSpec::LaxRev => {
+            let mut params = BTreeMap::new();
+            params.insert("axes".to_owned(), "0".to_owned());
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Rev,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params,
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
+        ProgramSpec::LaxSqueeze => {
+            let mut params = BTreeMap::new();
+            params.insert("dimensions".to_owned(), "0".to_owned());
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Squeeze,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params,
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
+        ProgramSpec::LaxConcatenate => {
+            // Two-input concatenation along axis 0 (default)
+            Jaxpr::new(
+                vec![VarId(1), VarId(2)],
+                vec![],
+                vec![VarId(3)],
+                vec![Equation {
+                    primitive: Primitive::Concatenate,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
                     effects: vec![],
                     sub_jaxprs: vec![],
                 }],
