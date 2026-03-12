@@ -1,11 +1,11 @@
 {
   "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c004_adversarial_dispatch_inputs.e2e/e2e_p2c004_adversarial_dispatch_inputs.e2e.sidecar.json",
   "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c004_adversarial_dispatch_inputs.e2e.json",
-  "expected_sha256_hex": "ba5b3755811cff169f6b029048db8dd9fddb6e29b1781361d0c3c64270f62924",
-  "decoded_sha256_hex": "ba5b3755811cff169f6b029048db8dd9fddb6e29b1781361d0c3c64270f62924",
+  "expected_sha256_hex": "4ee98041d397f07ab24cf7532ba58bdf03ce16adfa78c0b9ee7061a6566a2f21",
+  "decoded_sha256_hex": "4ee98041d397f07ab24cf7532ba58bdf03ce16adfa78c0b9ee7061a6566a2f21",
   "decoded_matches_expected": true,
   "total_symbols": 6,
   "source_symbols": 5,
   "repair_symbols": 1,
-  "generated_at_unix_ms": 1773312740238
+  "generated_at_unix_ms": 1773314057996
 }

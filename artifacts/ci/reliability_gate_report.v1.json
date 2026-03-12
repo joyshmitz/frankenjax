@@ -1,85 +1,85 @@
 {
   "schema_version": "frankenjax.reliability-gate-report.v1",
-  "generated_at_unix_ms": 1773296054149,
-  "run_id": "20260312-014357-aeb4648",
+  "generated_at_unix_ms": 1773314059076,
+  "run_id": "20260312-070252-7026442",
   "budgets_path": "/data/projects/frankenjax/artifacts/ci/reliability_budgets.v1.json",
   "artifact_root": "/data/projects/frankenjax/ci-artifacts",
-  "full_pipeline_duration_ms": 1816910,
+  "full_pipeline_duration_ms": 686393,
   "gate_summary": {
-    "passed": 5,
+    "passed": 7,
     "failed": 1,
-    "skipped": 2
+    "skipped": 0
   },
   "gate_results": [
     {
       "gate_id": "G1",
       "name": "fmt_lint",
       "status": "pass",
-      "duration_ms": 52523,
+      "duration_ms": 75595,
       "failure_count": 0
     },
     {
       "gate_id": "G2",
       "name": "unit_property_tests",
       "status": "pass",
-      "duration_ms": 85521,
+      "duration_ms": 131062,
       "failure_count": 0
     },
     {
       "gate_id": "G3",
       "name": "differential_conformance",
       "status": "pass",
-      "duration_ms": 44793,
+      "duration_ms": 42303,
       "failure_count": 0
     },
     {
       "gate_id": "G4",
       "name": "adversarial_crash_regression",
       "status": "pass",
-      "duration_ms": 614,
+      "duration_ms": 30,
       "failure_count": 0
     },
     {
       "gate_id": "G5",
       "name": "e2e_scenarios",
       "status": "pass",
-      "duration_ms": 1617748,
+      "duration_ms": 56405,
       "failure_count": 0
     },
     {
       "gate_id": "G6",
       "name": "performance_regression",
-      "status": "fail",
-      "duration_ms": 14993,
-      "failure_count": 1
+      "status": "pass",
+      "duration_ms": 296876,
+      "failure_count": 0
     },
     {
       "gate_id": "G7",
       "name": "artifact_schema_validation",
-      "status": "skipped",
-      "duration_ms": 0,
+      "status": "pass",
+      "duration_ms": 48726,
       "failure_count": 0
     },
     {
       "gate_id": "G8",
       "name": "durability_decode_proof",
-      "status": "skipped",
-      "duration_ms": 0,
-      "failure_count": 0
+      "status": "fail",
+      "duration_ms": 35253,
+      "failure_count": 1
     }
   ],
   "failures": [
     {
       "schema_version": "frankenjax.failure-diagnostic.v1",
-      "gate": "G6",
-      "test": "performance_regression",
+      "gate": "G8",
+      "test": "durability_decode_proof",
       "status": "fail",
-      "summary": "Compiling tinytemplate v1.2.1 Compiling fj-test-utils v0.1.0 (/data/projects/frankenjax/crates/fj-test-utils) Compiling egg v0.11.0 Compiling half v2.7.1 Compiling ppv-lite86 v0.2.21 Compiling fj-core",
-      "detail_path": "ci-artifacts/20260312-014357-aeb4648/G6/performance_regression.log",
-      "replay_cmd": "./scripts/check_perf_regression.sh --budgets artifacts/ci/reliability_budgets.v1.json",
+      "summary": "scrub report: /data/projects/frankenjax/artifacts/durability/gj_05_cache_hit_miss.golden/gj_05_cache_hit_miss.golden.scrub.json (match=true) PASS (verify): /data/projects/frankenjax/artifacts/e2e/gold",
+      "detail_path": "ci-artifacts/20260312-070252-7026442/G8/durability_decode_proof.log",
+      "replay_cmd": "./scripts/durability_ci_gate.sh --skip-generate",
       "related_fixtures": [],
-      "timestamp_unix_ms": 1773296054086,
-      "error_output": "ata/tmp/cargo-target/release/deps/dispatch_baseline-77b4a32874891847)\nBenchmarking dispatch_latency/jit/scalar_add\n\nthread 'main' (2259605) panicked at /home/ubuntu/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/criterion-0.8.2/src/analysis/mod.rs:56:13:\nBaseline 'main' must exist before comparison is allowed; try --save-baseline main\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\nerror: bench failed, to rerun pass `-p fj-dispatch --bench dispatch_baseline`",
+      "timestamp_unix_ms": 1773314059018,
+      "error_output": "ts.v1.scrub.json (match=true)\n  PASS (verify): /data/projects/frankenjax/artifacts/ci/reliability_budgets.v1.json\n  FAIL (verify): /data/projects/frankenjax/artifacts/ci/perf_regression_report.v1.json\n[durability] scanning /data/projects/frankenjax/artifacts/performance/evidence...\n\n[durability] ============================================\n[durability] Results: 85 passed, 1 failed, 0 skipped\n[durability] Drop-source resilience: 2 symbols\n[durability] ============================================",
       "root_cause_hint": "dependency_error"
     }
   ],

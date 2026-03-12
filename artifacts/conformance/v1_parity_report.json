@@ -1,11 +1,11 @@
 {
   "version": "frankenjax.v1-comprehensive-parity.v1",
-  "timestamp": "1773312614",
+  "timestamp": "1773313790",
   "fj_version": "0.1.0",
   "jax_version": "jax-0.9.0.1",
   "mode": "strict",
   "summary": {
-    "total": 362,
+    "total": 402,
     "pass_rate": 1.0,
     "gate": "pass"
   },
@@ -62,8 +62,8 @@
       ]
     },
     "grad": {
-      "total": 58,
-      "matched": 58,
+      "total": 83,
+      "matched": 83,
       "mismatched": 0,
       "cases": [
         {
@@ -284,6 +284,106 @@
         },
         {
           "case_id": "grad_lax_cosh_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_rsqrt_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_rsqrt_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_rsqrt_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_abs_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_abs_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_abs_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_abs_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_logistic_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_logistic_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_logistic_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_logistic_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_expm1_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_expm1_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_expm1_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_expm1_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_log1p_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_log1p_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_log1p_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_log1p_f64_3",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_asin_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_asin_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_asin_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_acos_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_acos_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "grad_lax_acos_f64_2",
           "matched": true
         },
         {
@@ -1458,8 +1558,8 @@
       ]
     },
     "vmap": {
-      "total": 9,
-      "matched": 9,
+      "total": 24,
+      "matched": 24,
       "mismatched": 0,
       "cases": [
         {
@@ -1496,6 +1596,66 @@
         },
         {
           "case_id": "vmap_sin_x_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_neg_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_exp_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_square_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_abs_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_tanh_f64_0",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_neg_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_exp_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_square_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_abs_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_tanh_f64_1",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_neg_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_exp_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_square_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_abs_f64_2",
+          "matched": true
+        },
+        {
+          "case_id": "vmap_lax_tanh_f64_2",
           "matched": true
         }
       ]
@@ -1578,10 +1738,17 @@
       ]
     },
     "LaxAbs": {
-      "total": 7,
-      "matched": 7,
+      "total": 14,
+      "matched": 14,
       "mismatched": 0,
       "cases": [
+        "grad_lax_abs_f64_0",
+        "grad_lax_abs_f64_1",
+        "grad_lax_abs_f64_2",
+        "grad_lax_abs_f64_3",
+        "vmap_lax_abs_f64_0",
+        "vmap_lax_abs_f64_1",
+        "vmap_lax_abs_f64_2",
         "lax_abs_f64_0",
         "lax_abs_f64_1",
         "lax_abs_f64_2",
@@ -1592,10 +1759,13 @@
       ]
     },
     "LaxAcos": {
-      "total": 5,
-      "matched": 5,
+      "total": 8,
+      "matched": 8,
       "mismatched": 0,
       "cases": [
+        "grad_lax_acos_f64_0",
+        "grad_lax_acos_f64_1",
+        "grad_lax_acos_f64_2",
         "lax_acos_f64_0",
         "lax_acos_f64_1",
         "lax_acos_f64_2",
@@ -1604,10 +1774,13 @@
       ]
     },
     "LaxAsin": {
-      "total": 5,
-      "matched": 5,
+      "total": 8,
+      "matched": 8,
       "mismatched": 0,
       "cases": [
+        "grad_lax_asin_f64_0",
+        "grad_lax_asin_f64_1",
+        "grad_lax_asin_f64_2",
         "lax_asin_f64_0",
         "lax_asin_f64_1",
         "lax_asin_f64_2",
@@ -1728,14 +1901,17 @@
       ]
     },
     "LaxExp": {
-      "total": 9,
-      "matched": 9,
+      "total": 12,
+      "matched": 12,
       "mismatched": 0,
       "cases": [
         "grad_lax_exp_f64_0",
         "grad_lax_exp_f64_1",
         "grad_lax_exp_f64_2",
         "grad_lax_exp_f64_3",
+        "vmap_lax_exp_f64_0",
+        "vmap_lax_exp_f64_1",
+        "vmap_lax_exp_f64_2",
         "lax_exp_f64_0",
         "lax_exp_f64_1",
         "lax_exp_f64_2",
@@ -1744,10 +1920,14 @@
       ]
     },
     "LaxExpm1": {
-      "total": 5,
-      "matched": 5,
+      "total": 9,
+      "matched": 9,
       "mismatched": 0,
       "cases": [
+        "grad_lax_expm1_f64_0",
+        "grad_lax_expm1_f64_1",
+        "grad_lax_expm1_f64_2",
+        "grad_lax_expm1_f64_3",
         "lax_expm1_f64_0",
         "lax_expm1_f64_1",
         "lax_expm1_f64_2",
@@ -1817,10 +1997,14 @@
       ]
     },
     "LaxLog1p": {
-      "total": 5,
-      "matched": 5,
+      "total": 9,
+      "matched": 9,
       "mismatched": 0,
       "cases": [
+        "grad_lax_log1p_f64_0",
+        "grad_lax_log1p_f64_1",
+        "grad_lax_log1p_f64_2",
+        "grad_lax_log1p_f64_3",
         "lax_log1p_f64_0",
         "lax_log1p_f64_1",
         "lax_log1p_f64_2",
@@ -1829,10 +2013,14 @@
       ]
     },
     "LaxLogistic": {
-      "total": 5,
-      "matched": 5,
+      "total": 9,
+      "matched": 9,
       "mismatched": 0,
       "cases": [
+        "grad_lax_logistic_f64_0",
+        "grad_lax_logistic_f64_1",
+        "grad_lax_logistic_f64_2",
+        "grad_lax_logistic_f64_3",
         "lax_logistic_f64_0",
         "lax_logistic_f64_1",
         "lax_logistic_f64_2",
@@ -1900,13 +2088,16 @@
       ]
     },
     "LaxNeg": {
-      "total": 10,
-      "matched": 10,
+      "total": 13,
+      "matched": 13,
       "mismatched": 0,
       "cases": [
         "grad_lax_neg_f64_0",
         "grad_lax_neg_f64_1",
         "grad_lax_neg_f64_2",
+        "vmap_lax_neg_f64_0",
+        "vmap_lax_neg_f64_1",
+        "vmap_lax_neg_f64_2",
         "lax_neg_f64_0",
         "lax_neg_f64_1",
         "lax_neg_f64_2",
@@ -1995,10 +2186,13 @@
       ]
     },
     "LaxRsqrt": {
-      "total": 5,
-      "matched": 5,
+      "total": 8,
+      "matched": 8,
       "mismatched": 0,
       "cases": [
+        "grad_lax_rsqrt_f64_0",
+        "grad_lax_rsqrt_f64_1",
+        "grad_lax_rsqrt_f64_2",
         "lax_rsqrt_f64_0",
         "lax_rsqrt_f64_1",
         "lax_rsqrt_f64_2",
@@ -2060,14 +2254,17 @@
       ]
     },
     "LaxSquare": {
-      "total": 11,
-      "matched": 11,
+      "total": 14,
+      "matched": 14,
       "mismatched": 0,
       "cases": [
         "grad_lax_square_f64_0",
         "grad_lax_square_f64_1",
         "grad_lax_square_f64_2",
         "grad_lax_square_f64_3",
+        "vmap_lax_square_f64_0",
+        "vmap_lax_square_f64_1",
+        "vmap_lax_square_f64_2",
         "lax_square_f64_0",
         "lax_square_f64_1",
         "lax_square_f64_2",
@@ -2106,14 +2303,17 @@
       ]
     },
     "LaxTanh": {
-      "total": 9,
-      "matched": 9,
+      "total": 12,
+      "matched": 12,
       "mismatched": 0,
       "cases": [
         "grad_lax_tanh_f64_0",
         "grad_lax_tanh_f64_1",
         "grad_lax_tanh_f64_2",
         "grad_lax_tanh_f64_3",
+        "vmap_lax_tanh_f64_0",
+        "vmap_lax_tanh_f64_1",
+        "vmap_lax_tanh_f64_2",
         "lax_tanh_f64_0",
         "lax_tanh_f64_1",
         "lax_tanh_f64_2",

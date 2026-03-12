@@ -459,10 +459,10 @@ fn build_vmap_fixture_bundle() -> TransformFixtureBundle {
                 values: vec![0.0, 1.0, 2.0, 3.0],
             }],
             vec![FixtureValue::VectorF64 {
-                values: vec![0.0, 2.0, 6.0, 12.0], // x^2 + x
+                values: vec![0.0, 3.0, 8.0, 15.0], // x^2 + 2x
             }],
         ),
-        // 35. vmap(grad(square_plus_linear)) = 2x + 1
+        // 35. vmap(grad(square_plus_linear)) = 2x + 2
         make_vmap_case(
             "vmap_grad_spl_01",
             FixtureProgram::SquarePlusLinear,
@@ -471,7 +471,7 @@ fn build_vmap_fixture_bundle() -> TransformFixtureBundle {
                 values: vec![0.0, 1.0, 2.0, 3.0],
             }],
             vec![FixtureValue::VectorF64 {
-                values: vec![1.0, 3.0, 5.0, 7.0],
+                values: vec![2.0, 4.0, 6.0, 8.0],
             }],
         ),
     ];

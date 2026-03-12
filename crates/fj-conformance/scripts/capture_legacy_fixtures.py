@@ -721,6 +721,56 @@ def build_grad_cases(cb: CaseBuilder) -> None:
             [x], [math.sinh(x)], atol=1e-6, rtol=1e-6,
         )
 
+    # grad(rsqrt(x)) = -0.5 * x^(-3/2)
+    for idx, x in enumerate([0.25, 1.0, 4.0]):
+        cb.add(
+            f"grad_lax_rsqrt_f64_{idx}", "grad", "lax_rsqrt", ["grad"],
+            [x], [-0.5 * x ** (-1.5)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(abs(x)) = sign(x)  (x != 0)
+    for idx, x in enumerate([-2.0, -0.5, 0.5, 2.0]):
+        cb.add(
+            f"grad_lax_abs_f64_{idx}", "grad", "lax_abs", ["grad"],
+            [x], [1.0 if x > 0 else -1.0], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(logistic(x)) = logistic(x) * (1 - logistic(x))
+    for idx, x in enumerate([-1.0, 0.0, 0.5, 1.0]):
+        s = _logistic(x)
+        cb.add(
+            f"grad_lax_logistic_f64_{idx}", "grad", "lax_logistic", ["grad"],
+            [x], [s * (1.0 - s)], atol=1e-4, rtol=1e-4,
+        )
+
+    # grad(expm1(x)) = exp(x)
+    for idx, x in enumerate([-1.0, 0.0, 0.5, 1.0]):
+        cb.add(
+            f"grad_lax_expm1_f64_{idx}", "grad", "lax_expm1", ["grad"],
+            [x], [math.exp(x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(log1p(x)) = 1/(1+x)
+    for idx, x in enumerate([0.001, 0.1, 0.5, 1.0]):
+        cb.add(
+            f"grad_lax_log1p_f64_{idx}", "grad", "lax_log1p", ["grad"],
+            [x], [1.0 / (1.0 + x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(asin(x)) = 1/sqrt(1-x^2)
+    for idx, x in enumerate([-0.5, 0.0, 0.5]):
+        cb.add(
+            f"grad_lax_asin_f64_{idx}", "grad", "lax_asin", ["grad"],
+            [x], [1.0 / math.sqrt(1.0 - x * x)], atol=1e-6, rtol=1e-6,
+        )
+
+    # grad(acos(x)) = -1/sqrt(1-x^2)
+    for idx, x in enumerate([-0.5, 0.0, 0.5]):
+        cb.add(
+            f"grad_lax_acos_f64_{idx}", "grad", "lax_acos", ["grad"],
+            [x], [-1.0 / math.sqrt(1.0 - x * x)], atol=1e-6, rtol=1e-6,
+        )
+
     # nested grad: grad(grad(x^3)) = 6x, but we approximate via grad(square) = 2x
     # which for grad(grad(square)) = grad(2*x) = 2 — the second derivative of x^2 is 2
     for idx, x in enumerate(_scalar_samples()[:3]):
@@ -750,6 +800,29 @@ def build_vmap_cases(cb: CaseBuilder) -> None:
         cb.add(
             f"vmap_sin_x_f64_{idx}", "vmap", "sin_x", ["vmap"],
             [vec], [[math.sin(v) for v in vec]], atol=1e-6, rtol=1e-6,
+        )
+
+    # vmap of lax unary primitives
+    for idx, vec in enumerate(_vmap_vectors_f64()):
+        cb.add(
+            f"vmap_lax_neg_f64_{idx}", "vmap", "lax_neg", ["vmap"],
+            [vec], [[-v for v in vec]], atol=1e-6, rtol=1e-6,
+        )
+        cb.add(
+            f"vmap_lax_exp_f64_{idx}", "vmap", "lax_exp", ["vmap"],
+            [vec], [[math.exp(v) for v in vec]], atol=1e-6, rtol=1e-6,
+        )
+        cb.add(
+            f"vmap_lax_square_f64_{idx}", "vmap", "lax_square", ["vmap"],
+            [vec], [[v * v for v in vec]], atol=1e-6, rtol=1e-6,
+        )
+        cb.add(
+            f"vmap_lax_abs_f64_{idx}", "vmap", "lax_abs", ["vmap"],
+            [vec], [[abs(v) for v in vec]], atol=1e-6, rtol=1e-6,
+        )
+        cb.add(
+            f"vmap_lax_tanh_f64_{idx}", "vmap", "lax_tanh", ["vmap"],
+            [vec], [[math.tanh(v) for v in vec]], atol=1e-6, rtol=1e-6,
         )
 
     # Depth-3 transform compositions

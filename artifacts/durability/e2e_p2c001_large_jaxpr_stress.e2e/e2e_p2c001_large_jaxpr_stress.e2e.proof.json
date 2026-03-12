@@ -1,9 +1,9 @@
 {
-  "proof_id": "decode-proof-d0d29944244f84f4",
+  "proof_id": "decode-proof-72ab2da02ad690bc",
   "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c001_large_jaxpr_stress.e2e/e2e_p2c001_large_jaxpr_stress.e2e.sidecar.json",
   "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c001_large_jaxpr_stress.e2e.json",
-  "expected_sha256_hex": "55f27689bd798d241dfae90e11cc9c528e06c7844110b97482c67041ca2d7ec2",
-  "decoded_sha256_hex": "55f27689bd798d241dfae90e11cc9c528e06c7844110b97482c67041ca2d7ec2",
+  "expected_sha256_hex": "da12fd808c74a7146e829d69818568a9f11fd71aa6b55e53e68fe484f0ab4614",
+  "decoded_sha256_hex": "da12fd808c74a7146e829d69818568a9f11fd71aa6b55e53e68fe484f0ab4614",
   "dropped_symbols": [
     "kind:source:sbn:0:esi:0",
     "kind:source:sbn:0:esi:1"
@@ -11,5 +11,5 @@
   "attempted_symbol_count": 134,
   "recovered": true,
   "details": "drop-kind=source count=2; recovered successfully from retained symbols",
-  "generated_at_unix_ms": 1773312739958
+  "generated_at_unix_ms": 1773313802467
 }

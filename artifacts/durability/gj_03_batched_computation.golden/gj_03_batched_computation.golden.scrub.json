@@ -1,11 +1,11 @@
 {
   "sidecar_path": "/data/projects/frankenjax/artifacts/durability/gj_03_batched_computation.golden/gj_03_batched_computation.golden.sidecar.json",
   "artifact_path": "/data/projects/frankenjax/artifacts/e2e/golden_journeys/gj_03_batched_computation.golden.json",
-  "expected_sha256_hex": "4a2fc707de430f2f0cb47ad95e39b62842f7b4654787f57bbb73f8cabb02401d",
-  "decoded_sha256_hex": "4a2fc707de430f2f0cb47ad95e39b62842f7b4654787f57bbb73f8cabb02401d",
+  "expected_sha256_hex": "875bf40aaef57b76343f8e4c1923773f5cdfaa51ef460e138033f861039788fa",
+  "decoded_sha256_hex": "875bf40aaef57b76343f8e4c1923773f5cdfaa51ef460e138033f861039788fa",
   "decoded_matches_expected": true,
   "total_symbols": 5,
   "source_symbols": 4,
   "repair_symbols": 1,
-  "generated_at_unix_ms": 1773312741043
+  "generated_at_unix_ms": 1773314058734
 }

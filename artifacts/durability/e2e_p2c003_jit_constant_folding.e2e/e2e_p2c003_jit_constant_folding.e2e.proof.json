@@ -1,14 +1,14 @@
 {
-  "proof_id": "decode-proof-e78bf11a8c04de84",
+  "proof_id": "decode-proof-2c65ee42b7e32f2d",
   "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c003_jit_constant_folding.e2e/e2e_p2c003_jit_constant_folding.e2e.sidecar.json",
   "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c003_jit_constant_folding.e2e.json",
-  "expected_sha256_hex": "f3cc6d6751f413539124c4f561e20ddd582c8cfd93909bb1ac6c86be5d6a85c1",
-  "decoded_sha256_hex": "f3cc6d6751f413539124c4f561e20ddd582c8cfd93909bb1ac6c86be5d6a85c1",
+  "expected_sha256_hex": "9bdd6e1e3389181e4263a85fcaf5d43cff0bcbf55a3dd16f0054b052895047ed",
+  "decoded_sha256_hex": "9bdd6e1e3389181e4263a85fcaf5d43cff0bcbf55a3dd16f0054b052895047ed",
   "dropped_symbols": [
     "kind:repair:sbn:0:esi:6"
   ],
   "attempted_symbol_count": 6,
   "recovered": true,
   "details": "drop-kind=repair count=1; recovered successfully from retained symbols",
-  "generated_at_unix_ms": 1773312740149
+  "generated_at_unix_ms": 1773313802668
 }

@@ -1,0 +1,1019 @@
+{
+  "entries": [
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [],
+        []
+      ],
+      "oracle_match": true,
+      "output_shape": [],
+      "pass": true,
+      "primitive": "Add2",
+      "rank": 0
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        []
+      ],
+      "oracle_match": true,
+      "output_shape": [],
+      "pass": true,
+      "primitive": "Square",
+      "rank": 0
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        []
+      ],
+      "oracle_match": true,
+      "output_shape": [],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 0
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        []
+      ],
+      "oracle_match": true,
+      "output_shape": [],
+      "pass": true,
+      "primitive": "LaxExp",
+      "rank": 0
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        []
+      ],
+      "oracle_match": true,
+      "output_shape": [],
+      "pass": true,
+      "primitive": "Square",
+      "rank": 0
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          3
+        ],
+        [
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        3
+      ],
+      "pass": true,
+      "primitive": "Add2",
+      "rank": 1
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          1
+        ],
+        [
+          1
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        1
+      ],
+      "pass": true,
+      "primitive": "Add2",
+      "rank": 1
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          1024
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        1024
+      ],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 1
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          3
+        ],
+        [
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [],
+      "pass": true,
+      "primitive": "Dot3",
+      "rank": 1
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          4
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [],
+      "pass": true,
+      "primitive": "ReduceSumVec",
+      "rank": 1
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          3,
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        3,
+        3
+      ],
+      "pass": true,
+      "primitive": "LaxAbs",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          4,
+          4
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        4,
+        4
+      ],
+      "pass": true,
+      "primitive": "LaxFloor",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        3
+      ],
+      "pass": true,
+      "primitive": "LaxExp",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          1,
+          1
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        1,
+        1
+      ],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          8,
+          16
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        8,
+        16
+      ],
+      "pass": true,
+      "primitive": "LaxSquare",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "Add2",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          3,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        3,
+        2
+      ],
+      "pass": true,
+      "primitive": "SinX",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxReciprocal",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxMul",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 3
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          3,
+          4
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        3,
+        4
+      ],
+      "pass": true,
+      "primitive": "LaxAbs",
+      "rank": 3
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          1,
+          1,
+          1
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        1,
+        1,
+        1
+      ],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 3
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          3,
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        3,
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxExp",
+      "rank": 3
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2,
+          3
+        ],
+        [
+          2,
+          2,
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2,
+        3
+      ],
+      "pass": true,
+      "primitive": "Add2",
+      "rank": 3
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2,
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 4
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          1,
+          2,
+          3,
+          4
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "pass": true,
+      "primitive": "LaxSquare",
+      "rank": 4
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          1,
+          1,
+          1,
+          1
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "pass": true,
+      "primitive": "LaxAbs",
+      "rank": 4
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "CosX",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        3
+      ],
+      "pass": true,
+      "primitive": "LaxTanh",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxLog",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxSqrt",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxLogistic",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxEq",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxLt",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxSub",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxDiv",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxMax",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxMin",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxPow",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          3,
+          4
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        3,
+        4
+      ],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        3
+      ],
+      "pass": true,
+      "primitive": "LaxSquare",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        3
+      ],
+      "pass": true,
+      "primitive": "ReduceSumVec",
+      "rank": 1
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxCeil",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": false,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": false,
+      "primitive": "LaxRound",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxSign",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxRsqrt",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxErf",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "AddOne",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          3
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        3
+      ],
+      "pass": true,
+      "primitive": "Square",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          3,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        3,
+        2
+      ],
+      "pass": true,
+      "primitive": "Identity",
+      "rank": 3
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxLog1p",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxExpm1",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          2,
+          2
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        2,
+        2
+      ],
+      "pass": true,
+      "primitive": "LaxErfc",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          4,
+          1
+        ],
+        [
+          1,
+          4
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        4,
+        4
+      ],
+      "pass": true,
+      "primitive": "Add2",
+      "rank": 2
+    },
+    {
+      "abs_error": null,
+      "input_shapes": [
+        [
+          0
+        ]
+      ],
+      "oracle_match": true,
+      "output_shape": [
+        0
+      ],
+      "pass": true,
+      "primitive": "LaxNeg",
+      "rank": 1
+    }
+  ],
+  "generated_at_unix_ms": 1773313664992,
+  "matched_cases": 55,
+  "mismatched_cases": 1,
+  "rank_summary": {
+    "0": {
+      "pass_rate": 1.0,
+      "passed": 5,
+      "total": 5
+    },
+    "1": {
+      "pass_rate": 1.0,
+      "passed": 7,
+      "total": 7
+    },
+    "2": {
+      "pass_rate": 0.9714285714285714,
+      "passed": 34,
+      "total": 35
+    },
+    "3": {
+      "pass_rate": 1.0,
+      "passed": 6,
+      "total": 6
+    },
+    "4": {
+      "pass_rate": 1.0,
+      "passed": 3,
+      "total": 3
+    }
+  },
+  "scenario": "e2e_multirank_fixture_sweep",
+  "total_cases": 56
+}

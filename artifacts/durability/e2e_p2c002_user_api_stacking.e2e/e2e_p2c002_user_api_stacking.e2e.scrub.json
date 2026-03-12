@@ -1,11 +1,11 @@
 {
   "sidecar_path": "/data/projects/frankenjax/artifacts/durability/e2e_p2c002_user_api_stacking.e2e/e2e_p2c002_user_api_stacking.e2e.sidecar.json",
   "artifact_path": "/data/projects/frankenjax/artifacts/e2e/e2e_p2c002_user_api_stacking.e2e.json",
-  "expected_sha256_hex": "37d120631cfe04d4718c9865f0e99e955c0d9402c7d2420dd0b2530b01dcb0c8",
-  "decoded_sha256_hex": "37d120631cfe04d4718c9865f0e99e955c0d9402c7d2420dd0b2530b01dcb0c8",
+  "expected_sha256_hex": "bf1c200143b3bcb61f86df215ed9b0cb30abdacc6ef6fd135e179e7dba63de2a",
+  "decoded_sha256_hex": "bf1c200143b3bcb61f86df215ed9b0cb30abdacc6ef6fd135e179e7dba63de2a",
   "decoded_matches_expected": true,
   "total_symbols": 7,
   "source_symbols": 6,
   "repair_symbols": 1,
-  "generated_at_unix_ms": 1773312740113
+  "generated_at_unix_ms": 1773314057878
 }
