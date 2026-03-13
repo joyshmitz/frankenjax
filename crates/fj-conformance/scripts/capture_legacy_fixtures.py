@@ -1904,11 +1904,11 @@ def build_lax_cases(cb: CaseBuilder) -> None:
         [{"kind": "scalar_complex128", "real": 0.0, "imag": 1.0}],
         atol=0.0, rtol=0.0, comparator="exact",
     )
-    # conj(5+0j) → 5+0j (real input unchanged)
+    # conj(5+3j) → 5-3j
     cb.add_raw(
         "lax_conj_complex128_2", "lax", "lax_conj", ["jit"],
-        [{"kind": "scalar_complex128", "real": 5.0, "imag": 0.0}],
-        [{"kind": "scalar_complex128", "real": 5.0, "imag": 0.0}],
+        [{"kind": "scalar_complex128", "real": 5.0, "imag": 3.0}],
+        [{"kind": "scalar_complex128", "real": 5.0, "imag": -3.0}],
         atol=0.0, rtol=0.0, comparator="exact",
     )
 
