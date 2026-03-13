@@ -18667,6 +18667,707 @@
       "transforms": [
         "jit"
       ]
+    },
+    {
+      "case_id": "lax_fft_4point_f64_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_fft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            4
+          ],
+          "values": [
+            1.0,
+            2.0,
+            3.0,
+            4.0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            10.0,
+            -2.0000000000000004,
+            -2.0,
+            -1.9999999999999982
+          ],
+          "imags": [
+            0.0,
+            1.9999999999999996,
+            -9.797174393178826e-16,
+            -2.000000000000001
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_fft_impulse_f64_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_fft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            4
+          ],
+          "values": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "imags": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_fft_dc_f64_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_fft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            4
+          ],
+          "values": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            4.0,
+            -1.8369701987210297e-16,
+            0.0,
+            3.2904645469127765e-16
+          ],
+          "imags": [
+            0.0,
+            -2.220446049250313e-16,
+            -2.449293598294706e-16,
+            -3.3306690738754696e-16
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_fft_batched_2x4_f64_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_fft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            2,
+            4
+          ],
+          "values": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            2,
+            4
+          ],
+          "reals": [
+            4.0,
+            -1.8369701987210297e-16,
+            0.0,
+            3.2904645469127765e-16,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "imags": [
+            0.0,
+            -2.220446049250313e-16,
+            -2.449293598294706e-16,
+            -3.3306690738754696e-16,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_fft_complex_input_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_fft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            3,
+            1,
+            0,
+            -1
+          ],
+          "imags": [
+            4,
+            -2,
+            0,
+            1
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            3.0,
+            2.220446049250313e-16,
+            3.0,
+            5.999999999999999
+          ],
+          "imags": [
+            3.0,
+            1.9999999999999998,
+            5.0,
+            6.0
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_ifft_4point_complex128_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_ifft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            10,
+            -2,
+            -2,
+            -2
+          ],
+          "imags": [
+            0,
+            2,
+            0,
+            -2
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            1.0,
+            2.0,
+            3.0,
+            3.9999999999999996
+          ],
+          "imags": [
+            0.0,
+            1.1102230246251565e-16,
+            -1.6653345369377348e-16,
+            -4.996003610813204e-16
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_ifft_dc_complex128_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_ifft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            4,
+            0,
+            0,
+            0
+          ],
+          "imags": [
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "imags": [
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_ifft_roundtrip_complex128_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_ifft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            10.0,
+            -2.0000000000000004,
+            -2.0,
+            -1.9999999999999982
+          ],
+          "imags": [
+            0.0,
+            1.9999999999999996,
+            -9.797174393178826e-16,
+            -2.000000000000001
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            4
+          ],
+          "reals": [
+            1.0000000000000004,
+            2.0,
+            2.9999999999999996,
+            4.0
+          ],
+          "imags": [
+            -5.551115123125783e-16,
+            -2.7755575615628914e-16,
+            -1.1102230246251565e-16,
+            2.7755575615628914e-16
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_rfft_8point_f64_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_rfft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            8
+          ],
+          "values": [
+            1.0,
+            2.0,
+            3.0,
+            4.0,
+            5.0,
+            6.0,
+            7.0,
+            8.0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            5
+          ],
+          "reals": [
+            36.0,
+            -4.000000000000003,
+            -4.000000000000002,
+            -4.0,
+            -4.0
+          ],
+          "imags": [
+            0.0,
+            9.65685424949238,
+            3.9999999999999982,
+            1.656854249492386,
+            -3.91886975727153e-15
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_rfft_impulse_f64_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_rfft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            8
+          ],
+          "values": [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            5
+          ],
+          "reals": [
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ],
+          "imags": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_rfft_zeropad_f64_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_rfft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            4
+          ],
+          "values": [
+            1.0,
+            2.0,
+            3.0,
+            4.0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            5
+          ],
+          "reals": [
+            10.0,
+            -0.4142135623730949,
+            -2.0000000000000004,
+            2.4142135623730954,
+            -2.0
+          ],
+          "imags": [
+            0.0,
+            -7.242640687119286,
+            1.9999999999999996,
+            -1.2426406871192845,
+            -9.797174393178826e-16
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_irfft_8point_complex128_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_irfft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            5
+          ],
+          "reals": [
+            36.0,
+            -4.000000000000003,
+            -4.000000000000002,
+            -4.0,
+            -4.0
+          ],
+          "imags": [
+            0.0,
+            9.65685424949238,
+            3.9999999999999982,
+            1.656854249492386,
+            -3.91886975727153e-15
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            8
+          ],
+          "values": [
+            0.9999999999999986,
+            1.9999999999999987,
+            3.0000000000000027,
+            3.999999999999999,
+            5.0,
+            6.000000000000005,
+            7.000000000000001,
+            7.999999999999995
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
+    },
+    {
+      "case_id": "lax_irfft_dc_complex128_0",
+      "family": "lax",
+      "mode": "strict",
+      "program": "lax_irfft",
+      "transforms": [
+        "jit"
+      ],
+      "args": [
+        {
+          "kind": "tensor_complex128",
+          "shape": [
+            5
+          ],
+          "reals": [
+            4,
+            0,
+            0,
+            0,
+            0
+          ],
+          "imags": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      ],
+      "expected": [
+        {
+          "kind": "tensor_f64",
+          "shape": [
+            8
+          ],
+          "values": [
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            0.5,
+            0.5
+          ]
+        }
+      ],
+      "comparator": "approx_atol_rtol",
+      "atol": 1e-10,
+      "rtol": 1e-10,
+      "baseline_mismatch": false,
+      "flaky": false,
+      "simulated_delay_ms": 0
     }
   ],
   "generated_at_unix_ms": 1773431653960,

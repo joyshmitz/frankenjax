@@ -2109,6 +2109,190 @@ def build_lax_cases(cb: CaseBuilder) -> None:
         atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
     )
 
+    # ── FFT / IFFT / RFFT / IRFFT ──
+
+    def _dft_1d(x: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        """Naive 1D DFT: X[k] = Σ x[j]·e^{-2πi·j·k/n}."""
+        n = len(x)
+        result = []
+        for k in range(n):
+            re_s, im_s = 0.0, 0.0
+            for j in range(n):
+                angle = -2.0 * math.pi * j * k / n
+                cos_a, sin_a = math.cos(angle), math.sin(angle)
+                xr, xi = x[j]
+                re_s += xr * cos_a - xi * sin_a
+                im_s += xr * sin_a + xi * cos_a
+            result.append((re_s, im_s))
+        return result
+
+    def _idft_1d(x: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        """Naive 1D IDFT: x[j] = (1/n) Σ X[k]·e^{2πi·j·k/n}."""
+        n = len(x)
+        inv_n = 1.0 / n
+        result = []
+        for j in range(n):
+            re_s, im_s = 0.0, 0.0
+            for k in range(n):
+                angle = 2.0 * math.pi * j * k / n
+                cos_a, sin_a = math.cos(angle), math.sin(angle)
+                xr, xi = x[k]
+                re_s += xr * cos_a - xi * sin_a
+                im_s += xr * sin_a + xi * cos_a
+            result.append((re_s * inv_n, im_s * inv_n))
+        return result
+
+    def _tc128(shape: list[int], pairs: list[tuple[float, float]]) -> dict:
+        return {
+            "kind": "tensor_complex128",
+            "shape": shape,
+            "reals": [r for r, _ in pairs],
+            "imags": [i for _, i in pairs],
+        }
+
+    # FFT: [1,2,3,4] → [10, -2+2i, -2, -2-2i]
+    fft4 = _dft_1d([(1, 0), (2, 0), (3, 0), (4, 0)])
+    cb.add_raw(
+        "lax_fft_4point_f64_0", "lax", "lax_fft", ["jit"],
+        [{"kind": "tensor_f64", "shape": [4], "values": [1.0, 2.0, 3.0, 4.0]}],
+        [_tc128([4], fft4)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # FFT: impulse [1,0,0,0] → [1,1,1,1]
+    fft_imp = _dft_1d([(1, 0), (0, 0), (0, 0), (0, 0)])
+    cb.add_raw(
+        "lax_fft_impulse_f64_0", "lax", "lax_fft", ["jit"],
+        [{"kind": "tensor_f64", "shape": [4], "values": [1.0, 0.0, 0.0, 0.0]}],
+        [_tc128([4], fft_imp)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # FFT: DC [1,1,1,1] → [4,0,0,0]
+    fft_dc = _dft_1d([(1, 0), (1, 0), (1, 0), (1, 0)])
+    cb.add_raw(
+        "lax_fft_dc_f64_0", "lax", "lax_fft", ["jit"],
+        [{"kind": "tensor_f64", "shape": [4], "values": [1.0, 1.0, 1.0, 1.0]}],
+        [_tc128([4], fft_dc)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # FFT: batched 2x4
+    r0 = _dft_1d([(1, 0), (1, 0), (1, 0), (1, 0)])
+    r1 = _dft_1d([(1, 0), (0, 0), (0, 0), (0, 0)])
+    cb.add_raw(
+        "lax_fft_batched_2x4_f64_0", "lax", "lax_fft", ["jit"],
+        [{"kind": "tensor_f64", "shape": [2, 4],
+          "values": [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]}],
+        [_tc128([2, 4], r0 + r1)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # FFT: complex input
+    cinp = [(3, 4), (1, -2), (0, 0), (-1, 1)]
+    cout = _dft_1d(cinp)
+    cb.add_raw(
+        "lax_fft_complex_input_0", "lax", "lax_fft", ["jit"],
+        [_tc128([4], cinp)],
+        [_tc128([4], cout)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # IFFT: [10, -2+2i, -2, -2-2i] → [1,2,3,4]
+    ifft_inp = [(10, 0), (-2, 2), (-2, 0), (-2, -2)]
+    ifft_out = _idft_1d(ifft_inp)
+    cb.add_raw(
+        "lax_ifft_4point_complex128_0", "lax", "lax_ifft", ["jit"],
+        [_tc128([4], ifft_inp)],
+        [_tc128([4], ifft_out)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # IFFT: DC [4,0,0,0] → [1,1,1,1]
+    ifft_dc_inp = [(4, 0), (0, 0), (0, 0), (0, 0)]
+    ifft_dc_out = _idft_1d(ifft_dc_inp)
+    cb.add_raw(
+        "lax_ifft_dc_complex128_0", "lax", "lax_ifft", ["jit"],
+        [_tc128([4], ifft_dc_inp)],
+        [_tc128([4], ifft_dc_out)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # IFFT: roundtrip (FFT then IFFT)
+    cb.add_raw(
+        "lax_ifft_roundtrip_complex128_0", "lax", "lax_ifft", ["jit"],
+        [_tc128([4], fft4)],
+        [_tc128([4], _idft_1d(fft4))],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # RFFT: [1..8] with fft_length=8 → 5 complex outputs
+    rfft_inp = [(float(i + 1), 0) for i in range(8)]
+    rfft_full = _dft_1d(rfft_inp)
+    rfft_out = rfft_full[:5]
+    cb.add_raw(
+        "lax_rfft_8point_f64_0", "lax", "lax_rfft", ["jit"],
+        [{"kind": "tensor_f64", "shape": [8],
+          "values": [float(i + 1) for i in range(8)]}],
+        [_tc128([5], rfft_out)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # RFFT: impulse [1,0,...,0] with fft_length=8
+    rfft_imp_inp = [(1, 0)] + [(0, 0)] * 7
+    rfft_imp_out = _dft_1d(rfft_imp_inp)[:5]
+    cb.add_raw(
+        "lax_rfft_impulse_f64_0", "lax", "lax_rfft", ["jit"],
+        [{"kind": "tensor_f64", "shape": [8],
+          "values": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}],
+        [_tc128([5], rfft_imp_out)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # RFFT: shorter input [1,2,3,4] zero-padded to fft_length=8
+    rfft_zp = _dft_1d([(1, 0), (2, 0), (3, 0), (4, 0)] + [(0, 0)] * 4)[:5]
+    cb.add_raw(
+        "lax_rfft_zeropad_f64_0", "lax", "lax_rfft", ["jit"],
+        [{"kind": "tensor_f64", "shape": [4], "values": [1.0, 2.0, 3.0, 4.0]}],
+        [_tc128([5], rfft_zp)],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # IRFFT: half-spectrum of [1..8] → recover [1..8]
+    irfft_half = rfft_out
+    fft_len = 8
+    full_spec: list[tuple[float, float]] = list(irfft_half) + [(0.0, 0.0)] * (fft_len - len(irfft_half))
+    for k in range(len(irfft_half), fft_len):
+        mirror = fft_len - k
+        if mirror < len(irfft_half):
+            re, im = irfft_half[mirror]
+            full_spec[k] = (re, -im)
+    irfft_result = _idft_1d(full_spec)
+    cb.add_raw(
+        "lax_irfft_8point_complex128_0", "lax", "lax_irfft", ["jit"],
+        [_tc128([5], irfft_half)],
+        [{"kind": "tensor_f64", "shape": [8],
+          "values": [r for r, _ in irfft_result]}],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
+    # IRFFT: DC [4,0,0,0,0] with fft_length=8
+    irfft_dc_half = [(4, 0), (0, 0), (0, 0), (0, 0), (0, 0)]
+    full_dc_spec: list[tuple[float, float]] = list(irfft_dc_half) + [(0.0, 0.0)] * (fft_len - len(irfft_dc_half))
+    for k in range(len(irfft_dc_half), fft_len):
+        mirror = fft_len - k
+        if mirror < len(irfft_dc_half):
+            re, im = irfft_dc_half[mirror]
+            full_dc_spec[k] = (re, -im)
+    irfft_dc_result = _idft_1d(full_dc_spec)
+    cb.add_raw(
+        "lax_irfft_dc_complex128_0", "lax", "lax_irfft", ["jit"],
+        [_tc128([5], irfft_dc_half)],
+        [{"kind": "tensor_f64", "shape": [8],
+          "values": [r for r, _ in irfft_dc_result]}],
+        atol=1e-10, rtol=1e-10, comparator="approx_atol_rtol",
+    )
+
 
 # ── Oracle-based capture (with real JAX) ─────────────────────────
 

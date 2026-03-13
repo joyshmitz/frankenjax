@@ -1053,7 +1053,8 @@ fn fixture_shape(value: &FixtureValue) -> Vec<u32> {
         FixtureValue::VectorI64 { values } => vec![values.len() as u32],
         FixtureValue::TensorF64 { shape, .. }
         | FixtureValue::TensorI64 { shape, .. }
-        | FixtureValue::TensorBool { shape, .. } => shape.clone(),
+        | FixtureValue::TensorBool { shape, .. }
+        | FixtureValue::TensorComplex128 { shape, .. } => shape.clone(),
     }
 }
 

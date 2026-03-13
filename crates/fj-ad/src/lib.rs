@@ -348,6 +348,112 @@ fn value_sub(a: &Value, b: &Value) -> Result<Value, AdError> {
         .map_err(|e| AdError::EvalFailed(e.to_string()))
 }
 
+/// Zero-pad a complex tensor along the last axis from current length to `target_len`.
+fn zero_pad_last_axis_complex(tensor: &TensorValue, target_len: usize) -> Result<Value, AdError> {
+    let cur_len = *tensor.shape.dims.last().unwrap_or(&0) as usize;
+    if cur_len >= target_len {
+        return Ok(Value::Tensor(tensor.clone()));
+    }
+    let batch_size = tensor.elements.len() / cur_len.max(1);
+    let mut elements = Vec::with_capacity(batch_size * target_len);
+    let zero = Literal::from_complex128(0.0, 0.0);
+    for batch in 0..batch_size {
+        let start = batch * cur_len;
+        elements.extend_from_slice(&tensor.elements[start..start + cur_len]);
+        elements.resize(elements.len() + (target_len - cur_len), zero);
+    }
+    let mut dims = tensor.shape.dims.clone();
+    *dims.last_mut().unwrap() = target_len as u32;
+    TensorValue::new(tensor.dtype, Shape { dims }, elements)
+        .map(Value::Tensor)
+        .map_err(|e| AdError::EvalFailed(e.to_string()))
+}
+
+/// Extract real parts from a complex tensor, producing an F64 tensor of the same shape.
+fn take_real_part(value: &Value) -> Result<Value, AdError> {
+    match value {
+        Value::Tensor(t) => {
+            let elements: Vec<Literal> = t
+                .elements
+                .iter()
+                .map(|lit| match lit {
+                    Literal::Complex128Bits(re, _) => Literal::from_f64(f64::from_bits(*re)),
+                    Literal::Complex64Bits(re, _) => {
+                        Literal::from_f64(f32::from_bits(*re) as f64)
+                    }
+                    other => Literal::from_f64(other.as_f64().unwrap_or(0.0)),
+                })
+                .collect();
+            TensorValue::new(DType::F64, t.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))
+        }
+        Value::Scalar(lit) => match lit {
+            Literal::Complex128Bits(re, _) => Ok(Value::scalar_f64(f64::from_bits(*re))),
+            Literal::Complex64Bits(re, _) => Ok(Value::scalar_f64(f32::from_bits(*re) as f64)),
+            other => Ok(Value::scalar_f64(other.as_f64().unwrap_or(0.0))),
+        },
+    }
+}
+
+/// Truncate a tensor's last axis to `target_len` elements.
+fn truncate_last_axis(tensor: &TensorValue, target_len: usize) -> Result<Value, AdError> {
+    let cur_len = *tensor.shape.dims.last().unwrap_or(&0) as usize;
+    if cur_len <= target_len {
+        return Ok(Value::Tensor(tensor.clone()));
+    }
+    let batch_size = tensor.elements.len() / cur_len;
+    let mut elements = Vec::with_capacity(batch_size * target_len);
+    for batch in 0..batch_size {
+        let start = batch * cur_len;
+        elements.extend_from_slice(&tensor.elements[start..start + target_len]);
+    }
+    let mut dims = tensor.shape.dims.clone();
+    *dims.last_mut().unwrap() = target_len as u32;
+    TensorValue::new(tensor.dtype, Shape { dims }, elements)
+        .map(Value::Tensor)
+        .map_err(|e| AdError::EvalFailed(e.to_string()))
+}
+
+/// Scale complex tensor elements: multiply interior bins (indices 1..n/2-1) by 2,
+/// leave DC (index 0) and Nyquist (index n/2) unchanged.
+/// Used for IRFFT VJP where the Hermitian extension adjoint doubles interior bins.
+fn scale_hermitian_adjoint(tensor: &TensorValue, fft_length: usize) -> Result<Value, AdError> {
+    let half_len = fft_length / 2 + 1;
+    let cur_len = *tensor.shape.dims.last().unwrap_or(&0) as usize;
+    if cur_len != half_len {
+        return Err(AdError::EvalFailed(format!(
+            "scale_hermitian_adjoint: expected last dim {half_len}, got {cur_len}"
+        )));
+    }
+    let batch_size = tensor.elements.len() / cur_len;
+    let nyquist_idx = fft_length / 2;
+    let mut elements = tensor.elements.clone();
+    for batch in 0..batch_size {
+        let start = batch * cur_len;
+        // Interior bins: indices 1..nyquist_idx (exclusive of 0 and nyquist)
+        for k in 1..nyquist_idx {
+            if k < cur_len {
+                let idx = start + k;
+                match &elements[idx] {
+                    Literal::Complex128Bits(re, im) => {
+                        let r = f64::from_bits(*re) * 2.0;
+                        let i = f64::from_bits(*im) * 2.0;
+                        elements[idx] = Literal::from_complex128(r, i);
+                    }
+                    other => {
+                        let v = other.as_f64().unwrap_or(0.0) * 2.0;
+                        elements[idx] = Literal::from_f64(v);
+                    }
+                }
+            }
+        }
+    }
+    TensorValue::new(tensor.dtype, tensor.shape.clone(), elements)
+        .map(Value::Tensor)
+        .map_err(|e| AdError::EvalFailed(e.to_string()))
+}
+
 fn is_zero_value(v: &Value) -> bool {
     match v {
         Value::Scalar(Literal::F64Bits(bits)) => f64::from_bits(*bits) == 0.0,
@@ -1950,7 +2056,88 @@ fn vjp(
             let inv_n = Value::Scalar(Literal::from_f64(1.0 / n));
             Ok(vec![value_mul(&fft_g, &inv_n)?])
         }
-        Primitive::Qr | Primitive::Svd | Primitive::Eigh | Primitive::Rfft | Primitive::Irfft => {
+        // ── RFFT VJP ──
+        // RFFT = project_{n/2+1}(DFT(zero_pad(x, n)))
+        // Adjoint: zero_extend(g) → n·IDFT → real → truncate to input length
+        Primitive::Rfft => {
+            let fft_length: usize = params
+                .get("fft_length")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| match &inputs[0] {
+                    Value::Tensor(t) => *t.shape.dims.last().unwrap_or(&1) as usize,
+                    Value::Scalar(_) => 1,
+                });
+            let input_len = match &inputs[0] {
+                Value::Tensor(t) => *t.shape.dims.last().unwrap_or(&1) as usize,
+                Value::Scalar(_) => 1,
+            };
+            let g_tensor = match g {
+                Value::Tensor(t) => t,
+                _ => {
+                    return Err(AdError::EvalFailed(
+                        "RFFT VJP: gradient must be tensor".to_owned(),
+                    ))
+                }
+            };
+            // Step 1: Zero-pad g from n/2+1 to fft_length
+            let padded = zero_pad_last_axis_complex(g_tensor, fft_length)?;
+            // Step 2: IFFT of zero-padded g
+            let ifft_result =
+                eval_primitive(Primitive::Ifft, std::slice::from_ref(&padded), &BTreeMap::new())
+                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            // Step 3: Scale by n
+            let n = fft_length as f64;
+            let scale = Value::Scalar(Literal::from_f64(n));
+            let scaled = value_mul(&ifft_result, &scale)?;
+            // Step 4: Take real part (input was real)
+            let real_result = take_real_part(&scaled)?;
+            // Step 5: Truncate to input length if needed
+            if input_len < fft_length {
+                let truncated = match &real_result {
+                    Value::Tensor(t) => truncate_last_axis(t, input_len)?,
+                    _ => real_result,
+                };
+                Ok(vec![truncated])
+            } else {
+                Ok(vec![real_result])
+            }
+        }
+        // ── IRFFT VJP ──
+        // IRFFT = real(IDFT(hermitian_extend(y)))
+        // Adjoint: hermitian_extend^T ∘ (1/n)·DFT ∘ embed_real
+        // For real g: (1/n)·FFT(g), truncated to n/2+1, interior bins doubled
+        Primitive::Irfft => {
+            let fft_length: usize = params
+                .get("fft_length")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| match &inputs[0] {
+                    Value::Tensor(t) => {
+                        let d = *t.shape.dims.last().unwrap_or(&1) as usize;
+                        d.saturating_sub(1).saturating_mul(2)
+                    }
+                    Value::Scalar(_) => 1,
+                });
+            // Step 1: FFT(g_real)
+            let fft_g =
+                eval_primitive(Primitive::Fft, std::slice::from_ref(g), &BTreeMap::new())
+                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            // Step 2: Scale by 1/n
+            let inv_n = Value::Scalar(Literal::from_f64(1.0 / fft_length as f64));
+            let scaled = value_mul(&fft_g, &inv_n)?;
+            // Step 3: Truncate to n/2+1
+            let half_len = fft_length / 2 + 1;
+            let truncated = match &scaled {
+                Value::Tensor(t) => truncate_last_axis(t, half_len)?,
+                _ => scaled,
+            };
+            // Step 4: Double interior bins (hermitian_extend adjoint)
+            let result = match &truncated {
+                Value::Tensor(t) => scale_hermitian_adjoint(t, fft_length)?,
+                _ => truncated,
+            };
+            Ok(vec![result])
+        }
+        Primitive::Qr | Primitive::Svd | Primitive::Eigh => {
             Err(AdError::UnsupportedPrimitive(primitive))
         }
     }
@@ -3798,7 +3985,13 @@ fn jvp_rule(
         // ── IFFT JVP ──
         // IFFT is linear: JVP = IFFT(tangent)
         Primitive::Ifft => ep(Primitive::Ifft, &[tangents[0].clone()]),
-        Primitive::Qr | Primitive::Svd | Primitive::Eigh | Primitive::Rfft | Primitive::Irfft => {
+        // ── RFFT JVP ──
+        // RFFT is linear: JVP = RFFT(tangent)
+        Primitive::Rfft => ep(Primitive::Rfft, &[tangents[0].clone()]),
+        // ── IRFFT JVP ──
+        // IRFFT is linear: JVP = IRFFT(tangent)
+        Primitive::Irfft => ep(Primitive::Irfft, &[tangents[0].clone()]),
+        Primitive::Qr | Primitive::Svd | Primitive::Eigh => {
             Err(AdError::UnsupportedPrimitive(primitive))
         }
     }
@@ -8349,6 +8542,221 @@ mod tests {
             (vals[1] - vals[2]).abs() < 1e-3,
             "hessian should be symmetric: {:?}",
             vals
+        );
+    }
+
+    // ── FFT AD tests ──
+
+    fn make_fft_jaxpr(prim: Primitive) -> Jaxpr {
+        Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![fj_core::Equation {
+                primitive: prim,
+                inputs: smallvec::smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec::smallvec![VarId(2)],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            }],
+        )
+    }
+
+    fn make_rfft_jaxpr(fft_length: usize) -> Jaxpr {
+        let mut params = BTreeMap::new();
+        params.insert("fft_length".to_owned(), fft_length.to_string());
+        Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![fj_core::Equation {
+                primitive: Primitive::Rfft,
+                inputs: smallvec::smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec::smallvec![VarId(2)],
+                params,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            }],
+        )
+    }
+
+    fn make_irfft_jaxpr(fft_length: usize) -> Jaxpr {
+        let mut params = BTreeMap::new();
+        params.insert("fft_length".to_owned(), fft_length.to_string());
+        Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![fj_core::Equation {
+                primitive: Primitive::Irfft,
+                inputs: smallvec::smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec::smallvec![VarId(2)],
+                params,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            }],
+        )
+    }
+
+    fn make_real_tensor(data: &[f64]) -> Value {
+        let elements: Vec<Literal> = data.iter().map(|&v| Literal::from_f64(v)).collect();
+        let shape = Shape {
+            dims: vec![data.len() as u32],
+        };
+        Value::Tensor(TensorValue::new(DType::F64, shape, elements).unwrap())
+    }
+
+    fn make_complex_tensor(data: &[(f64, f64)]) -> Value {
+        let elements: Vec<Literal> = data
+            .iter()
+            .map(|&(re, im)| Literal::from_complex128(re, im))
+            .collect();
+        let shape = Shape {
+            dims: vec![data.len() as u32],
+        };
+        Value::Tensor(TensorValue::new(DType::Complex128, shape, elements).unwrap())
+    }
+
+    fn extract_f64_vec(v: &Value) -> Vec<f64> {
+        match v {
+            Value::Tensor(t) => t
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap())
+                .collect(),
+            Value::Scalar(l) => vec![l.as_f64().unwrap()],
+        }
+    }
+
+    fn extract_complex_vec(v: &Value) -> Vec<(f64, f64)> {
+        match v {
+            Value::Tensor(t) => t
+                .elements
+                .iter()
+                .map(|l| l.as_complex128().unwrap_or((l.as_f64().unwrap_or(0.0), 0.0)))
+                .collect(),
+            Value::Scalar(l) => {
+                vec![l.as_complex128().unwrap_or((l.as_f64().unwrap_or(0.0), 0.0))]
+            }
+        }
+    }
+
+    #[test]
+    fn test_rfft_jvp_linearity() {
+        // RFFT is linear, so JVP(RFFT)(dx) = RFFT(dx)
+        let jaxpr = make_rfft_jaxpr(4);
+        let x = make_real_tensor(&[1.0, 2.0, 3.0, 4.0]);
+        let dx = make_real_tensor(&[0.1, 0.2, 0.3, 0.4]);
+
+        let jvp_result = jvp(&jaxpr, &[x], &[dx.clone()]).unwrap();
+        let tangent_out = extract_complex_vec(&jvp_result.tangents[0]);
+
+        let mut rfft_params = BTreeMap::new();
+        rfft_params.insert("fft_length".to_owned(), "4".to_owned());
+        let rfft_dx = eval_primitive(Primitive::Rfft, &[dx], &rfft_params).unwrap();
+        let expected = extract_complex_vec(&rfft_dx);
+
+        assert_eq!(tangent_out.len(), expected.len());
+        for (i, ((ar, ai), (er, ei))) in tangent_out.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (ar - er).abs() < 1e-10 && (ai - ei).abs() < 1e-10,
+                "RFFT JVP mismatch at {i}: got ({ar},{ai}), expected ({er},{ei})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_irfft_jvp_linearity() {
+        // IRFFT is linear, so JVP(IRFFT)(dg) = IRFFT(dg)
+        let jaxpr = make_irfft_jaxpr(4);
+        let g_in = make_complex_tensor(&[(10.0, 0.0), (-2.0, 2.0), (-2.0, 0.0)]);
+        let dg = make_complex_tensor(&[(1.0, 0.0), (0.5, -0.5), (0.0, 0.0)]);
+
+        let jvp_result = jvp(&jaxpr, &[g_in], &[dg.clone()]).unwrap();
+        let tangent_out = extract_f64_vec(&jvp_result.tangents[0]);
+
+        let mut irfft_params = BTreeMap::new();
+        irfft_params.insert("fft_length".to_owned(), "4".to_owned());
+        let irfft_dg = eval_primitive(Primitive::Irfft, &[dg], &irfft_params).unwrap();
+        let expected = extract_f64_vec(&irfft_dg);
+
+        assert_eq!(tangent_out.len(), expected.len());
+        for (i, (got, exp)) in tangent_out.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-10,
+                "IRFFT JVP mismatch at {i}: got {got}, expected {exp}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rfft_vjp_adjoint_identity() {
+        // Verify adjoint identity: <RFFT(x), g>_C = <x, VJP(g)>_R
+        let x = make_real_tensor(&[1.0, 2.0, 3.0, 4.0]);
+        let half_len = 3; // 4/2+1
+
+        let mut params = BTreeMap::new();
+        params.insert("fft_length".to_owned(), "4".to_owned());
+
+        let y = eval_primitive(Primitive::Rfft, &[x.clone()], &params).unwrap();
+
+        let g = make_complex_tensor(&vec![(1.0, 0.0); half_len]);
+        let vjp_result = vjp(Primitive::Rfft, &[x.clone()], &g, &params).unwrap();
+        let result = extract_f64_vec(&vjp_result[0]);
+        assert_eq!(result.len(), 4, "RFFT VJP should return tensor of input length");
+
+        let y_complex = extract_complex_vec(&y);
+        let g_complex = extract_complex_vec(&g);
+        let lhs: f64 = y_complex
+            .iter()
+            .zip(g_complex.iter())
+            .map(|((yr, yi), (gr, gi))| yr * gr + yi * gi)
+            .sum();
+        let x_vals = extract_f64_vec(&x);
+        let rhs: f64 = x_vals.iter().zip(result.iter()).map(|(a, b)| a * b).sum();
+
+        assert!(
+            (lhs - rhs).abs() < 1e-8,
+            "adjoint identity failed: <RFFT(x),g> = {lhs}, <x,VJP(g)> = {rhs}"
+        );
+    }
+
+    #[test]
+    fn test_irfft_vjp_adjoint_identity() {
+        // Verify adjoint identity: <IRFFT(y), g>_R = <y, VJP(g)>_C
+        let fft_length = 4;
+        let half_len = 3;
+
+        let mut params = BTreeMap::new();
+        params.insert("fft_length".to_owned(), "4".to_owned());
+
+        let y = make_complex_tensor(&[(10.0, 0.0), (-2.0, 2.0), (-2.0, 0.0)]);
+        let x = eval_primitive(Primitive::Irfft, &[y.clone()], &params).unwrap();
+
+        let g = make_real_tensor(&vec![1.0; fft_length]);
+        let vjp_result = vjp(Primitive::Irfft, &[y.clone()], &g, &params).unwrap();
+        let result = extract_complex_vec(&vjp_result[0]);
+        assert_eq!(
+            result.len(),
+            half_len,
+            "IRFFT VJP should return tensor of half-spectrum length"
+        );
+
+        let x_vals = extract_f64_vec(&x);
+        let g_vals = extract_f64_vec(&g);
+        let lhs: f64 = x_vals.iter().zip(g_vals.iter()).map(|(a, b)| a * b).sum();
+
+        let y_complex = extract_complex_vec(&y);
+        let rhs: f64 = y_complex
+            .iter()
+            .zip(result.iter())
+            .map(|((yr, yi), (vr, vi))| yr * vr + yi * vi)
+            .sum();
+
+        assert!(
+            (lhs - rhs).abs() < 1e-8,
+            "adjoint identity failed: <IRFFT(y),g> = {lhs}, <y,VJP(g)> = {rhs}"
         );
     }
 }

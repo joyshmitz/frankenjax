@@ -506,6 +506,11 @@ pub enum FixtureValue {
     TensorF64 { shape: Vec<u32>, values: Vec<f64> },
     TensorI64 { shape: Vec<u32>, values: Vec<i64> },
     TensorBool { shape: Vec<u32>, values: Vec<bool> },
+    TensorComplex128 {
+        shape: Vec<u32>,
+        reals: Vec<f64>,
+        imags: Vec<f64>,
+    },
 }
 
 impl FixtureValue {
@@ -551,6 +556,30 @@ impl FixtureValue {
                 fj_core::TensorValue::new(fj_core::DType::Bool, s, elements)
                     .map(Value::Tensor)
                     .map_err(|e| format!("tensor_bool conversion failed: {e}"))
+            }
+            Self::TensorComplex128 {
+                shape,
+                reals,
+                imags,
+            } => {
+                if reals.len() != imags.len() {
+                    return Err(format!(
+                        "tensor_complex128: reals ({}) and imags ({}) length mismatch",
+                        reals.len(),
+                        imags.len()
+                    ));
+                }
+                let elements: Vec<fj_core::Literal> = reals
+                    .iter()
+                    .zip(imags.iter())
+                    .map(|(&re, &im)| fj_core::Literal::from_complex128(re, im))
+                    .collect();
+                let s = fj_core::Shape {
+                    dims: shape.clone(),
+                };
+                fj_core::TensorValue::new(fj_core::DType::Complex128, s, elements)
+                    .map(Value::Tensor)
+                    .map_err(|e| format!("tensor_complex128 conversion failed: {e}"))
             }
         }
     }
@@ -621,6 +650,22 @@ impl FixtureValue {
                         .zip(values.iter())
                         .all(|(a, e)| matches!(a, fj_core::Literal::Bool(b) if *b == *e))
             }),
+            Self::TensorComplex128 {
+                shape,
+                reals,
+                imags,
+            } => actual.as_tensor().is_some_and(|tensor| {
+                tensor.shape.dims == *shape
+                    && tensor.elements.len() == reals.len()
+                    && tensor.elements.iter().zip(reals.iter().zip(imags.iter())).all(
+                        |(a, (&exp_re, &exp_im))| {
+                            a.as_complex128().is_some_and(|(act_re, act_im)| {
+                                approx_equal(exp_re, act_re, atol, rtol)
+                                    && approx_equal(exp_im, act_im, atol, rtol)
+                            })
+                        },
+                    )
+            }),
         }
     }
 
@@ -635,7 +680,8 @@ impl FixtureValue {
             Self::VectorF64 { .. } | Self::VectorI64 { .. } => 1,
             Self::TensorF64 { shape, .. }
             | Self::TensorI64 { shape, .. }
-            | Self::TensorBool { shape, .. } => shape.len(),
+            | Self::TensorBool { shape, .. }
+            | Self::TensorComplex128 { shape, .. } => shape.len(),
         }
     }
 }
@@ -974,7 +1020,9 @@ pub fn fixture_value_dtype(value: &FixtureValue) -> fj_core::DType {
         | FixtureValue::VectorI64 { .. }
         | FixtureValue::TensorI64 { .. } => fj_core::DType::I64,
         FixtureValue::ScalarBool { .. } | FixtureValue::TensorBool { .. } => fj_core::DType::Bool,
-        FixtureValue::ScalarComplex128 { .. } => fj_core::DType::Complex128,
+        FixtureValue::ScalarComplex128 { .. } | FixtureValue::TensorComplex128 { .. } => {
+            fj_core::DType::Complex128
+        }
     }
 }
 
@@ -1582,6 +1630,37 @@ fn record_fixture_comparison(
                 report.record(case_id, output_idx, 1, *imag, act_im, tolerance);
             }
         }
+        FixtureValue::TensorComplex128 {
+            reals, imags, ..
+        } => {
+            if let Some(tensor) = actual.as_tensor() {
+                for (elem_idx, ((&exp_re, &exp_im), lit)) in reals
+                    .iter()
+                    .zip(imags.iter())
+                    .zip(tensor.elements.iter())
+                    .enumerate()
+                {
+                    if let Some((act_re, act_im)) = lit.as_complex128() {
+                        report.record(
+                            case_id,
+                            output_idx,
+                            elem_idx * 2,
+                            exp_re,
+                            act_re,
+                            tolerance,
+                        );
+                        report.record(
+                            case_id,
+                            output_idx,
+                            elem_idx * 2 + 1,
+                            exp_im,
+                            act_im,
+                            tolerance,
+                        );
+                    }
+                }
+            }
+        }
         FixtureValue::ScalarI64 { .. }
         | FixtureValue::ScalarBool { .. }
         | FixtureValue::VectorI64 { .. }
@@ -1600,7 +1679,9 @@ fn value_shape_fingerprint(expected: &FixtureValue) -> String {
         | FixtureValue::ScalarComplex128 { .. } => "scalar".to_owned(),
         FixtureValue::VectorF64 { values } => format!("vector:{}", values.len()),
         FixtureValue::VectorI64 { values } => format!("vector:{}", values.len()),
-        FixtureValue::TensorF64 { shape, .. } | FixtureValue::TensorI64 { shape, .. } => {
+        FixtureValue::TensorF64 { shape, .. }
+        | FixtureValue::TensorI64 { shape, .. }
+        | FixtureValue::TensorComplex128 { shape, .. } => {
             format!("tensor:{shape:?}")
         }
         FixtureValue::TensorBool { shape, .. } => format!("tensor:{shape:?}"),
@@ -1628,7 +1709,9 @@ fn value_type_fingerprint(expected: &FixtureValue) -> &'static str {
         | FixtureValue::VectorI64 { .. }
         | FixtureValue::TensorI64 { .. } => "i64",
         FixtureValue::ScalarBool { .. } | FixtureValue::TensorBool { .. } => "bool",
-        FixtureValue::ScalarComplex128 { .. } => "complex128",
+        FixtureValue::ScalarComplex128 { .. } | FixtureValue::TensorComplex128 { .. } => {
+            "complex128"
+        }
     }
 }
 
