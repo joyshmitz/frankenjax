@@ -15,21 +15,14 @@ use crate::EvalError;
 /// Extract (re, im) from a Literal, treating real types as having zero imaginary part.
 fn literal_to_complex(lit: Literal) -> Result<(f64, f64), &'static str> {
     match lit {
-        Literal::F64Bits(bits) => Ok((f64::from_bits(bits), 0.0)),
-        Literal::I64(v) => Ok((v as f64, 0.0)),
-        Literal::U32(v) => Ok((v as f64, 0.0)),
-        Literal::U64(v) => Ok((v as f64, 0.0)),
-        Literal::BF16Bits(bits) => {
-            Ok((f64::from(f32::from(half::bf16::from_bits(bits))), 0.0))
-        }
-        Literal::F16Bits(bits) => {
-            Ok((f64::from(f32::from(half::f16::from_bits(bits))), 0.0))
-        }
-        Literal::Bool(b) => Ok((if b { 1.0 } else { 0.0 }, 0.0)),
         Literal::Complex64Bits(re, im) => {
             Ok((f32::from_bits(re) as f64, f32::from_bits(im) as f64))
         }
         Literal::Complex128Bits(re, im) => Ok((f64::from_bits(re), f64::from_bits(im))),
+        other => match other.as_f64() {
+            Some(v) => Ok((v, 0.0)),
+            None => Err("unsupported literal type for FFT"),
+        },
     }
 }
 
@@ -59,15 +52,14 @@ fn make_complex_literal(re: f64, im: f64, dtype: DType) -> Literal {
     }
 }
 
-/// Build a real Literal from an f64 in the given real dtype.
-fn make_real_literal(val: f64, dtype: DType) -> Literal {
-    match dtype {
-        DType::F32 => Literal::from_f64(val), // stored as F64Bits internally
-        _ => Literal::from_f64(val),
-    }
+/// Build a real Literal from an f64 value.
+/// All real dtypes use F64Bits storage internally; the tensor's DType tracks the logical type.
+fn make_real_literal(val: f64, _dtype: DType) -> Literal {
+    Literal::from_f64(val)
 }
 
 /// Extract a rank-1+ tensor from a Value, returning shape and elements as (re, im) pairs.
+#[allow(clippy::type_complexity)]
 fn extract_tensor_complex(
     primitive: Primitive,
     value: &Value,
@@ -113,18 +105,17 @@ fn dft_1d(input: &[(f64, f64)]) -> Vec<(f64, f64)> {
         return vec![];
     }
     let mut output = vec![(0.0, 0.0); n];
-    for k in 0..n {
+    for (k, out) in output.iter_mut().enumerate() {
         let mut re_sum = 0.0;
         let mut im_sum = 0.0;
-        for j in 0..n {
+        for (j, &(xr, xi)) in input.iter().enumerate() {
             let angle = -2.0 * PI * (j as f64) * (k as f64) / (n as f64);
             let (sin_a, cos_a) = angle.sin_cos();
-            let (xr, xi) = input[j];
             // (xr + i·xi) * (cos_a + i·sin_a) = (xr·cos_a - xi·sin_a) + i·(xr·sin_a + xi·cos_a)
             re_sum += xr * cos_a - xi * sin_a;
             im_sum += xr * sin_a + xi * cos_a;
         }
-        output[k] = (re_sum, im_sum);
+        *out = (re_sum, im_sum);
     }
     output
 }
@@ -138,17 +129,16 @@ fn idft_1d(input: &[(f64, f64)]) -> Vec<(f64, f64)> {
     }
     let mut output = vec![(0.0, 0.0); n];
     let inv_n = 1.0 / (n as f64);
-    for j in 0..n {
+    for (j, out) in output.iter_mut().enumerate() {
         let mut re_sum = 0.0;
         let mut im_sum = 0.0;
-        for k in 0..n {
+        for (k, &(xr, xi)) in input.iter().enumerate() {
             let angle = 2.0 * PI * (j as f64) * (k as f64) / (n as f64);
             let (sin_a, cos_a) = angle.sin_cos();
-            let (xr, xi) = input[k];
             re_sum += xr * cos_a - xi * sin_a;
             im_sum += xr * sin_a + xi * cos_a;
         }
-        output[j] = (re_sum * inv_n, im_sum * inv_n);
+        *out = (re_sum * inv_n, im_sum * inv_n);
     }
     output
 }
@@ -177,6 +167,12 @@ pub(crate) fn eval_fft(
     let out_dtype = complex_dtype_for(in_dtype);
 
     let n = *shape.dims.last().unwrap() as usize;
+    if n == 0 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: "FFT requires last dimension > 0".to_owned(),
+        });
+    }
     let batch_size = elements.len() / n;
 
     let mut out_elements = Vec::with_capacity(elements.len());
@@ -189,8 +185,8 @@ pub(crate) fn eval_fft(
         }
     }
 
-    let tensor = TensorValue::new(out_dtype, shape, out_elements)
-        .map_err(EvalError::InvalidTensor)?;
+    let tensor =
+        TensorValue::new(out_dtype, shape, out_elements).map_err(EvalError::InvalidTensor)?;
     Ok(Value::Tensor(tensor))
 }
 
@@ -218,6 +214,12 @@ pub(crate) fn eval_ifft(
     let out_dtype = complex_dtype_for(in_dtype);
 
     let n = *shape.dims.last().unwrap() as usize;
+    if n == 0 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: "IFFT requires last dimension > 0".to_owned(),
+        });
+    }
     let batch_size = elements.len() / n;
 
     let mut out_elements = Vec::with_capacity(elements.len());
@@ -230,8 +232,8 @@ pub(crate) fn eval_ifft(
         }
     }
 
-    let tensor = TensorValue::new(out_dtype, shape, out_elements)
-        .map_err(EvalError::InvalidTensor)?;
+    let tensor =
+        TensorValue::new(out_dtype, shape, out_elements).map_err(EvalError::InvalidTensor)?;
     Ok(Value::Tensor(tensor))
 }
 
@@ -262,6 +264,12 @@ pub(crate) fn eval_rfft(
     let out_dtype = complex_dtype_for(in_dtype);
 
     let input_last = *shape.dims.last().unwrap() as usize;
+    if input_last == 0 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: "RFFT requires last dimension > 0".to_owned(),
+        });
+    }
 
     // Parse fft_length from params (defaults to input last dim)
     let fft_length = params
@@ -310,8 +318,8 @@ pub(crate) fn eval_rfft(
     *out_dims.last_mut().unwrap() = out_last as u32;
     let out_shape = Shape { dims: out_dims };
 
-    let tensor = TensorValue::new(out_dtype, out_shape, out_elements)
-        .map_err(EvalError::InvalidTensor)?;
+    let tensor =
+        TensorValue::new(out_dtype, out_shape, out_elements).map_err(EvalError::InvalidTensor)?;
     Ok(Value::Tensor(tensor))
 }
 
@@ -342,6 +350,12 @@ pub(crate) fn eval_irfft(
     let out_dtype = real_dtype_for(in_dtype);
 
     let input_last = *shape.dims.last().unwrap() as usize;
+    if input_last == 0 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: "IRFFT requires last dimension > 0".to_owned(),
+        });
+    }
 
     // Parse fft_length from params. Default: (input_last - 1) * 2
     let default_fft_length = input_last.saturating_sub(1).saturating_mul(2);
@@ -379,11 +393,16 @@ pub(crate) fn eval_irfft(
         full[..copy_len].copy_from_slice(&half_spectrum[..copy_len]);
 
         // Fill conjugate-symmetric part
-        for k in input_last..fft_length {
+        for (k, slot) in full
+            .iter_mut()
+            .enumerate()
+            .take(fft_length)
+            .skip(input_last)
+        {
             let mirror = fft_length - k;
             if mirror < input_last {
                 let (re, im) = half_spectrum[mirror];
-                full[k] = (re, -im); // conjugate
+                *slot = (re, -im); // conjugate
             }
         }
 
@@ -400,8 +419,8 @@ pub(crate) fn eval_irfft(
     *out_dims.last_mut().unwrap() = fft_length as u32;
     let out_shape = Shape { dims: out_dims };
 
-    let tensor = TensorValue::new(out_dtype, out_shape, out_elements)
-        .map_err(EvalError::InvalidTensor)?;
+    let tensor =
+        TensorValue::new(out_dtype, out_shape, out_elements).map_err(EvalError::InvalidTensor)?;
     Ok(Value::Tensor(tensor))
 }
 
@@ -444,11 +463,7 @@ mod tests {
 
     fn extract_f64_elements(v: &Value) -> Vec<f64> {
         match v {
-            Value::Tensor(t) => t
-                .elements
-                .iter()
-                .map(|l| l.as_f64().unwrap())
-                .collect(),
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
             Value::Scalar(l) => vec![l.as_f64().unwrap()],
         }
     }
@@ -553,11 +568,7 @@ mod tests {
         let result = eval_rfft(&[input], &params).unwrap();
         let elems = extract_complex_elements(&result);
         assert_eq!(elems.len(), 3);
-        assert_complex_close(
-            &elems,
-            &[(10.0, 0.0), (-2.0, 2.0), (-2.0, 0.0)],
-            1e-10,
-        );
+        assert_complex_close(&elems, &[(10.0, 0.0), (-2.0, 2.0), (-2.0, 0.0)], 1e-10);
     }
 
     #[test]
@@ -568,11 +579,7 @@ mod tests {
         let elems = extract_complex_elements(&result);
         // Impulse FFT: all ones, keep first 3
         assert_eq!(elems.len(), 3);
-        assert_complex_close(
-            &elems,
-            &[(1.0, 0.0), (1.0, 0.0), (1.0, 0.0)],
-            1e-10,
-        );
+        assert_complex_close(&elems, &[(1.0, 0.0), (1.0, 0.0), (1.0, 0.0)], 1e-10);
     }
 
     // ── IRFFT tests ──────────────────────────────────────────
@@ -627,9 +634,7 @@ mod tests {
             .iter()
             .map(|&v| Literal::from_f64(v))
             .collect();
-        let shape = Shape {
-            dims: vec![2, 4],
-        };
+        let shape = Shape { dims: vec![2, 4] };
         let tensor = Value::Tensor(TensorValue::new(DType::F64, shape, elements).unwrap());
 
         let result = eval_fft(&[tensor], &BTreeMap::new()).unwrap();

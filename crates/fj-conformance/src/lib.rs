@@ -336,6 +336,11 @@ pub enum FixtureProgram {
     LaxQr,
     LaxSvd,
     LaxEigh,
+    // FFT primitives
+    LaxFft,
+    LaxIfft,
+    LaxRfft,
+    LaxIrfft,
     // Utility programs
     Identity,
     AddOneMulTwo,
@@ -458,6 +463,10 @@ impl FixtureProgram {
             Self::LaxQr => ProgramSpec::LaxQr,
             Self::LaxSvd => ProgramSpec::LaxSvd,
             Self::LaxEigh => ProgramSpec::LaxEigh,
+            Self::LaxFft => ProgramSpec::LaxFft,
+            Self::LaxIfft => ProgramSpec::LaxIfft,
+            Self::LaxRfft => ProgramSpec::LaxRfft,
+            Self::LaxIrfft => ProgramSpec::LaxIrfft,
             Self::Identity => ProgramSpec::Identity,
             Self::AddOneMulTwo => ProgramSpec::AddOneMulTwo,
             Self::CondSelect => ProgramSpec::CondSelect,

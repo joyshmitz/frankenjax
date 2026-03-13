@@ -1924,13 +1924,35 @@ fn vjp(
         // dA = -(A^{-T} G) X^T  (for lower, left_side)
         // dB = A^{-T} G
         Primitive::TriangularSolve => triangular_solve_vjp(inputs, g, params),
-        Primitive::Qr
-        | Primitive::Svd
-        | Primitive::Eigh
-        | Primitive::Fft
-        | Primitive::Ifft
-        | Primitive::Rfft
-        | Primitive::Irfft => Err(AdError::UnsupportedPrimitive(primitive)),
+        // ── FFT VJP ──
+        // FFT is linear: F. Adjoint F* = n · IFFT.
+        // VJP: g_x = n · IFFT(g_y)
+        Primitive::Fft => {
+            let ifft_g = eval_primitive(Primitive::Ifft, std::slice::from_ref(g), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let n = match &inputs[0] {
+                Value::Tensor(t) => *t.shape.dims.last().unwrap_or(&1) as f64,
+                Value::Scalar(_) => 1.0,
+            };
+            let scale = Value::Scalar(Literal::from_f64(n));
+            Ok(vec![value_mul(&ifft_g, &scale)?])
+        }
+        // ── IFFT VJP ──
+        // IFFT is (1/n) F*. Adjoint = (1/n) F = (1/n) · FFT.
+        // VJP: g_x = FFT(g_y) / n
+        Primitive::Ifft => {
+            let fft_g = eval_primitive(Primitive::Fft, std::slice::from_ref(g), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let n = match &inputs[0] {
+                Value::Tensor(t) => *t.shape.dims.last().unwrap_or(&1) as f64,
+                Value::Scalar(_) => 1.0,
+            };
+            let inv_n = Value::Scalar(Literal::from_f64(1.0 / n));
+            Ok(vec![value_mul(&fft_g, &inv_n)?])
+        }
+        Primitive::Qr | Primitive::Svd | Primitive::Eigh | Primitive::Rfft | Primitive::Irfft => {
+            Err(AdError::UnsupportedPrimitive(primitive))
+        }
     }
 }
 
@@ -3770,13 +3792,15 @@ fn jvp_rule(
         // ── TriangularSolve JVP ──
         // d(A\B) = A \ (dB - dA X) where X = A\B
         Primitive::TriangularSolve => triangular_solve_jvp(primals, tangents, params),
-        Primitive::Qr
-        | Primitive::Svd
-        | Primitive::Eigh
-        | Primitive::Fft
-        | Primitive::Ifft
-        | Primitive::Rfft
-        | Primitive::Irfft => Err(AdError::UnsupportedPrimitive(primitive)),
+        // ── FFT JVP ──
+        // FFT is linear: JVP = FFT(tangent)
+        Primitive::Fft => ep(Primitive::Fft, &[tangents[0].clone()]),
+        // ── IFFT JVP ──
+        // IFFT is linear: JVP = IFFT(tangent)
+        Primitive::Ifft => ep(Primitive::Ifft, &[tangents[0].clone()]),
+        Primitive::Qr | Primitive::Svd | Primitive::Eigh | Primitive::Rfft | Primitive::Irfft => {
+            Err(AdError::UnsupportedPrimitive(primitive))
+        }
     }
 }
 

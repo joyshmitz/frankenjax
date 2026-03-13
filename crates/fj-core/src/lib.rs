@@ -1268,6 +1268,11 @@ pub enum ProgramSpec {
     LaxQr,
     LaxSvd,
     LaxEigh,
+    // FFT primitives
+    LaxFft,
+    LaxIfft,
+    LaxRfft,
+    LaxIrfft,
     // Utility programs for testing
     Identity,
     AddOneMulTwo,
@@ -1994,6 +1999,46 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                 sub_jaxprs: vec![],
             }],
         ),
+        // FFT: 1D DFT along last axis
+        ProgramSpec::LaxFft => unary_program(Primitive::Fft),
+        // IFFT: 1D inverse DFT along last axis
+        ProgramSpec::LaxIfft => unary_program(Primitive::Ifft),
+        // RFFT: real-to-complex FFT (needs fft_length param)
+        ProgramSpec::LaxRfft => {
+            let mut params = BTreeMap::new();
+            params.insert("fft_length".to_owned(), "8".to_owned());
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Rfft,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params,
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
+        // IRFFT: complex-to-real inverse FFT (needs fft_length param)
+        ProgramSpec::LaxIrfft => {
+            let mut params = BTreeMap::new();
+            params.insert("fft_length".to_owned(), "8".to_owned());
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Irfft,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params,
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                }],
+            )
+        }
         // Utility programs
         ProgramSpec::Identity => Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(1)], vec![]),
         ProgramSpec::AddOneMulTwo => Jaxpr::new(

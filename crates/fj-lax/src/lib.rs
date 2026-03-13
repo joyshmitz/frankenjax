@@ -129,15 +129,6 @@ impl From<ValueError> for EvalError {
     }
 }
 
-fn unsupported_v1_stub(primitive: Primitive) -> Result<Value, EvalError> {
-    Err(EvalError::Unsupported {
-        primitive,
-        detail: format!(
-            "Primitive::{primitive:?} is not yet implemented in FrankenJAX V1. This is a planned V2 feature. Workaround: use supported V1 primitives or precompute this operation outside FrankenJAX."
-        ),
-    })
-}
-
 #[inline]
 pub fn eval_primitive(
     primitive: Primitive,
@@ -1366,15 +1357,6 @@ mod tests {
         params.insert("padding_high".to_owned(), high.to_owned());
         params.insert("padding_interior".to_owned(), interior.to_owned());
         params
-    }
-
-    fn assert_stub_error(primitive: Primitive) -> String {
-        let err = eval_primitive(primitive, &[Value::scalar_f64(1.0)], &no_params())
-            .expect_err("stub primitive should return unsupported error");
-        match err {
-            EvalError::Unsupported { detail, .. } => detail,
-            other => panic!("expected unsupported error, got {other:?}"),
-        }
     }
 
     #[test]
@@ -6901,109 +6883,48 @@ mod prop_tests {
 
     #[test]
     fn e2e_stub_errors_graceful() {
-        // Implemented primitives: verify they reject invalid (scalar) input gracefully
+        // All formerly-stubbed primitives are now implemented.
+        // Verify they all reject invalid (scalar) input gracefully.
         let implemented = [
             ("cholesky", Primitive::Cholesky),
             ("triangular_solve", Primitive::TriangularSolve),
             ("qr", Primitive::Qr),
             ("svd", Primitive::Svd),
             ("eigh", Primitive::Eigh),
-        ];
-        for (function, primitive) in implemented {
-            let result = eval_primitive(primitive, &[Value::scalar_f64(1.0)], &no_params());
-            assert!(result.is_err(), "{function} should reject scalar input");
-        }
-
-        // Remaining stub primitives: verify they return actionable V1-stub errors
-        let cases = [
             ("fft", Primitive::Fft),
             ("ifft", Primitive::Ifft),
             ("rfft", Primitive::Rfft),
             ("irfft", Primitive::Irfft),
         ];
 
-        let mut rows: Vec<(&str, String, String, bool, bool, bool)> =
-            Vec::with_capacity(cases.len());
         let mut all_passed = true;
-
-        for (function, primitive) in cases {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                eval_primitive(primitive, &[Value::scalar_f64(1.0)], &no_params())
-            }));
-
-            let (error_type, error_message, is_actionable, is_panic, pass) = match outcome {
-                Ok(Err(EvalError::Unsupported { detail, .. })) => {
-                    let actionable = detail.contains("not yet implemented in FrankenJAX V1")
-                        && detail.contains("Workaround");
-                    (
-                        "unsupported".to_owned(),
-                        detail,
-                        actionable,
-                        false,
-                        actionable,
-                    )
-                }
-                Ok(Err(other)) => (
-                    "non_unsupported_error".to_owned(),
-                    other.to_string(),
-                    false,
-                    false,
-                    false,
-                ),
-                Ok(Ok(value)) => (
-                    "unexpected_success".to_owned(),
-                    format!("stub returned value: {value:?}"),
-                    false,
-                    false,
-                    false,
-                ),
-                Err(_) => (
-                    "panic".to_owned(),
-                    "panic during eval_primitive".to_owned(),
-                    false,
-                    true,
-                    false,
-                ),
-            };
-
+        let mut rows: Vec<(&str, bool)> = Vec::new();
+        for (function, primitive) in implemented {
+            let result = eval_primitive(primitive, &[Value::scalar_f64(1.0)], &no_params());
+            let pass = result.is_err();
             all_passed &= pass;
-            rows.push((
-                function,
-                error_type,
-                error_message,
-                is_actionable,
-                is_panic,
-                pass,
-            ));
+            rows.push((function, pass));
         }
 
         let case_logs = format!(
             "[{}]",
             rows.iter()
-                .map(|(function, error_type, error_message, _, _, pass)| format!(
-                    "{{\"test_name\":\"e2e_stub_errors_graceful\",\"stub_function\":{:?},\"error_type\":{:?},\"error_message\":{:?},\"pass\":{}}}",
-                    function, error_type, error_message, pass
+                .map(|(function, pass)| format!(
+                    "{{\"test_name\":\"e2e_stub_errors_graceful\",\"function\":{:?},\"pass\":{}}}",
+                    function, pass
                 ))
                 .collect::<Vec<_>>()
                 .join(",")
         );
 
         let forensic_log = format!(
-            concat!(
-                "{{",
-                "\"scenario\":\"e2e_stub_errors_graceful\",",
-                "\"all_passed\":{},",
-                "\"cases\":[{}]",
-                "}}"
-            ),
+            "{{\"scenario\":\"e2e_stub_errors_graceful\",\"all_passed\":{},\"cases\":[{}]}}",
             all_passed,
             rows.iter()
-                .map(
-                    |(function, _, error_message, is_actionable, is_panic, pass)| format!(
-                        "{{\"function\":{:?},\"error_message\":{:?},\"is_actionable\":{},\"is_panic\":{},\"pass\":{}}}",
-                        function, error_message, is_actionable, is_panic, pass
-                    )
-                )
+                .map(|(function, pass)| format!(
+                    "{{\"function\":{:?},\"pass\":{}}}",
+                    function, pass
+                ))
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -7022,7 +6943,10 @@ mod prop_tests {
         std::fs::write(&e2e_path, forensic_log).expect("write stub e2e forensic log");
         std::fs::write(&test_log_path, case_logs).expect("write stub test logs");
 
-        assert!(all_passed, "stub error handling mismatch");
+        assert!(
+            all_passed,
+            "implemented primitives should reject scalar input"
+        );
     }
 
     // ── Nextafter tests ────────────────────────────────────────
