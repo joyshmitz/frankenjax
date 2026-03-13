@@ -16374,6 +16374,301 @@
     {
       "args": [
         {
+          "kind": "scalar_f64",
+          "value": 3.0
+        },
+        {
+          "kind": "scalar_f64",
+          "value": 4.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_complex_f64_0",
+      "comparator": "exact",
+      "expected": [
+        {
+          "imag": 4.0,
+          "kind": "scalar_complex128",
+          "real": 3.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_complex",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 0.0
+        },
+        {
+          "kind": "scalar_f64",
+          "value": 0.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_complex_f64_1",
+      "comparator": "exact",
+      "expected": [
+        {
+          "imag": 0.0,
+          "kind": "scalar_complex128",
+          "real": 0.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_complex",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "kind": "scalar_f64",
+          "value": 1.0
+        },
+        {
+          "kind": "scalar_f64",
+          "value": -2.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_complex_f64_2",
+      "comparator": "exact",
+      "expected": [
+        {
+          "imag": -2.0,
+          "kind": "scalar_complex128",
+          "real": 1.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_complex",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "imag": 4.0,
+          "kind": "scalar_complex128",
+          "real": 3.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_conj_complex128_0",
+      "comparator": "exact",
+      "expected": [
+        {
+          "imag": -4.0,
+          "kind": "scalar_complex128",
+          "real": 3.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_conj",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "imag": -1.0,
+          "kind": "scalar_complex128",
+          "real": 0.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_conj_complex128_1",
+      "comparator": "exact",
+      "expected": [
+        {
+          "imag": 1.0,
+          "kind": "scalar_complex128",
+          "real": 0.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_conj",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "imag": 0.0,
+          "kind": "scalar_complex128",
+          "real": 5.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_conj_complex128_2",
+      "comparator": "exact",
+      "expected": [
+        {
+          "imag": 0.0,
+          "kind": "scalar_complex128",
+          "real": 5.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_conj",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "imag": 4.0,
+          "kind": "scalar_complex128",
+          "real": 3.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_real_complex128_0",
+      "comparator": "exact",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 3.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_real",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "imag": -1.0,
+          "kind": "scalar_complex128",
+          "real": 0.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_real_complex128_1",
+      "comparator": "exact",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 0.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_real",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "imag": 4.0,
+          "kind": "scalar_complex128",
+          "real": 3.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_imag_complex128_0",
+      "comparator": "exact",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 4.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_imag",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
+          "imag": 0.0,
+          "kind": "scalar_complex128",
+          "real": 5.0
+        }
+      ],
+      "atol": 0.0,
+      "baseline_mismatch": false,
+      "case_id": "lax_imag_complex128_1",
+      "comparator": "exact",
+      "expected": [
+        {
+          "kind": "scalar_f64",
+          "value": 0.0
+        }
+      ],
+      "family": "lax",
+      "flaky": false,
+      "mode": "strict",
+      "program": "lax_imag",
+      "rtol": 0.0,
+      "simulated_delay_ms": 0,
+      "transforms": [
+        "jit"
+      ]
+    },
+    {
+      "args": [
+        {
           "kind": "scalar_i64",
           "value": 1
         },
@@ -17416,7 +17711,7 @@
       ]
     }
   ],
-  "generated_at_unix_ms": 1773351260686,
+  "generated_at_unix_ms": 1773374049246,
   "generated_by": "legacy_jax_capture_script",
   "metadata": {
     "hardware": "x86_64",
@@ -17424,7 +17719,7 @@
     "jax_version": "unavailable",
     "platform": "Linux",
     "python_version": "3.13.7",
-    "timestamp": "2026-03-12T21:34:20Z"
+    "timestamp": "2026-03-13T03:54:09Z"
   },
   "oracle_root": "/data/projects/frankenjax/legacy_jax_code/jax",
   "schema_version": "frankenjax.transform-fixtures.v1",

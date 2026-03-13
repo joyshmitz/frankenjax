@@ -1863,6 +1863,87 @@ def build_lax_cases(cb: CaseBuilder) -> None:
         atol=0.0, rtol=0.0, comparator="exact",
     )
 
+    # ── Complex: (real, imag) → complex128 scalar ──
+    # complex(3.0, 4.0) → 3+4j
+    cb.add_raw(
+        "lax_complex_f64_0", "lax", "lax_complex", ["jit"],
+        [{"kind": "scalar_f64", "value": 3.0},
+         {"kind": "scalar_f64", "value": 4.0}],
+        [{"kind": "scalar_complex128", "real": 3.0, "imag": 4.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    # complex(0.0, 0.0) → 0+0j
+    cb.add_raw(
+        "lax_complex_f64_1", "lax", "lax_complex", ["jit"],
+        [{"kind": "scalar_f64", "value": 0.0},
+         {"kind": "scalar_f64", "value": 0.0}],
+        [{"kind": "scalar_complex128", "real": 0.0, "imag": 0.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    # complex(1.0, -2.0) → 1-2j
+    cb.add_raw(
+        "lax_complex_f64_2", "lax", "lax_complex", ["jit"],
+        [{"kind": "scalar_f64", "value": 1.0},
+         {"kind": "scalar_f64", "value": -2.0}],
+        [{"kind": "scalar_complex128", "real": 1.0, "imag": -2.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Conj: conjugate (negate imaginary part) ──
+    # conj(3+4j) → 3-4j
+    cb.add_raw(
+        "lax_conj_complex128_0", "lax", "lax_conj", ["jit"],
+        [{"kind": "scalar_complex128", "real": 3.0, "imag": 4.0}],
+        [{"kind": "scalar_complex128", "real": 3.0, "imag": -4.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    # conj(0-1j) → 0+1j
+    cb.add_raw(
+        "lax_conj_complex128_1", "lax", "lax_conj", ["jit"],
+        [{"kind": "scalar_complex128", "real": 0.0, "imag": -1.0}],
+        [{"kind": "scalar_complex128", "real": 0.0, "imag": 1.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    # conj(5+0j) → 5+0j (real input unchanged)
+    cb.add_raw(
+        "lax_conj_complex128_2", "lax", "lax_conj", ["jit"],
+        [{"kind": "scalar_complex128", "real": 5.0, "imag": 0.0}],
+        [{"kind": "scalar_complex128", "real": 5.0, "imag": 0.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Real: extract real part as f64 ──
+    # real(3+4j) → 3.0
+    cb.add_raw(
+        "lax_real_complex128_0", "lax", "lax_real", ["jit"],
+        [{"kind": "scalar_complex128", "real": 3.0, "imag": 4.0}],
+        [{"kind": "scalar_f64", "value": 3.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    # real(0-1j) → 0.0
+    cb.add_raw(
+        "lax_real_complex128_1", "lax", "lax_real", ["jit"],
+        [{"kind": "scalar_complex128", "real": 0.0, "imag": -1.0}],
+        [{"kind": "scalar_f64", "value": 0.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
+    # ── Imag: extract imaginary part as f64 ──
+    # imag(3+4j) → 4.0
+    cb.add_raw(
+        "lax_imag_complex128_0", "lax", "lax_imag", ["jit"],
+        [{"kind": "scalar_complex128", "real": 3.0, "imag": 4.0}],
+        [{"kind": "scalar_f64", "value": 4.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+    # imag(5+0j) → 0.0
+    cb.add_raw(
+        "lax_imag_complex128_1", "lax", "lax_imag", ["jit"],
+        [{"kind": "scalar_complex128", "real": 5.0, "imag": 0.0}],
+        [{"kind": "scalar_f64", "value": 0.0}],
+        atol=0.0, rtol=0.0, comparator="exact",
+    )
+
 
 # ── Oracle-based capture (with real JAX) ─────────────────────────
 

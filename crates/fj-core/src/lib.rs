@@ -1253,6 +1253,11 @@ pub enum ProgramSpec {
     LaxBitcastF64ToI64,
     LaxReducePrecisionF64,
     LaxGather1d,
+    // Lax complex number primitives
+    LaxComplex,
+    LaxConj,
+    LaxReal,
+    LaxImag,
     // Utility programs for testing
     Identity,
     AddOneMulTwo,
@@ -1873,6 +1878,14 @@ pub fn build_program(spec: ProgramSpec) -> Jaxpr {
                 }],
             )
         }
+        // Complex: (real, imag) → complex128
+        ProgramSpec::LaxComplex => binary_program(Primitive::Complex),
+        // Conj: complex → complex (negate imag)
+        ProgramSpec::LaxConj => unary_program(Primitive::Conj),
+        // Real: complex → f64 (extract real part)
+        ProgramSpec::LaxReal => unary_program(Primitive::Real),
+        // Imag: complex → f64 (extract imaginary part)
+        ProgramSpec::LaxImag => unary_program(Primitive::Imag),
         // Utility programs
         ProgramSpec::Identity => Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(1)], vec![]),
         ProgramSpec::AddOneMulTwo => Jaxpr::new(

@@ -322,6 +322,11 @@ pub enum FixtureProgram {
     LaxBitcastF64ToI64,
     LaxReducePrecisionF64,
     LaxGather1d,
+    // Lax complex number primitives
+    LaxComplex,
+    LaxConj,
+    LaxReal,
+    LaxImag,
     // Utility programs
     Identity,
     AddOneMulTwo,
@@ -433,6 +438,10 @@ impl FixtureProgram {
             Self::LaxBitcastF64ToI64 => ProgramSpec::LaxBitcastF64ToI64,
             Self::LaxReducePrecisionF64 => ProgramSpec::LaxReducePrecisionF64,
             Self::LaxGather1d => ProgramSpec::LaxGather1d,
+            Self::LaxComplex => ProgramSpec::LaxComplex,
+            Self::LaxConj => ProgramSpec::LaxConj,
+            Self::LaxReal => ProgramSpec::LaxReal,
+            Self::LaxImag => ProgramSpec::LaxImag,
             Self::Identity => ProgramSpec::Identity,
             Self::AddOneMulTwo => ProgramSpec::AddOneMulTwo,
             Self::CondSelect => ProgramSpec::CondSelect,
@@ -466,6 +475,7 @@ pub enum FixtureValue {
     ScalarF64 { value: f64 },
     ScalarI64 { value: i64 },
     ScalarBool { value: bool },
+    ScalarComplex128 { real: f64, imag: f64 },
     VectorF64 { values: Vec<f64> },
     VectorI64 { values: Vec<i64> },
     TensorF64 { shape: Vec<u32>, values: Vec<f64> },
@@ -479,6 +489,7 @@ impl FixtureValue {
             Self::ScalarF64 { value } => Ok(Value::scalar_f64(*value)),
             Self::ScalarI64 { value } => Ok(Value::scalar_i64(*value)),
             Self::ScalarBool { value } => Ok(Value::scalar_bool(*value)),
+            Self::ScalarComplex128 { real, imag } => Ok(Value::scalar_complex128(*real, *imag)),
             Self::VectorF64 { values } => Value::vector_f64(values)
                 .map_err(|err| format!("vector_f64 conversion failed: {err}")),
             Self::VectorI64 { values } => Value::vector_i64(values)
@@ -531,6 +542,12 @@ impl FixtureValue {
             Self::ScalarBool { value } => actual
                 .as_bool_scalar()
                 .is_some_and(|actual_value| actual_value == *value),
+            Self::ScalarComplex128 { real, imag } => actual
+                .as_scalar_literal()
+                .and_then(fj_core::Literal::as_complex128)
+                .is_some_and(|(re, im)| {
+                    approx_equal(*real, re, atol, rtol) && approx_equal(*imag, im, atol, rtol)
+                }),
             Self::VectorF64 { values } => actual
                 .as_tensor()
                 .and_then(|tensor| tensor.to_f64_vec())
@@ -586,7 +603,10 @@ impl FixtureValue {
     #[must_use]
     pub fn rank(&self) -> usize {
         match self {
-            Self::ScalarF64 { .. } | Self::ScalarI64 { .. } | Self::ScalarBool { .. } => 0,
+            Self::ScalarF64 { .. }
+            | Self::ScalarI64 { .. }
+            | Self::ScalarBool { .. }
+            | Self::ScalarComplex128 { .. } => 0,
             Self::VectorF64 { .. } | Self::VectorI64 { .. } => 1,
             Self::TensorF64 { shape, .. }
             | Self::TensorI64 { shape, .. }
@@ -929,6 +949,7 @@ pub fn fixture_value_dtype(value: &FixtureValue) -> fj_core::DType {
         | FixtureValue::VectorI64 { .. }
         | FixtureValue::TensorI64 { .. } => fj_core::DType::I64,
         FixtureValue::ScalarBool { .. } | FixtureValue::TensorBool { .. } => fj_core::DType::Bool,
+        FixtureValue::ScalarComplex128 { .. } => fj_core::DType::Complex128,
     }
 }
 
@@ -1527,6 +1548,15 @@ fn record_fixture_comparison(
                 }
             }
         }
+        FixtureValue::ScalarComplex128 { real, imag } => {
+            if let Some((act_re, act_im)) = actual
+                .as_scalar_literal()
+                .and_then(fj_core::Literal::as_complex128)
+            {
+                report.record(case_id, output_idx, 0, *real, act_re, tolerance);
+                report.record(case_id, output_idx, 1, *imag, act_im, tolerance);
+            }
+        }
         FixtureValue::ScalarI64 { .. }
         | FixtureValue::ScalarBool { .. }
         | FixtureValue::VectorI64 { .. }
@@ -1541,7 +1571,8 @@ fn value_shape_fingerprint(expected: &FixtureValue) -> String {
     match expected {
         FixtureValue::ScalarF64 { .. }
         | FixtureValue::ScalarI64 { .. }
-        | FixtureValue::ScalarBool { .. } => "scalar".to_owned(),
+        | FixtureValue::ScalarBool { .. }
+        | FixtureValue::ScalarComplex128 { .. } => "scalar".to_owned(),
         FixtureValue::VectorF64 { values } => format!("vector:{}", values.len()),
         FixtureValue::VectorI64 { values } => format!("vector:{}", values.len()),
         FixtureValue::TensorF64 { shape, .. } | FixtureValue::TensorI64 { shape, .. } => {
@@ -1572,6 +1603,7 @@ fn value_type_fingerprint(expected: &FixtureValue) -> &'static str {
         | FixtureValue::VectorI64 { .. }
         | FixtureValue::TensorI64 { .. } => "i64",
         FixtureValue::ScalarBool { .. } | FixtureValue::TensorBool { .. } => "bool",
+        FixtureValue::ScalarComplex128 { .. } => "complex128",
     }
 }
 
