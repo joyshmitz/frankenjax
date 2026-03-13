@@ -2,6 +2,7 @@
 
 mod arithmetic;
 mod comparison;
+mod fft;
 mod linalg;
 mod reduction;
 mod tensor_ops;
@@ -19,6 +20,7 @@ use arithmetic::{
 };
 
 use comparison::eval_comparison;
+use fft::{eval_fft, eval_ifft, eval_irfft, eval_rfft};
 use linalg::{eval_cholesky, eval_eigh, eval_qr, eval_svd, eval_triangular_solve};
 use reduction::{eval_cumulative, eval_reduce_axes, eval_reduce_bitwise_axes};
 use tensor_ops::{
@@ -346,9 +348,10 @@ pub fn eval_primitive(
             let mut outputs = eval_eigh(inputs, params)?;
             Ok(outputs.remove(0))
         }
-        Primitive::Fft | Primitive::Ifft | Primitive::Rfft | Primitive::Irfft => {
-            unsupported_v1_stub(primitive)
-        }
+        Primitive::Fft => eval_fft(inputs, params),
+        Primitive::Ifft => eval_ifft(inputs, params),
+        Primitive::Rfft => eval_rfft(inputs, params),
+        Primitive::Irfft => eval_irfft(inputs, params),
         // One-hot encoding
         Primitive::OneHot => eval_one_hot(inputs, params),
         // Dynamic update slice
@@ -1399,38 +1402,27 @@ mod tests {
     }
 
     #[test]
-    fn test_fft_stub_fft_error() {
-        let detail = assert_stub_error(Primitive::Fft);
-        assert!(detail.contains("Primitive::Fft"));
-        assert!(detail.contains("planned V2 feature"));
+    fn test_fft_rejects_scalar_input() {
+        let result = eval_primitive(Primitive::Fft, &[Value::scalar_f64(1.0)], &no_params());
+        assert!(result.is_err(), "Fft should reject scalar input");
     }
 
     #[test]
-    fn test_fft_stub_ifft_error() {
-        let detail = assert_stub_error(Primitive::Ifft);
-        assert!(detail.contains("Primitive::Ifft"));
-        assert!(detail.contains("planned V2 feature"));
+    fn test_ifft_rejects_scalar_input() {
+        let result = eval_primitive(Primitive::Ifft, &[Value::scalar_f64(1.0)], &no_params());
+        assert!(result.is_err(), "Ifft should reject scalar input");
     }
 
     #[test]
-    fn test_stub_error_messages_actionable() {
-        // Cholesky, TriangularSolve, Qr, Svd, Eigh are now implemented — only FFT stubs remain
-        for primitive in [
-            Primitive::Fft,
-            Primitive::Ifft,
-            Primitive::Rfft,
-            Primitive::Irfft,
-        ] {
-            let detail = assert_stub_error(primitive);
-            assert!(
-                detail.contains("not yet implemented in FrankenJAX V1"),
-                "expected actionable compatibility message for {primitive:?}, detail={detail}"
-            );
-            assert!(
-                detail.contains("Workaround"),
-                "expected workaround guidance for {primitive:?}, detail={detail}"
-            );
-        }
+    fn test_rfft_rejects_scalar_input() {
+        let result = eval_primitive(Primitive::Rfft, &[Value::scalar_f64(1.0)], &no_params());
+        assert!(result.is_err(), "Rfft should reject scalar input");
+    }
+
+    #[test]
+    fn test_irfft_rejects_scalar_input() {
+        let result = eval_primitive(Primitive::Irfft, &[Value::scalar_f64(1.0)], &no_params());
+        assert!(result.is_err(), "Irfft should reject scalar input");
     }
 
     #[test]
