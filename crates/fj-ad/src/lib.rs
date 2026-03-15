@@ -4025,10 +4025,23 @@ pub fn jvp(jaxpr: &Jaxpr, primals: &[Value], tangents: &[Value]) -> Result<JvpRe
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
 
         if eqn.outputs.len() > 1 {
-            // Multi-output equation: store all primals, JVP not yet supported
-            for (var, val) in eqn.outputs.iter().zip(primal_outs.iter()) {
-                primal_env.insert(*var, val.clone());
-                tangent_env.insert(*var, zeros_like(val));
+            // Multi-output equation: compute tangents via jvp_rule_multi
+            let tangent_outs = jvp_rule_multi(
+                eqn.primitive,
+                &resolved_primals,
+                &resolved_tangents,
+                &primal_outs,
+                &eqn.params,
+            )?;
+            for (idx, var) in eqn.outputs.iter().enumerate() {
+                primal_env.insert(*var, primal_outs[idx].clone());
+                tangent_env.insert(
+                    *var,
+                    tangent_outs
+                        .get(idx)
+                        .cloned()
+                        .unwrap_or_else(|| zeros_like(&primal_outs[idx])),
+                );
             }
         } else {
             let tangent_out = jvp_rule(
@@ -4570,6 +4583,426 @@ fn jvp_rule(
         // IRFFT is linear: JVP = IRFFT(tangent)
         Primitive::Irfft => ep(Primitive::Irfft, &[tangents[0].clone()]),
         Primitive::Qr | Primitive::Svd | Primitive::Eigh => {
+            Err(AdError::UnsupportedPrimitive(primitive))
+        }
+    }
+}
+
+/// JVP rule for multi-output primitives.
+/// Given primals, tangents, and primal output values, computes output tangents.
+fn jvp_rule_multi(
+    primitive: Primitive,
+    primals: &[Value],
+    tangents: &[Value],
+    primal_outputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, AdError> {
+    match primitive {
+        // ── Eigh JVP ──
+        // A = V diag(w) V^T.  dA → (dw, dV)
+        // M = V^T dA V;  dw = diag(M);  dV = V (F ⊙ M)
+        Primitive::Eigh => {
+            let da = &tangents[0];
+            let v_val = &primal_outputs[1];
+            let w_val = &primal_outputs[0];
+
+            let v_t = v_val
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("Eigh JVP: V must be tensor".to_owned()))?;
+            let da_t = da
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("Eigh JVP: dA must be tensor".to_owned()))?;
+            let w_vec: Vec<f64> = w_val
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("Eigh JVP: W must be tensor".to_owned()))?
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap_or(0.0))
+                .collect();
+
+            let nn = w_vec.len();
+
+            // M = V^T dA V [n×n]
+            let vt_val = transpose_2d(v_t)?;
+            let vt = vt_val.as_tensor().unwrap();
+            let vt_da = matmul_2d(vt, da_t)?;
+            let m_val = matmul_2d(vt_da.as_tensor().unwrap(), v_t)?;
+            let m_t = m_val.as_tensor().unwrap();
+            let m_vals: Vec<f64> = m_t
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap_or(0.0))
+                .collect();
+
+            // dw = diag(M)
+            let dw: Vec<Literal> = (0..nn)
+                .map(|i| Literal::from_f64(m_vals[i * nn + i]))
+                .collect();
+            let dw_val = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape {
+                        dims: vec![nn as u32],
+                    },
+                    dw,
+                )
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+            );
+
+            // F ⊙ M [n×n]: F[i,j] = 1/(w[j]-w[i]) for i≠j, 0 for i=j
+            let mut fm = vec![0.0f64; nn * nn];
+            for i in 0..nn {
+                for j in 0..nn {
+                    if i != j {
+                        let denom = w_vec[j] - w_vec[i];
+                        let f_ij = if denom.abs() > 1e-20 {
+                            1.0 / denom
+                        } else {
+                            0.0
+                        };
+                        fm[i * nn + j] = f_ij * m_vals[i * nn + j];
+                    }
+                }
+            }
+            let fm_tensor = TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![nn as u32, nn as u32],
+                },
+                fm.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+
+            // dV = V (F ⊙ M)
+            let dv = matmul_2d(v_t, &fm_tensor)?;
+
+            Ok(vec![dw_val, dv])
+        }
+        // ── QR JVP ──
+        // A = QR.  dA → (dQ, dR)
+        // C = Q^T dA;  dR = triu(C);  Ω from lower triangle;  dQ = Q Ω
+        Primitive::Qr => {
+            let da = &tangents[0];
+            let q_val = &primal_outputs[0];
+            let r_val = &primal_outputs[1];
+
+            let q_t = q_val
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("QR JVP: Q must be tensor".to_owned()))?;
+            let r_t = r_val
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("QR JVP: R must be tensor".to_owned()))?;
+            let da_t = da
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("QR JVP: dA must be tensor".to_owned()))?;
+
+            let m = q_t.shape.dims[0] as usize;
+            let k = q_t.shape.dims[1] as usize; // k = min(m, n)
+            let n = r_t.shape.dims[1] as usize;
+            let r_vals: Vec<f64> = r_t
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap_or(0.0))
+                .collect();
+
+            // C = Q^T dA [k×n]
+            let qt_val = transpose_2d(q_t)?;
+            let qt = qt_val.as_tensor().unwrap();
+            let c_val = matmul_2d(qt, da_t)?;
+            let c_t = c_val.as_tensor().unwrap();
+            let c_vals: Vec<f64> = c_t
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap_or(0.0))
+                .collect();
+
+            // Solve for Ω from the lower triangle of C = Ω R + dR
+            // For i > j: C[i,j] = Σ_p Ω[i,p] R[p,j]
+            // Since R is upper triangular: only p ≤ j contribute
+            // Solve column by column using forward substitution
+            let mut omega = vec![0.0f64; k * k];
+            for j in 0..k {
+                for i in (j + 1)..k {
+                    let mut rhs = c_vals[i * n + j];
+                    for p in 0..j {
+                        rhs -= omega[i * k + p] * r_vals[p * n + j];
+                    }
+                    let r_jj = r_vals[j * n + j];
+                    omega[i * k + j] = if r_jj.abs() > 1e-20 { rhs / r_jj } else { 0.0 };
+                    // Antisymmetric: Ω[j,i] = -Ω[i,j]
+                    omega[j * k + i] = -omega[i * k + j];
+                }
+            }
+
+            // dR = C - Ω R, then take upper triangle
+            let omega_r = matmul_f64(k, k, n, &omega, &r_vals);
+            let mut dr_vals = vec![0.0f64; k * n];
+            for i in 0..k {
+                for j in i..n {
+                    dr_vals[i * n + j] = c_vals[i * n + j] - omega_r[i * n + j];
+                }
+            }
+            let dr = build_matrix_f64(k, n, &dr_vals)?;
+
+            // dQ = Q Ω [m×k]
+            let omega_tensor = TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![k as u32, k as u32],
+                },
+                omega.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+
+            let mut dq = matmul_2d(q_t, &omega_tensor)?;
+
+            // Extra term for m > k: dQ += (I - QQ^T) dA R^{-1}
+            if m > k {
+                let q_vals: Vec<f64> = q_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                let da_vals: Vec<f64> = da_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                // proj = dA - Q(Q^T dA) = dA - Q C [m×n]
+                let q_c = matmul_f64(m, k, n, &q_vals, &c_vals);
+                let proj: Vec<f64> = da_vals.iter().zip(q_c.iter()).map(|(a, b)| a - b).collect();
+                // proj @ R^{-1}: solve R X^T = proj^T => X = solve(R, proj^T)^T
+                let proj_val = build_matrix_f64(m, n, &proj)?;
+                let proj_t = transpose_2d(proj_val.as_tensor().unwrap())?;
+                let mut tri_params_jvp = BTreeMap::new();
+                tri_params_jvp.insert("lower".to_owned(), "false".to_owned());
+                let solve_result = eval_primitive(
+                    Primitive::TriangularSolve,
+                    &[r_val.clone(), proj_t],
+                    &tri_params_jvp,
+                )
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+                let extra = transpose_2d(solve_result.as_tensor().unwrap())?;
+                dq = tensor_add(dq.as_tensor().unwrap(), extra.as_tensor().unwrap())?;
+            }
+
+            Ok(vec![dq, dr])
+        }
+        // ── SVD JVP ──
+        // A = U Σ V^T.  dA → (dU, ds, dVt)
+        // M = U^T dA V;  ds = diag(M)
+        // Ω_U[i,j] = (s_j M[i,j] + s_i M[j,i]) / (s_j² - s_i²)
+        // Ω_V[i,j] = (s_i M[i,j] + s_j M[j,i]) / (s_j² - s_i²)
+        // dU = U Ω_U;  dV = V Ω_V;  dVt = Ω_V^T Vt
+        Primitive::Svd => {
+            let da = &tangents[0];
+            let u_val = &primal_outputs[0];
+            let s_val = &primal_outputs[1];
+            let vt_val = &primal_outputs[2];
+
+            let u_t = u_val
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("SVD JVP: U must be tensor".to_owned()))?;
+            let vt_t = vt_val
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("SVD JVP: Vt must be tensor".to_owned()))?;
+            let da_t = da
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("SVD JVP: dA must be tensor".to_owned()))?;
+
+            let s_vec: Vec<f64> = s_val
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("SVD JVP: S must be tensor".to_owned()))?
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap_or(0.0))
+                .collect();
+
+            let m = u_t.shape.dims[0] as usize;
+            let k = s_vec.len();
+            let n = vt_t.shape.dims[1] as usize;
+
+            // V = Vt^T [n×k]
+            let v_val = transpose_2d(vt_t)?;
+            let v_t = v_val.as_tensor().unwrap();
+
+            // M = U^T dA V [k×k]
+            let ut_val = transpose_2d(u_t)?;
+            let ut = ut_val.as_tensor().unwrap();
+            let ut_da = matmul_2d(ut, da_t)?;
+            let m_val = matmul_2d(ut_da.as_tensor().unwrap(), v_t)?;
+            let m_t = m_val.as_tensor().unwrap();
+            let m_vals: Vec<f64> = m_t
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap_or(0.0))
+                .collect();
+
+            // ds = diag(M)
+            let ds: Vec<Literal> = (0..k)
+                .map(|i| Literal::from_f64(m_vals[i * k + i]))
+                .collect();
+            let ds_val = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape {
+                        dims: vec![k as u32],
+                    },
+                    ds,
+                )
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+            );
+
+            // Build Ω_U and Ω_V [k×k]
+            let mut omega_u = vec![0.0f64; k * k];
+            let mut omega_v = vec![0.0f64; k * k];
+            for i in 0..k {
+                for j in 0..k {
+                    if i != j {
+                        let si = s_vec[i];
+                        let sj = s_vec[j];
+                        let denom = sj * sj - si * si;
+                        if denom.abs() > 1e-20 {
+                            let mij = m_vals[i * k + j];
+                            let mji = m_vals[j * k + i];
+                            omega_u[i * k + j] = (sj * mij + si * mji) / denom;
+                            omega_v[i * k + j] = (si * mij + sj * mji) / denom;
+                        }
+                    }
+                }
+            }
+
+            // dU = U Ω_U [m×k]
+            let omega_u_tensor = TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![k as u32, k as u32],
+                },
+                omega_u.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let mut du = matmul_2d(u_t, &omega_u_tensor)?;
+
+            // dVt = Ω_V^T Vt [k×n]  (since dV = V Ω_V, dVt = dV^T = Ω_V^T V^T = Ω_V^T Vt)
+            // But Ω_V is antisymmetric, so Ω_V^T = -Ω_V
+            let neg_omega_v: Vec<f64> = omega_v.iter().map(|&v| -v).collect();
+            let neg_omega_v_tensor = TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![k as u32, k as u32],
+                },
+                neg_omega_v.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let mut dvt = matmul_2d(&neg_omega_v_tensor, vt_t)?;
+
+            // Extra terms for non-square
+            if m > k {
+                let u_vals: Vec<f64> = u_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                let da_vals: Vec<f64> = da_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                let v_vals: Vec<f64> = v_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                // (I - UU^T) dA V Σ^{-1}
+                let ut_da_vals: Vec<f64> = ut_da
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                let u_ut_da = matmul_f64(m, k, n, &u_vals, &ut_da_vals);
+                let proj: Vec<f64> = da_vals
+                    .iter()
+                    .zip(u_ut_da.iter())
+                    .map(|(a, b)| a - b)
+                    .collect();
+                let proj_v = matmul_f64(m, n, k, &proj, &v_vals);
+                let mut du_extra = vec![0.0; m * k];
+                for i in 0..m {
+                    for j in 0..k {
+                        let sinv = if s_vec[j].abs() > 1e-20 {
+                            1.0 / s_vec[j]
+                        } else {
+                            0.0
+                        };
+                        du_extra[i * k + j] = proj_v[i * k + j] * sinv;
+                    }
+                }
+                let du_extra_val = build_matrix_f64(m, k, &du_extra)?;
+                du = tensor_add(du.as_tensor().unwrap(), du_extra_val.as_tensor().unwrap())?;
+            }
+
+            if n > k {
+                let u_vals: Vec<f64> = u_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                let vt_vals: Vec<f64> = vt_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                let da_vals: Vec<f64> = da_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                // Σ^{-1} U^T dA (I - VV^T)
+                let ut_da_vals: Vec<f64> = ut_da
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                // U^T dA [k×n] @ V [n×k] = M [k×k] — already have. Then V^T [k×n]
+                // (I_n - VV^T) = I - Vt^T Vt
+                let v_vals: Vec<f64> = v_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap_or(0.0))
+                    .collect();
+                let vt_trans = transpose_f64(k, n, &vt_vals);
+                let vvt = matmul_f64(n, k, n, &vt_trans, &vt_vals);
+                // U^T dA (I-VV^T) [k×n]
+                let ut_da_vvt = matmul_f64(k, n, n, &ut_da_vals, &vvt);
+                let proj: Vec<f64> = ut_da_vals
+                    .iter()
+                    .zip(ut_da_vvt.iter())
+                    .map(|(a, b)| a - b)
+                    .collect();
+                // Σ^{-1} @ proj [k×n]
+                let mut dvt_extra = vec![0.0; k * n];
+                for i in 0..k {
+                    let sinv = if s_vec[i].abs() > 1e-20 {
+                        1.0 / s_vec[i]
+                    } else {
+                        0.0
+                    };
+                    for j in 0..n {
+                        dvt_extra[i * n + j] = sinv * proj[i * n + j];
+                    }
+                }
+                let dvt_extra_val = build_matrix_f64(k, n, &dvt_extra)?;
+                dvt = tensor_add(dvt.as_tensor().unwrap(), dvt_extra_val.as_tensor().unwrap())?;
+            }
+
+            Ok(vec![du, ds_val, dvt])
+        }
+        _ => {
+            // Single-output primitives should not reach here
             Err(AdError::UnsupportedPrimitive(primitive))
         }
     }
@@ -9492,6 +9925,324 @@ mod tests {
                 (da_vals[idx] - numerical).abs() < 1e-4,
                 "QR VJP element {idx}: analytical={}, numerical={}",
                 da_vals[idx],
+                numerical,
+            );
+        }
+    }
+
+    // ── Eigh VJP test ──
+
+    #[test]
+    fn test_eigh_vjp_numerical() {
+        // Eigh of symmetric [[4, 2], [2, 3]]
+        let a_data = vec![4.0, 2.0, 2.0, 3.0];
+        let a = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 2] },
+                a_data.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .unwrap(),
+        );
+
+        let outputs =
+            fj_lax::eval_primitive_multi(Primitive::Eigh, &[a.clone()], &BTreeMap::new()).unwrap();
+        let w = &outputs[0];
+        let v = &outputs[1];
+
+        // VJP with g_w = ones(2), g_V = zeros(2,2) — measures sensitivity through eigenvalues
+        let g_w = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2] },
+                vec![Literal::from_f64(1.0), Literal::from_f64(1.0)],
+            )
+            .unwrap(),
+        );
+        let g_v = zeros_like(v);
+
+        let vjp_result = vjp(
+            Primitive::Eigh,
+            &[a.clone()],
+            &[g_w, g_v],
+            &[w.clone(), v.clone()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let da = vjp_result[0].as_tensor().unwrap();
+        let da_vals: Vec<f64> = da.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+
+        // Numerical check via finite differences
+        let eps = 1e-6;
+        for idx in 0..4 {
+            let mut a_plus = a_data.clone();
+            a_plus[idx] += eps;
+            // Keep symmetric
+            if idx == 1 {
+                a_plus[2] += eps;
+            }
+            if idx == 2 {
+                a_plus[1] += eps;
+            }
+            let a_plus_val = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: vec![2, 2] },
+                    a_plus.iter().map(|&v| Literal::from_f64(v)).collect(),
+                )
+                .unwrap(),
+            );
+            let mut a_minus = a_data.clone();
+            a_minus[idx] -= eps;
+            if idx == 1 {
+                a_minus[2] -= eps;
+            }
+            if idx == 2 {
+                a_minus[1] -= eps;
+            }
+            let a_minus_val = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: vec![2, 2] },
+                    a_minus.iter().map(|&v| Literal::from_f64(v)).collect(),
+                )
+                .unwrap(),
+            );
+
+            let out_plus =
+                fj_lax::eval_primitive_multi(Primitive::Eigh, &[a_plus_val], &BTreeMap::new())
+                    .unwrap();
+            let out_minus =
+                fj_lax::eval_primitive_multi(Primitive::Eigh, &[a_minus_val], &BTreeMap::new())
+                    .unwrap();
+
+            // g_w = ones → numerical = sum(w_plus - w_minus) / (2*eps)
+            let w_plus: Vec<f64> = out_plus[0]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap())
+                .collect();
+            let w_minus: Vec<f64> = out_minus[0]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap())
+                .collect();
+            let numerical: f64 = w_plus
+                .iter()
+                .zip(w_minus.iter())
+                .map(|(p, m)| (p - m) / (2.0 * eps))
+                .sum();
+
+            // For symmetric perturbation, off-diagonal elements contribute twice
+            let effective_da = if idx == 0 || idx == 3 {
+                da_vals[idx]
+            } else {
+                da_vals[idx] + da_vals[if idx == 1 { 2 } else { 1 }]
+            };
+            assert!(
+                (effective_da - numerical).abs() < 1e-4,
+                "Eigh VJP element {idx}: analytical={effective_da}, numerical={numerical}",
+            );
+        }
+    }
+
+    // ── SVD VJP test ──
+
+    #[test]
+    fn test_svd_vjp_numerical() {
+        // SVD of [[3, 0], [0, -2]]
+        let a_data = vec![3.0, 0.0, 0.0, -2.0];
+        let a = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 2] },
+                a_data.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .unwrap(),
+        );
+
+        let outputs =
+            fj_lax::eval_primitive_multi(Primitive::Svd, &[a.clone()], &BTreeMap::new()).unwrap();
+        let u = &outputs[0];
+        let s = &outputs[1];
+        let vt = &outputs[2];
+
+        // VJP with g_s = ones(2), g_U = zeros, g_Vt = zeros
+        let g_u = zeros_like(u);
+        let g_s = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2] },
+                vec![Literal::from_f64(1.0), Literal::from_f64(1.0)],
+            )
+            .unwrap(),
+        );
+        let g_vt = zeros_like(vt);
+
+        let vjp_result = vjp(
+            Primitive::Svd,
+            &[a.clone()],
+            &[g_u, g_s, g_vt],
+            &[u.clone(), s.clone(), vt.clone()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let da = vjp_result[0].as_tensor().unwrap();
+        let da_vals: Vec<f64> = da.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+
+        // Numerical check
+        let eps = 1e-6;
+        for idx in 0..4 {
+            let mut a_plus = a_data.clone();
+            a_plus[idx] += eps;
+            let a_plus_val = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: vec![2, 2] },
+                    a_plus.iter().map(|&v| Literal::from_f64(v)).collect(),
+                )
+                .unwrap(),
+            );
+            let mut a_minus = a_data.clone();
+            a_minus[idx] -= eps;
+            let a_minus_val = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: vec![2, 2] },
+                    a_minus.iter().map(|&v| Literal::from_f64(v)).collect(),
+                )
+                .unwrap(),
+            );
+
+            let out_plus =
+                fj_lax::eval_primitive_multi(Primitive::Svd, &[a_plus_val], &BTreeMap::new())
+                    .unwrap();
+            let out_minus =
+                fj_lax::eval_primitive_multi(Primitive::Svd, &[a_minus_val], &BTreeMap::new())
+                    .unwrap();
+
+            let s_plus: Vec<f64> = out_plus[1]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap())
+                .collect();
+            let s_minus: Vec<f64> = out_minus[1]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap())
+                .collect();
+            let numerical: f64 = s_plus
+                .iter()
+                .zip(s_minus.iter())
+                .map(|(p, m)| (p - m) / (2.0 * eps))
+                .sum();
+
+            assert!(
+                (da_vals[idx] - numerical).abs() < 1e-4,
+                "SVD VJP element {idx}: analytical={}, numerical={}",
+                da_vals[idx],
+                numerical,
+            );
+        }
+    }
+
+    // ── Eigh JVP test ──
+
+    #[test]
+    fn test_eigh_jvp_numerical() {
+        // Eigh JVP: verify dw tangent via finite differences
+        let a_data = vec![4.0, 2.0, 2.0, 3.0];
+        let make_a = |data: &[f64]| -> Value {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: vec![2, 2] },
+                    data.iter().map(|&v| Literal::from_f64(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let a = make_a(&a_data);
+
+        // Perturbation in the (0,0) direction: dA = [[1,0],[0,0]]
+        let da = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 2] },
+                vec![1.0, 0.0, 0.0, 0.0]
+                    .into_iter()
+                    .map(Literal::from_f64)
+                    .collect(),
+            )
+            .unwrap(),
+        );
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2), VarId(3)],
+            vec![fj_core::Equation {
+                primitive: Primitive::Eigh,
+                inputs: smallvec::smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec::smallvec![VarId(2), VarId(3)],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let jvp_result = jvp(&jaxpr, &[a.clone()], &[da]).unwrap();
+        let dw = &jvp_result.tangents[0];
+        let dw_vals: Vec<f64> = dw
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect();
+
+        // Numerical: perturb A[0,0] by eps
+        let eps = 1e-6;
+        let mut a_plus = a_data.clone();
+        a_plus[0] += eps;
+        let mut a_minus = a_data.clone();
+        a_minus[0] -= eps;
+        let w_plus =
+            fj_lax::eval_primitive_multi(Primitive::Eigh, &[make_a(&a_plus)], &BTreeMap::new())
+                .unwrap();
+        let w_minus =
+            fj_lax::eval_primitive_multi(Primitive::Eigh, &[make_a(&a_minus)], &BTreeMap::new())
+                .unwrap();
+
+        let wp: Vec<f64> = w_plus[0]
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect();
+        let wm: Vec<f64> = w_minus[0]
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect();
+
+        for i in 0..2 {
+            let numerical = (wp[i] - wm[i]) / (2.0 * eps);
+            assert!(
+                (dw_vals[i] - numerical).abs() < 1e-4,
+                "Eigh JVP dw[{i}]: analytical={}, numerical={}",
+                dw_vals[i],
                 numerical,
             );
         }
