@@ -682,9 +682,8 @@ fn backward(
 
 // ── VJP rules (tensor-aware) ──────────────────────────────────────
 
-/// Convenience wrapper for single-output VJP calls (used by tests and internal code).
-#[cfg(test)]
-fn vjp_single(
+/// Convenience wrapper for single-output VJP calls.
+pub fn vjp_single(
     primitive: Primitive,
     inputs: &[Value],
     g: &Value,
@@ -693,7 +692,8 @@ fn vjp_single(
     vjp(primitive, inputs, std::slice::from_ref(g), &[], params)
 }
 
-fn vjp(
+/// Compute VJP (reverse-mode AD) for a single primitive application.
+pub fn vjp(
     primitive: Primitive,
     inputs: &[Value],
     gs: &[Value],
