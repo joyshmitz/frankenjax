@@ -3084,7 +3084,7 @@ mod tests {
     fn transpose_identity() {
         let x = mat_f64(2, 2, &[1.0, 2.0, 3.0, 4.0]);
         let p = params(&[("permutation", "0,1")]);
-        let result = eval_transpose(&[x.clone()], &p).unwrap();
+        let result = eval_transpose(std::slice::from_ref(&x), &p).unwrap();
         assert_eq!(extract_f64_vec(&result), extract_f64_vec(&x));
     }
 
@@ -3212,7 +3212,7 @@ mod tests {
     #[test]
     fn copy_preserves_value() {
         let x = v_f64(&[1.0, 2.0, 3.0]);
-        let result = eval_copy(&[x.clone()]).unwrap();
+        let result = eval_copy(std::slice::from_ref(&x)).unwrap();
         assert_eq!(extract_f64_vec(&result), extract_f64_vec(&x));
     }
 
