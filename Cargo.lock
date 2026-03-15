@@ -623,6 +623,7 @@ dependencies = [
  "fj-cache",
  "fj-core",
  "fj-dispatch",
+ "fj-egraph",
  "fj-ffi",
  "fj-interpreters",
  "fj-lax",

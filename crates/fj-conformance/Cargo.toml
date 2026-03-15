@@ -18,6 +18,7 @@ fj-ad = { path = "../fj-ad" }
 fj-api = { path = "../fj-api" }
 fj-backend-cpu = { path = "../fj-backend-cpu" }
 fj-cache = { path = "../fj-cache" }
+fj-egraph = { path = "../fj-egraph" }
 fj-ffi = { path = "../fj-ffi" }
 fj-interpreters = { path = "../fj-interpreters" }
 fj-runtime = { path = "../fj-runtime" }
