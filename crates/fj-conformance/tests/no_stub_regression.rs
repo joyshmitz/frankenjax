@@ -53,6 +53,30 @@ const PRODUCTION_SRC_DIRS: &[&str] = &[
     "crates/fj-trace/src",
 ];
 
+const STATUS_CLAIM_AUDIT_ROOT_FILES: &[&str] = &[
+    "README.md",
+    "FEATURE_PARITY.md",
+    "EXHAUSTIVE_LEGACY_ANALYSIS.md",
+];
+
+const STATUS_CLAIM_AUDIT_DIRS: &[&str] = &[
+    "artifacts/conformance",
+    "artifacts/durability",
+    "artifacts/e2e",
+    "artifacts/phase2c",
+    "artifacts/testing/logs",
+    "crates/fj-conformance/fixtures",
+];
+
+const STALE_STATUS_MARKERS: &[&str] = &[
+    "not implemented",
+    "not yet implemented",
+    "placeholder",
+    "stub",
+    "todo",
+    "mock",
+];
+
 fn all_primitives() -> &'static [Primitive] {
     &[
         Primitive::Add,
@@ -594,9 +618,49 @@ fn workspace_source_files() -> Vec<PathBuf> {
         }
     }
 
+    let root = workspace_root();
     let mut files = Vec::new();
     for dir in PRODUCTION_SRC_DIRS {
-        visit(Path::new(dir), &mut files);
+        visit(&root.join(dir), &mut files);
+    }
+    files.sort();
+    files
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("fj-conformance should live under crates/")
+        .to_path_buf()
+}
+
+fn status_claim_audit_files() -> Vec<PathBuf> {
+    fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, out);
+            } else if path
+                .extension()
+                .is_some_and(|ext| matches!(ext.to_str(), Some("json" | "log" | "md")))
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    let root = workspace_root();
+    let mut files = STATUS_CLAIM_AUDIT_ROOT_FILES
+        .iter()
+        .map(|file| root.join(file))
+        .collect::<Vec<_>>();
+    for dir in STATUS_CLAIM_AUDIT_DIRS {
+        visit(&root.join(dir), &mut files);
     }
     files.sort();
     files
@@ -656,6 +720,42 @@ fn source_marker_allowed(line: &str) -> bool {
 fn suspicious_default_return_allowed(path: &Path, line: &str) -> bool {
     path.ends_with("crates/fj-interpreters/src/partial_eval.rs")
         && line.contains("return Ok(vec![])")
+}
+
+fn stale_status_claim_allowed(path: &Path, line: &str) -> bool {
+    let path = path.to_string_lossy();
+    let normalized = line.to_ascii_lowercase();
+
+    if path.ends_with("EXHAUSTIVE_LEGACY_ANALYSIS.md") || path.contains("artifacts/phase2c/") {
+        return true;
+    }
+
+    if path.contains("e2e_stub_errors") || path.contains("v2_stub_linalg_fft_shape_contracts") {
+        return true;
+    }
+
+    [
+        "closed",
+        "concrete replay",
+        "cpu-only",
+        "durability",
+        "explicit gap",
+        "ffi",
+        "fixture",
+        "future",
+        "generated",
+        "graceful",
+        "intentional",
+        "legacy",
+        "out-of-scope",
+        "replay",
+        "scenario",
+        "sidecar_path",
+        "test_id",
+        "v1",
+    ]
+    .iter()
+    .any(|allowed| normalized.contains(allowed))
 }
 
 #[test]
@@ -883,6 +983,31 @@ fn no_stub_suspicious_default_returns() {
         matches.is_empty(),
         "Found suspicious default returns outside cfg(test) modules:\n{}\n\
          These patterns often indicate stub implementations.",
+        matches.join("\n")
+    );
+}
+
+#[test]
+fn no_stub_docs_and_artifacts_scope_stale_status_claims() {
+    let mut matches = Vec::new();
+
+    for path in status_claim_audit_files() {
+        let source = std::fs::read_to_string(&path).expect("audit file should be readable");
+        for (line_no, line) in source.lines().enumerate() {
+            let normalized = line.to_ascii_lowercase();
+            if STALE_STATUS_MARKERS
+                .iter()
+                .any(|marker| normalized.contains(marker))
+                && !stale_status_claim_allowed(&path, line)
+            {
+                matches.push(format!("{}:{}: {line}", path.display(), line_no + 1));
+            }
+        }
+    }
+
+    assert!(
+        matches.is_empty(),
+        "Found stale status claims without explicit historical, excluded-scope, or replay rationale:\n{}",
         matches.join("\n")
     );
 }
