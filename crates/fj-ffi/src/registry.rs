@@ -161,7 +161,7 @@ mod tests {
     use std::sync::Arc;
 
     /// Trivial FFI function for testing: always returns 0 (success).
-    unsafe extern "C" fn mock_success(
+    unsafe extern "C" fn extern_test_success(
         _inputs: *const *const u8,
         _input_count: usize,
         _outputs: *const *mut u8,
@@ -170,8 +170,8 @@ mod tests {
         0
     }
 
-    /// Mock FFI function that returns error code 42.
-    unsafe extern "C" fn mock_error(
+    /// Extern test helper that returns error code 42.
+    unsafe extern "C" fn extern_test_error(
         _inputs: *const *const u8,
         _input_count: usize,
         _outputs: *const *mut u8,
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn registry_register_and_get() -> Result<(), Box<dyn std::error::Error>> {
         let reg = FfiRegistry::new();
-        reg.register("add_vectors", mock_success)?;
+        reg.register("add_vectors", extern_test_success)?;
         let target = reg.get("add_vectors")?;
         assert_eq!(target.name, "add_vectors");
         assert_eq!(reg.len(), 1);
@@ -200,8 +200,8 @@ mod tests {
     #[test]
     fn registry_duplicate_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let reg = FfiRegistry::new();
-        reg.register("my_fn", mock_success)?;
-        let err = match reg.register("my_fn", mock_error) {
+        reg.register("my_fn", extern_test_success)?;
+        let err = match reg.register("my_fn", extern_test_error) {
             Ok(()) => return Err("duplicate registration unexpectedly succeeded".into()),
             Err(err) => err,
         };
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn registry_target_not_found() -> Result<(), Box<dyn std::error::Error>> {
         let reg = FfiRegistry::new();
-        reg.register("exists", mock_success)?;
+        reg.register("exists", extern_test_success)?;
         let err = match reg.get("nonexistent") {
             Ok(target) => return Err(format!("unexpectedly found target: {target:?}").into()),
             Err(err) => err,
@@ -228,12 +228,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_target_not_found_reports_sorted_available_names()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn registry_target_not_found_reports_sorted_available_names(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let reg = FfiRegistry::new();
-        reg.register("zeta", mock_success)?;
-        reg.register("alpha", mock_success)?;
-        reg.register("middle", mock_success)?;
+        reg.register("zeta", extern_test_success)?;
+        reg.register("alpha", extern_test_success)?;
+        reg.register("middle", extern_test_success)?;
 
         let err = reg.get("missing").expect_err("missing target should fail");
         match err {
@@ -260,7 +260,7 @@ mod tests {
         .join();
 
         assert!(join.is_err());
-        reg.register("after_poison", mock_success)?;
+        reg.register("after_poison", extern_test_success)?;
 
         let target = reg.get("after_poison")?;
         assert_eq!(target.name, "after_poison");
@@ -273,8 +273,8 @@ mod tests {
     #[test]
     fn registry_registered_names() -> Result<(), Box<dyn std::error::Error>> {
         let reg = FfiRegistry::new();
-        reg.register("beta", mock_error)?;
-        reg.register("alpha", mock_success)?;
+        reg.register("beta", extern_test_error)?;
+        reg.register("alpha", extern_test_success)?;
         assert_eq!(reg.registered_names(), vec!["alpha", "beta"]);
         Ok(())
     }
@@ -283,7 +283,7 @@ mod tests {
     fn registry_multiple_registrations() -> Result<(), Box<dyn std::error::Error>> {
         let reg = FfiRegistry::new();
         for i in 0..10 {
-            reg.register(&format!("fn_{i}"), mock_success)?;
+            reg.register(&format!("fn_{i}"), extern_test_success)?;
         }
         assert_eq!(reg.len(), 10);
         Ok(())
@@ -304,7 +304,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..25 {
                     let name = format!("thread_{}_fn_{}", t, i);
-                    let _ = reg.register(&name, mock_success);
+                    let _ = reg.register(&name, extern_test_success);
                 }
             }));
         }
@@ -324,7 +324,7 @@ mod tests {
         let reg = Arc::new(FfiRegistry::new());
 
         for i in 0..10 {
-            reg.register(&format!("initial_{}", i), mock_success)
+            reg.register(&format!("initial_{}", i), extern_test_success)
                 .expect("initial registration should succeed");
         }
 
@@ -345,7 +345,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 for i in 0..25 {
                     let name = format!("writer_{}_fn_{}", t, i);
-                    let _ = reg.register(&name, mock_success);
+                    let _ = reg.register(&name, extern_test_success);
                 }
             }));
         }
@@ -375,7 +375,7 @@ mod tests {
         use std::thread;
 
         let reg = Arc::new(FfiRegistry::new());
-        reg.register("target_fn", mock_success)
+        reg.register("target_fn", extern_test_success)
             .expect("registration should succeed");
 
         let mut handles = vec![];
@@ -386,7 +386,10 @@ mod tests {
                 for _ in 0..1000 {
                     let target = reg.get("target_fn").expect("target should exist");
                     assert_eq!(target.name, "target_fn");
-                    assert_eq!(target.fn_ptr as usize, (mock_success as FfiFnPtr) as usize);
+                    assert_eq!(
+                        target.fn_ptr as usize,
+                        (extern_test_success as FfiFnPtr) as usize
+                    );
                 }
             }));
         }

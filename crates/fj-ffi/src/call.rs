@@ -3,8 +3,8 @@
 //! `FfiCall::invoke()` is the sole method that crosses the FFI boundary.
 //! All preconditions are validated before the unsafe block is entered.
 
-use crate::buffer::FfiBuffer;
 use crate::buffer::validate_buffer_contents;
+use crate::buffer::FfiBuffer;
 use crate::error::FfiError;
 use crate::registry::{FfiRegistry, FfiTarget};
 use smallvec::SmallVec;
@@ -138,8 +138,8 @@ mod tests {
     use crate::registry::FfiFnPtr;
     use fj_core::DType;
 
-    /// Mock FFI function: copies first input to first output (8 bytes).
-    unsafe extern "C" fn mock_copy(
+    /// Extern test helper: copies first input to first output (8 bytes).
+    unsafe extern "C" fn extern_test_copy(
         inputs: *const *const u8,
         input_count: usize,
         outputs: *const *mut u8,
@@ -156,8 +156,8 @@ mod tests {
         0
     }
 
-    /// Mock FFI function: always fails with code 99.
-    unsafe extern "C" fn mock_fail(
+    /// Extern test helper: always fails with code 99.
+    unsafe extern "C" fn extern_test_fail(
         _inputs: *const *const u8,
         _input_count: usize,
         _outputs: *const *mut u8,
@@ -166,8 +166,8 @@ mod tests {
         99
     }
 
-    /// Mock FFI function: doubles each f64 in the input.
-    unsafe extern "C" fn mock_double(
+    /// Extern test helper: doubles each f64 in the input.
+    unsafe extern "C" fn extern_test_double(
         inputs: *const *const u8,
         _input_count: usize,
         outputs: *const *mut u8,
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn invoke_copy_success() {
-        let reg = setup_registry("copy", mock_copy);
+        let reg = setup_registry("copy", extern_test_copy);
         let call = FfiCall::new("copy");
 
         let input_data: f64 = 42.0;
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn invoke_error_return_code() -> Result<(), String> {
-        let reg = setup_registry("fail", mock_fail);
+        let reg = setup_registry("fail", extern_test_fail);
         let call = FfiCall::new("fail");
 
         let input = FfiBuffer::new(vec![0u8; 8], vec![], DType::F64).unwrap();
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn invoke_double_produces_correct_result() {
-        let reg = setup_registry("double", mock_double);
+        let reg = setup_registry("double", extern_test_double);
         let call = FfiCall::new("double");
 
         let input_val: f64 = 21.0;
@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn invoke_no_inputs_no_outputs() {
-        unsafe extern "C" fn mock_noop(
+        unsafe extern "C" fn extern_test_noop(
             _inputs: *const *const u8,
             _input_count: usize,
             _outputs: *const *mut u8,
@@ -273,14 +273,14 @@ mod tests {
             0
         }
 
-        let reg = setup_registry("noop", mock_noop);
+        let reg = setup_registry("noop", extern_test_noop);
         let call = FfiCall::new("noop");
         call.invoke(&reg, &[], &mut []).unwrap();
     }
 
     #[test]
     fn invoke_vector_input_output() {
-        unsafe extern "C" fn mock_negate_vec(
+        unsafe extern "C" fn extern_test_negate_vec(
             inputs: *const *const u8,
             _input_count: usize,
             outputs: *const *mut u8,
@@ -296,7 +296,7 @@ mod tests {
             0
         }
 
-        let reg = setup_registry("negate3", mock_negate_vec);
+        let reg = setup_registry("negate3", extern_test_negate_vec);
         let call = FfiCall::new("negate3");
 
         let mut input_data = Vec::new();
@@ -322,7 +322,7 @@ mod tests {
     fn invoke_error_scrubs_output_buffers() {
         // Write non-zero data to output before a failing call;
         // verify the output is zeroed after the failure (fail-closed).
-        let reg = setup_registry("fail", mock_fail);
+        let reg = setup_registry("fail", extern_test_fail);
         let call = FfiCall::new("fail");
 
         let input = FfiBuffer::new(vec![0u8; 8], vec![], DType::F64).unwrap();
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn invoke_scrubs_outputs_before_successful_foreign_call() {
-        unsafe extern "C" fn mock_write_first_byte_only(
+        unsafe extern "C" fn extern_test_write_first_byte_only(
             _inputs: *const *const u8,
             _input_count: usize,
             outputs: *const *mut u8,
@@ -354,7 +354,7 @@ mod tests {
             0
         }
 
-        let reg = setup_registry("write_first_byte_only", mock_write_first_byte_only);
+        let reg = setup_registry("write_first_byte_only", extern_test_write_first_byte_only);
         let call = FfiCall::new("write_first_byte_only");
         let mut outputs = [FfiBuffer::new(vec![0xFF; 8], vec![], DType::F64).unwrap()];
 
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn invoke_multiple_inputs_outputs() {
         // FFI function that sums two f64 inputs into one output.
-        unsafe extern "C" fn mock_sum2(
+        unsafe extern "C" fn extern_test_sum2(
             inputs: *const *const u8,
             input_count: usize,
             outputs: *const *mut u8,
@@ -388,7 +388,7 @@ mod tests {
             0
         }
 
-        let reg = setup_registry("sum2", mock_sum2);
+        let reg = setup_registry("sum2", extern_test_sum2);
         let call = FfiCall::new("sum2");
 
         let a = FfiBuffer::new(3.0_f64.to_ne_bytes().to_vec(), vec![], DType::F64).unwrap();
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn invoke_i32_dtype_buffers() {
         // Verify non-f64 dtype buffers work correctly.
-        unsafe extern "C" fn mock_inc_i32(
+        unsafe extern "C" fn extern_test_inc_i32(
             inputs: *const *const u8,
             _input_count: usize,
             outputs: *const *mut u8,
@@ -417,7 +417,7 @@ mod tests {
             0
         }
 
-        let reg = setup_registry("inc_i32", mock_inc_i32);
+        let reg = setup_registry("inc_i32", extern_test_inc_i32);
         let call = FfiCall::new("inc_i32");
 
         let input = FfiBuffer::new(41_i32.to_ne_bytes().to_vec(), vec![], DType::I32).unwrap();
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn invoke_bool_dtype_buffer() {
         // Boolean buffers at the FFI boundary.
-        unsafe extern "C" fn mock_not(
+        unsafe extern "C" fn extern_test_not(
             inputs: *const *const u8,
             _input_count: usize,
             outputs: *const *mut u8,
@@ -445,7 +445,7 @@ mod tests {
             0
         }
 
-        let reg = setup_registry("not", mock_not);
+        let reg = setup_registry("not", extern_test_not);
         let call = FfiCall::new("not");
 
         let input = FfiBuffer::new(vec![1u8], vec![], DType::Bool).unwrap();
@@ -462,7 +462,7 @@ mod tests {
         static CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
         CALL_COUNT.store(0, Ordering::SeqCst);
 
-        unsafe extern "C" fn mock_unreachable(
+        unsafe extern "C" fn extern_test_unreachable(
             _inputs: *const *const u8,
             _input_count: usize,
             _outputs: *const *mut u8,
@@ -472,7 +472,7 @@ mod tests {
             99
         }
 
-        let reg = setup_registry("unreachable", mock_unreachable);
+        let reg = setup_registry("unreachable", extern_test_unreachable);
         let call = FfiCall::new("unreachable");
         let mut input = FfiBuffer::zeroed(vec![], DType::Bool).unwrap();
         input.as_bytes_mut()[0] = 2;
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn invoke_rejects_and_scrubs_noncanonical_bool_output() {
-        unsafe extern "C" fn mock_invalid_bool_output(
+        unsafe extern "C" fn extern_test_invalid_bool_output(
             _inputs: *const *const u8,
             _input_count: usize,
             outputs: *const *mut u8,
@@ -507,7 +507,7 @@ mod tests {
             0
         }
 
-        let reg = setup_registry("invalid_bool_output", mock_invalid_bool_output);
+        let reg = setup_registry("invalid_bool_output", extern_test_invalid_bool_output);
         let call = FfiCall::new("invalid_bool_output");
         let mut outputs = [FfiBuffer::zeroed(vec![], DType::Bool).unwrap()];
 

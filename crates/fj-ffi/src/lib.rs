@@ -173,7 +173,7 @@ mod tests {
     /// Adversarial: multiple output buffers with mixed dtypes.
     #[test]
     fn adversarial_mixed_dtype_outputs() {
-        unsafe extern "C" fn mock_mixed(
+        unsafe extern "C" fn extern_test_mixed(
             _inputs: *const *const u8,
             _input_count: usize,
             outputs: *const *mut u8,
@@ -191,7 +191,7 @@ mod tests {
         }
 
         let reg = FfiRegistry::new();
-        reg.register("mixed", mock_mixed).unwrap();
+        reg.register("mixed", extern_test_mixed).unwrap();
 
         let mut outputs = [
             FfiBuffer::zeroed(vec![], DType::F64).unwrap(),
@@ -211,7 +211,7 @@ mod tests {
     /// Buffer lifecycle: borrow → use → return pattern.
     #[test]
     fn buffer_lifecycle_borrow_use_return() {
-        unsafe extern "C" fn mock_increment(
+        unsafe extern "C" fn extern_test_increment(
             inputs: *const *const u8,
             _input_count: usize,
             outputs: *const *mut u8,
@@ -226,7 +226,7 @@ mod tests {
         }
 
         let reg = FfiRegistry::new();
-        reg.register("inc", mock_increment).unwrap();
+        reg.register("inc", extern_test_increment).unwrap();
         let call = FfiCall::new("inc");
 
         // Round-trip through multiple calls
