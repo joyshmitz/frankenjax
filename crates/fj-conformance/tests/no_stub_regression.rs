@@ -12,6 +12,7 @@ use fj_interpreters::eval_jaxpr;
 use fj_lax::{EvalError, eval_primitive};
 use smallvec::smallvec;
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 const BANNED_SUBSTRINGS: &[&str] = &[
     "not yet implemented",
@@ -30,6 +31,26 @@ const REPRESENTATIVE_DTYPES: &[DType] = &[
     DType::F64,
     DType::Complex128,
     DType::Bool,
+];
+
+const PRODUCTION_SRC_DIRS: &[&str] = &[
+    "crates/fj-ad/src",
+    "crates/fj-api/src",
+    "crates/fj-backend-cpu/src",
+    "crates/fj-backend-gpu/src",
+    "crates/fj-cache/src",
+    "crates/fj-conformance/src",
+    "crates/fj-core/src",
+    "crates/fj-dispatch/src",
+    "crates/fj-egraph/src",
+    "crates/fj-ffi/src",
+    "crates/fj-interpreters/src",
+    "crates/fj-lax/src",
+    "crates/fj-ledger/src",
+    "crates/fj-py/src",
+    "crates/fj-runtime/src",
+    "crates/fj-test-utils/src",
+    "crates/fj-trace/src",
 ];
 
 fn all_primitives() -> &'static [Primitive] {
@@ -557,6 +578,86 @@ fn snippet(message: &str) -> String {
     out
 }
 
+fn workspace_source_files() -> Vec<PathBuf> {
+    fn visit(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    for dir in PRODUCTION_SRC_DIRS {
+        visit(Path::new(dir), &mut files);
+    }
+    files.sort();
+    files
+}
+
+fn brace_delta(line: &str) -> i32 {
+    let opens = line.chars().filter(|ch| *ch == '{').count() as i32;
+    let closes = line.chars().filter(|ch| *ch == '}').count() as i32;
+    opens - closes
+}
+
+fn production_lines(source: &str) -> Vec<(usize, &str)> {
+    let mut lines = Vec::new();
+    let mut pending_cfg_test = false;
+    let mut skipped_test_module_depth: Option<i32> = None;
+
+    for (idx, line) in source.lines().enumerate() {
+        if let Some(depth) = skipped_test_module_depth.as_mut() {
+            *depth += brace_delta(line);
+            if *depth <= 0 {
+                skipped_test_module_depth = None;
+            }
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[cfg(test)]") {
+            pending_cfg_test = true;
+            continue;
+        }
+
+        if pending_cfg_test {
+            if trimmed.starts_with("mod ") && trimmed.contains('{') {
+                let depth = brace_delta(line);
+                if depth > 0 {
+                    skipped_test_module_depth = Some(depth);
+                }
+                pending_cfg_test = false;
+                continue;
+            }
+            pending_cfg_test = trimmed.starts_with("#[");
+            if pending_cfg_test {
+                continue;
+            }
+        }
+
+        lines.push((idx + 1, line));
+    }
+
+    lines
+}
+
+fn source_marker_allowed(line: &str) -> bool {
+    line.contains("user-supplied placeholder paths")
+}
+
+fn suspicious_default_return_allowed(path: &Path, line: &str) -> bool {
+    path.ends_with("crates/fj-interpreters/src/partial_eval.rs")
+        && line.contains("return Ok(vec![])")
+}
+
 #[test]
 fn no_stub_regression_matrix() {
     let mut eval_rows = Vec::new();
@@ -730,72 +831,58 @@ fn no_stub_regression_covers_interpreter_invalid_sub_jaxpr_error() {
 }
 
 #[test]
-fn no_stub_source_code_markers_via_grep() {
-    use std::process::Command;
-
+fn no_stub_source_code_markers_cover_workspace_sources() {
     let stub_patterns = [
         "unimplemented!",
         "todo!",
         r#"panic!("not impl"#,
-        "STUB",
-        "PLACEHOLDER",
-        "MOCK",
+        "stub",
+        "placeholder",
+        "mock",
     ];
 
-    let src_dirs = ["crates/fj-lax/src", "crates/fj-ad/src", "crates/fj-core/src"];
+    let mut matches = Vec::new();
 
-    for pattern in stub_patterns {
-        for dir in &src_dirs {
-            let output = Command::new("grep")
-                .args(["-rn", pattern, dir])
-                .output()
-                .expect("grep should execute");
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let matches: Vec<&str> = stdout
-                .lines()
-                .filter(|line| !line.contains("test") && !line.contains("Test"))
-                .collect();
-
-            assert!(
-                matches.is_empty(),
-                "Found stub marker `{pattern}` in {dir}:\n{}",
-                matches.join("\n")
-            );
+    for path in workspace_source_files() {
+        let source = std::fs::read_to_string(&path).expect("source file should be readable");
+        for (line_no, line) in production_lines(&source) {
+            let normalized = line.to_ascii_lowercase();
+            for pattern in stub_patterns {
+                if normalized.contains(pattern) && !source_marker_allowed(line) {
+                    matches.push(format!("{}:{line_no}: {line}", path.display()));
+                }
+            }
         }
     }
+
+    assert!(
+        matches.is_empty(),
+        "Found source-code stub markers outside cfg(test) modules:\n{}",
+        matches.join("\n")
+    );
 }
 
 #[test]
 fn no_stub_suspicious_default_returns() {
-    use std::process::Command;
+    let suspicious_patterns = ["return Ok(Default::default())", "return Ok(vec![])"];
 
-    let suspicious_patterns = [
-        r"return Ok\(Default::default\(\)\)",
-        r"return Ok\(vec!\[\]\)",
-    ];
+    let mut matches = Vec::new();
 
-    let src_files = ["crates/fj-lax/src/lib.rs", "crates/fj-ad/src/lib.rs"];
-
-    for pattern in suspicious_patterns {
-        for file in &src_files {
-            let output = Command::new("grep")
-                .args(["-En", pattern, file])
-                .output()
-                .expect("grep should execute");
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let matches: Vec<&str> = stdout
-                .lines()
-                .filter(|line| !line.contains("test") && !line.contains("Test"))
-                .collect();
-
-            assert!(
-                matches.is_empty(),
-                "Found suspicious default return `{pattern}` in {file}:\n{}\n\
-                 These patterns often indicate stub implementations.",
-                matches.join("\n")
-            );
+    for path in workspace_source_files() {
+        let source = std::fs::read_to_string(&path).expect("source file should be readable");
+        for (line_no, line) in production_lines(&source) {
+            for pattern in suspicious_patterns {
+                if line.contains(pattern) && !suspicious_default_return_allowed(&path, line) {
+                    matches.push(format!("{}:{line_no}: {line}", path.display()));
+                }
+            }
         }
     }
+
+    assert!(
+        matches.is_empty(),
+        "Found suspicious default returns outside cfg(test) modules:\n{}\n\
+         These patterns often indicate stub implementations.",
+        matches.join("\n")
+    );
 }
