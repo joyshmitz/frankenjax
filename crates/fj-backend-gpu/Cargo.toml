@@ -7,9 +7,9 @@ description = "GPU backend foundation for FrankenJAX with a V1 unavailable execu
 
 [features]
 default = []
-# Future: enable CUDA support via cudarc
+# Reserved V1 feature flag; no CUDA execution dependencies are wired yet.
 cuda = []
-# Future: enable cross-platform GPU via wgpu
+# Reserved V1 feature flag; no wgpu execution dependencies are wired yet.
 wgpu = []
 
 [dependencies]

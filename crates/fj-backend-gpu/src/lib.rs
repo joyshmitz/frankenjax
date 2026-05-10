@@ -1,32 +1,58 @@
 //! GPU backend foundation for FrankenJAX.
 //!
 //! This crate provides the architectural foundation for GPU acceleration.
-//! V1 reports unavailable because GPU execution requires future backend work:
-//! - CUDA backend via cudarc (NVIDIA GPUs)
-//! - Cross-platform via wgpu (Vulkan/Metal/DX12)
+//! V1 reports unavailable because no GPU execution backend is shipped in this
+//! crate. CUDA and wgpu integration are deferred contracts, not dormant probe
+//! implementations.
 //!
 //! The Backend trait implementation is wired for:
 //! - Device discovery infrastructure
 //! - Backend registry integration
-//! - Future GPU kernel compilation paths
+//! - A typed unavailable contract for non-CPU execution requests
 
 #![forbid(unsafe_code)]
 
-use fj_core::{DType, Jaxpr, Value};
+use fj_core::{Jaxpr, Value};
 use fj_runtime::backend::{Backend, BackendCapabilities, BackendError};
 use fj_runtime::buffer::Buffer;
 use fj_runtime::device::{DeviceId, DeviceInfo};
 
+/// Permanent V1 reason that GPU execution cannot be used.
+///
+/// This is deliberately separate from hardware discovery. V1 does not probe
+/// local CUDA or wgpu state, so callers get a deterministic unavailable result
+/// instead of environment-dependent behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuUnavailableReason {
+    /// FrankenJAX V1 has no shipped GPU execution backend.
+    ExecutionBackendAbsent,
+}
+
+impl GpuUnavailableReason {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExecutionBackendAbsent => "gpu_execution_backend_absent",
+        }
+    }
+
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::ExecutionBackendAbsent => {
+                "GPU backend unavailable in V1 (hardware execution backend absent)"
+            }
+        }
+    }
+}
+
 /// GPU backend implementation.
 ///
-/// Currently returns "unavailable" for all operations.
-/// Future implementations will detect GPU hardware and provide:
-/// - CUDA execution for NVIDIA GPUs
-/// - wgpu execution for cross-platform GPU support
+/// V1 always returns a typed unavailable reason for operations and discovery.
 #[derive(Debug, Clone)]
 pub struct GpuBackend {
-    /// Whether GPU hardware was detected during initialization.
-    available: bool,
+    /// Reason this backend is unavailable, or `None` once a real backend ships.
+    unavailable_reason: Option<GpuUnavailableReason>,
     /// Detected GPU devices (empty if unavailable).
     devices: Vec<DeviceInfo>,
 }
@@ -38,53 +64,46 @@ impl Default for GpuBackend {
 }
 
 impl GpuBackend {
-    /// Create a new GPU backend, probing for available hardware.
+    /// Create a new GPU backend.
     ///
-    /// V1: Always returns unavailable because no GPU execution path is shipped.
-    /// Future: Will probe CUDA/wgpu for GPU devices.
+    /// V1 returns a deterministic unavailable contract because no GPU execution
+    /// path is shipped.
     #[must_use]
     pub fn new() -> Self {
-        let (available, devices) = Self::probe_gpu_devices();
-        Self { available, devices }
+        let (unavailable_reason, devices) = Self::probe_gpu_devices();
+        Self {
+            unavailable_reason,
+            devices,
+        }
     }
 
-    /// Probe for GPU devices.
+    /// Return the V1 GPU availability contract.
     ///
-    /// V1: Returns (false, empty) because GPU support is outside the shipped V1 scope.
-    /// Future CUDA path: Query cudaGetDeviceCount, cudaGetDeviceProperties.
-    /// Future wgpu path: Query wgpu::Instance::enumerate_adapters.
-    fn probe_gpu_devices() -> (bool, Vec<DeviceInfo>) {
-        // V1: GPU support is unavailable; future code should probe CUDA or wgpu for devices.
-        #[cfg(feature = "cuda")]
-        {
-            // cudarc device enumeration belongs here when CUDA execution ships.
-            // let device_count = cudarc::driver::CudaDevice::count()?;
-        }
-
-        #[cfg(feature = "wgpu")]
-        {
-            // wgpu adapter enumeration belongs here when cross-platform GPU execution ships.
-            // let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-            // let adapters = instance.enumerate_adapters(wgpu::Backends::all());
-        }
-
-        (false, Vec::new())
+    /// The `cuda` and `wgpu` feature flags are reserved names in V1. They do not
+    /// enable hardware probing unless real execution dependencies are added.
+    fn probe_gpu_devices() -> (Option<GpuUnavailableReason>, Vec<DeviceInfo>) {
+        (
+            Some(GpuUnavailableReason::ExecutionBackendAbsent),
+            Vec::new(),
+        )
     }
 
     /// Check if GPU backend is available.
     #[must_use]
     pub fn is_available(&self) -> bool {
-        self.available
+        self.unavailable_reason.is_none()
     }
 
-    /// Get the reason GPU is unavailable.
+    /// Get the typed reason GPU is unavailable.
     #[must_use]
-    pub fn unavailable_reason(&self) -> &'static str {
-        if self.available {
-            ""
-        } else {
-            "GPU backend unavailable in V1 (hardware execution backend absent)"
-        }
+    pub fn unavailable_reason(&self) -> Option<GpuUnavailableReason> {
+        self.unavailable_reason
+    }
+
+    /// Get a human-readable unavailable message.
+    #[must_use]
+    pub fn unavailable_message(&self) -> Option<&'static str> {
+        self.unavailable_reason.map(GpuUnavailableReason::message)
     }
 }
 
@@ -107,44 +126,20 @@ impl Backend for GpuBackend {
         _args: &[Value],
         _device: DeviceId,
     ) -> Result<Vec<Value>, BackendError> {
-        if !self.available {
-            return Err(BackendError::Unavailable {
-                backend: "gpu".to_owned(),
-            });
-        }
-
-        // Future: Compile jaxpr to GPU kernels, execute on device.
-        Err(BackendError::ExecutionFailed {
-            detail: "GPU execution unavailable in V1".to_owned(),
+        Err(BackendError::Unavailable {
+            backend: "gpu".to_owned(),
         })
     }
 
-    fn allocate(&self, size_bytes: usize, device: DeviceId) -> Result<Buffer, BackendError> {
-        if !self.available {
-            return Err(BackendError::Unavailable {
-                backend: "gpu".to_owned(),
-            });
-        }
-
-        // Future: Allocate GPU device memory.
-        Err(BackendError::AllocationFailed {
-            device,
-            detail: format!("GPU allocation of {size_bytes} bytes unavailable in V1"),
+    fn allocate(&self, _size_bytes: usize, _device: DeviceId) -> Result<Buffer, BackendError> {
+        Err(BackendError::Unavailable {
+            backend: "gpu".to_owned(),
         })
     }
 
-    fn transfer(&self, _buffer: &Buffer, target: DeviceId) -> Result<Buffer, BackendError> {
-        if !self.available {
-            return Err(BackendError::Unavailable {
-                backend: "gpu".to_owned(),
-            });
-        }
-
-        // Future: DMA transfer between host and device.
-        Err(BackendError::TransferFailed {
-            source: DeviceId(0),
-            target,
-            detail: "GPU transfer unavailable in V1".to_owned(),
+    fn transfer(&self, _buffer: &Buffer, _target: DeviceId) -> Result<Buffer, BackendError> {
+        Err(BackendError::Unavailable {
+            backend: "gpu".to_owned(),
         })
     }
 
@@ -153,21 +148,11 @@ impl Backend for GpuBackend {
     }
 
     fn capabilities(&self) -> BackendCapabilities {
-        if !self.available {
-            return BackendCapabilities {
-                supported_dtypes: vec![],
-                max_tensor_rank: 0,
-                memory_limit_bytes: None,
-                multi_device: false,
-            };
-        }
-
-        // Future: Query actual GPU capabilities
         BackendCapabilities {
-            supported_dtypes: vec![DType::F32, DType::F64, DType::I32, DType::I64, DType::Bool],
-            max_tensor_rank: 8,
-            memory_limit_bytes: None, // Query from device
-            multi_device: true,       // GPU backends typically support multi-device
+            supported_dtypes: vec![],
+            max_tensor_rank: 0,
+            memory_limit_bytes: None,
+            multi_device: false,
         }
     }
 }
@@ -197,6 +182,25 @@ mod tests {
         let backend = GpuBackend::new();
         assert!(!backend.is_available());
         assert_eq!(backend.name(), "gpu");
+        assert_eq!(
+            backend.unavailable_reason(),
+            Some(GpuUnavailableReason::ExecutionBackendAbsent)
+        );
+        assert_eq!(
+            backend.unavailable_message(),
+            Some("GPU backend unavailable in V1 (hardware execution backend absent)")
+        );
+        assert_eq!(
+            GpuUnavailableReason::ExecutionBackendAbsent.as_str(),
+            "gpu_execution_backend_absent"
+        );
+    }
+
+    #[test]
+    fn gpu_probe_contract_is_deterministic_and_empty() {
+        let (reason, devices) = GpuBackend::probe_gpu_devices();
+        assert_eq!(reason, Some(GpuUnavailableReason::ExecutionBackendAbsent));
+        assert!(devices.is_empty());
     }
 
     #[test]
