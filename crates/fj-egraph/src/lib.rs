@@ -700,14 +700,36 @@ fn cancels_shape_chain(previous: &Equation, current: &Equation) -> bool {
 //   compose_explicit_transpose_perms). The implicit reverse-axes form is
 //   conservatively skipped here; inverse transpose pairs are already handled
 //   by the cancellation branch.
+// - (Rev, Rev) when both carry parseable axis sets and the symmetric
+//   difference is non-empty (the empty case is already handled by the
+//   cancellation branch): the chain collapses to one Rev with the sym-diff
+//   axes, since each axis reversed twice is identity.
 fn fuses_shape_chain(previous: &Equation, current: &Equation) -> bool {
     match (previous.primitive, current.primitive) {
         (Primitive::Reshape, Primitive::Reshape) => true,
         (Primitive::Transpose, Primitive::Transpose) => {
             compose_explicit_transpose_perms(&previous.params, &current.params).is_some()
         }
+        (Primitive::Rev, Primitive::Rev) => rev_axes_symmetric_difference(
+            &previous.params,
+            &current.params,
+        )
+        .is_some_and(|sym_diff| !sym_diff.is_empty()),
         _ => false,
     }
+}
+
+// Symmetric difference of two Rev equations' axis sets, returned as a
+// sorted, deduplicated Vec. None if either side cannot be parsed.
+fn rev_axes_symmetric_difference(
+    previous_params: &BTreeMap<String, String>,
+    current_params: &BTreeMap<String, String>,
+) -> Option<Vec<usize>> {
+    let prev = rev_axes(previous_params)?;
+    let curr = rev_axes(current_params)?;
+    let prev_set: std::collections::BTreeSet<usize> = prev.into_iter().collect();
+    let curr_set: std::collections::BTreeSet<usize> = curr.into_iter().collect();
+    Some(prev_set.symmetric_difference(&curr_set).copied().collect())
 }
 
 // Compose two explicit transpose permutations. Returns Some(composed) iff
@@ -845,6 +867,21 @@ fn optimize_shape_parametric_chains(jaxpr: &Jaxpr) -> Jaxpr {
                     .collect::<Vec<_>>()
                     .join(",");
                 rewritten.params.insert("permutation".to_owned(), csv);
+            }
+            if previous.primitive == Primitive::Rev
+                && rewritten.primitive == Primitive::Rev
+            {
+                let sym_diff = rev_axes_symmetric_difference(
+                    &previous.params,
+                    &rewritten.params,
+                )
+                .expect("fuse predicate already validated rev sym-diff");
+                let csv = sym_diff
+                    .iter()
+                    .map(|axis| axis.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                rewritten.params.insert("axes".to_owned(), csv);
             }
             rewritten.inputs[0] = previous.inputs[0].clone();
             equations.push(rewritten);
@@ -4874,6 +4911,127 @@ mod tests {
             transpose_count >= 1,
             "implicit-reverse transpose must NOT be fused away: {optimized:#?}"
         );
+    }
+
+    #[test]
+    fn rev_chain_fuses_into_symmetric_difference() {
+        // Rev([0, 1]) then Rev([1, 2]) should collapse to Rev([0, 2]):
+        // axis 1 is reversed twice (no-op) and axes 0 and 2 are reversed
+        // exactly once each.
+        let mut prev_params = BTreeMap::new();
+        prev_params.insert("axes".to_owned(), "0,1".to_owned());
+        let mut curr_params = BTreeMap::new();
+        curr_params.insert("axes".to_owned(), "1,2".to_owned());
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Rev,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    effects: vec![],
+                    params: prev_params,
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Rev,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    effects: vec![],
+                    params: curr_params,
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert_eq!(
+            optimized.equations.len(),
+            1,
+            "partially-overlapping rev pair should fuse: {optimized:#?}"
+        );
+        let fused = &optimized.equations[0];
+        assert_eq!(fused.primitive, Primitive::Rev);
+        assert_eq!(
+            fused.params.get("axes"),
+            Some(&"0,2".to_owned()),
+            "fused rev should carry symmetric difference of axes"
+        );
+        assert_eq!(optimized.outvars, vec![VarId(3)]);
+
+        // Eval-equivalence on a 2x3x4 i64 tensor.
+        let mut elements = Vec::with_capacity(2 * 3 * 4);
+        for i in 0..(2 * 3 * 4) {
+            elements.push(Literal::I64(i as i64));
+        }
+        let input = Value::Tensor(
+            TensorValue::new(DType::I64, Shape { dims: vec![2, 3, 4] }, elements).unwrap(),
+        );
+        let original_out = eval_jaxpr(&jaxpr, std::slice::from_ref(&input)).unwrap();
+        let optimized_out = eval_jaxpr(&optimized, std::slice::from_ref(&input)).unwrap();
+        assert_eq!(original_out, optimized_out);
+    }
+
+    #[test]
+    fn rev_chain_with_disjoint_axes_fuses() {
+        // Disjoint axis sets are also a valid sym-diff fuse (just union).
+        let mut prev_params = BTreeMap::new();
+        prev_params.insert("axes".to_owned(), "0".to_owned());
+        let mut curr_params = BTreeMap::new();
+        curr_params.insert("axes".to_owned(), "1".to_owned());
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Rev,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    effects: vec![],
+                    params: prev_params,
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Rev,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    effects: vec![],
+                    params: curr_params,
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+
+        let optimized = optimize_jaxpr(&jaxpr);
+        assert_eq!(
+            optimized.equations.len(),
+            1,
+            "disjoint rev pair should fuse to union: {optimized:#?}"
+        );
+        let fused = &optimized.equations[0];
+        assert_eq!(fused.primitive, Primitive::Rev);
+        assert_eq!(
+            fused.params.get("axes"),
+            Some(&"0,1".to_owned()),
+            "fused rev should carry union of axes"
+        );
+
+        // Eval-equivalence on a 3x3 i64 tensor.
+        let mut elements = Vec::with_capacity(9);
+        for i in 0..9 {
+            elements.push(Literal::I64(i as i64));
+        }
+        let input = Value::Tensor(
+            TensorValue::new(DType::I64, Shape { dims: vec![3, 3] }, elements).unwrap(),
+        );
+        let original_out = eval_jaxpr(&jaxpr, std::slice::from_ref(&input)).unwrap();
+        let optimized_out = eval_jaxpr(&optimized, std::slice::from_ref(&input)).unwrap();
+        assert_eq!(original_out, optimized_out);
     }
 
     #[test]
