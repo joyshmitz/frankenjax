@@ -3026,7 +3026,9 @@ fn batch_passthrough_leading_multi(
             .map_err(|e| BatchError::EvalError(e.to_string()))?;
 
         let buckets = per_output.get_or_insert_with(|| {
-            (0..outputs.len()).map(|_| Vec::with_capacity(batch_size)).collect()
+            (0..outputs.len())
+                .map(|_| Vec::with_capacity(batch_size))
+                .collect()
         });
         if buckets.len() != outputs.len() {
             return Err(BatchError::InterpreterError(format!(
@@ -4463,7 +4465,9 @@ fn batch_sub_jaxpr_by_slices(
         let outputs = eval_sub_jaxpr_equation_values(equation, &slices)?;
 
         let buckets = per_output.get_or_insert_with(|| {
-            (0..outputs.len()).map(|_| Vec::with_capacity(batch_size)).collect()
+            (0..outputs.len())
+                .map(|_| Vec::with_capacity(batch_size))
+                .collect()
         });
         if buckets.len() != outputs.len() {
             return Err(BatchError::InterpreterError(format!(
@@ -4649,7 +4653,9 @@ fn batch_switch_sub_jaxprs_by_slices(
             .map_err(|e| BatchError::InterpreterError(e.to_string()))?;
 
         let buckets = per_output.get_or_insert_with(|| {
-            (0..outputs.len()).map(|_| Vec::with_capacity(batch_size)).collect()
+            (0..outputs.len())
+                .map(|_| Vec::with_capacity(batch_size))
+                .collect()
         });
         if buckets.len() != outputs.len() {
             return Err(BatchError::InterpreterError(format!(
