@@ -42,18 +42,18 @@ fn extract_f64_vec(v: &Value) -> Vec<f64> {
     }
 }
 
-fn extract_f32_vec(v: &Value) -> Vec<f32> {
+fn extract_f32_vec(v: &Value) -> Result<Vec<f32>, String> {
     match v {
         Value::Tensor(t) => t
             .elements
             .iter()
             .map(|l| match l {
-                Literal::F32Bits(bits) => f32::from_bits(*bits),
-                other => panic!("expected F32Bits, got {other:?}"),
+                Literal::F32Bits(bits) => Ok(f32::from_bits(*bits)),
+                other => Err(format!("expected F32Bits, got {other:?}")),
             })
             .collect(),
-        Value::Scalar(Literal::F32Bits(bits)) => vec![f32::from_bits(*bits)],
-        other => panic!("expected F32 tensor or scalar, got {other:?}"),
+        Value::Scalar(Literal::F32Bits(bits)) => Ok(vec![f32::from_bits(*bits)]),
+        other => Err(format!("expected F32 tensor or scalar, got {other:?}")),
     }
 }
 
@@ -62,6 +62,36 @@ fn extract_shape(v: &Value) -> Vec<u32> {
         Value::Tensor(t) => t.shape.dims.clone(),
         Value::Scalar(_) => vec![],
     }
+}
+
+fn nextafter_f64_scalar(x: f64, y: f64) -> Result<f64, String> {
+    let result = eval_primitive(
+        Primitive::Nextafter,
+        &[
+            Value::Scalar(Literal::from_f64(x)),
+            Value::Scalar(Literal::from_f64(y)),
+        ],
+        &no_params(),
+    )
+    .map_err(|err| format!("{err:?}"))?;
+    match &result {
+        Value::Scalar(lit) => lit
+            .as_f64()
+            .ok_or_else(|| format!("expected f64 scalar, got {result:?}")),
+        Value::Tensor(t) if t.elements.len() == 1 => t
+            .elements
+            .first()
+            .and_then(|lit| lit.as_f64())
+            .ok_or_else(|| format!("expected single f64 tensor element, got {result:?}")),
+        other => Err(format!("expected scalar nextafter result, got {other:?}")),
+    }
+}
+
+fn assert_f32_tensor_dtype(value: &Value) {
+    assert!(
+        matches!(value, Value::Tensor(t) if t.dtype == DType::F32),
+        "expected F32 tensor, got {value:?}"
+    );
 }
 
 fn no_params() -> BTreeMap<String, String> {
@@ -145,13 +175,15 @@ fn oracle_nextafter_nan_y() {
 }
 
 #[test]
-fn oracle_nextafter_f32_scalar_preserves_dtype() {
+fn oracle_nextafter_f32_scalar_preserves_dtype() -> Result<(), String> {
     let a = Value::Scalar(Literal::from_f32(1.0));
     let b = Value::Scalar(Literal::from_f32(2.0));
-    let result = eval_primitive(Primitive::Nextafter, &[a, b], &no_params()).unwrap();
-    let vals = extract_f32_vec(&result);
+    let result = eval_primitive(Primitive::Nextafter, &[a, b], &no_params())
+        .map_err(|err| format!("{err:?}"))?;
+    let vals = extract_f32_vec(&result)?;
     assert!(vals[0] > 1.0);
     assert!(vals[0] < 1.0 + 1e-5);
+    Ok(())
 }
 
 // ======================== 1D Tests ========================
@@ -179,19 +211,93 @@ fn oracle_nextafter_1d_zeros() {
 }
 
 #[test]
-fn oracle_nextafter_f32_tensor_preserves_dtype() {
+fn oracle_nextafter_f32_tensor_preserves_dtype() -> Result<(), String> {
     let a = make_f32_tensor(&[3], vec![1.0, 2.0, 0.0]);
     let b = make_f32_tensor(&[3], vec![2.0, 1.0, -1.0]);
-    let result = eval_primitive(Primitive::Nextafter, &[a, b], &no_params()).unwrap();
+    let result = eval_primitive(Primitive::Nextafter, &[a, b], &no_params())
+        .map_err(|err| format!("{err:?}"))?;
     assert_eq!(extract_shape(&result), vec![3]);
-    match &result {
-        Value::Tensor(t) => assert_eq!(t.dtype, DType::F32),
-        other => panic!("expected F32 tensor, got {other:?}"),
-    }
-    let vals = extract_f32_vec(&result);
+    assert_f32_tensor_dtype(&result);
+    let vals = extract_f32_vec(&result)?;
     assert!(vals[0] > 1.0);
     assert!(vals[1] < 2.0);
     assert!(vals[2] < 0.0);
+    Ok(())
+}
+
+// ======================== Metamorphic Tests ========================
+
+#[test]
+fn metamorphic_nextafter_f64_one_step_roundtrip_bits() -> Result<(), String> {
+    let samples = [
+        1.0,
+        -1.0,
+        42.25,
+        -1024.5,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+        f64::from_bits(0x0010_0000_0000_0001),
+        -f64::from_bits(0x0010_0000_0000_0001),
+    ];
+
+    for x in samples {
+        let up = nextafter_f64_scalar(x, f64::INFINITY)?;
+        assert!(up > x, "nextafter({x}, +inf) did not move upward");
+        let back_down = nextafter_f64_scalar(up, f64::NEG_INFINITY)?;
+        assert_eq!(
+            back_down.to_bits(),
+            x.to_bits(),
+            "upward one-step roundtrip failed for {x}"
+        );
+
+        let down = nextafter_f64_scalar(x, f64::NEG_INFINITY)?;
+        assert!(down < x, "nextafter({x}, -inf) did not move downward");
+        let back_up = nextafter_f64_scalar(down, f64::INFINITY)?;
+        assert_eq!(
+            back_up.to_bits(),
+            x.to_bits(),
+            "downward one-step roundtrip failed for {x}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn metamorphic_nextafter_f32_tensor_roundtrip_preserves_bits_shape_and_dtype() -> Result<(), String>
+{
+    let samples = vec![
+        1.0_f32,
+        -1.0,
+        0.5,
+        -0.5,
+        f32::MIN_POSITIVE,
+        -f32::MIN_POSITIVE,
+    ];
+    let input = make_f32_tensor(&[2, 3], samples.clone());
+    let upward_targets = make_f32_tensor(&[2, 3], vec![f32::INFINITY; samples.len()]);
+    let upward = eval_primitive(Primitive::Nextafter, &[input, upward_targets], &no_params())
+        .map_err(|err| format!("{err:?}"))?;
+    assert_eq!(extract_shape(&upward), vec![2, 3]);
+    assert_f32_tensor_dtype(&upward);
+
+    let downward_targets = make_f32_tensor(&[2, 3], vec![f32::NEG_INFINITY; samples.len()]);
+    let recovered = eval_primitive(
+        Primitive::Nextafter,
+        &[upward, downward_targets],
+        &no_params(),
+    )
+    .map_err(|err| format!("{err:?}"))?;
+    assert_eq!(extract_shape(&recovered), vec![2, 3]);
+    assert_f32_tensor_dtype(&recovered);
+
+    for (original, recovered) in samples.iter().zip(extract_f32_vec(&recovered)?) {
+        assert_eq!(
+            recovered.to_bits(),
+            original.to_bits(),
+            "tensor one-step roundtrip failed for {original}"
+        );
+    }
+    Ok(())
 }
 
 // ======================== 2D Tests ========================
