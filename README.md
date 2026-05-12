@@ -761,8 +761,8 @@ uv pip install --python .venv/bin/python jax jaxlib numpy
 | Transform (jit/grad/vmap/lax/control_flow/mixed_dtype) | 613 | JAX 0.9.2 |
 | RNG determinism (key/split/fold_in/uniform/normal) | 25 | JAX 0.9.2 |
 | Linear algebra + FFT oracle | 46 | JAX 0.9.2; includes higher-rank linalg, Complex64 FFT, and 8-point FFT/RFFT/IRFFT rows |
-| Transform composition (jit+grad, grad+grad, vmap+grad, jacobian, hessian) | 15 | JAX 0.9.1 fixture metadata; recapture gate requires 0.9.2 refresh |
-| Dtype promotion (9x9 dtype matrix, add + mul) | 162 | JAX 0.9.1 fixture metadata; recapture gate requires 0.9.2 refresh |
+| Transform composition (jit+grad, grad+grad, vmap+grad, jacobian, hessian) | 15 | JAX 0.9.2 with x64=true metadata |
+| Dtype promotion (9x9 dtype matrix, add + mul) | 162 | JAX 0.9.2 with x64=true metadata |
 | **Total** | **861** | |
 
 The oracle recapture gate makes this evidence auditable instead of relying on

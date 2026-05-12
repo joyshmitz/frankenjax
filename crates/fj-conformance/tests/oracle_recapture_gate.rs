@@ -168,6 +168,70 @@ fn default_recapture_commands_are_legacy_root_bound() {
 }
 
 #[test]
+fn fixture_readme_matches_committed_recapture_matrix() {
+    let root = repo_root();
+    let matrix = build_oracle_recapture_matrix(&root);
+    let readme_path = root.join("crates/fj-conformance/fixtures/README.md");
+    let readme =
+        fs::read_to_string(&readme_path).expect("fixture README should be readable for audit");
+
+    assert!(
+        !readme.contains("JAX 0.9.1"),
+        "fixture README should not describe current oracle fixtures as stale 0.9.1 metadata"
+    );
+    assert!(
+        !readme.contains("intentionally flagged by the recapture gate until refreshed"),
+        "fixture README should not describe passing recapture rows as pending refresh"
+    );
+
+    for row in &matrix.rows {
+        let fixture_name = Path::new(&row.fixture_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("fixture path should have UTF-8 file name");
+        assert!(
+            readme.contains(fixture_name),
+            "fixture README should list {fixture_name}"
+        );
+        assert!(
+            readme.contains(&row.actual_case_count.to_string()),
+            "fixture README should list case count {} for {}",
+            row.actual_case_count,
+            row.family_id
+        );
+        assert!(
+            readme.contains(&format!("JAX {}", row.oracle_version)),
+            "fixture README should list oracle version {} for {}",
+            row.oracle_version,
+            row.family_id
+        );
+
+        let x64_label = match row.x64_enabled {
+            Some(enabled) => format!("x64={enabled}"),
+            None => "x64=unknown".to_owned(),
+        };
+        assert!(
+            readme.contains(&x64_label),
+            "fixture README should list {x64_label} for {}",
+            row.family_id
+        );
+
+        let script_name = row
+            .recapture_command
+            .iter()
+            .find(|argument| argument.ends_with(".py"))
+            .and_then(|script| Path::new(script).file_name())
+            .and_then(|name| name.to_str())
+            .expect("recapture command should name a Python script");
+        assert!(
+            readme.contains(script_name),
+            "fixture README should list recapture script {script_name} for {}",
+            row.family_id
+        );
+    }
+}
+
+#[test]
 fn missing_required_family_is_rejected() {
     let root = repo_root();
     let mut matrix = build_oracle_recapture_matrix(&root);
