@@ -227,6 +227,8 @@ fn primitive_arity_matches_runtime_contract_for_reviewed_edges() {
 
 #[test]
 fn primitive_inventory_comes_from_core_source_of_truth() {
+    let local_primitive_count = all_primitives().len() - Primitive::PMAP_COLLECTIVES.len();
+
     assert_eq!(
         all_primitives().len(),
         118,
@@ -237,10 +239,14 @@ fn primitive_inventory_comes_from_core_source_of_truth() {
         5,
         "pmap collective inventory should stay explicit while V1 fails closed"
     );
+    assert_eq!(
+        local_primitive_count, 113,
+        "V1 local eval/AD docs should track non-pmap primitive scope"
+    );
 
-    for primitive in Primitive::PMAP_COLLECTIVES {
+    for &primitive in Primitive::PMAP_COLLECTIVES {
         assert!(
-            all_primitives().contains(primitive),
+            all_primitives().contains(&primitive),
             "{primitive:?} should remain part of the canonical primitive inventory"
         );
     }
@@ -248,13 +254,7 @@ fn primitive_inventory_comes_from_core_source_of_truth() {
 
 #[test]
 fn collective_primitives_fail_closed_with_pmap_context_error() {
-    for primitive in [
-        Primitive::Psum,
-        Primitive::Pmean,
-        Primitive::AllGather,
-        Primitive::AllToAll,
-        Primitive::AxisIndex,
-    ] {
+    for &primitive in Primitive::PMAP_COLLECTIVES {
         let inputs = representative_inputs(DType::I64, primitive);
         let err = eval_primitive(primitive, &inputs, &BTreeMap::new())
             .expect_err("pmap-only collective should fail closed in V1");
@@ -282,6 +282,34 @@ fn collective_primitives_fail_closed_with_pmap_context_error() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn public_docs_scope_primitive_coverage_claims() {
+    let canonical_count = Primitive::ALL.len();
+    let pmap_count = Primitive::PMAP_COLLECTIVES.len();
+    let local_count = canonical_count - pmap_count;
+
+    for path in ["README.md", "FEATURE_PARITY.md"] {
+        let source =
+            std::fs::read_to_string(workspace_root().join(path)).expect("doc should be readable");
+        assert!(
+            source.contains(&format!("{canonical_count} canonical primitive")),
+            "{path} should state the canonical primitive inventory from Primitive::ALL"
+        );
+        assert!(
+            source.contains(&format!("{local_count} V1 local")),
+            "{path} should state the non-pmap V1 local primitive scope"
+        );
+        assert!(
+            source.contains(&format!("{pmap_count} pmap collectives")),
+            "{path} should state the pmap collective count"
+        );
+        assert!(
+            source.contains("fail closed"),
+            "{path} should describe pmap collectives as fail-closed, not fully implemented"
+        );
     }
 }
 
