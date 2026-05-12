@@ -210,6 +210,7 @@ advanced transform/control-flow parity and public API example replay are green.
 | `fj-conformance` | Differential conformance harness, 861 oracle fixtures, durability | 200+ |
 | `fj-backend-cpu` | Dependency-wave parallel executor (rayon) | 40 |
 | `fj-ffi` | C FFI surface (only crate permitted `unsafe`) | Yes |
+| `fj-py` | Alpha PyO3 bindings for `PyValue`, canned Jaxpr builders, `jit`, `grad`, `vmap`, `value_and_grad`, and `checkpoint` | Smoke |
 | `fj-test-utils` | Shared test scaffolding, fixture helpers | Yes |
 
 ## Current Status
@@ -1183,7 +1184,7 @@ A: Strict mode refuses to process anything it does not fully understand. Unknown
 A: It converts your Jaxpr into an equivalence graph where every algebraically equivalent form exists simultaneously (e.g., `x+x` and `2*x` coexist as equivalent). The 86 rewrite rules fire until saturation (no new equivalences found), then a cost function extracts the cheapest program. This can discover simplifications that sequential rule application would miss.
 
 **Q: Can I use FrankenJAX from Python/C?**
-A: The `fj-ffi` crate provides a C FFI surface for calling FrankenJAX from any language with C interop. Python bindings are not yet implemented but would be straightforward via PyO3 or cffi on top of fj-ffi.
+A: The `fj-ffi` crate provides a C FFI surface for calling FrankenJAX from any language with C interop. The `fj-py` crate now provides alpha PyO3 bindings via a `frankenjax` module: scalar/vector `PyValue`, canned Jaxpr builders for smoke programs, `jit`, `grad`, `vmap`, `value_and_grad`, and a real `checkpoint` wrapper with `call`, `grad`, `value_and_grad`, and `memory_savings_entries`. This is not a full NumPy/JAX-compatible Python frontend yet; it is a narrow smoke-tested binding surface.
 
 **Q: How are the linalg AD rules verified?**
 A: Every linalg VJP and JVP rule is verified two ways: (1) numerical finite-difference comparison (perturb inputs, compare analytical vs numerical gradient), and (2) oracle comparison against JAX's output with x64 precision enabled. This caught two real bugs in the Cholesky decomposition AD during development: a missing diagonal-halving factor and a wrong triangular-solve direction.
