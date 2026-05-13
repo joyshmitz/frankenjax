@@ -3445,9 +3445,11 @@ fn dynamic_update_slice_vjp(inputs: &[Value], g: &Value) -> Result<Vec<Value>, A
     let g_tensor = match g {
         Value::Tensor(t) => t,
         Value::Scalar(_) => {
-            // Scalar case: gradient flows to operand, zero to update
+            // Scalar case: gradient flows to operand, zero (of matching
+            // gradient dtype) to update. Start indices are discrete so
+            // their gradients stay F64 zero per AD convention.
             let n_starts = inputs.len().saturating_sub(2);
-            let mut result = vec![g.clone(), Value::scalar_f64(0.0)];
+            let mut result = vec![g.clone(), zeros_like(g)];
             result.extend(std::iter::repeat_n(Value::scalar_f64(0.0), n_starts));
             return Ok(result);
         }
@@ -3457,7 +3459,7 @@ fn dynamic_update_slice_vjp(inputs: &[Value], g: &Value) -> Result<Vec<Value>, A
         Value::Tensor(t) => t,
         Value::Scalar(_) => {
             let n_starts = inputs.len().saturating_sub(2);
-            let mut result = vec![g.clone(), Value::scalar_f64(0.0)];
+            let mut result = vec![g.clone(), zeros_like(g)];
             result.extend(std::iter::repeat_n(Value::scalar_f64(0.0), n_starts));
             return Ok(result);
         }
@@ -3491,37 +3493,33 @@ fn dynamic_update_slice_vjp(inputs: &[Value], g: &Value) -> Result<Vec<Value>, A
         starts.push(start_val);
     }
 
-    // g_operand: copy of g with the update region zeroed out
-    let mut g_op_elems: Vec<f64> = g_tensor
-        .elements
-        .iter()
-        .map(|l| l.as_f64().unwrap_or(0.0))
-        .collect();
+    // g_operand: copy of g with the update region zeroed out. Work
+    // directly on Literal values so the gradient preserves the input
+    // dtype — the previous as_f64() round-trip silently zeroed complex
+    // elements and widened every real type to F64.
+    let g_dtype = g_tensor.dtype;
+    let zero_lit = zero_literal_for_dtype(g_dtype);
+    let mut g_op_literals: Vec<Literal> = g_tensor.elements.clone();
 
     // g_update: slice of g at the start positions
     let upd_dims: Vec<usize> = update.shape.dims.iter().map(|&d| d as usize).collect();
     let g_dims: Vec<usize> = g_tensor.shape.dims.iter().map(|&d| d as usize).collect();
     let upd_total = ad_checked_usize_product("dynamic_update_slice update", &upd_dims)?;
-    let mut g_upd_elems = Vec::with_capacity(upd_total);
-    let g_elems = g_tensor
-        .elements
-        .iter()
-        .map(|l| l.as_f64().unwrap_or(0.0))
-        .collect::<Vec<_>>();
+    let mut g_upd_literals: Vec<Literal> = Vec::with_capacity(upd_total);
 
-    // Iterate over update indices
+    // Iterate over update indices.
     fn iterate_nd(
         dims: &[usize],
         starts: &[usize],
         g_dims: &[usize],
-        g_op_elems: &mut [f64],
-        g_elems: &[f64],
-        g_upd_elems: &mut Vec<f64>,
+        zero_lit: Literal,
+        g_op_literals: &mut [Literal],
+        g_source_literals: &[Literal],
+        g_upd_literals: &mut Vec<Literal>,
     ) -> Result<(), AdError> {
         let rank = dims.len();
         let total = ad_checked_usize_product("dynamic_update_slice update", dims)?;
         for flat_idx in 0..total {
-            // Convert flat index to ND coordinates in update space
             let mut remaining = flat_idx;
             let mut g_flat = 0usize;
             let mut stride = 1;
@@ -3555,8 +3553,8 @@ fn dynamic_update_slice_vjp(inputs: &[Value], g: &Value) -> Result<Vec<Value>, A
                     )
                 })?;
             }
-            g_upd_elems.push(g_elems[g_flat]);
-            g_op_elems[g_flat] = 0.0;
+            g_upd_literals.push(g_source_literals[g_flat]);
+            g_op_literals[g_flat] = zero_lit;
         }
         Ok(())
     }
@@ -3565,27 +3563,20 @@ fn dynamic_update_slice_vjp(inputs: &[Value], g: &Value) -> Result<Vec<Value>, A
         &upd_dims,
         &starts,
         &g_dims,
-        &mut g_op_elems,
-        &g_elems,
-        &mut g_upd_elems,
+        zero_lit,
+        &mut g_op_literals,
+        &g_tensor.elements,
+        &mut g_upd_literals,
     )?;
 
     let grad_operand = Value::Tensor(
-        TensorValue::new(
-            DType::F64,
-            g_tensor.shape.clone(),
-            g_op_elems.into_iter().map(Literal::from_f64).collect(),
-        )
-        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+        TensorValue::new(g_dtype, g_tensor.shape.clone(), g_op_literals)
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
     );
 
     let grad_update = Value::Tensor(
-        TensorValue::new(
-            DType::F64,
-            update.shape.clone(),
-            g_upd_elems.into_iter().map(Literal::from_f64).collect(),
-        )
-        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+        TensorValue::new(g_dtype, update.shape.clone(), g_upd_literals)
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
     );
 
     // Return grad for operand, update, and zero for each start index
@@ -14042,6 +14033,99 @@ mod tests {
                     if f32::from_bits(*re) == 0.0 && f32::from_bits(*im) == 0.0
             ));
         }
+    }
+
+    #[test]
+    fn dynamic_update_slice_vjp_preserves_complex64_dtype() {
+        // Build a Complex64 g_operand (the cotangent flowing into
+        // dynamic_update_slice). Previous implementation force-converted
+        // through f64, silently zeroing every complex element.
+        let g = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::Complex64,
+                fj_core::Shape { dims: vec![4] },
+                vec![
+                    fj_core::Literal::from_complex64(10.0, 1.0),
+                    fj_core::Literal::from_complex64(20.0, 2.0),
+                    fj_core::Literal::from_complex64(30.0, 3.0),
+                    fj_core::Literal::from_complex64(40.0, 4.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let operand = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::Complex64,
+                fj_core::Shape { dims: vec![4] },
+                vec![
+                    fj_core::Literal::from_complex64(0.0, 0.0),
+                    fj_core::Literal::from_complex64(0.0, 0.0),
+                    fj_core::Literal::from_complex64(0.0, 0.0),
+                    fj_core::Literal::from_complex64(0.0, 0.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let update = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::Complex64,
+                fj_core::Shape { dims: vec![2] },
+                vec![
+                    fj_core::Literal::from_complex64(0.0, 0.0),
+                    fj_core::Literal::from_complex64(0.0, 0.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let start = Value::Scalar(fj_core::Literal::I64(1));
+
+        let grads = super::dynamic_update_slice_vjp(
+            &[operand, update, start],
+            &g,
+        )
+        .expect("dynamic_update_slice_vjp should accept complex64");
+
+        let g_operand = grads[0].as_tensor().unwrap();
+        assert_eq!(g_operand.dtype, fj_core::DType::Complex64);
+        // Index 0 must remain g[0] = (10, 1), indices 1+2 must be zeroed,
+        // index 3 must remain g[3] = (40, 4). This proves both that we
+        // preserved dtype AND that we wrote the correct Complex64 zeros
+        // in the update region.
+        assert!(matches!(
+            g_operand.elements[0],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 10.0 && f32::from_bits(im) == 1.0
+        ));
+        assert!(matches!(
+            g_operand.elements[1],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 0.0 && f32::from_bits(im) == 0.0
+        ));
+        assert!(matches!(
+            g_operand.elements[2],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 0.0 && f32::from_bits(im) == 0.0
+        ));
+        assert!(matches!(
+            g_operand.elements[3],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 40.0 && f32::from_bits(im) == 4.0
+        ));
+
+        let g_update = grads[1].as_tensor().unwrap();
+        assert_eq!(g_update.dtype, fj_core::DType::Complex64);
+        // g_update is the slice of g at the start positions: g[1..3].
+        assert!(matches!(
+            g_update.elements[0],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 20.0 && f32::from_bits(im) == 2.0
+        ));
+        assert!(matches!(
+            g_update.elements[1],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 30.0 && f32::from_bits(im) == 3.0
+        ));
     }
 
     #[test]
