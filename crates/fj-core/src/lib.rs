@@ -1307,6 +1307,13 @@ impl Jaxpr {
                     });
                 }
             }
+            // Recursively validate any sub-jaxprs attached to this equation
+            // (cond branches, scan/while bodies, etc.). Sub-jaxprs are
+            // independent VarId scopes so this is a structural check on the
+            // nested IR — bindings from the parent are NOT propagated.
+            for sub_jaxpr in &eqn.sub_jaxprs {
+                sub_jaxpr.validate_well_formed()?;
+            }
         }
 
         let mut seen_outvars = BTreeSet::new();
@@ -3026,6 +3033,88 @@ mod tests {
                         var: VarId(1)
                     }
                 ));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn validate_well_formed_recurses_into_sub_jaxprs() {
+        run_logged_test(
+            "validate_well_formed_recurses_into_sub_jaxprs",
+            &("sub-jaxpr-validation", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // Build a malformed sub_jaxpr (duplicate invar).
+                let malformed_sub = Jaxpr::new(
+                    vec![VarId(1), VarId(1)],
+                    vec![],
+                    vec![VarId(1)],
+                    vec![],
+                );
+
+                // Parent is otherwise well-formed: a single Cond equation
+                // whose `sub_jaxprs` contains the malformed branch.
+                let parent = Jaxpr::new(
+                    vec![VarId(10)],
+                    vec![],
+                    vec![VarId(11)],
+                    vec![Equation {
+                        primitive: Primitive::Cond,
+                        inputs: smallvec![Atom::Var(VarId(10))],
+                        outputs: smallvec![VarId(11)],
+                        params: BTreeMap::new(),
+                        effects: vec![],
+                        sub_jaxprs: vec![malformed_sub],
+                    }],
+                );
+
+                let err = parent
+                    .validate_well_formed()
+                    .expect_err("nested malformed sub_jaxpr should propagate");
+                assert!(matches!(
+                    err,
+                    JaxprValidationError::DuplicateBinding {
+                        section: "invars",
+                        var: VarId(1)
+                    }
+                ));
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn validate_well_formed_accepts_well_formed_sub_jaxprs() {
+        run_logged_test(
+            "validate_well_formed_accepts_well_formed_sub_jaxprs",
+            &("sub-jaxpr-validation-ok", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let body = Jaxpr::new(
+                    vec![VarId(1)],
+                    vec![],
+                    vec![VarId(1)],
+                    vec![],
+                );
+
+                let parent = Jaxpr::new(
+                    vec![VarId(10)],
+                    vec![],
+                    vec![VarId(11)],
+                    vec![Equation {
+                        primitive: Primitive::Cond,
+                        inputs: smallvec![Atom::Var(VarId(10))],
+                        outputs: smallvec![VarId(11)],
+                        params: BTreeMap::new(),
+                        effects: vec![],
+                        sub_jaxprs: vec![body],
+                    }],
+                );
+
+                parent
+                    .validate_well_formed()
+                    .expect("well-formed parent + sub_jaxpr should pass");
                 Ok(Vec::new())
             },
         );
