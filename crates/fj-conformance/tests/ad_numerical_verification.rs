@@ -508,6 +508,122 @@ fn rfft_vjp_numerical() {
     assert_gradients_close(&analytical, &numerical, 1e-4, "RFFT VJP");
 }
 
+/// RFFT VJP regression for F32 input (frankenjax-35ur).
+///
+/// RFFT VJP previously hard-coded the IFFT scale literal and the final
+/// "take real part" output to F64, so an F32 RFFT input received an F64
+/// gradient — analogous to the IRFFT widening fixed by frankenjax-4y5q.
+/// This test pins the dtype-preservation invariant for the F32 input
+/// path AND verifies the gradient values still match a finite-difference
+/// reference within f32 tolerance.
+#[test]
+fn rfft_vjp_numerical_f32() {
+    let x_data: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+
+    let make_f32_input = |data: &[f32]| -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape {
+                    dims: vec![data.len() as u32],
+                },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        )
+    };
+
+    let x = make_f32_input(&x_data);
+
+    let mut params = BTreeMap::new();
+    params.insert("fft_length".to_owned(), "4".to_owned());
+
+    // Complex64 cotangent to match RFFT(F32 input) → Complex64 output.
+    let g = Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![3] },
+            (0..3).map(|_| Literal::from_complex64(1.0, 0.0)).collect(),
+        )
+        .unwrap(),
+    );
+
+    let vjp_result =
+        fj_ad::vjp_single(Primitive::Rfft, std::slice::from_ref(&x), &g, &params).unwrap();
+    let vjp_tensor = vjp_result[0].as_tensor().unwrap();
+
+    assert_eq!(
+        vjp_tensor.dtype,
+        DType::F32,
+        "RFFT VJP must keep F32 dtype when input is F32"
+    );
+    for elem in &vjp_tensor.elements {
+        assert!(
+            matches!(elem, Literal::F32Bits(_)),
+            "RFFT F32 VJP element must store F32Bits; got {elem:?}"
+        );
+    }
+
+    // Finite-difference check on sum(Re(RFFT(x))).
+    let analytical: Vec<f64> = vjp_tensor
+        .elements
+        .iter()
+        .map(|l| match l {
+            Literal::F32Bits(bits) => f64::from(f32::from_bits(*bits)),
+            _ => panic!("expected F32Bits"),
+        })
+        .collect();
+
+    let eps_f32 = 1e-3_f32;
+    let mut numerical = vec![0.0; 4];
+    for i in 0..4 {
+        let mut plus = x_data;
+        plus[i] += eps_f32;
+        let re_plus: f64 = eval_primitive(
+            Primitive::Rfft,
+            std::slice::from_ref(&make_f32_input(&plus)),
+            &params,
+        )
+        .unwrap()
+        .as_tensor()
+        .unwrap()
+        .elements
+        .iter()
+        .map(|l| match l {
+            Literal::Complex64Bits(re, _) => f64::from(f32::from_bits(*re)),
+            _ => 0.0,
+        })
+        .sum();
+
+        let mut minus = x_data;
+        minus[i] -= eps_f32;
+        let re_minus: f64 = eval_primitive(
+            Primitive::Rfft,
+            std::slice::from_ref(&make_f32_input(&minus)),
+            &params,
+        )
+        .unwrap()
+        .as_tensor()
+        .unwrap()
+        .elements
+        .iter()
+        .map(|l| match l {
+            Literal::Complex64Bits(re, _) => f64::from(f32::from_bits(*re)),
+            _ => 0.0,
+        })
+        .sum();
+
+        numerical[i] = (re_plus - re_minus) / (2.0 * f64::from(eps_f32));
+    }
+
+    for (i, (a, n)) in analytical.iter().zip(numerical.iter()).enumerate() {
+        assert!(
+            (a - n).abs() < 1e-2,
+            "RFFT F32 VJP[{i}]: analytical={a}, numerical={n}"
+        );
+    }
+}
+
 // ======================== Cholesky VJP 3x3 ========================
 
 #[test]

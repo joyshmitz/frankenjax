@@ -649,27 +649,45 @@ fn zero_pad_last_axis_complex(tensor: &TensorValue, target_len: usize) -> Result
 }
 
 /// Extract real parts from a complex tensor, producing an F64 tensor of the same shape.
+///
+/// Backwards-compatible alias for `take_real_part_as(value, DType::F64)` — keeps
+/// existing F64-oriented callers working without churn.
 fn take_real_part(value: &Value) -> Result<Value, AdError> {
+    take_real_part_as(value, DType::F64)
+}
+
+/// Extract real parts from a complex tensor into a real tensor of `target_dtype`.
+///
+/// `target_dtype` must be F32 or F64. Callers (e.g., RFFT VJP) pick the dtype
+/// that matches the upstream real input so the AD path preserves precision
+/// instead of force-widening every real-input gradient to F64.
+fn take_real_part_as(value: &Value, target_dtype: DType) -> Result<Value, AdError> {
+    let real_value_f64 = |lit: &Literal| -> f64 {
+        match lit {
+            Literal::Complex128Bits(re, _) => f64::from_bits(*re),
+            Literal::Complex64Bits(re, _) => f64::from(f32::from_bits(*re)),
+            other => other.as_f64().unwrap_or(0.0),
+        }
+    };
+    let to_target = |re: f64| -> Literal {
+        match target_dtype {
+            DType::F32 => Literal::from_f32(re as f32),
+            _ => Literal::from_f64(re),
+        }
+    };
+
     match value {
         Value::Tensor(t) => {
             let elements: Vec<Literal> = t
                 .elements
                 .iter()
-                .map(|lit| match lit {
-                    Literal::Complex128Bits(re, _) => Literal::from_f64(f64::from_bits(*re)),
-                    Literal::Complex64Bits(re, _) => Literal::from_f64(f32::from_bits(*re) as f64),
-                    other => Literal::from_f64(other.as_f64().unwrap_or(0.0)),
-                })
+                .map(|lit| to_target(real_value_f64(lit)))
                 .collect();
-            TensorValue::new(DType::F64, t.shape.clone(), elements)
+            TensorValue::new(target_dtype, t.shape.clone(), elements)
                 .map(Value::Tensor)
                 .map_err(|e| AdError::EvalFailed(e.to_string()))
         }
-        Value::Scalar(lit) => match lit {
-            Literal::Complex128Bits(re, _) => Ok(Value::scalar_f64(f64::from_bits(*re))),
-            Literal::Complex64Bits(re, _) => Ok(Value::scalar_f64(f32::from_bits(*re) as f64)),
-            other => Ok(Value::scalar_f64(other.as_f64().unwrap_or(0.0))),
-        },
+        Value::Scalar(lit) => Ok(Value::Scalar(to_target(real_value_f64(lit)))),
     }
 }
 
@@ -703,20 +721,41 @@ fn truncate_last_axis(tensor: &TensorValue, target_len: usize) -> Result<Value, 
 /// - F32 cotangent → F32 scalar (FFT(g) is Complex64 → product stays Complex64)
 /// - everything else → F64 scalar (FFT(g) is Complex128 → product stays Complex128)
 fn reciprocal_scalar_matching_cotangent_dtype(g: &Value, fft_length: usize) -> Value {
-    let g_dtype = match g {
-        Value::Scalar(lit) => match lit {
-            Literal::F32Bits(_) => Some(DType::F32),
-            Literal::F64Bits(_) => Some(DType::F64),
-            _ => None,
-        },
-        Value::Tensor(t) => Some(t.dtype),
-    };
+    let g_dtype = float_dtype_of_cotangent(g);
     let inv = 1.0 / fft_length as f64;
     match g_dtype {
         Some(DType::F32) | Some(DType::BF16) | Some(DType::F16) => {
             Value::Scalar(Literal::from_f32(inv as f32))
         }
         _ => Value::Scalar(Literal::from_f64(inv)),
+    }
+}
+
+/// Build the `fft_length` scale scalar used by the RFFT VJP to undo the
+/// 1/n IFFT normalisation. Mirrors `reciprocal_scalar_matching_cotangent_dtype`
+/// — emits F32 for F32/BF16/F16 cotangents and F64 otherwise so the
+/// downstream value_mul doesn't widen Complex64 to Complex128.
+fn scale_by_n_matching_cotangent_dtype(g: &Value, fft_length: usize) -> Value {
+    let g_dtype = float_dtype_of_cotangent(g);
+    let n = fft_length as f64;
+    match g_dtype {
+        Some(DType::F32) | Some(DType::BF16) | Some(DType::F16) => {
+            Value::Scalar(Literal::from_f32(n as f32))
+        }
+        _ => Value::Scalar(Literal::from_f64(n)),
+    }
+}
+
+fn float_dtype_of_cotangent(g: &Value) -> Option<DType> {
+    match g {
+        Value::Scalar(lit) => match lit {
+            Literal::F32Bits(_) => Some(DType::F32),
+            Literal::F64Bits(_) => Some(DType::F64),
+            Literal::BF16Bits(_) => Some(DType::BF16),
+            Literal::F16Bits(_) => Some(DType::F16),
+            _ => None,
+        },
+        Value::Tensor(t) => Some(t.dtype),
     }
 }
 
@@ -2627,12 +2666,27 @@ pub fn vjp(
                 &BTreeMap::new(),
             )
             .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            // Step 3: Scale by n
-            let n = fft_length as f64;
-            let scale = Value::Scalar(Literal::from_f64(n));
+            // Step 3: Scale by n. Match the cotangent's float dtype so
+            // a Complex64 IFFT result doesn't widen to Complex128 when
+            // multiplied by an unconditionally F64 scale literal.
+            let scale = scale_by_n_matching_cotangent_dtype(g, fft_length);
             let scaled = value_mul(&ifft_result, &scale)?;
-            // Step 4: Take real part (input was real)
-            let real_result = take_real_part(&scaled)?;
+            // Step 4: Take real part (input was real). Preserve the
+            // upstream real-input precision: F32 RFFT input expects F32
+            // gradient; everything else stays F64.
+            let real_dtype = match &inputs[0] {
+                Value::Tensor(t) => match t.dtype {
+                    DType::F32 | DType::BF16 | DType::F16 => DType::F32,
+                    _ => DType::F64,
+                },
+                Value::Scalar(lit) => match lit {
+                    Literal::F32Bits(_) | Literal::BF16Bits(_) | Literal::F16Bits(_) => {
+                        DType::F32
+                    }
+                    _ => DType::F64,
+                },
+            };
+            let real_result = take_real_part_as(&scaled, real_dtype)?;
             // Step 5: Truncate to input length if needed
             if input_len < fft_length {
                 let truncated = match &real_result {
