@@ -1444,19 +1444,14 @@ fn batch_scatter(
             return Ok(result);
         }
 
-        let (batch_size, batch_dim_source_value, batch_dim_source_axis) = if let Some(bd) =
-            indices.batch_dim
-        {
-            (get_batch_size(&indices.value, bd)?, &indices.value, bd)
+        let batch_size = if let Some(bd) = indices.batch_dim {
+            get_batch_size(&indices.value, bd)?
         } else {
             let bd = updates.batch_dim.ok_or_else(|| {
                 BatchError::BatchDimMoveError("scatter expected batched indices or updates".into())
             })?;
-            (get_batch_size(&updates.value, bd)?, &updates.value, bd)
+            get_batch_size(&updates.value, bd)?
         };
-
-        let _ = batch_dim_source_value;
-        let _ = batch_dim_source_axis;
 
         let indices_value = match indices.batch_dim {
             Some(bd) => move_batch_dim_to_front(&indices.value, bd)?,
