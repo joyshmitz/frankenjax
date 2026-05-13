@@ -1813,7 +1813,13 @@ fn lit_to_usize(lit: &Literal, primitive: Primitive) -> Result<usize, EvalError>
 
 fn normalize_dynamic_start(raw: i64, dim: i64, window: i64) -> usize {
     let adjusted = if raw < 0 { raw + dim } else { raw };
-    adjusted.max(0).min(dim - window) as usize
+    // Defensive: callers (eval_dynamic_slice / eval_dynamic_update_slice)
+    // already reject window > dim, but compute the upper bound so that an
+    // accidental invariant break elsewhere can't cause the `as usize` cast
+    // to wrap. With window > dim the upper bound would be negative; clamp
+    // to 0 first.
+    let max_start = (dim - window).max(0);
+    adjusted.max(0).min(max_start) as usize
 }
 
 /// Dynamic slice: like slice but start indices are dynamic (runtime) values.
@@ -4324,5 +4330,38 @@ mod tests {
         let p = params(&[("axis", "1")]);
         let result = eval_expand_dims(&[x], &p).unwrap();
         assert_eq!(extract_shape(&result), vec![2, 1]);
+    }
+
+    // ── normalize_dynamic_start defensive bounds ──
+
+    #[test]
+    fn normalize_dynamic_start_clamps_when_window_exceeds_dim() {
+        // dim=4, window=10 — caller violates the contract. The function
+        // must NOT cast a negative i64 to usize. Result should clamp to 0.
+        assert_eq!(super::normalize_dynamic_start(0, 4, 10), 0);
+        assert_eq!(super::normalize_dynamic_start(7, 4, 10), 0);
+        assert_eq!(super::normalize_dynamic_start(-3, 4, 10), 0);
+    }
+
+    #[test]
+    fn normalize_dynamic_start_keeps_existing_behavior_when_window_le_dim() {
+        // dim=10, window=4 -> max_start = 6
+        assert_eq!(super::normalize_dynamic_start(0, 10, 4), 0);
+        assert_eq!(super::normalize_dynamic_start(5, 10, 4), 5);
+        assert_eq!(super::normalize_dynamic_start(6, 10, 4), 6);
+        assert_eq!(super::normalize_dynamic_start(7, 10, 4), 6); // clamp
+        assert_eq!(super::normalize_dynamic_start(100, 10, 4), 6); // clamp
+        // Negative start interpreted relative to dim: -2 -> dim - 2 = 8 -> clamp to 6
+        assert_eq!(super::normalize_dynamic_start(-2, 10, 4), 6);
+        // -8 -> dim - 8 = 2
+        assert_eq!(super::normalize_dynamic_start(-8, 10, 4), 2);
+    }
+
+    #[test]
+    fn normalize_dynamic_start_zero_window_pins_to_start() {
+        // window = 0 -> max_start = dim
+        assert_eq!(super::normalize_dynamic_start(5, 10, 0), 5);
+        assert_eq!(super::normalize_dynamic_start(10, 10, 0), 10);
+        assert_eq!(super::normalize_dynamic_start(15, 10, 0), 10); // clamp
     }
 }
