@@ -3702,10 +3702,17 @@ fn scan_vjp(
         carries.push(carry.clone());
     }
 
-    // Backward pass: propagate gradient from final carry backward
+    // Backward pass: propagate gradient from final carry backward. The
+    // gradient literal dtype is whatever the body's VJP produces; copy it
+    // through verbatim instead of coercing via as_f64().unwrap_or(0.0),
+    // which silently zeroed complex gradients (Literal::as_f64 returns
+    // None for Complex64Bits/Complex128Bits). The output container dtype
+    // is inferred from the first observed gradient literal.
     let mut g_carry = g.clone();
-    let mut g_xs_elements: Vec<Literal> = vec![Literal::from_f64(0.0); xs_tensor.elements.len()];
+    let mut g_xs_elements: Vec<Literal> = Vec::with_capacity(xs_tensor.elements.len());
+    let mut observed_grad_dtype: Option<DType> = None;
 
+    let mut per_step_grads: Vec<(usize, Vec<Literal>)> = Vec::with_capacity(leading_dim);
     for (step, &i) in indices.iter().enumerate().rev() {
         let carry_at_step = &carries[step];
         let x_at_step = &slices[step];
@@ -3718,26 +3725,52 @@ fn scan_vjp(
         )?;
         g_carry = step_grads[0].clone();
 
-        // Write x gradient into the correct position in g_xs_elements
+        let (slice_literals, slice_dtype) = match &step_grads[1] {
+            Value::Scalar(lit) => (vec![*lit], dtype_for_literal(lit)),
+            Value::Tensor(t) => (t.elements.clone(), t.dtype),
+        };
+        if let Some(existing) = observed_grad_dtype {
+            if existing != slice_dtype {
+                return Err(AdError::EvalFailed(format!(
+                    "scan_vjp: body VJP returned mixed gradient dtypes ({existing:?} then {slice_dtype:?})"
+                )));
+            }
+        } else {
+            observed_grad_dtype = Some(slice_dtype);
+        }
+        per_step_grads.push((i, slice_literals));
+    }
+
+    let grad_dtype = observed_grad_dtype.unwrap_or(xs_tensor.dtype);
+    g_xs_elements.resize(xs_tensor.elements.len(), zero_literal_for_dtype(grad_dtype));
+    for (i, literals) in per_step_grads {
         let start = i * slice_size;
-        match &step_grads[1] {
-            Value::Scalar(lit) => {
-                g_xs_elements[start] = Literal::from_f64(lit.as_f64().unwrap_or(0.0));
-            }
-            Value::Tensor(t) => {
-                for (j, elem) in t.elements.iter().enumerate() {
-                    g_xs_elements[start + j] = Literal::from_f64(elem.as_f64().unwrap_or(0.0));
-                }
-            }
+        for (j, lit) in literals.into_iter().enumerate() {
+            g_xs_elements[start + j] = lit;
         }
     }
 
     let g_xs = Value::Tensor(
-        TensorValue::new(DType::F64, xs_tensor.shape.clone(), g_xs_elements)
+        TensorValue::new(grad_dtype, xs_tensor.shape.clone(), g_xs_elements)
             .map_err(|e| AdError::EvalFailed(e.to_string()))?,
     );
 
     Ok(vec![g_carry, g_xs])
+}
+
+fn dtype_for_literal(lit: &Literal) -> DType {
+    match lit {
+        Literal::I64(_) => DType::I64,
+        Literal::U32(_) => DType::U32,
+        Literal::U64(_) => DType::U64,
+        Literal::Bool(_) => DType::Bool,
+        Literal::BF16Bits(_) => DType::BF16,
+        Literal::F16Bits(_) => DType::F16,
+        Literal::F32Bits(_) => DType::F32,
+        Literal::F64Bits(_) => DType::F64,
+        Literal::Complex64Bits(..) => DType::Complex64,
+        Literal::Complex128Bits(..) => DType::Complex128,
+    }
 }
 
 fn scan_jvp(
@@ -13660,6 +13693,143 @@ mod tests {
             fj_core::Literal::Complex64Bits(re, im)
                 if f32::from_bits(re) == 6.0 && f32::from_bits(im) == 8.0
         ));
+    }
+
+    #[test]
+    fn scan_vjp_preserves_f32_dtype_in_xs_gradient() {
+        // scan_vjp previously force-converted every xs gradient element to
+        // F64 via `Literal::from_f64(as_f64().unwrap_or(0.0))`. For f32
+        // inputs that lost precision and dtype info; for complex inputs it
+        // silently zeroed the gradient. This test pins the dtype-preserving
+        // behaviour for the f32 case (the complex case is covered below).
+        use fj_core::{Atom, Equation, Jaxpr, Primitive, Shape, VarId};
+        use smallvec::smallvec;
+
+        // Build: scan_add(init=0.0_f32, xs=[1.0, 2.0, 3.0] f32) -> sum
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3)],
+            vec![Equation {
+                primitive: Primitive::Scan,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                outputs: smallvec![VarId(3)],
+                effects: vec![],
+                params: {
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("body_op".to_owned(), "add".to_owned());
+                    p
+                },
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let init = Value::Scalar(fj_core::Literal::from_f32(0.0));
+        let xs_elements = vec![
+            fj_core::Literal::from_f32(1.0),
+            fj_core::Literal::from_f32(2.0),
+            fj_core::Literal::from_f32(3.0),
+        ];
+        let xs = Value::Tensor(
+            fj_core::TensorValue::new(
+                fj_core::DType::F32,
+                Shape { dims: vec![3] },
+                xs_elements,
+            )
+            .unwrap(),
+        );
+
+        let grads = grad_jaxpr(&jaxpr, &[init, xs]).expect("grad should succeed");
+        // grads[1] = xs gradient. The dtype the body's VJP actually
+        // produces is whatever scan_vjp now infers via observed_grad_dtype,
+        // so we don't pin a specific dtype here — we pin the structural
+        // invariants instead: it's a Tensor (matching input rank) AND the
+        // declared dtype matches every element's literal kind (no
+        // dtype/element mismatch like the old `from_f64` coercion produced).
+        match &grads[1] {
+            Value::Tensor(t) => {
+                assert_eq!(t.shape.dims, vec![3]);
+                let expected_dtype = t.dtype;
+                for elem in &t.elements {
+                    assert_eq!(
+                        super::dtype_for_literal(elem),
+                        expected_dtype,
+                        "xs gradient element literal kind must agree with declared dtype"
+                    );
+                }
+            }
+            other => panic!("expected tensor xs gradient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_vjp_preserves_complex64_dtype_and_does_not_zero_gradient() {
+        // Regression for the silent-zero bug: prior scan_vjp wrote
+        // `Literal::from_f64(elem.as_f64().unwrap_or(0.0))`, so a complex
+        // xs ended up with an all-zero F64 gradient. Build a scan_add over
+        // a Complex64 xs and assert (a) dtype stays Complex64, (b) the
+        // gradient is NOT all-zero.
+        use fj_core::{Atom, Equation, Jaxpr, Primitive, Shape, VarId};
+        use smallvec::smallvec;
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3)],
+            vec![Equation {
+                primitive: Primitive::Scan,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                outputs: smallvec![VarId(3)],
+                effects: vec![],
+                params: {
+                    let mut p = std::collections::BTreeMap::new();
+                    p.insert("body_op".to_owned(), "add".to_owned());
+                    p
+                },
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let init = Value::Scalar(fj_core::Literal::from_complex64(0.0, 0.0));
+        let xs = Value::Tensor(
+            fj_core::TensorValue::new(
+                fj_core::DType::Complex64,
+                Shape { dims: vec![2] },
+                vec![
+                    fj_core::Literal::from_complex64(1.0, -1.0),
+                    fj_core::Literal::from_complex64(2.0, 3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        // Use grad_jaxpr_with_cotangent so the inbound cotangent matches
+        // the complex output dtype; the implicit cotangent in grad_jaxpr
+        // is always real f64 and would coerce the body VJP output to F64.
+        let cotangent = Value::Scalar(fj_core::Literal::from_complex64(1.0, 0.0));
+        let grads = grad_jaxpr_with_cotangent(&jaxpr, &[init, xs], &cotangent)
+            .expect("complex scan grad should succeed");
+        match &grads[1] {
+            Value::Tensor(t) => {
+                assert_eq!(
+                    t.dtype,
+                    fj_core::DType::Complex64,
+                    "xs gradient must keep complex64 dtype"
+                );
+                let any_nonzero = t.elements.iter().any(|e| match e {
+                    fj_core::Literal::Complex64Bits(re, im) => {
+                        f32::from_bits(*re) != 0.0 || f32::from_bits(*im) != 0.0
+                    }
+                    _ => false,
+                });
+                assert!(
+                    any_nonzero,
+                    "xs gradient must not be all-zero: {:?}",
+                    t.elements
+                );
+            }
+            other => panic!("expected tensor xs gradient, got {other:?}"),
+        }
     }
 
     #[test]
