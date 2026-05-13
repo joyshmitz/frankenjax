@@ -8,6 +8,7 @@
 use crate::CacheKey;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ── Cached Artifact ─────────────────────────────────────────────────
 
@@ -115,6 +116,15 @@ impl CacheBackend for InMemoryCache {
 pub struct FileCache {
     /// Root directory for cache files.
     cache_dir: PathBuf,
+    /// Count of `put` operations that failed at the filesystem layer.
+    ///
+    /// Incremented when either the temp-file write or the rename step of the
+    /// atomic-write pattern fails. The trait signature `fn put(&mut self, …)`
+    /// returns `()`, so this counter is the only way for callers to observe
+    /// silent persistence failures (disk full, permission denied, parent dir
+    /// removed mid-flight, cross-device link). Read via
+    /// [`FileCache::put_failure_count`].
+    put_failures: AtomicU64,
 }
 
 impl FileCache {
@@ -123,13 +133,27 @@ impl FileCache {
     /// Does not create the directory — callers must ensure it exists.
     #[must_use]
     pub fn new(cache_dir: PathBuf) -> Self {
-        Self { cache_dir }
+        Self {
+            cache_dir,
+            put_failures: AtomicU64::new(0),
+        }
     }
 
     /// Return the filesystem path for a given cache key.
     #[must_use]
     pub fn path_for(&self, key: &CacheKey) -> PathBuf {
         self.cache_dir.join(format!("{}.bin", key.as_string()))
+    }
+
+    /// Return the cumulative count of `put` operations that failed at the
+    /// filesystem layer (temp-file write failure or atomic-rename failure).
+    ///
+    /// Callers monitor this to detect silent persistence problems that the
+    /// `CacheBackend::put` trait method cannot surface via its `()` return
+    /// type.
+    #[must_use]
+    pub fn put_failure_count(&self) -> u64 {
+        self.put_failures.load(Ordering::Relaxed)
     }
 }
 
@@ -152,14 +176,27 @@ impl CacheBackend for FileCache {
         let bytes = crate::persistence::serialize(&artifact);
         // Atomic write: write to temp file, then rename.
         // Use a unique temp file to avoid concurrent write races.
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::AtomicUsize;
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_path = path.with_extension(format!("tmp.{}.{}", std::process::id(), id));
-        if std::fs::write(&tmp_path, bytes).is_ok() {
-            let _ = std::fs::rename(&tmp_path, &path);
-        } else {
-            let _ = std::fs::remove_file(&tmp_path);
+        match std::fs::write(&tmp_path, bytes) {
+            Ok(()) => {
+                if std::fs::rename(&tmp_path, &path).is_err() {
+                    // Atomic rename failed after a successful temp write.
+                    // The cache silently dropped the artifact; surface the
+                    // failure via put_failures so monitors can detect it.
+                    self.put_failures.fetch_add(1, Ordering::Relaxed);
+                    let _ = std::fs::remove_file(&tmp_path);
+                }
+            }
+            Err(_) => {
+                // Temp write failed — nothing to rename. Best-effort cleanup
+                // in case a partial file was left behind, then record the
+                // failure.
+                let _ = std::fs::remove_file(&tmp_path);
+                self.put_failures.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 
@@ -301,6 +338,57 @@ mod tests {
             artifact.integrity_sha256_hex,
             "corrupt wire payload must not be reported as integrity-clean"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_cache_put_failure_counter_increments_when_dir_missing() {
+        // Point the cache at a path whose parent directory does not exist.
+        // std::fs::write will fail with NotFound, exercising the
+        // temp-write-failure branch of put().
+        let dir = std::env::temp_dir().join(format!(
+            "fj-cache-test-missing-parent-{}/never_created",
+            std::process::id()
+        ));
+
+        let mut cache = FileCache::new(dir.clone());
+        assert_eq!(cache.put_failure_count(), 0);
+
+        let key = test_key("never_lands");
+        cache.put(&key, test_artifact(b"this write will fail"));
+
+        assert_eq!(
+            cache.put_failure_count(),
+            1,
+            "put against a non-existent parent dir should bump put_failures"
+        );
+
+        // Underlying directory was never created, so stats() should report
+        // an empty cache (read_dir falls back to default).
+        let stats = cache.stats();
+        assert_eq!(stats.entry_count, 0);
+        assert_eq!(stats.total_bytes, 0);
+
+        // A second failing put bumps the counter again.
+        cache.put(&key, test_artifact(b"still failing"));
+        assert_eq!(cache.put_failure_count(), 2);
+    }
+
+    #[test]
+    fn file_cache_put_failure_counter_stays_zero_on_success() {
+        let dir = std::env::temp_dir().join(format!(
+            "fj-cache-test-put-success-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut cache = FileCache::new(dir.clone());
+        let key = test_key("ok");
+        cache.put(&key, test_artifact(b"persists fine"));
+
+        assert_eq!(cache.put_failure_count(), 0);
+        assert_eq!(cache.stats().entry_count, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
