@@ -1182,23 +1182,20 @@ fn irfft_vjp_numerical() {
     }
 }
 
-/// IRFFT VJP regression for Complex64 input (frankenjax-7ckd / frankenjax-dums).
+/// IRFFT VJP regression for Complex64 input (frankenjax-7ckd / frankenjax-dums
+/// / frankenjax-4y5q).
 ///
 /// The Complex64 silent-zero bug in `scale_hermitian_adjoint` survived
 /// because every previous IRFFT VJP test used Complex128. This case
 /// exercises the half-precision-complex VJP path through to a real
 /// finite-difference comparison and pins the regression: the gradient
 /// must be non-zero AND match the numerical derivative within f32-grade
-/// tolerance.
-///
-/// NOTE: The IRFFT VJP currently widens to Complex128 internally because
-/// the in_n scalar is `Literal::from_f64(1/n)` which promotes the
-/// Complex64 FFT result during multiplication. That is an orthogonal
-/// dtype-preservation gap tracked separately; this test pins behaviour
-/// against that current state and against the underlying gradient values.
+/// tolerance, AND must keep Complex64 dtype (frankenjax-4y5q made the
+/// reciprocal scaling dtype-aware so an F32 cotangent no longer widens
+/// the FFT(g) product to Complex128).
 #[test]
 fn irfft_vjp_numerical_complex64() {
-    use fj_core::Literal::Complex128Bits;
+    use fj_core::Literal::Complex64Bits;
 
     let x_re: [f32; 3] = [10.0, -2.0, 2.0];
     let x_im: [f32; 3] = [0.0, 3.0, 0.0];
@@ -1241,13 +1238,19 @@ fn irfft_vjp_numerical_complex64() {
         fj_ad::vjp_single(Primitive::Irfft, std::slice::from_ref(&x), &g, &params).unwrap();
     let vjp_tensor = vjp_result[0].as_tensor().unwrap();
 
-    // Regression assertion: gradient must NOT be all-zero. The previous
-    // silent-zero bug in scale_hermitian_adjoint produced a degenerate
-    // zero tensor here for Complex64 input.
+    // dtype-preservation regression (frankenjax-4y5q): the IRFFT VJP
+    // must keep Complex64 when given Complex64 input + F32 cotangent.
+    assert_eq!(
+        vjp_tensor.dtype,
+        DType::Complex64,
+        "IRFFT VJP must keep Complex64 dtype for Complex64 input"
+    );
+
+    // Silent-zero regression (frankenjax-7ckd): gradient must NOT be
+    // all-zero. The previous bug in scale_hermitian_adjoint produced a
+    // degenerate zero tensor here.
     let any_nonzero = vjp_tensor.elements.iter().any(|e| match e {
-        Complex128Bits(re, im) => {
-            f64::from_bits(*re) != 0.0 || f64::from_bits(*im) != 0.0
-        }
+        Complex64Bits(re, im) => f32::from_bits(*re) != 0.0 || f32::from_bits(*im) != 0.0,
         _ => false,
     });
     assert!(
@@ -1294,8 +1297,8 @@ fn irfft_vjp_numerical_complex64() {
         let numerical_re = (l_plus - l_minus) / (2.0 * f64::from(eps_f32));
 
         let vjp_bin = match &vjp_tensor.elements[bin] {
-            Complex128Bits(re, _im) => f64::from_bits(*re),
-            other => panic!("expected complex literal in VJP, got {other:?}"),
+            Complex64Bits(re, _im) => f64::from(f32::from_bits(*re)),
+            other => panic!("expected Complex64Bits in VJP, got {other:?}"),
         };
 
         assert!(
@@ -1311,7 +1314,7 @@ fn irfft_vjp_numerical_complex64() {
 /// `fft_length.is_multiple_of(2)` guard.
 #[test]
 fn irfft_vjp_numerical_complex64_odd_fft_length() {
-    use fj_core::Literal::Complex128Bits;
+    use fj_core::Literal::Complex64Bits;
 
     // input length = (fft_length + 1) / 2 = 2 for fft_length=3
     let x_re: [f32; 2] = [4.0, -1.0];
@@ -1353,12 +1356,16 @@ fn irfft_vjp_numerical_complex64_odd_fft_length() {
         fj_ad::vjp_single(Primitive::Irfft, std::slice::from_ref(&x), &g, &params).unwrap();
     let vjp_tensor = vjp_result[0].as_tensor().unwrap();
 
+    assert_eq!(
+        vjp_tensor.dtype,
+        DType::Complex64,
+        "IRFFT VJP must keep Complex64 dtype for Complex64 input (odd fft_length)"
+    );
+
     // Regression: gradient must NOT be identically zero. This catches
     // any re-introduction of the silent-zero bug from frankenjax-7ckd.
     let any_nonzero = vjp_tensor.elements.iter().any(|e| match e {
-        Complex128Bits(re, im) => {
-            f64::from_bits(*re) != 0.0 || f64::from_bits(*im) != 0.0
-        }
+        Complex64Bits(re, im) => f32::from_bits(*re) != 0.0 || f32::from_bits(*im) != 0.0,
         _ => false,
     });
     assert!(

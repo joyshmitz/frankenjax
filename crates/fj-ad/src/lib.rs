@@ -696,6 +696,30 @@ fn truncate_last_axis(tensor: &TensorValue, target_len: usize) -> Result<Value, 
         .map_err(|e| AdError::EvalFailed(e.to_string()))
 }
 
+/// Build the `1/fft_length` reciprocal scalar used by the IRFFT VJP to
+/// scale `FFT(g)`. The literal kind is chosen so multiplication with the
+/// FFT(g) result does not silently promote to a wider dtype:
+///
+/// - F32 cotangent → F32 scalar (FFT(g) is Complex64 → product stays Complex64)
+/// - everything else → F64 scalar (FFT(g) is Complex128 → product stays Complex128)
+fn reciprocal_scalar_matching_cotangent_dtype(g: &Value, fft_length: usize) -> Value {
+    let g_dtype = match g {
+        Value::Scalar(lit) => match lit {
+            Literal::F32Bits(_) => Some(DType::F32),
+            Literal::F64Bits(_) => Some(DType::F64),
+            _ => None,
+        },
+        Value::Tensor(t) => Some(t.dtype),
+    };
+    let inv = 1.0 / fft_length as f64;
+    match g_dtype {
+        Some(DType::F32) | Some(DType::BF16) | Some(DType::F16) => {
+            Value::Scalar(Literal::from_f32(inv as f32))
+        }
+        _ => Value::Scalar(Literal::from_f64(inv)),
+    }
+}
+
 /// Scale complex tensor elements: multiply interior bins (indices 1..n/2-1) by 2,
 /// leave DC (index 0) and Nyquist (index n/2) unchanged.
 /// Used for IRFFT VJP where the Hermitian extension adjoint doubles interior bins.
@@ -2638,8 +2662,10 @@ pub fn vjp(
             // Step 1: FFT(g_real)
             let fft_g = eval_primitive(Primitive::Fft, std::slice::from_ref(g), &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            // Step 2: Scale by 1/n
-            let inv_n = Value::Scalar(Literal::from_f64(1.0 / fft_length as f64));
+            // Step 2: Scale by 1/n. Match the cotangent's float dtype so a
+            // Complex64-typed FFT(g) doesn't promote to Complex128 when
+            // multiplied by an unconditionally F64 reciprocal scalar.
+            let inv_n = reciprocal_scalar_matching_cotangent_dtype(g, fft_length);
             let scaled = value_mul(&fft_g, &inv_n)?;
             // Step 3: Truncate to n/2+1
             let half_len = fft_length / 2 + 1;
