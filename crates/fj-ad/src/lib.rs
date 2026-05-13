@@ -724,9 +724,21 @@ fn scale_hermitian_adjoint(tensor: &TensorValue, fft_length: usize) -> Result<Va
                     let i = f64::from_bits(*im) * 2.0;
                     elements[idx] = Literal::from_complex128(r, i);
                 }
+                Literal::Complex64Bits(re, im) => {
+                    let r = f32::from_bits(*re) * 2.0;
+                    let i = f32::from_bits(*im) * 2.0;
+                    elements[idx] = Literal::from_complex64(r, i);
+                }
                 other => {
-                    let v = other.as_f64().unwrap_or(0.0) * 2.0;
-                    elements[idx] = Literal::from_f64(v);
+                    // scale_hermitian_adjoint is the IRFFT VJP path; the
+                    // intermediate must be a complex tensor. Anything else
+                    // signals a typing bug upstream and is reported instead
+                    // of silently zeroing the bin (which Literal::as_f64
+                    // would do for any non-real literal via unwrap_or(0.0)).
+                    return Err(AdError::EvalFailed(format!(
+                        "scale_hermitian_adjoint: expected complex literal at \
+                         interior bin (batch {batch}, k {k}); got {other:?}"
+                    )));
                 }
             }
         }
@@ -13595,5 +13607,83 @@ mod tests {
         assert!(write_succeeded, "registry write should not panic after poison recovery");
 
         clear_custom_derivative_rules();
+    }
+
+    #[test]
+    fn scale_hermitian_adjoint_doubles_complex64_interior_bins() {
+        // For fft_length=6 the IRFFT VJP intermediate has length n/2+1 = 4.
+        // Indices 0 (DC) and 3 (Nyquist) stay; indices 1 and 2 double.
+        let elements = vec![
+            fj_core::Literal::from_complex64(10.0, 0.0),
+            fj_core::Literal::from_complex64(1.0, 2.0),
+            fj_core::Literal::from_complex64(3.0, 4.0),
+            fj_core::Literal::from_complex64(5.0, 0.0),
+        ];
+        let tensor = TensorValue::new(
+            fj_core::DType::Complex64,
+            fj_core::Shape { dims: vec![4] },
+            elements,
+        )
+        .unwrap();
+
+        let scaled = super::scale_hermitian_adjoint(&tensor, 6).expect("complex64 should scale");
+        let tensor_out = match scaled {
+            Value::Tensor(t) => t,
+            other => panic!("expected tensor, got {other:?}"),
+        };
+        assert_eq!(
+            tensor_out.dtype,
+            fj_core::DType::Complex64,
+            "dtype must be preserved"
+        );
+
+        // DC bin (index 0) and Nyquist bin (index 3) untouched.
+        assert!(matches!(
+            tensor_out.elements[0],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 10.0 && f32::from_bits(im) == 0.0
+        ));
+        assert!(matches!(
+            tensor_out.elements[3],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 5.0 && f32::from_bits(im) == 0.0
+        ));
+
+        // Interior bins (indices 1, 2) doubled.
+        assert!(matches!(
+            tensor_out.elements[1],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 2.0 && f32::from_bits(im) == 4.0
+        ));
+        assert!(matches!(
+            tensor_out.elements[2],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 6.0 && f32::from_bits(im) == 8.0
+        ));
+    }
+
+    #[test]
+    fn scale_hermitian_adjoint_rejects_real_typed_intermediate() {
+        // Real-valued elements should never reach scale_hermitian_adjoint;
+        // explicit Err keeps a typing bug from silently zeroing bins.
+        let elements = vec![
+            fj_core::Literal::from_f32(1.0),
+            fj_core::Literal::from_f32(2.0),
+            fj_core::Literal::from_f32(3.0),
+            fj_core::Literal::from_f32(4.0),
+        ];
+        let tensor = TensorValue::new(
+            fj_core::DType::F32,
+            fj_core::Shape { dims: vec![4] },
+            elements,
+        )
+        .unwrap();
+
+        let err = super::scale_hermitian_adjoint(&tensor, 6)
+            .expect_err("real-typed intermediate must surface a typed error");
+        assert!(
+            err.to_string().contains("expected complex literal"),
+            "got error: {err}"
+        );
     }
 }
