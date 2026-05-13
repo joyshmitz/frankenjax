@@ -1182,6 +1182,192 @@ fn irfft_vjp_numerical() {
     }
 }
 
+/// IRFFT VJP regression for Complex64 input (frankenjax-7ckd / frankenjax-dums).
+///
+/// The Complex64 silent-zero bug in `scale_hermitian_adjoint` survived
+/// because every previous IRFFT VJP test used Complex128. This case
+/// exercises the half-precision-complex VJP path through to a real
+/// finite-difference comparison and pins the regression: the gradient
+/// must be non-zero AND match the numerical derivative within f32-grade
+/// tolerance.
+///
+/// NOTE: The IRFFT VJP currently widens to Complex128 internally because
+/// the in_n scalar is `Literal::from_f64(1/n)` which promotes the
+/// Complex64 FFT result during multiplication. That is an orthogonal
+/// dtype-preservation gap tracked separately; this test pins behaviour
+/// against that current state and against the underlying gradient values.
+#[test]
+fn irfft_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex128Bits;
+
+    let x_re: [f32; 3] = [10.0, -2.0, 2.0];
+    let x_im: [f32; 3] = [0.0, 3.0, 0.0];
+
+    let make_input = |re: &[f32], im: &[f32]| -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                DType::Complex64,
+                Shape { dims: vec![3] },
+                re.iter()
+                    .zip(im.iter())
+                    .map(|(&r, &i)| Literal::from_complex64(r, i))
+                    .collect(),
+            )
+            .unwrap(),
+        )
+    };
+
+    let x = make_input(&x_re, &x_im);
+
+    let mut params = BTreeMap::new();
+    params.insert("fft_length".to_owned(), "4".to_owned());
+
+    // Real cotangent matching the IRFFT output dtype (F32).
+    let g = Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape { dims: vec![4] },
+            vec![
+                Literal::from_f32(1.0),
+                Literal::from_f32(1.0),
+                Literal::from_f32(1.0),
+                Literal::from_f32(1.0),
+            ],
+        )
+        .unwrap(),
+    );
+
+    let vjp_result =
+        fj_ad::vjp_single(Primitive::Irfft, std::slice::from_ref(&x), &g, &params).unwrap();
+    let vjp_tensor = vjp_result[0].as_tensor().unwrap();
+
+    // Regression assertion: gradient must NOT be all-zero. The previous
+    // silent-zero bug in scale_hermitian_adjoint produced a degenerate
+    // zero tensor here for Complex64 input.
+    let any_nonzero = vjp_tensor.elements.iter().any(|e| match e {
+        Complex128Bits(re, im) => {
+            f64::from_bits(*re) != 0.0 || f64::from_bits(*im) != 0.0
+        }
+        _ => false,
+    });
+    assert!(
+        any_nonzero,
+        "IRFFT Complex64 VJP must not produce all-zero gradient: {:?}",
+        vjp_tensor.elements
+    );
+
+    let extract_f32_sum = |val: &Value| -> f64 {
+        val.as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F32Bits(bits) => f64::from(f32::from_bits(*bits)),
+                _ => panic!("IRFFT Complex64 output must store F32Bits elements"),
+            })
+            .sum()
+    };
+
+    // Finite-difference verification, looser tolerance for f32 inputs.
+    let eps_f32 = 1e-3_f32;
+
+    for bin in 0..3 {
+        let mut re_plus = x_re;
+        re_plus[bin] += eps_f32;
+        let out_plus = eval_primitive(
+            Primitive::Irfft,
+            std::slice::from_ref(&make_input(&re_plus, &x_im)),
+            &params,
+        )
+        .unwrap();
+        let l_plus = extract_f32_sum(&out_plus);
+
+        let mut re_minus = x_re;
+        re_minus[bin] -= eps_f32;
+        let out_minus = eval_primitive(
+            Primitive::Irfft,
+            std::slice::from_ref(&make_input(&re_minus, &x_im)),
+            &params,
+        )
+        .unwrap();
+        let l_minus = extract_f32_sum(&out_minus);
+        let numerical_re = (l_plus - l_minus) / (2.0 * f64::from(eps_f32));
+
+        let vjp_bin = match &vjp_tensor.elements[bin] {
+            Complex128Bits(re, _im) => f64::from_bits(*re),
+            other => panic!("expected complex literal in VJP, got {other:?}"),
+        };
+
+        assert!(
+            (vjp_bin - numerical_re).abs() < 1e-2,
+            "IRFFT Complex64 VJP real part at bin {bin}: analytical={vjp_bin}, \
+             numerical={numerical_re}"
+        );
+    }
+}
+
+/// IRFFT VJP for Complex64 input with odd fft_length — exercises the
+/// "no Nyquist bin" branch of `scale_hermitian_adjoint`'s
+/// `fft_length.is_multiple_of(2)` guard.
+#[test]
+fn irfft_vjp_numerical_complex64_odd_fft_length() {
+    use fj_core::Literal::Complex128Bits;
+
+    // input length = (fft_length + 1) / 2 = 2 for fft_length=3
+    let x_re: [f32; 2] = [4.0, -1.0];
+    let x_im: [f32; 2] = [0.0, 2.0];
+
+    let make_input = |re: &[f32], im: &[f32]| -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                DType::Complex64,
+                Shape { dims: vec![2] },
+                re.iter()
+                    .zip(im.iter())
+                    .map(|(&r, &i)| Literal::from_complex64(r, i))
+                    .collect(),
+            )
+            .unwrap(),
+        )
+    };
+
+    let x = make_input(&x_re, &x_im);
+
+    let mut params = BTreeMap::new();
+    params.insert("fft_length".to_owned(), "3".to_owned());
+
+    let g = Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape { dims: vec![3] },
+            vec![
+                Literal::from_f32(1.0),
+                Literal::from_f32(1.0),
+                Literal::from_f32(1.0),
+            ],
+        )
+        .unwrap(),
+    );
+
+    let vjp_result =
+        fj_ad::vjp_single(Primitive::Irfft, std::slice::from_ref(&x), &g, &params).unwrap();
+    let vjp_tensor = vjp_result[0].as_tensor().unwrap();
+
+    // Regression: gradient must NOT be identically zero. This catches
+    // any re-introduction of the silent-zero bug from frankenjax-7ckd.
+    let any_nonzero = vjp_tensor.elements.iter().any(|e| match e {
+        Complex128Bits(re, im) => {
+            f64::from_bits(*re) != 0.0 || f64::from_bits(*im) != 0.0
+        }
+        _ => false,
+    });
+    assert!(
+        any_nonzero,
+        "IRFFT Complex64 VJP (odd fft_length) must not produce all-zero gradient: {:?}",
+        vjp_tensor.elements
+    );
+}
+
 // ======================== Edge-Case AD Verification (frankenjax-o2c) ========================
 
 /// QR VJP with a moderately ill-conditioned rectangular matrix.
