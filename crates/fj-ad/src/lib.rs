@@ -343,23 +343,35 @@ fn value_add(a: &Value, b: &Value) -> Result<Value, AdError> {
 fn zeros_like(v: &Value) -> Value {
     match v {
         Value::Scalar(lit) => match lit {
+            // Non-differentiable types keep the legacy F64 widening so
+            // existing AD conventions (e.g., switch index gradients are
+            // F64 zero) stay intact.
             Literal::I64(_) => Value::scalar_i64(0),
-            Literal::U32(_) | Literal::U64(_) => Value::scalar_f64(0.0),
-            Literal::Bool(_) => Value::scalar_f64(0.0),
-            Literal::BF16Bits(_) | Literal::F16Bits(_) => Value::scalar_f64(0.0),
+            Literal::U32(_) | Literal::U64(_) | Literal::Bool(_) => Value::scalar_f64(0.0),
+            // Differentiable types preserve their natural dtype so the
+            // gradient chain doesn't silently widen downstream.
+            Literal::BF16Bits(_) => Value::Scalar(Literal::from_bf16_f32(0.0)),
+            Literal::F16Bits(_) => Value::Scalar(Literal::from_f16_f32(0.0)),
             Literal::F32Bits(_) => Value::scalar_f32(0.0),
             Literal::F64Bits(_) => Value::scalar_f64(0.0),
-            Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => Value::scalar_f64(0.0),
+            Literal::Complex64Bits(..) => {
+                Value::Scalar(Literal::from_complex64(0.0, 0.0))
+            }
+            Literal::Complex128Bits(..) => {
+                Value::Scalar(Literal::from_complex128(0.0, 0.0))
+            }
         },
         Value::Tensor(t) => {
+            // Preserve dtype for differentiable types (F*, Complex*);
+            // widen non-differentiable types (Bool/U32/U64) to F64 to
+            // match the AD convention for discrete-input gradients. I64
+            // stays I64 to match the existing scalar arm.
             let (zero_lit, out_dtype) = match t.dtype {
                 DType::I64 | DType::I32 => (Literal::I64(0), DType::I64),
-                DType::U32 | DType::U64 => (Literal::from_f64(0.0), DType::F64),
-                DType::Bool => (Literal::from_f64(0.0), DType::F64),
-                DType::BF16 | DType::F16 => (Literal::from_f64(0.0), DType::F64),
-                DType::F32 => (Literal::from_f32(0.0), DType::F32),
-                DType::F64 => (Literal::from_f64(0.0), DType::F64),
-                DType::Complex64 | DType::Complex128 => (Literal::from_f64(0.0), DType::F64),
+                DType::U32 | DType::U64 | DType::Bool => {
+                    (Literal::from_f64(0.0), DType::F64)
+                }
+                _ => (zero_literal_for_dtype(t.dtype), t.dtype),
             };
             let elements = vec![zero_lit; t.elements.len()];
             Value::Tensor(tensor_with_existing_shape(out_dtype, t, elements))
@@ -405,18 +417,27 @@ fn parse_pad_i64_param_for_rank(
 fn ones_like(v: &Value) -> Value {
     match v {
         Value::Scalar(lit) => match lit {
-            Literal::I64(_) => Value::scalar_f64(1.0),
-            Literal::U32(_) | Literal::U64(_) => Value::scalar_f64(1.0),
-            Literal::Bool(_) => Value::scalar_f64(1.0),
-            Literal::BF16Bits(_) | Literal::F16Bits(_) => Value::scalar_f64(1.0),
+            // Non-differentiable types follow the legacy F64 convention.
+            Literal::I64(_) | Literal::U32(_) | Literal::U64(_) | Literal::Bool(_) => {
+                Value::scalar_f64(1.0)
+            }
+            Literal::BF16Bits(_) => Value::Scalar(Literal::from_bf16_f32(1.0)),
+            Literal::F16Bits(_) => Value::Scalar(Literal::from_f16_f32(1.0)),
             Literal::F32Bits(_) => Value::scalar_f32(1.0),
             Literal::F64Bits(_) => Value::scalar_f64(1.0),
-            Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => Value::scalar_f64(1.0),
+            Literal::Complex64Bits(..) => {
+                Value::Scalar(Literal::from_complex64(1.0, 0.0))
+            }
+            Literal::Complex128Bits(..) => {
+                Value::Scalar(Literal::from_complex128(1.0, 0.0))
+            }
         },
         Value::Tensor(t) => {
             let (one_lit, out_dtype) = match t.dtype {
-                DType::F32 => (Literal::from_f32(1.0), DType::F32),
-                _ => (Literal::from_f64(1.0), DType::F64),
+                DType::I64 | DType::I32 | DType::U32 | DType::U64 | DType::Bool => {
+                    (Literal::from_f64(1.0), DType::F64)
+                }
+                _ => (one_literal_for_dtype(t.dtype), t.dtype),
             };
             let elements = vec![one_lit; t.elements.len()];
             Value::Tensor(tensor_with_existing_shape(out_dtype, t, elements))
@@ -3346,6 +3367,21 @@ fn zero_literal_for_dtype(dtype: DType) -> Literal {
         DType::F64 => Literal::from_f64(0.0),
         DType::Complex64 => Literal::from_complex64(0.0, 0.0),
         DType::Complex128 => Literal::from_complex128(0.0, 0.0),
+    }
+}
+
+fn one_literal_for_dtype(dtype: DType) -> Literal {
+    match dtype {
+        DType::I64 | DType::I32 => Literal::I64(1),
+        DType::U32 => Literal::U32(1),
+        DType::U64 => Literal::U64(1),
+        DType::Bool => Literal::Bool(true),
+        DType::BF16 => Literal::from_bf16_f32(1.0),
+        DType::F16 => Literal::from_f16_f32(1.0),
+        DType::F32 => Literal::from_f32(1.0),
+        DType::F64 => Literal::from_f64(1.0),
+        DType::Complex64 => Literal::from_complex64(1.0, 0.0),
+        DType::Complex128 => Literal::from_complex128(1.0, 0.0),
     }
 }
 
@@ -13943,5 +13979,110 @@ mod tests {
             err.to_string().contains("expected complex literal"),
             "got error: {err}"
         );
+    }
+
+    #[test]
+    fn zeros_like_preserves_dtype_for_differentiable_kinds() {
+        // Differentiable scalar arms — dtype must be preserved.
+        assert!(matches!(
+            super::zeros_like(&Value::Scalar(fj_core::Literal::from_complex64(1.0, -2.0))),
+            Value::Scalar(fj_core::Literal::Complex64Bits(re, im))
+                if f32::from_bits(re) == 0.0 && f32::from_bits(im) == 0.0
+        ));
+        assert!(matches!(
+            super::zeros_like(&Value::Scalar(fj_core::Literal::from_complex128(1.0, -2.0))),
+            Value::Scalar(fj_core::Literal::Complex128Bits(re, im))
+                if f64::from_bits(re) == 0.0 && f64::from_bits(im) == 0.0
+        ));
+        assert!(matches!(
+            super::zeros_like(&Value::Scalar(fj_core::Literal::from_bf16_f32(3.0))),
+            Value::Scalar(fj_core::Literal::BF16Bits(_))
+        ));
+        assert!(matches!(
+            super::zeros_like(&Value::Scalar(fj_core::Literal::from_f16_f32(3.0))),
+            Value::Scalar(fj_core::Literal::F16Bits(_))
+        ));
+        assert!(matches!(
+            super::zeros_like(&Value::Scalar(fj_core::Literal::from_f32(3.0))),
+            Value::Scalar(fj_core::Literal::F32Bits(_))
+        ));
+
+        // Non-differentiable scalars keep legacy F64 widening (AD
+        // convention: gradients of discrete inputs are F64 zeros).
+        assert!(matches!(
+            super::zeros_like(&Value::Scalar(fj_core::Literal::Bool(true))),
+            Value::Scalar(fj_core::Literal::F64Bits(_))
+        ));
+        assert!(matches!(
+            super::zeros_like(&Value::Scalar(fj_core::Literal::U32(5))),
+            Value::Scalar(fj_core::Literal::F64Bits(_))
+        ));
+
+        // Tensor arm — Complex64 must stay Complex64 (regression for the
+        // silent F64-widening of zero gradients).
+        let complex_tensor = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::Complex64,
+                fj_core::Shape { dims: vec![3] },
+                vec![
+                    fj_core::Literal::from_complex64(1.0, -1.0),
+                    fj_core::Literal::from_complex64(2.0, 3.0),
+                    fj_core::Literal::from_complex64(-1.0, 0.5),
+                ],
+            )
+            .unwrap(),
+        );
+        let zeros = super::zeros_like(&complex_tensor);
+        let zt = zeros.as_tensor().unwrap();
+        assert_eq!(zt.dtype, fj_core::DType::Complex64);
+        for elem in &zt.elements {
+            assert!(matches!(
+                elem,
+                fj_core::Literal::Complex64Bits(re, im)
+                    if f32::from_bits(*re) == 0.0 && f32::from_bits(*im) == 0.0
+            ));
+        }
+    }
+
+    #[test]
+    fn ones_like_preserves_dtype_for_differentiable_kinds() {
+        assert!(matches!(
+            super::ones_like(&Value::Scalar(fj_core::Literal::from_complex64(7.0, 8.0))),
+            Value::Scalar(fj_core::Literal::Complex64Bits(re, im))
+                if f32::from_bits(re) == 1.0 && f32::from_bits(im) == 0.0
+        ));
+        assert!(matches!(
+            super::ones_like(&Value::Scalar(fj_core::Literal::from_complex128(7.0, 8.0))),
+            Value::Scalar(fj_core::Literal::Complex128Bits(re, im))
+                if f64::from_bits(re) == 1.0 && f64::from_bits(im) == 0.0
+        ));
+        // Bool ones_like keeps legacy F64 widening.
+        assert!(matches!(
+            super::ones_like(&Value::Scalar(fj_core::Literal::Bool(false))),
+            Value::Scalar(fj_core::Literal::F64Bits(_))
+        ));
+
+        // Tensor: complex128 ones must keep dtype + value.
+        let complex_tensor = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::Complex128,
+                fj_core::Shape { dims: vec![2] },
+                vec![
+                    fj_core::Literal::from_complex128(2.0, 1.0),
+                    fj_core::Literal::from_complex128(-3.0, 4.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let ones = super::ones_like(&complex_tensor);
+        let ot = ones.as_tensor().unwrap();
+        assert_eq!(ot.dtype, fj_core::DType::Complex128);
+        for elem in &ot.elements {
+            assert!(matches!(
+                elem,
+                fj_core::Literal::Complex128Bits(re, im)
+                    if f64::from_bits(*re) == 1.0 && f64::from_bits(*im) == 0.0
+            ));
+        }
     }
 }
