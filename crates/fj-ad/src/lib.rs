@@ -2175,7 +2175,10 @@ pub fn vjp(
         Primitive::Cumsum => {
             // VJP of cumsum is reverse cumsum of gradient.
             // For scalar: pass through (cumsum of scalar = scalar).
-            // For tensor: reverse cumulative sum along the cumsum axis.
+            // For tensor: reverse cumulative sum along the cumsum axis,
+            // preserving the input dtype (real or complex). The previous
+            // implementation funneled everything through f64, which
+            // silently zeroed complex inputs and widened every real type.
             match g {
                 Value::Scalar(_) => Ok(vec![g.clone()]),
                 Value::Tensor(gt) => {
@@ -2185,56 +2188,127 @@ pub fn vjp(
                         .unwrap_or(0);
                     let dims: Vec<usize> = gt.shape.dims.iter().map(|&d| d as usize).collect();
                     let rank = dims.len();
-                    let g_vals: Vec<f64> = gt
-                        .elements
-                        .iter()
-                        .map(|l| l.as_f64().unwrap_or(0.0))
-                        .collect();
-                    let total = g_vals.len();
-                    let mut result = vec![0.0_f64; total];
+                    let total = gt.elements.len();
 
-                    // Compute strides for ND indexing
                     let mut strides = vec![1usize; rank];
-                    for i in (0..rank - 1).rev() {
-                        strides[i] = strides[i + 1] * dims[i + 1];
+                    if rank > 0 {
+                        for i in (0..rank - 1).rev() {
+                            strides[i] = strides[i + 1] * dims[i + 1];
+                        }
                     }
 
-                    // For each position along the non-cumsum axes, do reverse cumsum
                     let axis_len = dims[axis];
                     if axis_len == 0 {
                         return Ok(vec![g.clone()]);
                     }
                     let axis_stride = strides[axis];
                     let outer_count = total / axis_len;
+                    let g_dtype = gt.dtype;
 
-                    for outer in 0..outer_count {
-                        // Compute base index: skip the axis dimension
-                        let mut base = 0;
-                        let mut rem = outer;
-                        for d in (0..rank).rev() {
-                            if d == axis {
-                                continue;
+                    // Two accumulation regimes: complex (re/im pair) or
+                    // real f64 with dtype-preserving rebuild.
+                    let result_elements: Vec<Literal> = match g_dtype {
+                        DType::Complex64 | DType::Complex128 => {
+                            // Convert to (re, im) f64 pairs, accumulate in
+                            // f64 (sufficient precision for both Complex64
+                            // and Complex128 sums), then re-encode at the
+                            // input's complex dtype.
+                            let pairs: Vec<(f64, f64)> = gt
+                                .elements
+                                .iter()
+                                .map(|l| match l {
+                                    Literal::Complex64Bits(re, im) => (
+                                        f64::from(f32::from_bits(*re)),
+                                        f64::from(f32::from_bits(*im)),
+                                    ),
+                                    Literal::Complex128Bits(re, im) => (
+                                        f64::from_bits(*re),
+                                        f64::from_bits(*im),
+                                    ),
+                                    _ => (0.0, 0.0),
+                                })
+                                .collect();
+                            let mut result_pairs = vec![(0.0_f64, 0.0_f64); total];
+                            for outer in 0..outer_count {
+                                let mut base = 0;
+                                let mut rem = outer;
+                                for d in (0..rank).rev() {
+                                    if d == axis {
+                                        continue;
+                                    }
+                                    base += (rem % dims[d]) * strides[d];
+                                    rem /= dims[d];
+                                }
+                                let mut run_re = 0.0_f64;
+                                let mut run_im = 0.0_f64;
+                                for i in (0..axis_len).rev() {
+                                    let idx = base + i * axis_stride;
+                                    run_re += pairs[idx].0;
+                                    run_im += pairs[idx].1;
+                                    result_pairs[idx] = (run_re, run_im);
+                                }
                             }
-                            base += (rem % dims[d]) * strides[d];
-                            rem /= dims[d];
+                            result_pairs
+                                .into_iter()
+                                .map(|(re, im)| match g_dtype {
+                                    DType::Complex64 => {
+                                        Literal::from_complex64(re as f32, im as f32)
+                                    }
+                                    _ => Literal::from_complex128(re, im),
+                                })
+                                .collect()
                         }
+                        _ => {
+                            let g_vals: Vec<f64> = gt
+                                .elements
+                                .iter()
+                                .map(|l| l.as_f64().unwrap_or(0.0))
+                                .collect();
+                            let mut result = vec![0.0_f64; total];
+                            for outer in 0..outer_count {
+                                let mut base = 0;
+                                let mut rem = outer;
+                                for d in (0..rank).rev() {
+                                    if d == axis {
+                                        continue;
+                                    }
+                                    base += (rem % dims[d]) * strides[d];
+                                    rem /= dims[d];
+                                }
+                                let mut running = 0.0;
+                                for i in (0..axis_len).rev() {
+                                    let idx = base + i * axis_stride;
+                                    running += g_vals[idx];
+                                    result[idx] = running;
+                                }
+                            }
+                            // Re-encode at the input's real dtype so we
+                            // don't widen e.g. F32 to F64 in the AD chain.
+                            result
+                                .into_iter()
+                                .map(|v| match g_dtype {
+                                    DType::F32 => Literal::from_f32(v as f32),
+                                    DType::BF16 => Literal::from_bf16_f32(v as f32),
+                                    DType::F16 => Literal::from_f16_f32(v as f32),
+                                    DType::F64 => Literal::from_f64(v),
+                                    DType::I64 | DType::I32 => Literal::I64(v as i64),
+                                    DType::U32 => Literal::U32(v as u32),
+                                    DType::U64 => Literal::U64(v as u64),
+                                    // Bool / others: legacy F64 zero path
+                                    _ => Literal::from_f64(v),
+                                })
+                                .collect()
+                        }
+                    };
 
-                        // Reverse cumulative sum along axis
-                        let mut running = 0.0;
-                        for i in (0..axis_len).rev() {
-                            let idx = base + i * axis_stride;
-                            running += g_vals[idx];
-                            result[idx] = running;
-                        }
-                    }
+                    let out_dtype = match g_dtype {
+                        DType::Bool => DType::F64,
+                        other => other,
+                    };
 
                     Ok(vec![Value::Tensor(
-                        TensorValue::new(
-                            DType::F64,
-                            gt.shape.clone(),
-                            result.into_iter().map(Literal::from_f64).collect(),
-                        )
-                        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                        TensorValue::new(out_dtype, gt.shape.clone(), result_elements)
+                            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
                     )])
                 }
             }
@@ -14032,6 +14106,89 @@ mod tests {
                 fj_core::Literal::Complex64Bits(re, im)
                     if f32::from_bits(*re) == 0.0 && f32::from_bits(*im) == 0.0
             ));
+        }
+    }
+
+    #[test]
+    fn cumsum_vjp_preserves_complex64_dtype_and_does_not_zero_gradient() {
+        // Reverse cumsum of g = [(1,1), (2,2), (3,3)] along axis 0 is
+        // [(6,6), (5,5), (3,3)]. Previously the Complex64 path silently
+        // zeroed everything because of the as_f64 round-trip.
+        let g = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::Complex64,
+                fj_core::Shape { dims: vec![3] },
+                vec![
+                    fj_core::Literal::from_complex64(1.0, 1.0),
+                    fj_core::Literal::from_complex64(2.0, 2.0),
+                    fj_core::Literal::from_complex64(3.0, 3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        use fj_core::Primitive;
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("axis".to_owned(), "0".to_owned());
+
+        // Use vjp_single directly on the Cumsum primitive.
+        let primal = g.clone(); // primal value is unused by Cumsum VJP
+        let grads = super::vjp_single(Primitive::Cumsum, std::slice::from_ref(&primal), &g, &params)
+            .expect("cumsum VJP should accept complex64");
+
+        let gt = grads[0].as_tensor().unwrap();
+        assert_eq!(gt.dtype, fj_core::DType::Complex64);
+        assert_eq!(gt.shape.dims, vec![3]);
+
+        // Element 0 = (1+2+3, 1+2+3) = (6, 6)
+        // Element 1 = (2+3, 2+3) = (5, 5)
+        // Element 2 = (3, 3)
+        let actual: Vec<(f32, f32)> = gt
+            .elements
+            .iter()
+            .map(|l| match l {
+                fj_core::Literal::Complex64Bits(re, im) => {
+                    (f32::from_bits(*re), f32::from_bits(*im))
+                }
+                _ => (0.0, 0.0),
+            })
+            .collect();
+        assert_eq!(actual, vec![(6.0, 6.0), (5.0, 5.0), (3.0, 3.0)]);
+
+    }
+
+    #[test]
+    fn cumsum_vjp_preserves_f32_dtype() {
+        let g = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::F32,
+                fj_core::Shape { dims: vec![3] },
+                vec![
+                    fj_core::Literal::from_f32(1.0),
+                    fj_core::Literal::from_f32(2.0),
+                    fj_core::Literal::from_f32(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let primal = g.clone();
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("axis".to_owned(), "0".to_owned());
+
+        let grads = super::vjp_single(
+            fj_core::Primitive::Cumsum,
+            std::slice::from_ref(&primal),
+            &g,
+            &params,
+        )
+        .expect("cumsum VJP should accept f32");
+
+        let gt = grads[0].as_tensor().unwrap();
+        assert_eq!(gt.dtype, fj_core::DType::F32);
+        for elem in &gt.elements {
+            assert!(
+                matches!(elem, fj_core::Literal::F32Bits(_)),
+                "F32 cumsum VJP element must be F32Bits; got {elem:?}"
+            );
         }
     }
 
