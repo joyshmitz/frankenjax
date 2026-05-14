@@ -2878,7 +2878,9 @@ pub fn vjp(
             let cbrt_x = eval_primitive(Primitive::Cbrt, inputs, params)
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             let cbrt_sq = value_mul(&cbrt_x, &cbrt_x)?;
-            let three = Value::scalar_f64(3.0);
+            // Match the "3" constant to cbrt_x's dtype so Complex64
+            // intermediates don't widen via F64 constant promotion.
+            let three = scalar_constant_matching_dtype(3.0, &cbrt_x);
             let denom = value_mul(&three, &cbrt_sq)?;
             let recip = eval_primitive(Primitive::Reciprocal, std::slice::from_ref(&denom), params)
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
