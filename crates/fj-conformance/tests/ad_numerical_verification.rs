@@ -414,6 +414,55 @@ fn mul_vjp_numerical_complex64() {
     );
 }
 
+/// Complex64 scalar Div VJP (frankenjax-ohim).
+///
+/// `c = a / b` in complex arithmetic; `dc/da = 1/b`, `dc/db = -a/b²`.
+/// With cotangent `g`, the chain rule yields `g_a = g/b` and
+/// `g_b = -g*a/b²`. Picking `a = 2+3i`, `b = 1+i`, `g = 1+0i`:
+///   b² = (1+i)² = 2i
+///   g_a = (1+0i)/(1+i) = (1-i)/2 = 0.5 - 0.5i
+///   g_b = -(2+3i)/(2i) = -1.5 + 1i
+#[test]
+fn div_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let a = Value::Scalar(Literal::from_complex64(2.0, 3.0));
+    let b = Value::Scalar(Literal::from_complex64(1.0, 1.0));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(Primitive::Div, &[a, b], &g, &BTreeMap::new())
+        .expect("div VJP should accept complex64 scalars");
+    assert_eq!(grads.len(), 2);
+
+    let close = |x: f32, y: f32| (x - y).abs() < 1e-5;
+
+    // g_a = g/b = (1+0i)/(1+i) = 0.5 - 0.5i
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                close(re, 0.5) && close(im, -0.5),
+                "g_a should be (0.5, -0.5); got ({re}, {im})"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+
+    // g_b = -g*a/b² = -(2+3i)/(2i) = -1.5 + 1i
+    match grads[1] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                close(re, -1.5) && close(im, 1.0),
+                "g_b should be (-1.5, 1.0); got ({re}, {im})"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
 /// Complex64 scalar Add VJP (frankenjax-6s96).
 ///
 /// Add is linear: `dc/da = 1`, `dc/db = 1`. With cotangent `g`,
