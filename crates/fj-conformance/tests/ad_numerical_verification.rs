@@ -414,6 +414,49 @@ fn mul_vjp_numerical_complex64() {
     );
 }
 
+/// Complex64 scalar Rsqrt VJP (frankenjax-zvth).
+///
+/// `d/dz rsqrt(z) = d/dz z^(-1/2) = -0.5 * z^(-3/2)` → `g_z = g * -0.5 * z^(-1.5)`.
+/// Pick the Pythagorean triple `z = 3 + 4i` so the powers have clean
+/// closed forms via `sqrt(3+4i) = 2+i`:
+///   z^(-1.5) = 1 / z^1.5 = 1 / (z * sqrt(z)) = 1 / ((3+4i)(2+i))
+///                       = 1 / (6 + 3i + 8i + 4i²)
+///                       = 1 / (6 + 11i + (-4))
+///                       = 1 / (2 + 11i)
+///                       = (2 - 11i) / (4 + 121) = (2 - 11i) / 125
+///   g_z = g * -0.5 * z^(-1.5)
+///       = (1+0i) * (-0.5) * (2 - 11i)/125
+///       = (-1 + 5.5i) / 125
+///       = -0.008 + 0.044i
+#[test]
+fn rsqrt_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(3.0, 4.0));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Rsqrt,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("rsqrt VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                (re - (-0.008)).abs() < 1e-5 && (im - 0.044).abs() < 1e-5,
+                "g_z should be (-0.008, 0.044); got ({re}, {im})"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
 /// Complex64 scalar Sqrt VJP (frankenjax-dgvr).
 ///
 /// `d/dz sqrt(z) = 1/(2*sqrt(z))` → `g_z = g/(2*sqrt(z))`. Pick the

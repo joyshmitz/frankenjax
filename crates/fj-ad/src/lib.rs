@@ -1286,16 +1286,20 @@ pub fn vjp(
         }
         Primitive::Rsqrt => {
             let x = &inputs[0];
-            // d/dx(x^(-1/2)) = -0.5 * x^(-3/2)
+            // d/dx(x^(-1/2)) = -0.5 * x^(-3/2). Match the -1.5 and -0.5
+            // constants to the gradient's dtype so Complex64 intermediates
+            // don't widen to Complex128 via F64-constant promotion.
+            let neg_one_point_five = scalar_constant_matching_dtype(-1.5, g);
             let x_pow_neg1p5 = eval_primitive(
                 Primitive::Pow,
-                &[x.clone(), scalar_value(-1.5)],
+                &[x.clone(), neg_one_point_five],
                 &BTreeMap::new(),
             )
             .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let neg_half = scalar_constant_matching_dtype(-0.5, g);
             Ok(vec![value_mul(
                 g,
-                &value_mul(&scalar_value(-0.5), &x_pow_neg1p5)?,
+                &value_mul(&neg_half, &x_pow_neg1p5)?,
             )?])
         }
         Primitive::Floor | Primitive::Ceil | Primitive::Round => Ok(vec![zeros_like(&inputs[0])]),
@@ -5882,17 +5886,20 @@ fn jvp_rule(
         }
 
         Primitive::Sqrt => {
-            // dx / (2 * sqrt(x))
+            // dx / (2 * sqrt(x)). Match the "2" constant to the tangent's
+            // dtype so Complex64 doesn't widen via F64 constant promotion.
             let sqrt_x = ep(Primitive::Sqrt, &[primals[0].clone()])?;
-            let two = Value::scalar_f64(2.0);
+            let two = scalar_constant_matching_dtype(2.0, &tangents[0]);
             let denom = ep(Primitive::Mul, &[two, sqrt_x])?;
             ep(Primitive::Div, &[tangents[0].clone(), denom])
         }
 
         Primitive::Rsqrt => {
-            // -0.5 * x^(-1.5) * dx
-            let neg_half = Value::scalar_f64(-0.5);
-            let exp = Value::scalar_f64(-1.5);
+            // -0.5 * x^(-1.5) * dx. Match constants to the tangent's
+            // dtype so Complex64 doesn't widen to Complex128 via F64
+            // constant promotion.
+            let neg_half = scalar_constant_matching_dtype(-0.5, &tangents[0]);
+            let exp = scalar_constant_matching_dtype(-1.5, &tangents[0]);
             let x_pow = ep(Primitive::Pow, &[primals[0].clone(), exp])?;
             let coeff = ep(Primitive::Mul, &[neg_half, x_pow])?;
             ep(Primitive::Mul, &[coeff, tangents[0].clone()])
