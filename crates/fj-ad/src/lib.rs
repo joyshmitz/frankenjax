@@ -2054,11 +2054,15 @@ pub fn vjp(
             // VJP of pad: extract the original operand positions from g via
             // strided slicing (accounting for interior padding), and compute
             // the pad-value gradient as the sum of g at all padding positions.
+            // Preserve gradient dtype throughout — the previous as_f64
+            // round-trip silently zeroed complex inputs and widened real
+            // inputs to F64 (same root cause as cumsum/scan VJPs).
             let operand = &inputs[0];
             match operand {
                 Value::Scalar(_) => {
-                    // Scalar operand: gradient passes through; pad value gets zero.
-                    Ok(vec![g.clone(), Value::scalar_f64(0.0)])
+                    // Scalar operand: gradient passes through; pad value
+                    // gets a zero of matching dtype.
+                    Ok(vec![g.clone(), zeros_like(g)])
                 }
                 Value::Tensor(op_tensor) => {
                     let rank = op_tensor.shape.rank();
@@ -2091,12 +2095,20 @@ pub fn vjp(
                         g_strides[i] = g_strides[i + 1] * g_dims[i + 1] as usize;
                     }
 
+                    let g_dtype = g_tensor.dtype;
+                    let zero_lit = zero_literal_for_dtype(g_dtype);
+
                     // Extract operand gradient: elements at positions
                     // low + k * (interior + 1) for k in 0..op_dim, per axis.
                     let op_total = op_tensor.elements.len();
-                    let mut op_grad_elements = Vec::with_capacity(op_total);
+                    let mut op_grad_elements: Vec<Literal> = Vec::with_capacity(op_total);
                     let mut op_coords = vec![0_usize; rank];
-                    let mut op_grad_sum = 0.0_f64;
+                    // Track which g-tensor positions feed the operand
+                    // gradient so we can compute pad_value = (sum of g) -
+                    // (sum of operand-positions in g) without lossy f64
+                    // round-trips on complex inputs.
+                    let mut op_position_set: std::collections::BTreeSet<usize> =
+                        std::collections::BTreeSet::new();
 
                     for _ in 0..op_total {
                         let mut g_flat = Some(0_usize);
@@ -2112,16 +2124,15 @@ pub fn vjp(
                             }
                         }
 
-                        let val = match g_flat {
+                        let lit = match g_flat {
                             Some(flat) if flat < g_tensor.elements.len() => {
-                                g_tensor.elements[flat].as_f64().unwrap_or(0.0)
+                                op_position_set.insert(flat);
+                                g_tensor.elements[flat]
                             }
-                            _ => 0.0,
+                            _ => zero_lit,
                         };
-                        op_grad_sum += val;
-                        op_grad_elements.push(Literal::from_f64(val));
+                        op_grad_elements.push(lit);
 
-                        // Increment operand coordinates.
                         if rank > 0 {
                             for ax in (0..rank).rev() {
                                 op_coords[ax] += 1;
@@ -2134,17 +2145,63 @@ pub fn vjp(
                     }
 
                     let g_operand = Value::Tensor(
-                        TensorValue::new(DType::F64, op_tensor.shape.clone(), op_grad_elements)
+                        TensorValue::new(g_dtype, op_tensor.shape.clone(), op_grad_elements)
                             .map_err(|e| AdError::EvalFailed(e.to_string()))?,
                     );
 
-                    // Pad-value gradient: sum of g at all padding positions.
-                    let g_total_sum: f64 = g_tensor
-                        .elements
-                        .iter()
-                        .map(|l| l.as_f64().unwrap_or(0.0))
-                        .sum();
-                    let g_pad_value = Value::scalar_f64(g_total_sum - op_grad_sum);
+                    // Pad-value gradient: sum of g at all padding positions
+                    // (g positions NOT in op_position_set). Accumulate in
+                    // dtype-appropriate domain so complex inputs preserve
+                    // both real and imaginary parts.
+                    let g_pad_value = match g_dtype {
+                        DType::Complex64 | DType::Complex128 => {
+                            let (mut sum_re, mut sum_im) = (0.0_f64, 0.0_f64);
+                            for (idx, lit) in g_tensor.elements.iter().enumerate() {
+                                if op_position_set.contains(&idx) {
+                                    continue;
+                                }
+                                let (re, im) = match lit {
+                                    Literal::Complex64Bits(re, im) => (
+                                        f64::from(f32::from_bits(*re)),
+                                        f64::from(f32::from_bits(*im)),
+                                    ),
+                                    Literal::Complex128Bits(re, im) => {
+                                        (f64::from_bits(*re), f64::from_bits(*im))
+                                    }
+                                    _ => (0.0, 0.0),
+                                };
+                                sum_re += re;
+                                sum_im += im;
+                            }
+                            Value::Scalar(match g_dtype {
+                                DType::Complex64 => {
+                                    Literal::from_complex64(sum_re as f32, sum_im as f32)
+                                }
+                                _ => Literal::from_complex128(sum_re, sum_im),
+                            })
+                        }
+                        _ => {
+                            let mut sum: f64 = 0.0;
+                            for (idx, lit) in g_tensor.elements.iter().enumerate() {
+                                if op_position_set.contains(&idx) {
+                                    continue;
+                                }
+                                sum += lit.as_f64().unwrap_or(0.0);
+                            }
+                            Value::Scalar(match g_dtype {
+                                DType::F32 => Literal::from_f32(sum as f32),
+                                DType::BF16 => Literal::from_bf16_f32(sum as f32),
+                                DType::F16 => Literal::from_f16_f32(sum as f32),
+                                DType::I64 | DType::I32 => Literal::I64(sum as i64),
+                                DType::U32 => Literal::U32(sum as u32),
+                                DType::U64 => Literal::U64(sum as u64),
+                                // F64 / Bool / others keep the legacy F64
+                                // sum (Bool follows the zeros_like F64
+                                // convention from frankenjax-o0mj).
+                                _ => Literal::from_f64(sum),
+                            })
+                        }
+                    };
 
                     Ok(vec![g_operand, g_pad_value])
                 }
@@ -14107,6 +14164,75 @@ mod tests {
                     if f32::from_bits(*re) == 0.0 && f32::from_bits(*im) == 0.0
             ));
         }
+    }
+
+    #[test]
+    fn pad_vjp_preserves_complex64_dtype_and_does_not_zero_gradient() {
+        use fj_core::Primitive;
+        // Operand length 2; pad with low=1, high=1, interior=0 to produce
+        // length 4. g (the cotangent) is length 4 of Complex64.
+        let operand = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::Complex64,
+                fj_core::Shape { dims: vec![2] },
+                vec![
+                    fj_core::Literal::from_complex64(0.0, 0.0),
+                    fj_core::Literal::from_complex64(0.0, 0.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let pad_value = Value::Scalar(fj_core::Literal::from_complex64(0.0, 0.0));
+        let g = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::Complex64,
+                fj_core::Shape { dims: vec![4] },
+                vec![
+                    fj_core::Literal::from_complex64(7.0, 7.5),   // padding (low)
+                    fj_core::Literal::from_complex64(1.0, -1.0),  // operand pos 0
+                    fj_core::Literal::from_complex64(2.0, -2.0),  // operand pos 1
+                    fj_core::Literal::from_complex64(9.0, 9.5),   // padding (high)
+                ],
+            )
+            .unwrap(),
+        );
+
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("padding_low".to_owned(), "1".to_owned());
+        params.insert("padding_high".to_owned(), "1".to_owned());
+        params.insert("padding_interior".to_owned(), "0".to_owned());
+
+        let grads = super::vjp_single(
+            Primitive::Pad,
+            &[operand, pad_value],
+            &g,
+            &params,
+        )
+        .expect("pad VJP should accept complex64");
+
+        // grads[0] = operand gradient: slice of g at operand positions
+        // [1, 2] → (1, -1) and (2, -2).
+        let g_operand = grads[0].as_tensor().unwrap();
+        assert_eq!(g_operand.dtype, fj_core::DType::Complex64);
+        assert_eq!(g_operand.shape.dims, vec![2]);
+        assert!(matches!(
+            g_operand.elements[0],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 1.0 && f32::from_bits(im) == -1.0
+        ));
+        assert!(matches!(
+            g_operand.elements[1],
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 2.0 && f32::from_bits(im) == -2.0
+        ));
+
+        // grads[1] = pad_value gradient: sum of g at padding positions
+        // = (7 + 9, 7.5 + 9.5) = (16, 17).
+        assert!(matches!(
+            grads[1],
+            Value::Scalar(fj_core::Literal::Complex64Bits(re, im))
+                if f32::from_bits(re) == 16.0 && f32::from_bits(im) == 17.0
+        ));
     }
 
     #[test]
