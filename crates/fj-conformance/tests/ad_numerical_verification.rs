@@ -414,6 +414,48 @@ fn mul_vjp_numerical_complex64() {
     );
 }
 
+/// Complex64 scalar Exp VJP (frankenjax-aabz).
+///
+/// For complex z = a+bi, `exp(z) = e^a * (cos(b) + i*sin(b))`. VJP:
+/// `d/dz exp(z) = exp(z)` → `g_z = g * exp(z)` (complex multiplication).
+///
+/// Pick `z = 0 + 0.5i`, `g = 1 + 0i`. Then `exp(z) = cos(0.5) + i*sin(0.5)`
+/// ≈ 0.8775826 + 0.4794255i, and `g_z = g * exp(z) ≈ 0.8775826 + 0.4794255i`.
+#[test]
+fn exp_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(0.0, 0.5));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Exp,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("exp VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            let expected_re = 0.5_f64.cos() as f32;
+            let expected_im = 0.5_f64.sin() as f32;
+            assert!(
+                (re - expected_re).abs() < 1e-5,
+                "g_z real part: expected {expected_re}, got {re}"
+            );
+            assert!(
+                (im - expected_im).abs() < 1e-5,
+                "g_z imag part: expected {expected_im}, got {im}"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
 /// Complex64 scalar Div VJP (frankenjax-ohim).
 ///
 /// `c = a / b` in complex arithmetic; `dc/da = 1/b`, `dc/db = -a/b²`.
