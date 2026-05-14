@@ -414,6 +414,42 @@ fn mul_vjp_numerical_complex64() {
     );
 }
 
+/// Complex64 scalar Sqrt VJP (frankenjax-dgvr).
+///
+/// `d/dz sqrt(z) = 1/(2*sqrt(z))` → `g_z = g/(2*sqrt(z))`. Pick the
+/// Pythagorean triple `z = 3 + 4i` so sqrt has a clean closed form:
+///   sqrt(3+4i) = 2+i (verify: (2+i)² = 4 + 4i + i² = 3+4i ✓)
+///   1/(2*(2+i)) = (4-2i)/(16+4) = 0.2 - 0.1i
+/// With `g = 1+0i`, `g_z = 0.2 - 0.1i`.
+#[test]
+fn sqrt_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(3.0, 4.0));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Sqrt,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("sqrt VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                (re - 0.2).abs() < 1e-5 && (im + 0.1).abs() < 1e-5,
+                "g_z should be (0.2, -0.1); got ({re}, {im})"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
 /// Complex64 scalar Log VJP (frankenjax-vhdl).
 ///
 /// `d/dz log(z) = 1/z` → `g_z = g/z` (complex division). Pick `z = 1+i`,

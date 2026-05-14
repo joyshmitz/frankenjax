@@ -497,6 +497,33 @@ fn scalar_value(x: f64) -> Value {
     Value::scalar_f64(x)
 }
 
+/// Build a scalar constant whose dtype matches `like`'s, so a downstream
+/// `value_mul(constant, like)` doesn't widen to a broader complex/F64 type.
+///
+/// This is the dtype-aware sibling of `scalar_value(x)` — use whenever
+/// an AD VJP/JVP needs a hard-coded numeric constant (e.g., the `2` in
+/// `1/(2*sqrt(x))`) that should track the gradient's precision instead of
+/// being unconditionally F64.
+fn scalar_constant_matching_dtype(x: f64, like: &Value) -> Value {
+    let dtype = match like {
+        Value::Scalar(lit) => dtype_for_literal(lit),
+        Value::Tensor(t) => t.dtype,
+    };
+    let lit = match dtype {
+        DType::F32 => Literal::from_f32(x as f32),
+        DType::BF16 => Literal::from_bf16_f32(x as f32),
+        DType::F16 => Literal::from_f16_f32(x as f32),
+        DType::F64 => Literal::from_f64(x),
+        DType::Complex64 => Literal::from_complex64(x as f32, 0.0),
+        DType::Complex128 => Literal::from_complex128(x, 0.0),
+        DType::I64 | DType::I32 => Literal::I64(x as i64),
+        DType::U32 => Literal::U32(x as u32),
+        DType::U64 => Literal::U64(x as u64),
+        DType::Bool => Literal::from_f64(x),
+    };
+    Value::Scalar(lit)
+}
+
 #[inline]
 fn is_near_integer(x: f64) -> bool {
     (x - x.round()).abs() < 1e-14
@@ -1251,7 +1278,10 @@ pub fn vjp(
             let x = &inputs[0];
             let sqrt_x = eval_primitive(Primitive::Sqrt, std::slice::from_ref(x), &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let two_sqrt = value_mul(&scalar_value(2.0), &sqrt_x)?;
+            // Match the "2" constant to the gradient's dtype so a
+            // Complex64 sqrt_x doesn't widen to Complex128 via F64×Complex64.
+            let two = scalar_constant_matching_dtype(2.0, g);
+            let two_sqrt = value_mul(&two, &sqrt_x)?;
             Ok(vec![value_div(g, &two_sqrt)?])
         }
         Primitive::Rsqrt => {
