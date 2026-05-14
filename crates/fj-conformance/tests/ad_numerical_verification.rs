@@ -358,6 +358,62 @@ fn fft_vjp_numerical() {
 
 // ======================== Complex primitive VJP ========================
 
+/// Complex64 scalar Mul VJP (frankenjax-o9xn).
+///
+/// Closed-form derivatives of `c = a * b` in complex arithmetic are
+/// `dc/da = b` and `dc/db = a`. With a Complex64 cotangent `g`, the
+/// chain rule yields `g_a = g * b` and `g_b = g * a`. This pins both
+/// dtype preservation (gradients stay Complex64) and exact value
+/// correctness against complex multiplication.
+#[test]
+fn mul_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let a = Value::Scalar(Literal::from_complex64(2.0, 3.0)); // 2 + 3i
+    let b = Value::Scalar(Literal::from_complex64(-1.0, 4.0)); // -1 + 4i
+    let g = Value::Scalar(Literal::from_complex64(0.5, -0.25)); // cotangent
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Mul,
+        &[a.clone(), b.clone()],
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("mul VJP should accept complex64 scalars");
+
+    assert_eq!(grads.len(), 2, "Mul VJP should return two gradients");
+
+    // dtype preservation
+    let extract_complex = |v: &Value| -> (f32, f32) {
+        match v {
+            Value::Scalar(Complex64Bits(re, im)) => (f32::from_bits(*re), f32::from_bits(*im)),
+            other => panic!("expected Complex64 scalar, got {other:?}"),
+        }
+    };
+
+    let g_a = extract_complex(&grads[0]);
+    let g_b = extract_complex(&grads[1]);
+
+    // g * b = (0.5 - 0.25i)(-1 + 4i)
+    //       = (0.5*-1 - (-0.25)*4, 0.5*4 + (-0.25)*-1)
+    //       = (-0.5 + 1.0, 2.0 + 0.25)
+    //       = (0.5, 2.25)
+    let close = |x: f32, y: f32| (x - y).abs() < 1e-5;
+    assert!(
+        close(g_a.0, 0.5) && close(g_a.1, 2.25),
+        "g_a = g*b should be (0.5, 2.25); got {g_a:?}"
+    );
+
+    // g * a = (0.5 - 0.25i)(2 + 3i)
+    //       = (0.5*2 - (-0.25)*3, 0.5*3 + (-0.25)*2)
+    //       = (1.0 + 0.75, 1.5 - 0.5)
+    //       = (1.75, 1.0)
+    assert!(
+        close(g_b.0, 1.75) && close(g_b.1, 1.0),
+        "g_b = g*a should be (1.75, 1.0); got {g_b:?}"
+    );
+}
+
 #[test]
 fn complex_conj_vjp_vector_conjugates_cotangent() {
     let input = make_complex128_vector(&[(1.0, -2.0), (-3.0, 4.0)]);
@@ -575,7 +631,7 @@ fn rfft_vjp_numerical_f32() {
         .collect();
 
     let eps_f32 = 1e-3_f32;
-    let mut numerical = vec![0.0; 4];
+    let mut numerical = [0.0_f64; 4];
     for i in 0..4 {
         let mut plus = x_data;
         plus[i] += eps_f32;

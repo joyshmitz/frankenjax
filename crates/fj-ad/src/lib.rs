@@ -671,8 +671,10 @@ fn zero_pad_last_axis_complex(tensor: &TensorValue, target_len: usize) -> Result
 
 /// Extract real parts from a complex tensor, producing an F64 tensor of the same shape.
 ///
-/// Backwards-compatible alias for `take_real_part_as(value, DType::F64)` — keeps
-/// existing F64-oriented callers working without churn.
+/// Backwards-compatible alias for `take_real_part_as(value, DType::F64)`. Kept
+/// for any out-of-tree callers that depended on the original signature before
+/// frankenjax-35ur introduced the dtype-parameterized variant.
+#[allow(dead_code)]
 fn take_real_part(value: &Value) -> Result<Value, AdError> {
     take_real_part_as(value, DType::F64)
 }
