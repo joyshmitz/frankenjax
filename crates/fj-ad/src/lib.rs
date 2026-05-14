@@ -1955,18 +1955,25 @@ pub fn vjp(
         }
         Primitive::Gather => {
             // VJP of gather: scatter the gradient back into a zero tensor
-            // of the original operand shape.
+            // of the original operand shape, preserving the gradient's
+            // dtype. The previous hard-coded F64 zero operand silently
+            // widened (or, on a strict scatter, rejected) non-F64 / complex
+            // gradients.
             let operand = &inputs[0];
             let indices = &inputs[1];
             let operand_shape = match operand {
                 Value::Scalar(_) => Shape::scalar(),
                 Value::Tensor(t) => t.shape.clone(),
             };
-            // Create zero tensor of original operand shape
+            let g_dtype = match g {
+                Value::Tensor(gt) => gt.dtype,
+                Value::Scalar(lit) => dtype_for_literal(lit),
+            };
             let total: usize = operand_shape.dims.iter().map(|d| *d as usize).product();
-            let zero_elements = vec![Literal::from_f64(0.0); total];
+            let zero_lit = zero_literal_for_dtype(g_dtype);
+            let zero_elements = vec![zero_lit; total];
             let zero_operand = Value::Tensor(
-                TensorValue::new(DType::F64, operand_shape, zero_elements)
+                TensorValue::new(g_dtype, operand_shape, zero_elements)
                     .map_err(|e| AdError::EvalFailed(e.to_string()))?,
             );
             let mut scatter_params = BTreeMap::new();
@@ -14166,6 +14173,40 @@ mod tests {
                     if f32::from_bits(*re) == 0.0 && f32::from_bits(*im) == 0.0
             ));
         }
+    }
+
+    #[test]
+    fn gather_vjp_builds_complex64_zero_operand() {
+        // Indirect test: gather VJP now picks the zero-operand dtype from
+        // g_tensor.dtype rather than hard-coding F64. Verify by reading
+        // the zero_literal_for_dtype helper directly — the Gather path
+        // funnels through eval_primitive(Scatter, ...) which is exercised
+        // elsewhere; this test guards the helper that the fix relies on.
+        assert!(matches!(
+            super::zero_literal_for_dtype(fj_core::DType::Complex64),
+            fj_core::Literal::Complex64Bits(re, im)
+                if f32::from_bits(re) == 0.0 && f32::from_bits(im) == 0.0
+        ));
+        assert!(matches!(
+            super::zero_literal_for_dtype(fj_core::DType::Complex128),
+            fj_core::Literal::Complex128Bits(re, im)
+                if f64::from_bits(re) == 0.0 && f64::from_bits(im) == 0.0
+        ));
+
+        // Also confirm dtype_for_literal — needed by the gather VJP to
+        // detect scalar g's dtype — handles all kinds.
+        assert_eq!(
+            super::dtype_for_literal(&fj_core::Literal::from_complex64(1.0, 2.0)),
+            fj_core::DType::Complex64
+        );
+        assert_eq!(
+            super::dtype_for_literal(&fj_core::Literal::from_complex128(1.0, 2.0)),
+            fj_core::DType::Complex128
+        );
+        assert_eq!(
+            super::dtype_for_literal(&fj_core::Literal::from_f32(3.0)),
+            fj_core::DType::F32
+        );
     }
 
     #[test]
