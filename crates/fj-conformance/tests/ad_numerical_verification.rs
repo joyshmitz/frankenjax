@@ -414,6 +414,40 @@ fn mul_vjp_numerical_complex64() {
     );
 }
 
+/// F64 scalar Erf VJP value sanity (frankenjax-elpz).
+///
+/// fj-ad's Erf VJP constants now route through `scalar_constant_matching_dtype`
+/// instead of unconditionally F64 `scalar_value()`. This is a defensive
+/// dtype-preservation pass — fj-lax's scalar `eval_unary_elementwise`
+/// path still widens non-complex scalar elements to F64 internally
+/// (latent issue outside this bead's scope), so end-to-end F32 dtype
+/// preservation isn't yet observable. Pin the f64 value correctness
+/// here as a smoke test for the constant rewrite.
+#[test]
+fn erf_vjp_numerical_f64_value_sanity() {
+    let x = Value::Scalar(Literal::from_f64(0.5));
+    let g = Value::Scalar(Literal::from_f64(1.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Erf,
+        std::slice::from_ref(&x),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("erf VJP should accept F64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    let actual = grads[0]
+        .as_f64_scalar()
+        .expect("Erf VJP should produce a real scalar");
+    // Expected: 2/√π * exp(-0.25) ≈ 0.878783
+    let expected = 2.0 / std::f64::consts::PI.sqrt() * (-0.25_f64).exp();
+    assert!(
+        (actual - expected).abs() < 1e-10,
+        "Erf VJP value: expected {expected}, got {actual}"
+    );
+}
+
 /// Complex64 scalar Cbrt VJP (frankenjax-6bfr).
 ///
 /// `d/dz cbrt(z) = 1/(3 * cbrt(z)²)` → `g_z = g/(3*cbrt(z)²)`. Pick

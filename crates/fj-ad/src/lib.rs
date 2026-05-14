@@ -1456,7 +1456,12 @@ pub fn vjp(
             let neg_x2 = value_neg(&x2)?;
             let exp_neg_x2 = eval_primitive(Primitive::Exp, &[neg_x2], &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let coeff = scalar_value(2.0 / std::f64::consts::PI.sqrt());
+            // Match the 2/√π coefficient to the gradient's dtype so an
+            // F32 erf input doesn't widen to F64 via F64×F32.
+            let coeff = scalar_constant_matching_dtype(
+                2.0 / std::f64::consts::PI.sqrt(),
+                g,
+            );
             let factor = value_mul(&coeff, &exp_neg_x2)?;
             Ok(vec![value_mul(g, &factor)?])
         }
@@ -1467,7 +1472,10 @@ pub fn vjp(
             let neg_x2 = value_neg(&x2)?;
             let exp_neg_x2 = eval_primitive(Primitive::Exp, &[neg_x2], &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let coeff = scalar_value(-2.0 / std::f64::consts::PI.sqrt());
+            let coeff = scalar_constant_matching_dtype(
+                -2.0 / std::f64::consts::PI.sqrt(),
+                g,
+            );
             let factor = value_mul(&coeff, &exp_neg_x2)?;
             Ok(vec![value_mul(g, &factor)?])
         }
@@ -1490,7 +1498,10 @@ pub fn vjp(
             let erf_inv_sq = value_mul(&erf_inv_x, &erf_inv_x)?;
             let exp_term = eval_primitive(Primitive::Exp, &[erf_inv_sq], &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let coeff = scalar_value(std::f64::consts::PI.sqrt() / 2.0);
+            let coeff = scalar_constant_matching_dtype(
+                std::f64::consts::PI.sqrt() / 2.0,
+                g,
+            );
             let factor = value_mul(&coeff, &exp_term)?;
             Ok(vec![value_mul(g, &factor)?])
         }
