@@ -414,6 +414,40 @@ fn mul_vjp_numerical_complex64() {
     );
 }
 
+/// Complex64 scalar Log VJP (frankenjax-vhdl).
+///
+/// `d/dz log(z) = 1/z` → `g_z = g/z` (complex division). Pick `z = 1+i`,
+/// `g = 1+0i`. Then `1/z = (1-i)/2 = 0.5 - 0.5i`, and
+/// `g_z = (1+0i)(0.5 - 0.5i) = 0.5 - 0.5i`.
+#[test]
+fn log_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(1.0, 1.0));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Log,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("log VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                (re - 0.5).abs() < 1e-5 && (im + 0.5).abs() < 1e-5,
+                "g_z should be (0.5, -0.5); got ({re}, {im})"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
 /// Complex64 scalar Exp VJP (frankenjax-aabz).
 ///
 /// For complex z = a+bi, `exp(z) = e^a * (cos(b) + i*sin(b))`. VJP:
