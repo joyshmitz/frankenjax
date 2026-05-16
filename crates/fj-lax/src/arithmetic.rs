@@ -2730,6 +2730,42 @@ mod tests {
         assert!((extract_f64(&roundtrip) - x).abs() < 1e-12);
     }
 
+    #[test]
+    fn unary_exp_f32_tensor_preserves_dtype() {
+        // Regression test for frankenjax-eldm: eval_unary_elementwise tensor
+        // arm previously emitted F64Bits element literals in an F32-declared
+        // tensor, silently corrupting the dtype/element invariant.
+        let input = v_f32(&[0.0, 1.0, 2.0]);
+        let result = eval_exp(Primitive::Exp, &[input]).unwrap();
+        let Value::Tensor(t) = result else {
+            panic!("expected tensor");
+        };
+        assert_eq!(t.dtype, DType::F32);
+        for lit in &t.elements {
+            assert!(
+                matches!(lit, Literal::F32Bits(_)),
+                "F32 tensor element must be F32Bits, got {lit:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unary_sin_f32_tensor_preserves_dtype() {
+        // Regression test for frankenjax-eldm.
+        let input = v_f32(&[0.0, 1.0, 2.0]);
+        let result = eval_sin(Primitive::Sin, &[input]).unwrap();
+        let Value::Tensor(t) = result else {
+            panic!("expected tensor");
+        };
+        assert_eq!(t.dtype, DType::F32);
+        for lit in &t.elements {
+            assert!(
+                matches!(lit, Literal::F32Bits(_)),
+                "F32 tensor element must be F32Bits, got {lit:?}"
+            );
+        }
+    }
+
     // ── Complex operations ──
 
     #[test]
