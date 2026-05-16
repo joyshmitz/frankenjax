@@ -37,8 +37,13 @@ pub fn arb_value() -> impl Strategy<Value = Value> {
         any::<u64>().prop_map(Value::scalar_u64),
         prop::num::f32::NORMAL.prop_map(Value::scalar_bf16),
         prop::num::f32::NORMAL.prop_map(Value::scalar_f16),
+        prop::num::f32::NORMAL.prop_map(Value::scalar_f32),
         prop::num::f64::NORMAL.prop_map(Value::scalar_f64),
         any::<bool>().prop_map(Value::scalar_bool),
+        (prop::num::f32::NORMAL, prop::num::f32::NORMAL)
+            .prop_map(|(re, im)| Value::scalar_complex64(re, im)),
+        (prop::num::f64::NORMAL, prop::num::f64::NORMAL)
+            .prop_map(|(re, im)| Value::scalar_complex128(re, im)),
     ]
 }
 
