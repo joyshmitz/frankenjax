@@ -2741,12 +2741,8 @@ mod tests {
             panic!("expected tensor");
         };
         assert_eq!(t.dtype, DType::F32);
-        for lit in &t.elements {
-            assert!(
-                matches!(lit, Literal::F32Bits(_)),
-                "F32 tensor element must be F32Bits, got {lit:?}"
-            );
-        }
+        t.validate_dtype_consistency()
+            .expect("F32 tensor must contain only F32Bits elements");
     }
 
     #[test]
@@ -2758,12 +2754,8 @@ mod tests {
             panic!("expected tensor");
         };
         assert_eq!(t.dtype, DType::F32);
-        for lit in &t.elements {
-            assert!(
-                matches!(lit, Literal::F32Bits(_)),
-                "F32 tensor element must be F32Bits, got {lit:?}"
-            );
-        }
+        t.validate_dtype_consistency()
+            .expect("F32 tensor must contain only F32Bits elements");
     }
 
     // ── Complex operations ──
