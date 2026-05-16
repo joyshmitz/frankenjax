@@ -5945,7 +5945,7 @@ fn jvp_rule(
         Primitive::Asin => {
             // dx / sqrt(1 - x^2)
             let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
-            let one = Value::scalar_f64(1.0);
+            let one = scalar_constant_matching_dtype(1.0, &tangents[0]);
             let diff = ep(Primitive::Sub, &[one, x_sq])?;
             let sqrt_diff = ep(Primitive::Sqrt, &[diff])?;
             ep(Primitive::Div, &[tangents[0].clone(), sqrt_diff])
@@ -5954,7 +5954,7 @@ fn jvp_rule(
         Primitive::Acos => {
             // -dx / sqrt(1 - x^2)
             let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
-            let one = Value::scalar_f64(1.0);
+            let one = scalar_constant_matching_dtype(1.0, &tangents[0]);
             let diff = ep(Primitive::Sub, &[one, x_sq])?;
             let sqrt_diff = ep(Primitive::Sqrt, &[diff])?;
             let neg_dx = ep(Primitive::Neg, &[tangents[0].clone()])?;
@@ -5964,7 +5964,7 @@ fn jvp_rule(
         Primitive::Atan => {
             // dx / (1 + x^2)
             let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
-            let one = Value::scalar_f64(1.0);
+            let one = scalar_constant_matching_dtype(1.0, &tangents[0]);
             let denom = ep(Primitive::Add, &[one, x_sq])?;
             ep(Primitive::Div, &[tangents[0].clone(), denom])
         }
@@ -6036,7 +6036,7 @@ fn jvp_rule(
 
         Primitive::Square => {
             // 2 * x * dx
-            let two = Value::scalar_f64(2.0);
+            let two = scalar_constant_matching_dtype(2.0, &tangents[0]);
             let two_x = ep(Primitive::Mul, &[two, primals[0].clone()])?;
             ep(Primitive::Mul, &[two_x, tangents[0].clone()])
         }
@@ -6051,7 +6051,7 @@ fn jvp_rule(
         Primitive::Logistic => {
             // sig(x) * (1 - sig(x)) * dx
             let sig = ep(Primitive::Logistic, &[primals[0].clone()])?;
-            let one = Value::scalar_f64(1.0);
+            let one = scalar_constant_matching_dtype(1.0, &tangents[0]);
             let one_minus_sig = ep(Primitive::Sub, &[one, sig.clone()])?;
             let coeff = ep(Primitive::Mul, &[sig, one_minus_sig])?;
             ep(Primitive::Mul, &[coeff, tangents[0].clone()])
@@ -6059,7 +6059,10 @@ fn jvp_rule(
 
         Primitive::Erf => {
             // (2/sqrt(pi)) * exp(-x^2) * dx
-            let coeff = Value::scalar_f64(2.0 / std::f64::consts::PI.sqrt());
+            let coeff = scalar_constant_matching_dtype(
+                2.0 / std::f64::consts::PI.sqrt(),
+                &tangents[0],
+            );
             let neg_x_sq = {
                 let x_sq = ep(Primitive::Mul, &[primals[0].clone(), primals[0].clone()])?;
                 ep(Primitive::Neg, &[x_sq])?
