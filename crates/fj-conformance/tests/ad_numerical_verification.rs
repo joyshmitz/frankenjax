@@ -1002,12 +1002,9 @@ fn rfft_vjp_numerical_f32() {
         DType::F32,
         "RFFT VJP must keep F32 dtype when input is F32"
     );
-    for elem in &vjp_tensor.elements {
-        assert!(
-            matches!(elem, Literal::F32Bits(_)),
-            "RFFT F32 VJP element must store F32Bits; got {elem:?}"
-        );
-    }
+    vjp_tensor
+        .validate_dtype_consistency()
+        .expect("RFFT F32 VJP cotangent dtype/element invariant");
 
     // Finite-difference check on sum(Re(RFFT(x))).
     let analytical: Vec<f64> = vjp_tensor
