@@ -1090,6 +1090,16 @@ fn infer_dtype_from_literals(elements: &[Literal]) -> DType {
         .all(|literal| matches!(literal, Literal::F32Bits(_)))
     {
         DType::F32
+    } else if elements
+        .iter()
+        .all(|literal| matches!(literal, Literal::Complex64Bits(..)))
+    {
+        DType::Complex64
+    } else if elements
+        .iter()
+        .all(|literal| matches!(literal, Literal::Complex128Bits(..)))
+    {
+        DType::Complex128
     } else {
         DType::F64
     }
@@ -3636,6 +3646,23 @@ mod tests {
         let empty_repeat = TensorValue::repeat_axis0(&Value::scalar_i64(0), 0)
             .expect_err("empty repeat should preserve stack's empty-axis error");
         assert!(matches!(empty_repeat, ValueError::EmptyAxisStack));
+    }
+
+    #[test]
+    fn stack_axis0_preserves_complex_scalar_dtype() {
+        // Regression test for frankenjax-znx7: infer_dtype_from_literals
+        // previously fell through to DType::F64 for all-Complex literal lists,
+        // so stack_axis0 of complex scalars produced a tensor declaring F64
+        // while containing Complex elements.
+        let c1 = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+        let c2 = Value::Scalar(Literal::from_complex64(2.0, 0.0));
+        let stacked = TensorValue::stack_axis0(&[c1, c2]).expect("complex64 stack");
+        assert_eq!(stacked.dtype, DType::Complex64);
+
+        let d1 = Value::Scalar(Literal::from_complex128(1.0, 0.0));
+        let d2 = Value::Scalar(Literal::from_complex128(2.0, 0.0));
+        let stacked128 = TensorValue::stack_axis0(&[d1, d2]).expect("complex128 stack");
+        assert_eq!(stacked128.dtype, DType::Complex128);
     }
 
     #[test]
