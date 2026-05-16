@@ -2905,7 +2905,9 @@ pub fn vjp(
                 .get("exponent")
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(1);
-            let n_val = Value::scalar_f64(f64::from(n));
+            // Anchor `n` to the cotangent's dtype so F32/BF16/F16/Complex
+            // inputs don't get widened through F64 constant promotion.
+            let n_val = scalar_constant_matching_dtype(f64::from(n), g);
             let mut nm1_params = params.clone();
             nm1_params.insert("exponent".into(), (n - 1).to_string());
             let x_nm1 = eval_primitive(Primitive::IntegerPow, inputs, &nm1_params)
