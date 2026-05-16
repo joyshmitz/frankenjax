@@ -7030,13 +7030,15 @@ fn reconstruct_args_from_flat(
 
 fn basis_value_like(template: &Value, basis_index: usize) -> Result<Value, AdError> {
     match template {
-        Value::Scalar(_) => {
+        Value::Scalar(lit) => {
             if basis_index != 0 {
                 return Err(AdError::EvalFailed(format!(
                     "scalar basis index out of range: {basis_index}"
                 )));
             }
-            Ok(Value::scalar_f64(1.0))
+            // Preserve template dtype so JVP-based Jacobian assembly doesn't
+            // widen F32/BF16/F16/Complex primals to F64 through the tangent.
+            Ok(Value::Scalar(one_literal_for_dtype(dtype_for_literal(lit))))
         }
         Value::Tensor(tensor) => {
             if basis_index >= tensor.len() {
@@ -7045,9 +7047,9 @@ fn basis_value_like(template: &Value, basis_index: usize) -> Result<Value, AdErr
                     tensor.len()
                 )));
             }
-            let mut elements = vec![Literal::from_f64(0.0); tensor.len()];
-            elements[basis_index] = Literal::from_f64(1.0);
-            TensorValue::new(DType::F64, tensor.shape.clone(), elements)
+            let mut elements = vec![zero_literal_for_dtype(tensor.dtype); tensor.len()];
+            elements[basis_index] = one_literal_for_dtype(tensor.dtype);
+            TensorValue::new(tensor.dtype, tensor.shape.clone(), elements)
                 .map(Value::Tensor)
                 .map_err(|e| AdError::EvalFailed(e.to_string()))
         }
