@@ -1222,7 +1222,19 @@ pub(crate) fn eval_unary_elementwise(
                 primitive,
                 detail: "expected numeric scalar",
             })?;
-            Ok(Value::scalar_f64(op(value)))
+            // Preserve the input literal's dtype so unary transcendentals
+            // (Exp, Log, Sin, Cos, …) on F32/BF16/F16 scalars don't get
+            // silently widened to F64. Integer/Bool inputs fall back to
+            // F64 since these primitives are not natively integer-typed.
+            let result = op(value);
+            let out_lit = match literal {
+                Literal::F32Bits(_) => Literal::from_f32(result as f32),
+                Literal::BF16Bits(_) => Literal::from_bf16_f32(result as f32),
+                Literal::F16Bits(_) => Literal::from_f16_f32(result as f32),
+                Literal::F64Bits(_) => Literal::from_f64(result),
+                _ => Literal::from_f64(result),
+            };
+            Ok(Value::Scalar(out_lit))
         }
         Value::Tensor(tensor) => {
             if matches!(tensor.dtype, DType::Complex64 | DType::Complex128) {
