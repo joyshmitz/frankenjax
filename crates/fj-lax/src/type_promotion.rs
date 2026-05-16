@@ -116,34 +116,6 @@ pub fn promote_dtype(lhs: DType, rhs: DType) -> DType {
     }
 }
 
-/// Infer the DType from a slice of Literal elements.
-/// Returns I64 if all are I64, Bool if all are Bool, otherwise F64.
-#[inline]
-#[allow(dead_code)]
-pub(crate) fn infer_dtype(elements: &[Literal]) -> DType {
-    if elements.is_empty() {
-        return DType::F64;
-    }
-    if elements
-        .iter()
-        .all(|literal| matches!(literal, Literal::I64(_)))
-    {
-        DType::I64
-    } else if elements
-        .iter()
-        .all(|literal| matches!(literal, Literal::Bool(_)))
-    {
-        DType::Bool
-    } else if elements
-        .iter()
-        .all(|literal| matches!(literal, Literal::F32Bits(_)))
-    {
-        DType::F32
-    } else {
-        DType::F64
-    }
-}
-
 /// Apply a binary operation to two literals, dispatching on int vs float.
 #[inline]
 pub(crate) fn binary_literal_op(
