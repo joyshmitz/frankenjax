@@ -8324,6 +8324,22 @@ mod tests {
     }
 
     #[test]
+    fn test_tanh_jvp_f32_preserves_dtype() {
+        // Regression test for frankenjax-6so0: the JVP entry for Tanh used
+        // Value::scalar_f64(1.0) for the "1" in (1 - tanh²x)·dx, which would
+        // widen F32 primals/tangents to F64. The fix anchors the constant on
+        // tangents[0] via scalar_constant_matching_dtype.
+        let primals = vec![Value::scalar_f32(0.5)];
+        let tangents = vec![Value::scalar_f32(1.0)];
+        let params = BTreeMap::new();
+        let out = jvp_rule(Primitive::Tanh, &primals, &tangents, &params).expect("jvp");
+        match out {
+            Value::Scalar(Literal::F32Bits(_)) => {}
+            other => panic!("expected F32Bits scalar tangent, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_squeeze_jvp() {
         let primal = Value::Tensor(
             TensorValue::new(
