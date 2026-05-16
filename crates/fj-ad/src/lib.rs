@@ -573,16 +573,23 @@ fn trigamma_value(x: &Value) -> Result<Value, AdError> {
             let x_val = lit.as_f64().ok_or_else(|| {
                 AdError::EvalFailed("digamma VJP expects numeric scalar".to_owned())
             })?;
-            Ok(Value::scalar_f64(trigamma_scalar(x_val)))
+            // Preserve input dtype so digamma's derivative chain doesn't
+            // widen F32/BF16/F16 primals to F64.
+            let dtype = dtype_for_literal(lit);
+            Ok(Value::Scalar(literal_from_f64_for_dtype(
+                dtype,
+                trigamma_scalar(x_val),
+            )))
         }
         Value::Tensor(tensor) => {
+            let dtype = tensor.dtype;
             let elements = tensor
                 .elements
                 .iter()
                 .map(|lit| {
                     lit.as_f64()
                         .map(trigamma_scalar)
-                        .map(Literal::from_f64)
+                        .map(|v| literal_from_f64_for_dtype(dtype, v))
                         .ok_or_else(|| {
                             AdError::EvalFailed(
                                 "digamma VJP expects numeric tensor elements".to_owned(),
@@ -591,7 +598,7 @@ fn trigamma_value(x: &Value) -> Result<Value, AdError> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(Value::Tensor(
-                TensorValue::new(DType::F64, tensor.shape.clone(), elements)
+                TensorValue::new(dtype, tensor.shape.clone(), elements)
                     .map_err(|e| AdError::EvalFailed(e.to_string()))?,
             ))
         }
