@@ -6979,16 +6979,34 @@ fn flatten_values_to_f64(values: &[Value]) -> Result<Vec<f64>, AdError> {
     Ok(out)
 }
 
+fn literal_from_f64_for_dtype(dtype: DType, value: f64) -> Literal {
+    match dtype {
+        DType::I64 | DType::I32 => Literal::I64(value as i64),
+        DType::U32 => Literal::U32(value as u32),
+        DType::U64 => Literal::U64(value as u64),
+        DType::Bool => Literal::Bool(value != 0.0),
+        DType::BF16 => Literal::from_bf16_f32(value as f32),
+        DType::F16 => Literal::from_f16_f32(value as f32),
+        DType::F32 => Literal::from_f32(value as f32),
+        DType::F64 => Literal::from_f64(value),
+        DType::Complex64 => Literal::from_complex64(value as f32, 0.0),
+        DType::Complex128 => Literal::from_complex128(value, 0.0),
+    }
+}
+
 fn value_from_flat_like(template: &Value, flat_values: &[f64]) -> Result<Value, AdError> {
     match template {
-        Value::Scalar(_) => {
+        Value::Scalar(lit) => {
             if flat_values.len() != 1 {
                 return Err(AdError::EvalFailed(format!(
                     "scalar reconstruction expected 1 value, got {}",
                     flat_values.len()
                 )));
             }
-            Ok(Value::scalar_f64(flat_values[0]))
+            // Preserve the template's dtype so finite-diff / JVP arg
+            // reconstruction doesn't widen F32/BF16/F16/Complex to F64.
+            let dtype = dtype_for_literal(lit);
+            Ok(Value::Scalar(literal_from_f64_for_dtype(dtype, flat_values[0])))
         }
         Value::Tensor(tensor) => {
             if flat_values.len() != tensor.len() {
@@ -7001,9 +7019,9 @@ fn value_from_flat_like(template: &Value, flat_values: &[f64]) -> Result<Value, 
             let elements = flat_values
                 .iter()
                 .copied()
-                .map(Literal::from_f64)
+                .map(|v| literal_from_f64_for_dtype(tensor.dtype, v))
                 .collect::<Vec<_>>();
-            TensorValue::new(DType::F64, tensor.shape.clone(), elements)
+            TensorValue::new(tensor.dtype, tensor.shape.clone(), elements)
                 .map(Value::Tensor)
                 .map_err(|e| AdError::EvalFailed(e.to_string()))
         }
