@@ -116,18 +116,7 @@ fn first_literal(val: &Value) -> Option<Literal> {
 }
 
 fn literal_matches_dtype(literal: Literal, dtype: DType) -> bool {
-    match dtype {
-        DType::Bool => matches!(literal, Literal::Bool(_)),
-        DType::I32 | DType::I64 => matches!(literal, Literal::I64(_)),
-        DType::U32 => matches!(literal, Literal::U32(_)),
-        DType::U64 => matches!(literal, Literal::U64(_)),
-        DType::BF16 => matches!(literal, Literal::BF16Bits(_)),
-        DType::F16 => matches!(literal, Literal::F16Bits(_)),
-        DType::F32 => matches!(literal, Literal::F32Bits(_)),
-        DType::F64 => matches!(literal, Literal::F64Bits(_)),
-        DType::Complex64 => matches!(literal, Literal::Complex64Bits(..)),
-        DType::Complex128 => matches!(literal, Literal::Complex128Bits(..)),
-    }
+    literal.matches_dtype(dtype)
 }
 
 fn dtype_value_tolerance(dtype: DType) -> f64 {

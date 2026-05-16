@@ -544,6 +544,28 @@ impl Literal {
         Self::Complex128Bits(re.to_bits(), im.to_bits())
     }
 
+    /// Check whether this literal's kind is consistent with the given dtype.
+    ///
+    /// Used to assert the dtype/element invariant: a `TensorValue` declaring
+    /// `DType::X` must contain only literals whose kind corresponds to `X`.
+    /// `I32` and `I64` both map to `Literal::I64`; everything else is a 1:1
+    /// pairing.
+    #[must_use]
+    pub fn matches_dtype(self, dtype: DType) -> bool {
+        match dtype {
+            DType::Bool => matches!(self, Self::Bool(_)),
+            DType::I32 | DType::I64 => matches!(self, Self::I64(_)),
+            DType::U32 => matches!(self, Self::U32(_)),
+            DType::U64 => matches!(self, Self::U64(_)),
+            DType::BF16 => matches!(self, Self::BF16Bits(_)),
+            DType::F16 => matches!(self, Self::F16Bits(_)),
+            DType::F32 => matches!(self, Self::F32Bits(_)),
+            DType::F64 => matches!(self, Self::F64Bits(_)),
+            DType::Complex64 => matches!(self, Self::Complex64Bits(..)),
+            DType::Complex128 => matches!(self, Self::Complex128Bits(..)),
+        }
+    }
+
     #[must_use]
     pub fn as_f64(self) -> Option<f64> {
         match self {
