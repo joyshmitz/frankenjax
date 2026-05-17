@@ -1108,13 +1108,9 @@ mod tests {
         match result {
             Value::Tensor(tensor) => {
                 assert_eq!(tensor.dtype, DType::F32);
-                assert!(
-                    tensor
-                        .elements
-                        .iter()
-                        .all(|element| matches!(element, Literal::F32Bits(_))),
-                    "IRFFT Complex64 output must store F32Bits elements"
-                );
+                tensor
+                    .validate_dtype_consistency()
+                    .expect("IRFFT Complex64 output dtype/element invariant");
             }
             Value::Scalar(_) => panic!("IRFFT must return a tensor"),
         }
