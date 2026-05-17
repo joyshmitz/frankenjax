@@ -5880,13 +5880,8 @@ mod tests {
         if let Value::Tensor(t) = &out {
             assert_eq!(t.dtype, DType::BF16);
             assert_eq!(t.shape.dims, vec![1, 2, 1]);
-            assert!(
-                t.elements
-                    .iter()
-                    .all(|literal| matches!(literal, Literal::BF16Bits(_))),
-                "conv BF16 output should store BF16 literals: {:?}",
-                t.elements
-            );
+            t.validate_dtype_consistency()
+                .expect("conv BF16 output dtype/element invariant");
         } else {
             assert!(matches!(out, Value::Tensor(_)), "expected tensor");
         }
@@ -7614,13 +7609,8 @@ mod tests {
         if let Value::Tensor(t) = &out {
             assert_eq!(t.dtype, DType::BF16);
             assert_eq!(t.shape.dims, vec![3]);
-            assert!(
-                t.elements
-                    .iter()
-                    .all(|literal| matches!(literal, Literal::BF16Bits(_))),
-                "reduce_window BF16 output should store BF16 literals: {:?}",
-                t.elements
-            );
+            t.validate_dtype_consistency()
+                .expect("reduce_window BF16 output dtype/element invariant");
             let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
             assert_eq!(vals, vec![3.0, 3.0, 4.0]);
         } else {
