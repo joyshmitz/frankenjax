@@ -1697,12 +1697,9 @@ fn fft_vjp_complex64_preserves_dtype() {
         DType::Complex64,
         "FFT VJP must keep Complex64 dtype for Complex64 input + Complex64 cotangent"
     );
-    for elem in &vjp_tensor.elements {
-        assert!(
-            matches!(elem, Complex64Bits(..)),
-            "FFT VJP element must store Complex64Bits; got {elem:?}"
-        );
-    }
+    vjp_tensor
+        .validate_dtype_consistency()
+        .expect("FFT Complex64 VJP cotangent dtype/element invariant");
 }
 
 /// IFFT VJP regression for Complex64 input (frankenjax-gvkt).
@@ -1742,12 +1739,9 @@ fn ifft_vjp_complex64_preserves_dtype() {
         DType::Complex64,
         "IFFT VJP must keep Complex64 dtype for Complex64 input + Complex64 cotangent"
     );
-    for elem in &vjp_tensor.elements {
-        assert!(
-            matches!(elem, Complex64Bits(..)),
-            "IFFT VJP element must store Complex64Bits; got {elem:?}"
-        );
-    }
+    vjp_tensor
+        .validate_dtype_consistency()
+        .expect("IFFT Complex64 VJP cotangent dtype/element invariant");
 }
 
 // ======================== IRFFT VJP ========================
