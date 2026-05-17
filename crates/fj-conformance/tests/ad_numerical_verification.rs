@@ -1663,8 +1663,6 @@ fn ifft_vjp_numerical() {
 /// preservation by asserting the VJP output stays Complex64.
 #[test]
 fn fft_vjp_complex64_preserves_dtype() {
-    use fj_core::Literal::Complex64Bits;
-
     let x_re: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
     let x_im: [f32; 4] = [0.5, -0.5, 1.5, -1.5];
     let x = Value::Tensor(
@@ -1705,8 +1703,6 @@ fn fft_vjp_complex64_preserves_dtype() {
 /// IFFT VJP regression for Complex64 input (frankenjax-gvkt).
 #[test]
 fn ifft_vjp_complex64_preserves_dtype() {
-    use fj_core::Literal::Complex64Bits;
-
     let x = Value::Tensor(
         TensorValue::new(
             DType::Complex64,
