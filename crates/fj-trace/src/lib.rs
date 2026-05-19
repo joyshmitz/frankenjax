@@ -3109,12 +3109,21 @@ fn infer_concatenate(
     }
 
     let mut out_dims = inputs[0].shape.dims.clone();
-    let mut out_dtype = inputs[0].dtype;
-    for input in &inputs[1..] {
+    let out_dtype = inputs[0].dtype;
+    for (input_idx, input) in inputs.iter().enumerate().skip(1) {
         if input.shape.rank() != rank {
             return Err(TraceError::ShapeInferenceFailed {
                 primitive,
                 detail: "concat rank mismatch across inputs".to_owned(),
+            });
+        }
+        if input.dtype != out_dtype {
+            return Err(TraceError::ShapeInferenceFailed {
+                primitive,
+                detail: format!(
+                    "concat input {input_idx} dtype {:?} does not match input 0 dtype {:?}",
+                    input.dtype, out_dtype
+                ),
             });
         }
         for (dim_idx, (expected_dim, actual_dim)) in
@@ -3139,7 +3148,6 @@ fn infer_concatenate(
                 primitive,
                 detail: "concat axis size overflow".to_owned(),
             })?;
-        out_dtype = promote_dtype(out_dtype, input.dtype);
     }
 
     Ok(vec![ShapedArray {
@@ -4155,6 +4163,42 @@ mod tests {
                 assert_eq!(
                     ctx.tracer_aval(selected[0]).expect("aval present").shape,
                     Shape { dims: vec![5, 7] }
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn infer_concatenate_rejects_dtype_mismatch() {
+        run_logged_test(
+            "infer_concatenate_rejects_dtype_mismatch",
+            fj_test_utils::fixture_id_from_json(&("concatenate-dtype-mismatch", [2_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![
+                    ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![2] },
+                    },
+                    ShapedArray {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![2] },
+                    },
+                ]);
+
+                let err = ctx
+                    .process_primitive(
+                        Primitive::Concatenate,
+                        &[TracerId(1), TracerId(2)],
+                        BTreeMap::new(),
+                    )
+                    .expect_err("mixed dtype concatenate should fail during tracing");
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("dtype") && msg.contains("does not match"),
+                    "unexpected error: {err}"
                 );
                 Ok(Vec::new())
             },
