@@ -537,3 +537,46 @@ fn metamorphic_reduce_sum_negation_cancels() {
 
     assert_close(sum_x + sum_neg_x, 0.0, 1e-14, "sum(x) + sum(neg(x)) = 0");
 }
+
+// Regression test for the dtype-preservation fix to fj-lax::reduction
+// (eval_reduce / eval_reduce_axes used to force the float output to
+// DType::F64 with F64Bits elements, widening F32/BF16/F16 inputs).
+#[test]
+fn oracle_reduce_sum_f32_full_preserves_dtype() {
+    let data: Vec<Literal> = [1.0_f32, 2.0, 3.0, 4.0]
+        .into_iter()
+        .map(Literal::from_f32)
+        .collect();
+    let input =
+        Value::Tensor(TensorValue::new(DType::F32, Shape { dims: vec![4] }, data).unwrap());
+
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &BTreeMap::new()).unwrap();
+    match result {
+        Value::Scalar(Literal::F32Bits(bits)) => {
+            let value = f32::from_bits(bits);
+            assert!((value - 10.0).abs() < 1e-6, "expected 10.0, got {value}");
+        }
+        other => panic!("expected F32Bits scalar from F32 reduce_sum, got {other:?}"),
+    }
+}
+
+#[test]
+fn oracle_reduce_sum_f32_axes_preserves_dtype() {
+    let data: Vec<Literal> = [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+        .into_iter()
+        .map(Literal::from_f32)
+        .collect();
+    let input =
+        Value::Tensor(TensorValue::new(DType::F32, Shape { dims: vec![2, 3] }, data).unwrap());
+
+    let mut params = BTreeMap::new();
+    params.insert("axes".to_string(), "1".to_string());
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &params).unwrap();
+    let Value::Tensor(t) = result else {
+        panic!("expected tensor");
+    };
+    assert_eq!(t.dtype, DType::F32);
+    assert_eq!(t.shape.dims, vec![2]);
+    t.validate_dtype_consistency()
+        .expect("F32 reduce_sum axes output dtype/element invariant");
+}
