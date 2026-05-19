@@ -1862,7 +1862,8 @@ impl SimpleTraceContext {
                 }
 
                 Ok(vec![ShapedArray {
-                    dtype: promote_dtype(input.dtype, input.dtype),
+                    // ReduceWindow preserves the input dtype.
+                    dtype: input.dtype,
                     shape: Shape { dims: out_dims },
                 }])
             }
