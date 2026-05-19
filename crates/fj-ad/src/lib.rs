@@ -1192,6 +1192,17 @@ pub fn vjp_single(
     vjp(primitive, inputs, std::slice::from_ref(g), &[], params)
 }
 
+fn require_input_arity(inputs: &[Value], expected: usize) -> Result<(), AdError> {
+    if inputs.len() == expected {
+        Ok(())
+    } else {
+        Err(AdError::InputArity {
+            expected,
+            actual: inputs.len(),
+        })
+    }
+}
+
 /// Compute VJP (reverse-mode AD) for a single primitive application.
 pub fn vjp(
     primitive: Primitive,
@@ -2287,6 +2298,7 @@ pub fn vjp(
             // Return a shape/dtype-matching zero so downstream autodiff
             // composition doesn't see a stray scalar where the index
             // tensor was.
+            require_input_arity(inputs, 1)?;
             Ok(vec![zeros_like(&inputs[0])])
         }
         Primitive::Copy => Ok(vec![g.clone()]),
@@ -2761,6 +2773,7 @@ pub fn vjp(
         Primitive::Argsort => {
             // Argsort is not differentiable (returns integer indices).
             // Use zeros_like so the cotangent shape matches the input.
+            require_input_arity(inputs, 1)?;
             Ok(vec![zeros_like(&inputs[0])])
         }
         Primitive::Conv => {
@@ -8179,7 +8192,9 @@ mod tests {
         let mut params = BTreeMap::new();
         params.insert("num_classes".into(), "3".into());
 
-        let grads = vjp_single(Primitive::OneHot, &[indices.clone()], &g, &params).expect("vjp");
+        let grads =
+            vjp_single(Primitive::OneHot, std::slice::from_ref(&indices), &g, &params)
+                .expect("vjp");
         let grad = grads[0].as_tensor().expect("grad must be a tensor, not scalar");
         let input_tensor = indices.as_tensor().expect("input is tensor");
         assert_eq!(grad.shape.dims, input_tensor.shape.dims);
@@ -8195,12 +8210,53 @@ mod tests {
         let g = Value::vector_i64(&[1, 0, 2]).expect("vector");
         let params = BTreeMap::new();
 
-        let grads = vjp_single(Primitive::Argsort, &[input.clone()], &g, &params).expect("vjp");
+        let grads =
+            vjp_single(Primitive::Argsort, std::slice::from_ref(&input), &g, &params)
+                .expect("vjp");
         let grad = grads[0].as_tensor().expect("grad must be a tensor, not scalar");
         let input_tensor = input.as_tensor().expect("input is tensor");
         assert_eq!(grad.shape.dims, input_tensor.shape.dims);
         grad.validate_dtype_consistency()
             .expect("Argsort VJP cotangent dtype/element invariant");
+    }
+
+    #[test]
+    fn test_one_hot_argsort_vjp_rejects_bad_input_arity() {
+        let g = Value::scalar_f64(1.0);
+        let params = BTreeMap::new();
+
+        for primitive in [Primitive::OneHot, Primitive::Argsort] {
+            let no_inputs =
+                vjp_single(primitive, &[], &g, &params).expect_err("missing input should error");
+            assert!(
+                matches!(
+                    no_inputs,
+                    AdError::InputArity {
+                        expected: 1,
+                        actual: 0
+                    }
+                ),
+                "expected InputArity for missing {primitive:?} input, got {no_inputs:?}"
+            );
+
+            let extra_inputs = vjp_single(
+                primitive,
+                &[Value::scalar_i64(0), Value::scalar_i64(1)],
+                &g,
+                &params,
+            )
+            .expect_err("extra input should error");
+            assert!(
+                matches!(
+                    extra_inputs,
+                    AdError::InputArity {
+                        expected: 1,
+                        actual: 2
+                    }
+                ),
+                "expected InputArity for extra {primitive:?} input, got {extra_inputs:?}"
+            );
+        }
     }
 
     #[test]
@@ -14110,10 +14166,12 @@ mod tests {
         for t in 0..2 {
             handles.push(thread::spawn(move || {
                 for i in 0..10 {
-                    let primitive = if (t + i) % 2 == 0 {
-                        Primitive::Sin
-                    } else {
-                        Primitive::Cos
+                    let primitive = match (t * 10 + i) % 5 {
+                        0 => Primitive::Psum,
+                        1 => Primitive::Pmean,
+                        2 => Primitive::AllGather,
+                        3 => Primitive::AllToAll,
+                        _ => Primitive::AxisIndex,
                     };
                     super::register_custom_jvp(primitive, |_primals, tangents, _params| {
                         Ok(tangents[0].clone())
