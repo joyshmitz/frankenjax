@@ -52,14 +52,31 @@ fn extract_matrix(
     Ok((m, n, elements, tensor.dtype))
 }
 
-/// Build a Value::Tensor from row-major f64 data and shape.
+/// Build a Value::Tensor from row-major f64 data and shape, emitting
+/// element literals that match the declared `dtype`. Before this, the
+/// helper unconditionally used `Literal::from_f64`, leaving F32/BF16/F16
+/// linalg outputs (Cholesky, QR, SVD, Eigh, TriangularSolve) declaring
+/// their input dtype but storing F64Bits — a dtype/element invariant
+/// violation.
 fn matrix_to_value(m: usize, n: usize, data: &[f64], dtype: DType) -> Result<Value, EvalError> {
-    let elements: Vec<Literal> = data.iter().map(|&v| Literal::from_f64(v)).collect();
+    let elements: Vec<Literal> = data
+        .iter()
+        .map(|&v| linalg_literal_from_f64(dtype, v))
+        .collect();
     let shape = Shape {
         dims: vec![m as u32, n as u32],
     };
     let tensor = TensorValue::new(dtype, shape, elements).map_err(EvalError::InvalidTensor)?;
     Ok(Value::Tensor(tensor))
+}
+
+fn linalg_literal_from_f64(dtype: DType, value: f64) -> Literal {
+    match dtype {
+        DType::BF16 => Literal::from_bf16_f32(value as f32),
+        DType::F16 => Literal::from_f16_f32(value as f32),
+        DType::F32 => Literal::from_f32(value as f32),
+        _ => Literal::from_f64(value),
+    }
 }
 
 // ── Cholesky decomposition ──────────────────────────────────────────
@@ -490,8 +507,13 @@ pub(crate) fn eval_svd(
 
     let u_val = matrix_to_value(m, u_cols, &u_out, dtype)?;
 
-    // S is a 1D vector
-    let s_elements: Vec<Literal> = sigma.iter().map(|&v| Literal::from_f64(v)).collect();
+    // S is a 1D vector — emit dtype-matching literals so an F32 SVD's
+    // singular-value tensor doesn't end up declaring F32 with F64Bits
+    // elements.
+    let s_elements: Vec<Literal> = sigma
+        .iter()
+        .map(|&v| linalg_literal_from_f64(dtype, v))
+        .collect();
     let s_shape = Shape {
         dims: vec![k as u32],
     };
@@ -674,8 +696,13 @@ pub(crate) fn eval_eigh(
         }
     }
 
-    // W is a 1D vector of eigenvalues
-    let w_elements: Vec<Literal> = w_sorted.iter().map(|&v| Literal::from_f64(v)).collect();
+    // W is a 1D vector of eigenvalues — emit dtype-matching literals so
+    // an F32 Eigh's eigenvalue tensor doesn't end up declaring F32 with
+    // F64Bits elements.
+    let w_elements: Vec<Literal> = w_sorted
+        .iter()
+        .map(|&v| linalg_literal_from_f64(dtype, v))
+        .collect();
     let w_shape = Shape {
         dims: vec![m as u32],
     };
