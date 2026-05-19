@@ -418,13 +418,51 @@ fn params_for(primitive: Primitive, dtype: DType) -> BTreeMap<String, String> {
 
 fn dtype_name(dtype: DType) -> &'static str {
     match dtype {
+        DType::I32 => "i32",
         DType::I64 => "i64",
         DType::U32 => "u32",
         DType::U64 => "u64",
+        DType::BF16 => "bf16",
+        DType::F16 => "f16",
+        DType::F32 => "f32",
         DType::F64 => "f64",
+        DType::Complex64 => "complex64",
         DType::Complex128 => "complex128",
         DType::Bool => "bool",
-        _ => "f64",
+    }
+}
+
+#[test]
+fn dtype_parameter_names_cover_representative_dtype_matrix() {
+    let expected_names = [
+        (DType::I32, "i32"),
+        (DType::I64, "i64"),
+        (DType::U32, "u32"),
+        (DType::U64, "u64"),
+        (DType::BF16, "bf16"),
+        (DType::F16, "f16"),
+        (DType::F32, "f32"),
+        (DType::F64, "f64"),
+        (DType::Complex64, "complex64"),
+        (DType::Complex128, "complex128"),
+        (DType::Bool, "bool"),
+    ];
+    let dtype_param_primitives = [
+        Primitive::Iota,
+        Primitive::BroadcastedIota,
+        Primitive::OneHot,
+    ];
+
+    for (dtype, expected_name) in expected_names {
+        assert_eq!(dtype_name(dtype), expected_name);
+        for primitive in dtype_param_primitives {
+            let params = params_for(primitive, dtype);
+            assert_eq!(
+                params.get("dtype").map(String::as_str),
+                Some(expected_name),
+                "{primitive:?}/{dtype:?} should preserve the representative dtype"
+            );
+        }
     }
 }
 
