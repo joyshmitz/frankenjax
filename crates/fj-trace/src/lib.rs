@@ -1332,6 +1332,13 @@ impl SimpleTraceContext {
                     "I32" | "i32" => DType::I32,
                     "U32" | "u32" => DType::U32,
                     "U64" | "u64" => DType::U64,
+                    "BF16" | "bf16" => DType::BF16,
+                    "F16" | "f16" => DType::F16,
+                    "F32" | "f32" => DType::F32,
+                    "F64" | "f64" => DType::F64,
+                    "Bool" | "bool" => DType::Bool,
+                    "Complex64" | "complex64" => DType::Complex64,
+                    "Complex128" | "complex128" => DType::Complex128,
                     _ => DType::F64,
                 };
                 let mut out_dims = inputs[0].shape.dims.clone();
