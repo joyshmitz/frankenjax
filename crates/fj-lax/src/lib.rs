@@ -1455,17 +1455,14 @@ fn parse_reduce_window_padding(
     }
 }
 
-fn reduce_window_output_dtype(input_dtype: fj_core::DType) -> fj_core::DType {
-    match input_dtype {
-        fj_core::DType::BF16 | fj_core::DType::F16 | fj_core::DType::F32 | fj_core::DType::F64 => {
-            input_dtype
-        }
-        fj_core::DType::I32 | fj_core::DType::I64 | fj_core::DType::U32 | fj_core::DType::U64 => {
-            input_dtype
-        }
-        fj_core::DType::Bool => fj_core::DType::Bool,
-        fj_core::DType::Complex64 | fj_core::DType::Complex128 => input_dtype,
-    }
+/// ReduceWindow preserves the input dtype across all variants — every arm of
+/// the prior exhaustive match returned `input_dtype` (including the Bool arm
+/// returning `DType::Bool == input_dtype`), so it was effectively the
+/// identity. The function is retained as a named helper so call sites read
+/// like a contract ("this primitive preserves dtype") rather than passing the
+/// raw input field through.
+const fn reduce_window_output_dtype(input_dtype: fj_core::DType) -> fj_core::DType {
+    input_dtype
 }
 
 fn reduce_window_literal_from_f64(dtype: fj_core::DType, value: f64) -> fj_core::Literal {
