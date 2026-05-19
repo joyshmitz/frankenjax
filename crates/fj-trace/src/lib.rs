@@ -1326,20 +1326,10 @@ impl SimpleTraceContext {
                         primitive,
                         detail: "missing or invalid 'num_classes' param".to_owned(),
                     })?;
-                let dtype_str = params.get("dtype").map(String::as_str).unwrap_or("F64");
-                let dtype = match dtype_str {
-                    "I64" | "i64" => DType::I64,
-                    "I32" | "i32" => DType::I32,
-                    "U32" | "u32" => DType::U32,
-                    "U64" | "u64" => DType::U64,
-                    "BF16" | "bf16" => DType::BF16,
-                    "F16" | "f16" => DType::F16,
-                    "F32" | "f32" => DType::F32,
-                    "F64" | "f64" => DType::F64,
-                    "Bool" | "bool" => DType::Bool,
-                    "Complex64" | "complex64" => DType::Complex64,
-                    "Complex128" | "complex128" => DType::Complex128,
-                    _ => DType::F64,
+                let dtype = if let Some(raw) = params.get("dtype") {
+                    parse_dtype_name(primitive, "dtype", raw)?
+                } else {
+                    DType::F64
                 };
                 let mut out_dims = inputs[0].shape.dims.clone();
                 out_dims.push(num_classes);
