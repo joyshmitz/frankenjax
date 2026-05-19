@@ -119,6 +119,40 @@ fn parse_axis_param(
     Ok(normalized as usize)
 }
 
+fn parse_axis_insert_param(
+    primitive: Primitive,
+    key: &str,
+    params: &BTreeMap<String, String>,
+    output_rank: usize,
+    default: usize,
+) -> Result<usize, EvalError> {
+    let Some(raw) = params.get(key) else {
+        return Ok(default);
+    };
+
+    let axis = raw
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| EvalError::Unsupported {
+            primitive,
+            detail: format!("invalid integer in param '{key}': '{raw}'"),
+        })?;
+    let normalized = if axis < 0 {
+        output_rank as i64 + axis
+    } else {
+        axis
+    };
+
+    if normalized < 0 || normalized >= output_rank as i64 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("axis {axis} out of bounds for output rank {output_rank}"),
+        });
+    }
+
+    Ok(normalized as usize)
+}
+
 fn parse_dtype_param(
     primitive: Primitive,
     key: &str,
@@ -2709,7 +2743,7 @@ pub(crate) fn eval_reduce_precision(
     }
 }
 
-/// One-hot encoding: given integer indices, produces a tensor with a trailing
+/// One-hot encoding: given integer indices, produces a tensor with an inserted
 /// `num_classes` dimension where position `index` is `on_value` and the rest
 /// are `off_value`.
 pub(crate) fn eval_one_hot(
@@ -2774,17 +2808,26 @@ pub(crate) fn eval_one_hot(
         }
     };
 
-    // Build output shape: input_shape ++ [num_classes]
     let input_shape = match &inputs[0] {
         Value::Scalar(_) => vec![],
         Value::Tensor(t) => t.shape.dims.clone(),
     };
-    let mut out_dims = input_shape;
-    out_dims.push(num_classes);
+    let output_rank = input_shape.len() + 1;
+    let axis = parse_axis_insert_param(primitive, "axis", params, output_rank, output_rank - 1)?;
+    let mut out_dims = input_shape.clone();
+    out_dims.insert(axis, num_classes);
 
     let nc = num_classes as usize;
-    let total = indices.len() * nc;
+    let total = indices
+        .len()
+        .checked_mul(nc)
+        .ok_or_else(|| EvalError::Unsupported {
+            primitive,
+            detail: "one_hot output element count overflows usize".to_owned(),
+        })?;
     let mut elements = Vec::with_capacity(total);
+    let input_strides = checked_row_major_strides(primitive, "one_hot", &input_shape)?;
+    let output_strides = checked_row_major_strides(primitive, "one_hot", &out_dims)?;
 
     let literal_for = |val: f64| -> Literal {
         match dtype {
@@ -2801,15 +2844,31 @@ pub(crate) fn eval_one_hot(
         }
     };
 
-    for &idx in &indices {
-        for c in 0..nc {
-            let val = if idx >= 0 && (idx as usize) == c {
-                on_value
-            } else {
-                off_value
-            };
-            elements.push(literal_for(val));
+    for out_flat in 0..total {
+        let mut remaining = out_flat;
+        let mut input_flat = 0_usize;
+        let mut input_axis = 0_usize;
+        let mut class_index = 0_usize;
+
+        for (out_axis, &stride) in output_strides.iter().enumerate() {
+            let coord = remaining / stride;
+            remaining %= stride;
+
+            if out_axis == axis {
+                class_index = coord;
+            } else if !input_shape.is_empty() {
+                input_flat += coord * input_strides[input_axis];
+                input_axis += 1;
+            }
         }
+
+        let idx = indices[input_flat];
+        let val = if idx >= 0 && (idx as usize) == class_index {
+            on_value
+        } else {
+            off_value
+        };
+        elements.push(literal_for(val));
     }
 
     Ok(Value::Tensor(TensorValue::new(

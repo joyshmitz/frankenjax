@@ -1312,7 +1312,7 @@ impl SimpleTraceContext {
                 }])
             }
             Primitive::OneHot => {
-                // one_hot(indices): output appends num_classes dimension
+                // one_hot(indices): output inserts num_classes dimension
                 if inputs.len() != 1 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -1332,7 +1332,15 @@ impl SimpleTraceContext {
                     DType::F64
                 };
                 let mut out_dims = inputs[0].shape.dims.clone();
-                out_dims.push(num_classes);
+                let output_rank = out_dims.len() + 1;
+                let axis = parse_axis_insert_param(
+                    primitive,
+                    "axis",
+                    params,
+                    output_rank,
+                    output_rank - 1,
+                )?;
+                out_dims.insert(axis, num_classes);
                 Ok(vec![ShapedArray {
                     dtype,
                     shape: Shape { dims: out_dims },
@@ -3461,6 +3469,41 @@ fn parse_dtype_name(
             value: raw.to_owned(),
         }),
     }
+}
+
+fn parse_axis_insert_param(
+    primitive: Primitive,
+    key: &'static str,
+    params: &BTreeMap<String, String>,
+    output_rank: usize,
+    default: usize,
+) -> Result<usize, TraceError> {
+    let Some(raw) = params.get(key) else {
+        return Ok(default);
+    };
+
+    let axis = raw
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| TraceError::InvalidPrimitiveParam {
+            primitive,
+            key,
+            value: raw.to_owned(),
+        })?;
+    let normalized = if axis < 0 {
+        output_rank as i64 + axis
+    } else {
+        axis
+    };
+
+    if normalized < 0 || normalized >= output_rank as i64 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!("axis {axis} out of bounds for output rank {output_rank}"),
+        });
+    }
+
+    Ok(normalized as usize)
 }
 
 // ── make_jaxpr: Trace Rust closures into Jaxpr ────────────────────
@@ -6077,6 +6120,70 @@ mod tests {
                 let aval = ctx.tracer_aval(out[0]).expect("aval present");
                 assert_eq!(aval.shape, Shape { dims: vec![4, 5] });
                 assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn infer_one_hot_axis_inserts_num_classes_dim() {
+        run_logged_test(
+            "infer_one_hot_axis_inserts_num_classes_dim",
+            fj_test_utils::fixture_id_from_json(&("one-hot-axis-shape", [2_u32, 4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape { dims: vec![2, 4] },
+                }]);
+                let idx = TracerId(1);
+
+                let mut params = BTreeMap::new();
+                params.insert("num_classes".to_owned(), "5".to_owned());
+                params.insert("axis".to_owned(), "1".to_owned());
+
+                let out = ctx
+                    .process_primitive(Primitive::OneHot, &[idx], params)
+                    .expect("one_hot axis inference should succeed");
+                let aval = ctx.tracer_aval(out[0]).expect("aval present");
+                assert_eq!(
+                    aval.shape,
+                    Shape {
+                        dims: vec![2, 5, 4]
+                    }
+                );
+                assert_eq!(aval.dtype, DType::F64);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn infer_one_hot_rejects_out_of_bounds_axis() {
+        run_logged_test(
+            "infer_one_hot_rejects_out_of_bounds_axis",
+            fj_test_utils::fixture_id_from_json(&("one-hot-axis-out-of-bounds", [4_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape::vector(4),
+                }]);
+                let idx = TracerId(1);
+
+                let mut params = BTreeMap::new();
+                params.insert("num_classes".to_owned(), "5".to_owned());
+                params.insert("axis".to_owned(), "-3".to_owned());
+
+                let err = ctx
+                    .process_primitive(Primitive::OneHot, &[idx], params)
+                    .expect_err("one_hot axis outside output rank should fail");
+                assert!(
+                    err.to_string().contains("axis -3 out of bounds"),
+                    "unexpected error: {err}"
+                );
                 Ok(Vec::new())
             },
         );

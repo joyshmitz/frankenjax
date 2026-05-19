@@ -5,7 +5,7 @@
 //! - on_value: value for the active index (default 1.0)
 //! - off_value: value for inactive indices (default 0.0)
 //! - dtype: output dtype (default F64)
-//! - Output shape is input_shape + [num_classes]
+//! - axis: insertion point for the one-hot class dimension (default trailing)
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
@@ -48,6 +48,12 @@ fn extract_shape(v: &Value) -> Vec<u32> {
 fn one_hot_params(num_classes: u32) -> BTreeMap<String, String> {
     let mut p = BTreeMap::new();
     p.insert("num_classes".to_string(), num_classes.to_string());
+    p
+}
+
+fn one_hot_params_axis(num_classes: u32, axis: i64) -> BTreeMap<String, String> {
+    let mut p = one_hot_params(num_classes);
+    p.insert("axis".to_string(), axis.to_string());
     p
 }
 
@@ -122,6 +128,43 @@ fn oracle_one_hot_1d_basic() {
     assert_eq!(
         extract_f64_vec(&result),
         vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    );
+}
+
+#[test]
+fn oracle_one_hot_axis_zero_inserts_class_dimension_first() {
+    let input = make_i64_tensor(&[2], vec![0, 2]);
+    let result = eval_primitive(Primitive::OneHot, &[input], &one_hot_params_axis(3, 0)).unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 2]);
+    assert_eq!(extract_f64_vec(&result), vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+}
+
+#[test]
+fn oracle_one_hot_axis_middle_inserts_class_dimension() {
+    let input = make_i64_tensor(&[2, 2], vec![0, 1, 2, 0]);
+    let result = eval_primitive(Primitive::OneHot, &[input], &one_hot_params_axis(3, 1)).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3, 2]);
+    assert_eq!(
+        extract_f64_vec(&result),
+        vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0]
+    );
+}
+
+#[test]
+fn oracle_one_hot_negative_axis_canonicalizes_against_output_rank() {
+    let input = make_i64_tensor(&[2, 2], vec![0, 1, 2, 0]);
+    let result = eval_primitive(Primitive::OneHot, &[input], &one_hot_params_axis(3, -2)).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3, 2]);
+}
+
+#[test]
+fn oracle_one_hot_rejects_out_of_bounds_axis() {
+    let input = make_i64_tensor(&[2], vec![0, 1]);
+    let err = eval_primitive(Primitive::OneHot, &[input], &one_hot_params_axis(3, -3))
+        .expect_err("axis before output rank should fail");
+    assert!(
+        err.to_string().contains("axis -3 out of bounds"),
+        "unexpected error: {err}"
     );
 }
 

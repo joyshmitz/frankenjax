@@ -2971,9 +2971,42 @@ fn batch_one_hot(
 
     get_batch_size(&input.value, batch_dim)?;
     let value = move_batch_dim_to_front(&input.value, batch_dim)?;
-    let result = eval_primitive(Primitive::OneHot, &[value], params)
+    let per_element_rank = match &value {
+        Value::Scalar(_) => 0,
+        Value::Tensor(tensor) => tensor.rank().saturating_sub(1),
+    };
+    let params = one_hot_params_for_leading_batch(params, per_element_rank)?;
+    let result = eval_primitive(Primitive::OneHot, &[value], &params)
         .map_err(|e| BatchError::EvalError(e.to_string()))?;
     Ok(BatchTracer::batched(result, 0))
+}
+
+fn one_hot_params_for_leading_batch(
+    params: &BTreeMap<String, String>,
+    per_element_rank: usize,
+) -> Result<BTreeMap<String, String>, BatchError> {
+    let mut adjusted = params.clone();
+    let Some(raw_axis) = params.get("axis") else {
+        return Ok(adjusted);
+    };
+
+    let output_rank = per_element_rank + 1;
+    let axis = raw_axis.trim().parse::<i64>().map_err(|_| {
+        BatchError::EvalError(format!("invalid integer in param 'axis': '{raw_axis}'"))
+    })?;
+    let normalized = if axis < 0 {
+        output_rank as i64 + axis
+    } else {
+        axis
+    };
+    if normalized < 0 || normalized >= output_rank as i64 {
+        return Err(BatchError::EvalError(format!(
+            "axis {axis} out of bounds for output rank {output_rank}"
+        )));
+    }
+
+    adjusted.insert("axis".to_owned(), (normalized + 1).to_string());
+    Ok(adjusted)
 }
 
 // ── Passthrough Leading Dim (Gather, Scatter, DynamicSlice, etc.) ──
@@ -8168,6 +8201,42 @@ mod tests {
         assert_eq!(
             extract_f64_vec(&result.value),
             vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn test_batch_trace_one_hot_axis_zero_keeps_batch_leading_for_scalars() {
+        let input = BatchTracer::batched(make_i64_vector(&[0, 2]), 0);
+        let params = BTreeMap::from([
+            ("num_classes".to_owned(), "3".to_owned()),
+            ("axis".to_owned(), "0".to_owned()),
+        ]);
+
+        let result = apply_batch_rule(Primitive::OneHot, &[input], &params).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let tensor = result.value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2, 3]);
+        assert_eq!(
+            extract_f64_vec(&result.value),
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn test_batch_trace_one_hot_axis_zero_keeps_batch_leading_for_vectors() {
+        let input = BatchTracer::batched(make_i64_matrix(2, 2, &[0, 1, 2, 0]), 0);
+        let params = BTreeMap::from([
+            ("num_classes".to_owned(), "3".to_owned()),
+            ("axis".to_owned(), "0".to_owned()),
+        ]);
+
+        let result = apply_batch_rule(Primitive::OneHot, &[input], &params).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let tensor = result.value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2, 3, 2]);
+        assert_eq!(
+            extract_f64_vec(&result.value),
+            vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0]
         );
     }
 
