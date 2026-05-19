@@ -28,6 +28,26 @@ fn complex_literal_from_parts(dtype: DType, re: f64, im: f64) -> Literal {
     }
 }
 
+/// Output dtype for a real (non-complex, non-integral) reduction: preserve
+/// the input's float precision so an F32/BF16/F16 reduction doesn't widen
+/// to F64. Non-float inputs (U32/U64/Bool reaching the float arm via as_f64)
+/// fall back to F64 since no narrower float type is implied.
+fn reduce_real_output_dtype(input_dtype: DType) -> DType {
+    match input_dtype {
+        DType::BF16 | DType::F16 | DType::F32 | DType::F64 => input_dtype,
+        _ => DType::F64,
+    }
+}
+
+fn reduce_real_literal(dtype: DType, value: f64) -> Literal {
+    match dtype {
+        DType::BF16 => Literal::from_bf16_f32(value as f32),
+        DType::F16 => Literal::from_f16_f32(value as f32),
+        DType::F32 => Literal::from_f32(value as f32),
+        _ => Literal::from_f64(value),
+    }
+}
+
 fn parse_reduction_axes(
     primitive: Primitive,
     raw_axes: &str,
@@ -161,7 +181,8 @@ pub(crate) fn eval_reduce(
                     })?;
                     acc = float_op(acc, val);
                 }
-                Ok(Value::scalar_f64(acc))
+                let out_dtype = reduce_real_output_dtype(tensor.dtype);
+                Ok(Value::Scalar(reduce_real_literal(out_dtype, acc)))
             }
         }
     }
@@ -341,9 +362,13 @@ pub(crate) fn eval_reduce_axes(
                             })?;
                     result[out_idx] = float_op(result[out_idx], val);
                 }
-                let elements: Vec<Literal> = result.into_iter().map(Literal::from_f64).collect();
+                let out_dtype = reduce_real_output_dtype(tensor.dtype);
+                let elements: Vec<Literal> = result
+                    .into_iter()
+                    .map(|v| reduce_real_literal(out_dtype, v))
+                    .collect();
                 Ok(Value::Tensor(TensorValue::new(
-                    DType::F64,
+                    out_dtype,
                     Shape { dims: out_dims },
                     elements,
                 )?))
