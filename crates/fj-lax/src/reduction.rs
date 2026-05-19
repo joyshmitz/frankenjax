@@ -789,6 +789,10 @@ pub(crate) fn eval_cumulative(
                         }
                     }
                 } else {
+                    // Emit literals matching the input tensor's dtype so an
+                    // F32/BF16/F16 cumulative output doesn't end up
+                    // declaring its narrow dtype while storing F64Bits.
+                    let out_dtype = reduce_real_output_dtype(tensor.dtype);
                     let mut acc = float_init;
                     if reverse {
                         for i in (0..axis_dim).rev() {
@@ -799,7 +803,7 @@ pub(crate) fn eval_cumulative(
                                     detail: "expected numeric tensor",
                                 })?;
                             acc = float_op(acc, val);
-                            elements[flat_idx] = Literal::from_f64(acc);
+                            elements[flat_idx] = reduce_real_literal(out_dtype, acc);
                         }
                     } else {
                         for i in 0..axis_dim {
@@ -810,7 +814,7 @@ pub(crate) fn eval_cumulative(
                                     detail: "expected numeric tensor",
                                 })?;
                             acc = float_op(acc, val);
-                            elements[flat_idx] = Literal::from_f64(acc);
+                            elements[flat_idx] = reduce_real_literal(out_dtype, acc);
                         }
                     }
                 }
