@@ -1925,7 +1925,10 @@ fn dot_result_is_integral(lhs: &TensorValue, rhs: &TensorValue) -> bool {
 #[derive(Clone, Copy)]
 enum DotOutputKind {
     Integral,
-    Real,
+    /// Real dot product; payload is the JAX-promoted real dtype to emit
+    /// (BF16 / F16 / F32 / F64) so F32×F32 doesn't silently widen to F64
+    /// (parity with `lax.dot_general` real-input promotion).
+    Real(DType),
     Complex(DType),
 }
 
@@ -1933,7 +1936,7 @@ impl DotOutputKind {
     fn tensor_dtype(self) -> DType {
         match self {
             Self::Integral => DType::I64,
-            Self::Real => DType::F64,
+            Self::Real(dtype) => dtype,
             Self::Complex(dtype) => dtype,
         }
     }
@@ -1947,7 +1950,14 @@ fn dot_output_kind(lhs: &TensorValue, rhs: &TensorValue) -> DotOutputKind {
     } else if dot_result_is_integral(lhs, rhs) {
         DotOutputKind::Integral
     } else {
-        DotOutputKind::Real
+        // Honour JAX promotion: F32×F32 → F32, BF16×BF16 → BF16,
+        // F16×F16 → F16, half + F32 → F32, anything with F64 → F64.
+        let promoted = promote_dtype(lhs.dtype, rhs.dtype);
+        let real_dtype = match promoted {
+            DType::BF16 | DType::F16 | DType::F32 | DType::F64 => promoted,
+            _ => DType::F64,
+        };
+        DotOutputKind::Real(real_dtype)
     }
 }
 
@@ -1974,7 +1984,7 @@ fn dot_accumulate(
             }
             Ok(Literal::I64(sum))
         }
-        DotOutputKind::Real => {
+        DotOutputKind::Real(dtype) => {
             let mut sum = 0.0_f64;
             for index in 0..len {
                 let (left, right) = pair_at(index);
@@ -1988,7 +1998,7 @@ fn dot_accumulate(
                 })?;
                 sum += left_f * right_f;
             }
-            Ok(Literal::from_f64(sum))
+            Ok(real_literal_from_f64(dtype, sum))
         }
         DotOutputKind::Complex(dtype) => {
             let mut sum = (0.0_f64, 0.0_f64);
@@ -2028,7 +2038,7 @@ fn dot_accumulate_contiguous(
             }
             Ok(Literal::I64(sum))
         }
-        DotOutputKind::Real => {
+        DotOutputKind::Real(dtype) => {
             let mut sum = 0.0_f64;
             for (left, right) in lhs.iter().zip(rhs) {
                 let left_f = left.as_f64().ok_or(EvalError::TypeMismatch {
@@ -2041,7 +2051,7 @@ fn dot_accumulate_contiguous(
                 })?;
                 sum += left_f * right_f;
             }
-            Ok(Literal::from_f64(sum))
+            Ok(real_literal_from_f64(dtype, sum))
         }
         DotOutputKind::Complex(dtype) => {
             let mut sum = (0.0_f64, 0.0_f64);
