@@ -1460,10 +1460,11 @@ fn reduce_window_output_dtype(input_dtype: fj_core::DType) -> fj_core::DType {
         fj_core::DType::BF16 | fj_core::DType::F16 | fj_core::DType::F32 | fj_core::DType::F64 => {
             input_dtype
         }
-        fj_core::DType::I64 | fj_core::DType::U32 | fj_core::DType::U64 => input_dtype,
+        fj_core::DType::I32 | fj_core::DType::I64 | fj_core::DType::U32 | fj_core::DType::U64 => {
+            input_dtype
+        }
         fj_core::DType::Bool => fj_core::DType::Bool,
         fj_core::DType::Complex64 | fj_core::DType::Complex128 => input_dtype,
-        _ => fj_core::DType::F64,
     }
 }
 
@@ -1519,11 +1520,13 @@ fn reduce_window_initial_accumulator(
     reduce_op: &str,
 ) -> ReduceWindowAccumulator {
     match output_dtype {
-        fj_core::DType::I64 => ReduceWindowAccumulator::I64(match reduce_op {
-            "max" => i64::MIN,
-            "min" => i64::MAX,
-            _ => 0,
-        }),
+        fj_core::DType::I32 | fj_core::DType::I64 => {
+            ReduceWindowAccumulator::I64(match reduce_op {
+                "max" => i64::MIN,
+                "min" => i64::MAX,
+                _ => 0,
+            })
+        }
         fj_core::DType::U32 => ReduceWindowAccumulator::U32(match reduce_op {
             "max" => u32::MIN,
             "min" => u32::MAX,
@@ -1644,7 +1647,7 @@ fn reduce_window_accumulator_literal(
     accumulator: ReduceWindowAccumulator,
 ) -> Result<fj_core::Literal, EvalError> {
     match (output_dtype, accumulator) {
-        (fj_core::DType::I64, ReduceWindowAccumulator::I64(value)) => {
+        (fj_core::DType::I32 | fj_core::DType::I64, ReduceWindowAccumulator::I64(value)) => {
             Ok(fj_core::Literal::I64(value))
         }
         (fj_core::DType::U32, ReduceWindowAccumulator::U32(value)) => {
@@ -7579,6 +7582,42 @@ mod tests {
                 .expect("reduce_window F32 output dtype/element invariant");
             let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
             assert_eq!(vals, vec![3.0, 5.0, 7.0]);
+        } else {
+            assert!(matches!(out, Value::Tensor(_)), "expected tensor");
+        }
+    }
+
+    #[test]
+    fn reduce_window_sum_preserves_i32_declared_dtype() {
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::I32,
+                Shape { dims: vec![4] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(
+            Primitive::ReduceWindow,
+            &[input],
+            &rw_params("sum", "2", "1"),
+        )
+        .unwrap();
+
+        if let Value::Tensor(t) = &out {
+            assert_eq!(t.dtype, DType::I32);
+            assert_eq!(t.shape.dims, vec![3]);
+            t.validate_dtype_consistency()
+                .expect("reduce_window I32 output dtype/element invariant");
+            assert_eq!(
+                t.elements,
+                vec![Literal::I64(3), Literal::I64(5), Literal::I64(7)]
+            );
         } else {
             assert!(matches!(out, Value::Tensor(_)), "expected tensor");
         }
