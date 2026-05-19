@@ -673,6 +673,8 @@ fn batch_dot(
             if dot_lhs_single_batch_can_eval_direct(&a_val, &b.value) {
                 let result = eval_primitive(Primitive::Dot, &[a_val, b.value.clone()], params)
                     .map_err(|e| BatchError::EvalError(e.to_string()))?;
+                let result =
+                    coerce_real_dot_result_dtype(result, a.value.dtype(), b.value.dtype())?;
                 return Ok(BatchTracer::batched(result, 0));
             }
 
@@ -688,6 +690,7 @@ fn batch_dot(
                     .map_err(|e| BatchError::TensorError(e.to_string()))?;
                 let r = eval_primitive(Primitive::Dot, &[slice, b.value.clone()], params)
                     .map_err(|e| BatchError::EvalError(e.to_string()))?;
+                let r = coerce_real_dot_result_dtype(r, a_tensor.dtype, b.value.dtype())?;
                 results.push(r);
             }
             let stacked = TensorValue::stack_axis0(&results)
@@ -702,6 +705,8 @@ fn batch_dot(
             if dot_rhs_single_batch_can_eval_direct(&a.value, &b_val) {
                 let result = eval_primitive(Primitive::Dot, &[a.value.clone(), b_val], params)
                     .map_err(|e| BatchError::EvalError(e.to_string()))?;
+                let result =
+                    coerce_real_dot_result_dtype(result, a.value.dtype(), b.value.dtype())?;
                 let output_batch_dim = match &a.value {
                     Value::Scalar(_) => 0,
                     Value::Tensor(tensor) => tensor.rank().saturating_sub(1),
@@ -722,6 +727,7 @@ fn batch_dot(
                     .map_err(|e| BatchError::TensorError(e.to_string()))?;
                 let r = eval_primitive(Primitive::Dot, &[a.value.clone(), slice], params)
                     .map_err(|e| BatchError::EvalError(e.to_string()))?;
+                let r = coerce_real_dot_result_dtype(r, a.value.dtype(), b_tensor.dtype)?;
                 results.push(r);
             }
             let stacked = TensorValue::stack_axis0(&results)
@@ -754,6 +760,7 @@ fn batch_dot(
                     .map_err(|e| BatchError::TensorError(e.to_string()))?;
                 let r = eval_primitive(Primitive::Dot, &[a_slice, b_slice], params)
                     .map_err(|e| BatchError::EvalError(e.to_string()))?;
+                let r = coerce_real_dot_result_dtype(r, a_tensor.dtype, b_tensor.dtype)?;
                 results.push(r);
             }
             let stacked = TensorValue::stack_axis0(&results)
@@ -787,6 +794,53 @@ fn real_literal_from_f64_dtype(dtype: DType, value: f64) -> Literal {
         DType::F16 => Literal::from_f16_f32(value as f32),
         DType::F32 => Literal::from_f32(value as f32),
         _ => Literal::from_f64(value),
+    }
+}
+
+fn real_dot_promoted_dtype(lhs_dtype: DType, rhs_dtype: DType) -> Option<DType> {
+    if matches!(lhs_dtype, DType::Complex64 | DType::Complex128)
+        || matches!(rhs_dtype, DType::Complex64 | DType::Complex128)
+    {
+        return None;
+    }
+
+    match promote_dtype_public(lhs_dtype, rhs_dtype) {
+        dtype @ (DType::BF16 | DType::F16 | DType::F32 | DType::F64) => Some(dtype),
+        _ => None,
+    }
+}
+
+fn coerce_real_dot_result_dtype(
+    result: Value,
+    lhs_dtype: DType,
+    rhs_dtype: DType,
+) -> Result<Value, BatchError> {
+    let Some(dtype) = real_dot_promoted_dtype(lhs_dtype, rhs_dtype) else {
+        return Ok(result);
+    };
+    if result.dtype() == dtype {
+        return Ok(result);
+    }
+
+    match result {
+        Value::Scalar(literal) => {
+            let value = literal.as_f64().ok_or_else(|| {
+                BatchError::EvalError("real dot expected numeric scalar output".to_owned())
+            })?;
+            Ok(Value::Scalar(real_literal_from_f64_dtype(dtype, value)))
+        }
+        Value::Tensor(tensor) => {
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for literal in tensor.elements {
+                let value = literal.as_f64().ok_or_else(|| {
+                    BatchError::EvalError("real dot expected numeric tensor output".to_owned())
+                })?;
+                elements.push(real_literal_from_f64_dtype(dtype, value));
+            }
+            TensorValue::new(dtype, tensor.shape, elements)
+                .map(Value::Tensor)
+                .map_err(|e| BatchError::TensorError(e.to_string()))
+        }
     }
 }
 
@@ -5003,6 +5057,19 @@ mod tests {
         )
     }
 
+    fn make_f32_tensor(dims: &[u32], data: &[f32]) -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape {
+                    dims: dims.to_vec(),
+                },
+                data.iter().map(|&x| Literal::from_f32(x)).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
     fn make_f64_tensor(dims: &[u32], data: &[f64]) -> Value {
         Value::Tensor(
             TensorValue::new(
@@ -5530,6 +5597,22 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_trace_dot_batched_f32_matrix_unbatched_vector_direct_preserves_dtype() {
+        let lhs = BatchTracer::batched(make_f32_matrix(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 0);
+        let rhs = BatchTracer::unbatched(make_f32_vector(&[7.0, 8.0, 9.0]));
+
+        let result = apply_batch_rule(Primitive::Dot, &[lhs, rhs], &BTreeMap::new()).unwrap();
+
+        assert_eq!(result.batch_dim, Some(0));
+        let out = result.value.as_tensor().unwrap();
+        assert_eq!(out.dtype, DType::F32);
+        out.validate_dtype_consistency()
+            .expect("single-batched lhs F32 dot output dtype/element invariant");
+        assert_eq!(out.shape.dims, vec![2]);
+        assert_eq!(extract_f64_vec(&result.value), vec![50.0, 122.0]);
+    }
+
+    #[test]
     fn test_batch_trace_dot_batched_matrix_unbatched_matrix_direct() {
         let lhs0 = make_f64_matrix(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let lhs1 = make_f64_matrix(2, 3, &[7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
@@ -5581,6 +5664,30 @@ mod tests {
 
         assert_dot_matches_slice_oracle(&result, &[lhs.clone(), lhs], &[rhs0, rhs1]);
         assert_eq!(result.value.as_tensor().unwrap().shape.dims, vec![2, 2, 2]);
+    }
+
+    #[test]
+    fn test_batch_trace_dot_unbatched_f32_matrix_batched_matrix_direct_preserves_dtype() {
+        let lhs = BatchTracer::unbatched(make_f32_matrix(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+        let rhs = BatchTracer::batched(
+            make_f32_tensor(
+                &[2, 3, 2],
+                &[
+                    1.0, 0.0, 0.0, 1.0, 2.0, 3.0, // batch element 0
+                    2.0, 1.0, 1.0, 0.0, 0.0, 2.0, // batch element 1
+                ],
+            ),
+            0,
+        );
+
+        let result = apply_batch_rule(Primitive::Dot, &[lhs, rhs], &BTreeMap::new()).unwrap();
+
+        assert_eq!(result.batch_dim, Some(0));
+        let out = result.value.as_tensor().unwrap();
+        assert_eq!(out.dtype, DType::F32);
+        out.validate_dtype_consistency()
+            .expect("single-batched rhs F32 dot output dtype/element invariant");
+        assert_eq!(out.shape.dims, vec![2, 2, 2]);
     }
 
     #[test]
