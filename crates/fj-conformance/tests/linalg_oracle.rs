@@ -720,3 +720,69 @@ fn metamorphic_eigh_scaling() {
         "Eigh eigenvalues should scale linearly",
     );
 }
+
+// ======================== F32 dtype preservation (f8871c7) ========================
+
+fn make_f32_matrix(rows: u32, cols: u32, data: &[f32]) -> Value {
+    assert_eq!(data.len(), (rows * cols) as usize);
+    Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: vec![rows, cols],
+            },
+            data.iter().map(|&v| Literal::from_f32(v)).collect(),
+        )
+        .unwrap(),
+    )
+}
+
+// `matrix_to_value` (shared by Cholesky, QR, SVD, Eigh, TriangularSolve)
+// previously unconditionally emitted Literal::from_f64, producing tensors
+// that declared F32 but stored F64Bits — a dtype/element invariant
+// violation. Plus the 1-D S (SVD) and W (Eigh) output vectors had the
+// same defect.
+#[test]
+fn oracle_cholesky_f32_preserves_dtype() {
+    // SPD 2x2 in F32.
+    let a = make_f32_matrix(2, 2, &[4.0, 0.0, 0.0, 9.0]);
+    let result =
+        eval_primitive_multi(Primitive::Cholesky, std::slice::from_ref(&a), &no_params()).unwrap();
+    let Value::Tensor(t) = &result[0] else {
+        panic!("expected tensor");
+    };
+    assert_eq!(t.dtype, DType::F32);
+    t.validate_dtype_consistency()
+        .expect("F32 Cholesky output dtype/element invariant");
+}
+
+#[test]
+fn oracle_qr_f32_preserves_dtype() {
+    let a = make_f32_matrix(2, 2, &[3.0, 4.0, 0.0, 5.0]);
+    let result = eval_primitive_multi(Primitive::Qr, std::slice::from_ref(&a), &no_params())
+        .unwrap();
+    for (label, val) in ["Q", "R"].iter().zip(result.iter()) {
+        let Value::Tensor(t) = val else {
+            panic!("{label}: expected tensor");
+        };
+        assert_eq!(t.dtype, DType::F32, "{label} dtype");
+        t.validate_dtype_consistency()
+            .unwrap_or_else(|e| panic!("{label} dtype/element invariant: {e}"));
+    }
+}
+
+#[test]
+fn oracle_eigh_f32_preserves_dtype() {
+    // Symmetric 2x2 in F32.
+    let a = make_f32_matrix(2, 2, &[2.0, 1.0, 1.0, 2.0]);
+    let result = eval_primitive_multi(Primitive::Eigh, std::slice::from_ref(&a), &no_params())
+        .unwrap();
+    for (label, val) in ["W", "V"].iter().zip(result.iter()) {
+        let Value::Tensor(t) = val else {
+            panic!("{label}: expected tensor");
+        };
+        assert_eq!(t.dtype, DType::F32, "{label} dtype");
+        t.validate_dtype_consistency()
+            .unwrap_or_else(|e| panic!("{label} dtype/element invariant: {e}"));
+    }
+}
