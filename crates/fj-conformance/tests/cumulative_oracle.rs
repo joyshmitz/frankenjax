@@ -286,3 +286,48 @@ fn metamorphic_cumprod_first_element_identity() {
     let vals = extract_i64_vec(&result);
     assert_eq!(vals[0], 5, "cumprod(x)[0] should equal x[0]");
 }
+
+// Regression tests for ff512bc — eval_cumulative previously emitted
+// Literal::from_f64 for every accumulator step regardless of input
+// dtype, leaving F32 cumulative outputs declaring DType::F32 while
+// storing F64Bits elements.
+#[test]
+fn oracle_cumsum_f32_preserves_dtype() {
+    let data: Vec<Literal> = [1.0_f32, 2.0, 3.0, 4.0]
+        .into_iter()
+        .map(Literal::from_f32)
+        .collect();
+    let input =
+        Value::Tensor(TensorValue::new(DType::F32, Shape { dims: vec![4] }, data).unwrap());
+    let result = eval_primitive(Primitive::Cumsum, &[input], &no_params()).unwrap();
+    let Value::Tensor(t) = result else {
+        panic!("expected tensor");
+    };
+    assert_eq!(t.dtype, DType::F32);
+    t.validate_dtype_consistency()
+        .expect("F32 cumsum output dtype/element invariant");
+    match t.elements.last().unwrap() {
+        Literal::F32Bits(bits) => {
+            let v = f32::from_bits(*bits);
+            assert!((v - 10.0).abs() < 1e-5, "expected 10.0, got {v}");
+        }
+        other => panic!("expected F32Bits, got {other:?}"),
+    }
+}
+
+#[test]
+fn oracle_cumprod_f32_preserves_dtype() {
+    let data: Vec<Literal> = [1.0_f32, 2.0, 3.0, 4.0]
+        .into_iter()
+        .map(Literal::from_f32)
+        .collect();
+    let input =
+        Value::Tensor(TensorValue::new(DType::F32, Shape { dims: vec![4] }, data).unwrap());
+    let result = eval_primitive(Primitive::Cumprod, &[input], &no_params()).unwrap();
+    let Value::Tensor(t) = result else {
+        panic!("expected tensor");
+    };
+    assert_eq!(t.dtype, DType::F32);
+    t.validate_dtype_consistency()
+        .expect("F32 cumprod output dtype/element invariant");
+}
