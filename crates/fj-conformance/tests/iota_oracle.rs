@@ -148,3 +148,44 @@ fn oracle_iota_f64_lowercase() {
     let vals = extract_f64_vec(&result);
     assert_eq!(vals.len(), 4);
 }
+
+// Property sweep: every dtype that Iota supports (everything except
+// Bool) round-trips through `eval_iota` + `literal_from_index_for_dtype`
+// with declared dtype and element kinds in agreement. Bool is rejected
+// per JAX semantics. Pins the dispatch helper against per-dtype
+// regressions a single-dtype point test would miss.
+#[test]
+fn property_iota_preserves_all_supported_dtypes() {
+    let cases: &[(&str, DType)] = &[
+        ("i32", DType::I32),
+        ("i64", DType::I64),
+        ("u32", DType::U32),
+        ("u64", DType::U64),
+        ("bf16", DType::BF16),
+        ("f16", DType::F16),
+        ("f32", DType::F32),
+        ("f64", DType::F64),
+        ("complex64", DType::Complex64),
+        ("complex128", DType::Complex128),
+    ];
+    for (token, expected_dtype) in cases {
+        let result = eval_primitive(Primitive::Iota, &[], &iota_params(5, token))
+            .unwrap_or_else(|e| panic!("iota dtype={token} failed: {e}"));
+        let Value::Tensor(t) = result else {
+            panic!("iota dtype={token}: expected tensor");
+        };
+        assert_eq!(
+            t.dtype, *expected_dtype,
+            "iota dtype={token}: declared dtype"
+        );
+        assert_eq!(t.shape.dims, vec![5]);
+        t.validate_dtype_consistency().unwrap_or_else(|e| {
+            panic!("iota dtype={token}: validate_dtype_consistency failed: {e}")
+        });
+    }
+    // bool dtype must be rejected (JAX `lax.iota` does not accept Bool).
+    assert!(
+        eval_primitive(Primitive::Iota, &[], &iota_params(3, "bool")).is_err(),
+        "iota with bool dtype must error"
+    );
+}
