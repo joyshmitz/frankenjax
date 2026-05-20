@@ -5,7 +5,7 @@
 //! - dimension: axis along which to broadcast indices
 //! - No inputs, output is indices broadcasted across shape
 
-use fj_core::{Primitive, Value};
+use fj_core::{DType, Primitive, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;
 
@@ -168,4 +168,64 @@ fn oracle_broadcasted_iota_tall() {
     let result = eval_primitive(Primitive::BroadcastedIota, &[], &iota_params(&[5, 1], 0)).unwrap();
     assert_eq!(extract_shape(&result), vec![5, 1]);
     assert_eq!(extract_i64_vec(&result), vec![0, 1, 2, 3, 4]);
+}
+
+// Property sweep across every BroadcastedIota-supported dtype. Bool is
+// rejected (mirrors the Iota path). Pins the dtype dispatch dispatch
+// helper against per-arm regressions.
+#[test]
+fn property_broadcasted_iota_preserves_all_supported_dtypes() {
+    fn iota_params_with_dtype(
+        shape: &[usize],
+        dimension: usize,
+        dtype: &str,
+    ) -> BTreeMap<String, String> {
+        let mut p = iota_params(shape, dimension);
+        p.insert("dtype".to_string(), dtype.to_string());
+        p
+    }
+
+    let cases: &[(&str, DType)] = &[
+        ("i32", DType::I32),
+        ("i64", DType::I64),
+        ("u32", DType::U32),
+        ("u64", DType::U64),
+        ("bf16", DType::BF16),
+        ("f16", DType::F16),
+        ("f32", DType::F32),
+        ("f64", DType::F64),
+        ("complex64", DType::Complex64),
+        ("complex128", DType::Complex128),
+    ];
+    for (token, expected_dtype) in cases {
+        let result = eval_primitive(
+            Primitive::BroadcastedIota,
+            &[],
+            &iota_params_with_dtype(&[3, 2], 0, token),
+        )
+        .unwrap_or_else(|e| panic!("broadcasted_iota dtype={token} failed: {e}"));
+        let Value::Tensor(t) = result else {
+            panic!("broadcasted_iota dtype={token}: expected tensor");
+        };
+        assert_eq!(
+            t.dtype, *expected_dtype,
+            "broadcasted_iota dtype={token}: declared dtype"
+        );
+        assert_eq!(t.shape.dims, vec![3, 2]);
+        t.validate_dtype_consistency().unwrap_or_else(|e| {
+            panic!(
+                "broadcasted_iota dtype={token}: validate_dtype_consistency failed: {e}"
+            )
+        });
+    }
+    // Bool must be rejected (no integer ramp semantics for booleans).
+    assert!(
+        eval_primitive(
+            Primitive::BroadcastedIota,
+            &[],
+            &iota_params_with_dtype(&[3], 0, "bool"),
+        )
+        .is_err(),
+        "broadcasted_iota with bool dtype must error"
+    );
 }
