@@ -417,8 +417,14 @@ fn oracle_dot_complex128_matmul_2x2() {
     //        (1+1j)*(0+1j) + (2+0j)*(0+0j) = (-1+1j) + 0 = -1+1j
     // Row 1: (0+1j)*(1+0j) + (1-1j)*(1+1j) = (0+1j) + (1+1-1+1j) = (0+1j) + (2+0j) = 2+1j
     //        (0+1j)*(0+1j) + (1-1j)*(0+0j) = -1 + 0 = -1+0j
-    let a = make_complex128_tensor(&[2, 2], vec![(1.0, 1.0), (2.0, 0.0), (0.0, 1.0), (1.0, -1.0)]);
-    let b = make_complex128_tensor(&[2, 2], vec![(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.0, 0.0)]);
+    let a = make_complex128_tensor(
+        &[2, 2],
+        vec![(1.0, 1.0), (2.0, 0.0), (0.0, 1.0), (1.0, -1.0)],
+    );
+    let b = make_complex128_tensor(
+        &[2, 2],
+        vec![(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.0, 0.0)],
+    );
     let result = eval_primitive(Primitive::Dot, &[a, b], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 2]);
     let vals = extract_complex128_vec(&result);
@@ -448,7 +454,10 @@ fn oracle_dot_complex128_matrix_vector() {
     // JAX: [[1+0j, 0+1j], [1+1j, 1-1j]] @ [1+0j, 0+1j]
     // Row 0: (1+0j)*(1+0j) + (0+1j)*(0+1j) = 1 + (-1) = 0+0j
     // Row 1: (1+1j)*(1+0j) + (1-1j)*(0+1j) = (1+1j) + (1+1j) = 2+2j
-    let a = make_complex128_tensor(&[2, 2], vec![(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0)]);
+    let a = make_complex128_tensor(
+        &[2, 2],
+        vec![(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0)],
+    );
     let b = make_complex128_tensor(&[2], vec![(1.0, 0.0), (0.0, 1.0)]);
     let result = eval_primitive(Primitive::Dot, &[a, b], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2]);
@@ -460,9 +469,14 @@ fn oracle_dot_complex128_matrix_vector() {
 #[test]
 fn oracle_dot_complex128_identity_matrix() {
     // A @ I = A for complex matrices
-    let a = make_complex128_tensor(&[2, 2], vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)]);
-    let identity =
-        make_complex128_tensor(&[2, 2], vec![(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)]);
+    let a = make_complex128_tensor(
+        &[2, 2],
+        vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0)],
+    );
+    let identity = make_complex128_tensor(
+        &[2, 2],
+        vec![(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)],
+    );
     let result = eval_primitive(Primitive::Dot, &[a, identity], &no_params()).unwrap();
     let vals = extract_complex128_vec(&result);
     assert_complex_close(vals[0], (1.0, 2.0), 1e-10, "A[0,0]");
@@ -502,7 +516,8 @@ fn metamorphic_dot_equals_reduce_sum_mul() {
 
     // Element-wise multiply then sum
     let mul_result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
-    let sum_result = eval_primitive(Primitive::ReduceSum, &[mul_result], &reduce_sum_params()).unwrap();
+    let sum_result =
+        eval_primitive(Primitive::ReduceSum, &[mul_result], &reduce_sum_params()).unwrap();
 
     assert_close(
         extract_f64_scalar(&dot_result),
@@ -565,7 +580,11 @@ fn metamorphic_dot_self_nonnegative() {
 #[test]
 fn metamorphic_dot_with_zero_vector() {
     // Dot(a, 0) = 0 for any vector a
-    for vals in [vec![1.0, 2.0, 3.0], vec![-5.0, 10.0], vec![0.0, 0.0, 0.0, 0.0]] {
+    for vals in [
+        vec![1.0, 2.0, 3.0],
+        vec![-5.0, 10.0],
+        vec![0.0, 0.0, 0.0, 0.0],
+    ] {
         let len = vals.len() as u32;
         let a = make_f64_tensor(&[len], vals.clone());
         let zero = make_f64_tensor(&[len], vec![0.0; vals.len()]);
@@ -589,6 +608,32 @@ fn make_f32_tensor(shape: &[u32], data: Vec<f32>) -> Value {
                 dims: shape.to_vec(),
             },
             data.into_iter().map(Literal::from_f32).collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_u32_tensor(shape: &[u32], data: Vec<u32>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::U32,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter().map(Literal::U32).collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_u64_tensor(shape: &[u32], data: Vec<u64>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::U64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter().map(Literal::U64).collect(),
         )
         .unwrap(),
     )
@@ -626,4 +671,31 @@ fn oracle_dot_f32_matvec_preserves_dtype() {
     assert_eq!(t.shape.dims, vec![2]);
     t.validate_dtype_consistency()
         .expect("F32 dot output dtype/element invariant");
+}
+
+#[test]
+fn oracle_dot_u32_vector_preserves_dtype() {
+    let a = make_u32_tensor(&[3], vec![1, 2, 3]);
+    let b = make_u32_tensor(&[3], vec![4, 5, 6]);
+    let result = eval_primitive(Primitive::Dot, &[a, b], &no_params()).unwrap();
+    assert_eq!(
+        result,
+        Value::Scalar(Literal::U32(32)),
+        "U32 dot should keep U32 literal output"
+    );
+}
+
+#[test]
+fn oracle_dot_u64_matvec_preserves_dtype_and_wraps() {
+    let a = make_u64_tensor(&[2, 2], vec![u64::MAX, 2, 3, 4]);
+    let b = make_u64_tensor(&[2], vec![1, 2]);
+    let result = eval_primitive(Primitive::Dot, &[a, b], &no_params()).unwrap();
+    let Value::Tensor(t) = result else {
+        panic!("expected tensor");
+    };
+    assert_eq!(t.dtype, DType::U64);
+    assert_eq!(t.shape.dims, vec![2]);
+    assert_eq!(t.elements, vec![Literal::U64(3), Literal::U64(11)]);
+    t.validate_dtype_consistency()
+        .expect("U64 dot output dtype/element invariant");
 }

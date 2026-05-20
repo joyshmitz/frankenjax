@@ -1398,21 +1398,23 @@ pub(crate) fn eval_unary_int_or_float(
                     Literal::U32(v) => Literal::U32(u32_op(v)),
                     Literal::U64(v) => Literal::U64(u64_op(v)),
                     Literal::BF16Bits(bits) => {
-                        let val = Literal::BF16Bits(bits).as_f64().ok_or(
-                            EvalError::TypeMismatch {
-                                primitive,
-                                detail: "expected numeric tensor elements, got bf16",
-                            },
-                        )?;
+                        let val =
+                            Literal::BF16Bits(bits)
+                                .as_f64()
+                                .ok_or(EvalError::TypeMismatch {
+                                    primitive,
+                                    detail: "expected numeric tensor elements, got bf16",
+                                })?;
                         Literal::from_bf16_f32(float_op(val) as f32)
                     }
                     Literal::F16Bits(bits) => {
-                        let val = Literal::F16Bits(bits).as_f64().ok_or(
-                            EvalError::TypeMismatch {
-                                primitive,
-                                detail: "expected numeric tensor elements, got f16",
-                            },
-                        )?;
+                        let val =
+                            Literal::F16Bits(bits)
+                                .as_f64()
+                                .ok_or(EvalError::TypeMismatch {
+                                    primitive,
+                                    detail: "expected numeric tensor elements, got f16",
+                                })?;
                         Literal::from_f16_f32(float_op(val) as f32)
                     }
                     Literal::F32Bits(bits) => {
@@ -1924,7 +1926,7 @@ fn dot_result_is_integral(lhs: &TensorValue, rhs: &TensorValue) -> bool {
 
 #[derive(Clone, Copy)]
 enum DotOutputKind {
-    Integral,
+    Integral(DType),
     /// Real dot product; payload is the JAX-promoted real dtype to emit
     /// (BF16 / F16 / F32 / F64) so F32×F32 doesn't silently widen to F64
     /// (parity with `lax.dot_general` real-input promotion).
@@ -1935,7 +1937,7 @@ enum DotOutputKind {
 impl DotOutputKind {
     fn tensor_dtype(self) -> DType {
         match self {
-            Self::Integral => DType::I64,
+            Self::Integral(dtype) => dtype,
             Self::Real(dtype) => dtype,
             Self::Complex(dtype) => dtype,
         }
@@ -1947,17 +1949,42 @@ fn dot_output_kind(lhs: &TensorValue, rhs: &TensorValue) -> DotOutputKind {
         || matches!(rhs.dtype, DType::Complex64 | DType::Complex128)
     {
         DotOutputKind::Complex(complex_binary_output_dtype(lhs.dtype, rhs.dtype))
-    } else if dot_result_is_integral(lhs, rhs) {
-        DotOutputKind::Integral
     } else {
         // Honour JAX promotion: F32×F32 → F32, BF16×BF16 → BF16,
         // F16×F16 → F16, half + F32 → F32, anything with F64 → F64.
         let promoted = promote_dtype(lhs.dtype, rhs.dtype);
-        let real_dtype = match promoted {
-            DType::BF16 | DType::F16 | DType::F32 | DType::F64 => promoted,
-            _ => DType::F64,
-        };
-        DotOutputKind::Real(real_dtype)
+        if dot_result_is_integral(lhs, rhs)
+            && matches!(promoted, DType::I32 | DType::I64 | DType::U32 | DType::U64)
+        {
+            DotOutputKind::Integral(promoted)
+        } else {
+            let real_dtype = match promoted {
+                DType::BF16 | DType::F16 | DType::F32 | DType::F64 => promoted,
+                _ => DType::F64,
+            };
+            DotOutputKind::Real(real_dtype)
+        }
+    }
+}
+
+fn integral_dot_literal_from_i64(dtype: DType, value: i64) -> Result<Literal, EvalError> {
+    match dtype {
+        DType::I32 | DType::I64 => Ok(Literal::I64(value)),
+        _ => Err(EvalError::Unsupported {
+            primitive: Primitive::Dot,
+            detail: format!("unsupported signed dot output dtype {dtype:?}"),
+        }),
+    }
+}
+
+fn integral_dot_literal_from_u64(dtype: DType, value: u64) -> Result<Literal, EvalError> {
+    match dtype {
+        DType::U32 => Ok(Literal::U32(value as u32)),
+        DType::U64 => Ok(Literal::U64(value)),
+        _ => Err(EvalError::Unsupported {
+            primitive: Primitive::Dot,
+            detail: format!("unsupported unsigned dot output dtype {dtype:?}"),
+        }),
     }
 }
 
@@ -1968,21 +1995,38 @@ fn dot_accumulate(
     mut pair_at: impl FnMut(usize) -> (Literal, Literal),
 ) -> Result<Literal, EvalError> {
     match output_kind {
-        DotOutputKind::Integral => {
-            let mut sum = 0_i64;
-            for index in 0..len {
-                let (left, right) = pair_at(index);
-                let left_i = left.as_i64().ok_or(EvalError::TypeMismatch {
-                    primitive,
-                    detail: "integral dot expected i64 elements",
-                })?;
-                let right_i = right.as_i64().ok_or(EvalError::TypeMismatch {
-                    primitive,
-                    detail: "integral dot expected i64 elements",
-                })?;
-                sum += left_i * right_i;
+        DotOutputKind::Integral(dtype) => {
+            if matches!(dtype, DType::U32 | DType::U64) {
+                let mut sum = 0_u64;
+                for index in 0..len {
+                    let (left, right) = pair_at(index);
+                    let left_u = left.as_u64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "unsigned dot expected unsigned/integral lhs elements",
+                    })?;
+                    let right_u = right.as_u64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "unsigned dot expected unsigned/integral rhs elements",
+                    })?;
+                    sum = sum.wrapping_add(left_u.wrapping_mul(right_u));
+                }
+                integral_dot_literal_from_u64(dtype, sum)
+            } else {
+                let mut sum = 0_i64;
+                for index in 0..len {
+                    let (left, right) = pair_at(index);
+                    let left_i = left.as_i64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "signed dot expected signed/integral lhs elements",
+                    })?;
+                    let right_i = right.as_i64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "signed dot expected signed/integral rhs elements",
+                    })?;
+                    sum = sum.wrapping_add(left_i.wrapping_mul(right_i));
+                }
+                integral_dot_literal_from_i64(dtype, sum)
             }
-            Ok(Literal::I64(sum))
         }
         DotOutputKind::Real(dtype) => {
             let mut sum = 0.0_f64;
@@ -2023,20 +2067,36 @@ fn dot_accumulate_contiguous(
     rhs: &[Literal],
 ) -> Result<Literal, EvalError> {
     match output_kind {
-        DotOutputKind::Integral => {
-            let mut sum = 0_i64;
-            for (left, right) in lhs.iter().zip(rhs) {
-                let left_i = left.as_i64().ok_or(EvalError::TypeMismatch {
-                    primitive,
-                    detail: "integral dot expected i64 elements",
-                })?;
-                let right_i = right.as_i64().ok_or(EvalError::TypeMismatch {
-                    primitive,
-                    detail: "integral dot expected i64 elements",
-                })?;
-                sum += left_i * right_i;
+        DotOutputKind::Integral(dtype) => {
+            if matches!(dtype, DType::U32 | DType::U64) {
+                let mut sum = 0_u64;
+                for (left, right) in lhs.iter().zip(rhs) {
+                    let left_u = left.as_u64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "unsigned dot expected unsigned/integral lhs elements",
+                    })?;
+                    let right_u = right.as_u64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "unsigned dot expected unsigned/integral rhs elements",
+                    })?;
+                    sum = sum.wrapping_add(left_u.wrapping_mul(right_u));
+                }
+                integral_dot_literal_from_u64(dtype, sum)
+            } else {
+                let mut sum = 0_i64;
+                for (left, right) in lhs.iter().zip(rhs) {
+                    let left_i = left.as_i64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "signed dot expected signed/integral lhs elements",
+                    })?;
+                    let right_i = right.as_i64().ok_or(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "signed dot expected signed/integral rhs elements",
+                    })?;
+                    sum = sum.wrapping_add(left_i.wrapping_mul(right_i));
+                }
+                integral_dot_literal_from_i64(dtype, sum)
             }
-            Ok(Literal::I64(sum))
         }
         DotOutputKind::Real(dtype) => {
             let mut sum = 0.0_f64;
