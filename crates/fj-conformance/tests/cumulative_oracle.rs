@@ -331,3 +331,60 @@ fn oracle_cumprod_f32_preserves_dtype() {
     t.validate_dtype_consistency()
         .expect("F32 cumprod output dtype/element invariant");
 }
+
+// Property sweep across BF16/F16/F32/F64. The fix in ff512bc routes
+// through `reduce_real_literal`/`reduce_real_output_dtype`, which apply
+// per-dtype. Single-dtype point tests can mask regressions in any one
+// arm.
+#[test]
+fn property_cumulative_preserves_all_float_dtypes() {
+    fn make_vec<F>(dtype: DType, values: &[f64], lit_for: F) -> Value
+    where
+        F: Fn(f64) -> Literal,
+    {
+        Value::Tensor(
+            TensorValue::new(
+                dtype,
+                Shape {
+                    dims: vec![values.len() as u32],
+                },
+                values.iter().copied().map(lit_for).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    let values = [1.0_f64, 2.0, 3.0, 4.0];
+    let cases: Vec<(DType, Value)> = vec![
+        (
+            DType::BF16,
+            make_vec(DType::BF16, &values, |v| Literal::from_bf16_f32(v as f32)),
+        ),
+        (
+            DType::F16,
+            make_vec(DType::F16, &values, |v| Literal::from_f16_f32(v as f32)),
+        ),
+        (
+            DType::F32,
+            make_vec(DType::F32, &values, |v| Literal::from_f32(v as f32)),
+        ),
+        (DType::F64, make_vec(DType::F64, &values, Literal::from_f64)),
+    ];
+
+    for (dtype, input) in cases {
+        for primitive in [Primitive::Cumsum, Primitive::Cumprod] {
+            let result = eval_primitive(primitive, &[input.clone()], &no_params())
+                .unwrap_or_else(|e| panic!("{primitive:?} {dtype:?} failed: {e}"));
+            let Value::Tensor(t) = result else {
+                panic!("{primitive:?} {dtype:?}: expected tensor");
+            };
+            assert_eq!(
+                t.dtype, dtype,
+                "{primitive:?} {dtype:?}: tensor dtype mismatch"
+            );
+            t.validate_dtype_consistency().unwrap_or_else(|e| {
+                panic!("{primitive:?} {dtype:?}: validate_dtype_consistency failed: {e}")
+            });
+        }
+    }
+}
