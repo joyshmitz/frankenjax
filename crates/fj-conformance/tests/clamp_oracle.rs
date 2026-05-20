@@ -389,3 +389,58 @@ fn metamorphic_clamp_tensor_idempotent() {
         assert_eq!(*v1, *v2, "clamp is idempotent for tensors");
     }
 }
+
+// `eval_clamp`'s mixed-dtype tensor arm previously emitted Literal::from_f64
+// while declaring the tensor's original dtype (BF16/F16/F32), violating the
+// dtype/element invariant. The fix in 1x85 threaded an Option<DType> target
+// through clamp_literal. This property sweep guards against per-dtype
+// regressions across all four float variants for the same-dtype path.
+#[test]
+fn property_clamp_preserves_all_float_dtypes() {
+    fn make_scalar(dtype: DType, v: f64) -> Value {
+        Value::Scalar(match dtype {
+            DType::BF16 => Literal::from_bf16_f32(v as f32),
+            DType::F16 => Literal::from_f16_f32(v as f32),
+            DType::F32 => Literal::from_f32(v as f32),
+            DType::F64 => Literal::from_f64(v),
+            _ => unreachable!(),
+        })
+    }
+
+    fn make_vec(dtype: DType, values: &[f64]) -> Value {
+        let lit_for = |v: f64| match dtype {
+            DType::BF16 => Literal::from_bf16_f32(v as f32),
+            DType::F16 => Literal::from_f16_f32(v as f32),
+            DType::F32 => Literal::from_f32(v as f32),
+            DType::F64 => Literal::from_f64(v),
+            _ => unreachable!(),
+        };
+        Value::Tensor(
+            TensorValue::new(
+                dtype,
+                Shape {
+                    dims: vec![values.len() as u32],
+                },
+                values.iter().copied().map(lit_for).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    let values = [-5.0_f64, 2.0, 7.0, 12.0];
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let x = make_vec(dtype, &values);
+        let lo = make_scalar(dtype, 0.0);
+        let hi = make_scalar(dtype, 10.0);
+
+        let result = eval_primitive(Primitive::Clamp, &[x, lo, hi], &no_params())
+            .unwrap_or_else(|e| panic!("clamp {dtype:?} failed: {e}"));
+        let Value::Tensor(t) = result else {
+            panic!("clamp {dtype:?}: expected tensor");
+        };
+        assert_eq!(t.dtype, dtype, "clamp {dtype:?}: tensor dtype mismatch");
+        t.validate_dtype_consistency().unwrap_or_else(|e| {
+            panic!("clamp {dtype:?}: validate_dtype_consistency failed: {e}")
+        });
+    }
+}
