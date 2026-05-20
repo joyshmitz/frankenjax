@@ -699,3 +699,63 @@ fn oracle_dot_u64_matvec_preserves_dtype_and_wraps() {
     t.validate_dtype_consistency()
         .expect("U64 dot output dtype/element invariant");
 }
+
+// Property-style sweep: for every float dtype, asserting `dot(a, a)` on
+// a small vector returns a scalar whose declared dtype matches the input
+// AND every output literal kind matches that dtype. Pins both eef360c
+// (batched dot) and 8387d98 (tensor dot) against future widening
+// regressions across the half/single/double precision family.
+#[test]
+fn property_dot_self_preserves_float_dtype() {
+    fn make_vec<F>(dtype: DType, values: &[f64], lit_for: F) -> Value
+    where
+        F: Fn(f64) -> Literal,
+    {
+        Value::Tensor(
+            TensorValue::new(
+                dtype,
+                Shape {
+                    dims: vec![values.len() as u32],
+                },
+                values.iter().copied().map(lit_for).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    let values = [1.0_f64, 2.0, 3.0];
+    let cases: Vec<(DType, Value)> = vec![
+        (
+            DType::BF16,
+            make_vec(DType::BF16, &values, |v| Literal::from_bf16_f32(v as f32)),
+        ),
+        (
+            DType::F16,
+            make_vec(DType::F16, &values, |v| Literal::from_f16_f32(v as f32)),
+        ),
+        (
+            DType::F32,
+            make_vec(DType::F32, &values, |v| Literal::from_f32(v as f32)),
+        ),
+        (DType::F64, make_vec(DType::F64, &values, Literal::from_f64)),
+    ];
+
+    for (dtype, vec_value) in cases {
+        let result =
+            eval_primitive(Primitive::Dot, &[vec_value.clone(), vec_value], &no_params()).unwrap();
+        match result {
+            Value::Scalar(lit) => {
+                assert!(
+                    lit.matches_dtype(dtype),
+                    "dtype={dtype:?}: scalar dot literal {lit:?} does not match dtype"
+                );
+            }
+            Value::Tensor(t) => {
+                assert_eq!(t.dtype, dtype, "dtype={dtype:?}: tensor dtype mismatch");
+                t.validate_dtype_consistency().unwrap_or_else(|e| {
+                    panic!("dtype={dtype:?}: validate_dtype_consistency failed: {e}")
+                });
+            }
+        }
+    }
+}
