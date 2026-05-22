@@ -44,6 +44,8 @@ def test_value_scalar():
     v = fj.PyValue.scalar_f64(42.0)
     assert isinstance(v, fj.Array)
     assert v.shape == ()
+    assert v.T.shape == ()
+    assert abs(v.T.item() - 42.0) < 1e-12
     assert v.dtype == "F64"
     assert isinstance(v.aval, fj.ShapeDtypeStruct)
     assert v.aval.shape == ()
@@ -258,6 +260,9 @@ def test_value_scalar():
     assert vec.is_fully_addressable is True
     assert vec.is_fully_replicated is True
     assert len(vec) == 3
+    vec_t = vec.T
+    assert vec_t.shape == (3,)
+    assert vec_t.tolist() == [1, 2, 3]
     assert vec.item(0) == 1
     assert vec.item(-1) == 3
     try:
@@ -368,6 +373,13 @@ def test_make_jaxpr_generic():
     result = fj.jit(add2, [fj.PyValue.scalar_i64(3), fj.PyValue.scalar_i64(4)])
     assert len(result) == 1
     assert result[0].as_i64() == 7
+
+    reshape = fj.make_jaxpr("lax_reshape_6_to_2x3")
+    matrix = fj.jit(reshape, [fj.PyValue.vector_i64([1, 2, 3, 4, 5, 6])])[0]
+    assert matrix.shape == (2, 3)
+    matrix_t = matrix.T
+    assert matrix_t.shape == (3, 2)
+    assert matrix_t.tolist() == [1, 4, 2, 5, 3, 6]
 
     try:
         fj.make_jaxpr("missing_program")

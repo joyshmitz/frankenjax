@@ -155,6 +155,72 @@ impl PyValue {
         let tensor = TensorValue::stack_axis0(&values).map_err(value_error)?;
         Ok(Self::from_value(Value::Tensor(tensor)))
     }
+
+    fn transpose_all_axes(&self) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        let Value::Tensor(tensor) = &self.inner else {
+            return Ok(self.clone());
+        };
+        let rank = tensor.rank();
+        if rank <= 1 {
+            return Ok(self.clone());
+        }
+
+        let mut dims = tensor.shape.dims.clone();
+        dims.reverse();
+        if tensor.elements.is_empty() {
+            let tensor =
+                TensorValue::new(tensor.dtype, Shape { dims }, Vec::new()).map_err(value_error)?;
+            return Ok(Self::from_value(Value::Tensor(tensor)));
+        }
+
+        let old_strides = row_major_strides(&tensor.shape.dims)?;
+        let new_strides = row_major_strides(&dims)?;
+        let mut elements = Vec::with_capacity(tensor.elements.len());
+        for new_flat_index in 0..tensor.elements.len() {
+            let mut remainder = new_flat_index;
+            let mut old_flat_index = 0_usize;
+            for (axis, new_stride) in new_strides.iter().copied().enumerate() {
+                if new_stride == 0 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                        "transpose stride computation produced zero stride",
+                    ));
+                }
+                let coord = remainder / new_stride;
+                remainder %= new_stride;
+                let old_axis = rank - 1 - axis;
+                let old_stride = old_strides.get(old_axis).copied().ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                        "transpose stride index is out of bounds",
+                    )
+                })?;
+                let offset = coord.checked_mul(old_stride).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                        "transpose index computation overflowed",
+                    )
+                })?;
+                old_flat_index = old_flat_index.checked_add(offset).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                        "transpose index computation overflowed",
+                    )
+                })?;
+            }
+            let literal = tensor
+                .elements
+                .get(old_flat_index)
+                .copied()
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                        "transpose index is out of bounds",
+                    )
+                })?;
+            elements.push(literal);
+        }
+
+        let tensor =
+            TensorValue::new(tensor.dtype, Shape { dims }, elements).map_err(value_error)?;
+        Ok(Self::from_value(Value::Tensor(tensor)))
+    }
 }
 
 #[pyclass]
@@ -380,6 +446,11 @@ impl PyValue {
     #[getter]
     fn shape(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         shape_to_py_tuple(py, &self.shape_dims())
+    }
+
+    #[getter(T)]
+    fn transpose_property(&self) -> PyResult<Self> {
+        self.transpose_all_axes()
     }
 
     #[getter]
@@ -1360,6 +1431,23 @@ fn runtime_error(error: impl ToString) -> PyErr {
 
 fn value_error(error: impl ToString) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string())
+}
+
+fn row_major_strides(dims: &[u32]) -> PyResult<Vec<usize>> {
+    let mut strides = vec![1_usize; dims.len()];
+    let mut stride = 1_usize;
+    for (dim, stride_slot) in dims.iter().rev().zip(strides.iter_mut().rev()) {
+        *stride_slot = stride;
+        let dim = usize::try_from(*dim).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array dimension does not fit usize")
+        })?;
+        stride = stride.checked_mul(dim).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "array stride computation overflowed",
+            )
+        })?;
+    }
+    Ok(strides)
 }
 
 fn py_object_repr(py: Python<'_>, value: Option<Py<PyAny>>) -> PyResult<String> {
@@ -2481,6 +2569,10 @@ mod tests {
     fn value_scalar_roundtrip() {
         let v = PyValue::scalar_f64(42.0);
         assert_eq!(v.shape_dims(), Vec::<u32>::new());
+        assert_eq!(
+            v.transpose_all_axes().unwrap().shape_dims(),
+            Vec::<u32>::new()
+        );
         assert_eq!(v.dtype(), "F64");
         assert!(v.__hash__().is_err());
         assert_eq!(v.ndim(), 0);
@@ -2515,6 +2607,7 @@ mod tests {
         assert!(deleted.block_until_ready().is_err());
         assert!(deleted.is_ready().is_err());
         assert!(deleted.copy_to_host_async().is_err());
+        assert!(deleted.transpose_all_axes().is_err());
         assert!(deleted.addressable_data(0).is_err());
         assert!(deleted.addressable_shards().is_err());
         assert!(deleted.global_shards().is_err());
@@ -2675,6 +2768,9 @@ mod tests {
 
         let ints = PyValue::vector_i64(vec![1, 2, 3]).unwrap();
         assert_eq!(ints.shape_dims(), vec![3]);
+        let ints_t = ints.transpose_all_axes().unwrap();
+        assert_eq!(ints_t.shape_dims(), vec![3]);
+        assert_eq!(ints_t.as_i64_list().unwrap(), vec![1, 2, 3]);
         assert_eq!(ints.dtype(), "I64");
         assert_eq!(ints.ndim(), 1);
         assert_eq!(ints.size(), 3);
@@ -2737,6 +2833,25 @@ mod tests {
         });
         assert_eq!(ints.as_i64_list().unwrap(), vec![1, 2, 3]);
         assert_eq!(ints.as_f64_list().unwrap(), vec![1.0, 2.0, 3.0]);
+
+        let matrix = PyValue::from_value(Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3] },
+                vec![
+                    Literal::I64(1),
+                    Literal::I64(2),
+                    Literal::I64(3),
+                    Literal::I64(4),
+                    Literal::I64(5),
+                    Literal::I64(6),
+                ],
+            )
+            .unwrap(),
+        ));
+        let matrix_t = matrix.transpose_all_axes().unwrap();
+        assert_eq!(matrix_t.shape_dims(), vec![3, 2]);
+        assert_eq!(matrix_t.as_i64_list().unwrap(), vec![1, 4, 2, 5, 3, 6]);
 
         let one = PyValue::vector_i64(vec![0]).unwrap();
         assert!(!one.__bool__().unwrap());
