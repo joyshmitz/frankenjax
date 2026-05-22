@@ -231,3 +231,73 @@ fn lu_negative_values() {
     assert_eq!(result.len(), 3);
     assert_eq!(shape(&result[0]), Some(Shape { dims: vec![2, 2] }));
 }
+
+#[test]
+fn lu_upper_triangular_matrix() {
+    // Upper triangular matrices need no pivoting
+    let input = f64_matrix(3, 3, &[1.0, 2.0, 3.0, 0.0, 4.0, 5.0, 0.0, 0.0, 6.0]);
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("upper triangular LU should succeed");
+
+    assert_eq!(result.len(), 3);
+    let lu = f64_values(&result[0]).expect("expected f64 LU");
+    // For upper triangular, LU should be the same (L=I, U=A)
+    assert_close(&lu, &[1.0, 2.0, 3.0, 0.0, 4.0, 5.0, 0.0, 0.0, 6.0], 1e-12);
+    // No pivoting needed - identity permutation
+    assert_eq!(i64_values(&result[1]), Some(vec![0, 1, 2]));
+    assert_eq!(i64_values(&result[2]), Some(vec![0, 1, 2]));
+}
+
+#[test]
+fn lu_lower_triangular_matrix() {
+    // Lower triangular matrix
+    let input = f64_matrix(3, 3, &[1.0, 0.0, 0.0, 2.0, 3.0, 0.0, 4.0, 5.0, 6.0]);
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("lower triangular LU should succeed");
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(shape(&result[0]), Some(Shape { dims: vec![3, 3] }));
+}
+
+#[test]
+fn lu_4x4_matrix() {
+    let input = f64_matrix(
+        4,
+        4,
+        &[
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
+        ],
+    );
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("4x4 LU should succeed");
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(shape(&result[0]), Some(Shape { dims: vec![4, 4] }));
+    assert_eq!(shape(&result[1]), Some(Shape { dims: vec![4] }));
+    assert_eq!(shape(&result[2]), Some(Shape { dims: vec![4] }));
+}
+
+#[test]
+fn lu_very_wide_matrix() {
+    // 2x5 wide matrix
+    let input = f64_matrix(2, 5, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("wide rectangular LU should succeed");
+
+    assert_eq!(shape(&result[0]), Some(Shape { dims: vec![2, 5] }));
+    // pivots length = min(rows, cols) = 2
+    assert_eq!(shape(&result[1]), Some(Shape { dims: vec![2] }));
+    // permutation length = rows = 2
+    assert_eq!(shape(&result[2]), Some(Shape { dims: vec![2] }));
+}
+
+#[test]
+fn lu_scale_invariant() {
+    // LU of scaled matrix should have scaled U
+    let input = f64_matrix(2, 2, &[2.0, 4.0, 6.0, 8.0]);
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("scaled LU should succeed");
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(shape(&result[0]), Some(Shape { dims: vec![2, 2] }));
+}

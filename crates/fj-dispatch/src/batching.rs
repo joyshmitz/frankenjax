@@ -584,8 +584,9 @@ fn batch_clamp(
     inputs: &[BatchTracer],
     params: &BTreeMap<String, String>,
 ) -> Result<BatchTracer, BatchError> {
-    let (x, lo, hi, out_batch_dim) = harmonize_ternary(&inputs[0], &inputs[1], &inputs[2])?;
-    let result = eval_primitive(Primitive::Clamp, &[x, lo, hi], params)
+    let (min, operand, max, out_batch_dim) =
+        harmonize_ternary(&inputs[0], &inputs[1], &inputs[2])?;
+    let result = eval_primitive(Primitive::Clamp, &[min, operand, max], params)
         .map_err(|e| BatchError::EvalError(e.to_string()))?;
     Ok(BatchTracer {
         value: result,

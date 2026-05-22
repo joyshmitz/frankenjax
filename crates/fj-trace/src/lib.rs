@@ -1183,7 +1183,7 @@ impl SimpleTraceContext {
                     });
                 }
                 let reps = parse_usize_list(primitive, "reps", raw_reps)?;
-                if reps.iter().any(|&rep| rep == 0) {
+                if reps.contains(&0) {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
                         detail: "tile reps must all be positive".to_owned(),
@@ -1417,14 +1417,37 @@ impl SimpleTraceContext {
                 }])
             }
             Primitive::Clamp => {
-                // clamp(x, lo, hi): 3 inputs, output shape matches first
+                // JAX order: clamp(min, operand, max). The result follows the
+                // broadcasted shape rather than the first argument's shape.
                 if inputs.len() != 3 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
                         detail: format!("expected 3 inputs, got {}", inputs.len()),
                     });
                 }
-                Ok(vec![inputs[0].clone()])
+                let shape = broadcast_shape(&inputs[0].shape, &inputs[1].shape).ok_or(
+                    TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "cannot broadcast clamp min shape {:?} with operand shape {:?}",
+                            inputs[0].shape.dims, inputs[1].shape.dims
+                        ),
+                    },
+                )?;
+                let shape = broadcast_shape(&shape, &inputs[2].shape).ok_or(
+                    TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "cannot broadcast clamp output shape {:?} with max shape {:?}",
+                            shape.dims, inputs[2].shape.dims
+                        ),
+                    },
+                )?;
+                let dtype = promote_dtype(
+                    promote_dtype(inputs[0].dtype, inputs[1].dtype),
+                    inputs[2].dtype,
+                );
+                Ok(vec![ShapedArray { dtype, shape }])
             }
             Primitive::Iota => {
                 // Iota: no inputs, output shape from params
@@ -7545,6 +7568,35 @@ mod tests {
             make_jaxpr(|inputs| vec![&inputs[0] + &inputs[1]], vec![scalar, vector]).unwrap();
         assert_eq!(closed.jaxpr.equations.len(), 1);
         assert_eq!(closed.jaxpr.equations[0].primitive, Primitive::Add);
+    }
+
+    #[test]
+    fn test_trace_clamp_jax_order_scalar_bounds_vector_operand_shape() {
+        let mut ctx = SimpleTraceContext::with_inputs(vec![
+            ShapedArray {
+                dtype: DType::F64,
+                shape: Shape::scalar(),
+            },
+            ShapedArray {
+                dtype: DType::F64,
+                shape: Shape { dims: vec![4] },
+            },
+            ShapedArray {
+                dtype: DType::F64,
+                shape: Shape::scalar(),
+            },
+        ]);
+
+        let out = ctx
+            .process_primitive(
+                Primitive::Clamp,
+                &[TracerId(1), TracerId(2), TracerId(3)],
+                BTreeMap::new(),
+            )
+            .expect("clamp(min, operand, max) should infer operand shape");
+        let aval = ctx.tracer_aval(out[0]).expect("aval present");
+        assert_eq!(aval.dtype, DType::F64);
+        assert_eq!(aval.shape, Shape { dims: vec![4] });
     }
 
     #[test]

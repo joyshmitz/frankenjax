@@ -361,3 +361,116 @@ fn dynamic_update_slice_middle_update_2d() {
     let (_, values) = tensor_i64_parts(&result).unwrap();
     assert_eq!(values, vec![1, 2, 3, 4, 99, 6, 7, 8, 9]);
 }
+
+#[test]
+fn dynamic_update_slice_rank4() {
+    // [2, 2, 2, 2] operand, update [1, 1, 1, 2] at various positions
+    let operand_values: Vec<i64> = (0..16).collect();
+    let operand = tensor_i64(&[2, 2, 2, 2], &operand_values).unwrap();
+    let update = tensor_i64(&[1, 1, 1, 2], &[90, 91]).unwrap();
+    let starts = vec![
+        Value::scalar_i64(0),
+        Value::scalar_i64(1),
+        Value::scalar_i64(1),
+        Value::scalar_i64(0),
+    ];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[
+            operand,
+            update,
+            starts[0].clone(),
+            starts[1].clone(),
+            starts[2].clone(),
+            starts[3].clone(),
+        ],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (shape, values) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(shape, vec![2, 2, 2, 2]);
+    // Position [0, 1, 1, 0..2] = indices 6 and 7
+    let mut expected: Vec<i64> = (0..16).collect();
+    expected[6] = 90;
+    expected[7] = 91;
+    assert_eq!(values, expected);
+}
+
+#[test]
+fn dynamic_update_slice_bool_dtype() {
+    fn tensor_bool(shape: &[u32], values: &[bool]) -> Result<Value, String> {
+        TensorValue::new(
+            DType::Bool,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            values.iter().copied().map(Literal::Bool).collect(),
+        )
+        .map(Value::Tensor)
+        .map_err(|err| format!("failed to build bool tensor: {err}"))
+    }
+
+    let operand = tensor_bool(&[5], &[false, false, false, false, false]).unwrap();
+    let update = tensor_bool(&[2], &[true, true]).unwrap();
+    let starts = vec![Value::scalar_i64(1)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let Value::Tensor(tensor) = result else {
+        panic!("expected tensor");
+    };
+    assert_eq!(tensor.dtype, DType::Bool);
+    let values: Vec<bool> = tensor
+        .elements
+        .iter()
+        .map(|l| match l {
+            Literal::Bool(b) => *b,
+            _ => panic!("expected bool"),
+        })
+        .collect();
+    assert_eq!(values, vec![false, true, true, false, false]);
+}
+
+#[test]
+fn dynamic_update_slice_noop_zero_size_update() {
+    // Update with zero-size tensor should be a no-op
+    let operand = tensor_i64(&[5], &[1, 2, 3, 4, 5]).unwrap();
+    let update = tensor_i64(&[0], &[]).unwrap();
+    let starts = vec![Value::scalar_i64(2)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (_, values) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(values, vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn dynamic_update_slice_scalar_operand() {
+    // Scalar update on scalar operand
+    let operand = tensor_i64(&[], &[42]).unwrap();
+    let update = tensor_i64(&[], &[99]).unwrap();
+    // No starts needed for scalar
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (shape, values) = tensor_i64_parts(&result).unwrap();
+    assert!(shape.is_empty(), "scalar should have empty shape");
+    assert_eq!(values, vec![99]);
+}

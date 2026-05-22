@@ -639,6 +639,23 @@ fn value_sub(a: &Value, b: &Value) -> Result<Value, AdError> {
         .map_err(|e| AdError::EvalFailed(e.to_string()))
 }
 
+fn value_select(cond: &Value, on_true: &Value, on_false: &Value) -> Result<Value, AdError> {
+    eval_primitive(
+        Primitive::Select,
+        &[cond.clone(), on_true.clone(), on_false.clone()],
+        &BTreeMap::new(),
+    )
+    .map_err(|e| AdError::EvalFailed(e.to_string()))
+}
+
+fn value_bool_and(lhs: &Value, rhs: &Value) -> Result<Value, AdError> {
+    value_select(lhs, rhs, &Value::scalar_bool(false))
+}
+
+fn value_masked(mask: &Value, value: &Value, zero_like_value: &Value) -> Result<Value, AdError> {
+    value_select(mask, value, &zeros_like(zero_like_value))
+}
+
 fn checked_axis_len(target_len: usize, context: &'static str) -> Result<u32, AdError> {
     u32::try_from(target_len).map_err(|_| {
         AdError::EvalFailed(format!(
@@ -2422,32 +2439,52 @@ pub fn vjp(
             Ok(vec![grad_operand, grad_updates])
         }
         Primitive::Clamp => {
-            // VJP of clamp(x, lo, hi): gradient passes through where lo < x < hi,
-            // otherwise zero (x is at a boundary).
-            let x = &inputs[0];
-            let lo = &inputs[1];
-            let hi = &inputs[2];
-            // mask = (x > lo) & (x < hi)
-            let gt_lo = eval_primitive(Primitive::Gt, &[x.clone(), lo.clone()], &BTreeMap::new())
-                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let lt_hi = eval_primitive(Primitive::Lt, &[x.clone(), hi.clone()], &BTreeMap::new())
-                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            // g_x = select(gt_lo & lt_hi, g, 0)
-            // Since we don't have And, use select twice: select(gt_lo, select(lt_hi, g, 0), 0)
-            let inner = eval_primitive(
-                Primitive::Select,
-                &[lt_hi, g.clone(), zeros_like(g)],
+            // JAX order is clamp(min, operand, max). Its subgradients are
+            // branch-specific; min and max are differentiable when they are
+            // the selected output, not permanent constants.
+            let min = &inputs[0];
+            let operand = &inputs[1];
+            let max = &inputs[2];
+
+            let min_gt_operand = eval_primitive(
+                Primitive::Gt,
+                &[min.clone(), operand.clone()],
                 &BTreeMap::new(),
             )
             .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let g_x = eval_primitive(
-                Primitive::Select,
-                &[gt_lo, inner, zeros_like(g)],
+            let min_lt_max = eval_primitive(
+                Primitive::Lt,
+                &[min.clone(), max.clone()],
                 &BTreeMap::new(),
             )
             .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            // lo and hi don't receive gradients in JAX
-            Ok(vec![g_x, zeros_like(lo), zeros_like(hi)])
+            let operand_gt_min = eval_primitive(
+                Primitive::Gt,
+                &[operand.clone(), min.clone()],
+                &BTreeMap::new(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let operand_lt_max = eval_primitive(
+                Primitive::Lt,
+                &[operand.clone(), max.clone()],
+                &BTreeMap::new(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let max_lt_operand = eval_primitive(
+                Primitive::Lt,
+                &[max.clone(), operand.clone()],
+                &BTreeMap::new(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+
+            let min_mask = value_bool_and(&min_gt_operand, &min_lt_max)?;
+            let operand_mask = value_bool_and(&operand_gt_min, &operand_lt_max)?;
+
+            Ok(vec![
+                value_masked(&min_mask, g, min)?,
+                value_masked(&operand_mask, g, operand)?,
+                value_masked(&max_lt_operand, g, max)?,
+            ])
         }
         Primitive::DynamicSlice => dynamic_slice_vjp(inputs, g),
         Primitive::Pad => {
@@ -5021,7 +5058,6 @@ fn tile_vjp(
                 let mut g_coords = Vec::with_capacity(rank);
                 let mut remaining = g_flat;
                 for i in 0..rank {
-                    let g_dim = (input_shape[i] as usize) * reps[i];
                     let g_stride: usize = (i + 1..rank)
                         .map(|j| (input_shape[j] as usize) * reps[j])
                         .product();
@@ -7120,18 +7156,26 @@ fn jvp_rule(
             ep_p(Primitive::Scatter, &inputs, params)
         }
 
-        // ── Clamp: tangent passes through where x is in (lo, hi) ──
+        // ── Clamp: JAX order is clamp(min, operand, max) ──
         Primitive::Clamp => {
-            let in_range_lo = ep(Primitive::Gt, &[primals[0].clone(), primals[1].clone()])?;
-            let in_range_hi = ep(Primitive::Lt, &[primals[0].clone(), primals[2].clone()])?;
-            let in_range = eval_primitive(
-                Primitive::Select,
-                &[in_range_lo, in_range_hi, Value::scalar_bool(false)],
-                &no_params,
-            )
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let zero = zeros_like(&tangents[0]);
-            ep(Primitive::Select, &[in_range, tangents[0].clone(), zero])
+            let min = &primals[0];
+            let operand = &primals[1];
+            let max = &primals[2];
+
+            let min_gt_operand = ep(Primitive::Gt, &[min.clone(), operand.clone()])?;
+            let min_lt_max = ep(Primitive::Lt, &[min.clone(), max.clone()])?;
+            let operand_gt_min = ep(Primitive::Gt, &[operand.clone(), min.clone()])?;
+            let operand_lt_max = ep(Primitive::Lt, &[operand.clone(), max.clone()])?;
+            let max_lt_operand = ep(Primitive::Lt, &[max.clone(), operand.clone()])?;
+
+            let min_mask = value_bool_and(&min_gt_operand, &min_lt_max)?;
+            let operand_mask = value_bool_and(&operand_gt_min, &operand_lt_max)?;
+
+            let min_tangent = value_masked(&min_mask, &tangents[0], &tangents[0])?;
+            let operand_tangent = value_masked(&operand_mask, &tangents[1], &tangents[1])?;
+            let max_tangent = value_masked(&max_lt_operand, &tangents[2], &tangents[2])?;
+            let lower_tangent = value_add(&min_tangent, &operand_tangent)?;
+            value_add(&lower_tangent, &max_tangent)
         }
 
         Primitive::DynamicSlice => ep_p(Primitive::DynamicSlice, tangents, params),
@@ -11960,6 +12004,114 @@ mod tests {
         let grads = vjp_single(Primitive::Sort, &[x], &g, &params).unwrap();
         let result = tensor_f64_values(&grads[0]);
         assert_eq!(result, vec![50.0, 20.0, 10.0, 40.0, 30.0, 60.0]);
+    }
+
+    #[test]
+    fn clamp_vjp_routes_cotangent_to_operand_in_open_interval() {
+        let g = Value::scalar_f64(3.0);
+        let grads = vjp_single(
+            Primitive::Clamp,
+            &[
+                Value::scalar_f64(0.0),
+                Value::scalar_f64(5.0),
+                Value::scalar_f64(10.0),
+            ],
+            &g,
+            &BTreeMap::new(),
+        )
+        .expect("clamp VJP should succeed");
+        assert_eq!(to_f64(&grads[0]).unwrap(), 0.0);
+        assert_eq!(to_f64(&grads[1]).unwrap(), 3.0);
+        assert_eq!(to_f64(&grads[2]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn clamp_vjp_routes_cotangent_to_selected_bounds() {
+        let g = Value::scalar_f64(4.0);
+        let min_grads = vjp_single(
+            Primitive::Clamp,
+            &[
+                Value::scalar_f64(2.0),
+                Value::scalar_f64(1.0),
+                Value::scalar_f64(10.0),
+            ],
+            &g,
+            &BTreeMap::new(),
+        )
+        .expect("clamp VJP should route to min");
+        assert_eq!(to_f64(&min_grads[0]).unwrap(), 4.0);
+        assert_eq!(to_f64(&min_grads[1]).unwrap(), 0.0);
+        assert_eq!(to_f64(&min_grads[2]).unwrap(), 0.0);
+
+        let max_grads = vjp_single(
+            Primitive::Clamp,
+            &[
+                Value::scalar_f64(0.0),
+                Value::scalar_f64(12.0),
+                Value::scalar_f64(10.0),
+            ],
+            &g,
+            &BTreeMap::new(),
+        )
+        .expect("clamp VJP should route to max");
+        assert_eq!(to_f64(&max_grads[0]).unwrap(), 0.0);
+        assert_eq!(to_f64(&max_grads[1]).unwrap(), 0.0);
+        assert_eq!(to_f64(&max_grads[2]).unwrap(), 4.0);
+    }
+
+    #[test]
+    fn clamp_jvp_uses_jax_argument_order() {
+        let params = BTreeMap::new();
+        let tangent = jvp_rule(
+            Primitive::Clamp,
+            &[
+                Value::scalar_f64(2.0),
+                Value::scalar_f64(1.0),
+                Value::scalar_f64(10.0),
+            ],
+            &[
+                Value::scalar_f64(7.0),
+                Value::scalar_f64(11.0),
+                Value::scalar_f64(13.0),
+            ],
+            &params,
+        )
+        .expect("min-selected clamp JVP should succeed");
+        assert_eq!(to_f64(&tangent).unwrap(), 7.0);
+
+        let tangent = jvp_rule(
+            Primitive::Clamp,
+            &[
+                Value::scalar_f64(0.0),
+                Value::scalar_f64(5.0),
+                Value::scalar_f64(10.0),
+            ],
+            &[
+                Value::scalar_f64(7.0),
+                Value::scalar_f64(11.0),
+                Value::scalar_f64(13.0),
+            ],
+            &params,
+        )
+        .expect("operand-selected clamp JVP should succeed");
+        assert_eq!(to_f64(&tangent).unwrap(), 11.0);
+
+        let tangent = jvp_rule(
+            Primitive::Clamp,
+            &[
+                Value::scalar_f64(0.0),
+                Value::scalar_f64(12.0),
+                Value::scalar_f64(10.0),
+            ],
+            &[
+                Value::scalar_f64(7.0),
+                Value::scalar_f64(11.0),
+                Value::scalar_f64(13.0),
+            ],
+            &params,
+        )
+        .expect("max-selected clamp JVP should succeed");
+        assert_eq!(to_f64(&tangent).unwrap(), 13.0);
     }
 
     #[test]
