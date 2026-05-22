@@ -249,8 +249,11 @@ fn oracle_rem_f64_negative_zero() {
     let b = make_f64_tensor(&[1], vec![1.0]);
     let result = eval_primitive(Primitive::Rem, &[a, b], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    assert!(vals[0] == 0.0);
-    assert!(vals[0].is_sign_negative());
+    assert_eq!(
+        vals[0].to_bits(),
+        (-0.0_f64).to_bits(),
+        "rem(-0.0, 1.0) = -0.0"
+    );
 }
 
 // ======================== 2D Tensors ========================
