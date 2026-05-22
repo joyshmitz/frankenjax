@@ -1569,10 +1569,42 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
     }
 }
 
+/// Convert a SelectN index literal to a usize.
+/// Supports both integer indices and boolean indices (when n_operands <= 2).
+fn select_n_index_to_usize(
+    idx_lit: Literal,
+    n_operands: usize,
+    primitive: Primitive,
+) -> Result<usize, EvalError> {
+    let idx = match idx_lit {
+        Literal::Bool(b) => {
+            if n_operands > 2 {
+                return Err(EvalError::TypeMismatch {
+                    primitive,
+                    detail: "select_n with boolean index requires at most 2 operands",
+                });
+            }
+            if b { 1 } else { 0 }
+        }
+        _ => idx_lit.as_i64().ok_or_else(|| EvalError::TypeMismatch {
+            primitive,
+            detail: "select_n index must be an integer or boolean",
+        })? as usize,
+    };
+    if idx >= n_operands {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("select_n index {idx} out of bounds for {n_operands} operands"),
+        });
+    }
+    Ok(idx)
+}
+
 /// SelectN: select from N operands based on integer index.
 ///
 /// inputs[0] is the index (integer values 0..N-1), inputs[1..] are the N operands.
 /// For each element position i, output[i] = operands[index[i]][i].
+/// Also supports boolean indices when there are at most 2 operands (false=0, true=1).
 pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() < 2 {
         return Err(EvalError::ArityMismatch {
@@ -1588,10 +1620,7 @@ pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Va
 
     match index {
         Value::Scalar(idx_lit) => {
-            let idx = idx_lit.as_i64().ok_or_else(|| EvalError::TypeMismatch {
-                primitive,
-                detail: "select_n index must be an integer",
-            })? as usize;
+            let idx = select_n_index_to_usize(*idx_lit, n_operands, primitive)?;
             if idx >= n_operands {
                 return Err(EvalError::Unsupported {
                     primitive,
@@ -1642,19 +1671,7 @@ pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Va
             let mut elements = Vec::with_capacity(idx_tensor.elements.len());
 
             for (i, idx_lit) in idx_tensor.elements.iter().enumerate() {
-                let idx = idx_lit.as_i64().ok_or_else(|| EvalError::TypeMismatch {
-                    primitive,
-                    detail: "select_n index elements must be integers",
-                })? as usize;
-
-                if idx >= n_operands {
-                    return Err(EvalError::Unsupported {
-                        primitive,
-                        detail: format!(
-                            "select_n index value {idx} out of bounds for {n_operands} operands"
-                        ),
-                    });
-                }
+                let idx = select_n_index_to_usize(*idx_lit, n_operands, primitive)?;
 
                 let operand = match &operands[idx] {
                     Value::Tensor(t) => t,

@@ -1,8 +1,8 @@
 //! Oracle tests for the SelectN primitive.
 //!
 //! Upstream `jax.lax.select_n(which, *cases)` selects case values by integer
-//! index. Boolean `which` parity is tracked separately because current fj-lax
-//! only accepts integer selectors.
+//! index. Boolean `which` is allowed when len(cases) <= 2, where false selects
+//! case 0 and true selects case 1.
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
@@ -32,6 +32,17 @@ fn vector_i64(values: &[i64]) -> Value {
 
 fn no_params() -> BTreeMap<String, String> {
     BTreeMap::new()
+}
+
+fn vector_bool(values: &[bool]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Bool,
+            Shape::vector(values.len() as u32),
+            values.iter().copied().map(Literal::Bool).collect(),
+        )
+        .unwrap(),
+    )
 }
 
 fn select_n(inputs: Vec<Value>) -> Result<Value, fj_lax::EvalError> {
@@ -167,5 +178,68 @@ fn select_n_rejects_operand_shape_mismatch() {
     assert!(
         err.to_string().contains("matching shapes"),
         "unexpected operand-shape error: {err}"
+    );
+}
+
+// ======================== Boolean which tests ========================
+
+#[test]
+fn select_n_boolean_scalar_false_picks_case_0() {
+    let result = select_n(vec![
+        Value::scalar_bool(false),
+        Value::scalar_f64(10.0),
+        Value::scalar_f64(20.0),
+    ])
+    .expect("boolean false should select case 0");
+
+    assert_eq!(extract_scalar(&result), 10.0);
+}
+
+#[test]
+fn select_n_boolean_scalar_true_picks_case_1() {
+    let result = select_n(vec![
+        Value::scalar_bool(true),
+        Value::scalar_f64(10.0),
+        Value::scalar_f64(20.0),
+    ])
+    .expect("boolean true should select case 1");
+
+    assert_eq!(extract_scalar(&result), 20.0);
+}
+
+#[test]
+fn select_n_boolean_tensor_index_selects_elementwise() {
+    let result = select_n(vec![
+        vector_bool(&[false, true, false, true]),
+        vector_f64(&[1.0, 2.0, 3.0, 4.0]),
+        vector_f64(&[10.0, 20.0, 30.0, 40.0]),
+    ])
+    .expect("boolean tensor index should select elementwise");
+
+    assert_eq!(extract_vector(&result), vec![1.0, 20.0, 3.0, 40.0]);
+}
+
+#[test]
+fn select_n_boolean_with_single_case_false() {
+    let result = select_n(vec![Value::scalar_bool(false), Value::scalar_f64(42.0)])
+        .expect("boolean false with single case should succeed");
+
+    assert_eq!(extract_scalar(&result), 42.0);
+}
+
+#[test]
+fn select_n_boolean_with_three_cases_rejected() {
+    let err = select_n(vec![
+        Value::scalar_bool(true),
+        Value::scalar_f64(10.0),
+        Value::scalar_f64(20.0),
+        Value::scalar_f64(30.0),
+    ])
+    .expect_err("boolean with 3 cases should fail");
+
+    assert!(
+        err.to_string().contains("at most 2 operands")
+            || err.to_string().contains("boolean"),
+        "unexpected boolean-3-cases error: {err}"
     );
 }
