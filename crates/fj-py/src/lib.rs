@@ -448,6 +448,18 @@ fn effects_barrier() {}
 fn clear_caches() {}
 
 #[pyfunction]
+fn clear_backends() {}
+
+#[pyfunction]
+fn clean_up() {}
+
+#[pyfunction(signature = (platform=None))]
+fn live_arrays(platform: Option<String>) -> PyResult<Vec<PyValue>> {
+    validate_cpu_backend(platform.as_deref())?;
+    Ok(Vec::new())
+}
+
+#[pyfunction]
 fn default_backend() -> &'static str {
     "cpu"
 }
@@ -617,6 +629,9 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(copy_to_host_async, m)?)?;
     m.add_function(wrap_pyfunction!(effects_barrier, m)?)?;
     m.add_function(wrap_pyfunction!(clear_caches, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_backends, m)?)?;
+    m.add_function(wrap_pyfunction!(clean_up, m)?)?;
+    m.add_function(wrap_pyfunction!(live_arrays, m)?)?;
     m.add_function(wrap_pyfunction!(default_backend, m)?)?;
     m.add_function(wrap_pyfunction!(device_count, m)?)?;
     m.add_function(wrap_pyfunction!(local_device_count, m)?)?;
@@ -843,6 +858,17 @@ mod tests {
             ensure_compile_time_eval().name(),
             "ensure_compile_time_eval"
         );
+    }
+
+    #[test]
+    fn backend_cleanup_helpers_are_cpu_local() {
+        clear_caches();
+        clear_backends();
+        clean_up();
+
+        assert!(live_arrays(None).unwrap().is_empty());
+        assert!(live_arrays(Some("cpu".to_owned())).unwrap().is_empty());
+        assert!(live_arrays(Some("gpu".to_owned())).is_err());
     }
 
     #[test]

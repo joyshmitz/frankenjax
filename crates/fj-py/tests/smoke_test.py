@@ -190,6 +190,23 @@ def test_backend_topology_helpers():
     print("✓ backend topology helpers expose one local CPU device")
 
 
+def test_backend_cleanup_helpers():
+    """Test CPU-local backend cleanup and live-array introspection helpers."""
+    assert fj.clear_backends() is None
+    assert fj.clean_up() is None
+    assert fj.live_arrays() == []
+    assert fj.live_arrays("cpu") == []
+
+    try:
+        fj.live_arrays("gpu")
+    except ValueError as exc:
+        assert "unsupported backend" in str(exc)
+    else:
+        raise AssertionError("live_arrays should reject unsupported backend")
+
+    print("✓ clear_backends/clean_up/live_arrays expose CPU-local backend helpers")
+
+
 def test_named_helpers():
     """Test no-op named_call and named_scope helper behavior."""
 
@@ -330,6 +347,7 @@ if __name__ == "__main__":
     test_value_and_grad()
     test_device_helpers()
     test_backend_topology_helpers()
+    test_backend_cleanup_helpers()
     test_named_helpers()
     test_local_context_helpers()
     test_vmap()
