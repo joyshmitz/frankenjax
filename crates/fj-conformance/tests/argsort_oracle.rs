@@ -136,3 +136,53 @@ fn oracle_argsort_2d() {
     // Row 1: sorted [4, 5, 6] -> indices [1, 2, 0]
     assert_eq!(indices, vec![1, 2, 0, 1, 2, 0]);
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_argsort_single_element() {
+    let input = make_f64_tensor(&[1], vec![42.0]);
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false)).unwrap();
+    assert_eq!(extract_shape(&result), vec![1]);
+    assert_eq!(extract_i64_vec(&result), vec![0]);
+}
+
+#[test]
+fn oracle_argsort_2d_axis0() {
+    // Sort along axis 0 (columns)
+    // [[3, 1], [1, 3]] -> sorted by columns: [[1, 1], [3, 3]]
+    // Column 0: [3, 1] -> indices [1, 0]
+    // Column 1: [1, 3] -> indices [0, 1]
+    let input = make_f64_tensor(&[2, 2], vec![3.0, 1.0, 1.0, 3.0]);
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(0, false)).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let indices = extract_i64_vec(&result);
+    assert_eq!(indices, vec![1, 0, 0, 1]);
+}
+
+#[test]
+fn oracle_argsort_preserves_index_dtype() {
+    let input = make_f64_tensor(&[3], vec![3.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false)).unwrap();
+    match &result {
+        Value::Tensor(t) => {
+            // Argsort output should be integer type
+            assert!(
+                matches!(t.dtype, DType::I32 | DType::I64),
+                "argsort should return integer indices"
+            );
+        }
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_argsort_with_zeros() {
+    let input = make_f64_tensor(&[5], vec![0.0, -1.0, 1.0, 0.0, -2.0]);
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false)).unwrap();
+    let indices = extract_i64_vec(&result);
+    // Sorted: -2, -1, 0, 0, 1 -> indices: 4, 1, 0 or 3, 3 or 0, 2
+    let original = vec![0.0, -1.0, 1.0, 0.0, -2.0];
+    let sorted: Vec<f64> = indices.iter().map(|&i| original[i as usize]).collect();
+    assert!(sorted.windows(2).all(|w| w[0] <= w[1]), "result should be sorted");
+}
