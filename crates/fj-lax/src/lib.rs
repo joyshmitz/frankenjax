@@ -1344,6 +1344,78 @@ fn apply_bitwise_binary_u64(primitive: Primitive, lhs: u64, rhs: u64) -> u64 {
     }
 }
 
+// Broadcast helpers for bitwise operations
+fn bitwise_broadcast_shape(lhs: &Shape, rhs: &Shape) -> Option<Shape> {
+    let max_rank = lhs.rank().max(rhs.rank());
+    let mut dims = Vec::with_capacity(max_rank);
+
+    for offset in 0..max_rank {
+        let lhs_dim = if offset < lhs.rank() {
+            lhs.dims[lhs.rank() - 1 - offset]
+        } else {
+            1
+        };
+        let rhs_dim = if offset < rhs.rank() {
+            rhs.dims[rhs.rank() - 1 - offset]
+        } else {
+            1
+        };
+
+        let out_dim = if lhs_dim == rhs_dim {
+            lhs_dim
+        } else if lhs_dim == 1 {
+            rhs_dim
+        } else if rhs_dim == 1 {
+            lhs_dim
+        } else {
+            return None;
+        };
+        dims.push(out_dim);
+    }
+
+    dims.reverse();
+    Some(Shape { dims })
+}
+
+fn bitwise_compute_strides(dims: &[u32]) -> Vec<usize> {
+    let mut strides = vec![1_usize; dims.len()];
+    for i in (0..dims.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * dims[i + 1] as usize;
+    }
+    strides
+}
+
+fn bitwise_flat_to_multi(flat: usize, strides: &[usize]) -> Vec<usize> {
+    let mut multi = Vec::with_capacity(strides.len());
+    let mut remainder = flat;
+    for &stride in strides {
+        multi.push(remainder / stride);
+        remainder %= stride;
+    }
+    multi
+}
+
+fn bitwise_broadcast_strides(shape: &Shape, out_shape: &Shape) -> Vec<usize> {
+    let rank = shape.rank();
+    let out_rank = out_shape.rank();
+    let real_strides = bitwise_compute_strides(&shape.dims);
+
+    let mut result = vec![0_usize; out_rank];
+    for (i, &stride) in real_strides.iter().enumerate().take(rank) {
+        let out_axis = out_rank - rank + i;
+        if shape.dims[i] == 1 {
+            result[out_axis] = 0;
+        } else {
+            result[out_axis] = stride;
+        }
+    }
+    result
+}
+
+fn bitwise_broadcast_flat_index(multi: &[usize], strides: &[usize]) -> usize {
+    multi.iter().zip(strides.iter()).map(|(&m, &s)| m * s).sum()
+}
+
 fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() != 2 {
         return Err(EvalError::ArityMismatch {
@@ -1353,6 +1425,7 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         });
     }
     match (&inputs[0], &inputs[1]) {
+        // Scalar-Scalar
         (Value::Scalar(fj_core::Literal::I64(a)), Value::Scalar(fj_core::Literal::I64(b))) => Ok(
             Value::scalar_i64(apply_bitwise_binary_i64(primitive, *a, *b)),
         ),
@@ -1362,25 +1435,191 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         (Value::Scalar(fj_core::Literal::U64(a)), Value::Scalar(fj_core::Literal::U64(b))) => Ok(
             Value::scalar_u64(apply_bitwise_binary_u64(primitive, *a, *b)),
         ),
-        (Value::Tensor(a), Value::Tensor(b)) => {
-            if a.shape != b.shape {
-                return Err(EvalError::ShapeMismatch {
-                    primitive,
-                    left: a.shape.clone(),
-                    right: b.shape.clone(),
-                });
+
+        // Scalar-Tensor broadcast
+        (Value::Scalar(fj_core::Literal::I64(scalar)), Value::Tensor(tensor))
+            if tensor.dtype == fj_core::DType::I64 =>
+        {
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for el in tensor.elements.iter() {
+                match el {
+                    fj_core::Literal::I64(v) => {
+                        elements.push(fj_core::Literal::I64(apply_bitwise_binary_i64(
+                            primitive, *scalar, *v,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
             }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::I64, tensor.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        (Value::Scalar(fj_core::Literal::U32(scalar)), Value::Tensor(tensor))
+            if tensor.dtype == fj_core::DType::U32 =>
+        {
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for el in tensor.elements.iter() {
+                match el {
+                    fj_core::Literal::U32(v) => {
+                        elements.push(fj_core::Literal::U32(apply_bitwise_binary_u32(
+                            primitive, *scalar, *v,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::U32, tensor.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        (Value::Scalar(fj_core::Literal::U64(scalar)), Value::Tensor(tensor))
+            if tensor.dtype == fj_core::DType::U64 =>
+        {
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for el in tensor.elements.iter() {
+                match el {
+                    fj_core::Literal::U64(v) => {
+                        elements.push(fj_core::Literal::U64(apply_bitwise_binary_u64(
+                            primitive, *scalar, *v,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::U64, tensor.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+
+        // Tensor-Scalar broadcast
+        (Value::Tensor(tensor), Value::Scalar(fj_core::Literal::I64(scalar)))
+            if tensor.dtype == fj_core::DType::I64 =>
+        {
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for el in tensor.elements.iter() {
+                match el {
+                    fj_core::Literal::I64(v) => {
+                        elements.push(fj_core::Literal::I64(apply_bitwise_binary_i64(
+                            primitive, *v, *scalar,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::I64, tensor.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        (Value::Tensor(tensor), Value::Scalar(fj_core::Literal::U32(scalar)))
+            if tensor.dtype == fj_core::DType::U32 =>
+        {
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for el in tensor.elements.iter() {
+                match el {
+                    fj_core::Literal::U32(v) => {
+                        elements.push(fj_core::Literal::U32(apply_bitwise_binary_u32(
+                            primitive, *v, *scalar,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::U32, tensor.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        (Value::Tensor(tensor), Value::Scalar(fj_core::Literal::U64(scalar)))
+            if tensor.dtype == fj_core::DType::U64 =>
+        {
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for el in tensor.elements.iter() {
+                match el {
+                    fj_core::Literal::U64(v) => {
+                        elements.push(fj_core::Literal::U64(apply_bitwise_binary_u64(
+                            primitive, *v, *scalar,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::U64, tensor.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+
+        // Tensor-Tensor (same shape or broadcast)
+        (Value::Tensor(a), Value::Tensor(b)) => {
             if a.dtype != b.dtype {
                 return Err(EvalError::TypeMismatch {
                     primitive,
                     detail: "bitwise tensor operands must share dtype",
                 });
             }
+
+            // Same shape: fast path
+            if a.shape == b.shape {
+                return eval_bitwise_tensor_same_shape(primitive, a, b);
+            }
+
+            // Different shapes: broadcast
+            let out_shape =
+                bitwise_broadcast_shape(&a.shape, &b.shape).ok_or(EvalError::ShapeMismatch {
+                    primitive,
+                    left: a.shape.clone(),
+                    right: b.shape.clone(),
+                })?;
+
+            let out_count = out_shape.element_count().unwrap_or(0) as usize;
+            let out_strides = bitwise_compute_strides(&out_shape.dims);
+            let a_strides = bitwise_broadcast_strides(&a.shape, &out_shape);
+            let b_strides = bitwise_broadcast_strides(&b.shape, &out_shape);
+
             match a.dtype {
                 fj_core::DType::I64 => {
-                    let mut elements = Vec::with_capacity(a.elements.len());
-                    for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
-                        match (ea, eb) {
+                    let mut elements = Vec::with_capacity(out_count);
+                    for flat_idx in 0..out_count {
+                        let multi = bitwise_flat_to_multi(flat_idx, &out_strides);
+                        let a_idx = bitwise_broadcast_flat_index(&multi, &a_strides);
+                        let b_idx = bitwise_broadcast_flat_index(&multi, &b_strides);
+
+                        match (&a.elements[a_idx], &b.elements[b_idx]) {
                             (fj_core::Literal::I64(va), fj_core::Literal::I64(vb)) => {
                                 elements.push(fj_core::Literal::I64(apply_bitwise_binary_i64(
                                     primitive, *va, *vb,
@@ -1395,14 +1634,18 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                         }
                     }
                     Ok(Value::Tensor(
-                        TensorValue::new(fj_core::DType::I64, a.shape.clone(), elements)
+                        TensorValue::new(fj_core::DType::I64, out_shape, elements)
                             .map_err(EvalError::InvalidTensor)?,
                     ))
                 }
                 fj_core::DType::U32 => {
-                    let mut elements = Vec::with_capacity(a.elements.len());
-                    for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
-                        match (ea, eb) {
+                    let mut elements = Vec::with_capacity(out_count);
+                    for flat_idx in 0..out_count {
+                        let multi = bitwise_flat_to_multi(flat_idx, &out_strides);
+                        let a_idx = bitwise_broadcast_flat_index(&multi, &a_strides);
+                        let b_idx = bitwise_broadcast_flat_index(&multi, &b_strides);
+
+                        match (&a.elements[a_idx], &b.elements[b_idx]) {
                             (fj_core::Literal::U32(va), fj_core::Literal::U32(vb)) => {
                                 elements.push(fj_core::Literal::U32(apply_bitwise_binary_u32(
                                     primitive, *va, *vb,
@@ -1417,14 +1660,18 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                         }
                     }
                     Ok(Value::Tensor(
-                        TensorValue::new(fj_core::DType::U32, a.shape.clone(), elements)
+                        TensorValue::new(fj_core::DType::U32, out_shape, elements)
                             .map_err(EvalError::InvalidTensor)?,
                     ))
                 }
                 fj_core::DType::U64 => {
-                    let mut elements = Vec::with_capacity(a.elements.len());
-                    for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
-                        match (ea, eb) {
+                    let mut elements = Vec::with_capacity(out_count);
+                    for flat_idx in 0..out_count {
+                        let multi = bitwise_flat_to_multi(flat_idx, &out_strides);
+                        let a_idx = bitwise_broadcast_flat_index(&multi, &a_strides);
+                        let b_idx = bitwise_broadcast_flat_index(&multi, &b_strides);
+
+                        match (&a.elements[a_idx], &b.elements[b_idx]) {
                             (fj_core::Literal::U64(va), fj_core::Literal::U64(vb)) => {
                                 elements.push(fj_core::Literal::U64(apply_bitwise_binary_u64(
                                     primitive, *va, *vb,
@@ -1439,7 +1686,7 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                         }
                     }
                     Ok(Value::Tensor(
-                        TensorValue::new(fj_core::DType::U64, a.shape.clone(), elements)
+                        TensorValue::new(fj_core::DType::U64, out_shape, elements)
                             .map_err(EvalError::InvalidTensor)?,
                     ))
                 }
@@ -1448,6 +1695,85 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                     detail: "bitwise ops require integer types",
                 }),
             }
+        }
+        _ => Err(EvalError::TypeMismatch {
+            primitive,
+            detail: "bitwise ops require integer types",
+        }),
+    }
+}
+
+fn eval_bitwise_tensor_same_shape(
+    primitive: Primitive,
+    a: &TensorValue,
+    b: &TensorValue,
+) -> Result<Value, EvalError> {
+    match a.dtype {
+        fj_core::DType::I64 => {
+            let mut elements = Vec::with_capacity(a.elements.len());
+            for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
+                match (ea, eb) {
+                    (fj_core::Literal::I64(va), fj_core::Literal::I64(vb)) => {
+                        elements.push(fj_core::Literal::I64(apply_bitwise_binary_i64(
+                            primitive, *va, *vb,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::I64, a.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        fj_core::DType::U32 => {
+            let mut elements = Vec::with_capacity(a.elements.len());
+            for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
+                match (ea, eb) {
+                    (fj_core::Literal::U32(va), fj_core::Literal::U32(vb)) => {
+                        elements.push(fj_core::Literal::U32(apply_bitwise_binary_u32(
+                            primitive, *va, *vb,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::U32, a.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        fj_core::DType::U64 => {
+            let mut elements = Vec::with_capacity(a.elements.len());
+            for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
+                match (ea, eb) {
+                    (fj_core::Literal::U64(va), fj_core::Literal::U64(vb)) => {
+                        elements.push(fj_core::Literal::U64(apply_bitwise_binary_u64(
+                            primitive, *va, *vb,
+                        )));
+                    }
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "bitwise ops require integer tensors",
+                        });
+                    }
+                }
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::U64, a.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
         }
         _ => Err(EvalError::TypeMismatch {
             primitive,

@@ -634,3 +634,142 @@ fn metamorphic_bitwise_or_complement_all_ones() {
         );
     }
 }
+
+// ======================== BROADCAST TESTS ========================
+
+fn scalar_i64(v: i64) -> Value {
+    Value::Scalar(Literal::I64(v))
+}
+
+#[test]
+fn oracle_bitwise_and_scalar_tensor_broadcast() {
+    // scalar & tensor broadcasts scalar across tensor
+    let scalar = scalar_i64(0x0F);
+    let tensor = make_i64_tensor(&[4], vec![0xFF, 0xF0, 0x33, 0xAA]);
+    let result = eval_primitive(Primitive::BitwiseAnd, &[scalar, tensor], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_i64_vec(&result), vec![0x0F, 0x00, 0x03, 0x0A]);
+}
+
+#[test]
+fn oracle_bitwise_and_tensor_scalar_broadcast() {
+    // tensor & scalar broadcasts scalar across tensor
+    let tensor = make_i64_tensor(&[4], vec![0xFF, 0xF0, 0x33, 0xAA]);
+    let scalar = scalar_i64(0x0F);
+    let result = eval_primitive(Primitive::BitwiseAnd, &[tensor, scalar], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_i64_vec(&result), vec![0x0F, 0x00, 0x03, 0x0A]);
+}
+
+#[test]
+fn oracle_bitwise_or_scalar_tensor_broadcast() {
+    let scalar = scalar_i64(0xF0);
+    let tensor = make_i64_tensor(&[3], vec![0x0F, 0x00, 0x05]);
+    let result = eval_primitive(Primitive::BitwiseOr, &[scalar, tensor], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![0xFF, 0xF0, 0xF5]);
+}
+
+#[test]
+fn oracle_bitwise_or_tensor_scalar_broadcast() {
+    let tensor = make_i64_tensor(&[3], vec![0x0F, 0x00, 0x05]);
+    let scalar = scalar_i64(0xF0);
+    let result = eval_primitive(Primitive::BitwiseOr, &[tensor, scalar], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![0xFF, 0xF0, 0xF5]);
+}
+
+#[test]
+fn oracle_bitwise_xor_scalar_tensor_broadcast() {
+    let scalar = scalar_i64(0xFF);
+    let tensor = make_i64_tensor(&[4], vec![0x00, 0x0F, 0xF0, 0xFF]);
+    let result = eval_primitive(Primitive::BitwiseXor, &[scalar, tensor], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_i64_vec(&result), vec![0xFF, 0xF0, 0x0F, 0x00]);
+}
+
+#[test]
+fn oracle_bitwise_xor_tensor_scalar_broadcast() {
+    let tensor = make_i64_tensor(&[4], vec![0x00, 0x0F, 0xF0, 0xFF]);
+    let scalar = scalar_i64(0xFF);
+    let result = eval_primitive(Primitive::BitwiseXor, &[tensor, scalar], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_i64_vec(&result), vec![0xFF, 0xF0, 0x0F, 0x00]);
+}
+
+#[test]
+fn oracle_bitwise_and_row_vector_broadcast() {
+    // [1, 3] & [2, 3] -> [2, 3]
+    let row = make_i64_tensor(&[1, 3], vec![0x0F, 0xF0, 0xFF]);
+    let mat = make_i64_tensor(&[2, 3], vec![0xFF, 0xFF, 0xFF, 0xAA, 0x55, 0x33]);
+    let result = eval_primitive(Primitive::BitwiseAnd, &[row, mat], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![0x0F, 0xF0, 0xFF, 0x0A, 0x50, 0x33]);
+}
+
+#[test]
+fn oracle_bitwise_and_column_vector_broadcast() {
+    // [2, 1] & [2, 3] -> [2, 3]
+    let col = make_i64_tensor(&[2, 1], vec![0x0F, 0xF0]);
+    let mat = make_i64_tensor(&[2, 3], vec![0xFF, 0xAA, 0x55, 0xFF, 0xAA, 0x55]);
+    let result = eval_primitive(Primitive::BitwiseAnd, &[col, mat], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![0x0F, 0x0A, 0x05, 0xF0, 0xA0, 0x50]);
+}
+
+#[test]
+fn oracle_bitwise_or_row_vector_broadcast() {
+    let row = make_i64_tensor(&[1, 3], vec![0x01, 0x02, 0x04]);
+    let mat = make_i64_tensor(&[2, 3], vec![0x10, 0x20, 0x40, 0x00, 0x00, 0x00]);
+    let result = eval_primitive(Primitive::BitwiseOr, &[row, mat], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![0x11, 0x22, 0x44, 0x01, 0x02, 0x04]);
+}
+
+#[test]
+fn oracle_bitwise_xor_different_ranks_broadcast() {
+    // [3] ^ [2, 3] -> [2, 3] (1D broadcast against 2D)
+    let vec = make_i64_tensor(&[3], vec![0x0F, 0xF0, 0xFF]);
+    let mat = make_i64_tensor(&[2, 3], vec![0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF]);
+    let result = eval_primitive(Primitive::BitwiseXor, &[vec, mat], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![0x0F, 0xF0, 0xFF, 0xF0, 0x0F, 0x00]);
+}
+
+#[test]
+fn oracle_bitwise_and_incompatible_shapes_error() {
+    // [2] & [3] should error - incompatible broadcast
+    let a = make_i64_tensor(&[2], vec![0xFF, 0xFF]);
+    let b = make_i64_tensor(&[3], vec![0x0F, 0x0F, 0x0F]);
+    let result = eval_primitive(Primitive::BitwiseAnd, &[a, b], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
+}
+
+#[test]
+fn oracle_bitwise_and_3d_broadcast() {
+    // [1, 2, 3] & [2, 2, 3] -> [2, 2, 3]
+    let a = make_i64_tensor(&[1, 2, 3], vec![0x0F, 0xF0, 0xFF, 0x00, 0xAA, 0x55]);
+    let b = make_i64_tensor(
+        &[2, 2, 3],
+        vec![
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
+        ],
+    );
+    let result = eval_primitive(Primitive::BitwiseAnd, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 3]);
+    assert_eq!(
+        extract_i64_vec(&result),
+        vec![0x0F, 0xF0, 0xFF, 0x00, 0xAA, 0x55, 0x01, 0x00, 0x03, 0x00, 0x00, 0x04]
+    );
+}
+
+#[test]
+fn oracle_bitwise_or_zero_dim_broadcast() {
+    // scalar-like tensor [] | [2, 2] -> [2, 2]
+    let scalar_tensor = make_i64_tensor(&[], vec![0xF0]);
+    let mat = make_i64_tensor(&[2, 2], vec![0x01, 0x02, 0x03, 0x04]);
+    let result = eval_primitive(Primitive::BitwiseOr, &[scalar_tensor, mat], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    assert_eq!(extract_i64_vec(&result), vec![0xF1, 0xF2, 0xF3, 0xF4]);
+}
