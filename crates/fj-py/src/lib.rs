@@ -382,6 +382,60 @@ impl PyShapeDtypeStruct {
         Python::with_gil(|py| self.vma.as_ref().map(|vma| vma.clone_ref(py)))
     }
 
+    fn update_from_kwargs(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let shape = match py_dict_get_item(kwargs, "shape")? {
+            Some(value) => value.extract::<Vec<u32>>()?,
+            None => self.shape.clone(),
+        };
+        let dtype = match py_dict_get_item(kwargs, "dtype")? {
+            Some(value) => {
+                if value.is_none() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "ShapeDtypeStruct: dtype must be specified.",
+                    ));
+                }
+                value.extract::<String>()?
+            }
+            None => self.dtype.clone(),
+        };
+        if let Some(sharding) = py_dict_get_item(kwargs, "sharding")?
+            && !sharding.is_none()
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ShapeDtypeStruct sharding is not supported by fj-py yet",
+            ));
+        }
+        let weak_type = match py_dict_get_item(kwargs, "weak_type")? {
+            Some(value) if !value.is_none() => value.extract::<bool>()?,
+            _ => self.weak_type,
+        };
+        let is_ref = match py_dict_get_item(kwargs, "is_ref")? {
+            Some(value) if !value.is_none() => value.extract::<bool>()?,
+            _ => self.is_ref,
+        };
+        let (vma, vma_hash, vma_len, vma_repr) = match py_dict_get_item(kwargs, "vma")? {
+            Some(value) if value.is_none() => (None, 0, 0, None),
+            Some(value) => Self::normalize_vma(Some(value.unbind()))?,
+            None => (
+                self.clone_vma(),
+                self.vma_hash,
+                self.vma_len,
+                self.vma_repr.clone(),
+            ),
+        };
+
+        Ok(Self {
+            shape,
+            dtype,
+            weak_type,
+            is_ref,
+            vma,
+            vma_hash,
+            vma_len,
+            vma_repr,
+        })
+    }
+
     #[cfg(test)]
     fn shape_vec(&self) -> Vec<u32> {
         self.shape.clone()
@@ -1249,36 +1303,9 @@ impl PyShapeDtypeStruct {
         self.is_ref
     }
 
-    #[pyo3(signature = (*, shape=None, dtype=None, sharding=None, weak_type=None, vma=None, is_ref=None))]
-    fn update(
-        &self,
-        shape: Option<Vec<u32>>,
-        dtype: Option<String>,
-        sharding: Option<Py<PyAny>>,
-        weak_type: Option<bool>,
-        vma: Option<Py<PyAny>>,
-        is_ref: Option<bool>,
-    ) -> PyResult<Self> {
-        Self::require_sharding_none(sharding)?;
-        let (vma, vma_hash, vma_len, vma_repr) = match vma {
-            Some(vma) => Self::normalize_vma(Some(vma))?,
-            None => (
-                self.clone_vma(),
-                self.vma_hash,
-                self.vma_len,
-                self.vma_repr.clone(),
-            ),
-        };
-        Ok(Self {
-            shape: shape.unwrap_or_else(|| self.shape.clone()),
-            dtype: dtype.unwrap_or_else(|| self.dtype.clone()),
-            weak_type: weak_type.unwrap_or(self.weak_type),
-            is_ref: is_ref.unwrap_or(self.is_ref),
-            vma,
-            vma_hash,
-            vma_len,
-            vma_repr,
-        })
+    #[pyo3(signature = (**kwargs))]
+    fn update(&self, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        self.update_from_kwargs(kwargs)
     }
 
     fn __richcmp__(&self, other: PyRef<'_, Self>, op: CompareOp) -> PyResult<bool> {
@@ -1467,6 +1494,16 @@ fn py_values_to_rust(args: Vec<PyValue>) -> Vec<Value> {
 
 fn py_values_from_rust(values: Vec<Value>) -> Vec<PyValue> {
     values.into_iter().map(PyValue::from_value).collect()
+}
+
+fn py_dict_get_item<'py>(
+    kwargs: Option<&Bound<'py, PyDict>>,
+    name: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    match kwargs {
+        Some(kwargs) => kwargs.get_item(name),
+        None => Ok(None),
+    }
 }
 
 fn dtype_itemsize(dtype: DType) -> u64 {
@@ -3659,16 +3696,16 @@ mod tests {
         );
         assert_eq!(weak_meta.__str__(), weak_meta.__repr__());
 
-        let updated = meta
-            .update(
-                Some(vec![4]),
-                Some("I64".to_owned()),
-                None,
-                Some(true),
-                None,
-                Some(true),
-            )
-            .unwrap();
+        pyo3::prepare_freethreaded_python();
+        let updated = Python::with_gil(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("shape", vec![4_u32])?;
+            kwargs.set_item("dtype", "I64")?;
+            kwargs.set_item("weak_type", true)?;
+            kwargs.set_item("is_ref", true)?;
+            meta.update(Some(&kwargs))
+        })
+        .unwrap();
         assert_eq!(updated.shape_vec(), vec![4]);
         assert_eq!(updated.dtype(), "I64");
         assert!(updated.sharding().is_none());
@@ -3722,14 +3759,24 @@ mod tests {
             assert!(vma_meta.same_metadata(&same_vma_meta).unwrap());
             assert_eq!(vma_meta.__hash__(), same_vma_meta.__hash__());
 
-            let updated_vma = PySet::new(py, ["batch"]).unwrap().into_any().unbind();
-            let updated_vma_meta = vma_meta
-                .update(None, None, None, None, Some(updated_vma), None)
+            let preserve_vma_meta = vma_meta.update(None).unwrap();
+            let preserved_vma = preserve_vma_meta.vma().unwrap();
+            assert!(preserved_vma.bind(py).contains("data").unwrap());
+
+            let update_kwargs = PyDict::new(py);
+            update_kwargs
+                .set_item("vma", PySet::new(py, ["batch"]).unwrap())
                 .unwrap();
+            let updated_vma_meta = vma_meta.update(Some(&update_kwargs)).unwrap();
             let updated_vma = updated_vma_meta.vma().unwrap();
             let updated_vma = updated_vma.bind(py);
             assert!(updated_vma.contains("batch").unwrap());
             assert!(!updated_vma.contains("data").unwrap());
+
+            let clear_kwargs = PyDict::new(py);
+            clear_kwargs.set_item("vma", py.None()).unwrap();
+            let cleared_vma_meta = vma_meta.update(Some(&clear_kwargs)).unwrap();
+            assert!(cleared_vma_meta.vma().is_none());
 
             let invalid_vma = PyList::empty(py).into_any().unbind();
             let invalid_result = PyShapeDtypeStruct::new(

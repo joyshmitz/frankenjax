@@ -667,8 +667,12 @@ def test_shape_dtype_struct_constructor():
     same_vma_meta = fj.ShapeDtypeStruct([2], "F64", vma=frozenset({"data"}))
     assert vma_meta == same_vma_meta
     assert hash(vma_meta) == hash(same_vma_meta)
+    preserved_vma_meta = vma_meta.update()
+    assert preserved_vma_meta.vma == frozenset({"data"})
     updated_vma_meta = vma_meta.update(vma={"batch"})
     assert updated_vma_meta.vma == frozenset({"batch"})
+    cleared_vma_meta = vma_meta.update(vma=None)
+    assert cleared_vma_meta.vma is None
     try:
         fj.ShapeDtypeStruct([2], "F64", vma=["data"])
     except TypeError as exc:
