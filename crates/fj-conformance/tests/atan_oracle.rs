@@ -71,6 +71,16 @@ fn assert_close(actual: f64, expected: f64, tol: f64, msg: &str) {
     );
 }
 
+fn assert_same_f64_bits(actual: f64, expected: f64, msg: &str) {
+    assert_eq!(
+        actual.to_bits(),
+        expected.to_bits(),
+        "{msg}: expected bits {:#018x}, got {:#018x}",
+        expected.to_bits(),
+        actual.to_bits()
+    );
+}
+
 // ====================== SPECIAL VALUES ======================
 
 #[test]
@@ -87,6 +97,17 @@ fn oracle_atan_neg_zero() {
     let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
     assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "atan(-0.0) = -0");
+}
+
+#[test]
+fn oracle_atan_tensor_signed_zero_bits() {
+    let input = make_f64_tensor(&[2], vec![0.0, -0.0]);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2]);
+    let vals = extract_f64_vec(&result);
+
+    assert_same_f64_bits(vals[0], 0.0, "atan(+0.0) tensor lane");
+    assert_same_f64_bits(vals[1], -0.0, "atan(-0.0) tensor lane");
 }
 
 #[test]
