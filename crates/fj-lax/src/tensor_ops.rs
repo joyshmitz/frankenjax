@@ -5205,11 +5205,13 @@ mod tests {
     }
 
     #[test]
-    fn top_k_scalar() {
+    fn top_k_scalar_rejects() {
         let x = Value::Scalar(fj_core::Literal::from_f64(42.0));
         let p = params(&[("k", "1")]);
-        let outputs = super::eval_top_k(&[x], &p).unwrap();
-        assert!(matches!(outputs[0], Value::Scalar(_)));
-        assert_eq!(outputs[0].as_f64_scalar().unwrap(), 42.0);
+        let err = super::eval_top_k(&[x], &p).expect_err("scalar should be rejected");
+        assert!(
+            err.to_string().contains(">= 1 dimension"),
+            "unexpected error: {err}"
+        );
     }
 }
