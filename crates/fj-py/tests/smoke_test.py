@@ -403,6 +403,12 @@ def test_shape_dtype_struct_constructor():
         assert "set` or `frozenset`" in str(exc)
     else:
         raise AssertionError("ShapeDtypeStruct list vma should raise TypeError")
+    try:
+        fj.ShapeDtypeStruct([2], None)
+    except ValueError as exc:
+        assert str(exc) == "ShapeDtypeStruct: dtype must be specified."
+    else:
+        raise AssertionError("ShapeDtypeStruct dtype=None should raise ValueError")
 
     print("✓ ShapeDtypeStruct constructor preserves metadata")
 

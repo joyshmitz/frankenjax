@@ -607,12 +607,17 @@ impl PyShapeDtypeStruct {
     #[pyo3(signature = (shape, dtype, *, sharding=None, weak_type=false, vma=None, is_ref=false))]
     fn new(
         shape: Vec<u32>,
-        dtype: String,
+        dtype: Option<String>,
         sharding: Option<Py<PyAny>>,
         weak_type: bool,
         vma: Option<Py<PyAny>>,
         is_ref: bool,
     ) -> PyResult<Self> {
+        let dtype = dtype.ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ShapeDtypeStruct: dtype must be specified.",
+            )
+        })?;
         Self::require_sharding_none(sharding)?;
         let (vma, vma_hash, vma_len, vma_repr) = Self::normalize_vma(vma)?;
         Ok(Self {
@@ -2346,8 +2351,9 @@ mod tests {
 
     #[test]
     fn shape_dtype_struct_constructor_roundtrips_metadata() {
-        let meta = PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), None, false, None, false)
-            .unwrap();
+        let meta =
+            PyShapeDtypeStruct::new(vec![2, 3], Some("F64".to_owned()), None, false, None, false)
+                .unwrap();
         assert_eq!(meta.shape(), vec![2, 3]);
         assert_eq!(meta.dtype(), "F64");
         assert!(meta.sharding().is_none());
@@ -2361,7 +2367,8 @@ mod tests {
         assert_eq!(meta.__str__(), meta.__repr__());
 
         let weak_meta =
-            PyShapeDtypeStruct::new(vec![], "F64".to_owned(), None, true, None, true).unwrap();
+            PyShapeDtypeStruct::new(vec![], Some("F64".to_owned()), None, true, None, true)
+                .unwrap();
         assert!(weak_meta.__len__().is_err());
         assert!(weak_meta.sharding().is_none());
         assert!(weak_meta.vma().is_none());
@@ -2399,7 +2406,7 @@ mod tests {
         assert!(!meta.is_ref());
 
         let same_meta =
-            PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), None, false, None, false)
+            PyShapeDtypeStruct::new(vec![2, 3], Some("F64".to_owned()), None, false, None, false)
                 .unwrap();
         assert!(meta.same_metadata(&same_meta).unwrap());
         assert_eq!(meta.__hash__(), same_meta.__hash__());
@@ -2410,7 +2417,7 @@ mod tests {
             let input_vma = PySet::new(py, ["data"]).unwrap().into_any().unbind();
             let vma_meta = PyShapeDtypeStruct::new(
                 vec![2],
-                "F64".to_owned(),
+                Some("F64".to_owned()),
                 None,
                 false,
                 Some(input_vma),
@@ -2426,7 +2433,7 @@ mod tests {
             let same_vma = PyFrozenSet::new(py, ["data"]).unwrap().into_any().unbind();
             let same_vma_meta = PyShapeDtypeStruct::new(
                 vec![2],
-                "F64".to_owned(),
+                Some("F64".to_owned()),
                 None,
                 false,
                 Some(same_vma),
@@ -2448,7 +2455,7 @@ mod tests {
             let invalid_vma = PyList::empty(py).into_any().unbind();
             let invalid_result = PyShapeDtypeStruct::new(
                 vec![2],
-                "F64".to_owned(),
+                Some("F64".to_owned()),
                 None,
                 false,
                 Some(invalid_vma),
@@ -2460,6 +2467,14 @@ mod tests {
                     .contains("should be of type `set` or `frozenset`")
             }));
         });
+
+        let missing_dtype =
+            PyShapeDtypeStruct::new(vec![2], Option::<String>::None, None, false, None, false);
+        assert!(missing_dtype.as_ref().err().is_some_and(|error| {
+            error
+                .to_string()
+                .contains("ShapeDtypeStruct: dtype must be specified.")
+        }));
     }
 
     #[test]
