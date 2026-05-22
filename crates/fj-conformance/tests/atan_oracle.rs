@@ -77,7 +77,16 @@ fn assert_close(actual: f64, expected: f64, tol: f64, msg: &str) {
 fn oracle_atan_zero() {
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "atan(0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "atan(0) = +0");
+}
+
+#[test]
+fn oracle_atan_neg_zero() {
+    let input = make_f64_tensor(&[], vec![-0.0]);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "atan(-0.0) = -0");
 }
 
 #[test]
@@ -348,13 +357,19 @@ fn metamorphic_atan_tan_identity() {
 #[test]
 fn metamorphic_atan_tensor_roundtrip() {
     let input = make_f64_tensor(&[5], vec![-1.0, -0.5, 0.0, 0.5, 1.0]);
-    let atan_result = eval_primitive(Primitive::Atan, std::slice::from_ref(&input), &no_params()).unwrap();
+    let atan_result =
+        eval_primitive(Primitive::Atan, std::slice::from_ref(&input), &no_params()).unwrap();
     let tan_atan = eval_primitive(Primitive::Tan, &[atan_result], &no_params()).unwrap();
 
     let original = extract_f64_vec(&input);
     let round_trip = extract_f64_vec(&tan_atan);
 
     for (orig, rt) in original.iter().zip(round_trip.iter()) {
-        assert_close(*rt, *orig, 1e-12, &format!("tan(atan({})) = {}", orig, orig));
+        assert_close(
+            *rt,
+            *orig,
+            1e-12,
+            &format!("tan(atan({})) = {}", orig, orig),
+        );
     }
 }
