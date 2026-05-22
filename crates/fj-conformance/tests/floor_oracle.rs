@@ -56,6 +56,16 @@ fn no_params() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
+fn assert_same_f64_bits(actual: f64, expected: f64, msg: &str) {
+    assert_eq!(
+        actual.to_bits(),
+        expected.to_bits(),
+        "{msg}: expected bits {:#018x}, got {:#018x}",
+        expected.to_bits(),
+        actual.to_bits()
+    );
+}
+
 // ======================== Integers ========================
 
 #[test]
@@ -271,8 +281,8 @@ fn oracle_floor_1d() {
 
     assert_eq!(vals[0], -2.0, "floor(-1.5)");
     assert_eq!(vals[1], -1.0, "floor(-0.5)");
-    assert_eq!(vals[2], 0.0, "floor(0)");
-    assert_eq!(vals[3], 0.0, "floor(0.5)");
+    assert_same_f64_bits(vals[2], 0.0, "floor(0)");
+    assert_same_f64_bits(vals[3], 0.0, "floor(0.5)");
     assert_eq!(vals[4], 1.0, "floor(1.5)");
 }
 
@@ -282,7 +292,7 @@ fn oracle_floor_1d_special() {
     let result = eval_primitive(Primitive::Floor, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
 
-    assert_eq!(vals[0], 0.0, "floor(0)");
+    assert_same_f64_bits(vals[0], 0.0, "floor(0)");
     assert!(vals[1].is_infinite() && vals[1] > 0.0, "floor(+inf)");
     assert!(vals[2].is_infinite() && vals[2] < 0.0, "floor(-inf)");
     assert!(vals[3].is_nan(), "floor(NaN)");
@@ -314,8 +324,8 @@ fn oracle_floor_3d() {
     assert_eq!(extract_shape(&result), vec![2, 2, 2]);
     let vals = extract_f64_vec(&result);
 
-    assert_eq!(vals[0], 0.0, "floor(0.1)");
-    assert_eq!(vals[1], 0.0, "floor(0.9)");
+    assert_same_f64_bits(vals[0], 0.0, "floor(0.1)");
+    assert_same_f64_bits(vals[1], 0.0, "floor(0.9)");
     assert_eq!(vals[2], 1.0, "floor(1.5)");
     assert_eq!(vals[3], 2.0, "floor(2.5)");
     assert_eq!(vals[4], -1.0, "floor(-0.1)");
