@@ -239,3 +239,36 @@ fn oracle_isinf_output_dtype() {
         assert_eq!(t.dtype, DType::Bool, "isinf output dtype should be Bool");
     }
 }
+
+#[test]
+fn oracle_isnan_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::IsNan, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(extract_bool_vec(&result), vec![] as Vec<bool>);
+}
+
+#[test]
+fn oracle_isinf_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::IsInf, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(extract_bool_vec(&result), vec![] as Vec<bool>);
+}
+
+#[test]
+fn oracle_isnan_3d() {
+    let input = make_f64_tensor(&[2, 1, 2], vec![f64::NAN, 1.0, 2.0, f64::NAN]);
+    let result = eval_primitive(Primitive::IsNan, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 1, 2]);
+    assert_eq!(extract_bool_vec(&result), vec![true, false, false, true]);
+}
+
+#[test]
+fn oracle_isinf_subnormal() {
+    // Subnormal values are not infinite
+    let tiny = f64::MIN_POSITIVE / 2.0;
+    let input = make_f64_tensor(&[2], vec![tiny, -tiny]);
+    let result = eval_primitive(Primitive::IsInf, &[input], &no_params()).unwrap();
+    assert_eq!(extract_bool_vec(&result), vec![false, false]);
+}

@@ -252,3 +252,21 @@ fn oracle_trunc_large_magnitude() {
     let result = eval_primitive(Primitive::Trunc, &[input], &no_params()).unwrap();
     assert_eq!(extract_f64_scalar(&result), 1e15, "trunc(1e15 + 0.5)");
 }
+
+#[test]
+fn oracle_trunc_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Trunc, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(extract_f64_vec(&result), vec![] as Vec<f64>);
+}
+
+#[test]
+fn oracle_trunc_preserves_dtype() {
+    let input = make_f64_tensor(&[3], vec![1.5, 2.5, 3.5]);
+    let result = eval_primitive(Primitive::Trunc, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::F64),
+        _ => panic!("expected tensor"),
+    }
+}
