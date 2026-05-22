@@ -77,14 +77,16 @@ fn oracle_expm1_zero() {
     // expm1(0) = e^0 - 1 = 0
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Expm1, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "expm1(0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "expm1(0) = +0");
 }
 
 #[test]
 fn oracle_expm1_neg_zero() {
     let input = make_f64_tensor(&[], vec![-0.0]);
     let result = eval_primitive(Primitive::Expm1, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "expm1(-0.0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "expm1(-0.0) = -0");
 }
 
 // ======================== Positive Values ========================
@@ -421,13 +423,19 @@ fn metamorphic_log1p_expm1_identity() {
 fn metamorphic_expm1_log1p_tensor_roundtrip() {
     // For a tensor: expm1(log1p(x)) = x for x > -1
     let input = make_f64_tensor(&[6], vec![0.0, 0.5, 1.0, 2.0, 5.0, 10.0]);
-    let log1p_result = eval_primitive(Primitive::Log1p, std::slice::from_ref(&input), &no_params()).unwrap();
+    let log1p_result =
+        eval_primitive(Primitive::Log1p, std::slice::from_ref(&input), &no_params()).unwrap();
     let roundtrip = eval_primitive(Primitive::Expm1, &[log1p_result], &no_params()).unwrap();
 
     let original = extract_f64_vec(&input);
     let recovered = extract_f64_vec(&roundtrip);
 
     for (orig, rec) in original.iter().zip(recovered.iter()) {
-        assert_close(*rec, *orig, 1e-12, &format!("expm1(log1p({})) = {}", orig, orig));
+        assert_close(
+            *rec,
+            *orig,
+            1e-12,
+            &format!("expm1(log1p({})) = {}", orig, orig),
+        );
     }
 }
