@@ -458,21 +458,36 @@ pub fn eval_primitive(
         Primitive::IsInf => eval_is_inf(primitive, inputs),
         Primitive::Signbit => eval_signbit(primitive, inputs),
         Primitive::Heaviside => {
-            // heaviside(x, h0) = 0 if x < 0, h0 if x == 0, 1 if x > 0
+            // Match JAX/Numpy: NaN compares neither < 0 nor > 0, so it returns h0.
             eval_binary_elementwise(
                 primitive,
                 inputs,
                 |x, h0| {
-                    if x < 0 { 0 } else if x == 0 { h0 } else { 1 }
+                    if x < 0 {
+                        0
+                    } else if x == 0 {
+                        h0
+                    } else {
+                        1
+                    }
                 },
                 |x, h0| {
-                    if x < 0.0 { 0.0 } else if x == 0.0 { h0 } else { 1.0 }
+                    if x < 0.0 {
+                        0.0
+                    } else if x > 0.0 {
+                        1.0
+                    } else {
+                        h0
+                    }
                 },
             )
         }
-        Primitive::CopySign => {
-            eval_binary_elementwise(primitive, inputs, |a, b| f64::copysign(a as f64, b as f64) as i64, f64::copysign)
-        }
+        Primitive::CopySign => eval_binary_elementwise(
+            primitive,
+            inputs,
+            |a, b| f64::copysign(a as f64, b as f64) as i64,
+            f64::copysign,
+        ),
         Primitive::Ldexp => {
             // ldexp(x, n) = x * 2^n
             eval_binary_elementwise(

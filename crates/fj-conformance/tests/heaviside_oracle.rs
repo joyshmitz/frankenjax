@@ -63,11 +63,7 @@ fn oracle_heaviside_positive() {
     let x = make_f64_tensor(&[], vec![1.0]);
     let h0 = make_f64_tensor(&[], vec![0.5]);
     let result = eval_primitive(Primitive::Heaviside, &[x, h0], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        1.0,
-        "heaviside(1, h0) = 1"
-    );
+    assert_eq!(extract_f64_scalar(&result), 1.0, "heaviside(1, h0) = 1");
 }
 
 #[test]
@@ -75,11 +71,7 @@ fn oracle_heaviside_negative() {
     let x = make_f64_tensor(&[], vec![-1.0]);
     let h0 = make_f64_tensor(&[], vec![0.5]);
     let result = eval_primitive(Primitive::Heaviside, &[x, h0], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        0.0,
-        "heaviside(-1, h0) = 0"
-    );
+    assert_eq!(extract_f64_scalar(&result), 0.0, "heaviside(-1, h0) = 0");
 }
 
 #[test]
@@ -87,11 +79,7 @@ fn oracle_heaviside_zero_half() {
     let x = make_f64_tensor(&[], vec![0.0]);
     let h0 = make_f64_tensor(&[], vec![0.5]);
     let result = eval_primitive(Primitive::Heaviside, &[x, h0], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        0.5,
-        "heaviside(0, 0.5) = 0.5"
-    );
+    assert_eq!(extract_f64_scalar(&result), 0.5, "heaviside(0, 0.5) = 0.5");
 }
 
 #[test]
@@ -99,11 +87,7 @@ fn oracle_heaviside_zero_one() {
     let x = make_f64_tensor(&[], vec![0.0]);
     let h0 = make_f64_tensor(&[], vec![1.0]);
     let result = eval_primitive(Primitive::Heaviside, &[x, h0], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        1.0,
-        "heaviside(0, 1) = 1"
-    );
+    assert_eq!(extract_f64_scalar(&result), 1.0, "heaviside(0, 1) = 1");
 }
 
 #[test]
@@ -111,11 +95,7 @@ fn oracle_heaviside_zero_zero() {
     let x = make_f64_tensor(&[], vec![0.0]);
     let h0 = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Heaviside, &[x, h0], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        0.0,
-        "heaviside(0, 0) = 0"
-    );
+    assert_eq!(extract_f64_scalar(&result), 0.0, "heaviside(0, 0) = 0");
 }
 
 // ======================== Small Values ========================
@@ -151,11 +131,7 @@ fn oracle_heaviside_positive_inf() {
     let x = make_f64_tensor(&[], vec![f64::INFINITY]);
     let h0 = make_f64_tensor(&[], vec![0.5]);
     let result = eval_primitive(Primitive::Heaviside, &[x, h0], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        1.0,
-        "heaviside(inf, h0) = 1"
-    );
+    assert_eq!(extract_f64_scalar(&result), 1.0, "heaviside(inf, h0) = 1");
 }
 
 #[test]
@@ -163,11 +139,7 @@ fn oracle_heaviside_negative_inf() {
     let x = make_f64_tensor(&[], vec![f64::NEG_INFINITY]);
     let h0 = make_f64_tensor(&[], vec![0.5]);
     let result = eval_primitive(Primitive::Heaviside, &[x, h0], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        0.0,
-        "heaviside(-inf, h0) = 0"
-    );
+    assert_eq!(extract_f64_scalar(&result), 0.0, "heaviside(-inf, h0) = 0");
 }
 
 #[test]
