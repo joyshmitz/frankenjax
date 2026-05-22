@@ -65,10 +65,7 @@ fn oracle_xlogy_basic() {
     let y = make_f64_tensor(&[], vec![std::f64::consts::E]);
     let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(
-        (actual - 2.0).abs() < 1e-14,
-        "xlogy(2, e) = 2*1 = 2"
-    );
+    assert!((actual - 2.0).abs() < 1e-14, "xlogy(2, e) = 2*1 = 2");
 }
 
 #[test]
@@ -78,10 +75,7 @@ fn oracle_xlogy_basic_2() {
     let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
     let expected = 3.0 * 2.0_f64.ln();
-    assert!(
-        (actual - expected).abs() < 1e-14,
-        "xlogy(3, 2) = 3*ln(2)"
-    );
+    assert!((actual - expected).abs() < 1e-14, "xlogy(3, 2) = 3*ln(2)");
 }
 
 // ======================== XLogY Zero X Cases ========================
@@ -91,11 +85,7 @@ fn oracle_xlogy_zero_x_positive_y() {
     let x = make_f64_tensor(&[], vec![0.0]);
     let y = make_f64_tensor(&[], vec![5.0]);
     let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        0.0,
-        "xlogy(0, 5) = 0"
-    );
+    assert_eq!(extract_f64_scalar(&result), 0.0, "xlogy(0, 5) = 0");
 }
 
 #[test]
@@ -116,11 +106,7 @@ fn oracle_xlogy_zero_x_inf_y() {
     let x = make_f64_tensor(&[], vec![0.0]);
     let y = make_f64_tensor(&[], vec![f64::INFINITY]);
     let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        0.0,
-        "xlogy(0, inf) = 0"
-    );
+    assert_eq!(extract_f64_scalar(&result), 0.0, "xlogy(0, inf) = 0");
 }
 
 // ======================== XLogY Negative X ========================
@@ -131,10 +117,7 @@ fn oracle_xlogy_negative_x() {
     let y = make_f64_tensor(&[], vec![std::f64::consts::E]);
     let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(
-        (actual - (-2.0)).abs() < 1e-14,
-        "xlogy(-2, e) = -2"
-    );
+    assert!((actual - (-2.0)).abs() < 1e-14, "xlogy(-2, e) = -2");
 }
 
 // ======================== XLogY Special Values ========================
@@ -156,10 +139,7 @@ fn oracle_xlogy_nan() {
     let x = make_f64_tensor(&[], vec![f64::NAN]);
     let y = make_f64_tensor(&[], vec![2.0]);
     let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
-    assert!(
-        extract_f64_scalar(&result).is_nan(),
-        "xlogy(NaN, 2) = NaN"
-    );
+    assert!(extract_f64_scalar(&result).is_nan(), "xlogy(NaN, 2) = NaN");
 }
 
 // ======================== XLog1PY Basic Cases ========================
@@ -171,10 +151,7 @@ fn oracle_xlog1py_basic() {
     let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
     // xlog1py(2, e-1) = 2 * log(1 + (e-1)) = 2 * log(e) = 2
-    assert!(
-        (actual - 2.0).abs() < 1e-14,
-        "xlog1py(2, e-1) = 2"
-    );
+    assert!((actual - 2.0).abs() < 1e-14, "xlog1py(2, e-1) = 2");
 }
 
 #[test]
@@ -182,11 +159,7 @@ fn oracle_xlog1py_zero_x() {
     let x = make_f64_tensor(&[], vec![0.0]);
     let y = make_f64_tensor(&[], vec![5.0]);
     let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        0.0,
-        "xlog1py(0, 5) = 0"
-    );
+    assert_eq!(extract_f64_scalar(&result), 0.0, "xlog1py(0, 5) = 0");
 }
 
 #[test]
@@ -200,6 +173,35 @@ fn oracle_xlog1py_zero_x_neg_one_y() {
         0.0,
         "xlog1py(0, -1) = 0 (special case)"
     );
+}
+
+#[test]
+fn oracle_xlog1py_domain_edges_vector() {
+    let x = make_f64_tensor(&[5], vec![0.0, 2.0, -2.0, 3.0, 4.0]);
+    let y = make_f64_tensor(&[5], vec![-1.0, -1.0, -1.0, -2.0, 0.0]);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![5]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 0.0, "zero x masks log1p(-1) to zero");
+    assert_eq!(vals[1], f64::NEG_INFINITY, "positive x times -inf");
+    assert_eq!(vals[2], f64::INFINITY, "negative x times -inf");
+    assert!(vals[3].is_nan(), "nonzero x with y < -1 is NaN");
+    assert_eq!(vals[4], 0.0, "xlog1py(x, 0) = 0");
+}
+
+#[test]
+fn oracle_xlog1py_zero_x_masks_invalid_log1p_lanes() {
+    let x = make_f64_tensor(&[2, 2], vec![0.0, 1.0, 0.0, 2.0]);
+    let y = make_f64_tensor(&[2, 2], vec![-2.0, -2.0, f64::INFINITY, f64::INFINITY]);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 0.0, "zero x masks y < -1");
+    assert!(vals[1].is_nan(), "nonzero x with y < -1 is NaN");
+    assert_eq!(vals[2], 0.0, "zero x masks infinite log1p lane");
+    assert_eq!(vals[3], f64::INFINITY, "positive x times log1p(inf)");
 }
 
 // ======================== Tensor Shapes ========================
