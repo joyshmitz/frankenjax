@@ -392,6 +392,15 @@ pub fn eval_primitive(
         Primitive::CopySign => {
             eval_binary_elementwise(primitive, inputs, |a, b| f64::copysign(a as f64, b as f64) as i64, f64::copysign)
         }
+        Primitive::Ldexp => {
+            // ldexp(x, n) = x * 2^n
+            eval_binary_elementwise(
+                primitive,
+                inputs,
+                |a, b| (a as f64 * 2f64.powi(b as i32)) as i64,
+                |a, b| a * 2f64.powi(b as i32),
+            )
+        }
         Primitive::IntegerPow => eval_integer_pow(primitive, inputs, params),
         Primitive::Nextafter => eval_nextafter(primitive, inputs),
         Primitive::Slice => eval_slice(inputs, params),

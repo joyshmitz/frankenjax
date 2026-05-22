@@ -3298,6 +3298,18 @@ pub fn vjp(
             let gy = zeros_like(y);
             Ok(vec![gx, gy])
         }
+        Primitive::Ldexp => {
+            // ldexp(x, n) = x * 2^n
+            // dx = g * 2^n, dn = 0 (n is integer)
+            let x = &inputs[0];
+            let n = &inputs[1];
+            let one = ones_like(x);
+            let scale = eval_primitive(Primitive::Ldexp, &[one, n.clone()], &BTreeMap::new())
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let gx = value_mul(g, &scale)?;
+            let gn = zeros_like(n);
+            Ok(vec![gx, gn])
+        }
         // IntegerPow: d/dx x^n = n * x^(n-1)
         Primitive::IntegerPow => {
             let n: i32 = params
@@ -6798,6 +6810,14 @@ fn jvp_rule(
             let sign_y = ep(Primitive::Sign, &[primals[1].clone()])?;
             let sign_prod = ep(Primitive::Mul, &[sign_x, sign_y])?;
             ep(Primitive::Mul, &[sign_prod, tangents[0].clone()])
+        }
+
+        Primitive::Ldexp => {
+            // ldexp(x, n) = x * 2^n
+            // d(ldexp) = 2^n * dx (n is integer, no gradient)
+            let one = scalar_constant_matching_dtype(1.0, &tangents[0]);
+            let scale = ep(Primitive::Ldexp, &[one, primals[1].clone()])?;
+            ep(Primitive::Mul, &[scale, tangents[0].clone()])
         }
 
         Primitive::Atan2 => {
