@@ -22,6 +22,13 @@ struct PyCheckpoint {
     inner: fj_api::CheckpointWrapped,
 }
 
+#[pyclass]
+#[derive(Clone)]
+struct PyVjpPullback {
+    jaxpr: Jaxpr,
+    primals: Vec<Value>,
+}
+
 #[pymethods]
 impl PyValue {
     #[staticmethod]
@@ -129,6 +136,31 @@ impl PyCheckpoint {
     }
 }
 
+#[pymethods]
+impl PyVjpPullback {
+    fn call(&self, cotangents: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
+        let rust_cotangents = py_values_to_rust(cotangents);
+        let [cotangent] = rust_cotangents.as_slice() else {
+            return Err(runtime_error(format!(
+                "vjp pullback expects exactly one output cotangent, got {}",
+                rust_cotangents.len()
+            )));
+        };
+
+        fj_ad::grad_jaxpr_with_cotangent(&self.jaxpr, &self.primals, cotangent)
+            .map(py_values_from_rust)
+            .map_err(runtime_error)
+    }
+
+    fn __call__(&self, cotangents: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
+        self.call(cotangents)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PyVjpPullback(num_primals={})", self.primals.len())
+    }
+}
+
 fn py_values_to_rust(args: Vec<PyValue>) -> Vec<Value> {
     args.into_iter().map(|pv| pv.inner).collect()
 }
@@ -199,6 +231,23 @@ fn jvp(
 }
 
 #[pyfunction]
+fn vjp(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyVjpPullback)> {
+    let rust_args = py_values_to_rust(args);
+    fj_api::jit(jaxpr.inner.clone())
+        .call(rust_args.clone())
+        .map(|outputs| {
+            (
+                py_values_from_rust(outputs),
+                PyVjpPullback {
+                    jaxpr: jaxpr.inner.clone(),
+                    primals: rust_args,
+                },
+            )
+        })
+        .map_err(runtime_error)
+}
+
+#[pyfunction]
 fn vmap(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
     let rust_args = py_values_to_rust(args);
     fj_api::vmap(jaxpr.inner.clone())
@@ -255,12 +304,14 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyValue>()?;
     m.add_class::<PyJaxpr>()?;
     m.add_class::<PyCheckpoint>()?;
+    m.add_class::<PyVjpPullback>()?;
     m.add_function(wrap_pyfunction!(make_jaxpr_square, m)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr_add2, m)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr_add_one, m)?)?;
     m.add_function(wrap_pyfunction!(jit, m)?)?;
     m.add_function(wrap_pyfunction!(grad, m)?)?;
     m.add_function(wrap_pyfunction!(jvp, m)?)?;
+    m.add_function(wrap_pyfunction!(vjp, m)?)?;
     m.add_function(wrap_pyfunction!(vmap, m)?)?;
     m.add_function(wrap_pyfunction!(pmap, m)?)?;
     m.add_function(wrap_pyfunction!(value_and_grad, m)?)?;
@@ -338,6 +389,18 @@ mod tests {
         assert_eq!(tangents.len(), 1);
         assert!((primals[0].as_f64().unwrap() - 9.0).abs() < 1e-12);
         assert!((tangents[0].as_f64().unwrap() - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vjp_wrapper_returns_outputs_and_pullback() {
+        let jaxpr = make_jaxpr_square();
+        let (values, pullback) = vjp(&jaxpr, vec![PyValue::scalar_f64(3.0)]).unwrap();
+        assert_eq!(values.len(), 1);
+        assert!((values[0].as_f64().unwrap() - 9.0).abs() < 1e-12);
+
+        let grads = pullback.call(vec![PyValue::scalar_f64(1.0)]).unwrap();
+        assert_eq!(grads.len(), 1);
+        assert!((grads[0].as_f64().unwrap() - 6.0).abs() < 1e-9);
     }
 
     #[test]

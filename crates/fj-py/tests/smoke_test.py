@@ -61,6 +61,19 @@ def test_jvp_square():
     print("✓ jvp(square)(3.0, 1.0) = (9.0, 6.0)")
 
 
+def test_vjp_square():
+    """Test reverse-mode VJP of x^2."""
+    jaxpr = fj.make_jaxpr_square()
+    values, pullback = fj.vjp(jaxpr, [fj.PyValue.scalar_f64(3.0)])
+    assert len(values) == 1
+    assert abs(values[0].as_f64() - 9.0) < 1e-12
+
+    grads = pullback.call([fj.PyValue.scalar_f64(1.0)])
+    assert len(grads) == 1
+    assert abs(grads[0].as_f64() - 6.0) < 1e-6
+    print("✓ vjp(square)(3.0)(1.0) = (9.0, 6.0)")
+
+
 def test_value_and_grad():
     """Test value_and_grad of x^2."""
     jaxpr = fj.make_jaxpr_square()
@@ -133,6 +146,7 @@ if __name__ == "__main__":
     test_jit_add()
     test_grad_square()
     test_jvp_square()
+    test_vjp_square()
     test_value_and_grad()
     test_vmap()
     test_pmap_fails_closed()
