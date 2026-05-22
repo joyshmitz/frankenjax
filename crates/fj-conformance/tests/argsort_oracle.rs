@@ -280,3 +280,43 @@ fn oracle_argsort_result_is_permutation() {
     sorted_indices.sort();
     assert_eq!(sorted_indices, vec![0, 1, 2, 3, 4, 5]);
 }
+
+#[test]
+fn oracle_argsort_4d() {
+    let input = make_f64_tensor(&[2, 2, 2, 3], vec![
+        3.0, 1.0, 2.0, 6.0, 4.0, 5.0, 9.0, 7.0, 8.0, 12.0, 10.0, 11.0,
+        15.0, 13.0, 14.0, 18.0, 16.0, 17.0, 21.0, 19.0, 20.0, 24.0, 22.0, 23.0,
+    ]);
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false)).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2, 3]);
+}
+
+#[test]
+fn oracle_argsort_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false)).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_argsort_large_tensor() {
+    let data: Vec<f64> = (0..200).map(|x| (100 - x % 200) as f64).collect();
+    let input = make_f64_tensor(&[200], data.clone());
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false)).unwrap();
+    assert_eq!(extract_shape(&result), vec![200]);
+    let indices = extract_i64_vec(&result);
+    let sorted: Vec<f64> = indices.iter().map(|&i| data[i as usize]).collect();
+    assert!(sorted.windows(2).all(|w| w[0] <= w[1]), "result should be sorted");
+}
+
+#[test]
+fn oracle_argsort_subnormal() {
+    let subnormal = f64::MIN_POSITIVE / 2.0;
+    let input = make_f64_tensor(&[4], vec![subnormal, 0.0, -subnormal, 1.0]);
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false)).unwrap();
+    let indices = extract_i64_vec(&result);
+    // Order: -subnormal (2), 0 (1), subnormal (0), 1 (3)
+    assert_eq!(indices, vec![2, 1, 0, 3]);
+}

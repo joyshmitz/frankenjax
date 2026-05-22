@@ -275,3 +275,35 @@ fn oracle_iota_output_shape_is_1d() {
         assert_eq!(shape[0], len);
     }
 }
+
+#[test]
+fn oracle_iota_complex64() {
+    let result = eval_primitive(Primitive::Iota, &[], &iota_params(4, "Complex64")).unwrap();
+    assert_eq!(extract_dtype(&result), DType::Complex64);
+    assert_eq!(extract_shape(&result), vec![4]);
+}
+
+#[test]
+fn oracle_iota_complex128() {
+    let result = eval_primitive(Primitive::Iota, &[], &iota_params(4, "Complex128")).unwrap();
+    assert_eq!(extract_dtype(&result), DType::Complex128);
+    assert_eq!(extract_shape(&result), vec![4]);
+}
+
+#[test]
+fn oracle_iota_f64_precision() {
+    let result = eval_primitive(Primitive::Iota, &[], &iota_params(10, "F64")).unwrap();
+    let vals = extract_f64_vec(&result);
+    for (i, &v) in vals.iter().enumerate() {
+        assert!((v - i as f64).abs() < 1e-15, "iota f64 should have exact integer values");
+    }
+}
+
+#[test]
+fn oracle_iota_i32_range() {
+    let result = eval_primitive(Primitive::Iota, &[], &iota_params(50, "I32")).unwrap();
+    assert_eq!(extract_dtype(&result), DType::I32);
+    assert_eq!(extract_shape(&result), vec![50]);
+    let vals = extract_i64_vec(&result);
+    assert_eq!(vals[49], 49);
+}
