@@ -1373,6 +1373,17 @@ pub fn vjp(
             let db = value_mul(g, &value_mul(&a_pow_b, &ln_a)?)?;
             Ok(vec![da, db])
         }
+        Primitive::Hypot => {
+            let x = &inputs[0];
+            let y = &inputs[1];
+            // hypot(x, y) = sqrt(x^2 + y^2)
+            // d(hypot)/dx = x / hypot, d(hypot)/dy = y / hypot
+            let h = eval_primitive(Primitive::Hypot, &[x.clone(), y.clone()], &BTreeMap::new())
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let gx = value_mul(g, &value_div(x, &h)?)?;
+            let gy = value_mul(g, &value_div(y, &h)?)?;
+            Ok(vec![gx, gy])
+        }
         Primitive::Exp => {
             let x = &inputs[0];
             let exp_x = eval_primitive(Primitive::Exp, std::slice::from_ref(x), &BTreeMap::new())
@@ -6728,6 +6739,15 @@ fn jvp_rule(
             let db_part = ep(Primitive::Mul, &[a_pow_b, ln_a])?;
             let db_term = ep(Primitive::Mul, &[db_part, tangents[1].clone()])?;
             ep(Primitive::Add, &[da_term, db_term])
+        }
+
+        Primitive::Hypot => {
+            // d(hypot) = (x * dx + y * dy) / hypot(x, y)
+            let h = ep(Primitive::Hypot, &[primals[0].clone(), primals[1].clone()])?;
+            let x_dx = ep(Primitive::Mul, &[primals[0].clone(), tangents[0].clone()])?;
+            let y_dy = ep(Primitive::Mul, &[primals[1].clone(), tangents[1].clone()])?;
+            let numer = ep(Primitive::Add, &[x_dx, y_dy])?;
+            ep(Primitive::Div, &[numer, h])
         }
 
         Primitive::Atan2 => {

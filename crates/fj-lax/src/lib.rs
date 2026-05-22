@@ -177,6 +177,9 @@ pub fn eval_primitive(
             |a, b| (a as f64).powf(b as f64) as i64,
             f64::powf,
         ),
+        Primitive::Hypot => {
+            eval_binary_elementwise(primitive, inputs, |a, b| f64::hypot(a as f64, b as f64) as i64, f64::hypot)
+        }
         // Unary arithmetic
         Primitive::Neg => eval_neg(primitive, inputs),
         Primitive::Abs => eval_abs(primitive, inputs),
