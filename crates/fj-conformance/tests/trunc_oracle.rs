@@ -56,6 +56,16 @@ fn no_params() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
+fn assert_same_f64_bits(actual: f64, expected: f64, msg: &str) {
+    assert_eq!(
+        actual.to_bits(),
+        expected.to_bits(),
+        "{msg}: expected bits {:#018x}, got {:#018x}",
+        expected.to_bits(),
+        actual.to_bits()
+    );
+}
+
 // ======================== Integers ========================
 
 #[test]
@@ -187,7 +197,11 @@ fn oracle_trunc_matrix() {
     let input = make_f64_tensor(&[2, 3], vec![0.1, 0.5, 0.9, -0.1, -0.5, -0.9]);
     let result = eval_primitive(Primitive::Trunc, &[input], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 3]);
-    assert_eq!(extract_f64_vec(&result), vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals, vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    assert_same_f64_bits(vals[3], -0.0, "trunc(-0.1)");
+    assert_same_f64_bits(vals[4], -0.0, "trunc(-0.5)");
+    assert_same_f64_bits(vals[5], -0.0, "trunc(-0.9)");
 }
 
 #[test]
@@ -208,7 +222,11 @@ fn oracle_trunc_vs_floor_negative() {
     let input = make_f64_tensor(&[3], vec![-0.1, -0.5, -0.9]);
     let trunc_result = eval_primitive(Primitive::Trunc, &[input.clone()], &no_params()).unwrap();
     let floor_result = eval_primitive(Primitive::Floor, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_vec(&trunc_result), vec![0.0, 0.0, 0.0]);
+    let trunc_vals = extract_f64_vec(&trunc_result);
+    assert_eq!(trunc_vals, vec![0.0, 0.0, 0.0]);
+    assert_same_f64_bits(trunc_vals[0], -0.0, "trunc(-0.1)");
+    assert_same_f64_bits(trunc_vals[1], -0.0, "trunc(-0.5)");
+    assert_same_f64_bits(trunc_vals[2], -0.0, "trunc(-0.9)");
     assert_eq!(extract_f64_vec(&floor_result), vec![-1.0, -1.0, -1.0]);
 }
 
