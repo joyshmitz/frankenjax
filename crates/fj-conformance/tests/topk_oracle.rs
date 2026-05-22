@@ -184,3 +184,28 @@ fn oracle_topk_multi_output_rejects_k_larger_than_axis() {
         "unexpected oversized-k error: {err}",
     );
 }
+
+#[test]
+fn oracle_topk_rejects_scalar_operand() {
+    let err = eval_primitive(Primitive::TopK, &[Value::scalar_f64(42.0)], &topk_params(1))
+        .expect_err("scalar operand should fail");
+
+    assert!(
+        err.to_string().contains(">= 1 dimension")
+            || err.to_string().contains("ndim"),
+        "unexpected scalar error: {err}",
+    );
+}
+
+#[test]
+fn oracle_topk_rejects_0d_tensor() {
+    let input = make_f64_tensor(&[], vec![42.0]);
+    let err = eval_primitive(Primitive::TopK, &[input], &topk_params(1))
+        .expect_err("0-d tensor should fail");
+
+    assert!(
+        err.to_string().contains(">= 1 dimension")
+            || err.to_string().contains("ndim"),
+        "unexpected 0-d tensor error: {err}",
+    );
+}

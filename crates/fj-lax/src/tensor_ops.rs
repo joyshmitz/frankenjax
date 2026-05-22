@@ -3111,40 +3111,29 @@ pub(crate) fn eval_top_k(
         });
     }
 
-    let k: usize = params
-        .get("k")
-        .and_then(|s| s.trim().parse().ok())
-        .ok_or(EvalError::Unsupported {
-            primitive,
-            detail: "top_k requires 'k' param".to_owned(),
-        })?;
+    let k: usize =
+        params
+            .get("k")
+            .and_then(|s| s.trim().parse().ok())
+            .ok_or(EvalError::Unsupported {
+                primitive,
+                detail: "top_k requires 'k' param".to_owned(),
+            })?;
 
     match &inputs[0] {
-        Value::Scalar(lit) => {
-            if k == 0 {
-                return Err(EvalError::Unsupported {
-                    primitive,
-                    detail: "k must be >= 1".to_owned(),
-                });
-            }
-            Ok(vec![
-                Value::Scalar(*lit),
-                Value::Scalar(Literal::I64(0)),
-            ])
+        Value::Scalar(_) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: "top_k operand must have >= 1 dimension".to_owned(),
+            });
         }
         Value::Tensor(tensor) => {
             let rank = tensor.shape.rank();
             if rank == 0 {
-                if k == 0 {
-                    return Err(EvalError::Unsupported {
-                        primitive,
-                        detail: "k must be >= 1".to_owned(),
-                    });
-                }
-                return Ok(vec![
-                    Value::Scalar(tensor.elements[0]),
-                    Value::Scalar(Literal::I64(0)),
-                ]);
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: "top_k operand must have >= 1 dimension".to_owned(),
+                });
             }
 
             let axis_size = tensor.shape.dims[rank - 1] as usize;
@@ -3174,7 +3163,9 @@ pub(crate) fn eval_top_k(
                 indexed.sort_by(|a, b| {
                     let a_val = a.1.as_f64().unwrap_or(f64::NEG_INFINITY);
                     let b_val = b.1.as_f64().unwrap_or(f64::NEG_INFINITY);
-                    b_val.partial_cmp(&a_val).unwrap_or(std::cmp::Ordering::Equal)
+                    b_val
+                        .partial_cmp(&a_val)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
                 for (orig_idx, lit) in indexed.iter().take(k) {
@@ -3183,16 +3174,23 @@ pub(crate) fn eval_top_k(
                 }
             }
 
-            let values = TensorValue::new(tensor.dtype, Shape { dims: output_dims.clone() }, values_elements)
-                .map_err(|e| EvalError::Unsupported {
-                    primitive,
-                    detail: e.to_string(),
-                })?;
-            let indices = TensorValue::new(DType::I64, Shape { dims: output_dims }, indices_elements)
-                .map_err(|e| EvalError::Unsupported {
-                    primitive,
-                    detail: e.to_string(),
-                })?;
+            let values = TensorValue::new(
+                tensor.dtype,
+                Shape {
+                    dims: output_dims.clone(),
+                },
+                values_elements,
+            )
+            .map_err(|e| EvalError::Unsupported {
+                primitive,
+                detail: e.to_string(),
+            })?;
+            let indices =
+                TensorValue::new(DType::I64, Shape { dims: output_dims }, indices_elements)
+                    .map_err(|e| EvalError::Unsupported {
+                        primitive,
+                        detail: e.to_string(),
+                    })?;
 
             Ok(vec![Value::Tensor(values), Value::Tensor(indices)])
         }
@@ -3279,16 +3277,20 @@ fn extremum_along_axis(
                         detail: "argmin/argmax encountered zero non-axis dimension".to_owned(),
                     });
                 }
-                let offset = (idx % dim).checked_mul(strides[ax]).ok_or_else(|| {
-                    EvalError::Unsupported {
+                let offset =
+                    (idx % dim)
+                        .checked_mul(strides[ax])
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: "argmin/argmax flat offset multiplication overflowed"
+                                .to_owned(),
+                        })?;
+                flat = flat
+                    .checked_add(offset)
+                    .ok_or_else(|| EvalError::Unsupported {
                         primitive,
-                        detail: "argmin/argmax flat offset multiplication overflowed".to_owned(),
-                    }
-                })?;
-                flat = flat.checked_add(offset).ok_or_else(|| EvalError::Unsupported {
-                    primitive,
-                    detail: "argmin/argmax flat offset addition overflowed".to_owned(),
-                })?;
+                        detail: "argmin/argmax flat offset addition overflowed".to_owned(),
+                    })?;
                 idx /= dim;
             }
             flat
@@ -3296,16 +3298,18 @@ fn extremum_along_axis(
 
         let mut best_idx = 0_usize;
         let first_flat = base;
-        let first_literal = *tensor.elements.get(first_flat).ok_or_else(|| {
-            EvalError::Unsupported {
-                primitive,
-                detail: format!(
-                    "argmin/argmax flat index {first_flat} out of bounds for {total} elements"
-                ),
-            }
-        })?;
-        let mut best_key =
-            sort_key(first_literal).map_err(|detail| EvalError::Unsupported { primitive, detail })?;
+        let first_literal =
+            *tensor
+                .elements
+                .get(first_flat)
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: format!(
+                        "argmin/argmax flat index {first_flat} out of bounds for {total} elements"
+                    ),
+                })?;
+        let mut best_key = sort_key(first_literal)
+            .map_err(|detail| EvalError::Unsupported { primitive, detail })?;
 
         for i in 1..axis_dim {
             let flat_idx = i
@@ -3315,14 +3319,15 @@ fn extremum_along_axis(
                     primitive,
                     detail: "argmin/argmax axis offset overflowed".to_owned(),
                 })?;
-            let literal = *tensor.elements.get(flat_idx).ok_or_else(|| {
-                EvalError::Unsupported {
+            let literal = *tensor
+                .elements
+                .get(flat_idx)
+                .ok_or_else(|| EvalError::Unsupported {
                     primitive,
                     detail: format!(
                         "argmin/argmax flat index {flat_idx} out of bounds for {total} elements"
                     ),
-                }
-            })?;
+                })?;
             let key =
                 sort_key(literal).map_err(|detail| EvalError::Unsupported { primitive, detail })?;
 
@@ -4480,27 +4485,25 @@ pub(crate) fn eval_tile(
                 .dims
                 .iter()
                 .zip(reps.iter())
-                .map(|(&d, &r)| d.checked_mul(r as u32).ok_or_else(|| EvalError::Unsupported {
-                    primitive,
-                    detail: "tile result dimension overflows u32".into(),
-                }))
+                .map(|(&d, &r)| {
+                    d.checked_mul(r as u32)
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: "tile result dimension overflows u32".into(),
+                        })
+                })
                 .collect::<Result<_, _>>()?;
 
-            let new_count: u64 = new_dims.iter().try_fold(1_u64, |acc, &d| {
-                acc.checked_mul(u64::from(d))
-            }).ok_or_else(|| EvalError::Unsupported {
-                primitive,
-                detail: "tile result element count overflows u64".into(),
-            })?;
+            let new_count: u64 = new_dims
+                .iter()
+                .try_fold(1_u64, |acc, &d| acc.checked_mul(u64::from(d)))
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "tile result element count overflows u64".into(),
+                })?;
 
             let mut result = Vec::with_capacity(new_count as usize);
-            tile_recursive(
-                &tensor.elements,
-                &tensor.shape.dims,
-                &reps,
-                0,
-                &mut result,
-            );
+            tile_recursive(&tensor.elements, &tensor.shape.dims, &reps, 0, &mut result);
 
             Ok(Value::Tensor(
                 TensorValue::new(tensor.dtype, Shape { dims: new_dims }, result)
@@ -4536,7 +4539,13 @@ fn tile_recursive(
             for i in 0..dim {
                 let start = i * stride;
                 let sub_elements = &elements[start..start + stride];
-                tile_recursive(sub_elements, &dims[depth + 1..], &reps[depth + 1..], 0, result);
+                tile_recursive(
+                    sub_elements,
+                    &dims[depth + 1..],
+                    &reps[depth + 1..],
+                    0,
+                    result,
+                );
             }
         }
     }
@@ -5057,10 +5066,7 @@ mod tests {
         let p = params(&[("reps", "2")]);
         let result = eval_tile(&[x], &p).unwrap();
         assert_eq!(extract_shape(&result), vec![6]);
-        assert_eq!(
-            extract_f64_vec(&result),
-            vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]
-        );
+        assert_eq!(extract_f64_vec(&result), vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]);
     }
 
     #[test]
