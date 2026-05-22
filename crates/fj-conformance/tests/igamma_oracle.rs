@@ -346,3 +346,72 @@ fn oracle_igammac_vector_a_scalar_x_broadcast() {
         );
     }
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_igamma_3d() {
+    let a = make_f64_tensor(&[2, 2, 2], vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
+    let x = make_f64_tensor(&[2, 2, 2], vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+    let result = eval_primitive(Primitive::Igamma, &[a, x], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    // igamma(a, 0) = 0
+    assert_eq!(vals[0], 0.0);
+    assert_eq!(vals[2], 0.0);
+}
+
+#[test]
+fn oracle_igamma_empty() {
+    let a = make_f64_tensor(&[0], vec![]);
+    let x = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Igamma, &[a, x], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+}
+
+#[test]
+fn oracle_igamma_2d_empty() {
+    let a = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let x = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Igamma, &[a, x], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_igamma_preserves_dtype() {
+    let a = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let x = make_f64_tensor(&[2], vec![1.0, 1.0]);
+    let result = eval_primitive(Primitive::Igamma, &[a, x], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_igammac_preserves_dtype() {
+    let a = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let x = make_f64_tensor(&[2], vec![1.0, 1.0]);
+    let result = eval_primitive(Primitive::Igammac, &[a, x], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_igamma_nan_handling() {
+    let a = make_f64_tensor(&[], vec![f64::NAN]);
+    let x = make_f64_tensor(&[], vec![1.0]);
+    let result = eval_primitive(Primitive::Igamma, &[a, x], &no_params()).unwrap();
+    assert!(extract_f64_scalar(&result).is_nan(), "igamma(NaN, x) = NaN");
+}
+
+#[test]
+fn oracle_igammac_nan_handling() {
+    let a = make_f64_tensor(&[], vec![1.0]);
+    let x = make_f64_tensor(&[], vec![f64::NAN]);
+    let result = eval_primitive(Primitive::Igammac, &[a, x], &no_params()).unwrap();
+    assert!(
+        extract_f64_scalar(&result).is_nan(),
+        "igammac(a, NaN) = NaN"
+    );
+}
