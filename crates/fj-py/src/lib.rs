@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 
-use fj_core::{Jaxpr, ProgramSpec, Value, build_program};
+use fj_core::{DType, Jaxpr, ProgramSpec, Value, build_program};
 
 #[pyclass]
 #[derive(Clone)]
@@ -136,6 +136,16 @@ impl PyValue {
         self.shape()
             .iter()
             .fold(1_u64, |size, dim| size.saturating_mul(u64::from(*dim)))
+    }
+
+    #[getter]
+    fn itemsize(&self) -> u64 {
+        dtype_itemsize(self.inner.dtype())
+    }
+
+    #[getter]
+    fn nbytes(&self) -> u64 {
+        self.size().saturating_mul(self.itemsize())
     }
 
     fn as_f64_list(&self) -> Option<Vec<f64>> {
@@ -397,6 +407,16 @@ fn py_values_to_rust(args: Vec<PyValue>) -> Vec<Value> {
 
 fn py_values_from_rust(values: Vec<Value>) -> Vec<PyValue> {
     values.into_iter().map(|inner| PyValue { inner }).collect()
+}
+
+fn dtype_itemsize(dtype: DType) -> u64 {
+    match dtype {
+        DType::Bool => 1,
+        DType::BF16 | DType::F16 => 2,
+        DType::F32 | DType::I32 | DType::U32 => 4,
+        DType::F64 | DType::I64 | DType::U64 | DType::Complex64 => 8,
+        DType::Complex128 => 16,
+    }
 }
 
 fn py_shape_dtype_from_rust(value: &Value) -> PyShapeDtypeStruct {
@@ -1453,6 +1473,8 @@ mod tests {
         assert_eq!(v.dtype(), "F64");
         assert_eq!(v.ndim(), 0);
         assert_eq!(v.size(), 1);
+        assert_eq!(v.itemsize(), 8);
+        assert_eq!(v.nbytes(), 8);
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
     }
 
@@ -1463,6 +1485,8 @@ mod tests {
         assert_eq!(floats.dtype(), "F64");
         assert_eq!(floats.ndim(), 1);
         assert_eq!(floats.size(), 3);
+        assert_eq!(floats.itemsize(), 8);
+        assert_eq!(floats.nbytes(), 24);
         assert_eq!(floats.as_f64_list().unwrap(), vec![1.0, 2.5, 4.0]);
         assert_eq!(floats.as_i64_list(), None);
 
@@ -1471,6 +1495,8 @@ mod tests {
         assert_eq!(ints.dtype(), "I64");
         assert_eq!(ints.ndim(), 1);
         assert_eq!(ints.size(), 3);
+        assert_eq!(ints.itemsize(), 8);
+        assert_eq!(ints.nbytes(), 24);
         assert_eq!(ints.as_i64_list().unwrap(), vec![1, 2, 3]);
         assert_eq!(ints.as_f64_list().unwrap(), vec![1.0, 2.0, 3.0]);
     }
