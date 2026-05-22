@@ -215,6 +215,10 @@ fn oracle_gcd_matrix() {
 
 // ======================== Broadcasting ========================
 
+fn scalar_i64(v: i64) -> Value {
+    Value::Scalar(Literal::I64(v))
+}
+
 #[test]
 fn oracle_gcd_singleton_vector_broadcast() {
     let a = make_i64_tensor(&[1], vec![12]);
@@ -233,4 +237,117 @@ fn oracle_lcm_singleton_vector_broadcast() {
 
     assert_eq!(extract_shape(&result), vec![3]);
     assert_eq!(extract_i64_vec(&result), vec![12, 36, 12]);
+}
+
+#[test]
+fn oracle_gcd_scalar_tensor_broadcast() {
+    let a = scalar_i64(12);
+    let b = make_i64_tensor(&[4], vec![6, 8, 9, 12]);
+    let result = eval_primitive(Primitive::Gcd, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 4, 3, 12]);
+}
+
+#[test]
+fn oracle_gcd_tensor_scalar_broadcast() {
+    let a = make_i64_tensor(&[4], vec![6, 8, 9, 12]);
+    let b = scalar_i64(12);
+    let result = eval_primitive(Primitive::Gcd, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 4, 3, 12]);
+}
+
+#[test]
+fn oracle_lcm_scalar_tensor_broadcast() {
+    let a = scalar_i64(6);
+    let b = make_i64_tensor(&[3], vec![4, 9, 12]);
+    let result = eval_primitive(Primitive::Lcm, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![12, 18, 12]);
+}
+
+#[test]
+fn oracle_lcm_tensor_scalar_broadcast() {
+    let a = make_i64_tensor(&[3], vec![4, 9, 12]);
+    let b = scalar_i64(6);
+    let result = eval_primitive(Primitive::Lcm, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![12, 18, 12]);
+}
+
+#[test]
+fn oracle_gcd_row_vector_broadcast() {
+    // [1, 3] gcd [2, 3] -> [2, 3]
+    let a = make_i64_tensor(&[1, 3], vec![12, 18, 24]);
+    let b = make_i64_tensor(&[2, 3], vec![6, 9, 12, 8, 12, 16]);
+    let result = eval_primitive(Primitive::Gcd, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 9, 12, 4, 6, 8]);
+}
+
+#[test]
+fn oracle_gcd_column_vector_broadcast() {
+    // [2, 1] gcd [2, 3] -> [2, 3]
+    let a = make_i64_tensor(&[2, 1], vec![12, 18]);
+    let b = make_i64_tensor(&[2, 3], vec![6, 8, 9, 9, 12, 15]);
+    let result = eval_primitive(Primitive::Gcd, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 4, 3, 9, 6, 3]);
+}
+
+#[test]
+fn oracle_lcm_row_vector_broadcast() {
+    // [1, 3] lcm [2, 3] -> [2, 3]
+    let a = make_i64_tensor(&[1, 3], vec![2, 3, 4]);
+    let b = make_i64_tensor(&[2, 3], vec![3, 4, 5, 5, 6, 7]);
+    let result = eval_primitive(Primitive::Lcm, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 12, 20, 10, 6, 28]);
+}
+
+#[test]
+fn oracle_gcd_different_ranks_broadcast() {
+    // [3] gcd [2, 3] -> [2, 3] (1D broadcast against 2D)
+    let a = make_i64_tensor(&[3], vec![12, 18, 24]);
+    let b = make_i64_tensor(&[2, 3], vec![6, 9, 12, 8, 12, 16]);
+    let result = eval_primitive(Primitive::Gcd, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 9, 12, 4, 6, 8]);
+}
+
+#[test]
+fn oracle_lcm_different_ranks_broadcast() {
+    // [3] lcm [2, 3] -> [2, 3]
+    let a = make_i64_tensor(&[3], vec![2, 3, 4]);
+    let b = make_i64_tensor(&[2, 3], vec![3, 4, 5, 5, 6, 7]);
+    let result = eval_primitive(Primitive::Lcm, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 12, 20, 10, 6, 28]);
+}
+
+#[test]
+fn oracle_gcd_incompatible_shapes_error() {
+    // [2] gcd [3] should error
+    let a = make_i64_tensor(&[2], vec![12, 18]);
+    let b = make_i64_tensor(&[3], vec![6, 9, 12]);
+    let result = eval_primitive(Primitive::Gcd, &[a, b], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
+}
+
+#[test]
+fn oracle_lcm_incompatible_shapes_error() {
+    // [2] lcm [3] should error
+    let a = make_i64_tensor(&[2], vec![2, 3]);
+    let b = make_i64_tensor(&[3], vec![4, 5, 6]);
+    let result = eval_primitive(Primitive::Lcm, &[a, b], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
 }
