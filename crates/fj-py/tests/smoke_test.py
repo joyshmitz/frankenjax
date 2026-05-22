@@ -7,6 +7,7 @@ Run after building with:
 """
 
 import frankenjax as fj
+import operator
 
 
 def test_version_metadata():
@@ -74,6 +75,12 @@ def test_value_scalar():
     assert float(v) == 42.0
     assert int(v) == 42
     assert complex(v) == complex(42.0, 0.0)
+    try:
+        operator.index(v)
+    except TypeError as exc:
+        assert "integer scalar arrays" in str(exc)
+    else:
+        raise AssertionError("operator.index(float scalar) should raise TypeError")
     assert abs(v.as_f64() - 42.0) < 1e-12
     print("✓ scalar_f64 roundtrip")
 
@@ -91,6 +98,7 @@ def test_value_scalar():
     assert v2.is_fully_replicated is True
     assert int(v2) == 123
     assert complex(v2) == complex(123.0, 0.0)
+    assert operator.index(v2) == 123
     assert v2.as_i64() == 123
     print("✓ scalar_i64 roundtrip")
 
@@ -130,6 +138,12 @@ def test_value_scalar():
         assert "only scalar arrays" in str(exc)
     else:
         raise AssertionError("complex(vector) should raise TypeError")
+    try:
+        operator.index(vec)
+    except TypeError as exc:
+        assert "integer scalar arrays" in str(exc)
+    else:
+        raise AssertionError("operator.index(vector) should raise TypeError")
     assert vec.as_i64_list() == [1, 2, 3]
     assert vec.as_f64_list() == [1.0, 2.0, 3.0]
     print("✓ vector_i64 roundtrip")

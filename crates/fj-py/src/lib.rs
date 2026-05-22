@@ -254,6 +254,29 @@ impl PyValue {
             .unbind())
     }
 
+    fn __index__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let literal = self.inner.as_scalar_literal().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Only integer scalar arrays can be converted to a scalar index.",
+            )
+        })?;
+
+        match literal {
+            Literal::I64(_) | Literal::U32(_) | Literal::U64(_) => {
+                literal_to_py_object(py, literal)
+            }
+            Literal::Bool(_)
+            | Literal::BF16Bits(_)
+            | Literal::F16Bits(_)
+            | Literal::F32Bits(_)
+            | Literal::F64Bits(_)
+            | Literal::Complex64Bits(..)
+            | Literal::Complex128Bits(..) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Only integer scalar arrays can be converted to a scalar index.",
+            )),
+        }
+    }
+
     fn as_f64_list(&self) -> Option<Vec<f64>> {
         match &self.inner {
             Value::Scalar(_) => self.inner.as_f64_scalar().map(|value| vec![value]),
@@ -1653,9 +1676,16 @@ mod tests {
                 value.getattr("imag").unwrap().extract::<f64>().unwrap(),
                 0.0
             );
+            assert!(v.__index__(py).is_err());
         });
         assert!((v.__float__().unwrap() - 42.0).abs() < 1e-12);
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
+
+        let i = PyValue::scalar_i64(123);
+        Python::with_gil(|py| {
+            let value = i.__index__(py).unwrap();
+            assert_eq!(value.bind(py).extract::<i64>().unwrap(), 123);
+        });
     }
 
     #[test]
@@ -1709,6 +1739,7 @@ mod tests {
         Python::with_gil(|py| {
             assert!(ints.__int__(py).is_err());
             assert!(ints.__complex__(py).is_err());
+            assert!(ints.__index__(py).is_err());
             let values = ints.tolist(py).unwrap();
             assert_eq!(
                 values.bind(py).extract::<Vec<i64>>().unwrap(),
