@@ -707,6 +707,24 @@ impl PyValue {
         array_namespace(py, api_version)
     }
 
+    #[pyo3(signature = (decimals = 0, out = None))]
+    fn round(&self, decimals: i32, out: Option<Py<PyAny>>) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        if out.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "The 'out' argument to round is not supported.",
+            ));
+        }
+        round_value(&self.inner, decimals, false).map(Self::from_value)
+    }
+
+    #[pyo3(signature = (ndigits = None))]
+    fn __round__(&self, ndigits: Option<i32>) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        let decimals = ndigits.unwrap_or(0);
+        round_value(&self.inner, decimals, ndigits.is_none()).map(Self::from_value)
+    }
+
     fn __getitem__(&self, index: &Bound<'_, PyAny>) -> PyResult<Self> {
         self.ensure_not_deleted()?;
         if let Ok(index) = index.extract::<isize>() {
@@ -1731,6 +1749,148 @@ fn zero_literal_for_dtype(dtype: DType) -> Literal {
         DType::Complex64 => Literal::from_complex64(0.0, 0.0),
         DType::Complex128 => Literal::from_complex128(0.0, 0.0),
     }
+}
+
+fn round_value(value: &Value, decimals: i32, cast_to_int: bool) -> PyResult<Value> {
+    match value {
+        Value::Scalar(literal) => {
+            round_literal(*literal, value.dtype(), decimals, cast_to_int).map(Value::Scalar)
+        }
+        Value::Tensor(tensor) => {
+            let output_dtype = if cast_to_int {
+                DType::I64
+            } else {
+                tensor.dtype
+            };
+            let elements = tensor
+                .elements
+                .iter()
+                .copied()
+                .map(|literal| round_literal(literal, tensor.dtype, decimals, cast_to_int))
+                .collect::<PyResult<Vec<_>>>()?;
+            TensorValue::new(output_dtype, tensor.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(value_error)
+        }
+    }
+}
+
+fn round_literal(
+    literal: Literal,
+    dtype: DType,
+    decimals: i32,
+    cast_to_int: bool,
+) -> PyResult<Literal> {
+    if cast_to_int {
+        let rounded = round_literal(literal, dtype, decimals, false)?;
+        return rounded_literal_to_i64(rounded);
+    }
+
+    match (dtype, literal) {
+        (DType::I32 | DType::I64 | DType::U32 | DType::U64, _) => {
+            if decimals < 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "integer round is not implemented for decimals < 0",
+                ));
+            }
+            Ok(literal)
+        }
+        (DType::F32, Literal::F32Bits(bits)) => {
+            Ok(Literal::from_f32(round_f32(f32::from_bits(bits), decimals)))
+        }
+        (DType::F64, Literal::F64Bits(bits)) => {
+            Ok(Literal::from_f64(round_f64(f64::from_bits(bits), decimals)))
+        }
+        (DType::BF16, Literal::BF16Bits(bits)) => {
+            let value = Literal::BF16Bits(bits)
+                .as_f64()
+                .expect("bf16 literal should convert to f64") as f32;
+            Ok(Literal::from_bf16_f32(round_f32(value, decimals)))
+        }
+        (DType::F16, Literal::F16Bits(bits)) => {
+            let value = Literal::F16Bits(bits)
+                .as_f64()
+                .expect("f16 literal should convert to f64") as f32;
+            Ok(Literal::from_f16_f32(round_f32(value, decimals)))
+        }
+        (DType::Complex64, Literal::Complex64Bits(re, im)) => Ok(Literal::from_complex64(
+            round_f32(f32::from_bits(re), decimals),
+            round_f32(f32::from_bits(im), decimals),
+        )),
+        (DType::Complex128, Literal::Complex128Bits(re, im)) => Ok(Literal::from_complex128(
+            round_f64(f64::from_bits(re), decimals),
+            round_f64(f64::from_bits(im), decimals),
+        )),
+        (DType::Bool, Literal::Bool(_)) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "round is not defined for bool arrays",
+        )),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "round literal dtype mismatch",
+        )),
+    }
+}
+
+fn round_f32(value: f32, decimals: i32) -> f32 {
+    if decimals == 0 {
+        value.round_ties_even()
+    } else {
+        let factor = 10_f32.powi(decimals);
+        if factor.is_infinite() {
+            value
+        } else {
+            (value * factor).round_ties_even() / factor
+        }
+    }
+}
+
+fn round_f64(value: f64, decimals: i32) -> f64 {
+    if decimals == 0 {
+        value.round_ties_even()
+    } else {
+        let factor = 10_f64.powi(decimals);
+        if factor.is_infinite() {
+            value
+        } else {
+            (value * factor).round_ties_even() / factor
+        }
+    }
+}
+
+fn rounded_literal_to_i64(literal: Literal) -> PyResult<Literal> {
+    match literal {
+        Literal::I64(value) => Ok(Literal::I64(value)),
+        Literal::U32(value) => Ok(Literal::I64(i64::from(value))),
+        Literal::U64(value) => i64::try_from(value).map(Literal::I64).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("rounded value does not fit int64")
+        }),
+        Literal::F32Bits(bits) => rounded_float_to_i64(f64::from(f32::from_bits(bits))),
+        Literal::F64Bits(bits) => rounded_float_to_i64(f64::from_bits(bits)),
+        Literal::BF16Bits(_) | Literal::F16Bits(_) => rounded_float_to_i64(
+            literal
+                .as_f64()
+                .expect("low-precision float literal should convert to f64"),
+        ),
+        Literal::Bool(value) => Ok(Literal::I64(i64::from(value))),
+        Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "round with ndigits=None cannot cast complex arrays to int",
+            ))
+        }
+    }
+}
+
+fn rounded_float_to_i64(value: f64) -> PyResult<Literal> {
+    if !value.is_finite() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "cannot cast non-finite rounded value to int64",
+        ));
+    }
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+            "rounded value does not fit int64",
+        ));
+    }
+    Ok(Literal::I64(value as i64))
 }
 
 fn array_namespace(py: Python<'_>, api_version: Option<&str>) -> PyResult<Py<PyAny>> {
@@ -2871,6 +3031,40 @@ mod tests {
         assert_eq!(v.dtype(), "F64");
         assert!((v.real_part().unwrap().as_f64().unwrap() - 42.0).abs() < 1e-12);
         assert!(v.imag_part().unwrap().as_f64().unwrap().abs() < 1e-12);
+        assert_eq!(
+            PyValue::scalar_f64(10.5)
+                .round(0, None)
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            10.0
+        );
+        assert_eq!(
+            PyValue::scalar_f64(21.5)
+                .round(0, None)
+                .unwrap()
+                .as_f64()
+                .unwrap(),
+            22.0
+        );
+        assert_eq!(
+            PyValue::scalar_f64(10.5)
+                .__round__(None)
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            10
+        );
+        assert!(
+            (PyValue::scalar_f64(1.25)
+                .__round__(Some(1))
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                - 1.2)
+                .abs()
+                < 1e-12
+        );
         assert!(v.__hash__().is_err());
         assert_eq!(v.ndim(), 0);
         assert_eq!(v.size(), 1);
@@ -2908,6 +3102,8 @@ mod tests {
         assert!(deleted.matrix_transpose().is_err());
         assert!(deleted.real_part().is_err());
         assert!(deleted.imag_part().is_err());
+        assert!(deleted.round(0, None).is_err());
+        assert!(deleted.__round__(None).is_err());
         assert!(deleted.addressable_data(0).is_err());
         assert!(deleted.addressable_shards().is_err());
         assert!(deleted.global_shards().is_err());
@@ -3006,6 +3202,8 @@ mod tests {
                 0.0
             );
             assert!(v.__index__(py).is_err());
+            let out = PyBool::new(py, true).to_owned().into_any().unbind();
+            assert!(v.round(0, Some(out)).is_err());
         });
         assert!((v.__float__().unwrap() - 42.0).abs() < 1e-12);
         assert!(v.__bool__().unwrap());
@@ -3015,10 +3213,15 @@ mod tests {
         assert!(i.__bool__().unwrap());
         assert_eq!(i.real_part().unwrap().as_i64().unwrap(), 123);
         assert_eq!(i.imag_part().unwrap().as_i64().unwrap(), 0);
+        assert_eq!(i.round(0, None).unwrap().as_i64().unwrap(), 123);
+        assert!(i.round(-1, None).is_err());
         assert!(!PyValue::scalar_i64(0).__bool__().unwrap());
         let complex = PyValue::from_value(Value::scalar_complex128(3.0, -2.0));
         assert!((complex.real_part().unwrap().as_f64().unwrap() - 3.0).abs() < 1e-12);
         assert!((complex.imag_part().unwrap().as_f64().unwrap() + 2.0).abs() < 1e-12);
+        let complex_rounded = complex.round(0, None).unwrap();
+        assert!((complex_rounded.real_part().unwrap().as_f64().unwrap() - 3.0).abs() < 1e-12);
+        assert!((complex_rounded.imag_part().unwrap().as_f64().unwrap() + 2.0).abs() < 1e-12);
         Python::with_gil(|py| {
             let value = i.__index__(py).unwrap();
             assert_eq!(value.bind(py).extract::<i64>().unwrap(), 123);
@@ -3056,6 +3259,24 @@ mod tests {
         );
         assert!(floats.copy_to_host_async().is_ok());
         assert_eq!(floats.copy().as_f64_list().unwrap(), vec![1.0, 2.5, 4.0]);
+        let rounded_ties = PyValue::vector_f64(vec![10.5, 21.5, 12.5, 31.5])
+            .unwrap()
+            .round(0, None)
+            .unwrap();
+        assert_eq!(
+            rounded_ties.as_f64_list().unwrap(),
+            vec![10.0, 22.0, 12.0, 32.0]
+        );
+        let rounded_decimals = PyValue::vector_f64(vec![1.25, 3.35]).unwrap();
+        let rounded_decimals = rounded_decimals.__round__(Some(1)).unwrap();
+        let rounded_decimals = rounded_decimals.as_f64_list().unwrap();
+        assert!((rounded_decimals[0] - 1.2).abs() < 1e-12);
+        assert!((rounded_decimals[1] - 3.4).abs() < 1e-12);
+        let rounded_ints = PyValue::vector_f64(vec![10.5, 21.5])
+            .unwrap()
+            .__round__(None)
+            .unwrap();
+        assert_eq!(rounded_ints.as_i64_list().unwrap(), vec![10, 22]);
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let values = floats.tolist(py).unwrap();

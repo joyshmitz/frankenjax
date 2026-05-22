@@ -88,6 +88,16 @@ def test_value_scalar():
     assert {device.platform for device in v.devices()} == {"cpu"}
     assert str(v) == "42.0"
     assert format(v, ".1f") == "42.0"
+    assert abs(v.round().as_f64() - 42.0) < 1e-12
+    assert round(fj.PyValue.scalar_f64(10.5)).as_i64() == 10
+    assert round(fj.PyValue.scalar_f64(21.5)).as_i64() == 22
+    assert abs(round(fj.PyValue.scalar_f64(1.25), 1).as_f64() - 1.2) < 1e-12
+    try:
+        v.round(out=object())
+    except NotImplementedError as exc:
+        assert "out" in str(exc)
+    else:
+        raise AssertionError("Array.round should reject non-None out")
     array = np.asarray(v)
     assert array.shape == ()
     assert abs(array.item() - 42.0) < 1e-12
@@ -191,6 +201,8 @@ def test_value_scalar():
         ("transpose", deleted.transpose),
         ("real", lambda: deleted.real),
         ("imag", lambda: deleted.imag),
+        ("round", deleted.round),
+        ("dunder round", lambda: round(deleted)),
         ("reversed", lambda: list(reversed(deleted))),
         ("array namespace", deleted.__array_namespace__),
         ("array protocol", lambda: np.asarray(deleted)),
@@ -264,6 +276,13 @@ def test_value_scalar():
     assert v2.__oct__() == "0o173"
     assert v2.real.as_i64() == 123
     assert v2.imag.as_i64() == 0
+    assert v2.round().as_i64() == 123
+    try:
+        v2.round(decimals=-1)
+    except NotImplementedError as exc:
+        assert "decimals < 0" in str(exc)
+    else:
+        raise AssertionError("integer Array.round should reject decimals < 0")
     assert v2.tobytes(order="K") == struct.pack("@q", 123)
     assert bool(v2) is True
     assert bool(fj.PyValue.scalar_i64(0)) is False
@@ -353,6 +372,10 @@ def test_value_scalar():
     assert vec.copy_to_host_async() is None
     assert vec.copy().as_i64_list() == [1, 2, 3]
     assert vec.tolist() == [1, 2, 3]
+    assert vec.round().as_i64_list() == [1, 2, 3]
+    rounded = fj.PyValue.vector_f64([10.5, 21.5, 12.5, 31.5])
+    assert rounded.round().as_f64_list() == [10.0, 22.0, 12.0, 32.0]
+    assert round(rounded).as_i64_list() == [10, 22, 12, 32]
     assert vec.tobytes(order="A") == struct.pack("@qqq", 1, 2, 3)
     try:
         float(vec)
