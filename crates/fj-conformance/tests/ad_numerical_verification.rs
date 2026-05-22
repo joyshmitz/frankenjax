@@ -1076,6 +1076,122 @@ fn tanh_vjp_numerical_complex64() {
     }
 }
 
+/// Complex64 scalar Asinh VJP.
+///
+/// d/dz[asinh(z)] = 1/sqrt(z² + 1). Verify dtype preservation and
+/// reasonable numerical result for z = 0.5 + 0.3i.
+#[test]
+fn asinh_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(0.5, 0.3));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Asinh,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("asinh VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    // Verify output is Complex64 and has finite values
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(re.is_finite(), "asinh VJP real should be finite");
+            assert!(im.is_finite(), "asinh VJP imag should be finite");
+            // d/dz[asinh(z)] = 1/sqrt(z² + 1) should have magnitude ~0.8-1.0 for small z
+            assert!(
+                re.abs() < 2.0 && im.abs() < 2.0,
+                "asinh VJP should have reasonable magnitude"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
+/// Complex64 scalar Acosh VJP.
+///
+/// d/dz[acosh(z)] = 1/sqrt(z² - 1). Verify dtype preservation.
+/// Use z = 1.5 + 0.3i to avoid branch cut issues.
+#[test]
+fn acosh_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(1.5, 0.3));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Acosh,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("acosh VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(re.is_finite(), "acosh VJP real should be finite");
+            assert!(im.is_finite(), "acosh VJP imag should be finite");
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
+/// Complex64 scalar Atanh VJP.
+///
+/// d/dz[atanh(z)] = 1/(1 - z²). Verify dtype preservation.
+/// Use z = 0.3 + 0.2i (inside unit disk).
+#[test]
+fn atanh_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(0.3, 0.2));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    // Expected: 1/(1 - z²)
+    let z_re = 0.3_f64;
+    let z_im = 0.2_f64;
+    let z2_re = z_re * z_re - z_im * z_im;
+    let z2_im = 2.0 * z_re * z_im;
+    let denom_re = 1.0 - z2_re;
+    let denom_im = -z2_im;
+    let denom_mag2 = denom_re * denom_re + denom_im * denom_im;
+    let expected_re = denom_re / denom_mag2;
+    let expected_im = -denom_im / denom_mag2;
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Atanh,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("atanh VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                (re - expected_re as f32).abs() < 1e-4,
+                "atanh VJP real: expected {expected_re}, got {re}"
+            );
+            assert!(
+                (im - expected_im as f32).abs() < 1e-4,
+                "atanh VJP imag: expected {expected_im}, got {im}"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
 #[test]
 fn complex_conj_vjp_vector_conjugates_cotangent() {
     let input = make_complex128_vector(&[(1.0, -2.0), (-3.0, 4.0)]);
