@@ -47,6 +47,7 @@ def test_value_scalar():
     assert v.itemsize == 8
     assert v.nbytes == 8
     assert v.weak_type is False
+    assert v.committed is False
     assert abs(v.as_f64() - 42.0) < 1e-12
     print("✓ scalar_f64 roundtrip")
 
@@ -59,6 +60,7 @@ def test_value_scalar():
     assert v2.itemsize == 8
     assert v2.nbytes == 8
     assert v2.weak_type is False
+    assert v2.committed is False
     assert v2.as_i64() == 123
     print("✓ scalar_i64 roundtrip")
 
@@ -71,6 +73,7 @@ def test_value_scalar():
     assert vec.itemsize == 8
     assert vec.nbytes == 24
     assert vec.weak_type is False
+    assert vec.committed is False
     assert vec.as_i64_list() == [1, 2, 3]
     assert vec.as_f64_list() == [1.0, 2.0, 3.0]
     print("✓ vector_i64 roundtrip")
