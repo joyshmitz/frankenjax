@@ -2693,63 +2693,65 @@ fn eval_ternary_elementwise(
     let b_val = &inputs[1];
     let x_val = &inputs[2];
 
-    match (a_val, b_val, x_val) {
-        (Value::Scalar(a), Value::Scalar(b), Value::Scalar(x)) => {
-            let a_f = a.as_f64().unwrap_or(0.0);
-            let b_f = b.as_f64().unwrap_or(0.0);
-            let x_f = x.as_f64().unwrap_or(0.0);
-            Ok(Value::Scalar(Literal::from_f64(op(a_f, b_f, x_f))))
-        }
-        (Value::Tensor(t_a), Value::Tensor(t_b), Value::Tensor(t_x)) => {
-            if t_a.shape != t_b.shape || t_b.shape != t_x.shape {
-                return Err(EvalError::Unsupported {
-                    primitive,
-                    detail: format!(
-                        "shape mismatch: {:?} vs {:?} vs {:?}",
-                        t_a.shape, t_b.shape, t_x.shape
-                    ),
-                });
-            }
-            let elements: Vec<Literal> = t_a
-                .elements
-                .iter()
-                .zip(t_b.elements.iter())
-                .zip(t_x.elements.iter())
-                .map(|((a, b), x)| {
-                    let a_f = a.as_f64().unwrap_or(0.0);
-                    let b_f = b.as_f64().unwrap_or(0.0);
-                    let x_f = x.as_f64().unwrap_or(0.0);
-                    Literal::from_f64(op(a_f, b_f, x_f))
-                })
-                .collect();
-            Ok(Value::Tensor(TensorValue::new(
-                DType::F64,
-                t_a.shape.clone(),
-                elements,
-            )?))
-        }
-        (Value::Scalar(a), Value::Scalar(b), Value::Tensor(t_x)) => {
-            let a_f = a.as_f64().unwrap_or(0.0);
-            let b_f = b.as_f64().unwrap_or(0.0);
-            let elements: Vec<Literal> = t_x
-                .elements
-                .iter()
-                .map(|x| {
-                    let x_f = x.as_f64().unwrap_or(0.0);
-                    Literal::from_f64(op(a_f, b_f, x_f))
-                })
-                .collect();
-            Ok(Value::Tensor(TensorValue::new(
-                DType::F64,
-                t_x.shape.clone(),
-                elements,
-            )?))
-        }
-        _ => Err(EvalError::Unsupported {
-            primitive,
-            detail: "betainc requires matching scalar/tensor shapes".to_string(),
-        }),
+    // All scalars -> scalar output
+    if let (Value::Scalar(a), Value::Scalar(b), Value::Scalar(x)) = (a_val, b_val, x_val) {
+        let a_f = a.as_f64().unwrap_or(0.0);
+        let b_f = b.as_f64().unwrap_or(0.0);
+        let x_f = x.as_f64().unwrap_or(0.0);
+        return Ok(Value::Scalar(Literal::from_f64(op(a_f, b_f, x_f))));
     }
+
+    // Convert scalars to 0-d tensors for uniform handling
+    let scalar_to_tensor = |v: &Value| -> TensorValue {
+        match v {
+            Value::Scalar(lit) => TensorValue::new(DType::F64, Shape { dims: vec![] }, vec![*lit])
+                .expect("scalar->tensor conversion"),
+            Value::Tensor(t) => t.clone(),
+        }
+    };
+
+    let t_a = scalar_to_tensor(a_val);
+    let t_b = scalar_to_tensor(b_val);
+    let t_x = scalar_to_tensor(x_val);
+
+    // Broadcast first two shapes, then result with third
+    let ab_shape = broadcast_shape(&t_a.shape, &t_b.shape).ok_or(EvalError::ShapeMismatch {
+        primitive,
+        left: t_a.shape.clone(),
+        right: t_b.shape.clone(),
+    })?;
+    let out_shape = broadcast_shape(&ab_shape, &t_x.shape).ok_or(EvalError::ShapeMismatch {
+        primitive,
+        left: ab_shape.clone(),
+        right: t_x.shape.clone(),
+    })?;
+
+    let total_elements: usize = out_shape.dims.iter().map(|&d| d as usize).product();
+    if total_elements == 0 {
+        return Ok(Value::Tensor(TensorValue::new(DType::F64, out_shape, vec![])?));
+    }
+
+    let out_strides = compute_strides(&out_shape.dims);
+    let a_strides = broadcast_strides(&t_a.shape, &out_shape);
+    let b_strides = broadcast_strides(&t_b.shape, &out_shape);
+    let x_strides = broadcast_strides(&t_x.shape, &out_shape);
+
+    let mut elements = Vec::with_capacity(total_elements);
+    let mut multi = Vec::with_capacity(out_shape.rank());
+
+    for flat in 0..total_elements {
+        flat_to_multi_into(flat, &out_strides, &mut multi);
+        let a_idx = broadcast_flat_index(&multi, &a_strides);
+        let b_idx = broadcast_flat_index(&multi, &b_strides);
+        let x_idx = broadcast_flat_index(&multi, &x_strides);
+
+        let a_f = t_a.elements[a_idx].as_f64().unwrap_or(0.0);
+        let b_f = t_b.elements[b_idx].as_f64().unwrap_or(0.0);
+        let x_f = t_x.elements[x_idx].as_f64().unwrap_or(0.0);
+        elements.push(Literal::from_f64(op(a_f, b_f, x_f)));
+    }
+
+    Ok(Value::Tensor(TensorValue::new(DType::F64, out_shape, elements)?))
 }
 
 pub(crate) fn hurwitz_zeta_approx(x: f64, q: f64) -> f64 {

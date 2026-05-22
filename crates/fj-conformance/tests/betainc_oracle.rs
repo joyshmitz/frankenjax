@@ -152,11 +152,139 @@ fn oracle_betainc_vector() {
 
 // ======================== Broadcasting ========================
 
+fn scalar_f64(v: f64) -> Value {
+    Value::Scalar(Literal::from_f64(v))
+}
+
+#[test]
+fn oracle_betainc_all_scalars_broadcast() {
+    // scalar betainc with all scalars -> scalar
+    let a = scalar_f64(1.0);
+    let b = scalar_f64(1.0);
+    let x = scalar_f64(0.5);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    assert!((extract_f64_scalar(&result) - 0.5).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_betainc_scalar_a_scalar_b_tensor_x_broadcast() {
+    // scalar a, scalar b, tensor x
+    let a = scalar_f64(1.0);
+    let b = scalar_f64(1.0);
+    let x = make_f64_tensor(&[4], vec![0.0, 0.25, 0.75, 1.0]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    let vals = extract_f64_vec(&result);
+    // betainc(1, 1, x) = x
+    assert!((vals[0] - 0.0).abs() < 1e-14);
+    assert!((vals[1] - 0.25).abs() < 1e-14);
+    assert!((vals[2] - 0.75).abs() < 1e-14);
+    assert!((vals[3] - 1.0).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_betainc_tensor_a_scalar_b_scalar_x_broadcast() {
+    // tensor a, scalar b, scalar x
+    let a = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let b = scalar_f64(1.0);
+    let x = scalar_f64(0.0);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    // betainc(a, b, 0) = 0 for all a, b
+    assert_eq!(vals[0], 0.0);
+    assert_eq!(vals[1], 0.0);
+    assert_eq!(vals[2], 0.0);
+}
+
+#[test]
+fn oracle_betainc_scalar_a_tensor_b_scalar_x_broadcast() {
+    // scalar a, tensor b, scalar x
+    let a = scalar_f64(1.0);
+    let b = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let x = scalar_f64(1.0);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    // betainc(a, b, 1) = 1 for all a, b
+    assert_eq!(vals[0], 1.0);
+    assert_eq!(vals[1], 1.0);
+    assert_eq!(vals[2], 1.0);
+}
+
+#[test]
+fn oracle_betainc_singleton_a_vector_x_broadcast() {
+    // [1] a with [1] b and [3] x -> [3]
+    let a = make_f64_tensor(&[1], vec![1.0]);
+    let b = make_f64_tensor(&[1], vec![1.0]);
+    let x = make_f64_tensor(&[3], vec![0.0, 0.5, 1.0]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    // betainc(1, 1, x) = x
+    assert_eq!(vals[0], 0.0);
+    assert!((vals[1] - 0.5).abs() < 1e-14);
+    assert_eq!(vals[2], 1.0);
+}
+
+#[test]
+fn oracle_betainc_column_params_matrix_x_broadcast() {
+    // [2, 1] a,b with [2, 3] x -> [2, 3]
+    let a = make_f64_tensor(&[2, 1], vec![1.0, 1.0]);
+    let b = make_f64_tensor(&[2, 1], vec![1.0, 1.0]);
+    let x = make_f64_tensor(&[2, 3], vec![0.0, 0.5, 1.0, 0.25, 0.5, 0.75]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_f64_vec(&result);
+    // betainc(1, 1, x) = x for all values
+    assert_eq!(vals[0], 0.0);
+    assert!((vals[1] - 0.5).abs() < 1e-14);
+    assert_eq!(vals[2], 1.0);
+    assert!((vals[3] - 0.25).abs() < 1e-14);
+    assert!((vals[4] - 0.5).abs() < 1e-14);
+    assert!((vals[5] - 0.75).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_betainc_different_ranks_broadcast() {
+    // [3] params with [2, 3] x -> [2, 3]
+    let a = make_f64_tensor(&[3], vec![1.0, 1.0, 1.0]);
+    let b = make_f64_tensor(&[3], vec![1.0, 1.0, 1.0]);
+    let x = make_f64_tensor(&[2, 3], vec![0.0, 0.5, 1.0, 0.25, 0.75, 0.5]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_f64_vec(&result);
+    // Row 0: 0.0, 0.5, 1.0
+    assert_eq!(vals[0], 0.0);
+    assert!((vals[1] - 0.5).abs() < 1e-14);
+    assert_eq!(vals[2], 1.0);
+    // Row 1: 0.25, 0.75, 0.5
+    assert!((vals[3] - 0.25).abs() < 1e-14);
+    assert!((vals[4] - 0.75).abs() < 1e-14);
+    assert!((vals[5] - 0.5).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_betainc_incompatible_shapes_error() {
+    // [2] params with [3] x should error
+    let a = make_f64_tensor(&[2], vec![1.0, 1.0]);
+    let b = make_f64_tensor(&[2], vec![1.0, 1.0]);
+    let x = make_f64_tensor(&[3], vec![0.0, 0.5, 1.0]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
+}
+
 #[test]
 fn oracle_betainc_scalar_params_vector_x_broadcast() {
-    let a = Value::scalar_f64(1.0);
-    let b = Value::scalar_f64(1.0);
-    let x_values = [0.0_f64, 0.25, 0.5, 0.75, 1.0];
+    let a = scalar_f64(1.0);
+    let b = scalar_f64(1.0);
+    let x_values: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
     let x = make_f64_tensor(&[5], x_values.to_vec());
     let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
 
