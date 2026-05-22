@@ -395,3 +395,47 @@ fn oracle_nextafter_negative_zero() {
     let vals = extract_f64_vec(&result);
     assert!(vals[0] > 0.0);
 }
+
+// ======================== Broadcast Tests ========================
+
+#[test]
+fn oracle_nextafter_scalar_tensor_broadcast() {
+    // Scalar x, tensor direction -> broadcasts scalar over tensor shape
+    let x = Value::Scalar(Literal::from_f64(1.0));
+    let y = make_f64_tensor(&[3], vec![2.0, 0.0, 1.0]);
+    let result = eval_primitive(Primitive::Nextafter, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0] > 1.0, "towards 2.0");
+    assert!(vals[1] < 1.0, "towards 0.0");
+    assert!((vals[2] - 1.0).abs() < 1e-15, "same value");
+}
+
+#[test]
+fn oracle_nextafter_tensor_scalar_broadcast() {
+    // Tensor x, scalar direction -> broadcasts direction over tensor shape
+    let x = make_f64_tensor(&[3], vec![1.0, 2.0, 0.0]);
+    let y = Value::Scalar(Literal::from_f64(10.0));
+    let result = eval_primitive(Primitive::Nextafter, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0] > 1.0, "1.0 towards 10.0");
+    assert!(vals[1] > 2.0, "2.0 towards 10.0");
+    assert!(vals[2] > 0.0, "0.0 towards 10.0");
+}
+
+#[test]
+fn oracle_nextafter_scalar_tensor_broadcast_2d() {
+    let x = Value::Scalar(Literal::from_f64(0.0));
+    let y = make_f64_tensor(&[2, 2], vec![1.0, -1.0, 2.0, -2.0]);
+    let result = eval_primitive(Primitive::Nextafter, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0] > 0.0, "0 towards 1");
+    assert!(vals[1] < 0.0, "0 towards -1");
+    assert!(vals[2] > 0.0, "0 towards 2");
+    assert!(vals[3] < 0.0, "0 towards -2");
+}
