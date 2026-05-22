@@ -80,14 +80,16 @@ fn assert_close(actual: f64, expected: f64, tol: f64, msg: &str) {
 fn oracle_tanh_zero() {
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Tanh, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "tanh(0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "tanh(0) = +0");
 }
 
 #[test]
 fn oracle_tanh_neg_zero() {
     let input = make_f64_tensor(&[], vec![-0.0]);
     let result = eval_primitive(Primitive::Tanh, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "tanh(-0.0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "tanh(-0.0) = -0");
 }
 
 // ======================== Positive Values ========================
@@ -425,13 +427,19 @@ fn metamorphic_tanh_atanh_identity() {
 #[test]
 fn metamorphic_tanh_tensor_roundtrip() {
     let input = make_f64_tensor(&[5], vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
-    let tanh_result = eval_primitive(Primitive::Tanh, std::slice::from_ref(&input), &no_params()).unwrap();
+    let tanh_result =
+        eval_primitive(Primitive::Tanh, std::slice::from_ref(&input), &no_params()).unwrap();
     let atanh_tanh = eval_primitive(Primitive::Atanh, &[tanh_result], &no_params()).unwrap();
 
     let original = extract_f64_vec(&input);
     let round_trip = extract_f64_vec(&atanh_tanh);
 
     for (orig, rt) in original.iter().zip(round_trip.iter()) {
-        assert_close(*rt, *orig, 1e-12, &format!("atanh(tanh({})) = {}", orig, orig));
+        assert_close(
+            *rt,
+            *orig,
+            1e-12,
+            &format!("atanh(tanh({})) = {}", orig, orig),
+        );
     }
 }
