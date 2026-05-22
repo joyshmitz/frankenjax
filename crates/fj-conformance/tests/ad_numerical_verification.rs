@@ -803,6 +803,172 @@ fn neg_vjp_numerical_complex64() {
     ), "Neg VJP g_a must equal -g; got {:?}", grads[0]);
 }
 
+/// Complex64 scalar Sin VJP.
+///
+/// d/dz[sin(z)] = cos(z). For z = 1 + 0.5i and g = 1 + 0i:
+/// cos(1 + 0.5i) = cos(1)cosh(0.5) - i*sin(1)sinh(0.5) ≈ 0.609 - 0.4385i
+/// VJP: g_z = g * cos(z) ≈ 0.609 - 0.4385i
+#[test]
+fn sin_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(1.0, 0.5));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Sin,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("sin VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    // Expected: cos(1+0.5i) = cos(1)*cosh(0.5) - i*sin(1)*sinh(0.5)
+    let expected_re = 1.0_f64.cos() * 0.5_f64.cosh();
+    let expected_im = -(1.0_f64.sin() * 0.5_f64.sinh());
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                (re - expected_re as f32).abs() < 1e-5,
+                "sin VJP real: expected {expected_re}, got {re}"
+            );
+            assert!(
+                (im - expected_im as f32).abs() < 1e-5,
+                "sin VJP imag: expected {expected_im}, got {im}"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
+/// Complex64 scalar Cos VJP.
+///
+/// d/dz[cos(z)] = -sin(z). For z = 1 + 0.5i and g = 1 + 0i:
+/// -sin(1 + 0.5i) = -(sin(1)cosh(0.5) + i*cos(1)sinh(0.5)) ≈ -0.949 - 0.2816i
+/// VJP: g_z = -g * sin(z)
+#[test]
+fn cos_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(1.0, 0.5));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Cos,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("cos VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    // Expected: -sin(1+0.5i) = -(sin(1)*cosh(0.5) + i*cos(1)*sinh(0.5))
+    let expected_re = -(1.0_f64.sin() * 0.5_f64.cosh());
+    let expected_im = -(1.0_f64.cos() * 0.5_f64.sinh());
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                (re - expected_re as f32).abs() < 1e-5,
+                "cos VJP real: expected {expected_re}, got {re}"
+            );
+            assert!(
+                (im - expected_im as f32).abs() < 1e-5,
+                "cos VJP imag: expected {expected_im}, got {im}"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
+/// Complex64 scalar Sinh VJP.
+///
+/// d/dz[sinh(z)] = cosh(z). For z = 0.5 + 1i and g = 1 + 0i:
+/// cosh(0.5+i) = cosh(0.5)cos(1) + i*sinh(0.5)sin(1)
+#[test]
+fn sinh_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(0.5, 1.0));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Sinh,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("sinh VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    // Expected: cosh(0.5+i) = cosh(0.5)*cos(1) + i*sinh(0.5)*sin(1)
+    let expected_re = 0.5_f64.cosh() * 1.0_f64.cos();
+    let expected_im = 0.5_f64.sinh() * 1.0_f64.sin();
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                (re - expected_re as f32).abs() < 1e-5,
+                "sinh VJP real: expected {expected_re}, got {re}"
+            );
+            assert!(
+                (im - expected_im as f32).abs() < 1e-5,
+                "sinh VJP imag: expected {expected_im}, got {im}"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
+/// Complex64 scalar Cosh VJP.
+///
+/// d/dz[cosh(z)] = sinh(z). For z = 0.5 + 1i and g = 1 + 0i:
+/// sinh(0.5+i) = sinh(0.5)cos(1) + i*cosh(0.5)sin(1)
+#[test]
+fn cosh_vjp_numerical_complex64() {
+    use fj_core::Literal::Complex64Bits;
+
+    let z = Value::Scalar(Literal::from_complex64(0.5, 1.0));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+
+    let grads = fj_ad::vjp_single(
+        Primitive::Cosh,
+        std::slice::from_ref(&z),
+        &g,
+        &BTreeMap::new(),
+    )
+    .expect("cosh VJP should accept complex64 scalar");
+    assert_eq!(grads.len(), 1);
+
+    // Expected: sinh(0.5+i) = sinh(0.5)*cos(1) + i*cosh(0.5)*sin(1)
+    let expected_re = 0.5_f64.sinh() * 1.0_f64.cos();
+    let expected_im = 0.5_f64.cosh() * 1.0_f64.sin();
+
+    match grads[0] {
+        Value::Scalar(Complex64Bits(re, im)) => {
+            let re = f32::from_bits(re);
+            let im = f32::from_bits(im);
+            assert!(
+                (re - expected_re as f32).abs() < 1e-5,
+                "cosh VJP real: expected {expected_re}, got {re}"
+            );
+            assert!(
+                (im - expected_im as f32).abs() < 1e-5,
+                "cosh VJP imag: expected {expected_im}, got {im}"
+            );
+        }
+        ref other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
 #[test]
 fn complex_conj_vjp_vector_conjugates_cotangent() {
     let input = make_complex128_vector(&[(1.0, -2.0), (-3.0, 4.0)]);
