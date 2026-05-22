@@ -208,3 +208,27 @@ fn oracle_rev_empty_tensor() {
     assert_eq!(extract_shape(&result), vec![0]);
     assert_eq!(extract_i64_vec(&result), vec![] as Vec<i64>);
 }
+
+#[test]
+fn oracle_rev_preserves_dtype() {
+    let input = make_i64_tensor(&[3], vec![1, 2, 3]);
+    let result = eval_primitive(Primitive::Rev, &[input], &axes_params(&[0])).unwrap();
+    assert_eq!(result.dtype(), DType::I64);
+}
+
+#[test]
+fn oracle_rev_shape_preserved() {
+    // Verify shape is preserved after reversal
+    let input = make_i64_tensor(&[3, 4], (0..12).collect::<Vec<_>>());
+    let result = eval_primitive(Primitive::Rev, &[input], &axes_params(&[1])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 4]);
+}
+
+#[test]
+fn oracle_rev_large_tensor() {
+    let input = make_i64_tensor(&[100], (0..100).collect::<Vec<_>>());
+    let result = eval_primitive(Primitive::Rev, &[input], &axes_params(&[0])).unwrap();
+    let vals = extract_i64_vec(&result);
+    assert_eq!(vals[0], 99);
+    assert_eq!(vals[99], 0);
+}
