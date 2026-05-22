@@ -36,7 +36,7 @@ struct PyLinearizedJvp {
     primals: Vec<Value>,
 }
 
-#[pyclass]
+#[pyclass(name = "ShapeDtypeStruct")]
 #[derive(Clone)]
 struct PyShapeDtypeStruct {
     shape: Vec<u32>,
@@ -218,7 +218,7 @@ impl PyShapeDtypeStruct {
 
     fn __repr__(&self) -> String {
         format!(
-            "PyShapeDtypeStruct(shape={:?}, dtype={})",
+            "ShapeDtypeStruct(shape={:?}, dtype={})",
             self.shape, self.dtype
         )
     }

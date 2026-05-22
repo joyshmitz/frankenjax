@@ -102,6 +102,7 @@ def test_eval_shape():
     """Test eval_shape metadata for scalar and vector outputs."""
     scalar_meta = fj.eval_shape(fj.make_jaxpr_square(), [fj.PyValue.scalar_f64(3.0)])
     assert len(scalar_meta) == 1
+    assert isinstance(scalar_meta[0], fj.ShapeDtypeStruct)
     assert scalar_meta[0].shape() == []
     assert scalar_meta[0].dtype() == "F64"
 
@@ -110,6 +111,7 @@ def test_eval_shape():
         [fj.PyValue.vector_f64([1.0, 2.0, 3.0])],
     )
     assert len(vector_meta) == 1
+    assert isinstance(vector_meta[0], fj.ShapeDtypeStruct)
     assert vector_meta[0].shape() == [3]
     assert vector_meta[0].dtype() == "F64"
     print("✓ eval_shape returns shape/dtype metadata for scalar and vector outputs")
