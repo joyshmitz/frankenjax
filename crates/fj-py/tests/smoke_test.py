@@ -179,6 +179,8 @@ def test_value_scalar():
         ("T", lambda: deleted.T),
         ("mT", lambda: deleted.mT),
         ("transpose", deleted.transpose),
+        ("real", lambda: deleted.real),
+        ("imag", lambda: deleted.imag),
         ("array protocol", lambda: np.asarray(deleted)),
         ("DLPack device protocol", deleted.__dlpack_device__),
         ("addressable_shards", lambda: deleted.addressable_shards),
@@ -195,6 +197,8 @@ def test_value_scalar():
     assert v.is_deleted() is False
     assert v.item() == 42.0
     assert v.tolist() == 42.0
+    assert abs(v.real.tolist() - 42.0) < 1e-12
+    assert abs(v.imag.tolist()) < 1e-12
     assert v.tobytes() == struct.pack("@d", 42.0)
     assert v.tobytes(order="F") == struct.pack("@d", 42.0)
     try:
@@ -240,6 +244,8 @@ def test_value_scalar():
     assert operator.index(v2) == 123
     assert v2.__hex__() == "0x7b"
     assert v2.__oct__() == "0o173"
+    assert v2.real.as_i64() == 123
+    assert v2.imag.as_i64() == 0
     assert v2.tobytes(order="K") == struct.pack("@q", 123)
     assert bool(v2) is True
     assert bool(fj.PyValue.scalar_i64(0)) is False
@@ -266,6 +272,8 @@ def test_value_scalar():
     vec_t = vec.T
     assert vec_t.shape == (3,)
     assert vec_t.tolist() == [1, 2, 3]
+    assert vec.real.as_i64_list() == [1, 2, 3]
+    assert vec.imag.as_i64_list() == [0, 0, 0]
     assert vec.transpose().tolist() == [1, 2, 3]
     assert vec.transpose(None).tolist() == [1, 2, 3]
     assert vec.transpose(0).tolist() == [1, 2, 3]
@@ -390,6 +398,8 @@ def test_make_jaxpr_generic():
     reshape = fj.make_jaxpr("lax_reshape_6_to_2x3")
     matrix = fj.jit(reshape, [fj.PyValue.vector_i64([1, 2, 3, 4, 5, 6])])[0]
     assert matrix.shape == (2, 3)
+    assert matrix.real.tolist() == [1, 2, 3, 4, 5, 6]
+    assert matrix.imag.tolist() == [0, 0, 0, 0, 0, 0]
     matrix_t = matrix.T
     assert matrix_t.shape == (3, 2)
     assert matrix_t.tolist() == [1, 4, 2, 5, 3, 6]
@@ -421,6 +431,13 @@ def test_make_jaxpr_generic():
     matrix_mt = matrix.mT
     assert matrix_mt.shape == (3, 2)
     assert matrix_mt.tolist() == [1, 4, 2, 5, 3, 6]
+
+    complex_value = fj.jit(
+        fj.make_jaxpr("lax_complex"),
+        [fj.PyValue.scalar_f64(3.0), fj.PyValue.scalar_f64(-2.0)],
+    )[0]
+    assert abs(complex_value.real.as_f64() - 3.0) < 1e-12
+    assert abs(complex_value.imag.as_f64() + 2.0) < 1e-12
 
     try:
         fj.make_jaxpr("missing_program")

@@ -185,6 +185,16 @@ impl PyValue {
         self.transpose_with_permutation(&permutation)
     }
 
+    fn real_part(&self) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        value_real_part(&self.inner).map(Self::from_value)
+    }
+
+    fn imag_part(&self) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        value_imag_part(&self.inner).map(Self::from_value)
+    }
+
     fn transpose_with_permutation(&self, permutation: &[usize]) -> PyResult<Self> {
         let Value::Tensor(tensor) = &self.inner else {
             if permutation.is_empty() {
@@ -515,6 +525,16 @@ impl PyValue {
         let rank = self.inner.as_tensor().map_or(0, |tensor| tensor.rank());
         let permutation = transpose_permutation_from_py_args(args, rank)?;
         self.transpose_with_permutation(&permutation)
+    }
+
+    #[getter]
+    fn real(&self) -> PyResult<Self> {
+        self.real_part()
+    }
+
+    #[getter]
+    fn imag(&self) -> PyResult<Self> {
+        self.imag_part()
     }
 
     #[getter]
@@ -1605,6 +1625,88 @@ fn normalize_axis(axis: isize, rank: usize) -> PyResult<usize> {
     usize::try_from(normalized).map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyOverflowError, _>("normalized axis does not fit usize")
     })
+}
+
+fn value_real_part(value: &Value) -> PyResult<Value> {
+    match value {
+        Value::Scalar(literal) => Ok(Value::Scalar(literal_real_part(*literal))),
+        Value::Tensor(tensor) if matches!(tensor.dtype, DType::Complex64 | DType::Complex128) => {
+            let dtype = complex_component_dtype(tensor.dtype);
+            let elements = tensor
+                .elements
+                .iter()
+                .copied()
+                .map(literal_real_part)
+                .collect::<Vec<_>>();
+            TensorValue::new(dtype, tensor.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(value_error)
+        }
+        Value::Tensor(_) => Ok(value.clone()),
+    }
+}
+
+fn value_imag_part(value: &Value) -> PyResult<Value> {
+    match value {
+        Value::Scalar(literal) => Ok(Value::Scalar(literal_imag_part(*literal, value.dtype()))),
+        Value::Tensor(tensor) if matches!(tensor.dtype, DType::Complex64 | DType::Complex128) => {
+            let dtype = complex_component_dtype(tensor.dtype);
+            let elements = tensor
+                .elements
+                .iter()
+                .copied()
+                .map(|literal| literal_imag_part(literal, tensor.dtype))
+                .collect::<Vec<_>>();
+            TensorValue::new(dtype, tensor.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(value_error)
+        }
+        Value::Tensor(tensor) => {
+            let elements = vec![zero_literal_for_dtype(tensor.dtype); tensor.elements.len()];
+            TensorValue::new(tensor.dtype, tensor.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(value_error)
+        }
+    }
+}
+
+fn literal_real_part(literal: Literal) -> Literal {
+    match literal {
+        Literal::Complex64Bits(re, _) => Literal::F32Bits(re),
+        Literal::Complex128Bits(re, _) => Literal::F64Bits(re),
+        _ => literal,
+    }
+}
+
+fn literal_imag_part(literal: Literal, dtype: DType) -> Literal {
+    match literal {
+        Literal::Complex64Bits(_, im) => Literal::F32Bits(im),
+        Literal::Complex128Bits(_, im) => Literal::F64Bits(im),
+        _ => zero_literal_for_dtype(dtype),
+    }
+}
+
+fn complex_component_dtype(dtype: DType) -> DType {
+    match dtype {
+        DType::Complex64 => DType::F32,
+        DType::Complex128 => DType::F64,
+        _ => dtype,
+    }
+}
+
+fn zero_literal_for_dtype(dtype: DType) -> Literal {
+    match dtype {
+        DType::Bool => Literal::Bool(false),
+        DType::I32 | DType::I64 => Literal::I64(0),
+        DType::U32 => Literal::U32(0),
+        DType::U64 => Literal::U64(0),
+        DType::BF16 => Literal::BF16Bits(0),
+        DType::F16 => Literal::F16Bits(0),
+        DType::F32 => Literal::from_f32(0.0),
+        DType::F64 => Literal::from_f64(0.0),
+        DType::Complex64 => Literal::from_complex64(0.0, 0.0),
+        DType::Complex128 => Literal::from_complex128(0.0, 0.0),
+    }
 }
 
 fn py_object_repr(py: Python<'_>, value: Option<Py<PyAny>>) -> PyResult<String> {
@@ -2731,6 +2833,8 @@ mod tests {
             Vec::<u32>::new()
         );
         assert_eq!(v.dtype(), "F64");
+        assert!((v.real_part().unwrap().as_f64().unwrap() - 42.0).abs() < 1e-12);
+        assert!(v.imag_part().unwrap().as_f64().unwrap().abs() < 1e-12);
         assert!(v.__hash__().is_err());
         assert_eq!(v.ndim(), 0);
         assert_eq!(v.size(), 1);
@@ -2766,6 +2870,8 @@ mod tests {
         assert!(deleted.copy_to_host_async().is_err());
         assert!(deleted.transpose_all_axes().is_err());
         assert!(deleted.matrix_transpose().is_err());
+        assert!(deleted.real_part().is_err());
+        assert!(deleted.imag_part().is_err());
         assert!(deleted.addressable_data(0).is_err());
         assert!(deleted.addressable_shards().is_err());
         assert!(deleted.global_shards().is_err());
@@ -2871,7 +2977,12 @@ mod tests {
 
         let i = PyValue::scalar_i64(123);
         assert!(i.__bool__().unwrap());
+        assert_eq!(i.real_part().unwrap().as_i64().unwrap(), 123);
+        assert_eq!(i.imag_part().unwrap().as_i64().unwrap(), 0);
         assert!(!PyValue::scalar_i64(0).__bool__().unwrap());
+        let complex = PyValue::from_value(Value::scalar_complex128(3.0, -2.0));
+        assert!((complex.real_part().unwrap().as_f64().unwrap() - 3.0).abs() < 1e-12);
+        assert!((complex.imag_part().unwrap().as_f64().unwrap() + 2.0).abs() < 1e-12);
         Python::with_gil(|py| {
             let value = i.__index__(py).unwrap();
             assert_eq!(value.bind(py).extract::<i64>().unwrap(), 123);
@@ -2935,6 +3046,14 @@ mod tests {
         assert_eq!(ints_t.shape_dims(), vec![3]);
         assert_eq!(ints_t.as_i64_list().unwrap(), vec![1, 2, 3]);
         assert!(ints.matrix_transpose().is_err());
+        assert_eq!(
+            ints.real_part().unwrap().as_i64_list().unwrap(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            ints.imag_part().unwrap().as_i64_list().unwrap(),
+            vec![0, 0, 0]
+        );
         assert_eq!(ints.dtype(), "I64");
         assert_eq!(ints.ndim(), 1);
         assert_eq!(ints.size(), 3);
@@ -3024,6 +3143,33 @@ mod tests {
         let matrix_mt = matrix.matrix_transpose().unwrap();
         assert_eq!(matrix_mt.shape_dims(), vec![3, 2]);
         assert_eq!(matrix_mt.as_i64_list().unwrap(), vec![1, 4, 2, 5, 3, 6]);
+        assert_eq!(
+            matrix.real_part().unwrap().as_i64_list().unwrap(),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            matrix.imag_part().unwrap().as_i64_list().unwrap(),
+            vec![0, 0, 0, 0, 0, 0]
+        );
+        let complex_vector = PyValue::from_value(Value::Tensor(
+            TensorValue::new(
+                DType::Complex64,
+                Shape { dims: vec![2] },
+                vec![
+                    Literal::from_complex64(1.5, -2.0),
+                    Literal::from_complex64(-3.25, 4.5),
+                ],
+            )
+            .unwrap(),
+        ));
+        assert_eq!(
+            complex_vector.real_part().unwrap().as_f64_list().unwrap(),
+            vec![1.5, -3.25]
+        );
+        assert_eq!(
+            complex_vector.imag_part().unwrap().as_f64_list().unwrap(),
+            vec![-2.0, 4.5]
+        );
         Python::with_gil(|py| {
             let axes = PyTuple::new(py, [1_isize, 0_isize]).unwrap();
             let explicit_args = PyTuple::new(py, [axes]).unwrap();
