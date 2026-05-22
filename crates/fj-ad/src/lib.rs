@@ -1384,6 +1384,20 @@ pub fn vjp(
             let gy = value_mul(g, &value_div(y, &h)?)?;
             Ok(vec![gx, gy])
         }
+        Primitive::LogAddExp => {
+            let x = &inputs[0];
+            let y = &inputs[1];
+            // d/dx = sigmoid(x-y), d/dy = sigmoid(y-x)
+            let x_minus_y = value_sub(x, y)?;
+            let y_minus_x = value_sub(y, x)?;
+            let sig_xy = eval_primitive(Primitive::Logistic, &[x_minus_y], &BTreeMap::new())
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let sig_yx = eval_primitive(Primitive::Logistic, &[y_minus_x], &BTreeMap::new())
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let gx = value_mul(g, &sig_xy)?;
+            let gy = value_mul(g, &sig_yx)?;
+            Ok(vec![gx, gy])
+        }
         Primitive::Exp => {
             let x = &inputs[0];
             let exp_x = eval_primitive(Primitive::Exp, std::slice::from_ref(x), &BTreeMap::new())
@@ -6748,6 +6762,17 @@ fn jvp_rule(
             let y_dy = ep(Primitive::Mul, &[primals[1].clone(), tangents[1].clone()])?;
             let numer = ep(Primitive::Add, &[x_dx, y_dy])?;
             ep(Primitive::Div, &[numer, h])
+        }
+
+        Primitive::LogAddExp => {
+            // d(logaddexp) = sigmoid(x-y) * dx + sigmoid(y-x) * dy
+            let x_minus_y = ep(Primitive::Sub, &[primals[0].clone(), primals[1].clone()])?;
+            let y_minus_x = ep(Primitive::Sub, &[primals[1].clone(), primals[0].clone()])?;
+            let sig_xy = ep(Primitive::Logistic, &[x_minus_y])?;
+            let sig_yx = ep(Primitive::Logistic, &[y_minus_x])?;
+            let dx_term = ep(Primitive::Mul, &[sig_xy, tangents[0].clone()])?;
+            let dy_term = ep(Primitive::Mul, &[sig_yx, tangents[1].clone()])?;
+            ep(Primitive::Add, &[dx_term, dy_term])
         }
 
         Primitive::Atan2 => {

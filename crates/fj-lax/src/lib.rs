@@ -180,6 +180,18 @@ pub fn eval_primitive(
         Primitive::Hypot => {
             eval_binary_elementwise(primitive, inputs, |a, b| f64::hypot(a as f64, b as f64) as i64, f64::hypot)
         }
+        Primitive::LogAddExp => {
+            // log(exp(x) + exp(y)) = max(x,y) + log1p(exp(min(x,y) - max(x,y)))
+            eval_binary_elementwise(
+                primitive,
+                inputs,
+                |a, b| {
+                    let (a, b) = (a as f64, b as f64);
+                    (a.max(b) + (-(a - b).abs()).exp().ln_1p()) as i64
+                },
+                |a, b| a.max(b) + (-(a - b).abs()).exp().ln_1p(),
+            )
+        }
         // Unary arithmetic
         Primitive::Neg => eval_neg(primitive, inputs),
         Primitive::Abs => eval_abs(primitive, inputs),
