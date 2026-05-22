@@ -171,3 +171,60 @@ fn oracle_argmax_negative_axis_out_of_bounds_errors() {
         "unexpected error: {err}"
     );
 }
+
+// ======================== Additional Coverage ========================
+
+fn make_i64_tensor(shape: &[u32], data: Vec<i64>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter().map(Literal::I64).collect(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn oracle_argmin_negative_values() {
+    let input = make_f64_tensor(&[4], vec![-3.0, -1.0, -4.0, -2.0]);
+    let result = eval_primitive(Primitive::Argmin, &[input], &axis_params(0)).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 2); // -4 at index 2
+}
+
+#[test]
+fn oracle_argmax_negative_values() {
+    let input = make_f64_tensor(&[4], vec![-3.0, -1.0, -4.0, -2.0]);
+    let result = eval_primitive(Primitive::Argmax, &[input], &axis_params(0)).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 1); // -1 at index 1
+}
+
+#[test]
+fn oracle_argmin_all_equal_returns_first() {
+    let input = make_f64_tensor(&[4], vec![5.0, 5.0, 5.0, 5.0]);
+    let result = eval_primitive(Primitive::Argmin, &[input], &axis_params(0)).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 0); // first index
+}
+
+#[test]
+fn oracle_argmax_all_equal_returns_first() {
+    let input = make_f64_tensor(&[4], vec![5.0, 5.0, 5.0, 5.0]);
+    let result = eval_primitive(Primitive::Argmax, &[input], &axis_params(0)).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 0); // first index
+}
+
+#[test]
+fn oracle_argmin_integer_dtype() {
+    let input = make_i64_tensor(&[4], vec![30, 10, 40, 20]);
+    let result = eval_primitive(Primitive::Argmin, &[input], &axis_params(0)).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 1); // 10 at index 1
+}
+
+#[test]
+fn oracle_argmax_integer_dtype() {
+    let input = make_i64_tensor(&[4], vec![30, 10, 40, 20]);
+    let result = eval_primitive(Primitive::Argmax, &[input], &axis_params(0)).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 2); // 40 at index 2
+}
