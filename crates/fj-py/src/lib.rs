@@ -126,6 +126,18 @@ impl PyValue {
         format!("{:?}", self.inner.dtype())
     }
 
+    #[getter]
+    fn ndim(&self) -> usize {
+        self.shape().len()
+    }
+
+    #[getter]
+    fn size(&self) -> u64 {
+        self.shape()
+            .iter()
+            .fold(1_u64, |size, dim| size.saturating_mul(u64::from(*dim)))
+    }
+
     fn as_f64_list(&self) -> Option<Vec<f64>> {
         match &self.inner {
             Value::Scalar(_) => self.inner.as_f64_scalar().map(|value| vec![value]),
@@ -1437,6 +1449,10 @@ mod tests {
     #[test]
     fn value_scalar_roundtrip() {
         let v = PyValue::scalar_f64(42.0);
+        assert_eq!(v.shape(), Vec::<u32>::new());
+        assert_eq!(v.dtype(), "F64");
+        assert_eq!(v.ndim(), 0);
+        assert_eq!(v.size(), 1);
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
     }
 
@@ -1445,12 +1461,16 @@ mod tests {
         let floats = PyValue::vector_f64(vec![1.0, 2.5, 4.0]).unwrap();
         assert_eq!(floats.shape(), vec![3]);
         assert_eq!(floats.dtype(), "F64");
+        assert_eq!(floats.ndim(), 1);
+        assert_eq!(floats.size(), 3);
         assert_eq!(floats.as_f64_list().unwrap(), vec![1.0, 2.5, 4.0]);
         assert_eq!(floats.as_i64_list(), None);
 
         let ints = PyValue::vector_i64(vec![1, 2, 3]).unwrap();
         assert_eq!(ints.shape(), vec![3]);
         assert_eq!(ints.dtype(), "I64");
+        assert_eq!(ints.ndim(), 1);
+        assert_eq!(ints.size(), 3);
         assert_eq!(ints.as_i64_list().unwrap(), vec![1, 2, 3]);
         assert_eq!(ints.as_f64_list().unwrap(), vec![1.0, 2.0, 3.0]);
     }

@@ -42,6 +42,8 @@ def test_value_scalar():
     assert isinstance(v, fj.Array)
     assert v.shape == []
     assert v.dtype == "F64"
+    assert v.ndim == 0
+    assert v.size == 1
     assert abs(v.as_f64() - 42.0) < 1e-12
     print("✓ scalar_f64 roundtrip")
 
@@ -49,6 +51,8 @@ def test_value_scalar():
     assert isinstance(v2, fj.Array)
     assert v2.shape == []
     assert v2.dtype == "I64"
+    assert v2.ndim == 0
+    assert v2.size == 1
     assert v2.as_i64() == 123
     print("✓ scalar_i64 roundtrip")
 
@@ -56,6 +60,8 @@ def test_value_scalar():
     assert isinstance(vec, fj.Array)
     assert vec.shape == [3]
     assert vec.dtype == "I64"
+    assert vec.ndim == 1
+    assert vec.size == 3
     assert vec.as_i64_list() == [1, 2, 3]
     assert vec.as_f64_list() == [1.0, 2.0, 3.0]
     print("✓ vector_i64 roundtrip")
