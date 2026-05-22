@@ -16,6 +16,16 @@ def test_version_metadata():
     print("✓ __version__/__version_info__ metadata")
 
 
+def test_environment_info():
+    """Test environment info helper return and print modes."""
+    info = fj.print_environment_info(return_string=True)
+    assert "jax:    0.1.0" in info
+    assert "device info: cpu-1, 1 local devices" in info
+    assert "process_count: 1" in info
+    assert fj.print_environment_info() is None
+    print("✓ print_environment_info returns and prints CPU-local diagnostics")
+
+
 def test_value_scalar():
     """Test scalar value creation and retrieval."""
     assert fj.Array is fj.PyValue
@@ -397,6 +407,7 @@ def test_remat_alias():
 
 if __name__ == "__main__":
     test_version_metadata()
+    test_environment_info()
     test_value_scalar()
     test_jit_add()
     test_grad_square()

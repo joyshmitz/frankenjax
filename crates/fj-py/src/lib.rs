@@ -333,6 +333,34 @@ fn version_info() -> (u64, u64, u64) {
     )
 }
 
+fn environment_info() -> String {
+    let mut info = format!(
+        "jax:    {}\n\
+         jaxlib: unavailable\n\
+         numpy:  unavailable\n\
+         python: unavailable\n\
+         device info: cpu-1, 1 local devices\n\
+         process_count: 1\n\
+         platform: {}-{}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    );
+
+    let mut jax_env: Vec<_> = std::env::vars()
+        .filter(|(key, _)| key.starts_with("JAX_") || key.starts_with("XLA_"))
+        .collect();
+    jax_env.sort_by(|left, right| left.0.cmp(&right.0));
+    for (key, value) in jax_env {
+        info.push('\n');
+        info.push_str(&key);
+        info.push('=');
+        info.push_str(&value);
+    }
+
+    info
+}
+
 #[pyfunction]
 fn make_jaxpr_square() -> PyJaxpr {
     PyJaxpr {
@@ -596,6 +624,19 @@ fn ensure_compile_time_eval() -> PyNamedScope {
     }
 }
 
+#[pyfunction(signature = (return_string=false))]
+fn print_environment_info(py: Python<'_>, return_string: bool) -> PyResult<Option<String>> {
+    let info = environment_info();
+    if return_string {
+        Ok(Some(info))
+    } else {
+        py.import_bound("builtins")?
+            .getattr("print")?
+            .call1((info,))?;
+        Ok(None)
+    }
+}
+
 #[pyfunction]
 fn vmap(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
     let rust_args = py_values_to_rust(args);
@@ -712,6 +753,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(named_scope, m)?)?;
     m.add_function(wrap_pyfunction!(disable_jit, m)?)?;
     m.add_function(wrap_pyfunction!(ensure_compile_time_eval, m)?)?;
+    m.add_function(wrap_pyfunction!(print_environment_info, m)?)?;
     m.add_function(wrap_pyfunction!(vmap, m)?)?;
     m.add_function(wrap_pyfunction!(pmap, m)?)?;
     m.add_function(wrap_pyfunction!(value_and_grad, m)?)?;
@@ -753,6 +795,14 @@ mod tests {
     fn jaxpr_square_builds() {
         let jaxpr = make_jaxpr_square();
         assert!(!jaxpr.inner.equations.is_empty());
+    }
+
+    #[test]
+    fn environment_info_reports_cpu_local_runtime() {
+        let info = environment_info();
+        assert!(info.contains("jax:    0.1.0"));
+        assert!(info.contains("device info: cpu-1, 1 local devices"));
+        assert!(info.contains("process_count: 1"));
     }
 
     #[test]
