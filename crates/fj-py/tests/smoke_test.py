@@ -144,6 +144,45 @@ def test_device_helpers():
     )
 
 
+def test_backend_topology_helpers():
+    """Test CPU-only backend and process topology helpers."""
+    assert fj.default_backend() == "cpu"
+    assert fj.device_count() == 1
+    assert fj.device_count("cpu") == 1
+    assert fj.local_device_count() == 1
+    assert fj.process_index() == 0
+    assert fj.process_count() == 1
+    assert fj.process_indices() == [0]
+
+    devices = fj.devices()
+    assert len(devices) == 1
+    device = devices[0]
+    assert isinstance(device, fj.Device)
+    assert device.id == 0
+    assert device.process_index == 0
+    assert device.platform == "cpu"
+    local_devices = fj.local_devices()
+    assert len(local_devices) == 1
+    assert local_devices[0].id == 0
+    assert fj.local_devices(0)[0].id == 0
+
+    try:
+        fj.local_devices(1)
+    except ValueError as exc:
+        assert "process_index" in str(exc)
+    else:
+        raise AssertionError("local_devices should reject unknown process_index")
+
+    try:
+        fj.device_count("gpu")
+    except ValueError as exc:
+        assert "unsupported backend" in str(exc)
+    else:
+        raise AssertionError("device_count should reject unsupported backend")
+
+    print("✓ backend topology helpers expose one local CPU device")
+
+
 def test_vmap():
     """Test vmap of add_one."""
     jaxpr = fj.make_jaxpr_add_one()
@@ -234,6 +273,7 @@ if __name__ == "__main__":
     test_eval_shape()
     test_value_and_grad()
     test_device_helpers()
+    test_backend_topology_helpers()
     test_vmap()
     test_pmap_fails_closed()
     test_jacobian_and_hessian()

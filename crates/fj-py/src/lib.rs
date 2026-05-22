@@ -43,6 +43,13 @@ struct PyShapeDtypeStruct {
     dtype: String,
 }
 
+#[pyclass(name = "Device")]
+#[derive(Clone)]
+struct PyDevice {
+    id: usize,
+    process_index: usize,
+}
+
 #[pymethods]
 impl PyValue {
     #[staticmethod]
@@ -211,6 +218,31 @@ impl PyShapeDtypeStruct {
     }
 }
 
+#[pymethods]
+impl PyDevice {
+    #[getter]
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    #[getter]
+    fn process_index(&self) -> usize {
+        self.process_index
+    }
+
+    #[getter]
+    fn platform(&self) -> &'static str {
+        "cpu"
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Device(id={}, process_index={}, platform='cpu')",
+            self.id, self.process_index
+        )
+    }
+}
+
 fn py_values_to_rust(args: Vec<PyValue>) -> Vec<Value> {
     args.into_iter().map(|pv| pv.inner).collect()
 }
@@ -230,6 +262,22 @@ fn py_shape_dtype_from_rust(value: &Value) -> PyShapeDtypeStruct {
 
 fn runtime_error(error: impl ToString) -> PyErr {
     PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(error.to_string())
+}
+
+fn validate_cpu_backend(backend: Option<&str>) -> PyResult<()> {
+    match backend {
+        None | Some("cpu") => Ok(()),
+        Some(backend) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unsupported backend '{backend}'; fj-py currently exposes only the CPU backend"
+        ))),
+    }
+}
+
+fn cpu_device() -> PyDevice {
+    PyDevice {
+        id: 0,
+        process_index: 0,
+    }
 }
 
 #[pyfunction]
@@ -359,6 +407,58 @@ fn effects_barrier() {}
 fn clear_caches() {}
 
 #[pyfunction]
+fn default_backend() -> &'static str {
+    "cpu"
+}
+
+#[pyfunction(signature = (backend=None))]
+fn device_count(backend: Option<String>) -> PyResult<usize> {
+    validate_cpu_backend(backend.as_deref())?;
+    Ok(1)
+}
+
+#[pyfunction(signature = (backend=None))]
+fn local_device_count(backend: Option<String>) -> PyResult<usize> {
+    validate_cpu_backend(backend.as_deref())?;
+    Ok(1)
+}
+
+#[pyfunction(signature = (backend=None))]
+fn devices(backend: Option<String>) -> PyResult<Vec<PyDevice>> {
+    validate_cpu_backend(backend.as_deref())?;
+    Ok(vec![cpu_device()])
+}
+
+#[pyfunction(signature = (process_index=None, backend=None))]
+fn local_devices(process_index: Option<usize>, backend: Option<String>) -> PyResult<Vec<PyDevice>> {
+    validate_cpu_backend(backend.as_deref())?;
+    match process_index {
+        None | Some(0) => Ok(vec![cpu_device()]),
+        Some(process_index) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "unknown process_index {process_index}"
+        ))),
+    }
+}
+
+#[pyfunction(signature = (backend=None))]
+fn process_index(backend: Option<String>) -> PyResult<usize> {
+    validate_cpu_backend(backend.as_deref())?;
+    Ok(0)
+}
+
+#[pyfunction(signature = (backend=None))]
+fn process_count(backend: Option<String>) -> PyResult<usize> {
+    validate_cpu_backend(backend.as_deref())?;
+    Ok(1)
+}
+
+#[pyfunction(signature = (backend=None))]
+fn process_indices(backend: Option<String>) -> PyResult<Vec<usize>> {
+    validate_cpu_backend(backend.as_deref())?;
+    Ok(vec![0])
+}
+
+#[pyfunction]
 fn vmap(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
     let rust_args = py_values_to_rust(args);
     fj_api::vmap(jaxpr.inner.clone())
@@ -433,6 +533,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyVjpPullback>()?;
     m.add_class::<PyLinearizedJvp>()?;
     m.add_class::<PyShapeDtypeStruct>()?;
+    m.add_class::<PyDevice>()?;
     m.add_function(wrap_pyfunction!(make_jaxpr_square, m)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr_add2, m)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr_add_one, m)?)?;
@@ -448,6 +549,14 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(copy_to_host_async, m)?)?;
     m.add_function(wrap_pyfunction!(effects_barrier, m)?)?;
     m.add_function(wrap_pyfunction!(clear_caches, m)?)?;
+    m.add_function(wrap_pyfunction!(default_backend, m)?)?;
+    m.add_function(wrap_pyfunction!(device_count, m)?)?;
+    m.add_function(wrap_pyfunction!(local_device_count, m)?)?;
+    m.add_function(wrap_pyfunction!(devices, m)?)?;
+    m.add_function(wrap_pyfunction!(local_devices, m)?)?;
+    m.add_function(wrap_pyfunction!(process_index, m)?)?;
+    m.add_function(wrap_pyfunction!(process_count, m)?)?;
+    m.add_function(wrap_pyfunction!(process_indices, m)?)?;
     m.add_function(wrap_pyfunction!(vmap, m)?)?;
     m.add_function(wrap_pyfunction!(pmap, m)?)?;
     m.add_function(wrap_pyfunction!(value_and_grad, m)?)?;
@@ -615,6 +724,29 @@ mod tests {
 
         effects_barrier();
         clear_caches();
+    }
+
+    #[test]
+    fn cpu_backend_topology_helpers_report_single_local_device() {
+        assert_eq!(default_backend(), "cpu");
+        assert_eq!(device_count(None::<String>).unwrap(), 1);
+        assert_eq!(device_count(Some("cpu".to_owned())).unwrap(), 1);
+        assert!(device_count(Some("gpu".to_owned())).is_err());
+        assert_eq!(local_device_count(None::<String>).unwrap(), 1);
+        assert_eq!(process_index(None::<String>).unwrap(), 0);
+        assert_eq!(process_count(None::<String>).unwrap(), 1);
+        assert_eq!(process_indices(None::<String>).unwrap(), vec![0]);
+
+        let all_devices = devices(None::<String>).unwrap();
+        assert_eq!(all_devices.len(), 1);
+        assert_eq!(all_devices[0].id(), 0);
+        assert_eq!(all_devices[0].process_index(), 0);
+        assert_eq!(all_devices[0].platform(), "cpu");
+
+        let local = local_devices(None, None::<String>).unwrap();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].id(), 0);
+        assert!(local_devices(Some(1), None::<String>).is_err());
     }
 
     #[test]
