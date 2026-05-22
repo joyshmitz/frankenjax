@@ -228,3 +228,28 @@ fn oracle_argmax_integer_dtype() {
     let result = eval_primitive(Primitive::Argmax, &[input], &axis_params(0)).unwrap();
     assert_eq!(extract_i64_scalar(&result), 2); // 40 at index 2
 }
+
+#[test]
+fn oracle_argmin_3d_axis1() {
+    // [2, 3, 2] tensor, reduce along axis 1
+    let input = make_f64_tensor(
+        &[2, 3, 2],
+        vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0, 5.0, 8.0],
+    );
+    let result = eval_primitive(Primitive::Argmin, &[input], &axis_params(1)).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+}
+
+#[test]
+fn oracle_argmax_single_element() {
+    let input = make_f64_tensor(&[1], vec![42.0]);
+    let result = eval_primitive(Primitive::Argmax, &[input], &axis_params(0)).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 0);
+}
+
+#[test]
+fn oracle_argmin_inf_values() {
+    let input = make_f64_tensor(&[4], vec![1.0, f64::NEG_INFINITY, 2.0, f64::INFINITY]);
+    let result = eval_primitive(Primitive::Argmin, &[input], &axis_params(0)).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 1); // -inf at index 1
+}

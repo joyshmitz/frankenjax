@@ -250,3 +250,31 @@ fn oracle_ctz_i32_power_of_two() {
     let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
     assert_eq!(extract_i64_scalar(&result), 4, "ctz(16i32) = 4");
 }
+
+#[test]
+fn oracle_ctz_preserves_dtype_i64() {
+    let input = make_i64_tensor(&[2], vec![8, 4]);
+    let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::I64),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_ctz_empty_tensor() {
+    let input = make_i64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(extract_i64_vec(&result), vec![] as Vec<i64>);
+}
+
+#[test]
+fn oracle_ctz_mixed_values() {
+    // Mix of zeros, ones, powers of two, and odd numbers
+    let input = make_i64_tensor(&[5], vec![0, 1, 6, 12, 7]);
+    let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![5]);
+    // 0 -> 64, 1 -> 0, 6 (0b110) -> 1, 12 (0b1100) -> 2, 7 (0b111) -> 0
+    assert_eq!(extract_i64_vec(&result), vec![64, 0, 1, 2, 0]);
+}
