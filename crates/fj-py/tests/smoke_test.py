@@ -98,6 +98,12 @@ def test_value_scalar():
     assert v.reshape(1).as_f64_list() == [42.0]
     assert v.flatten().shape == (1,)
     assert v.flatten().as_f64_list() == [42.0]
+    try:
+        v.flat
+    except NotImplementedError as exc:
+        assert "flatten()" in str(exc)
+    else:
+        raise AssertionError("Array.flat should raise NotImplementedError")
     assert v.ravel().as_f64_list() == [42.0]
     try:
         v.astype("float64", device="gpu")
@@ -228,6 +234,7 @@ def test_value_scalar():
         ("astype", lambda: deleted.astype("float64")),
         ("reshape", lambda: deleted.reshape(1)),
         ("flatten", deleted.flatten),
+        ("flat", lambda: deleted.flat),
         ("ravel", deleted.ravel),
         ("squeeze", deleted.squeeze),
         ("item", deleted.item),

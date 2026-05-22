@@ -580,6 +580,14 @@ impl PyValue {
         self.matrix_transpose()
     }
 
+    #[getter]
+    fn flat(&self) -> PyResult<()> {
+        self.ensure_not_deleted()?;
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "JAX Arrays do not implement the arr.flat property: consider arr.flatten() instead.",
+        ))
+    }
+
     #[pyo3(signature = (*args))]
     fn transpose(&self, args: &Bound<'_, PyTuple>) -> PyResult<Self> {
         self.ensure_not_deleted()?;
@@ -3833,6 +3841,7 @@ mod tests {
         assert!(v.is_fully_replicated());
         assert!(v.__len__().is_err());
         assert!(v.swapaxes(0, 0).is_err());
+        assert!(v.flat().is_err());
         assert!((v.block_until_ready().unwrap().as_f64().unwrap() - 42.0).abs() < 1e-12);
         assert!(v.is_ready().unwrap());
         assert!(v.copy_to_host_async().is_ok());
@@ -3850,6 +3859,7 @@ mod tests {
         assert!(deleted.transpose_all_axes().is_err());
         assert!(deleted.matrix_transpose().is_err());
         assert!(deleted.swapaxes(0, 0).is_err());
+        assert!(deleted.flat().is_err());
         assert!(deleted.real_part().is_err());
         assert!(deleted.imag_part().is_err());
         assert!(deleted.conjugate().is_err());
