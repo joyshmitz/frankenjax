@@ -29,6 +29,13 @@ struct PyVjpPullback {
     primals: Vec<Value>,
 }
 
+#[pyclass]
+#[derive(Clone)]
+struct PyLinearizedJvp {
+    jaxpr: Jaxpr,
+    primals: Vec<Value>,
+}
+
 #[pymethods]
 impl PyValue {
     #[staticmethod]
@@ -161,6 +168,24 @@ impl PyVjpPullback {
     }
 }
 
+#[pymethods]
+impl PyLinearizedJvp {
+    fn call(&self, tangents: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
+        let rust_tangents = py_values_to_rust(tangents);
+        fj_ad::jvp(&self.jaxpr, &self.primals, &rust_tangents)
+            .map(|result| py_values_from_rust(result.tangents))
+            .map_err(runtime_error)
+    }
+
+    fn __call__(&self, tangents: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
+        self.call(tangents)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("PyLinearizedJvp(num_primals={})", self.primals.len())
+    }
+}
+
 fn py_values_to_rust(args: Vec<PyValue>) -> Vec<Value> {
     args.into_iter().map(|pv| pv.inner).collect()
 }
@@ -248,6 +273,23 @@ fn vjp(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyVjpPull
 }
 
 #[pyfunction]
+fn linearize(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyLinearizedJvp)> {
+    let rust_args = py_values_to_rust(args);
+    fj_api::jit(jaxpr.inner.clone())
+        .call(rust_args.clone())
+        .map(|outputs| {
+            (
+                py_values_from_rust(outputs),
+                PyLinearizedJvp {
+                    jaxpr: jaxpr.inner.clone(),
+                    primals: rust_args,
+                },
+            )
+        })
+        .map_err(runtime_error)
+}
+
+#[pyfunction]
 fn vmap(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
     let rust_args = py_values_to_rust(args);
     fj_api::vmap(jaxpr.inner.clone())
@@ -305,6 +347,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyJaxpr>()?;
     m.add_class::<PyCheckpoint>()?;
     m.add_class::<PyVjpPullback>()?;
+    m.add_class::<PyLinearizedJvp>()?;
     m.add_function(wrap_pyfunction!(make_jaxpr_square, m)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr_add2, m)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr_add_one, m)?)?;
@@ -312,6 +355,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(grad, m)?)?;
     m.add_function(wrap_pyfunction!(jvp, m)?)?;
     m.add_function(wrap_pyfunction!(vjp, m)?)?;
+    m.add_function(wrap_pyfunction!(linearize, m)?)?;
     m.add_function(wrap_pyfunction!(vmap, m)?)?;
     m.add_function(wrap_pyfunction!(pmap, m)?)?;
     m.add_function(wrap_pyfunction!(value_and_grad, m)?)?;
@@ -401,6 +445,22 @@ mod tests {
         let grads = pullback.call(vec![PyValue::scalar_f64(1.0)]).unwrap();
         assert_eq!(grads.len(), 1);
         assert!((grads[0].as_f64().unwrap() - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn linearize_wrapper_returns_outputs_and_linearized_jvp() {
+        let jaxpr = make_jaxpr_square();
+        let (values, linearized) = linearize(&jaxpr, vec![PyValue::scalar_f64(3.0)]).unwrap();
+        assert_eq!(values.len(), 1);
+        assert!((values[0].as_f64().unwrap() - 9.0).abs() < 1e-12);
+
+        let tangents = linearized.call(vec![PyValue::scalar_f64(1.0)]).unwrap();
+        assert_eq!(tangents.len(), 1);
+        assert!((tangents[0].as_f64().unwrap() - 6.0).abs() < 1e-9);
+
+        let scaled_tangents = linearized.call(vec![PyValue::scalar_f64(2.0)]).unwrap();
+        assert_eq!(scaled_tangents.len(), 1);
+        assert!((scaled_tangents[0].as_f64().unwrap() - 12.0).abs() < 1e-9);
     }
 
     #[test]

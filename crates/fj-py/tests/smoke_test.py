@@ -74,6 +74,23 @@ def test_vjp_square():
     print("✓ vjp(square)(3.0)(1.0) = (9.0, 6.0)")
 
 
+def test_linearize_square():
+    """Test reusable linearized JVP of x^2."""
+    jaxpr = fj.make_jaxpr_square()
+    values, linearized = fj.linearize(jaxpr, [fj.PyValue.scalar_f64(3.0)])
+    assert len(values) == 1
+    assert abs(values[0].as_f64() - 9.0) < 1e-12
+
+    tangents = linearized.call([fj.PyValue.scalar_f64(1.0)])
+    assert len(tangents) == 1
+    assert abs(tangents[0].as_f64() - 6.0) < 1e-6
+
+    scaled_tangents = linearized.call([fj.PyValue.scalar_f64(2.0)])
+    assert len(scaled_tangents) == 1
+    assert abs(scaled_tangents[0].as_f64() - 12.0) < 1e-6
+    print("✓ linearize(square)(3.0) reuses pushforward for tangents 1.0 and 2.0")
+
+
 def test_value_and_grad():
     """Test value_and_grad of x^2."""
     jaxpr = fj.make_jaxpr_square()
@@ -147,6 +164,7 @@ if __name__ == "__main__":
     test_grad_square()
     test_jvp_square()
     test_vjp_square()
+    test_linearize_square()
     test_value_and_grad()
     test_vmap()
     test_pmap_fails_closed()
