@@ -304,3 +304,41 @@ fn metamorphic_asinh_tensor_sinh_inverse() {
         );
     }
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_asinh_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert!(extract_f64_vec(&result).is_empty());
+}
+
+#[test]
+fn oracle_asinh_preserves_dtype() {
+    let input = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_asinh_3d() {
+    let input = make_f64_tensor(&[2, 2, 2], vec![-1.0, 0.0, 1.0, 2.0, -2.0, 0.5, -0.5, 3.0]);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_close(vals[0], (-1.0_f64).asinh(), 1e-14, "asinh(-1)");
+    assert_close(vals[7], 3.0_f64.asinh(), 1e-14, "asinh(3)");
+}
+
+#[test]
+fn oracle_asinh_subnormal() {
+    let tiny = f64::MIN_POSITIVE / 2.0;
+    let input = make_f64_tensor(&[2], vec![tiny, -tiny]);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    let vals = extract_f64_vec(&result);
+    // For very small x, asinh(x) ≈ x
+    assert_close(vals[0], tiny.asinh(), 1e-30, "asinh(subnormal)");
+    assert_close(vals[1], (-tiny).asinh(), 1e-30, "asinh(-subnormal)");
+}

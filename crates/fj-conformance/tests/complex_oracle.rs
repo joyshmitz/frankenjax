@@ -285,3 +285,47 @@ fn oracle_complex_broadcast_incompatible_shapes_error() {
     let result = eval_primitive(Primitive::Complex, &[re, im], &no_params());
     assert!(result.is_err(), "incompatible shapes [2] vs [3] should error");
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_complex_empty_tensor() {
+    let re = make_f64_tensor(&[0], vec![]);
+    let im = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Complex, &[re, im], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+}
+
+#[test]
+fn oracle_complex_output_dtype() {
+    let re = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let im = make_f64_tensor(&[2], vec![3.0, 4.0]);
+    let result = eval_primitive(Primitive::Complex, &[re, im], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn oracle_complex_3d() {
+    let re = make_f64_tensor(&[2, 1, 2], vec![1.0, 2.0, 3.0, 4.0]);
+    let im = make_f64_tensor(&[2, 1, 2], vec![5.0, 6.0, 7.0, 8.0]);
+    let result = eval_primitive(Primitive::Complex, &[re, im], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 1, 2]);
+    let vals = extract_complex_vec(&result);
+    assert!((vals[0].0 - 1.0).abs() < 1e-10);
+    assert!((vals[0].1 - 5.0).abs() < 1e-10);
+    assert!((vals[3].0 - 4.0).abs() < 1e-10);
+    assert!((vals[3].1 - 8.0).abs() < 1e-10);
+}
+
+#[test]
+fn oracle_complex_special_values() {
+    let re = make_f64_tensor(&[4], vec![f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 0.0]);
+    let im = make_f64_tensor(&[4], vec![0.0, f64::INFINITY, f64::NAN, f64::NEG_INFINITY]);
+    let result = eval_primitive(Primitive::Complex, &[re, im], &no_params()).unwrap();
+    let vals = extract_complex_vec(&result);
+    assert!(vals[0].0.is_infinite() && vals[0].0 > 0.0);
+    assert!(vals[1].0.is_infinite() && vals[1].0 < 0.0);
+    assert!(vals[1].1.is_infinite() && vals[1].1 > 0.0);
+    assert!(vals[2].0.is_nan());
+    assert!(vals[3].1.is_infinite() && vals[3].1 < 0.0);
+}
