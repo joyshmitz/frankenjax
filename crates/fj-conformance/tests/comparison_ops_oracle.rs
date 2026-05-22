@@ -16,6 +16,7 @@
 //! - Infinity handling
 //! - NaN semantics (NaN comparisons are always false except Ne)
 //! - Tensor shapes
+//! - Broadcast-compatible operands
 //! - Relationship between operations
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
@@ -515,6 +516,68 @@ fn oracle_lt_2d() {
     assert_eq!(extract_bool_vec(&result), vec![true, false, true, false]);
 }
 
+// ====================== BROADCASTING ======================
+
+#[test]
+fn oracle_eq_scalar_lhs_vector_broadcast() {
+    let a = Value::scalar_f64(5.0);
+    let b = make_f64_tensor(&[4], vec![5.0, 2.0, 5.0, 7.0]);
+    let result = eval_primitive(Primitive::Eq, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_bool_vec(&result), vec![true, false, true, false]);
+}
+
+#[test]
+fn oracle_ne_vector_scalar_rhs_broadcast() {
+    let a = make_f64_tensor(&[4], vec![1.0, 2.0, 1.0, 3.0]);
+    let b = Value::scalar_f64(1.0);
+    let result = eval_primitive(Primitive::Ne, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_bool_vec(&result), vec![false, true, false, true]);
+}
+
+#[test]
+fn oracle_lt_scalar_lhs_vector_broadcast() {
+    let a = Value::scalar_f64(3.0);
+    let b = make_f64_tensor(&[4], vec![2.0, 5.0, 3.0, 6.0]);
+    let result = eval_primitive(Primitive::Lt, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_bool_vec(&result), vec![false, true, false, true]);
+}
+
+#[test]
+fn oracle_le_vector_scalar_rhs_broadcast() {
+    let a = make_f64_tensor(&[4], vec![1.0, 5.0, 3.0, 4.0]);
+    let b = Value::scalar_f64(3.0);
+    let result = eval_primitive(Primitive::Le, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_bool_vec(&result), vec![true, false, true, false]);
+}
+
+#[test]
+fn oracle_gt_scalar_lhs_vector_broadcast() {
+    let a = Value::scalar_f64(3.0);
+    let b = make_f64_tensor(&[3], vec![1.0, 5.0, 3.0]);
+    let result = eval_primitive(Primitive::Gt, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_bool_vec(&result), vec![true, false, false]);
+}
+
+#[test]
+fn oracle_ge_vector_scalar_rhs_broadcast() {
+    let a = make_f64_tensor(&[3], vec![1.0, 5.0, 3.0]);
+    let b = Value::scalar_f64(3.0);
+    let result = eval_primitive(Primitive::Ge, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_bool_vec(&result), vec![false, true, true]);
+}
+
 // ====================== TRICHOTOMY ======================
 
 #[test]
@@ -561,7 +624,10 @@ fn metamorphic_lt_neg_equals_gt() {
             extract_bool_scalar(&lt_neg),
             extract_bool_scalar(&gt),
             "Lt(Neg({}), Neg({})) = Gt({}, {})",
-            a_val, b_val, a_val, b_val
+            a_val,
+            b_val,
+            a_val,
+            b_val
         );
     }
 }
@@ -587,7 +653,10 @@ fn metamorphic_gt_neg_equals_lt() {
             extract_bool_scalar(&gt_neg),
             extract_bool_scalar(&lt),
             "Gt(Neg({}), Neg({})) = Lt({}, {})",
-            a_val, b_val, a_val, b_val
+            a_val,
+            b_val,
+            a_val,
+            b_val
         );
     }
 }
@@ -613,7 +682,10 @@ fn metamorphic_le_neg_equals_ge() {
             extract_bool_scalar(&le_neg),
             extract_bool_scalar(&ge),
             "Le(Neg({}), Neg({})) = Ge({}, {})",
-            a_val, b_val, a_val, b_val
+            a_val,
+            b_val,
+            a_val,
+            b_val
         );
     }
 }
@@ -639,7 +711,10 @@ fn metamorphic_ge_neg_equals_le() {
             extract_bool_scalar(&ge_neg),
             extract_bool_scalar(&le),
             "Ge(Neg({}), Neg({})) = Le({}, {})",
-            a_val, b_val, a_val, b_val
+            a_val,
+            b_val,
+            a_val,
+            b_val
         );
     }
 }
