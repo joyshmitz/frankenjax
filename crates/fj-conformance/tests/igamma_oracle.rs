@@ -13,6 +13,7 @@
 //! - Complementary property
 //! - Known values
 //! - Special values
+//! - Broadcast-compatible operands
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
@@ -102,13 +103,22 @@ fn oracle_igamma_igammac_sum_to_one() {
     for (a, x) in [(1.0, 0.5), (2.0, 1.0), (3.0, 2.0), (0.5, 1.0)] {
         let a_val = make_f64_tensor(&[], vec![a]);
         let x_val = make_f64_tensor(&[], vec![x]);
-        let ig = eval_primitive(Primitive::Igamma, &[a_val.clone(), x_val.clone()], &no_params()).unwrap();
+        let ig = eval_primitive(
+            Primitive::Igamma,
+            &[a_val.clone(), x_val.clone()],
+            &no_params(),
+        )
+        .unwrap();
         let igc = eval_primitive(Primitive::Igammac, &[a_val, x_val], &no_params()).unwrap();
         let sum = extract_f64_scalar(&ig) + extract_f64_scalar(&igc);
         assert!(
             (sum - 1.0).abs() < 1e-14,
             "igamma({}, {}) + igammac({}, {}) = {} (should be 1)",
-            a, x, a, x, sum
+            a,
+            x,
+            a,
+            x,
+            sum
         );
     }
 }
@@ -123,10 +133,7 @@ fn oracle_igamma_a1_x1() {
     let result = eval_primitive(Primitive::Igamma, &[a, x], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
     let expected = 1.0 - (-1.0_f64).exp();
-    assert!(
-        (actual - expected).abs() < 1e-14,
-        "igamma(1, 1) = 1 - e^-1"
-    );
+    assert!((actual - expected).abs() < 1e-14, "igamma(1, 1) = 1 - e^-1");
 }
 
 #[test]
@@ -137,10 +144,7 @@ fn oracle_igammac_a1_x1() {
     let result = eval_primitive(Primitive::Igammac, &[a, x], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
     let expected = (-1.0_f64).exp();
-    assert!(
-        (actual - expected).abs() < 1e-14,
-        "igammac(1, 1) = e^-1"
-    );
+    assert!((actual - expected).abs() < 1e-14, "igammac(1, 1) = e^-1");
 }
 
 // ======================== Tensor Shapes ========================
@@ -162,5 +166,44 @@ fn oracle_igammac_vector() {
     let result = eval_primitive(Primitive::Igammac, &[a, x], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![3]);
     let vals = extract_f64_vec(&result);
-    assert!(vals.iter().all(|&v| v == 1.0), "igammac(a, 0) = 1 for all a");
+    assert!(
+        vals.iter().all(|&v| v == 1.0),
+        "igammac(a, 0) = 1 for all a"
+    );
+}
+
+// ======================== Broadcasting ========================
+
+#[test]
+fn oracle_igamma_scalar_a_vector_x_broadcast() {
+    let a = make_f64_tensor(&[], vec![1.0]);
+    let x_values = [0.0_f64, 1.0, 2.0];
+    let x = make_f64_tensor(&[3], x_values.to_vec());
+    let result = eval_primitive(Primitive::Igamma, &[a, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let actual = extract_f64_vec(&result);
+    for (i, (&actual, &x)) in actual.iter().zip(x_values.iter()).enumerate() {
+        let expected = 1.0 - (-x).exp();
+        assert!(
+            (actual - expected).abs() < 1e-14,
+            "igamma scalar a broadcast element {i}: expected {expected}, got {actual}"
+        );
+    }
+}
+
+#[test]
+fn oracle_igammac_vector_a_scalar_x_broadcast() {
+    let a = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let x = make_f64_tensor(&[], vec![0.0]);
+    let result = eval_primitive(Primitive::Igammac, &[a, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let actual = extract_f64_vec(&result);
+    for (i, &actual) in actual.iter().enumerate() {
+        assert_eq!(
+            actual, 1.0,
+            "igammac scalar x broadcast element {i}: expected 1, got {actual}"
+        );
+    }
 }
