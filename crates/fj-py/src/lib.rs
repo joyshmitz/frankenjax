@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use pyo3::class::basic::CompareOp;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyList};
 
@@ -54,6 +55,32 @@ struct PyShapeDtypeStruct {
     dtype: String,
     weak_type: bool,
     is_ref: bool,
+}
+
+impl PyShapeDtypeStruct {
+    fn same_metadata(&self, other: &Self) -> bool {
+        self.shape == other.shape
+            && self.dtype == other.dtype
+            && self.weak_type == other.weak_type
+            && self.is_ref == other.is_ref
+    }
+
+    fn metadata_hash(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for dim in &self.shape {
+            hash ^= u64::from(*dim);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        for byte in self.dtype.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        for flag in [self.weak_type, self.is_ref] {
+            hash ^= u64::from(flag);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash
+    }
 }
 
 #[pyclass(name = "Device")]
@@ -486,6 +513,27 @@ impl PyShapeDtypeStruct {
             weak_type: weak_type.unwrap_or(self.weak_type),
             is_ref: is_ref.unwrap_or(self.is_ref),
         }
+    }
+
+    fn __richcmp__(&self, other: PyRef<'_, Self>, op: CompareOp) -> bool {
+        let equal = self.same_metadata(&other);
+        match op {
+            CompareOp::Eq => equal,
+            CompareOp::Ne => !equal,
+            _ => false,
+        }
+    }
+
+    fn __hash__(&self) -> isize {
+        let signed = i64::from_ne_bytes(self.metadata_hash().to_ne_bytes());
+        let hash = isize::try_from(signed).unwrap_or_else(|_| {
+            if signed.is_negative() {
+                isize::MIN
+            } else {
+                isize::MAX
+            }
+        });
+        if hash == -1 { -2 } else { hash }
     }
 
     fn __repr__(&self) -> String {
@@ -2026,6 +2074,12 @@ mod tests {
         assert_eq!(meta.shape(), vec![2, 3]);
         assert!(!meta.weak_type());
         assert!(!meta.is_ref());
+
+        let same_meta = PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), false, false);
+        assert!(meta.same_metadata(&same_meta));
+        assert_eq!(meta.__hash__(), same_meta.__hash__());
+        assert!(!meta.same_metadata(&updated));
+        assert_ne!(meta.__hash__(), updated.__hash__());
     }
 
     #[test]

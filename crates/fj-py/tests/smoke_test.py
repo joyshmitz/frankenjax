@@ -325,6 +325,11 @@ def test_shape_dtype_struct_constructor():
     assert meta.dtype == "F64"
     assert meta.weak_type is False
     assert meta.is_ref is False
+    same_meta = fj.ShapeDtypeStruct([2, 3], "F64")
+    assert meta == same_meta
+    assert hash(meta) == hash(same_meta)
+    assert meta != weak_meta
+    assert meta != updated
     print("✓ ShapeDtypeStruct constructor preserves metadata")
 
 
