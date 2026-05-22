@@ -1674,6 +1674,81 @@ pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Va
     }
 }
 
+/// FMA: fused multiply-add: fma(a, b, c) = a * b + c with single rounding.
+pub(crate) fn eval_fma(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    if inputs.len() != 3 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 3,
+            actual: inputs.len(),
+        });
+    }
+
+    fn fma_literal(a: Literal, b: Literal, c: Literal) -> Result<Literal, &'static str> {
+        match (a, b, c) {
+            (Literal::I64(av), Literal::I64(bv), Literal::I64(cv)) => {
+                Ok(Literal::I64(av.wrapping_mul(bv).wrapping_add(cv)))
+            }
+            (Literal::F64Bits(ab), Literal::F64Bits(bb), Literal::F64Bits(cb)) => {
+                let af = f64::from_bits(ab);
+                let bf = f64::from_bits(bb);
+                let cf = f64::from_bits(cb);
+                Ok(Literal::from_f64(af.mul_add(bf, cf)))
+            }
+            (Literal::F32Bits(ab), Literal::F32Bits(bb), Literal::F32Bits(cb)) => {
+                let af = f32::from_bits(ab);
+                let bf = f32::from_bits(bb);
+                let cf = f32::from_bits(cb);
+                Ok(Literal::from_f32(af.mul_add(bf, cf)))
+            }
+            _ => {
+                let af = a.as_f64().ok_or("expected numeric")?;
+                let bf = b.as_f64().ok_or("expected numeric")?;
+                let cf = c.as_f64().ok_or("expected numeric")?;
+                Ok(Literal::from_f64(af.mul_add(bf, cf)))
+            }
+        }
+    }
+
+    match (&inputs[0], &inputs[1], &inputs[2]) {
+        (Value::Scalar(a), Value::Scalar(b), Value::Scalar(c)) => {
+            fma_literal(*a, *b, *c)
+                .map(Value::Scalar)
+                .map_err(|e| EvalError::TypeMismatch { primitive, detail: e })
+        }
+        (Value::Tensor(ta), Value::Tensor(tb), Value::Tensor(tc)) => {
+            if ta.shape != tb.shape || ta.shape != tc.shape {
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: "fma requires all tensor inputs to have the same shape".to_owned(),
+                });
+            }
+            let mut elements = Vec::with_capacity(ta.elements.len());
+            for ((av, bv), cv) in ta
+                .elements
+                .iter()
+                .copied()
+                .zip(tb.elements.iter().copied())
+                .zip(tc.elements.iter().copied())
+            {
+                elements.push(
+                    fma_literal(av, bv, cv)
+                        .map_err(|e| EvalError::TypeMismatch { primitive, detail: e })?,
+                );
+            }
+            Ok(Value::Tensor(TensorValue::new(
+                ta.dtype,
+                ta.shape.clone(),
+                elements,
+            )?))
+        }
+        _ => Err(EvalError::Unsupported {
+            primitive,
+            detail: "fma requires (scalar, scalar, scalar) or (tensor, tensor, tensor)".to_owned(),
+        }),
+    }
+}
+
 /// Clamp: clamp(lo, x, hi) = min(max(lo, x), hi).
 /// Supports scalar and tensor inputs with broadcasting.
 pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {

@@ -1356,6 +1356,16 @@ pub fn vjp(
             let gb = value_mul(g, &balanced_eq_weight(b, &ans, a)?)?;
             Ok(vec![ga, gb])
         }
+        Primitive::Fma => {
+            // fma(a, b, c) = a * b + c
+            // ga = g * b, gb = g * a, gc = g
+            let a = &inputs[0];
+            let b = &inputs[1];
+            let ga = value_mul(g, b)?;
+            let gb = value_mul(g, a)?;
+            let gc = g.clone();
+            Ok(vec![ga, gb, gc])
+        }
         Primitive::Pow => {
             let a = &inputs[0];
             let b = &inputs[1];
@@ -6968,6 +6978,15 @@ fn jvp_rule(
                 ],
             )?;
             ep(Primitive::Add, &[lhs, rhs])
+        }
+
+        Primitive::Fma => {
+            // fma(a, b, c) = a * b + c
+            // d(fma) = da * b + a * db + dc
+            let da_b = ep(Primitive::Mul, &[tangents[0].clone(), primals[1].clone()])?;
+            let a_db = ep(Primitive::Mul, &[primals[0].clone(), tangents[1].clone()])?;
+            let ab_term = ep(Primitive::Add, &[da_b, a_db])?;
+            ep(Primitive::Add, &[ab_term, tangents[2].clone()])
         }
 
         // ── Select: tangent follows primal condition ──

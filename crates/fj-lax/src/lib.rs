@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 
 use arithmetic::{
     erf_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh, eval_bessel_i0e, eval_bessel_i1e,
-    eval_betainc, eval_binary_elementwise, eval_clamp, eval_complex, eval_conj, eval_cos,
+    eval_betainc, eval_binary_elementwise, eval_clamp, eval_complex, eval_conj, eval_cos, eval_fma,
     eval_cosh, eval_digamma, eval_dot, eval_dot_general, eval_erf_inv, eval_exp, eval_igamma,
     eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf, eval_is_nan,
     eval_lgamma, eval_log, eval_neg,
@@ -172,6 +172,7 @@ pub fn eval_primitive(
         }
         Primitive::Max => eval_binary_elementwise(primitive, inputs, |a, b| a.max(b), jax_max_f64),
         Primitive::Min => eval_binary_elementwise(primitive, inputs, |a, b| a.min(b), jax_min_f64),
+        Primitive::Fma => eval_fma(primitive, inputs),
         Primitive::Pow => eval_binary_elementwise(
             primitive,
             inputs,
