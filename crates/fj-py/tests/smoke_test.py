@@ -285,7 +285,7 @@ def test_eval_shape():
 
 def test_shape_dtype_struct_constructor():
     """Test public ShapeDtypeStruct constructor metadata."""
-    meta = fj.ShapeDtypeStruct([2, 3], "F64")
+    meta = fj.ShapeDtypeStruct([2, 3], "F64", sharding=None, vma=None)
     assert meta.shape == [2, 3]
     assert meta.dtype == "F64"
     assert meta.sharding is None
@@ -316,7 +316,14 @@ def test_shape_dtype_struct_constructor():
         "ShapeDtypeStruct(shape=[], dtype=F64, weak_type=True, is_ref=True)"
     )
     assert str(weak_meta) == repr(weak_meta)
-    updated = meta.update(shape=[4], dtype="I64", weak_type=True, is_ref=True)
+    updated = meta.update(
+        shape=[4],
+        dtype="I64",
+        sharding=None,
+        weak_type=True,
+        vma=None,
+        is_ref=True,
+    )
     assert updated.shape == [4]
     assert updated.dtype == "I64"
     assert updated.sharding is None

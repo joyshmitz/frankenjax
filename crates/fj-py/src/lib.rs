@@ -58,6 +58,26 @@ struct PyShapeDtypeStruct {
 }
 
 impl PyShapeDtypeStruct {
+    fn require_sharding_none(sharding: Option<Py<PyAny>>) -> PyResult<()> {
+        if sharding.is_some() {
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ShapeDtypeStruct sharding is not supported by fj-py yet",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn require_vma_none(vma: Option<Py<PyAny>>) -> PyResult<()> {
+        if vma.is_some() {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "ShapeDtypeStruct vma is not supported by fj-py yet",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     fn same_metadata(&self, other: &Self) -> bool {
         self.shape == other.shape
             && self.dtype == other.dtype
@@ -445,14 +465,23 @@ impl PyBackwardPass {
 #[pymethods]
 impl PyShapeDtypeStruct {
     #[new]
-    #[pyo3(signature = (shape, dtype, *, weak_type=false, is_ref=false))]
-    fn new(shape: Vec<u32>, dtype: String, weak_type: bool, is_ref: bool) -> Self {
-        Self {
+    #[pyo3(signature = (shape, dtype, *, sharding=None, weak_type=false, vma=None, is_ref=false))]
+    fn new(
+        shape: Vec<u32>,
+        dtype: String,
+        sharding: Option<Py<PyAny>>,
+        weak_type: bool,
+        vma: Option<Py<PyAny>>,
+        is_ref: bool,
+    ) -> PyResult<Self> {
+        Self::require_sharding_none(sharding)?;
+        Self::require_vma_none(vma)?;
+        Ok(Self {
             shape,
             dtype,
             weak_type,
             is_ref,
-        }
+        })
     }
 
     #[getter]
@@ -509,20 +538,24 @@ impl PyShapeDtypeStruct {
         self.is_ref
     }
 
-    #[pyo3(signature = (*, shape=None, dtype=None, weak_type=None, is_ref=None))]
+    #[pyo3(signature = (*, shape=None, dtype=None, sharding=None, weak_type=None, vma=None, is_ref=None))]
     fn update(
         &self,
         shape: Option<Vec<u32>>,
         dtype: Option<String>,
+        sharding: Option<Py<PyAny>>,
         weak_type: Option<bool>,
+        vma: Option<Py<PyAny>>,
         is_ref: Option<bool>,
-    ) -> Self {
-        Self {
+    ) -> PyResult<Self> {
+        Self::require_sharding_none(sharding)?;
+        Self::require_vma_none(vma)?;
+        Ok(Self {
             shape: shape.unwrap_or_else(|| self.shape.clone()),
             dtype: dtype.unwrap_or_else(|| self.dtype.clone()),
             weak_type: weak_type.unwrap_or(self.weak_type),
             is_ref: is_ref.unwrap_or(self.is_ref),
-        }
+        })
     }
 
     fn __richcmp__(&self, other: PyRef<'_, Self>, op: CompareOp) -> bool {
@@ -2051,7 +2084,8 @@ mod tests {
 
     #[test]
     fn shape_dtype_struct_constructor_roundtrips_metadata() {
-        let meta = PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), false, false);
+        let meta = PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), None, false, None, false)
+            .unwrap();
         assert_eq!(meta.shape(), vec![2, 3]);
         assert_eq!(meta.dtype(), "F64");
         assert!(meta.sharding().is_none());
@@ -2064,7 +2098,8 @@ mod tests {
         assert_eq!(meta.__repr__(), "ShapeDtypeStruct(shape=[2, 3], dtype=F64)");
         assert_eq!(meta.__str__(), meta.__repr__());
 
-        let weak_meta = PyShapeDtypeStruct::new(vec![], "F64".to_owned(), true, true);
+        let weak_meta =
+            PyShapeDtypeStruct::new(vec![], "F64".to_owned(), None, true, None, true).unwrap();
         assert!(weak_meta.__len__().is_err());
         assert!(weak_meta.sharding().is_none());
         assert!(weak_meta.vma().is_none());
@@ -2076,12 +2111,16 @@ mod tests {
         );
         assert_eq!(weak_meta.__str__(), weak_meta.__repr__());
 
-        let updated = meta.update(
-            Some(vec![4]),
-            Some("I64".to_owned()),
-            Some(true),
-            Some(true),
-        );
+        let updated = meta
+            .update(
+                Some(vec![4]),
+                Some("I64".to_owned()),
+                None,
+                Some(true),
+                None,
+                Some(true),
+            )
+            .unwrap();
         assert_eq!(updated.shape(), vec![4]);
         assert_eq!(updated.dtype(), "I64");
         assert!(updated.sharding().is_none());
@@ -2097,7 +2136,9 @@ mod tests {
         assert!(!meta.weak_type());
         assert!(!meta.is_ref());
 
-        let same_meta = PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), false, false);
+        let same_meta =
+            PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), None, false, None, false)
+                .unwrap();
         assert!(meta.same_metadata(&same_meta));
         assert_eq!(meta.__hash__(), same_meta.__hash__());
         assert!(!meta.same_metadata(&updated));
