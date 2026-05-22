@@ -668,6 +668,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("__version_info__", version_info())?;
     m.add_class::<PyValue>()?;
+    m.add("Array", m.getattr("PyValue")?)?;
     m.add_class::<PyJaxpr>()?;
     m.add_class::<PyCheckpoint>()?;
     m.add_class::<PyVjpPullback>()?;
