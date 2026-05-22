@@ -158,6 +158,20 @@ impl PyValue {
         false
     }
 
+    fn __len__(&self) -> PyResult<usize> {
+        let first_dim = self
+            .inner
+            .as_tensor()
+            .and_then(|tensor| tensor.shape.dims.first().copied())
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>("len() of unsized object")
+            })?;
+
+        usize::try_from(first_dim).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array length does not fit usize")
+        })
+    }
+
     fn as_f64_list(&self) -> Option<Vec<f64>> {
         match &self.inner {
             Value::Scalar(_) => self.inner.as_f64_scalar().map(|value| vec![value]),
@@ -1487,6 +1501,7 @@ mod tests {
         assert_eq!(v.nbytes(), 8);
         assert!(!v.weak_type());
         assert!(!v.committed());
+        assert!(v.__len__().is_err());
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
     }
 
@@ -1501,6 +1516,7 @@ mod tests {
         assert_eq!(floats.nbytes(), 24);
         assert!(!floats.weak_type());
         assert!(!floats.committed());
+        assert_eq!(floats.__len__().unwrap(), 3);
         assert_eq!(floats.as_f64_list().unwrap(), vec![1.0, 2.5, 4.0]);
         assert_eq!(floats.as_i64_list(), None);
 
@@ -1513,6 +1529,7 @@ mod tests {
         assert_eq!(ints.nbytes(), 24);
         assert!(!ints.weak_type());
         assert!(!ints.committed());
+        assert_eq!(ints.__len__().unwrap(), 3);
         assert_eq!(ints.as_i64_list().unwrap(), vec![1, 2, 3]);
         assert_eq!(ints.as_f64_list().unwrap(), vec![1.0, 2.0, 3.0]);
     }
