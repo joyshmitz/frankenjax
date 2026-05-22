@@ -367,6 +367,7 @@ pub fn apply_batch_rule(
         | Primitive::IsFinite
         | Primitive::IntegerPow
         | Primitive::Copy
+        | Primitive::ConvertElementType
         | Primitive::BitcastConvertType
         | Primitive::ReducePrecision => batch_unary_elementwise(primitive, inputs, params),
 
@@ -408,6 +409,7 @@ pub fn apply_batch_rule(
 
         // ── Selection (ternary elementwise) ────────────────────
         Primitive::Select => batch_select(inputs, params),
+        Primitive::SelectN => batch_passthrough_leading(primitive, inputs, params),
 
         // ── Clamp (ternary elementwise) ────────────────────────
         Primitive::Clamp => batch_clamp(inputs, params),
@@ -439,6 +441,7 @@ pub fn apply_batch_rule(
         Primitive::Squeeze => batch_squeeze(inputs, params),
         Primitive::Split => batch_split(inputs, params),
         Primitive::ExpandDims => batch_expand_dims(inputs, params),
+        Primitive::Tile => batch_passthrough_leading(primitive, inputs, params),
         Primitive::Cholesky => batch_cholesky(inputs, params),
         Primitive::TriangularSolve => batch_triangular_solve(inputs, params),
         Primitive::Qr | Primitive::Svd | Primitive::Eigh => {
@@ -460,6 +463,9 @@ pub fn apply_batch_rule(
 
         // ── Sorting ────────────────────────────────────────────
         Primitive::Sort | Primitive::Argsort => batch_sort(primitive, inputs, params),
+        Primitive::Argmin | Primitive::Argmax => {
+            batch_passthrough_leading(primitive, inputs, params)
+        }
 
         // ── Convolution ────────────────────────────────────────
         Primitive::Conv => batch_conv(inputs, params),

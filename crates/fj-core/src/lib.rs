@@ -254,6 +254,7 @@ pub enum Primitive {
     // Integer intrinsics
     PopulationCount,
     CountLeadingZeros,
+    CountTrailingZeros,
 }
 
 impl Primitive {
@@ -415,6 +416,7 @@ impl Primitive {
         Self::ReduceWindow,
         Self::PopulationCount,
         Self::CountLeadingZeros,
+        Self::CountTrailingZeros,
     ];
 
     /// Pmap-only collective primitives that fail closed without an active pmap context.
@@ -585,6 +587,7 @@ impl Primitive {
             Self::ReduceWindow => "reduce_window",
             Self::PopulationCount => "population_count",
             Self::CountLeadingZeros => "count_leading_zeros",
+            Self::CountTrailingZeros => "count_trailing_zeros",
         }
     }
 }

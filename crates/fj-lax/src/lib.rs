@@ -626,9 +626,10 @@ pub fn eval_primitive(
         | Primitive::ShiftLeft
         | Primitive::ShiftRightArithmetic
         | Primitive::ShiftRightLogical => eval_bitwise_binary(primitive, inputs),
-        Primitive::BitwiseNot | Primitive::PopulationCount | Primitive::CountLeadingZeros => {
-            eval_bitwise_unary(primitive, inputs)
-        }
+        Primitive::BitwiseNot
+        | Primitive::PopulationCount
+        | Primitive::CountLeadingZeros
+        | Primitive::CountTrailingZeros => eval_bitwise_unary(primitive, inputs),
         // Windowed reduction (pooling)
         Primitive::ReduceWindow => eval_reduce_window(primitive, inputs, params),
     }
@@ -1486,13 +1487,27 @@ fn apply_bitwise_unary_literal_with_dtype(
         (Primitive::CountLeadingZeros, fj_core::Literal::U64(value)) => {
             Some(fj_core::Literal::I64(i64::from(value.leading_zeros())))
         }
+        (Primitive::CountTrailingZeros, fj_core::Literal::I64(value)) => {
+            let count = if dtype == Some(fj_core::DType::I32) {
+                (value as i32).trailing_zeros()
+            } else {
+                value.trailing_zeros()
+            };
+            Some(fj_core::Literal::I64(i64::from(count)))
+        }
+        (Primitive::CountTrailingZeros, fj_core::Literal::U32(value)) => {
+            Some(fj_core::Literal::I64(i64::from(value.trailing_zeros())))
+        }
+        (Primitive::CountTrailingZeros, fj_core::Literal::U64(value)) => {
+            Some(fj_core::Literal::I64(i64::from(value.trailing_zeros())))
+        }
         _ => None,
     }
 }
 
 fn unary_bitwise_output_dtype(primitive: Primitive, input_dtype: fj_core::DType) -> fj_core::DType {
     match primitive {
-        Primitive::PopulationCount | Primitive::CountLeadingZeros => fj_core::DType::I64,
+        Primitive::PopulationCount | Primitive::CountLeadingZeros | Primitive::CountTrailingZeros => fj_core::DType::I64,
         Primitive::BitwiseNot => input_dtype,
         _ => input_dtype,
     }

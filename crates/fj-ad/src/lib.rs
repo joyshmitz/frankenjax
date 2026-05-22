@@ -3291,7 +3291,7 @@ pub fn vjp(
         Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor => {
             Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])])
         }
-        Primitive::BitwiseNot | Primitive::PopulationCount | Primitive::CountLeadingZeros => {
+        Primitive::BitwiseNot | Primitive::PopulationCount | Primitive::CountLeadingZeros | Primitive::CountTrailingZeros => {
             Ok(vec![zeros_like(&inputs[0])])
         }
         Primitive::ShiftLeft | Primitive::ShiftRightArithmetic | Primitive::ShiftRightLogical => {
@@ -7254,6 +7254,7 @@ fn jvp_rule(
         | Primitive::ShiftRightLogical
         | Primitive::PopulationCount
         | Primitive::CountLeadingZeros
+        | Primitive::CountTrailingZeros
         | Primitive::IsFinite
         | Primitive::IsNan
         | Primitive::IsInf

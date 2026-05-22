@@ -664,7 +664,7 @@ impl SimpleTraceContext {
                 }
                 Ok(vec![inputs[0].clone()])
             }
-            Primitive::BitcastConvertType => {
+            Primitive::ConvertElementType | Primitive::BitcastConvertType => {
                 if inputs.len() != 1 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -786,6 +786,56 @@ impl SimpleTraceContext {
                 Ok(vec![ShapedArray {
                     dtype: promote_dtype(inputs[1].dtype, inputs[2].dtype),
                     shape: inputs[1].shape.clone(),
+                }])
+            }
+            Primitive::SelectN => {
+                if inputs.len() < 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected at least 2 inputs, got {}", inputs.len()),
+                    });
+                }
+                if !matches!(
+                    inputs[0].dtype,
+                    DType::I32 | DType::I64 | DType::U32 | DType::U64
+                ) {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "select_n index must be integer, got {:?}",
+                            inputs[0].dtype
+                        ),
+                    });
+                }
+
+                let output_shape = &inputs[1].shape;
+                let mut output_dtype = inputs[1].dtype;
+                for operand in &inputs[2..] {
+                    if operand.shape != *output_shape {
+                        return Err(TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!(
+                                "select_n operands must have matching shapes, got {:?} and {:?}",
+                                output_shape.dims, operand.shape.dims
+                            ),
+                        });
+                    }
+                    output_dtype = promote_dtype(output_dtype, operand.dtype);
+                }
+
+                if inputs[0].shape != Shape::scalar() && inputs[0].shape != *output_shape {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "select_n index shape must be scalar or match operands, got {:?} and {:?}",
+                            inputs[0].shape.dims, output_shape.dims
+                        ),
+                    });
+                }
+
+                Ok(vec![ShapedArray {
+                    dtype: output_dtype,
+                    shape: output_shape.clone(),
                 }])
             }
             Primitive::Concatenate => infer_concatenate(inputs, params),
@@ -1032,6 +1082,88 @@ impl SimpleTraceContext {
                 Ok(vec![ShapedArray {
                     dtype: inputs[0].dtype,
                     shape: Shape { dims: new_dims },
+                }])
+            }
+            Primitive::Tile => {
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                let raw_reps = params
+                    .get("reps")
+                    .ok_or(TraceError::MissingPrimitiveParam {
+                        primitive,
+                        key: "reps",
+                    })?;
+                if raw_reps.trim().is_empty() {
+                    return Err(TraceError::InvalidPrimitiveParam {
+                        primitive,
+                        key: "reps",
+                        value: raw_reps.to_owned(),
+                    });
+                }
+                let reps = parse_usize_list(primitive, "reps", raw_reps)?;
+                if reps.iter().any(|&rep| rep == 0) {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "tile reps must all be positive".to_owned(),
+                    });
+                }
+
+                let input = &inputs[0];
+                let rank = input.shape.rank();
+                if rank == 0 {
+                    if reps.len() != 1 {
+                        return Err(TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!("scalar tile requires 1 rep, got {}", reps.len()),
+                        });
+                    }
+                    let rep =
+                        u32::try_from(reps[0]).map_err(|_| TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: "tile rep exceeds u32".to_owned(),
+                        })?;
+                    let shape = if rep == 1 {
+                        Shape::scalar()
+                    } else {
+                        Shape::vector(rep)
+                    };
+                    return Ok(vec![ShapedArray {
+                        dtype: input.dtype,
+                        shape,
+                    }]);
+                }
+                if reps.len() != rank {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("reps length {} does not match rank {rank}", reps.len()),
+                    });
+                }
+
+                let dims = input
+                    .shape
+                    .dims
+                    .iter()
+                    .zip(reps)
+                    .map(|(&dim, rep)| {
+                        let rep =
+                            u32::try_from(rep).map_err(|_| TraceError::ShapeInferenceFailed {
+                                primitive,
+                                detail: "tile rep exceeds u32".to_owned(),
+                            })?;
+                        dim.checked_mul(rep)
+                            .ok_or_else(|| TraceError::ShapeInferenceFailed {
+                                primitive,
+                                detail: "tile result dimension overflows u32".to_owned(),
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(vec![ShapedArray {
+                    dtype: input.dtype,
+                    shape: Shape { dims },
                 }])
             }
             Primitive::DynamicSlice => {
@@ -1378,6 +1510,47 @@ impl SimpleTraceContext {
                 Ok(vec![ShapedArray {
                     dtype: DType::I64,
                     shape: inputs[0].shape.clone(),
+                }])
+            }
+            Primitive::Argmin | Primitive::Argmax => {
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                let input = &inputs[0];
+                let rank = input.shape.rank();
+                if rank == 0 {
+                    return Ok(vec![ShapedArray {
+                        dtype: DType::I64,
+                        shape: Shape::scalar(),
+                    }]);
+                }
+                let axis = if let Some(raw_axis) = params.get("axis") {
+                    let axis = raw_axis.trim().parse::<i64>().map_err(|_| {
+                        TraceError::InvalidPrimitiveParam {
+                            primitive,
+                            key: "axis",
+                            value: raw_axis.to_owned(),
+                        }
+                    })?;
+                    let normalized = if axis < 0 { rank as i64 + axis } else { axis };
+                    if normalized < 0 || normalized >= rank as i64 {
+                        return Err(TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!("axis {axis} out of bounds for rank {rank}"),
+                        });
+                    }
+                    normalized as usize
+                } else {
+                    rank - 1
+                };
+                let mut dims = input.shape.dims.clone();
+                dims.remove(axis);
+                Ok(vec![ShapedArray {
+                    dtype: DType::I64,
+                    shape: Shape { dims },
                 }])
             }
             Primitive::Conv => {
@@ -3932,7 +4105,7 @@ mod tests {
         let outcome = catch_unwind(AssertUnwindSafe(body));
         log.phase_timings.execute_ms = duration_ms(execute_start);
 
-        let verify_start = Instant::now();
+        let assertion_start = Instant::now();
         let mut panic_payload: Option<Box<dyn Any + Send>> = None;
         let mut failure_detail: Option<String> = None;
 
@@ -3967,7 +4140,7 @@ mod tests {
                 panic_payload = Some(payload);
             }
         }
-        log.phase_timings.verify_ms = duration_ms(verify_start);
+        log.phase_timings.verify_ms = duration_ms(assertion_start);
 
         let log_path = test_log_path(&test_id);
         log.artifact_refs.push(log_path.display().to_string());
