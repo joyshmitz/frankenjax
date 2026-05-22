@@ -87,6 +87,7 @@ pub enum Primitive {
     Floor,
     Ceil,
     Round,
+    Trunc,
     // Trigonometric
     Sin,
     Cos,
@@ -257,6 +258,7 @@ impl Primitive {
         Self::Floor,
         Self::Ceil,
         Self::Round,
+        Self::Trunc,
         Self::Sin,
         Self::Cos,
         Self::Tan,
@@ -410,6 +412,7 @@ impl Primitive {
             Self::Floor => "floor",
             Self::Ceil => "ceil",
             Self::Round => "round",
+            Self::Trunc => "trunc",
             Self::Sin => "sin",
             Self::Cos => "cos",
             Self::Tan => "tan",

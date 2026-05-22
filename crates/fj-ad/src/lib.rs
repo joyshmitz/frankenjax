@@ -1438,7 +1438,9 @@ pub fn vjp(
                 &value_mul(&neg_half, &x_pow_neg1p5)?,
             )?])
         }
-        Primitive::Floor | Primitive::Ceil | Primitive::Round => Ok(vec![zeros_like(&inputs[0])]),
+        Primitive::Floor | Primitive::Ceil | Primitive::Round | Primitive::Trunc => {
+            Ok(vec![zeros_like(&inputs[0])])
+        }
         Primitive::Sin => {
             let x = &inputs[0];
             let cos_x = eval_primitive(Primitive::Cos, std::slice::from_ref(x), &BTreeMap::new())
@@ -6411,7 +6413,9 @@ fn jvp_rule(
             ep(Primitive::Mul, &[coeff, tangents[0].clone()])
         }
 
-        Primitive::Floor | Primitive::Ceil | Primitive::Round => Ok(zeros_like(&primals[0])),
+        Primitive::Floor | Primitive::Ceil | Primitive::Round | Primitive::Trunc => {
+            Ok(zeros_like(&primals[0]))
+        }
 
         Primitive::Sin => {
             // cos(x) * dx

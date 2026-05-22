@@ -197,6 +197,7 @@ pub fn eval_primitive(
         Primitive::Floor => eval_unary_elementwise(primitive, inputs, f64::floor),
         Primitive::Ceil => eval_unary_elementwise(primitive, inputs, f64::ceil),
         Primitive::Round => eval_round(primitive, inputs, params),
+        Primitive::Trunc => eval_unary_elementwise(primitive, inputs, f64::trunc),
         // Trigonometric
         Primitive::Sin => eval_sin(primitive, inputs),
         Primitive::Cos => eval_cos(primitive, inputs),
