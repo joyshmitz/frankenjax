@@ -482,3 +482,135 @@ fn metamorphic_div_neg_distributive() {
         );
     }
 }
+
+// ======================== BROADCAST TESTS ========================
+
+fn scalar_f64(v: f64) -> Value {
+    Value::Scalar(Literal::from_f64(v))
+}
+
+fn scalar_i64(v: i64) -> Value {
+    Value::Scalar(Literal::I64(v))
+}
+
+#[test]
+fn oracle_mul_scalar_tensor_broadcast() {
+    let a = scalar_f64(2.0);
+    let b = make_f64_tensor(&[4], vec![1.0, 2.0, 3.0, 4.0]);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_f64_vec(&result), vec![2.0, 4.0, 6.0, 8.0]);
+}
+
+#[test]
+fn oracle_mul_tensor_scalar_broadcast() {
+    let a = make_f64_tensor(&[4], vec![1.0, 2.0, 3.0, 4.0]);
+    let b = scalar_f64(3.0);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_f64_vec(&result), vec![3.0, 6.0, 9.0, 12.0]);
+}
+
+#[test]
+fn oracle_div_scalar_tensor_broadcast() {
+    let a = scalar_f64(12.0);
+    let b = make_f64_tensor(&[4], vec![1.0, 2.0, 3.0, 4.0]);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_f64_vec(&result), vec![12.0, 6.0, 4.0, 3.0]);
+}
+
+#[test]
+fn oracle_div_tensor_scalar_broadcast() {
+    let a = make_f64_tensor(&[4], vec![12.0, 24.0, 36.0, 48.0]);
+    let b = scalar_f64(12.0);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_f64_vec(&result), vec![1.0, 2.0, 3.0, 4.0]);
+}
+
+#[test]
+fn oracle_mul_row_vector_broadcast() {
+    // [1, 3] * [2, 3] -> [2, 3]
+    let a = make_f64_tensor(&[1, 3], vec![1.0, 2.0, 3.0]);
+    let b = make_f64_tensor(&[2, 3], vec![2.0, 2.0, 2.0, 3.0, 3.0, 3.0]);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_f64_vec(&result), vec![2.0, 4.0, 6.0, 3.0, 6.0, 9.0]);
+}
+
+#[test]
+fn oracle_mul_column_vector_broadcast() {
+    // [2, 1] * [2, 3] -> [2, 3]
+    let a = make_f64_tensor(&[2, 1], vec![2.0, 3.0]);
+    let b = make_f64_tensor(&[2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_f64_vec(&result), vec![2.0, 4.0, 6.0, 12.0, 15.0, 18.0]);
+}
+
+#[test]
+fn oracle_div_row_vector_broadcast() {
+    // [2, 3] / [1, 3] -> [2, 3]
+    let a = make_f64_tensor(&[2, 3], vec![6.0, 12.0, 18.0, 12.0, 24.0, 36.0]);
+    let b = make_f64_tensor(&[1, 3], vec![2.0, 3.0, 6.0]);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_f64_vec(&result), vec![3.0, 4.0, 3.0, 6.0, 8.0, 6.0]);
+}
+
+#[test]
+fn oracle_mul_different_ranks_broadcast() {
+    // [3] * [2, 3] -> [2, 3] (1D broadcast against 2D)
+    let a = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let b = make_f64_tensor(&[2, 3], vec![10.0, 10.0, 10.0, 20.0, 20.0, 20.0]);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_f64_vec(&result), vec![10.0, 20.0, 30.0, 20.0, 40.0, 60.0]);
+}
+
+#[test]
+fn oracle_div_different_ranks_broadcast() {
+    // [2, 3] / [3] -> [2, 3]
+    let a = make_f64_tensor(&[2, 3], vec![12.0, 12.0, 12.0, 24.0, 24.0, 24.0]);
+    let b = make_f64_tensor(&[3], vec![2.0, 3.0, 4.0]);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_f64_vec(&result), vec![6.0, 4.0, 3.0, 12.0, 8.0, 6.0]);
+}
+
+#[test]
+fn oracle_mul_i64_scalar_tensor_broadcast() {
+    let a = scalar_i64(3);
+    let b = make_i64_tensor(&[3], vec![2, 4, 6]);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 12, 18]);
+}
+
+#[test]
+fn oracle_div_i64_tensor_scalar_broadcast() {
+    let a = make_i64_tensor(&[3], vec![6, 12, 18]);
+    let b = scalar_i64(3);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![2, 4, 6]);
+}
+
+#[test]
+fn oracle_mul_incompatible_shapes_error() {
+    // [2] * [3] should error
+    let a = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let b = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
+}
+
+#[test]
+fn oracle_div_incompatible_shapes_error() {
+    // [2] / [3] should error
+    let a = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let b = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
+}
