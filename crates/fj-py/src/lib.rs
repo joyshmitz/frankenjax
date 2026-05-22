@@ -53,6 +53,7 @@ struct PyShapeDtypeStruct {
     shape: Vec<u32>,
     dtype: String,
     weak_type: bool,
+    is_ref: bool,
 }
 
 #[pyclass(name = "Device")]
@@ -417,12 +418,13 @@ impl PyBackwardPass {
 #[pymethods]
 impl PyShapeDtypeStruct {
     #[new]
-    #[pyo3(signature = (shape, dtype, *, weak_type=false))]
-    fn new(shape: Vec<u32>, dtype: String, weak_type: bool) -> Self {
+    #[pyo3(signature = (shape, dtype, *, weak_type=false, is_ref=false))]
+    fn new(shape: Vec<u32>, dtype: String, weak_type: bool, is_ref: bool) -> Self {
         Self {
             shape,
             dtype,
             weak_type,
+            is_ref,
         }
     }
 
@@ -453,15 +455,21 @@ impl PyShapeDtypeStruct {
         self.weak_type
     }
 
+    #[getter]
+    fn is_ref(&self) -> bool {
+        self.is_ref
+    }
+
     fn __repr__(&self) -> String {
         let weak_type = if self.weak_type {
             ", weak_type=True"
         } else {
             ""
         };
+        let is_ref = if self.is_ref { ", is_ref=True" } else { "" };
         format!(
-            "ShapeDtypeStruct(shape={:?}, dtype={}{})",
-            self.shape, self.dtype, weak_type
+            "ShapeDtypeStruct(shape={:?}, dtype={}{}{})",
+            self.shape, self.dtype, weak_type, is_ref
         )
     }
 }
@@ -583,6 +591,7 @@ fn py_shape_dtype_from_rust(value: &Value) -> PyShapeDtypeStruct {
             .map_or_else(Vec::new, |tensor| tensor.shape.dims.clone()),
         dtype: format!("{:?}", value.dtype()),
         weak_type: false,
+        is_ref: false,
     }
 }
 
@@ -1952,19 +1961,21 @@ mod tests {
 
     #[test]
     fn shape_dtype_struct_constructor_roundtrips_metadata() {
-        let meta = PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), false);
+        let meta = PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), false, false);
         assert_eq!(meta.shape(), vec![2, 3]);
         assert_eq!(meta.dtype(), "F64");
         assert_eq!(meta.ndim(), 2);
         assert_eq!(meta.size(), 6);
         assert!(!meta.weak_type());
+        assert!(!meta.is_ref());
         assert_eq!(meta.__repr__(), "ShapeDtypeStruct(shape=[2, 3], dtype=F64)");
 
-        let weak_meta = PyShapeDtypeStruct::new(vec![], "F64".to_owned(), true);
+        let weak_meta = PyShapeDtypeStruct::new(vec![], "F64".to_owned(), true, true);
         assert!(weak_meta.weak_type());
+        assert!(weak_meta.is_ref());
         assert_eq!(
             weak_meta.__repr__(),
-            "ShapeDtypeStruct(shape=[], dtype=F64, weak_type=True)"
+            "ShapeDtypeStruct(shape=[], dtype=F64, weak_type=True, is_ref=True)"
         );
     }
 
