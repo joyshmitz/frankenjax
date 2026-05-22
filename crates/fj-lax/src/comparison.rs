@@ -1,9 +1,80 @@
 #![forbid(unsafe_code)]
 
-use fj_core::{DType, Literal, Primitive, TensorValue, Value};
+use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 
 use crate::EvalError;
 use crate::type_promotion::compare_literals;
+
+fn broadcast_shape(lhs: &Shape, rhs: &Shape) -> Option<Shape> {
+    let max_rank = lhs.rank().max(rhs.rank());
+    let mut dims = Vec::with_capacity(max_rank);
+
+    for offset in 0..max_rank {
+        let lhs_dim = if offset < lhs.rank() {
+            lhs.dims[lhs.rank() - 1 - offset]
+        } else {
+            1
+        };
+        let rhs_dim = if offset < rhs.rank() {
+            rhs.dims[rhs.rank() - 1 - offset]
+        } else {
+            1
+        };
+
+        let out_dim = if lhs_dim == rhs_dim {
+            lhs_dim
+        } else if lhs_dim == 1 {
+            rhs_dim
+        } else if rhs_dim == 1 {
+            lhs_dim
+        } else {
+            return None;
+        };
+        dims.push(out_dim);
+    }
+
+    dims.reverse();
+    Some(Shape { dims })
+}
+
+fn compute_strides(dims: &[u32]) -> Vec<usize> {
+    let mut strides = vec![1_usize; dims.len()];
+    for i in (0..dims.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * dims[i + 1] as usize;
+    }
+    strides
+}
+
+fn flat_to_multi(flat: usize, strides: &[usize]) -> Vec<usize> {
+    let mut multi = Vec::with_capacity(strides.len());
+    let mut remainder = flat;
+    for &stride in strides {
+        multi.push(remainder / stride);
+        remainder %= stride;
+    }
+    multi
+}
+
+fn broadcast_strides(shape: &Shape, out_shape: &Shape) -> Vec<usize> {
+    let rank = shape.rank();
+    let out_rank = out_shape.rank();
+    let real_strides = compute_strides(&shape.dims);
+
+    let mut result = vec![0_usize; out_rank];
+    for (i, &stride) in real_strides.iter().enumerate().take(rank) {
+        let out_axis = out_rank - rank + i;
+        if shape.dims[i] == 1 {
+            result[out_axis] = 0;
+        } else {
+            result[out_axis] = stride;
+        }
+    }
+    result
+}
+
+fn broadcast_flat_index(multi: &[usize], strides: &[usize]) -> usize {
+    multi.iter().zip(strides.iter()).map(|(&m, &s)| m * s).sum()
+}
 
 /// Comparison operators: return Bool scalars/tensors.
 #[inline]
@@ -27,27 +98,53 @@ pub(crate) fn eval_comparison(
             Ok(Value::scalar_bool(result))
         }
         (Value::Tensor(lhs), Value::Tensor(rhs)) => {
-            if lhs.shape != rhs.shape {
-                return Err(EvalError::ShapeMismatch {
+            if lhs.shape == rhs.shape {
+                let mut elements = Vec::with_capacity(lhs.elements.len());
+                for (lhs, rhs) in lhs
+                    .elements
+                    .iter()
+                    .copied()
+                    .zip(rhs.elements.iter().copied())
+                {
+                    elements.push(Literal::Bool(compare_literals(
+                        lhs, rhs, primitive, &int_cmp, &float_cmp,
+                    )?));
+                }
+                return Ok(Value::Tensor(TensorValue::new(
+                    DType::Bool,
+                    lhs.shape.clone(),
+                    elements,
+                )?));
+            }
+
+            let out_shape =
+                broadcast_shape(&lhs.shape, &rhs.shape).ok_or(EvalError::ShapeMismatch {
                     primitive,
                     left: lhs.shape.clone(),
                     right: rhs.shape.clone(),
-                });
-            }
-            let mut elements = Vec::with_capacity(lhs.elements.len());
-            for (lhs, rhs) in lhs
-                .elements
-                .iter()
-                .copied()
-                .zip(rhs.elements.iter().copied())
-            {
+                })?;
+
+            let out_count = out_shape.element_count().unwrap_or(0) as usize;
+            let out_strides = compute_strides(&out_shape.dims);
+            let lhs_strides = broadcast_strides(&lhs.shape, &out_shape);
+            let rhs_strides = broadcast_strides(&rhs.shape, &out_shape);
+
+            let mut elements = Vec::with_capacity(out_count);
+            for flat_idx in 0..out_count {
+                let multi = flat_to_multi(flat_idx, &out_strides);
+                let lhs_idx = broadcast_flat_index(&multi, &lhs_strides);
+                let rhs_idx = broadcast_flat_index(&multi, &rhs_strides);
+
+                let l = lhs.elements[lhs_idx];
+                let r = rhs.elements[rhs_idx];
                 elements.push(Literal::Bool(compare_literals(
-                    lhs, rhs, primitive, &int_cmp, &float_cmp,
+                    l, r, primitive, &int_cmp, &float_cmp,
                 )?));
             }
+
             Ok(Value::Tensor(TensorValue::new(
                 DType::Bool,
-                lhs.shape.clone(),
+                out_shape,
                 elements,
             )?))
         }

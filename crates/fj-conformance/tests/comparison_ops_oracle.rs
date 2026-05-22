@@ -718,3 +718,76 @@ fn metamorphic_ge_neg_equals_le() {
         );
     }
 }
+
+// ======================== Broadcast-compatible tensor operands ========================
+
+#[test]
+fn oracle_comparison_row_vector_broadcast() {
+    // [2,3] vs [3] should broadcast row vector
+    let a = make_f64_tensor(&[2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let b = make_f64_tensor(&[3], vec![2.0, 2.0, 2.0]);
+    let result = eval_primitive(Primitive::Gt, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    // Row 0: [1>2, 2>2, 3>2] = [false, false, true]
+    // Row 1: [4>2, 5>2, 6>2] = [true, true, true]
+    assert_eq!(
+        extract_bool_vec(&result),
+        vec![false, false, true, true, true, true]
+    );
+}
+
+#[test]
+fn oracle_comparison_column_vector_broadcast() {
+    // [3] vs [2,3] should broadcast to match
+    let a = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let b = make_f64_tensor(&[2, 3], vec![1.0, 1.0, 1.0, 3.0, 3.0, 3.0]);
+    let result = eval_primitive(Primitive::Lt, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    // Row 0 of b: [1<1, 2<1, 3<1] = [false, false, false]
+    // Row 1 of b: [1<3, 2<3, 3<3] = [true, true, false]
+    assert_eq!(
+        extract_bool_vec(&result),
+        vec![false, false, false, true, true, false]
+    );
+}
+
+#[test]
+fn oracle_comparison_zero_dim_tensor_broadcast() {
+    // [4] vs [] (zero-dimensional tensor scalar) should broadcast
+    let a = make_f64_tensor(&[4], vec![1.0, 2.0, 3.0, 4.0]);
+    let b = make_f64_tensor(&[], vec![2.5]);
+    let result = eval_primitive(Primitive::Le, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    // [1<=2.5, 2<=2.5, 3<=2.5, 4<=2.5] = [true, true, false, false]
+    assert_eq!(extract_bool_vec(&result), vec![true, true, false, false]);
+}
+
+#[test]
+fn oracle_comparison_broadcast_different_ranks() {
+    // [2,1,3] vs [4,3] should broadcast to [2,4,3]
+    let a = make_f64_tensor(&[2, 1, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let b = make_f64_tensor(
+        &[4, 3],
+        vec![
+            1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0,
+        ],
+    );
+    let result = eval_primitive(Primitive::Eq, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 4, 3]);
+}
+
+#[test]
+fn oracle_comparison_broadcast_ne() {
+    let a = make_i64_tensor(&[2, 2], vec![1, 2, 3, 4]);
+    let b = make_i64_tensor(&[2], vec![1, 2]);
+    let result = eval_primitive(Primitive::Ne, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    // Row 0: [1!=1, 2!=2] = [false, false]
+    // Row 1: [3!=1, 4!=2] = [true, true]
+    assert_eq!(extract_bool_vec(&result), vec![false, false, true, true]);
+}
