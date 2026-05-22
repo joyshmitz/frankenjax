@@ -46,6 +46,21 @@ def test_grad_square():
     print("✓ grad(square)(3.0) = 6.0")
 
 
+def test_jvp_square():
+    """Test forward-mode JVP of x^2."""
+    jaxpr = fj.make_jaxpr_square()
+    primals, tangents = fj.jvp(
+        jaxpr,
+        [fj.PyValue.scalar_f64(3.0)],
+        [fj.PyValue.scalar_f64(1.0)],
+    )
+    assert len(primals) == 1
+    assert len(tangents) == 1
+    assert abs(primals[0].as_f64() - 9.0) < 1e-12
+    assert abs(tangents[0].as_f64() - 6.0) < 1e-6
+    print("✓ jvp(square)(3.0, 1.0) = (9.0, 6.0)")
+
+
 def test_value_and_grad():
     """Test value_and_grad of x^2."""
     jaxpr = fj.make_jaxpr_square()
@@ -117,6 +132,7 @@ if __name__ == "__main__":
     test_value_scalar()
     test_jit_add()
     test_grad_square()
+    test_jvp_square()
     test_value_and_grad()
     test_vmap()
     test_pmap_fails_closed()

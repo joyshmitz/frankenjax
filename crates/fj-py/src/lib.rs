@@ -181,6 +181,24 @@ fn grad(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
 }
 
 #[pyfunction]
+fn jvp(
+    jaxpr: &PyJaxpr,
+    primals: Vec<PyValue>,
+    tangents: Vec<PyValue>,
+) -> PyResult<(Vec<PyValue>, Vec<PyValue>)> {
+    let rust_primals = py_values_to_rust(primals);
+    let rust_tangents = py_values_to_rust(tangents);
+    fj_ad::jvp(&jaxpr.inner, &rust_primals, &rust_tangents)
+        .map(|result| {
+            (
+                py_values_from_rust(result.primals),
+                py_values_from_rust(result.tangents),
+            )
+        })
+        .map_err(runtime_error)
+}
+
+#[pyfunction]
 fn vmap(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
     let rust_args = py_values_to_rust(args);
     fj_api::vmap(jaxpr.inner.clone())
@@ -242,6 +260,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(make_jaxpr_add_one, m)?)?;
     m.add_function(wrap_pyfunction!(jit, m)?)?;
     m.add_function(wrap_pyfunction!(grad, m)?)?;
+    m.add_function(wrap_pyfunction!(jvp, m)?)?;
     m.add_function(wrap_pyfunction!(vmap, m)?)?;
     m.add_function(wrap_pyfunction!(pmap, m)?)?;
     m.add_function(wrap_pyfunction!(value_and_grad, m)?)?;
@@ -303,6 +322,22 @@ mod tests {
             .unwrap();
         assert!((values[0].as_f64().unwrap() - 16.0).abs() < 1e-12);
         assert!((grads[0].as_f64().unwrap() - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn jvp_wrapper_returns_primal_and_tangent_outputs() {
+        let jaxpr = make_jaxpr_square();
+        let (primals, tangents) = jvp(
+            &jaxpr,
+            vec![PyValue::scalar_f64(3.0)],
+            vec![PyValue::scalar_f64(1.0)],
+        )
+        .unwrap();
+
+        assert_eq!(primals.len(), 1);
+        assert_eq!(tangents.len(), 1);
+        assert!((primals[0].as_f64().unwrap() - 9.0).abs() < 1e-12);
+        assert!((tangents[0].as_f64().unwrap() - 6.0).abs() < 1e-9);
     }
 
     #[test]
