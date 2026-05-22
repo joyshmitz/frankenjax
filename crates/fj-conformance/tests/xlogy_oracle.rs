@@ -250,9 +250,53 @@ fn oracle_xlogy_matrix() {
 
 // ======================== Broadcasting ========================
 
+fn scalar_f64(v: f64) -> Value {
+    Value::Scalar(Literal::from_f64(v))
+}
+
+// -- XLogY Broadcast Tests --
+
+#[test]
+fn oracle_xlogy_all_scalars_broadcast() {
+    let x = scalar_f64(2.0);
+    let y = scalar_f64(std::f64::consts::E);
+    let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
+    assert!((extract_f64_scalar(&result) - 2.0).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_xlogy_scalar_x_tensor_y_broadcast() {
+    let x = scalar_f64(2.0);
+    let y = make_f64_tensor(&[3], vec![1.0, std::f64::consts::E, std::f64::consts::E * std::f64::consts::E]);
+    let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    assert!((vals[0] - 0.0).abs() < 1e-14, "xlogy(2, 1) = 0");
+    assert!((vals[1] - 2.0).abs() < 1e-14, "xlogy(2, e) = 2");
+    assert!((vals[2] - 4.0).abs() < 1e-14, "xlogy(2, e^2) = 4");
+}
+
+#[test]
+fn oracle_xlogy_tensor_x_scalar_y_broadcast() {
+    let x_values: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
+    let x = make_f64_tensor(&[4], x_values.to_vec());
+    let y = scalar_f64(std::f64::consts::E);
+    let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    let actual = extract_f64_vec(&result);
+    for (i, (&actual, &expected)) in actual.iter().zip(x_values.iter()).enumerate() {
+        assert!(
+            (actual - expected).abs() < 1e-14,
+            "xlogy tensor_x scalar_y element {i}: expected {expected}, got {actual}"
+        );
+    }
+}
+
 #[test]
 fn oracle_xlogy_vector_scalar_y_broadcast() {
-    let x_values = [0.0, 1.0, 2.0, 3.0];
+    let x_values: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
     let x = make_f64_tensor(&[4], x_values.to_vec());
     let y = make_f64_tensor(&[], vec![std::f64::consts::E]);
     let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
@@ -268,6 +312,37 @@ fn oracle_xlogy_vector_scalar_y_broadcast() {
 }
 
 #[test]
+fn oracle_xlogy_singleton_x_vector_y_broadcast() {
+    let x = make_f64_tensor(&[1], vec![2.0]);
+    let y = make_f64_tensor(&[3], vec![1.0, std::f64::consts::E, std::f64::consts::E * std::f64::consts::E]);
+    let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    assert!((vals[0] - 0.0).abs() < 1e-14);
+    assert!((vals[1] - 2.0).abs() < 1e-14);
+    assert!((vals[2] - 4.0).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_xlogy_column_x_matrix_y_broadcast() {
+    let x = make_f64_tensor(&[2, 1], vec![1.0, 2.0]);
+    let y = make_f64_tensor(&[2, 3], vec![1.0, std::f64::consts::E, std::f64::consts::E, 1.0, std::f64::consts::E, std::f64::consts::E]);
+    let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_f64_vec(&result);
+    // Row 0: xlogy(1, 1)=0, xlogy(1, e)=1, xlogy(1, e)=1
+    assert!((vals[0] - 0.0).abs() < 1e-14);
+    assert!((vals[1] - 1.0).abs() < 1e-14);
+    assert!((vals[2] - 1.0).abs() < 1e-14);
+    // Row 1: xlogy(2, 1)=0, xlogy(2, e)=2, xlogy(2, e)=2
+    assert!((vals[3] - 0.0).abs() < 1e-14);
+    assert!((vals[4] - 2.0).abs() < 1e-14);
+    assert!((vals[5] - 2.0).abs() < 1e-14);
+}
+
+#[test]
 fn oracle_xlogy_matrix_row_y_broadcast() {
     let x = make_f64_tensor(&[2, 2], vec![0.0, 1.0, 2.0, 3.0]);
     let y = make_f64_tensor(&[2], vec![1.0, std::f64::consts::E]);
@@ -275,7 +350,7 @@ fn oracle_xlogy_matrix_row_y_broadcast() {
 
     assert_eq!(extract_shape(&result), vec![2, 2]);
     let actual = extract_f64_vec(&result);
-    let expected = [0.0, 1.0, 0.0, 3.0];
+    let expected: [f64; 4] = [0.0, 1.0, 0.0, 3.0];
     for (i, (&actual, &expected)) in actual.iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - expected).abs() < 1e-14,
@@ -285,8 +360,75 @@ fn oracle_xlogy_matrix_row_y_broadcast() {
 }
 
 #[test]
+fn oracle_xlogy_different_ranks_broadcast() {
+    let x = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let y = make_f64_tensor(&[2, 3], vec![std::f64::consts::E, std::f64::consts::E, std::f64::consts::E, 1.0, 1.0, 1.0]);
+    let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_f64_vec(&result);
+    // Row 0: xlogy(1,e)=1, xlogy(2,e)=2, xlogy(3,e)=3
+    assert!((vals[0] - 1.0).abs() < 1e-14);
+    assert!((vals[1] - 2.0).abs() < 1e-14);
+    assert!((vals[2] - 3.0).abs() < 1e-14);
+    // Row 1: xlogy(1,1)=0, xlogy(2,1)=0, xlogy(3,1)=0
+    assert!((vals[3] - 0.0).abs() < 1e-14);
+    assert!((vals[4] - 0.0).abs() < 1e-14);
+    assert!((vals[5] - 0.0).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_xlogy_incompatible_shapes_error() {
+    let x = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let y = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
+}
+
+// -- XLog1PY Broadcast Tests --
+
+#[test]
+fn oracle_xlog1py_all_scalars_broadcast() {
+    let x = scalar_f64(2.0);
+    let y = scalar_f64(std::f64::consts::E - 1.0);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
+    assert!((extract_f64_scalar(&result) - 2.0).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_xlog1py_scalar_x_tensor_y_broadcast() {
+    let x = scalar_f64(2.0);
+    let e = std::f64::consts::E;
+    let y = make_f64_tensor(&[3], vec![0.0, e - 1.0, e * e - 1.0]);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    assert!((vals[0] - 0.0).abs() < 1e-14, "xlog1py(2, 0) = 0");
+    assert!((vals[1] - 2.0).abs() < 1e-14, "xlog1py(2, e-1) = 2");
+    assert!((vals[2] - 4.0).abs() < 1e-12, "xlog1py(2, e^2-1) = 4");
+}
+
+#[test]
+fn oracle_xlog1py_tensor_x_scalar_y_broadcast() {
+    let x_values: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
+    let x = make_f64_tensor(&[4], x_values.to_vec());
+    let y = scalar_f64(std::f64::consts::E - 1.0);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    let actual = extract_f64_vec(&result);
+    for (i, (&actual, &expected)) in actual.iter().zip(x_values.iter()).enumerate() {
+        assert!(
+            (actual - expected).abs() < 1e-14,
+            "xlog1py tensor_x scalar_y element {i}: expected {expected}, got {actual}"
+        );
+    }
+}
+
+#[test]
 fn oracle_xlog1py_vector_scalar_y_broadcast() {
-    let x_values = [0.0, 1.0, 2.0, 3.0];
+    let x_values: [f64; 4] = [0.0, 1.0, 2.0, 3.0];
     let x = make_f64_tensor(&[4], x_values.to_vec());
     let y = make_f64_tensor(&[], vec![std::f64::consts::E - 1.0]);
     let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
@@ -302,6 +444,20 @@ fn oracle_xlog1py_vector_scalar_y_broadcast() {
 }
 
 #[test]
+fn oracle_xlog1py_singleton_x_vector_y_broadcast() {
+    let x = make_f64_tensor(&[1], vec![2.0]);
+    let e = std::f64::consts::E;
+    let y = make_f64_tensor(&[3], vec![0.0, e - 1.0, e * e - 1.0]);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    assert!((vals[0] - 0.0).abs() < 1e-14);
+    assert!((vals[1] - 2.0).abs() < 1e-14);
+    assert!((vals[2] - 4.0).abs() < 1e-12);
+}
+
+#[test]
 fn oracle_xlog1py_matrix_row_y_broadcast() {
     let x = make_f64_tensor(&[2, 2], vec![0.0, 1.0, 2.0, 3.0]);
     let y = make_f64_tensor(&[2], vec![0.0, std::f64::consts::E - 1.0]);
@@ -309,11 +465,19 @@ fn oracle_xlog1py_matrix_row_y_broadcast() {
 
     assert_eq!(extract_shape(&result), vec![2, 2]);
     let actual = extract_f64_vec(&result);
-    let expected = [0.0, 1.0, 0.0, 3.0];
+    let expected: [f64; 4] = [0.0, 1.0, 0.0, 3.0];
     for (i, (&actual, &expected)) in actual.iter().zip(expected.iter()).enumerate() {
         assert!(
             (actual - expected).abs() < 1e-14,
             "xlog1py row y broadcast element {i}: expected {expected}, got {actual}"
         );
     }
+}
+
+#[test]
+fn oracle_xlog1py_incompatible_shapes_error() {
+    let x = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let y = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
 }
