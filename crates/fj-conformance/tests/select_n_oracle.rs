@@ -243,3 +243,52 @@ fn select_n_boolean_with_three_cases_rejected() {
         "unexpected boolean-3-cases error: {err}"
     );
 }
+
+// ======================== Dtype parity tests ========================
+
+#[test]
+fn select_n_rejects_mismatched_case_dtypes_scalar() {
+    let err = select_n(vec![
+        Value::scalar_i64(0),
+        Value::scalar_f64(10.0),
+        Value::scalar_i64(20),
+    ])
+    .expect_err("mismatched case dtypes should fail");
+
+    assert!(
+        err.to_string().contains("dtypes must match")
+            || err.to_string().contains("F64")
+            || err.to_string().contains("I64"),
+        "unexpected dtype-mismatch error: {err}"
+    );
+}
+
+#[test]
+fn select_n_rejects_mismatched_case_dtypes_tensor() {
+    let err = select_n(vec![
+        vector_i64(&[0, 1]),
+        vector_f64(&[1.0, 2.0]),
+        vector_i64(&[10, 20]),
+    ])
+    .expect_err("mismatched tensor case dtypes should fail");
+
+    assert!(
+        err.to_string().contains("dtypes must match")
+            || err.to_string().contains("F64")
+            || err.to_string().contains("I64"),
+        "unexpected tensor dtype-mismatch error: {err}"
+    );
+}
+
+#[test]
+fn select_n_accepts_matching_dtypes() {
+    let result = select_n(vec![
+        Value::scalar_i64(1),
+        Value::scalar_f64(10.0),
+        Value::scalar_f64(20.0),
+        Value::scalar_f64(30.0),
+    ])
+    .expect("matching dtypes should succeed");
+
+    assert_eq!(extract_scalar(&result), 20.0);
+}

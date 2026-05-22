@@ -665,6 +665,13 @@ fn literal_dtype(literal: Literal) -> DType {
     }
 }
 
+fn operand_dtype(value: &Value) -> DType {
+    match value {
+        Value::Scalar(literal) => literal_dtype(*literal),
+        Value::Tensor(tensor) => tensor.dtype,
+    }
+}
+
 fn literal_to_real_f64(primitive: Primitive, literal: Literal) -> Result<f64, EvalError> {
     match literal {
         Literal::I64(v) => Ok(v as f64),
@@ -1617,6 +1624,23 @@ pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Va
     let n_operands = inputs.len() - 1;
     let index = &inputs[0];
     let operands = &inputs[1..];
+
+    // Validate all operands have the same dtype (per upstream check_same_dtypes)
+    let first_dtype = operand_dtype(&operands[0]);
+    for (i, op) in operands[1..].iter().enumerate() {
+        let op_dtype = operand_dtype(op);
+        if op_dtype != first_dtype {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "select_n case dtypes must match: case 0 has {:?}, case {} has {:?}",
+                    first_dtype,
+                    i + 1,
+                    op_dtype
+                ),
+            });
+        }
+    }
 
     match index {
         Value::Scalar(idx_lit) => {
