@@ -1389,6 +1389,14 @@ pub fn vjp(
             let x_ln2 = value_mul(x, &ln2)?;
             Ok(vec![value_div(g, &x_ln2)?])
         }
+        Primitive::Exp2 => {
+            let x = &inputs[0];
+            let exp2_x = eval_primitive(Primitive::Exp2, std::slice::from_ref(x), &BTreeMap::new())
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let ln2 = scalar_constant_matching_dtype(std::f64::consts::LN_2, g);
+            let deriv = value_mul(&exp2_x, &ln2)?;
+            Ok(vec![value_mul(g, &deriv)?])
+        }
         Primitive::Sqrt => {
             let x = &inputs[0];
             let sqrt_x = eval_primitive(Primitive::Sqrt, std::slice::from_ref(x), &BTreeMap::new())
@@ -6343,6 +6351,14 @@ fn jvp_rule(
             let ln2 = scalar_constant_matching_dtype(std::f64::consts::LN_2, &tangents[0]);
             let x_ln2 = ep(Primitive::Mul, &[primals[0].clone(), ln2])?;
             ep(Primitive::Div, &[tangents[0].clone(), x_ln2])
+        }
+
+        Primitive::Exp2 => {
+            // 2^x * ln(2) * dx
+            let exp2_x = ep(Primitive::Exp2, &[primals[0].clone()])?;
+            let ln2 = scalar_constant_matching_dtype(std::f64::consts::LN_2, &tangents[0]);
+            let deriv = ep(Primitive::Mul, &[exp2_x, ln2])?;
+            ep(Primitive::Mul, &[deriv, tangents[0].clone()])
         }
 
         Primitive::Sqrt => {

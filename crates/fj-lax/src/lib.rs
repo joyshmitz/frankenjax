@@ -183,6 +183,7 @@ pub fn eval_primitive(
         Primitive::Exp => eval_exp(primitive, inputs),
         Primitive::Log => eval_log(primitive, inputs),
         Primitive::Log2 => eval_unary_elementwise(primitive, inputs, f64::log2),
+        Primitive::Exp2 => eval_unary_elementwise(primitive, inputs, f64::exp2),
         Primitive::Sqrt => eval_unary_elementwise(primitive, inputs, f64::sqrt),
         Primitive::Rsqrt => eval_unary_elementwise(primitive, inputs, |x| 1.0 / x.sqrt()),
         Primitive::Floor => eval_unary_elementwise(primitive, inputs, f64::floor),
