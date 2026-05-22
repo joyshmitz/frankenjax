@@ -175,6 +175,20 @@ def test_checkpoint():
     print("✓ checkpoint(square) exposes call/grad/value_and_grad")
 
 
+def test_remat_alias():
+    """Test remat alias for checkpoint wrapper."""
+    jaxpr = fj.make_jaxpr_square()
+    rematted = fj.remat(jaxpr)
+    assert rematted.memory_savings_entries() > 0
+
+    values = rematted.call([fj.PyValue.scalar_f64(3.0)])
+    assert abs(values[0].as_f64() - 9.0) < 1e-12
+
+    grads = rematted.grad([fj.PyValue.scalar_f64(3.0)])
+    assert abs(grads[0].as_f64() - 6.0) < 1e-6
+    print("✓ remat(square) aliases checkpoint call/grad behavior")
+
+
 if __name__ == "__main__":
     test_value_scalar()
     test_jit_add()
@@ -188,4 +202,5 @@ if __name__ == "__main__":
     test_pmap_fails_closed()
     test_jacobian_and_hessian()
     test_checkpoint()
+    test_remat_alias()
     print("\n✅ All smoke tests passed!")

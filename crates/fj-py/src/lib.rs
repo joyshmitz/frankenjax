@@ -384,6 +384,11 @@ fn checkpoint(jaxpr: &PyJaxpr) -> PyCheckpoint {
     }
 }
 
+#[pyfunction]
+fn remat(jaxpr: &PyJaxpr) -> PyCheckpoint {
+    checkpoint(jaxpr)
+}
+
 #[pymodule]
 fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyValue>()?;
@@ -407,6 +412,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(jacobian, m)?)?;
     m.add_function(wrap_pyfunction!(hessian, m)?)?;
     m.add_function(wrap_pyfunction!(checkpoint, m)?)?;
+    m.add_function(wrap_pyfunction!(remat, m)?)?;
     Ok(())
 }
 
@@ -462,6 +468,23 @@ mod tests {
             .unwrap();
         assert!((values[0].as_f64().unwrap() - 16.0).abs() < 1e-12);
         assert!((grads[0].as_f64().unwrap() - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn remat_alias_exposes_checkpoint_wrapper() {
+        let jaxpr = make_jaxpr_square();
+        let wrapped = remat(&jaxpr);
+
+        assert_eq!(
+            wrapped.memory_savings_entries(),
+            jaxpr.inner.equations.len()
+        );
+
+        let values = wrapped.call(vec![PyValue::scalar_f64(3.0)]).unwrap();
+        assert!((values[0].as_f64().unwrap() - 9.0).abs() < 1e-12);
+
+        let grads = wrapped.grad(vec![PyValue::scalar_f64(3.0)]).unwrap();
+        assert!((grads[0].as_f64().unwrap() - 6.0).abs() < 1e-9);
     }
 
     #[test]
