@@ -49,6 +49,7 @@ def test_value_scalar():
     assert v.weak_type is False
     assert v.committed is False
     assert v.is_fully_addressable is True
+    assert v.is_fully_replicated is True
     try:
         len(v)
     except TypeError as exc:
@@ -69,6 +70,7 @@ def test_value_scalar():
     assert v2.weak_type is False
     assert v2.committed is False
     assert v2.is_fully_addressable is True
+    assert v2.is_fully_replicated is True
     assert v2.as_i64() == 123
     print("✓ scalar_i64 roundtrip")
 
@@ -83,6 +85,7 @@ def test_value_scalar():
     assert vec.weak_type is False
     assert vec.committed is False
     assert vec.is_fully_addressable is True
+    assert vec.is_fully_replicated is True
     assert len(vec) == 3
     assert vec.as_i64_list() == [1, 2, 3]
     assert vec.as_f64_list() == [1.0, 2.0, 3.0]

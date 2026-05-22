@@ -163,6 +163,11 @@ impl PyValue {
         true
     }
 
+    #[getter]
+    fn is_fully_replicated(&self) -> bool {
+        true
+    }
+
     fn __len__(&self) -> PyResult<usize> {
         let first_dim = self
             .inner
@@ -1507,6 +1512,7 @@ mod tests {
         assert!(!v.weak_type());
         assert!(!v.committed());
         assert!(v.is_fully_addressable());
+        assert!(v.is_fully_replicated());
         assert!(v.__len__().is_err());
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
     }
@@ -1523,6 +1529,7 @@ mod tests {
         assert!(!floats.weak_type());
         assert!(!floats.committed());
         assert!(floats.is_fully_addressable());
+        assert!(floats.is_fully_replicated());
         assert_eq!(floats.__len__().unwrap(), 3);
         assert_eq!(floats.as_f64_list().unwrap(), vec![1.0, 2.5, 4.0]);
         assert_eq!(floats.as_i64_list(), None);
@@ -1537,6 +1544,7 @@ mod tests {
         assert!(!ints.weak_type());
         assert!(!ints.committed());
         assert!(ints.is_fully_addressable());
+        assert!(ints.is_fully_replicated());
         assert_eq!(ints.__len__().unwrap(), 3);
         assert_eq!(ints.as_i64_list().unwrap(), vec![1, 2, 3]);
         assert_eq!(ints.as_f64_list().unwrap(), vec![1.0, 2.0, 3.0]);
