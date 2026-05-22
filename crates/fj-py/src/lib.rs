@@ -162,12 +162,59 @@ impl PyValue {
             return Ok(self.clone());
         };
         let rank = tensor.rank();
+        let permutation = (0..rank).rev().collect::<Vec<_>>();
+        self.transpose_with_permutation(&permutation)
+    }
+
+    fn matrix_transpose(&self) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        let Some(tensor) = self.inner.as_tensor() else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "x must be at least two-dimensional for matrix_transpose; got ndim=0",
+            ));
+        };
+        let rank = tensor.rank();
+        if rank < 2 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "x must be at least two-dimensional for matrix_transpose; got ndim={rank}"
+            )));
+        }
+
+        let mut permutation = (0..rank).collect::<Vec<_>>();
+        permutation.swap(rank - 2, rank - 1);
+        self.transpose_with_permutation(&permutation)
+    }
+
+    fn transpose_with_permutation(&self, permutation: &[usize]) -> PyResult<Self> {
+        let Value::Tensor(tensor) = &self.inner else {
+            if permutation.is_empty() {
+                return Ok(self.clone());
+            }
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "transpose permutation rank does not match scalar array rank",
+            ));
+        };
+        let rank = tensor.rank();
+        if permutation.len() != rank {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "transpose permutation rank does not match array rank",
+            ));
+        }
+        validate_permutation(permutation, rank)?;
+
         if rank <= 1 {
             return Ok(self.clone());
         }
 
-        let mut dims = tensor.shape.dims.clone();
-        dims.reverse();
+        let mut dims = Vec::with_capacity(rank);
+        for axis in permutation {
+            let dim = tensor.shape.dims.get(*axis).copied().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    "transpose dimension index is out of bounds",
+                )
+            })?;
+            dims.push(dim);
+        }
         if tensor.elements.is_empty() {
             let tensor =
                 TensorValue::new(tensor.dtype, Shape { dims }, Vec::new()).map_err(value_error)?;
@@ -188,7 +235,11 @@ impl PyValue {
                 }
                 let coord = remainder / new_stride;
                 remainder %= new_stride;
-                let old_axis = rank - 1 - axis;
+                let old_axis = permutation.get(axis).copied().ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                        "transpose permutation index is out of bounds",
+                    )
+                })?;
                 let old_stride = old_strides.get(old_axis).copied().ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyIndexError, _>(
                         "transpose stride index is out of bounds",
@@ -451,6 +502,11 @@ impl PyValue {
     #[getter(T)]
     fn transpose_property(&self) -> PyResult<Self> {
         self.transpose_all_axes()
+    }
+
+    #[getter(mT)]
+    fn matrix_transpose_property(&self) -> PyResult<Self> {
+        self.matrix_transpose()
     }
 
     #[getter]
@@ -1448,6 +1504,24 @@ fn row_major_strides(dims: &[u32]) -> PyResult<Vec<usize>> {
         })?;
     }
     Ok(strides)
+}
+
+fn validate_permutation(permutation: &[usize], rank: usize) -> PyResult<()> {
+    let mut seen = vec![false; rank];
+    for axis in permutation {
+        let Some(slot) = seen.get_mut(*axis) else {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "transpose permutation axis is out of bounds",
+            ));
+        };
+        if *slot {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "transpose permutation contains a repeated axis",
+            ));
+        }
+        *slot = true;
+    }
+    Ok(())
 }
 
 fn py_object_repr(py: Python<'_>, value: Option<Py<PyAny>>) -> PyResult<String> {
@@ -2608,6 +2682,7 @@ mod tests {
         assert!(deleted.is_ready().is_err());
         assert!(deleted.copy_to_host_async().is_err());
         assert!(deleted.transpose_all_axes().is_err());
+        assert!(deleted.matrix_transpose().is_err());
         assert!(deleted.addressable_data(0).is_err());
         assert!(deleted.addressable_shards().is_err());
         assert!(deleted.global_shards().is_err());
@@ -2771,6 +2846,7 @@ mod tests {
         let ints_t = ints.transpose_all_axes().unwrap();
         assert_eq!(ints_t.shape_dims(), vec![3]);
         assert_eq!(ints_t.as_i64_list().unwrap(), vec![1, 2, 3]);
+        assert!(ints.matrix_transpose().is_err());
         assert_eq!(ints.dtype(), "I64");
         assert_eq!(ints.ndim(), 1);
         assert_eq!(ints.size(), 3);
@@ -2852,6 +2928,9 @@ mod tests {
         let matrix_t = matrix.transpose_all_axes().unwrap();
         assert_eq!(matrix_t.shape_dims(), vec![3, 2]);
         assert_eq!(matrix_t.as_i64_list().unwrap(), vec![1, 4, 2, 5, 3, 6]);
+        let matrix_mt = matrix.matrix_transpose().unwrap();
+        assert_eq!(matrix_mt.shape_dims(), vec![3, 2]);
+        assert_eq!(matrix_mt.as_i64_list().unwrap(), vec![1, 4, 2, 5, 3, 6]);
 
         let one = PyValue::vector_i64(vec![0]).unwrap();
         assert!(!one.__bool__().unwrap());

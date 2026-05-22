@@ -176,6 +176,8 @@ def test_value_scalar():
         ("item", deleted.item),
         ("indexing", lambda: deleted[0]),
         ("item assignment", lambda: assign_first(deleted)),
+        ("T", lambda: deleted.T),
+        ("mT", lambda: deleted.mT),
         ("array protocol", lambda: np.asarray(deleted)),
         ("DLPack device protocol", deleted.__dlpack_device__),
         ("addressable_shards", lambda: deleted.addressable_shards),
@@ -263,6 +265,12 @@ def test_value_scalar():
     vec_t = vec.T
     assert vec_t.shape == (3,)
     assert vec_t.tolist() == [1, 2, 3]
+    try:
+        vec.mT
+    except ValueError as exc:
+        assert "two-dimensional" in str(exc)
+    else:
+        raise AssertionError("Array.mT should reject vectors")
     assert vec.item(0) == 1
     assert vec.item(-1) == 3
     try:
@@ -380,6 +388,9 @@ def test_make_jaxpr_generic():
     matrix_t = matrix.T
     assert matrix_t.shape == (3, 2)
     assert matrix_t.tolist() == [1, 4, 2, 5, 3, 6]
+    matrix_mt = matrix.mT
+    assert matrix_mt.shape == (3, 2)
+    assert matrix_mt.tolist() == [1, 4, 2, 5, 3, 6]
 
     try:
         fj.make_jaxpr("missing_program")
