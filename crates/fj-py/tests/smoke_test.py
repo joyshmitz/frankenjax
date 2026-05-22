@@ -89,6 +89,12 @@ def test_value_scalar():
         assert "integer scalar arrays" in str(exc)
     else:
         raise AssertionError("operator.index(float scalar) should raise TypeError")
+    try:
+        v.__hex__()
+    except TypeError as exc:
+        assert "integer scalar arrays" in str(exc)
+    else:
+        raise AssertionError("__hex__(float scalar) should raise TypeError")
     assert abs(v.as_f64() - 42.0) < 1e-12
     print("✓ scalar_f64 roundtrip")
 
@@ -107,6 +113,8 @@ def test_value_scalar():
     assert int(v2) == 123
     assert complex(v2) == complex(123.0, 0.0)
     assert operator.index(v2) == 123
+    assert v2.__hex__() == "0x7b"
+    assert v2.__oct__() == "0o173"
     assert bool(v2) is True
     assert bool(fj.PyValue.scalar_i64(0)) is False
     assert v2.as_i64() == 123

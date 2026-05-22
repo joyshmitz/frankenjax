@@ -427,6 +427,22 @@ impl PyValue {
         }
     }
 
+    fn __hex__(&self, py: Python<'_>) -> PyResult<String> {
+        let value = self.__index__(py)?;
+        py.import("builtins")?
+            .getattr("hex")?
+            .call1((value.bind(py),))?
+            .extract()
+    }
+
+    fn __oct__(&self, py: Python<'_>) -> PyResult<String> {
+        let value = self.__index__(py)?;
+        py.import("builtins")?
+            .getattr("oct")?
+            .call1((value.bind(py),))?
+            .extract()
+    }
+
     fn as_f64_list(&self) -> Option<Vec<f64>> {
         match &self.inner {
             Value::Scalar(_) => self.inner.as_f64_scalar().map(|value| vec![value]),
@@ -2000,6 +2016,10 @@ mod tests {
         Python::with_gil(|py| {
             let value = i.__index__(py).unwrap();
             assert_eq!(value.bind(py).extract::<i64>().unwrap(), 123);
+            assert_eq!(i.__hex__(py).unwrap(), "0x7b");
+            assert_eq!(i.__oct__(py).unwrap(), "0o173");
+            assert!(v.__hex__(py).is_err());
+            assert!(v.__oct__(py).is_err());
         });
     }
 
