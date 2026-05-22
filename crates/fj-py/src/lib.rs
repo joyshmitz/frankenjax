@@ -776,6 +776,20 @@ impl PyValue {
         cast_value_to_dtype(&self.inner, dtype).map(Self::from_value)
     }
 
+    #[pyo3(signature = (*args, order = "C", out_sharding = None))]
+    fn reshape(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        order: &str,
+        out_sharding: Option<Py<PyAny>>,
+    ) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        validate_reshape_out_sharding(py, out_sharding)?;
+        let raw_shape = reshape_shape_from_py_args(args)?;
+        reshape_value(&self.inner, &raw_shape, order).map(Self::from_value)
+    }
+
     #[pyo3(signature = (decimals = 0, out = None))]
     fn round(&self, decimals: i32, out: Option<Py<PyAny>>) -> PyResult<Self> {
         self.ensure_not_deleted()?;
@@ -1760,6 +1774,326 @@ fn normalize_axis(axis: isize, rank: usize) -> PyResult<usize> {
     usize::try_from(normalized).map_err(|_| {
         PyErr::new::<pyo3::exceptions::PyOverflowError, _>("normalized axis does not fit usize")
     })
+}
+
+fn reshape_shape_from_py_args(args: &Bound<'_, PyTuple>) -> PyResult<Vec<i64>> {
+    match args.len() {
+        0 => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "reshape() missing required shape argument",
+        )),
+        1 => {
+            let shape = args.get_item(0)?;
+            extract_reshape_shape(&shape)
+        }
+        len => {
+            let mut dims = Vec::with_capacity(len);
+            for index in 0..len {
+                dims.push(args.get_item(index)?.extract::<i64>().map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "reshape dimensions must be integers",
+                    )
+                })?);
+            }
+            Ok(dims)
+        }
+    }
+}
+
+fn extract_reshape_shape(shape: &Bound<'_, PyAny>) -> PyResult<Vec<i64>> {
+    if let Ok(dim) = shape.extract::<i64>() {
+        return Ok(vec![dim]);
+    }
+    shape.extract::<Vec<i64>>().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "reshape shape must be an integer or a sequence of integers",
+        )
+    })
+}
+
+fn validate_reshape_out_sharding(py: Python<'_>, out_sharding: Option<Py<PyAny>>) -> PyResult<()> {
+    let Some(out_sharding) = out_sharding else {
+        return Ok(());
+    };
+    if out_sharding.bind(py).is_none() {
+        Ok(())
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "Array.reshape out_sharding is not supported by the CPU-local fj-py backend",
+        ))
+    }
+}
+
+fn reshape_value(value: &Value, raw_shape: &[i64], order: &str) -> PyResult<Value> {
+    let element_count = value_element_count(value)?;
+    let dims = resolve_reshape_dims(raw_shape, element_count)?;
+
+    match order {
+        "C" => reshape_value_with_order(value, dims, ReshapeOrder::C),
+        "F" => reshape_value_with_order(value, dims, ReshapeOrder::F),
+        "A" => Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "np.reshape order=A is not implemented.",
+        )),
+        _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Unexpected value for 'order' argument: {order}."
+        ))),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReshapeOrder {
+    C,
+    F,
+}
+
+fn reshape_value_with_order(value: &Value, dims: Vec<u32>, order: ReshapeOrder) -> PyResult<Value> {
+    let dtype = value.dtype();
+    let elements = match value {
+        Value::Scalar(literal) => vec![*literal],
+        Value::Tensor(tensor) => match order {
+            ReshapeOrder::C => tensor.elements.clone(),
+            ReshapeOrder::F => {
+                fortran_reshape_elements(&tensor.elements, &tensor.shape.dims, &dims)?
+            }
+        },
+    };
+
+    if dims.is_empty() {
+        let literal = elements.first().copied().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot reshape empty array into scalar shape",
+            )
+        })?;
+        return Ok(Value::Scalar(literal));
+    }
+
+    TensorValue::new(dtype, Shape { dims }, elements)
+        .map(Value::Tensor)
+        .map_err(value_error)
+}
+
+fn value_element_count(value: &Value) -> PyResult<u64> {
+    match value {
+        Value::Scalar(_) => Ok(1),
+        Value::Tensor(tensor) => u64::try_from(tensor.elements.len()).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "array element count does not fit u64",
+            )
+        }),
+    }
+}
+
+fn resolve_reshape_dims(raw_shape: &[i64], element_count: u64) -> PyResult<Vec<u32>> {
+    let mut dims = Vec::with_capacity(raw_shape.len());
+    let mut inferred_axis = None;
+    let mut known_product = 1_u64;
+
+    for (axis, dim) in raw_shape.iter().copied().enumerate() {
+        if dim == -1 {
+            if inferred_axis.is_some() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "can only specify one unknown axis size with -1",
+                ));
+            }
+            inferred_axis = Some(axis);
+            dims.push(0);
+        } else if dim < -1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "negative dimensions are not allowed",
+            ));
+        } else {
+            let dim = u64::try_from(dim).map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                    "reshape dimension does not fit u64",
+                )
+            })?;
+            known_product = known_product.checked_mul(dim).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                    "reshape dimension product overflowed",
+                )
+            })?;
+            dims.push(u32::try_from(dim).map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                    "reshape dimension does not fit u32",
+                )
+            })?);
+        }
+    }
+
+    if let Some(axis) = inferred_axis {
+        if known_product == 0 || !element_count.is_multiple_of(known_product) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "cannot infer reshape dimension for size {element_count} and shape {raw_shape:?}"
+            )));
+        }
+        let inferred = element_count / known_product;
+        let inferred = u32::try_from(inferred).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "inferred reshape dimension does not fit u32",
+            )
+        })?;
+        let slot = dims.get_mut(axis).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "inferred reshape axis is out of bounds",
+            )
+        })?;
+        *slot = inferred;
+    } else if known_product != element_count {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "cannot reshape array of size {element_count} into shape {raw_shape:?}"
+        )));
+    }
+
+    Ok(dims)
+}
+
+fn fortran_reshape_elements(
+    elements: &[Literal],
+    old_dims: &[u32],
+    new_dims: &[u32],
+) -> PyResult<Vec<Literal>> {
+    if elements.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut output = Vec::with_capacity(elements.len());
+    for row_major_index in 0..elements.len() {
+        let new_coord = unravel_row_major(row_major_index, new_dims)?;
+        let fortran_position = column_major_flat_index(&new_coord, new_dims)?;
+        let old_coord = unravel_column_major(fortran_position, old_dims)?;
+        let old_row_major_index = row_major_flat_index(&old_coord, old_dims)?;
+        let literal = elements.get(old_row_major_index).copied().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "reshape computed an out-of-bounds source index",
+            )
+        })?;
+        output.push(literal);
+    }
+    Ok(output)
+}
+
+fn unravel_row_major(mut index: usize, dims: &[u32]) -> PyResult<Vec<usize>> {
+    if dims.is_empty() {
+        if index == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+            "scalar row-major index is out of bounds",
+        ));
+    }
+
+    let strides = row_major_strides(dims)?;
+    let mut coord = Vec::with_capacity(dims.len());
+    for (dim, stride) in dims.iter().zip(strides) {
+        let dim = usize::try_from(*dim).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array dimension does not fit usize")
+        })?;
+        if dim == 0 || stride == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "cannot unravel index for an empty reshape dimension",
+            ));
+        }
+        let axis_coord = index / stride;
+        if axis_coord >= dim {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "row-major reshape coordinate is out of bounds",
+            ));
+        }
+        coord.push(axis_coord);
+        index %= stride;
+    }
+    Ok(coord)
+}
+
+fn row_major_flat_index(coord: &[usize], dims: &[u32]) -> PyResult<usize> {
+    if coord.len() != dims.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "reshape coordinate rank does not match shape rank",
+        ));
+    }
+
+    let strides = row_major_strides(dims)?;
+    let mut index = 0_usize;
+    for ((axis_coord, dim), stride) in coord.iter().zip(dims).zip(strides) {
+        let dim = usize::try_from(*dim).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array dimension does not fit usize")
+        })?;
+        if *axis_coord >= dim {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "reshape coordinate is out of bounds",
+            ));
+        }
+        let offset = axis_coord.checked_mul(stride).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "reshape index computation overflowed",
+            )
+        })?;
+        index = index.checked_add(offset).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "reshape index computation overflowed",
+            )
+        })?;
+    }
+    Ok(index)
+}
+
+fn column_major_flat_index(coord: &[usize], dims: &[u32]) -> PyResult<usize> {
+    if coord.len() != dims.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "reshape coordinate rank does not match shape rank",
+        ));
+    }
+
+    let mut index = 0_usize;
+    let mut stride = 1_usize;
+    for (axis_coord, dim) in coord.iter().zip(dims) {
+        let dim = usize::try_from(*dim).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array dimension does not fit usize")
+        })?;
+        if *axis_coord >= dim {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "reshape coordinate is out of bounds",
+            ));
+        }
+        let offset = axis_coord.checked_mul(stride).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "reshape index computation overflowed",
+            )
+        })?;
+        index = index.checked_add(offset).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "reshape index computation overflowed",
+            )
+        })?;
+        stride = stride.checked_mul(dim).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "reshape stride computation overflowed",
+            )
+        })?;
+    }
+    Ok(index)
+}
+
+fn unravel_column_major(mut index: usize, dims: &[u32]) -> PyResult<Vec<usize>> {
+    let mut coord = Vec::with_capacity(dims.len());
+    for dim in dims {
+        let dim = usize::try_from(*dim).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array dimension does not fit usize")
+        })?;
+        if dim == 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "cannot unravel index for an empty reshape dimension",
+            ));
+        }
+        coord.push(index % dim);
+        index /= dim;
+    }
+    if index == 0 {
+        Ok(coord)
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+            "column-major reshape index is out of bounds",
+        ))
+    }
 }
 
 fn value_real_part(value: &Value) -> PyResult<Value> {
@@ -3339,6 +3673,7 @@ mod tests {
             assert!(deleted.tobytes(py, "C").is_err());
             assert!(deleted.transpose(&PyTuple::empty(py)).is_err());
             assert!(deleted.astype(py, None, false, None).is_err());
+            assert!(deleted.reshape(py, &PyTuple::empty(py), "C", None).is_err());
             assert!(deleted.__array__(py, None, None, None).is_err());
             assert!(deleted.__dlpack_device__(py).is_err());
             assert_eq!(
@@ -3376,11 +3711,31 @@ mod tests {
             assert!(
                 (v.astype(py, None, false, None).unwrap().as_f64().unwrap() - 42.0).abs() < 1e-12
             );
+            let scalar_shape = PyTuple::empty(py);
+            let scalar_args = PyTuple::new(py, [scalar_shape]).unwrap();
+            assert!(
+                (v.reshape(py, &scalar_args, "C", None)
+                    .unwrap()
+                    .as_f64()
+                    .unwrap()
+                    - 42.0)
+                    .abs()
+                    < 1e-12
+            );
+            let vector_args = PyTuple::new(py, [1_i64]).unwrap();
+            let vector = v.reshape(py, &vector_args, "C", None).unwrap();
+            assert_eq!(vector.shape_dims(), vec![1]);
+            assert_eq!(vector.as_f64_list().unwrap(), vec![42.0]);
             let bad_device = pyo3::types::PyString::new(py, "gpu")
                 .to_owned()
                 .into_any()
                 .unbind();
             assert!(v.astype(py, None, false, Some(bad_device)).is_err());
+            let out_sharding = PyBool::new(py, true).to_owned().into_any().unbind();
+            assert!(
+                v.reshape(py, &vector_args, "C", Some(out_sharding))
+                    .is_err()
+            );
             if py.import("numpy").is_ok() {
                 let array = v.__array__(py, None, None, None).unwrap();
                 let array = array.bind(py);
@@ -3609,6 +3964,14 @@ mod tests {
                     .unwrap(),
                 vec![1.0, 2.0, 3.0]
             );
+            let reshape_args = PyTuple::new(py, [3_i64, 1_i64]).unwrap();
+            let reshaped = ints.reshape(py, &reshape_args, "C", None).unwrap();
+            assert_eq!(reshaped.shape_dims(), vec![3, 1]);
+            assert_eq!(reshaped.as_i64_list().unwrap(), vec![1, 2, 3]);
+            let inferred_args = PyTuple::new(py, [-1_i64]).unwrap();
+            let inferred = ints.reshape(py, &inferred_args, "C", None).unwrap();
+            assert_eq!(inferred.shape_dims(), vec![3]);
+            assert_eq!(inferred.as_i64_list().unwrap(), vec![1, 2, 3]);
             let shards = ints.addressable_shards().unwrap();
             assert_eq!(shards.len(), 1);
             let shard = shards.first().unwrap();
@@ -3719,6 +4082,22 @@ mod tests {
             assert!(matrix.transpose(&duplicate_args).is_err());
             let short_args = PyTuple::new(py, [0_isize]).unwrap();
             assert!(matrix.transpose(&short_args).is_err());
+
+            let flat_args = PyTuple::new(py, [6_i64]).unwrap();
+            let flat = matrix.reshape(py, &flat_args, "C", None).unwrap();
+            assert_eq!(flat.shape_dims(), vec![6]);
+            assert_eq!(flat.as_i64_list().unwrap(), vec![1, 2, 3, 4, 5, 6]);
+            let f_shape = PyTuple::new(py, [3_i64, 2_i64]).unwrap();
+            let f_args = PyTuple::new(py, [f_shape]).unwrap();
+            let fortran = matrix.reshape(py, &f_args, "F", None).unwrap();
+            assert_eq!(fortran.shape_dims(), vec![3, 2]);
+            assert_eq!(fortran.as_i64_list().unwrap(), vec![1, 5, 4, 3, 2, 6]);
+            assert!(matrix.reshape(py, &f_args, "A", None).is_err());
+            assert!(matrix.reshape(py, &f_args, "K", None).is_err());
+            let incompatible = PyTuple::new(py, [4_i64]).unwrap();
+            assert!(matrix.reshape(py, &incompatible, "C", None).is_err());
+            let repeated_infer = PyTuple::new(py, [-1_i64, -1_i64]).unwrap();
+            assert!(matrix.reshape(py, &repeated_infer, "C", None).is_err());
         });
 
         let one = PyValue::vector_i64(vec![0]).unwrap();
