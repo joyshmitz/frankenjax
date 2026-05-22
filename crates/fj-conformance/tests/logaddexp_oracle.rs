@@ -260,6 +260,138 @@ fn oracle_logaddexp_matrix() {
 
 // ======================== Broadcasting ========================
 
+fn scalar_f64(v: f64) -> Value {
+    Value::Scalar(Literal::from_f64(v))
+}
+
+#[test]
+fn oracle_logaddexp_scalar_x_tensor_y_broadcast() {
+    // scalar x with tensor y
+    let x = scalar_f64(1.0);
+    let y = make_f64_tensor(&[4], vec![0.0, 1.0, 2.0, 10.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    let vals = extract_f64_vec(&result);
+    for (i, &y_val) in [0.0, 1.0, 2.0, 10.0].iter().enumerate() {
+        let expected = expected_logaddexp(1.0, y_val);
+        assert!(
+            (vals[i] - expected).abs() < 1e-14,
+            "scalar x broadcast element {i}: {} vs {}",
+            vals[i],
+            expected
+        );
+    }
+}
+
+#[test]
+fn oracle_logaddexp_tensor_x_scalar_y_broadcast() {
+    // tensor x with scalar y
+    let x = make_f64_tensor(&[4], vec![0.0, 1.0, 2.0, 10.0]);
+    let y = scalar_f64(1.0);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    let vals = extract_f64_vec(&result);
+    for (i, &x_val) in [0.0, 1.0, 2.0, 10.0].iter().enumerate() {
+        let expected = expected_logaddexp(x_val, 1.0);
+        assert!(
+            (vals[i] - expected).abs() < 1e-14,
+            "tensor x broadcast element {i}: {} vs {}",
+            vals[i],
+            expected
+        );
+    }
+}
+
+#[test]
+fn oracle_logaddexp_singleton_x_vector_y_broadcast() {
+    // [1] x with [3] y -> [3]
+    let x = make_f64_tensor(&[1], vec![1.0]);
+    let y = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    for (i, &y_val) in [0.0, 1.0, 2.0].iter().enumerate() {
+        let expected = expected_logaddexp(1.0, y_val);
+        assert!((vals[i] - expected).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn oracle_logaddexp_vector_x_singleton_y_broadcast() {
+    // [3] x with [1] y -> [3]
+    let x = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let y = make_f64_tensor(&[1], vec![1.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    for (i, &x_val) in [0.0, 1.0, 2.0].iter().enumerate() {
+        let expected = expected_logaddexp(x_val, 1.0);
+        assert!((vals[i] - expected).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn oracle_logaddexp_column_x_matrix_y_broadcast() {
+    // [2, 1] x with [2, 3] y -> [2, 3]
+    let x = make_f64_tensor(&[2, 1], vec![0.0, 10.0]);
+    let y = make_f64_tensor(&[2, 3], vec![0.0, 1.0, 2.0, 0.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_f64_vec(&result);
+    // Row 0: x=0 with y=0,1,2
+    assert!((vals[0] - expected_logaddexp(0.0, 0.0)).abs() < 1e-14);
+    assert!((vals[1] - expected_logaddexp(0.0, 1.0)).abs() < 1e-14);
+    assert!((vals[2] - expected_logaddexp(0.0, 2.0)).abs() < 1e-14);
+    // Row 1: x=10 with y=0,1,2
+    assert!((vals[3] - expected_logaddexp(10.0, 0.0)).abs() < 1e-14);
+    assert!((vals[4] - expected_logaddexp(10.0, 1.0)).abs() < 1e-14);
+    assert!((vals[5] - expected_logaddexp(10.0, 2.0)).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_logaddexp_different_ranks_broadcast() {
+    // [3] x with [2, 3] y -> [2, 3]
+    let x = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let y = make_f64_tensor(&[2, 3], vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_f64_vec(&result);
+    // Row 0: x=[0,1,2] with y=0
+    assert!((vals[0] - expected_logaddexp(0.0, 0.0)).abs() < 1e-14);
+    assert!((vals[1] - expected_logaddexp(1.0, 0.0)).abs() < 1e-14);
+    assert!((vals[2] - expected_logaddexp(2.0, 0.0)).abs() < 1e-14);
+    // Row 1: x=[0,1,2] with y=10
+    assert!((vals[3] - expected_logaddexp(0.0, 10.0)).abs() < 1e-14);
+    assert!((vals[4] - expected_logaddexp(1.0, 10.0)).abs() < 1e-14);
+    assert!((vals[5] - expected_logaddexp(2.0, 10.0)).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_logaddexp_all_scalars_broadcast() {
+    // scalar logaddexp scalar -> scalar
+    let x = scalar_f64(1.0);
+    let y = scalar_f64(2.0);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+    let val = extract_f64_scalar(&result);
+    let expected = expected_logaddexp(1.0, 2.0);
+    assert!((val - expected).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_logaddexp_incompatible_shapes_error() {
+    // [2] logaddexp [3] should error
+    let x = make_f64_tensor(&[2], vec![0.0, 1.0]);
+    let y = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
+}
+
 #[test]
 fn oracle_logaddexp_vector_scalar_y_broadcast() {
     let x_values = [0.0, 1.0, 2.0];
