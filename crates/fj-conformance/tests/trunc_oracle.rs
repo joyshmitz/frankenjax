@@ -270,3 +270,46 @@ fn oracle_trunc_preserves_dtype() {
         _ => panic!("expected tensor"),
     }
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_trunc_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Trunc, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_trunc_4d_shape() {
+    let input = make_f64_tensor(&[2, 2, 2, 2], vec![
+        1.1, -1.1, 2.2, -2.2, 3.3, -3.3, 4.4, -4.4,
+        5.5, -5.5, 6.6, -6.6, 7.7, -7.7, 8.8, -8.8,
+    ]);
+    let result = eval_primitive(Primitive::Trunc, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 1.0);
+    assert_eq!(vals[1], -1.0);
+    assert_eq!(vals[15], -8.0);
+}
+
+#[test]
+fn oracle_trunc_subnormal() {
+    let subnormal = f64::MIN_POSITIVE / 2.0;
+    let input = make_f64_tensor(&[], vec![subnormal]);
+    let result = eval_primitive(Primitive::Trunc, &[input], &no_params()).unwrap();
+    assert_eq!(extract_f64_scalar(&result), 0.0, "trunc(subnormal) = 0");
+}
+
+#[test]
+fn oracle_trunc_subnormal_negative() {
+    let subnormal = -(f64::MIN_POSITIVE / 2.0);
+    let input = make_f64_tensor(&[], vec![subnormal]);
+    let result = eval_primitive(Primitive::Trunc, &[input], &no_params()).unwrap();
+    let val = extract_f64_scalar(&result);
+    assert_eq!(val, 0.0, "trunc(-subnormal) = 0");
+    assert_eq!(val.to_bits(), (-0.0_f64).to_bits(), "trunc(-subnormal) = -0.0");
+}

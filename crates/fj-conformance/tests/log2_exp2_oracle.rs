@@ -268,3 +268,87 @@ fn oracle_exp2_matrix() {
     assert_eq!(extract_shape(&result), vec![2, 2]);
     assert_eq!(extract_f64_vec(&result), vec![1.0, 2.0, 4.0, 16.0]);
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_log2_3d_shape() {
+    let input = make_f64_tensor(&[2, 2, 2], vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]);
+    let result = eval_primitive(Primitive::Log2, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 0.0);
+    assert_eq!(vals[7], 7.0);
+}
+
+#[test]
+fn oracle_exp2_3d_shape() {
+    let input = make_f64_tensor(&[2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    let result = eval_primitive(Primitive::Exp2, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 1.0);
+    assert_eq!(vals[7], 128.0);
+}
+
+#[test]
+fn oracle_log2_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Log2, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert!(extract_f64_vec(&result).is_empty());
+}
+
+#[test]
+fn oracle_exp2_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Exp2, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert!(extract_f64_vec(&result).is_empty());
+}
+
+#[test]
+fn oracle_log2_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Log2, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_exp2_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Exp2, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_log2_preserves_dtype() {
+    let input = make_f64_tensor(&[3], vec![1.0, 2.0, 4.0]);
+    let result = eval_primitive(Primitive::Log2, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_exp2_preserves_dtype() {
+    let input = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::Exp2, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_log2_neg_zero() {
+    let input = make_f64_tensor(&[], vec![-0.0]);
+    let result = eval_primitive(Primitive::Log2, &[input], &no_params()).unwrap();
+    assert_eq!(extract_f64_scalar(&result), f64::NEG_INFINITY, "log2(-0) = -inf");
+}
+
+#[test]
+fn oracle_exp2_neg_zero() {
+    let input = make_f64_tensor(&[], vec![-0.0]);
+    let result = eval_primitive(Primitive::Exp2, &[input], &no_params()).unwrap();
+    assert_eq!(extract_f64_scalar(&result), 1.0, "exp2(-0) = 1");
+}
