@@ -257,3 +257,29 @@ fn oracle_topk_rejects_0d_tensor() {
         "unexpected 0-d tensor error: {err}",
     );
 }
+
+#[test]
+fn oracle_topk_3d_batched() {
+    // [2, 2, 3] -> top 2 per innermost axis
+    let input = make_f64_tensor(
+        &[2, 2, 3],
+        vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0, 5.0, 8.0],
+    );
+    let result = eval_primitive(Primitive::TopK, &[input], &topk_params(2)).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+}
+
+#[test]
+fn oracle_topk_single_element() {
+    let input = make_f64_tensor(&[1], vec![42.0]);
+    let result = eval_primitive(Primitive::TopK, &[input], &topk_params(1)).unwrap();
+    assert_eq!(extract_shape(&result), vec![1]);
+    assert_eq!(extract_f64_vec(&result), vec![42.0]);
+}
+
+#[test]
+fn oracle_topk_already_sorted_descending() {
+    let input = make_f64_tensor(&[5], vec![5.0, 4.0, 3.0, 2.0, 1.0]);
+    let result = eval_primitive(Primitive::TopK, &[input], &topk_params(3)).unwrap();
+    assert_eq!(extract_f64_vec(&result), vec![5.0, 4.0, 3.0]);
+}

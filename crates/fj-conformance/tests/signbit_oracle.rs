@@ -196,3 +196,29 @@ fn oracle_signbit_output_dtype() {
         assert_eq!(t.dtype, DType::Bool, "signbit output dtype should be Bool");
     }
 }
+
+#[test]
+fn oracle_signbit_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Signbit, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(extract_bool_vec(&result), vec![] as Vec<bool>);
+}
+
+#[test]
+fn oracle_signbit_3d() {
+    let input = make_f64_tensor(&[2, 1, 2], vec![1.0, -1.0, -0.0, 0.0]);
+    let result = eval_primitive(Primitive::Signbit, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 1, 2]);
+    assert_eq!(extract_bool_vec(&result), vec![false, true, true, false]);
+}
+
+#[test]
+fn oracle_signbit_subnormal() {
+    // Subnormal positive and negative values
+    let tiny_pos = f64::MIN_POSITIVE / 2.0;
+    let tiny_neg = -f64::MIN_POSITIVE / 2.0;
+    let input = make_f64_tensor(&[2], vec![tiny_pos, tiny_neg]);
+    let result = eval_primitive(Primitive::Signbit, &[input], &no_params()).unwrap();
+    assert_eq!(extract_bool_vec(&result), vec![false, true]);
+}

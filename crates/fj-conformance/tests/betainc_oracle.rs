@@ -297,3 +297,34 @@ fn oracle_betainc_scalar_params_vector_x_broadcast() {
         );
     }
 }
+
+#[test]
+fn oracle_betainc_preserves_dtype() {
+    let a = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let b = make_f64_tensor(&[2], vec![1.0, 2.0]);
+    let x = make_f64_tensor(&[2], vec![0.5, 0.5]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::F64),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_betainc_empty_tensor() {
+    let a = make_f64_tensor(&[0], vec![]);
+    let b = make_f64_tensor(&[0], vec![]);
+    let x = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(extract_f64_vec(&result), vec![] as Vec<f64>);
+}
+
+#[test]
+fn oracle_betainc_nan_propagates() {
+    let a = make_f64_tensor(&[], vec![f64::NAN]);
+    let b = make_f64_tensor(&[], vec![2.0]);
+    let x = make_f64_tensor(&[], vec![0.5]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    assert!(extract_f64_scalar(&result).is_nan(), "NaN should propagate");
+}
