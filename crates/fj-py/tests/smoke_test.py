@@ -96,6 +96,16 @@ def test_vjp_square():
     print("✓ vjp(square)(3.0)(1.0) = (9.0, 6.0)")
 
 
+def test_linear_transpose_square():
+    """Test linear_transpose returns a callable cotangent pullback."""
+    jaxpr = fj.make_jaxpr_square()
+    transpose = fj.linear_transpose(jaxpr, [fj.PyValue.scalar_f64(3.0)])
+    grads = transpose([fj.PyValue.scalar_f64(1.0)])
+    assert len(grads) == 1
+    assert abs(grads[0].as_f64() - 6.0) < 1e-6
+    print("✓ linear_transpose(square)(3.0)(1.0) = 6.0")
+
+
 def test_linearize_square():
     """Test reusable linearized JVP of x^2."""
     jaxpr = fj.make_jaxpr_square()
@@ -743,6 +753,7 @@ if __name__ == "__main__":
     test_grad_square()
     test_jvp_square()
     test_vjp_square()
+    test_linear_transpose_square()
     test_linearize_square()
     test_eval_shape()
     test_typeof()

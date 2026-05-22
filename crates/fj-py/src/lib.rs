@@ -501,6 +501,14 @@ fn vjp(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyVjpPull
 }
 
 #[pyfunction]
+fn linear_transpose(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyVjpPullback {
+    PyVjpPullback {
+        jaxpr: jaxpr.inner.clone(),
+        primals: py_values_to_rust(args),
+    }
+}
+
+#[pyfunction]
 fn linearize(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyLinearizedJvp)> {
     let rust_args = py_values_to_rust(args);
     fj_api::jit(jaxpr.inner.clone())
@@ -1084,6 +1092,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(grad, m)?)?;
     m.add_function(wrap_pyfunction!(jvp, m)?)?;
     m.add_function(wrap_pyfunction!(vjp, m)?)?;
+    m.add_function(wrap_pyfunction!(linear_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(linearize, m)?)?;
     m.add_function(wrap_pyfunction!(eval_shape, m)?)?;
     m.add_function(wrap_pyfunction!(typeof_value, m)?)?;
@@ -1258,6 +1267,16 @@ mod tests {
         let (values, pullback) = vjp(&jaxpr, vec![PyValue::scalar_f64(3.0)]).unwrap();
         assert_eq!(values.len(), 1);
         assert!((values[0].as_f64().unwrap() - 9.0).abs() < 1e-12);
+
+        let grads = pullback.call(vec![PyValue::scalar_f64(1.0)]).unwrap();
+        assert_eq!(grads.len(), 1);
+        assert!((grads[0].as_f64().unwrap() - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn linear_transpose_returns_callable_pullback() {
+        let jaxpr = make_jaxpr_square();
+        let pullback = linear_transpose(&jaxpr, vec![PyValue::scalar_f64(3.0)]);
 
         let grads = pullback.call(vec![PyValue::scalar_f64(1.0)]).unwrap();
         assert_eq!(grads.len(), 1);
