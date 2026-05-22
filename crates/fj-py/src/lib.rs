@@ -2,7 +2,7 @@
 
 use pyo3::class::basic::CompareOp;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyList};
+use pyo3::types::{PyBool, PyFrozenSet, PyList, PySet};
 
 use fj_core::{DType, Jaxpr, Literal, ProgramSpec, Value, build_program};
 
@@ -49,12 +49,30 @@ struct PyForwardPass {
 struct PyBackwardPass;
 
 #[pyclass(name = "ShapeDtypeStruct")]
-#[derive(Clone)]
 struct PyShapeDtypeStruct {
     shape: Vec<u32>,
     dtype: String,
     weak_type: bool,
     is_ref: bool,
+    vma: Option<Py<PyAny>>,
+    vma_hash: isize,
+    vma_len: usize,
+    vma_repr: Option<String>,
+}
+
+impl Clone for PyShapeDtypeStruct {
+    fn clone(&self) -> Self {
+        Self {
+            shape: self.shape.clone(),
+            dtype: self.dtype.clone(),
+            weak_type: self.weak_type,
+            is_ref: self.is_ref,
+            vma: self.clone_vma(),
+            vma_hash: self.vma_hash,
+            vma_len: self.vma_len,
+            vma_repr: self.vma_repr.clone(),
+        }
+    }
 }
 
 impl PyShapeDtypeStruct {
@@ -68,21 +86,48 @@ impl PyShapeDtypeStruct {
         }
     }
 
-    fn require_vma_none(vma: Option<Py<PyAny>>) -> PyResult<()> {
-        if vma.is_some() {
-            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "ShapeDtypeStruct vma is not supported by fj-py yet",
-            ))
-        } else {
-            Ok(())
-        }
+    fn normalize_vma(
+        vma: Option<Py<PyAny>>,
+    ) -> PyResult<(Option<Py<PyAny>>, isize, usize, Option<String>)> {
+        let Some(vma) = vma else {
+            return Ok((None, 0, 0, None));
+        };
+
+        Python::with_gil(|py| {
+            let vma = vma.bind(py);
+            if !vma.is_instance_of::<PySet>() && !vma.is_instance_of::<PyFrozenSet>() {
+                let type_repr: String = vma.get_type().repr()?.extract()?;
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "`vma` argument passed to ShapeDtypeStruct should be of type `set` or `frozenset`. Got type {type_repr}"
+                )));
+            }
+
+            let frozen = py.import("builtins")?.getattr("frozenset")?.call1((vma,))?;
+            let vma_hash = frozen.hash()?;
+            let vma_len = frozen.len()?;
+            let vma_repr = frozen.repr()?.extract()?;
+            Ok((Some(frozen.unbind()), vma_hash, vma_len, Some(vma_repr)))
+        })
     }
 
-    fn same_metadata(&self, other: &Self) -> bool {
-        self.shape == other.shape
+    fn clone_vma(&self) -> Option<Py<PyAny>> {
+        Python::with_gil(|py| self.vma.as_ref().map(|vma| vma.clone_ref(py)))
+    }
+
+    fn same_metadata(&self, other: &Self) -> PyResult<bool> {
+        let static_metadata_matches = self.shape == other.shape
             && self.dtype == other.dtype
             && self.weak_type == other.weak_type
-            && self.is_ref == other.is_ref
+            && self.is_ref == other.is_ref;
+        if !static_metadata_matches {
+            return Ok(false);
+        }
+
+        Python::with_gil(|py| match (&self.vma, &other.vma) {
+            (None, None) => Ok(true),
+            (Some(left), Some(right)) => left.bind(py).eq(right.bind(py)),
+            _ => Ok(false),
+        })
     }
 
     fn metadata_hash(&self) -> u64 {
@@ -97,6 +142,16 @@ impl PyShapeDtypeStruct {
         }
         for flag in [self.weak_type, self.is_ref] {
             hash ^= u64::from(flag);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        hash ^= u64::from(self.vma.is_some());
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        for byte in self.vma_hash.to_ne_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        for byte in self.vma_len.to_ne_bytes() {
+            hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
         }
         hash
@@ -497,12 +552,16 @@ impl PyShapeDtypeStruct {
         is_ref: bool,
     ) -> PyResult<Self> {
         Self::require_sharding_none(sharding)?;
-        Self::require_vma_none(vma)?;
+        let (vma, vma_hash, vma_len, vma_repr) = Self::normalize_vma(vma)?;
         Ok(Self {
             shape,
             dtype,
             weak_type,
             is_ref,
+            vma,
+            vma_hash,
+            vma_len,
+            vma_repr,
         })
     }
 
@@ -523,7 +582,7 @@ impl PyShapeDtypeStruct {
 
     #[getter]
     fn vma(&self) -> Option<Py<PyAny>> {
-        None
+        self.clone_vma()
     }
 
     #[getter]
@@ -571,21 +630,33 @@ impl PyShapeDtypeStruct {
         is_ref: Option<bool>,
     ) -> PyResult<Self> {
         Self::require_sharding_none(sharding)?;
-        Self::require_vma_none(vma)?;
+        let (vma, vma_hash, vma_len, vma_repr) = match vma {
+            Some(vma) => Self::normalize_vma(Some(vma))?,
+            None => (
+                self.clone_vma(),
+                self.vma_hash,
+                self.vma_len,
+                self.vma_repr.clone(),
+            ),
+        };
         Ok(Self {
             shape: shape.unwrap_or_else(|| self.shape.clone()),
             dtype: dtype.unwrap_or_else(|| self.dtype.clone()),
             weak_type: weak_type.unwrap_or(self.weak_type),
             is_ref: is_ref.unwrap_or(self.is_ref),
+            vma,
+            vma_hash,
+            vma_len,
+            vma_repr,
         })
     }
 
-    fn __richcmp__(&self, other: PyRef<'_, Self>, op: CompareOp) -> bool {
-        let equal = self.same_metadata(&other);
+    fn __richcmp__(&self, other: PyRef<'_, Self>, op: CompareOp) -> PyResult<bool> {
+        let equal = self.same_metadata(&other)?;
         match op {
-            CompareOp::Eq => equal,
-            CompareOp::Ne => !equal,
-            _ => false,
+            CompareOp::Eq => Ok(equal),
+            CompareOp::Ne => Ok(!equal),
+            _ => Ok(false),
         }
     }
 
@@ -607,10 +678,18 @@ impl PyShapeDtypeStruct {
         } else {
             ""
         };
+        let vma = if self.vma_len > 0 {
+            format!(
+                ", vma={}",
+                self.vma_repr.as_deref().unwrap_or("frozenset()")
+            )
+        } else {
+            String::new()
+        };
         let is_ref = if self.is_ref { ", is_ref=True" } else { "" };
         format!(
-            "ShapeDtypeStruct(shape={:?}, dtype={}{}{})",
-            self.shape, self.dtype, weak_type, is_ref
+            "ShapeDtypeStruct(shape={:?}, dtype={}{}{}{})",
+            self.shape, self.dtype, weak_type, vma, is_ref
         )
     }
 
@@ -751,6 +830,10 @@ fn py_shape_dtype_from_rust(value: &Value) -> PyShapeDtypeStruct {
         dtype: format!("{:?}", value.dtype()),
         weak_type: false,
         is_ref: false,
+        vma: None,
+        vma_hash: 0,
+        vma_len: 0,
+        vma_repr: None,
     }
 }
 
@@ -2184,10 +2267,65 @@ mod tests {
         let same_meta =
             PyShapeDtypeStruct::new(vec![2, 3], "F64".to_owned(), None, false, None, false)
                 .unwrap();
-        assert!(meta.same_metadata(&same_meta));
+        assert!(meta.same_metadata(&same_meta).unwrap());
         assert_eq!(meta.__hash__(), same_meta.__hash__());
-        assert!(!meta.same_metadata(&updated));
+        assert!(!meta.same_metadata(&updated).unwrap());
         assert_ne!(meta.__hash__(), updated.__hash__());
+
+        Python::with_gil(|py| {
+            let input_vma = PySet::new(py, ["data"]).unwrap().into_any().unbind();
+            let vma_meta = PyShapeDtypeStruct::new(
+                vec![2],
+                "F64".to_owned(),
+                None,
+                false,
+                Some(input_vma),
+                false,
+            )
+            .unwrap();
+            let vma = vma_meta.vma().unwrap();
+            let vma = vma.bind(py);
+            assert!(vma.is_instance_of::<PyFrozenSet>());
+            assert!(vma.contains("data").unwrap());
+            assert!(vma_meta.__repr__().contains("vma=frozenset("));
+
+            let same_vma = PyFrozenSet::new(py, ["data"]).unwrap().into_any().unbind();
+            let same_vma_meta = PyShapeDtypeStruct::new(
+                vec![2],
+                "F64".to_owned(),
+                None,
+                false,
+                Some(same_vma),
+                false,
+            )
+            .unwrap();
+            assert!(vma_meta.same_metadata(&same_vma_meta).unwrap());
+            assert_eq!(vma_meta.__hash__(), same_vma_meta.__hash__());
+
+            let updated_vma = PySet::new(py, ["batch"]).unwrap().into_any().unbind();
+            let updated_vma_meta = vma_meta
+                .update(None, None, None, None, Some(updated_vma), None)
+                .unwrap();
+            let updated_vma = updated_vma_meta.vma().unwrap();
+            let updated_vma = updated_vma.bind(py);
+            assert!(updated_vma.contains("batch").unwrap());
+            assert!(!updated_vma.contains("data").unwrap());
+
+            let invalid_vma = PyList::empty(py).into_any().unbind();
+            let invalid_result = PyShapeDtypeStruct::new(
+                vec![2],
+                "F64".to_owned(),
+                None,
+                false,
+                Some(invalid_vma),
+                false,
+            );
+            assert!(invalid_result.as_ref().err().is_some_and(|error| {
+                error
+                    .to_string()
+                    .contains("should be of type `set` or `frozenset`")
+            }));
+        });
     }
 
     #[test]

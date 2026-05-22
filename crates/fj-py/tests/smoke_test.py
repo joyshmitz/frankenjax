@@ -362,6 +362,22 @@ def test_shape_dtype_struct_constructor():
     assert hash(meta) == hash(same_meta)
     assert meta != weak_meta
     assert meta != updated
+
+    vma_meta = fj.ShapeDtypeStruct([2], "F64", vma={"data"})
+    assert vma_meta.vma == frozenset({"data"})
+    assert "vma=frozenset(" in repr(vma_meta)
+    same_vma_meta = fj.ShapeDtypeStruct([2], "F64", vma=frozenset({"data"}))
+    assert vma_meta == same_vma_meta
+    assert hash(vma_meta) == hash(same_vma_meta)
+    updated_vma_meta = vma_meta.update(vma={"batch"})
+    assert updated_vma_meta.vma == frozenset({"batch"})
+    try:
+        fj.ShapeDtypeStruct([2], "F64", vma=["data"])
+    except TypeError as exc:
+        assert "set` or `frozenset`" in str(exc)
+    else:
+        raise AssertionError("ShapeDtypeStruct list vma should raise TypeError")
+
     print("✓ ShapeDtypeStruct constructor preserves metadata")
 
 
