@@ -103,14 +103,16 @@ fn oracle_asin_zero() {
     // asin(0) = 0
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Asin, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "asin(0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "asin(0) = +0");
 }
 
 #[test]
 fn oracle_asin_neg_zero() {
     let input = make_f64_tensor(&[], vec![-0.0]);
     let result = eval_primitive(Primitive::Asin, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "asin(-0.0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "asin(-0.0) = -0");
 }
 
 // ======================== Common Values ========================
@@ -385,14 +387,20 @@ fn metamorphic_asin_sin_identity() {
 fn metamorphic_asin_tensor_roundtrip() {
     // Test both directions on a tensor
     let input = make_f64_tensor(&[5], vec![-0.9, -0.5, 0.0, 0.5, 0.9]);
-    let asin_result = eval_primitive(Primitive::Asin, std::slice::from_ref(&input), &no_params()).unwrap();
+    let asin_result =
+        eval_primitive(Primitive::Asin, std::slice::from_ref(&input), &no_params()).unwrap();
     let sin_asin = eval_primitive(Primitive::Sin, &[asin_result], &no_params()).unwrap();
 
     let original = extract_f64_vec(&input);
     let round_trip = extract_f64_vec(&sin_asin);
 
     for (orig, rt) in original.iter().zip(round_trip.iter()) {
-        assert_close(*rt, *orig, 1e-12, &format!("sin(asin({})) = {}", orig, orig));
+        assert_close(
+            *rt,
+            *orig,
+            1e-12,
+            &format!("sin(asin({})) = {}", orig, orig),
+        );
     }
 }
 
