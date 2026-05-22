@@ -274,3 +274,40 @@ fn oracle_bessel_i0e_empty_tensor() {
     assert_eq!(extract_shape(&result), vec![0]);
     assert_eq!(extract_f64_vec(&result), vec![] as Vec<f64>);
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_bessel_i0e_3d() {
+    let input = make_f64_tensor(&[2, 2, 2], vec![0.0, 1.0, -1.0, 2.0, -2.0, 0.5, -0.5, 0.0]);
+    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 1.0); // I0e(0)
+    assert_eq!(vals[7], 1.0); // I0e(0)
+}
+
+#[test]
+fn oracle_bessel_i1e_3d() {
+    let input = make_f64_tensor(&[2, 2, 2], vec![0.0, 1.0, -1.0, 2.0, -2.0, 0.5, -0.5, 0.0]);
+    let result = eval_primitive(Primitive::BesselI1e, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 0.0); // I1e(0)
+    assert_eq!(vals[7], 0.0); // I1e(0)
+}
+
+#[test]
+fn oracle_bessel_i0e_neg_inf() {
+    let input = make_f64_tensor(&[], vec![f64::NEG_INFINITY]);
+    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params()).unwrap();
+    assert_eq!(extract_f64_scalar(&result), 0.0, "I0e(-inf) = 0");
+}
+
+#[test]
+fn oracle_bessel_i1e_neg_inf() {
+    let input = make_f64_tensor(&[], vec![f64::NEG_INFINITY]);
+    let result = eval_primitive(Primitive::BesselI1e, &[input], &no_params()).unwrap();
+    let val = extract_f64_scalar(&result);
+    assert!(val == 0.0 || val.is_nan(), "I1e(-inf) = 0 or NaN");
+}

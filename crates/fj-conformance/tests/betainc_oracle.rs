@@ -328,3 +328,42 @@ fn oracle_betainc_nan_propagates() {
     let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
     assert!(extract_f64_scalar(&result).is_nan(), "NaN should propagate");
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_betainc_3d() {
+    let a = make_f64_tensor(&[2, 2, 2], vec![1.0; 8]);
+    let b = make_f64_tensor(&[2, 2, 2], vec![1.0; 8]);
+    let x = make_f64_tensor(&[2, 2, 2], vec![0.0, 0.25, 0.5, 0.75, 1.0, 0.125, 0.375, 0.625]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+}
+
+#[test]
+fn oracle_betainc_nan_in_b() {
+    let a = make_f64_tensor(&[], vec![2.0]);
+    let b = make_f64_tensor(&[], vec![f64::NAN]);
+    let x = make_f64_tensor(&[], vec![0.5]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    assert!(extract_f64_scalar(&result).is_nan(), "NaN in b should propagate");
+}
+
+#[test]
+fn oracle_betainc_nan_in_x() {
+    let a = make_f64_tensor(&[], vec![2.0]);
+    let b = make_f64_tensor(&[], vec![3.0]);
+    let x = make_f64_tensor(&[], vec![f64::NAN]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    assert!(extract_f64_scalar(&result).is_nan(), "NaN in x should propagate");
+}
+
+#[test]
+fn oracle_betainc_large_params() {
+    let a = make_f64_tensor(&[], vec![100.0]);
+    let b = make_f64_tensor(&[], vec![100.0]);
+    let x = make_f64_tensor(&[], vec![0.5]);
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    let val = extract_f64_scalar(&result);
+    assert!((val - 0.5).abs() < 0.01, "betainc(100, 100, 0.5) ~ 0.5");
+}
