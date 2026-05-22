@@ -79,7 +79,16 @@ fn assert_close(actual: f64, expected: f64, tol: f64, msg: &str) {
 fn oracle_tan_zero() {
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Tan, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "tan(0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "tan(0) = +0");
+}
+
+#[test]
+fn oracle_tan_neg_zero() {
+    let input = make_f64_tensor(&[], vec![-0.0]);
+    let result = eval_primitive(Primitive::Tan, &[input], &no_params()).unwrap();
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "tan(-0.0) = -0");
 }
 
 #[test]
@@ -329,8 +338,10 @@ fn metamorphic_tan_equals_sin_over_cos() {
     for x in [0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0] {
         let input = make_f64_tensor(&[], vec![x]);
 
-        let tan_result = eval_primitive(Primitive::Tan, std::slice::from_ref(&input), &no_params()).unwrap();
-        let sin_result = eval_primitive(Primitive::Sin, std::slice::from_ref(&input), &no_params()).unwrap();
+        let tan_result =
+            eval_primitive(Primitive::Tan, std::slice::from_ref(&input), &no_params()).unwrap();
+        let sin_result =
+            eval_primitive(Primitive::Sin, std::slice::from_ref(&input), &no_params()).unwrap();
         let cos_result = eval_primitive(Primitive::Cos, &[input], &no_params()).unwrap();
 
         let tan_val = extract_f64_scalar(&tan_result);
@@ -399,8 +410,10 @@ fn metamorphic_tan_tensor_sin_over_cos() {
     // tan(x) = sin(x) / cos(x) for 1D tensor
     let x = make_f64_tensor(&[5], vec![0.1, 0.5, 1.0, 1.5, 2.0]);
 
-    let tan_result = eval_primitive(Primitive::Tan, std::slice::from_ref(&x), &no_params()).unwrap();
-    let sin_result = eval_primitive(Primitive::Sin, std::slice::from_ref(&x), &no_params()).unwrap();
+    let tan_result =
+        eval_primitive(Primitive::Tan, std::slice::from_ref(&x), &no_params()).unwrap();
+    let sin_result =
+        eval_primitive(Primitive::Sin, std::slice::from_ref(&x), &no_params()).unwrap();
     let cos_result = eval_primitive(Primitive::Cos, &[x], &no_params()).unwrap();
 
     let tan_vals = extract_f64_vec(&tan_result);
