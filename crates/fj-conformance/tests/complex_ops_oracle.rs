@@ -248,3 +248,54 @@ fn oracle_conj_double_is_identity() {
     assert!((vals[0].0 - 3.0).abs() < 1e-10);
     assert!((vals[0].1 - 4.0).abs() < 1e-10);
 }
+
+#[test]
+fn oracle_real_empty_tensor() {
+    let input = make_complex128_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Real, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+}
+
+#[test]
+fn oracle_imag_empty_tensor() {
+    let input = make_complex128_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Imag, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+}
+
+#[test]
+fn oracle_conj_empty_tensor() {
+    let input = make_complex128_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Conj, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+}
+
+#[test]
+fn oracle_real_output_dtype_is_f64() {
+    let input = make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let result = eval_primitive(Primitive::Real, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::F64),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_imag_output_dtype_is_f64() {
+    let input = make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let result = eval_primitive(Primitive::Imag, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::F64),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_conj_preserves_dtype() {
+    let input = make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let result = eval_primitive(Primitive::Conj, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::Complex128),
+        _ => panic!("expected tensor"),
+    }
+}
