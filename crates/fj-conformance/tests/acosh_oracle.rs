@@ -220,3 +220,43 @@ fn oracle_acosh_non_negative() {
         );
     }
 }
+
+#[test]
+fn oracle_acosh_preserves_dtype() {
+    let input = make_f64_tensor(&[3], vec![1.0, 2.0, 5.0]);
+    let result = eval_primitive(Primitive::Acosh, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::F64),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_acosh_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Acosh, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims, vec![0]);
+            assert!(t.elements.is_empty());
+        }
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_acosh_vector() {
+    let input = make_f64_tensor(&[4], vec![1.0, 2.0, 5.0, 10.0]);
+    let result = eval_primitive(Primitive::Acosh, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims, vec![4]);
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_close(vals[0], 0.0, 1e-14, "acosh(1)");
+            assert_close(vals[1], 2.0_f64.acosh(), 1e-14, "acosh(2)");
+            assert_close(vals[2], 5.0_f64.acosh(), 1e-14, "acosh(5)");
+            assert_close(vals[3], 10.0_f64.acosh(), 1e-14, "acosh(10)");
+        }
+        _ => panic!("expected tensor"),
+    }
+}

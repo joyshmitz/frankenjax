@@ -236,3 +236,41 @@ fn oracle_bessel_i1e_vector() {
     assert_eq!(vals[0], 0.0);
     assert!((vals[1] + vals[2]).abs() < 1e-15, "I1e odd function");
 }
+
+#[test]
+fn oracle_bessel_i0e_preserves_dtype() {
+    let input = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::F64),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_bessel_i1e_preserves_dtype() {
+    let input = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::BesselI1e, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::F64),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_bessel_i0e_2d() {
+    let input = make_f64_tensor(&[2, 2], vec![0.0, 1.0, -1.0, 2.0]);
+    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 1.0); // I0e(0)
+    assert!((vals[1] - vals[2]).abs() < 1e-15, "I0e symmetric");
+}
+
+#[test]
+fn oracle_bessel_i0e_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(extract_f64_vec(&result), vec![] as Vec<f64>);
+}

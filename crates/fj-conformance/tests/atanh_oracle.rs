@@ -244,3 +244,50 @@ fn oracle_atanh_stdlib() {
         );
     }
 }
+
+fn extract_f64_vec(v: &Value) -> Vec<f64> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_atanh_preserves_dtype() {
+    let input = make_f64_tensor(&[3], vec![0.0, 0.5, -0.5]);
+    let result = eval_primitive(Primitive::Atanh, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::F64),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_atanh_vector() {
+    let input = make_f64_tensor(&[4], vec![0.0, 0.5, -0.5, 0.9]);
+    let result = eval_primitive(Primitive::Atanh, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims, vec![4]);
+            let vals = extract_f64_vec(&result);
+            assert_close(vals[0], 0.0, 1e-14, "atanh(0)");
+            assert_close(vals[1], 0.5_f64.atanh(), 1e-14, "atanh(0.5)");
+            assert_close(vals[2], (-0.5_f64).atanh(), 1e-14, "atanh(-0.5)");
+            assert_close(vals[3], 0.9_f64.atanh(), 1e-14, "atanh(0.9)");
+        }
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_atanh_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Atanh, &[input], &no_params()).unwrap();
+    match &result {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims, vec![0]);
+            assert!(t.elements.is_empty());
+        }
+        _ => panic!("expected tensor"),
+    }
+}

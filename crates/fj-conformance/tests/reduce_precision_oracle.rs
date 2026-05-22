@@ -287,3 +287,42 @@ fn oracle_reduce_precision_single_element() {
     .unwrap();
     assert_eq!(extract_shape(&result), vec![1]);
 }
+
+#[test]
+fn oracle_reduce_precision_nan() {
+    let input = Value::Scalar(Literal::from_f64(f64::NAN));
+    let result = eval_primitive(
+        Primitive::ReducePrecision,
+        &[input],
+        &precision_params(8, 10),
+    )
+    .unwrap();
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0].is_nan(), "NaN should remain NaN after precision reduction");
+}
+
+#[test]
+fn oracle_reduce_precision_inf() {
+    let input = Value::Scalar(Literal::from_f64(f64::INFINITY));
+    let result = eval_primitive(
+        Primitive::ReducePrecision,
+        &[input],
+        &precision_params(8, 10),
+    )
+    .unwrap();
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0].is_infinite() && vals[0] > 0.0, "Inf should remain Inf");
+}
+
+#[test]
+fn oracle_reduce_precision_empty_tensor() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(
+        Primitive::ReducePrecision,
+        &[input],
+        &precision_params(8, 10),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(extract_f64_vec(&result), vec![] as Vec<f64>);
+}
