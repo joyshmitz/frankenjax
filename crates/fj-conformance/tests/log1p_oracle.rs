@@ -79,14 +79,16 @@ fn oracle_log1p_zero() {
     // log1p(0) = log(1) = 0
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Log1p, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "log1p(0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "log1p(0) = +0");
 }
 
 #[test]
 fn oracle_log1p_neg_zero() {
     let input = make_f64_tensor(&[], vec![-0.0]);
     let result = eval_primitive(Primitive::Log1p, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "log1p(-0.0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "log1p(-0.0) = -0");
 }
 
 // ======================== Positive Values ========================
