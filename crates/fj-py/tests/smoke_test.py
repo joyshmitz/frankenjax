@@ -18,6 +18,7 @@ def test_version_metadata():
     assert fj.__version__ == "0.1.0"
     assert fj.__version_info__ == (0, 1, 0)
     assert fj.__array_api_version__ == "2024.12"
+    assert fj.Array.__array_priority__ == 100
     print("✓ __version__/__version_info__ metadata")
 
 
@@ -73,6 +74,7 @@ def test_value_scalar():
     assert v.size == 1
     assert v.itemsize == 8
     assert v.nbytes == 8
+    assert v.__array_priority__ == 100
     assert v.weak_type is False
     assert v.committed is False
     assert isinstance(v.device, fj.Device)

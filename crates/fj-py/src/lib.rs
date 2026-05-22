@@ -528,6 +528,11 @@ struct PyFloat0DType;
 
 #[pymethods]
 impl PyValue {
+    #[classattr]
+    fn __array_priority__() -> i32 {
+        100
+    }
+
     #[staticmethod]
     fn scalar_f64(v: f64) -> Self {
         PyValue::from_value(Value::scalar_f64(v))
@@ -3761,6 +3766,7 @@ mod tests {
 
     #[test]
     fn value_scalar_roundtrip() {
+        assert_eq!(PyValue::__array_priority__(), 100);
         let v = PyValue::scalar_f64(42.0);
         assert_eq!(v.shape_dims(), Vec::<u32>::new());
         assert_eq!(
