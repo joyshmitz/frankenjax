@@ -188,7 +188,11 @@ fn oracle_rsqrt_zero() {
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Rsqrt, &[input], &no_params()).unwrap();
     let val = extract_f64_scalar(&result);
-    assert!(val.is_infinite() && val > 0.0, "rsqrt(0) should be +inf");
+    assert_eq!(
+        val.to_bits(),
+        f64::INFINITY.to_bits(),
+        "rsqrt(+0.0) should be exact +inf"
+    );
 }
 
 #[test]
@@ -207,7 +211,11 @@ fn oracle_rsqrt_positive_infinity() {
     // rsqrt(+inf) = 0
     let input = make_f64_tensor(&[], vec![f64::INFINITY]);
     let result = eval_primitive(Primitive::Rsqrt, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "rsqrt(inf) should be 0");
+    assert_eq!(
+        extract_f64_scalar(&result).to_bits(),
+        0.0_f64.to_bits(),
+        "rsqrt(+inf) should be exact +0.0"
+    );
 }
 
 // ======================== Negative Values (NaN) ========================
@@ -294,10 +302,18 @@ fn oracle_rsqrt_1d_mixed() {
     let result = eval_primitive(Primitive::Rsqrt, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
     assert_close(vals[0], 0.5, 1e-14, "rsqrt(4)");
-    assert!(vals[1].is_infinite() && vals[1] > 0.0, "rsqrt(0) = +inf");
+    assert_eq!(
+        vals[1].to_bits(),
+        f64::INFINITY.to_bits(),
+        "rsqrt(+0.0) = exact +inf"
+    );
     assert_close(vals[2], 1.0, 1e-14, "rsqrt(1)");
     assert!(vals[3].is_nan(), "rsqrt(-1) = NaN");
-    assert_eq!(vals[4], 0.0, "rsqrt(inf) = 0");
+    assert_eq!(
+        vals[4].to_bits(),
+        0.0_f64.to_bits(),
+        "rsqrt(+inf) = exact +0.0"
+    );
 }
 
 // ======================== 2D Tensor ========================
