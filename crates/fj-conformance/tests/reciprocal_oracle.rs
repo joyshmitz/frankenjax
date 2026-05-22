@@ -6,7 +6,7 @@
 //! - Basic: reciprocal(2) = 0.5, reciprocal(4) = 0.25
 //! - Zero: reciprocal(0) = +infinity, reciprocal(-0) = -infinity
 //! - Negative: reciprocal(-x) = -reciprocal(x)
-//! - Infinity: reciprocal(inf) = 0
+//! - Infinity: reciprocal(inf) = exact signed zero
 //! - NaN propagation
 //! - Identity: reciprocal(reciprocal(x)) = x
 
@@ -188,8 +188,7 @@ fn oracle_reciprocal_positive_infinity() {
     let input = make_f64_tensor(&[], vec![f64::INFINITY]);
     let result = eval_primitive(Primitive::Reciprocal, &[input], &no_params()).unwrap();
     let val = extract_f64_scalar(&result);
-    assert_eq!(val, 0.0, "reciprocal(+inf) = 0");
-    assert!(!val.is_sign_negative(), "reciprocal(+inf) should be +0");
+    assert_eq!(val.to_bits(), 0.0_f64.to_bits(), "reciprocal(+inf) = +0");
 }
 
 #[test]
@@ -198,8 +197,7 @@ fn oracle_reciprocal_negative_infinity() {
     let input = make_f64_tensor(&[], vec![f64::NEG_INFINITY]);
     let result = eval_primitive(Primitive::Reciprocal, &[input], &no_params()).unwrap();
     let val = extract_f64_scalar(&result);
-    assert_eq!(val, 0.0, "reciprocal(-inf) = 0");
-    assert!(val.is_sign_negative(), "reciprocal(-inf) should be -0");
+    assert_eq!(val.to_bits(), (-0.0_f64).to_bits(), "reciprocal(-inf) = -0");
 }
 
 // ======================== NaN ========================
@@ -402,7 +400,12 @@ fn metamorphic_reciprocal_mul_identity() {
     // Mul(x, reciprocal(x)) = 1 using Mul primitive
     for x in [0.5, 1.0, 2.0, 3.0, 10.0, -1.0, -5.0] {
         let input = make_f64_tensor(&[], vec![x]);
-        let recip = eval_primitive(Primitive::Reciprocal, std::slice::from_ref(&input), &no_params()).unwrap();
+        let recip = eval_primitive(
+            Primitive::Reciprocal,
+            std::slice::from_ref(&input),
+            &no_params(),
+        )
+        .unwrap();
         let product = eval_primitive(Primitive::Mul, &[input, recip], &no_params()).unwrap();
 
         assert_close(
@@ -423,7 +426,8 @@ fn metamorphic_reciprocal_negation() {
         let input = make_f64_tensor(&[], vec![x]);
 
         // reciprocal(Neg(x))
-        let neg_x = eval_primitive(Primitive::Neg, std::slice::from_ref(&input), &no_params()).unwrap();
+        let neg_x =
+            eval_primitive(Primitive::Neg, std::slice::from_ref(&input), &no_params()).unwrap();
         let recip_neg = eval_primitive(Primitive::Reciprocal, &[neg_x], &no_params()).unwrap();
 
         // Neg(reciprocal(x))
