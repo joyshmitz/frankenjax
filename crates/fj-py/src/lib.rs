@@ -348,6 +348,17 @@ fn block_until_ready(value: PyValue) -> PyValue {
 }
 
 #[pyfunction]
+fn copy_to_host_async(value: PyValue) -> PyValue {
+    value
+}
+
+#[pyfunction]
+fn effects_barrier() {}
+
+#[pyfunction]
+fn clear_caches() {}
+
+#[pyfunction]
 fn vmap(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
     let rust_args = py_values_to_rust(args);
     fj_api::vmap(jaxpr.inner.clone())
@@ -434,6 +445,9 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(device_put, m)?)?;
     m.add_function(wrap_pyfunction!(device_get, m)?)?;
     m.add_function(wrap_pyfunction!(block_until_ready, m)?)?;
+    m.add_function(wrap_pyfunction!(copy_to_host_async, m)?)?;
+    m.add_function(wrap_pyfunction!(effects_barrier, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_caches, m)?)?;
     m.add_function(wrap_pyfunction!(vmap, m)?)?;
     m.add_function(wrap_pyfunction!(pmap, m)?)?;
     m.add_function(wrap_pyfunction!(value_and_grad, m)?)?;
@@ -593,6 +607,14 @@ mod tests {
         assert_eq!(host_vector.shape(), vec![3]);
         assert_eq!(host_vector.dtype(), "I64");
         assert_eq!(host_vector.as_i64_list().unwrap(), vec![1, 2, 3]);
+
+        let copied_vector = copy_to_host_async(host_vector);
+        assert_eq!(copied_vector.shape(), vec![3]);
+        assert_eq!(copied_vector.dtype(), "I64");
+        assert_eq!(copied_vector.as_i64_list().unwrap(), vec![1, 2, 3]);
+
+        effects_barrier();
+        clear_caches();
     }
 
     #[test]

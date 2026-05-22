@@ -132,7 +132,16 @@ def test_device_helpers():
     assert host_vector.shape() == [3]
     assert host_vector.dtype() == "I64"
     assert host_vector.as_i64_list() == [1, 2, 3]
-    print("✓ device_put/device_get/block_until_ready preserve CPU-local values")
+
+    copied_vector = fj.copy_to_host_async(host_vector)
+    assert copied_vector.shape() == [3]
+    assert copied_vector.dtype() == "I64"
+    assert copied_vector.as_i64_list() == [1, 2, 3]
+    assert fj.effects_barrier() is None
+    assert fj.clear_caches() is None
+    print(
+        "✓ device_put/device_get/block_until_ready/copy_to_host_async preserve CPU-local values"
+    )
 
 
 def test_vmap():
