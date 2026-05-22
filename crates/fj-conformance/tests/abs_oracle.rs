@@ -7,6 +7,7 @@
 //! - abs(-x) = abs(x) (symmetry/evenness)
 //! - abs(x * y) = abs(x) * abs(y) (multiplicativity)
 //! - abs(x) = 0 iff x = 0
+//! - abs(+0.0) = abs(-0.0) = +0.0 in IEEE 754
 //! - For complex: abs(z) = sqrt(re^2 + im^2) (magnitude)
 //!
 //! Tests:
@@ -153,14 +154,16 @@ fn oracle_abs_negative_f64() {
 fn oracle_abs_zero_f64() {
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Abs, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0);
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "abs(+0.0) = +0.0");
 }
 
 #[test]
 fn oracle_abs_neg_zero_f64() {
     let input = make_f64_tensor(&[], vec![-0.0]);
     let result = eval_primitive(Primitive::Abs, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0);
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "abs(-0.0) = +0.0");
 }
 
 // ====================== INTEGER VALUES ======================
@@ -477,7 +480,8 @@ fn metamorphic_abs_negation_invariant() {
     // abs(-x) = abs(x) using Neg primitive
     for x in [-5.5, -1.0, 0.0, 1.0, 5.5, f64::INFINITY] {
         let input = make_f64_tensor(&[], vec![x]);
-        let negated = eval_primitive(Primitive::Neg, std::slice::from_ref(&input), &no_params()).unwrap();
+        let negated =
+            eval_primitive(Primitive::Neg, std::slice::from_ref(&input), &no_params()).unwrap();
 
         let abs_x = eval_primitive(Primitive::Abs, &[input], &no_params()).unwrap();
         let abs_neg_x = eval_primitive(Primitive::Abs, &[negated], &no_params()).unwrap();
@@ -510,7 +514,12 @@ fn metamorphic_abs_multiplicative() {
         let y_tensor = make_f64_tensor(&[], vec![y]);
 
         // abs(Mul(x, y))
-        let product = eval_primitive(Primitive::Mul, &[x_tensor.clone(), y_tensor.clone()], &no_params()).unwrap();
+        let product = eval_primitive(
+            Primitive::Mul,
+            &[x_tensor.clone(), y_tensor.clone()],
+            &no_params(),
+        )
+        .unwrap();
         let abs_product = eval_primitive(Primitive::Abs, &[product], &no_params()).unwrap();
 
         // Mul(abs(x), abs(y))
@@ -536,7 +545,12 @@ fn metamorphic_abs_tensor_multiplicative() {
     let y_tensor = make_f64_tensor(&[4], vec![1.5, -2.5, 3.5, -4.5]);
 
     // abs(Mul(x, y))
-    let product = eval_primitive(Primitive::Mul, &[x_tensor.clone(), y_tensor.clone()], &no_params()).unwrap();
+    let product = eval_primitive(
+        Primitive::Mul,
+        &[x_tensor.clone(), y_tensor.clone()],
+        &no_params(),
+    )
+    .unwrap();
     let abs_product = eval_primitive(Primitive::Abs, &[product], &no_params()).unwrap();
 
     // Mul(abs(x), abs(y))
