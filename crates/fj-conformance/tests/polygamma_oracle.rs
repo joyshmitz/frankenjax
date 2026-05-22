@@ -358,3 +358,40 @@ fn polygamma_broadcast_incompatible_shapes_error() {
         "incompatible shapes [2] vs [3] should error"
     );
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn polygamma_empty_tensor() {
+    let result = eval_polygamma(scalar_f64(1.0), tensor_f64(&[0], &[]));
+    assert_eq!(get_shape(&result), vec![0]);
+    assert!(get_elements(&result).is_empty());
+}
+
+#[test]
+fn polygamma_preserves_dtype() {
+    let result = eval_polygamma(scalar_f64(1.0), scalar_f64(2.0));
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn polygamma_third_order() {
+    let result = eval_polygamma(scalar_f64(3.0), scalar_f64(1.0));
+    // polygamma(3, 1) = pi^4/15
+    let expected = std::f64::consts::PI.powi(4) / 15.0;
+    assert_close(
+        extract_scalar(&result),
+        expected,
+        POLYGAMMA_APPROX_TOL,
+        "polygamma(3, 1)",
+    );
+}
+
+#[test]
+fn polygamma_noninteger_order() {
+    // Non-integer orders should still work (extension via gamma function)
+    let result = eval_polygamma(scalar_f64(0.5), scalar_f64(1.0));
+    // Just verify it returns a finite value
+    let val = extract_scalar(&result);
+    assert!(val.is_finite(), "polygamma(0.5, 1) should be finite");
+}
