@@ -203,3 +203,21 @@ fn oracle_copy_large() {
     assert_eq!(extract_shape(&result), vec![100]);
     assert_eq!(extract_i64_vec(&result), (1..=100).collect::<Vec<_>>());
 }
+
+#[test]
+fn oracle_copy_preserves_special_f64_values() {
+    let input = make_f64_tensor(&[4], vec![f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 0.0]);
+    let result = eval_primitive(Primitive::Copy, &[input], &no_params()).unwrap();
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0].is_infinite() && vals[0].is_sign_positive());
+    assert!(vals[1].is_infinite() && vals[1].is_sign_negative());
+    assert!(vals[2].is_nan());
+    assert_eq!(vals[3], 0.0);
+}
+
+#[test]
+fn oracle_copy_preserves_dtype() {
+    let input = make_i64_tensor(&[2], vec![1, 2]);
+    let result = eval_primitive(Primitive::Copy, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::I64);
+}

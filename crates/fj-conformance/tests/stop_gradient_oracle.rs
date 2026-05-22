@@ -233,3 +233,63 @@ fn stop_gradient_vjp_rank2_zero_cotangent() {
         vec![0.0, 0.0, 0.0, 0.0]
     );
 }
+
+#[test]
+fn stop_gradient_preserves_special_values() {
+    let input = make_f64_vector(&[f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 0.0, -0.0]);
+    let output = eval_primitive(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient special values should succeed");
+
+    let values = extract_f64_vec(&output);
+    assert!(values[0].is_infinite() && values[0].is_sign_positive());
+    assert!(values[1].is_infinite() && values[1].is_sign_negative());
+    assert!(values[2].is_nan());
+    assert_eq!(values[3], 0.0);
+    assert_eq!(values[4], 0.0);
+}
+
+#[test]
+fn stop_gradient_empty_tensor() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0] }, vec![]).unwrap(),
+    );
+    let output = eval_primitive(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient empty tensor should succeed");
+
+    let tensor = output.as_tensor().expect("expected tensor");
+    assert_eq!(tensor.shape.dims, vec![0]);
+    assert!(tensor.elements.is_empty());
+}
+
+#[test]
+fn stop_gradient_jvp_scalar() {
+    let scalar_jaxpr = Jaxpr::new(
+        vec![VarId(1)],
+        vec![],
+        vec![VarId(2)],
+        vec![Equation {
+            primitive: Primitive::StopGradient,
+            inputs: smallvec![Atom::Var(VarId(1))],
+            outputs: smallvec![VarId(2)],
+            params: BTreeMap::new(),
+            effects: vec![],
+            sub_jaxprs: vec![],
+        }],
+    );
+    let primal = Value::scalar_f64(5.0);
+    let tangent = Value::scalar_f64(100.0);
+
+    let result =
+        fj_ad::jvp(&scalar_jaxpr, &[primal], &[tangent]).expect("stop_gradient scalar JVP");
+
+    assert_eq!(result.primals[0].as_f64_scalar(), Some(5.0));
+    assert_eq!(result.tangents[0].as_f64_scalar(), Some(0.0));
+}

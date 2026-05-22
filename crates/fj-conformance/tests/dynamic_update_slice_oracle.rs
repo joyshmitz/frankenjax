@@ -282,3 +282,82 @@ fn dynamic_update_slice_preserves_untouched_elements() {
     // Row 0: [1, 90, 91, 4], Row 1 unchanged: [5, 6, 7, 8]
     assert_eq!(values, vec![1, 90, 91, 4, 5, 6, 7, 8]);
 }
+
+#[test]
+fn dynamic_update_slice_at_end() {
+    let operand = tensor_i64(&[5], &[0, 1, 2, 3, 4]).unwrap();
+    let update = tensor_i64(&[2], &[88, 99]).unwrap();
+    let starts = vec![Value::scalar_i64(3)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (_, values) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(values, vec![0, 1, 2, 88, 99]);
+}
+
+#[test]
+fn dynamic_update_slice_preserves_dtype() {
+    let operand = tensor_i64(&[4], &[1, 2, 3, 4]).unwrap();
+    let update = tensor_i64(&[2], &[10, 20]).unwrap();
+    let starts = vec![Value::scalar_i64(1)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    match result {
+        Value::Tensor(t) => assert_eq!(t.dtype, DType::I64, "dtype should be preserved"),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn dynamic_update_slice_metamorphic_sequential_updates() {
+    // Two sequential updates: first at index 0, then at index 2
+    let operand = tensor_i64(&[5], &[0, 1, 2, 3, 4]).unwrap();
+    let update1 = tensor_i64(&[2], &[10, 11]).unwrap();
+    let update2 = tensor_i64(&[2], &[20, 21]).unwrap();
+
+    let result1 = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update1, Value::scalar_i64(0)],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let result2 = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[result1, update2, Value::scalar_i64(2)],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (_, values) = tensor_i64_parts(&result2).unwrap();
+    assert_eq!(values, vec![10, 11, 20, 21, 4]);
+}
+
+#[test]
+fn dynamic_update_slice_middle_update_2d() {
+    // Update center of a 3x3 matrix
+    let operand = tensor_i64(&[3, 3], &[1, 2, 3, 4, 5, 6, 7, 8, 9]).unwrap();
+    let update = tensor_i64(&[1, 1], &[99]).unwrap();
+    let starts = vec![Value::scalar_i64(1), Value::scalar_i64(1)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone(), starts[1].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (_, values) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(values, vec![1, 2, 3, 4, 99, 6, 7, 8, 9]);
+}

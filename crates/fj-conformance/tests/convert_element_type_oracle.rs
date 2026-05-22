@@ -248,3 +248,57 @@ fn convert_element_type_rejects_wrong_arity() {
         "unexpected arity error: {err}"
     );
 }
+
+#[test]
+fn convert_element_type_f64_to_i32() {
+    let input = f64_tensor(&[3], &[1.5, -2.7, 100.9]);
+    let result = convert(input, "i32").expect("f64 to i32 conversion should succeed");
+
+    assert_eq!(result.dtype(), DType::I32);
+    let values: Vec<i64> = result
+        .as_tensor()
+        .expect("expected tensor")
+        .elements
+        .iter()
+        .map(|l| l.as_i64().expect("expected i32 stored as i64"))
+        .collect();
+    assert_eq!(values, vec![1, -2, 100]);
+}
+
+#[test]
+fn convert_element_type_empty_tensor() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0] }, vec![]).unwrap(),
+    );
+    let result = convert(input, "i64").expect("empty tensor conversion should succeed");
+
+    assert_eq!(result.dtype(), DType::I64);
+    let tensor = result.as_tensor().expect("expected tensor");
+    assert_eq!(tensor.shape.dims, vec![0]);
+    assert!(tensor.elements.is_empty());
+}
+
+#[test]
+fn convert_element_type_noop_same_dtype() {
+    let input = f64_tensor(&[2], &[1.5, 2.5]);
+    let result = convert(input, "f64").expect("noop conversion should succeed");
+
+    assert_eq!(result.dtype(), DType::F64);
+    let values: Vec<f64> = result
+        .as_tensor()
+        .expect("expected tensor")
+        .elements
+        .iter()
+        .map(|l| l.as_f64().expect("expected f64"))
+        .collect();
+    assert_eq!(values, vec![1.5, 2.5]);
+}
+
+#[test]
+fn convert_element_type_rank2_shape_preserved() {
+    let input = i64_tensor(&[2, 3], &[1, 2, 3, 4, 5, 6]);
+    let result = convert(input, "f32").expect("rank-2 conversion should succeed");
+
+    assert_eq!(result.dtype(), DType::F32);
+    assert_eq!(shape(&result).dims, vec![2, 3]);
+}
