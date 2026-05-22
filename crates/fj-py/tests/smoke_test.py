@@ -72,6 +72,7 @@ def test_value_scalar():
     assert abs(copied.as_f64() - 42.0) < 1e-12
     assert v.tolist() == 42.0
     assert float(v) == 42.0
+    assert int(v) == 42
     assert abs(v.as_f64() - 42.0) < 1e-12
     print("✓ scalar_f64 roundtrip")
 
@@ -87,6 +88,7 @@ def test_value_scalar():
     assert v2.committed is False
     assert v2.is_fully_addressable is True
     assert v2.is_fully_replicated is True
+    assert int(v2) == 123
     assert v2.as_i64() == 123
     print("✓ scalar_i64 roundtrip")
 
@@ -114,6 +116,12 @@ def test_value_scalar():
         assert "only scalar arrays" in str(exc)
     else:
         raise AssertionError("float(vector) should raise TypeError")
+    try:
+        int(vec)
+    except TypeError as exc:
+        assert "only scalar arrays" in str(exc)
+    else:
+        raise AssertionError("int(vector) should raise TypeError")
     assert vec.as_i64_list() == [1, 2, 3]
     assert vec.as_f64_list() == [1.0, 2.0, 3.0]
     print("✓ vector_i64 roundtrip")

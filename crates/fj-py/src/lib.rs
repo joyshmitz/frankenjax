@@ -227,6 +227,18 @@ impl PyValue {
             })
     }
 
+    fn __int__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let literal = self.inner.as_scalar_literal().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "only scalar arrays can be converted to Python scalars",
+            )
+        })?;
+
+        let value = literal_to_py_object(py, literal)?;
+        let builtins = py.import("builtins")?;
+        Ok(builtins.getattr("int")?.call1((value.bind(py),))?.unbind())
+    }
+
     fn as_f64_list(&self) -> Option<Vec<f64>> {
         match &self.inner {
             Value::Scalar(_) => self.inner.as_f64_scalar().map(|value| vec![value]),
@@ -1615,6 +1627,8 @@ mod tests {
         Python::with_gil(|py| {
             let value = v.tolist(py).unwrap();
             assert!((value.bind(py).extract::<f64>().unwrap() - 42.0).abs() < 1e-12);
+            let value = v.__int__(py).unwrap();
+            assert_eq!(value.bind(py).extract::<i64>().unwrap(), 42);
         });
         assert!((v.__float__().unwrap() - 42.0).abs() < 1e-12);
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
@@ -1669,6 +1683,7 @@ mod tests {
         assert_eq!(ints.__len__().unwrap(), 3);
         assert!(ints.__float__().is_err());
         Python::with_gil(|py| {
+            assert!(ints.__int__(py).is_err());
             let values = ints.tolist(py).unwrap();
             assert_eq!(
                 values.bind(py).extract::<Vec<i64>>().unwrap(),
