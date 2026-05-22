@@ -242,3 +242,58 @@ fn oracle_tile_empty_input() {
     assert_eq!(extract_shape(&result), vec![0]);
     assert_eq!(extract_f64_vec(&result), vec![] as Vec<f64>);
 }
+
+#[test]
+fn oracle_tile_4d() {
+    let input = make_f64_tensor(&[1, 1, 1, 2], vec![1.0, 2.0]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2, 2, 2, 1])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals.len(), 16);
+    assert!(vals.iter().all(|&v| (v - 1.0).abs() < 1e-10 || (v - 2.0).abs() < 1e-10));
+}
+
+#[test]
+fn oracle_tile_special_values() {
+    let input = make_f64_tensor(&[3], vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2])).unwrap();
+    assert_eq!(extract_shape(&result), vec![6]);
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0].is_nan());
+    assert!(vals[1].is_infinite() && vals[1] > 0.0);
+    assert!(vals[2].is_infinite() && vals[2] < 0.0);
+}
+
+#[test]
+fn oracle_tile_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2, 2])).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 6]);
+}
+
+#[test]
+fn oracle_tile_bool_dtype() {
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::Bool,
+            Shape { dims: vec![2] },
+            vec![Literal::Bool(true), Literal::Bool(false)],
+        )
+        .unwrap(),
+    );
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![6]);
+    match &result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Bool);
+            let vals: Vec<bool> = t.elements.iter().map(|l| match l {
+                Literal::Bool(b) => *b,
+                _ => panic!("expected bool"),
+            }).collect();
+            assert_eq!(vals, vec![true, false, true, false, true, false]);
+        }
+        _ => panic!("expected tensor"),
+    }
+}

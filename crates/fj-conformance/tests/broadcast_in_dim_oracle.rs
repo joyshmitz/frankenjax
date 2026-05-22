@@ -394,3 +394,70 @@ fn oracle_broadcast_large_expansion() {
     assert!(vals[0..25].iter().all(|&v| v == 1));
     assert!(vals[25..50].iter().all(|&v| v == 2));
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_broadcast_4d_shape() {
+    let input = make_i64_tensor(&[2], vec![1, 2]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[2, 3, 4, 5], &[0]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3, 4, 5]);
+    let vals = extract_i64_vec(&result);
+    assert_eq!(vals.len(), 120);
+}
+
+#[test]
+fn oracle_broadcast_empty_input() {
+    let input = make_i64_tensor(&[0], vec![]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[3, 0], &[1]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 0]);
+}
+
+#[test]
+fn oracle_broadcast_to_empty() {
+    let input = make_i64_tensor(&[1], vec![42]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[0, 3], &[0]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_broadcast_preserves_dtype() {
+    let input = make_f64_tensor(&[2], vec![1.5, 2.5]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[3, 2], &[1]),
+    )
+    .unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_broadcast_special_values() {
+    let input = make_f64_tensor(&[3], vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[2, 3], &[1]),
+    )
+    .unwrap();
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0].is_nan());
+    assert!(vals[1].is_infinite() && vals[1] > 0.0);
+    assert!(vals[2].is_infinite() && vals[2] < 0.0);
+}

@@ -378,3 +378,77 @@ fn stop_gradient_complex_dtype() {
     assert_eq!(output.dtype(), DType::Complex128);
     assert_eq!(output.as_complex128_scalar(), Some((3.0, 4.0)));
 }
+
+#[test]
+fn stop_gradient_4d_shape() {
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape { dims: vec![2, 2, 2, 2] },
+            (1..=16).map(|x| Literal::from_f64(x as f64)).collect(),
+        )
+        .unwrap(),
+    );
+    let output = eval_primitive(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient 4D eval should succeed");
+
+    let tensor = output.as_tensor().expect("expected tensor output");
+    assert_eq!(tensor.shape.dims, vec![2, 2, 2, 2]);
+}
+
+#[test]
+fn stop_gradient_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let output = eval_primitive(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient 2D empty should succeed");
+
+    let tensor = output.as_tensor().expect("expected tensor");
+    assert_eq!(tensor.shape.dims, vec![0, 3]);
+}
+
+#[test]
+fn stop_gradient_subnormal_values() {
+    let subnormal = f64::MIN_POSITIVE / 2.0;
+    let input = make_f64_vector(&[subnormal, -subnormal, 0.0]);
+    let output = eval_primitive(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient subnormal should succeed");
+
+    let values = extract_f64_vec(&output);
+    assert_eq!(values[0].to_bits(), subnormal.to_bits());
+    assert_eq!(values[1].to_bits(), (-subnormal).to_bits());
+}
+
+#[test]
+fn stop_gradient_u32_dtype() {
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::U32,
+            Shape::vector(3),
+            vec![Literal::U32(10), Literal::U32(20), Literal::U32(30)],
+        )
+        .unwrap(),
+    );
+    let output = eval_primitive(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient u32 eval should succeed");
+
+    let tensor = output.as_tensor().expect("expected tensor output");
+    assert_eq!(tensor.dtype, DType::U32);
+}

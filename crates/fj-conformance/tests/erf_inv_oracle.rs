@@ -271,3 +271,40 @@ fn oracle_erf_inv_tensor_special_values() {
     assert!(vals[2].is_nan(), "erfinv(NaN) = NaN");
     assert!(vals[3].is_nan(), "erfinv(+inf) = NaN");
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_erf_inv_3d() {
+    let input = make_f64_tensor(&[2, 2, 2], vec![0.0, 0.1, 0.2, 0.3, -0.1, -0.2, -0.3, 0.5]);
+    let result = eval_primitive(Primitive::ErfInv, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0].abs() < 1e-10); // erfinv(0) = 0
+}
+
+#[test]
+fn oracle_erf_inv_empty() {
+    let input = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::ErfInv, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+}
+
+#[test]
+fn oracle_erf_inv_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::ErfInv, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_erf_inv_large_tensor() {
+    let data: Vec<f64> = (0..100).map(|i| (i as f64 - 50.0) / 100.0).collect();
+    let input = make_f64_tensor(&[100], data);
+    let result = eval_primitive(Primitive::ErfInv, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![100]);
+    let vals = extract_f64_vec(&result);
+    assert!(vals[50].abs() < 1e-10); // erfinv(0) = 0
+}
