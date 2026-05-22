@@ -283,3 +283,30 @@ fn oracle_topk_already_sorted_descending() {
     let result = eval_primitive(Primitive::TopK, &[input], &topk_params(3)).unwrap();
     assert_eq!(extract_f64_vec(&result), vec![5.0, 4.0, 3.0]);
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_topk_preserves_dtype() {
+    let input = make_f64_tensor(&[5], vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    let result = eval_primitive(Primitive::TopK, &[input], &topk_params(2)).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_topk_large_tensor() {
+    let data: Vec<f64> = (0..100).map(|x| x as f64).collect();
+    let input = make_f64_tensor(&[100], data);
+    let result = eval_primitive(Primitive::TopK, &[input], &topk_params(3)).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_f64_vec(&result), vec![99.0, 98.0, 97.0]);
+}
+
+#[test]
+fn oracle_topk_inf_values() {
+    let input = make_f64_tensor(&[4], vec![1.0, f64::INFINITY, 2.0, f64::NEG_INFINITY]);
+    let result = eval_primitive(Primitive::TopK, &[input], &topk_params(2)).unwrap();
+    let vals = extract_f64_vec(&result);
+    assert!(vals[0].is_infinite() && vals[0] > 0.0);
+    assert_eq!(vals[1], 2.0);
+}

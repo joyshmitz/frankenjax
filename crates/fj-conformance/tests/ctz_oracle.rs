@@ -278,3 +278,33 @@ fn oracle_ctz_mixed_values() {
     // 0 -> 64, 1 -> 0, 6 (0b110) -> 1, 12 (0b1100) -> 2, 7 (0b111) -> 0
     assert_eq!(extract_i64_vec(&result), vec![64, 0, 1, 2, 0]);
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_ctz_4d_shape() {
+    let input = make_i64_tensor(&[2, 2, 2, 2], vec![1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]);
+    let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2, 2]);
+}
+
+#[test]
+fn oracle_ctz_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::I64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_ctz_large_tensor() {
+    let data: Vec<i64> = (0..100).map(|x| 1i64 << (x % 64)).collect();
+    let input = make_i64_tensor(&[100], data);
+    let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![100]);
+    let vals = extract_i64_vec(&result);
+    for (i, &v) in vals.iter().enumerate() {
+        assert_eq!(v, (i % 64) as i64, "ctz at index {i}");
+    }
+}
