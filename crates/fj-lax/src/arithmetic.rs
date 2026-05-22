@@ -2330,6 +2330,159 @@ pub(crate) fn eval_igammac(primitive: Primitive, inputs: &[Value]) -> Result<Val
     )
 }
 
+fn betainc_cf(a: f64, b: f64, x: f64) -> f64 {
+    let qab = a + b;
+    let qap = a + 1.0;
+    let qam = a - 1.0;
+
+    let mut c = 1.0;
+    let mut d = 1.0 - qab * x / qap;
+    if d.abs() < 1e-30 {
+        d = 1e-30;
+    }
+    d = 1.0 / d;
+    let mut h = d;
+
+    for m in 1..=200 {
+        let m = m as f64;
+        let m2 = 2.0 * m;
+
+        let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < 1e-30 {
+            d = 1e-30;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < 1e-30 {
+            c = 1e-30;
+        }
+        d = 1.0 / d;
+        h *= d * c;
+
+        let aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+        d = 1.0 + aa * d;
+        if d.abs() < 1e-30 {
+            d = 1e-30;
+        }
+        c = 1.0 + aa / c;
+        if c.abs() < 1e-30 {
+            c = 1e-30;
+        }
+        d = 1.0 / d;
+        let del = d * c;
+        h *= del;
+
+        if (del - 1.0).abs() < 1e-14 {
+            break;
+        }
+    }
+    h
+}
+
+pub(crate) fn betainc_approx(a: f64, b: f64, x: f64) -> f64 {
+    if x.is_nan() || a.is_nan() || b.is_nan() {
+        return f64::NAN;
+    }
+    if x < 0.0 || x > 1.0 {
+        return f64::NAN;
+    }
+    if x == 0.0 {
+        return 0.0;
+    }
+    if x == 1.0 {
+        return 1.0;
+    }
+    if a <= 0.0 || b <= 0.0 {
+        return f64::NAN;
+    }
+
+    let bt = (lgamma_approx(a + b) - lgamma_approx(a) - lgamma_approx(b)
+        + a * x.ln()
+        + b * (1.0 - x).ln())
+    .exp();
+
+    if x < (a + 1.0) / (a + b + 2.0) {
+        bt * betainc_cf(a, b, x) / a
+    } else {
+        1.0 - bt * betainc_cf(b, a, 1.0 - x) / b
+    }
+}
+
+pub(crate) fn eval_betainc(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    if inputs.len() != 3 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 3,
+            actual: inputs.len(),
+        });
+    }
+    eval_ternary_elementwise(primitive, inputs, |a, b, x| betainc_approx(a, b, x))
+}
+
+fn eval_ternary_elementwise(
+    primitive: Primitive,
+    inputs: &[Value],
+    op: impl Fn(f64, f64, f64) -> f64,
+) -> Result<Value, EvalError> {
+    let a_val = &inputs[0];
+    let b_val = &inputs[1];
+    let x_val = &inputs[2];
+
+    match (a_val, b_val, x_val) {
+        (Value::Scalar(a), Value::Scalar(b), Value::Scalar(x)) => {
+            let a_f = a.as_f64().unwrap_or(0.0);
+            let b_f = b.as_f64().unwrap_or(0.0);
+            let x_f = x.as_f64().unwrap_or(0.0);
+            Ok(Value::Scalar(Literal::from_f64(op(a_f, b_f, x_f))))
+        }
+        (Value::Tensor(t_a), Value::Tensor(t_b), Value::Tensor(t_x)) => {
+            if t_a.shape != t_b.shape || t_b.shape != t_x.shape {
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: format!(
+                        "shape mismatch: {:?} vs {:?} vs {:?}",
+                        t_a.shape, t_b.shape, t_x.shape
+                    ),
+                });
+            }
+            let elements: Vec<Literal> = t_a
+                .elements
+                .iter()
+                .zip(t_b.elements.iter())
+                .zip(t_x.elements.iter())
+                .map(|((a, b), x)| {
+                    let a_f = a.as_f64().unwrap_or(0.0);
+                    let b_f = b.as_f64().unwrap_or(0.0);
+                    let x_f = x.as_f64().unwrap_or(0.0);
+                    Literal::from_f64(op(a_f, b_f, x_f))
+                })
+                .collect();
+            Ok(Value::Tensor(
+                TensorValue::new(DType::F64, t_a.shape.clone(), elements)?,
+            ))
+        }
+        (Value::Scalar(a), Value::Scalar(b), Value::Tensor(t_x)) => {
+            let a_f = a.as_f64().unwrap_or(0.0);
+            let b_f = b.as_f64().unwrap_or(0.0);
+            let elements: Vec<Literal> = t_x
+                .elements
+                .iter()
+                .map(|x| {
+                    let x_f = x.as_f64().unwrap_or(0.0);
+                    Literal::from_f64(op(a_f, b_f, x_f))
+                })
+                .collect();
+            Ok(Value::Tensor(
+                TensorValue::new(DType::F64, t_x.shape.clone(), elements)?,
+            ))
+        }
+        _ => Err(EvalError::Unsupported {
+            primitive,
+            detail: "betainc requires matching scalar/tensor shapes".to_string(),
+        }),
+    }
+}
+
 pub(crate) fn bessel_i0e_approx(x: f64) -> f64 {
     let ax = x.abs();
     if ax < 3.75 {
@@ -4248,6 +4401,36 @@ mod tests {
         let igamma_val = extract_f64(&eval_igamma(Primitive::Igamma, &[a.clone(), x.clone()]).unwrap());
         let igammac_val = extract_f64(&eval_igammac(Primitive::Igammac, &[a, x]).unwrap());
         assert!((igamma_val + igammac_val - 1.0).abs() < 1e-10, "P + Q = 1");
+    }
+
+    // ── Betainc ──
+
+    #[test]
+    fn betainc_boundary_zero() {
+        let result = eval_betainc(Primitive::Betainc, &[s_f64(1.0), s_f64(1.0), s_f64(0.0)]).unwrap();
+        let val = extract_f64(&result);
+        assert!((val - 0.0).abs() < 1e-10, "I_0(a,b) = 0");
+    }
+
+    #[test]
+    fn betainc_boundary_one() {
+        let result = eval_betainc(Primitive::Betainc, &[s_f64(1.0), s_f64(1.0), s_f64(1.0)]).unwrap();
+        let val = extract_f64(&result);
+        assert!((val - 1.0).abs() < 1e-10, "I_1(a,b) = 1");
+    }
+
+    #[test]
+    fn betainc_uniform() {
+        let result = eval_betainc(Primitive::Betainc, &[s_f64(1.0), s_f64(1.0), s_f64(0.5)]).unwrap();
+        let val = extract_f64(&result);
+        assert!((val - 0.5).abs() < 1e-10, "I_0.5(1,1) = 0.5 (uniform)");
+    }
+
+    #[test]
+    fn betainc_half_half() {
+        let result = eval_betainc(Primitive::Betainc, &[s_f64(0.5), s_f64(0.5), s_f64(0.5)]).unwrap();
+        let val = extract_f64(&result);
+        assert!((val - 0.5).abs() < 1e-10, "I_0.5(0.5,0.5) = 0.5 (arcsine)");
     }
 
     // ── BesselI0e / BesselI1e ──

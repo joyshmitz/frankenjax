@@ -1664,6 +1664,34 @@ pub fn vjp(
             let neg_dx = value_neg(&dx)?;
             Ok(vec![zeros_like(a), value_mul(g, &neg_dx)?])
         }
+        Primitive::Betainc => {
+            // d/da, d/db: complex, return zeros
+            // d/dx I_x(a,b) = x^{a-1} * (1-x)^{b-1} / B(a,b)
+            let a = &inputs[0];
+            let b = &inputs[1];
+            let x = &inputs[2];
+            let one = scalar_constant_matching_dtype(1.0, x);
+            let a_m1 = value_sub(a, &one)?;
+            let b_m1 = value_sub(b, &one)?;
+            let one_minus_x = value_sub(&one, x)?;
+            let x_pow = eval_primitive(Primitive::Pow, &[x.clone(), a_m1], params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let omx_pow = eval_primitive(Primitive::Pow, &[one_minus_x, b_m1], params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let lgamma_a = eval_primitive(Primitive::Lgamma, std::slice::from_ref(a), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let lgamma_b = eval_primitive(Primitive::Lgamma, std::slice::from_ref(b), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let ab = value_add(a, b)?;
+            let lgamma_ab = eval_primitive(Primitive::Lgamma, &[ab], params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let log_beta = value_sub(&value_add(&lgamma_a, &lgamma_b)?, &lgamma_ab)?;
+            let beta = eval_primitive(Primitive::Exp, &[log_beta], params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let numer = value_mul(&x_pow, &omx_pow)?;
+            let dx = value_div(&numer, &beta)?;
+            Ok(vec![zeros_like(a), zeros_like(b), value_mul(g, &dx)?])
+        }
         Primitive::BesselI0e => {
             // d/dx I0e(x) = I1e(x) - sign(x) * I0e(x)
             let x = &inputs[0];
@@ -6549,6 +6577,29 @@ fn jvp_rule(
             let deriv = ep(Primitive::Div, &[numer, gamma_a])?;
             let neg_deriv = ep(Primitive::Neg, &[deriv])?;
             ep(Primitive::Mul, &[neg_deriv, dx.clone()])
+        }
+        Primitive::Betainc => {
+            // d/dx I_x(a,b) = x^{a-1} * (1-x)^{b-1} / B(a,b)
+            let a = &primals[0];
+            let b = &primals[1];
+            let x = &primals[2];
+            let dx = &tangents[2];
+            let one = scalar_constant_matching_dtype(1.0, x);
+            let a_m1 = ep(Primitive::Sub, &[a.clone(), one.clone()])?;
+            let b_m1 = ep(Primitive::Sub, &[b.clone(), one.clone()])?;
+            let omx = ep(Primitive::Sub, &[one, x.clone()])?;
+            let x_pow = ep(Primitive::Pow, &[x.clone(), a_m1])?;
+            let omx_pow = ep(Primitive::Pow, &[omx, b_m1])?;
+            let lgamma_a = ep(Primitive::Lgamma, &[a.clone()])?;
+            let lgamma_b = ep(Primitive::Lgamma, &[b.clone()])?;
+            let ab = ep(Primitive::Add, &[a.clone(), b.clone()])?;
+            let lgamma_ab = ep(Primitive::Lgamma, &[ab])?;
+            let lg_sum = ep(Primitive::Add, &[lgamma_a, lgamma_b])?;
+            let log_beta = ep(Primitive::Sub, &[lg_sum, lgamma_ab])?;
+            let beta = ep(Primitive::Exp, &[log_beta])?;
+            let numer = ep(Primitive::Mul, &[x_pow, omx_pow])?;
+            let deriv = ep(Primitive::Div, &[numer, beta])?;
+            ep(Primitive::Mul, &[deriv, dx.clone()])
         }
         Primitive::BesselI0e => {
             // d/dx I0e(x) = I1e(x) - sign(x) * I0e(x)
