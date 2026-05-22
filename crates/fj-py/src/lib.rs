@@ -2,7 +2,7 @@
 
 use pyo3::class::basic::CompareOp;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyFrozenSet, PyList, PySet};
+use pyo3::types::{PyBool, PyBytes, PyFrozenSet, PyList, PySet, PyTuple};
 
 use fj_core::{DType, Jaxpr, Literal, ProgramSpec, Value, build_program};
 
@@ -122,6 +122,11 @@ impl PyShapeDtypeStruct {
 
     fn clone_vma(&self) -> Option<Py<PyAny>> {
         Python::with_gil(|py| self.vma.as_ref().map(|vma| vma.clone_ref(py)))
+    }
+
+    #[cfg(test)]
+    fn shape_vec(&self) -> Vec<u32> {
+        self.shape.clone()
     }
 
     fn same_metadata(&self, other: &Self) -> PyResult<bool> {
@@ -633,8 +638,8 @@ impl PyShapeDtypeStruct {
     }
 
     #[getter]
-    fn shape(&self) -> Vec<u32> {
-        self.shape.clone()
+    fn shape(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        shape_to_py_tuple(py, &self.shape)
     }
 
     #[getter]
@@ -755,8 +760,12 @@ impl PyShapeDtypeStruct {
         };
         let is_ref = if self.is_ref { ", is_ref=True" } else { "" };
         format!(
-            "ShapeDtypeStruct(shape={:?}, dtype={}{}{}{})",
-            self.shape, self.dtype, weak_type, vma, is_ref
+            "ShapeDtypeStruct(shape={}, dtype={}{}{}{})",
+            format_shape_tuple(&self.shape),
+            self.dtype,
+            weak_type,
+            vma,
+            is_ref
         )
     }
 
@@ -984,6 +993,27 @@ fn literals_to_py_list(py: Python<'_>, literals: &[Literal]) -> PyResult<Py<PyAn
     Ok(PyList::new(py, values.iter().map(|value| value.bind(py)))?
         .into_any()
         .unbind())
+}
+
+fn shape_to_py_tuple(py: Python<'_>, shape: &[u32]) -> PyResult<Py<PyAny>> {
+    Ok(PyTuple::new(py, shape.iter().copied())?.into_any().unbind())
+}
+
+fn format_shape_tuple(shape: &[u32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut formatted = String::from("(");
+    for (index, dim) in shape.iter().enumerate() {
+        if index > 0 {
+            formatted.push_str(", ");
+        }
+        let _ = write!(&mut formatted, "{dim}");
+    }
+    if shape.len() == 1 {
+        formatted.push(',');
+    }
+    formatted.push(')');
+    formatted
 }
 
 fn validate_tobytes_order(order: &str) -> PyResult<()> {
@@ -2336,7 +2366,7 @@ mod tests {
     fn eval_shape_returns_output_shape_dtype_metadata() {
         let scalar_meta = eval_shape(&make_jaxpr_square(), vec![PyValue::scalar_f64(3.0)]).unwrap();
         assert_eq!(scalar_meta.len(), 1);
-        assert_eq!(scalar_meta[0].shape(), Vec::<u32>::new());
+        assert_eq!(scalar_meta[0].shape_vec(), Vec::<u32>::new());
         assert_eq!(scalar_meta[0].dtype(), "F64");
 
         let vector_meta = eval_shape(
@@ -2345,7 +2375,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(vector_meta.len(), 1);
-        assert_eq!(vector_meta[0].shape(), vec![3]);
+        assert_eq!(vector_meta[0].shape_vec(), vec![3]);
         assert_eq!(vector_meta[0].dtype(), "F64");
     }
 
@@ -2354,7 +2384,7 @@ mod tests {
         let meta =
             PyShapeDtypeStruct::new(vec![2, 3], Some("F64".to_owned()), None, false, None, false)
                 .unwrap();
-        assert_eq!(meta.shape(), vec![2, 3]);
+        assert_eq!(meta.shape_vec(), vec![2, 3]);
         assert_eq!(meta.dtype(), "F64");
         assert!(meta.sharding().is_none());
         assert!(meta.vma().is_none());
@@ -2363,7 +2393,7 @@ mod tests {
         assert_eq!(meta.__len__().unwrap(), 2);
         assert!(!meta.weak_type());
         assert!(!meta.is_ref());
-        assert_eq!(meta.__repr__(), "ShapeDtypeStruct(shape=[2, 3], dtype=F64)");
+        assert_eq!(meta.__repr__(), "ShapeDtypeStruct(shape=(2, 3), dtype=F64)");
         assert_eq!(meta.__str__(), meta.__repr__());
 
         let weak_meta =
@@ -2376,7 +2406,7 @@ mod tests {
         assert!(weak_meta.is_ref());
         assert_eq!(
             weak_meta.__repr__(),
-            "ShapeDtypeStruct(shape=[], dtype=F64, weak_type=True, is_ref=True)"
+            "ShapeDtypeStruct(shape=(), dtype=F64, weak_type=True, is_ref=True)"
         );
         assert_eq!(weak_meta.__str__(), weak_meta.__repr__());
 
@@ -2390,7 +2420,7 @@ mod tests {
                 Some(true),
             )
             .unwrap();
-        assert_eq!(updated.shape(), vec![4]);
+        assert_eq!(updated.shape_vec(), vec![4]);
         assert_eq!(updated.dtype(), "I64");
         assert!(updated.sharding().is_none());
         assert!(updated.vma().is_none());
@@ -2399,9 +2429,9 @@ mod tests {
         assert!(updated.is_ref());
         assert_eq!(
             updated.__repr__(),
-            "ShapeDtypeStruct(shape=[4], dtype=I64, weak_type=True, is_ref=True)"
+            "ShapeDtypeStruct(shape=(4,), dtype=I64, weak_type=True, is_ref=True)"
         );
-        assert_eq!(meta.shape(), vec![2, 3]);
+        assert_eq!(meta.shape_vec(), vec![2, 3]);
         assert!(!meta.weak_type());
         assert!(!meta.is_ref());
 
@@ -2480,12 +2510,12 @@ mod tests {
     #[test]
     fn typeof_returns_value_shape_dtype_metadata() {
         let scalar_meta = typeof_value(&PyValue::scalar_i64(7));
-        assert_eq!(scalar_meta.shape(), Vec::<u32>::new());
+        assert_eq!(scalar_meta.shape_vec(), Vec::<u32>::new());
         assert_eq!(scalar_meta.dtype(), "I64");
 
         let vector = PyValue::vector_f64(vec![1.0, 2.0, 3.0]).unwrap();
         let vector_meta = typeof_value(&vector);
-        assert_eq!(vector_meta.shape(), vec![3]);
+        assert_eq!(vector_meta.shape_vec(), vec![3]);
         assert_eq!(vector_meta.dtype(), "F64");
     }
 
