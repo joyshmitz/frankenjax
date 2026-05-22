@@ -1538,6 +1538,16 @@ pub fn vjp(
             let denom = value_add(&ones_like(x), &x2)?;
             Ok(vec![value_div(g, &denom)?])
         }
+        Primitive::Deg2Rad => {
+            // d/dx deg2rad(x) = PI/180
+            let scale = scalar_constant_matching_dtype(std::f64::consts::PI / 180.0, g);
+            Ok(vec![value_mul(g, &scale)?])
+        }
+        Primitive::Rad2Deg => {
+            // d/dx rad2deg(x) = 180/PI
+            let scale = scalar_constant_matching_dtype(180.0 / std::f64::consts::PI, g);
+            Ok(vec![value_mul(g, &scale)?])
+        }
         Primitive::Sinh => {
             // d/dx sinh(x) = cosh(x)
             let x = &inputs[0];
@@ -6593,6 +6603,18 @@ fn jvp_rule(
             let one = scalar_constant_matching_dtype(1.0, &tangents[0]);
             let denom = ep(Primitive::Add, &[one, x_sq])?;
             ep(Primitive::Div, &[tangents[0].clone(), denom])
+        }
+
+        Primitive::Deg2Rad => {
+            // dx * PI/180
+            let scale = scalar_constant_matching_dtype(std::f64::consts::PI / 180.0, &tangents[0]);
+            ep(Primitive::Mul, &[tangents[0].clone(), scale])
+        }
+
+        Primitive::Rad2Deg => {
+            // dx * 180/PI
+            let scale = scalar_constant_matching_dtype(180.0 / std::f64::consts::PI, &tangents[0]);
+            ep(Primitive::Mul, &[tangents[0].clone(), scale])
         }
 
         Primitive::Sinh => {

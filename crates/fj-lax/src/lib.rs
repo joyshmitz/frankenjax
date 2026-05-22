@@ -239,6 +239,8 @@ pub fn eval_primitive(
         Primitive::Asin => eval_unary_elementwise(primitive, inputs, f64::asin),
         Primitive::Acos => eval_unary_elementwise(primitive, inputs, f64::acos),
         Primitive::Atan => eval_unary_elementwise(primitive, inputs, f64::atan),
+        Primitive::Deg2Rad => eval_unary_elementwise(primitive, inputs, f64::to_radians),
+        Primitive::Rad2Deg => eval_unary_elementwise(primitive, inputs, f64::to_degrees),
         // Hyperbolic
         Primitive::Sinh => eval_sinh(primitive, inputs),
         Primitive::Cosh => eval_cosh(primitive, inputs),
