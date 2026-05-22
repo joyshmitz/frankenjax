@@ -7,6 +7,7 @@
 //! - Zero: copysign with +0/-0
 //! - Same signs: no change
 //! - Special values: infinity, NaN
+//! - Broadcast-compatible sign inputs
 //! - Tensor shapes
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
@@ -61,11 +62,7 @@ fn oracle_copysign_positive_negative() {
     let x = make_f64_tensor(&[], vec![5.0]);
     let y = make_f64_tensor(&[], vec![-1.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        -5.0,
-        "copysign(5, -1) = -5"
-    );
+    assert_eq!(extract_f64_scalar(&result), -5.0, "copysign(5, -1) = -5");
 }
 
 #[test]
@@ -73,11 +70,7 @@ fn oracle_copysign_negative_positive() {
     let x = make_f64_tensor(&[], vec![-5.0]);
     let y = make_f64_tensor(&[], vec![1.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        5.0,
-        "copysign(-5, 1) = 5"
-    );
+    assert_eq!(extract_f64_scalar(&result), 5.0, "copysign(-5, 1) = 5");
 }
 
 #[test]
@@ -85,11 +78,7 @@ fn oracle_copysign_positive_positive() {
     let x = make_f64_tensor(&[], vec![5.0]);
     let y = make_f64_tensor(&[], vec![1.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        5.0,
-        "copysign(5, 1) = 5"
-    );
+    assert_eq!(extract_f64_scalar(&result), 5.0, "copysign(5, 1) = 5");
 }
 
 #[test]
@@ -97,11 +86,7 @@ fn oracle_copysign_negative_negative() {
     let x = make_f64_tensor(&[], vec![-5.0]);
     let y = make_f64_tensor(&[], vec![-1.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        -5.0,
-        "copysign(-5, -1) = -5"
-    );
+    assert_eq!(extract_f64_scalar(&result), -5.0, "copysign(-5, -1) = -5");
 }
 
 // ======================== Zero Cases ========================
@@ -112,7 +97,10 @@ fn oracle_copysign_zero_positive() {
     let y = make_f64_tensor(&[], vec![1.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(actual == 0.0 && actual.is_sign_positive(), "copysign(0, 1) = +0");
+    assert!(
+        actual == 0.0 && actual.is_sign_positive(),
+        "copysign(0, 1) = +0"
+    );
 }
 
 #[test]
@@ -121,7 +109,10 @@ fn oracle_copysign_zero_negative() {
     let y = make_f64_tensor(&[], vec![-1.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(actual == 0.0 && actual.is_sign_negative(), "copysign(0, -1) = -0");
+    assert!(
+        actual == 0.0 && actual.is_sign_negative(),
+        "copysign(0, -1) = -0"
+    );
 }
 
 #[test]
@@ -129,11 +120,7 @@ fn oracle_copysign_with_neg_zero() {
     let x = make_f64_tensor(&[], vec![5.0]);
     let y = make_f64_tensor(&[], vec![-0.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
-    assert_eq!(
-        extract_f64_scalar(&result),
-        -5.0,
-        "copysign(5, -0) = -5"
-    );
+    assert_eq!(extract_f64_scalar(&result), -5.0, "copysign(5, -0) = -5");
 }
 
 // ======================== Special Values ========================
@@ -180,7 +167,10 @@ fn oracle_copysign_nan_positive() {
     let y = make_f64_tensor(&[], vec![1.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(actual.is_nan() && actual.is_sign_positive(), "copysign(NaN, 1) = +NaN");
+    assert!(
+        actual.is_nan() && actual.is_sign_positive(),
+        "copysign(NaN, 1) = +NaN"
+    );
 }
 
 #[test]
@@ -189,7 +179,10 @@ fn oracle_copysign_nan_negative() {
     let y = make_f64_tensor(&[], vec![-1.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(actual.is_nan() && actual.is_sign_negative(), "copysign(NaN, -1) = -NaN");
+    assert!(
+        actual.is_nan() && actual.is_sign_negative(),
+        "copysign(NaN, -1) = -NaN"
+    );
 }
 
 #[test]
@@ -220,4 +213,32 @@ fn oracle_copysign_matrix() {
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 2]);
     assert_eq!(extract_f64_vec(&result), vec![-1.0, -2.0, 3.0, 4.0]);
+}
+
+// ======================== Broadcasting ========================
+
+#[test]
+fn oracle_copysign_matrix_scalar_sign_broadcast() {
+    let x = make_f64_tensor(&[2, 3], vec![1.0, -2.0, 3.0, -4.0, 5.0, -6.0]);
+    let y = make_f64_tensor(&[], vec![-1.0]);
+    let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(
+        extract_f64_vec(&result),
+        vec![-1.0, -2.0, -3.0, -4.0, -5.0, -6.0]
+    );
+}
+
+#[test]
+fn oracle_copysign_matrix_row_sign_broadcast() {
+    let x = make_f64_tensor(&[2, 3], vec![1.0, -2.0, 3.0, -4.0, 5.0, -6.0]);
+    let y = make_f64_tensor(&[3], vec![-1.0, 1.0, -1.0]);
+    let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(
+        extract_f64_vec(&result),
+        vec![-1.0, 2.0, -3.0, -4.0, 5.0, -6.0]
+    );
 }
