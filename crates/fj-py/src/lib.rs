@@ -388,6 +388,11 @@ impl PyValue {
     }
 
     #[getter]
+    fn aval(&self) -> PyShapeDtypeStruct {
+        py_shape_dtype_from_rust(&self.inner)
+    }
+
+    #[getter]
     fn __numpy_dtype__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         numpy_dtype_object(py, self.inner.dtype())
     }

@@ -45,6 +45,10 @@ def test_value_scalar():
     assert isinstance(v, fj.Array)
     assert v.shape == ()
     assert v.dtype == "F64"
+    assert isinstance(v.aval, fj.ShapeDtypeStruct)
+    assert v.aval.shape == ()
+    assert v.aval.dtype == "F64"
+    assert not v.aval.weak_type
     assert v.__numpy_dtype__ == np.dtype("float64")
     try:
         hash(v)
@@ -234,6 +238,8 @@ def test_value_scalar():
     assert isinstance(vec, fj.Array)
     assert vec.shape == (3,)
     assert vec.dtype == "I64"
+    assert vec.aval.shape == (3,)
+    assert vec.aval.dtype == "I64"
     assert vec.__numpy_dtype__ == np.dtype("int64")
     assert vec.ndim == 1
     assert vec.size == 3
