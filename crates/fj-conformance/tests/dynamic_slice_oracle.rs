@@ -222,3 +222,77 @@ fn metamorphic_dynamic_slice_preserves_dtype() {
         _ => panic!("expected tensor"),
     }
 }
+
+// ======================== Additional Coverage ========================
+
+fn tensor_f64(shape: &[u32], values: &[f64]) -> Result<Value, String> {
+    TensorValue::new(
+        DType::F64,
+        Shape {
+            dims: shape.to_vec(),
+        },
+        values.iter().copied().map(Literal::from_f64).collect(),
+    )
+    .map(Value::Tensor)
+    .map_err(|err| format!("failed to build f64 tensor {shape:?}: {err}"))
+}
+
+fn tensor_f64_values(value: &Value) -> Result<Vec<f64>, String> {
+    let Value::Tensor(tensor) = value else {
+        return Err(format!("expected tensor, got {value:?}"));
+    };
+    tensor
+        .elements
+        .iter()
+        .map(|literal| match literal {
+            Literal::F64Bits(bits) => Ok(f64::from_bits(*bits)),
+            other => Err(format!("expected f64 literal, got {other:?}")),
+        })
+        .collect()
+}
+
+#[test]
+fn dynamic_slice_f64_dtype() {
+    let operand = tensor_f64(&[4], &[1.5, 2.5, 3.5, 4.5]).unwrap();
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2".to_owned());
+
+    let result =
+        eval_primitive(Primitive::DynamicSlice, &[operand, Value::scalar_i64(1)], &params).unwrap();
+    let vals = tensor_f64_values(&result).unwrap();
+    assert!((vals[0] - 2.5).abs() < 1e-10);
+    assert!((vals[1] - 3.5).abs() < 1e-10);
+}
+
+#[test]
+fn dynamic_slice_2d_both_axes() {
+    // Slice [2,2] from [3,4] starting at [1,1]
+    let operand = tensor_i64(&[3, 4], &(0..12).collect::<Vec<_>>()).unwrap();
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2,2".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(1), Value::scalar_i64(1)],
+        &params,
+    )
+    .unwrap();
+    let (shape, vals) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(shape, vec![2, 2]);
+    // Row 1 cols 1,2: [5, 6], Row 2 cols 1,2: [9, 10]
+    assert_eq!(vals, vec![5, 6, 9, 10]);
+}
+
+#[test]
+fn dynamic_slice_empty_output() {
+    // Slice with size 0
+    let operand = tensor_i64(&[5], &[1, 2, 3, 4, 5]).unwrap();
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "0".to_owned());
+
+    let result =
+        eval_primitive(Primitive::DynamicSlice, &[operand, Value::scalar_i64(0)], &params).unwrap();
+    let (shape, vals) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(shape, vec![0]);
+    assert!(vals.is_empty());
+}
