@@ -354,20 +354,38 @@ def test_local_context_helpers():
     with fj.checking_leaks():
         assert add_one(8) == 9
 
-    with fj.ensure_compile_time_eval():
+    with fj.debug_nans():
         assert add_one(9) == 10
+
+    with fj.debug_nans(False):
+        assert add_one(10) == 11
+
+    with fj.debug_infs():
+        assert add_one(11) == 12
+
+    with fj.debug_infs(False):
+        assert add_one(12) == 13
+
+    with fj.ensure_compile_time_eval():
+        assert add_one(13) == 14
 
     assert fj.enable_checks().name == "enable_checks(true)"
     assert fj.enable_checks(False).name == "enable_checks(false)"
     assert fj.check_tracer_leaks().name == "check_tracer_leaks(true)"
     assert fj.check_tracer_leaks(False).name == "check_tracer_leaks(false)"
     assert fj.checking_leaks().name == "checking_leaks"
+    assert fj.debug_nans().name == "debug_nans(true)"
+    assert fj.debug_nans(False).name == "debug_nans(false)"
+    assert fj.debug_infs().name == "debug_infs(true)"
+    assert fj.debug_infs(False).name == "debug_infs(false)"
     assert fj.disable_jit().name == "disable_jit(true)"
     assert fj.disable_jit(False).name == "disable_jit(false)"
     assert fj.ensure_compile_time_eval().name == "ensure_compile_time_eval"
     assert fj.enable_checks()(add_one) is add_one
     assert fj.check_tracer_leaks()(add_one) is add_one
     assert fj.checking_leaks()(add_one) is add_one
+    assert fj.debug_nans()(add_one) is add_one
+    assert fj.debug_infs()(add_one) is add_one
     assert fj.disable_jit()(add_one) is add_one
     assert fj.ensure_compile_time_eval()(add_one) is add_one
     print("✓ config-style local context helpers preserve Python callables")

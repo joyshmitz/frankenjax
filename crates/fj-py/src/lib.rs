@@ -674,6 +674,20 @@ fn checking_leaks() -> PyNamedScope {
     }
 }
 
+#[pyfunction(signature = (enabled=true))]
+fn debug_nans(enabled: bool) -> PyNamedScope {
+    PyNamedScope {
+        name: format!("debug_nans({enabled})"),
+    }
+}
+
+#[pyfunction(signature = (enabled=true))]
+fn debug_infs(enabled: bool) -> PyNamedScope {
+    PyNamedScope {
+        name: format!("debug_infs({enabled})"),
+    }
+}
+
 #[pyfunction(signature = (disable=true))]
 fn disable_jit(disable: bool) -> PyNamedScope {
     PyNamedScope {
@@ -819,6 +833,8 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(enable_checks, m)?)?;
     m.add_function(wrap_pyfunction!(check_tracer_leaks, m)?)?;
     m.add_function(wrap_pyfunction!(checking_leaks, m)?)?;
+    m.add_function(wrap_pyfunction!(debug_nans, m)?)?;
+    m.add_function(wrap_pyfunction!(debug_infs, m)?)?;
     m.add_function(wrap_pyfunction!(disable_jit, m)?)?;
     m.add_function(wrap_pyfunction!(ensure_compile_time_eval, m)?)?;
     m.add_function(wrap_pyfunction!(print_environment_info, m)?)?;
@@ -1086,6 +1102,10 @@ mod tests {
             "check_tracer_leaks(false)"
         );
         assert_eq!(checking_leaks().name(), "checking_leaks");
+        assert_eq!(debug_nans(true).name(), "debug_nans(true)");
+        assert_eq!(debug_nans(false).name(), "debug_nans(false)");
+        assert_eq!(debug_infs(true).name(), "debug_infs(true)");
+        assert_eq!(debug_infs(false).name(), "debug_infs(false)");
         assert_eq!(disable_jit(true).name(), "disable_jit(true)");
         assert_eq!(disable_jit(false).name(), "disable_jit(false)");
         assert_eq!(
