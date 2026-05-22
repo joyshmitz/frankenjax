@@ -36,6 +36,16 @@ struct PyLinearizedJvp {
     primals: Vec<Value>,
 }
 
+#[pyclass]
+#[derive(Clone)]
+struct PyForwardPass {
+    jaxpr: Jaxpr,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct PyBackwardPass;
+
 #[pyclass(name = "ShapeDtypeStruct")]
 #[derive(Clone)]
 struct PyShapeDtypeStruct {
@@ -213,6 +223,40 @@ impl PyLinearizedJvp {
 }
 
 #[pymethods]
+impl PyForwardPass {
+    fn call(&self, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyVjpPullback)> {
+        vjp_outputs_and_pullback(&self.jaxpr, args)
+    }
+
+    fn __call__(&self, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyVjpPullback)> {
+        self.call(args)
+    }
+
+    fn __repr__(&self) -> String {
+        "PyForwardPass()".to_owned()
+    }
+}
+
+#[pymethods]
+impl PyBackwardPass {
+    fn call(&self, residuals: &PyVjpPullback, cotangents: Vec<PyValue>) -> PyResult<Vec<PyValue>> {
+        residuals.call(cotangents)
+    }
+
+    fn __call__(
+        &self,
+        residuals: &PyVjpPullback,
+        cotangents: Vec<PyValue>,
+    ) -> PyResult<Vec<PyValue>> {
+        self.call(residuals, cotangents)
+    }
+
+    fn __repr__(&self) -> String {
+        "PyBackwardPass()".to_owned()
+    }
+}
+
+#[pymethods]
 impl PyShapeDtypeStruct {
     fn shape(&self) -> Vec<u32> {
         self.shape.clone()
@@ -321,6 +365,25 @@ fn py_shape_dtype_from_rust(value: &Value) -> PyShapeDtypeStruct {
             .map_or_else(Vec::new, |tensor| tensor.shape.dims.clone()),
         dtype: format!("{:?}", value.dtype()),
     }
+}
+
+fn vjp_outputs_and_pullback(
+    jaxpr: &Jaxpr,
+    args: Vec<PyValue>,
+) -> PyResult<(Vec<PyValue>, PyVjpPullback)> {
+    let rust_args = py_values_to_rust(args);
+    fj_api::jit(jaxpr.clone())
+        .call(rust_args.clone())
+        .map(|outputs| {
+            (
+                py_values_from_rust(outputs),
+                PyVjpPullback {
+                    jaxpr: jaxpr.clone(),
+                    primals: rust_args,
+                },
+            )
+        })
+        .map_err(runtime_error)
 }
 
 fn runtime_error(error: impl ToString) -> PyErr {
@@ -485,19 +548,7 @@ fn jvp(
 
 #[pyfunction]
 fn vjp(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyVjpPullback)> {
-    let rust_args = py_values_to_rust(args);
-    fj_api::jit(jaxpr.inner.clone())
-        .call(rust_args.clone())
-        .map(|outputs| {
-            (
-                py_values_from_rust(outputs),
-                PyVjpPullback {
-                    jaxpr: jaxpr.inner.clone(),
-                    primals: rust_args,
-                },
-            )
-        })
-        .map_err(runtime_error)
+    vjp_outputs_and_pullback(&jaxpr.inner, args)
 }
 
 #[pyfunction]
@@ -523,6 +574,16 @@ fn linearize(jaxpr: &PyJaxpr, args: Vec<PyValue>) -> PyResult<(Vec<PyValue>, PyL
             )
         })
         .map_err(runtime_error)
+}
+
+#[pyfunction]
+fn fwd_and_bwd(jaxpr: &PyJaxpr) -> (PyForwardPass, PyBackwardPass) {
+    (
+        PyForwardPass {
+            jaxpr: jaxpr.inner.clone(),
+        },
+        PyBackwardPass,
+    )
 }
 
 #[pyfunction]
@@ -702,7 +763,8 @@ fn host_ids(backend: Option<String>) -> PyResult<Vec<usize>> {
 }
 
 #[pyfunction(signature = (function, name=None))]
-fn named_call(function: Py<PyAny>, _name: Option<String>) -> Py<PyAny> {
+fn named_call(function: Py<PyAny>, name: Option<String>) -> Py<PyAny> {
+    drop(name);
     function
 }
 
@@ -1081,6 +1143,8 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyCheckpoint>()?;
     m.add_class::<PyVjpPullback>()?;
     m.add_class::<PyLinearizedJvp>()?;
+    m.add_class::<PyForwardPass>()?;
+    m.add_class::<PyBackwardPass>()?;
     m.add_class::<PyShapeDtypeStruct>()?;
     m.add_class::<PyDevice>()?;
     m.add_class::<PyNamedScope>()?;
@@ -1094,6 +1158,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(vjp, m)?)?;
     m.add_function(wrap_pyfunction!(linear_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(linearize, m)?)?;
+    m.add_function(wrap_pyfunction!(fwd_and_bwd, m)?)?;
     m.add_function(wrap_pyfunction!(eval_shape, m)?)?;
     m.add_function(wrap_pyfunction!(typeof_value, m)?)?;
     m.add_function(wrap_pyfunction!(device_put, m)?)?;
@@ -1297,6 +1362,28 @@ mod tests {
         let scaled_tangents = linearized.call(vec![PyValue::scalar_f64(2.0)]).unwrap();
         assert_eq!(scaled_tangents.len(), 1);
         assert!((scaled_tangents[0].as_f64().unwrap() - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fwd_and_bwd_returns_reusable_forward_backward_pair() {
+        let jaxpr = make_jaxpr_square();
+        let (forward, backward) = fwd_and_bwd(&jaxpr);
+
+        let (values, residuals) = forward.call(vec![PyValue::scalar_f64(3.0)]).unwrap();
+        assert_eq!(values.len(), 1);
+        assert!((values[0].as_f64().unwrap() - 9.0).abs() < 1e-12);
+
+        let grads = backward
+            .call(&residuals, vec![PyValue::scalar_f64(1.0)])
+            .unwrap();
+        assert_eq!(grads.len(), 1);
+        assert!((grads[0].as_f64().unwrap() - 6.0).abs() < 1e-9);
+
+        let scaled_grads = backward
+            .call(&residuals, vec![PyValue::scalar_f64(2.0)])
+            .unwrap();
+        assert_eq!(scaled_grads.len(), 1);
+        assert!((scaled_grads[0].as_f64().unwrap() - 12.0).abs() < 1e-9);
     }
 
     #[test]

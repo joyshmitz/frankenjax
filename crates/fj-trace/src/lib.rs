@@ -523,7 +523,21 @@ impl SimpleTraceContext {
             | Primitive::Pow
             | Primitive::Div
             | Primitive::Rem
-            | Primitive::Atan2 => {
+            | Primitive::Atan2
+            | Primitive::Hypot
+            | Primitive::LogAddExp
+            | Primitive::LogAddExp2
+            | Primitive::Gcd
+            | Primitive::Lcm
+            | Primitive::CopySign
+            | Primitive::Ldexp
+            | Primitive::XLogY
+            | Primitive::XLog1PY
+            | Primitive::Polygamma
+            | Primitive::Heaviside
+            | Primitive::Igamma
+            | Primitive::Igammac
+            | Primitive::Zeta => {
                 if inputs.len() != 2 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -540,6 +554,38 @@ impl SimpleTraceContext {
                     },
                 )?;
                 let dtype = promote_dtype(inputs[0].dtype, inputs[1].dtype);
+                Ok(vec![ShapedArray { dtype, shape }])
+            }
+            // Ternary elementwise: Fma(a, b, c) = a*b + c, Betainc(a, b, x)
+            Primitive::Fma | Primitive::Betainc => {
+                if inputs.len() != 3 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 3 inputs, got {}", inputs.len()),
+                    });
+                }
+                let shape = broadcast_shape(&inputs[0].shape, &inputs[1].shape).ok_or(
+                    TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "cannot broadcast {:?} with {:?}",
+                            inputs[0].shape.dims, inputs[1].shape.dims
+                        ),
+                    },
+                )?;
+                let shape = broadcast_shape(&shape, &inputs[2].shape).ok_or(
+                    TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!(
+                            "cannot broadcast {:?} with {:?}",
+                            shape.dims, inputs[2].shape.dims
+                        ),
+                    },
+                )?;
+                let dtype = promote_dtype(
+                    promote_dtype(inputs[0].dtype, inputs[1].dtype),
+                    inputs[2].dtype,
+                );
                 Ok(vec![ShapedArray { dtype, shape }])
             }
             Primitive::Complex => {
@@ -603,7 +649,29 @@ impl SimpleTraceContext {
                     shape,
                 }])
             }
+            // Unary predicates: output shape = input shape, dtype = Bool
+            Primitive::IsNan | Primitive::IsInf | Primitive::Signbit => {
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![ShapedArray {
+                    dtype: DType::Bool,
+                    shape: inputs[0].shape.clone(),
+                }])
+            }
             Primitive::Dot => infer_dot(inputs),
+            Primitive::DotGeneral => {
+                if inputs.len() != 2 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 2 inputs, got {}", inputs.len()),
+                    });
+                }
+                infer_dot_general(inputs, params)
+            }
             // Unary elementwise: output shape = input shape
             Primitive::Neg
             | Primitive::Abs
@@ -640,7 +708,16 @@ impl SimpleTraceContext {
             | Primitive::Cbrt
             | Primitive::IntegerPow
             | Primitive::Copy
-            | Primitive::ReducePrecision => {
+            | Primitive::ReducePrecision
+            | Primitive::Trunc
+            | Primitive::Log2
+            | Primitive::Exp2
+            | Primitive::Sinc
+            | Primitive::Deg2Rad
+            | Primitive::Rad2Deg
+            | Primitive::BesselI0e
+            | Primitive::BesselI1e
+            | Primitive::StopGradient => {
                 if inputs.len() != 1 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -745,6 +822,7 @@ impl SimpleTraceContext {
                 Ok(vec![inputs[0].clone()])
             }
             Primitive::Cholesky => infer_cholesky(inputs),
+            Primitive::Lu => infer_lu(inputs),
             Primitive::Qr => infer_qr(inputs, params),
             Primitive::Svd => infer_svd(inputs, params),
             Primitive::TriangularSolve => infer_triangular_solve(inputs),
@@ -1478,7 +1556,7 @@ impl SimpleTraceContext {
                     shape: Shape { dims: out_dims },
                 }])
             }
-            Primitive::Cumsum | Primitive::Cumprod => {
+            Primitive::Cumsum | Primitive::Cumprod | Primitive::Cummax | Primitive::Cummin => {
                 // Cumulative ops: output shape = input shape
                 if inputs.len() != 1 {
                     return Err(TraceError::ShapeInferenceFailed {
@@ -1911,7 +1989,10 @@ impl SimpleTraceContext {
             }
 
             // Bitwise/integer unary: same shape and type as input
-            Primitive::BitwiseNot | Primitive::PopulationCount | Primitive::CountLeadingZeros => {
+            Primitive::BitwiseNot
+            | Primitive::PopulationCount
+            | Primitive::CountLeadingZeros
+            | Primitive::CountTrailingZeros => {
                 if inputs.is_empty() {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -2040,6 +2121,7 @@ impl SimpleTraceContext {
                     shape: Shape { dims: out_dims },
                 }])
             }
+            _ => Err(TraceError::UnsupportedPrimitive { primitive }),
         }
     }
 
@@ -2311,6 +2393,73 @@ fn infer_dot(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
     }])
 }
 
+fn infer_dot_general(
+    inputs: &[ShapedArray],
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<ShapedArray>, TraceError> {
+    let primitive = Primitive::DotGeneral;
+    if inputs.len() != 2 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!("expected 2 inputs, got {}", inputs.len()),
+        });
+    }
+
+    let lhs = &inputs[0];
+    let rhs = &inputs[1];
+
+    fn parse_dims_str(s: &str) -> Vec<usize> {
+        if s.is_empty() || s == "[]" {
+            vec![]
+        } else {
+            s.trim_matches(|c| c == '[' || c == ']')
+                .split(',')
+                .filter(|s| !s.trim().is_empty())
+                .filter_map(|x| x.trim().parse::<usize>().ok())
+                .collect()
+        }
+    }
+
+    let lhs_contracting = params
+        .get("lhs_contracting_dims")
+        .map(|s| parse_dims_str(s))
+        .unwrap_or_default();
+    let rhs_contracting = params
+        .get("rhs_contracting_dims")
+        .map(|s| parse_dims_str(s))
+        .unwrap_or_default();
+    let lhs_batch = params
+        .get("lhs_batch_dims")
+        .map(|s| parse_dims_str(s))
+        .unwrap_or_default();
+    let rhs_batch = params
+        .get("rhs_batch_dims")
+        .map(|s| parse_dims_str(s))
+        .unwrap_or_default();
+
+    let mut out_dims = Vec::new();
+    for &b in &lhs_batch {
+        if b < lhs.shape.rank() {
+            out_dims.push(lhs.shape.dims[b]);
+        }
+    }
+    for (i, &d) in lhs.shape.dims.iter().enumerate() {
+        if !lhs_contracting.contains(&i) && !lhs_batch.contains(&i) {
+            out_dims.push(d);
+        }
+    }
+    for (i, &d) in rhs.shape.dims.iter().enumerate() {
+        if !rhs_contracting.contains(&i) && !rhs_batch.contains(&i) {
+            out_dims.push(d);
+        }
+    }
+
+    Ok(vec![ShapedArray {
+        dtype: promote_dtype(lhs.dtype, rhs.dtype),
+        shape: Shape { dims: out_dims },
+    }])
+}
+
 fn infer_reduce_sum(
     primitive: Primitive,
     inputs: &[ShapedArray],
@@ -2517,6 +2666,33 @@ fn infer_cholesky(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError
     let input = expect_single_matrix_input(primitive, inputs)?;
     let _ = expect_square_trailing_dims(primitive, input)?;
     Ok(vec![input.clone()])
+}
+
+fn infer_lu(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
+    let primitive = Primitive::Lu;
+    let input = expect_single_matrix_input(primitive, inputs)?;
+    let rank = input.shape.rank();
+    let m = input.shape.dims[rank - 2];
+    let n = input.shape.dims[rank - 1];
+    let k = m.min(n);
+    let batch_dims = &input.shape.dims[..rank - 2];
+
+    let mut pivot_dims = batch_dims.to_vec();
+    pivot_dims.push(k);
+
+    Ok(vec![
+        input.clone(),
+        ShapedArray {
+            dtype: DType::I64,
+            shape: Shape {
+                dims: pivot_dims.clone(),
+            },
+        },
+        ShapedArray {
+            dtype: DType::I64,
+            shape: Shape { dims: pivot_dims },
+        },
+    ])
 }
 
 fn infer_qr(

@@ -403,9 +403,9 @@ pub fn apply_batch_rule(
         Primitive::BitwiseNot => batch_unary_elementwise(primitive, inputs, params),
 
         // ── Integer intrinsics (unary elementwise) ─────────────
-        Primitive::PopulationCount | Primitive::CountLeadingZeros => {
-            batch_unary_elementwise(primitive, inputs, params)
-        }
+        Primitive::PopulationCount
+        | Primitive::CountLeadingZeros
+        | Primitive::CountTrailingZeros => batch_unary_elementwise(primitive, inputs, params),
 
         // ── Selection (ternary elementwise) ────────────────────
         Primitive::Select => batch_select(inputs, params),
@@ -487,6 +487,8 @@ pub fn apply_batch_rule(
         | Primitive::AxisIndex => Err(BatchError::EvalError(
             "collective operation requires an active pmap context".to_owned(),
         )),
+
+        _ => Err(BatchError::NoBatchRule(primitive)),
     }
 }
 

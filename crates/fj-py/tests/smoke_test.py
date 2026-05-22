@@ -123,6 +123,24 @@ def test_linearize_square():
     print("✓ linearize(square)(3.0) reuses pushforward for tangents 1.0 and 2.0")
 
 
+def test_fwd_and_bwd_square():
+    """Test reusable forward/backward pair of x^2."""
+    jaxpr = fj.make_jaxpr_square()
+    forward, backward = fj.fwd_and_bwd(jaxpr)
+    values, residuals = forward([fj.PyValue.scalar_f64(3.0)])
+    assert len(values) == 1
+    assert abs(values[0].as_f64() - 9.0) < 1e-12
+
+    grads = backward(residuals, [fj.PyValue.scalar_f64(1.0)])
+    assert len(grads) == 1
+    assert abs(grads[0].as_f64() - 6.0) < 1e-6
+
+    scaled_grads = backward(residuals, [fj.PyValue.scalar_f64(2.0)])
+    assert len(scaled_grads) == 1
+    assert abs(scaled_grads[0].as_f64() - 12.0) < 1e-6
+    print("✓ fwd_and_bwd(square) reuses backward pass for cotangents 1.0 and 2.0")
+
+
 def test_eval_shape():
     """Test eval_shape metadata for scalar and vector outputs."""
     scalar_meta = fj.eval_shape(fj.make_jaxpr_square(), [fj.PyValue.scalar_f64(3.0)])
@@ -755,6 +773,7 @@ if __name__ == "__main__":
     test_vjp_square()
     test_linear_transpose_square()
     test_linearize_square()
+    test_fwd_and_bwd_square()
     test_eval_shape()
     test_typeof()
     test_value_and_grad()
