@@ -86,6 +86,17 @@ def test_value_scalar():
         assert "out of bounds" in str(exc)
     else:
         raise AssertionError("addressable_data should reject nonzero shard indexes")
+    addressable_shards = v.addressable_shards
+    assert len(addressable_shards) == 1
+    shard = addressable_shards[0]
+    assert isinstance(shard, fj.Shard)
+    assert shard.device.platform == "cpu"
+    assert shard.index == ()
+    assert shard.replica_id == 0
+    assert abs(shard.data.as_f64() - 42.0) < 1e-12
+    global_shards = v.global_shards
+    assert len(global_shards) == 1
+    assert abs(global_shards[0].data.as_f64() - 42.0) < 1e-12
     assert v.on_device_size_in_bytes() == v.nbytes
     assert v.is_fully_addressable is True
     assert v.is_fully_replicated is True
@@ -145,6 +156,8 @@ def test_value_scalar():
         ("indexing", lambda: deleted[0]),
         ("array protocol", lambda: np.asarray(deleted)),
         ("DLPack device protocol", deleted.__dlpack_device__),
+        ("addressable_shards", lambda: deleted.addressable_shards),
+        ("global_shards", lambda: deleted.global_shards),
     ]
     for name, accessor in deleted_accessors:
         try:
@@ -223,6 +236,10 @@ def test_value_scalar():
     assert [item.as_i64() for item in iterated] == [1, 2, 3]
     assert [item.shape for item in iterated] == [(), (), ()]
     assert all(isinstance(item, fj.Array) for item in iterated)
+    vec_shard = vec.addressable_shards[0]
+    assert vec_shard.index == (slice(None),)
+    assert vec_shard.replica_id == 0
+    assert vec_shard.data.as_i64_list() == [1, 2, 3]
     assert vec[0].as_i64() == 1
     assert vec[-1].as_i64() == 3
     assert vec[1:].shape == (2,)

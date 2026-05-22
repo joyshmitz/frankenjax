@@ -309,6 +309,24 @@ struct PyDevice {
     process_index: usize,
 }
 
+#[pyclass(name = "Shard")]
+#[derive(Clone)]
+struct PyShard {
+    device: PyDevice,
+    rank: usize,
+    data: Option<PyValue>,
+}
+
+impl PyShard {
+    fn from_array(value: &PyValue) -> Self {
+        Self {
+            device: cpu_device(),
+            rank: value.shape_dims().len(),
+            data: Some(value.clone()),
+        }
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 struct PyNamedScope {
@@ -439,6 +457,17 @@ impl PyValue {
             )));
         }
         Ok(self.clone())
+    }
+
+    #[getter]
+    fn addressable_shards(&self) -> PyResult<Vec<PyShard>> {
+        self.ensure_not_deleted()?;
+        Ok(vec![PyShard::from_array(self)])
+    }
+
+    #[getter]
+    fn global_shards(&self) -> PyResult<Vec<PyShard>> {
+        self.addressable_shards()
     }
 
     fn on_device_size_in_bytes(&self) -> u64 {
@@ -1042,6 +1071,43 @@ impl PyDevice {
             "Device(id={}, process_index={}, platform='cpu')",
             self.id, self.process_index
         )
+    }
+}
+
+#[pymethods]
+impl PyShard {
+    #[getter]
+    fn device(&self) -> PyDevice {
+        self.device.clone()
+    }
+
+    #[getter]
+    fn index(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let slices: Vec<_> = (0..self.rank).map(|_| PySlice::full(py)).collect();
+        Ok(PyTuple::new(py, slices)?.into_any().unbind())
+    }
+
+    #[getter]
+    fn replica_id(&self) -> usize {
+        0
+    }
+
+    #[getter]
+    fn data(&self) -> Option<PyValue> {
+        self.data.clone()
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let index = self.index(py)?;
+        let index = index.bind(py).repr()?.extract::<String>()?;
+        let data = match &self.data {
+            Some(data) => data.__repr__(),
+            None => "None".to_string(),
+        };
+        Ok(format!(
+            "Shard(device={}, index={index}, replica_id=0, data={data})",
+            self.device.__repr__()
+        ))
     }
 }
 
@@ -2203,6 +2269,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBackwardPass>()?;
     m.add_class::<PyShapeDtypeStruct>()?;
     m.add_class::<PyDevice>()?;
+    m.add_class::<PyShard>()?;
     m.add_class::<PyNamedScope>()?;
     m.add_class::<PyUserContext>()?;
     m.add_class::<PyFloat0DType>()?;
@@ -2332,7 +2399,19 @@ mod tests {
         assert!(deleted.is_ready().is_err());
         assert!(deleted.copy_to_host_async().is_err());
         assert!(deleted.addressable_data(0).is_err());
+        assert!(deleted.addressable_shards().is_err());
+        assert!(deleted.global_shards().is_err());
         assert!(!v.is_deleted());
+        let shards = v.addressable_shards().unwrap();
+        assert_eq!(shards.len(), 1);
+        let shard = shards.first().unwrap();
+        assert_eq!(shard.device().platform(), "cpu");
+        assert_eq!(shard.replica_id(), 0);
+        assert!((shard.data().unwrap().as_f64().unwrap() - 42.0).abs() < 1e-12);
+        let global_shards = v.global_shards().unwrap();
+        assert_eq!(global_shards.len(), 1);
+        let global_shard = global_shards.first().unwrap();
+        assert!((global_shard.data().unwrap().as_f64().unwrap() - 42.0).abs() < 1e-12);
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             assert!(deleted.devices(py).is_err());
@@ -2340,6 +2419,8 @@ mod tests {
             assert!(deleted.tobytes(py, "C").is_err());
             assert!(deleted.__array__(py, None, None, None).is_err());
             assert!(deleted.__dlpack_device__(py).is_err());
+            let shard_index = shard.index(py).unwrap();
+            assert_eq!(shard_index.bind(py).downcast::<PyTuple>().unwrap().len(), 0);
             let devices = v.devices(py).unwrap();
             assert_eq!(devices.bind(py).len().unwrap(), 1);
             let dlpack_device = v.__dlpack_device__(py).unwrap();
@@ -2508,6 +2589,14 @@ mod tests {
             assert!(ints.__int__(py).is_err());
             assert!(ints.__complex__(py).is_err());
             assert!(ints.__index__(py).is_err());
+            let shards = ints.addressable_shards().unwrap();
+            assert_eq!(shards.len(), 1);
+            let shard = shards.first().unwrap();
+            assert_eq!(shard.data().unwrap().as_i64_list().unwrap(), vec![1, 2, 3]);
+            let index = shard.index(py).unwrap();
+            let index = index.bind(py).downcast::<PyTuple>().unwrap();
+            assert_eq!(index.len(), 1);
+            assert!(index.get_item(0).unwrap().downcast::<PySlice>().is_ok());
             let tail = ints.axis0_slice(&PySlice::new(py, 1, 3, 1)).unwrap();
             assert_eq!(tail.shape_dims(), vec![2]);
             assert_eq!(tail.as_i64_list().unwrap(), vec![2, 3]);
