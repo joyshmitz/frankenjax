@@ -155,6 +155,21 @@ fn oracle_nextafter_zero_to_negative() {
 }
 
 #[test]
+fn oracle_nextafter_zero_f64_subnormal_bits() -> Result<(), String> {
+    let positive = nextafter_f64_scalar(0.0, 1.0)?;
+    assert_eq!(positive.to_bits(), 1, "nextafter(0.0, 1.0)");
+
+    let negative = nextafter_f64_scalar(0.0, -1.0)?;
+    assert_eq!(
+        negative.to_bits(),
+        1 | (1_u64 << 63),
+        "nextafter(0.0, -1.0)"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn oracle_nextafter_nan_x() {
     // nextafter(NaN, y) = NaN
     let a = Value::Scalar(Literal::from_f64(f64::NAN));
@@ -183,6 +198,39 @@ fn oracle_nextafter_f32_scalar_preserves_dtype() -> Result<(), String> {
     let vals = extract_f32_vec(&result)?;
     assert!(vals[0] > 1.0);
     assert!(vals[0] < 1.0 + 1e-5);
+    Ok(())
+}
+
+#[test]
+fn oracle_nextafter_zero_f32_subnormal_bits() -> Result<(), String> {
+    let positive = eval_primitive(
+        Primitive::Nextafter,
+        &[
+            Value::Scalar(Literal::from_f32(0.0)),
+            Value::Scalar(Literal::from_f32(1.0)),
+        ],
+        &no_params(),
+    )
+    .map_err(|err| format!("{err:?}"))?;
+    let positive_vals = extract_f32_vec(&positive)?;
+    assert_eq!(positive_vals[0].to_bits(), 1, "nextafter(0.0f32, 1.0)");
+
+    let negative = eval_primitive(
+        Primitive::Nextafter,
+        &[
+            Value::Scalar(Literal::from_f32(0.0)),
+            Value::Scalar(Literal::from_f32(-1.0)),
+        ],
+        &no_params(),
+    )
+    .map_err(|err| format!("{err:?}"))?;
+    let negative_vals = extract_f32_vec(&negative)?;
+    assert_eq!(
+        negative_vals[0].to_bits(),
+        1 | (1_u32 << 31),
+        "nextafter(0.0f32, -1.0)"
+    );
+
     Ok(())
 }
 
