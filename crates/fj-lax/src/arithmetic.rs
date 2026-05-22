@@ -2138,6 +2138,64 @@ pub(crate) fn eval_igammac(primitive: Primitive, inputs: &[Value]) -> Result<Val
     )
 }
 
+pub(crate) fn bessel_i0e_approx(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax < 3.75 {
+        let t = (x / 3.75).powi(2);
+        let i0 = 1.0
+            + t * (3.5156229
+                + t * (3.0899424
+                    + t * (1.2067492
+                        + t * (0.2659732 + t * (0.0360768 + t * 0.0045813)))));
+        i0 * (-ax).exp()
+    } else {
+        let t = 3.75 / ax;
+        let i0e = (0.39894228
+            + t * (0.01328592
+                + t * (0.00225319
+                    + t * (-0.00157565
+                        + t * (0.00916281
+                            + t * (-0.02057706
+                                + t * (0.02635537 + t * (-0.01647633 + t * 0.00392377))))))))
+            / ax.sqrt();
+        i0e
+    }
+}
+
+pub(crate) fn bessel_i1e_approx(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax < 3.75 {
+        let t = (x / 3.75).powi(2);
+        let i1 = ax
+            * (0.5
+                + t * (0.87890594
+                    + t * (0.51498869
+                        + t * (0.15084934
+                            + t * (0.02658733 + t * (0.00301532 + t * 0.00032411))))));
+        let result = i1 * (-ax).exp();
+        if x < 0.0 { -result } else { result }
+    } else {
+        let t = 3.75 / ax;
+        let i1e = (0.39894228
+            + t * (-0.03988024
+                + t * (-0.00362018
+                    + t * (0.00163801
+                        + t * (-0.01031555
+                            + t * (0.02282967
+                                + t * (-0.02895312 + t * (0.01787654 - t * 0.00420059))))))))
+            / ax.sqrt();
+        if x < 0.0 { -i1e } else { i1e }
+    }
+}
+
+pub(crate) fn eval_bessel_i0e(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    eval_unary_elementwise(primitive, inputs, bessel_i0e_approx)
+}
+
+pub(crate) fn eval_bessel_i1e(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    eval_unary_elementwise(primitive, inputs, bessel_i1e_approx)
+}
+
 fn dot_result_is_integral(lhs: &TensorValue, rhs: &TensorValue) -> bool {
     lhs.elements.iter().all(|literal| literal.is_integral())
         && rhs.elements.iter().all(|literal| literal.is_integral())
@@ -3955,5 +4013,44 @@ mod tests {
         let igamma_val = extract_f64(&eval_igamma(Primitive::Igamma, &[a.clone(), x.clone()]).unwrap());
         let igammac_val = extract_f64(&eval_igammac(Primitive::Igammac, &[a, x]).unwrap());
         assert!((igamma_val + igammac_val - 1.0).abs() < 1e-10, "P + Q = 1");
+    }
+
+    // ── BesselI0e / BesselI1e ──
+
+    #[test]
+    fn bessel_i0e_at_zero() {
+        let result = eval_bessel_i0e(Primitive::BesselI0e, &[s_f64(0.0)]).unwrap();
+        let val = extract_f64(&result);
+        assert!((val - 1.0).abs() < 1e-10, "I0e(0) = 1");
+    }
+
+    #[test]
+    fn bessel_i0e_small() {
+        let result = eval_bessel_i0e(Primitive::BesselI0e, &[s_f64(1.0)]).unwrap();
+        let val = extract_f64(&result);
+        let expected = 0.4657596;
+        assert!((val - expected).abs() < 1e-4, "I0e(1) ≈ 0.4658");
+    }
+
+    #[test]
+    fn bessel_i1e_at_zero() {
+        let result = eval_bessel_i1e(Primitive::BesselI1e, &[s_f64(0.0)]).unwrap();
+        let val = extract_f64(&result);
+        assert!(val.abs() < 1e-10, "I1e(0) = 0");
+    }
+
+    #[test]
+    fn bessel_i1e_small() {
+        let result = eval_bessel_i1e(Primitive::BesselI1e, &[s_f64(1.0)]).unwrap();
+        let val = extract_f64(&result);
+        let expected = 0.2079104;
+        assert!((val - expected).abs() < 1e-4, "I1e(1) ≈ 0.2079");
+    }
+
+    #[test]
+    fn bessel_i1e_negative() {
+        let pos = eval_bessel_i1e(Primitive::BesselI1e, &[s_f64(2.0)]).unwrap();
+        let neg = eval_bessel_i1e(Primitive::BesselI1e, &[s_f64(-2.0)]).unwrap();
+        assert!((extract_f64(&pos) + extract_f64(&neg)).abs() < 1e-10, "I1e(-x) = -I1e(x)");
     }
 }

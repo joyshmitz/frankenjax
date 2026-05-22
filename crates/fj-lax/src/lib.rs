@@ -16,12 +16,12 @@ use fj_core::{Literal, Primitive, Shape, TensorValue, Value, ValueError};
 use std::collections::BTreeMap;
 
 use arithmetic::{
-    erf_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh, eval_binary_elementwise, eval_clamp,
-    eval_complex, eval_conj, eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general,
-    eval_erf_inv, eval_exp, eval_igamma, eval_igammac, eval_imag, eval_integer_pow, eval_is_finite,
-    eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_real, eval_round, eval_select,
-    eval_select_n, eval_sin, eval_sinh, eval_tan, eval_tanh, eval_unary_elementwise,
-    eval_unary_int_or_float,
+    erf_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh, eval_bessel_i0e, eval_bessel_i1e,
+    eval_binary_elementwise, eval_clamp, eval_complex, eval_conj, eval_cos, eval_cosh,
+    eval_digamma, eval_dot, eval_dot_general, eval_erf_inv, eval_exp, eval_igamma, eval_igammac,
+    eval_imag, eval_integer_pow, eval_is_finite, eval_lgamma, eval_log, eval_neg, eval_nextafter,
+    eval_real, eval_round, eval_select, eval_select_n, eval_sin, eval_sinh, eval_tan, eval_tanh,
+    eval_unary_elementwise, eval_unary_int_or_float,
 };
 
 use comparison::eval_comparison;
@@ -239,6 +239,8 @@ pub fn eval_primitive(
         Primitive::ErfInv => eval_erf_inv(primitive, inputs),
         Primitive::Igamma => eval_igamma(primitive, inputs),
         Primitive::Igammac => eval_igammac(primitive, inputs),
+        Primitive::BesselI0e => eval_bessel_i0e(primitive, inputs),
+        Primitive::BesselI1e => eval_bessel_i1e(primitive, inputs),
         Primitive::Conj => eval_conj(primitive, inputs),
         Primitive::Real => eval_real(primitive, inputs),
         Primitive::Imag => eval_imag(primitive, inputs),

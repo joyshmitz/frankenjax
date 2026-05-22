@@ -1652,6 +1652,35 @@ pub fn vjp(
             let neg_dx = value_neg(&dx)?;
             Ok(vec![zeros_like(a), value_mul(g, &neg_dx)?])
         }
+        Primitive::BesselI0e => {
+            // d/dx I0e(x) = I1e(x) - sign(x) * I0e(x)
+            let x = &inputs[0];
+            let i0e = eval_primitive(Primitive::BesselI0e, inputs, params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let i1e = eval_primitive(Primitive::BesselI1e, inputs, params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let sign_x = eval_primitive(Primitive::Sign, std::slice::from_ref(x), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let sign_i0e = value_mul(&sign_x, &i0e)?;
+            let deriv = value_sub(&i1e, &sign_i0e)?;
+            Ok(vec![value_mul(g, &deriv)?])
+        }
+        Primitive::BesselI1e => {
+            // d/dx I1e(x) = I0e(x) - I1e(x) * (1/x + sign(x))
+            let x = &inputs[0];
+            let i0e = eval_primitive(Primitive::BesselI0e, inputs, params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let i1e = eval_primitive(Primitive::BesselI1e, inputs, params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let sign_x = eval_primitive(Primitive::Sign, std::slice::from_ref(x), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let recip_x = eval_primitive(Primitive::Reciprocal, std::slice::from_ref(x), params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let coeff = value_add(&recip_x, &sign_x)?;
+            let i1e_coeff = value_mul(&i1e, &coeff)?;
+            let deriv = value_sub(&i0e, &i1e_coeff)?;
+            Ok(vec![value_mul(g, &deriv)?])
+        }
         Primitive::Div => {
             // d/da (a/b) = 1/b, d/db (a/b) = -a/b²
             let a = &inputs[0];
@@ -6492,6 +6521,30 @@ fn jvp_rule(
             let deriv = ep(Primitive::Div, &[numer, gamma_a])?;
             let neg_deriv = ep(Primitive::Neg, &[deriv])?;
             ep(Primitive::Mul, &[neg_deriv, dx.clone()])
+        }
+        Primitive::BesselI0e => {
+            // d/dx I0e(x) = I1e(x) - sign(x) * I0e(x)
+            let x = &primals[0];
+            let dx = &tangents[0];
+            let i0e = ep(Primitive::BesselI0e, &[x.clone()])?;
+            let i1e = ep(Primitive::BesselI1e, &[x.clone()])?;
+            let sign_x = ep(Primitive::Sign, &[x.clone()])?;
+            let sign_i0e = ep(Primitive::Mul, &[sign_x, i0e])?;
+            let deriv = ep(Primitive::Sub, &[i1e, sign_i0e])?;
+            ep(Primitive::Mul, &[deriv, dx.clone()])
+        }
+        Primitive::BesselI1e => {
+            // d/dx I1e(x) = I0e(x) - I1e(x) * (1/x + sign(x))
+            let x = &primals[0];
+            let dx = &tangents[0];
+            let i0e = ep(Primitive::BesselI0e, &[x.clone()])?;
+            let i1e = ep(Primitive::BesselI1e, &[x.clone()])?;
+            let sign_x = ep(Primitive::Sign, &[x.clone()])?;
+            let recip_x = ep(Primitive::Reciprocal, &[x.clone()])?;
+            let coeff = ep(Primitive::Add, &[recip_x, sign_x])?;
+            let i1e_coeff = ep(Primitive::Mul, &[i1e, coeff])?;
+            let deriv = ep(Primitive::Sub, &[i0e, i1e_coeff])?;
+            ep(Primitive::Mul, &[deriv, dx.clone()])
         }
 
         // ── Binary ops with quotient rule ──
