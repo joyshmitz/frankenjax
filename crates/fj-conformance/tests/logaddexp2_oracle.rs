@@ -10,6 +10,7 @@
 //! - Symmetry: logaddexp2(x, y) = logaddexp2(y, x)
 //! - Special values
 //! - Tensor shapes
+//! - Broadcast-compatible operands
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
@@ -56,6 +57,11 @@ fn no_params() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
 
+fn expected_logaddexp2(x: f64, y: f64) -> f64 {
+    let max = x.max(y);
+    max + (-(x - y).abs()).exp2().ln_1p() / std::f64::consts::LN_2
+}
+
 // ======================== Basic Cases ========================
 
 #[test]
@@ -78,10 +84,7 @@ fn oracle_logaddexp2_same_value() {
     let result = eval_primitive(Primitive::LogAddExp2, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
     // log2(2^5 + 2^5) = log2(2 * 2^5) = log2(2^6) = 6
-    assert!(
-        (actual - 6.0).abs() < 1e-14,
-        "logaddexp2(5, 5) = 6"
-    );
+    assert!((actual - 6.0).abs() < 1e-14, "logaddexp2(5, 5) = 6");
 }
 
 // ======================== Dominance (one value much larger) ========================
@@ -92,10 +95,7 @@ fn oracle_logaddexp2_large_small() {
     let y = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::LogAddExp2, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(
-        (actual - 100.0).abs() < 1e-10,
-        "logaddexp2(100, 0) ~ 100"
-    );
+    assert!((actual - 100.0).abs() < 1e-10, "logaddexp2(100, 0) ~ 100");
 }
 
 #[test]
@@ -104,10 +104,7 @@ fn oracle_logaddexp2_small_large() {
     let y = make_f64_tensor(&[], vec![100.0]);
     let result = eval_primitive(Primitive::LogAddExp2, &[x, y], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(
-        (actual - 100.0).abs() < 1e-10,
-        "logaddexp2(0, 100) ~ 100"
-    );
+    assert!((actual - 100.0).abs() < 1e-10, "logaddexp2(0, 100) ~ 100");
 }
 
 // ======================== Symmetry ========================
@@ -119,8 +116,7 @@ fn oracle_logaddexp2_symmetry() {
         let y = make_f64_tensor(&[], vec![b]);
         let result1 =
             eval_primitive(Primitive::LogAddExp2, &[x.clone(), y.clone()], &no_params()).unwrap();
-        let result2 =
-            eval_primitive(Primitive::LogAddExp2, &[y, x], &no_params()).unwrap();
+        let result2 = eval_primitive(Primitive::LogAddExp2, &[y, x], &no_params()).unwrap();
         let val1 = extract_f64_scalar(&result1);
         let val2 = extract_f64_scalar(&result2);
         assert!(
@@ -261,6 +257,50 @@ fn oracle_logaddexp2_matrix() {
             i,
             v,
             expected
+        );
+    }
+}
+
+// ======================== Broadcasting ========================
+
+#[test]
+fn oracle_logaddexp2_vector_scalar_y_broadcast() {
+    let x_values = [0.0, 1.0, 2.0];
+    let x = make_f64_tensor(&[3], x_values.to_vec());
+    let y = make_f64_tensor(&[], vec![0.5]);
+    let result = eval_primitive(Primitive::LogAddExp2, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    for (i, (&actual, &x_value)) in vals.iter().zip(x_values.iter()).enumerate() {
+        let expected = expected_logaddexp2(x_value, 0.5);
+        assert!(
+            (actual - expected).abs() < 1e-14,
+            "broadcast scalar y element {i}: {actual} vs {expected}"
+        );
+    }
+}
+
+#[test]
+fn oracle_logaddexp2_matrix_row_y_broadcast() {
+    let x_values = [3.0, -1.0, 8.0, 5.0];
+    let y_values = [2.0, 3.0];
+    let x = make_f64_tensor(&[2, 2], x_values.to_vec());
+    let y = make_f64_tensor(&[2], y_values.to_vec());
+    let result = eval_primitive(Primitive::LogAddExp2, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_f64_vec(&result);
+    for (i, ((&actual, &x_value), &y_value)) in vals
+        .iter()
+        .zip(x_values.iter())
+        .zip(y_values.iter().cycle())
+        .enumerate()
+    {
+        let expected = expected_logaddexp2(x_value, y_value);
+        assert!(
+            (actual - expected).abs() < 1e-14,
+            "broadcast row y element {i}: {actual} vs {expected}"
         );
     }
 }
