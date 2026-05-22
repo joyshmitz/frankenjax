@@ -137,3 +137,16 @@ fn lu_rejects_non_matrix_input() {
         "unexpected LU scalar-input error: {err}"
     );
 }
+
+#[test]
+fn lu_pivots_and_permutation_are_int32() {
+    let input = f64_matrix(2, 2, &[1.0, 2.0, 3.0, 4.0]);
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("LU should succeed");
+
+    let pivots_dtype = result[1].as_tensor().expect("pivots should be tensor").dtype;
+    let perm_dtype = result[2].as_tensor().expect("perm should be tensor").dtype;
+
+    assert_eq!(pivots_dtype, DType::I32, "pivots should be I32 per upstream JAX");
+    assert_eq!(perm_dtype, DType::I32, "permutation should be I32 per upstream JAX");
+}

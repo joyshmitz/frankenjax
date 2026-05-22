@@ -463,18 +463,22 @@ pub(crate) fn eval_lu(
 
     let lu_val = matrix_to_value(m, n, &lu, dtype)?;
 
+    // Upstream JAX returns pivots and permutation as int32 (see lax.linalg.lu)
     let pivots_lits: Vec<Literal> = pivots.iter().map(|&p| Literal::I64(p)).collect();
-    let pivots_shape = Shape { dims: vec![k as u32] };
+    let pivots_shape = Shape {
+        dims: vec![k as u32],
+    };
     let pivots_val = Value::Tensor(
-        TensorValue::new(DType::I64, pivots_shape, pivots_lits)
+        TensorValue::new(DType::I32, pivots_shape, pivots_lits)
             .map_err(EvalError::InvalidTensor)?,
     );
 
     let perm_lits: Vec<Literal> = perm.iter().map(|&p| Literal::I64(p)).collect();
-    let perm_shape = Shape { dims: vec![m as u32] };
+    let perm_shape = Shape {
+        dims: vec![m as u32],
+    };
     let perm_val = Value::Tensor(
-        TensorValue::new(DType::I64, perm_shape, perm_lits)
-            .map_err(EvalError::InvalidTensor)?,
+        TensorValue::new(DType::I32, perm_shape, perm_lits).map_err(EvalError::InvalidTensor)?,
     );
 
     Ok(vec![lu_val, pivots_val, perm_val])
@@ -1168,11 +1172,19 @@ mod tests {
 
         let lu = extract_f64_elements(&result[0]);
         let pivots = match &result[1] {
-            Value::Tensor(t) => t.elements.iter().map(|l| l.as_i64().unwrap()).collect::<Vec<_>>(),
+            Value::Tensor(t) => t
+                .elements
+                .iter()
+                .map(|l| l.as_i64().unwrap())
+                .collect::<Vec<_>>(),
             _ => panic!("pivots should be tensor"),
         };
         let perm = match &result[2] {
-            Value::Tensor(t) => t.elements.iter().map(|l| l.as_i64().unwrap()).collect::<Vec<_>>(),
+            Value::Tensor(t) => t
+                .elements
+                .iter()
+                .map(|l| l.as_i64().unwrap())
+                .collect::<Vec<_>>(),
             _ => panic!("perm should be tensor"),
         };
 
@@ -1196,18 +1208,15 @@ mod tests {
             a_orig[p1 * 2 + 1],
         ];
 
-        let reconstructed = [
-            l11 * u11,
-            l11 * u12,
-            l21 * u11,
-            l21 * u12 + u22,
-        ];
+        let reconstructed = [l11 * u11, l11 * u12, l21 * u11, l21 * u12 + u22];
 
         for i in 0..4 {
             assert!(
                 (a_perm[i] - reconstructed[i]).abs() < 1e-10,
                 "PA = LU failed at index {}: {} vs {}",
-                i, a_perm[i], reconstructed[i]
+                i,
+                a_perm[i],
+                reconstructed[i]
             );
         }
     }
