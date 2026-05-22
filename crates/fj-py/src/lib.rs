@@ -406,6 +406,18 @@ impl PyValue {
         Ok(devices.into_any().unbind())
     }
 
+    fn addressable_data(&self, index: isize) -> PyResult<Self> {
+        if self.deleted {
+            return Err(runtime_error("Array has been deleted."));
+        }
+        if index != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "addressable_data index {index} is out of bounds for 1 local shard"
+            )));
+        }
+        Ok(self.clone())
+    }
+
     fn on_device_size_in_bytes(&self) -> u64 {
         self.nbytes()
     }
@@ -2224,6 +2236,8 @@ mod tests {
         assert_eq!(device.process_index(), 0);
         assert_eq!(device.platform(), "cpu");
         assert_eq!(v.platform(), "cpu");
+        assert!((v.addressable_data(0).unwrap().as_f64().unwrap() - 42.0).abs() < 1e-12);
+        assert!(v.addressable_data(1).is_err());
         assert_eq!(v.on_device_size_in_bytes(), v.nbytes());
         assert!(v.is_fully_addressable());
         assert!(v.is_fully_replicated());
@@ -2237,6 +2251,7 @@ mod tests {
         deleted.delete();
         assert!(deleted.is_deleted());
         assert!(deleted.is_ready().is_err());
+        assert!(deleted.addressable_data(0).is_err());
         assert!(!v.is_deleted());
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {

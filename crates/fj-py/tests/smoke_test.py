@@ -57,6 +57,13 @@ def test_value_scalar():
     assert v.device.device_kind == "cpu"
     assert v.platform() == "cpu"
     assert {device.platform for device in v.devices()} == {"cpu"}
+    assert abs(v.addressable_data(0).as_f64() - 42.0) < 1e-12
+    try:
+        v.addressable_data(1)
+    except IndexError as exc:
+        assert "out of bounds" in str(exc)
+    else:
+        raise AssertionError("addressable_data should reject nonzero shard indexes")
     assert v.on_device_size_in_bytes() == v.nbytes
     assert v.is_fully_addressable is True
     assert v.is_fully_replicated is True
@@ -98,6 +105,12 @@ def test_value_scalar():
         assert "Array has been deleted" in str(exc)
     else:
         raise AssertionError("is_ready should reject deleted arrays")
+    try:
+        deleted.addressable_data(0)
+    except RuntimeError as exc:
+        assert "Array has been deleted" in str(exc)
+    else:
+        raise AssertionError("addressable_data should reject deleted arrays")
     assert v.is_deleted() is False
     assert v.tolist() == 42.0
     assert v.tobytes() == struct.pack("@d", 42.0)
