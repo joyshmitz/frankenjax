@@ -54,6 +54,43 @@ impl PyValue {
         }
         Ok(values)
     }
+
+    fn axis0_value_at(&self, index: isize) -> PyResult<Self> {
+        let Value::Tensor(tensor) = &self.inner else {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "Too many indices: array is 0-dimensional, but 1 were indexed",
+            ));
+        };
+
+        let first_dim = tensor.leading_dim().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "Too many indices: array is 0-dimensional, but 1 were indexed",
+            )
+        })?;
+        let axis_size = isize::try_from(first_dim).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array length does not fit isize")
+        })?;
+        let normalized_index = if index < 0 {
+            index.checked_add(axis_size).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {index} is out of bounds for axis 0 with size {axis_size}"
+                ))
+            })?
+        } else {
+            index
+        };
+        if !(0..axis_size).contains(&normalized_index) {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "index {index} is out of bounds for axis 0 with size {axis_size}"
+            )));
+        }
+
+        let index = usize::try_from(normalized_index).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array index does not fit usize")
+        })?;
+        let value = tensor.slice_axis0(index).map_err(value_error)?;
+        Ok(Self::from_value(value))
+    }
 }
 
 #[pyclass]
@@ -348,6 +385,10 @@ impl PyValue {
         Ok(PyList::new(py, py_values)?
             .call_method0("__iter__")?
             .unbind())
+    }
+
+    fn __getitem__(&self, index: isize) -> PyResult<Self> {
+        self.axis0_value_at(index)
     }
 
     fn block_until_ready(&self) -> Self {
@@ -2099,6 +2140,7 @@ mod tests {
         assert_eq!(v.itemsize(), 8);
         assert_eq!(v.nbytes(), 8);
         assert!(v.leading_axis_values().is_err());
+        assert!(v.__getitem__(0).is_err());
         assert!(!v.weak_type());
         assert!(!v.committed());
         let device = v.device();
@@ -2231,6 +2273,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2, 3]
         );
+        assert_eq!(ints.__getitem__(0).unwrap().as_i64().unwrap(), 1);
+        assert_eq!(ints.__getitem__(-1).unwrap().as_i64().unwrap(), 3);
+        assert!(ints.__getitem__(3).is_err());
         Python::with_gil(|py| {
             assert!(ints.__int__(py).is_err());
             assert!(ints.__complex__(py).is_err());

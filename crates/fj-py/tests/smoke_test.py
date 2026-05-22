@@ -71,6 +71,12 @@ def test_value_scalar():
         assert str(exc) == "iteration over a 0-d array"
     else:
         raise AssertionError("iter(scalar) should raise TypeError")
+    try:
+        v[0]
+    except IndexError as exc:
+        assert "Too many indices" in str(exc)
+    else:
+        raise AssertionError("scalar indexing should raise IndexError")
     ready = v.block_until_ready()
     assert isinstance(ready, fj.Array)
     assert abs(ready.as_f64() - 42.0) < 1e-12
@@ -154,6 +160,14 @@ def test_value_scalar():
     assert [item.as_i64() for item in iterated] == [1, 2, 3]
     assert [item.shape for item in iterated] == [(), (), ()]
     assert all(isinstance(item, fj.Array) for item in iterated)
+    assert vec[0].as_i64() == 1
+    assert vec[-1].as_i64() == 3
+    try:
+        vec[3]
+    except IndexError as exc:
+        assert "index 3 is out of bounds for axis 0 with size 3" in str(exc)
+    else:
+        raise AssertionError("out-of-bounds vector indexing should raise IndexError")
     assert vec.block_until_ready().as_i64_list() == [1, 2, 3]
     assert vec.copy_to_host_async().as_i64_list() == [1, 2, 3]
     assert vec.copy().as_i64_list() == [1, 2, 3]
