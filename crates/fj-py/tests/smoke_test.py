@@ -219,6 +219,8 @@ def test_value_scalar():
         ("transpose", deleted.transpose),
         ("real", lambda: deleted.real),
         ("imag", lambda: deleted.imag),
+        ("conj", deleted.conj),
+        ("conjugate", deleted.conjugate),
         ("round", deleted.round),
         ("dunder round", lambda: round(deleted)),
         ("reversed", lambda: list(reversed(deleted))),
@@ -241,6 +243,8 @@ def test_value_scalar():
     assert v.tolist() == 42.0
     assert abs(v.real.tolist() - 42.0) < 1e-12
     assert abs(v.imag.tolist()) < 1e-12
+    assert abs(v.conj().tolist() - 42.0) < 1e-12
+    assert abs(v.conjugate().tolist() - 42.0) < 1e-12
     assert v.tobytes() == struct.pack("@d", 42.0)
     assert v.tobytes(order="F") == struct.pack("@d", 42.0)
     try:
@@ -533,6 +537,9 @@ def test_make_jaxpr_generic():
     )[0]
     assert abs(complex_value.real.as_f64() - 3.0) < 1e-12
     assert abs(complex_value.imag.as_f64() + 2.0) < 1e-12
+    assert abs(complex_value.conj().real.as_f64() - 3.0) < 1e-12
+    assert abs(complex_value.conj().imag.as_f64() - 2.0) < 1e-12
+    assert abs(complex_value.conjugate().imag.as_f64() - 2.0) < 1e-12
 
     try:
         fj.make_jaxpr("missing_program")

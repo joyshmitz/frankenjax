@@ -593,6 +593,15 @@ impl PyValue {
         self.imag_part()
     }
 
+    fn conj(&self) -> PyResult<Self> {
+        self.conjugate()
+    }
+
+    fn conjugate(&self) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        value_conjugate(&self.inner).map(Self::from_value)
+    }
+
     #[getter]
     fn dtype(&self) -> String {
         format!("{:?}", self.inner.dtype())
@@ -2169,6 +2178,24 @@ fn value_imag_part(value: &Value) -> PyResult<Value> {
     }
 }
 
+fn value_conjugate(value: &Value) -> PyResult<Value> {
+    match value {
+        Value::Scalar(literal) => Ok(Value::Scalar(literal_conjugate(*literal))),
+        Value::Tensor(tensor) if matches!(tensor.dtype, DType::Complex64 | DType::Complex128) => {
+            let elements = tensor
+                .elements
+                .iter()
+                .copied()
+                .map(literal_conjugate)
+                .collect::<Vec<_>>();
+            TensorValue::new(tensor.dtype, tensor.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(value_error)
+        }
+        Value::Tensor(_) => Ok(value.clone()),
+    }
+}
+
 fn literal_real_part(literal: Literal) -> Literal {
     match literal {
         Literal::Complex64Bits(re, _) => Literal::F32Bits(re),
@@ -2182,6 +2209,18 @@ fn literal_imag_part(literal: Literal, dtype: DType) -> Literal {
         Literal::Complex64Bits(_, im) => Literal::F32Bits(im),
         Literal::Complex128Bits(_, im) => Literal::F64Bits(im),
         _ => zero_literal_for_dtype(dtype),
+    }
+}
+
+fn literal_conjugate(literal: Literal) -> Literal {
+    match literal {
+        Literal::Complex64Bits(re, im) => {
+            Literal::from_complex64(f32::from_bits(re), -f32::from_bits(im))
+        }
+        Literal::Complex128Bits(re, im) => {
+            Literal::from_complex128(f64::from_bits(re), -f64::from_bits(im))
+        }
+        _ => literal,
     }
 }
 
@@ -3680,6 +3719,7 @@ mod tests {
         assert!(deleted.matrix_transpose().is_err());
         assert!(deleted.real_part().is_err());
         assert!(deleted.imag_part().is_err());
+        assert!(deleted.conjugate().is_err());
         assert!(deleted.round(0, None).is_err());
         assert!(deleted.__round__(None).is_err());
         assert!(deleted.addressable_data(0).is_err());
@@ -3843,12 +3883,19 @@ mod tests {
         assert!(i.__bool__().unwrap());
         assert_eq!(i.real_part().unwrap().as_i64().unwrap(), 123);
         assert_eq!(i.imag_part().unwrap().as_i64().unwrap(), 0);
+        assert_eq!(i.conj().unwrap().as_i64().unwrap(), 123);
+        assert_eq!(i.conjugate().unwrap().as_i64().unwrap(), 123);
         assert_eq!(i.round(0, None).unwrap().as_i64().unwrap(), 123);
         assert!(i.round(-1, None).is_err());
         assert!(!PyValue::scalar_i64(0).__bool__().unwrap());
         let complex = PyValue::from_value(Value::scalar_complex128(3.0, -2.0));
         assert!((complex.real_part().unwrap().as_f64().unwrap() - 3.0).abs() < 1e-12);
         assert!((complex.imag_part().unwrap().as_f64().unwrap() + 2.0).abs() < 1e-12);
+        let conjugated = complex.conjugate().unwrap();
+        assert!((conjugated.real_part().unwrap().as_f64().unwrap() - 3.0).abs() < 1e-12);
+        assert!((conjugated.imag_part().unwrap().as_f64().unwrap() - 2.0).abs() < 1e-12);
+        let conj_alias = complex.conj().unwrap();
+        assert!((conj_alias.imag_part().unwrap().as_f64().unwrap() - 2.0).abs() < 1e-12);
         let complex_rounded = complex.round(0, None).unwrap();
         assert!((complex_rounded.real_part().unwrap().as_f64().unwrap() - 3.0).abs() < 1e-12);
         assert!((complex_rounded.imag_part().unwrap().as_f64().unwrap() + 2.0).abs() < 1e-12);
@@ -4108,6 +4155,25 @@ mod tests {
         assert_eq!(
             complex_vector.imag_part().unwrap().as_f64_list().unwrap(),
             vec![-2.0, 4.5]
+        );
+        let complex_conjugated = complex_vector.conjugate().unwrap();
+        assert_eq!(
+            complex_conjugated
+                .imag_part()
+                .unwrap()
+                .as_f64_list()
+                .unwrap(),
+            vec![2.0, -4.5]
+        );
+        assert_eq!(
+            complex_vector
+                .conj()
+                .unwrap()
+                .imag_part()
+                .unwrap()
+                .as_f64_list()
+                .unwrap(),
+            vec![2.0, -4.5]
         );
         Python::with_gil(|py| {
             let axes = PyTuple::new(py, [1_isize, 0_isize]).unwrap();
