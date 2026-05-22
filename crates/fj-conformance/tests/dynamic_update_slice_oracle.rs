@@ -1,4 +1,5 @@
-//! JAX oracle parity for `lax.dynamic_update_slice` start-index clamping.
+//! JAX oracle parity for `lax.dynamic_update_slice` start-index clamping and
+//! general semantics.
 //!
 //! Reference outputs were captured with:
 //! `uv run --with 'jax[cpu]' python ...`
@@ -140,4 +141,144 @@ fn dynamic_update_slice_start_clamping_matches_jax_reference() -> Result<(), Str
     }
 
     Ok(())
+}
+
+// ======================== Additional Coverage ========================
+
+fn tensor_f64(shape: &[u32], values: &[f64]) -> Result<Value, String> {
+    TensorValue::new(
+        DType::F64,
+        Shape {
+            dims: shape.to_vec(),
+        },
+        values.iter().copied().map(Literal::from_f64).collect(),
+    )
+    .map(Value::Tensor)
+    .map_err(|err| format!("failed to build f64 tensor {shape:?}: {err}"))
+}
+
+fn tensor_f64_values(value: &Value) -> Result<Vec<f64>, String> {
+    let Value::Tensor(tensor) = value else {
+        return Err(format!("expected tensor, got {value:?}"));
+    };
+    tensor
+        .elements
+        .iter()
+        .map(|literal| match literal {
+            Literal::F64Bits(bits) => Ok(f64::from_bits(*bits)),
+            other => Err(format!("expected f64 literal, got {other:?}")),
+        })
+        .collect()
+}
+
+#[test]
+fn dynamic_update_slice_start_at_zero() {
+    let operand = tensor_i64(&[5], &[0, 1, 2, 3, 4]).unwrap();
+    let update = tensor_i64(&[2], &[90, 91]).unwrap();
+    let starts = vec![Value::scalar_i64(0)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (_, values) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(values, vec![90, 91, 2, 3, 4]);
+}
+
+#[test]
+fn dynamic_update_slice_full_replacement() {
+    let operand = tensor_i64(&[3], &[1, 2, 3]).unwrap();
+    let update = tensor_i64(&[3], &[7, 8, 9]).unwrap();
+    let starts = vec![Value::scalar_i64(0)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (_, values) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(values, vec![7, 8, 9]);
+}
+
+#[test]
+fn dynamic_update_slice_single_element() {
+    let operand = tensor_i64(&[5], &[0, 1, 2, 3, 4]).unwrap();
+    let update = tensor_i64(&[1], &[99]).unwrap();
+    let starts = vec![Value::scalar_i64(2)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (_, values) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(values, vec![0, 1, 99, 3, 4]);
+}
+
+#[test]
+fn dynamic_update_slice_f64_dtype() {
+    let operand = tensor_f64(&[4], &[1.0, 2.0, 3.0, 4.0]).unwrap();
+    let update = tensor_f64(&[2], &[10.5, 11.5]).unwrap();
+    let starts = vec![Value::scalar_i64(1)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let values = tensor_f64_values(&result).unwrap();
+    assert!((values[0] - 1.0).abs() < 1e-10);
+    assert!((values[1] - 10.5).abs() < 1e-10);
+    assert!((values[2] - 11.5).abs() < 1e-10);
+    assert!((values[3] - 4.0).abs() < 1e-10);
+}
+
+#[test]
+fn dynamic_update_slice_rank3() {
+    // [2, 2, 2] operand, update [1, 1, 2] at position [1, 0, 0]
+    let operand = tensor_i64(&[2, 2, 2], &[0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+    let update = tensor_i64(&[1, 1, 2], &[90, 91]).unwrap();
+    let starts = vec![
+        Value::scalar_i64(1),
+        Value::scalar_i64(0),
+        Value::scalar_i64(0),
+    ];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone(), starts[1].clone(), starts[2].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (shape, values) = tensor_i64_parts(&result).unwrap();
+    assert_eq!(shape, vec![2, 2, 2]);
+    assert_eq!(values, vec![0, 1, 2, 3, 90, 91, 6, 7]);
+}
+
+#[test]
+fn dynamic_update_slice_preserves_untouched_elements() {
+    let operand = tensor_i64(&[2, 4], &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+    let update = tensor_i64(&[1, 2], &[90, 91]).unwrap();
+    let starts = vec![Value::scalar_i64(0), Value::scalar_i64(1)];
+
+    let result = eval_primitive(
+        Primitive::DynamicUpdateSlice,
+        &[operand, update, starts[0].clone(), starts[1].clone()],
+        &BTreeMap::new(),
+    )
+    .unwrap();
+
+    let (_, values) = tensor_i64_parts(&result).unwrap();
+    // Row 0: [1, 90, 91, 4], Row 1 unchanged: [5, 6, 7, 8]
+    assert_eq!(values, vec![1, 90, 91, 4, 5, 6, 7, 8]);
 }
