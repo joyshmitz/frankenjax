@@ -178,6 +178,7 @@ def test_value_scalar():
         ("item assignment", lambda: assign_first(deleted)),
         ("T", lambda: deleted.T),
         ("mT", lambda: deleted.mT),
+        ("transpose", deleted.transpose),
         ("array protocol", lambda: np.asarray(deleted)),
         ("DLPack device protocol", deleted.__dlpack_device__),
         ("addressable_shards", lambda: deleted.addressable_shards),
@@ -265,6 +266,10 @@ def test_value_scalar():
     vec_t = vec.T
     assert vec_t.shape == (3,)
     assert vec_t.tolist() == [1, 2, 3]
+    assert vec.transpose().tolist() == [1, 2, 3]
+    assert vec.transpose(None).tolist() == [1, 2, 3]
+    assert vec.transpose(0).tolist() == [1, 2, 3]
+    assert vec.transpose((0,)).tolist() == [1, 2, 3]
     try:
         vec.mT
     except ValueError as exc:
@@ -388,6 +393,31 @@ def test_make_jaxpr_generic():
     matrix_t = matrix.T
     assert matrix_t.shape == (3, 2)
     assert matrix_t.tolist() == [1, 4, 2, 5, 3, 6]
+    matrix_call_t = matrix.transpose()
+    assert matrix_call_t.shape == (3, 2)
+    assert matrix_call_t.tolist() == [1, 4, 2, 5, 3, 6]
+    assert matrix.transpose(1, 0).tolist() == [1, 4, 2, 5, 3, 6]
+    assert matrix.transpose((1, 0)).tolist() == [1, 4, 2, 5, 3, 6]
+    assert matrix.transpose([1, 0]).tolist() == [1, 4, 2, 5, 3, 6]
+    assert matrix.transpose(-1, -2).tolist() == [1, 4, 2, 5, 3, 6]
+    try:
+        matrix.transpose(0)
+    except ValueError as exc:
+        assert "rank" in str(exc)
+    else:
+        raise AssertionError("Array.transpose should reject too few axes")
+    try:
+        matrix.transpose(0, 0)
+    except ValueError as exc:
+        assert "repeated" in str(exc)
+    else:
+        raise AssertionError("Array.transpose should reject repeated axes")
+    try:
+        matrix.transpose(2, 0)
+    except ValueError as exc:
+        assert "out of bounds" in str(exc)
+    else:
+        raise AssertionError("Array.transpose should reject out-of-bounds axes")
     matrix_mt = matrix.mT
     assert matrix_mt.shape == (3, 2)
     assert matrix_mt.tolist() == [1, 4, 2, 5, 3, 6]

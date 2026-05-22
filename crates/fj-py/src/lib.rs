@@ -162,7 +162,7 @@ impl PyValue {
             return Ok(self.clone());
         };
         let rank = tensor.rank();
-        let permutation = (0..rank).rev().collect::<Vec<_>>();
+        let permutation = default_transpose_permutation(rank);
         self.transpose_with_permutation(&permutation)
     }
 
@@ -507,6 +507,14 @@ impl PyValue {
     #[getter(mT)]
     fn matrix_transpose_property(&self) -> PyResult<Self> {
         self.matrix_transpose()
+    }
+
+    #[pyo3(signature = (*args))]
+    fn transpose(&self, args: &Bound<'_, PyTuple>) -> PyResult<Self> {
+        self.ensure_not_deleted()?;
+        let rank = self.inner.as_tensor().map_or(0, |tensor| tensor.rank());
+        let permutation = transpose_permutation_from_py_args(args, rank)?;
+        self.transpose_with_permutation(&permutation)
     }
 
     #[getter]
@@ -1522,6 +1530,81 @@ fn validate_permutation(permutation: &[usize], rank: usize) -> PyResult<()> {
         *slot = true;
     }
     Ok(())
+}
+
+fn default_transpose_permutation(rank: usize) -> Vec<usize> {
+    (0..rank).rev().collect()
+}
+
+fn transpose_permutation_from_py_args(
+    args: &Bound<'_, PyTuple>,
+    rank: usize,
+) -> PyResult<Vec<usize>> {
+    let raw_axes = match args.len() {
+        0 => return Ok(default_transpose_permutation(rank)),
+        1 => {
+            let value = args.get_item(0)?;
+            if value.is_none() {
+                return Ok(default_transpose_permutation(rank));
+            }
+            extract_axis_sequence(&value)?
+        }
+        _ => {
+            let mut axes = Vec::with_capacity(args.len());
+            for index in 0..args.len() {
+                axes.push(args.get_item(index)?.extract::<isize>()?);
+            }
+            axes
+        }
+    };
+    normalize_axis_permutation(&raw_axes, rank)
+}
+
+fn extract_axis_sequence(value: &Bound<'_, PyAny>) -> PyResult<Vec<isize>> {
+    if let Ok(axis) = value.extract::<isize>() {
+        return Ok(vec![axis]);
+    }
+    value.extract::<Vec<isize>>().map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "transpose axes must be None, an integer, or a sequence of integers",
+        )
+    })
+}
+
+fn normalize_axis_permutation(raw_axes: &[isize], rank: usize) -> PyResult<Vec<usize>> {
+    if raw_axes.len() != rank {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "transpose permutation rank does not match array rank",
+        ));
+    }
+
+    let mut permutation = Vec::with_capacity(raw_axes.len());
+    for axis in raw_axes {
+        permutation.push(normalize_axis(*axis, rank)?);
+    }
+    validate_permutation(&permutation, rank)?;
+    Ok(permutation)
+}
+
+fn normalize_axis(axis: isize, rank: usize) -> PyResult<usize> {
+    let rank_isize = isize::try_from(rank).map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyOverflowError, _>("array rank does not fit isize")
+    })?;
+    let normalized = if axis < 0 {
+        axis.checked_add(rank_isize).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("axis normalization overflowed")
+        })?
+    } else {
+        axis
+    };
+    if !(0..rank_isize).contains(&normalized) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "axis {axis} is out of bounds for array of dimension {rank}"
+        )));
+    }
+    usize::try_from(normalized).map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyOverflowError, _>("normalized axis does not fit usize")
+    })
 }
 
 fn py_object_repr(py: Python<'_>, value: Option<Py<PyAny>>) -> PyResult<String> {
@@ -2702,8 +2785,13 @@ mod tests {
             assert!(deleted.devices(py).is_err());
             assert!(deleted.tolist(py).is_err());
             assert!(deleted.tobytes(py, "C").is_err());
+            assert!(deleted.transpose(&PyTuple::empty(py)).is_err());
             assert!(deleted.__array__(py, None, None, None).is_err());
             assert!(deleted.__dlpack_device__(py).is_err());
+            assert_eq!(
+                v.transpose(&PyTuple::empty(py)).unwrap().shape_dims(),
+                Vec::<u32>::new()
+            );
             let shard_index = shard.index(py).unwrap();
             assert_eq!(shard_index.bind(py).downcast::<PyTuple>().unwrap().len(), 0);
             let devices = v.devices(py).unwrap();
@@ -2892,6 +2980,11 @@ mod tests {
             let empty = ints.axis0_slice(&PySlice::new(py, 3, 3, 1)).unwrap();
             assert_eq!(empty.shape_dims(), vec![0]);
             assert_eq!(empty.as_i64_list().unwrap(), Vec::<i64>::new());
+            let transpose_arg = PyTuple::new(py, [0_isize]).unwrap();
+            let transpose_args = PyTuple::new(py, [transpose_arg]).unwrap();
+            let ints_explicit_t = ints.transpose(&transpose_args).unwrap();
+            assert_eq!(ints_explicit_t.shape_dims(), vec![3]);
+            assert_eq!(ints_explicit_t.as_i64_list().unwrap(), vec![1, 2, 3]);
             let values = ints.tolist(py).unwrap();
             assert_eq!(
                 values.bind(py).extract::<Vec<i64>>().unwrap(),
@@ -2931,6 +3024,29 @@ mod tests {
         let matrix_mt = matrix.matrix_transpose().unwrap();
         assert_eq!(matrix_mt.shape_dims(), vec![3, 2]);
         assert_eq!(matrix_mt.as_i64_list().unwrap(), vec![1, 4, 2, 5, 3, 6]);
+        Python::with_gil(|py| {
+            let axes = PyTuple::new(py, [1_isize, 0_isize]).unwrap();
+            let explicit_args = PyTuple::new(py, [axes]).unwrap();
+            let matrix_explicit_t = matrix.transpose(&explicit_args).unwrap();
+            assert_eq!(matrix_explicit_t.shape_dims(), vec![3, 2]);
+            assert_eq!(
+                matrix_explicit_t.as_i64_list().unwrap(),
+                vec![1, 4, 2, 5, 3, 6]
+            );
+
+            let vararg_args = PyTuple::new(py, [1_isize, 0_isize]).unwrap();
+            let matrix_vararg_t = matrix.transpose(&vararg_args).unwrap();
+            assert_eq!(matrix_vararg_t.shape_dims(), vec![3, 2]);
+            assert_eq!(
+                matrix_vararg_t.as_i64_list().unwrap(),
+                vec![1, 4, 2, 5, 3, 6]
+            );
+
+            let duplicate_args = PyTuple::new(py, [0_isize, 0_isize]).unwrap();
+            assert!(matrix.transpose(&duplicate_args).is_err());
+            let short_args = PyTuple::new(py, [0_isize]).unwrap();
+            assert!(matrix.transpose(&short_args).is_err());
+        });
 
         let one = PyValue::vector_i64(vec![0]).unwrap();
         assert!(!one.__bool__().unwrap());
