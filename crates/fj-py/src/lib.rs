@@ -311,6 +311,16 @@ fn validate_cpu_backend(backend: Option<&str>) -> PyResult<()> {
     }
 }
 
+fn validate_cpu_device(device: &PyDevice) -> PyResult<()> {
+    if device.id == 0 && device.process_index == 0 {
+        Ok(())
+    } else {
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "fj-py currently supports exactly one local CPU device",
+        ))
+    }
+}
+
 fn cpu_device() -> PyDevice {
     PyDevice {
         id: 0,
@@ -320,7 +330,7 @@ fn cpu_device() -> PyDevice {
 
 fn validate_single_cpu_device(devices: &[PyDevice]) -> PyResult<()> {
     match devices {
-        [device] if device.id == 0 && device.process_index == 0 => Ok(()),
+        [device] => validate_cpu_device(device),
         [] => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "devices must be a non-empty sequence",
         )),
@@ -534,6 +544,34 @@ fn live_arrays(platform: Option<String>) -> PyResult<Vec<PyValue>> {
     Ok(Vec::new())
 }
 
+#[pyfunction(signature = (device=None))]
+fn default_device(py: Python<'_>, device: Option<Py<PyAny>>) -> PyResult<PyNamedScope> {
+    let name = match device {
+        None => "default_device(None)".to_owned(),
+        Some(device) => {
+            let device = device.bind(py);
+            if device.is_none() {
+                "default_device(None)".to_owned()
+            } else if let Ok(platform) = device.extract::<String>() {
+                validate_cpu_backend(Some(platform.as_str()))?;
+                format!("default_device({platform:?})")
+            } else if let Ok(device) = device.extract::<PyRef<'_, PyDevice>>() {
+                validate_cpu_device(&device)?;
+                format!(
+                    "default_device(Device(id={}, process_index={}))",
+                    device.id, device.process_index
+                )
+            } else {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "default_device expects None, 'cpu', or a fj-py Device",
+                ));
+            }
+        }
+    };
+
+    Ok(PyNamedScope { name })
+}
+
 #[pyfunction]
 fn default_backend() -> &'static str {
     "cpu"
@@ -743,6 +781,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(clear_backends, m)?)?;
     m.add_function(wrap_pyfunction!(clean_up, m)?)?;
     m.add_function(wrap_pyfunction!(live_arrays, m)?)?;
+    m.add_function(wrap_pyfunction!(default_device, m)?)?;
     m.add_function(wrap_pyfunction!(default_backend, m)?)?;
     m.add_function(wrap_pyfunction!(device_count, m)?)?;
     m.add_function(wrap_pyfunction!(local_device_count, m)?)?;
@@ -968,6 +1007,14 @@ mod tests {
         assert_eq!(host_id(None::<String>).unwrap(), 0);
         assert_eq!(host_count(None::<String>).unwrap(), 1);
         assert_eq!(host_ids(None::<String>).unwrap(), vec![0]);
+
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            assert_eq!(
+                default_device(py, None).unwrap().name(),
+                "default_device(None)"
+            );
+        });
 
         let all_devices = devices(None::<String>).unwrap();
         assert_eq!(all_devices.len(), 1);

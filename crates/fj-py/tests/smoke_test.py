@@ -229,6 +229,16 @@ def test_backend_topology_helpers():
     assert local_devices[0].id == 0
     assert fj.local_devices(0)[0].id == 0
     assert fj.local_devices(host_id=0)[0].id == 0
+    assert fj.default_device().name == "default_device(None)"
+    assert fj.default_device(None).name == "default_device(None)"
+    assert fj.default_device("cpu").name == 'default_device("cpu")'
+    assert (
+        fj.default_device(device).name
+        == "default_device(Device(id=0, process_index=0))"
+    )
+
+    with fj.default_device(device):
+        assert fj.default_backend() == "cpu"
 
     try:
         fj.local_devices(1)
@@ -250,6 +260,20 @@ def test_backend_topology_helpers():
         assert "unsupported backend" in str(exc)
     else:
         raise AssertionError("device_count should reject unsupported backend")
+
+    try:
+        fj.default_device("gpu")
+    except ValueError as exc:
+        assert "unsupported backend" in str(exc)
+    else:
+        raise AssertionError("default_device should reject unsupported backend")
+
+    try:
+        fj.default_device(object())
+    except ValueError as exc:
+        assert "default_device expects" in str(exc)
+    else:
+        raise AssertionError("default_device should reject non-device objects")
 
     try:
         fj.host_count("gpu")
