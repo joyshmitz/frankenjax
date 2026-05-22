@@ -41,14 +41,14 @@ fn make_f64_tensor(shape: &[u32], data: Vec<f64>) -> Value {
 fn extract_i64_vec(v: &Value) -> Vec<i64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_i64().unwrap()).collect(),
-        _ => panic!("expected tensor"),
+        _ => unreachable!("expected tensor"),
     }
 }
 
 fn extract_f64_vec(v: &Value) -> Vec<f64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
-        _ => panic!("expected tensor"),
+        _ => unreachable!("expected tensor"),
     }
 }
 
@@ -73,7 +73,7 @@ fn oracle_clamp_scalar_in_range() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert_eq!(lit.as_i64().unwrap(), 5),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -86,7 +86,7 @@ fn oracle_clamp_scalar_below_min() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert_eq!(lit.as_i64().unwrap(), 0),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -99,7 +99,7 @@ fn oracle_clamp_scalar_above_max() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert_eq!(lit.as_i64().unwrap(), 10),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -112,7 +112,7 @@ fn oracle_clamp_scalar_at_min() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert_eq!(lit.as_i64().unwrap(), 0),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -125,7 +125,7 @@ fn oracle_clamp_scalar_at_max() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert_eq!(lit.as_i64().unwrap(), 10),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -167,7 +167,7 @@ fn oracle_clamp_negative_range() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert_eq!(lit.as_i64().unwrap(), -5),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -180,7 +180,7 @@ fn oracle_clamp_single_point() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert_eq!(lit.as_i64().unwrap(), 5),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -192,7 +192,7 @@ fn oracle_clamp_f64_scalar() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert!((lit.as_f64().unwrap() - 0.7).abs() < 1e-10),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -207,7 +207,7 @@ fn oracle_clamp_positive_infinity_clamped() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert!((lit.as_f64().unwrap() - 10.0).abs() < 1e-10),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -220,7 +220,7 @@ fn oracle_clamp_negative_infinity_clamped() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert!((lit.as_f64().unwrap() - 0.0).abs() < 1e-10),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -233,7 +233,7 @@ fn oracle_clamp_nan_propagates() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert!(lit.as_f64().unwrap().is_nan(), "clamp(0, NaN, 10) = NaN"),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -245,9 +245,9 @@ fn oracle_clamp_preserves_negative_zero_operand_at_lower_bound() {
     let hi = Value::Scalar(Literal::from_f64(1.0));
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     let val = extract_f64_scalar(&result);
-    assert_eq!(val, 0.0);
-    assert!(
-        val.is_sign_negative(),
+    assert_eq!(
+        val.to_bits(),
+        (-0.0_f64).to_bits(),
         "clamp should preserve the operand's -0.0 sign at an equal lower bound"
     );
 }
@@ -260,9 +260,9 @@ fn oracle_clamp_preserves_positive_zero_operand_at_upper_bound() {
     let hi = Value::Scalar(Literal::from_f64(-0.0));
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     let val = extract_f64_scalar(&result);
-    assert_eq!(val, 0.0);
-    assert!(
-        val.is_sign_positive(),
+    assert_eq!(
+        val.to_bits(),
+        0.0_f64.to_bits(),
         "clamp should preserve the operand's +0.0 sign at an equal upper bound"
     );
 }
@@ -276,7 +276,7 @@ fn oracle_clamp_infinite_bounds() {
     let result = eval_primitive(Primitive::Clamp, &[lo, x, hi], &no_params()).unwrap();
     match result {
         Value::Scalar(lit) => assert!((lit.as_f64().unwrap() - 5.0).abs() < 1e-10),
-        _ => panic!("expected scalar"),
+        _ => unreachable!("expected scalar"),
     }
 }
 
@@ -337,17 +337,22 @@ fn metamorphic_clamp_output_in_range() {
     let lo = 0.0;
     let hi = 10.0;
 
-    for x in [-100.0, -1.0, 0.0, 5.0, 10.0, 100.0, f64::INFINITY, f64::NEG_INFINITY] {
+    for x in [
+        -100.0,
+        -1.0,
+        0.0,
+        5.0,
+        10.0,
+        100.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
         let lo_val = make_f64_tensor(&[], vec![lo]);
         let hi_val = make_f64_tensor(&[], vec![hi]);
         let input = make_f64_tensor(&[], vec![x]);
 
-        let result = eval_primitive(
-            Primitive::Clamp,
-            &[lo_val, input, hi_val],
-            &no_params(),
-        )
-        .unwrap();
+        let result =
+            eval_primitive(Primitive::Clamp, &[lo_val, input, hi_val], &no_params()).unwrap();
         let val = extract_f64_scalar(&result);
 
         if !x.is_nan() {
@@ -369,12 +374,8 @@ fn metamorphic_clamp_tensor_idempotent() {
     let x = make_f64_tensor(&[5], vec![-5.0, 0.0, 5.0, 10.0, 15.0]);
     let hi = make_f64_tensor(&[5], vec![10.0, 10.0, 10.0, 10.0, 10.0]);
 
-    let clamp1 = eval_primitive(
-        Primitive::Clamp,
-        &[lo.clone(), x, hi.clone()],
-        &no_params(),
-    )
-    .unwrap();
+    let clamp1 =
+        eval_primitive(Primitive::Clamp, &[lo.clone(), x, hi.clone()], &no_params()).unwrap();
     let clamp2 = eval_primitive(
         Primitive::Clamp,
         &[lo.clone(), clamp1.clone(), hi.clone()],
@@ -434,13 +435,13 @@ fn property_clamp_preserves_all_float_dtypes() {
         let hi = make_scalar(dtype, 10.0);
 
         let result = eval_primitive(Primitive::Clamp, &[x, lo, hi], &no_params())
-            .unwrap_or_else(|e| panic!("clamp {dtype:?} failed: {e}"));
+            .unwrap_or_else(|e| unreachable!("clamp {dtype:?} failed: {e}"));
         let Value::Tensor(t) = result else {
-            panic!("clamp {dtype:?}: expected tensor");
+            unreachable!("clamp {dtype:?}: expected tensor");
         };
         assert_eq!(t.dtype, dtype, "clamp {dtype:?}: tensor dtype mismatch");
         t.validate_dtype_consistency().unwrap_or_else(|e| {
-            panic!("clamp {dtype:?}: validate_dtype_consistency failed: {e}")
+            unreachable!("clamp {dtype:?}: validate_dtype_consistency failed: {e}")
         });
     }
 }
