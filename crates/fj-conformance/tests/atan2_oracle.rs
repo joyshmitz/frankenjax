@@ -358,6 +358,140 @@ fn oracle_atan2_2d() {
 
 // ======================== Broadcasting ========================
 
+fn scalar_f64(v: f64) -> Value {
+    Value::Scalar(Literal::from_f64(v))
+}
+
+#[test]
+fn oracle_atan2_scalar_y_tensor_x_broadcast() {
+    // scalar y with tensor x
+    let y = scalar_f64(1.0);
+    let x = make_f64_tensor(&[4], vec![1.0, -1.0, 0.0, 2.0]);
+    let result = eval_primitive(Primitive::Atan2, &[y, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    let vals = extract_f64_vec(&result);
+    for (i, &x_val) in [1.0, -1.0, 0.0, 2.0].iter().enumerate() {
+        let expected = 1.0_f64.atan2(x_val);
+        assert!(
+            (vals[i] - expected).abs() < 1e-14,
+            "scalar y broadcast element {i}: {} vs {}",
+            vals[i],
+            expected
+        );
+    }
+}
+
+#[test]
+fn oracle_atan2_tensor_y_scalar_x_broadcast() {
+    // tensor y with scalar x
+    let y = make_f64_tensor(&[4], vec![1.0, -1.0, 0.0, 2.0]);
+    let x = scalar_f64(1.0);
+    let result = eval_primitive(Primitive::Atan2, &[y, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    let vals = extract_f64_vec(&result);
+    let y_values: [f64; 4] = [1.0, -1.0, 0.0, 2.0];
+    for (i, &y_val) in y_values.iter().enumerate() {
+        let expected = y_val.atan2(1.0);
+        assert!(
+            (vals[i] - expected).abs() < 1e-14,
+            "tensor y broadcast element {i}: {} vs {}",
+            vals[i],
+            expected
+        );
+    }
+}
+
+#[test]
+fn oracle_atan2_singleton_y_vector_x_broadcast() {
+    // [1] y with [3] x -> [3]
+    let y = make_f64_tensor(&[1], vec![1.0]);
+    let x = make_f64_tensor(&[3], vec![1.0, -1.0, 2.0]);
+    let result = eval_primitive(Primitive::Atan2, &[y, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    for (i, &x_val) in [1.0, -1.0, 2.0].iter().enumerate() {
+        let expected = 1.0_f64.atan2(x_val);
+        assert!((vals[i] - expected).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn oracle_atan2_vector_y_singleton_x_broadcast() {
+    // [3] y with [1] x -> [3]
+    let y = make_f64_tensor(&[3], vec![1.0, -1.0, 2.0]);
+    let x = make_f64_tensor(&[1], vec![1.0]);
+    let result = eval_primitive(Primitive::Atan2, &[y, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_f64_vec(&result);
+    let y_values: [f64; 3] = [1.0, -1.0, 2.0];
+    for (i, &y_val) in y_values.iter().enumerate() {
+        let expected = y_val.atan2(1.0);
+        assert!((vals[i] - expected).abs() < 1e-14);
+    }
+}
+
+#[test]
+fn oracle_atan2_column_y_matrix_x_broadcast() {
+    // [2, 1] y with [2, 3] x -> [2, 3]
+    let y = make_f64_tensor(&[2, 1], vec![1.0, -1.0]);
+    let x = make_f64_tensor(&[2, 3], vec![1.0, -1.0, 0.0, 1.0, -1.0, 0.0]);
+    let result = eval_primitive(Primitive::Atan2, &[y, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_f64_vec(&result);
+    // Row 0: y=1 with x=1,-1,0
+    assert!((vals[0] - 1.0_f64.atan2(1.0)).abs() < 1e-14);
+    assert!((vals[1] - 1.0_f64.atan2(-1.0)).abs() < 1e-14);
+    assert!((vals[2] - 1.0_f64.atan2(0.0)).abs() < 1e-14);
+    // Row 1: y=-1 with x=1,-1,0
+    assert!((vals[3] - (-1.0_f64).atan2(1.0)).abs() < 1e-14);
+    assert!((vals[4] - (-1.0_f64).atan2(-1.0)).abs() < 1e-14);
+    assert!((vals[5] - (-1.0_f64).atan2(0.0)).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_atan2_different_ranks_broadcast() {
+    // [3] y with [2, 3] x -> [2, 3]
+    let y = make_f64_tensor(&[3], vec![1.0, -1.0, 0.0]);
+    let x = make_f64_tensor(&[2, 3], vec![1.0, 1.0, 1.0, -1.0, -1.0, -1.0]);
+    let result = eval_primitive(Primitive::Atan2, &[y, x], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_f64_vec(&result);
+    // Row 0: y=[1,-1,0] with x=1
+    assert!((vals[0] - 1.0_f64.atan2(1.0)).abs() < 1e-14);
+    assert!((vals[1] - (-1.0_f64).atan2(1.0)).abs() < 1e-14);
+    assert!((vals[2] - 0.0_f64.atan2(1.0)).abs() < 1e-14);
+    // Row 1: y=[1,-1,0] with x=-1
+    assert!((vals[3] - 1.0_f64.atan2(-1.0)).abs() < 1e-14);
+    assert!((vals[4] - (-1.0_f64).atan2(-1.0)).abs() < 1e-14);
+    assert!((vals[5] - 0.0_f64.atan2(-1.0)).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_atan2_all_scalars_broadcast() {
+    // scalar atan2 scalar -> scalar
+    let y = scalar_f64(1.0);
+    let x = scalar_f64(1.0);
+    let result = eval_primitive(Primitive::Atan2, &[y, x], &no_params()).unwrap();
+    let val = extract_f64_scalar(&result);
+    let expected = 1.0_f64.atan2(1.0);
+    assert!((val - expected).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_atan2_incompatible_shapes_error() {
+    // [2] atan2 [3] should error
+    let y = make_f64_tensor(&[2], vec![1.0, -1.0]);
+    let x = make_f64_tensor(&[3], vec![1.0, -1.0, 0.0]);
+    let result = eval_primitive(Primitive::Atan2, &[y, x], &no_params());
+    assert!(result.is_err(), "incompatible shapes should error");
+}
+
 #[test]
 fn oracle_atan2_vector_scalar_x_broadcast() {
     let y_values = [1.0, -1.0, 2.0, -2.0];
