@@ -1,8 +1,9 @@
 #![forbid(unsafe_code)]
 
 use pyo3::prelude::*;
+use pyo3::types::{PyBool, PyList};
 
-use fj_core::{DType, Jaxpr, ProgramSpec, Value, build_program};
+use fj_core::{DType, Jaxpr, Literal, ProgramSpec, Value, build_program};
 
 #[pyclass]
 #[derive(Clone)]
@@ -197,6 +198,13 @@ impl PyValue {
 
     fn copy(&self) -> Self {
         self.clone()
+    }
+
+    fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match &self.inner {
+            Value::Scalar(literal) => literal_to_py_object(py, *literal),
+            Value::Tensor(tensor) => literals_to_py_list(py, &tensor.elements),
+        }
     }
 
     fn as_f64_list(&self) -> Option<Vec<f64>> {
@@ -514,6 +522,51 @@ fn py_object_repr(py: Python<'_>, value: Option<Py<PyAny>>) -> PyResult<String> 
         }
         None => Ok("None".to_owned()),
     }
+}
+
+fn literal_to_py_object(py: Python<'_>, literal: Literal) -> PyResult<Py<PyAny>> {
+    match literal {
+        Literal::I64(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
+        Literal::U32(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
+        Literal::U64(value) => Ok(value.into_pyobject(py)?.into_any().unbind()),
+        Literal::Bool(value) => Ok(PyBool::new(py, value).to_owned().into_any().unbind()),
+        Literal::BF16Bits(_) | Literal::F16Bits(_) | Literal::F32Bits(_) | Literal::F64Bits(_) => {
+            Ok(literal
+                .as_f64()
+                .expect("float literal should convert to f64")
+                .into_pyobject(py)?
+                .into_any()
+                .unbind())
+        }
+        Literal::Complex64Bits(..) => {
+            let (re, im) = literal
+                .as_complex64()
+                .expect("complex64 literal should convert to parts");
+            complex_to_py_object(py, f64::from(re), f64::from(im))
+        }
+        Literal::Complex128Bits(..) => {
+            let (re, im) = literal
+                .as_complex128()
+                .expect("complex128 literal should convert to parts");
+            complex_to_py_object(py, re, im)
+        }
+    }
+}
+
+fn complex_to_py_object(py: Python<'_>, re: f64, im: f64) -> PyResult<Py<PyAny>> {
+    let builtins = py.import("builtins")?;
+    Ok(builtins.getattr("complex")?.call1((re, im))?.unbind())
+}
+
+fn literals_to_py_list(py: Python<'_>, literals: &[Literal]) -> PyResult<Py<PyAny>> {
+    let values = literals
+        .iter()
+        .copied()
+        .map(|literal| literal_to_py_object(py, literal))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyList::new(py, values.iter().map(|value| value.bind(py)))?
+        .into_any()
+        .unbind())
 }
 
 fn validate_cpu_backend(backend: Option<&str>) -> PyResult<()> {
@@ -1538,6 +1591,11 @@ mod tests {
         assert!((v.block_until_ready().as_f64().unwrap() - 42.0).abs() < 1e-12);
         assert!((v.copy_to_host_async().as_f64().unwrap() - 42.0).abs() < 1e-12);
         assert!((v.copy().as_f64().unwrap() - 42.0).abs() < 1e-12);
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let value = v.tolist(py).unwrap();
+            assert!((value.bind(py).extract::<f64>().unwrap() - 42.0).abs() < 1e-12);
+        });
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
     }
 
@@ -1565,6 +1623,14 @@ mod tests {
             vec![1.0, 2.5, 4.0]
         );
         assert_eq!(floats.copy().as_f64_list().unwrap(), vec![1.0, 2.5, 4.0]);
+        pyo3::prepare_freethreaded_python();
+        Python::with_gil(|py| {
+            let values = floats.tolist(py).unwrap();
+            assert_eq!(
+                values.bind(py).extract::<Vec<f64>>().unwrap(),
+                vec![1.0, 2.5, 4.0]
+            );
+        });
         assert_eq!(floats.as_f64_list().unwrap(), vec![1.0, 2.5, 4.0]);
         assert_eq!(floats.as_i64_list(), None);
 
@@ -1580,6 +1646,13 @@ mod tests {
         assert!(ints.is_fully_addressable());
         assert!(ints.is_fully_replicated());
         assert_eq!(ints.__len__().unwrap(), 3);
+        Python::with_gil(|py| {
+            let values = ints.tolist(py).unwrap();
+            assert_eq!(
+                values.bind(py).extract::<Vec<i64>>().unwrap(),
+                vec![1, 2, 3]
+            );
+        });
         assert_eq!(ints.as_i64_list().unwrap(), vec![1, 2, 3]);
         assert_eq!(ints.as_f64_list().unwrap(), vec![1.0, 2.0, 3.0]);
     }
