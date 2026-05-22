@@ -62,7 +62,16 @@ fn no_params() -> BTreeMap<String, String> {
 fn oracle_deg2rad_zero() {
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Deg2Rad, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "deg2rad(0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "deg2rad(0) = +0");
+}
+
+#[test]
+fn oracle_deg2rad_neg_zero() {
+    let input = make_f64_tensor(&[], vec![-0.0]);
+    let result = eval_primitive(Primitive::Deg2Rad, &[input], &no_params()).unwrap();
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "deg2rad(-0.0) = -0");
 }
 
 #[test]
@@ -70,10 +79,7 @@ fn oracle_deg2rad_90() {
     let input = make_f64_tensor(&[], vec![90.0]);
     let result = eval_primitive(Primitive::Deg2Rad, &[input], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(
-        (actual - PI / 2.0).abs() < 1e-15,
-        "deg2rad(90) = pi/2"
-    );
+    assert!((actual - PI / 2.0).abs() < 1e-15, "deg2rad(90) = pi/2");
 }
 
 #[test]
@@ -100,10 +106,7 @@ fn oracle_deg2rad_360() {
     let input = make_f64_tensor(&[], vec![360.0]);
     let result = eval_primitive(Primitive::Deg2Rad, &[input], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(
-        (actual - 2.0 * PI).abs() < 1e-14,
-        "deg2rad(360) = 2pi"
-    );
+    assert!((actual - 2.0 * PI).abs() < 1e-14, "deg2rad(360) = 2pi");
 }
 
 // ======================== Rad2Deg: Common Angles ========================
@@ -112,7 +115,16 @@ fn oracle_deg2rad_360() {
 fn oracle_rad2deg_zero() {
     let input = make_f64_tensor(&[], vec![0.0]);
     let result = eval_primitive(Primitive::Rad2Deg, &[input], &no_params()).unwrap();
-    assert_eq!(extract_f64_scalar(&result), 0.0, "rad2deg(0) = 0");
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), 0.0_f64.to_bits(), "rad2deg(0) = +0");
+}
+
+#[test]
+fn oracle_rad2deg_neg_zero() {
+    let input = make_f64_tensor(&[], vec![-0.0]);
+    let result = eval_primitive(Primitive::Rad2Deg, &[input], &no_params()).unwrap();
+    let actual = extract_f64_scalar(&result);
+    assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "rad2deg(-0.0) = -0");
 }
 
 #[test]
@@ -180,10 +192,7 @@ fn oracle_deg2rad_negative() {
     let input = make_f64_tensor(&[], vec![-90.0]);
     let result = eval_primitive(Primitive::Deg2Rad, &[input], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!(
-        (actual - (-PI / 2.0)).abs() < 1e-15,
-        "deg2rad(-90) = -pi/2"
-    );
+    assert!((actual - (-PI / 2.0)).abs() < 1e-15, "deg2rad(-90) = -pi/2");
 }
 
 #[test]
