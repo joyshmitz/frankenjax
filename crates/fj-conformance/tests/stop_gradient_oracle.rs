@@ -131,3 +131,105 @@ fn stop_gradient_jvp_preserves_primal_and_blocks_tangent() {
     assert_eq!(extract_f64_vec(&result.primals[0]), vec![2.0, -1.0, 0.25]);
     assert_eq!(extract_f64_vec(&result.tangents[0]), vec![0.0, 0.0, 0.0]);
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn stop_gradient_preserves_integer_dtype() {
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape::vector(3),
+            vec![Literal::I64(10), Literal::I64(-20), Literal::I64(30)],
+        )
+        .unwrap(),
+    );
+    let output = eval_primitive(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient i64 eval should succeed");
+
+    let tensor = output.as_tensor().expect("expected tensor output");
+    assert_eq!(tensor.dtype, DType::I64);
+    let values: Vec<i64> = tensor
+        .elements
+        .iter()
+        .map(|l| match l {
+            Literal::I64(v) => *v,
+            _ => panic!("expected i64"),
+        })
+        .collect();
+    assert_eq!(values, vec![10, -20, 30]);
+}
+
+#[test]
+fn stop_gradient_preserves_rank2_tensor() {
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape { dims: vec![2, 3] },
+            (1..=6).map(|x| Literal::from_f64(x as f64)).collect(),
+        )
+        .unwrap(),
+    );
+    let output = eval_primitive(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient rank-2 eval should succeed");
+
+    let tensor = output.as_tensor().expect("expected tensor output");
+    assert_eq!(tensor.shape.dims, vec![2, 3]);
+    assert_eq!(extract_f64_vec(&output), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+}
+
+#[test]
+fn stop_gradient_vjp_rank2_zero_cotangent() {
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape { dims: vec![2, 2] },
+            vec![
+                Literal::from_f64(1.0),
+                Literal::from_f64(2.0),
+                Literal::from_f64(3.0),
+                Literal::from_f64(4.0),
+            ],
+        )
+        .unwrap(),
+    );
+    let output = input.clone();
+    let incoming_cotangent = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape { dims: vec![2, 2] },
+            vec![
+                Literal::from_f64(10.0),
+                Literal::from_f64(20.0),
+                Literal::from_f64(30.0),
+                Literal::from_f64(40.0),
+            ],
+        )
+        .unwrap(),
+    );
+
+    let cotangents = fj_ad::vjp(
+        Primitive::StopGradient,
+        std::slice::from_ref(&input),
+        std::slice::from_ref(&incoming_cotangent),
+        std::slice::from_ref(&output),
+        &BTreeMap::new(),
+    )
+    .expect("stop_gradient rank-2 VJP should succeed");
+
+    assert_eq!(cotangents.len(), 1);
+    let tensor = cotangents[0].as_tensor().expect("expected tensor");
+    assert_eq!(tensor.shape.dims, vec![2, 2]);
+    assert_eq!(
+        extract_f64_vec(&cotangents[0]),
+        vec![0.0, 0.0, 0.0, 0.0]
+    );
+}
