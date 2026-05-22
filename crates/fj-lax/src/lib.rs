@@ -408,6 +408,19 @@ pub fn eval_primitive(
         Primitive::IsNan => eval_is_nan(primitive, inputs),
         Primitive::IsInf => eval_is_inf(primitive, inputs),
         Primitive::Signbit => eval_signbit(primitive, inputs),
+        Primitive::Heaviside => {
+            // heaviside(x, h0) = 0 if x < 0, h0 if x == 0, 1 if x > 0
+            eval_binary_elementwise(
+                primitive,
+                inputs,
+                |x, h0| {
+                    if x < 0 { 0 } else if x == 0 { h0 } else { 1 }
+                },
+                |x, h0| {
+                    if x < 0.0 { 0.0 } else if x == 0.0 { h0 } else { 1.0 }
+                },
+            )
+        }
         Primitive::CopySign => {
             eval_binary_elementwise(primitive, inputs, |a, b| f64::copysign(a as f64, b as f64) as i64, f64::copysign)
         }

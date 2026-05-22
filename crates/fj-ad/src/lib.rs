@@ -3311,6 +3311,21 @@ pub fn vjp(
         Primitive::IsFinite | Primitive::IsNan | Primitive::IsInf | Primitive::Signbit => {
             Ok(vec![zeros_like(&inputs[0])])
         }
+        Primitive::Heaviside => {
+            // heaviside(x, h0): step function, gradient is 0 for x, (x==0) for h0
+            let x = &inputs[0];
+            let h0 = &inputs[1];
+            let gx = zeros_like(x);
+            let zero = zeros_like(x);
+            let x_is_zero = eval_primitive(Primitive::Eq, &[x.clone(), zero], &BTreeMap::new())
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let one = ones_like(h0);
+            let zero_h0 = zeros_like(h0);
+            let gh0_mask = eval_primitive(Primitive::Select, &[x_is_zero, one, zero_h0], &BTreeMap::new())
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let gh0 = value_mul(g, &gh0_mask)?;
+            Ok(vec![gx, gh0])
+        }
         Primitive::CopySign => {
             // copysign(x, y) = |x| * sign(y)
             // dx = g * sign(x) * sign(y), dy = 0
@@ -7215,6 +7230,13 @@ fn jvp_rule(
         | Primitive::IsInf
         | Primitive::Signbit
         | Primitive::Nextafter => Ok(zeros_like(&primals[0])),
+
+        Primitive::Heaviside => {
+            // heaviside(x, h0): JVP is dh0 where x == 0
+            let zeros = zeros_like(&primals[0]);
+            let x_is_zero = ep(Primitive::Eq, &[primals[0].clone(), zeros.clone()])?;
+            ep(Primitive::Select, &[x_is_zero, tangents[1].clone(), zeros])
+        }
 
         Primitive::ReduceWindow => ep_p(Primitive::ReduceWindow, &[tangents[0].clone()], params),
 
