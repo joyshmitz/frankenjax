@@ -150,3 +150,63 @@ fn lu_pivots_and_permutation_are_int32() {
     assert_eq!(pivots_dtype, DType::I32, "pivots should be I32 per upstream JAX");
     assert_eq!(perm_dtype, DType::I32, "permutation should be I32 per upstream JAX");
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn lu_3x3_matrix_factors_correctly() {
+    // Test a 3x3 matrix that requires pivoting
+    let input = f64_matrix(
+        3,
+        3,
+        &[
+            2.0, 1.0, 1.0,
+            4.0, 3.0, 3.0,
+            8.0, 7.0, 9.0,
+        ],
+    );
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("3x3 LU should succeed");
+
+    assert_eq!(result.len(), 3);
+    assert_eq!(shape(&result[0]), Some(Shape { dims: vec![3, 3] }));
+    assert_eq!(shape(&result[1]), Some(Shape { dims: vec![3] }));
+    assert_eq!(shape(&result[2]), Some(Shape { dims: vec![3] }));
+}
+
+#[test]
+fn lu_tall_rectangular_matrix() {
+    // 3x2 tall matrix
+    let input = f64_matrix(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("tall rectangular LU should succeed");
+
+    assert_eq!(shape(&result[0]), Some(Shape { dims: vec![3, 2] }));
+    // pivots length = min(rows, cols) = 2
+    assert_eq!(shape(&result[1]), Some(Shape { dims: vec![2] }));
+    // permutation length = rows = 3
+    assert_eq!(shape(&result[2]), Some(Shape { dims: vec![3] }));
+}
+
+#[test]
+fn lu_preserves_dtype_f64() {
+    let input = f64_matrix(2, 2, &[1.0, 2.0, 3.0, 4.0]);
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("LU should succeed");
+
+    let lu_dtype = result[0].as_tensor().expect("LU should be tensor").dtype;
+    assert_eq!(lu_dtype, DType::F64, "LU output should preserve F64 dtype");
+}
+
+#[test]
+fn lu_1x1_trivial_case() {
+    let input = f64_matrix(1, 1, &[7.5]);
+    let result = eval_primitive_multi(Primitive::Lu, &[input], &no_params())
+        .expect("1x1 LU should succeed");
+
+    assert_eq!(shape(&result[0]), Some(Shape { dims: vec![1, 1] }));
+    let lu = f64_values(&result[0]).expect("expected f64 LU");
+    assert_close(&lu, &[7.5], 1e-12);
+    assert_eq!(i64_values(&result[1]), Some(vec![0]));
+    assert_eq!(i64_values(&result[2]), Some(vec![0]));
+}
