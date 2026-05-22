@@ -653,6 +653,13 @@ fn named_scope(name: String) -> PyNamedScope {
     PyNamedScope { name }
 }
 
+#[pyfunction(signature = (checks=true))]
+fn enable_checks(checks: bool) -> PyNamedScope {
+    PyNamedScope {
+        name: format!("enable_checks({checks})"),
+    }
+}
+
 #[pyfunction(signature = (disable=true))]
 fn disable_jit(disable: bool) -> PyNamedScope {
     PyNamedScope {
@@ -795,6 +802,7 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(host_ids, m)?)?;
     m.add_function(wrap_pyfunction!(named_call, m)?)?;
     m.add_function(wrap_pyfunction!(named_scope, m)?)?;
+    m.add_function(wrap_pyfunction!(enable_checks, m)?)?;
     m.add_function(wrap_pyfunction!(disable_jit, m)?)?;
     m.add_function(wrap_pyfunction!(ensure_compile_time_eval, m)?)?;
     m.add_function(wrap_pyfunction!(print_environment_info, m)?)?;
@@ -1054,6 +1062,8 @@ mod tests {
 
     #[test]
     fn local_context_helpers_track_names() {
+        assert_eq!(enable_checks(true).name(), "enable_checks(true)");
+        assert_eq!(enable_checks(false).name(), "enable_checks(false)");
         assert_eq!(disable_jit(true).name(), "disable_jit(true)");
         assert_eq!(disable_jit(false).name(), "disable_jit(false)");
         assert_eq!(

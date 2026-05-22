@@ -339,15 +339,24 @@ def test_local_context_helpers():
     with fj.disable_jit(False):
         assert add_one(3) == 4
 
-    with fj.ensure_compile_time_eval():
+    with fj.enable_checks():
         assert add_one(4) == 5
 
+    with fj.enable_checks(False):
+        assert add_one(5) == 6
+
+    with fj.ensure_compile_time_eval():
+        assert add_one(6) == 7
+
+    assert fj.enable_checks().name == "enable_checks(true)"
+    assert fj.enable_checks(False).name == "enable_checks(false)"
     assert fj.disable_jit().name == "disable_jit(true)"
     assert fj.disable_jit(False).name == "disable_jit(false)"
     assert fj.ensure_compile_time_eval().name == "ensure_compile_time_eval"
+    assert fj.enable_checks()(add_one) is add_one
     assert fj.disable_jit()(add_one) is add_one
     assert fj.ensure_compile_time_eval()(add_one) is add_one
-    print("✓ disable_jit/ensure_compile_time_eval expose local no-op contexts")
+    print("✓ enable_checks/disable_jit/ensure_compile_time_eval expose local contexts")
 
 
 def test_vmap():
