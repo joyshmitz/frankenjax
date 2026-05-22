@@ -57,6 +57,8 @@ def test_value_scalar():
     assert v.device.device_kind == "cpu"
     assert v.platform() == "cpu"
     assert {device.platform for device in v.devices()} == {"cpu"}
+    assert str(v) == "42.0"
+    assert format(v, ".1f") == "42.0"
     try:
         v.device_buffer
     except AttributeError as exc:

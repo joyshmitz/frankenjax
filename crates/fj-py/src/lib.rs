@@ -664,6 +664,18 @@ impl PyValue {
         }
     }
 
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.tolist(py)?.bind(py).str()?.extract()
+    }
+
+    fn __format__(&self, py: Python<'_>, format_spec: &str) -> PyResult<String> {
+        let value = self.tolist(py)?;
+        py.import("builtins")?
+            .getattr("format")?
+            .call1((value.bind(py), format_spec))?
+            .extract()
+    }
+
     fn __repr__(&self) -> String {
         format!("{:?}", self.inner)
     }
@@ -2273,6 +2285,8 @@ mod tests {
         Python::with_gil(|py| {
             let devices = v.devices(py).unwrap();
             assert_eq!(devices.bind(py).len().unwrap(), 1);
+            assert_eq!(v.__str__(py).unwrap(), "42.0");
+            assert_eq!(v.__format__(py, ".1f").unwrap(), "42.0");
             let value = v.tolist(py).unwrap();
             assert!((value.bind(py).extract::<f64>().unwrap() - 42.0).abs() < 1e-12);
             let value = v.__int__(py).unwrap();
