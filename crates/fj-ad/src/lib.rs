@@ -2871,6 +2871,11 @@ pub fn vjp(
                 }
             }
         }
+        Primitive::Cummax | Primitive::Cummin => {
+            // VJP of cummax/cummin: complex (scatter gradient to argmax positions).
+            // Returns zeros for now.
+            Ok(vec![zeros_like(&inputs[0])])
+        }
         Primitive::Sort => {
             // VJP of sort: unsort the gradient using the argsort permutation.
             // Must respect the `axis` parameter — sort operates along a specific axis.
@@ -6839,6 +6844,11 @@ fn jvp_rule(
         Primitive::DynamicUpdateSlice => ep_p(Primitive::DynamicUpdateSlice, tangents, params),
         Primitive::Cumsum => ep_p(Primitive::Cumsum, &[tangents[0].clone()], params),
         Primitive::Cumprod => cumprod_jvp_value(&primals[0], &tangents[0], params),
+        Primitive::Cummax | Primitive::Cummin => {
+            // JVP of cummax/cummin: complex (tangent follows argmax positions).
+            // Returns zeros for now.
+            Ok(zeros_like(&primals[0]))
+        }
         Primitive::Sort => ep_p(Primitive::Sort, &[tangents[0].clone()], params),
         Primitive::Argsort => Ok(zeros_like(&primals[0])),
         Primitive::TopK => {

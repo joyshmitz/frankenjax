@@ -198,6 +198,8 @@ pub enum Primitive {
     // Cumulative
     Cumsum,
     Cumprod,
+    Cummax,
+    Cummin,
     // Sorting
     Sort,
     Argsort,
@@ -344,6 +346,8 @@ impl Primitive {
         Self::OneHot,
         Self::Cumsum,
         Self::Cumprod,
+        Self::Cummax,
+        Self::Cummin,
         Self::Sort,
         Self::Argsort,
         Self::TopK,
@@ -491,6 +495,8 @@ impl Primitive {
             Self::OneHot => "one_hot",
             Self::Cumsum => "cumsum",
             Self::Cumprod => "cumprod",
+            Self::Cummax => "cummax",
+            Self::Cummin => "cummin",
             Self::Sort => "sort",
             Self::Argsort => "argsort",
             Self::TopK => "top_k",

@@ -1275,6 +1275,40 @@ mod tests {
     }
 
     #[test]
+    fn cummax_vector() {
+        // cummax([1, 3, 2, 4]) = [1, 3, 3, 4]
+        let result = eval_cumulative(
+            Primitive::Cummax,
+            &[v_f64(&[1.0, 3.0, 2.0, 4.0])],
+            &BTreeMap::new(),
+            i64::MIN,
+            f64::NEG_INFINITY,
+            |a, b| a.max(b),
+            |a, b| a.max(b),
+        )
+        .unwrap();
+        let vals = extract_f64_vec(&result);
+        assert_eq!(vals, vec![1.0, 3.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn cummin_vector() {
+        // cummin([4, 2, 3, 1]) = [4, 2, 2, 1]
+        let result = eval_cumulative(
+            Primitive::Cummin,
+            &[v_f64(&[4.0, 2.0, 3.0, 1.0])],
+            &BTreeMap::new(),
+            i64::MAX,
+            f64::INFINITY,
+            |a, b| a.min(b),
+            |a, b| a.min(b),
+        )
+        .unwrap();
+        let vals = extract_f64_vec(&result);
+        assert_eq!(vals, vec![4.0, 2.0, 2.0, 1.0]);
+    }
+
+    #[test]
     fn cumsum_empty_selected_axis_returns_empty_tensor() {
         let mut params = BTreeMap::new();
         params.insert("axis".to_owned(), "-1".to_owned());
