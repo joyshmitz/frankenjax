@@ -142,6 +142,21 @@ fn oracle_xlogy_nan() {
     assert!(extract_f64_scalar(&result).is_nan(), "xlogy(NaN, 2) = NaN");
 }
 
+#[test]
+fn oracle_xlogy_domain_edges_vector() {
+    let x = make_f64_tensor(&[5], vec![0.0, 2.0, -2.0, 3.0, 4.0]);
+    let y = make_f64_tensor(&[5], vec![-1.0, 0.0, 0.0, -2.0, 1.0]);
+    let result = eval_primitive(Primitive::XLogY, &[x, y], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![5]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 0.0, "zero x masks log(negative) to zero");
+    assert_eq!(vals[1], f64::NEG_INFINITY, "positive x times log(0)");
+    assert_eq!(vals[2], f64::INFINITY, "negative x times log(0)");
+    assert!(vals[3].is_nan(), "nonzero x with y < 0 is NaN");
+    assert_eq!(vals[4], 0.0, "xlogy(x, 1) = 0");
+}
+
 // ======================== XLog1PY Basic Cases ========================
 
 #[test]
