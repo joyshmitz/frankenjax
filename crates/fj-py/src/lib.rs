@@ -182,6 +182,10 @@ impl PyValue {
         })
     }
 
+    fn block_until_ready(&self) -> Self {
+        self.clone()
+    }
+
     fn as_f64_list(&self) -> Option<Vec<f64>> {
         match &self.inner {
             Value::Scalar(_) => self.inner.as_f64_scalar().map(|value| vec![value]),
@@ -1514,6 +1518,7 @@ mod tests {
         assert!(v.is_fully_addressable());
         assert!(v.is_fully_replicated());
         assert!(v.__len__().is_err());
+        assert!((v.block_until_ready().as_f64().unwrap() - 42.0).abs() < 1e-12);
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
     }
 
@@ -1531,6 +1536,10 @@ mod tests {
         assert!(floats.is_fully_addressable());
         assert!(floats.is_fully_replicated());
         assert_eq!(floats.__len__().unwrap(), 3);
+        assert_eq!(
+            floats.block_until_ready().as_f64_list().unwrap(),
+            vec![1.0, 2.5, 4.0]
+        );
         assert_eq!(floats.as_f64_list().unwrap(), vec![1.0, 2.5, 4.0]);
         assert_eq!(floats.as_i64_list(), None);
 

@@ -56,6 +56,9 @@ def test_value_scalar():
         assert str(exc) == "len() of unsized object"
     else:
         raise AssertionError("len(scalar) should raise TypeError")
+    ready = v.block_until_ready()
+    assert isinstance(ready, fj.Array)
+    assert abs(ready.as_f64() - 42.0) < 1e-12
     assert abs(v.as_f64() - 42.0) < 1e-12
     print("✓ scalar_f64 roundtrip")
 
@@ -87,6 +90,7 @@ def test_value_scalar():
     assert vec.is_fully_addressable is True
     assert vec.is_fully_replicated is True
     assert len(vec) == 3
+    assert vec.block_until_ready().as_i64_list() == [1, 2, 3]
     assert vec.as_i64_list() == [1, 2, 3]
     assert vec.as_f64_list() == [1.0, 2.0, 3.0]
     print("✓ vector_i64 roundtrip")
