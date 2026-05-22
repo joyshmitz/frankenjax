@@ -72,6 +72,10 @@ struct PyUserContext {
     default_repr: String,
 }
 
+#[pyclass(name = "_Float0DType")]
+#[derive(Clone, Copy)]
+struct PyFloat0DType;
+
 #[pymethods]
 impl PyValue {
     #[staticmethod]
@@ -347,6 +351,22 @@ impl PyUserContext {
 
     fn __repr__(&self) -> String {
         format!("PyUserContext(default_value={})", self.default_repr)
+    }
+}
+
+#[pymethods]
+impl PyFloat0DType {
+    #[getter]
+    fn name(&self) -> &'static str {
+        "float0"
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "float0"
+    }
+
+    fn __str__(&self) -> &'static str {
+        "float0"
     }
 }
 
@@ -1316,6 +1336,8 @@ fn frankenjax(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDevice>()?;
     m.add_class::<PyNamedScope>()?;
     m.add_class::<PyUserContext>()?;
+    m.add_class::<PyFloat0DType>()?;
+    m.add("float0", Py::new(m.py(), PyFloat0DType)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr, m)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr_square, m)?)?;
     m.add_function(wrap_pyfunction!(make_jaxpr_add2, m)?)?;
@@ -1687,6 +1709,14 @@ mod tests {
     fn version_metadata_matches_crate_package_version() {
         assert_eq!(env!("CARGO_PKG_VERSION"), "0.1.0");
         assert_eq!(version_info(), (0, 1, 0));
+    }
+
+    #[test]
+    fn float0_sentinel_reports_stable_metadata() {
+        let dtype = PyFloat0DType;
+        assert_eq!(dtype.name(), "float0");
+        assert_eq!(dtype.__repr__(), "float0");
+        assert_eq!(dtype.__str__(), "float0");
     }
 
     #[test]

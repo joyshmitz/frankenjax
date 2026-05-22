@@ -16,6 +16,14 @@ def test_version_metadata():
     print("✓ __version__/__version_info__ metadata")
 
 
+def test_float0_sentinel():
+    """Test zero-tangent dtype sentinel metadata."""
+    assert str(fj.float0) == "float0"
+    assert repr(fj.float0) == "float0"
+    assert fj.float0.name == "float0"
+    print("✓ float0 sentinel metadata")
+
+
 def test_environment_info():
     """Test environment info helper return and print modes."""
     info = fj.print_environment_info(return_string=True)
@@ -788,6 +796,7 @@ def test_remat_alias():
 
 if __name__ == "__main__":
     test_version_metadata()
+    test_float0_sentinel()
     test_environment_info()
     test_value_scalar()
     test_jit_add()
