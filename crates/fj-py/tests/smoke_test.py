@@ -45,6 +45,7 @@ def test_value_scalar():
     assert isinstance(v, fj.Array)
     assert v.shape == ()
     assert v.dtype == "F64"
+    assert v.__numpy_dtype__ == np.dtype("float64")
     try:
         hash(v)
     except TypeError as exc:
@@ -209,6 +210,7 @@ def test_value_scalar():
     assert isinstance(v2, fj.Array)
     assert v2.shape == ()
     assert v2.dtype == "I64"
+    assert v2.__numpy_dtype__ == np.dtype("int64")
     assert v2.ndim == 0
     assert v2.size == 1
     assert v2.itemsize == 8
@@ -232,6 +234,7 @@ def test_value_scalar():
     assert isinstance(vec, fj.Array)
     assert vec.shape == (3,)
     assert vec.dtype == "I64"
+    assert vec.__numpy_dtype__ == np.dtype("int64")
     assert vec.ndim == 1
     assert vec.size == 3
     assert vec.itemsize == 8

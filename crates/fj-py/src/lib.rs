@@ -388,6 +388,11 @@ impl PyValue {
     }
 
     #[getter]
+    fn __numpy_dtype__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        numpy_dtype_object(py, self.inner.dtype())
+    }
+
+    #[getter]
     fn ndim(&self) -> usize {
         self.shape_dims().len()
     }
@@ -1203,6 +1208,30 @@ fn dtype_itemsize(dtype: DType) -> u64 {
         DType::F64 | DType::I64 | DType::U64 | DType::Complex64 => 8,
         DType::Complex128 => 16,
     }
+}
+
+fn numpy_dtype_name(dtype: DType) -> &'static str {
+    match dtype {
+        DType::BF16 => "bfloat16",
+        DType::F16 => "float16",
+        DType::F32 => "float32",
+        DType::F64 => "float64",
+        DType::I32 => "int32",
+        DType::I64 => "int64",
+        DType::U32 => "uint32",
+        DType::U64 => "uint64",
+        DType::Bool => "bool",
+        DType::Complex64 => "complex64",
+        DType::Complex128 => "complex128",
+    }
+}
+
+fn numpy_dtype_object(py: Python<'_>, dtype: DType) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("numpy")?
+        .getattr("dtype")?
+        .call1((numpy_dtype_name(dtype),))?
+        .unbind())
 }
 
 fn literal_truth_value(literal: Literal) -> bool {
