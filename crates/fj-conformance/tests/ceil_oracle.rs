@@ -271,6 +271,11 @@ fn oracle_ceil_1d() {
 
     assert_eq!(vals[0], -1.0, "ceil(-1.5)");
     assert_eq!(vals[1], 0.0, "ceil(-0.5)");
+    assert_eq!(
+        vals[1].to_bits(),
+        (-0.0_f64).to_bits(),
+        "ceil(-0.5) should produce exact -0.0 bits"
+    );
     assert_eq!(vals[2], 0.0, "ceil(0)");
     assert_eq!(vals[3], 1.0, "ceil(0.5)");
     assert_eq!(vals[4], 2.0, "ceil(1.5)");
@@ -319,7 +324,17 @@ fn oracle_ceil_3d() {
     assert_eq!(vals[2], 2.0, "ceil(1.5)");
     assert_eq!(vals[3], 3.0, "ceil(2.5)");
     assert_eq!(vals[4], 0.0, "ceil(-0.1)");
+    assert_eq!(
+        vals[4].to_bits(),
+        (-0.0_f64).to_bits(),
+        "ceil(-0.1) should produce exact -0.0 bits"
+    );
     assert_eq!(vals[5], 0.0, "ceil(-0.9)");
+    assert_eq!(
+        vals[5].to_bits(),
+        (-0.0_f64).to_bits(),
+        "ceil(-0.9) should produce exact -0.0 bits"
+    );
     assert_eq!(vals[6], -1.0, "ceil(-1.5)");
     assert_eq!(vals[7], -2.0, "ceil(-2.5)");
 }
