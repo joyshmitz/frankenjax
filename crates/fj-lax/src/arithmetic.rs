@@ -2427,24 +2427,27 @@ pub(crate) fn eval_polygamma(primitive: Primitive, inputs: &[Value]) -> Result<V
             )?))
         }
         (Value::Tensor(n_tensor), Value::Tensor(x_tensor)) => {
-            if n_tensor.shape != x_tensor.shape {
-                return Err(EvalError::ShapeMismatch {
+            let out_shape =
+                broadcast_shape(&n_tensor.shape, &x_tensor.shape).ok_or(EvalError::ShapeMismatch {
                     primitive,
                     left: n_tensor.shape.clone(),
                     right: x_tensor.shape.clone(),
-                });
-            }
-            let mut elements = Vec::with_capacity(x_tensor.elements.len());
-            for (n_elem, x_elem) in n_tensor.elements.iter().zip(x_tensor.elements.iter()) {
-                let n = polygamma_literal_to_i64(*n_elem, primitive)?;
-                let x = polygamma_literal_to_f64(*x_elem, primitive)?;
+                })?;
+            let n_strides = broadcast_strides(&n_tensor.shape, &out_shape);
+            let x_strides = broadcast_strides(&x_tensor.shape, &out_shape);
+            let out_strides = compute_strides(&out_shape.dims);
+            let total: usize = out_shape.dims.iter().map(|&d| d as usize).product();
+            let mut elements = Vec::with_capacity(total.max(1));
+            let mut multi = vec![0usize; out_shape.dims.len()];
+            for flat in 0..total.max(1) {
+                flat_to_multi_into(flat, &out_strides, &mut multi);
+                let n_idx = broadcast_flat_index(&multi, &n_strides);
+                let x_idx = broadcast_flat_index(&multi, &x_strides);
+                let n = polygamma_literal_to_i64(n_tensor.elements[n_idx], primitive)?;
+                let x = polygamma_literal_to_f64(x_tensor.elements[x_idx], primitive)?;
                 elements.push(Literal::from_f64(polygamma_approx(n, x)));
             }
-            Ok(Value::Tensor(TensorValue::new(
-                DType::F64,
-                x_tensor.shape.clone(),
-                elements,
-            )?))
+            Ok(Value::Tensor(TensorValue::new(DType::F64, out_shape, elements)?))
         }
     }
 }

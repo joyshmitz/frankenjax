@@ -201,3 +201,160 @@ fn polygamma_rejects_invalid_arity() {
         "unexpected arity error: {err}"
     );
 }
+
+// --------------------------------------------------------------------------
+// Broadcast tests: verify NumPy-style broadcasting semantics
+// --------------------------------------------------------------------------
+
+fn scalar_f64(v: f64) -> Value {
+    Value::scalar_f64(v)
+}
+
+fn tensor_f64(shape: &[u32], data: &[f64]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape { dims: shape.to_vec() },
+            data.iter().copied().map(Literal::from_f64).collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn get_shape(v: &Value) -> Vec<u32> {
+    match v {
+        Value::Scalar(_) => vec![],
+        Value::Tensor(t) => t.shape.dims.clone(),
+    }
+}
+
+fn get_elements(v: &Value) -> Vec<f64> {
+    match v {
+        Value::Scalar(lit) => vec![lit.as_f64().unwrap()],
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+    }
+}
+
+#[test]
+fn polygamma_broadcast_scalar_scalar() {
+    let result = eval_polygamma(scalar_f64(1.0), scalar_f64(2.0));
+    assert_eq!(get_shape(&result), Vec::<u32>::new());
+    let val = get_elements(&result)[0];
+    assert_close(
+        val,
+        std::f64::consts::PI.powi(2) / 6.0 - 1.0,
+        POLYGAMMA_APPROX_TOL,
+        "scalar-scalar broadcast",
+    );
+}
+
+#[test]
+fn polygamma_broadcast_scalar_order_tensor_x() {
+    let result = eval_polygamma(scalar_f64(1.0), tensor_f64(&[2], &[1.0, 2.0]));
+    assert_eq!(get_shape(&result), vec![2]);
+    let vals = get_elements(&result);
+    assert_close(
+        vals[0],
+        std::f64::consts::PI.powi(2) / 6.0,
+        POLYGAMMA_APPROX_TOL,
+        "scalar-tensor[0]",
+    );
+    assert_close(
+        vals[1],
+        std::f64::consts::PI.powi(2) / 6.0 - 1.0,
+        POLYGAMMA_APPROX_TOL,
+        "scalar-tensor[1]",
+    );
+}
+
+#[test]
+fn polygamma_broadcast_tensor_order_scalar_x() {
+    let result = eval_polygamma(tensor_f64(&[2], &[0.0, 1.0]), scalar_f64(2.0));
+    assert_eq!(get_shape(&result), vec![2]);
+    let vals = get_elements(&result);
+    assert_close(
+        vals[0],
+        1.0 - EULER_MASCHERONI,
+        POLYGAMMA_APPROX_TOL,
+        "tensor-scalar[0]",
+    );
+    assert_close(
+        vals[1],
+        std::f64::consts::PI.powi(2) / 6.0 - 1.0,
+        POLYGAMMA_APPROX_TOL,
+        "tensor-scalar[1]",
+    );
+}
+
+#[test]
+fn polygamma_broadcast_singleton_to_vector() {
+    let result = eval_polygamma(tensor_f64(&[1], &[1.0]), tensor_f64(&[3], &[1.0, 2.0, 3.0]));
+    assert_eq!(get_shape(&result), vec![3]);
+    let vals = get_elements(&result);
+    let expected_trigamma_1 = std::f64::consts::PI.powi(2) / 6.0;
+    let expected_trigamma_2 = expected_trigamma_1 - 1.0;
+    let expected_trigamma_3 = expected_trigamma_2 - 0.25;
+    assert_close(vals[0], expected_trigamma_1, POLYGAMMA_APPROX_TOL, "singleton→vec[0]");
+    assert_close(vals[1], expected_trigamma_2, POLYGAMMA_APPROX_TOL, "singleton→vec[1]");
+    assert_close(vals[2], expected_trigamma_3, POLYGAMMA_APPROX_TOL, "singleton→vec[2]");
+}
+
+#[test]
+fn polygamma_broadcast_vector_to_singleton() {
+    let result = eval_polygamma(tensor_f64(&[3], &[0.0, 1.0, 2.0]), tensor_f64(&[1], &[2.0]));
+    assert_eq!(get_shape(&result), vec![3]);
+    let vals = get_elements(&result);
+    assert_close(
+        vals[0],
+        1.0 - EULER_MASCHERONI,
+        POLYGAMMA_APPROX_TOL,
+        "vec→singleton[0] digamma(2)",
+    );
+    assert_close(
+        vals[1],
+        std::f64::consts::PI.powi(2) / 6.0 - 1.0,
+        POLYGAMMA_APPROX_TOL,
+        "vec→singleton[1] trigamma(2)",
+    );
+}
+
+#[test]
+fn polygamma_broadcast_column_to_row() {
+    // [2,1] x [1,3] → [2,3]
+    let order = tensor_f64(&[2, 1], &[0.0, 1.0]);
+    let x = tensor_f64(&[1, 3], &[1.0, 2.0, 3.0]);
+    let result = eval_polygamma(order, x);
+    assert_eq!(get_shape(&result), vec![2, 3]);
+    let vals = get_elements(&result);
+    // Row 0: digamma, Row 1: trigamma
+    assert_close(vals[0], -EULER_MASCHERONI, POLYGAMMA_APPROX_TOL, "col×row[0,0]");
+    assert_close(vals[1], 1.0 - EULER_MASCHERONI, POLYGAMMA_APPROX_TOL, "col×row[0,1]");
+    let trigamma_1 = std::f64::consts::PI.powi(2) / 6.0;
+    assert_close(vals[3], trigamma_1, POLYGAMMA_APPROX_TOL, "col×row[1,0]");
+}
+
+#[test]
+fn polygamma_broadcast_different_ranks() {
+    // [3] x [2,3] → [2,3]
+    let order = tensor_f64(&[3], &[1.0, 1.0, 1.0]);
+    let x = tensor_f64(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let result = eval_polygamma(order, x);
+    assert_eq!(get_shape(&result), vec![2, 3]);
+    let vals = get_elements(&result);
+    let trigamma_1 = std::f64::consts::PI.powi(2) / 6.0;
+    assert_close(vals[0], trigamma_1, POLYGAMMA_APPROX_TOL, "ranks[0]");
+    assert_eq!(vals.len(), 6);
+}
+
+#[test]
+fn polygamma_broadcast_incompatible_shapes_error() {
+    let result = eval_primitive(
+        Primitive::Polygamma,
+        &[tensor_f64(&[2], &[1.0, 1.0]), tensor_f64(&[3], &[1.0, 2.0, 3.0])],
+        &no_params(),
+    );
+    assert!(
+        result.is_err(),
+        "incompatible shapes [2] vs [3] should error"
+    );
+}
