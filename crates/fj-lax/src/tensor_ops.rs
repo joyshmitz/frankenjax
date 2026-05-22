@@ -2963,6 +2963,174 @@ pub(crate) fn eval_argsort(
     }
 }
 
+pub(crate) fn eval_argmin(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    eval_arg_extremum(primitive, inputs, params, false)
+}
+
+pub(crate) fn eval_argmax(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    eval_arg_extremum(primitive, inputs, params, true)
+}
+
+fn eval_arg_extremum(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+    find_max: bool,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    match &inputs[0] {
+        Value::Scalar(_) => Ok(Value::scalar_i64(0)),
+        Value::Tensor(tensor) => {
+            let rank = tensor.shape.rank();
+            if rank == 0 {
+                return Ok(Value::scalar_i64(0));
+            }
+
+            let axis = parse_axis_param(primitive, "axis", params, rank, rank - 1)?;
+            extremum_along_axis(primitive, tensor, axis, find_max)
+        }
+    }
+}
+
+fn extremum_along_axis(
+    primitive: Primitive,
+    tensor: &TensorValue,
+    axis: usize,
+    find_max: bool,
+) -> Result<Value, EvalError> {
+    let rank = tensor.shape.rank();
+    let axis_dim = tensor.shape.dims[axis] as usize;
+
+    if axis_dim == 0 || tensor.elements.is_empty() {
+        let mut result_dims: Vec<u32> = tensor.shape.dims.clone();
+        result_dims.remove(axis);
+        let result_shape = Shape { dims: result_dims };
+        return Ok(Value::Tensor(
+            TensorValue::new(DType::I64, result_shape, vec![]).map_err(EvalError::InvalidTensor)?,
+        ));
+    }
+
+    let strides = checked_row_major_strides(primitive, "argmin/argmax", &tensor.shape.dims)?;
+    let axis_stride = strides[axis];
+    let total = tensor.elements.len();
+    if !total.is_multiple_of(axis_dim) {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "argmin/argmax axis dimension {axis_dim} does not divide {total} input elements"
+            ),
+        });
+    }
+    let outer_count = total / axis_dim;
+
+    let mut result_dims: Vec<u32> = tensor.shape.dims.clone();
+    result_dims.remove(axis);
+    let result_shape = Shape { dims: result_dims };
+
+    let mut result_elements = Vec::with_capacity(outer_count);
+
+    for outer in 0..outer_count {
+        let base = {
+            let mut idx = outer;
+            let mut flat = 0_usize;
+            for ax in (0..rank).rev() {
+                if ax == axis {
+                    continue;
+                }
+                let dim = tensor.shape.dims[ax] as usize;
+                if dim == 0 {
+                    return Err(EvalError::Unsupported {
+                        primitive,
+                        detail: "argmin/argmax encountered zero non-axis dimension".to_owned(),
+                    });
+                }
+                let offset = (idx % dim).checked_mul(strides[ax]).ok_or_else(|| {
+                    EvalError::Unsupported {
+                        primitive,
+                        detail: "argmin/argmax flat offset multiplication overflowed".to_owned(),
+                    }
+                })?;
+                flat = flat.checked_add(offset).ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "argmin/argmax flat offset addition overflowed".to_owned(),
+                })?;
+                idx /= dim;
+            }
+            flat
+        };
+
+        let mut best_idx = 0_usize;
+        let first_flat = base;
+        let first_literal = *tensor.elements.get(first_flat).ok_or_else(|| {
+            EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "argmin/argmax flat index {first_flat} out of bounds for {total} elements"
+                ),
+            }
+        })?;
+        let mut best_key =
+            sort_key(first_literal).map_err(|detail| EvalError::Unsupported { primitive, detail })?;
+
+        for i in 1..axis_dim {
+            let flat_idx = i
+                .checked_mul(axis_stride)
+                .and_then(|offset| base.checked_add(offset))
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "argmin/argmax axis offset overflowed".to_owned(),
+                })?;
+            let literal = *tensor.elements.get(flat_idx).ok_or_else(|| {
+                EvalError::Unsupported {
+                    primitive,
+                    detail: format!(
+                        "argmin/argmax flat index {flat_idx} out of bounds for {total} elements"
+                    ),
+                }
+            })?;
+            let key =
+                sort_key(literal).map_err(|detail| EvalError::Unsupported { primitive, detail })?;
+
+            let is_better = if find_max {
+                compare_sort_keys(key, best_key) == std::cmp::Ordering::Greater
+            } else {
+                compare_sort_keys(key, best_key) == std::cmp::Ordering::Less
+            };
+
+            if is_better {
+                best_idx = i;
+                best_key = key;
+            }
+        }
+
+        result_elements.push(Literal::I64(best_idx as i64));
+    }
+
+    if result_shape.dims.is_empty() {
+        Ok(Value::Scalar(result_elements[0]))
+    } else {
+        Ok(Value::Tensor(
+            TensorValue::new(DType::I64, result_shape, result_elements)
+                .map_err(EvalError::InvalidTensor)?,
+        ))
+    }
+}
+
 /// Sort or argsort a tensor along a given axis.
 fn sort_along_axis(
     primitive: Primitive,
@@ -4383,6 +4551,61 @@ mod tests {
                 .contains("does not divide 1 input elements"),
             "unexpected mismatch error: {mismatch_err}"
         );
+    }
+
+    // ── Argmin / Argmax ──
+
+    #[test]
+    fn argmin_1d_finds_minimum_index() {
+        let x = v_f64(&[3.0, 1.0, 4.0, 1.0, 5.0]);
+        let result = eval_argmin(Primitive::Argmin, &[x], &BTreeMap::new()).unwrap();
+        let idx = result.as_i64_scalar().expect("expected scalar i64 result");
+        assert_eq!(idx, 1);
+    }
+
+    #[test]
+    fn argmax_1d_finds_maximum_index() {
+        let x = v_f64(&[3.0, 1.0, 4.0, 1.0, 5.0]);
+        let result = eval_argmax(Primitive::Argmax, &[x], &BTreeMap::new()).unwrap();
+        let idx = result.as_i64_scalar().expect("expected scalar i64 result");
+        assert_eq!(idx, 4);
+    }
+
+    #[test]
+    fn argmin_2d_axis0() {
+        let x = mat_f64(2, 3, &[1.0, 4.0, 2.0, 3.0, 0.0, 5.0]);
+        let p = params(&[("axis", "0")]);
+        let result = eval_argmin(Primitive::Argmin, &[x], &p).unwrap();
+        let indices: Vec<i64> = result
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_i64().expect("expected integer index"))
+            .collect();
+        assert_eq!(indices, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn argmax_2d_axis1() {
+        let x = mat_f64(2, 3, &[1.0, 4.0, 2.0, 3.0, 0.0, 5.0]);
+        let p = params(&[("axis", "1")]);
+        let result = eval_argmax(Primitive::Argmax, &[x], &p).unwrap();
+        let indices: Vec<i64> = result
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_i64().expect("expected integer index"))
+            .collect();
+        assert_eq!(indices, vec![1, 2]);
+    }
+
+    #[test]
+    fn argmin_scalar_returns_zero() {
+        let x = Value::Scalar(Literal::from_f64(42.0));
+        let result = eval_argmin(Primitive::Argmin, &[x], &BTreeMap::new()).unwrap();
+        assert_eq!(result.as_i64_scalar(), Some(0));
     }
 
     // ── Copy ──

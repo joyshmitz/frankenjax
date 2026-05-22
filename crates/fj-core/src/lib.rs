@@ -189,6 +189,9 @@ pub enum Primitive {
     // Sorting
     Sort,
     Argsort,
+    // Index-of-extremum
+    Argmin,
+    Argmax,
     // Convolution
     Conv,
     // Control flow
@@ -318,6 +321,8 @@ impl Primitive {
         Self::Cumprod,
         Self::Sort,
         Self::Argsort,
+        Self::Argmin,
+        Self::Argmax,
         Self::Conv,
         Self::Cond,
         Self::Scan,
@@ -450,6 +455,8 @@ impl Primitive {
             Self::Cumprod => "cumprod",
             Self::Sort => "sort",
             Self::Argsort => "argsort",
+            Self::Argmin => "argmin",
+            Self::Argmax => "argmax",
             Self::Conv => "conv",
             Self::Cond => "cond",
             Self::Scan => "scan",

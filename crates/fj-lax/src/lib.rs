@@ -28,7 +28,8 @@ use fft::{eval_fft, eval_ifft, eval_irfft, eval_rfft};
 use linalg::{eval_cholesky, eval_eigh, eval_qr, eval_svd, eval_triangular_solve};
 use reduction::{eval_cumulative, eval_reduce_axes, eval_reduce_bitwise_axes};
 use tensor_ops::{
-    eval_argsort, eval_bitcast_convert_type, eval_broadcast_in_dim, eval_broadcasted_iota,
+    eval_argmax, eval_argmin, eval_argsort, eval_bitcast_convert_type, eval_broadcast_in_dim,
+    eval_broadcasted_iota,
     eval_concatenate, eval_conv, eval_copy, eval_dynamic_slice, eval_dynamic_update_slice,
     eval_expand_dims, eval_gather, eval_iota, eval_one_hot, eval_pad, eval_reduce_precision,
     eval_reshape, eval_rev, eval_scatter, eval_slice, eval_sort, eval_split, eval_squeeze,
@@ -409,6 +410,9 @@ pub fn eval_primitive(
         // Sorting
         Primitive::Sort => eval_sort(primitive, inputs, params),
         Primitive::Argsort => eval_argsort(primitive, inputs, params),
+        // Index-of-extremum
+        Primitive::Argmin => eval_argmin(primitive, inputs, params),
+        Primitive::Argmax => eval_argmax(primitive, inputs, params),
         // Convolution
         Primitive::Conv => eval_conv(primitive, inputs, params),
         // Control flow

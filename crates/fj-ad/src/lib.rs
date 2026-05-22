@@ -2776,6 +2776,12 @@ pub fn vjp(
             require_input_arity(inputs, 1)?;
             Ok(vec![zeros_like(&inputs[0])])
         }
+        Primitive::Argmin | Primitive::Argmax => {
+            // Argmin/Argmax are not differentiable (return integer indices).
+            // Use zeros_like so the cotangent shape matches the input.
+            require_input_arity(inputs, 1)?;
+            Ok(vec![zeros_like(&inputs[0])])
+        }
         Primitive::Conv => {
             // Conv 1D VJP for layout lhs=[N, W, C_in], rhs=[K, C_in, C_out], out=[N, W_out, C_out]
             // grad_lhs: convolve g with flipped kernel (transposed convolution)
@@ -6327,6 +6333,7 @@ fn jvp_rule(
         Primitive::Cumprod => cumprod_jvp_value(&primals[0], &tangents[0], params),
         Primitive::Sort => ep_p(Primitive::Sort, &[tangents[0].clone()], params),
         Primitive::Argsort => Ok(zeros_like(&primals[0])),
+        Primitive::Argmin | Primitive::Argmax => Ok(zeros_like(&primals[0])),
         Primitive::Conv => ep_p(Primitive::Conv, tangents, params),
 
         // ── Control flow ──
