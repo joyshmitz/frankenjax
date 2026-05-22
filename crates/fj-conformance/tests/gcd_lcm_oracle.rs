@@ -10,6 +10,7 @@
 //! - Zero: gcd(n, 0) = n, lcm(n, 0) = 0
 //! - Negative values
 //! - Tensor shapes
+//! - Broadcast-compatible operands
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
@@ -210,4 +211,26 @@ fn oracle_gcd_matrix() {
     let result = eval_primitive(Primitive::Gcd, &[a, b], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 2]);
     assert_eq!(extract_i64_vec(&result), vec![4, 6, 8, 12]);
+}
+
+// ======================== Broadcasting ========================
+
+#[test]
+fn oracle_gcd_singleton_vector_broadcast() {
+    let a = make_i64_tensor(&[1], vec![12]);
+    let b = make_i64_tensor(&[3], vec![6, 9, 12]);
+    let result = eval_primitive(Primitive::Gcd, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![6, 3, 12]);
+}
+
+#[test]
+fn oracle_lcm_singleton_vector_broadcast() {
+    let a = make_i64_tensor(&[1], vec![12]);
+    let b = make_i64_tensor(&[3], vec![6, 9, 12]);
+    let result = eval_primitive(Primitive::Lcm, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![12, 36, 12]);
 }
