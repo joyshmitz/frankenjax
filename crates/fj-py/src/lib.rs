@@ -207,6 +207,26 @@ impl PyValue {
         }
     }
 
+    fn __float__(&self) -> PyResult<f64> {
+        let literal = self.inner.as_scalar_literal().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "only scalar arrays can be converted to Python scalars",
+            )
+        })?;
+
+        literal
+            .as_f64()
+            .or_else(|| match literal {
+                Literal::Bool(value) => Some(if value { 1.0 } else { 0.0 }),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "only real scalar arrays can be converted to Python float",
+                )
+            })
+    }
+
     fn as_f64_list(&self) -> Option<Vec<f64>> {
         match &self.inner {
             Value::Scalar(_) => self.inner.as_f64_scalar().map(|value| vec![value]),
@@ -1596,6 +1616,7 @@ mod tests {
             let value = v.tolist(py).unwrap();
             assert!((value.bind(py).extract::<f64>().unwrap() - 42.0).abs() < 1e-12);
         });
+        assert!((v.__float__().unwrap() - 42.0).abs() < 1e-12);
         assert!((v.as_f64().unwrap() - 42.0).abs() < 1e-12);
     }
 
@@ -1646,6 +1667,7 @@ mod tests {
         assert!(ints.is_fully_addressable());
         assert!(ints.is_fully_replicated());
         assert_eq!(ints.__len__().unwrap(), 3);
+        assert!(ints.__float__().is_err());
         Python::with_gil(|py| {
             let values = ints.tolist(py).unwrap();
             assert_eq!(
