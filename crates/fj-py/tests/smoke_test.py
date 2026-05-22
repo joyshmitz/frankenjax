@@ -223,6 +223,7 @@ def test_backend_topology_helpers():
     assert device.id == 0
     assert device.process_index == 0
     assert device.platform == "cpu"
+    assert device.device_kind == "cpu"
     local_devices = fj.local_devices()
     assert len(local_devices) == 1
     assert local_devices[0].id == 0

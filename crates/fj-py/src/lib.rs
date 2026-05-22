@@ -241,6 +241,11 @@ impl PyDevice {
         "cpu"
     }
 
+    #[getter]
+    fn device_kind(&self) -> &'static str {
+        "cpu"
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Device(id={}, process_index={}, platform='cpu')",
@@ -969,6 +974,7 @@ mod tests {
         assert_eq!(all_devices[0].id(), 0);
         assert_eq!(all_devices[0].process_index(), 0);
         assert_eq!(all_devices[0].platform(), "cpu");
+        assert_eq!(all_devices[0].device_kind(), "cpu");
 
         let local = local_devices(None, None::<String>, None).unwrap();
         assert_eq!(local.len(), 1);
