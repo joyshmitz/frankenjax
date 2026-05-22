@@ -13,6 +13,7 @@
 //! - Infinity
 //! - NaN handling
 //! - Tensor shapes
+//! - Broadcast-compatible operands
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
@@ -233,6 +234,31 @@ fn oracle_min_1d_nan_propagates() {
     assert_eq!(values[3], 6.0);
 }
 
+// ======================== Min: Broadcasting ========================
+
+#[test]
+fn oracle_min_vector_scalar_rhs_broadcast() {
+    let a = make_f64_tensor(&[4], vec![1.0, 5.0, -3.0, 7.0]);
+    let b = make_f64_tensor(&[], vec![3.0]);
+    let result = eval_primitive(Primitive::Min, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_f64_vec(&result), vec![1.0, 3.0, -3.0, 3.0]);
+}
+
+#[test]
+fn oracle_min_matrix_row_rhs_broadcast() {
+    let a = make_f64_tensor(&[2, 3], vec![1.0, 5.0, 2.0, -3.0, 4.0, 7.0]);
+    let b = make_f64_tensor(&[3], vec![-2.0, 3.0, 6.0]);
+    let result = eval_primitive(Primitive::Min, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(
+        extract_f64_vec(&result),
+        vec![-2.0, 3.0, 2.0, -3.0, 3.0, 6.0]
+    );
+}
+
 // ====================== MAX TESTS ======================
 
 // ======================== Max: Basic Comparison ========================
@@ -382,6 +408,31 @@ fn oracle_max_1d_nan_propagates() {
     assert!(values[1].is_nan());
     assert!(values[2].is_nan());
     assert_eq!(values[3], 7.0);
+}
+
+// ======================== Max: Broadcasting ========================
+
+#[test]
+fn oracle_max_vector_scalar_rhs_broadcast() {
+    let a = make_f64_tensor(&[4], vec![1.0, 5.0, -3.0, 7.0]);
+    let b = make_f64_tensor(&[], vec![3.0]);
+    let result = eval_primitive(Primitive::Max, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_f64_vec(&result), vec![3.0, 5.0, 3.0, 7.0]);
+}
+
+#[test]
+fn oracle_max_matrix_row_rhs_broadcast() {
+    let a = make_f64_tensor(&[2, 3], vec![1.0, 5.0, 2.0, -3.0, 4.0, 7.0]);
+    let b = make_f64_tensor(&[3], vec![-2.0, 3.0, 6.0]);
+    let result = eval_primitive(Primitive::Max, &[a, b], &no_params()).unwrap();
+
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(
+        extract_f64_vec(&result),
+        vec![1.0, 5.0, 6.0, -2.0, 4.0, 7.0]
+    );
 }
 
 // ====================== MIN/MAX RELATIONSHIP ======================
