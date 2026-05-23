@@ -49,6 +49,19 @@ fn make_complex128_vector(data: &[(f64, f64)]) -> Value {
     )
 }
 
+fn make_complex64_scalar(re: f32, im: f32) -> Value {
+    Value::Scalar(Literal::from_complex64(re, im))
+}
+
+fn extract_complex64_scalar(val: &Value) -> (f32, f32) {
+    match val {
+        Value::Scalar(Literal::Complex64Bits(re, im)) => {
+            (f32::from_bits(*re), f32::from_bits(*im))
+        }
+        other => panic!("expected Complex64 scalar, got {other:?}"),
+    }
+}
+
 fn extract_f64_vec(val: &Value) -> Vec<f64> {
     val.as_tensor()
         .unwrap()
@@ -1083,4 +1096,293 @@ fn max_jvp_numerical() {
 fn min_jvp_numerical() {
     verify_binary_scalar_jvp(Primitive::Min, 3.0, 7.0, 1.0, 1.0, 1e-5, "min JVP b>a");
     verify_binary_scalar_jvp(Primitive::Min, 7.0, 3.0, 1.0, 1.0, 1e-5, "min JVP a>b");
+}
+
+// ── Complex64 JVP numerical verification (parity with VJP tests) ──
+//
+// These tests verify that JVP for complex primitives produces correct tangent
+// values by checking against analytically derived expected results.
+
+/// Helper: compute complex multiplication (a_re + a_im*i) * (b_re + b_im*i)
+fn complex_mul(a_re: f32, a_im: f32, b_re: f32, b_im: f32) -> (f32, f32) {
+    (a_re * b_re - a_im * b_im, a_re * b_im + a_im * b_re)
+}
+
+/// Helper: compute complex division (a_re + a_im*i) / (b_re + b_im*i)
+fn complex_div(a_re: f32, a_im: f32, b_re: f32, b_im: f32) -> (f32, f32) {
+    let denom = b_re * b_re + b_im * b_im;
+    ((a_re * b_re + a_im * b_im) / denom, (a_im * b_re - a_re * b_im) / denom)
+}
+
+/// Helper: compute complex negation
+fn complex_neg(re: f32, im: f32) -> (f32, f32) {
+    (-re, -im)
+}
+
+/// Helper: compute complex exp
+fn complex_exp(re: f32, im: f32) -> (f32, f32) {
+    let r = re.exp();
+    (r * im.cos(), r * im.sin())
+}
+
+fn assert_complex64_close(actual: (f32, f32), expected: (f32, f32), tol: f32, context: &str) {
+    let (ar, ai) = actual;
+    let (er, ei) = expected;
+    let re_diff = (ar - er).abs();
+    let im_diff = (ai - ei).abs();
+    assert!(
+        re_diff < tol && im_diff < tol,
+        "{context}: got ({ar}, {ai}), expected ({er}, {ei}), diff=({re_diff}, {im_diff}) (tol={tol})"
+    );
+}
+
+/// Complex64 Exp JVP: d/dz exp(z) = exp(z), so tangent = exp(z) * dz
+#[test]
+fn exp_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.0, 0.5);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Exp);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    let exp_z = complex_exp(0.0, 0.5);
+    let expected = complex_mul(exp_z.0, exp_z.1, 1.0, 0.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-5, "exp JVP at z=0.5i");
+}
+
+/// Complex64 Log JVP: d/dz log(z) = 1/z, so tangent = dz/z
+#[test]
+fn log_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(1.0, 1.0);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Log);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // 1/z = 1/(1+i) = (1-i)/2 = 0.5 - 0.5i
+    let expected = complex_div(1.0, 0.0, 1.0, 1.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-5, "log JVP at z=1+i");
+}
+
+/// Complex64 Sin JVP: d/dz sin(z) = cos(z), so tangent = cos(z) * dz
+#[test]
+fn sin_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.5, 0.3);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Sin);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // cos(z) for z = a+bi: cos(a)*cosh(b) - i*sin(a)*sinh(b)
+    let (a, b) = (0.5_f32, 0.3_f32);
+    let cos_z = (a.cos() * b.cosh(), -a.sin() * b.sinh());
+    let expected = complex_mul(cos_z.0, cos_z.1, 1.0, 0.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "sin JVP at z=0.5+0.3i");
+}
+
+/// Complex64 Cos JVP: d/dz cos(z) = -sin(z), so tangent = -sin(z) * dz
+#[test]
+fn cos_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.5, 0.3);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Cos);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // sin(z) for z = a+bi: sin(a)*cosh(b) + i*cos(a)*sinh(b)
+    let (a, b) = (0.5_f32, 0.3_f32);
+    let sin_z = (a.sin() * b.cosh(), a.cos() * b.sinh());
+    let neg_sin_z = complex_neg(sin_z.0, sin_z.1);
+    let expected = complex_mul(neg_sin_z.0, neg_sin_z.1, 1.0, 0.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "cos JVP at z=0.5+0.3i");
+}
+
+/// Complex64 Sinh JVP: d/dz sinh(z) = cosh(z)
+#[test]
+fn sinh_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.5, 0.3);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Sinh);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // cosh(z) for z = a+bi: cosh(a)*cos(b) + i*sinh(a)*sin(b)
+    let (a, b) = (0.5_f32, 0.3_f32);
+    let cosh_z = (a.cosh() * b.cos(), a.sinh() * b.sin());
+    let expected = complex_mul(cosh_z.0, cosh_z.1, 1.0, 0.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "sinh JVP at z=0.5+0.3i");
+}
+
+/// Complex64 Cosh JVP: d/dz cosh(z) = sinh(z)
+#[test]
+fn cosh_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.5, 0.3);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Cosh);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // sinh(z) for z = a+bi: sinh(a)*cos(b) + i*cosh(a)*sin(b)
+    let (a, b) = (0.5_f32, 0.3_f32);
+    let sinh_z = (a.sinh() * b.cos(), a.cosh() * b.sin());
+    let expected = complex_mul(sinh_z.0, sinh_z.1, 1.0, 0.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "cosh JVP at z=0.5+0.3i");
+}
+
+/// Complex64 Tan JVP: d/dz tan(z) = sec²(z) = 1/cos²(z)
+#[test]
+fn tan_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.3, 0.2);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Tan);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // cos(z), then 1/cos²(z)
+    let (a, b) = (0.3_f32, 0.2_f32);
+    let cos_z = (a.cos() * b.cosh(), -a.sin() * b.sinh());
+    let cos_sq = complex_mul(cos_z.0, cos_z.1, cos_z.0, cos_z.1);
+    let expected = complex_div(1.0, 0.0, cos_sq.0, cos_sq.1);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "tan JVP at z=0.3+0.2i");
+}
+
+/// Complex64 Tanh JVP: d/dz tanh(z) = sech²(z) = 1/cosh²(z)
+#[test]
+fn tanh_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.3, 0.2);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Tanh);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // cosh(z), then 1/cosh²(z)
+    let (a, b) = (0.3_f32, 0.2_f32);
+    let cosh_z = (a.cosh() * b.cos(), a.sinh() * b.sin());
+    let cosh_sq = complex_mul(cosh_z.0, cosh_z.1, cosh_z.0, cosh_z.1);
+    let expected = complex_div(1.0, 0.0, cosh_sq.0, cosh_sq.1);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "tanh JVP at z=0.3+0.2i");
+}
+
+/// Complex64 Neg JVP: d/dz (-z) = -1, so tangent = -dz
+#[test]
+fn neg_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(2.0, 3.0);
+    let dz = make_complex64_scalar(1.5, -0.5);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Neg);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    let expected = complex_neg(1.5, -0.5);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-6, "neg JVP");
+}
+
+/// Complex64 Sqrt JVP: d/dz sqrt(z) = 1/(2*sqrt(z))
+#[test]
+fn sqrt_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(3.0, 4.0);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Sqrt);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // sqrt(3+4i) = 2+i (verify: (2+i)² = 4 + 4i - 1 = 3+4i)
+    // derivative = 1/(2*sqrt(z)) = 1/(2*(2+i)) = 1/(4+2i) = (4-2i)/20 = 0.2 - 0.1i
+    let expected = complex_div(1.0, 0.0, 4.0, 2.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-5, "sqrt JVP at z=3+4i");
+}
+
+/// Complex64 Square JVP: d/dz z² = 2z
+#[test]
+fn square_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(2.0, 3.0);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Square);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // 2*z = 2*(2+3i) = 4+6i
+    let expected = (4.0, 6.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-6, "square JVP at z=2+3i");
+}
+
+/// Complex64 Add JVP: d/dz (a+b) w.r.t a is 1, w.r.t b is 1
+#[test]
+fn add_jvp_numerical_complex64() {
+    let a = make_complex64_scalar(2.0, 3.0);
+    let b = make_complex64_scalar(-1.0, 4.0);
+    let da = make_complex64_scalar(1.0, 0.5);
+    let db = make_complex64_scalar(-0.5, 1.0);
+
+    let jaxpr = make_two_input_jaxpr(Primitive::Add, BTreeMap::new());
+    let jvp_result = fj_ad::jvp(&jaxpr, &[a, b], &[da, db]).unwrap();
+
+    // tangent = da + db = (1+0.5i) + (-0.5+i) = 0.5 + 1.5i
+    let expected = (0.5, 1.5);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-6, "add JVP complex64");
+}
+
+/// Complex64 Sub JVP: d/dz (a-b) w.r.t a is 1, w.r.t b is -1
+#[test]
+fn sub_jvp_numerical_complex64() {
+    let a = make_complex64_scalar(2.0, 3.0);
+    let b = make_complex64_scalar(-1.0, 4.0);
+    let da = make_complex64_scalar(1.0, 0.5);
+    let db = make_complex64_scalar(-0.5, 1.0);
+
+    let jaxpr = make_two_input_jaxpr(Primitive::Sub, BTreeMap::new());
+    let jvp_result = fj_ad::jvp(&jaxpr, &[a, b], &[da, db]).unwrap();
+
+    // tangent = da - db = (1+0.5i) - (-0.5+i) = 1.5 - 0.5i
+    let expected = (1.5, -0.5);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-6, "sub JVP complex64");
+}
+
+/// Complex64 Mul JVP: d/dz (a*b) = da*b + a*db
+#[test]
+fn mul_jvp_numerical_complex64() {
+    let a = make_complex64_scalar(2.0, 3.0);
+    let b = make_complex64_scalar(-1.0, 4.0);
+    let da = make_complex64_scalar(1.0, 0.0);
+    let db = make_complex64_scalar(0.0, 1.0);
+
+    let jaxpr = make_two_input_jaxpr(Primitive::Mul, BTreeMap::new());
+    let jvp_result = fj_ad::jvp(&jaxpr, &[a, b], &[da, db]).unwrap();
+
+    // tangent = da*b + a*db = (1+0i)*(-1+4i) + (2+3i)*(0+i)
+    //         = (-1+4i) + (2i + 3i²) = (-1+4i) + (-3+2i) = -4+6i
+    let da_b = complex_mul(1.0, 0.0, -1.0, 4.0);
+    let a_db = complex_mul(2.0, 3.0, 0.0, 1.0);
+    let expected = (da_b.0 + a_db.0, da_b.1 + a_db.1);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-5, "mul JVP complex64");
+}
+
+/// Complex64 Div JVP: d/dz (a/b) = (da*b - a*db)/b²
+#[test]
+fn div_jvp_numerical_complex64() {
+    let a = make_complex64_scalar(2.0, 3.0);
+    let b = make_complex64_scalar(1.0, 1.0);
+    let da = make_complex64_scalar(1.0, 0.0);
+    let db = make_complex64_scalar(0.0, 0.0);
+
+    let jaxpr = make_two_input_jaxpr(Primitive::Div, BTreeMap::new());
+    let jvp_result = fj_ad::jvp(&jaxpr, &[a, b], &[da, db]).unwrap();
+
+    // tangent with db=0: da/b = (1+0i)/(1+i) = (1-i)/2 = 0.5 - 0.5i
+    let expected = complex_div(1.0, 0.0, 1.0, 1.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-5, "div JVP complex64 da only");
 }
