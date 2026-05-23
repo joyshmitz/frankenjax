@@ -392,3 +392,14 @@ fn oracle_ldexp_matrix_row_exp_broadcast() {
         );
     }
 }
+
+// ======================== PROPERTY: dtype preservation ========================
+
+#[test]
+fn property_ldexp_preserves_float_dtype() {
+    // ldexp(x, n) preserves the dtype of x (float)
+    let x = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let n = make_i64_tensor(&[3], vec![1, 2, 3]);
+    let result = eval_primitive(Primitive::Ldexp, &[x, n], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64, "ldexp should preserve F64 dtype");
+}

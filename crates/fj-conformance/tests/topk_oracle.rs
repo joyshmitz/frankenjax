@@ -320,3 +320,12 @@ fn oracle_topk_2d_batch_empty() {
     let result = eval_primitive(Primitive::TopK, &[input], &topk_params(2)).unwrap();
     assert_eq!(extract_shape(&result), vec![0, 2]);
 }
+
+// ======================== PROPERTY: dtype preservation ========================
+
+#[test]
+fn property_topk_preserves_dtype() {
+    let input = make_f64_tensor(&[5], vec![1.0, 5.0, 3.0, 4.0, 2.0]);
+    let result = eval_primitive(Primitive::TopK, &[input], &topk_params(3)).unwrap();
+    assert_eq!(result.dtype(), DType::F64, "topk should preserve F64 dtype");
+}

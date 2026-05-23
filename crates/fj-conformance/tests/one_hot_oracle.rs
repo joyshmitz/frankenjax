@@ -327,8 +327,10 @@ fn one_hot_params_with_dtype(num_classes: u32, dtype: &str) -> BTreeMap<String, 
 // `eval_one_hot` previously declared `DType::F32` but emitted `Literal::F64Bits`
 // elements, violating the dtype/element invariant. It also silently downgraded
 // BF16/F16/Complex64/Complex128/Bool/U32/U64 dtype requests to F64.
+// ======================== PROPERTY: dtype preservation ========================
+
 #[test]
-fn oracle_one_hot_dtype_param_preserves_element_kinds() {
+fn property_one_hot_dtype_param_preserves_element_kinds() {
     let cases: &[(&str, DType)] = &[
         ("F32", DType::F32),
         ("f32", DType::F32),

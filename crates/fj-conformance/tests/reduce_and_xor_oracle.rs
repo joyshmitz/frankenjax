@@ -310,3 +310,21 @@ fn oracle_reduce_xor_preserves_dtype() {
     let result = eval_primitive(Primitive::ReduceXor, &[input], &no_params()).unwrap();
     assert_eq!(result.dtype(), DType::I64);
 }
+
+// ======================== PROPERTY: dtype preservation ========================
+
+#[test]
+fn property_reduce_and_xor_preserve_dtypes() {
+    // Test ReduceAnd and ReduceXor preserve both Bool and I64 dtypes
+    let bool_input = make_bool_tensor(&[3], vec![true, true, false]);
+    let and_result = eval_primitive(Primitive::ReduceAnd, &[bool_input.clone()], &no_params()).unwrap();
+    let xor_result = eval_primitive(Primitive::ReduceXor, &[bool_input], &no_params()).unwrap();
+    assert_eq!(and_result.dtype(), DType::Bool, "ReduceAnd Bool");
+    assert_eq!(xor_result.dtype(), DType::Bool, "ReduceXor Bool");
+
+    let i64_input = make_i64_tensor(&[3], vec![0xFF, 0x0F, 0xF0]);
+    let and_i64 = eval_primitive(Primitive::ReduceAnd, &[i64_input.clone()], &no_params()).unwrap();
+    let xor_i64 = eval_primitive(Primitive::ReduceXor, &[i64_input], &no_params()).unwrap();
+    assert_eq!(and_i64.dtype(), DType::I64, "ReduceAnd I64");
+    assert_eq!(xor_i64.dtype(), DType::I64, "ReduceXor I64");
+}
