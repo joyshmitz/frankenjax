@@ -654,3 +654,191 @@ fn property_reduce_sum_preserves_all_float_dtypes() {
         }
     }
 }
+
+// ======================== COMPLEX64/COMPLEX128 TESTS ========================
+
+fn make_complex64_tensor(shape: &[u32], pairs: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            pairs
+                .into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], pairs: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: shape.to_vec() },
+            pairs
+                .into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_scalar(v: &Value) -> (f32, f32) {
+    match v {
+        Value::Tensor(t) => {
+            assert!(t.shape.dims.is_empty(), "expected scalar");
+            t.elements[0].as_complex64().unwrap()
+        }
+        Value::Scalar(l) => l.as_complex64().unwrap(),
+    }
+}
+
+fn extract_complex128_scalar(v: &Value) -> (f64, f64) {
+    match v {
+        Value::Tensor(t) => {
+            assert!(t.shape.dims.is_empty(), "expected scalar");
+            t.elements[0].as_complex128().unwrap()
+        }
+        Value::Scalar(l) => l.as_complex128().unwrap(),
+    }
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn assert_complex64_close(actual: (f32, f32), expected: (f32, f32), tol: f32, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+fn assert_complex128_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+#[test]
+fn oracle_reduce_sum_complex64_1d() {
+    // Sum of [(1+2i), (3+4i), (5+6i)] = (9+12i)
+    let input = make_complex64_tensor(&[3], vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]);
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &BTreeMap::new()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (9.0, 12.0), 1e-5, "sum of complex vector");
+}
+
+#[test]
+fn oracle_reduce_sum_complex64_2d_full() {
+    // Full reduction of 2x2 matrix
+    // [[1+1i, 2+2i], [3+3i, 4+4i]] -> 10+10i
+    let input = make_complex64_tensor(&[2, 2], vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)]);
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &BTreeMap::new()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (10.0, 10.0), 1e-5, "full reduction of 2x2 complex");
+}
+
+#[test]
+fn oracle_reduce_sum_complex64_axis0() {
+    // Reduce axis 0 of 2x3 matrix
+    // [[1+0i, 2+0i, 3+0i], [4+0i, 5+0i, 6+0i]] axis=0 -> [5+0i, 7+0i, 9+0i]
+    let input = make_complex64_tensor(&[2, 3], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("axes".to_string(), "0".to_string());
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &params).unwrap();
+    let vals = extract_complex64_vec(&result);
+
+    assert_complex64_close(vals[0], (5.0, 0.0), 1e-5, "sum axis 0 [0]");
+    assert_complex64_close(vals[1], (7.0, 0.0), 1e-5, "sum axis 0 [1]");
+    assert_complex64_close(vals[2], (9.0, 0.0), 1e-5, "sum axis 0 [2]");
+}
+
+#[test]
+fn oracle_reduce_sum_complex64_axis1() {
+    // Reduce axis 1 of 2x3 matrix
+    // [[1+1i, 2+2i, 3+3i], [4+4i, 5+5i, 6+6i]] axis=1 -> [6+6i, 15+15i]
+    let input = make_complex64_tensor(&[2, 3], vec![
+        (1.0, 1.0), (2.0, 2.0), (3.0, 3.0),
+        (4.0, 4.0), (5.0, 5.0), (6.0, 6.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("axes".to_string(), "1".to_string());
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &params).unwrap();
+    let vals = extract_complex64_vec(&result);
+
+    assert_complex64_close(vals[0], (6.0, 6.0), 1e-5, "sum axis 1 [0]");
+    assert_complex64_close(vals[1], (15.0, 15.0), 1e-5, "sum axis 1 [1]");
+}
+
+#[test]
+fn oracle_reduce_sum_complex64_single_element() {
+    // Sum of single element returns that element
+    let input = make_complex64_tensor(&[1], vec![(3.0, 4.0)]);
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &BTreeMap::new()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (3.0, 4.0), 1e-6, "sum of single element");
+}
+
+#[test]
+fn oracle_reduce_sum_complex128_1d() {
+    // Sum with higher precision
+    let input = make_complex128_tensor(&[3], vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]);
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &BTreeMap::new()).unwrap();
+    let (re, im) = extract_complex128_scalar(&result);
+    assert_complex128_close((re, im), (9.0, 12.0), 1e-12, "sum Complex128");
+}
+
+#[test]
+fn oracle_reduce_sum_complex64_empty() {
+    // Sum of empty tensor is 0
+    let input = make_complex64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &BTreeMap::new()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (0.0, 0.0), 1e-6, "sum of empty = 0");
+}
+
+#[test]
+fn oracle_reduce_sum_complex64_preserves_dtype() {
+    let input = make_complex64_tensor(&[3], vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &BTreeMap::new()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_reduce_sum_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[3], vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    let result = eval_primitive(Primitive::ReduceSum, &[input], &BTreeMap::new()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
