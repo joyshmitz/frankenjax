@@ -320,3 +320,32 @@ fn oracle_argsort_subnormal() {
     // Order: -subnormal (2), 0 (1), subnormal (0), 1 (3)
     assert_eq!(indices, vec![2, 1, 0, 3]);
 }
+
+// ======================== PROPERTY: output dtype is always I64 indices ========================
+
+#[test]
+fn property_argsort_output_i64_for_all_float_inputs() {
+    fn make_vec(dtype: DType, values: &[f64]) -> Value {
+        let lits: Vec<Literal> = values
+            .iter()
+            .map(|&v| match dtype {
+                DType::BF16 => Literal::from_bf16_f32(v as f32),
+                DType::F16 => Literal::from_f16_f32(v as f32),
+                DType::F32 => Literal::from_f32(v as f32),
+                DType::F64 => Literal::from_f64(v),
+                _ => panic!("not a float dtype"),
+            })
+            .collect();
+        Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![4] }, lits).unwrap())
+    }
+    let values = [3.0_f64, 1.0, 4.0, 2.0];
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let input = make_vec(dtype, &values);
+        let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false)).unwrap();
+        assert!(
+            matches!(result.dtype(), DType::I32 | DType::I64),
+            "argsort on {dtype:?} should return integer indices, got {:?}",
+            result.dtype()
+        );
+    }
+}
