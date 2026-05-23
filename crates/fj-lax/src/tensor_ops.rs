@@ -3598,13 +3598,13 @@ pub(crate) fn eval_conv(
         }
     };
 
-    let is_float =
-        |dtype: DType| matches!(dtype, DType::BF16 | DType::F16 | DType::F32 | DType::F64);
-    if !is_float(lhs.dtype) || !is_float(rhs.dtype) {
+    let is_numeric =
+        |dtype: DType| matches!(dtype, DType::BF16 | DType::F16 | DType::F32 | DType::F64 | DType::Complex64 | DType::Complex128);
+    if !is_numeric(lhs.dtype) || !is_numeric(rhs.dtype) {
         return Err(EvalError::Unsupported {
             primitive,
             detail: format!(
-                "conv requires floating dtypes, got lhs {:?}, rhs {:?}",
+                "conv requires floating or complex dtypes, got lhs {:?}, rhs {:?}",
                 lhs.dtype, rhs.dtype
             ),
         });
@@ -3669,6 +3669,31 @@ fn conv_float_literal_from_f64(dtype: DType, value: f64) -> Literal {
         DType::F16 => Literal::from_f16_f32(value as f32),
         DType::F32 => Literal::from_f32(value as f32),
         _ => Literal::from_f64(value),
+    }
+}
+
+fn conv_literal_from_complex(dtype: DType, re: f64, im: f64) -> Literal {
+    match dtype {
+        DType::Complex64 => Literal::from_complex64(re as f32, im as f32),
+        DType::Complex128 => Literal::from_complex128(re, im),
+        // For real dtypes, ignore imaginary part (shouldn't happen in valid conv)
+        DType::BF16 => Literal::from_bf16_f32(re as f32),
+        DType::F16 => Literal::from_f16_f32(re as f32),
+        DType::F32 => Literal::from_f32(re as f32),
+        _ => Literal::from_f64(re),
+    }
+}
+
+/// Extract complex value from literal, returning (re, im).
+fn literal_as_complex(lit: &Literal) -> (f64, f64) {
+    if let Some((re, im)) = lit.as_complex128() {
+        (re, im)
+    } else if let Some((re, im)) = lit.as_complex64() {
+        (re as f64, im as f64)
+    } else if let Some(v) = lit.as_f64() {
+        (v, 0.0)
+    } else {
+        (0.0, 0.0)
     }
 }
 
@@ -3757,6 +3782,8 @@ fn eval_conv_1d(
             detail: "conv rhs kernel stride overflow".into(),
         })?;
 
+    let is_complex = matches!(out_dtype, DType::Complex64 | DType::Complex128);
+
     for n in 0..batch {
         let n_offset = n
             .checked_mul(width_c_in)
@@ -3766,20 +3793,40 @@ fn eval_conv_1d(
             })?;
         for w in 0..out_w {
             for co in 0..c_out {
-                let mut acc = 0.0_f64;
-                for k in 0..kernel_w {
-                    let in_pos = (w * stride + k) as isize - pad_left as isize;
-                    if in_pos >= 0 && (in_pos as usize) < width {
-                        for ci in 0..c_in {
-                            let lhs_idx = n_offset + (in_pos as usize) * c_in + ci;
-                            let rhs_idx = k * c_in_c_out + ci * c_out + co;
-                            let lhs_val = lhs.elements[lhs_idx].as_f64().unwrap_or(0.0);
-                            let rhs_val = rhs.elements[rhs_idx].as_f64().unwrap_or(0.0);
-                            acc += lhs_val * rhs_val;
+                if is_complex {
+                    let mut acc_re = 0.0_f64;
+                    let mut acc_im = 0.0_f64;
+                    for k in 0..kernel_w {
+                        let in_pos = (w * stride + k) as isize - pad_left as isize;
+                        if in_pos >= 0 && (in_pos as usize) < width {
+                            for ci in 0..c_in {
+                                let lhs_idx = n_offset + (in_pos as usize) * c_in + ci;
+                                let rhs_idx = k * c_in_c_out + ci * c_out + co;
+                                let (lhs_re, lhs_im) = literal_as_complex(&lhs.elements[lhs_idx]);
+                                let (rhs_re, rhs_im) = literal_as_complex(&rhs.elements[rhs_idx]);
+                                // Complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i
+                                acc_re += lhs_re * rhs_re - lhs_im * rhs_im;
+                                acc_im += lhs_re * rhs_im + lhs_im * rhs_re;
+                            }
                         }
                     }
+                    elements.push(conv_literal_from_complex(out_dtype, acc_re, acc_im));
+                } else {
+                    let mut acc = 0.0_f64;
+                    for k in 0..kernel_w {
+                        let in_pos = (w * stride + k) as isize - pad_left as isize;
+                        if in_pos >= 0 && (in_pos as usize) < width {
+                            for ci in 0..c_in {
+                                let lhs_idx = n_offset + (in_pos as usize) * c_in + ci;
+                                let rhs_idx = k * c_in_c_out + ci * c_out + co;
+                                let lhs_val = lhs.elements[lhs_idx].as_f64().unwrap_or(0.0);
+                                let rhs_val = rhs.elements[rhs_idx].as_f64().unwrap_or(0.0);
+                                acc += lhs_val * rhs_val;
+                            }
+                        }
+                    }
+                    elements.push(conv_float_literal_from_f64(out_dtype, acc));
                 }
-                elements.push(conv_float_literal_from_f64(out_dtype, acc));
             }
         }
     }
@@ -3871,6 +3918,8 @@ fn eval_conv_2d(
             detail: "conv rhs stride overflow".into(),
         })?;
 
+    let is_complex = matches!(out_dtype, DType::Complex64 | DType::Complex128);
+
     for n in 0..batch {
         let n_offset = n
             .checked_mul(height_width_c_in)
@@ -3881,29 +3930,57 @@ fn eval_conv_2d(
         for oh in 0..out_h {
             for ow in 0..out_w {
                 for co in 0..c_out {
-                    let mut acc = 0.0_f64;
-                    for kh in 0..kernel_h {
-                        let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
-                        if in_h < 0 || (in_h as usize) >= height {
-                            continue;
-                        }
-                        let h_offset = (in_h as usize) * width_c_in;
-                        for kw in 0..kernel_w {
-                            let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
-                            if in_w < 0 || (in_w as usize) >= width {
+                    if is_complex {
+                        let mut acc_re = 0.0_f64;
+                        let mut acc_im = 0.0_f64;
+                        for kh in 0..kernel_h {
+                            let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
+                            if in_h < 0 || (in_h as usize) >= height {
                                 continue;
                             }
-                            for ci in 0..c_in {
-                                let lhs_idx = n_offset + h_offset + (in_w as usize) * c_in + ci;
-                                let rhs_idx =
-                                    kh * kw_c_in_c_out + kw * c_in_c_out + ci * c_out + co;
-                                let lhs_val = lhs.elements[lhs_idx].as_f64().unwrap_or(0.0);
-                                let rhs_val = rhs.elements[rhs_idx].as_f64().unwrap_or(0.0);
-                                acc += lhs_val * rhs_val;
+                            let h_offset = (in_h as usize) * width_c_in;
+                            for kw in 0..kernel_w {
+                                let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
+                                if in_w < 0 || (in_w as usize) >= width {
+                                    continue;
+                                }
+                                for ci in 0..c_in {
+                                    let lhs_idx = n_offset + h_offset + (in_w as usize) * c_in + ci;
+                                    let rhs_idx =
+                                        kh * kw_c_in_c_out + kw * c_in_c_out + ci * c_out + co;
+                                    let (lhs_re, lhs_im) = literal_as_complex(&lhs.elements[lhs_idx]);
+                                    let (rhs_re, rhs_im) = literal_as_complex(&rhs.elements[rhs_idx]);
+                                    acc_re += lhs_re * rhs_re - lhs_im * rhs_im;
+                                    acc_im += lhs_re * rhs_im + lhs_im * rhs_re;
+                                }
                             }
                         }
+                        elements.push(conv_literal_from_complex(out_dtype, acc_re, acc_im));
+                    } else {
+                        let mut acc = 0.0_f64;
+                        for kh in 0..kernel_h {
+                            let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
+                            if in_h < 0 || (in_h as usize) >= height {
+                                continue;
+                            }
+                            let h_offset = (in_h as usize) * width_c_in;
+                            for kw in 0..kernel_w {
+                                let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
+                                if in_w < 0 || (in_w as usize) >= width {
+                                    continue;
+                                }
+                                for ci in 0..c_in {
+                                    let lhs_idx = n_offset + h_offset + (in_w as usize) * c_in + ci;
+                                    let rhs_idx =
+                                        kh * kw_c_in_c_out + kw * c_in_c_out + ci * c_out + co;
+                                    let lhs_val = lhs.elements[lhs_idx].as_f64().unwrap_or(0.0);
+                                    let rhs_val = rhs.elements[rhs_idx].as_f64().unwrap_or(0.0);
+                                    acc += lhs_val * rhs_val;
+                                }
+                            }
+                        }
+                        elements.push(conv_float_literal_from_f64(out_dtype, acc));
                     }
-                    elements.push(conv_float_literal_from_f64(out_dtype, acc));
                 }
             }
         }
