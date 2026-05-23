@@ -308,3 +308,19 @@ fn oracle_ctz_large_tensor() {
         assert_eq!(v, (i % 64) as i64, "ctz at index {i}");
     }
 }
+
+// ======================== PROPERTY: output dtype ========================
+
+#[test]
+fn property_ctz_always_outputs_i64() {
+    for (dtype, lits) in [
+        (DType::I32, vec![Literal::I64(1), Literal::I64(2), Literal::I64(4)]),
+        (DType::I64, vec![Literal::I64(1), Literal::I64(2), Literal::I64(4)]),
+        (DType::U32, vec![Literal::U32(1), Literal::U32(2), Literal::U32(4)]),
+        (DType::U64, vec![Literal::U64(1), Literal::U64(2), Literal::U64(4)]),
+    ] {
+        let input = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap());
+        let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
+        assert_eq!(result.dtype(), DType::I64, "ctz {dtype:?} input: output should always be I64");
+    }
+}

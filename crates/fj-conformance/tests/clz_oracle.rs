@@ -415,3 +415,19 @@ fn oracle_clz_i32_vs_i64_distinguishes() {
     assert_eq!(extract_i64_scalar(&i32_result), 31, "I32: 31 leading zeros");
     assert_eq!(extract_i64_scalar(&i64_result), 63, "I64: 63 leading zeros");
 }
+
+// ======================== PROPERTY: output dtype ========================
+
+#[test]
+fn property_clz_always_outputs_i64() {
+    for (dtype, lits) in [
+        (DType::I32, vec![Literal::I64(1), Literal::I64(2), Literal::I64(4)]),
+        (DType::I64, vec![Literal::I64(1), Literal::I64(2), Literal::I64(4)]),
+        (DType::U32, vec![Literal::U32(1), Literal::U32(2), Literal::U32(4)]),
+        (DType::U64, vec![Literal::U64(1), Literal::U64(2), Literal::U64(4)]),
+    ] {
+        let input = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap());
+        let result = eval_primitive(Primitive::CountLeadingZeros, &[input], &no_params()).unwrap();
+        assert_eq!(result.dtype(), DType::I64, "clz {dtype:?} input: output should always be I64");
+    }
+}
