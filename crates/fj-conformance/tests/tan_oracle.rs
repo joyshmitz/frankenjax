@@ -517,3 +517,195 @@ fn property_tan_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex64/Complex128 coverage ========================
+//
+// Complex tan: tan(a + bi) = (sin(2a) + i*sinh(2b)) / (cos(2a) + cosh(2b))
+
+fn make_complex64_tensor(shape: &[u32], data: &[(f32, f32)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: &[(f64, f64)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::Complex64Bits(re, im) => (f32::from_bits(*re), f32::from_bits(*im)),
+                _ => panic!("expected Complex64"),
+            })
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex128().unwrap()).collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn assert_complex_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let (ar, ai) = actual;
+    let (er, ei) = expected;
+    let re_diff = (ar - er).abs();
+    let im_diff = (ai - ei).abs();
+    assert!(
+        re_diff < tol && im_diff < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        er,
+        ei,
+        ar,
+        ai,
+        re_diff,
+        im_diff
+    );
+}
+
+#[test]
+fn oracle_tan_complex64_zero() {
+    let input = make_complex64_tensor(&[], &[(0.0, 0.0)]);
+    let result = eval_primitive(Primitive::Tan, &[input], &no_params()).unwrap();
+    let vec = extract_complex64_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(
+        (vec[0].0 as f64, vec[0].1 as f64),
+        (0.0, 0.0),
+        1e-6,
+        "tan(0+0i)",
+    );
+}
+
+#[test]
+fn oracle_tan_complex128_pure_imaginary() {
+    // tan(i*x) = i*tanh(x)
+    let x = 0.5_f64;
+    let input = make_complex128_tensor(&[], &[(0.0, x)]);
+    let result = eval_primitive(Primitive::Tan, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (0.0, x.tanh()), 1e-10, "tan(0+0.5i) = i*tanh(0.5)");
+}
+
+#[test]
+fn oracle_tan_complex128_pure_real() {
+    let x = 0.5_f64;
+    let input = make_complex128_tensor(&[], &[(x, 0.0)]);
+    let result = eval_primitive(Primitive::Tan, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (x.tan(), 0.0), 1e-10, "tan(0.5+0i) = tan(0.5)");
+}
+
+#[test]
+fn oracle_tan_complex128_general() {
+    // tan(a+bi) = (sin(2a) + i*sinh(2b)) / (cos(2a) + cosh(2b))
+    let (a, b) = (0.3_f64, 0.2_f64);
+    let denom = (2.0 * a).cos() + (2.0 * b).cosh();
+    let expected_re = (2.0 * a).sin() / denom;
+    let expected_im = (2.0 * b).sinh() / denom;
+
+    let input = make_complex128_tensor(&[], &[(a, b)]);
+    let result = eval_primitive(Primitive::Tan, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(
+        vec[0],
+        (expected_re, expected_im),
+        1e-10,
+        "tan(0.3+0.2i)",
+    );
+}
+
+#[test]
+fn oracle_tan_complex64_vector() {
+    let data: &[(f32, f32)] = &[(0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.3, 0.2)];
+    let input = make_complex64_tensor(&[4], data);
+    let result = eval_primitive(Primitive::Tan, &[input], &no_params()).unwrap();
+    let vec = extract_complex64_vec(&result);
+    assert_eq!(vec.len(), 4);
+
+    // tan(0) = 0
+    assert_complex_close((vec[0].0 as f64, vec[0].1 as f64), (0.0, 0.0), 1e-5, "tan(0)");
+
+    // tan(0.5+0i) = tan(0.5)
+    assert_complex_close(
+        (vec[1].0 as f64, vec[1].1 as f64),
+        (0.5_f64.tan(), 0.0),
+        1e-4,
+        "tan(0.5+0i)",
+    );
+
+    // tan(0.5i) = i*tanh(0.5)
+    assert_complex_close(
+        (vec[2].0 as f64, vec[2].1 as f64),
+        (0.0, 0.5_f64.tanh()),
+        1e-4,
+        "tan(0.5i)",
+    );
+
+    // tan(0.3+0.2i) using the formula
+    let (a, b) = (0.3_f64, 0.2_f64);
+    let denom = (2.0 * a).cos() + (2.0 * b).cosh();
+    let expected = ((2.0 * a).sin() / denom, (2.0 * b).sinh() / denom);
+    assert_complex_close(
+        (vec[3].0 as f64, vec[3].1 as f64),
+        expected,
+        1e-4,
+        "tan(0.3+0.2i)",
+    );
+}
+
+#[test]
+fn oracle_tan_complex_dtype_preservation() {
+    // Complex64 -> Complex64
+    let c64_input = make_complex64_tensor(&[2], &[(0.3, 0.2), (-0.2, 0.3)]);
+    let c64_result = eval_primitive(Primitive::Tan, &[c64_input], &no_params()).unwrap();
+    match &c64_result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Complex64, "tan should preserve Complex64");
+            t.validate_dtype_consistency().unwrap();
+        }
+        _ => panic!("expected tensor"),
+    }
+
+    // Complex128 -> Complex128
+    let c128_input = make_complex128_tensor(&[2], &[(0.3, 0.2), (-0.2, 0.3)]);
+    let c128_result = eval_primitive(Primitive::Tan, &[c128_input], &no_params()).unwrap();
+    match &c128_result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Complex128, "tan should preserve Complex128");
+            t.validate_dtype_consistency().unwrap();
+        }
+        _ => panic!("expected tensor"),
+    }
+}
