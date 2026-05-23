@@ -773,3 +773,56 @@ fn oracle_bitwise_or_zero_dim_broadcast() {
     assert_eq!(extract_shape(&result), vec![2, 2]);
     assert_eq!(extract_i64_vec(&result), vec![0xF1, 0xF2, 0xF3, 0xF4]);
 }
+
+// ======================== PROPERTY: dtype preservation ========================
+
+#[test]
+fn property_bitwise_and_preserves_int_dtypes() {
+    for (dtype, lits) in [
+        (DType::I64, vec![Literal::I64(0xFF), Literal::I64(0xF0), Literal::I64(0x0F)]),
+        (DType::U64, vec![Literal::U64(0xFF), Literal::U64(0xF0), Literal::U64(0x0F)]),
+    ] {
+        let a = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits.clone()).unwrap());
+        let b = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap());
+        let result = eval_primitive(Primitive::BitwiseAnd, &[a, b], &no_params()).unwrap();
+        assert_eq!(result.dtype(), dtype, "BitwiseAnd {dtype:?}: dtype mismatch");
+    }
+}
+
+#[test]
+fn property_bitwise_or_preserves_int_dtypes() {
+    for (dtype, lits) in [
+        (DType::I64, vec![Literal::I64(0xFF), Literal::I64(0xF0), Literal::I64(0x0F)]),
+        (DType::U64, vec![Literal::U64(0xFF), Literal::U64(0xF0), Literal::U64(0x0F)]),
+    ] {
+        let a = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits.clone()).unwrap());
+        let b = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap());
+        let result = eval_primitive(Primitive::BitwiseOr, &[a, b], &no_params()).unwrap();
+        assert_eq!(result.dtype(), dtype, "BitwiseOr {dtype:?}: dtype mismatch");
+    }
+}
+
+#[test]
+fn property_bitwise_xor_preserves_int_dtypes() {
+    for (dtype, lits) in [
+        (DType::I64, vec![Literal::I64(0xFF), Literal::I64(0xF0), Literal::I64(0x0F)]),
+        (DType::U64, vec![Literal::U64(0xFF), Literal::U64(0xF0), Literal::U64(0x0F)]),
+    ] {
+        let a = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits.clone()).unwrap());
+        let b = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap());
+        let result = eval_primitive(Primitive::BitwiseXor, &[a, b], &no_params()).unwrap();
+        assert_eq!(result.dtype(), dtype, "BitwiseXor {dtype:?}: dtype mismatch");
+    }
+}
+
+#[test]
+fn property_bitwise_not_preserves_int_dtypes() {
+    for (dtype, lits) in [
+        (DType::I64, vec![Literal::I64(0xFF), Literal::I64(0xF0), Literal::I64(0x0F)]),
+        (DType::U64, vec![Literal::U64(0xFF), Literal::U64(0xF0), Literal::U64(0x0F)]),
+    ] {
+        let input = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap());
+        let result = eval_primitive(Primitive::BitwiseNot, &[input], &no_params()).unwrap();
+        assert_eq!(result.dtype(), dtype, "BitwiseNot {dtype:?}: dtype mismatch");
+    }
+}
