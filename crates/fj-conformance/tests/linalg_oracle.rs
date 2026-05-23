@@ -826,3 +826,117 @@ fn property_cholesky_preserves_all_float_dtypes() {
         });
     }
 }
+
+#[test]
+fn property_qr_preserves_all_float_dtypes() {
+    fn make_matrix(dtype: DType, data: &[f64]) -> Value {
+        let lit_for = |v: f64| match dtype {
+            DType::BF16 => Literal::from_bf16_f32(v as f32),
+            DType::F16 => Literal::from_f16_f32(v as f32),
+            DType::F32 => Literal::from_f32(v as f32),
+            DType::F64 => Literal::from_f64(v),
+            _ => unreachable!(),
+        };
+        Value::Tensor(
+            TensorValue::new(
+                dtype,
+                Shape { dims: vec![2, 2] },
+                data.iter().copied().map(lit_for).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    let identity = [1.0_f64, 0.0, 0.0, 1.0];
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let a = make_matrix(dtype, &identity);
+        let result = eval_primitive_multi(Primitive::Qr, std::slice::from_ref(&a), &no_params())
+            .unwrap_or_else(|e| panic!("QR {dtype:?} failed: {e}"));
+        assert_eq!(result.len(), 2, "QR should return Q and R for {dtype:?}");
+        for (idx, output) in result.iter().enumerate() {
+            let Value::Tensor(t) = output else {
+                panic!("QR {dtype:?} output {idx}: expected tensor");
+            };
+            assert_eq!(t.dtype, dtype, "QR {dtype:?} output {idx}: dtype mismatch");
+            t.validate_dtype_consistency().unwrap_or_else(|e| {
+                panic!("QR {dtype:?} output {idx}: validate failed: {e}")
+            });
+        }
+    }
+}
+
+#[test]
+fn property_svd_preserves_all_float_dtypes() {
+    fn make_matrix(dtype: DType, data: &[f64]) -> Value {
+        let lit_for = |v: f64| match dtype {
+            DType::BF16 => Literal::from_bf16_f32(v as f32),
+            DType::F16 => Literal::from_f16_f32(v as f32),
+            DType::F32 => Literal::from_f32(v as f32),
+            DType::F64 => Literal::from_f64(v),
+            _ => unreachable!(),
+        };
+        Value::Tensor(
+            TensorValue::new(
+                dtype,
+                Shape { dims: vec![2, 2] },
+                data.iter().copied().map(lit_for).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    let identity = [1.0_f64, 0.0, 0.0, 1.0];
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let a = make_matrix(dtype, &identity);
+        let result = eval_primitive_multi(Primitive::Svd, std::slice::from_ref(&a), &no_params())
+            .unwrap_or_else(|e| panic!("SVD {dtype:?} failed: {e}"));
+        assert_eq!(result.len(), 3, "SVD should return U, S, Vt for {dtype:?}");
+        for (idx, output) in result.iter().enumerate() {
+            let Value::Tensor(t) = output else {
+                panic!("SVD {dtype:?} output {idx}: expected tensor");
+            };
+            assert_eq!(t.dtype, dtype, "SVD {dtype:?} output {idx}: dtype mismatch");
+            t.validate_dtype_consistency().unwrap_or_else(|e| {
+                panic!("SVD {dtype:?} output {idx}: validate failed: {e}")
+            });
+        }
+    }
+}
+
+#[test]
+fn property_eigh_preserves_all_float_dtypes() {
+    fn make_matrix(dtype: DType, data: &[f64]) -> Value {
+        let lit_for = |v: f64| match dtype {
+            DType::BF16 => Literal::from_bf16_f32(v as f32),
+            DType::F16 => Literal::from_f16_f32(v as f32),
+            DType::F32 => Literal::from_f32(v as f32),
+            DType::F64 => Literal::from_f64(v),
+            _ => unreachable!(),
+        };
+        Value::Tensor(
+            TensorValue::new(
+                dtype,
+                Shape { dims: vec![2, 2] },
+                data.iter().copied().map(lit_for).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    let identity = [1.0_f64, 0.0, 0.0, 1.0];
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let a = make_matrix(dtype, &identity);
+        let result = eval_primitive_multi(Primitive::Eigh, std::slice::from_ref(&a), &no_params())
+            .unwrap_or_else(|e| panic!("Eigh {dtype:?} failed: {e}"));
+        assert_eq!(result.len(), 2, "Eigh should return eigenvalues and eigenvectors for {dtype:?}");
+        for (idx, output) in result.iter().enumerate() {
+            let Value::Tensor(t) = output else {
+                panic!("Eigh {dtype:?} output {idx}: expected tensor");
+            };
+            assert_eq!(t.dtype, dtype, "Eigh {dtype:?} output {idx}: dtype mismatch");
+            t.validate_dtype_consistency().unwrap_or_else(|e| {
+                panic!("Eigh {dtype:?} output {idx}: validate failed: {e}")
+            });
+        }
+    }
+}
