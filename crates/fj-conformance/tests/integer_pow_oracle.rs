@@ -393,3 +393,86 @@ fn property_integer_pow_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex Type Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+#[test]
+#[ignore = "PARITY GAP: integer_pow not supported for complex operands"]
+fn oracle_integer_pow_complex64_square() {
+    // (1+i)^2 = 1 + 2i - 1 = 2i
+    let input = make_complex64_tensor(&[1], vec![(1.0, 1.0)]);
+    let result = eval_primitive(Primitive::IntegerPow, &[input], &pow_params(2))
+        .expect("integer_pow complex64 should succeed");
+    let vals = extract_complex64_vec(&result);
+    assert!(vals[0].0.abs() < 1e-5, "expected 0, got {}", vals[0].0);
+    assert!((vals[0].1 - 2.0).abs() < 1e-5, "expected 2, got {}", vals[0].1);
+}
+
+#[test]
+#[ignore = "PARITY GAP: integer_pow not supported for complex operands"]
+fn oracle_integer_pow_complex64_cube() {
+    // i^3 = i * i * i = -i
+    let input = make_complex64_tensor(&[1], vec![(0.0, 1.0)]);
+    let result = eval_primitive(Primitive::IntegerPow, &[input], &pow_params(3))
+        .expect("integer_pow complex64 cube should succeed");
+    let vals = extract_complex64_vec(&result);
+    assert!(vals[0].0.abs() < 1e-5, "expected 0, got {}", vals[0].0);
+    assert!((vals[0].1 - (-1.0)).abs() < 1e-5, "expected -1, got {}", vals[0].1);
+}
+
+#[test]
+#[ignore = "PARITY GAP: integer_pow not supported for complex operands"]
+fn oracle_integer_pow_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[2], vec![(1.0, 0.0), (2.0, 0.0)]);
+    let result = eval_primitive(Primitive::IntegerPow, &[input], &pow_params(2))
+        .expect("integer_pow complex128 should succeed");
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+#[ignore = "PARITY GAP: integer_pow not supported for complex operands"]
+fn property_integer_pow_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = match dtype {
+            DType::Complex64 => make_complex64_tensor(&[2], vec![(1.0, 0.0), (2.0, 0.0)]),
+            DType::Complex128 => make_complex128_tensor(&[2], vec![(1.0, 0.0), (2.0, 0.0)]),
+            _ => unreachable!(),
+        };
+        let result = eval_primitive(Primitive::IntegerPow, &[input], &pow_params(2))
+            .expect("integer_pow should succeed for complex dtype");
+        assert_eq!(result.dtype(), dtype, "integer_pow {dtype:?}: dtype mismatch");
+    }
+}
