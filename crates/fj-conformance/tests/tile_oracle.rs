@@ -326,3 +326,172 @@ fn property_tile_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex64/Complex128 Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex128().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_tile_complex64_1d() {
+    let input = make_complex64_tensor(&[3], vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2])).unwrap();
+    assert_eq!(extract_shape(&result), vec![6]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+    ]);
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_tile_complex64_2d_rows() {
+    let input = make_complex64_tensor(&[2, 2], vec![
+        (1.0, 1.0), (2.0, 2.0),
+        (3.0, 3.0), (4.0, 4.0),
+    ]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2, 1])).unwrap();
+    assert_eq!(extract_shape(&result), vec![4, 2]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![
+        (1.0, 1.0), (2.0, 2.0),
+        (3.0, 3.0), (4.0, 4.0),
+        (1.0, 1.0), (2.0, 2.0),
+        (3.0, 3.0), (4.0, 4.0),
+    ]);
+}
+
+#[test]
+fn oracle_tile_complex64_2d_cols() {
+    let input = make_complex64_tensor(&[2, 2], vec![
+        (1.0, 0.0), (2.0, 0.0),
+        (3.0, 0.0), (4.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[1, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 6]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![
+        (1.0, 0.0), (2.0, 0.0), (1.0, 0.0), (2.0, 0.0), (1.0, 0.0), (2.0, 0.0),
+        (3.0, 0.0), (4.0, 0.0), (3.0, 0.0), (4.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+    ]);
+}
+
+#[test]
+fn oracle_tile_complex64_2d_both() {
+    let input = make_complex64_tensor(&[2, 2], vec![
+        (1.0, -1.0), (2.0, -2.0),
+        (3.0, -3.0), (4.0, -4.0),
+    ]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2, 2])).unwrap();
+    assert_eq!(extract_shape(&result), vec![4, 4]);
+}
+
+#[test]
+fn oracle_tile_complex128_1d() {
+    let input = make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![6]);
+    let vals = extract_complex128_vec(&result);
+    assert_eq!(vals, vec![
+        (1.0, 2.0), (3.0, 4.0),
+        (1.0, 2.0), (3.0, 4.0),
+        (1.0, 2.0), (3.0, 4.0),
+    ]);
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn oracle_tile_complex64_identity() {
+    let input = make_complex64_tensor(&[3], vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[1])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
+}
+
+#[test]
+fn oracle_tile_complex64_preserves_dtype() {
+    let input = make_complex64_tensor(&[2], vec![(1.0, 0.0), (2.0, 0.0)]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2])).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_tile_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[2], vec![(1.0, 0.0), (2.0, 0.0)]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2])).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn property_tile_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let lits: Vec<Literal> = match dtype {
+            DType::Complex64 => vec![
+                Literal::from_complex64(1.0, 2.0),
+                Literal::from_complex64(3.0, 4.0),
+            ],
+            DType::Complex128 => vec![
+                Literal::from_complex128(1.0, 2.0),
+                Literal::from_complex128(3.0, 4.0),
+            ],
+            _ => unreachable!(),
+        };
+        let input = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![2] }, lits).unwrap());
+        let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2])).unwrap();
+        let t = result.as_tensor().expect("tensor result");
+        assert_eq!(t.dtype, dtype, "tile {dtype:?}: dtype mismatch");
+        t.validate_dtype_consistency()
+            .expect("literal/dtype consistency");
+    }
+}
