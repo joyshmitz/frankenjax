@@ -349,3 +349,72 @@ fn property_imag_extracts_to_float_dtype() {
     assert_eq!(t.dtype, DType::F64, "Imag on Complex128 should produce F64");
     t.validate_dtype_consistency().expect("literal/dtype consistency");
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_conj_preserves_real_part() {
+    // Re(conj(z)) = Re(z)
+    let z = make_complex128_tensor(&[4], vec![(1.0, 2.0), (-3.0, 4.0), (0.0, -5.0), (7.0, 0.0)]);
+    let conj_z = eval_primitive(Primitive::Conj, &[z.clone()], &no_params()).unwrap();
+    let real_z = eval_primitive(Primitive::Real, &[z], &no_params()).unwrap();
+    let real_conj_z = eval_primitive(Primitive::Real, &[conj_z], &no_params()).unwrap();
+    let vals_z = extract_f64_vec(&real_z);
+    let vals_conj_z = extract_f64_vec(&real_conj_z);
+    for (a, b) in vals_z.iter().zip(vals_conj_z.iter()) {
+        assert!((a - b).abs() < 1e-10, "Re(conj(z)) should equal Re(z)");
+    }
+}
+
+#[test]
+fn metamorphic_conj_negates_imag_part() {
+    // Im(conj(z)) = -Im(z)
+    let z = make_complex128_tensor(&[4], vec![(1.0, 2.0), (-3.0, 4.0), (0.0, -5.0), (7.0, 0.0)]);
+    let conj_z = eval_primitive(Primitive::Conj, &[z.clone()], &no_params()).unwrap();
+    let imag_z = eval_primitive(Primitive::Imag, &[z], &no_params()).unwrap();
+    let imag_conj_z = eval_primitive(Primitive::Imag, &[conj_z], &no_params()).unwrap();
+    let vals_z = extract_f64_vec(&imag_z);
+    let vals_conj_z = extract_f64_vec(&imag_conj_z);
+    for (a, b) in vals_z.iter().zip(vals_conj_z.iter()) {
+        assert!((a + b).abs() < 1e-10, "Im(conj(z)) should equal -Im(z)");
+    }
+}
+
+#[test]
+fn metamorphic_complex_real_imag_roundtrip() {
+    // Complex(Re(z), Im(z)) = z
+    let z = make_complex128_tensor(&[3], vec![(3.0, 4.0), (-1.0, 2.0), (0.0, -7.0)]);
+    let real_z = eval_primitive(Primitive::Real, &[z.clone()], &no_params()).unwrap();
+    let imag_z = eval_primitive(Primitive::Imag, &[z.clone()], &no_params()).unwrap();
+    let reconstructed = eval_primitive(Primitive::Complex, &[real_z, imag_z], &no_params()).unwrap();
+    let orig_vals = extract_complex_vec(&z);
+    let recon_vals = extract_complex_vec(&reconstructed);
+    for ((orig_re, orig_im), (recon_re, recon_im)) in orig_vals.iter().zip(recon_vals.iter()) {
+        assert!((orig_re - recon_re).abs() < 1e-10, "Real part should match");
+        assert!((orig_im - recon_im).abs() < 1e-10, "Imag part should match");
+    }
+}
+
+#[test]
+fn metamorphic_real_of_real_is_identity() {
+    // For a purely real complex number: Re(a + 0i) = a
+    let real_vals = vec![(1.0, 0.0), (-3.5, 0.0), (0.0, 0.0), (100.0, 0.0)];
+    let z = make_complex128_tensor(&[4], real_vals.clone());
+    let result = eval_primitive(Primitive::Real, &[z], &no_params()).unwrap();
+    let extracted = extract_f64_vec(&result);
+    for (i, &(expected, _)) in real_vals.iter().enumerate() {
+        assert!((extracted[i] - expected).abs() < 1e-10);
+    }
+}
+
+#[test]
+fn metamorphic_imag_of_imag_is_identity() {
+    // For a purely imaginary complex number: Im(0 + bi) = b
+    let imag_vals = vec![(0.0, 1.0), (0.0, -3.5), (0.0, 0.0), (0.0, 100.0)];
+    let z = make_complex128_tensor(&[4], imag_vals.clone());
+    let result = eval_primitive(Primitive::Imag, &[z], &no_params()).unwrap();
+    let extracted = extract_f64_vec(&result);
+    for (i, &(_, expected)) in imag_vals.iter().enumerate() {
+        assert!((extracted[i] - expected).abs() < 1e-10);
+    }
+}

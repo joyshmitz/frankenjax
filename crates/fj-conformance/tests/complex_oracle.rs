@@ -341,3 +341,62 @@ fn oracle_complex_2d_empty() {
     let result = eval_primitive(Primitive::Complex, &[re, im], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![0, 3]);
 }
+
+// ======================== METAMORPHIC: mathematical properties ========================
+
+#[test]
+fn metamorphic_complex_zero_is_zero_element() {
+    // Complex(0, 0) should be the zero element for complex addition
+    let zeros = make_f64_tensor(&[3], vec![0.0, 0.0, 0.0]);
+    let result = eval_primitive(Primitive::Complex, &[zeros.clone(), zeros], &no_params()).unwrap();
+    let vals = extract_complex_vec(&result);
+    for (re, im) in vals {
+        assert!(re.abs() < 1e-10, "real part should be zero");
+        assert!(im.abs() < 1e-10, "imag part should be zero");
+    }
+}
+
+#[test]
+fn metamorphic_complex_purely_real_has_zero_imag() {
+    // Complex(a, 0) should have zero imaginary part
+    let reals = make_f64_tensor(&[4], vec![1.0, -2.5, 0.0, 100.0]);
+    let zeros = make_f64_tensor(&[4], vec![0.0, 0.0, 0.0, 0.0]);
+    let result = eval_primitive(Primitive::Complex, &[reals, zeros], &no_params()).unwrap();
+    let vals = extract_complex_vec(&result);
+    let expected = [1.0, -2.5, 0.0, 100.0];
+    for (i, (re, im)) in vals.iter().enumerate() {
+        assert!((*re - expected[i]).abs() < 1e-10, "real part mismatch");
+        assert!(im.abs() < 1e-10, "imag should be zero for purely real");
+    }
+}
+
+#[test]
+fn metamorphic_complex_purely_imag_has_zero_real() {
+    // Complex(0, b) should have zero real part
+    let zeros = make_f64_tensor(&[4], vec![0.0, 0.0, 0.0, 0.0]);
+    let imags = make_f64_tensor(&[4], vec![1.0, -2.5, 0.0, 100.0]);
+    let result = eval_primitive(Primitive::Complex, &[zeros, imags], &no_params()).unwrap();
+    let vals = extract_complex_vec(&result);
+    let expected = [1.0, -2.5, 0.0, 100.0];
+    for (i, (re, im)) in vals.iter().enumerate() {
+        assert!(re.abs() < 1e-10, "real should be zero for purely imaginary");
+        assert!((*im - expected[i]).abs() < 1e-10, "imag part mismatch");
+    }
+}
+
+#[test]
+fn metamorphic_complex_negation_symmetry() {
+    // Complex(-a, -b) = -Complex(a, b)
+    let re = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let im = make_f64_tensor(&[3], vec![4.0, 5.0, 6.0]);
+    let neg_re = make_f64_tensor(&[3], vec![-1.0, -2.0, -3.0]);
+    let neg_im = make_f64_tensor(&[3], vec![-4.0, -5.0, -6.0]);
+    let pos_result = eval_primitive(Primitive::Complex, &[re, im], &no_params()).unwrap();
+    let neg_result = eval_primitive(Primitive::Complex, &[neg_re, neg_im], &no_params()).unwrap();
+    let pos_vals = extract_complex_vec(&pos_result);
+    let neg_vals = extract_complex_vec(&neg_result);
+    for ((pos_re, pos_im), (neg_re, neg_im)) in pos_vals.iter().zip(neg_vals.iter()) {
+        assert!((*pos_re + *neg_re).abs() < 1e-10, "negation: real parts should sum to zero");
+        assert!((*pos_im + *neg_im).abs() < 1e-10, "negation: imag parts should sum to zero");
+    }
+}
