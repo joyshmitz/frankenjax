@@ -519,3 +519,199 @@ fn property_logistic_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== COMPLEX64/COMPLEX128 TESTS ========================
+
+fn make_complex64_scalar(re: f32, im: f32) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![] },
+            vec![Literal::from_complex64(re, im)],
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_scalar(re: f64, im: f64) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: vec![] },
+            vec![Literal::from_complex128(re, im)],
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex64_tensor(shape: &[u32], pairs: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            pairs
+                .into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_scalar(v: &Value) -> (f32, f32) {
+    match v {
+        Value::Tensor(t) => {
+            assert!(t.shape.dims.is_empty(), "expected scalar");
+            t.elements[0].as_complex64().unwrap()
+        }
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex128_scalar(v: &Value) -> (f64, f64) {
+    match v {
+        Value::Tensor(t) => {
+            assert!(t.shape.dims.is_empty(), "expected scalar");
+            t.elements[0].as_complex128().unwrap()
+        }
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn assert_complex64_close(actual: (f32, f32), expected: (f32, f32), tol: f32, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+fn assert_complex128_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+#[test]
+fn oracle_logistic_complex64_zero() {
+    // logistic(0) = 1/(1+e^0) = 1/2 = 0.5
+    let input = make_complex64_scalar(0.0, 0.0);
+    let result = eval_primitive(Primitive::Logistic, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (0.5, 0.0), 1e-6, "logistic(0) = 0.5");
+}
+
+#[test]
+fn oracle_logistic_complex64_real_positive() {
+    // For large positive x, logistic(x) -> 1
+    let input = make_complex64_scalar(5.0, 0.0);
+    let result = eval_primitive(Primitive::Logistic, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    // logistic(5) ≈ 0.9933
+    assert!(re > 0.99, "logistic(5) should be close to 1");
+    assert!(im.abs() < 1e-5, "imaginary part should be near zero");
+}
+
+#[test]
+fn oracle_logistic_complex64_real_negative() {
+    // For large negative x, logistic(x) -> 0
+    let input = make_complex64_scalar(-5.0, 0.0);
+    let result = eval_primitive(Primitive::Logistic, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    // logistic(-5) ≈ 0.0067
+    assert!(re < 0.01, "logistic(-5) should be close to 0");
+    assert!(im.abs() < 1e-5, "imaginary part should be near zero");
+}
+
+#[test]
+fn oracle_logistic_complex64_pure_imaginary() {
+    // logistic(i*pi/2) = 1/(1+e^(-i*pi/2)) = 1/(1-i)
+    // 1/(1-i) = (1+i)/2 = 0.5 + 0.5i
+    let pi_half = std::f32::consts::FRAC_PI_2;
+    let input = make_complex64_scalar(0.0, pi_half);
+    let result = eval_primitive(Primitive::Logistic, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    // Expected: 1/(1+e^(-i*pi/2)) = 1/(1+cos(-pi/2)+i*sin(-pi/2)) = 1/(1-i) = (1+i)/2
+    assert_complex64_close((re, im), (0.5, 0.5), 1e-4, "logistic(i*pi/2)");
+}
+
+#[test]
+fn oracle_logistic_complex64_symmetry() {
+    // logistic(z) + logistic(-z) = 1
+    let z = make_complex64_scalar(0.5, 0.3);
+    let neg_z = make_complex64_scalar(-0.5, -0.3);
+    let log_z = eval_primitive(Primitive::Logistic, &[z], &no_params()).unwrap();
+    let log_neg_z = eval_primitive(Primitive::Logistic, &[neg_z], &no_params()).unwrap();
+
+    let (re1, im1) = extract_complex64_scalar(&log_z);
+    let (re2, im2) = extract_complex64_scalar(&log_neg_z);
+
+    // Sum should be 1 + 0i
+    assert_complex64_close((re1 + re2, im1 + im2), (1.0, 0.0), 1e-4, "logistic(z) + logistic(-z) = 1");
+}
+
+#[test]
+fn oracle_logistic_complex64_vector() {
+    let input = make_complex64_tensor(&[3], vec![(0.0, 0.0), (5.0, 0.0), (-5.0, 0.0)]);
+    let result = eval_primitive(Primitive::Logistic, &[input], &no_params()).unwrap();
+    let vals = extract_complex64_vec(&result);
+
+    // logistic(0) = 0.5
+    assert_complex64_close(vals[0], (0.5, 0.0), 1e-5, "logistic(0)");
+    // logistic(5) ≈ 0.9933
+    assert!(vals[1].0 > 0.99 && vals[1].1.abs() < 1e-5, "logistic(5)");
+    // logistic(-5) ≈ 0.0067
+    assert!(vals[2].0 < 0.01 && vals[2].1.abs() < 1e-5, "logistic(-5)");
+}
+
+#[test]
+fn oracle_logistic_complex128_zero() {
+    // logistic(0) = 0.5 with higher precision
+    let input = make_complex128_scalar(0.0, 0.0);
+    let result = eval_primitive(Primitive::Logistic, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex128_scalar(&result);
+    assert_complex128_close((re, im), (0.5, 0.0), 1e-12, "logistic(0) Complex128");
+}
+
+#[test]
+fn oracle_logistic_complex64_preserves_dtype() {
+    let input = make_complex64_scalar(1.0, 1.0);
+    let result = eval_primitive(Primitive::Logistic, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_logistic_complex128_preserves_dtype() {
+    let input = make_complex128_scalar(1.0, 1.0);
+    let result = eval_primitive(Primitive::Logistic, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
