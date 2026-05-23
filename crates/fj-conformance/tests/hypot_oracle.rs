@@ -416,3 +416,72 @@ fn property_hypot_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_hypot_scaling_property() {
+    // hypot(k*x, k*y) = |k| * hypot(x, y) for scalar k
+    let x = make_f64_tensor(&[3], vec![3.0, 5.0, 8.0]);
+    let y = make_f64_tensor(&[3], vec![4.0, 12.0, 15.0]);
+    let result1 = eval_primitive(Primitive::Hypot, &[x.clone(), y.clone()], &no_params()).unwrap();
+    let vals1 = extract_f64_vec(&result1);
+
+    for k in [2.0, -2.0, 0.5] {
+        let kx = make_f64_tensor(&[3], vec![k * 3.0, k * 5.0, k * 8.0]);
+        let ky = make_f64_tensor(&[3], vec![k * 4.0, k * 12.0, k * 15.0]);
+        let result2 = eval_primitive(Primitive::Hypot, &[kx, ky], &no_params()).unwrap();
+        let vals2 = extract_f64_vec(&result2);
+        for (i, (&v1, &v2)) in vals1.iter().zip(vals2.iter()).enumerate() {
+            let expected = k.abs() * v1;
+            assert!(
+                (v2 - expected).abs() < 1e-10,
+                "hypot({k}*x, {k}*y) at index {i}: expected {expected}, got {v2}"
+            );
+        }
+    }
+}
+
+#[test]
+fn metamorphic_hypot_triangle_inequality() {
+    // hypot(a+c, b+d) <= hypot(a, b) + hypot(c, d)
+    let a = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let b = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let c = make_f64_tensor(&[3], vec![2.0, 3.0, 4.0]);
+    let d = make_f64_tensor(&[3], vec![2.0, 3.0, 4.0]);
+    let ac = make_f64_tensor(&[3], vec![3.0, 5.0, 7.0]);
+    let bd = make_f64_tensor(&[3], vec![3.0, 5.0, 7.0]);
+
+    let h_ab = extract_f64_vec(&eval_primitive(Primitive::Hypot, &[a, b], &no_params()).unwrap());
+    let h_cd = extract_f64_vec(&eval_primitive(Primitive::Hypot, &[c, d], &no_params()).unwrap());
+    let h_acbd = extract_f64_vec(&eval_primitive(Primitive::Hypot, &[ac, bd], &no_params()).unwrap());
+
+    for i in 0..3 {
+        let sum = h_ab[i] + h_cd[i];
+        assert!(
+            h_acbd[i] <= sum + 1e-10,
+            "triangle inequality at index {i}: hypot(a+c, b+d)={} > hypot(a,b) + hypot(c,d)={}",
+            h_acbd[i], sum
+        );
+    }
+}
+
+#[test]
+fn metamorphic_hypot_pythagorean_identity() {
+    // hypot(x, y)^2 = x^2 + y^2
+    let x = make_f64_tensor(&[4], vec![3.0, -5.0, 8.0, 0.0]);
+    let y = make_f64_tensor(&[4], vec![4.0, 12.0, -15.0, 7.0]);
+    let result = eval_primitive(Primitive::Hypot, &[x.clone(), y.clone()], &no_params()).unwrap();
+    let h = extract_f64_vec(&result);
+
+    let x_vals = [3.0, -5.0, 8.0, 0.0];
+    let y_vals = [4.0, 12.0, -15.0, 7.0];
+    for i in 0..4 {
+        let expected_sq = x_vals[i] * x_vals[i] + y_vals[i] * y_vals[i];
+        let actual_sq = h[i] * h[i];
+        assert!(
+            (actual_sq - expected_sq).abs() < 1e-10,
+            "hypot^2 at index {i}: expected {expected_sq}, got {actual_sq}"
+        );
+    }
+}
