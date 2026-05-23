@@ -1,0 +1,1 @@
+strict dispatch request seed with jit transform and scalar args
