@@ -1484,3 +1484,114 @@ fn atanh_jvp_numerical_complex64() {
     let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
     assert_complex64_close(actual, expected, 1e-4, "atanh JVP at z=0.3+0.2i");
 }
+
+// ── FFT JVP tests ──
+//
+// FFT and IFFT are linear operations, so their JVP is simply the
+// operation applied to the tangent: JVP of FFT(x) with tangent dx is FFT(dx).
+
+/// FFT JVP: since FFT is linear, JVP tangent = FFT(tangent input)
+#[test]
+fn fft_jvp_numerical() {
+    let x = make_complex128_vector(&[(1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0)]);
+    let dx = make_complex128_vector(&[(0.1, 0.0), (0.2, 0.0), (0.3, 0.0), (0.4, 0.0)]);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Fft);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[x], &[dx.clone()]).unwrap();
+
+    // For linear FFT: tangent = FFT(dx)
+    let expected_tangent =
+        eval_primitive_multi(Primitive::Fft, &[dx], &BTreeMap::new()).unwrap();
+
+    let actual = extract_complex_vec(&jvp_result.tangents[0]);
+    let expected = extract_complex_vec(&expected_tangent[0]);
+
+    assert_complex_close(&actual, &expected, 1e-10, "FFT JVP tangent = FFT(dx)");
+}
+
+/// IFFT JVP: since IFFT is linear, JVP tangent = IFFT(tangent input)
+#[test]
+fn ifft_jvp_numerical() {
+    let x = make_complex128_vector(&[(10.0, 0.0), (-2.0, 2.0), (-2.0, 0.0), (-2.0, -2.0)]);
+    let dx = make_complex128_vector(&[(1.0, 0.0), (0.5, 0.5), (0.0, 1.0), (0.5, -0.5)]);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Ifft);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[x], &[dx.clone()]).unwrap();
+
+    // For linear IFFT: tangent = IFFT(dx)
+    let expected_tangent =
+        eval_primitive_multi(Primitive::Ifft, &[dx], &BTreeMap::new()).unwrap();
+
+    let actual = extract_complex_vec(&jvp_result.tangents[0]);
+    let expected = extract_complex_vec(&expected_tangent[0]);
+
+    assert_complex_close(&actual, &expected, 1e-10, "IFFT JVP tangent = IFFT(dx)");
+}
+
+/// FFT JVP preserves Complex64 dtype
+#[test]
+fn fft_jvp_complex64_preserves_dtype() {
+    let x = Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![4] },
+            (0..4)
+                .map(|i| Literal::from_complex64(i as f32, 0.0))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let dx = Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![4] },
+            (0..4)
+                .map(|i| Literal::from_complex64(0.1 * (i + 1) as f32, 0.0))
+                .collect(),
+        )
+        .unwrap(),
+    );
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Fft);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[x], &[dx]).unwrap();
+
+    assert_eq!(
+        jvp_result.tangents[0].dtype(),
+        DType::Complex64,
+        "FFT JVP should preserve Complex64 dtype"
+    );
+}
+
+/// IFFT JVP preserves Complex64 dtype
+#[test]
+fn ifft_jvp_complex64_preserves_dtype() {
+    let x = Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![4] },
+            (0..4)
+                .map(|i| Literal::from_complex64(i as f32 + 1.0, 0.0))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let dx = Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![4] },
+            (0..4)
+                .map(|i| Literal::from_complex64(0.1 * (i + 1) as f32, 0.0))
+                .collect(),
+        )
+        .unwrap(),
+    );
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Ifft);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[x], &[dx]).unwrap();
+
+    assert_eq!(
+        jvp_result.tangents[0].dtype(),
+        DType::Complex64,
+        "IFFT JVP should preserve Complex64 dtype"
+    );
+}
