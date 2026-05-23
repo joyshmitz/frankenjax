@@ -319,6 +319,42 @@ fn complex_erfc(z: (f64, f64)) -> (f64, f64) {
     (1.0 - erf_z.0, -erf_z.1)
 }
 
+fn complex_erf_inv(w: (f64, f64)) -> (f64, f64) {
+    let two_over_sqrt_pi = 2.0 / std::f64::consts::PI.sqrt();
+    let mut z = if w.1.abs() < 1e-10 {
+        let real_approx = if w.0.abs() < 0.5 {
+            let x = w.0;
+            let a = [0.886226899, -1.645349621, 0.914624893, -0.140543331];
+            let b = [1.0, -2.118377725, 1.442710462, -0.329097515, 0.012229801];
+            let num = a[0] + x * (a[1] + x * (a[2] + x * a[3]));
+            let den = b[0] + x * (b[1] + x * (b[2] + x * (b[3] + x * b[4])));
+            x * num / den
+        } else {
+            let t = (-2.0 * (1.0 - w.0.abs()).ln()).sqrt();
+            let c = [2.515517, 0.802853, 0.010328];
+            let d = [1.0, 1.432788, 0.189269, 0.001308];
+            let approx = t - (c[0] + t * (c[1] + t * c[2])) / (d[0] + t * (d[1] + t * (d[2] + t * d[3])));
+            if w.0 < 0.0 { -approx } else { approx }
+        };
+        (real_approx, w.1 * std::f64::consts::FRAC_PI_2.sqrt())
+    } else {
+        (w.0 * std::f64::consts::FRAC_PI_2.sqrt(), w.1 * std::f64::consts::FRAC_PI_2.sqrt())
+    };
+    for _ in 0..30 {
+        let erf_z = complex_erf(z);
+        let residual = complex_sub(erf_z, w);
+        if residual.0.abs() < 1e-14 && residual.1.abs() < 1e-14 {
+            break;
+        }
+        let neg_z_sq = complex_mul(z, z);
+        let deriv = (two_over_sqrt_pi * (-neg_z_sq.0).exp() * neg_z_sq.1.cos(),
+                     two_over_sqrt_pi * (-neg_z_sq.0).exp() * (-neg_z_sq.1.sin()));
+        let step = complex_div(residual, deriv);
+        z = complex_sub(z, step);
+    }
+    z
+}
+
 fn complex_unary_elementwise(primitive: Primitive, input: (f64, f64)) -> Option<(f64, f64)> {
     match primitive {
         Primitive::Sqrt => Some(complex_sqrt(input)),
@@ -343,6 +379,7 @@ fn complex_unary_elementwise(primitive: Primitive, input: (f64, f64)) -> Option<
         Primitive::Sinc => Some(complex_sinc(input)),
         Primitive::Erf => Some(complex_erf(input)),
         Primitive::Erfc => Some(complex_erfc(input)),
+        Primitive::ErfInv => Some(complex_erf_inv(input)),
         _ => None,
     }
 }
@@ -358,7 +395,6 @@ fn complex_unary_unsupported_detail(primitive: Primitive) -> &'static str {
         Primitive::Round => "round is not supported for complex dtypes",
         Primitive::Lgamma => "lgamma is not supported for complex dtypes",
         Primitive::Digamma => "digamma is not supported for complex dtypes",
-        Primitive::ErfInv => "erf_inv is not supported for complex dtypes",
         _ => "operation is not supported for complex operands",
     }
 }

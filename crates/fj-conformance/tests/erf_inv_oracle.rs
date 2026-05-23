@@ -370,7 +370,6 @@ fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
 }
 
 #[test]
-#[ignore = "PARITY GAP: erf_inv is not supported for complex dtypes"]
 fn oracle_erf_inv_complex64_real_axis() {
     // erf_inv on real axis: erf_inv(0) = 0
     let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (0.5, 0.0)]);
@@ -380,7 +379,6 @@ fn oracle_erf_inv_complex64_real_axis() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: erf_inv is not supported for complex dtypes"]
 fn oracle_erf_inv_complex128_preserves_dtype() {
     let input = make_complex128_tensor(&[2], vec![(0.0, 0.0), (0.5, 0.0)]);
     let result = eval_primitive(Primitive::ErfInv, &[input], &no_params())
@@ -389,7 +387,6 @@ fn oracle_erf_inv_complex128_preserves_dtype() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: erf_inv is not supported for complex dtypes"]
 fn property_erf_inv_preserves_complex_dtypes() {
     for dtype in [DType::Complex64, DType::Complex128] {
         let input = match dtype {
