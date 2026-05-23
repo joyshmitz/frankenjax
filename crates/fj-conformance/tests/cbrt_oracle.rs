@@ -420,3 +420,184 @@ fn property_cbrt_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex64/Complex128 coverage ========================
+//
+// Complex cbrt: principal cube root of a complex number
+
+fn make_complex64_tensor(shape: &[u32], data: &[(f32, f32)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: &[(f64, f64)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::Complex64Bits(re, im) => (f32::from_bits(*re), f32::from_bits(*im)),
+                _ => panic!("expected Complex64"),
+            })
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex128().unwrap()).collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn assert_complex_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let (ar, ai) = actual;
+    let (er, ei) = expected;
+    let re_diff = (ar - er).abs();
+    let im_diff = (ai - ei).abs();
+    assert!(
+        re_diff < tol && im_diff < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        er,
+        ei,
+        ar,
+        ai,
+        re_diff,
+        im_diff
+    );
+}
+
+#[test]
+fn oracle_cbrt_complex128_real_positive() {
+    // cbrt(8+0i) = 2+0i
+    let input = make_complex128_tensor(&[], &[(8.0, 0.0)]);
+    let result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (2.0, 0.0), 1e-10, "cbrt(8+0i) = 2");
+}
+
+#[test]
+fn oracle_cbrt_complex128_real_negative() {
+    // cbrt(-8+0i) should give principal root (not -2 which is real but not principal)
+    // Principal cube root of -8 = 8 * e^(i*pi) has principal root 2 * e^(i*pi/3)
+    // = 2 * (cos(pi/3) + i*sin(pi/3)) = 2 * (0.5 + i*sqrt(3)/2) = 1 + i*sqrt(3)
+    let input = make_complex128_tensor(&[], &[(-8.0, 0.0)]);
+    let result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    let expected = (1.0, 3.0_f64.sqrt());
+    assert_complex_close(vec[0], expected, 1e-10, "cbrt(-8+0i) = 1 + sqrt(3)i");
+}
+
+#[test]
+fn oracle_cbrt_complex128_pure_imaginary() {
+    // cbrt(i) = cbrt(e^(i*pi/2)) = e^(i*pi/6) = cos(pi/6) + i*sin(pi/6) = sqrt(3)/2 + 0.5i
+    let input = make_complex128_tensor(&[], &[(0.0, 1.0)]);
+    let result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    let expected = (3.0_f64.sqrt() / 2.0, 0.5);
+    assert_complex_close(vec[0], expected, 1e-10, "cbrt(i)");
+}
+
+#[test]
+fn oracle_cbrt_complex64_vector() {
+    let data: &[(f32, f32)] = &[(8.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+    let input = make_complex64_tensor(&[3], data);
+    let result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
+    let vec = extract_complex64_vec(&result);
+    assert_eq!(vec.len(), 3);
+
+    // cbrt(8) = 2
+    assert_complex_close((vec[0].0 as f64, vec[0].1 as f64), (2.0, 0.0), 1e-4, "cbrt(8)");
+
+    // cbrt(1) = 1
+    assert_complex_close((vec[1].0 as f64, vec[1].1 as f64), (1.0, 0.0), 1e-4, "cbrt(1)");
+
+    // cbrt(i) ≈ (sqrt(3)/2, 0.5)
+    let expected_i = (3.0_f64.sqrt() / 2.0, 0.5);
+    assert_complex_close(
+        (vec[2].0 as f64, vec[2].1 as f64),
+        expected_i,
+        1e-4,
+        "cbrt(i)",
+    );
+}
+
+#[test]
+fn oracle_cbrt_complex_cubed_identity() {
+    // cbrt(z)³ = z
+    let values: &[(f64, f64)] = &[(8.0, 0.0), (1.0, 1.0), (2.0, 3.0)];
+
+    for &(a, b) in values {
+        let input = make_complex128_tensor(&[], &[(a, b)]);
+        let cbrt_result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
+        let cbrt_val = extract_complex128_vec(&cbrt_result)[0];
+
+        // Cube the result: z³ = z * z * z
+        let z_sq_re = cbrt_val.0 * cbrt_val.0 - cbrt_val.1 * cbrt_val.1;
+        let z_sq_im = 2.0 * cbrt_val.0 * cbrt_val.1;
+        let z_cubed_re = z_sq_re * cbrt_val.0 - z_sq_im * cbrt_val.1;
+        let z_cubed_im = z_sq_re * cbrt_val.1 + z_sq_im * cbrt_val.0;
+
+        assert_complex_close(
+            (z_cubed_re, z_cubed_im),
+            (a, b),
+            1e-9,
+            &format!("cbrt({a}+{b}i)³ = {a}+{b}i"),
+        );
+    }
+}
+
+#[test]
+fn oracle_cbrt_complex_dtype_preservation() {
+    // Complex64 -> Complex64
+    let c64_input = make_complex64_tensor(&[2], &[(8.0, 0.0), (1.0, 1.0)]);
+    let c64_result = eval_primitive(Primitive::Cbrt, &[c64_input], &no_params()).unwrap();
+    match &c64_result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Complex64, "cbrt should preserve Complex64");
+            t.validate_dtype_consistency().unwrap();
+        }
+        _ => panic!("expected tensor"),
+    }
+
+    // Complex128 -> Complex128
+    let c128_input = make_complex128_tensor(&[2], &[(8.0, 0.0), (1.0, 1.0)]);
+    let c128_result = eval_primitive(Primitive::Cbrt, &[c128_input], &no_params()).unwrap();
+    match &c128_result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Complex128, "cbrt should preserve Complex128");
+            t.validate_dtype_consistency().unwrap();
+        }
+        _ => panic!("expected tensor"),
+    }
+}
