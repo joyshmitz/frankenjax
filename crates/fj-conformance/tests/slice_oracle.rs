@@ -559,3 +559,242 @@ fn property_slice_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex64/Complex128 Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex128().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_slice_complex64_1d_basic() {
+    let input = make_complex64_tensor(
+        &[5],
+        vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)],
+    );
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[1], &[4])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_slice_complex64_1d_from_start() {
+    let input = make_complex64_tensor(
+        &[5],
+        vec![(0.0, 0.0), (1.0, -1.0), (2.0, -2.0), (3.0, -3.0), (4.0, -4.0)],
+    );
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[0], &[3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(0.0, 0.0), (1.0, -1.0), (2.0, -2.0)]);
+}
+
+#[test]
+fn oracle_slice_complex64_1d_single_element() {
+    let input = make_complex64_tensor(&[5], vec![
+        (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[2], &[3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![1]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(2.0, 2.0)]);
+}
+
+#[test]
+fn oracle_slice_complex64_1d_with_stride() {
+    let input = make_complex64_tensor(&[6], vec![
+        (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0), (5.0, 5.0),
+    ]);
+    let result = eval_primitive(
+        Primitive::Slice,
+        &[input],
+        &slice_params_with_strides(&[0], &[6], &[2]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(0.0, 0.0), (2.0, 2.0), (4.0, 4.0)]);
+}
+
+#[test]
+fn oracle_slice_complex64_2d_rows() {
+    let input = make_complex64_tensor(&[3, 3], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+        (7.0, 0.0), (8.0, 0.0), (9.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[1, 0], &[3, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+        (7.0, 0.0), (8.0, 0.0), (9.0, 0.0),
+    ]);
+}
+
+#[test]
+fn oracle_slice_complex64_2d_cols() {
+    let input = make_complex64_tensor(&[3, 3], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+        (7.0, 0.0), (8.0, 0.0), (9.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[0, 1], &[3, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 2]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![
+        (2.0, 0.0), (3.0, 0.0),
+        (5.0, 0.0), (6.0, 0.0),
+        (8.0, 0.0), (9.0, 0.0),
+    ]);
+}
+
+#[test]
+fn oracle_slice_complex64_2d_submatrix() {
+    let input = make_complex64_tensor(&[3, 3], vec![
+        (1.0, 1.0), (2.0, 2.0), (3.0, 3.0),
+        (4.0, 4.0), (5.0, 5.0), (6.0, 6.0),
+        (7.0, 7.0), (8.0, 8.0), (9.0, 9.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[1, 1], &[3, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(5.0, 5.0), (6.0, 6.0), (8.0, 8.0), (9.0, 9.0)]);
+}
+
+#[test]
+fn oracle_slice_complex128_1d() {
+    let input = make_complex128_tensor(
+        &[5],
+        vec![(0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)],
+    );
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[1], &[4])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_complex128_vec(&result);
+    assert_eq!(vals, vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn oracle_slice_complex128_2d() {
+    let input = make_complex128_tensor(&[2, 3], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[0, 1], &[2, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_complex128_vec(&result);
+    assert_eq!(vals, vec![(2.0, 0.0), (3.0, 0.0), (5.0, 0.0), (6.0, 0.0)]);
+}
+
+#[test]
+fn oracle_slice_complex64_empty() {
+    let input = make_complex64_tensor(&[5], vec![
+        (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[2], &[2])).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_slice_complex64_full_copy() {
+    let input = make_complex64_tensor(&[5], vec![
+        (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[0], &[5])).unwrap();
+    assert_eq!(extract_shape(&result), vec![5]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![
+        (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0),
+    ]);
+}
+
+#[test]
+fn oracle_slice_complex64_preserves_dtype() {
+    let input = make_complex64_tensor(&[4], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[1], &[3])).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_slice_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[4], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[1], &[3])).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn property_slice_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let lits: Vec<Literal> = match dtype {
+            DType::Complex64 => (1..=4)
+                .map(|i| Literal::from_complex64(i as f32, -(i as f32)))
+                .collect(),
+            DType::Complex128 => (1..=4)
+                .map(|i| Literal::from_complex128(i as f64, -(i as f64)))
+                .collect(),
+            _ => unreachable!(),
+        };
+        let input = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![4] }, lits).unwrap());
+        let result = eval_primitive(Primitive::Slice, &[input], &slice_params(&[1], &[3])).unwrap();
+        let t = result.as_tensor().expect("tensor result");
+        assert_eq!(t.dtype, dtype, "slice {dtype:?}: dtype mismatch");
+        t.validate_dtype_consistency()
+            .expect("literal/dtype consistency");
+    }
+}
