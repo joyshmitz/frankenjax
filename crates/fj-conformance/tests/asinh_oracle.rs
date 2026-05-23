@@ -382,3 +382,183 @@ fn property_asinh_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex64/Complex128 coverage ========================
+//
+// Complex asinh: asinh(z) = log(z + sqrt(z² + 1))
+
+fn make_complex64_tensor(shape: &[u32], data: &[(f32, f32)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: &[(f64, f64)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::Complex64Bits(re, im) => (f32::from_bits(*re), f32::from_bits(*im)),
+                _ => panic!("expected Complex64"),
+            })
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex128().unwrap()).collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn assert_complex_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let (ar, ai) = actual;
+    let (er, ei) = expected;
+    let re_diff = (ar - er).abs();
+    let im_diff = (ai - ei).abs();
+    assert!(
+        re_diff < tol && im_diff < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        er,
+        ei,
+        ar,
+        ai,
+        re_diff,
+        im_diff
+    );
+}
+
+#[test]
+fn oracle_asinh_complex64_zero() {
+    let input = make_complex64_tensor(&[], &[(0.0, 0.0)]);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    let vec = extract_complex64_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(
+        (vec[0].0 as f64, vec[0].1 as f64),
+        (0.0, 0.0),
+        1e-6,
+        "asinh(0+0i)",
+    );
+}
+
+#[test]
+fn oracle_asinh_complex128_pure_imaginary() {
+    // asinh(i) = i * asin(1) = i * pi/2
+    let input = make_complex128_tensor(&[], &[(0.0, 1.0)]);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(
+        vec[0],
+        (0.0, std::f64::consts::FRAC_PI_2),
+        1e-10,
+        "asinh(i) = i*pi/2",
+    );
+}
+
+#[test]
+fn oracle_asinh_complex128_pure_real() {
+    let x = 1.0_f64;
+    let input = make_complex128_tensor(&[], &[(x, 0.0)]);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (x.asinh(), 0.0), 1e-10, "asinh(1+0i) = asinh(1)");
+}
+
+#[test]
+fn oracle_asinh_complex64_vector() {
+    let data: &[(f32, f32)] = &[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+    let input = make_complex64_tensor(&[3], data);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    let vec = extract_complex64_vec(&result);
+    assert_eq!(vec.len(), 3);
+
+    // asinh(0) = 0
+    assert_complex_close((vec[0].0 as f64, vec[0].1 as f64), (0.0, 0.0), 1e-5, "asinh(0)");
+
+    // asinh(1+0i) = asinh(1)
+    assert_complex_close(
+        (vec[1].0 as f64, vec[1].1 as f64),
+        (1.0_f64.asinh(), 0.0),
+        1e-4,
+        "asinh(1)",
+    );
+
+    // asinh(i) = i*pi/2
+    assert_complex_close(
+        (vec[2].0 as f64, vec[2].1 as f64),
+        (0.0, std::f64::consts::FRAC_PI_2),
+        1e-4,
+        "asinh(i)",
+    );
+}
+
+#[test]
+fn oracle_asinh_complex_sinh_inverse_identity() {
+    // sinh(asinh(z)) = z
+    let values: &[(f64, f64)] = &[(0.5, 0.3), (1.0, 0.0), (0.0, 0.5)];
+
+    for &(a, b) in values {
+        let input = make_complex128_tensor(&[], &[(a, b)]);
+        let asinh_result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+        let sinh_asinh = eval_primitive(Primitive::Sinh, &[asinh_result], &no_params()).unwrap();
+
+        let result = extract_complex128_vec(&sinh_asinh)[0];
+        assert_complex_close(result, (a, b), 1e-9, &format!("sinh(asinh({a}+{b}i)) = {a}+{b}i"));
+    }
+}
+
+#[test]
+fn oracle_asinh_complex_dtype_preservation() {
+    // Complex64 -> Complex64
+    let c64_input = make_complex64_tensor(&[2], &[(0.5, 0.3), (1.0, 0.0)]);
+    let c64_result = eval_primitive(Primitive::Asinh, &[c64_input], &no_params()).unwrap();
+    match &c64_result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Complex64, "asinh should preserve Complex64");
+            t.validate_dtype_consistency().unwrap();
+        }
+        _ => panic!("expected tensor"),
+    }
+
+    // Complex128 -> Complex128
+    let c128_input = make_complex128_tensor(&[2], &[(0.5, 0.3), (1.0, 0.0)]);
+    let c128_result = eval_primitive(Primitive::Asinh, &[c128_input], &no_params()).unwrap();
+    match &c128_result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Complex128, "asinh should preserve Complex128");
+            t.validate_dtype_consistency().unwrap();
+        }
+        _ => panic!("expected tensor"),
+    }
+}
