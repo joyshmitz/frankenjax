@@ -676,3 +676,272 @@ fn property_div_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== COMPLEX64/COMPLEX128 TESTS ========================
+
+fn make_complex64_scalar(re: f32, im: f32) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![] },
+            vec![Literal::from_complex64(re, im)],
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_scalar(re: f64, im: f64) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: vec![] },
+            vec![Literal::from_complex128(re, im)],
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex64_tensor(shape: &[u32], pairs: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            pairs
+                .into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_scalar(v: &Value) -> (f32, f32) {
+    match v {
+        Value::Tensor(t) => {
+            assert!(t.shape.dims.is_empty(), "expected scalar");
+            t.elements[0].as_complex64().unwrap()
+        }
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex128_scalar(v: &Value) -> (f64, f64) {
+    match v {
+        Value::Tensor(t) => {
+            assert!(t.shape.dims.is_empty(), "expected scalar");
+            t.elements[0].as_complex128().unwrap()
+        }
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn assert_complex64_close(actual: (f32, f32), expected: (f32, f32), tol: f32, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+fn assert_complex128_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+#[test]
+fn oracle_mul_complex64_basic() {
+    // (2+3i) * (4+5i) = (2*4 - 3*5) + (2*5 + 3*4)i = (8-15) + (10+12)i = -7 + 22i
+    let a = make_complex64_scalar(2.0, 3.0);
+    let b = make_complex64_scalar(4.0, 5.0);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (-7.0, 22.0), 1e-5, "(2+3i)*(4+5i)");
+}
+
+#[test]
+fn oracle_mul_complex64_identity() {
+    // z * 1 = z
+    let z = make_complex64_scalar(3.0, 4.0);
+    let one = make_complex64_scalar(1.0, 0.0);
+    let result = eval_primitive(Primitive::Mul, &[z, one], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (3.0, 4.0), 1e-6, "(3+4i)*1");
+}
+
+#[test]
+fn oracle_mul_complex64_zero() {
+    // z * 0 = 0
+    let z = make_complex64_scalar(3.0, 4.0);
+    let zero = make_complex64_scalar(0.0, 0.0);
+    let result = eval_primitive(Primitive::Mul, &[z, zero], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (0.0, 0.0), 1e-6, "(3+4i)*0");
+}
+
+#[test]
+fn oracle_mul_complex64_i_squared() {
+    // i * i = -1
+    let i = make_complex64_scalar(0.0, 1.0);
+    let result = eval_primitive(Primitive::Mul, &[i.clone(), i], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (-1.0, 0.0), 1e-6, "i*i = -1");
+}
+
+#[test]
+fn oracle_mul_complex64_conjugate_product() {
+    // z * conj(z) = |z|^2 (real)
+    // (3+4i) * (3-4i) = 9 + 16 = 25
+    let z = make_complex64_scalar(3.0, 4.0);
+    let conj_z = make_complex64_scalar(3.0, -4.0);
+    let result = eval_primitive(Primitive::Mul, &[z, conj_z], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (25.0, 0.0), 1e-5, "(3+4i)*(3-4i) = 25");
+}
+
+#[test]
+fn oracle_mul_complex64_vector() {
+    let a = make_complex64_tensor(&[3], vec![(1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]);
+    let b = make_complex64_tensor(&[3], vec![(2.0, 0.0), (0.0, 1.0), (1.0, -1.0)]);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    let vals = extract_complex64_vec(&result);
+
+    // 1 * 2 = 2
+    assert_complex64_close(vals[0], (2.0, 0.0), 1e-5, "1*2");
+    // i * i = -1
+    assert_complex64_close(vals[1], (-1.0, 0.0), 1e-5, "i*i");
+    // (1+i)*(1-i) = 1 + 1 = 2
+    assert_complex64_close(vals[2], (2.0, 0.0), 1e-5, "(1+i)*(1-i)");
+}
+
+#[test]
+fn oracle_div_complex64_basic() {
+    // (3+4i) / (1+2i) = (3+4i)(1-2i) / |1+2i|^2 = (3+8 + (4-6)i) / 5 = (11 - 2i)/5 = 2.2 - 0.4i
+    let a = make_complex64_scalar(3.0, 4.0);
+    let b = make_complex64_scalar(1.0, 2.0);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (2.2, -0.4), 1e-5, "(3+4i)/(1+2i)");
+}
+
+#[test]
+fn oracle_div_complex64_identity() {
+    // z / 1 = z
+    let z = make_complex64_scalar(3.0, 4.0);
+    let one = make_complex64_scalar(1.0, 0.0);
+    let result = eval_primitive(Primitive::Div, &[z, one], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (3.0, 4.0), 1e-6, "(3+4i)/1");
+}
+
+#[test]
+fn oracle_div_complex64_self() {
+    // z / z = 1 for z != 0
+    let z = make_complex64_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Div, &[z.clone(), z], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (1.0, 0.0), 1e-5, "(3+4i)/(3+4i) = 1");
+}
+
+#[test]
+fn oracle_div_complex64_by_i() {
+    // z / i = z * (-i) = (a+bi) * (-i) = b - ai
+    // (3+4i) / i = 4 - 3i
+    let z = make_complex64_scalar(3.0, 4.0);
+    let i = make_complex64_scalar(0.0, 1.0);
+    let result = eval_primitive(Primitive::Div, &[z, i], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (4.0, -3.0), 1e-5, "(3+4i)/i");
+}
+
+#[test]
+fn oracle_mul_div_complex64_inverse() {
+    // (z * w) / w = z
+    let z = make_complex64_scalar(2.0, 3.0);
+    let w = make_complex64_scalar(4.0, 5.0);
+    let zw = eval_primitive(Primitive::Mul, &[z.clone(), w.clone()], &no_params()).unwrap();
+    let result = eval_primitive(Primitive::Div, &[zw, w], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (2.0, 3.0), 1e-4, "(z*w)/w = z");
+}
+
+#[test]
+fn oracle_mul_complex128_basic() {
+    // (2+3i) * (4+5i) = -7 + 22i
+    let a = make_complex128_scalar(2.0, 3.0);
+    let b = make_complex128_scalar(4.0, 5.0);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    let (re, im) = extract_complex128_scalar(&result);
+    assert_complex128_close((re, im), (-7.0, 22.0), 1e-12, "(2+3i)*(4+5i) Complex128");
+}
+
+#[test]
+fn oracle_div_complex128_basic() {
+    // (3+4i) / (1+2i) = 2.2 - 0.4i
+    let a = make_complex128_scalar(3.0, 4.0);
+    let b = make_complex128_scalar(1.0, 2.0);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    let (re, im) = extract_complex128_scalar(&result);
+    assert_complex128_close((re, im), (2.2, -0.4), 1e-12, "(3+4i)/(1+2i) Complex128");
+}
+
+#[test]
+fn oracle_mul_complex64_preserves_dtype() {
+    let a = make_complex64_scalar(1.0, 2.0);
+    let b = make_complex64_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_mul_complex128_preserves_dtype() {
+    let a = make_complex128_scalar(1.0, 2.0);
+    let b = make_complex128_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Mul, &[a, b], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn oracle_div_complex64_preserves_dtype() {
+    let a = make_complex64_scalar(1.0, 2.0);
+    let b = make_complex64_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_div_complex128_preserves_dtype() {
+    let a = make_complex128_scalar(1.0, 2.0);
+    let b = make_complex128_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Div, &[a, b], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
