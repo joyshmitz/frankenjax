@@ -349,3 +349,95 @@ fn property_split_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex Type Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_split_complex64_basic() {
+    // Split [4] into 2 sections -> [2, 2]
+    let input = make_complex64_tensor(&[4], vec![
+        (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0),
+    ]);
+    let result = eval_primitive(Primitive::Split, &[input], &split_params(0, 2))
+        .expect("split complex64 should succeed");
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_complex64_vec(&result);
+    // First section: [1+i, 2+2i], second section: [3+3i, 4+4i]
+    assert!((vals[0].0 - 1.0).abs() < 1e-5);
+    assert!((vals[1].0 - 2.0).abs() < 1e-5);
+    assert!((vals[2].0 - 3.0).abs() < 1e-5);
+    assert!((vals[3].0 - 4.0).abs() < 1e-5);
+}
+
+#[test]
+fn oracle_split_complex64_2d() {
+    // [2, 4] split along axis 1 into 2 sections -> [2, 2, 2]
+    let input = make_complex64_tensor(&[2, 4], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+        (5.0, 0.0), (6.0, 0.0), (7.0, 0.0), (8.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Split, &[input], &split_params(1, 2))
+        .expect("split complex64 2D should succeed");
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+}
+
+#[test]
+fn oracle_split_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[4], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Split, &[input], &split_params(0, 2))
+        .expect("split complex128 should succeed");
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn property_split_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = match dtype {
+            DType::Complex64 => make_complex64_tensor(&[4], vec![
+                (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+            ]),
+            DType::Complex128 => make_complex128_tensor(&[4], vec![
+                (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+            ]),
+            _ => unreachable!(),
+        };
+        let result = eval_primitive(Primitive::Split, &[input], &split_params(0, 2))
+            .expect("split should succeed for complex dtype");
+        assert_eq!(result.dtype(), dtype, "split {dtype:?}: dtype mismatch");
+    }
+}
