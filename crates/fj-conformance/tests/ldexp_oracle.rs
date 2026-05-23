@@ -403,3 +403,93 @@ fn property_ldexp_preserves_float_dtype() {
     let result = eval_primitive(Primitive::Ldexp, &[x, n], &no_params()).unwrap();
     assert_eq!(result.dtype(), DType::F64, "ldexp should preserve F64 dtype");
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_ldexp_zero_exponent_is_identity() {
+    // ldexp(x, 0) = x
+    let x = make_f64_tensor(&[5], vec![1.0, -2.5, 0.0, 100.0, -0.001]);
+    let zero = make_i64_tensor(&[5], vec![0, 0, 0, 0, 0]);
+    let result = eval_primitive(Primitive::Ldexp, &[x.clone(), zero], &no_params()).unwrap();
+    let result_vals = extract_f64_vec(&result);
+    let x_vals = extract_f64_vec(&x);
+    for (i, (&r, &x_v)) in result_vals.iter().zip(x_vals.iter()).enumerate() {
+        assert!(
+            (r - x_v).abs() < 1e-10,
+            "ldexp(x, 0) should equal x at index {i}: got {r}, expected {x_v}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_ldexp_composition() {
+    // ldexp(ldexp(x, n), m) = ldexp(x, n+m)
+    let x = make_f64_tensor(&[4], vec![1.0, 2.0, 0.5, 4.0]);
+    let n = make_i64_tensor(&[4], vec![2, 3, -1, 0]);
+    let m = make_i64_tensor(&[4], vec![1, -2, 2, 3]);
+    let nm = make_i64_tensor(&[4], vec![3, 1, 1, 3]);
+
+    let first = eval_primitive(Primitive::Ldexp, &[x.clone(), n], &no_params()).unwrap();
+    let composed = eval_primitive(Primitive::Ldexp, &[first, m], &no_params()).unwrap();
+    let direct = eval_primitive(Primitive::Ldexp, &[x, nm], &no_params()).unwrap();
+
+    let composed_vals = extract_f64_vec(&composed);
+    let direct_vals = extract_f64_vec(&direct);
+
+    for (i, (&c, &d)) in composed_vals.iter().zip(direct_vals.iter()).enumerate() {
+        assert!(
+            (c - d).abs() < 1e-10,
+            "ldexp(ldexp(x, n), m) should equal ldexp(x, n+m) at index {i}: got {c}, expected {d}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_ldexp_inverse() {
+    // ldexp(ldexp(x, n), -n) = x
+    let x = make_f64_tensor(&[4], vec![1.0, 2.5, 0.125, 8.0]);
+    let n = make_i64_tensor(&[4], vec![3, -2, 4, -1]);
+    let neg_n = make_i64_tensor(&[4], vec![-3, 2, -4, 1]);
+
+    let forward = eval_primitive(Primitive::Ldexp, &[x.clone(), n], &no_params()).unwrap();
+    let roundtrip = eval_primitive(Primitive::Ldexp, &[forward, neg_n], &no_params()).unwrap();
+
+    let x_vals = extract_f64_vec(&x);
+    let roundtrip_vals = extract_f64_vec(&roundtrip);
+
+    for (i, (&orig, &rt)) in x_vals.iter().zip(roundtrip_vals.iter()).enumerate() {
+        assert!(
+            (orig - rt).abs() < 1e-10,
+            "ldexp(ldexp(x, n), -n) should equal x at index {i}: got {rt}, expected {orig}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_ldexp_scaling_relation() {
+    // ldexp(x, 1) = 2*x and ldexp(x, -1) = x/2
+    let x = make_f64_tensor(&[4], vec![1.0, 2.5, -3.0, 0.125]);
+    let one = make_i64_tensor(&[4], vec![1, 1, 1, 1]);
+    let neg_one = make_i64_tensor(&[4], vec![-1, -1, -1, -1]);
+
+    let double = eval_primitive(Primitive::Ldexp, &[x.clone(), one], &no_params()).unwrap();
+    let half = eval_primitive(Primitive::Ldexp, &[x.clone(), neg_one], &no_params()).unwrap();
+
+    let x_vals = extract_f64_vec(&x);
+    let double_vals = extract_f64_vec(&double);
+    let half_vals = extract_f64_vec(&half);
+
+    for (i, (&x_v, (&d, &h))) in x_vals.iter().zip(double_vals.iter().zip(half_vals.iter())).enumerate() {
+        assert!(
+            (d - 2.0 * x_v).abs() < 1e-10,
+            "ldexp(x, 1) should equal 2*x at index {i}: got {d}, expected {}",
+            2.0 * x_v
+        );
+        assert!(
+            (h - x_v / 2.0).abs() < 1e-10,
+            "ldexp(x, -1) should equal x/2 at index {i}: got {h}, expected {}",
+            x_v / 2.0
+        );
+    }
+}
