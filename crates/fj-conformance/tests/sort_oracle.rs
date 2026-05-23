@@ -442,3 +442,28 @@ fn property_sort_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ====================== COMPLEX DTYPE TESTS ======================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+#[ignore = "PARITY GAP: Sort not supported for complex - no natural ordering"]
+fn oracle_sort_complex64_not_supported() {
+    let input = make_complex64_tensor(&[3], vec![(3.0, 0.0), (1.0, 0.0), (2.0, 0.0)]);
+    let _result = eval_primitive(Primitive::Sort, &[input], &no_params())
+        .expect("sort should work on complex64");
+}

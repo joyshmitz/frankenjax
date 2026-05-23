@@ -349,3 +349,28 @@ fn property_argsort_output_i64_for_all_float_inputs() {
         );
     }
 }
+
+// ====================== COMPLEX DTYPE TESTS ======================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+#[ignore = "PARITY GAP: Argsort not supported for complex - no natural ordering"]
+fn oracle_argsort_complex64_not_supported() {
+    let input = make_complex64_tensor(&[3], vec![(3.0, 0.0), (1.0, 0.0), (2.0, 0.0)]);
+    let _result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false))
+        .expect("argsort should work on complex64");
+}
