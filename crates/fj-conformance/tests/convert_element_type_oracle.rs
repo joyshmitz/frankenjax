@@ -367,3 +367,14 @@ fn convert_element_type_bool_to_f64() {
         .collect();
     assert_eq!(vals, vec![1.0, 0.0, 1.0]);
 }
+
+#[test]
+fn convert_element_type_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 5] }, vec![]).unwrap(),
+    );
+    let result = convert(input, "i32").expect("2D empty tensor conversion should succeed");
+
+    assert_eq!(result.dtype(), DType::I32);
+    assert_eq!(shape(&result).dims, vec![0, 5]);
+}

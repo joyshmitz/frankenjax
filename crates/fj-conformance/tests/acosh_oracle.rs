@@ -309,3 +309,13 @@ fn oracle_acosh_near_one() {
     let val = extract_f64_scalar(&result);
     assert!(val > 0.0 && val < 1e-4, "acosh(1+tiny) should be small positive");
 }
+
+#[test]
+fn oracle_acosh_4d() {
+    let input = make_f64_tensor(&[2, 2, 2, 2], vec![
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5,
+    ]);
+    let result = eval_primitive(Primitive::Acosh, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2, 2]);
+}

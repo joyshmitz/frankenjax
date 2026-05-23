@@ -328,3 +328,14 @@ fn oracle_atanh_very_small() {
         "atanh(tiny) ≈ tiny for |x| << 1",
     );
 }
+
+#[test]
+fn oracle_atanh_subnormal() {
+    let tiny = f64::MIN_POSITIVE / 2.0;
+    let input = make_f64_tensor(&[2], vec![tiny, -tiny]);
+    let result = eval_primitive(Primitive::Atanh, &[input], &no_params()).unwrap();
+    let vals = extract_f64_vec(&result);
+    // For very small x, atanh(x) ≈ x
+    assert_close(vals[0], tiny.atanh(), 1e-30, "atanh(subnormal)");
+    assert_close(vals[1], (-tiny).atanh(), 1e-30, "atanh(-subnormal)");
+}

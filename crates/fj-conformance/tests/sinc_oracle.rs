@@ -289,3 +289,12 @@ fn oracle_sinc_f32_dtype() {
     assert_eq!(result.dtype(), DType::F32);
     assert_eq!(extract_shape(&result), vec![3]);
 }
+
+#[test]
+fn oracle_sinc_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 4] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Sinc, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 4]);
+}

@@ -342,3 +342,12 @@ fn oracle_asinh_subnormal() {
     assert_close(vals[0], tiny.asinh(), 1e-30, "asinh(subnormal)");
     assert_close(vals[1], (-tiny).asinh(), 1e-30, "asinh(-subnormal)");
 }
+
+#[test]
+fn oracle_asinh_2d_empty() {
+    let input = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
