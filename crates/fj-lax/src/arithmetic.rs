@@ -3772,27 +3772,66 @@ pub(crate) fn eval_integer_pow(
             detail: "integer_pow requires 'exponent' param".to_owned(),
         })?;
 
+    fn complex_powi(z: (f64, f64), n: i32) -> (f64, f64) {
+        if n == 0 {
+            return (1.0, 0.0);
+        }
+        if n < 0 {
+            let inv = complex_powi(z, -n);
+            return complex_div((1.0, 0.0), inv);
+        }
+        let mut result = (1.0, 0.0);
+        let mut base = z;
+        let mut exp = n as u32;
+        while exp > 0 {
+            if exp & 1 == 1 {
+                result = complex_mul(result, base);
+            }
+            base = complex_mul(base, base);
+            exp >>= 1;
+        }
+        result
+    }
+
+    fn integer_pow_literal(literal: Literal, exponent: i32) -> Result<Literal, &'static str> {
+        match literal {
+            Literal::Complex64Bits(re_bits, im_bits) => {
+                let z = (f32::from_bits(re_bits) as f64, f32::from_bits(im_bits) as f64);
+                let result = complex_powi(z, exponent);
+                Ok(Literal::from_complex64(result.0 as f32, result.1 as f32))
+            }
+            Literal::Complex128Bits(re_bits, im_bits) => {
+                let z = (f64::from_bits(re_bits), f64::from_bits(im_bits));
+                let result = complex_powi(z, exponent);
+                Ok(Literal::from_complex128(result.0, result.1))
+            }
+            _ => {
+                let value = literal.as_f64().ok_or("expected numeric")?;
+                let in_dtype = literal_dtype(literal);
+                Ok(real_literal_from_f64(in_dtype, value.powi(exponent)))
+            }
+        }
+    }
+
     match &inputs[0] {
         Value::Scalar(literal) => {
-            let in_dtype = literal_dtype(*literal);
-            let value = literal.as_f64().ok_or(EvalError::TypeMismatch {
-                primitive,
-                detail: "expected numeric scalar",
-            })?;
-            Ok(Value::Scalar(real_literal_from_f64(
-                in_dtype,
-                value.powi(exponent),
-            )))
+            integer_pow_literal(*literal, exponent)
+                .map(Value::Scalar)
+                .map_err(|e| EvalError::TypeMismatch {
+                    primitive,
+                    detail: e,
+                })
         }
         Value::Tensor(tensor) => {
             let out_dtype = tensor.dtype;
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in &tensor.elements {
-                let value = literal.as_f64().ok_or(EvalError::TypeMismatch {
-                    primitive,
-                    detail: "expected numeric tensor elements",
-                })?;
-                elements.push(real_literal_from_f64(out_dtype, value.powi(exponent)));
+                elements.push(
+                    integer_pow_literal(*literal, exponent).map_err(|e| EvalError::TypeMismatch {
+                        primitive,
+                        detail: e,
+                    })?,
+                );
             }
 
             Ok(Value::Tensor(TensorValue::new(

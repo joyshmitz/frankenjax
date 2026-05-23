@@ -430,7 +430,7 @@ fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
 }
 
 #[test]
-#[ignore = "PARITY GAP: integer_pow not supported for complex operands"]
+
 fn oracle_integer_pow_complex64_square() {
     // (1+i)^2 = 1 + 2i - 1 = 2i
     let input = make_complex64_tensor(&[1], vec![(1.0, 1.0)]);
@@ -442,7 +442,7 @@ fn oracle_integer_pow_complex64_square() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: integer_pow not supported for complex operands"]
+
 fn oracle_integer_pow_complex64_cube() {
     // i^3 = i * i * i = -i
     let input = make_complex64_tensor(&[1], vec![(0.0, 1.0)]);
@@ -454,7 +454,7 @@ fn oracle_integer_pow_complex64_cube() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: integer_pow not supported for complex operands"]
+
 fn oracle_integer_pow_complex128_preserves_dtype() {
     let input = make_complex128_tensor(&[2], vec![(1.0, 0.0), (2.0, 0.0)]);
     let result = eval_primitive(Primitive::IntegerPow, &[input], &pow_params(2))
@@ -463,7 +463,7 @@ fn oracle_integer_pow_complex128_preserves_dtype() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: integer_pow not supported for complex operands"]
+
 fn property_integer_pow_preserves_complex_dtypes() {
     for dtype in [DType::Complex64, DType::Complex128] {
         let input = match dtype {
