@@ -611,35 +611,36 @@ pub(crate) fn eval_svd(
         });
     }
 
-    let (m, n, a, dtype) = extract_matrix(primitive, &inputs[0])?;
+    let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
     let k = m.min(n);
+    let zero = (0.0, 0.0);
 
     let full_matrices = params
         .get("full_matrices")
         .is_some_and(|v| v.trim() == "true");
 
-    // Step 1: Compute A^T A (n×n symmetric matrix)
-    let mut ata = vec![0.0_f64; n * n];
+    // Step 1: Compute A^H A (n×n Hermitian matrix)
+    let mut aha = vec![zero; n * n];
     for i in 0..n {
         for j in i..n {
-            let mut dot = 0.0;
+            let mut dot = zero;
             for row in 0..m {
-                dot += a[row * n + i] * a[row * n + j];
+                dot = complex_add(dot, complex_mul(complex_conj(a[row * n + i]), a[row * n + j]));
             }
-            ata[i * n + j] = dot;
-            ata[j * n + i] = dot;
+            aha[i * n + j] = dot;
+            aha[j * n + i] = complex_conj(dot);
         }
     }
 
-    // Step 2: Eigendecompose A^T A via Jacobi rotations → V, eigenvalues σ²
-    let (eigenvalues, v) = jacobi_eigendecomposition(&mut ata, n);
+    // Step 2: Eigendecompose A^H A via Jacobi rotations → V, eigenvalues σ²
+    let (eigenvalues, v) = complex_jacobi_eigendecomposition(&mut aha, n);
 
     // Step 3: Sort eigenvalues (and corresponding V columns) in descending order
     let mut indices: Vec<usize> = (0..n).collect();
     indices.sort_by(|&a, &b| eigenvalues[b].total_cmp(&eigenvalues[a]));
 
     let mut sigma = vec![0.0_f64; k];
-    let mut v_sorted = vec![0.0_f64; n * n];
+    let mut v_sorted = vec![zero; n * n];
     for (new_col, &old_col) in indices.iter().enumerate() {
         if new_col < k {
             sigma[new_col] = eigenvalues[old_col].max(0.0).sqrt();
@@ -650,15 +651,15 @@ pub(crate) fn eval_svd(
     }
 
     // Step 4: Compute U = A V Σ^{-1} (thin: m×k)
-    let mut u = vec![0.0_f64; m * k];
+    let mut u = vec![zero; m * k];
     for i in 0..m {
         for j in 0..k {
             if sigma[j] > f64::EPSILON * 1e4 {
-                let mut val = 0.0;
+                let mut val = zero;
                 for col in 0..n {
-                    val += a[i * n + col] * v_sorted[col * n + j];
+                    val = complex_add(val, complex_mul(a[i * n + col], v_sorted[col * n + j]));
                 }
-                u[i * k + j] = val / sigma[j];
+                u[i * k + j] = complex_div(val, (sigma[j], 0.0));
             }
         }
     }
@@ -667,53 +668,150 @@ pub(crate) fn eval_svd(
     let u_cols = if full_matrices { m } else { k };
     let vt_rows = if full_matrices { n } else { k };
 
-    // For full_matrices, extend U to m×m orthogonal matrix
+    // For full_matrices, extend U to m×m unitary matrix
     let u_out = if full_matrices && u_cols > k {
-        extend_orthogonal_columns(&u, m, k, u_cols)
+        complex_extend_unitary_columns(&u, m, k, u_cols)
     } else {
         u
     };
 
-    // Build V^T (transposed)
-    let vt_out = if full_matrices {
-        // Full V^T is n×n
-        let mut vt = vec![0.0_f64; n * n];
+    // Build V^H (conjugate transpose)
+    let vh_out = if full_matrices {
+        let mut vh = vec![zero; n * n];
         for i in 0..n {
             for j in 0..n {
-                vt[i * n + j] = v_sorted[j * n + i]; // transpose
+                vh[i * n + j] = complex_conj(v_sorted[j * n + i]);
             }
         }
-        vt
+        vh
     } else {
-        // Thin V^T is k×n
-        let mut vt = vec![0.0_f64; k * n];
+        let mut vh = vec![zero; k * n];
         for i in 0..k {
             for j in 0..n {
-                vt[i * n + j] = v_sorted[j * n + i]; // transpose
+                vh[i * n + j] = complex_conj(v_sorted[j * n + i]);
             }
         }
-        vt
+        vh
     };
 
-    let u_val = matrix_to_value(m, u_cols, &u_out, dtype)?;
+    let u_val = complex_matrix_to_value(m, u_cols, &u_out, dtype)?;
 
-    // S is a 1D vector — emit dtype-matching literals so an F32 SVD's
-    // singular-value tensor doesn't end up declaring F32 with F64Bits
-    // elements.
     let s_elements: Vec<Literal> = sigma
         .iter()
         .map(|&v| linalg_literal_from_f64(dtype, v))
         .collect();
-    let s_shape = Shape {
-        dims: vec![k as u32],
+    let s_shape = Shape { dims: vec![k as u32] };
+    let s_dtype = match dtype {
+        DType::Complex64 => DType::F32,
+        DType::Complex128 => DType::F64,
+        _ => dtype,
     };
-    let s_tensor =
-        TensorValue::new(dtype, s_shape, s_elements).map_err(EvalError::InvalidTensor)?;
+    let s_tensor = TensorValue::new(s_dtype, s_shape, s_elements).map_err(EvalError::InvalidTensor)?;
     let s_val = Value::Tensor(s_tensor);
 
-    let vt_val = matrix_to_value(vt_rows, n, &vt_out, dtype)?;
+    let vh_val = complex_matrix_to_value(vt_rows, n, &vh_out, dtype)?;
 
-    Ok(vec![u_val, s_val, vt_val])
+    Ok(vec![u_val, s_val, vh_val])
+}
+
+/// Complex Jacobi eigendecomposition of a Hermitian n×n matrix.
+/// Returns (eigenvalues, eigenvectors) where eigenvalues are real and eigenvectors are complex.
+fn complex_jacobi_eigendecomposition(
+    a: &mut [(f64, f64)],
+    n: usize,
+) -> (Vec<f64>, Vec<(f64, f64)>) {
+    let zero = (0.0, 0.0);
+    let one = (1.0, 0.0);
+
+    let mut v = vec![zero; n * n];
+    for i in 0..n {
+        v[i * n + i] = one;
+    }
+
+    let max_iter = 100 * n * n;
+    let tol = f64::EPSILON * 1e2;
+
+    for _ in 0..max_iter {
+        let mut max_val = 0.0_f64;
+        let mut p = 0;
+        let mut q = 1;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let abs_val = complex_abs(a[i * n + j]);
+                if abs_val > max_val {
+                    max_val = abs_val;
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+
+        if max_val < tol {
+            break;
+        }
+
+        let app = a[p * n + p].0;
+        let aqq = a[q * n + q].0;
+        let apq = a[p * n + q];
+
+        let apq_abs = complex_abs(apq);
+        let phase = if apq_abs > f64::EPSILON {
+            complex_div(apq, (apq_abs, 0.0))
+        } else {
+            one
+        };
+
+        let theta = if (app - aqq).abs() < f64::EPSILON {
+            std::f64::consts::FRAC_PI_4
+        } else {
+            0.5 * (2.0 * apq_abs / (app - aqq)).atan()
+        };
+
+        let (sin_t, cos_t) = theta.sin_cos();
+        let phase_sin = complex_mul(phase, (sin_t, 0.0));
+        let phase_sin_conj = complex_conj(phase_sin);
+
+        let mut new_row_p = vec![zero; n];
+        let mut new_row_q = vec![zero; n];
+        for i in 0..n {
+            new_row_p[i] = complex_add(
+                complex_mul((cos_t, 0.0), a[p * n + i]),
+                complex_mul(phase_sin_conj, a[q * n + i]),
+            );
+            new_row_q[i] = complex_add(
+                complex_mul((-sin_t, 0.0), complex_mul(phase, a[p * n + i])),
+                complex_mul((cos_t, 0.0), a[q * n + i]),
+            );
+        }
+
+        for i in 0..n {
+            a[p * n + i] = new_row_p[i];
+            a[q * n + i] = new_row_q[i];
+            a[i * n + p] = complex_conj(new_row_p[i]);
+            a[i * n + q] = complex_conj(new_row_q[i]);
+        }
+
+        a[p * n + p] = (cos_t * new_row_p[p].0 + sin_t * complex_mul(phase_sin_conj, new_row_p[q]).0, 0.0);
+        a[q * n + q] = (-sin_t * complex_mul(phase, new_row_q[p]).0 + cos_t * new_row_q[q].0, 0.0);
+        a[p * n + q] = zero;
+        a[q * n + p] = zero;
+
+        for i in 0..n {
+            let vip = v[i * n + p];
+            let viq = v[i * n + q];
+            v[i * n + p] = complex_add(
+                complex_mul((cos_t, 0.0), vip),
+                complex_mul(phase_sin_conj, viq),
+            );
+            v[i * n + q] = complex_add(
+                complex_mul((-sin_t, 0.0), complex_mul(phase, vip)),
+                complex_mul((cos_t, 0.0), viq),
+            );
+        }
+    }
+
+    let eigenvalues: Vec<f64> = (0..n).map(|i| a[i * n + i].0).collect();
+    (eigenvalues, v)
 }
 
 /// Jacobi eigendecomposition of a symmetric n×n matrix.
@@ -842,11 +940,60 @@ fn extend_orthogonal_columns(u: &[f64], m: usize, k: usize, m_full: usize) -> Ve
     result
 }
 
+/// Extend a set of k unitary columns in an m×k complex matrix to m×m_full
+/// by adding orthogonal complement columns via Gram-Schmidt.
+fn complex_extend_unitary_columns(
+    u: &[(f64, f64)],
+    m: usize,
+    k: usize,
+    m_full: usize,
+) -> Vec<(f64, f64)> {
+    let zero = (0.0, 0.0);
+    let one = (1.0, 0.0);
+    let mut result = vec![zero; m * m_full];
+
+    for i in 0..m {
+        for j in 0..k {
+            result[i * m_full + j] = u[i * k + j];
+        }
+    }
+
+    let mut added = k;
+    for basis_idx in 0..m {
+        if added >= m_full {
+            break;
+        }
+
+        let mut col = vec![zero; m];
+        col[basis_idx] = one;
+
+        for j in 0..added {
+            let mut dot = zero;
+            for i in 0..m {
+                dot = complex_add(dot, complex_mul(complex_conj(result[i * m_full + j]), col[i]));
+            }
+            for i in 0..m {
+                col[i] = complex_sub(col[i], complex_mul(dot, result[i * m_full + j]));
+            }
+        }
+
+        let norm: f64 = col.iter().map(|x| x.0 * x.0 + x.1 * x.1).sum::<f64>().sqrt();
+        if norm > f64::EPSILON * 1e4 {
+            for i in 0..m {
+                result[i * m_full + added] = complex_div(col[i], (norm, 0.0));
+            }
+            added += 1;
+        }
+    }
+
+    result
+}
+
 // ── Eigh (Symmetric Eigendecomposition) ────────────────────────────
 
-/// Compute the eigendecomposition of a symmetric matrix: A = V diag(W) V^T.
+/// Compute the eigendecomposition of a Hermitian matrix: A = V diag(W) V^H.
 ///
-/// Returns `[W, V]` where W is a vector of eigenvalues (ascending) and V
+/// Returns `[W, V]` where W is a vector of real eigenvalues (ascending) and V
 /// contains eigenvectors as columns.
 pub(crate) fn eval_eigh(
     inputs: &[Value],
@@ -862,6 +1009,55 @@ pub(crate) fn eval_eigh(
         });
     }
 
+    // Dispatch based on dtype: real matrices use simpler real Jacobi algorithm
+    let is_complex = matches!(inputs[0], Value::Tensor(ref t) if t.dtype == DType::Complex64 || t.dtype == DType::Complex128);
+
+    if is_complex {
+        let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
+        let zero = (0.0, 0.0);
+        if m != n {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("Eigh requires a square matrix, got {m}x{n}"),
+            });
+        }
+
+        let mut a_work = a;
+        let (eigenvalues, eigenvectors) = complex_jacobi_eigendecomposition(&mut a_work, m);
+
+        // Sort eigenvalues in ascending order (JAX convention for eigh)
+        let mut indices: Vec<usize> = (0..m).collect();
+        indices.sort_by(|&a, &b| eigenvalues[a].total_cmp(&eigenvalues[b]));
+
+        let mut w_sorted = vec![0.0_f64; m];
+        let mut v_sorted = vec![zero; m * m];
+        for (new_col, &old_col) in indices.iter().enumerate() {
+            w_sorted[new_col] = eigenvalues[old_col];
+            for row in 0..m {
+                v_sorted[row * m + new_col] = eigenvectors[row * m + old_col];
+            }
+        }
+
+        // Eigenvalues are always real for Hermitian matrices
+        let w_dtype = match dtype {
+            DType::Complex64 => DType::F32,
+            DType::Complex128 => DType::F64,
+            _ => dtype,
+        };
+        let w_elements: Vec<Literal> = w_sorted
+            .iter()
+            .map(|&v| linalg_literal_from_f64(w_dtype, v))
+            .collect();
+        let w_shape = Shape { dims: vec![m as u32] };
+        let w_tensor = TensorValue::new(w_dtype, w_shape, w_elements).map_err(EvalError::InvalidTensor)?;
+        let w_val = Value::Tensor(w_tensor);
+
+        let v_val = complex_matrix_to_value(m, m, &v_sorted, dtype)?;
+
+        return Ok(vec![w_val, v_val]);
+    }
+
+    // Real symmetric matrix path
     let (m, n, a, dtype) = extract_matrix(primitive, &inputs[0])?;
     if m != n {
         return Err(EvalError::Unsupported {
@@ -886,18 +1082,12 @@ pub(crate) fn eval_eigh(
         }
     }
 
-    // W is a 1D vector of eigenvalues — emit dtype-matching literals so
-    // an F32 Eigh's eigenvalue tensor doesn't end up declaring F32 with
-    // F64Bits elements.
     let w_elements: Vec<Literal> = w_sorted
         .iter()
         .map(|&v| linalg_literal_from_f64(dtype, v))
         .collect();
-    let w_shape = Shape {
-        dims: vec![m as u32],
-    };
-    let w_tensor =
-        TensorValue::new(dtype, w_shape, w_elements).map_err(EvalError::InvalidTensor)?;
+    let w_shape = Shape { dims: vec![m as u32] };
+    let w_tensor = TensorValue::new(dtype, w_shape, w_elements).map_err(EvalError::InvalidTensor)?;
     let w_val = Value::Tensor(w_tensor);
 
     let v_val = matrix_to_value(m, m, &v_sorted, dtype)?;
