@@ -351,3 +351,14 @@ fn oracle_zeta_arity_error() {
     let result = eval_primitive(Primitive::Zeta, &[x], &no_params());
     assert!(result.is_err(), "Unary zeta should error - JAX zeta requires two arguments");
 }
+
+// ======================== PROPERTY: dtype ========================
+
+#[test]
+fn property_zeta_outputs_f64() {
+    // Zeta only supports F64 due to precision requirements
+    let x = make_f64_tensor(&[3], vec![2.0, 3.0, 4.0]);
+    let q = make_f64_tensor(&[3], vec![1.0, 1.0, 1.0]);
+    let result = eval_primitive(Primitive::Zeta, &[x, q], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64, "zeta should output F64");
+}
