@@ -329,3 +329,87 @@ fn property_sinc_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex Type Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+#[test]
+#[ignore = "PARITY GAP: sinc not supported for complex operands"]
+fn oracle_sinc_complex64_at_zero() {
+    // sinc(0) = 1 for any dtype
+    let input = make_complex64_tensor(&[1], vec![(0.0, 0.0)]);
+    let result = eval_primitive(Primitive::Sinc, &[input], &no_params())
+        .expect("sinc complex64 should succeed");
+    let vals = extract_complex64_vec(&result);
+    assert!((vals[0].0 - 1.0).abs() < 1e-5, "sinc(0) = 1");
+    assert!(vals[0].1.abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "PARITY GAP: sinc not supported for complex operands"]
+fn oracle_sinc_complex64_real_axis() {
+    // sinc on real axis should match real sinc
+    let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
+    let result = eval_primitive(Primitive::Sinc, &[input], &no_params())
+        .expect("sinc complex64 real should succeed");
+    let vals = extract_complex64_vec(&result);
+    assert!((vals[0].0 - 1.0).abs() < 1e-5, "sinc(0) = 1");
+    // sinc(1) = sin(pi)/pi ≈ 0 (normalized sinc)
+    // or sin(1)/1 ≈ 0.8415 (unnormalized)
+}
+
+#[test]
+#[ignore = "PARITY GAP: sinc not supported for complex operands"]
+fn oracle_sinc_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
+    let result = eval_primitive(Primitive::Sinc, &[input], &no_params())
+        .expect("sinc complex128 should succeed");
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+#[ignore = "PARITY GAP: sinc not supported for complex operands"]
+fn property_sinc_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = match dtype {
+            DType::Complex64 => make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]),
+            DType::Complex128 => make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]),
+            _ => unreachable!(),
+        };
+        let result = eval_primitive(Primitive::Sinc, &[input], &no_params())
+            .expect("sinc should succeed for complex dtype");
+        assert_eq!(result.dtype(), dtype, "sinc {dtype:?}: dtype mismatch");
+    }
+}
