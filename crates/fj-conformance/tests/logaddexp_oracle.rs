@@ -433,3 +433,55 @@ fn oracle_logaddexp_matrix_row_y_broadcast() {
         );
     }
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_logaddexp_3d_shape() {
+    let x = make_f64_tensor(&[2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    let y = make_f64_tensor(&[2, 2, 2], vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert!((vals[0] - 2.0_f64.ln()).abs() < 1e-15);
+    assert!((vals[7] - (7.0 + 2.0_f64.ln())).abs() < 1e-14);
+}
+
+#[test]
+fn oracle_logaddexp_empty_tensor() {
+    let x = make_f64_tensor(&[0], vec![]);
+    let y = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert!(extract_f64_vec(&result).is_empty());
+}
+
+#[test]
+fn oracle_logaddexp_2d_empty() {
+    let x = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let y = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_logaddexp_preserves_dtype() {
+    let x = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let y = make_f64_tensor(&[3], vec![0.0, 1.0, 2.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_logaddexp_inf_inf() {
+    // Numerically stable formula: max(x,y) + log1p(exp(-|x-y|))
+    // With inf,inf: inf - inf = NaN, so result is NaN
+    let x = make_f64_tensor(&[], vec![f64::INFINITY]);
+    let y = make_f64_tensor(&[], vec![f64::INFINITY]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x, y], &no_params()).unwrap();
+    assert!(extract_f64_scalar(&result).is_nan(), "logaddexp(inf, inf) = NaN due to inf-inf");
+}

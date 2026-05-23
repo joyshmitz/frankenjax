@@ -325,3 +325,71 @@ fn oracle_fma_incompatible_shapes_error() {
     let result = eval_primitive(Primitive::Fma, &[a, b, c], &no_params());
     assert!(result.is_err(), "incompatible shapes should error");
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_fma_3d_shape() {
+    let a = make_f64_tensor(&[2, 2, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    let b = make_f64_tensor(&[2, 2, 2], vec![2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]);
+    let c = make_f64_tensor(&[2, 2, 2], vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    let result = eval_primitive(Primitive::Fma, &[a, b, c], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_f64_vec(&result);
+    assert_eq!(vals[0], 3.0);  // 1*2+1
+    assert_eq!(vals[7], 17.0); // 8*2+1
+}
+
+#[test]
+fn oracle_fma_empty_tensor() {
+    let a = make_f64_tensor(&[0], vec![]);
+    let b = make_f64_tensor(&[0], vec![]);
+    let c = make_f64_tensor(&[0], vec![]);
+    let result = eval_primitive(Primitive::Fma, &[a, b, c], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0]);
+    assert!(extract_f64_vec(&result).is_empty());
+}
+
+#[test]
+fn oracle_fma_2d_empty() {
+    let a = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let b = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let c = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Fma, &[a, b, c], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn oracle_fma_preserves_dtype() {
+    let a = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let b = make_f64_tensor(&[3], vec![2.0, 2.0, 2.0]);
+    let c = make_f64_tensor(&[3], vec![1.0, 1.0, 1.0]);
+    let result = eval_primitive(Primitive::Fma, &[a, b, c], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::F64);
+}
+
+#[test]
+fn oracle_fma_neg_inf() {
+    let a = make_f64_tensor(&[], vec![f64::NEG_INFINITY]);
+    let b = make_f64_tensor(&[], vec![2.0]);
+    let c = make_f64_tensor(&[], vec![1.0]);
+    let result = eval_primitive(Primitive::Fma, &[a, b, c], &no_params()).unwrap();
+    assert_eq!(extract_f64_scalar(&result), f64::NEG_INFINITY, "fma(-inf, 2, 1) = -inf");
+}
+
+#[test]
+fn oracle_fma_subnormal() {
+    let subnormal = f64::MIN_POSITIVE / 2.0;
+    let a = make_f64_tensor(&[], vec![subnormal]);
+    let b = make_f64_tensor(&[], vec![2.0]);
+    let c = make_f64_tensor(&[], vec![0.0]);
+    let result = eval_primitive(Primitive::Fma, &[a, b, c], &no_params()).unwrap();
+    let val = extract_f64_scalar(&result);
+    assert!((val - subnormal * 2.0).abs() < 1e-300, "fma(subnormal, 2, 0) = 2*subnormal");
+}
