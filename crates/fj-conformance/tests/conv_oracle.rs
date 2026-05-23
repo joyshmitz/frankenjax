@@ -577,3 +577,111 @@ fn property_conv_preserves_float_dtypes() {
         t.validate_dtype_consistency().expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex Type Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex64().unwrap()).collect(),
+        Value::Scalar(lit) => vec![lit.as_complex64().unwrap()],
+    }
+}
+
+#[test]
+#[ignore = "PARITY GAP: conv requires floating dtypes, rejects complex"]
+fn oracle_conv_1d_complex64_simple() {
+    // 1D conv with complex-valued input and kernel
+    // input: [1+0i, 2+0i, 3+0i] shape [1, 3, 1] (batch, length, channels)
+    // kernel: [1+0i, 1+0i] shape [2, 1, 1] (kernel_size, in_channels, out_channels)
+    // result: [3+0i, 5+0i] (valid padding)
+    let lhs = make_complex64_tensor(&[1, 3, 1], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+    ]);
+    let rhs = make_complex64_tensor(&[2, 1, 1], vec![
+        (1.0, 0.0), (1.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("valid", "1"))
+        .expect("conv complex64 should succeed");
+    let vals = extract_complex64_vec(&result);
+    assert!((vals[0].0 - 3.0).abs() < 1e-5);
+    assert!((vals[1].0 - 5.0).abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "PARITY GAP: conv requires floating dtypes, rejects complex"]
+fn oracle_conv_1d_complex64_with_imaginary() {
+    // Complex conv: [1+i, 2+2i] * [1+0i, i]
+    // Position 0: (1+i)*1 + (2+2i)*i = 1+i + 2i - 2 = -1 + 3i
+    let lhs = make_complex64_tensor(&[1, 2, 1], vec![
+        (1.0, 1.0), (2.0, 2.0),
+    ]);
+    let rhs = make_complex64_tensor(&[2, 1, 1], vec![
+        (1.0, 0.0), (0.0, 1.0),
+    ]);
+    let result = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("valid", "1"))
+        .expect("conv complex64 with imaginary should succeed");
+    let vals = extract_complex64_vec(&result);
+    assert!((vals[0].0 - (-1.0)).abs() < 1e-5, "expected -1, got {}", vals[0].0);
+    assert!((vals[0].1 - 3.0).abs() < 1e-5, "expected 3, got {}", vals[0].1);
+}
+
+#[test]
+#[ignore = "PARITY GAP: conv requires floating dtypes, rejects complex"]
+fn oracle_conv_1d_complex128_simple() {
+    let lhs = make_complex128_tensor(&[1, 3, 1], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+    ]);
+    let rhs = make_complex128_tensor(&[2, 1, 1], vec![
+        (1.0, 0.0), (1.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("valid", "1"))
+        .expect("conv complex128 should succeed");
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+#[ignore = "PARITY GAP: conv requires floating dtypes, rejects complex"]
+fn property_conv_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let (lhs, rhs) = match dtype {
+            DType::Complex64 => (
+                make_complex64_tensor(&[1, 3, 1], vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]),
+                make_complex64_tensor(&[2, 1, 1], vec![(1.0, 0.0), (1.0, 0.0)]),
+            ),
+            DType::Complex128 => (
+                make_complex128_tensor(&[1, 3, 1], vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]),
+                make_complex128_tensor(&[2, 1, 1], vec![(1.0, 0.0), (1.0, 0.0)]),
+            ),
+            _ => unreachable!(),
+        };
+        let result = eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("valid", "1"))
+            .expect("conv should succeed for complex dtype");
+        assert_eq!(result.dtype(), dtype, "conv {dtype:?}: dtype mismatch");
+    }
+}
