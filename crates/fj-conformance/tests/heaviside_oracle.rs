@@ -407,3 +407,80 @@ fn property_heaviside_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_heaviside_complement_sums_to_one() {
+    // heaviside(x, 0.5) + heaviside(-x, 0.5) = 1 for all x
+    let x = make_f64_tensor(&[5], vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
+    let neg_x = make_f64_tensor(&[5], vec![2.0, 1.0, 0.0, -1.0, -2.0]);
+    let h0 = make_f64_tensor(&[5], vec![0.5, 0.5, 0.5, 0.5, 0.5]);
+    let result1 = eval_primitive(Primitive::Heaviside, &[x, h0.clone()], &no_params()).unwrap();
+    let result2 = eval_primitive(Primitive::Heaviside, &[neg_x, h0], &no_params()).unwrap();
+    let vals1 = extract_f64_vec(&result1);
+    let vals2 = extract_f64_vec(&result2);
+    for (i, (&v1, &v2)) in vals1.iter().zip(vals2.iter()).enumerate() {
+        assert!(
+            (v1 + v2 - 1.0).abs() < 1e-10,
+            "heaviside(x, 0.5) + heaviside(-x, 0.5) should equal 1 at index {i}: got {}",
+            v1 + v2
+        );
+    }
+}
+
+#[test]
+fn metamorphic_heaviside_idempotent_on_positive() {
+    // heaviside(heaviside(x, h), h) = heaviside(x, h) when h > 0
+    // For x positive: heaviside(x, h) = 1, then heaviside(1, h) = 1
+    // For x negative: heaviside(x, h) = 0, then heaviside(0, h) = h
+    // For x = 0: heaviside(0, h) = h, then heaviside(h, h) depends on sign of h
+    let x = make_f64_tensor(&[3], vec![-1.0, 1.0, 2.0]);
+    let h0 = make_f64_tensor(&[3], vec![0.5, 0.5, 0.5]);
+    let first = eval_primitive(Primitive::Heaviside, &[x, h0.clone()], &no_params()).unwrap();
+    let second = eval_primitive(Primitive::Heaviside, &[first.clone(), h0], &no_params()).unwrap();
+    let first_vals = extract_f64_vec(&first);
+    let second_vals = extract_f64_vec(&second);
+    // first = [0, 1, 1], second = heaviside([0, 1, 1], 0.5) = [0.5, 1, 1]
+    for (i, &v) in second_vals.iter().enumerate() {
+        let expected = if first_vals[i] > 0.0 { 1.0 } else { 0.5 };
+        assert!(
+            (v - expected).abs() < 1e-10,
+            "heaviside idempotent at index {i}: got {v}, expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_heaviside_h0_independent_for_nonzero() {
+    // For x != 0, the h0 value doesn't affect the result
+    let x = make_f64_tensor(&[4], vec![-2.0, -1.0, 1.0, 2.0]);
+    let h0_a = make_f64_tensor(&[4], vec![0.0, 0.25, 0.5, 0.75]);
+    let h0_b = make_f64_tensor(&[4], vec![1.0, 0.0, 0.9, 0.1]);
+    let result_a = eval_primitive(Primitive::Heaviside, &[x.clone(), h0_a], &no_params()).unwrap();
+    let result_b = eval_primitive(Primitive::Heaviside, &[x, h0_b], &no_params()).unwrap();
+    let vals_a = extract_f64_vec(&result_a);
+    let vals_b = extract_f64_vec(&result_b);
+    for (i, (&va, &vb)) in vals_a.iter().zip(vals_b.iter()).enumerate() {
+        assert!(
+            (va - vb).abs() < 1e-10,
+            "for x != 0, heaviside should be independent of h0 at index {i}: got {} vs {}",
+            va, vb
+        );
+    }
+}
+
+#[test]
+fn metamorphic_heaviside_output_bounded() {
+    // heaviside output is always in [0, 1] when h0 is in [0, 1]
+    let x = make_f64_tensor(&[5], vec![-100.0, -0.001, 0.0, 0.001, 100.0]);
+    let h0 = make_f64_tensor(&[5], vec![0.0, 0.25, 0.5, 0.75, 1.0]);
+    let result = eval_primitive(Primitive::Heaviside, &[x, h0], &no_params()).unwrap();
+    let vals = extract_f64_vec(&result);
+    for (i, &v) in vals.iter().enumerate() {
+        assert!(
+            v >= 0.0 && v <= 1.0,
+            "heaviside output should be in [0, 1] at index {i}: got {v}"
+        );
+    }
+}
