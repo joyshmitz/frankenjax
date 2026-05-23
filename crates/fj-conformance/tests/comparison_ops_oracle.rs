@@ -828,3 +828,152 @@ fn property_comparison_ops_always_return_bool() {
         }
     }
 }
+
+// ====================== COMPLEX DTYPE TESTS ======================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn oracle_eq_complex64_equal() {
+    let a = make_complex64_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let b = make_complex64_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let result = eval_primitive(Primitive::Eq, &[a, b], &no_params())
+        .expect("Eq should work on complex64");
+    assert_eq!(extract_bool_vec(&result), vec![true, true]);
+}
+
+#[test]
+fn oracle_eq_complex64_different_real() {
+    let a = make_complex64_tensor(&[1], vec![(1.0, 2.0)]);
+    let b = make_complex64_tensor(&[1], vec![(1.5, 2.0)]);
+    let result = eval_primitive(Primitive::Eq, &[a, b], &no_params())
+        .expect("Eq should work on complex64");
+    assert_eq!(extract_bool_vec(&result), vec![false]);
+}
+
+#[test]
+fn oracle_eq_complex64_different_imag() {
+    let a = make_complex64_tensor(&[1], vec![(1.0, 2.0)]);
+    let b = make_complex64_tensor(&[1], vec![(1.0, 2.5)]);
+    let result = eval_primitive(Primitive::Eq, &[a, b], &no_params())
+        .expect("Eq should work on complex64");
+    assert_eq!(extract_bool_vec(&result), vec![false]);
+}
+
+#[test]
+fn oracle_ne_complex64_basic() {
+    let a = make_complex64_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let b = make_complex64_tensor(&[2], vec![(1.0, 2.0), (3.0, 5.0)]);
+    let result = eval_primitive(Primitive::Ne, &[a, b], &no_params())
+        .expect("Ne should work on complex64");
+    assert_eq!(extract_bool_vec(&result), vec![false, true]);
+}
+
+#[test]
+fn oracle_eq_complex128_equal() {
+    let a = make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let b = make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let result = eval_primitive(Primitive::Eq, &[a, b], &no_params())
+        .expect("Eq should work on complex128");
+    assert_eq!(extract_bool_vec(&result), vec![true, true]);
+}
+
+#[test]
+fn oracle_ne_complex128_basic() {
+    let a = make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let b = make_complex128_tensor(&[2], vec![(1.0, 9.0), (3.0, 4.0)]);
+    let result = eval_primitive(Primitive::Ne, &[a, b], &no_params())
+        .expect("Ne should work on complex128");
+    assert_eq!(extract_bool_vec(&result), vec![true, false]);
+}
+
+#[test]
+#[ignore = "PARITY GAP: Lt not supported for complex operands - no natural ordering"]
+fn oracle_lt_complex64_not_supported() {
+    let a = make_complex64_tensor(&[1], vec![(1.0, 0.0)]);
+    let b = make_complex64_tensor(&[1], vec![(2.0, 0.0)]);
+    let _result = eval_primitive(Primitive::Lt, &[a, b], &no_params())
+        .expect("Lt should work on complex64");
+}
+
+#[test]
+#[ignore = "PARITY GAP: Le not supported for complex operands - no natural ordering"]
+fn oracle_le_complex64_not_supported() {
+    let a = make_complex64_tensor(&[1], vec![(1.0, 0.0)]);
+    let b = make_complex64_tensor(&[1], vec![(2.0, 0.0)]);
+    let _result = eval_primitive(Primitive::Le, &[a, b], &no_params())
+        .expect("Le should work on complex64");
+}
+
+#[test]
+#[ignore = "PARITY GAP: Gt not supported for complex operands - no natural ordering"]
+fn oracle_gt_complex64_not_supported() {
+    let a = make_complex64_tensor(&[1], vec![(2.0, 0.0)]);
+    let b = make_complex64_tensor(&[1], vec![(1.0, 0.0)]);
+    let _result = eval_primitive(Primitive::Gt, &[a, b], &no_params())
+        .expect("Gt should work on complex64");
+}
+
+#[test]
+#[ignore = "PARITY GAP: Ge not supported for complex operands - no natural ordering"]
+fn oracle_ge_complex64_not_supported() {
+    let a = make_complex64_tensor(&[1], vec![(2.0, 0.0)]);
+    let b = make_complex64_tensor(&[1], vec![(1.0, 0.0)]);
+    let _result = eval_primitive(Primitive::Ge, &[a, b], &no_params())
+        .expect("Ge should work on complex64");
+}
+
+#[test]
+fn property_eq_ne_complex_dtypes_return_bool() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let (a, b) = match dtype {
+            DType::Complex64 => (
+                make_complex64_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]),
+                make_complex64_tensor(&[2], vec![(1.0, 2.0), (5.0, 6.0)]),
+            ),
+            DType::Complex128 => (
+                make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]),
+                make_complex128_tensor(&[2], vec![(1.0, 2.0), (5.0, 6.0)]),
+            ),
+            _ => unreachable!(),
+        };
+
+        for (prim, name) in [(Primitive::Eq, "Eq"), (Primitive::Ne, "Ne")] {
+            let result = eval_primitive(prim, &[a.clone(), b.clone()], &no_params())
+                .expect(&format!("{name} should work on {dtype:?}"));
+            assert_eq!(
+                result.dtype(),
+                DType::Bool,
+                "{name} with {dtype:?} input should return Bool"
+            );
+        }
+    }
+}
