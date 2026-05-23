@@ -454,3 +454,241 @@ fn property_reshape_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex64/Complex128 Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex128().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_reshape_complex64_1d_to_2d() {
+    let input = make_complex64_tensor(
+        &[6],
+        vec![
+            (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+            (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+        ],
+    );
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[2, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_reshape_complex64_2d_to_1d() {
+    let input = make_complex64_tensor(
+        &[2, 3],
+        vec![
+            (1.0, 1.0), (2.0, 2.0), (3.0, 3.0),
+            (4.0, 4.0), (5.0, 5.0), (6.0, 6.0),
+        ],
+    );
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[6])).unwrap();
+    assert_eq!(extract_shape(&result), vec![6]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals[0], (1.0, 1.0));
+    assert_eq!(vals[5], (6.0, 6.0));
+}
+
+#[test]
+fn oracle_reshape_complex64_with_inference() {
+    let input = make_complex64_tensor(
+        &[12],
+        (1..=12).map(|i| (i as f32, -(i as f32))).collect(),
+    );
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[3, -1])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 4]);
+}
+
+#[test]
+fn oracle_reshape_complex64_add_unit_dims() {
+    let input = make_complex64_tensor(&[3], vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]);
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[1, 3, 1])).unwrap();
+    assert_eq!(extract_shape(&result), vec![1, 3, 1]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]);
+}
+
+#[test]
+fn oracle_reshape_complex64_remove_unit_dims() {
+    let input = make_complex64_tensor(&[1, 3, 1], vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]);
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+}
+
+#[test]
+fn oracle_reshape_complex64_identity() {
+    let input = make_complex64_tensor(&[2, 3], vec![
+        (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0),
+        (0.0, -1.0), (1.0, 1.0), (-1.0, -1.0),
+    ]);
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[2, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals[0], (1.0, 0.0));
+    assert_eq!(vals[1], (0.0, 1.0));
+}
+
+#[test]
+fn oracle_reshape_complex128_1d_to_2d() {
+    let input = make_complex128_tensor(
+        &[6],
+        vec![
+            (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+            (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+        ],
+    );
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[2, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn oracle_reshape_complex128_with_inference() {
+    let input = make_complex128_tensor(
+        &[12],
+        (1..=12).map(|i| (i as f64, -(i as f64))).collect(),
+    );
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[-1, 4])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 4]);
+}
+
+#[test]
+fn oracle_reshape_complex64_scalar_to_tensor() {
+    let input = Value::Scalar(Literal::from_complex64(42.0, -42.0));
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[1, 1, 1])).unwrap();
+    assert_eq!(extract_shape(&result), vec![1, 1, 1]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(42.0, -42.0)]);
+}
+
+#[test]
+fn oracle_reshape_complex64_single_element() {
+    let input = make_complex64_tensor(&[1], vec![(99.0, -99.0)]);
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[1, 1, 1])).unwrap();
+    assert_eq!(extract_shape(&result), vec![1, 1, 1]);
+}
+
+#[test]
+fn oracle_reshape_complex64_preserves_dtype() {
+    let input = make_complex64_tensor(&[6], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[2, 3])).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_reshape_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[6], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[2, 3])).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn metamorphic_reshape_complex64_roundtrip() {
+    let data: Vec<(f32, f32)> = (1..=12).map(|i| (i as f32, -(i as f32))).collect();
+    let input = make_complex64_tensor(&[3, 4], data.clone());
+
+    let flattened = eval_primitive(
+        Primitive::Reshape,
+        std::slice::from_ref(&input),
+        &reshape_params(&[12]),
+    )
+    .unwrap();
+    let restored = eval_primitive(Primitive::Reshape, &[flattened], &reshape_params(&[3, 4])).unwrap();
+
+    assert_eq!(extract_shape(&restored), vec![3, 4]);
+    assert_eq!(extract_complex64_vec(&restored), data);
+}
+
+#[test]
+fn metamorphic_reshape_complex128_roundtrip() {
+    let data: Vec<(f64, f64)> = (1..=12).map(|i| (i as f64, -(i as f64))).collect();
+    let input = make_complex128_tensor(&[3, 4], data.clone());
+
+    let flattened = eval_primitive(
+        Primitive::Reshape,
+        std::slice::from_ref(&input),
+        &reshape_params(&[12]),
+    )
+    .unwrap();
+    let restored = eval_primitive(Primitive::Reshape, &[flattened], &reshape_params(&[3, 4])).unwrap();
+
+    assert_eq!(extract_shape(&restored), vec![3, 4]);
+    assert_eq!(extract_complex128_vec(&restored), data);
+}
+
+#[test]
+fn property_reshape_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let lits: Vec<Literal> = match dtype {
+            DType::Complex64 => (1..=6)
+                .map(|i| Literal::from_complex64(i as f32, -(i as f32)))
+                .collect(),
+            DType::Complex128 => (1..=6)
+                .map(|i| Literal::from_complex128(i as f64, -(i as f64)))
+                .collect(),
+            _ => unreachable!(),
+        };
+        let input = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![6] }, lits).unwrap());
+        let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[2, 3])).unwrap();
+        let t = result.as_tensor().expect("tensor result");
+        assert_eq!(t.dtype, dtype, "reshape {dtype:?}: dtype mismatch");
+        t.validate_dtype_consistency()
+            .expect("literal/dtype consistency");
+    }
+}
