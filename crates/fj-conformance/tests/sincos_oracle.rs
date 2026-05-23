@@ -560,3 +560,271 @@ fn property_sin_cos_preserves_all_float_dtypes() {
         }
     }
 }
+
+// ======================== Complex64/Complex128 coverage ========================
+//
+// Complex sin: sin(a + bi) = sin(a)*cosh(b) + i*cos(a)*sinh(b)
+// Complex cos: cos(a + bi) = cos(a)*cosh(b) - i*sin(a)*sinh(b)
+
+fn make_complex64_tensor(shape: &[u32], data: &[(f32, f32)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: &[(f64, f64)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::Complex64Bits(re, im) => (f32::from_bits(*re), f32::from_bits(*im)),
+                _ => panic!("expected Complex64"),
+            })
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex128().unwrap()).collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn assert_complex_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let (ar, ai) = actual;
+    let (er, ei) = expected;
+    let re_diff = (ar - er).abs();
+    let im_diff = (ai - ei).abs();
+    assert!(
+        re_diff < tol && im_diff < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        er,
+        ei,
+        ar,
+        ai,
+        re_diff,
+        im_diff
+    );
+}
+
+#[test]
+fn oracle_sin_complex64_zero() {
+    let input = make_complex64_tensor(&[], &[(0.0, 0.0)]);
+    let result = eval_primitive(Primitive::Sin, &[input], &BTreeMap::new()).unwrap();
+    let vec = extract_complex64_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close((vec[0].0 as f64, vec[0].1 as f64), (0.0, 0.0), 1e-6, "sin(0+0i)");
+}
+
+#[test]
+fn oracle_cos_complex64_zero() {
+    let input = make_complex64_tensor(&[], &[(0.0, 0.0)]);
+    let result = eval_primitive(Primitive::Cos, &[input], &BTreeMap::new()).unwrap();
+    let vec = extract_complex64_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close((vec[0].0 as f64, vec[0].1 as f64), (1.0, 0.0), 1e-6, "cos(0+0i)");
+}
+
+#[test]
+fn oracle_sin_complex128_pure_imaginary() {
+    // sin(i*x) = i*sinh(x)
+    let x = 0.5_f64;
+    let input = make_complex128_tensor(&[], &[(0.0, x)]);
+    let result = eval_primitive(Primitive::Sin, &[input], &BTreeMap::new()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (0.0, x.sinh()), 1e-10, "sin(0+0.5i) = i*sinh(0.5)");
+}
+
+#[test]
+fn oracle_cos_complex128_pure_imaginary() {
+    // cos(i*x) = cosh(x)
+    let x = 0.5_f64;
+    let input = make_complex128_tensor(&[], &[(0.0, x)]);
+    let result = eval_primitive(Primitive::Cos, &[input], &BTreeMap::new()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (x.cosh(), 0.0), 1e-10, "cos(0+0.5i) = cosh(0.5)");
+}
+
+#[test]
+fn oracle_sin_complex128_pure_real() {
+    let x = 0.5_f64;
+    let input = make_complex128_tensor(&[], &[(x, 0.0)]);
+    let result = eval_primitive(Primitive::Sin, &[input], &BTreeMap::new()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (x.sin(), 0.0), 1e-10, "sin(0.5+0i) = sin(0.5)");
+}
+
+#[test]
+fn oracle_cos_complex128_pure_real() {
+    let x = 0.5_f64;
+    let input = make_complex128_tensor(&[], &[(x, 0.0)]);
+    let result = eval_primitive(Primitive::Cos, &[input], &BTreeMap::new()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (x.cos(), 0.0), 1e-10, "cos(0.5+0i) = cos(0.5)");
+}
+
+#[test]
+fn oracle_sin_complex128_general() {
+    // sin(a+bi) = sin(a)*cosh(b) + i*cos(a)*sinh(b)
+    let (a, b) = (0.5_f64, 0.3_f64);
+    let expected_re = a.sin() * b.cosh();
+    let expected_im = a.cos() * b.sinh();
+
+    let input = make_complex128_tensor(&[], &[(a, b)]);
+    let result = eval_primitive(Primitive::Sin, &[input], &BTreeMap::new()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (expected_re, expected_im), 1e-10, "sin(0.5+0.3i)");
+}
+
+#[test]
+fn oracle_cos_complex128_general() {
+    // cos(a+bi) = cos(a)*cosh(b) - i*sin(a)*sinh(b)
+    let (a, b) = (0.5_f64, 0.3_f64);
+    let expected_re = a.cos() * b.cosh();
+    let expected_im = -a.sin() * b.sinh();
+
+    let input = make_complex128_tensor(&[], &[(a, b)]);
+    let result = eval_primitive(Primitive::Cos, &[input], &BTreeMap::new()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (expected_re, expected_im), 1e-10, "cos(0.5+0.3i)");
+}
+
+#[test]
+fn oracle_sincos_complex64_vector() {
+    let data: &[(f32, f32)] = &[(0.0, 0.0), (0.5, 0.0), (0.0, 0.5), (0.5, 0.3)];
+    let input_sin = make_complex64_tensor(&[4], data);
+    let input_cos = make_complex64_tensor(&[4], data);
+
+    let sin_result = eval_primitive(Primitive::Sin, &[input_sin], &BTreeMap::new()).unwrap();
+    let cos_result = eval_primitive(Primitive::Cos, &[input_cos], &BTreeMap::new()).unwrap();
+
+    let sin_vec = extract_complex64_vec(&sin_result);
+    let cos_vec = extract_complex64_vec(&cos_result);
+    assert_eq!(sin_vec.len(), 4);
+    assert_eq!(cos_vec.len(), 4);
+
+    // sin(0) = 0, cos(0) = 1
+    assert_complex_close((sin_vec[0].0 as f64, sin_vec[0].1 as f64), (0.0, 0.0), 1e-5, "sin(0)");
+    assert_complex_close((cos_vec[0].0 as f64, cos_vec[0].1 as f64), (1.0, 0.0), 1e-5, "cos(0)");
+
+    // sin(0.5) pure real
+    assert_complex_close(
+        (sin_vec[1].0 as f64, sin_vec[1].1 as f64),
+        (0.5_f64.sin(), 0.0),
+        1e-4,
+        "sin(0.5)",
+    );
+
+    // sin(0.5i) = i*sinh(0.5)
+    assert_complex_close(
+        (sin_vec[2].0 as f64, sin_vec[2].1 as f64),
+        (0.0, 0.5_f64.sinh()),
+        1e-4,
+        "sin(0.5i)",
+    );
+
+    // cos(0.5i) = cosh(0.5)
+    assert_complex_close(
+        (cos_vec[2].0 as f64, cos_vec[2].1 as f64),
+        (0.5_f64.cosh(), 0.0),
+        1e-4,
+        "cos(0.5i)",
+    );
+}
+
+#[test]
+fn oracle_sincos_complex_dtype_preservation() {
+    for prim in [Primitive::Sin, Primitive::Cos] {
+        // Complex64 -> Complex64
+        let c64_input = make_complex64_tensor(&[2], &[(0.5, 0.3), (-0.3, 0.5)]);
+        let c64_result = eval_primitive(prim, &[c64_input], &BTreeMap::new()).unwrap();
+        match &c64_result {
+            Value::Tensor(t) => {
+                assert_eq!(t.dtype, DType::Complex64, "{prim:?} should preserve Complex64");
+                t.validate_dtype_consistency().unwrap();
+            }
+            _ => panic!("expected tensor"),
+        }
+
+        // Complex128 -> Complex128
+        let c128_input = make_complex128_tensor(&[2], &[(0.5, 0.3), (-0.3, 0.5)]);
+        let c128_result = eval_primitive(prim, &[c128_input], &BTreeMap::new()).unwrap();
+        match &c128_result {
+            Value::Tensor(t) => {
+                assert_eq!(t.dtype, DType::Complex128, "{prim:?} should preserve Complex128");
+                t.validate_dtype_consistency().unwrap();
+            }
+            _ => panic!("expected tensor"),
+        }
+    }
+}
+
+#[test]
+fn oracle_sincos_pythagorean_identity_complex() {
+    // sin²(z) + cos²(z) = 1 holds for all complex z
+    let z_values: &[(f64, f64)] = &[(0.0, 0.0), (0.5, 0.3), (1.0, -0.5), (-0.3, 0.7)];
+
+    for &z in z_values {
+        let input_sin = make_complex128_tensor(&[], &[z]);
+        let input_cos = make_complex128_tensor(&[], &[z]);
+
+        let sin_result = eval_primitive(Primitive::Sin, &[input_sin], &BTreeMap::new()).unwrap();
+        let cos_result = eval_primitive(Primitive::Cos, &[input_cos], &BTreeMap::new()).unwrap();
+
+        let sin_z = extract_complex128_vec(&sin_result)[0];
+        let cos_z = extract_complex128_vec(&cos_result)[0];
+
+        // sin²(z) = sin(z) * sin(z)
+        let sin_sq_re = sin_z.0 * sin_z.0 - sin_z.1 * sin_z.1;
+        let sin_sq_im = 2.0 * sin_z.0 * sin_z.1;
+
+        // cos²(z) = cos(z) * cos(z)
+        let cos_sq_re = cos_z.0 * cos_z.0 - cos_z.1 * cos_z.1;
+        let cos_sq_im = 2.0 * cos_z.0 * cos_z.1;
+
+        // sin²(z) + cos²(z) should equal 1 + 0i
+        let sum_re = sin_sq_re + cos_sq_re;
+        let sum_im = sin_sq_im + cos_sq_im;
+
+        assert_complex_close(
+            (sum_re, sum_im),
+            (1.0, 0.0),
+            1e-10,
+            &format!("sin²({:?}) + cos²({:?}) = 1", z, z),
+        );
+    }
+}
