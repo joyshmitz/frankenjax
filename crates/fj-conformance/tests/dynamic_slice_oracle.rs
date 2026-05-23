@@ -466,3 +466,241 @@ fn property_dynamic_slice_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex64/Complex128 Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex128().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_shape(v: &Value) -> Vec<u32> {
+    match v {
+        Value::Tensor(t) => t.shape.dims.clone(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn dynamic_slice_complex64_1d_basic() {
+    let operand = make_complex64_tensor(&[5], vec![
+        (0.0, 0.0), (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "3".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(1)],
+        &params,
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn dynamic_slice_complex64_1d_from_start() {
+    let operand = make_complex64_tensor(&[4], vec![
+        (1.0, -1.0), (2.0, -2.0), (3.0, -3.0), (4.0, -4.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(0)],
+        &params,
+    )
+    .unwrap();
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(1.0, -1.0), (2.0, -2.0)]);
+}
+
+#[test]
+fn dynamic_slice_complex64_1d_clamped() {
+    // Start index out of bounds should be clamped
+    let operand = make_complex64_tensor(&[4], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(10)],  // Way past end
+        &params,
+    )
+    .unwrap();
+    let vals = extract_complex64_vec(&result);
+    // Should clamp to last valid position [2:4]
+    assert_eq!(vals, vec![(3.0, 0.0), (4.0, 0.0)]);
+}
+
+#[test]
+fn dynamic_slice_complex64_2d() {
+    let operand = make_complex64_tensor(&[3, 3], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+        (7.0, 0.0), (8.0, 0.0), (9.0, 0.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2,2".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(1), Value::scalar_i64(1)],
+        &params,
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(5.0, 0.0), (6.0, 0.0), (8.0, 0.0), (9.0, 0.0)]);
+}
+
+#[test]
+fn dynamic_slice_complex128_1d() {
+    let operand = make_complex128_tensor(&[4], vec![
+        (1.0, 2.0), (3.0, 4.0), (5.0, 6.0), (7.0, 8.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(1)],
+        &params,
+    )
+    .unwrap();
+    let vals = extract_complex128_vec(&result);
+    assert_eq!(vals, vec![(3.0, 4.0), (5.0, 6.0)]);
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn dynamic_slice_complex64_full_slice() {
+    let operand = make_complex64_tensor(&[3], vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "3".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(0)],
+        &params,
+    )
+    .unwrap();
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+}
+
+#[test]
+fn dynamic_slice_complex64_preserves_dtype() {
+    let operand = make_complex64_tensor(&[4], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(0)],
+        &params,
+    )
+    .unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn dynamic_slice_complex128_preserves_dtype() {
+    let operand = make_complex128_tensor(&[4], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0),
+    ]);
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2".to_owned());
+
+    let result = eval_primitive(
+        Primitive::DynamicSlice,
+        &[operand, Value::scalar_i64(0)],
+        &params,
+    )
+    .unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn property_dynamic_slice_preserves_complex_dtypes() {
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_owned(), "2".to_owned());
+
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let lits: Vec<Literal> = match dtype {
+            DType::Complex64 => (1..=4)
+                .map(|i| Literal::from_complex64(i as f32, -(i as f32)))
+                .collect(),
+            DType::Complex128 => (1..=4)
+                .map(|i| Literal::from_complex128(i as f64, -(i as f64)))
+                .collect(),
+            _ => unreachable!(),
+        };
+        let input = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![4] }, lits).unwrap());
+        let result = eval_primitive(
+            Primitive::DynamicSlice,
+            &[input, Value::scalar_i64(1)],
+            &params,
+        )
+        .unwrap();
+        let t = result.as_tensor().expect("tensor result");
+        assert_eq!(t.dtype, dtype, "dynamic_slice {dtype:?}: dtype mismatch");
+        t.validate_dtype_consistency()
+            .expect("literal/dtype consistency");
+    }
+}
