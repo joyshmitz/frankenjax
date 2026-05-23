@@ -395,3 +395,24 @@ fn polygamma_noninteger_order() {
     let val = extract_scalar(&result);
     assert!(val.is_finite(), "polygamma(0.5, 1) should be finite");
 }
+
+#[test]
+fn polygamma_2d_empty() {
+    let order = scalar_f64(1.0);
+    let x = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_polygamma(order, x);
+    assert_eq!(get_shape(&result), vec![0, 3]);
+}
+
+#[test]
+fn polygamma_3d_shape() {
+    let order = scalar_f64(1.0);
+    let x = tensor_f64(&[2, 2, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    let result = eval_polygamma(order, x);
+    assert_eq!(get_shape(&result), vec![2, 2, 2]);
+    let vals = get_elements(&result);
+    assert_eq!(vals.len(), 8);
+    assert!(vals.iter().all(|&v| v.is_finite()));
+}
