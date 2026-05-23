@@ -404,3 +404,81 @@ fn property_betainc_outputs_f64() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_betainc_symmetry_relation() {
+    // betainc(a, b, x) + betainc(b, a, 1-x) = 1
+    let a = make_f64_tensor(&[4], vec![1.0, 2.0, 3.0, 4.0]);
+    let b = make_f64_tensor(&[4], vec![2.0, 3.0, 4.0, 5.0]);
+    let x = make_f64_tensor(&[4], vec![0.2, 0.4, 0.6, 0.8]);
+    let one_minus_x = make_f64_tensor(&[4], vec![0.8, 0.6, 0.4, 0.2]);
+
+    let result1 = eval_primitive(Primitive::Betainc, &[a.clone(), b.clone(), x], &no_params()).unwrap();
+    let result2 = eval_primitive(Primitive::Betainc, &[b, a, one_minus_x], &no_params()).unwrap();
+
+    let vals1 = extract_f64_vec(&result1);
+    let vals2 = extract_f64_vec(&result2);
+
+    for (i, (&v1, &v2)) in vals1.iter().zip(vals2.iter()).enumerate() {
+        assert!(
+            (v1 + v2 - 1.0).abs() < 0.01,
+            "betainc(a, b, x) + betainc(b, a, 1-x) should equal 1 at index {i}: got {}",
+            v1 + v2
+        );
+    }
+}
+
+#[test]
+fn metamorphic_betainc_monotonicity_in_x() {
+    // betainc(a, b, x) is monotonically increasing in x for fixed a, b
+    let a = make_f64_tensor(&[], vec![2.0]);
+    let b = make_f64_tensor(&[], vec![3.0]);
+    let x_vals = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0];
+    let mut prev = 0.0;
+    for &x_val in &x_vals {
+        let x = make_f64_tensor(&[], vec![x_val]);
+        let result = eval_primitive(Primitive::Betainc, &[a.clone(), b.clone(), x], &no_params()).unwrap();
+        let curr = extract_f64_scalar(&result);
+        assert!(
+            curr >= prev - 1e-10,
+            "betainc should be monotonically increasing: at x={x_val}, got {curr} < prev {prev}"
+        );
+        prev = curr;
+    }
+}
+
+#[test]
+fn metamorphic_betainc_bounded_output() {
+    // betainc(a, b, x) is always in [0, 1] for x in [0, 1]
+    let a = make_f64_tensor(&[5], vec![0.5, 1.0, 2.0, 5.0, 10.0]);
+    let b = make_f64_tensor(&[5], vec![0.5, 2.0, 1.0, 3.0, 5.0]);
+    let x = make_f64_tensor(&[5], vec![0.1, 0.3, 0.5, 0.7, 0.9]);
+
+    let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+    let vals = extract_f64_vec(&result);
+
+    for (i, &v) in vals.iter().enumerate() {
+        assert!(
+            v >= 0.0 && v <= 1.0,
+            "betainc output should be in [0, 1] at index {i}: got {v}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_betainc_equal_params_at_half() {
+    // betainc(a, a, 0.5) = 0.5 for any a > 0 (symmetry when a = b)
+    for a_val in [1.0, 2.0, 3.0, 5.0, 10.0] {
+        let a = make_f64_tensor(&[], vec![a_val]);
+        let b = make_f64_tensor(&[], vec![a_val]);
+        let x = make_f64_tensor(&[], vec![0.5]);
+        let result = eval_primitive(Primitive::Betainc, &[a, b, x], &no_params()).unwrap();
+        let val = extract_f64_scalar(&result);
+        assert!(
+            (val - 0.5).abs() < 0.01,
+            "betainc(a, a, 0.5) should equal 0.5 for a={a_val}: got {val}"
+        );
+    }
+}
