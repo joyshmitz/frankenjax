@@ -371,3 +371,76 @@ fn property_bessel_i1e_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex Type Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+#[ignore = "PARITY GAP: bessel functions not supported for complex operands"]
+fn oracle_bessel_i0e_complex64_real_axis() {
+    // bessel_i0e on real axis should match real version
+    let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
+    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params())
+        .expect("bessel_i0e complex64 should succeed");
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+#[ignore = "PARITY GAP: bessel functions not supported for complex operands"]
+fn oracle_bessel_i1e_complex64_real_axis() {
+    let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
+    let result = eval_primitive(Primitive::BesselI1e, &[input], &no_params())
+        .expect("bessel_i1e complex64 should succeed");
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+#[ignore = "PARITY GAP: bessel functions not supported for complex operands"]
+fn oracle_bessel_i0e_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
+    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params())
+        .expect("bessel_i0e complex128 should succeed");
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+#[ignore = "PARITY GAP: bessel functions not supported for complex operands"]
+fn property_bessel_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = match dtype {
+            DType::Complex64 => make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]),
+            DType::Complex128 => make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]),
+            _ => unreachable!(),
+        };
+        for primitive in [Primitive::BesselI0e, Primitive::BesselI1e] {
+            let result = eval_primitive(primitive, std::slice::from_ref(&input), &no_params())
+                .expect("bessel should succeed for complex dtype");
+            assert_eq!(result.dtype(), dtype, "{primitive:?} {dtype:?}: dtype mismatch");
+        }
+    }
+}
