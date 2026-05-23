@@ -542,7 +542,7 @@ fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
 }
 
 #[test]
-#[ignore = "PARITY GAP: xlogy not supported for complex operands"]
+
 fn oracle_xlogy_complex64_basic() {
     // xlogy(1+0i, e+0i) = 1 * log(e) = 1
     let x = make_complex64_tensor(&[1], vec![(1.0, 0.0)]);
@@ -553,7 +553,7 @@ fn oracle_xlogy_complex64_basic() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: xlogy not supported for complex operands"]
+
 fn oracle_xlogy_complex128_preserves_dtype() {
     let x = make_complex128_tensor(&[1], vec![(1.0, 0.0)]);
     let y = make_complex128_tensor(&[1], vec![(1.0, 0.0)]);
@@ -563,7 +563,7 @@ fn oracle_xlogy_complex128_preserves_dtype() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: xlogy not supported for complex operands"]
+
 fn property_xlogy_preserves_complex_dtypes() {
     for dtype in [DType::Complex64, DType::Complex128] {
         let (x, y) = match dtype {

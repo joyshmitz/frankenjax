@@ -171,6 +171,13 @@ fn apply_complex_binary(
         Primitive::Min => Ok(if complex_lex_ge(lhs, rhs) { rhs } else { lhs }),
         Primitive::Pow => apply_complex_pow(lhs, rhs),
         Primitive::Atan2 => Ok(complex_atan2(lhs, rhs)),
+        Primitive::XLogY => {
+            if ar == 0.0 && ai == 0.0 {
+                Ok((0.0, 0.0))
+            } else {
+                Ok(complex_mul(lhs, complex_log(rhs)))
+            }
+        }
         _ => Err(EvalError::TypeMismatch {
             primitive,
             detail: complex_binary_unsupported_detail(primitive),
@@ -464,7 +471,8 @@ fn eval_binary_elementwise_complex(
         | Primitive::Max
         | Primitive::Min
         | Primitive::Pow
-        | Primitive::Atan2 => {}
+        | Primitive::Atan2
+        | Primitive::XLogY => {}
         _ => {
             return Err(EvalError::TypeMismatch {
                 primitive,
