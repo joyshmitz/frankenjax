@@ -456,3 +456,121 @@ fn oracle_bitcast_2d_empty() {
     assert_eq!(extract_shape(&result), vec![0, 4]);
     assert_eq!(result.dtype(), DType::I64);
 }
+
+// ====================== COMPLEX DTYPE TESTS ======================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex128().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_bitcast_complex64_to_i64() {
+    let input = make_complex64_tensor(&[1], vec![(1.0, 2.0)]);
+    let result = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[input],
+        &bitcast_params("i64"),
+    )
+    .expect("bitcast complex64 to i64 should work");
+    assert_eq!(result.dtype(), DType::I64);
+}
+
+#[test]
+fn oracle_bitcast_i64_to_complex64() {
+    let input = make_i64_tensor(&[1], vec![0x4000_0000_3f80_0000_i64]);
+    let result = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[input],
+        &bitcast_params("complex64"),
+    )
+    .expect("bitcast i64 to complex64 should work");
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_bitcast_complex64_roundtrip() {
+    let re = 3.14159_f32;
+    let im = 2.71828_f32;
+    let input = make_complex64_tensor(&[1], vec![(re, im)]);
+    let as_i64 = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[input],
+        &bitcast_params("i64"),
+    )
+    .expect("bitcast to i64");
+    let back = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[as_i64],
+        &bitcast_params("complex64"),
+    )
+    .expect("bitcast back to complex64");
+    let vals = extract_complex64_vec(&back);
+    assert!(
+        (vals[0].0 - re).abs() < 1e-6,
+        "real part should round-trip: {} vs {}",
+        vals[0].0,
+        re
+    );
+    assert!(
+        (vals[0].1 - im).abs() < 1e-6,
+        "imag part should round-trip: {} vs {}",
+        vals[0].1,
+        im
+    );
+}
+
+#[test]
+fn oracle_bitcast_complex128_preserves_shape() {
+    let input = make_complex128_tensor(&[2, 3], vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (4.0, 0.0), (5.0, 0.0), (6.0, 0.0),
+    ]);
+    let result = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[input.clone()],
+        &bitcast_params("complex128"),
+    )
+    .expect("identity bitcast should work");
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(result.dtype(), DType::Complex128);
+}
