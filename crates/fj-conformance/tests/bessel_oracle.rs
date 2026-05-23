@@ -401,7 +401,6 @@ fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
 }
 
 #[test]
-#[ignore = "PARITY GAP: bessel functions not supported for complex operands"]
 fn oracle_bessel_i0e_complex64_real_axis() {
     // bessel_i0e on real axis should match real version
     let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
@@ -411,7 +410,6 @@ fn oracle_bessel_i0e_complex64_real_axis() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: bessel functions not supported for complex operands"]
 fn oracle_bessel_i1e_complex64_real_axis() {
     let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
     let result = eval_primitive(Primitive::BesselI1e, &[input], &no_params())
@@ -420,7 +418,6 @@ fn oracle_bessel_i1e_complex64_real_axis() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: bessel functions not supported for complex operands"]
 fn oracle_bessel_i0e_complex128_preserves_dtype() {
     let input = make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
     let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params())
@@ -429,7 +426,6 @@ fn oracle_bessel_i0e_complex128_preserves_dtype() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: bessel functions not supported for complex operands"]
 fn property_bessel_preserves_complex_dtypes() {
     for dtype in [DType::Complex64, DType::Complex128] {
         let input = match dtype {

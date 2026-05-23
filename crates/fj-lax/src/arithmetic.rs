@@ -413,6 +413,37 @@ fn complex_digamma(z: (f64, f64)) -> (f64, f64) {
     result
 }
 
+fn complex_bessel_i0e(z: (f64, f64)) -> (f64, f64) {
+    let z_sq_4 = complex_mul(complex_mul(z, z), (0.25, 0.0));
+    let mut sum = (1.0, 0.0);
+    let mut term = (1.0, 0.0);
+    for k in 1..40 {
+        term = complex_div(complex_mul(term, z_sq_4), ((k * k) as f64, 0.0));
+        sum = complex_add(sum, term);
+        if term.0.abs() < 1e-15 && term.1.abs() < 1e-15 {
+            break;
+        }
+    }
+    let scale = (-z.0.abs()).exp();
+    (sum.0 * scale, sum.1 * scale)
+}
+
+fn complex_bessel_i1e(z: (f64, f64)) -> (f64, f64) {
+    let z_sq_4 = complex_mul(complex_mul(z, z), (0.25, 0.0));
+    let mut sum = (1.0, 0.0);
+    let mut term = (1.0, 0.0);
+    for k in 1..40 {
+        term = complex_div(complex_mul(term, z_sq_4), ((k * (k + 1)) as f64, 0.0));
+        sum = complex_add(sum, term);
+        if term.0.abs() < 1e-15 && term.1.abs() < 1e-15 {
+            break;
+        }
+    }
+    let i1 = complex_mul((0.5, 0.0), complex_mul(z, sum));
+    let scale = (-z.0.abs()).exp();
+    (i1.0 * scale, i1.1 * scale)
+}
+
 fn complex_unary_elementwise(primitive: Primitive, input: (f64, f64)) -> Option<(f64, f64)> {
     match primitive {
         Primitive::Sqrt => Some(complex_sqrt(input)),
@@ -440,6 +471,8 @@ fn complex_unary_elementwise(primitive: Primitive, input: (f64, f64)) -> Option<
         Primitive::ErfInv => Some(complex_erf_inv(input)),
         Primitive::Lgamma => Some(complex_lgamma(input)),
         Primitive::Digamma => Some(complex_digamma(input)),
+        Primitive::BesselI0e => Some(complex_bessel_i0e(input)),
+        Primitive::BesselI1e => Some(complex_bessel_i1e(input)),
         _ => None,
     }
 }
