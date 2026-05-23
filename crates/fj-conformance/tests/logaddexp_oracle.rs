@@ -588,3 +588,88 @@ fn property_logaddexp_preserves_complex_dtypes() {
         assert_eq!(result.dtype(), dtype, "logaddexp {dtype:?}: dtype mismatch");
     }
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_logaddexp_commutativity() {
+    // logaddexp(x, y) = logaddexp(y, x)
+    let x = make_f64_tensor(&[5], vec![0.0, 1.0, -1.0, 10.0, -10.0]);
+    let y = make_f64_tensor(&[5], vec![1.0, -1.0, 0.0, -5.0, 5.0]);
+    let result_xy = eval_primitive(Primitive::LogAddExp, &[x.clone(), y.clone()], &no_params()).unwrap();
+    let result_yx = eval_primitive(Primitive::LogAddExp, &[y, x], &no_params()).unwrap();
+    let vals_xy = extract_f64_vec(&result_xy);
+    let vals_yx = extract_f64_vec(&result_yx);
+    for (i, (&v1, &v2)) in vals_xy.iter().zip(vals_yx.iter()).enumerate() {
+        assert!(
+            (v1 - v2).abs() < 1e-10,
+            "logaddexp(x, y) should equal logaddexp(y, x) at index {i}: got {} vs {}",
+            v1, v2
+        );
+    }
+}
+
+#[test]
+fn metamorphic_logaddexp_same_value() {
+    // logaddexp(x, x) = x + ln(2)
+    let x = make_f64_tensor(&[5], vec![0.0, 1.0, -1.0, 10.0, -10.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x.clone(), x.clone()], &no_params()).unwrap();
+    let vals = extract_f64_vec(&result);
+    let x_vals = extract_f64_vec(&x);
+    let ln2 = 2.0_f64.ln();
+    for (i, (&v, &x_v)) in vals.iter().zip(x_vals.iter()).enumerate() {
+        let expected = x_v + ln2;
+        assert!(
+            (v - expected).abs() < 1e-10,
+            "logaddexp(x, x) should equal x + ln(2) at index {i}: got {v}, expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_logaddexp_greater_than_max() {
+    // logaddexp(x, y) >= max(x, y) always
+    let x = make_f64_tensor(&[5], vec![0.0, 1.0, -1.0, 10.0, -10.0]);
+    let y = make_f64_tensor(&[5], vec![1.0, -1.0, 0.0, -5.0, 5.0]);
+    let result = eval_primitive(Primitive::LogAddExp, &[x.clone(), y.clone()], &no_params()).unwrap();
+    let vals = extract_f64_vec(&result);
+    let x_vals = extract_f64_vec(&x);
+    let y_vals = extract_f64_vec(&y);
+    for (i, (&v, (&x_v, &y_v))) in vals.iter().zip(x_vals.iter().zip(y_vals.iter())).enumerate() {
+        let max_val = x_v.max(y_v);
+        assert!(
+            v >= max_val - 1e-10,
+            "logaddexp(x, y) should be >= max(x, y) at index {i}: got {v} < {}",
+            max_val
+        );
+    }
+}
+
+#[test]
+fn metamorphic_logaddexp_associativity_approximation() {
+    // While logaddexp is not strictly associative, we can test that
+    // logaddexp(logaddexp(x, y), z) gives a sensible result
+    let x = make_f64_tensor(&[], vec![1.0]);
+    let y = make_f64_tensor(&[], vec![2.0]);
+    let z = make_f64_tensor(&[], vec![3.0]);
+
+    let xy = eval_primitive(Primitive::LogAddExp, &[x.clone(), y.clone()], &no_params()).unwrap();
+    let xyz_left = eval_primitive(Primitive::LogAddExp, &[xy, z.clone()], &no_params()).unwrap();
+
+    let yz = eval_primitive(Primitive::LogAddExp, &[y, z], &no_params()).unwrap();
+    let xyz_right = eval_primitive(Primitive::LogAddExp, &[x, yz], &no_params()).unwrap();
+
+    let left = extract_f64_scalar(&xyz_left);
+    let right = extract_f64_scalar(&xyz_right);
+
+    // Both should equal log(e^1 + e^2 + e^3)
+    let expected = (1.0_f64.exp() + 2.0_f64.exp() + 3.0_f64.exp()).ln();
+    assert!(
+        (left - expected).abs() < 1e-10,
+        "left associative: got {left}, expected {expected}"
+    );
+    assert!(
+        (right - expected).abs() < 1e-10,
+        "right associative: got {right}, expected {expected}"
+    );
+}
