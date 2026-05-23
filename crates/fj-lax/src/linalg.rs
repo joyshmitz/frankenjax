@@ -26,6 +26,22 @@ fn complex_sub(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     (a.0 - b.0, a.1 - b.1)
 }
 
+fn complex_add(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0 + b.0, a.1 + b.1)
+}
+
+fn complex_conj(a: (f64, f64)) -> (f64, f64) {
+    (a.0, -a.1)
+}
+
+fn complex_sqrt_real(x: f64) -> (f64, f64) {
+    if x >= 0.0 {
+        (x.sqrt(), 0.0)
+    } else {
+        (0.0, (-x).sqrt())
+    }
+}
+
 // ── Matrix Helpers ──────────────────────────────────────────────────────────
 
 /// Extract a rank-2 (matrix) tensor from Value, returning its dimensions and
@@ -176,10 +192,10 @@ fn linalg_literal_from_f64(dtype: DType, value: f64) -> Literal {
 
 // ── Cholesky decomposition ──────────────────────────────────────────
 
-/// Compute the lower-triangular Cholesky factor L such that A = L * L^T.
+/// Compute the lower-triangular Cholesky factor L such that A = L * L^H.
 ///
 /// Uses the standard row-by-row algorithm (Cholesky–Banachiewicz).
-/// Input must be a symmetric positive-definite matrix.
+/// Input must be a Hermitian positive-definite matrix (symmetric for real).
 pub(crate) fn eval_cholesky(
     inputs: &[Value],
     _params: &std::collections::BTreeMap<String, String>,
@@ -194,7 +210,7 @@ pub(crate) fn eval_cholesky(
         });
     }
 
-    let (m, n, a, dtype) = extract_matrix(primitive, &inputs[0])?;
+    let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
 
     if m != n {
         return Err(EvalError::Unsupported {
@@ -203,33 +219,35 @@ pub(crate) fn eval_cholesky(
         });
     }
 
-    let mut l = vec![0.0_f64; m * m];
+    let mut l = vec![(0.0_f64, 0.0_f64); m * m];
 
     for i in 0..m {
         for j in 0..=i {
-            let mut sum = 0.0_f64;
+            let mut sum = (0.0_f64, 0.0_f64);
             for k in 0..j {
-                sum += l[i * m + k] * l[j * m + k];
+                sum = complex_add(sum, complex_mul(l[i * m + k], complex_conj(l[j * m + k])));
             }
 
             if i == j {
-                let diag = a[i * m + i] - sum;
-                if diag <= 0.0 {
+                let diag_val = complex_sub(a[i * m + i], sum);
+                if diag_val.0 <= 0.0 || diag_val.1.abs() > 1e-10 {
                     return Err(EvalError::Unsupported {
                         primitive,
                         detail: format!(
-                            "matrix is not positive definite (diagonal element {i} = {diag})"
+                            "matrix is not positive definite (diagonal element {i} = {:?})",
+                            diag_val
                         ),
                     });
                 }
-                l[i * m + j] = diag.sqrt();
+                l[i * m + j] = (diag_val.0.sqrt(), 0.0);
             } else {
-                l[i * m + j] = (a[i * m + j] - sum) / l[j * m + j];
+                let numer = complex_sub(a[i * m + j], sum);
+                l[i * m + j] = complex_div(numer, l[j * m + j]);
             }
         }
     }
 
-    matrix_to_value(m, m, &l, dtype)
+    complex_matrix_to_value(m, m, &l, dtype)
 }
 
 // ── Triangular solve ────────────────────────────────────────────────
@@ -255,8 +273,8 @@ pub(crate) fn eval_triangular_solve(
         });
     }
 
-    let (m_a, n_a, a, dtype_a) = extract_matrix(primitive, &inputs[0])?;
-    let (m_b, n_b, b, dtype_b) = extract_matrix(primitive, &inputs[1])?;
+    let (m_a, n_a, a, dtype_a) = extract_complex_matrix(primitive, &inputs[0])?;
+    let (m_b, n_b, b, dtype_b) = extract_complex_matrix(primitive, &inputs[1])?;
 
     if m_a != n_a {
         return Err(EvalError::Unsupported {
@@ -285,85 +303,77 @@ pub(crate) fn eval_triangular_solve(
         .get("unit_diagonal")
         .is_some_and(|v| v.trim() == "true");
 
-    let n = m_a; // system size
-
-    // Solve column by column: for each column j of B, solve A x_j = b_j
-    let mut x = vec![0.0_f64; n * n_b];
-
-    // Reuse buffer across column iterations to avoid O(n_b) allocations
-    let mut b_col = vec![0.0_f64; n];
+    let n = m_a;
+    let one = (1.0, 0.0);
+    let mut x = vec![(0.0_f64, 0.0_f64); n * n_b];
+    let mut b_col = vec![(0.0_f64, 0.0_f64); n];
 
     for col in 0..n_b {
-        // Extract column `col` from B into reused buffer
         for row in 0..n {
             b_col[row] = b[row * n_b + col];
         }
 
         if lower && !transpose_a {
-            // Forward substitution (lower triangular)
             for i in 0..n {
                 for k in 0..i {
-                    b_col[i] -= a[i * n + k] * x[k * n_b + col];
+                    b_col[i] = complex_sub(b_col[i], complex_mul(a[i * n + k], x[k * n_b + col]));
                 }
-                let diag = if unit_diagonal { 1.0 } else { a[i * n + i] };
-                if diag.abs() < f64::EPSILON * 1e4 {
+                let diag = if unit_diagonal { one } else { a[i * n + i] };
+                if complex_abs(diag) < f64::EPSILON * 1e4 {
                     return Err(EvalError::Unsupported {
                         primitive,
                         detail: "singular or near-singular triangular matrix".to_owned(),
                     });
                 }
-                x[i * n_b + col] = b_col[i] / diag;
+                x[i * n_b + col] = complex_div(b_col[i], diag);
             }
         } else if !lower && !transpose_a {
-            // Back substitution (upper triangular)
             for i in (0..n).rev() {
                 for k in (i + 1)..n {
-                    b_col[i] -= a[i * n + k] * x[k * n_b + col];
+                    b_col[i] = complex_sub(b_col[i], complex_mul(a[i * n + k], x[k * n_b + col]));
                 }
-                let diag = if unit_diagonal { 1.0 } else { a[i * n + i] };
-                if diag.abs() < f64::EPSILON * 1e4 {
+                let diag = if unit_diagonal { one } else { a[i * n + i] };
+                if complex_abs(diag) < f64::EPSILON * 1e4 {
                     return Err(EvalError::Unsupported {
                         primitive,
                         detail: "singular or near-singular triangular matrix".to_owned(),
                     });
                 }
-                x[i * n_b + col] = b_col[i] / diag;
+                x[i * n_b + col] = complex_div(b_col[i], diag);
             }
         } else if lower && transpose_a {
-            // Back substitution with L^T (effectively upper triangular)
             for i in (0..n).rev() {
                 for k in (i + 1)..n {
-                    b_col[i] -= a[k * n + i] * x[k * n_b + col]; // a[k][i] = L^T[i][k]
+                    b_col[i] = complex_sub(b_col[i], complex_mul(a[k * n + i], x[k * n_b + col]));
                 }
-                let diag = if unit_diagonal { 1.0 } else { a[i * n + i] };
-                if diag.abs() < f64::EPSILON * 1e4 {
+                let diag = if unit_diagonal { one } else { a[i * n + i] };
+                if complex_abs(diag) < f64::EPSILON * 1e4 {
                     return Err(EvalError::Unsupported {
                         primitive,
                         detail: "singular or near-singular triangular matrix".to_owned(),
                     });
                 }
-                x[i * n_b + col] = b_col[i] / diag;
+                x[i * n_b + col] = complex_div(b_col[i], diag);
             }
         } else {
-            // !lower && transpose_a: forward substitution with U^T
             for i in 0..n {
                 for k in 0..i {
-                    b_col[i] -= a[k * n + i] * x[k * n_b + col]; // a[k][i] = U^T[i][k]
+                    b_col[i] = complex_sub(b_col[i], complex_mul(a[k * n + i], x[k * n_b + col]));
                 }
-                let diag = if unit_diagonal { 1.0 } else { a[i * n + i] };
-                if diag.abs() < f64::EPSILON * 1e4 {
+                let diag = if unit_diagonal { one } else { a[i * n + i] };
+                if complex_abs(diag) < f64::EPSILON * 1e4 {
                     return Err(EvalError::Unsupported {
                         primitive,
                         detail: "singular or near-singular triangular matrix".to_owned(),
                     });
                 }
-                x[i * n_b + col] = b_col[i] / diag;
+                x[i * n_b + col] = complex_div(b_col[i], diag);
             }
         }
     }
 
     let out_dtype = promote_dtype(dtype_a, dtype_b);
-    matrix_to_value(n, n_b, &x, out_dtype)
+    complex_matrix_to_value(n, n_b, &x, out_dtype)
 }
 
 // ── QR decomposition ───────────────────────────────────────────────

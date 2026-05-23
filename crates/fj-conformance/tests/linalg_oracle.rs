@@ -1029,7 +1029,6 @@ fn extract_complex128_matrix(val: &Value) -> Vec<(f64, f64)> {
 }
 
 #[test]
-#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
 fn oracle_triangular_solve_complex64_lower_2x2() {
     // Solve L * X = B where L is lower triangular
     // L = [[1+0i, 0], [0.5+0i, 1+0i]], B = I (identity)
@@ -1052,7 +1051,6 @@ fn oracle_triangular_solve_complex64_lower_2x2() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
 fn oracle_triangular_solve_complex64_with_imaginary() {
     // L = [[1+i, 0], [0, 1+i]], B = [[1+i, 0], [0, 1+i]]
     // Solution X = I (identity)
@@ -1074,7 +1072,6 @@ fn oracle_triangular_solve_complex64_with_imaginary() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
 fn oracle_triangular_solve_complex128_lower_2x2() {
     // Same as complex64 but with higher precision
     let lower = make_complex128_matrix(2, 2, &[
@@ -1094,7 +1091,6 @@ fn oracle_triangular_solve_complex128_lower_2x2() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
 fn oracle_cholesky_complex64_hermitian_2x2() {
     // Hermitian positive-definite matrix: [[2, 1-i], [1+i, 2]]
     // This is A where A = L * L^H (conjugate transpose)
@@ -1112,7 +1108,7 @@ fn oracle_cholesky_complex64_hermitian_2x2() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
+#[ignore = "PARITY GAP: QR not yet implemented for complex types"]
 fn oracle_qr_complex64_2x2() {
     // QR decomposition of a simple complex matrix
     let matrix = make_complex64_matrix(2, 2, &[
@@ -1129,7 +1125,6 @@ fn oracle_qr_complex64_2x2() {
 }
 
 #[test]
-#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
 fn property_triangular_solve_preserves_complex_dtypes() {
     for dtype in [DType::Complex64, DType::Complex128] {
         let (lower, rhs) = match dtype {
