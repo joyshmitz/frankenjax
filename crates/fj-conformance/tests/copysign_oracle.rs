@@ -370,3 +370,76 @@ fn property_copysign_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_copysign_preserves_magnitude() {
+    // |copysign(x, y)| = |x|
+    let x = make_f64_tensor(&[5], vec![3.0, -4.0, 5.0, -6.0, 0.0]);
+    let y = make_f64_tensor(&[5], vec![-1.0, 1.0, -1.0, 1.0, -1.0]);
+    let result = eval_primitive(Primitive::CopySign, &[x.clone(), y], &no_params()).unwrap();
+    let result_vals = extract_f64_vec(&result);
+    let x_vals = extract_f64_vec(&x);
+    for (i, (&r, &x_v)) in result_vals.iter().zip(x_vals.iter()).enumerate() {
+        assert!(
+            (r.abs() - x_v.abs()).abs() < 1e-10,
+            "copysign at index {i}: |result|={} should equal |x|={}",
+            r.abs(), x_v.abs()
+        );
+    }
+}
+
+#[test]
+fn metamorphic_copysign_takes_sign_from_y() {
+    // sign(copysign(x, y)) = sign(y) for nonzero values
+    let x = make_f64_tensor(&[4], vec![3.0, -4.0, 5.0, -6.0]);
+    let y = make_f64_tensor(&[4], vec![-7.0, 8.0, -9.0, 10.0]);
+    let result = eval_primitive(Primitive::CopySign, &[x, y.clone()], &no_params()).unwrap();
+    let result_vals = extract_f64_vec(&result);
+    let y_vals = extract_f64_vec(&y);
+    for (i, (&r, &y_v)) in result_vals.iter().zip(y_vals.iter()).enumerate() {
+        let r_sign = r.signum();
+        let y_sign = y_v.signum();
+        assert!(
+            (r_sign - y_sign).abs() < 1e-10,
+            "copysign at index {i}: result sign {} should match y sign {}",
+            r_sign, y_sign
+        );
+    }
+}
+
+#[test]
+fn metamorphic_copysign_double_application() {
+    // copysign(copysign(x, y), z) = copysign(x, z)
+    let x = make_f64_tensor(&[3], vec![3.0, -4.0, 5.0]);
+    let y = make_f64_tensor(&[3], vec![-1.0, 1.0, -1.0]);
+    let z = make_f64_tensor(&[3], vec![1.0, -1.0, 1.0]);
+    let first = eval_primitive(Primitive::CopySign, &[x.clone(), y], &no_params()).unwrap();
+    let double = eval_primitive(Primitive::CopySign, &[first, z.clone()], &no_params()).unwrap();
+    let direct = eval_primitive(Primitive::CopySign, &[x, z], &no_params()).unwrap();
+    let double_vals = extract_f64_vec(&double);
+    let direct_vals = extract_f64_vec(&direct);
+    for (i, (&d, &expected)) in double_vals.iter().zip(direct_vals.iter()).enumerate() {
+        assert!(
+            (d - expected).abs() < 1e-10,
+            "double copysign at index {i}: got {d}, expected {expected}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_copysign_with_self_positive() {
+    // copysign(|x|, x) = |x| * sign(x) = x for nonzero x
+    let x = make_f64_tensor(&[4], vec![3.0, -4.0, 5.0, -6.0]);
+    let abs_x = make_f64_tensor(&[4], vec![3.0, 4.0, 5.0, 6.0]);
+    let result = eval_primitive(Primitive::CopySign, &[abs_x, x.clone()], &no_params()).unwrap();
+    let result_vals = extract_f64_vec(&result);
+    let x_vals = extract_f64_vec(&x);
+    for (i, (&r, &expected)) in result_vals.iter().zip(x_vals.iter()).enumerate() {
+        assert!(
+            (r - expected).abs() < 1e-10,
+            "copysign(|x|, x) at index {i}: got {r}, expected {expected}"
+        );
+    }
+}
