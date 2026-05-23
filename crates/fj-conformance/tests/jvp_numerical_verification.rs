@@ -1386,3 +1386,101 @@ fn div_jvp_numerical_complex64() {
     let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
     assert_complex64_close(actual, expected, 1e-5, "div JVP complex64 da only");
 }
+
+/// Complex64 Rsqrt JVP: d/dz rsqrt(z) = -1/(2*z^(3/2))
+#[test]
+fn rsqrt_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(3.0, 4.0);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Rsqrt);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // sqrt(3+4i) = 2+i, rsqrt = 1/(2+i) = (2-i)/5 = 0.4 - 0.2i
+    // d/dz rsqrt(z) = -1/(2*z*sqrt(z)) = -rsqrt/(2z)
+    // = -(0.4-0.2i)/(2*(3+4i)) = -(0.4-0.2i)/(6+8i)
+    let rsqrt = complex_div(1.0, 0.0, 2.0, 1.0);
+    let two_z = (6.0, 8.0);
+    let neg_rsqrt = complex_neg(rsqrt.0, rsqrt.1);
+    let expected = complex_div(neg_rsqrt.0, neg_rsqrt.1, two_z.0, two_z.1);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-5, "rsqrt JVP at z=3+4i");
+}
+
+/// Complex64 Cbrt JVP: d/dz cbrt(z) = 1/(3*cbrt(z)²)
+#[test]
+fn cbrt_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(8.0, 0.0);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Cbrt);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // cbrt(8) = 2, d/dz cbrt(z) = 1/(3*z^(2/3)) = 1/(3*4) = 1/12 ≈ 0.0833
+    let expected = (1.0 / 12.0, 0.0);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "cbrt JVP at z=8");
+}
+
+/// Complex64 Asinh JVP: d/dz asinh(z) = 1/sqrt(1+z²)
+#[test]
+fn asinh_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.5, 0.3);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Asinh);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // z² = (0.5+0.3i)² = 0.25 - 0.09 + 0.3i = 0.16 + 0.3i
+    // 1+z² = 1.16 + 0.3i
+    // sqrt(1.16+0.3i) ≈ compute numerically
+    let z_sq = complex_mul(0.5, 0.3, 0.5, 0.3);
+    let one_plus_z_sq = (1.0 + z_sq.0, z_sq.1);
+    // Use numerical approximation for sqrt
+    let r = (one_plus_z_sq.0 * one_plus_z_sq.0 + one_plus_z_sq.1 * one_plus_z_sq.1).sqrt();
+    let sqrt_re = ((r + one_plus_z_sq.0) / 2.0).sqrt();
+    let sqrt_im = one_plus_z_sq.1.signum() * ((r - one_plus_z_sq.0) / 2.0).sqrt();
+    let expected = complex_div(1.0, 0.0, sqrt_re, sqrt_im);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "asinh JVP at z=0.5+0.3i");
+}
+
+/// Complex64 Acosh JVP: d/dz acosh(z) = 1/sqrt(z²-1)
+#[test]
+fn acosh_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(2.0, 0.5);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Acosh);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // z² = (2+0.5i)² = 4 - 0.25 + 2i = 3.75 + 2i
+    // z²-1 = 2.75 + 2i
+    let z_sq = complex_mul(2.0, 0.5, 2.0, 0.5);
+    let z_sq_minus_1 = (z_sq.0 - 1.0, z_sq.1);
+    // Numerical sqrt
+    let r = (z_sq_minus_1.0 * z_sq_minus_1.0 + z_sq_minus_1.1 * z_sq_minus_1.1).sqrt();
+    let sqrt_re = ((r + z_sq_minus_1.0) / 2.0).sqrt();
+    let sqrt_im = z_sq_minus_1.1.signum() * ((r - z_sq_minus_1.0) / 2.0).sqrt();
+    let expected = complex_div(1.0, 0.0, sqrt_re, sqrt_im);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "acosh JVP at z=2+0.5i");
+}
+
+/// Complex64 Atanh JVP: d/dz atanh(z) = 1/(1-z²)
+#[test]
+fn atanh_jvp_numerical_complex64() {
+    let z = make_complex64_scalar(0.3, 0.2);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Atanh);
+    let jvp_result = fj_ad::jvp(&jaxpr, &[z], &[dz]).unwrap();
+
+    // z² = (0.3+0.2i)² = 0.09 - 0.04 + 0.12i = 0.05 + 0.12i
+    // 1-z² = 0.95 - 0.12i
+    let z_sq = complex_mul(0.3, 0.2, 0.3, 0.2);
+    let one_minus_z_sq = (1.0 - z_sq.0, -z_sq.1);
+    let expected = complex_div(1.0, 0.0, one_minus_z_sq.0, one_minus_z_sq.1);
+    let actual = extract_complex64_scalar(&jvp_result.tangents[0]);
+    assert_complex64_close(actual, expected, 1e-4, "atanh JVP at z=0.3+0.2i");
+}
