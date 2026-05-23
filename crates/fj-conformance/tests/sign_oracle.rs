@@ -479,3 +479,226 @@ fn property_sign_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== COMPLEX64/COMPLEX128 TESTS ========================
+
+fn make_complex64_scalar(re: f32, im: f32) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![] },
+            vec![Literal::from_complex64(re, im)],
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_scalar(re: f64, im: f64) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: vec![] },
+            vec![Literal::from_complex128(re, im)],
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex64_tensor(shape: &[u32], pairs: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            pairs
+                .into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_scalar(v: &Value) -> (f32, f32) {
+    match v {
+        Value::Tensor(t) => {
+            assert!(t.shape.dims.is_empty(), "expected scalar");
+            t.elements[0].as_complex64().unwrap()
+        }
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex128_scalar(v: &Value) -> (f64, f64) {
+    match v {
+        Value::Tensor(t) => {
+            assert!(t.shape.dims.is_empty(), "expected scalar");
+            t.elements[0].as_complex128().unwrap()
+        }
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn assert_complex64_close(actual: (f32, f32), expected: (f32, f32), tol: f32, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+fn assert_complex128_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+#[test]
+fn oracle_sign_complex64_zero() {
+    // sign(0+0i) = 0+0i
+    let input = make_complex64_scalar(0.0, 0.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (0.0, 0.0), 1e-6, "sign(0)");
+}
+
+#[test]
+fn oracle_sign_complex64_positive_real() {
+    // sign(3+0i) = 1+0i (unit vector in positive real direction)
+    let input = make_complex64_scalar(3.0, 0.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (1.0, 0.0), 1e-6, "sign(3) = 1");
+}
+
+#[test]
+fn oracle_sign_complex64_negative_real() {
+    // sign(-3+0i) = -1+0i
+    let input = make_complex64_scalar(-3.0, 0.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (-1.0, 0.0), 1e-6, "sign(-3) = -1");
+}
+
+#[test]
+fn oracle_sign_complex64_positive_imaginary() {
+    // sign(0+2i) = 0+i (unit vector in positive imaginary direction)
+    let input = make_complex64_scalar(0.0, 2.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (0.0, 1.0), 1e-6, "sign(2i) = i");
+}
+
+#[test]
+fn oracle_sign_complex64_negative_imaginary() {
+    // sign(0-2i) = 0-i
+    let input = make_complex64_scalar(0.0, -2.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (0.0, -1.0), 1e-6, "sign(-2i) = -i");
+}
+
+#[test]
+fn oracle_sign_complex64_unit_circle() {
+    // sign(z) = z/|z| gives a point on the unit circle
+    // sign(3+4i): |3+4i| = 5, so sign = (3/5, 4/5) = (0.6, 0.8)
+    let input = make_complex64_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (0.6, 0.8), 1e-5, "sign(3+4i) = (0.6, 0.8)");
+
+    // Verify it's on the unit circle: |sign(z)| = 1
+    let magnitude = (re * re + im * im).sqrt();
+    assert!((magnitude - 1.0).abs() < 1e-5, "sign result should have magnitude 1");
+}
+
+#[test]
+fn oracle_sign_complex64_diagonal() {
+    // sign(1+i): |1+i| = sqrt(2), so sign = (1/sqrt(2), 1/sqrt(2))
+    let sqrt2_inv = 1.0 / 2.0_f32.sqrt();
+    let input = make_complex64_scalar(1.0, 1.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (sqrt2_inv, sqrt2_inv), 1e-5, "sign(1+i)");
+}
+
+#[test]
+fn oracle_sign_complex64_vector() {
+    let input = make_complex64_tensor(&[4], vec![
+        (0.0, 0.0),   // zero
+        (5.0, 0.0),   // positive real
+        (0.0, 3.0),   // positive imaginary
+        (3.0, 4.0),   // 3-4-5 triangle
+    ]);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let vals = extract_complex64_vec(&result);
+
+    assert_complex64_close(vals[0], (0.0, 0.0), 1e-5, "sign(0)");
+    assert_complex64_close(vals[1], (1.0, 0.0), 1e-5, "sign(5)");
+    assert_complex64_close(vals[2], (0.0, 1.0), 1e-5, "sign(3i)");
+    assert_complex64_close(vals[3], (0.6, 0.8), 1e-5, "sign(3+4i)");
+}
+
+#[test]
+fn oracle_sign_complex64_idempotent() {
+    // sign(sign(z)) = sign(z) for z != 0 (since |sign(z)| = 1)
+    let z = make_complex64_scalar(3.0, 4.0);
+    let sign_z = eval_primitive(Primitive::Sign, &[z], &no_params()).unwrap();
+    let sign_sign_z = eval_primitive(Primitive::Sign, &[sign_z.clone()], &no_params()).unwrap();
+
+    let (s1_re, s1_im) = extract_complex64_scalar(&sign_z);
+    let (s2_re, s2_im) = extract_complex64_scalar(&sign_sign_z);
+
+    assert_complex64_close((s2_re, s2_im), (s1_re, s1_im), 1e-5, "sign(sign(z)) = sign(z)");
+}
+
+#[test]
+fn oracle_sign_complex128_unit_circle() {
+    // sign(3+4i) = (0.6, 0.8) with higher precision
+    let input = make_complex128_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex128_scalar(&result);
+    assert_complex128_close((re, im), (0.6, 0.8), 1e-12, "sign(3+4i) Complex128");
+}
+
+#[test]
+fn oracle_sign_complex64_preserves_dtype() {
+    let input = make_complex64_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_sign_complex128_preserves_dtype() {
+    let input = make_complex128_scalar(3.0, 4.0);
+    let result = eval_primitive(Primitive::Sign, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
