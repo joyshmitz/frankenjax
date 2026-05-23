@@ -329,3 +329,28 @@ fn property_topk_preserves_dtype() {
     let result = eval_primitive(Primitive::TopK, &[input], &topk_params(3)).unwrap();
     assert_eq!(result.dtype(), DType::F64, "topk should preserve F64 dtype");
 }
+
+// ====================== COMPLEX DTYPE TESTS ======================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+#[ignore = "PARITY GAP: TopK not supported for complex - no natural ordering"]
+fn oracle_topk_complex64_not_supported() {
+    let input = make_complex64_tensor(&[4], vec![(1.0, 0.0), (4.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
+    let _result = eval_primitive(Primitive::TopK, &[input], &topk_params(2))
+        .expect("topk should work on complex64");
+}
