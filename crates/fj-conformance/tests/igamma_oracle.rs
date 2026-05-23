@@ -479,3 +479,79 @@ fn property_igammac_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_igamma_igammac_sum_to_one() {
+    // igamma(a, x) + igammac(a, x) = 1
+    let a = make_f64_tensor(&[5], vec![1.0, 2.0, 3.0, 5.0, 10.0]);
+    let x = make_f64_tensor(&[5], vec![0.5, 1.0, 2.0, 3.0, 5.0]);
+
+    let igamma_result = eval_primitive(Primitive::Igamma, &[a.clone(), x.clone()], &no_params()).unwrap();
+    let igammac_result = eval_primitive(Primitive::Igammac, &[a, x], &no_params()).unwrap();
+
+    let igamma_vals = extract_f64_vec(&igamma_result);
+    let igammac_vals = extract_f64_vec(&igammac_result);
+
+    for (i, (&p, &q)) in igamma_vals.iter().zip(igammac_vals.iter()).enumerate() {
+        assert!(
+            (p + q - 1.0).abs() < 0.01,
+            "igamma + igammac should equal 1 at index {i}: got {}",
+            p + q
+        );
+    }
+}
+
+#[test]
+fn metamorphic_igamma_monotonicity_in_x() {
+    // igamma(a, x) is monotonically increasing in x for fixed a
+    let a = make_f64_tensor(&[], vec![2.0]);
+    let x_vals = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0];
+    let mut prev = 0.0;
+    for &x_val in &x_vals {
+        let x = make_f64_tensor(&[], vec![x_val]);
+        let result = eval_primitive(Primitive::Igamma, &[a.clone(), x], &no_params()).unwrap();
+        let curr = extract_f64_scalar(&result);
+        assert!(
+            curr >= prev - 1e-10,
+            "igamma should be monotonically increasing: at x={x_val}, got {curr} < prev {prev}"
+        );
+        prev = curr;
+    }
+}
+
+#[test]
+fn metamorphic_igamma_bounded_output() {
+    // igamma(a, x) is always in [0, 1] for positive a, x
+    let a = make_f64_tensor(&[5], vec![0.5, 1.0, 2.0, 5.0, 10.0]);
+    let x = make_f64_tensor(&[5], vec![0.1, 0.5, 1.0, 2.0, 5.0]);
+
+    let result = eval_primitive(Primitive::Igamma, &[a, x], &no_params()).unwrap();
+    let vals = extract_f64_vec(&result);
+
+    for (i, &v) in vals.iter().enumerate() {
+        assert!(
+            v >= 0.0 && v <= 1.0,
+            "igamma output should be in [0, 1] at index {i}: got {v}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_igammac_monotonicity_in_x() {
+    // igammac(a, x) is monotonically decreasing in x for fixed a
+    let a = make_f64_tensor(&[], vec![2.0]);
+    let x_vals = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0];
+    let mut prev = 1.0;
+    for &x_val in &x_vals {
+        let x = make_f64_tensor(&[], vec![x_val]);
+        let result = eval_primitive(Primitive::Igammac, &[a.clone(), x], &no_params()).unwrap();
+        let curr = extract_f64_scalar(&result);
+        assert!(
+            curr <= prev + 1e-10,
+            "igammac should be monotonically decreasing: at x={x_val}, got {curr} > prev {prev}"
+        );
+        prev = curr;
+    }
+}
