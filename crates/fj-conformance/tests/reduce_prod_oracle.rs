@@ -575,3 +575,153 @@ fn property_reduce_prod_preserves_all_float_dtypes() {
         assert_eq!(result.dtype(), dtype, "reduce_prod {dtype:?}: dtype mismatch");
     }
 }
+
+// ======================== Complex Type Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: shape.to_vec() },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_scalar(v: &Value) -> (f32, f32) {
+    match v {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims.len(), 0, "expected scalar");
+            t.elements[0].as_complex64().unwrap()
+        }
+        Value::Scalar(l) => l.as_complex64().unwrap(),
+    }
+}
+
+fn extract_complex128_scalar(v: &Value) -> (f64, f64) {
+    match v {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims.len(), 0, "expected scalar");
+            t.elements[0].as_complex128().unwrap()
+        }
+        Value::Scalar(l) => l.as_complex128().unwrap(),
+    }
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex128().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+#[test]
+#[ignore = "PARITY GAP: complex reduction only supported for reduce_sum, not reduce_prod"]
+fn oracle_reduce_prod_complex64_1d() {
+    // (1+0i) * (2+0i) * (3+0i) = 6+0i
+    let input = make_complex64_tensor(&[3], vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
+    let result = eval_primitive(Primitive::ReduceProd, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert!((re - 6.0).abs() < 1e-5);
+    assert!(im.abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "PARITY GAP: complex reduction only supported for reduce_sum, not reduce_prod"]
+fn oracle_reduce_prod_complex64_with_imaginary() {
+    // i * i = -1, so i * i * i = -i
+    let input = make_complex64_tensor(&[3], vec![(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)]);
+    let result = eval_primitive(Primitive::ReduceProd, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert!(re.abs() < 1e-5, "expected 0, got {re}");
+    assert!((im - (-1.0)).abs() < 1e-5, "expected -1, got {im}");
+}
+
+#[test]
+#[ignore = "PARITY GAP: complex reduction only supported for reduce_sum, not reduce_prod"]
+fn oracle_reduce_prod_complex128_1d() {
+    // (1+1i) * (1-1i) = 1 - i^2 = 2
+    let input = make_complex128_tensor(&[2], vec![(1.0, 1.0), (1.0, -1.0)]);
+    let result = eval_primitive(Primitive::ReduceProd, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex128_scalar(&result);
+    assert!((re - 2.0).abs() < 1e-10);
+    assert!(im.abs() < 1e-10);
+}
+
+#[test]
+#[ignore = "PARITY GAP: complex reduction only supported for reduce_sum, not reduce_prod"]
+fn oracle_reduce_prod_complex64_2d_axis0() {
+    // [[1+0i, 2+0i], [3+0i, 4+0i]] along axis 0 => [3+0i, 8+0i]
+    let input = make_complex64_tensor(&[2, 2], vec![
+        (1.0, 0.0), (2.0, 0.0),
+        (3.0, 0.0), (4.0, 0.0),
+    ]);
+    let result = eval_primitive(Primitive::ReduceProd, &[input], &axis_params(&[0])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2]);
+    let vals = extract_complex64_vec(&result);
+    assert!((vals[0].0 - 3.0).abs() < 1e-5);
+    assert!((vals[1].0 - 8.0).abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "PARITY GAP: complex reduction only supported for reduce_sum, not reduce_prod"]
+fn oracle_reduce_prod_complex64_with_zero() {
+    // (2+0i) * (0+0i) = 0+0i
+    let input = make_complex64_tensor(&[2], vec![(2.0, 0.0), (0.0, 0.0)]);
+    let result = eval_primitive(Primitive::ReduceProd, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert!(re.abs() < 1e-5);
+    assert!(im.abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "PARITY GAP: complex reduction only supported for reduce_sum, not reduce_prod"]
+fn oracle_reduce_prod_complex64_single_element() {
+    let input = make_complex64_tensor(&[1], vec![(42.0, -17.0)]);
+    let result = eval_primitive(Primitive::ReduceProd, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert!((re - 42.0).abs() < 1e-5);
+    assert!((im - (-17.0)).abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "PARITY GAP: complex reduction only supported for reduce_sum, not reduce_prod"]
+fn property_reduce_prod_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let input = match dtype {
+            DType::Complex64 => make_complex64_tensor(&[3], vec![
+                (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+            ]),
+            DType::Complex128 => make_complex128_tensor(&[3], vec![
+                (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+            ]),
+            _ => unreachable!(),
+        };
+        let result = eval_primitive(Primitive::ReduceProd, &[input], &no_params())
+            .expect("reduce_prod should succeed for complex dtype");
+        assert_eq!(result.dtype(), dtype, "reduce_prod {dtype:?}: dtype mismatch");
+    }
+}
