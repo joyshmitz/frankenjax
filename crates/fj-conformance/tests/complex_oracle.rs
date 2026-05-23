@@ -329,3 +329,15 @@ fn oracle_complex_special_values() {
     assert!(vals[2].0.is_nan());
     assert!(vals[3].1.is_infinite() && vals[3].1 < 0.0);
 }
+
+#[test]
+fn oracle_complex_2d_empty() {
+    let re = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let im = Value::Tensor(
+        TensorValue::new(DType::F64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::Complex, &[re, im], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 3]);
+}
