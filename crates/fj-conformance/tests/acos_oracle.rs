@@ -465,3 +465,190 @@ fn property_acos_preserves_all_float_dtypes() {
         });
     }
 }
+
+// ======================== Complex64/Complex128 coverage ========================
+//
+// Complex acos: acos(z) = pi/2 - asin(z)
+
+fn make_complex64_tensor(shape: &[u32], data: &[(f32, f32)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: &[(f64, f64)]) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::Complex64Bits(re, im) => (f32::from_bits(*re), f32::from_bits(*im)),
+                _ => panic!("expected Complex64"),
+            })
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_complex128().unwrap()).collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn assert_complex_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let (ar, ai) = actual;
+    let (er, ei) = expected;
+    let re_diff = (ar - er).abs();
+    let im_diff = (ai - ei).abs();
+    assert!(
+        re_diff < tol && im_diff < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        er,
+        ei,
+        ar,
+        ai,
+        re_diff,
+        im_diff
+    );
+}
+
+#[test]
+fn oracle_acos_complex128_one() {
+    // acos(1+0i) = 0+0i
+    let input = make_complex128_tensor(&[], &[(1.0, 0.0)]);
+    let result = eval_primitive(Primitive::Acos, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (0.0, 0.0), 1e-10, "acos(1+0i) = 0");
+}
+
+#[test]
+fn oracle_acos_complex128_zero() {
+    // acos(0+0i) = pi/2 + 0i
+    let input = make_complex128_tensor(&[], &[(0.0, 0.0)]);
+    let result = eval_primitive(Primitive::Acos, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(
+        vec[0],
+        (std::f64::consts::FRAC_PI_2, 0.0),
+        1e-10,
+        "acos(0) = pi/2",
+    );
+}
+
+#[test]
+fn oracle_acos_complex128_real_in_domain() {
+    let x = 0.5_f64;
+    let input = make_complex128_tensor(&[], &[(x, 0.0)]);
+    let result = eval_primitive(Primitive::Acos, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    assert_complex_close(vec[0], (x.acos(), 0.0), 1e-10, "acos(0.5+0i) = acos(0.5)");
+}
+
+#[test]
+fn oracle_acos_complex128_pure_imaginary() {
+    // acos(i) = pi/2 - asin(i) = pi/2 - i*asinh(1)
+    let input = make_complex128_tensor(&[], &[(0.0, 1.0)]);
+    let result = eval_primitive(Primitive::Acos, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert_eq!(vec.len(), 1);
+    let expected = (std::f64::consts::FRAC_PI_2, -1.0_f64.asinh());
+    assert_complex_close(vec[0], expected, 1e-10, "acos(i) = pi/2 - i*asinh(1)");
+}
+
+#[test]
+fn oracle_acos_complex64_vector() {
+    let data: &[(f32, f32)] = &[(1.0, 0.0), (0.0, 0.0), (0.5, 0.0)];
+    let input = make_complex64_tensor(&[3], data);
+    let result = eval_primitive(Primitive::Acos, &[input], &no_params()).unwrap();
+    let vec = extract_complex64_vec(&result);
+    assert_eq!(vec.len(), 3);
+
+    // acos(1) = 0
+    assert_complex_close((vec[0].0 as f64, vec[0].1 as f64), (0.0, 0.0), 1e-5, "acos(1)");
+
+    // acos(0) = pi/2
+    assert_complex_close(
+        (vec[1].0 as f64, vec[1].1 as f64),
+        (std::f64::consts::FRAC_PI_2, 0.0),
+        1e-4,
+        "acos(0)",
+    );
+
+    // acos(0.5) = acos(0.5)
+    assert_complex_close(
+        (vec[2].0 as f64, vec[2].1 as f64),
+        (0.5_f64.acos(), 0.0),
+        1e-4,
+        "acos(0.5)",
+    );
+}
+
+#[test]
+fn oracle_acos_complex_cos_inverse_identity() {
+    // cos(acos(z)) = z
+    let values: &[(f64, f64)] = &[(0.5, 0.0), (0.0, 0.5), (0.3, 0.2)];
+
+    for &(a, b) in values {
+        let input = make_complex128_tensor(&[], &[(a, b)]);
+        let acos_result = eval_primitive(Primitive::Acos, &[input], &no_params()).unwrap();
+        let cos_acos = eval_primitive(Primitive::Cos, &[acos_result], &no_params()).unwrap();
+
+        let result = extract_complex128_vec(&cos_acos)[0];
+        assert_complex_close(result, (a, b), 1e-9, &format!("cos(acos({a}+{b}i)) = {a}+{b}i"));
+    }
+}
+
+#[test]
+fn oracle_acos_complex_dtype_preservation() {
+    // Complex64 -> Complex64
+    let c64_input = make_complex64_tensor(&[2], &[(0.5, 0.0), (0.0, 0.5)]);
+    let c64_result = eval_primitive(Primitive::Acos, &[c64_input], &no_params()).unwrap();
+    match &c64_result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Complex64, "acos should preserve Complex64");
+            t.validate_dtype_consistency().unwrap();
+        }
+        _ => panic!("expected tensor"),
+    }
+
+    // Complex128 -> Complex128
+    let c128_input = make_complex128_tensor(&[2], &[(0.5, 0.0), (0.0, 0.5)]);
+    let c128_result = eval_primitive(Primitive::Acos, &[c128_input], &no_params()).unwrap();
+    match &c128_result {
+        Value::Tensor(t) => {
+            assert_eq!(t.dtype, DType::Complex128, "acos should preserve Complex128");
+            t.validate_dtype_consistency().unwrap();
+        }
+        _ => panic!("expected tensor"),
+    }
+}

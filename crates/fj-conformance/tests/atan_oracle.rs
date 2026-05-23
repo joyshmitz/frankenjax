@@ -442,6 +442,216 @@ fn oracle_atan_subnormal() {
     assert_close(vals[1], (-subnormal).atan(), 1e-30, "atan(-subnormal)");
 }
 
+// ======================== COMPLEX64/COMPLEX128 TESTS ========================
+
+fn make_complex64_scalar(re: f32, im: f32) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![] },
+            vec![Literal::from_complex64(re, im)],
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_scalar(re: f64, im: f64) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: vec![] },
+            vec![Literal::from_complex128(re, im)],
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex64_tensor(shape: &[u32], pairs: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: shape.to_vec() },
+            pairs
+                .into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_scalar(v: &Value) -> (f32, f32) {
+    match v {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims.len(), 0, "expected scalar");
+            t.elements[0].as_complex64().unwrap()
+        }
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex128_scalar(v: &Value) -> (f64, f64) {
+    match v {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims.len(), 0, "expected scalar");
+            t.elements[0].as_complex128().unwrap()
+        }
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn assert_complex64_close(actual: (f32, f32), expected: (f32, f32), tol: f32, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+fn assert_complex128_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
+    let diff_re = (actual.0 - expected.0).abs();
+    let diff_im = (actual.1 - expected.1).abs();
+    assert!(
+        diff_re < tol && diff_im < tol,
+        "{}: expected ({}, {}), got ({}, {}), diff=({}, {})",
+        msg,
+        expected.0,
+        expected.1,
+        actual.0,
+        actual.1,
+        diff_re,
+        diff_im
+    );
+}
+
+#[test]
+fn oracle_atan_complex64_zero() {
+    // atan(0+0i) = 0+0i
+    let input = make_complex64_scalar(0.0, 0.0);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close((re, im), (0.0, 0.0), 1e-6, "atan(0+0i)");
+}
+
+#[test]
+fn oracle_atan_complex64_real() {
+    // atan(1+0i) = pi/4 + 0i
+    let input = make_complex64_scalar(1.0, 0.0);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close(
+        (re, im),
+        (std::f32::consts::FRAC_PI_4, 0.0),
+        1e-6,
+        "atan(1+0i) = pi/4",
+    );
+}
+
+#[test]
+fn oracle_atan_complex64_pure_imaginary() {
+    // For pure imaginary z = iy: atan(iy) = i * atanh(y)
+    // atan(0.5i) = i * atanh(0.5) ≈ 0 + 0.5493i
+    let y = 0.5_f32;
+    let atanh_y = 0.5 * ((1.0 + y) / (1.0 - y)).ln();
+    let input = make_complex64_scalar(0.0, y);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    assert_complex64_close(
+        (re, im),
+        (0.0, atanh_y),
+        1e-5,
+        "atan(0.5i) = i*atanh(0.5)",
+    );
+}
+
+#[test]
+fn oracle_atan_complex64_general() {
+    // atan(1+i): compute expected using formula
+    // atan(z) = (1/2i) * ln((i+z)/(i-z))
+    // For z = 1+i:
+    // i+z = 1+2i, i-z = -1, (i+z)/(i-z) = -(1+2i) = -1-2i
+    // ln(-1-2i) = ln(sqrt(5)) + i*atan2(-2,-1) = ln(sqrt(5)) + i*(-2.034...)
+    // atan(1+i) ≈ 1.0172 + 0.4024i
+    let input = make_complex64_scalar(1.0, 1.0);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&result);
+    // Reference values from numpy: np.arctan(1+1j) ≈ 1.0172 + 0.4024i
+    assert_complex64_close((re, im), (1.0172, 0.4024), 0.001, "atan(1+i)");
+}
+
+#[test]
+fn oracle_atan_complex64_vector() {
+    let input = make_complex64_tensor(&[3], vec![(0.0, 0.0), (1.0, 0.0), (0.0, 0.5)]);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_complex64_vec(&result);
+
+    // atan(0) = 0
+    assert_complex64_close(vals[0], (0.0, 0.0), 1e-6, "atan(0)");
+    // atan(1) = pi/4
+    assert_complex64_close(vals[1], (std::f32::consts::FRAC_PI_4, 0.0), 1e-5, "atan(1)");
+    // atan(0.5i) = i*atanh(0.5)
+    let atanh_05 = 0.5_f32 * ((1.0_f32 + 0.5) / (1.0_f32 - 0.5)).ln();
+    assert_complex64_close(vals[2], (0.0, atanh_05), 1e-5, "atan(0.5i)");
+}
+
+#[test]
+fn oracle_atan_complex128_general() {
+    // atan(1+i) ≈ 1.0172219678978514 + 0.40235947810852507i
+    let input = make_complex128_scalar(1.0, 1.0);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    let (re, im) = extract_complex128_scalar(&result);
+    assert_complex128_close(
+        (re, im),
+        (1.0172219678978514, 0.40235947810852507),
+        1e-10,
+        "atan(1+i) Complex128",
+    );
+}
+
+#[test]
+fn oracle_atan_complex64_tan_inverse_identity() {
+    // tan(atan(z)) = z for complex z (away from branch cuts)
+    let z = make_complex64_scalar(0.5, 0.3);
+    let atan_z = eval_primitive(Primitive::Atan, &[z], &no_params()).unwrap();
+    let tan_atan_z = eval_primitive(Primitive::Tan, &[atan_z], &no_params()).unwrap();
+    let (re, im) = extract_complex64_scalar(&tan_atan_z);
+    assert_complex64_close((re, im), (0.5, 0.3), 1e-5, "tan(atan(0.5+0.3i)) = 0.5+0.3i");
+}
+
+#[test]
+fn oracle_atan_complex64_preserves_dtype() {
+    let input = make_complex64_scalar(1.0, 1.0);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_atan_complex128_preserves_dtype() {
+    let input = make_complex128_scalar(1.0, 1.0);
+    let result = eval_primitive(Primitive::Atan, &[input], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
 // ======================== Property: dtype preservation across all float types ========================
 
 #[test]
