@@ -495,3 +495,225 @@ fn property_broadcast_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Complex64/Complex128 Tests ========================
+
+fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter()
+                .map(|(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex64().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_complex128().unwrap())
+            .collect(),
+        _ => panic!("expected tensor"),
+    }
+}
+
+#[test]
+fn oracle_broadcast_complex64_scalar_to_1d() {
+    let input = Value::Scalar(Literal::from_complex64(1.0, 2.0));
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params_shape_only(&[3]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![(1.0, 2.0), (1.0, 2.0), (1.0, 2.0)]);
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_broadcast_complex64_1d_to_2d() {
+    let input = make_complex64_tensor(&[3], vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[2, 3], &[1]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals, vec![
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+        (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+    ]);
+}
+
+#[test]
+fn oracle_broadcast_complex64_row_to_matrix() {
+    let input = make_complex64_tensor(&[1, 3], vec![(1.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[3, 3], &[0, 1]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 3]);
+    let vals = extract_complex64_vec(&result);
+    // Each row should be [1+i, 2+2i, 3+3i]
+    assert_eq!(vals[0], (1.0, 1.0));
+    assert_eq!(vals[3], (1.0, 1.0));
+    assert_eq!(vals[6], (1.0, 1.0));
+}
+
+#[test]
+fn oracle_broadcast_complex64_col_to_matrix() {
+    let input = make_complex64_tensor(&[3, 1], vec![(1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[3, 3], &[0, 1]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 3]);
+    let vals = extract_complex64_vec(&result);
+    // First row all 1+0i, second row all 2+0i, etc.
+    assert_eq!(vals[0], (1.0, 0.0));
+    assert_eq!(vals[1], (1.0, 0.0));
+    assert_eq!(vals[2], (1.0, 0.0));
+    assert_eq!(vals[3], (2.0, 0.0));
+}
+
+#[test]
+fn oracle_broadcast_complex64_to_3d() {
+    let input = make_complex64_tensor(&[2], vec![(1.0, -1.0), (2.0, -2.0)]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[2, 2, 2], &[2]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2]);
+    let vals = extract_complex64_vec(&result);
+    assert_eq!(vals.len(), 8);
+    // Last dim should alternate [1-i, 2-2i]
+    assert_eq!(vals[0], (1.0, -1.0));
+    assert_eq!(vals[1], (2.0, -2.0));
+}
+
+#[test]
+fn oracle_broadcast_complex128_scalar_to_2d() {
+    let input = Value::Scalar(Literal::from_complex128(3.0, 4.0));
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params_shape_only(&[2, 2]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    let vals = extract_complex128_vec(&result);
+    assert_eq!(vals, vec![(3.0, 4.0), (3.0, 4.0), (3.0, 4.0), (3.0, 4.0)]);
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn oracle_broadcast_complex128_1d_to_2d() {
+    let input = make_complex128_tensor(&[3], vec![(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[2, 3], &[1]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    let vals = extract_complex128_vec(&result);
+    assert_eq!(vals, vec![
+        (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0),
+        (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0),
+    ]);
+}
+
+#[test]
+fn oracle_broadcast_complex64_preserves_dtype() {
+    let input = make_complex64_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[3, 2], &[1]),
+    )
+    .unwrap();
+    assert_eq!(result.dtype(), DType::Complex64);
+}
+
+#[test]
+fn oracle_broadcast_complex128_preserves_dtype() {
+    let input = make_complex128_tensor(&[2], vec![(1.0, 2.0), (3.0, 4.0)]);
+    let result = eval_primitive(
+        Primitive::BroadcastInDim,
+        &[input],
+        &broadcast_params(&[3, 2], &[1]),
+    )
+    .unwrap();
+    assert_eq!(result.dtype(), DType::Complex128);
+}
+
+#[test]
+fn property_broadcast_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let lits: Vec<Literal> = match dtype {
+            DType::Complex64 => vec![
+                Literal::from_complex64(1.0, 2.0),
+                Literal::from_complex64(3.0, 4.0),
+            ],
+            DType::Complex128 => vec![
+                Literal::from_complex128(1.0, 2.0),
+                Literal::from_complex128(3.0, 4.0),
+            ],
+            _ => unreachable!(),
+        };
+        let input = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![2] }, lits).unwrap());
+        let result = eval_primitive(
+            Primitive::BroadcastInDim,
+            &[input],
+            &broadcast_params(&[3, 2], &[1]),
+        )
+        .unwrap();
+        let t = result.as_tensor().expect("tensor result");
+        assert_eq!(t.dtype, dtype, "broadcast_in_dim {dtype:?}: dtype mismatch");
+        t.validate_dtype_consistency()
+            .expect("literal/dtype consistency");
+    }
+}
