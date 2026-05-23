@@ -940,3 +940,42 @@ fn property_eigh_preserves_all_float_dtypes() {
         }
     }
 }
+
+#[test]
+fn property_triangular_solve_preserves_all_float_dtypes() {
+    fn make_matrix(dtype: DType, data: &[f64]) -> Value {
+        let lit_for = |v: f64| match dtype {
+            DType::BF16 => Literal::from_bf16_f32(v as f32),
+            DType::F16 => Literal::from_f16_f32(v as f32),
+            DType::F32 => Literal::from_f32(v as f32),
+            DType::F64 => Literal::from_f64(v),
+            _ => unreachable!(),
+        };
+        Value::Tensor(
+            TensorValue::new(
+                dtype,
+                Shape { dims: vec![2, 2] },
+                data.iter().copied().map(lit_for).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    let lower_triangular = [1.0_f64, 0.0, 0.5, 1.0];
+    let rhs = [1.0_f64, 0.0, 0.0, 1.0];
+
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let a = make_matrix(dtype, &lower_triangular);
+        let b = make_matrix(dtype, &rhs);
+        let result = eval_primitive_multi(Primitive::TriangularSolve, &[a, b], &no_params())
+            .unwrap_or_else(|e| panic!("TriangularSolve {dtype:?} failed: {e}"));
+        assert_eq!(result.len(), 1, "TriangularSolve should return one output for {dtype:?}");
+        let Value::Tensor(t) = &result[0] else {
+            panic!("TriangularSolve {dtype:?}: expected tensor output");
+        };
+        assert_eq!(t.dtype, dtype, "TriangularSolve {dtype:?}: dtype mismatch");
+        t.validate_dtype_consistency().unwrap_or_else(|e| {
+            panic!("TriangularSolve {dtype:?}: validate failed: {e}")
+        });
+    }
+}
