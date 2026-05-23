@@ -619,3 +619,22 @@ fn metamorphic_scatter_idempotent() {
         "Scatter same value twice should be idempotent"
     );
 }
+
+// ======================== PROPERTY: dtype preservation ========================
+
+#[test]
+fn property_gather_preserves_dtype() {
+    let operand = make_i64_tensor(&[4], vec![1, 2, 3, 4]);
+    let indices = make_i64_tensor(&[2], vec![0, 2]);
+    let result = eval_primitive(Primitive::Gather, &[operand, indices], &gather_params(&[1])).unwrap();
+    assert_eq!(result.dtype(), DType::I64, "gather should preserve I64 dtype");
+}
+
+#[test]
+fn property_scatter_preserves_dtype() {
+    let operand = make_i64_tensor(&[4], vec![1, 2, 3, 4]);
+    let indices = make_i64_tensor(&[1], vec![1]);
+    let updates = make_i64_tensor(&[1], vec![99]);
+    let result = eval_primitive(Primitive::Scatter, &[operand, indices, updates], &scatter_params()).unwrap();
+    assert_eq!(result.dtype(), DType::I64, "scatter should preserve I64 dtype");
+}

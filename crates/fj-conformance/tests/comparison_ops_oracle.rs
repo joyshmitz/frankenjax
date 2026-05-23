@@ -791,3 +791,40 @@ fn oracle_comparison_broadcast_ne() {
     // Row 1: [3!=1, 4!=2] = [true, true]
     assert_eq!(extract_bool_vec(&result), vec![false, false, true, true]);
 }
+
+// ======================== PROPERTY: comparison always returns Bool ========================
+
+#[test]
+fn property_comparison_ops_always_return_bool() {
+    fn make_vec(dtype: DType, values: &[f64]) -> Value {
+        let lits: Vec<Literal> = values
+            .iter()
+            .map(|&v| match dtype {
+                DType::BF16 => Literal::from_bf16_f32(v as f32),
+                DType::F16 => Literal::from_f16_f32(v as f32),
+                DType::F32 => Literal::from_f32(v as f32),
+                DType::F64 => Literal::from_f64(v),
+                _ => panic!("not a float dtype"),
+            })
+            .collect();
+        Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap())
+    }
+
+    let values = [1.0_f64, 2.0, 3.0];
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let a = make_vec(dtype, &values);
+        let b = make_vec(dtype, &values);
+
+        for (prim, name) in [
+            (Primitive::Eq, "Eq"),
+            (Primitive::Ne, "Ne"),
+            (Primitive::Lt, "Lt"),
+            (Primitive::Le, "Le"),
+            (Primitive::Gt, "Gt"),
+            (Primitive::Ge, "Ge"),
+        ] {
+            let result = eval_primitive(prim, &[a.clone(), b.clone()], &no_params()).unwrap();
+            assert_eq!(result.dtype(), DType::Bool, "{name} with {dtype:?} input should return Bool");
+        }
+    }
+}
