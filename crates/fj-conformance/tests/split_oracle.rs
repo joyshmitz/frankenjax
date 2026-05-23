@@ -289,3 +289,34 @@ fn oracle_split_rejects_indivisible() {
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("divisible"));
 }
+
+// ======================== Additional Coverage ========================
+
+#[test]
+fn oracle_split_4d() {
+    // [4, 2, 2, 3] -> [2, 2, 2, 2, 3]
+    let input = make_i64_tensor(&[4, 2, 2, 3], (1..=48).collect());
+    let result = eval_primitive(Primitive::Split, &[input], &split_params(0, 2)).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2, 2, 2, 3]);
+}
+
+#[test]
+fn oracle_split_preserves_dtype() {
+    let input = make_i64_tensor(&[6], vec![1, 2, 3, 4, 5, 6]);
+    let result = eval_primitive(Primitive::Split, &[input], &split_params(0, 2)).unwrap();
+    assert_eq!(result.dtype(), DType::I64);
+}
+
+#[test]
+fn oracle_split_2d_empty_axis0() {
+    // Empty tensor split
+    let input = Value::Tensor(
+        TensorValue::new(DType::I64, Shape { dims: vec![0, 3] }, vec![]).unwrap(),
+    );
+    // num_sections=1 should work even for empty axis
+    let mut params = BTreeMap::new();
+    params.insert("axis".to_string(), "0".to_string());
+    params.insert("num_sections".to_string(), "1".to_string());
+    let result = eval_primitive(Primitive::Split, &[input], &params).unwrap();
+    assert_eq!(extract_shape(&result), vec![1, 0, 3]);
+}
