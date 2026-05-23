@@ -355,6 +355,64 @@ fn complex_erf_inv(w: (f64, f64)) -> (f64, f64) {
     z
 }
 
+fn complex_lgamma(z: (f64, f64)) -> (f64, f64) {
+    const G: f64 = 7.0;
+    const LANCZOS_COEFFS: [f64; 9] = [
+        0.99999999999980993,
+        676.5203681218851,
+        -1259.1392167224028,
+        771.32342877765313,
+        -176.61502916214059,
+        12.507343278686905,
+        -0.13857109526572012,
+        9.9843695780195716e-6,
+        1.5056327351493116e-7,
+    ];
+    let (re, im) = z;
+    if re < 0.5 {
+        let sin_pz = complex_sin((std::f64::consts::PI * re, std::f64::consts::PI * im));
+        let ln_pi = (std::f64::consts::PI.ln(), 0.0);
+        let ln_sin = complex_log(sin_pz);
+        let lgamma_1mz = complex_lgamma((1.0 - re, -im));
+        return complex_sub(complex_sub(ln_pi, ln_sin), lgamma_1mz);
+    }
+    let z_shifted = (re - 1.0, im);
+    let mut x = (LANCZOS_COEFFS[0], 0.0);
+    for (i, &coeff) in LANCZOS_COEFFS.iter().enumerate().skip(1) {
+        let denom = complex_add(z_shifted, (i as f64, 0.0));
+        x = complex_add(x, complex_div((coeff, 0.0), denom));
+    }
+    let t = complex_add(z_shifted, (G + 0.5, 0.0));
+    let half_ln_2pi = (0.5 * (2.0 * std::f64::consts::PI).ln(), 0.0);
+    let exp_term = complex_add(z_shifted, (0.5, 0.0));
+    complex_add(
+        complex_add(half_ln_2pi, complex_mul(exp_term, complex_log(t))),
+        complex_sub(complex_log(x), t),
+    )
+}
+
+fn complex_digamma(z: (f64, f64)) -> (f64, f64) {
+    let (mut re, mut im) = z;
+    let mut result = (0.0, 0.0);
+    while re < 6.0 {
+        result = complex_sub(result, complex_reciprocal((re, im)));
+        re += 1.0;
+    }
+    let z2 = (re, im);
+    let z2_inv = complex_reciprocal(z2);
+    let z2_inv_sq = complex_mul(z2_inv, z2_inv);
+    let mut term = z2_inv_sq;
+    let bernoulli = [1.0 / 12.0, -1.0 / 120.0, 1.0 / 252.0, -1.0 / 240.0, 5.0 / 660.0];
+    let ln_z = complex_log(z2);
+    result = complex_add(result, ln_z);
+    result = complex_sub(result, (0.5 * z2_inv.0, 0.5 * z2_inv.1));
+    for &b in &bernoulli {
+        result = complex_sub(result, (b * term.0, b * term.1));
+        term = complex_mul(term, z2_inv_sq);
+    }
+    result
+}
+
 fn complex_unary_elementwise(primitive: Primitive, input: (f64, f64)) -> Option<(f64, f64)> {
     match primitive {
         Primitive::Sqrt => Some(complex_sqrt(input)),
@@ -380,6 +438,8 @@ fn complex_unary_elementwise(primitive: Primitive, input: (f64, f64)) -> Option<
         Primitive::Erf => Some(complex_erf(input)),
         Primitive::Erfc => Some(complex_erfc(input)),
         Primitive::ErfInv => Some(complex_erf_inv(input)),
+        Primitive::Lgamma => Some(complex_lgamma(input)),
+        Primitive::Digamma => Some(complex_digamma(input)),
         _ => None,
     }
 }
@@ -393,8 +453,6 @@ fn complex_unary_unsupported_detail(primitive: Primitive) -> &'static str {
         Primitive::Floor => "floor is not supported for complex dtypes",
         Primitive::Ceil => "ceil is not supported for complex dtypes",
         Primitive::Round => "round is not supported for complex dtypes",
-        Primitive::Lgamma => "lgamma is not supported for complex dtypes",
-        Primitive::Digamma => "digamma is not supported for complex dtypes",
         _ => "operation is not supported for complex operands",
     }
 }
