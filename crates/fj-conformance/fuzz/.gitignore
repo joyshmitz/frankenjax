@@ -1,6 +1,7 @@
 target
 artifacts
 coverage
+crates
 corpus/generated
 !corpus/generated/.gitkeep
 corpus/crashes/*
