@@ -979,3 +979,172 @@ fn property_triangular_solve_preserves_all_float_dtypes() {
         });
     }
 }
+
+// ======================== Complex Type Tests ========================
+
+fn make_complex64_matrix(rows: u32, cols: u32, data: &[(f32, f32)]) -> Value {
+    assert_eq!(data.len(), (rows * cols) as usize);
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![rows, cols] },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex64(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn make_complex128_matrix(rows: u32, cols: u32, data: &[(f64, f64)]) -> Value {
+    assert_eq!(data.len(), (rows * cols) as usize);
+    Value::Tensor(
+        TensorValue::new(
+            DType::Complex128,
+            Shape { dims: vec![rows, cols] },
+            data.iter()
+                .map(|&(re, im)| Literal::from_complex128(re, im))
+                .collect(),
+        )
+        .unwrap(),
+    )
+}
+
+fn extract_complex64_matrix(val: &Value) -> Vec<(f32, f32)> {
+    val.as_tensor()
+        .unwrap()
+        .elements
+        .iter()
+        .map(|l| l.as_complex64().unwrap())
+        .collect()
+}
+
+fn extract_complex128_matrix(val: &Value) -> Vec<(f64, f64)> {
+    val.as_tensor()
+        .unwrap()
+        .elements
+        .iter()
+        .map(|l| l.as_complex128().unwrap())
+        .collect()
+}
+
+#[test]
+#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
+fn oracle_triangular_solve_complex64_lower_2x2() {
+    // Solve L * X = B where L is lower triangular
+    // L = [[1+0i, 0], [0.5+0i, 1+0i]], B = I (identity)
+    // Solution X = L^-1 = [[1, 0], [-0.5, 1]]
+    let lower = make_complex64_matrix(2, 2, &[
+        (1.0, 0.0), (0.0, 0.0),
+        (0.5, 0.0), (1.0, 0.0),
+    ]);
+    let rhs = make_complex64_matrix(2, 2, &[
+        (1.0, 0.0), (0.0, 0.0),
+        (0.0, 0.0), (1.0, 0.0),
+    ]);
+    let result = eval_primitive_multi(Primitive::TriangularSolve, &[lower, rhs], &no_params())
+        .expect("TriangularSolve complex64 should succeed");
+    assert_eq!(result.len(), 1);
+    let vals = extract_complex64_matrix(&result[0]);
+    assert!((vals[0].0 - 1.0).abs() < 1e-5, "expected 1, got {:?}", vals[0]);
+    assert!((vals[2].0 - (-0.5)).abs() < 1e-5, "expected -0.5, got {:?}", vals[2]);
+    assert!((vals[3].0 - 1.0).abs() < 1e-5, "expected 1, got {:?}", vals[3]);
+}
+
+#[test]
+#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
+fn oracle_triangular_solve_complex64_with_imaginary() {
+    // L = [[1+i, 0], [0, 1+i]], B = [[1+i, 0], [0, 1+i]]
+    // Solution X = I (identity)
+    let lower = make_complex64_matrix(2, 2, &[
+        (1.0, 1.0), (0.0, 0.0),
+        (0.0, 0.0), (1.0, 1.0),
+    ]);
+    let rhs = make_complex64_matrix(2, 2, &[
+        (1.0, 1.0), (0.0, 0.0),
+        (0.0, 0.0), (1.0, 1.0),
+    ]);
+    let result = eval_primitive_multi(Primitive::TriangularSolve, &[lower, rhs], &no_params())
+        .expect("TriangularSolve complex64 with imaginary should succeed");
+    let vals = extract_complex64_matrix(&result[0]);
+    assert!((vals[0].0 - 1.0).abs() < 1e-5, "expected 1+0i, got {:?}", vals[0]);
+    assert!(vals[0].1.abs() < 1e-5);
+    assert!((vals[3].0 - 1.0).abs() < 1e-5, "expected 1+0i, got {:?}", vals[3]);
+    assert!(vals[3].1.abs() < 1e-5);
+}
+
+#[test]
+#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
+fn oracle_triangular_solve_complex128_lower_2x2() {
+    // Same as complex64 but with higher precision
+    let lower = make_complex128_matrix(2, 2, &[
+        (1.0, 0.0), (0.0, 0.0),
+        (0.5, 0.0), (1.0, 0.0),
+    ]);
+    let rhs = make_complex128_matrix(2, 2, &[
+        (1.0, 0.0), (0.0, 0.0),
+        (0.0, 0.0), (1.0, 0.0),
+    ]);
+    let result = eval_primitive_multi(Primitive::TriangularSolve, &[lower, rhs], &no_params())
+        .expect("TriangularSolve complex128 should succeed");
+    let vals = extract_complex128_matrix(&result[0]);
+    assert!((vals[0].0 - 1.0).abs() < 1e-10);
+    assert!((vals[2].0 - (-0.5)).abs() < 1e-10);
+    assert!((vals[3].0 - 1.0).abs() < 1e-10);
+}
+
+#[test]
+#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
+fn oracle_cholesky_complex64_hermitian_2x2() {
+    // Hermitian positive-definite matrix: [[2, 1-i], [1+i, 2]]
+    // This is A where A = L * L^H (conjugate transpose)
+    // L should be approximately [[sqrt(2), 0], [(1+i)/sqrt(2), sqrt(1/2)]]
+    let matrix = make_complex64_matrix(2, 2, &[
+        (2.0, 0.0), (1.0, -1.0),
+        (1.0, 1.0), (2.0, 0.0),
+    ]);
+    let result = eval_primitive_multi(Primitive::Cholesky, &[matrix], &no_params())
+        .expect("Cholesky complex64 hermitian should succeed");
+    assert_eq!(result.len(), 1);
+    let vals = extract_complex64_matrix(&result[0]);
+    let sqrt2 = 2.0_f32.sqrt();
+    assert!((vals[0].0 - sqrt2).abs() < 1e-4, "L[0,0] expected sqrt(2)={sqrt2}, got {:?}", vals[0]);
+}
+
+#[test]
+#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
+fn oracle_qr_complex64_2x2() {
+    // QR decomposition of a simple complex matrix
+    let matrix = make_complex64_matrix(2, 2, &[
+        (1.0, 0.0), (0.0, 1.0),
+        (0.0, 1.0), (1.0, 0.0),
+    ]);
+    let result = eval_primitive_multi(Primitive::Qr, &[matrix], &no_params())
+        .expect("QR complex64 should succeed");
+    assert!(result.len() >= 2, "QR should return Q and R");
+    let q_dtype = result[0].dtype();
+    let r_dtype = result[1].dtype();
+    assert_eq!(q_dtype, DType::Complex64, "Q should preserve complex64 dtype");
+    assert_eq!(r_dtype, DType::Complex64, "R should preserve complex64 dtype");
+}
+
+#[test]
+#[ignore = "PARITY GAP: linalg primitives reject complex types with 'expected numeric elements'"]
+fn property_triangular_solve_preserves_complex_dtypes() {
+    for dtype in [DType::Complex64, DType::Complex128] {
+        let (lower, rhs) = match dtype {
+            DType::Complex64 => (
+                make_complex64_matrix(2, 2, &[(1.0, 0.0), (0.0, 0.0), (0.5, 0.0), (1.0, 0.0)]),
+                make_complex64_matrix(2, 2, &[(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)]),
+            ),
+            DType::Complex128 => (
+                make_complex128_matrix(2, 2, &[(1.0, 0.0), (0.0, 0.0), (0.5, 0.0), (1.0, 0.0)]),
+                make_complex128_matrix(2, 2, &[(1.0, 0.0), (0.0, 0.0), (0.0, 0.0), (1.0, 0.0)]),
+            ),
+            _ => unreachable!(),
+        };
+        let result = eval_primitive_multi(Primitive::TriangularSolve, &[lower, rhs], &no_params())
+            .unwrap_or_else(|e| panic!("TriangularSolve {dtype:?} failed: {e}"));
+        assert_eq!(result[0].dtype(), dtype, "TriangularSolve {dtype:?}: dtype mismatch");
+    }
+}
