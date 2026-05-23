@@ -262,3 +262,29 @@ fn oracle_is_finite_subnormal() {
     let result = eval_primitive(Primitive::IsFinite, &[input], &no_params()).unwrap();
     assert_eq!(extract_bool_vec(&result), vec![true, true]);
 }
+
+// ======================== PROPERTY: is_finite always returns Bool ========================
+
+#[test]
+fn property_is_finite_always_returns_bool() {
+    fn make_vec(dtype: DType, values: &[f64]) -> Value {
+        let lits: Vec<Literal> = values
+            .iter()
+            .map(|&v| match dtype {
+                DType::BF16 => Literal::from_bf16_f32(v as f32),
+                DType::F16 => Literal::from_f16_f32(v as f32),
+                DType::F32 => Literal::from_f32(v as f32),
+                DType::F64 => Literal::from_f64(v),
+                _ => panic!("not a float dtype"),
+            })
+            .collect();
+        Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap())
+    }
+
+    let values = [1.0_f64, f64::INFINITY, f64::NAN];
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let input = make_vec(dtype, &values);
+        let result = eval_primitive(Primitive::IsFinite, &[input], &no_params()).unwrap();
+        assert_eq!(result.dtype(), DType::Bool, "is_finite with {dtype:?} input should return Bool");
+    }
+}

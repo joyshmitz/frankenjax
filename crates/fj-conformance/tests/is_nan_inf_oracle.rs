@@ -272,3 +272,31 @@ fn oracle_isinf_subnormal() {
     let result = eval_primitive(Primitive::IsInf, &[input], &no_params()).unwrap();
     assert_eq!(extract_bool_vec(&result), vec![false, false]);
 }
+
+// ======================== PROPERTY: isnan/isinf always return Bool ========================
+
+#[test]
+fn property_isnan_isinf_always_return_bool() {
+    fn make_vec(dtype: DType, values: &[f64]) -> Value {
+        let lits: Vec<Literal> = values
+            .iter()
+            .map(|&v| match dtype {
+                DType::BF16 => Literal::from_bf16_f32(v as f32),
+                DType::F16 => Literal::from_f16_f32(v as f32),
+                DType::F32 => Literal::from_f32(v as f32),
+                DType::F64 => Literal::from_f64(v),
+                _ => panic!("not a float dtype"),
+            })
+            .collect();
+        Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, lits).unwrap())
+    }
+
+    let values = [1.0_f64, f64::INFINITY, f64::NAN];
+    for dtype in [DType::BF16, DType::F16, DType::F32, DType::F64] {
+        let input = make_vec(dtype, &values);
+        let isnan_result = eval_primitive(Primitive::IsNan, &[input.clone()], &no_params()).unwrap();
+        let isinf_result = eval_primitive(Primitive::IsInf, &[input], &no_params()).unwrap();
+        assert_eq!(isnan_result.dtype(), DType::Bool, "is_nan with {dtype:?} input should return Bool");
+        assert_eq!(isinf_result.dtype(), DType::Bool, "is_inf with {dtype:?} input should return Bool");
+    }
+}
