@@ -551,3 +551,32 @@ fn property_exp_log_preserves_all_float_dtypes() {
         }
     }
 }
+
+// ======================== Edge Cases: Infinity Handling ========================
+
+#[test]
+fn oracle_exp_positive_infinity() {
+    // exp(+inf) = +inf
+    let x = make_f64_tensor(&[], vec![f64::INFINITY]);
+    let result = eval_primitive(Primitive::Exp, &[x], &no_params()).unwrap();
+    let y = extract_f64_scalar(&result);
+    assert!(y.is_infinite() && y.is_sign_positive(), "exp(+inf) = +inf");
+}
+
+#[test]
+fn oracle_exp_negative_infinity() {
+    // exp(-inf) = 0
+    let x = make_f64_tensor(&[], vec![f64::NEG_INFINITY]);
+    let result = eval_primitive(Primitive::Exp, &[x], &no_params()).unwrap();
+    let y = extract_f64_scalar(&result);
+    assert_eq!(y, 0.0, "exp(-inf) = 0");
+}
+
+#[test]
+fn oracle_exp_nan_propagation() {
+    // exp(NaN) = NaN
+    let x = make_f64_tensor(&[], vec![f64::NAN]);
+    let result = eval_primitive(Primitive::Exp, &[x], &no_params()).unwrap();
+    let y = extract_f64_scalar(&result);
+    assert!(y.is_nan(), "exp(NaN) = NaN");
+}
