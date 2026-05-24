@@ -828,3 +828,76 @@ fn oracle_sincos_pythagorean_identity_complex() {
         );
     }
 }
+
+// ======================== METAMORPHIC: mathematical identities ========================
+
+#[test]
+fn metamorphic_sin_cos_pythagorean() {
+    // sin²(x) + cos²(x) = 1 for real x
+    let x = make_f64_tensor(&[6], vec![0.0, 0.5, 1.0, 2.0, -1.0, 3.14159]);
+    let sin_result = eval_primitive(Primitive::Sin, &[x.clone()], &BTreeMap::new()).unwrap();
+    let cos_result = eval_primitive(Primitive::Cos, &[x], &BTreeMap::new()).unwrap();
+    let sin_vals = extract_f64_vec(&sin_result);
+    let cos_vals = extract_f64_vec(&cos_result);
+    for (i, (&s, &c)) in sin_vals.iter().zip(cos_vals.iter()).enumerate() {
+        let sum = s * s + c * c;
+        assert!(
+            (sum - 1.0).abs() < 1e-10,
+            "sin²(x) + cos²(x) should equal 1 at index {i}: got {sum}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_sin_odd_symmetry() {
+    // sin(-x) = -sin(x)
+    let x = make_f64_tensor(&[5], vec![0.5, 1.0, 2.0, -1.5, 3.0]);
+    let neg_x = make_f64_tensor(&[5], vec![-0.5, -1.0, -2.0, 1.5, -3.0]);
+    let sin_x = eval_primitive(Primitive::Sin, &[x], &BTreeMap::new()).unwrap();
+    let sin_neg_x = eval_primitive(Primitive::Sin, &[neg_x], &BTreeMap::new()).unwrap();
+    let vals_x = extract_f64_vec(&sin_x);
+    let vals_neg_x = extract_f64_vec(&sin_neg_x);
+    for (i, (&sx, &snx)) in vals_x.iter().zip(vals_neg_x.iter()).enumerate() {
+        assert!(
+            (sx + snx).abs() < 1e-10,
+            "sin(-x) should equal -sin(x) at index {i}: sin(x)={sx}, sin(-x)={snx}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_cos_even_symmetry() {
+    // cos(-x) = cos(x)
+    let x = make_f64_tensor(&[5], vec![0.5, 1.0, 2.0, -1.5, 3.0]);
+    let neg_x = make_f64_tensor(&[5], vec![-0.5, -1.0, -2.0, 1.5, -3.0]);
+    let cos_x = eval_primitive(Primitive::Cos, &[x], &BTreeMap::new()).unwrap();
+    let cos_neg_x = eval_primitive(Primitive::Cos, &[neg_x], &BTreeMap::new()).unwrap();
+    let vals_x = extract_f64_vec(&cos_x);
+    let vals_neg_x = extract_f64_vec(&cos_neg_x);
+    for (i, (&cx, &cnx)) in vals_x.iter().zip(vals_neg_x.iter()).enumerate() {
+        assert!(
+            (cx - cnx).abs() < 1e-10,
+            "cos(-x) should equal cos(x) at index {i}: cos(x)={cx}, cos(-x)={cnx}"
+        );
+    }
+}
+
+#[test]
+fn metamorphic_sincos_bounded_output() {
+    // |sin(x)| <= 1 and |cos(x)| <= 1 for real x
+    let x = make_f64_tensor(&[6], vec![0.0, 1.0, 10.0, -100.0, 1000.0, -0.001]);
+    let sin_result = eval_primitive(Primitive::Sin, &[x.clone()], &BTreeMap::new()).unwrap();
+    let cos_result = eval_primitive(Primitive::Cos, &[x], &BTreeMap::new()).unwrap();
+    let sin_vals = extract_f64_vec(&sin_result);
+    let cos_vals = extract_f64_vec(&cos_result);
+    for (i, (&s, &c)) in sin_vals.iter().zip(cos_vals.iter()).enumerate() {
+        assert!(
+            s.abs() <= 1.0 + 1e-10,
+            "|sin(x)| should be <= 1 at index {i}: got {}", s.abs()
+        );
+        assert!(
+            c.abs() <= 1.0 + 1e-10,
+            "|cos(x)| should be <= 1 at index {i}: got {}", c.abs()
+        );
+    }
+}
