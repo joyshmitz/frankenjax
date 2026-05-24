@@ -215,6 +215,97 @@ pub fn random_categorical(
     Ok(result)
 }
 
+/// Generate exponentially distributed samples with rate parameter `rate` (λ).
+///
+/// Matches JAX's `jax.random.exponential(key, shape)` scaled by `1/rate`.
+/// Uses inverse transform: X = -ln(U) / rate where U ~ Uniform(0,1).
+#[must_use]
+pub fn random_exponential(key: PRNGKey, count: usize, rate: f64) -> Vec<f64> {
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms
+        .into_iter()
+        .map(|u| {
+            // Clamp away from 0 to avoid -ln(0) = inf
+            let clamped = u.max(1e-30);
+            -clamped.ln() / rate
+        })
+        .collect()
+}
+
+/// Generate Gumbel-distributed samples with location `loc` and scale `scale`.
+///
+/// Matches JAX's `jax.random.gumbel(key, shape)` with optional loc/scale.
+/// Uses inverse transform: X = loc - scale * ln(-ln(U)) where U ~ Uniform(0,1).
+#[must_use]
+pub fn random_gumbel(key: PRNGKey, count: usize, loc: f64, scale: f64) -> Vec<f64> {
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms
+        .into_iter()
+        .map(|u| {
+            let clamped = u.clamp(1e-30, 1.0 - 1e-10);
+            loc - scale * (-clamped.ln()).ln()
+        })
+        .collect()
+}
+
+/// Generate Laplace (double exponential) distributed samples.
+///
+/// Matches JAX's `jax.random.laplace(key, shape)` with loc and scale.
+/// Uses inverse transform on U ~ Uniform(-0.5, 0.5).
+#[must_use]
+pub fn random_laplace(key: PRNGKey, count: usize, loc: f64, scale: f64) -> Vec<f64> {
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms
+        .into_iter()
+        .map(|u| {
+            // Shift to (-0.5, 0.5)
+            let shifted = u - 0.5;
+            // Inverse CDF: loc - scale * sign(u) * ln(1 - 2|u|)
+            let abs_shifted = shifted.abs().min(0.5 - 1e-10);
+            loc - scale * shifted.signum() * (1.0 - 2.0 * abs_shifted).ln()
+        })
+        .collect()
+}
+
+/// Generate random integers uniformly in [minval, maxval).
+///
+/// Matches JAX's `jax.random.randint(key, shape, minval, maxval)`.
+#[must_use]
+pub fn random_randint(key: PRNGKey, count: usize, minval: i64, maxval: i64) -> Vec<i64> {
+    if maxval <= minval {
+        return vec![minval; count];
+    }
+    let range = (maxval - minval) as f64;
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms
+        .into_iter()
+        .map(|u| minval + (u * range).floor() as i64)
+        .collect()
+}
+
+/// Randomly permute elements of a sequence.
+///
+/// Matches JAX's `jax.random.permutation(key, n)` returning a permutation of 0..n.
+/// Uses Fisher-Yates shuffle.
+#[must_use]
+pub fn random_permutation(key: PRNGKey, n: usize) -> Vec<usize> {
+    if n == 0 {
+        return vec![];
+    }
+
+    let mut result: Vec<usize> = (0..n).collect();
+    // Need n-1 random swaps
+    let uniforms = random_uniform(key, n.saturating_sub(1), 0.0, 1.0);
+
+    for i in 0..n.saturating_sub(1) {
+        let remaining = n - i;
+        let j = i + (uniforms[i] * remaining as f64).floor() as usize;
+        let j = j.min(n - 1); // Safety clamp
+        result.swap(i, j);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,5 +923,95 @@ mod tests {
             corr.abs() < 0.1,
             "split key samples should be uncorrelated, got r={corr:.4}"
         );
+    }
+
+    // === Tests for new distributions ===
+
+    #[test]
+    fn test_exponential_positive() {
+        let key = random_key(42);
+        let vals = random_exponential(key, 1000, 1.0);
+        assert!(vals.iter().all(|&v| v > 0.0), "exponential should be > 0");
+    }
+
+    #[test]
+    fn test_exponential_mean() {
+        let key = random_key(42);
+        let rate = 2.0;
+        let vals = random_exponential(key, 10_000, rate);
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        let expected = 1.0 / rate;
+        assert!(
+            (mean - expected).abs() < 0.05,
+            "exponential mean={mean:.4} expected={expected:.4}"
+        );
+    }
+
+    #[test]
+    fn test_gumbel_deterministic() {
+        let key = random_key(42);
+        let a = random_gumbel(key, 100, 0.0, 1.0);
+        let b = random_gumbel(key, 100, 0.0, 1.0);
+        assert_eq!(a, b, "gumbel: same key must produce same samples");
+    }
+
+    #[test]
+    fn test_laplace_symmetric() {
+        let key = random_key(42);
+        let vals = random_laplace(key, 10_000, 0.0, 1.0);
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        assert!(
+            mean.abs() < 0.1,
+            "laplace(0,1) should have mean ~0, got {mean:.4}"
+        );
+    }
+
+    #[test]
+    fn test_randint_range() {
+        let key = random_key(42);
+        let vals = random_randint(key, 1000, 0, 10);
+        assert!(
+            vals.iter().all(|&v| (0..10).contains(&v)),
+            "randint should be in [minval, maxval)"
+        );
+    }
+
+    #[test]
+    fn test_randint_all_values_possible() {
+        let key = random_key(42);
+        let vals = random_randint(key, 10_000, 0, 10);
+        for i in 0..10 {
+            assert!(
+                vals.iter().any(|&v| v == i),
+                "randint should produce value {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_permutation_is_permutation() {
+        let key = random_key(42);
+        let n = 100;
+        let perm = random_permutation(key, n);
+        assert_eq!(perm.len(), n);
+        let mut sorted = perm.clone();
+        sorted.sort();
+        let expected: Vec<usize> = (0..n).collect();
+        assert_eq!(sorted, expected, "permutation should contain 0..n exactly");
+    }
+
+    #[test]
+    fn test_permutation_empty() {
+        let key = random_key(42);
+        let perm = random_permutation(key, 0);
+        assert!(perm.is_empty());
+    }
+
+    #[test]
+    fn test_permutation_shuffles() {
+        let key = random_key(42);
+        let perm = random_permutation(key, 100);
+        let identity: Vec<usize> = (0..100).collect();
+        assert_ne!(perm, identity, "permutation should shuffle");
     }
 }
