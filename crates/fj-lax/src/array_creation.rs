@@ -231,6 +231,178 @@ pub fn diag(v: &[f64], k: i32) -> Result<Value, ValueError> {
     Ok(Value::Tensor(tensor))
 }
 
+/// Extract the upper triangle of a matrix.
+///
+/// Matches `jnp.triu(m, k)` where k is the diagonal offset.
+/// Elements below the k-th diagonal are zeroed.
+pub fn triu(a: &[f64], m: usize, n: usize, k: i32) -> Vec<f64> {
+    let mut result = vec![0.0; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            if (j as i32) >= (i as i32) + k {
+                result[i * n + j] = a[i * n + j];
+            }
+        }
+    }
+    result
+}
+
+/// Extract the lower triangle of a matrix.
+///
+/// Matches `jnp.tril(m, k)` where k is the diagonal offset.
+/// Elements above the k-th diagonal are zeroed.
+pub fn tril(a: &[f64], m: usize, n: usize, k: i32) -> Vec<f64> {
+    let mut result = vec![0.0; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            if (j as i32) <= (i as i32) + k {
+                result[i * n + j] = a[i * n + j];
+            }
+        }
+    }
+    result
+}
+
+/// Extract the trace (sum of diagonal elements) of a matrix.
+///
+/// Matches `jnp.trace(a, offset)`.
+pub fn trace(a: &[f64], m: usize, n: usize, offset: i32) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..m {
+        let j = (i as i32) + offset;
+        if j >= 0 && (j as usize) < n {
+            sum += a[i * n + j as usize];
+        }
+    }
+    sum
+}
+
+/// Extract a diagonal from a matrix.
+///
+/// Matches `jnp.diagonal(a, offset)`.
+pub fn diagonal(a: &[f64], m: usize, n: usize, offset: i32) -> Vec<f64> {
+    let mut diag = Vec::new();
+    for i in 0..m {
+        let j = (i as i32) + offset;
+        if j >= 0 && (j as usize) < n {
+            diag.push(a[i * n + j as usize]);
+        }
+    }
+    diag
+}
+
+/// Flip array along an axis.
+///
+/// Matches `jnp.flip(m, axis)` for a 2D array.
+pub fn flip_2d(a: &[f64], m: usize, n: usize, axis: usize) -> Vec<f64> {
+    let mut result = vec![0.0; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let (src_i, src_j) = if axis == 0 {
+                (m - 1 - i, j)
+            } else {
+                (i, n - 1 - j)
+            };
+            result[i * n + j] = a[src_i * n + src_j];
+        }
+    }
+    result
+}
+
+/// Roll array elements along an axis.
+///
+/// Matches `jnp.roll(a, shift, axis)` for a 1D array.
+pub fn roll_1d(a: &[f64], shift: i32) -> Vec<f64> {
+    if a.is_empty() {
+        return Vec::new();
+    }
+    let n = a.len();
+    let shift = ((shift % n as i32) + n as i32) as usize % n;
+    let mut result = vec![0.0; n];
+    for i in 0..n {
+        result[(i + shift) % n] = a[i];
+    }
+    result
+}
+
+/// Create a triangular matrix (lower or upper) filled with ones.
+///
+/// Matches `jnp.tri(n, m, k)`.
+pub fn tri(n: usize, m: usize, k: i32) -> Vec<f64> {
+    let mut result = vec![0.0; n * m];
+    for i in 0..n {
+        for j in 0..m {
+            if (j as i32) <= (i as i32) + k {
+                result[i * m + j] = 1.0;
+            }
+        }
+    }
+    result
+}
+
+/// Stack arrays along a new axis.
+///
+/// Matches `jnp.stack(arrays, axis)` for 1D arrays along axis 0.
+/// Returns (result, new_shape) where new_shape is [count, len].
+pub fn stack_1d(arrays: &[&[f64]]) -> (Vec<f64>, Vec<usize>) {
+    if arrays.is_empty() {
+        return (Vec::new(), vec![0, 0]);
+    }
+    let len = arrays[0].len();
+    let count = arrays.len();
+    let mut result = Vec::with_capacity(count * len);
+    for arr in arrays {
+        result.extend_from_slice(arr);
+    }
+    (result, vec![count, len])
+}
+
+/// Vertically stack (row-wise) 1D or 2D arrays.
+///
+/// Matches `jnp.vstack(arrays)` for 1D arrays.
+pub fn vstack_1d(arrays: &[&[f64]]) -> Vec<f64> {
+    let mut result = Vec::new();
+    for arr in arrays {
+        result.extend_from_slice(arr);
+    }
+    result
+}
+
+/// Horizontally stack (column-wise) 1D arrays.
+///
+/// Matches `jnp.hstack(arrays)` for 1D arrays.
+pub fn hstack_1d(arrays: &[&[f64]]) -> Vec<f64> {
+    let mut result = Vec::new();
+    for arr in arrays {
+        result.extend_from_slice(arr);
+    }
+    result
+}
+
+/// Repeat elements of an array.
+///
+/// Matches `jnp.repeat(a, repeats)` for a 1D array.
+pub fn repeat_1d(a: &[f64], repeats: usize) -> Vec<f64> {
+    let mut result = Vec::with_capacity(a.len() * repeats);
+    for &val in a {
+        for _ in 0..repeats {
+            result.push(val);
+        }
+    }
+    result
+}
+
+/// Tile an array.
+///
+/// Matches `jnp.tile(a, reps)` for a 1D array.
+pub fn tile_1d(a: &[f64], reps: usize) -> Vec<f64> {
+    let mut result = Vec::with_capacity(a.len() * reps);
+    for _ in 0..reps {
+        result.extend_from_slice(a);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,5 +558,132 @@ mod tests {
         assert_eq!(vals.len(), 9);
         assert!((vals[1] - 1.0).abs() < 1e-10);
         assert!((vals[5] - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_triu_basic() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let result = triu(&a, 3, 3, 0);
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 0.0, 5.0, 6.0, 0.0, 0.0, 9.0]);
+    }
+
+    #[test]
+    fn test_triu_offset() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let result = triu(&a, 3, 3, 1);
+        assert_eq!(result, vec![0.0, 2.0, 3.0, 0.0, 0.0, 6.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_tril_basic() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let result = tril(&a, 3, 3, 0);
+        assert_eq!(result, vec![1.0, 0.0, 0.0, 4.0, 5.0, 0.0, 7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn test_tril_offset() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let result = tril(&a, 3, 3, -1);
+        assert_eq!(result, vec![0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 7.0, 8.0, 0.0]);
+    }
+
+    #[test]
+    fn test_trace_basic() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let tr = trace(&a, 3, 3, 0);
+        assert!((tr - 15.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_trace_offset() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let tr = trace(&a, 3, 3, 1);
+        assert!((tr - 8.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_diagonal_basic() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let diag = diagonal(&a, 3, 3, 0);
+        assert_eq!(diag, vec![1.0, 5.0, 9.0]);
+    }
+
+    #[test]
+    fn test_diagonal_offset() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
+        let diag = diagonal(&a, 3, 3, 1);
+        assert_eq!(diag, vec![2.0, 6.0]);
+    }
+
+    #[test]
+    fn test_flip_2d_axis0() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let result = flip_2d(&a, 2, 3, 0);
+        assert_eq!(result, vec![4.0, 5.0, 6.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_flip_2d_axis1() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let result = flip_2d(&a, 2, 3, 1);
+        assert_eq!(result, vec![3.0, 2.0, 1.0, 6.0, 5.0, 4.0]);
+    }
+
+    #[test]
+    fn test_roll_1d_positive() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let result = roll_1d(&a, 2);
+        assert_eq!(result, vec![4.0, 5.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_roll_1d_negative() {
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let result = roll_1d(&a, -2);
+        assert_eq!(result, vec![3.0, 4.0, 5.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn test_tri_basic() {
+        let result = tri(3, 3, 0);
+        assert_eq!(result, vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_tri_offset() {
+        let result = tri(3, 3, 1);
+        assert_eq!(result, vec![1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_stack_1d() {
+        let a = [1.0, 2.0];
+        let b = [3.0, 4.0];
+        let (result, shape) = stack_1d(&[&a, &b]);
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(shape, vec![2, 2]);
+    }
+
+    #[test]
+    fn test_vstack_1d() {
+        let a = [1.0, 2.0];
+        let b = [3.0, 4.0];
+        let result = vstack_1d(&[&a, &b]);
+        assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn test_repeat_1d() {
+        let a = [1.0, 2.0];
+        let result = repeat_1d(&a, 3);
+        assert_eq!(result, vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn test_tile_1d() {
+        let a = [1.0, 2.0];
+        let result = tile_1d(&a, 3);
+        assert_eq!(result, vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
     }
 }
