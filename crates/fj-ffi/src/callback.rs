@@ -235,8 +235,8 @@ mod tests {
 
     #[test]
     fn io_callback_invocation() {
-        use std::sync::atomic::{AtomicU64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
 
         let counter = Arc::new(AtomicU64::new(0));
         let counter_clone = counter.clone();
@@ -340,8 +340,8 @@ mod tests {
 
     #[test]
     fn impure_callback_fails_idempotency_check() {
-        use std::sync::atomic::{AtomicI64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicI64, Ordering};
 
         let counter = Arc::new(AtomicI64::new(0));
         let counter_clone = counter.clone();
@@ -358,8 +358,8 @@ mod tests {
 
     #[test]
     fn io_callback_skips_idempotency_check() {
-        use std::sync::atomic::{AtomicI64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicI64, Ordering};
 
         let counter = Arc::new(AtomicI64::new(0));
         let counter_clone = counter.clone();
@@ -377,8 +377,8 @@ mod tests {
 
     #[test]
     fn permissive_config_skips_all_checks() {
-        use std::sync::atomic::{AtomicI64, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicI64, Ordering};
 
         let counter = Arc::new(AtomicI64::new(0));
         let counter_clone = counter.clone();

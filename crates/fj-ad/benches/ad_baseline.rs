@@ -125,9 +125,7 @@ fn build_exp_log_jaxpr() -> Jaxpr {
 fn bench_grad_square(c: &mut Criterion) {
     let jaxpr = build_square_jaxpr();
     let args = vec![Value::scalar_f64(3.0)];
-    c.bench_function("ad/grad_square", |b| {
-        b.iter(|| grad_jaxpr(&jaxpr, &args))
-    });
+    c.bench_function("ad/grad_square", |b| b.iter(|| grad_jaxpr(&jaxpr, &args)));
 }
 
 fn bench_grad_polynomial(c: &mut Criterion) {
@@ -149,9 +147,7 @@ fn bench_grad_trig(c: &mut Criterion) {
 fn bench_grad_exp_log(c: &mut Criterion) {
     let jaxpr = build_exp_log_jaxpr();
     let args = vec![Value::scalar_f64(1.0)];
-    c.bench_function("ad/grad_exp_log", |b| {
-        b.iter(|| grad_jaxpr(&jaxpr, &args))
-    });
+    c.bench_function("ad/grad_exp_log", |b| b.iter(|| grad_jaxpr(&jaxpr, &args)));
 }
 
 fn bench_value_and_grad_poly(c: &mut Criterion) {

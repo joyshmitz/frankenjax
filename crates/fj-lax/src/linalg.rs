@@ -19,7 +19,10 @@ fn complex_mul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
 
 fn complex_div(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     let denom = b.0 * b.0 + b.1 * b.1;
-    ((a.0 * b.0 + a.1 * b.1) / denom, (a.1 * b.0 - a.0 * b.1) / denom)
+    (
+        (a.0 * b.0 + a.1 * b.1) / denom,
+        (a.1 * b.0 - a.0 * b.1) / denom,
+    )
 }
 
 fn complex_sub(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
@@ -468,7 +471,8 @@ pub(crate) fn eval_qr(
             }
             let tau_dot = complex_mul(tau, dot);
             for (vi, row) in v.iter().zip(j..m) {
-                q[row * q_cols + col] = complex_sub(q[row * q_cols + col], complex_mul(*vi, tau_dot));
+                q[row * q_cols + col] =
+                    complex_sub(q[row * q_cols + col], complex_mul(*vi, tau_dot));
             }
         }
     }
@@ -561,7 +565,8 @@ pub(crate) fn eval_lu(
             let factor = complex_div(lu[row * n + col], diag);
             lu[row * n + col] = factor;
             for j in (col + 1)..n {
-                lu[row * n + j] = complex_sub(lu[row * n + j], complex_mul(factor, lu[col * n + j]));
+                lu[row * n + j] =
+                    complex_sub(lu[row * n + j], complex_mul(factor, lu[col * n + j]));
             }
         }
     }
@@ -627,7 +632,10 @@ pub(crate) fn eval_svd(
         for j in i..n {
             let mut dot = zero;
             for row in 0..m {
-                dot = complex_add(dot, complex_mul(complex_conj(a[row * n + i]), a[row * n + j]));
+                dot = complex_add(
+                    dot,
+                    complex_mul(complex_conj(a[row * n + i]), a[row * n + j]),
+                );
             }
             aha[i * n + j] = dot;
             aha[j * n + i] = complex_conj(dot);
@@ -702,13 +710,16 @@ pub(crate) fn eval_svd(
         .iter()
         .map(|&v| linalg_literal_from_f64(dtype, v))
         .collect();
-    let s_shape = Shape { dims: vec![k as u32] };
+    let s_shape = Shape {
+        dims: vec![k as u32],
+    };
     let s_dtype = match dtype {
         DType::Complex64 => DType::F32,
         DType::Complex128 => DType::F64,
         _ => dtype,
     };
-    let s_tensor = TensorValue::new(s_dtype, s_shape, s_elements).map_err(EvalError::InvalidTensor)?;
+    let s_tensor =
+        TensorValue::new(s_dtype, s_shape, s_elements).map_err(EvalError::InvalidTensor)?;
     let s_val = Value::Tensor(s_tensor);
 
     let vh_val = complex_matrix_to_value(vt_rows, n, &vh_out, dtype)?;
@@ -784,10 +795,10 @@ fn complex_jacobi_eigendecomposition(
         // U = [[c, -s*e^{-iφ}], [s*e^{iφ}, c]]
         // U^H = [[c, s*e^{-iφ}], [-s*e^{iφ}, c]]
         let phase_conj = complex_conj(phase);
-        let neg_s_phase_conj = complex_mul((-s, 0.0), phase_conj);  // -s*e^{-iφ}
-        let s_phase = complex_mul((s, 0.0), phase);                  // s*e^{iφ}
-        let s_phase_conj = complex_mul((s, 0.0), phase_conj);        // s*e^{-iφ}
-        let neg_s_phase = complex_mul((-s, 0.0), phase);             // -s*e^{iφ}
+        let neg_s_phase_conj = complex_mul((-s, 0.0), phase_conj); // -s*e^{-iφ}
+        let s_phase = complex_mul((s, 0.0), phase); // s*e^{iφ}
+        let s_phase_conj = complex_mul((s, 0.0), phase_conj); // s*e^{-iφ}
+        let neg_s_phase = complex_mul((-s, 0.0), phase); // -s*e^{iφ}
 
         // Apply U^H from left
         let row_p: Vec<_> = (0..n).map(|j| a[p * n + j]).collect();
@@ -834,10 +845,7 @@ fn complex_jacobi_eigendecomposition(
         let vq: Vec<_> = (0..n).map(|i| v[i * n + q]).collect();
         for i in 0..n {
             // V'[i][p] = V[i][p]*c + V[i][q]*s*e^{iφ}
-            v[i * n + p] = complex_add(
-                complex_mul((c, 0.0), vp[i]),
-                complex_mul(s_phase, vq[i]),
-            );
+            v[i * n + p] = complex_add(complex_mul((c, 0.0), vp[i]), complex_mul(s_phase, vq[i]));
             // V'[i][q] = V[i][p]*(-s*e^{-iφ}) + V[i][q]*c
             v[i * n + q] = complex_add(
                 complex_mul(neg_s_phase_conj, vp[i]),
@@ -1007,14 +1015,21 @@ fn complex_extend_unitary_columns(
         for j in 0..added {
             let mut dot = zero;
             for i in 0..m {
-                dot = complex_add(dot, complex_mul(complex_conj(result[i * m_full + j]), col[i]));
+                dot = complex_add(
+                    dot,
+                    complex_mul(complex_conj(result[i * m_full + j]), col[i]),
+                );
             }
             for i in 0..m {
                 col[i] = complex_sub(col[i], complex_mul(dot, result[i * m_full + j]));
             }
         }
 
-        let norm: f64 = col.iter().map(|x| x.0 * x.0 + x.1 * x.1).sum::<f64>().sqrt();
+        let norm: f64 = col
+            .iter()
+            .map(|x| x.0 * x.0 + x.1 * x.1)
+            .sum::<f64>()
+            .sqrt();
         if norm > f64::EPSILON * 1e4 {
             for i in 0..m {
                 result[i * m_full + added] = complex_div(col[i], (norm, 0.0));
@@ -1085,14 +1100,20 @@ pub(crate) fn eval_eigh(
             if b_abs_sq > f64::EPSILON * f64::EPSILON {
                 // Non-trivial off-diagonal
                 let v1_unnorm = (complex_conj(b), (lambda1 - aa, 0.0));
-                let v1_norm = (v1_unnorm.0.0 * v1_unnorm.0.0 + v1_unnorm.0.1 * v1_unnorm.0.1
-                    + v1_unnorm.1.0 * v1_unnorm.1.0 + v1_unnorm.1.1 * v1_unnorm.1.1).sqrt();
+                let v1_norm = (v1_unnorm.0.0 * v1_unnorm.0.0
+                    + v1_unnorm.0.1 * v1_unnorm.0.1
+                    + v1_unnorm.1.0 * v1_unnorm.1.0
+                    + v1_unnorm.1.1 * v1_unnorm.1.1)
+                    .sqrt();
                 v[0] = complex_div(v1_unnorm.0, (v1_norm, 0.0));
                 v[2] = complex_div(v1_unnorm.1, (v1_norm, 0.0));
 
                 let v2_unnorm = (complex_conj(b), (lambda2 - aa, 0.0));
-                let v2_norm = (v2_unnorm.0.0 * v2_unnorm.0.0 + v2_unnorm.0.1 * v2_unnorm.0.1
-                    + v2_unnorm.1.0 * v2_unnorm.1.0 + v2_unnorm.1.1 * v2_unnorm.1.1).sqrt();
+                let v2_norm = (v2_unnorm.0.0 * v2_unnorm.0.0
+                    + v2_unnorm.0.1 * v2_unnorm.0.1
+                    + v2_unnorm.1.0 * v2_unnorm.1.0
+                    + v2_unnorm.1.1 * v2_unnorm.1.1)
+                    .sqrt();
                 v[1] = complex_div(v2_unnorm.0, (v2_norm, 0.0));
                 v[3] = complex_div(v2_unnorm.1, (v2_norm, 0.0));
             } else {
@@ -1130,8 +1151,11 @@ pub(crate) fn eval_eigh(
             .iter()
             .map(|&v| linalg_literal_from_f64(w_dtype, v))
             .collect();
-        let w_shape = Shape { dims: vec![m as u32] };
-        let w_tensor = TensorValue::new(w_dtype, w_shape, w_elements).map_err(EvalError::InvalidTensor)?;
+        let w_shape = Shape {
+            dims: vec![m as u32],
+        };
+        let w_tensor =
+            TensorValue::new(w_dtype, w_shape, w_elements).map_err(EvalError::InvalidTensor)?;
         let w_val = Value::Tensor(w_tensor);
 
         let v_val = complex_matrix_to_value(m, m, &v_sorted, dtype)?;
@@ -1168,8 +1192,11 @@ pub(crate) fn eval_eigh(
         .iter()
         .map(|&v| linalg_literal_from_f64(dtype, v))
         .collect();
-    let w_shape = Shape { dims: vec![m as u32] };
-    let w_tensor = TensorValue::new(dtype, w_shape, w_elements).map_err(EvalError::InvalidTensor)?;
+    let w_shape = Shape {
+        dims: vec![m as u32],
+    };
+    let w_tensor =
+        TensorValue::new(dtype, w_shape, w_elements).map_err(EvalError::InvalidTensor)?;
     let w_val = Value::Tensor(w_tensor);
 
     let v_val = matrix_to_value(m, m, &v_sorted, dtype)?;

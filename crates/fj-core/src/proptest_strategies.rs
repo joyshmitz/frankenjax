@@ -52,7 +52,9 @@ pub fn arb_shape() -> impl Strategy<Value = Shape> {
         Just(Shape::scalar()),
         (1..=16u32).prop_map(Shape::vector),
         (1..=8u32, 1..=8u32).prop_map(|(r, c)| Shape { dims: vec![r, c] }),
-        (1..=4u32, 1..=4u32, 1..=4u32).prop_map(|(a, b, c)| Shape { dims: vec![a, b, c] }),
+        (1..=4u32, 1..=4u32, 1..=4u32).prop_map(|(a, b, c)| Shape {
+            dims: vec![a, b, c]
+        }),
     ]
 }
 

@@ -3233,12 +3233,8 @@ mod tests {
             fj_test_utils::TestMode::Strict,
             || {
                 // Build a malformed sub_jaxpr (duplicate invar).
-                let malformed_sub = Jaxpr::new(
-                    vec![VarId(1), VarId(1)],
-                    vec![],
-                    vec![VarId(1)],
-                    vec![],
-                );
+                let malformed_sub =
+                    Jaxpr::new(vec![VarId(1), VarId(1)], vec![], vec![VarId(1)], vec![]);
 
                 // Parent is otherwise well-formed: a single Cond equation
                 // whose `sub_jaxprs` contains the malformed branch.
@@ -3278,12 +3274,7 @@ mod tests {
             &("sub-jaxpr-validation-ok", 1_u32),
             fj_test_utils::TestMode::Strict,
             || {
-                let body = Jaxpr::new(
-                    vec![VarId(1)],
-                    vec![],
-                    vec![VarId(1)],
-                    vec![],
-                );
+                let body = Jaxpr::new(vec![VarId(1)], vec![], vec![VarId(1)], vec![]);
 
                 let parent = Jaxpr::new(
                     vec![VarId(10)],

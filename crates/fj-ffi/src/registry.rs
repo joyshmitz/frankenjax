@@ -228,8 +228,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_target_not_found_reports_sorted_available_names(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn registry_target_not_found_reports_sorted_available_names()
+    -> Result<(), Box<dyn std::error::Error>> {
         let reg = FfiRegistry::new();
         reg.register("zeta", extern_test_success)?;
         reg.register("alpha", extern_test_success)?;

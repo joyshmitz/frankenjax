@@ -506,10 +506,8 @@ mod tests {
 
     #[test]
     fn file_cache_put_failure_counter_stays_zero_on_success() {
-        let dir = std::env::temp_dir().join(format!(
-            "fj-cache-test-put-success-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fj-cache-test-put-success-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
 
         let mut cache = FileCache::new(dir.clone());
@@ -524,8 +522,10 @@ mod tests {
 
     #[test]
     fn file_cache_evict_missing_does_not_bump_failure_counter() {
-        let dir =
-            std::env::temp_dir().join(format!("fj-cache-test-evict-missing-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fj-cache-test-evict-missing-{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
 
         let mut cache = FileCache::new(dir.clone());
@@ -543,8 +543,10 @@ mod tests {
 
     #[test]
     fn file_cache_evict_success_does_not_bump_failure_counter() {
-        let dir =
-            std::env::temp_dir().join(format!("fj-cache-test-evict-success-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fj-cache-test-evict-success-{}",
+            std::process::id()
+        ));
         let _ = std::fs::create_dir_all(&dir);
 
         let mut cache = FileCache::new(dir.clone());
@@ -612,10 +614,8 @@ mod tests {
 
     #[test]
     fn file_cache_rejects_path_traversal_key_on_put_get_evict() {
-        let dir = std::env::temp_dir().join(format!(
-            "fj-cache-test-traversal-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fj-cache-test-traversal-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
 
         let mut cache = FileCache::new(dir.clone());

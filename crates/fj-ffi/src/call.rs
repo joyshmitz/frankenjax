@@ -3,8 +3,8 @@
 //! `FfiCall::invoke()` is the sole method that crosses the FFI boundary.
 //! All preconditions are validated before the unsafe block is entered.
 
-use crate::buffer::validate_buffer_contents;
 use crate::buffer::FfiBuffer;
+use crate::buffer::validate_buffer_contents;
 use crate::error::FfiError;
 use crate::registry::{FfiRegistry, FfiTarget};
 use smallvec::SmallVec;

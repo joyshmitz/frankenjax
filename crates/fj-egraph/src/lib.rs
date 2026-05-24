@@ -747,11 +747,10 @@ fn fuses_shape_chain(previous: &Equation, current: &Equation) -> bool {
         (Primitive::Transpose, Primitive::Transpose) => {
             compose_explicit_transpose_perms(&previous.params, &current.params).is_some()
         }
-        (Primitive::Rev, Primitive::Rev) => rev_axes_symmetric_difference(
-            &previous.params,
-            &current.params,
-        )
-        .is_some_and(|sym_diff| !sym_diff.is_empty()),
+        (Primitive::Rev, Primitive::Rev) => {
+            rev_axes_symmetric_difference(&previous.params, &current.params)
+                .is_some_and(|sym_diff| !sym_diff.is_empty())
+        }
         _ => false,
     }
 }
@@ -893,11 +892,9 @@ fn optimize_shape_parametric_chains(jaxpr: &Jaxpr) -> Jaxpr {
             if previous.primitive == Primitive::Transpose
                 && rewritten.primitive == Primitive::Transpose
             {
-                let composed = compose_explicit_transpose_perms(
-                    &previous.params,
-                    &rewritten.params,
-                )
-                .expect("fuse predicate already validated permutation composition");
+                let composed =
+                    compose_explicit_transpose_perms(&previous.params, &rewritten.params)
+                        .expect("fuse predicate already validated permutation composition");
                 let csv = composed
                     .iter()
                     .map(|axis| axis.to_string())
@@ -905,14 +902,9 @@ fn optimize_shape_parametric_chains(jaxpr: &Jaxpr) -> Jaxpr {
                     .join(",");
                 rewritten.params.insert("permutation".to_owned(), csv);
             }
-            if previous.primitive == Primitive::Rev
-                && rewritten.primitive == Primitive::Rev
-            {
-                let sym_diff = rev_axes_symmetric_difference(
-                    &previous.params,
-                    &rewritten.params,
-                )
-                .expect("fuse predicate already validated rev sym-diff");
+            if previous.primitive == Primitive::Rev && rewritten.primitive == Primitive::Rev {
+                let sym_diff = rev_axes_symmetric_difference(&previous.params, &rewritten.params)
+                    .expect("fuse predicate already validated rev sym-diff");
                 let csv = sym_diff
                     .iter()
                     .map(|axis| axis.to_string())
@@ -1169,7 +1161,11 @@ fn expected_egraph_input_arity(primitive: Primitive) -> Option<usize> {
         | Primitive::ShiftLeft
         | Primitive::ShiftRightArithmetic
         | Primitive::ShiftRightLogical => 2,
-        Primitive::Select | Primitive::SelectN | Primitive::Clamp | Primitive::Fma | Primitive::Betainc => 3,
+        Primitive::Select
+        | Primitive::SelectN
+        | Primitive::Clamp
+        | Primitive::Fma
+        | Primitive::Betainc => 3,
         Primitive::Neg
         | Primitive::Abs
         | Primitive::Exp
@@ -3054,9 +3050,11 @@ fn excluded_primitive_reason(primitive: Primitive) -> Option<ExclusionReason> {
             Some(ExclusionReason::ControlFlow)
         }
         // Sorting needs explicit axis and comparator metadata.
-        Primitive::Sort | Primitive::Argsort | Primitive::TopK | Primitive::Argmin | Primitive::Argmax => {
-            Some(ExclusionReason::Sorting)
-        }
+        Primitive::Sort
+        | Primitive::Argsort
+        | Primitive::TopK
+        | Primitive::Argmin
+        | Primitive::Argmax => Some(ExclusionReason::Sorting),
         // Convolution needs window, stride, and padding metadata.
         Primitive::Conv => Some(ExclusionReason::Convolution),
         // Index and utility helpers need dynamic index/update metadata.
@@ -5313,7 +5311,14 @@ mod tests {
             elements.push(Literal::I64(i as i64));
         }
         let input = Value::Tensor(
-            TensorValue::new(DType::I64, Shape { dims: vec![2, 3, 4] }, elements).unwrap(),
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![2, 3, 4],
+                },
+                elements,
+            )
+            .unwrap(),
         );
         let original_out = eval_jaxpr(&jaxpr, std::slice::from_ref(&input)).unwrap();
         let optimized_out = eval_jaxpr(&optimized, std::slice::from_ref(&input)).unwrap();
@@ -5424,7 +5429,14 @@ mod tests {
             elements.push(Literal::I64(i as i64));
         }
         let input = Value::Tensor(
-            TensorValue::new(DType::I64, Shape { dims: vec![2, 3, 4] }, elements).unwrap(),
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![2, 3, 4],
+                },
+                elements,
+            )
+            .unwrap(),
         );
         let original_out = eval_jaxpr(&jaxpr, std::slice::from_ref(&input)).unwrap();
         let optimized_out = eval_jaxpr(&optimized, std::slice::from_ref(&input)).unwrap();
@@ -7023,29 +7035,27 @@ mod tests {
 
     #[test]
     fn numerical_safety_mode_preserves_clamp_validation_errors() {
-        let cases = [
-            (
-                "clamp_same_complex",
-                Jaxpr::new(
-                    vec![VarId(1)],
-                    vec![],
-                    vec![VarId(2)],
-                    vec![Equation {
-                        primitive: Primitive::Clamp,
-                        inputs: smallvec![
-                            Atom::Var(VarId(1)),
-                            Atom::Var(VarId(1)),
-                            Atom::Var(VarId(1))
-                        ],
-                        outputs: smallvec![VarId(2)],
-                        effects: vec![],
-                        params: BTreeMap::new(),
-                        sub_jaxprs: vec![],
-                    }],
-                ),
-                vec![Value::Scalar(Literal::from_complex128(1.0, 0.0))],
+        let cases = [(
+            "clamp_same_complex",
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: Primitive::Clamp,
+                    inputs: smallvec![
+                        Atom::Var(VarId(1)),
+                        Atom::Var(VarId(1)),
+                        Atom::Var(VarId(1))
+                    ],
+                    outputs: smallvec![VarId(2)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                }],
             ),
-        ];
+            vec![Value::Scalar(Literal::from_complex128(1.0, 0.0))],
+        )];
 
         for (name, jaxpr, args) in cases {
             assert_safe_and_default_preserve_error(name, &jaxpr, &args);
@@ -7858,26 +7868,28 @@ mod tests {
                 4 => vec![vec![4], vec![2, 2], vec![1, 4], vec![4, 1]],
                 6 => vec![vec![6], vec![2, 3], vec![3, 2], vec![1, 6], vec![6, 1]],
                 8 => vec![vec![8], vec![2, 4], vec![4, 2], vec![2, 2, 2]],
-                12 => vec![vec![12], vec![3, 4], vec![4, 3], vec![2, 6], vec![6, 2], vec![2, 2, 3]],
+                12 => vec![
+                    vec![12],
+                    vec![3, 4],
+                    vec![4, 3],
+                    vec![2, 6],
+                    vec![6, 2],
+                    vec![2, 2, 3],
+                ],
                 _ => vec![vec![n]],
             }
         }
 
-        fn reshape_chain_strategy()
-            -> impl Strategy<Value = (Vec<u32>, Vec<Vec<u32>>)>
-        {
+        fn reshape_chain_strategy() -> impl Strategy<Value = (Vec<u32>, Vec<Vec<u32>>)> {
             // Element counts kept small to keep eval cheap.
             let element_count_choices: Vec<u32> = vec![1, 2, 4, 6, 8, 12];
-            proptest::sample::select(element_count_choices)
-                .prop_flat_map(|n| {
-                    let candidates = factorizations_of(n);
-                    let init = proptest::sample::select(candidates.clone());
-                    let chain = prop::collection::vec(
-                        proptest::sample::select(candidates),
-                        2_usize..=5,
-                    );
-                    (init, chain)
-                })
+            proptest::sample::select(element_count_choices).prop_flat_map(|n| {
+                let candidates = factorizations_of(n);
+                let init = proptest::sample::select(candidates.clone());
+                let chain =
+                    prop::collection::vec(proptest::sample::select(candidates), 2_usize..=5);
+                (init, chain)
+            })
         }
 
         fn build_reshape_chain_jaxpr(target_shapes: &[Vec<u32>]) -> Jaxpr {

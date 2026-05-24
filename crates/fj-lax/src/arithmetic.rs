@@ -333,12 +333,16 @@ fn complex_erf_inv(w: (f64, f64)) -> (f64, f64) {
             let t = (-2.0 * (1.0 - w.0.abs()).ln()).sqrt();
             let c = [2.515517, 0.802853, 0.010328];
             let d = [1.0, 1.432788, 0.189269, 0.001308];
-            let approx = t - (c[0] + t * (c[1] + t * c[2])) / (d[0] + t * (d[1] + t * (d[2] + t * d[3])));
+            let approx =
+                t - (c[0] + t * (c[1] + t * c[2])) / (d[0] + t * (d[1] + t * (d[2] + t * d[3])));
             if w.0 < 0.0 { -approx } else { approx }
         };
         (real_approx, w.1 * std::f64::consts::FRAC_PI_2.sqrt())
     } else {
-        (w.0 * std::f64::consts::FRAC_PI_2.sqrt(), w.1 * std::f64::consts::FRAC_PI_2.sqrt())
+        (
+            w.0 * std::f64::consts::FRAC_PI_2.sqrt(),
+            w.1 * std::f64::consts::FRAC_PI_2.sqrt(),
+        )
     };
     for _ in 0..30 {
         let erf_z = complex_erf(z);
@@ -347,8 +351,10 @@ fn complex_erf_inv(w: (f64, f64)) -> (f64, f64) {
             break;
         }
         let neg_z_sq = complex_mul(z, z);
-        let deriv = (two_over_sqrt_pi * (-neg_z_sq.0).exp() * neg_z_sq.1.cos(),
-                     two_over_sqrt_pi * (-neg_z_sq.0).exp() * (-neg_z_sq.1.sin()));
+        let deriv = (
+            two_over_sqrt_pi * (-neg_z_sq.0).exp() * neg_z_sq.1.cos(),
+            two_over_sqrt_pi * (-neg_z_sq.0).exp() * (-neg_z_sq.1.sin()),
+        );
         let step = complex_div(residual, deriv);
         z = complex_sub(z, step);
     }
@@ -403,7 +409,13 @@ fn complex_digamma(z: (f64, f64)) -> (f64, f64) {
     let z2_inv = complex_reciprocal(z2);
     let z2_inv_sq = complex_mul(z2_inv, z2_inv);
     let mut term = z2_inv_sq;
-    let bernoulli = [1.0 / 12.0, -1.0 / 120.0, 1.0 / 252.0, -1.0 / 240.0, 5.0 / 660.0];
+    let bernoulli = [
+        1.0 / 12.0,
+        -1.0 / 120.0,
+        1.0 / 252.0,
+        -1.0 / 240.0,
+        5.0 / 660.0,
+    ];
     let ln_z = complex_log(z2);
     result = complex_add(result, ln_z);
     result = complex_sub(result, (0.5 * z2_inv.0, 0.5 * z2_inv.1));
@@ -2027,7 +2039,10 @@ pub(crate) fn eval_fma(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     let b_strides = broadcast_strides(&shape_b, &out_shape);
     let c_strides = broadcast_strides(&shape_c, &out_shape);
 
-    let out_dtype = promote_dtype(promote_dtype(get_dtype(&inputs[0]), get_dtype(&inputs[1])), get_dtype(&inputs[2]));
+    let out_dtype = promote_dtype(
+        promote_dtype(get_dtype(&inputs[0]), get_dtype(&inputs[1])),
+        get_dtype(&inputs[2]),
+    );
 
     let mut multi = Vec::with_capacity(out_strides.len());
     let mut elements = Vec::with_capacity(out_count);
@@ -2041,15 +2056,15 @@ pub(crate) fn eval_fma(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         let b = get_literal(&inputs[1], b_idx);
         let c = get_literal(&inputs[2], c_idx);
 
-        elements.push(
-            fma_literal(a, b, c).map_err(|e| EvalError::TypeMismatch {
-                primitive,
-                detail: e,
-            })?,
-        );
+        elements.push(fma_literal(a, b, c).map_err(|e| EvalError::TypeMismatch {
+            primitive,
+            detail: e,
+        })?);
     }
 
-    Ok(Value::Tensor(TensorValue::new(out_dtype, out_shape, elements)?))
+    Ok(Value::Tensor(TensorValue::new(
+        out_dtype, out_shape, elements,
+    )?))
 }
 
 /// Clamp: clamp(lo, x, hi) = min(max(lo, x), hi).
@@ -2230,21 +2245,18 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                 );
             }
             Ok(Value::Tensor(TensorValue::new(
-                x.dtype,
-                out_shape,
-                elements,
+                x.dtype, out_shape, elements,
             )?))
         }
         // Scalar lo with tensor x and tensor hi (broadcasts lo)
         (Value::Scalar(lo), Value::Tensor(x), Value::Tensor(hi)) => {
-            let out_shape =
-                broadcast_shape(&x.shape, &hi.shape).ok_or(EvalError::Unsupported {
-                    primitive,
-                    detail: format!(
-                        "clamp shapes not broadcast-compatible: x={:?}, max={:?}",
-                        x.shape, hi.shape
-                    ),
-                })?;
+            let out_shape = broadcast_shape(&x.shape, &hi.shape).ok_or(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "clamp shapes not broadcast-compatible: x={:?}, max={:?}",
+                    x.shape, hi.shape
+                ),
+            })?;
 
             let out_count = out_shape.element_count().unwrap_or(0) as usize;
             let out_strides = compute_strides(&out_shape.dims);
@@ -2266,21 +2278,18 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                 );
             }
             Ok(Value::Tensor(TensorValue::new(
-                x.dtype,
-                out_shape,
-                elements,
+                x.dtype, out_shape, elements,
             )?))
         }
         // Tensor lo with tensor x and scalar hi (broadcasts hi)
         (Value::Tensor(lo), Value::Tensor(x), Value::Scalar(hi)) => {
-            let out_shape =
-                broadcast_shape(&x.shape, &lo.shape).ok_or(EvalError::Unsupported {
-                    primitive,
-                    detail: format!(
-                        "clamp shapes not broadcast-compatible: min={:?}, x={:?}",
-                        lo.shape, x.shape
-                    ),
-                })?;
+            let out_shape = broadcast_shape(&x.shape, &lo.shape).ok_or(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "clamp shapes not broadcast-compatible: min={:?}, x={:?}",
+                    lo.shape, x.shape
+                ),
+            })?;
 
             let out_count = out_shape.element_count().unwrap_or(0) as usize;
             let out_strides = compute_strides(&out_shape.dims);
@@ -2302,9 +2311,7 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                 );
             }
             Ok(Value::Tensor(TensorValue::new(
-                x.dtype,
-                out_shape,
-                elements,
+                x.dtype, out_shape, elements,
             )?))
         }
         _ => Err(EvalError::Unsupported {
@@ -2649,12 +2656,13 @@ pub(crate) fn eval_polygamma(primitive: Primitive, inputs: &[Value]) -> Result<V
             )?))
         }
         (Value::Tensor(n_tensor), Value::Tensor(x_tensor)) => {
-            let out_shape =
-                broadcast_shape(&n_tensor.shape, &x_tensor.shape).ok_or(EvalError::ShapeMismatch {
+            let out_shape = broadcast_shape(&n_tensor.shape, &x_tensor.shape).ok_or(
+                EvalError::ShapeMismatch {
                     primitive,
                     left: n_tensor.shape.clone(),
                     right: x_tensor.shape.clone(),
-                })?;
+                },
+            )?;
             let n_strides = broadcast_strides(&n_tensor.shape, &out_shape);
             let x_strides = broadcast_strides(&x_tensor.shape, &out_shape);
             let out_strides = compute_strides(&out_shape.dims);
@@ -2669,7 +2677,11 @@ pub(crate) fn eval_polygamma(primitive: Primitive, inputs: &[Value]) -> Result<V
                 let x = polygamma_literal_to_f64(x_tensor.elements[x_idx], primitive)?;
                 elements.push(Literal::from_f64(polygamma_approx(n, x)));
             }
-            Ok(Value::Tensor(TensorValue::new(DType::F64, out_shape, elements)?))
+            Ok(Value::Tensor(TensorValue::new(
+                DType::F64,
+                out_shape,
+                elements,
+            )?))
         }
     }
 }
@@ -2953,7 +2965,11 @@ fn eval_ternary_elementwise(
 
     let total_elements: usize = out_shape.dims.iter().map(|&d| d as usize).product();
     if total_elements == 0 {
-        return Ok(Value::Tensor(TensorValue::new(DType::F64, out_shape, vec![])?));
+        return Ok(Value::Tensor(TensorValue::new(
+            DType::F64,
+            out_shape,
+            vec![],
+        )?));
     }
 
     let out_strides = compute_strides(&out_shape.dims);
@@ -2976,7 +2992,11 @@ fn eval_ternary_elementwise(
         elements.push(Literal::from_f64(op(a_f, b_f, x_f)));
     }
 
-    Ok(Value::Tensor(TensorValue::new(DType::F64, out_shape, elements)?))
+    Ok(Value::Tensor(TensorValue::new(
+        DType::F64,
+        out_shape,
+        elements,
+    )?))
 }
 
 pub(crate) fn hurwitz_zeta_approx(x: f64, q: f64) -> f64 {
@@ -3988,7 +4008,10 @@ pub(crate) fn eval_integer_pow(
     fn integer_pow_literal(literal: Literal, exponent: i32) -> Result<Literal, &'static str> {
         match literal {
             Literal::Complex64Bits(re_bits, im_bits) => {
-                let z = (f32::from_bits(re_bits) as f64, f32::from_bits(im_bits) as f64);
+                let z = (
+                    f32::from_bits(re_bits) as f64,
+                    f32::from_bits(im_bits) as f64,
+                );
                 let result = complex_powi(z, exponent);
                 Ok(Literal::from_complex64(result.0 as f32, result.1 as f32))
             }
@@ -4006,24 +4029,22 @@ pub(crate) fn eval_integer_pow(
     }
 
     match &inputs[0] {
-        Value::Scalar(literal) => {
-            integer_pow_literal(*literal, exponent)
-                .map(Value::Scalar)
-                .map_err(|e| EvalError::TypeMismatch {
-                    primitive,
-                    detail: e,
-                })
-        }
+        Value::Scalar(literal) => integer_pow_literal(*literal, exponent)
+            .map(Value::Scalar)
+            .map_err(|e| EvalError::TypeMismatch {
+                primitive,
+                detail: e,
+            }),
         Value::Tensor(tensor) => {
             let out_dtype = tensor.dtype;
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in &tensor.elements {
-                elements.push(
-                    integer_pow_literal(*literal, exponent).map_err(|e| EvalError::TypeMismatch {
+                elements.push(integer_pow_literal(*literal, exponent).map_err(|e| {
+                    EvalError::TypeMismatch {
                         primitive,
                         detail: e,
-                    })?,
-                );
+                    }
+                })?);
             }
 
             Ok(Value::Tensor(TensorValue::new(

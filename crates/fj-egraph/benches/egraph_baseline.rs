@@ -11,7 +11,10 @@ fn build_redundant_add_zero() -> Jaxpr {
         vec![VarId(1)],
         vec![Equation {
             primitive: Primitive::Add,
-            inputs: smallvec![Atom::Var(VarId(0)), Atom::Lit(fj_core::Literal::from_f64(0.0))],
+            inputs: smallvec![
+                Atom::Var(VarId(0)),
+                Atom::Lit(fj_core::Literal::from_f64(0.0))
+            ],
             outputs: smallvec![VarId(1)],
             params: BTreeMap::new(),
             effects: Vec::new(),
@@ -27,7 +30,10 @@ fn build_redundant_mul_one() -> Jaxpr {
         vec![VarId(1)],
         vec![Equation {
             primitive: Primitive::Mul,
-            inputs: smallvec![Atom::Var(VarId(0)), Atom::Lit(fj_core::Literal::from_f64(1.0))],
+            inputs: smallvec![
+                Atom::Var(VarId(0)),
+                Atom::Lit(fj_core::Literal::from_f64(1.0))
+            ],
             outputs: smallvec![VarId(1)],
             params: BTreeMap::new(),
             effects: Vec::new(),
@@ -112,7 +118,10 @@ fn build_complex_polynomial() -> Jaxpr {
             },
             Equation {
                 primitive: Primitive::Add,
-                inputs: smallvec![Atom::Var(VarId(2)), Atom::Lit(fj_core::Literal::from_f64(0.0))],
+                inputs: smallvec![
+                    Atom::Var(VarId(2)),
+                    Atom::Lit(fj_core::Literal::from_f64(0.0))
+                ],
                 outputs: smallvec![VarId(3)],
                 params: BTreeMap::new(),
                 effects: Vec::new(),
@@ -120,7 +129,10 @@ fn build_complex_polynomial() -> Jaxpr {
             },
             Equation {
                 primitive: Primitive::Mul,
-                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(fj_core::Literal::from_f64(1.0))],
+                inputs: smallvec![
+                    Atom::Var(VarId(1)),
+                    Atom::Lit(fj_core::Literal::from_f64(1.0))
+                ],
                 outputs: smallvec![VarId(4)],
                 params: BTreeMap::new(),
                 effects: Vec::new(),

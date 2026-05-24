@@ -278,12 +278,8 @@ pub(crate) fn eval_reduce_axes(
                 } else {
                     (float_init, float_init)
                 };
-                let mut result_re = try_filled_vec(
-                    primitive,
-                    "reduction real accumulator",
-                    out_count,
-                    init_re,
-                )?;
+                let mut result_re =
+                    try_filled_vec(primitive, "reduction real accumulator", out_count, init_re)?;
                 let mut result_im = try_filled_vec(
                     primitive,
                     "reduction imaginary accumulator",
@@ -790,7 +786,8 @@ pub(crate) fn eval_cumulative(
                     if primitive != Primitive::Cumsum && primitive != Primitive::Cumprod {
                         return Err(EvalError::Unsupported {
                             primitive,
-                            detail: "complex cumulative is supported only for cumsum and cumprod".to_owned(),
+                            detail: "complex cumulative is supported only for cumsum and cumprod"
+                                .to_owned(),
                         });
                     }
                     let (mut acc_re, mut acc_im) = if primitive == Primitive::Cumprod {
@@ -815,7 +812,8 @@ pub(crate) fn eval_cumulative(
                             acc_re += re;
                             acc_im += im;
                         }
-                        elements[flat_idx] = complex_literal_from_parts(tensor.dtype, acc_re, acc_im);
+                        elements[flat_idx] =
+                            complex_literal_from_parts(tensor.dtype, acc_re, acc_im);
                     }
                 } else if is_integral {
                     let mut acc = int_init;

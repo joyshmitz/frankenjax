@@ -3598,8 +3598,17 @@ pub(crate) fn eval_conv(
         }
     };
 
-    let is_numeric =
-        |dtype: DType| matches!(dtype, DType::BF16 | DType::F16 | DType::F32 | DType::F64 | DType::Complex64 | DType::Complex128);
+    let is_numeric = |dtype: DType| {
+        matches!(
+            dtype,
+            DType::BF16
+                | DType::F16
+                | DType::F32
+                | DType::F64
+                | DType::Complex64
+                | DType::Complex128
+        )
+    };
     if !is_numeric(lhs.dtype) || !is_numeric(rhs.dtype) {
         return Err(EvalError::Unsupported {
             primitive,
@@ -3948,8 +3957,10 @@ fn eval_conv_2d(
                                     let lhs_idx = n_offset + h_offset + (in_w as usize) * c_in + ci;
                                     let rhs_idx =
                                         kh * kw_c_in_c_out + kw * c_in_c_out + ci * c_out + co;
-                                    let (lhs_re, lhs_im) = literal_as_complex(&lhs.elements[lhs_idx]);
-                                    let (rhs_re, rhs_im) = literal_as_complex(&rhs.elements[rhs_idx]);
+                                    let (lhs_re, lhs_im) =
+                                        literal_as_complex(&lhs.elements[lhs_idx]);
+                                    let (rhs_re, rhs_im) =
+                                        literal_as_complex(&rhs.elements[rhs_idx]);
                                     acc_re += lhs_re * rhs_re - lhs_im * rhs_im;
                                     acc_im += lhs_re * rhs_im + lhs_im * rhs_re;
                                 }

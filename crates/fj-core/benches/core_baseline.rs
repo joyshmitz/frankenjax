@@ -50,16 +50,12 @@ fn build_large_jaxpr() -> Jaxpr {
 
 fn bench_jaxpr_clone_simple(c: &mut Criterion) {
     let jaxpr = build_simple_jaxpr();
-    c.bench_function("core/jaxpr_clone_simple", |b| {
-        b.iter(|| jaxpr.clone())
-    });
+    c.bench_function("core/jaxpr_clone_simple", |b| b.iter(|| jaxpr.clone()));
 }
 
 fn bench_jaxpr_clone_large(c: &mut Criterion) {
     let jaxpr = build_large_jaxpr();
-    c.bench_function("core/jaxpr_clone_large", |b| {
-        b.iter(|| jaxpr.clone())
-    });
+    c.bench_function("core/jaxpr_clone_large", |b| b.iter(|| jaxpr.clone()));
 }
 
 fn bench_jaxpr_fingerprint_simple(c: &mut Criterion) {
@@ -92,7 +88,9 @@ fn bench_jaxpr_validate_large(c: &mut Criterion) {
 
 fn bench_tensor_value_new(c: &mut Criterion) {
     let elements: Vec<Literal> = (0..1000).map(|i| Literal::from_f64(i as f64)).collect();
-    let shape = Shape { dims: vec![10, 100] };
+    let shape = Shape {
+        dims: vec![10, 100],
+    };
     c.bench_function("core/tensor_value_new_1k", |b| {
         b.iter(|| TensorValue::new(DType::F64, shape.clone(), elements.clone()))
     });
@@ -112,7 +110,9 @@ fn bench_value_vector_f64(c: &mut Criterion) {
 }
 
 fn bench_shape_element_count(c: &mut Criterion) {
-    let shape = Shape { dims: vec![10, 20, 30, 40] };
+    let shape = Shape {
+        dims: vec![10, 20, 30, 40],
+    };
     c.bench_function("core/shape_element_count", |b| {
         b.iter(|| shape.element_count())
     });
