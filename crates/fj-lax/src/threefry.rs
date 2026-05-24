@@ -508,6 +508,112 @@ pub fn random_pareto(key: PRNGKey, count: usize, b: f64) -> Vec<f64> {
         .collect()
 }
 
+/// Generate Weibull-distributed random samples.
+///
+/// Matches `jax.random.weibull_min(key, scale, concentration, shape)`.
+/// Uses inverse transform: X = scale * (-ln(U))^(1/concentration)
+pub fn random_weibull(key: PRNGKey, count: usize, scale: f64, concentration: f64) -> Vec<f64> {
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms
+        .into_iter()
+        .map(|u| {
+            let clamped = u.max(1e-30);
+            scale * (-clamped.ln()).powf(1.0 / concentration)
+        })
+        .collect()
+}
+
+/// Generate Rayleigh-distributed random samples.
+///
+/// Matches `jax.random.rayleigh(key, scale, shape)`.
+/// Uses inverse transform: X = scale * sqrt(-2 * ln(U))
+pub fn random_rayleigh(key: PRNGKey, count: usize, scale: f64) -> Vec<f64> {
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms
+        .into_iter()
+        .map(|u| {
+            let clamped = u.max(1e-30);
+            scale * (-2.0 * clamped.ln()).sqrt()
+        })
+        .collect()
+}
+
+/// Generate chi-squared distributed random samples.
+///
+/// Matches `jax.random.chisquare(key, df, shape)`.
+/// Uses the fact that chi2(df) = 2 * Gamma(df/2, 1).
+pub fn random_chi2(key: PRNGKey, count: usize, df: f64) -> Vec<f64> {
+    let gamma_samples = random_gamma(key, count, df / 2.0);
+    gamma_samples.into_iter().map(|g| 2.0 * g).collect()
+}
+
+/// Generate Student's t-distributed random samples.
+///
+/// Matches `jax.random.t(key, df, shape)`.
+/// Uses the representation: t = Z / sqrt(chi2 / df) where Z ~ N(0,1), chi2 ~ chi2(df).
+pub fn random_t(key: PRNGKey, count: usize, df: f64) -> Vec<f64> {
+    let (key1, key2) = random_split(key);
+    let normals = random_normal(key1, count);
+    let chi2_samples = random_chi2(key2, count, df);
+
+    normals
+        .into_iter()
+        .zip(chi2_samples)
+        .map(|(z, c)| z / (c / df).sqrt())
+        .collect()
+}
+
+/// Generate Dirichlet-distributed random samples.
+///
+/// Matches `jax.random.dirichlet(key, alpha, shape)`.
+/// Uses the property that if X_i ~ Gamma(alpha_i, 1), then (X_1/S, ..., X_k/S) ~ Dirichlet(alpha)
+/// where S = sum(X_i).
+///
+/// Returns a vector of length `count * alpha.len()`, representing `count` samples from Dirichlet(alpha).
+pub fn random_dirichlet(key: PRNGKey, count: usize, alpha: &[f64]) -> Vec<f64> {
+    let k = alpha.len();
+    if k == 0 || count == 0 {
+        return Vec::new();
+    }
+
+    let mut result = Vec::with_capacity(count * k);
+    let mut current_key = key;
+
+    for _ in 0..count {
+        let mut gamma_samples = Vec::with_capacity(k);
+        for &a in alpha {
+            let (k1, k2) = random_split(current_key);
+            current_key = k2;
+            let g = random_gamma(k1, 1, a);
+            gamma_samples.push(g[0]);
+        }
+        let sum: f64 = gamma_samples.iter().sum();
+        for g in gamma_samples {
+            result.push(g / sum);
+        }
+    }
+    result
+}
+
+/// Generate geometrically-distributed random samples.
+///
+/// Matches `jax.random.geometric(key, p, shape)`.
+/// Uses inverse transform: X = ceil(ln(U) / ln(1-p))
+pub fn random_geometric(key: PRNGKey, count: usize, p: f64) -> Vec<u64> {
+    if p <= 0.0 || p >= 1.0 {
+        return vec![1; count];
+    }
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    let log_1_minus_p = (1.0 - p).ln();
+    uniforms
+        .into_iter()
+        .map(|u| {
+            let clamped = u.max(1e-30);
+            (clamped.ln() / log_1_minus_p).ceil().max(1.0) as u64
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1293,5 +1399,124 @@ mod tests {
         let key = random_key(42);
         let vals = random_pareto(key, 100, 1.0);
         assert!(vals.iter().all(|&v| v >= 1.0));
+    }
+
+    #[test]
+    fn test_weibull_positive() {
+        let key = random_key(42);
+        let vals = random_weibull(key, 100, 1.0, 2.0);
+        assert!(vals.iter().all(|&v| v >= 0.0));
+    }
+
+    #[test]
+    fn test_weibull_scale() {
+        let key = random_key(42);
+        let vals = random_weibull(key, 1000, 5.0, 1.0);
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        assert!(
+            (mean - 5.0).abs() < 1.0,
+            "Weibull(5, 1) should have mean ~5, got {mean}"
+        );
+    }
+
+    #[test]
+    fn test_rayleigh_positive() {
+        let key = random_key(42);
+        let vals = random_rayleigh(key, 100, 1.0);
+        assert!(vals.iter().all(|&v| v >= 0.0));
+    }
+
+    #[test]
+    fn test_chi2_positive() {
+        let key = random_key(42);
+        let vals = random_chi2(key, 100, 5.0);
+        assert!(vals.iter().all(|&v| v > 0.0 || v.is_nan()));
+    }
+
+    #[test]
+    fn test_chi2_mean() {
+        let key = random_key(42);
+        let df = 10.0;
+        let vals = random_chi2(key, 1000, df);
+        let valid: Vec<_> = vals.into_iter().filter(|v| !v.is_nan()).collect();
+        let mean = valid.iter().sum::<f64>() / valid.len() as f64;
+        assert!(
+            (mean - df).abs() < 2.0,
+            "Chi2({df}) should have mean ~{df}, got {mean}"
+        );
+    }
+
+    #[test]
+    fn test_t_produces_values() {
+        let key = random_key(42);
+        let vals = random_t(key, 100, 5.0);
+        assert_eq!(vals.len(), 100);
+        let finite_count = vals.iter().filter(|v| v.is_finite()).count();
+        assert!(finite_count > 90);
+    }
+
+    #[test]
+    fn test_t_symmetric() {
+        let key = random_key(42);
+        let vals = random_t(key, 1000, 10.0);
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        assert!(
+            mean.abs() < 0.5,
+            "t(10) should have mean ~0, got {mean}"
+        );
+    }
+
+    #[test]
+    fn test_dirichlet_sums_to_one() {
+        let key = random_key(42);
+        let alpha = [1.0, 1.0, 1.0];
+        let vals = random_dirichlet(key, 10, &alpha);
+        assert_eq!(vals.len(), 30); // 10 samples * 3 dimensions
+        for i in 0..10 {
+            let sum: f64 = vals[i * 3..(i + 1) * 3].iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-10,
+                "Dirichlet sample {} should sum to 1, got {sum}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_dirichlet_uniform() {
+        let key = random_key(42);
+        let alpha = [1.0, 1.0, 1.0];
+        let vals = random_dirichlet(key, 100, &alpha);
+        let means: Vec<f64> = (0..3)
+            .map(|j| (0..100).map(|i| vals[i * 3 + j]).sum::<f64>() / 100.0)
+            .collect();
+        for (j, &m) in means.iter().enumerate() {
+            assert!(
+                (m - 1.0 / 3.0).abs() < 0.1,
+                "Dirichlet(1,1,1) dim {} should have mean ~0.333, got {}",
+                j,
+                m
+            );
+        }
+    }
+
+    #[test]
+    fn test_geometric_positive() {
+        let key = random_key(42);
+        let vals = random_geometric(key, 100, 0.5);
+        assert!(vals.iter().all(|&v| v >= 1));
+    }
+
+    #[test]
+    fn test_geometric_mean() {
+        let key = random_key(42);
+        let p = 0.5;
+        let vals = random_geometric(key, 1000, p);
+        let mean = vals.iter().map(|&v| v as f64).sum::<f64>() / vals.len() as f64;
+        let expected_mean = 1.0 / p;
+        assert!(
+            (mean - expected_mean).abs() < 0.5,
+            "Geometric({p}) should have mean ~{expected_mean}, got {mean}"
+        );
     }
 }
