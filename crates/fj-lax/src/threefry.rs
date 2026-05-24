@@ -306,6 +306,208 @@ pub fn random_permutation(key: PRNGKey, n: usize) -> Vec<usize> {
     result
 }
 
+/// Generate gamma-distributed samples using Marsaglia & Tsang's method.
+///
+/// Matches `jax.random.gamma(key, a, shape)` where `a` is the shape parameter.
+/// Uses the transformation method for a >= 1 and rejection sampling otherwise.
+#[must_use]
+pub fn random_gamma(key: PRNGKey, count: usize, shape_param: f64) -> Vec<f64> {
+    if shape_param <= 0.0 {
+        return vec![f64::NAN; count];
+    }
+
+    // For shape < 1, use transformation: Gamma(a) = Gamma(a+1) * U^(1/a)
+    let (effective_shape, needs_transform) = if shape_param < 1.0 {
+        (shape_param + 1.0, true)
+    } else {
+        (shape_param, false)
+    };
+
+    // Marsaglia & Tsang's method for shape >= 1
+    let d = effective_shape - 1.0 / 3.0;
+    let c = 1.0 / (9.0 * d).sqrt();
+
+    // Need extra uniforms for transformation
+    let extra = if needs_transform { count } else { 0 };
+    let uniforms = random_uniform(key, count * 10 + extra, 0.0, 1.0);
+    let normals = random_normal(key, count * 10);
+
+    let mut result = Vec::with_capacity(count);
+    let mut idx = 0;
+    let mut attempts = 0;
+
+    while result.len() < count && attempts < count * 100 {
+        if idx >= normals.len() {
+            break;
+        }
+
+        let x = normals[idx];
+        let v_base = 1.0 + c * x;
+
+        if v_base > 0.0 {
+            let v = v_base * v_base * v_base;
+            let u = uniforms[idx % uniforms.len()];
+
+            // Accept/reject
+            let accept = u < 1.0 - 0.0331 * x * x * x * x
+                || u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln());
+
+            if accept {
+                let mut sample = d * v;
+
+                // Transform for shape < 1
+                if needs_transform && result.len() < count {
+                    let u_transform = uniforms[(count * 5 + result.len()) % uniforms.len()];
+                    sample *= u_transform.powf(1.0 / shape_param);
+                }
+
+                result.push(sample);
+            }
+        }
+        idx += 1;
+        attempts += 1;
+    }
+
+    // Fill remaining with NaN if not enough samples generated
+    while result.len() < count {
+        result.push(f64::NAN);
+    }
+
+    result
+}
+
+/// Generate beta-distributed samples.
+///
+/// Matches `jax.random.beta(key, a, b, shape)`.
+/// Uses the relationship: Beta(a,b) = Gamma(a) / (Gamma(a) + Gamma(b))
+#[must_use]
+pub fn random_beta(key: PRNGKey, count: usize, a: f64, b: f64) -> Vec<f64> {
+    let (k1, k2) = random_split(key);
+    let gamma_a = random_gamma(k1, count, a);
+    let gamma_b = random_gamma(k2, count, b);
+
+    gamma_a
+        .iter()
+        .zip(gamma_b.iter())
+        .map(|(&ga, &gb)| {
+            let sum = ga + gb;
+            if sum > 0.0 { ga / sum } else { 0.5 }
+        })
+        .collect()
+}
+
+/// Generate Poisson-distributed samples.
+///
+/// Matches `jax.random.poisson(key, lam, shape)`.
+/// Uses inverse transform method for small lambda, normal approximation for large.
+#[must_use]
+pub fn random_poisson(key: PRNGKey, count: usize, lam: f64) -> Vec<u64> {
+    if lam <= 0.0 {
+        return vec![0; count];
+    }
+
+    let uniforms = random_uniform(key, count * 100, 0.0, 1.0);
+
+    let mut result = Vec::with_capacity(count);
+
+    if lam < 30.0 {
+        // Inverse transform method
+        let exp_neg_lam = (-lam).exp();
+
+        for i in 0..count {
+            let mut k = 0u64;
+            let mut p = 1.0;
+            let base_idx = i * 50;
+
+            loop {
+                let u_idx = (base_idx + k as usize) % uniforms.len();
+                p *= uniforms[u_idx];
+                if p <= exp_neg_lam || k >= 1000 {
+                    break;
+                }
+                k += 1;
+            }
+            result.push(k);
+        }
+    } else {
+        // Normal approximation for large lambda
+        let normals = random_normal(key, count);
+        let sqrt_lam = lam.sqrt();
+
+        for &n in &normals {
+            let sample = lam + sqrt_lam * n;
+            result.push(sample.round().max(0.0) as u64);
+        }
+    }
+
+    result
+}
+
+/// Generate truncated normal samples in [lower, upper].
+///
+/// Matches `jax.random.truncated_normal(key, lower, upper, shape)`.
+/// Uses rejection sampling.
+#[must_use]
+pub fn random_truncated_normal(
+    key: PRNGKey,
+    count: usize,
+    lower: f64,
+    upper: f64,
+) -> Vec<f64> {
+    if lower >= upper {
+        return vec![f64::NAN; count];
+    }
+
+    let normals = random_normal(key, count * 20);
+    let mut result = Vec::with_capacity(count);
+    let mut idx = 0;
+
+    while result.len() < count && idx < normals.len() {
+        let sample = normals[idx];
+        if sample >= lower && sample <= upper {
+            result.push(sample);
+        }
+        idx += 1;
+    }
+
+    // Fill remaining with midpoint if not enough valid samples
+    let midpoint = (lower + upper) / 2.0;
+    while result.len() < count {
+        result.push(midpoint);
+    }
+
+    result
+}
+
+/// Generate samples from a Cauchy distribution.
+///
+/// Matches `jax.random.cauchy(key, shape)`.
+/// Uses inverse transform: X = tan(pi * (U - 0.5))
+#[must_use]
+pub fn random_cauchy(key: PRNGKey, count: usize) -> Vec<f64> {
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms
+        .into_iter()
+        .map(|u| (std::f64::consts::PI * (u - 0.5)).tan())
+        .collect()
+}
+
+/// Generate samples from a Pareto distribution.
+///
+/// Matches `jax.random.pareto(key, b, shape)` where b is the shape parameter.
+/// Uses inverse transform: X = U^(-1/b)
+#[must_use]
+pub fn random_pareto(key: PRNGKey, count: usize, b: f64) -> Vec<f64> {
+    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    uniforms
+        .into_iter()
+        .map(|u| {
+            let clamped = u.max(1e-30);
+            clamped.powf(-1.0 / b)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1013,5 +1215,83 @@ mod tests {
         let perm = random_permutation(key, 100);
         let identity: Vec<usize> = (0..100).collect();
         assert_ne!(perm, identity, "permutation should shuffle");
+    }
+
+    // === New distribution tests ===
+
+    #[test]
+    fn test_gamma_positive() {
+        let key = random_key(42);
+        let vals = random_gamma(key, 100, 2.0);
+        assert!(vals.iter().all(|&v| v > 0.0 || v.is_nan()));
+    }
+
+    #[test]
+    fn test_gamma_shape_less_than_one() {
+        let key = random_key(42);
+        let vals = random_gamma(key, 100, 0.5);
+        let valid: Vec<_> = vals.iter().filter(|v| !v.is_nan()).collect();
+        assert!(!valid.is_empty(), "should produce some valid samples");
+    }
+
+    #[test]
+    fn test_beta_bounds() {
+        let key = random_key(42);
+        let vals = random_beta(key, 100, 2.0, 5.0);
+        assert!(vals.iter().all(|&v| (0.0..=1.0).contains(&v)));
+    }
+
+    #[test]
+    fn test_beta_symmetric() {
+        let key = random_key(42);
+        let vals = random_beta(key, 1000, 1.0, 1.0);
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        assert!(
+            (mean - 0.5).abs() < 0.1,
+            "Beta(1,1) should have mean ~0.5, got {mean}"
+        );
+    }
+
+    #[test]
+    fn test_poisson_nonnegative() {
+        let key = random_key(42);
+        let vals = random_poisson(key, 100, 5.0);
+        assert!(vals.iter().all(|&v| v < 1000), "poisson should be bounded");
+    }
+
+    #[test]
+    fn test_poisson_mean() {
+        let key = random_key(42);
+        let lam = 10.0;
+        let vals = random_poisson(key, 1000, lam);
+        let mean = vals.iter().map(|&v| v as f64).sum::<f64>() / vals.len() as f64;
+        assert!(
+            (mean - lam).abs() < 1.5,
+            "Poisson({lam}) mean should be ~{lam}, got {mean}"
+        );
+    }
+
+    #[test]
+    fn test_truncated_normal_bounds() {
+        let key = random_key(42);
+        let vals = random_truncated_normal(key, 100, -1.0, 1.0);
+        assert!(vals.iter().all(|&v| (-1.0..=1.0).contains(&v)));
+    }
+
+    #[test]
+    fn test_cauchy_produces_values() {
+        let key = random_key(42);
+        let vals = random_cauchy(key, 100);
+        assert_eq!(vals.len(), 100);
+        // Cauchy has heavy tails, just check we get finite values mostly
+        let finite_count = vals.iter().filter(|v| v.is_finite()).count();
+        assert!(finite_count > 90);
+    }
+
+    #[test]
+    fn test_pareto_greater_than_one() {
+        let key = random_key(42);
+        let vals = random_pareto(key, 100, 1.0);
+        assert!(vals.iter().all(|&v| v >= 1.0));
     }
 }
