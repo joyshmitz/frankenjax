@@ -7,6 +7,7 @@ mod fft;
 mod linalg;
 pub mod nn;
 mod reduction;
+pub mod tensor_contraction;
 mod tensor_ops;
 pub mod threefry;
 mod type_promotion;
