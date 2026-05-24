@@ -210,6 +210,108 @@ pub fn log_sigmoid(x: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Compute log-sum-exp in a numerically stable way.
+///
+/// Matches `jax.scipy.special.logsumexp(x)`.
+/// Uses the identity: log(sum(exp(x))) = max(x) + log(sum(exp(x - max(x))))
+#[must_use]
+pub fn logsumexp(x: &[f64]) -> f64 {
+    if x.is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if max_val.is_infinite() {
+        return max_val;
+    }
+    let sum_exp: f64 = x.iter().map(|&v| (v - max_val).exp()).sum();
+    max_val + sum_exp.ln()
+}
+
+/// Compute log-sum-exp along the last axis of a 2D array.
+///
+/// Returns a vector of logsumexp values, one per row.
+#[must_use]
+pub fn logsumexp_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    (0..rows)
+        .map(|i| {
+            let row = &x[i * cols..(i + 1) * cols];
+            logsumexp(row)
+        })
+        .collect()
+}
+
+/// Softmax: exp(x - max(x)) / sum(exp(x - max(x)))
+///
+/// Matches `jax.nn.softmax(x)` for a 1D array.
+/// Uses numerically stable computation via log-sum-exp.
+#[must_use]
+pub fn softmax(x: &[f64]) -> Vec<f64> {
+    if x.is_empty() {
+        return Vec::new();
+    }
+    let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let exp_shifted: Vec<f64> = x.iter().map(|&v| (v - max_val).exp()).collect();
+    let sum_exp: f64 = exp_shifted.iter().sum();
+    exp_shifted.iter().map(|&e| e / sum_exp).collect()
+}
+
+/// Softmax along the last axis of a 2D array.
+///
+/// Matches `jax.nn.softmax(x, axis=-1)` for a 2D array.
+/// Returns a flattened result with the same shape as input.
+#[must_use]
+pub fn softmax_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut result = vec![0.0; rows * cols];
+    for i in 0..rows {
+        let row = &x[i * cols..(i + 1) * cols];
+        let sm = softmax(row);
+        result[i * cols..(i + 1) * cols].copy_from_slice(&sm);
+    }
+    result
+}
+
+/// Log-softmax: log(softmax(x)) = x - logsumexp(x)
+///
+/// Matches `jax.nn.log_softmax(x)` for a 1D array.
+/// More numerically stable than computing log(softmax(x)) directly.
+#[must_use]
+pub fn log_softmax(x: &[f64]) -> Vec<f64> {
+    if x.is_empty() {
+        return Vec::new();
+    }
+    let lse = logsumexp(x);
+    x.iter().map(|&v| v - lse).collect()
+}
+
+/// Log-softmax along the last axis of a 2D array.
+///
+/// Matches `jax.nn.log_softmax(x, axis=-1)` for a 2D array.
+#[must_use]
+pub fn log_softmax_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut result = vec![0.0; rows * cols];
+    for i in 0..rows {
+        let row = &x[i * cols..(i + 1) * cols];
+        let lsm = log_softmax(row);
+        result[i * cols..(i + 1) * cols].copy_from_slice(&lsm);
+    }
+    result
+}
+
+/// Normalize input to have zero mean and unit variance.
+///
+/// Matches `jax.nn.standardize(x)` for a 1D array.
+#[must_use]
+pub fn standardize(x: &[f64], epsilon: f64) -> Vec<f64> {
+    if x.is_empty() {
+        return Vec::new();
+    }
+    let n = x.len() as f64;
+    let mean = x.iter().sum::<f64>() / n;
+    let var = x.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n;
+    let std = (var + epsilon).sqrt();
+    x.iter().map(|&v| (v - mean) / std).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,5 +478,131 @@ mod tests {
     fn test_hard_swish_is_hard_silu() {
         let x = vec![-1.0, 0.0, 1.0, 2.0];
         assert_eq!(hard_silu(&x), hard_swish(&x));
+    }
+
+    #[test]
+    fn test_logsumexp_basic() {
+        let x = vec![0.0, 0.0];
+        let lse = logsumexp(&x);
+        assert!(approx_eq(lse, 2.0_f64.ln(), 1e-10));
+    }
+
+    #[test]
+    fn test_logsumexp_large_values() {
+        let x = vec![1000.0, 1000.0];
+        let lse = logsumexp(&x);
+        assert!(approx_eq(lse, 1000.0 + 2.0_f64.ln(), 1e-10));
+    }
+
+    #[test]
+    fn test_logsumexp_small_values() {
+        let x = vec![-1000.0, -1000.0];
+        let lse = logsumexp(&x);
+        assert!(approx_eq(lse, -1000.0 + 2.0_f64.ln(), 1e-10));
+    }
+
+    #[test]
+    fn test_logsumexp_empty() {
+        let x: Vec<f64> = vec![];
+        let lse = logsumexp(&x);
+        assert!(lse.is_infinite() && lse < 0.0);
+    }
+
+    #[test]
+    fn test_softmax_sums_to_one() {
+        let x = vec![1.0, 2.0, 3.0];
+        let sm = softmax(&x);
+        let sum: f64 = sm.iter().sum();
+        assert!(approx_eq(sum, 1.0, 1e-10));
+    }
+
+    #[test]
+    fn test_softmax_uniform() {
+        let x = vec![1.0, 1.0, 1.0];
+        let sm = softmax(&x);
+        for &v in &sm {
+            assert!(approx_eq(v, 1.0 / 3.0, 1e-10));
+        }
+    }
+
+    #[test]
+    fn test_softmax_preserves_order() {
+        let x = vec![1.0, 2.0, 3.0];
+        let sm = softmax(&x);
+        assert!(sm[0] < sm[1] && sm[1] < sm[2]);
+    }
+
+    #[test]
+    fn test_softmax_numerical_stability() {
+        let x = vec![1000.0, 1001.0, 1002.0];
+        let sm = softmax(&x);
+        let sum: f64 = sm.iter().sum();
+        assert!(approx_eq(sum, 1.0, 1e-10));
+        assert!(sm.iter().all(|&v| v.is_finite()));
+    }
+
+    #[test]
+    fn test_log_softmax_basic() {
+        let x = vec![1.0, 2.0, 3.0];
+        let lsm = log_softmax(&x);
+        let sm = softmax(&x);
+        for (l, s) in lsm.iter().zip(sm.iter()) {
+            assert!(approx_eq(*l, s.ln(), 1e-10));
+        }
+    }
+
+    #[test]
+    fn test_log_softmax_sums_to_zero_exp() {
+        let x = vec![1.0, 2.0, 3.0];
+        let lsm = log_softmax(&x);
+        let sum_exp: f64 = lsm.iter().map(|&v| v.exp()).sum();
+        assert!(approx_eq(sum_exp, 1.0, 1e-10));
+    }
+
+    #[test]
+    fn test_log_softmax_numerical_stability() {
+        let x = vec![1000.0, 1001.0, 1002.0];
+        let lsm = log_softmax(&x);
+        assert!(lsm.iter().all(|&v| v.is_finite()));
+        let sum_exp: f64 = lsm.iter().map(|&v| v.exp()).sum();
+        assert!(approx_eq(sum_exp, 1.0, 1e-10));
+    }
+
+    #[test]
+    fn test_softmax_2d() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let sm = softmax_2d(&x, 2, 3);
+        let row1_sum: f64 = sm[0..3].iter().sum();
+        let row2_sum: f64 = sm[3..6].iter().sum();
+        assert!(approx_eq(row1_sum, 1.0, 1e-10));
+        assert!(approx_eq(row2_sum, 1.0, 1e-10));
+    }
+
+    #[test]
+    fn test_log_softmax_2d() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let lsm = log_softmax_2d(&x, 2, 3);
+        let row1_sum_exp: f64 = lsm[0..3].iter().map(|&v| v.exp()).sum();
+        let row2_sum_exp: f64 = lsm[3..6].iter().map(|&v| v.exp()).sum();
+        assert!(approx_eq(row1_sum_exp, 1.0, 1e-10));
+        assert!(approx_eq(row2_sum_exp, 1.0, 1e-10));
+    }
+
+    #[test]
+    fn test_standardize_zero_mean() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let s = standardize(&x, 1e-10);
+        let mean: f64 = s.iter().sum::<f64>() / s.len() as f64;
+        assert!(approx_eq(mean, 0.0, 1e-10));
+    }
+
+    #[test]
+    fn test_standardize_unit_variance() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let s = standardize(&x, 1e-10);
+        let n = s.len() as f64;
+        let mean = s.iter().sum::<f64>() / n;
+        let var = s.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n;
+        assert!(approx_eq(var, 1.0, 1e-10));
     }
 }
