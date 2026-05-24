@@ -1490,6 +1490,122 @@ pub fn matrix_norm_inf(a: &[f64], m: usize, n: usize) -> f64 {
     max_row_sum
 }
 
+/// Solve the linear system Ax = b using LU decomposition with partial pivoting.
+///
+/// Matches `jnp.linalg.solve(a, b)`.
+///
+/// Returns None if the matrix is singular.
+pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
+    if a.len() != n * n || b.len() != n {
+        return None;
+    }
+
+    let mut lu = a.to_vec();
+    let mut p: Vec<usize> = (0..n).collect();
+
+    for k in 0..n {
+        let mut max_idx = k;
+        let mut max_val = lu[k * n + k].abs();
+        for i in (k + 1)..n {
+            let val = lu[i * n + k].abs();
+            if val > max_val {
+                max_val = val;
+                max_idx = i;
+            }
+        }
+
+        if max_val < 1e-14 {
+            return None;
+        }
+
+        if max_idx != k {
+            p.swap(k, max_idx);
+            for j in 0..n {
+                let tmp = lu[k * n + j];
+                lu[k * n + j] = lu[max_idx * n + j];
+                lu[max_idx * n + j] = tmp;
+            }
+        }
+
+        for i in (k + 1)..n {
+            let factor = lu[i * n + k] / lu[k * n + k];
+            lu[i * n + k] = factor;
+            for j in (k + 1)..n {
+                lu[i * n + j] -= factor * lu[k * n + j];
+            }
+        }
+    }
+
+    let mut pb = vec![0.0; n];
+    for i in 0..n {
+        pb[i] = b[p[i]];
+    }
+
+    let mut y = vec![0.0; n];
+    for i in 0..n {
+        let mut sum = pb[i];
+        for j in 0..i {
+            sum -= lu[i * n + j] * y[j];
+        }
+        y[i] = sum;
+    }
+
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut sum = y[i];
+        for j in (i + 1)..n {
+            sum -= lu[i * n + j] * x[j];
+        }
+        x[i] = sum / lu[i * n + i];
+    }
+
+    Some(x)
+}
+
+/// Solve the linear system Ax = b for multiple right-hand sides.
+///
+/// A is n x n, B is n x m, returns X which is n x m.
+pub fn solve_multi_rhs(a: &[f64], b: &[f64], n: usize, m: usize) -> Option<Vec<f64>> {
+    let mut result = vec![0.0; n * m];
+    for j in 0..m {
+        let rhs: Vec<f64> = (0..n).map(|i| b[i * m + j]).collect();
+        let x = solve(a, &rhs, n)?;
+        for i in 0..n {
+            result[i * m + j] = x[i];
+        }
+    }
+    Some(result)
+}
+
+/// Least-squares solution to Ax = b using the normal equations.
+///
+/// Matches `jnp.linalg.lstsq(a, b)` for overdetermined systems.
+///
+/// Returns the least-squares solution x that minimizes ||Ax - b||^2.
+pub fn lstsq(a: &[f64], m: usize, n: usize, b: &[f64]) -> Option<Vec<f64>> {
+    let mut ata = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for k in 0..m {
+                sum += a[k * n + i] * a[k * n + j];
+            }
+            ata[i * n + j] = sum;
+        }
+    }
+
+    let mut atb = vec![0.0; n];
+    for i in 0..n {
+        let mut sum = 0.0;
+        for k in 0..m {
+            sum += a[k * n + i] * b[k];
+        }
+        atb[i] = sum;
+    }
+
+    solve(&ata, &atb, n)
+}
+
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2222,5 +2338,125 @@ mod tests {
         let n = matrix_norm_inf(&a, 2, 2);
         // Row sums: |1|+|-2|=3, |3|+|4|=7 → max = 7
         assert!((n - 7.0).abs() < 1e-10);
+    }
+
+    // ── Solve tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn solve_2x2_identity() {
+        let a = [1.0, 0.0, 0.0, 1.0];
+        let b = [3.0, 4.0];
+        let x = solve(&a, &b, 2).expect("identity solvable");
+        assert!((x[0] - 3.0).abs() < 1e-10);
+        assert!((x[1] - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn solve_2x2_general() {
+        // A = [[2, 1], [1, 3]], b = [5, 7]
+        // Solution: x = [8/5, 9/5] = [1.6, 1.8]
+        let a = [2.0, 1.0, 1.0, 3.0];
+        let b = [5.0, 7.0];
+        let x = solve(&a, &b, 2).expect("solvable");
+        assert!((x[0] - 1.6).abs() < 1e-10);
+        assert!((x[1] - 1.8).abs() < 1e-10);
+    }
+
+    #[test]
+    fn solve_3x3() {
+        // A = [[1, 2, 3], [4, 5, 6], [7, 8, 10]]
+        // b = [14, 32, 53]
+        // Ax = b has solution x = [1, 2, 3]
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0];
+        let b = [14.0, 32.0, 53.0];
+        let x = solve(&a, &b, 3).expect("solvable");
+        assert!((x[0] - 1.0).abs() < 1e-8);
+        assert!((x[1] - 2.0).abs() < 1e-8);
+        assert!((x[2] - 3.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn solve_singular_returns_none() {
+        let a = [1.0, 2.0, 2.0, 4.0]; // singular
+        let b = [3.0, 6.0];
+        assert!(solve(&a, &b, 2).is_none());
+    }
+
+    #[test]
+    fn solve_verifies_ax_eq_b() {
+        let a = [3.0, 2.0, 1.0, 1.0, 2.0, 3.0, 2.0, 1.0, 3.0];
+        let b = [1.0, 2.0, 3.0];
+        let x = solve(&a, &b, 3).expect("solvable");
+        // Verify A*x = b
+        for i in 0..3 {
+            let mut row_sum = 0.0;
+            for j in 0..3 {
+                row_sum += a[i * 3 + j] * x[j];
+            }
+            assert!((row_sum - b[i]).abs() < 1e-8, "A*x[{i}] = {row_sum}, expected {}", b[i]);
+        }
+    }
+
+    #[test]
+    fn solve_multi_rhs_basic() {
+        let a = [1.0, 0.0, 0.0, 1.0];
+        let b = [1.0, 2.0, 3.0, 4.0]; // 2x2 (two RHS columns)
+        let x = solve_multi_rhs(&a, &b, 2, 2).expect("solvable");
+        assert_eq!(x.len(), 4);
+        assert!((x[0] - 1.0).abs() < 1e-10);
+        assert!((x[1] - 2.0).abs() < 1e-10);
+        assert!((x[2] - 3.0).abs() < 1e-10);
+        assert!((x[3] - 4.0).abs() < 1e-10);
+    }
+
+    // ── Least squares tests ─────────────────────────────────────────
+
+    #[test]
+    fn lstsq_exact_square() {
+        let a = [1.0, 0.0, 0.0, 1.0];
+        let b = [3.0, 4.0];
+        let x = lstsq(&a, 2, 2, &b).expect("solvable");
+        assert!((x[0] - 3.0).abs() < 1e-10);
+        assert!((x[1] - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn lstsq_overdetermined() {
+        // 3 equations, 2 unknowns: y = x line
+        // Points: (0,0), (1,1), (2,2)
+        // A = [[1, 0], [1, 1], [1, 2]], b = [0, 1, 2]
+        // Least squares: a=0, b=1 (y = 0 + 1*x)
+        let a = [1.0, 0.0, 1.0, 1.0, 1.0, 2.0];
+        let b = [0.0, 1.0, 2.0];
+        let x = lstsq(&a, 3, 2, &b).expect("solvable");
+        // x should be [0, 1] for intercept and slope
+        assert!((x[0]).abs() < 1e-8, "intercept should be ~0, got {}", x[0]);
+        assert!((x[1] - 1.0).abs() < 1e-8, "slope should be ~1, got {}", x[1]);
+    }
+
+    #[test]
+    fn lstsq_verifies_normal_equations() {
+        // Verify A^T * A * x = A^T * b
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 3x2
+        let b = [1.0, 2.0, 3.0];
+        let x = lstsq(&a, 3, 2, &b).expect("solvable");
+
+        // Compute A^T * A * x and A^T * b
+        let mut ata_x = [0.0; 2];
+        let mut atb = [0.0; 2];
+        for i in 0..2 {
+            for j in 0..2 {
+                let mut ata_ij = 0.0;
+                for k in 0..3 {
+                    ata_ij += a[k * 2 + i] * a[k * 2 + j];
+                }
+                ata_x[i] += ata_ij * x[j];
+            }
+            for k in 0..3 {
+                atb[i] += a[k * 2 + i] * b[k];
+            }
+        }
+        assert!((ata_x[0] - atb[0]).abs() < 1e-8);
+        assert!((ata_x[1] - atb[1]).abs() < 1e-8);
     }
 }
