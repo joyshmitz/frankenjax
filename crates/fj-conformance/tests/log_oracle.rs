@@ -559,3 +559,23 @@ fn property_log_preserves_all_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+// ======================== Edge Cases: Infinity and NaN ========================
+
+#[test]
+fn oracle_log_infinity_result() {
+    // log(+inf) = +inf
+    let x = make_f64_tensor(&[], vec![f64::INFINITY]);
+    let result = eval_primitive(Primitive::Log, &[x], &no_params()).unwrap();
+    let y = extract_f64_scalar(&result);
+    assert!(y.is_infinite() && y.is_sign_positive(), "log(+inf) = +inf");
+}
+
+#[test]
+fn oracle_log_nan_propagation() {
+    // log(NaN) = NaN
+    let x = make_f64_tensor(&[], vec![f64::NAN]);
+    let result = eval_primitive(Primitive::Log, &[x], &no_params()).unwrap();
+    let y = extract_f64_scalar(&result);
+    assert!(y.is_nan(), "log(NaN) = NaN");
+}
