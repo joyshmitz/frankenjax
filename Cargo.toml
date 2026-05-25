@@ -32,3 +32,9 @@ rustc-hash = "2.1.1"
 proptest = "1.9"
 egg = "0.11"
 half = "2.7"
+
+# Profiling-optimized release build with debug symbols for flamegraph/samply
+[profile.release-perf]
+inherits = "release"
+debug = "line-tables-only"
+strip = false

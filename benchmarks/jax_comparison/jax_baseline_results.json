@@ -1,0 +1,224 @@
+{
+  "environment": {
+    "platform": "Linux-6.17.0-14-generic-x86_64-with-glibc2.42",
+    "python_version": "3.13.7",
+    "processor": "",
+    "machine": "x86_64",
+    "jax_version": "0.10.1",
+    "jax_devices": "[CpuDevice(id=0)]"
+  },
+  "runs_per_benchmark": 50,
+  "timestamp": "2026-05-25T21:57:55Z",
+  "results": [
+    {
+      "name": "jit/scalar_add",
+      "runs": 50,
+      "p50_ns": 8275.5,
+      "p95_ns": 8913.5,
+      "p99_ns": 9137.0,
+      "mean_ns": 8388.52,
+      "std_ns": 256.44104507664133,
+      "throughput_ops_per_sec": 119210.54011911516
+    },
+    {
+      "name": "grad/scalar_square",
+      "runs": 50,
+      "p50_ns": 7824.5,
+      "p95_ns": 8227.45,
+      "p99_ns": 8422.9,
+      "mean_ns": 7865.38,
+      "std_ns": 188.7290004212389,
+      "throughput_ops_per_sec": 127139.43890822821
+    },
+    {
+      "name": "vmap/vector_add_one",
+      "runs": 50,
+      "p50_ns": 7860.0,
+      "p95_ns": 8322.95,
+      "p99_ns": 8612.9,
+      "mean_ns": 7943.8,
+      "std_ns": 216.75977486609457,
+      "throughput_ops_per_sec": 125884.33747073189
+    },
+    {
+      "name": "value_and_grad/scalar_square",
+      "runs": 50,
+      "p50_ns": 10119.5,
+      "p95_ns": 10439.5,
+      "p99_ns": 10963.719999999998,
+      "mean_ns": 10164.66,
+      "std_ns": 214.29135400197555,
+      "throughput_ops_per_sec": 98380.07370635122
+    },
+    {
+      "name": "jit_grad/scalar_square",
+      "runs": 50,
+      "p50_ns": 8060.5,
+      "p95_ns": 8577.45,
+      "p99_ns": 8688.31,
+      "mean_ns": 8113.78,
+      "std_ns": 243.97838346869997,
+      "throughput_ops_per_sec": 123247.1178661487
+    },
+    {
+      "name": "vmap_grad/vector_square",
+      "runs": 50,
+      "p50_ns": 8301.0,
+      "p95_ns": 8641.5,
+      "p99_ns": 14242.979999999981,
+      "mean_ns": 8502.74,
+      "std_ns": 1513.671758473415,
+      "throughput_ops_per_sec": 117609.14716903023
+    },
+    {
+      "name": "ad/grad_poly_x3+x2+x",
+      "runs": 50,
+      "p50_ns": 7764.5,
+      "p95_ns": 8592.5,
+      "p99_ns": 1550524.399999994,
+      "mean_ns": 68324.14,
+      "std_ns": 422021.4272689959,
+      "throughput_ops_per_sec": 14636.115434456988
+    },
+    {
+      "name": "ad/grad_sin_cos_mul",
+      "runs": 50,
+      "p50_ns": 7649.5,
+      "p95_ns": 8979.099999999997,
+      "p99_ns": 10749.649999999994,
+      "mean_ns": 7881.72,
+      "std_ns": 702.1038111276707,
+      "throughput_ops_per_sec": 126875.85958394868
+    },
+    {
+      "name": "ad/grad_exp_log",
+      "runs": 50,
+      "p50_ns": 8060.5,
+      "p95_ns": 8423.5,
+      "p99_ns": 8752.9,
+      "mean_ns": 8101.2,
+      "std_ns": 197.44082657849668,
+      "throughput_ops_per_sec": 123438.50293783637
+    },
+    {
+      "name": "eval/add_1k_i64_vec",
+      "runs": 50,
+      "p50_ns": 58461.0,
+      "p95_ns": 69234.65,
+      "p99_ns": 72259.87,
+      "mean_ns": 59083.7,
+      "std_ns": 5522.080203148085,
+      "throughput_ops_per_sec": 16925.14179037535
+    },
+    {
+      "name": "eval/mul_1k_f64_vec",
+      "runs": 50,
+      "p50_ns": 50210.5,
+      "p95_ns": 61636.2,
+      "p99_ns": 65158.28999999999,
+      "mean_ns": 53825.36,
+      "std_ns": 5288.491560965187,
+      "throughput_ops_per_sec": 18578.603097127452
+    },
+    {
+      "name": "eval/sin_1k_f64",
+      "runs": 50,
+      "p50_ns": 11311.0,
+      "p95_ns": 12007.0,
+      "p99_ns": 17265.77999999998,
+      "mean_ns": 11595.18,
+      "std_ns": 1483.8174374228117,
+      "throughput_ops_per_sec": 86242.73189376965
+    },
+    {
+      "name": "eval/exp_1k_f64",
+      "runs": 50,
+      "p50_ns": 6452.0,
+      "p95_ns": 8248.249999999995,
+      "p99_ns": 12910.509999999998,
+      "mean_ns": 6778.26,
+      "std_ns": 1322.0357152512938,
+      "throughput_ops_per_sec": 147530.48717517476
+    },
+    {
+      "name": "eval/reduce_sum_1k_i64",
+      "runs": 50,
+      "p50_ns": 66105.5,
+      "p95_ns": 77747.94999999998,
+      "p99_ns": 83422.45999999999,
+      "mean_ns": 68027.48,
+      "std_ns": 4585.194129979668,
+      "throughput_ops_per_sec": 14699.941847030053
+    },
+    {
+      "name": "eval/dot_100_i64",
+      "runs": 50,
+      "p50_ns": 12198.5,
+      "p95_ns": 14100.05,
+      "p99_ns": 18649.039999999986,
+      "mean_ns": 12390.06,
+      "std_ns": 1678.8873745430335,
+      "throughput_ops_per_sec": 80709.85935499909
+    },
+    {
+      "name": "eval/fft_256_complex128",
+      "runs": 50,
+      "p50_ns": 67122.0,
+      "p95_ns": 102052.55,
+      "p99_ns": 371874.599999999,
+      "mean_ns": 76410.3,
+      "std_ns": 79608.9736334416,
+      "throughput_ops_per_sec": 13087.240856271994
+    },
+    {
+      "name": "eval/rfft_256_f64",
+      "runs": 50,
+      "p50_ns": 71025.0,
+      "p95_ns": 106589.55,
+      "p99_ns": 110249.20999999999,
+      "mean_ns": 74565.46,
+      "std_ns": 24204.889538446565,
+      "throughput_ops_per_sec": 13411.035082463113
+    },
+    {
+      "name": "vmap_qr/batched_matrix_3x2",
+      "runs": 50,
+      "p50_ns": 276649.0,
+      "p95_ns": 6734989.549999998,
+      "p99_ns": 7885322.179999999,
+      "mean_ns": 1783265.66,
+      "std_ns": 2224709.1325865374,
+      "throughput_ops_per_sec": 560.768943422597
+    },
+    {
+      "name": "vmap_svd/batched_matrix_3x2",
+      "runs": 50,
+      "p50_ns": 1553713.0,
+      "p95_ns": 4698809.85,
+      "p99_ns": 6971341.499999995,
+      "mean_ns": 2036921.94,
+      "std_ns": 1329870.2364852806,
+      "throughput_ops_per_sec": 490.9368299111158
+    },
+    {
+      "name": "vmap_eigh/batched_matrix_3x3",
+      "runs": 50,
+      "p50_ns": 1387428.5,
+      "p95_ns": 4703154.449999995,
+      "p99_ns": 6513810.279999997,
+      "mean_ns": 1715131.92,
+      "std_ns": 1400274.4390340894,
+      "throughput_ops_per_sec": 583.045530398618
+    },
+    {
+      "name": "vmap_scan/shared_init_batched_xs_128x64",
+      "runs": 50,
+      "p50_ns": 28184.0,
+      "p95_ns": 29506.55,
+      "p99_ns": 40605.999999999985,
+      "mean_ns": 28764.56,
+      "std_ns": 2499.9058235061575,
+      "throughput_ops_per_sec": 34765.00248917418
+    }
+  ]
+}
