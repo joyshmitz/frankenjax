@@ -11,10 +11,11 @@ pub use fj_ad::{
 pub use fj_core::{DType, Shape, Value};
 pub use transforms::{
     CheckpointWrapped, ComposedTransform, CustomJvpWrapped, CustomVjpWrapped, GradWrapped,
-    HessianWrapped, JacobianWrapped, JitWrapped, PmapWrapped, ValueAndGradWrapped, VmapWrapped,
+    HessianWrapped, JacobianWrapped, JitWrapped, LinearizeResult, LinearizedFunction,
+    PmapWrapped, ValueAndGradWrapped, VmapWrapped,
 };
 pub use transforms::{
-    checkpoint, compose, custom_jvp, custom_vjp, grad, hessian, jacobian, jit, pmap,
+    checkpoint, compose, custom_jvp, custom_vjp, grad, hessian, jacobian, jit, linearize, pmap,
     value_and_grad, vmap,
 };
 
@@ -159,6 +160,48 @@ mod tests {
         assert!((value[0].as_f64_scalar().expect("scalar output") - 6.0).abs() < 1e-6);
         assert!((gradients[0].as_f64_scalar().expect("scalar gradient") - 3.0).abs() < 1e-6);
         assert!((gradients[1].as_f64_scalar().expect("scalar gradient") - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linearize_square() {
+        let jaxpr = build_program(ProgramSpec::Square);
+        let result = linearize(jaxpr, vec![Value::scalar_f64(3.0)]).expect("linearize should succeed");
+
+        let primal_out = result.primal_outputs[0]
+            .as_f64_scalar()
+            .expect("primal should be scalar");
+        assert!((primal_out - 9.0).abs() < 1e-6);
+
+        let tangent_out = result
+            .linearized
+            .call(vec![Value::scalar_f64(1.0)])
+            .expect("linearized call should succeed");
+        let tangent_val = tangent_out[0]
+            .as_f64_scalar()
+            .expect("tangent should be scalar");
+        assert!((tangent_val - 6.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linearize_reuses_primals() {
+        let jaxpr = build_program(ProgramSpec::Square);
+        let result = linearize(jaxpr, vec![Value::scalar_f64(4.0)]).expect("linearize");
+
+        let t1 = result
+            .linearized
+            .call(vec![Value::scalar_f64(1.0)])
+            .expect("call 1")[0]
+            .as_f64_scalar()
+            .unwrap();
+        let t2 = result
+            .linearized
+            .call(vec![Value::scalar_f64(2.0)])
+            .expect("call 2")[0]
+            .as_f64_scalar()
+            .unwrap();
+
+        assert!((t1 - 8.0).abs() < 1e-6);
+        assert!((t2 - 16.0).abs() < 1e-6);
     }
 
     // --- Transform composition tests ---

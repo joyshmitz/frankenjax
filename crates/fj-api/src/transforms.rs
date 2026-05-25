@@ -70,6 +70,26 @@ pub struct HessianWrapped {
     jaxpr: Jaxpr,
 }
 
+/// A linearized function returned by `linearize`.
+///
+/// Captures the Jaxpr and input primals, allowing JVP tangent computation
+/// without recomputing the forward pass. JAX equivalent: the second return
+/// value of `jax.linearize`.
+#[derive(Debug, Clone)]
+pub struct LinearizedFunction {
+    jaxpr: Jaxpr,
+    primals: Vec<Value>,
+}
+
+/// Result of `linearize(jaxpr, primals)`.
+///
+/// Contains the primal outputs and a `LinearizedFunction` for computing
+/// tangent outputs at different tangent inputs.
+pub struct LinearizeResult {
+    pub primal_outputs: Vec<Value>,
+    pub linearized: LinearizedFunction,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointWrapped {
     jaxpr: Jaxpr,
@@ -250,6 +270,36 @@ pub fn jacobian(jaxpr: Jaxpr) -> JacobianWrapped {
 #[must_use]
 pub fn hessian(jaxpr: Jaxpr) -> HessianWrapped {
     HessianWrapped { jaxpr }
+}
+
+/// Linearize a Jaxpr at given primal values.
+///
+/// Returns `(f(primals), linearized_fn)` where `linearized_fn(tangents)` computes
+/// the JVP tangent outputs without recomputing the forward pass.
+///
+/// JAX equivalent: `jax.linearize`
+///
+/// # Example
+/// ```ignore
+/// let result = linearize(jaxpr, primals)?;
+/// let tangent_out = result.linearized.call(tangents)?;
+/// ```
+pub fn linearize(jaxpr: Jaxpr, primals: Vec<Value>) -> Result<LinearizeResult, ApiError> {
+    let primal_outputs = fj_interpreters::eval_jaxpr(&jaxpr, &primals)?;
+    Ok(LinearizeResult {
+        primal_outputs,
+        linearized: LinearizedFunction { jaxpr, primals },
+    })
+}
+
+impl LinearizedFunction {
+    /// Compute tangent outputs for the given input tangents.
+    ///
+    /// Uses the cached primals from `linearize` to avoid recomputing the forward pass.
+    pub fn call(&self, tangents: Vec<Value>) -> Result<Vec<Value>, ApiError> {
+        let jvp_result = fj_ad::jvp(&self.jaxpr, &self.primals, &tangents)?;
+        Ok(jvp_result.tangents)
+    }
 }
 
 /// Wrap a Jaxpr for memory-efficient gradient computation (rematerialization).

@@ -2,6 +2,7 @@
 
 use fj_ad::AdError;
 use fj_dispatch::{DispatchError, TransformExecutionError};
+use fj_interpreters::InterpreterError;
 
 #[derive(Debug)]
 pub enum ApiError {
@@ -86,6 +87,14 @@ impl From<AdError> for ApiError {
             other => Self::EvalError {
                 detail: other.to_string(),
             },
+        }
+    }
+}
+
+impl From<InterpreterError> for ApiError {
+    fn from(err: InterpreterError) -> Self {
+        Self::EvalError {
+            detail: err.to_string(),
         }
     }
 }
