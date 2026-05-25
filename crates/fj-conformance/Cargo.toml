@@ -27,6 +27,7 @@ fj-runtime = { path = "../fj-runtime" }
 fj-test-utils = { path = "../fj-test-utils" }
 insta = "1.47"
 jsonschema = "0.42"
+proptest.workspace = true
 tempfile = "3.25"
 
 [lints.clippy]
