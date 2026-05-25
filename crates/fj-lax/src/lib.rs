@@ -32,7 +32,7 @@ use arithmetic::{
 
 use comparison::eval_comparison;
 use fft::{eval_fft, eval_ifft, eval_irfft, eval_rfft};
-use linalg::{eval_cholesky, eval_det, eval_eigh, eval_lu, eval_qr, eval_slogdet, eval_solve, eval_svd, eval_triangular_solve};
+use linalg::{eval_cholesky, eval_det, eval_eig, eval_eigh, eval_lu, eval_qr, eval_slogdet, eval_solve, eval_svd, eval_triangular_solve};
 use reduction::{eval_cumulative, eval_reduce_axes, eval_reduce_bitwise_axes};
 use tensor_ops::{
     eval_argmax, eval_argmin, eval_argsort, eval_bitcast_convert_type, eval_broadcast_in_dim,
@@ -571,6 +571,11 @@ pub fn eval_primitive(
         Primitive::Eigh => {
             // Eigh is multi-output; return first output (W) for single-value API.
             let mut outputs = eval_eigh(inputs, params)?;
+            Ok(outputs.remove(0))
+        }
+        Primitive::Eig => {
+            // Eig is multi-output; return first output (eigenvalues) for single-value API.
+            let mut outputs = eval_eig(inputs, params)?;
             Ok(outputs.remove(0))
         }
         Primitive::Solve => eval_solve(inputs, params),

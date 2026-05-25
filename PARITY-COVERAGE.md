@@ -18,7 +18,7 @@ FrankenJAX is a **reference implementation of JAX's transform semantics**, NOT a
 | **jax.* transforms** | 12 core | 12 | 100% | Full coverage |
 | **jax.lax primitives** | ~150 unique | 152 | ~100% | Full coverage for V1 scope |
 | **jax.lax control flow** | 5 | 5 | 100% | cond, scan, while_loop, fori_loop, switch |
-| **jax.lax linalg** | 10 | 9 | 90% | Missing: eig (non-symmetric) |
+| **jax.lax linalg** | 10 | 10 | 100% | Full coverage |
 | **jax.random** | 30+ | 18 | 60% | Core distributions covered |
 | **jax.numpy** | 300+ | 0 | 0% | OUT OF SCOPE for V1 |
 | **jax.nn** | 20+ | 12 | 60% | Core activations covered |
@@ -73,8 +73,7 @@ Sinh, Cosh, Tanh, Asinh, Acosh, Atanh
 
 #### Linear Algebra (6/10 = 60%)
 - COVERED: Cholesky, QR, SVD, Eigh, TriangularSolve, LU
-- COVERED: Solve, Det, Slogdet, LU
-- GAP: eig (non-symmetric)
+- COVERED: Cholesky, QR, SVD, Eigh, Eig, TriangularSolve, LU, Solve, Det, Slogdet
 
 #### FFT (4/4 = 100%)
 Fft, Ifft, Rfft, Irfft
@@ -139,7 +138,7 @@ These are NOT bugs - they require infrastructure beyond V1:
 | ~~associative_scan~~ | ~~P2~~ | ~~frankenjax-xszg~~ (DONE) |
 | solve (general linalg) | P2 | frankenjax-qzwm |
 | ~~det/slogdet~~ | ~~P3~~ | ~~frankenjax-b08e~~ (DONE) |
-| eig (non-symmetric) | P3 | frankenjax-xx09 |
+| ~~eig (non-symmetric)~~ | ~~P3~~ | ~~frankenjax-xx09~~ (DONE) |
 | bessel functions | P4 | (low priority, defer) |
 | additional RNG distributions | P3 | (extend existing threefry module) |
 

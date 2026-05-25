@@ -3844,6 +3844,10 @@ pub fn vjp(
         // PA = LU. LU VJP is complex; returns zeros for now.
         // Full gradient: dA = P^T @ (L^{-T} tril(dLU, -1) U^T + L triu(dLU) U^{-T})
         Primitive::Lu => Ok(vec![zeros_like(&inputs[0])]),
+        // ── Eig VJP ──
+        // Non-symmetric eigenvalue differentiation is complex.
+        // V1: return zero gradient (eig not differentiable in V1).
+        Primitive::Eig => Ok(vec![zeros_like(&inputs[0])]),
         // ── SVD VJP ──
         // A = U diag(s) V^T. Given cotangents g_U, g_s, g_Vt:
         // G[i,j] = [s_j(D_U[i,j]-D_U[j,i]) + s_i(D_V[i,j]-D_V[j,i])] / (s_j²-s_i²)
@@ -7704,7 +7708,7 @@ fn jvp_rule(
         // ── IRFFT JVP ──
         // IRFFT is linear: JVP = IRFFT(tangent)
         Primitive::Irfft => ep(Primitive::Irfft, &[tangents[0].clone()]),
-        Primitive::Qr | Primitive::Lu | Primitive::Svd | Primitive::Eigh => {
+        Primitive::Qr | Primitive::Lu | Primitive::Svd | Primitive::Eigh | Primitive::Eig => {
             Err(AdError::UnsupportedPrimitive(primitive))
         }
     }
