@@ -234,6 +234,7 @@ pub enum Primitive {
     // Control flow
     Cond,
     Scan,
+    AssociativeScan,
     While,
     Switch,
     // Collective operations (pmap axis-aware reductions)
@@ -401,6 +402,7 @@ impl Primitive {
         Self::Conv,
         Self::Cond,
         Self::Scan,
+        Self::AssociativeScan,
         Self::While,
         Self::Switch,
         Self::Psum,
@@ -573,6 +575,7 @@ impl Primitive {
             Self::Conv => "conv",
             Self::Cond => "cond",
             Self::Scan => "scan",
+            Self::AssociativeScan => "associative_scan",
             Self::While => "while_loop",
             Self::Switch => "switch",
             Self::Psum => "psum",

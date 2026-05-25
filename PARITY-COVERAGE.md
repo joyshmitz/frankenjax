@@ -89,9 +89,9 @@ Gather, Scatter, Concatenate, Pad, Rev, Squeeze, Split, ExpandDims
 BitwiseAnd, BitwiseOr, BitwiseXor, BitwiseNot, ShiftLeft, ShiftRightArithmetic, 
 ShiftRightLogical, PopulationCount, CountLeadingZeros
 
-#### Control Flow (4/5 = 80%)
+#### Control Flow (5/5 = 100%)
 - COVERED: Cond, Scan, While, Switch
-- GAP: associative_scan (parallel scan)
+- COVERED: associative_scan (sequential V1)
 
 ### jax.random Coverage (18/30+ = 60%)
 
@@ -135,7 +135,7 @@ These are NOT bugs - they require infrastructure beyond V1:
 | ~~linearize~~ | ~~P2~~ | ~~frankenjax-6duf~~ (DONE) |
 | ~~linear_transpose~~ | ~~P2~~ | ~~frankenjax-awjz~~ (DONE) |
 | eval_shape | P3 | frankenjax-jm5s |
-| associative_scan | P2 | frankenjax-xszg |
+| ~~associative_scan~~ | ~~P2~~ | ~~frankenjax-xszg~~ (DONE) |
 | solve (general linalg) | P2 | frankenjax-qzwm |
 | det/slogdet | P3 | frankenjax-b08e |
 | eig (non-symmetric) | P3 | frankenjax-xx09 |

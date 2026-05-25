@@ -635,6 +635,7 @@ pub fn eval_primitive(
         // Control flow
         Primitive::Cond => eval_cond(primitive, inputs),
         Primitive::Scan => eval_scan(primitive, inputs, params),
+        Primitive::AssociativeScan => eval_associative_scan(primitive, inputs, params),
         Primitive::While => eval_while_loop(primitive, inputs, params),
         Primitive::Switch => eval_switch(primitive, inputs, params),
         // Collective operations (pmap-only, require multi-device runtime)
@@ -801,6 +802,93 @@ fn eval_scan(
             }
 
             Ok(carry)
+        }
+    }
+}
+
+/// Evaluate associative_scan: parallel prefix scan using an associative binary operator.
+///
+/// Unlike regular scan, associative_scan:
+/// 1. Takes only xs (no initial carry)
+/// 2. Returns all prefix scan values, not just the final carry
+/// 3. First output is xs[0], not fn(init, xs[0])
+///
+/// For an associative binary op ⊕:
+///   out[0] = xs[0]
+///   out[i] = xs[0] ⊕ xs[1] ⊕ ... ⊕ xs[i]
+///
+/// V1: Sequential implementation for correctness. Parallel optimization deferred.
+fn eval_associative_scan(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Value, EvalError> {
+    if inputs.len() != 1 {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: inputs.len(),
+        });
+    }
+
+    let xs = &inputs[0];
+
+    let body_op_name = params.get("body_op").map(|s| s.as_str()).unwrap_or("add");
+    let body_op = match body_op_name {
+        "add" => Primitive::Add,
+        "mul" => Primitive::Mul,
+        "max" => Primitive::Max,
+        "min" => Primitive::Min,
+        "and" => Primitive::BitwiseAnd,
+        "or" => Primitive::BitwiseOr,
+        "xor" => Primitive::BitwiseXor,
+        other => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("unsupported associative_scan body_op: {other}"),
+            });
+        }
+    };
+
+    let reverse = params.get("reverse").map(|s| s == "true").unwrap_or(false);
+
+    match xs {
+        Value::Scalar(lit) => {
+            Ok(Value::Scalar(*lit))
+        }
+        Value::Tensor(t) => {
+            let leading_dim = scan_leading_dim(t)?;
+            if leading_dim == 0 {
+                return Ok(xs.clone());
+            }
+            if leading_dim == 1 {
+                return Ok(xs.clone());
+            }
+
+            let mut results: Vec<Value> = Vec::with_capacity(leading_dim);
+
+            if reverse {
+                let mut acc = t.slice_axis0(leading_dim - 1).map_err(EvalError::InvalidTensor)?;
+                results.push(acc.clone());
+                for i in (0..leading_dim - 1).rev() {
+                    let x_slice = t.slice_axis0(i).map_err(EvalError::InvalidTensor)?;
+                    acc = eval_primitive(body_op, &[x_slice, acc], &BTreeMap::new())?;
+                    results.push(acc.clone());
+                }
+                results.reverse();
+            } else {
+                let mut acc = t.slice_axis0(0).map_err(EvalError::InvalidTensor)?;
+                results.push(acc.clone());
+                for i in 1..leading_dim {
+                    let x_slice = t.slice_axis0(i).map_err(EvalError::InvalidTensor)?;
+                    acc = eval_primitive(body_op, &[acc, x_slice], &BTreeMap::new())?;
+                    results.push(acc.clone());
+                }
+            }
+
+            TensorValue::stack_axis0(&results)
+                .map(Value::Tensor)
+                .map_err(EvalError::InvalidTensor)
         }
     }
 }
@@ -7051,6 +7139,98 @@ mod tests {
                 detail: "scan tensor xs must have a leading axis"
             }
         );
+    }
+
+    // ── Associative scan tests ──────────────────────────────
+
+    fn assoc_scan_params(op: &str) -> BTreeMap<String, String> {
+        let mut params = BTreeMap::new();
+        params.insert("body_op".to_owned(), op.to_owned());
+        params
+    }
+
+    fn assoc_scan_params_reverse(op: &str) -> BTreeMap<String, String> {
+        let mut params = BTreeMap::new();
+        params.insert("body_op".to_owned(), op.to_owned());
+        params.insert("reverse".to_owned(), "true".to_owned());
+        params
+    }
+
+    #[test]
+    fn associative_scan_add_prefix_sum() {
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let out =
+            eval_primitive(Primitive::AssociativeScan, &[xs], &assoc_scan_params("add")).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![1.0, 3.0, 6.0, 10.0]);
+        } else {
+            panic!("expected tensor output");
+        }
+    }
+
+    #[test]
+    fn associative_scan_mul_prefix_prod() {
+        let xs = Value::vector_f64(&[2.0, 3.0, 4.0]).unwrap();
+        let out =
+            eval_primitive(Primitive::AssociativeScan, &[xs], &assoc_scan_params("mul")).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![2.0, 6.0, 24.0]);
+        } else {
+            panic!("expected tensor output");
+        }
+    }
+
+    #[test]
+    fn associative_scan_max_running_max() {
+        let xs = Value::vector_f64(&[3.0, 1.0, 4.0, 1.0, 5.0]).unwrap();
+        let out =
+            eval_primitive(Primitive::AssociativeScan, &[xs], &assoc_scan_params("max")).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![3.0, 3.0, 4.0, 4.0, 5.0]);
+        } else {
+            panic!("expected tensor output");
+        }
+    }
+
+    #[test]
+    fn associative_scan_reverse() {
+        let xs = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0]).unwrap();
+        let out = eval_primitive(
+            Primitive::AssociativeScan,
+            &[xs],
+            &assoc_scan_params_reverse("add"),
+        )
+        .unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![10.0, 9.0, 7.0, 4.0]);
+        } else {
+            panic!("expected tensor output");
+        }
+    }
+
+    #[test]
+    fn associative_scan_single_element() {
+        let xs = Value::vector_f64(&[42.0]).unwrap();
+        let out =
+            eval_primitive(Primitive::AssociativeScan, &[xs], &assoc_scan_params("add")).unwrap();
+        if let Value::Tensor(t) = &out {
+            let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            assert_eq!(vals, vec![42.0]);
+        } else {
+            panic!("expected tensor output");
+        }
+    }
+
+    #[test]
+    fn associative_scan_scalar() {
+        let xs = Value::scalar_f64(7.0);
+        let out =
+            eval_primitive(Primitive::AssociativeScan, &[xs], &assoc_scan_params("add")).unwrap();
+        assert_eq!(out.as_f64_scalar().unwrap(), 7.0);
     }
 
     // ── Scan functional tests (bd-3eyv) ──────────────────────────────
