@@ -90,6 +90,18 @@ pub struct LinearizeResult {
     pub linearized: LinearizedFunction,
 }
 
+/// A transposed linear function returned by `linear_transpose`.
+///
+/// For a linear function f: R^n -> R^m, the transpose f^T: R^m -> R^n
+/// satisfies <f(x), y> = <x, f^T(y)> for all x, y.
+///
+/// JAX equivalent: the return value of `jax.linear_transpose`.
+#[derive(Debug, Clone)]
+pub struct TransposedLinearFunction {
+    jaxpr: Jaxpr,
+    primals: Vec<Value>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointWrapped {
     jaxpr: Jaxpr,
@@ -299,6 +311,36 @@ impl LinearizedFunction {
     pub fn call(&self, tangents: Vec<Value>) -> Result<Vec<Value>, ApiError> {
         let jvp_result = fj_ad::jvp(&self.jaxpr, &self.primals, &tangents)?;
         Ok(jvp_result.tangents)
+    }
+}
+
+/// Compute the transpose of a linear function.
+///
+/// For a linear function f: R^n -> R^m represented by a Jaxpr, returns a
+/// `TransposedLinearFunction` that computes f^T: R^m -> R^n.
+///
+/// The function is assumed to be linear in all its inputs. For a linear f,
+/// the transpose is computed using VJP: f^T(cotangent) = VJP(f, zeros, cotangent).
+///
+/// JAX equivalent: `jax.linear_transpose`
+///
+/// # Example
+/// ```ignore
+/// let transposed = linear_transpose(jaxpr, primals)?;
+/// let result = transposed.call(cotangent)?;
+/// ```
+pub fn linear_transpose(jaxpr: Jaxpr, primals: Vec<Value>) -> Result<TransposedLinearFunction, ApiError> {
+    let _ = fj_interpreters::eval_jaxpr(&jaxpr, &primals)?;
+    Ok(TransposedLinearFunction { jaxpr, primals })
+}
+
+impl TransposedLinearFunction {
+    /// Compute the transposed linear function at the given cotangent.
+    ///
+    /// For a linear function f, this computes f^T(cotangent) using VJP.
+    pub fn call(&self, cotangent: Value) -> Result<Vec<Value>, ApiError> {
+        let grads = fj_ad::grad_jaxpr_with_cotangent(&self.jaxpr, &self.primals, &cotangent)?;
+        Ok(grads)
     }
 }
 

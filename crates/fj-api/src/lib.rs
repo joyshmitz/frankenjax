@@ -12,11 +12,11 @@ pub use fj_core::{DType, Shape, Value};
 pub use transforms::{
     CheckpointWrapped, ComposedTransform, CustomJvpWrapped, CustomVjpWrapped, GradWrapped,
     HessianWrapped, JacobianWrapped, JitWrapped, LinearizeResult, LinearizedFunction,
-    PmapWrapped, ValueAndGradWrapped, VmapWrapped,
+    PmapWrapped, TransposedLinearFunction, ValueAndGradWrapped, VmapWrapped,
 };
 pub use transforms::{
-    checkpoint, compose, custom_jvp, custom_vjp, grad, hessian, jacobian, jit, linearize, pmap,
-    value_and_grad, vmap,
+    checkpoint, compose, custom_jvp, custom_vjp, grad, hessian, jacobian, jit, linear_transpose,
+    linearize, pmap, value_and_grad, vmap,
 };
 
 // Re-export make_jaxpr tracing API from fj-trace
@@ -202,6 +202,32 @@ mod tests {
 
         assert!((t1 - 8.0).abs() < 1e-6);
         assert!((t2 - 16.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linear_transpose_identity() {
+        let jaxpr = build_program(ProgramSpec::Identity);
+        let transposed =
+            linear_transpose(jaxpr, vec![Value::scalar_f64(1.0)]).expect("linear_transpose");
+        let result = transposed
+            .call(Value::scalar_f64(5.0))
+            .expect("call")[0]
+            .as_f64_scalar()
+            .unwrap();
+        assert!((result - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linear_transpose_neg() {
+        let jaxpr = build_program(ProgramSpec::LaxNeg);
+        let transposed =
+            linear_transpose(jaxpr, vec![Value::scalar_f64(1.0)]).expect("linear_transpose");
+        let result = transposed
+            .call(Value::scalar_f64(3.0))
+            .expect("call")[0]
+            .as_f64_scalar()
+            .unwrap();
+        assert!((result - (-3.0)).abs() < 1e-6);
     }
 
     // --- Transform composition tests ---

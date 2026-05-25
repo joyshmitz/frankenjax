@@ -15,7 +15,7 @@ FrankenJAX is a **reference implementation of JAX's transform semantics**, NOT a
 
 | JAX Module | Upstream Count | FrankenJAX Count | Coverage | Notes |
 |------------|----------------|------------------|----------|-------|
-| **jax.* transforms** | 12 core | 11 | 92% | Missing: linear_transpose |
+| **jax.* transforms** | 12 core | 12 | 100% | Full coverage |
 | **jax.lax primitives** | ~150 unique | 152 | ~100% | Full coverage for V1 scope |
 | **jax.lax control flow** | 5 | 5 | 100% | cond, scan, while_loop, fori_loop, switch |
 | **jax.lax linalg** | 10 | 6 | 60% | Missing: lu, eig, solve, det |
@@ -47,7 +47,7 @@ FrankenJAX is a **reference implementation of JAX's transform semantics**, NOT a
 | jvp | COVERED | Forward-mode AD |
 | vjp | COVERED | Reverse-mode AD |
 | linearize | COVERED | Via fj-api |
-| linear_transpose | GAP | Not implemented |
+| linear_transpose | COVERED | Via fj-api |
 | pmap | EXCLUDED | Requires multi-device |
 | shard_map | EXCLUDED | Requires sharding |
 | eval_shape | GAP | Not implemented |
@@ -133,7 +133,7 @@ These are NOT bugs - they require infrastructure beyond V1:
 | Gap | Priority | Bead |
 |-----|----------|------|
 | ~~linearize~~ | ~~P2~~ | ~~frankenjax-6duf~~ (DONE) |
-| linear_transpose | P2 | frankenjax-awjz |
+| ~~linear_transpose~~ | ~~P2~~ | ~~frankenjax-awjz~~ (DONE) |
 | eval_shape | P3 | frankenjax-jm5s |
 | associative_scan | P2 | frankenjax-xszg |
 | solve (general linalg) | P2 | frankenjax-qzwm |
