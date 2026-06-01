@@ -1647,6 +1647,18 @@ fn batch_scatter_unbatched_operand_direct(
     {
         return Ok(None);
     }
+    if let Some(result) = batch_scatter_unbatched_operand_rank1_overwrite(
+        operand_tensor,
+        indices_tensor,
+        updates_tensor,
+        params,
+        batch_size,
+        batch_size_u32,
+        operand_axis0,
+        operand_axis0_dim,
+    )? {
+        return Ok(Some(result));
+    }
 
     let flat_axis0 = batch_size
         .checked_mul(operand_axis0)
@@ -1718,6 +1730,82 @@ fn batch_scatter_unbatched_operand_direct(
         operand_tensor.dtype,
         Shape { dims: output_dims },
         flat_tensor.elements,
+    )
+    .map_err(|e| BatchError::TensorError(e.to_string()))?;
+    Ok(Some(BatchTracer::batched(Value::Tensor(output), 0)))
+}
+
+fn batch_scatter_unbatched_operand_rank1_overwrite(
+    operand_tensor: &TensorValue,
+    indices_tensor: &TensorValue,
+    updates_tensor: &TensorValue,
+    params: &BTreeMap<String, String>,
+    batch_size: usize,
+    batch_size_u32: u32,
+    operand_axis0: usize,
+    operand_axis0_dim: u32,
+) -> Result<Option<BatchTracer>, BatchError> {
+    if operand_tensor.rank() != 1 {
+        return Ok(None);
+    }
+    let mode = params
+        .get("mode")
+        .map(String::as_str)
+        .unwrap_or("overwrite");
+    if mode != "overwrite" {
+        return Ok(None);
+    }
+    if updates_tensor.dtype != operand_tensor.dtype || updates_tensor.shape != indices_tensor.shape
+    {
+        return Ok(None);
+    }
+    let Some(indices_per_batch) = indices_tensor.elements.len().checked_div(batch_size) else {
+        return Ok(None);
+    };
+    if indices_per_batch
+        .checked_mul(batch_size)
+        .is_none_or(|len| len != indices_tensor.elements.len())
+        || updates_tensor.elements.len() != indices_tensor.elements.len()
+    {
+        return Ok(None);
+    }
+
+    let output_len = batch_size
+        .checked_mul(operand_axis0)
+        .ok_or_else(|| BatchError::TensorError("scatter output size overflowed".to_owned()))?;
+    let mut output_elements = Vec::with_capacity(output_len);
+    for _ in 0..batch_size {
+        output_elements.extend_from_slice(&operand_tensor.elements);
+    }
+
+    for (flat_pos, &literal) in indices_tensor.elements.iter().enumerate() {
+        let Some(raw_index) = scatter_index_literal_to_usize(literal)? else {
+            return Ok(None);
+        };
+        if raw_index >= operand_axis0 {
+            return Ok(None);
+        }
+        let batch_idx = flat_pos / indices_per_batch;
+        let batch_offset = batch_idx.checked_mul(operand_axis0).ok_or_else(|| {
+            BatchError::TensorError("scatter output offset overflowed".to_owned())
+        })?;
+        let output_index = batch_offset
+            .checked_add(raw_index)
+            .ok_or_else(|| BatchError::TensorError("scatter output index overflowed".to_owned()))?;
+        let update = *updates_tensor.elements.get(flat_pos).ok_or_else(|| {
+            BatchError::TensorError("scatter update index out of range".to_owned())
+        })?;
+        *output_elements.get_mut(output_index).ok_or_else(|| {
+            BatchError::TensorError("scatter output index out of range".to_owned())
+        })? = update;
+    }
+
+    let output = TensorValue::new(
+        operand_tensor.dtype,
+        Shape {
+            dims: vec![batch_size_u32, operand_axis0_dim],
+        },
+        output_elements,
     )
     .map_err(|e| BatchError::TensorError(e.to_string()))?;
     Ok(Some(BatchTracer::batched(Value::Tensor(output), 0)))
@@ -4895,16 +4983,14 @@ pub fn batch_eval_jaxpr_with_consts(
                 .inputs
                 .iter()
                 .map(|atom| match atom {
-                    Atom::Var(var) => {
-                        jaxpr
-                            .invars
-                            .iter()
-                            .position(|v| v == var)
-                            .map(|idx| args[idx].clone())
-                            .ok_or_else(|| {
-                                BatchError::InterpreterError(format!("missing variable v{}", var.0))
-                            })
-                    }
+                    Atom::Var(var) => jaxpr
+                        .invars
+                        .iter()
+                        .position(|v| v == var)
+                        .map(|idx| args[idx].clone())
+                        .ok_or_else(|| {
+                            BatchError::InterpreterError(format!("missing variable v{}", var.0))
+                        }),
                     Atom::Lit(lit) => Ok(BatchTracer::unbatched(Value::Scalar(*lit))),
                 })
                 .collect();
@@ -7741,6 +7827,24 @@ mod tests {
             extract_i64_vec(&result.value),
             vec![0, 10, 0, 20, 30, 0, 40, 0]
         );
+    }
+
+    #[test]
+    fn test_batch_trace_scatter_overwrite_duplicates_keep_last_update_direct() {
+        let operand = BatchTracer::unbatched(make_i64_vector(&[0, 0, 0]));
+        let indices = BatchTracer::batched(make_i64_matrix(2, 3, &[1, 1, 2, 0, 0, 2]), 0);
+        let updates = BatchTracer::batched(make_i64_matrix(2, 3, &[10, 20, 30, 40, 50, 60]), 0);
+
+        let result = apply_batch_rule(
+            Primitive::Scatter,
+            &[operand, indices, updates],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        assert_eq!(result.batch_dim, Some(0));
+        assert_eq!(result.value.as_tensor().unwrap().shape.dims, vec![2, 3]);
+        assert_eq!(extract_i64_vec(&result.value), vec![0, 20, 30, 50, 0, 60]);
     }
 
     #[test]

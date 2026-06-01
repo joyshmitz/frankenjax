@@ -1,0 +1,59 @@
+{
+  "schema_version": "frankenjax.optimization-pass-evidence.v1",
+  "bead_id": "frankenjax-e4u4",
+  "hotspot_id": "hotspot-vmap-scatter-rank1-overwrite-001",
+  "pass": 1,
+  "captured_at_iso": "2026-06-01T23:46:46Z",
+  "worker": "ts2",
+  "one_lever": "Specialize BatchTrace unbatched-operand rank-1 overwrite scatter to write the batched output directly.",
+  "baseline": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scatter/batched_indices_updates --sample-size 20 --measurement-time 3 --warm-up-time 1",
+    "time_ms_lower": 21.567,
+    "time_ms_mid": 21.746,
+    "time_ms_upper": 21.92
+  },
+  "candidate": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scatter/batched_indices_updates --sample-size 20 --measurement-time 3 --warm-up-time 1",
+    "time_ms_lower": 19.549,
+    "time_ms_mid": 19.824,
+    "time_ms_upper": 20.079,
+    "midpoint_speedup_percent": 8.84
+  },
+  "score": {
+    "impact": 8.84,
+    "confidence": 0.78,
+    "effort": 2.0,
+    "impact_x_confidence_over_effort": 3.45,
+    "decision": "keep"
+  },
+  "behavior_proof": {
+    "ordering": "Overwrite mode still iterates row-major through indices; duplicate indices keep the last update within each batch.",
+    "tie_breaking": "No comparator or branch-priority tie-breaker changed.",
+    "floating_point": "The kept fast path only rewrites overwrite assignment and does not perform floating-point arithmetic.",
+    "rng": "No RNG state or random primitive is read or written.",
+    "strict_hardened": "No compatibility-mode branch is changed.",
+    "golden_output_sha256": "0e77c60d1d9070b0b1ccda582048094f9c04356f2a3cda03a2b4ec5f82fddd6d",
+    "golden_output_payload": "direct=[0,10,0,20,30,0,40,0]\\nduplicates=[0,20,30,50,0,60]\\n"
+  },
+  "validation": [
+    {
+      "command": "rch exec -- cargo test -p fj-dispatch scatter -- --nocapture",
+      "result": "pass",
+      "notes": "4 scatter-filtered lib tests and 3 scatter-filtered dispatch_p2c004 integration tests passed."
+    },
+    {
+      "command": "rch exec -- cargo check -p fj-dispatch --all-targets",
+      "result": "pass",
+      "notes": "Existing fj-ad unused-variable warning remained advisory."
+    },
+    {
+      "command": "rch exec -- cargo clippy -p fj-dispatch --all-targets -- -D warnings",
+      "result": "blocked",
+      "notes": "Blocked before fj-dispatch by existing crates/fj-ad/src/lib.rs:6479 unused variable, tracked as frankenjax-ch8e."
+    }
+  ],
+  "rejected_alternatives": [
+    "Generic scatter add-mode specialization: rejected for pass 1 because add requires dtype-specific arithmetic and the current benchmark is overwrite-only.",
+    "Shape-general slice specialization: rejected for pass 1 to keep the lever narrow and prove rank-1 scalar-update semantics first."
+  ]
+}
