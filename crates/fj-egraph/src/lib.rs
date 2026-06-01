@@ -957,6 +957,23 @@ pub fn jaxpr_to_egraph(
             });
         }
         validate_egraph_equation_arity(eqn)?;
+        // Fail closed at the conversion boundary: the e-graph stores no
+        // operation parameters (except IntegerPow's exponent, encoded below as a
+        // Num child), so lowering a param-bearing equation would silently drop
+        // its semantics — e.g. a reduction's `axes` or `convert_element_type`'s
+        // dtype. The segment optimizer already routes such equations around the
+        // e-graph via `is_egraph_barrier`, so this never fires from
+        // `optimize_jaxpr`; it protects direct callers of this public API.
+        if !equation_params_representable(eqn) {
+            return Err(EGraphLoweringError::InvalidPrimitiveParams {
+                primitive: eqn.primitive,
+                detail: format!(
+                    "equation carries {} operation parameter(s) the algebraic e-graph cannot \
+                     represent (only IntegerPow's exponent is encodable)",
+                    eqn.params.len()
+                ),
+            });
+        }
 
         let input_ids: Vec<Id> = eqn
             .inputs
@@ -3337,6 +3354,34 @@ mod tests {
             equation.params.get("exponent").map(String::as_str),
             Some("2")
         );
+    }
+
+    #[test]
+    fn jaxpr_to_egraph_rejects_unrepresentable_params() {
+        // Direct-API defense-in-depth: a reduction carrying an `axes` param has
+        // no e-graph representation, so lowering must fail closed rather than
+        // silently drop the axes (which would rebuild it as a full reduction).
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                effects: vec![],
+                params: BTreeMap::from([("axes".to_owned(), "0".to_owned())]),
+                sub_jaxprs: vec![],
+            }],
+        );
+        let err = jaxpr_to_egraph(&jaxpr).expect_err("axis-bearing reduction must not lower");
+        assert!(matches!(
+            err,
+            EGraphLoweringError::InvalidPrimitiveParams {
+                primitive: Primitive::ReduceSum,
+                ..
+            }
+        ));
     }
 
     #[test]
