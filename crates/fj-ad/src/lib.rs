@@ -716,6 +716,27 @@ fn value_bool_and(lhs: &Value, rhs: &Value) -> Result<Value, AdError> {
     value_select(lhs, rhs, &Value::scalar_bool(false))
 }
 
+/// `log(_replace_zero(x))` matching JAX's `pow` exponent-gradient helper, where
+/// `_replace_zero(x) = select(x == 0, 1, x)` (jax/_src/lax/lax.py `_pow_jvp_rhs`).
+///
+/// The `pow` exponent gradient is `g * x^y * log(x)`. Taking `log(x)` directly
+/// yields `-inf` at `x == 0`, and `x^y == 0` there (for `y > 0`), so the product
+/// becomes `0 * -inf = NaN`. JAX replaces the zero base with `1` before the log
+/// so the term collapses to `0`, matching the limit. We mirror that exactly.
+fn log_replace_zero(x: &Value) -> Result<Value, AdError> {
+    let zero = scalar_constant_matching_dtype(0.0, x);
+    let is_zero = eval_primitive(Primitive::Eq, &[x.clone(), zero], &BTreeMap::new())
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+    let one = scalar_constant_matching_dtype(1.0, x);
+    let safe_base = value_select(&is_zero, &one, x)?;
+    eval_primitive(
+        Primitive::Log,
+        std::slice::from_ref(&safe_base),
+        &BTreeMap::new(),
+    )
+    .map_err(|e| AdError::EvalFailed(e.to_string()))
+}
+
 fn value_masked(mask: &Value, value: &Value, zero_like_value: &Value) -> Result<Value, AdError> {
     value_select(mask, value, &zeros_like(zero_like_value))
 }
@@ -1498,8 +1519,7 @@ pub fn vjp(
 
             let a_pow_b = eval_primitive(Primitive::Pow, &[a.clone(), b.clone()], &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let ln_a = eval_primitive(Primitive::Log, std::slice::from_ref(a), &BTreeMap::new())
-                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let ln_a = log_replace_zero(a)?;
             let db = value_mul(g, &value_mul(&a_pow_b, &ln_a)?)?;
             Ok(vec![da, db])
         }
@@ -7217,7 +7237,7 @@ fn jvp_rule(
             let da_part = ep(Primitive::Mul, &[primals[1].clone(), a_pow_bm1])?;
             let da_term = ep(Primitive::Mul, &[da_part, tangents[0].clone()])?;
             let a_pow_b = ep(Primitive::Pow, &[primals[0].clone(), primals[1].clone()])?;
-            let ln_a = ep(Primitive::Log, &[primals[0].clone()])?;
+            let ln_a = log_replace_zero(&primals[0])?;
             let db_part = ep(Primitive::Mul, &[a_pow_b, ln_a])?;
             let db_term = ep(Primitive::Mul, &[db_part, tangents[1].clone()])?;
             ep(Primitive::Add, &[da_term, db_term])
@@ -9468,6 +9488,59 @@ mod tests {
         let grads = vjp_single(Primitive::IntegerPow, &[input], &g, &params).expect("vjp");
         let grad = grads[0].as_f64_scalar().expect("scalar");
         assert!((grad - 108.0).abs() < 1e-10, "got {grad}");
+    }
+
+    #[test]
+    fn test_pow_vjp_base_zero_exponent_grad_is_finite() {
+        // Regression: the exponent gradient `g * a^b * log(a)` used `log(a)`
+        // directly, giving `0 * -inf = NaN` at base 0. JAX's `_pow_jvp_rhs`
+        // replaces the zero base with 1 inside the log, so db == 0 there.
+        let base = Value::scalar_f64(0.0);
+        let exponent = Value::scalar_f64(2.0);
+        let g = Value::scalar_f64(1.0);
+        let grads =
+            vjp_single(Primitive::Pow, &[base, exponent], &g, &BTreeMap::new()).expect("vjp");
+        let da = grads[0].as_f64_scalar().expect("scalar da");
+        let db = grads[1].as_f64_scalar().expect("scalar db");
+        assert!(
+            da.is_finite() && da.abs() < 1e-12,
+            "da should be 0, got {da}"
+        );
+        assert!(
+            db.is_finite() && db.abs() < 1e-12,
+            "db should be 0, got {db}"
+        );
+    }
+
+    #[test]
+    fn test_pow_vjp_positive_base_unchanged() {
+        // Guard against regression in the common (positive base) path.
+        let base = Value::scalar_f64(2.0);
+        let exponent = Value::scalar_f64(3.0);
+        let g = Value::scalar_f64(1.0);
+        let grads =
+            vjp_single(Primitive::Pow, &[base, exponent], &g, &BTreeMap::new()).expect("vjp");
+        let da = grads[0].as_f64_scalar().expect("scalar da");
+        let db = grads[1].as_f64_scalar().expect("scalar db");
+        // d/da(a^b) = b*a^(b-1) = 3*4 = 12; d/db(a^b) = a^b*ln(a) = 8*ln(2).
+        assert!((da - 12.0).abs() < 1e-10, "got {da}");
+        assert!(
+            (db - 8.0 * std::f64::consts::LN_2).abs() < 1e-10,
+            "got {db}"
+        );
+    }
+
+    #[test]
+    fn test_pow_jvp_base_zero_tangent_is_finite() {
+        // JVP counterpart: `a^b * log(a) * db` must not produce NaN at base 0.
+        let primals = vec![Value::scalar_f64(0.0), Value::scalar_f64(2.0)];
+        let tangents = vec![Value::scalar_f64(1.0), Value::scalar_f64(1.0)];
+        let out = jvp_rule(Primitive::Pow, &primals, &tangents, &BTreeMap::new()).expect("jvp");
+        let t = out.as_f64_scalar().expect("scalar tangent");
+        assert!(
+            t.is_finite() && t.abs() < 1e-12,
+            "tangent should be 0, got {t}"
+        );
     }
 
     #[test]
