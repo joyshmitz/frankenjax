@@ -122,8 +122,13 @@ impl<B: CacheBackend> CacheBackend for LruCache<B> {
     }
 
     fn put(&mut self, key: &CacheKey, artifact: CachedArtifact) {
-        self.touch(key);
+        let put_failures_before = self.inner.put_failure_count();
         self.inner.put(key, artifact);
+        if self.inner.put_failure_count() != put_failures_before {
+            return;
+        }
+
+        self.touch(key);
         self.enforce_budget();
     }
 
@@ -373,6 +378,47 @@ mod tests {
 
         fn clear(&mut self) {
             self.entries.clear();
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingPutBackend {
+        entries: HashMap<String, CachedArtifact>,
+        fail_next_put: bool,
+        put_failures: u64,
+    }
+
+    impl CacheBackend for FailingPutBackend {
+        fn get(&self, key: &CacheKey) -> Option<CachedArtifact> {
+            self.entries.get(&key.as_string()).cloned()
+        }
+
+        fn put(&mut self, key: &CacheKey, artifact: CachedArtifact) {
+            if self.fail_next_put {
+                self.fail_next_put = false;
+                self.put_failures += 1;
+                return;
+            }
+            self.entries.insert(key.as_string(), artifact);
+        }
+
+        fn evict(&mut self, key: &CacheKey) -> bool {
+            self.entries.remove(&key.as_string()).is_some()
+        }
+
+        fn stats(&self) -> CacheStats {
+            CacheStats {
+                entry_count: self.entries.len(),
+                total_bytes: self.entries.values().map(|a| a.data.len() as u64).sum(),
+            }
+        }
+
+        fn clear(&mut self) {
+            self.entries.clear();
+        }
+
+        fn put_failure_count(&self) -> u64 {
+            self.put_failures
         }
     }
 
@@ -781,6 +827,37 @@ mod tests {
             1,
             "LruCache::put_failure_count must forward to inner FileCache"
         );
+    }
+
+    #[test]
+    fn lru_failed_put_does_not_evict_live_entry() {
+        let config = LruConfig {
+            max_entries: 1,
+            max_bytes: 0,
+        };
+        let mut cache = LruCache::new(FailingPutBackend::default(), config);
+        let live = test_key("live");
+        let failed = test_key("failed");
+
+        cache.put(&live, test_artifact(b"live artifact"));
+        cache.inner.fail_next_put = true;
+        cache.put(&failed, test_artifact(b"not stored"));
+
+        assert_eq!(cache.put_failure_count(), 1);
+        {
+            let order = cache.order.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(order.len(), 1);
+            assert_eq!(order.front(), Some(&live));
+        }
+        assert!(
+            cache.get(&live).is_some(),
+            "failed put must not evict the existing live entry"
+        );
+        assert!(
+            cache.get(&failed).is_none(),
+            "failed put must not create a readable entry"
+        );
+        assert_eq!(cache.stats().entry_count, 1);
     }
 
     #[test]
