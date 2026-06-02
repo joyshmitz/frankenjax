@@ -695,6 +695,14 @@ pub fn eval_primitive_multi(
         Primitive::Svd => eval_svd(inputs, params),
         Primitive::Eigh => eval_eigh(inputs, params),
         Primitive::TopK => eval_top_k(inputs, params),
+        // Slogdet → (sign, logabsdet); Eig → (eigenvalues, eigenvectors).
+        // The single-output `eval_primitive` path keeps only the first of
+        // each, so route the multi-output evaluator to the real evals instead
+        // of falling through (which silently truncated the second output and
+        // would trip the interpreter's output-arity check on a 2-output
+        // equation).
+        Primitive::Slogdet => eval_slogdet(inputs, params),
+        Primitive::Eig => eval_eig(inputs, params),
         _ => eval_primitive(primitive, inputs, params).map(|v| vec![v]),
     }
 }
@@ -2672,6 +2680,53 @@ mod tests {
         params.insert("padding_high".to_owned(), high.to_owned());
         params.insert("padding_interior".to_owned(), interior.to_owned());
         params
+    }
+
+    fn square_2x2(data: [f64; 4]) -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 2] },
+                data.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn eval_primitive_multi_slogdet_returns_both_outputs() {
+        // Previously eval_primitive_multi fell through to the single-output
+        // path and silently dropped logabsdet, returning only [sign].
+        let a = square_2x2([2.0, 0.0, 0.0, 3.0]); // det = 6
+        let outputs =
+            super::eval_primitive_multi(Primitive::Slogdet, &[a], &no_params()).unwrap();
+        assert_eq!(outputs.len(), 2, "slogdet must yield (sign, logabsdet)");
+        let sign = outputs[0].as_f64_scalar().unwrap();
+        let logabsdet = outputs[1].as_f64_scalar().unwrap();
+        assert!((sign - 1.0).abs() < 1e-12, "sign={sign}");
+        assert!(
+            (logabsdet - 6.0_f64.ln()).abs() < 1e-9,
+            "logabsdet={logabsdet}"
+        );
+    }
+
+    #[test]
+    fn eval_primitive_multi_eig_returns_both_outputs() {
+        // Eig must yield (eigenvalues, eigenvectors), not just eigenvalues.
+        let a = square_2x2([2.0, 0.0, 0.0, 3.0]);
+        let outputs = super::eval_primitive_multi(Primitive::Eig, &[a], &no_params()).unwrap();
+        assert_eq!(outputs.len(), 2, "eig must yield (eigenvalues, eigenvectors)");
+        // eigenvalues: length-2 vector; eigenvectors: 2x2 matrix.
+        assert_eq!(
+            outputs[0].as_tensor().unwrap().shape.dims,
+            vec![2],
+            "eigenvalues shape"
+        );
+        assert_eq!(
+            outputs[1].as_tensor().unwrap().shape.dims,
+            vec![2, 2],
+            "eigenvectors shape"
+        );
     }
 
     #[test]
