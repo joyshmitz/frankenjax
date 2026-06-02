@@ -3147,15 +3147,21 @@ fn excluded_primitive_reason(primitive: Primitive) -> Option<ExclusionReason> {
         | Primitive::Svd
         | Primitive::Lu
         | Primitive::TriangularSolve
-        | Primitive::Eigh => Some(ExclusionReason::LinearAlgebra),
+        | Primitive::Eigh
+        | Primitive::Eig
+        | Primitive::Solve
+        | Primitive::Det
+        | Primitive::Slogdet => Some(ExclusionReason::LinearAlgebra),
         // FFT lowering depends on transform-length and layout metadata.
         Primitive::Fft | Primitive::Ifft | Primitive::Rfft | Primitive::Irfft => {
             Some(ExclusionReason::Fft)
         }
         // Control flow carries sub-jaxprs and branch metadata.
-        Primitive::Cond | Primitive::Scan | Primitive::While | Primitive::Switch => {
-            Some(ExclusionReason::ControlFlow)
-        }
+        Primitive::Cond
+        | Primitive::Scan
+        | Primitive::AssociativeScan
+        | Primitive::While
+        | Primitive::Switch => Some(ExclusionReason::ControlFlow),
         // Sorting needs explicit axis and comparator metadata.
         Primitive::Sort
         | Primitive::Argsort
@@ -3582,12 +3588,17 @@ mod tests {
             (Primitive::Svd, ExclusionReason::LinearAlgebra),
             (Primitive::TriangularSolve, ExclusionReason::LinearAlgebra),
             (Primitive::Eigh, ExclusionReason::LinearAlgebra),
+            (Primitive::Eig, ExclusionReason::LinearAlgebra),
+            (Primitive::Solve, ExclusionReason::LinearAlgebra),
+            (Primitive::Det, ExclusionReason::LinearAlgebra),
+            (Primitive::Slogdet, ExclusionReason::LinearAlgebra),
             (Primitive::Fft, ExclusionReason::Fft),
             (Primitive::Ifft, ExclusionReason::Fft),
             (Primitive::Rfft, ExclusionReason::Fft),
             (Primitive::Irfft, ExclusionReason::Fft),
             (Primitive::Cond, ExclusionReason::ControlFlow),
             (Primitive::Scan, ExclusionReason::ControlFlow),
+            (Primitive::AssociativeScan, ExclusionReason::ControlFlow),
             (Primitive::While, ExclusionReason::ControlFlow),
             (Primitive::Switch, ExclusionReason::ControlFlow),
             (Primitive::Sort, ExclusionReason::Sorting),
