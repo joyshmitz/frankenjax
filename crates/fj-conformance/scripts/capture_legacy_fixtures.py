@@ -73,6 +73,7 @@ def _get_metadata(jax_version: str | None, x64_enabled: bool | None) -> dict[str
         "hardware": platform.machine(),
         "platform": platform.system(),
         "hostname": platform.node(),
+        "x64_enabled": True,
     }
     if x64_enabled is not None:
         metadata["x64_enabled"] = x64_enabled

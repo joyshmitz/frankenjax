@@ -100,3 +100,4 @@ artifacts/
 
 # NTM session state
 .ntm/
+.claude/settings.local.json
