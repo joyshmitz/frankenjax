@@ -3121,9 +3121,44 @@ pub fn vjp(
             }
         }
         Primitive::Cummax | Primitive::Cummin => {
-            // VJP of cummax/cummin: complex (scatter gradient to argmax positions).
-            // Returns zeros for now.
-            Ok(vec![zeros_like(&inputs[0])])
+            // VJP of cummax/cummin: route each output cotangent back to the
+            // input element that produced the running extremum reaching that
+            // position. This is the transpose of the JVP gather. JAX defines
+            // the JVP as jvp(associative_scan(max|min)); on tie-free inputs the
+            // running extremum has a unique source, so this matches the oracle.
+            match (g, &inputs[0]) {
+                (Value::Scalar(_), _) => Ok(vec![g.clone()]),
+                (Value::Tensor(gt), Value::Tensor(xt)) => {
+                    if xt.shape.rank() == 0 {
+                        return Ok(vec![g.clone()]);
+                    }
+                    let source = cum_extreme_sources(primitive, xt, params)?;
+                    let total = xt.elements.len();
+                    let g_vals: Vec<f64> = gt
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap_or(0.0))
+                        .collect();
+                    let mut acc = vec![0.0_f64; total];
+                    for (idx, &src) in source.iter().enumerate() {
+                        acc[src] += g_vals[idx];
+                    }
+                    let g_dtype = gt.dtype;
+                    let elements: Vec<Literal> = acc
+                        .into_iter()
+                        .map(|v| encode_real_dtype(g_dtype, v))
+                        .collect();
+                    let out_dtype = match g_dtype {
+                        DType::Bool => DType::F64,
+                        other => other,
+                    };
+                    Ok(vec![Value::Tensor(
+                        TensorValue::new(out_dtype, gt.shape.clone(), elements)
+                            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                    )])
+                }
+                _ => Ok(vec![zeros_like(&inputs[0])]),
+            }
         }
         Primitive::Sort => {
             // VJP of sort: unsort the gradient using the argsort permutation.
@@ -6117,6 +6152,127 @@ fn parse_cumulative_axis(
     Ok(axis)
 }
 
+/// Encode an accumulated f64 gradient back at a real input dtype, mirroring the
+/// dtype-preserving rebuild used by the cumsum/cumprod VJPs so the AD chain does
+/// not silently widen e.g. F32 to F64.
+fn encode_real_dtype(dtype: DType, v: f64) -> Literal {
+    match dtype {
+        DType::F32 => Literal::from_f32(v as f32),
+        DType::BF16 => Literal::from_bf16_f32(v as f32),
+        DType::F16 => Literal::from_f16_f32(v as f32),
+        DType::F64 => Literal::from_f64(v),
+        DType::I64 | DType::I32 => Literal::I64(v as i64),
+        DType::U32 => Literal::U32(v as u32),
+        DType::U64 => Literal::U64(v as u64),
+        // Bool / others: legacy F64 path
+        _ => Literal::from_f64(v),
+    }
+}
+
+/// For cummax/cummin, compute for each output position the flat index of the
+/// input element that produced the running extremum reaching that position.
+///
+/// `source[idx]` is the running argmax (`Cummax`) / argmin (`Cummin`) source for
+/// the scan step that writes `idx`. The forward VJP scatters output cotangents
+/// to these sources; the JVP gathers input tangents from them — the two are
+/// exact transposes. Ties keep the earliest scan position (strict-inequality
+/// update), giving a deterministic gradient that matches JAX's
+/// `jvp(associative_scan(max|min))` on tie-free inputs. The `reverse` param is
+/// honoured so the scan direction matches `eval_cumulative`.
+fn cum_extreme_sources(
+    primitive: Primitive,
+    x: &TensorValue,
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<usize>, AdError> {
+    let is_max = matches!(primitive, Primitive::Cummax);
+    let rank = x.shape.rank();
+    let axis = parse_cumulative_axis(params, rank, primitive)?;
+    let reverse = params.get("reverse").map(|s| s == "true").unwrap_or(false);
+    let dims: Vec<usize> = x.shape.dims.iter().map(|&d| d as usize).collect();
+    let strides = ad_row_major_strides("cum-extreme input", &x.shape.dims)?;
+    let axis_len = dims[axis];
+    let total = x.elements.len();
+    let mut source: Vec<usize> = (0..total).collect();
+    if axis_len == 0 {
+        return Ok(source);
+    }
+    let axis_stride = strides[axis];
+    let outer_count = total / axis_len;
+    for outer in 0..outer_count {
+        let mut base = 0_usize;
+        let mut rem = outer;
+        for d in (0..rank).rev() {
+            if d == axis {
+                continue;
+            }
+            base += (rem % dims[d]) * strides[d];
+            rem /= dims[d];
+        }
+        let mut best_idx = base;
+        let mut best_val = 0.0_f64;
+        let mut have = false;
+        for step in 0..axis_len {
+            let i = if reverse { axis_len - 1 - step } else { step };
+            let idx = base + i * axis_stride;
+            let xv = x.elements[idx].as_f64().ok_or_else(|| {
+                AdError::EvalFailed(format!("{} input must be numeric", primitive.as_str()))
+            })?;
+            let take = if !have {
+                true
+            } else if is_max {
+                xv > best_val
+            } else {
+                xv < best_val
+            };
+            if take {
+                best_val = xv;
+                best_idx = idx;
+                have = true;
+            }
+            source[idx] = best_idx;
+        }
+    }
+    Ok(source)
+}
+
+/// JVP of cummax/cummin: the output tangent at each position is the tangent of
+/// the input element that achieved the running extremum there (gather over the
+/// sources from [`cum_extreme_sources`]). Tangent literals are copied verbatim,
+/// preserving the tangent's exact dtype and value.
+fn cum_extreme_jvp_value(
+    primitive: Primitive,
+    primal: &Value,
+    tangent: &Value,
+    params: &BTreeMap<String, String>,
+) -> Result<Value, AdError> {
+    match (primal, tangent) {
+        (Value::Scalar(_), _) => Ok(tangent.clone()),
+        (Value::Tensor(xt), Value::Tensor(tt)) => {
+            if xt.shape.rank() == 0 {
+                return Ok(tangent.clone());
+            }
+            if tt.elements.len() != xt.elements.len() {
+                return Err(AdError::EvalFailed(format!(
+                    "{} JVP tangent shape mismatch: primal has {} elements, tangent has {}",
+                    primitive.as_str(),
+                    xt.elements.len(),
+                    tt.elements.len()
+                )));
+            }
+            let source = cum_extreme_sources(primitive, xt, params)?;
+            let elements: Vec<Literal> = source.iter().map(|&s| tt.elements[s]).collect();
+            Ok(Value::Tensor(
+                TensorValue::new(tt.dtype, tt.shape.clone(), elements)
+                    .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+            ))
+        }
+        _ => Err(AdError::EvalFailed(format!(
+            "{} JVP primal/tangent structure mismatch",
+            primitive.as_str()
+        ))),
+    }
+}
+
 fn cumprod_jvp_value(
     primal: &Value,
     tangent: &Value,
@@ -7531,9 +7687,7 @@ fn jvp_rule(
         Primitive::Cumsum => ep_p(Primitive::Cumsum, &[tangents[0].clone()], params),
         Primitive::Cumprod => cumprod_jvp_value(&primals[0], &tangents[0], params),
         Primitive::Cummax | Primitive::Cummin => {
-            // JVP of cummax/cummin: complex (tangent follows argmax positions).
-            // Returns zeros for now.
-            Ok(zeros_like(&primals[0]))
+            cum_extreme_jvp_value(primitive, &primals[0], &tangents[0], params)
         }
         Primitive::Sort => ep_p(Primitive::Sort, &[tangents[0].clone()], params),
         Primitive::Argsort => Ok(zeros_like(&primals[0])),
@@ -12259,6 +12413,176 @@ mod tests {
         assert!((result[0] - 16.0).abs() < 1e-10, "got {}", result[0]);
         assert!((result[1] - 10.0).abs() < 1e-10, "got {}", result[1]);
         assert!((result[2] - 6.0).abs() < 1e-10, "got {}", result[2]);
+    }
+
+    // ── Cummax / Cummin gradient tests ────────────────────────────
+
+    fn f64_tensor(dims: Vec<u32>, vals: &[f64]) -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims },
+                vals.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn axis_params(axis: &str, reverse: bool) -> BTreeMap<String, String> {
+        let mut p = BTreeMap::new();
+        p.insert("axis".to_string(), axis.to_string());
+        if reverse {
+            p.insert("reverse".to_string(), "true".to_string());
+        }
+        p
+    }
+
+    /// Plain reference cummax/cummin over a 1-D slice (no ties in callers).
+    fn cum_extreme_ref(v: &[f64], is_max: bool) -> Vec<f64> {
+        let mut out = Vec::with_capacity(v.len());
+        let mut acc = if is_max {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        for &x in v {
+            acc = if is_max { acc.max(x) } else { acc.min(x) };
+            out.push(acc);
+        }
+        out
+    }
+
+    #[test]
+    fn cummax_vjp_routes_to_running_argmax() {
+        // x = [1, 3, 2, 4] -> cummax = [1, 3, 3, 4]
+        // running-max source per position: [0, 1, 1, 3]
+        // g = [1, 2, 3, 4] -> dx = [1, 2+3, 0, 4] = [1, 5, 0, 4]
+        let x = f64_tensor(vec![4], &[1.0, 3.0, 2.0, 4.0]);
+        let g = f64_tensor(vec![4], &[1.0, 2.0, 3.0, 4.0]);
+        let grads = vjp_single(Primitive::Cummax, &[x], &g, &axis_params("0", false)).unwrap();
+        assert_eq!(tensor_f64_values(&grads[0]), vec![1.0, 5.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn cummin_vjp_routes_to_running_argmin() {
+        // x = [4, 2, 3, 1] -> cummin = [4, 2, 2, 1]; source = [0, 1, 1, 3]
+        // g = [1, 2, 3, 4] -> dx = [1, 5, 0, 4]
+        let x = f64_tensor(vec![4], &[4.0, 2.0, 3.0, 1.0]);
+        let g = f64_tensor(vec![4], &[1.0, 2.0, 3.0, 4.0]);
+        let grads = vjp_single(Primitive::Cummin, &[x], &g, &axis_params("0", false)).unwrap();
+        assert_eq!(tensor_f64_values(&grads[0]), vec![1.0, 5.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn cummax_jvp_gathers_running_argmax() {
+        // x = [1, 3, 2, 4]; source = [0, 1, 1, 3]
+        // tangent = [10, 20, 30, 40] -> ty = [10, 20, 20, 40]
+        let x = f64_tensor(vec![4], &[1.0, 3.0, 2.0, 4.0]);
+        let dx = f64_tensor(vec![4], &[10.0, 20.0, 30.0, 40.0]);
+        let ty = jvp_rule(Primitive::Cummax, &[x], &[dx], &axis_params("0", false)).unwrap();
+        assert_eq!(tensor_f64_values(&ty), vec![10.0, 20.0, 20.0, 40.0]);
+    }
+
+    #[test]
+    fn cummax_vjp_honours_reverse() {
+        // reverse cummax of [1,3,2,4]: y_i = max(x_i..x_3) = [4,4,4,4]
+        // every position's running max source is index 3.
+        // g = [1, 2, 3, 4] -> dx = [0, 0, 0, 10]
+        let x = f64_tensor(vec![4], &[1.0, 3.0, 2.0, 4.0]);
+        let g = f64_tensor(vec![4], &[1.0, 2.0, 3.0, 4.0]);
+        let grads = vjp_single(Primitive::Cummax, &[x], &g, &axis_params("0", true)).unwrap();
+        assert_eq!(tensor_f64_values(&grads[0]), vec![0.0, 0.0, 0.0, 10.0]);
+    }
+
+    #[test]
+    fn cummax_vjp_2d_along_axis1() {
+        // 2x3, axis 1. Row0 = [1,3,2] -> source idx (flat) [0,1,1]
+        //                Row1 = [5,4,6] -> source idx (flat) [3,3,5]
+        // g = [[1,1,1],[1,1,1]] -> dx = [[1,2,0],[2,0,1]]
+        let x = f64_tensor(vec![2, 3], &[1.0, 3.0, 2.0, 5.0, 4.0, 6.0]);
+        let g = f64_tensor(vec![2, 3], &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+        let grads = vjp_single(Primitive::Cummax, &[x], &g, &axis_params("1", false)).unwrap();
+        assert_eq!(
+            tensor_f64_values(&grads[0]),
+            vec![1.0, 2.0, 0.0, 2.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn cummax_jvp_matches_finite_difference() {
+        // Gold-standard: directional derivative of the real cummax function via
+        // central differences must equal the analytic JVP on a tie-free input.
+        let xv = [0.5_f64, 1.2, 0.9, 2.1, 1.8, 0.3, 2.4];
+        let tv = [0.7_f64, -1.1, 0.4, 0.2, -0.6, 1.3, -0.9];
+        let eps = 1e-6;
+        let plus: Vec<f64> = xv.iter().zip(&tv).map(|(x, t)| x + eps * t).collect();
+        let minus: Vec<f64> = xv.iter().zip(&tv).map(|(x, t)| x - eps * t).collect();
+        let fd: Vec<f64> = cum_extreme_ref(&plus, true)
+            .iter()
+            .zip(cum_extreme_ref(&minus, true))
+            .map(|(p, m)| (p - m) / (2.0 * eps))
+            .collect();
+
+        let x = f64_tensor(vec![7], &xv);
+        let dx = f64_tensor(vec![7], &tv);
+        let ty = jvp_rule(Primitive::Cummax, &[x], &[dx], &axis_params("0", false)).unwrap();
+        let got = tensor_f64_values(&ty);
+        for (g, f) in got.iter().zip(&fd) {
+            assert!((g - f).abs() < 1e-4, "jvp {g} vs fd {f}");
+        }
+    }
+
+    #[test]
+    fn cummin_jvp_matches_finite_difference() {
+        let xv = [2.4_f64, 0.3, 1.8, 0.9, 2.1, 1.2, 0.5];
+        let tv = [0.7_f64, -1.1, 0.4, 0.2, -0.6, 1.3, -0.9];
+        let eps = 1e-6;
+        let plus: Vec<f64> = xv.iter().zip(&tv).map(|(x, t)| x + eps * t).collect();
+        let minus: Vec<f64> = xv.iter().zip(&tv).map(|(x, t)| x - eps * t).collect();
+        let fd: Vec<f64> = cum_extreme_ref(&plus, false)
+            .iter()
+            .zip(cum_extreme_ref(&minus, false))
+            .map(|(p, m)| (p - m) / (2.0 * eps))
+            .collect();
+
+        let x = f64_tensor(vec![7], &xv);
+        let dx = f64_tensor(vec![7], &tv);
+        let ty = jvp_rule(Primitive::Cummin, &[x], &[dx], &axis_params("0", false)).unwrap();
+        let got = tensor_f64_values(&ty);
+        for (g, f) in got.iter().zip(&fd) {
+            assert!((g - f).abs() < 1e-4, "jvp {g} vs fd {f}");
+        }
+    }
+
+    #[test]
+    fn cummax_vjp_is_transpose_of_jvp() {
+        // Adjoint identity: <J u, v> == <u, Jt v> for the linear JVP J and its
+        // transpose (the VJP Jt). Holds for any u, v on a fixed tie-free x.
+        let xv = [0.5_f64, 1.2, 0.9, 2.1, 1.8, 0.3, 2.4];
+        let u = [0.7_f64, -1.1, 0.4, 0.2, -0.6, 1.3, -0.9];
+        let v = [1.5_f64, 0.2, -0.8, 2.0, -1.3, 0.6, 0.1];
+        let params = axis_params("0", false);
+
+        let ju = jvp_rule(
+            Primitive::Cummax,
+            &[f64_tensor(vec![7], &xv)],
+            &[f64_tensor(vec![7], &u)],
+            &params,
+        )
+        .unwrap();
+        let jtv = vjp_single(
+            Primitive::Cummax,
+            &[f64_tensor(vec![7], &xv)],
+            &f64_tensor(vec![7], &v),
+            &params,
+        )
+        .unwrap();
+
+        let ju = tensor_f64_values(&ju);
+        let jtv = tensor_f64_values(&jtv[0]);
+        let lhs: f64 = ju.iter().zip(&v).map(|(a, b)| a * b).sum();
+        let rhs: f64 = u.iter().zip(&jtv).map(|(a, b)| a * b).sum();
+        assert!((lhs - rhs).abs() < 1e-9, "adjoint mismatch: {lhs} vs {rhs}");
     }
 
     // ── Sort VJP tests ────────────────────────────────────────────
