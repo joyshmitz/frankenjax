@@ -389,9 +389,19 @@ fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
 }
 
 #[test]
-#[ignore = "PARITY GAP: Argsort not supported for complex - no natural ordering"]
-fn oracle_argsort_complex64_not_supported() {
-    let input = make_complex64_tensor(&[3], vec![(3.0, 0.0), (1.0, 0.0), (2.0, 0.0)]);
-    let _result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false))
+fn oracle_argsort_complex64_lexicographic() {
+    // Complex argsort orders lexicographically by (real, imag), matching JAX/NumPy:
+    //   np.argsort([3+1j, 1+2j, 1+1j, 2+0j]) == [2, 1, 3, 0]
+    let input = make_complex64_tensor(&[4], vec![(3.0, 1.0), (1.0, 2.0), (1.0, 1.0), (2.0, 0.0)]);
+    let result = eval_primitive(Primitive::Argsort, &[input], &argsort_params(-1, false))
         .expect("argsort should work on complex64");
+    let Value::Tensor(t) = result else {
+        panic!("expected tensor output");
+    };
+    let got: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+    assert_eq!(
+        got,
+        vec![2, 1, 3, 0],
+        "complex64 argsort must order lexicographically by (real, imag)"
+    );
 }

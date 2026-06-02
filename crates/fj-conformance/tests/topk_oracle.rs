@@ -347,9 +347,25 @@ fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
 }
 
 #[test]
-#[ignore = "PARITY GAP: TopK not supported for complex - no natural ordering"]
-fn oracle_topk_complex64_not_supported() {
+fn oracle_topk_complex64_lexicographic() {
+    // top_k orders complex lexicographically by (real, imag), descending, like
+    // JAX/NumPy. For [1+0j, 4+0j, 2+0j, 3+0j] the top-2 are 4+0j (idx 1) and
+    // 3+0j (idx 3).
     let input = make_complex64_tensor(&[4], vec![(1.0, 0.0), (4.0, 0.0), (2.0, 0.0), (3.0, 0.0)]);
-    let _result = eval_primitive(Primitive::TopK, &[input], &topk_params(2))
+    let result = eval_primitive_multi(Primitive::TopK, &[input], &topk_params(2))
         .expect("topk should work on complex64");
+    let Value::Tensor(values) = &result[0] else {
+        panic!("expected tensor values");
+    };
+    let got_vals: Vec<(f32, f32)> = values
+        .elements
+        .iter()
+        .map(|l| l.as_complex64().unwrap())
+        .collect();
+    assert_eq!(got_vals, vec![(4.0, 0.0), (3.0, 0.0)]);
+    let Value::Tensor(indices) = &result[1] else {
+        panic!("expected tensor indices");
+    };
+    let got_idx: Vec<i64> = indices.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+    assert_eq!(got_idx, vec![1, 3]);
 }

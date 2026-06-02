@@ -472,9 +472,21 @@ fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
 }
 
 #[test]
-#[ignore = "PARITY GAP: Sort not supported for complex - no natural ordering"]
-fn oracle_sort_complex64_not_supported() {
-    let input = make_complex64_tensor(&[3], vec![(3.0, 0.0), (1.0, 0.0), (2.0, 0.0)]);
-    let _result = eval_primitive(Primitive::Sort, &[input], &no_params())
+fn oracle_sort_complex64_lexicographic() {
+    // JAX lax.sort sorts complex lexicographically by (real, imag) — its
+    // comparator (`_operands_to_keys`) splits complex into [real, imag] float
+    // keys. NumPy agrees:
+    //   np.sort([3+1j, 1+2j, 1+1j, 2+0j]) == [1+1j, 1+2j, 2+0j, 3+1j]
+    let input = make_complex64_tensor(&[4], vec![(3.0, 1.0), (1.0, 2.0), (1.0, 1.0), (2.0, 0.0)]);
+    let result = eval_primitive(Primitive::Sort, &[input], &no_params())
         .expect("sort should work on complex64");
+    let Value::Tensor(t) = result else {
+        panic!("expected tensor output");
+    };
+    let got: Vec<(f32, f32)> = t.elements.iter().map(|l| l.as_complex64().unwrap()).collect();
+    assert_eq!(
+        got,
+        vec![(1.0, 1.0), (1.0, 2.0), (2.0, 0.0), (3.0, 1.0)],
+        "complex64 sort must order lexicographically by (real, imag)"
+    );
 }

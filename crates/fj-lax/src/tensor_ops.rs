@@ -3524,6 +3524,11 @@ enum SortKey {
     Signed(i64),
     Unsigned(u64),
     Float(f64),
+    /// Complex values order lexicographically by (real, imaginary), matching
+    /// JAX's `lax.sort` comparator (`_operands_to_keys` splits complex into
+    /// [real, imag] float keys) and NumPy's complex sort. Both components are
+    /// widened to f64 so Complex64 and Complex128 share one comparison path.
+    Complex(f64, f64),
 }
 
 fn sort_key(literal: Literal) -> Result<SortKey, String> {
@@ -3538,9 +3543,13 @@ fn sort_key(literal: Literal) -> Result<SortKey, String> {
                 .map(SortKey::Float)
                 .ok_or_else(|| format!("sort requires orderable numeric literals, got {literal:?}"))
         }
-        Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => Err(format!(
-            "sort does not support complex literals: {literal:?}"
+        Literal::Complex64Bits(re, im) => Ok(SortKey::Complex(
+            f64::from(f32::from_bits(re)),
+            f64::from(f32::from_bits(im)),
         )),
+        Literal::Complex128Bits(re, im) => {
+            Ok(SortKey::Complex(f64::from_bits(re), f64::from_bits(im)))
+        }
     }
 }
 
@@ -3550,6 +3559,9 @@ fn compare_sort_keys(lhs: SortKey, rhs: SortKey) -> Ordering {
         (SortKey::Signed(lhs), SortKey::Signed(rhs)) => lhs.cmp(&rhs),
         (SortKey::Unsigned(lhs), SortKey::Unsigned(rhs)) => lhs.cmp(&rhs),
         (SortKey::Float(lhs), SortKey::Float(rhs)) => lhs.total_cmp(&rhs),
+        (SortKey::Complex(lhs_re, lhs_im), SortKey::Complex(rhs_re, rhs_im)) => lhs_re
+            .total_cmp(&rhs_re)
+            .then_with(|| lhs_im.total_cmp(&rhs_im)),
         (lhs, rhs) => sort_key_rank(lhs).cmp(&sort_key_rank(rhs)),
     }
 }
@@ -3560,6 +3572,7 @@ fn sort_key_rank(key: SortKey) -> u8 {
         SortKey::Signed(_) => 1,
         SortKey::Unsigned(_) => 2,
         SortKey::Float(_) => 3,
+        SortKey::Complex(..) => 4,
     }
 }
 
