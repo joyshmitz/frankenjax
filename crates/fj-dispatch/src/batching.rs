@@ -501,6 +501,10 @@ fn apply_batch_rule_multi(
         Primitive::Qr => batch_qr_multi(inputs, params),
         Primitive::Eigh => batch_eigh_multi(inputs, params),
         Primitive::Svd => batch_svd_multi(inputs, params),
+        // LU is multi-output (packed LU, pivots, permutation) and has no
+        // stacked fast path; the generic per-slice batcher runs lu() on each
+        // batch element and stacks every output, matching JAX's batched LU.
+        Primitive::Lu => batch_passthrough_leading_multi(primitive, inputs, params),
         _ => apply_batch_rule(primitive, inputs, params).map(|result| vec![result]),
     }
 }
@@ -1647,15 +1651,18 @@ fn batch_scatter_unbatched_operand_direct(
     {
         return Ok(None);
     }
+    let rank1_shape = ScatterRank1BatchShape {
+        batch_size,
+        batch_size_u32,
+        operand_axis0,
+        operand_axis0_dim,
+    };
     if let Some(result) = batch_scatter_unbatched_operand_rank1_overwrite(
         operand_tensor,
         indices_tensor,
         updates_tensor,
         params,
-        batch_size,
-        batch_size_u32,
-        operand_axis0,
-        operand_axis0_dim,
+        rank1_shape,
     )? {
         return Ok(Some(result));
     }
@@ -1735,15 +1742,20 @@ fn batch_scatter_unbatched_operand_direct(
     Ok(Some(BatchTracer::batched(Value::Tensor(output), 0)))
 }
 
+#[derive(Clone, Copy)]
+struct ScatterRank1BatchShape {
+    batch_size: usize,
+    batch_size_u32: u32,
+    operand_axis0: usize,
+    operand_axis0_dim: u32,
+}
+
 fn batch_scatter_unbatched_operand_rank1_overwrite(
     operand_tensor: &TensorValue,
     indices_tensor: &TensorValue,
     updates_tensor: &TensorValue,
     params: &BTreeMap<String, String>,
-    batch_size: usize,
-    batch_size_u32: u32,
-    operand_axis0: usize,
-    operand_axis0_dim: u32,
+    shape: ScatterRank1BatchShape,
 ) -> Result<Option<BatchTracer>, BatchError> {
     if operand_tensor.rank() != 1 {
         return Ok(None);
@@ -1759,22 +1771,24 @@ fn batch_scatter_unbatched_operand_rank1_overwrite(
     {
         return Ok(None);
     }
-    let Some(indices_per_batch) = indices_tensor.elements.len().checked_div(batch_size) else {
+    let Some(indices_per_batch) = indices_tensor.elements.len().checked_div(shape.batch_size)
+    else {
         return Ok(None);
     };
     if indices_per_batch
-        .checked_mul(batch_size)
+        .checked_mul(shape.batch_size)
         .is_none_or(|len| len != indices_tensor.elements.len())
         || updates_tensor.elements.len() != indices_tensor.elements.len()
     {
         return Ok(None);
     }
 
-    let output_len = batch_size
-        .checked_mul(operand_axis0)
+    let output_len = shape
+        .batch_size
+        .checked_mul(shape.operand_axis0)
         .ok_or_else(|| BatchError::TensorError("scatter output size overflowed".to_owned()))?;
     let mut output_elements = Vec::with_capacity(output_len);
-    for _ in 0..batch_size {
+    for _ in 0..shape.batch_size {
         output_elements.extend_from_slice(&operand_tensor.elements);
     }
 
@@ -1782,11 +1796,11 @@ fn batch_scatter_unbatched_operand_rank1_overwrite(
         let Some(raw_index) = scatter_index_literal_to_usize(literal)? else {
             return Ok(None);
         };
-        if raw_index >= operand_axis0 {
+        if raw_index >= shape.operand_axis0 {
             return Ok(None);
         }
         let batch_idx = flat_pos / indices_per_batch;
-        let batch_offset = batch_idx.checked_mul(operand_axis0).ok_or_else(|| {
+        let batch_offset = batch_idx.checked_mul(shape.operand_axis0).ok_or_else(|| {
             BatchError::TensorError("scatter output offset overflowed".to_owned())
         })?;
         let output_index = batch_offset
@@ -1803,7 +1817,7 @@ fn batch_scatter_unbatched_operand_rank1_overwrite(
     let output = TensorValue::new(
         operand_tensor.dtype,
         Shape {
-            dims: vec![batch_size_u32, operand_axis0_dim],
+            dims: vec![shape.batch_size_u32, shape.operand_axis0_dim],
         },
         output_elements,
     )
@@ -6349,6 +6363,83 @@ mod tests {
         assert!(err.to_string().contains("expected rank-2 tensor"));
     }
 
+    /// Verify a multi-output vmap result against the per-slice oracle: each
+    /// output stacked over `matrices` must equal running the primitive on each
+    /// matrix and stacking. Generic over output arity.
+    fn assert_multi_matches_slice_oracle(
+        primitive: Primitive,
+        outputs: &[BatchTracer],
+        matrices: &[Value],
+        params: &BTreeMap<String, String>,
+    ) {
+        let arity = eval_primitive_multi(primitive, std::slice::from_ref(&matrices[0]), params)
+            .unwrap()
+            .len();
+        assert_eq!(outputs.len(), arity);
+        for out in outputs {
+            assert_eq!(out.batch_dim, Some(0));
+        }
+        let mut expected: Vec<Vec<Value>> = (0..arity).map(|_| Vec::new()).collect();
+        for matrix in matrices {
+            let slice =
+                eval_primitive_multi(primitive, std::slice::from_ref(matrix), params).unwrap();
+            for (bucket, value) in expected.iter_mut().zip(slice) {
+                bucket.push(value);
+            }
+        }
+        for (actual, slices) in outputs.iter().zip(expected) {
+            let stacked = Value::Tensor(TensorValue::stack_axis0(&slices).unwrap());
+            assert_eq!(
+                actual.value.as_tensor().unwrap().shape.dims,
+                stacked.as_tensor().unwrap().shape.dims
+            );
+            assert_f64_close(&extract_f64_vec(&actual.value), &extract_f64_vec(&stacked));
+        }
+    }
+
+    #[test]
+    fn test_batch_trace_lu_multi_leading_batch_dim() {
+        // vmap over lu() must batch all three outputs (packed LU, pivots,
+        // permutation), matching the per-slice oracle.
+        let m0 = make_f64_matrix(3, 3, &[4.0, 1.0, 2.0, 1.0, 5.0, 1.0, 2.0, 1.0, 6.0]);
+        let m1 = make_f64_matrix(3, 3, &[2.0, 1.0, 1.0, 4.0, 3.0, 3.0, 8.0, 7.0, 9.0]);
+        let input = BatchTracer::batched(
+            make_f64_tensor(
+                &[2, 3, 3],
+                &[
+                    4.0, 1.0, 2.0, 1.0, 5.0, 1.0, 2.0, 1.0, 6.0, // element 0
+                    2.0, 1.0, 1.0, 4.0, 3.0, 3.0, 8.0, 7.0, 9.0, // element 1
+                ],
+            ),
+            0,
+        );
+        let outputs = apply_batch_rule_multi(Primitive::Lu, &[input], &BTreeMap::new()).unwrap();
+        assert_multi_matches_slice_oracle(Primitive::Lu, &outputs, &[m0, m1], &BTreeMap::new());
+        assert_eq!(
+            outputs[0].value.as_tensor().unwrap().shape.dims,
+            vec![2, 3, 3]
+        );
+    }
+
+    #[test]
+    fn test_batch_trace_lu_multi_nonleading_batch_dim() {
+        // Batch dim at axis 1 — exercises move_batch_dim_to_front.
+        let m0 = make_f64_matrix(2, 2, &[4.0, 1.0, 1.0, 3.0]);
+        let m1 = make_f64_matrix(2, 2, &[2.0, 5.0, 6.0, 1.0]);
+        let input = BatchTracer::batched(
+            make_f64_tensor(
+                &[2, 2, 2],
+                &[
+                    4.0, 1.0, 2.0, 5.0, // row 0, both lanes
+                    1.0, 3.0, 6.0, 1.0, // row 1, both lanes
+                ],
+            ),
+            1,
+        );
+        let outputs = apply_batch_rule_multi(Primitive::Lu, &[input], &BTreeMap::new()).unwrap();
+        assert_multi_matches_slice_oracle(Primitive::Lu, &outputs, &[m0, m1], &BTreeMap::new());
+    }
+
     fn assert_eigh_matches_slice_oracle(outputs: &[BatchTracer], matrices: &[Value]) {
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[0].batch_dim, Some(0));
@@ -8014,7 +8105,10 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_trace_split_unequal_returns_first_section_per_batch() {
+    fn test_batch_trace_split_unequal_fails_closed_per_batch() {
+        // Uneven split is rejected at the primitive level (fj-lax fails closed
+        // rather than silently returning only the first section), so the
+        // batched per-slice eval must surface that error rather than truncate.
         let input = BatchTracer::batched(
             make_f64_matrix(2, 5, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
             0,
@@ -8024,11 +8118,12 @@ mod tests {
             ("sizes".to_owned(), "2, 3".to_owned()),
         ]);
 
-        let result = apply_batch_rule(Primitive::Split, &[input], &params).unwrap();
-        assert_eq!(result.batch_dim, Some(0));
-        let tensor = result.value.as_tensor().unwrap();
-        assert_eq!(tensor.shape.dims, vec![2, 2]);
-        assert_eq!(extract_f64_vec(&result.value), vec![1.0, 2.0, 6.0, 7.0]);
+        let err = apply_batch_rule(Primitive::Split, &[input], &params)
+            .expect_err("uneven split under vmap must fail closed, not truncate");
+        assert!(
+            err.to_string().contains("uneven split"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
