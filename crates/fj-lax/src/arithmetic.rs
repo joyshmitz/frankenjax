@@ -4644,8 +4644,9 @@ mod tests {
         let b = v_f64(&[2.0, 3.0, -4.0]);
         let result =
             eval_binary_elementwise(Primitive::Mul, &[a, b], |a, b| a * b, |a, b| a * b).unwrap();
+        assert!(matches!(&result, Value::Tensor(_)));
         let Value::Tensor(tensor) = result else {
-            panic!("expected tensor result");
+            return;
         };
         assert_eq!(tensor.dtype, DType::F64);
         assert_eq!(tensor.shape.dims, vec![3]);
