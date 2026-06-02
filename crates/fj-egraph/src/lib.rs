@@ -4,6 +4,7 @@ use egg::{CostFunction, Id, Language, RecExpr, Runner, define_language, rewrite}
 use fj_core::{Atom, Equation, Jaxpr, Literal, Primitive, VarId};
 use smallvec::smallvec;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 define_language! {
     pub enum FjLang {
@@ -372,6 +373,25 @@ pub fn algebraic_rules_with_config(config: &OptimizationConfig) -> Vec<egg::Rewr
         rules.extend(numerically_unsafe_rules());
     }
     rules
+}
+
+fn cached_algebraic_rules_with_config(
+    config: &OptimizationConfig,
+) -> &'static [egg::Rewrite<FjLang, ()>] {
+    static SAFE_RULES: OnceLock<Vec<egg::Rewrite<FjLang, ()>>> = OnceLock::new();
+    static AGGRESSIVE_RULES: OnceLock<Vec<egg::Rewrite<FjLang, ()>>> = OnceLock::new();
+
+    if config.numerical_safety_mode {
+        SAFE_RULES.get_or_init(safe_algebraic_rules).as_slice()
+    } else {
+        AGGRESSIVE_RULES
+            .get_or_init(|| {
+                let mut rules = safe_algebraic_rules();
+                rules.extend(numerically_unsafe_rules());
+                rules
+            })
+            .as_slice()
+    }
 }
 
 /// Rules that are always safe regardless of input domain.
@@ -2740,7 +2760,7 @@ fn optimize_supported_segment(
     if let Some(root) = rec_id_to_egraph_id.last().copied() {
         runner.roots.push(root);
     }
-    let runner = runner.run(&algebraic_rules_with_config(config));
+    let runner = runner.run(cached_algebraic_rules_with_config(config));
     let extractor = egg::Extractor::new(&runner.egraph, OpCount);
 
     let mut merged_equations = Vec::new();
