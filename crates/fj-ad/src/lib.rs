@@ -810,7 +810,12 @@ fn zero_pad_last_axis_complex(tensor: &TensorValue, target_len: usize) -> Result
         .checked_mul(target_len)
         .ok_or_else(|| AdError::EvalFailed(format!("{context}: element count overflow")))?;
     let mut elements = Vec::with_capacity(target_elements);
-    let zero = Literal::from_complex128(0.0, 0.0);
+    // Pad with a zero literal matching the tensor's own dtype. A hard-coded
+    // Complex128 zero would mismatch a Complex64 tensor (e.g. the RFFT VJP of
+    // an F32 input), producing a tensor whose declared dtype disagrees with
+    // its literals — TensorValue::new only checks element count, so the
+    // downstream IFFT would then read inconsistent data.
+    let zero = zero_literal_for_dtype(tensor.dtype);
     for batch in 0..batch_size {
         let start = batch * cur_len;
         elements.extend_from_slice(&tensor.elements[start..start + cur_len]);
@@ -15474,6 +15479,41 @@ mod tests {
             "unexpected error: {err}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn zero_pad_last_axis_complex_preserves_complex64_dtype() {
+        // Padding a Complex64 tensor must use a Complex64 zero, not a
+        // hard-coded Complex128 zero — otherwise the result's declared dtype
+        // (Complex64) disagrees with its literals and the downstream IFFT in
+        // the RFFT VJP reads inconsistent data.
+        let tensor = TensorValue::new(
+            DType::Complex64,
+            Shape { dims: vec![2] },
+            vec![
+                Literal::from_complex64(1.0, -1.0),
+                Literal::from_complex64(2.0, 3.0),
+            ],
+        )
+        .unwrap();
+
+        let out = zero_pad_last_axis_complex(&tensor, 4).expect("pad");
+        match out {
+            Value::Tensor(t) => {
+                assert_eq!(t.dtype, DType::Complex64);
+                assert_eq!(t.shape.dims, vec![4]);
+                t.validate_dtype_consistency()
+                    .expect("padded tensor must be dtype-consistent");
+                // Original values kept, tail zero-padded with Complex64 zeros.
+                assert!(matches!(
+                    t.elements[2],
+                    Literal::Complex64Bits(re, im)
+                        if f32::from_bits(re) == 0.0 && f32::from_bits(im) == 0.0
+                ));
+                assert!(matches!(t.elements[3], Literal::Complex64Bits(..)));
+            }
+            other => panic!("expected tensor, got {other:?}"),
+        }
     }
 
     #[test]
