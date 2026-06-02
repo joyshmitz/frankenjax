@@ -1,0 +1,136 @@
+{
+  "bead": "frankenjax-gagr",
+  "labels": ["perf", "fj-interpreters", "optimization"],
+  "pass": 11,
+  "date": "2026-06-02",
+  "skill_loop": {
+    "profiling": "profiling-software-performance",
+    "optimization": "extreme-software-optimization",
+    "repeat_policy": "serial pass, one lever per commit"
+  },
+  "crate": "fj-interpreters",
+  "target": {
+    "subsystem": "partial evaluation dead-code elimination",
+    "function": "dce_jaxpr",
+    "benchmark": "dce/all_used/1000eq",
+    "scenario": "1000-equation linear Add chain with final output marked used"
+  },
+  "baseline_fingerprint": {
+    "git_sha_before": "6802063f",
+    "runner": "rch",
+    "crate_scoped": true,
+    "cargo_target_dir": "/data/tmp/frankenjax-fj-interpreters-profile",
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-profile rch exec -- cargo bench -p fj-interpreters --bench pe_baseline -- --sample-size 10 --measurement-time 1 --warm-up-time 1",
+    "worker": "vmi1227854",
+    "criterion_profile": "bench",
+    "sample_size": 10,
+    "measurement_time_seconds": 1,
+    "warm_up_time_seconds": 1
+  },
+  "profile_hotspots": [
+    {
+      "rank": 1,
+      "benchmark": "dce/all_used/1000eq",
+      "mean_us": 59.355,
+      "confidence_interval_us": [56.490, 61.834],
+      "category": "CPU/allocation",
+      "evidence": "Criterion rch baseline ranked dce/all_used/1000eq as the slowest fj-interpreters pe_baseline case"
+    },
+    {
+      "rank": 2,
+      "benchmark": "partial_eval/all_known/1000eq",
+      "mean_us": 49.548,
+      "confidence_interval_us": [48.229, 51.724],
+      "category": "CPU/allocation",
+      "evidence": "Criterion rch baseline"
+    },
+    {
+      "rank": 3,
+      "benchmark": "eval/scan_sub_jaxpr_add_emit_128",
+      "mean_us": 46.542,
+      "confidence_interval_us": [42.055, 55.792],
+      "category": "CPU",
+      "evidence": "Criterion rch baseline"
+    }
+  ],
+  "opportunity_matrix": {
+    "lever": "Remove the keep_eqn Vec<bool> allocation and second pass in dce_jaxpr by collecting retained equations during the reverse dependency walk.",
+    "impact": 3,
+    "confidence": 4,
+    "effort": 1,
+    "score": 12.0,
+    "threshold": 2.0
+  },
+  "change": {
+    "single_lever": true,
+    "files_changed": ["crates/fj-interpreters/src/partial_eval.rs"],
+    "summary": "retained_eqns is populated while walking equations in reverse, then reversed once to restore original equation order"
+  },
+  "benchmark_delta": {
+    "baseline": {
+      "worker": "vmi1227854",
+      "mean_us": 59.355,
+      "confidence_interval_us": [56.490, 61.834]
+    },
+    "after": {
+      "worker": "vmi1293453",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-profile rch exec -- cargo bench -p fj-interpreters --bench pe_baseline -- dce/all_used/1000eq --sample-size 10 --measurement-time 1 --warm-up-time 1",
+      "mean_us": 54.805,
+      "confidence_interval_us": [52.867, 56.475]
+    },
+    "delta_us": -4.550,
+    "delta_percent": -7.67,
+    "speedup": 1.083,
+    "note": "Workers differ, so confidence is bounded; the measured win is aligned with the removed allocation/filter pass."
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "yes - equations are inspected in the same reverse dependency order, retained equations are cloned once, and retained_eqns.reverse() restores the original forward order",
+    "tie_breaking_unchanged": "yes - no tie-breaking data structure or comparator changed",
+    "floating_point": "N/A - DCE graph pruning does not evaluate floating-point operations",
+    "rng": "N/A - no RNG paths are touched",
+    "unsafe_code": "unchanged - no unsafe code added",
+    "golden_output_sha256": "7c529440da70e1d16f77deb2e7fecd230609915ec042a02c9578f982822ae88d",
+    "semantic_digest": "3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8"
+  },
+  "validation": [
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-interpreters/src/partial_eval.rs",
+      "runner": "local formatter",
+      "result": "pass"
+    },
+    {
+      "command": "git diff --check -- crates/fj-interpreters/src/partial_eval.rs",
+      "runner": "local git",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-interpreters/src/partial_eval.rs",
+      "runner": "local ubs",
+      "result": "nonzero due existing fj-interpreters monolith inventory; no unsafe blocks or formatting issues; reported pre-existing unwrap/expect/assert/index findings and an Instant::now false-positive"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-profile rch exec -- cargo test -p fj-interpreters test_dce_all_used_large_chain_golden_hash -- --nocapture",
+      "runner": "rch vmi1227854",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-profile rch exec -- cargo check -p fj-interpreters --all-targets",
+      "runner": "rch vmi1156319",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-profile rch exec -- cargo test -p fj-interpreters --all-targets",
+      "runner": "rch vmi1227854",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-profile rch exec -- cargo clippy -p fj-interpreters --all-targets -- -D warnings",
+      "runner": "rch vmi1149989",
+      "result": "pass"
+    }
+  ],
+  "decision": {
+    "keep_change": true,
+    "reason": "Profile-backed top benchmark improved by 7.67 percent with unchanged DCE output digest and focused crate-scoped validation."
+  }
+}

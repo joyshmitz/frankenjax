@@ -436,26 +436,19 @@ pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
     }
 
     // Walk equations in reverse, marking inputs of needed equations.
-    let mut keep_eqn = vec![false; jaxpr.equations.len()];
-    for (i, eqn) in jaxpr.equations.iter().enumerate().rev() {
+    let mut retained_eqns = Vec::with_capacity(jaxpr.equations.len());
+    for eqn in jaxpr.equations.iter().rev() {
         let outputs_needed = eqn.outputs.iter().any(|v| needed[v.0 as usize]);
         if outputs_needed {
-            keep_eqn[i] = true;
             for atom in &eqn.inputs {
                 if let Atom::Var(v) = atom {
                     needed[v.0 as usize] = true;
                 }
             }
+            retained_eqns.push(eqn.clone());
         }
     }
-
-    let retained_eqns: Vec<Equation> = jaxpr
-        .equations
-        .iter()
-        .zip(keep_eqn.iter())
-        .filter(|(_, keep)| **keep)
-        .map(|(eqn, _)| eqn.clone())
-        .collect();
+    retained_eqns.reverse();
 
     let used_inputs: Vec<bool> = jaxpr.invars.iter().map(|v| needed[v.0 as usize]).collect();
 
@@ -1067,6 +1060,28 @@ mod tests {
                     sub_jaxprs: vec![],
                 },
             ],
+        )
+    }
+
+    fn make_linear_add_chain_jaxpr(n: usize) -> Jaxpr {
+        let mut equations = Vec::with_capacity(n);
+        for i in 0..n {
+            let input_var = VarId((i + 1) as u32);
+            let output_var = VarId((i + 2) as u32);
+            equations.push(Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(input_var), Atom::Lit(Literal::I64(1))],
+                outputs: smallvec![output_var],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            });
+        }
+        Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId((n + 1) as u32)],
+            equations,
         )
     }
 
@@ -2100,6 +2115,28 @@ mod tests {
                 assert_eq!(used_inputs, vec![true, true]);
                 Ok(vec![])
             },
+        );
+    }
+
+    #[test]
+    fn test_dce_all_used_large_chain_golden_hash() {
+        let jaxpr = make_linear_add_chain_jaxpr(1000);
+        let (pruned, used_inputs) = dce_jaxpr(&jaxpr, &[true]);
+
+        assert_eq!(pruned.invars, jaxpr.invars);
+        assert_eq!(pruned.outvars, jaxpr.outvars);
+        assert_eq!(pruned.equations.len(), 1000);
+        assert_eq!(used_inputs, vec![true]);
+        for (idx, eqn) in pruned.equations.iter().enumerate() {
+            assert_eq!(eqn.primitive, Primitive::Add);
+            assert_eq!(eqn.outputs.as_slice(), &[VarId((idx + 2) as u32)]);
+        }
+
+        let digest =
+            fj_test_utils::fixture_id_from_json(&(pruned, used_inputs)).expect("DCE digest");
+        assert_eq!(
+            digest,
+            "3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8"
         );
     }
 
