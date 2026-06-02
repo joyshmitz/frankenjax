@@ -2522,9 +2522,7 @@ fn round_literal(
     match (dtype, literal) {
         (DType::I32 | DType::I64 | DType::U32 | DType::U64, _) => {
             if decimals < 0 {
-                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                    "integer round with decimals < 0 is unsupported by JAX parity scope",
-                ));
+                return round_integer_literal(literal, dtype, decimals);
             }
             Ok(literal)
         }
@@ -2587,6 +2585,130 @@ fn round_f64(value: f64, decimals: i32) -> f64 {
             (value * factor).round_ties_even() / factor
         }
     }
+}
+
+fn round_integer_literal(literal: Literal, dtype: DType, decimals: i32) -> PyResult<Literal> {
+    match (dtype, literal) {
+        (DType::I32, Literal::I64(value)) => {
+            round_signed_integer(value, decimals).and_then(|rounded| {
+                i32::try_from(rounded)
+                    .map(|_| Literal::I64(rounded))
+                    .map_err(|_| {
+                        PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                            "rounded value does not fit int32",
+                        )
+                    })
+            })
+        }
+        (DType::I64, Literal::I64(value)) => {
+            round_signed_integer(value, decimals).map(Literal::I64)
+        }
+        (DType::U32, Literal::U32(value)) => round_unsigned_integer(u64::from(value), decimals)
+            .and_then(|rounded| {
+                u32::try_from(rounded).map(Literal::U32).map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                        "rounded value does not fit uint32",
+                    )
+                })
+            }),
+        (DType::U64, Literal::U64(value)) => {
+            round_unsigned_integer(value, decimals).map(Literal::U64)
+        }
+        _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "round literal dtype mismatch",
+        )),
+    }
+}
+
+fn round_signed_integer(value: i64, decimals: i32) -> PyResult<i64> {
+    let Some(factor) = negative_decimal_factor(decimals)? else {
+        return Ok(0);
+    };
+    let magnitude = if value < 0 {
+        u128::try_from(-i128::from(value)).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "integer magnitude does not fit round accumulator",
+            )
+        })?
+    } else {
+        u128::try_from(value).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "integer magnitude does not fit round accumulator",
+            )
+        })?
+    };
+    let rounded = round_unsigned_magnitude(magnitude, factor)?;
+    if value < 0 {
+        let min_magnitude = u128::try_from(i64::MAX).expect("i64::MAX fits in u128") + 1;
+        if rounded == min_magnitude {
+            Ok(i64::MIN)
+        } else if rounded < min_magnitude {
+            let rounded = i64::try_from(rounded).map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                    "rounded value does not fit int64",
+                )
+            })?;
+            Ok(-rounded)
+        } else {
+            Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "rounded value does not fit int64",
+            ))
+        }
+    } else {
+        i64::try_from(rounded).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("rounded value does not fit int64")
+        })
+    }
+}
+
+fn round_unsigned_integer(value: u64, decimals: i32) -> PyResult<u64> {
+    let Some(factor) = negative_decimal_factor(decimals)? else {
+        return Ok(0);
+    };
+    let rounded = round_unsigned_magnitude(u128::from(value), factor)?;
+    u64::try_from(rounded).map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyOverflowError, _>("rounded value does not fit uint64")
+    })
+}
+
+fn negative_decimal_factor(decimals: i32) -> PyResult<Option<u128>> {
+    debug_assert!(decimals < 0);
+    let places = u32::try_from(decimals.checked_neg().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyOverflowError, _>("round decimal scale overflowed")
+    })?)
+    .map_err(|_| {
+        PyErr::new::<pyo3::exceptions::PyOverflowError, _>("round decimal scale overflowed")
+    })?;
+    if places > 20 {
+        return Ok(None);
+    }
+    let mut factor = 1_u128;
+    for _ in 0..places {
+        let Some(next) = factor.checked_mul(10) else {
+            return Ok(None);
+        };
+        factor = next;
+    }
+    Ok(Some(factor))
+}
+
+fn round_unsigned_magnitude(magnitude: u128, factor: u128) -> PyResult<u128> {
+    let quotient = magnitude / factor;
+    let remainder = magnitude % factor;
+    let twice_remainder = remainder.checked_mul(2).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyOverflowError, _>("round remainder overflowed")
+    })?;
+    let round_up = twice_remainder > factor || (twice_remainder == factor && quotient % 2 == 1);
+    let rounded_quotient = if round_up {
+        quotient.checked_add(1).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("round quotient overflowed")
+        })?
+    } else {
+        quotient
+    };
+    rounded_quotient.checked_mul(factor).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyOverflowError, _>("rounded value overflows")
+    })
 }
 
 fn rounded_literal_to_i64(literal: Literal) -> PyResult<Literal> {
@@ -4067,7 +4189,39 @@ mod tests {
         assert_eq!(i.conj().unwrap().as_i64().unwrap(), 123);
         assert_eq!(i.conjugate().unwrap().as_i64().unwrap(), 123);
         assert_eq!(i.round(0, None).unwrap().as_i64().unwrap(), 123);
-        assert!(i.round(-1, None).is_err());
+        assert_eq!(i.round(-1, None).unwrap().as_i64().unwrap(), 120);
+        assert_eq!(
+            PyValue::scalar_i64(15)
+                .round(-1, None)
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            20
+        );
+        assert_eq!(
+            PyValue::scalar_i64(25)
+                .round(-1, None)
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            20
+        );
+        assert_eq!(
+            PyValue::scalar_i64(-15)
+                .round(-1, None)
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            -20
+        );
+        assert_eq!(
+            PyValue::scalar_i64(-25)
+                .round(-1, None)
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            -20
+        );
         assert!(!PyValue::scalar_i64(0).__bool__().unwrap());
         let complex = PyValue::from_value(Value::scalar_complex128(3.0, -2.0));
         assert!((complex.real_part().unwrap().as_f64().unwrap() - 3.0).abs() < 1e-12);
@@ -4151,6 +4305,33 @@ mod tests {
             .__round__(None)
             .unwrap();
         assert_eq!(rounded_ints.as_i64_list().unwrap(), vec![10, 22]);
+        let rounded_negative_decimal_ints =
+            PyValue::vector_i64(vec![5, 15, 25, 35, -5, -15, -25, -35])
+                .unwrap()
+                .round(-1, None)
+                .unwrap();
+        assert_eq!(
+            rounded_negative_decimal_ints.as_i64_list().unwrap(),
+            vec![0, 20, 20, 40, 0, -20, -20, -40]
+        );
+        let unsigned_ints = PyValue::from_value(Value::Tensor(
+            TensorValue::new(
+                DType::U64,
+                Shape::vector(4),
+                vec![
+                    Literal::U64(5),
+                    Literal::U64(15),
+                    Literal::U64(25),
+                    Literal::U64(35),
+                ],
+            )
+            .unwrap(),
+        ));
+        let rounded_unsigned_ints = unsigned_ints.round(-1, None).unwrap();
+        assert_eq!(
+            rounded_unsigned_ints.as_i64_list().unwrap(),
+            vec![0, 20, 20, 40]
+        );
         pyo3::prepare_freethreaded_python();
         Python::with_gil(|py| {
             let int_dtype = pyo3::types::PyString::new(py, "int64")

@@ -1,0 +1,51 @@
+{
+  "bead": "frankenjax-ot03",
+  "date": "2026-06-02",
+  "agent": "IcyGlacier",
+  "phase": "Phase B mock-code-finder",
+  "finding": "crates/fj-py/src/lib.rs raised PyNotImplementedError for integer Array.round(decimals < 0)",
+  "change": "Implemented checked integer negative-decimal rounding for signed and unsigned literals with ties-to-even behavior.",
+  "behavior_proof": {
+    "ordering": "Element iteration order is unchanged; tensor shape is reused unchanged.",
+    "tie_breaking": "Halfway cases round by quotient ties-to-even: 15 -> 20, 25 -> 20, -15 -> -20, -25 -> -20.",
+    "floating_point": "Floating-point round branches are untouched.",
+    "rng": "No RNG is used or introduced.",
+    "dtype": "Input integer dtype is preserved; out-of-range rounded values fail closed with PyOverflowError."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_py_integer_round_negative_decimals_2026-06-02.golden",
+    "sha256": "b2bbf7e15a26baa5869be8add214db51f3b6d60945583c22079286be2f53b235"
+  },
+  "validation": [
+    {
+      "command": "cargo fmt -p fj-py --check",
+      "executor": "local",
+      "status": "passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-py-check-ot03 cargo check -p fj-py --all-targets",
+      "executor": "rch",
+      "worker": "vmi1149989",
+      "status": "passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-py-test-ot03 cargo test -p fj-py value_ -- --nocapture",
+      "executor": "rch",
+      "worker": "vmi1149989",
+      "status": "passed",
+      "tests": "3 passed; 0 failed; 21 filtered out"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-py-clippy-ot03 cargo clippy -p fj-py --all-targets --no-deps -- -D warnings",
+      "executor": "rch",
+      "worker": "vmi1149989",
+      "status": "passed"
+    },
+    {
+      "command": "ubs crates/fj-py/src/lib.rs",
+      "executor": "local",
+      "status": "passed_exit_0",
+      "notes": "No critical findings; broad pre-existing warning inventory remains in this large file."
+    }
+  ]
+}

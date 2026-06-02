@@ -1,0 +1,6 @@
+frankenjax-ot03 fj-py integer round negative decimals
+signed_i64 round(-1): [5, 15, 25, 35, -5, -15, -25, -35] -> [0, 20, 20, 40, 0, -20, -20, -40]
+unsigned_u64 round(-1): [5, 15, 25, 35] -> [0, 20, 20, 40]
+scalar_i64 round(-1): 123 -> 120
+ties: 15 -> 20, 25 -> 20, -15 -> -20, -25 -> -20
+isomorphism: element order preserved; duplicate values preserved; tie-breaking is quotient ties-to-even; no RNG path; no floating-point path changes for integer inputs
