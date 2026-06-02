@@ -2017,8 +2017,8 @@ pub fn vjp(
         }
         Primitive::Zeta => {
             // Hurwitz zeta ζ(x, q) has two inputs but no differentiation rule
-            // in JAX (zeta_p registers no JVP/VJP — grad raises "differentiation
-            // rule not implemented"). The previous code returned a single
+            // in JAX (zeta_p registers no JVP/VJP — grad raises a missing
+            // differentiation-rule error). The previous code returned a single
             // zero cotangent, which (a) diverged from JAX by silently
             // succeeding and (b) was an arity bug: the caller zips cotangents
             // with the two inputs, so the `q` adjoint was silently dropped.

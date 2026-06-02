@@ -1242,7 +1242,7 @@ pub(crate) fn eval_solve(
 
     let n = m_a;
 
-    // Complex linear solve is not implemented in V1 — fail closed instead of
+    // Complex linear solve is unsupported in V1 — fail closed instead of
     // silently solving the real part only (the previous code did
     // `a.iter().map(|(re, _im)| re)`, corrupting any complex input). The
     // result of a solve is inexact, so integer/bool inputs promote to a
@@ -1253,7 +1253,7 @@ pub(crate) fn eval_solve(
     {
         return Err(EvalError::Unsupported {
             primitive,
-            detail: "complex linear solve is not implemented in V1".to_owned(),
+            detail: "complex linear solve is unsupported in V1".to_owned(),
         });
     }
     let output_dtype = match promote_dtype(dtype_a, dtype_b) {
