@@ -1,0 +1,1 @@
+frankenjax-9aos-pass12|fj-egraph|aggressive_distribute_rule_removed|baseline_mean_us=498.72|after_mean_us=459.59|speedup=1.085|optimized_fingerprint=in=[v0,]const=[]out=[v11,]eqn:add(v0,f64bits:4607182418800017408,)->v7,{}|eqn:mul(v0,v0,)->v8,{}|eqn:mul(v8,v7,)->v9,{}|eqn:add(f64bits:0,v9,)->v10,{}|eqn:add(v0,v10,)->v11,{}||eval_x=-2,0,2,7.5|ordering=tie_breaking_fp_rng_preserved

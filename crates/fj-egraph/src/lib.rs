@@ -316,7 +316,7 @@ pub struct OptimizationConfig {
     /// numerically unsafe near domain boundaries (0, NaN, Inf, denormals).
     ///
     /// Disabled rewrites in safety mode:
-    /// - Floating associativity/distributivity/factoring (changes rounding,
+    /// - Floating associativity/factoring (changes rounding,
     ///   overflow, and cancellation order)
     /// - `exp(log(a)) => a` (fails when a <= 0)
     /// - `a/a => 1` (fails when a = 0, NaN, denormal)
@@ -419,8 +419,8 @@ fn safe_algebraic_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
         // mul-neg-one moved to numerically_unsafe_rules
         // (unary neg can change promoted unsigned/integer output dtype)
         // ── Distributivity ───────────────────────────────────────────
-        // distribute, factor moved to numerically_unsafe_rules
-        // (floating distribution changes overflow and cancellation order)
+        // factor moved to numerically_unsafe_rules
+        // (floating factoring changes overflow and cancellation order)
         // ── Negation ─────────────────────────────────────────────────
         // neg-neg moved to numerically_unsafe_rules (bypasses bool validation in eval_neg)
         // neg-zero moved to numerically_unsafe_rules (erases output dtype)
@@ -545,9 +545,8 @@ fn numerically_unsafe_rules() -> Vec<egg::Rewrite<FjLang, ()>> {
         rewrite!("div-one"; "(div ?a 1)" => "?a"),
         rewrite!("pow-one"; "(pow ?a 1)" => "?a"),
         rewrite!("integer-pow-one"; "(integer_pow ?a 1)" => "?a"),
-        // Distribution/factoring can erase overflow-visible NaNs, e.g.
+        // Factoring can erase overflow-visible NaNs, e.g.
         // (x*2) + (x*-2) is NaN for x=Inf-ish overflow, while x*(2 + -2) is 0.
-        rewrite!("distribute"; "(mul ?a (add ?b ?c))" => "(add (mul ?a ?b) (mul ?a ?c))"),
         rewrite!("factor"; "(add (mul ?a ?b) (mul ?a ?c))" => "(mul ?a (add ?b ?c))"),
         // exp(log(a)) => a fails when a <= 0 (log undefined)
         rewrite!("exp-log"; "(exp (log ?a))" => "?a"),
@@ -3215,6 +3214,82 @@ mod tests {
 
         let args = [Value::scalar_f64(0.5)];
         assert_eq!(eval_jaxpr(&jaxpr, &args)?, eval_jaxpr(&optimized, &args)?);
+        Ok(())
+    }
+
+    fn aggressive_benchmark_polynomial_jaxpr() -> Jaxpr {
+        Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(6)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(1)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(2)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Lit(Literal::from_f64(0.0))],
+                    outputs: smallvec![VarId(3)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::from_f64(1.0))],
+                    outputs: smallvec![VarId(4)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(3)), Atom::Var(VarId(4))],
+                    outputs: smallvec![VarId(5)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(5)), Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(6)],
+                    effects: vec![],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn aggressive_benchmark_polynomial_golden_after_distribute_removal()
+    -> Result<(), fj_interpreters::InterpreterError> {
+        let jaxpr = aggressive_benchmark_polynomial_jaxpr();
+        let optimized = optimize_jaxpr_with_config(&jaxpr, &OptimizationConfig::aggressive());
+
+        assert_eq!(
+            optimized.canonical_fingerprint(),
+            "in=[v0,]const=[]out=[v11,]eqn:add(v0,f64bits:4607182418800017408,)->v7,{}|eqn:mul(v0,v0,)->v8,{}|eqn:mul(v8,v7,)->v9,{}|eqn:add(f64bits:0,v9,)->v10,{}|eqn:add(v0,v10,)->v11,{}|"
+        );
+
+        for x in [-2.0, 0.0, 2.0, 7.5] {
+            let args = [Value::scalar_f64(x)];
+            assert_eq!(eval_jaxpr(&jaxpr, &args)?, eval_jaxpr(&optimized, &args)?);
+        }
         Ok(())
     }
 

@@ -1,0 +1,88 @@
+{
+  "bead": "frankenjax-9aos",
+  "date": "2026-06-02",
+  "crate": "fj-egraph",
+  "subsystem": "aggressive equality saturation",
+  "lever": "remove expansion-only distribute rewrite while retaining cost-reducing factor rewrite",
+  "profile_target": "egraph/optimize_aggressive_config",
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-profile-pass12 cargo bench -p fj-egraph --bench egraph_baseline -- --sample-size 40 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1153651",
+    "mean_us": 498.72,
+    "confidence_interval_us": [460.35, 552.64],
+    "nearby_profile_points_us": {
+      "egraph/optimize_complex_poly": 52.663,
+      "egraph/optimize_safe_config": 46.079,
+      "egraph/jaxpr_to_egraph": 1.1423
+    }
+  },
+  "after": {
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-bench-after-pass12 cargo bench -p fj-egraph --bench egraph_baseline -- egraph/optimize_aggressive_config --sample-size 40 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1153651",
+    "mean_us": 459.59,
+    "confidence_interval_us": [439.01, 492.42]
+  },
+  "delta": {
+    "absolute_us": -39.13,
+    "percent": -7.84,
+    "speedup": 1.085
+  },
+  "opportunity_score": {
+    "impact": 2,
+    "confidence": 4,
+    "effort": 1,
+    "score": 8.0
+  },
+  "golden": {
+    "file": "artifacts/performance/evidence/fj_egraph_aggressive_distribute_rule_pass12_2026-06-02.golden",
+    "sha256": "011ea59f82b44a8705b2d7abb7b82fd5fdada2a78df691627b3492fce7273830",
+    "optimized_fingerprint": "in=[v0,]const=[]out=[v11,]eqn:add(v0,f64bits:4607182418800017408,)->v7,{}|eqn:mul(v0,v0,)->v8,{}|eqn:mul(v8,v7,)->v9,{}|eqn:add(f64bits:0,v9,)->v10,{}|eqn:add(v0,v10,)->v11,{}|"
+  },
+  "isomorphism_proof": {
+    "ordering": "Equation ordering is fixed by the asserted optimized canonical fingerprint and the crate regression test.",
+    "tie_breaking": "Extractor and OpCount tie-breaking are unchanged; this lever only removes an expansion rewrite from the aggressive rule list.",
+    "floating_point": "The new golden test evaluates original and optimized programs for x=-2.0, 0.0, 2.0, 7.5, and existing overflow-boundary tests still pass.",
+    "rng": "No RNG state or stochastic primitive paths are touched.",
+    "unsafe": "No unsafe code added."
+  },
+  "validation": [
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-egraph/src/lib.rs",
+      "result": "pass"
+    },
+    {
+      "command": "git diff --check -- crates/fj-egraph/src/lib.rs",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-egraph/src/lib.rs",
+      "result": "pass",
+      "note": "exit 0; existing warning inventory reported by UBS was not introduced by this lever"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-check-pass12 cargo check -p fj-egraph --all-targets",
+      "worker": "vmi1227854",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-test-all-pass12 cargo test -p fj-egraph --all-targets",
+      "worker": "vmi1227854",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-clippy-pass12 cargo clippy -p fj-egraph --all-targets --no-deps -- -D warnings",
+      "worker": "vmi1156319",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-profile-pass12 cargo bench -p fj-egraph --bench egraph_baseline -- --sample-size 40 --warm-up-time 1 --measurement-time 3",
+      "worker": "vmi1153651",
+      "result": "profile baseline"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-bench-after-pass12 cargo bench -p fj-egraph --bench egraph_baseline -- egraph/optimize_aggressive_config --sample-size 40 --warm-up-time 1 --measurement-time 3",
+      "worker": "vmi1153651",
+      "result": "bench after"
+    }
+  ]
+}
