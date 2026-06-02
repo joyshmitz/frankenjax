@@ -1,0 +1,49 @@
+{
+  "bead": "frankenjax-5z1y",
+  "pass": 3,
+  "target": "fj-ad forward tape build in crates/fj-ad/src/lib.rs",
+  "benchmark": {
+    "crate": "fj-api",
+    "bench": "api_overhead",
+    "filter": "value_and_grad_runtime/shared/deep_100_nodes",
+    "command": "rch exec -- cargo bench -p fj-api --bench api_overhead -- value_and_grad_runtime/shared/deep_100_nodes --sample-size 20 --measurement-time 3 --warm-up-time 1"
+  },
+  "fresh_baseline": {
+    "worker": "vmi1152480",
+    "range_us": [206.72, 257.43],
+    "midpoint_us": 228.46
+  },
+  "candidates": [
+    {
+      "lever": "move outputs into the tape before cloning them into the forward environment",
+      "worker": "ts2",
+      "range_us": [230.76, 232.43],
+      "midpoint_us": 231.51,
+      "decision": "rejected",
+      "reason": "regressed against the fresh baseline midpoint"
+    },
+    {
+      "lever": "use SmallVec for per-equation tape and scratch vectors",
+      "worker": "ts2",
+      "range_us": [223.57, 226.26],
+      "midpoint_us": 225.10,
+      "decision": "rejected",
+      "reason": "roughly 1.5 percent midpoint improvement, below score threshold and within cross-worker noise"
+    },
+    {
+      "lever": "replace the forward BTreeMap environment with a dense indexed environment plus sparse fallback",
+      "worker": "ts2",
+      "range_us": [222.72, 227.30],
+      "midpoint_us": 225.18,
+      "decision": "rejected",
+      "reason": "roughly 1.4 percent midpoint improvement, below score threshold and equivalent to the SmallVec noise band",
+      "validation": "rch exec -- cargo check -p fj-ad --all-targets passed with the pre-existing fj-ad g_data warning"
+    }
+  ],
+  "final_decision": {
+    "source_code_kept": false,
+    "reason": "No candidate cleared the required Impact x Confidence / Effort score >= 2.0.",
+    "behavior_proof": "No source code is committed for this pass; ordering, tie-breaking, floating-point behavior, RNG behavior, and strict/hardened semantics are unchanged by construction.",
+    "golden_output_sha256": "not_applicable_no_source_change"
+  }
+}
