@@ -1001,6 +1001,30 @@ fn no_stub_source_code_markers_cover_workspace_sources() {
 }
 
 #[test]
+fn no_stub_source_not_implemented_wording_cover_workspace_sources() {
+    let banned_phrases = ["not implemented", "not yet implemented"];
+    let mut matches = Vec::new();
+
+    for path in workspace_source_files() {
+        let source = std::fs::read_to_string(&path).expect("source file should be readable");
+        for (line_no, line) in production_lines(&source) {
+            let normalized = line.to_ascii_lowercase();
+            for phrase in banned_phrases {
+                if normalized.contains(phrase) {
+                    matches.push(format!("{}:{line_no}: {line}", path.display()));
+                }
+            }
+        }
+    }
+
+    assert!(
+        matches.is_empty(),
+        "Found production-source not-implemented wording outside cfg(test) modules:\n{}",
+        matches.join("\n")
+    );
+}
+
+#[test]
 fn no_stub_suspicious_default_returns() {
     let suspicious_patterns = ["return Ok(Default::default())", "return Ok(vec![])"];
 

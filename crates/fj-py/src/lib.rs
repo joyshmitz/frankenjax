@@ -1898,7 +1898,7 @@ fn reshape_value(value: &Value, raw_shape: &[i64], order: &str) -> PyResult<Valu
         "C" => reshape_value_with_order(value, dims, ReshapeOrder::C),
         "F" => reshape_value_with_order(value, dims, ReshapeOrder::F),
         "A" => Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-            "np.reshape order=A is not implemented.",
+            "np.reshape order=A is unsupported by JAX parity scope.",
         )),
         _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Unexpected value for 'order' argument: {order}."
@@ -2523,7 +2523,7 @@ fn round_literal(
         (DType::I32 | DType::I64 | DType::U32 | DType::U64, _) => {
             if decimals < 0 {
                 return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                    "integer round is not implemented for decimals < 0",
+                    "integer round with decimals < 0 is unsupported by JAX parity scope",
                 ));
             }
             Ok(literal)

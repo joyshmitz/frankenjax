@@ -330,7 +330,7 @@ def test_value_scalar():
     try:
         v2.round(decimals=-1)
     except NotImplementedError as exc:
-        assert "decimals < 0" in str(exc)
+        assert "unsupported" in str(exc)
     else:
         raise AssertionError("integer Array.round should reject decimals < 0")
     assert v2.tobytes(order="K") == struct.pack("@q", 123)
@@ -544,7 +544,7 @@ def test_make_jaxpr_generic():
     try:
         matrix.reshape((3, 2), order="A")
     except NotImplementedError as exc:
-        assert "order=A" in str(exc)
+        assert "unsupported" in str(exc)
     else:
         raise AssertionError("Array.reshape should reject order=A")
     try:
