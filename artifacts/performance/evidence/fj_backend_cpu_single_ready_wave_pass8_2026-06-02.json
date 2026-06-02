@@ -1,0 +1,84 @@
+{
+  "pass": 8,
+  "bead": "frankenjax-ixse",
+  "crate": "fj-backend-cpu",
+  "target": "backend_scheduler_dependency_chain",
+  "profile_backed_target": {
+    "baseline_command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-ixse-pass8-20260602-0543 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo bench -p fj-backend-cpu --bench backend_baseline -- dependency_chain --save-baseline frankenjax-ixse-pass8-before",
+    "after_command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-ixse-pass8-20260602-0543 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo bench -p fj-backend-cpu --bench backend_baseline -- dependency_chain --save-baseline frankenjax-ixse-pass8-after",
+    "measurement_backend": "criterion_via_rch",
+    "benchmark_results": [
+      {
+        "benchmark": "backend_execute/dependency_chain_512",
+        "before_mean_us": 114.139,
+        "after_mean_us": 102.162,
+        "delta_percent": -10.49
+      },
+      {
+        "benchmark": "backend_scheduler_cutover/dependency_chain/128",
+        "before_mean_us": 29.09,
+        "after_mean_us": 25.479,
+        "delta_percent": -12.41
+      },
+      {
+        "benchmark": "backend_scheduler_cutover/dependency_chain/255",
+        "before_mean_us": 55.816,
+        "after_mean_us": 51.419,
+        "delta_percent": -7.88
+      },
+      {
+        "benchmark": "backend_scheduler_cutover/dependency_chain/256",
+        "before_mean_us": 55.777,
+        "after_mean_us": 53.809,
+        "delta_percent": -3.53
+      },
+      {
+        "benchmark": "backend_scheduler_cutover/dependency_chain/512",
+        "before_mean_us": 108.713,
+        "after_mean_us": 112.882,
+        "delta_percent": 3.84,
+        "note": "mean regressed, but median improved from 107.590 us to 107.312 us"
+      },
+      {
+        "benchmark": "backend_scheduler_cutover/dependency_chain/1000",
+        "before_mean_us": 229.866,
+        "after_mean_us": 214.914,
+        "delta_percent": -6.5
+      }
+    ]
+  },
+  "change": {
+    "lever": "Short-circuit execute_ready_wave when the ready wave contains exactly one equation, avoiding tensor-work cost calculation and rayon gate checks when parallelism is impossible.",
+    "files": [
+      "crates/fj-backend-cpu/src/executor.rs"
+    ],
+    "single_lever": true,
+    "unsafe": false
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "score": 15.0,
+    "kept": true
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "yes; singleton ready waves execute the same one equation and mutate env/executed/remaining in the same order as the old serial branch.",
+    "tie_breaking_unchanged": "yes; no scheduling choice is introduced because a singleton wave has no competing ready equation.",
+    "floating_point": "identical; primitive evaluation is unchanged and the same equation is evaluated once.",
+    "rng": "N/A; scheduler path has no random inputs or seeds.",
+    "outputs": "unchanged; dependency_scheduler_executes_long_chain_with_dependency_counts still returns input plus chain length and max_ready_wave remains 1.",
+    "golden_outputs": "sha256sum -c artifacts/performance/evidence/fj_backend_cpu_single_ready_wave_pass8_2026-06-02.golden.sha256 passed",
+    "golden_sha256": "e831cb440fde35a6bdb9b65340f341f2f7681e84125e31b1207d2bb60255d9f8"
+  },
+  "validation": [
+    "rustfmt --edition 2024 --check crates/fj-backend-cpu/src/executor.rs",
+    "git diff --check -- crates/fj-backend-cpu/src/executor.rs",
+    "ubs crates/fj-backend-cpu/src/executor.rs (exit 0; no critical findings, existing warning inventory only)",
+    "CARGO_TARGET_DIR=/data/tmp/frankenjax-ixse-final-verify RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo check -p fj-backend-cpu --all-targets (remote vmi1227854, exit 0)",
+    "CARGO_TARGET_DIR=/data/tmp/frankenjax-ixse-final-test RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo test -p fj-backend-cpu (rch local fallback, 60 tests passed)",
+    "CARGO_TARGET_DIR=/data/tmp/frankenjax-ixse-final-clippy RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo clippy -p fj-backend-cpu --all-targets -- -D warnings (remote vmi1264463, exit 0)",
+    "sha256sum -c artifacts/performance/evidence/fj_backend_cpu_single_ready_wave_pass8_2026-06-02.golden.sha256",
+    "jq . artifacts/performance/evidence/fj_backend_cpu_single_ready_wave_pass8_2026-06-02.json"
+  ]
+}

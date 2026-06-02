@@ -216,6 +216,16 @@ fn execute_ready_wave(
     remaining: &mut usize,
     ready_indices: &[usize],
 ) -> Result<(), InterpreterError> {
+    if let [idx] = ready_indices {
+        let eqn = &jaxpr.equations[*idx];
+        let output = evaluate_equation(eqn, env)?;
+        let out_var = single_output_var(eqn)?;
+        env.insert(out_var, output);
+        executed[*idx] = true;
+        *remaining -= 1;
+        return Ok(());
+    }
+
     let should_parallelize = should_parallelize_ready_wave(jaxpr, env, ready_indices);
 
     if should_parallelize {
