@@ -1,0 +1,136 @@
+{
+  "bead": "frankenjax-1qvw",
+  "labels": ["perf", "fj-interpreters", "optimization"],
+  "pass": 24,
+  "date": "2026-06-02",
+  "skill_loop": {
+    "profiling": "profiling-software-performance",
+    "optimization": "extreme-software-optimization",
+    "repeat_policy": "serial pass, one lever per commit"
+  },
+  "crate": "fj-interpreters",
+  "target": {
+    "subsystem": "partial evaluation dead-code elimination",
+    "function": "dce_jaxpr",
+    "benchmark": "dce/all_used/1000eq",
+    "scenario": "1000-equation linear Add chain with final output marked used"
+  },
+  "baseline_fingerprint": {
+    "runner": "rch",
+    "crate_scoped": true,
+    "cargo_target_dir": "/data/tmp/frankenjax-fj-interpreters-profile-pass24",
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-profile-pass24 cargo bench -p fj-interpreters --bench pe_baseline -- --sample-size 40 --measurement-time 2 --warm-up-time 1",
+    "worker": "vmi1153651",
+    "criterion_profile": "bench",
+    "sample_size": 40,
+    "measurement_time_seconds": 2,
+    "warm_up_time_seconds": 1
+  },
+  "profile_hotspots": [
+    {
+      "rank": 1,
+      "benchmark": "dce/all_used/1000eq",
+      "mean_us": 132.14,
+      "category": "CPU/allocation",
+      "evidence": "Criterion rch baseline ranked dce/all_used/1000eq as the slowest fj-interpreters pe_baseline case"
+    },
+    {
+      "rank": 2,
+      "benchmark": "eval/scan_sub_jaxpr_add_emit_128",
+      "mean_us": 89.507,
+      "category": "CPU",
+      "evidence": "Criterion rch baseline"
+    },
+    {
+      "rank": 3,
+      "benchmark": "partial_eval/all_known/1000eq",
+      "mean_us": 90.790,
+      "category": "CPU/allocation",
+      "evidence": "Criterion rch baseline"
+    }
+  ],
+  "opportunity_matrix": {
+    "lever": "For large DCE graphs, record retained equation positions during the reverse liveness pass and clone retained equations in forward order, with a full-retention fast path.",
+    "impact": 3,
+    "confidence": 3,
+    "effort": 1,
+    "score": 9.0,
+    "threshold": 2.0
+  },
+  "change": {
+    "single_lever": true,
+    "files_changed": ["crates/fj-interpreters/src/partial_eval.rs"],
+    "summary": "dce_jaxpr keeps the existing reverse-push path for graphs below 256 equations, and uses a retained-position mask plus forward-order cloning for larger graphs"
+  },
+  "benchmark_delta": {
+    "baseline": {
+      "worker": "vmi1153651",
+      "mean_us": 132.14
+    },
+    "after": {
+      "worker": "vmi1153651",
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-profile-pass24-gated cargo bench -p fj-interpreters --bench pe_baseline -- --sample-size 40 --measurement-time 2 --warm-up-time 1",
+      "mean_us": 107.47,
+      "confidence_interval_us": [105.32, 109.73]
+    },
+    "delta_us": -24.67,
+    "delta_percent": -18.66,
+    "speedup": 1.23,
+    "noise_note": "dce/all_used/10eq and dce/all_used/100eq are on the unchanged path below the 256-equation threshold; their slower rebench values moved with other unrelated rows, so they are treated as run-wide noise rather than a semantic or local-path regression."
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "yes - below 256 equations the old reverse-push-then-reverse path is retained exactly; at 256+ equations retained positions are recorded by original equation index and cloned in original forward order",
+    "tie_breaking_unchanged": "yes - DCE only filters equations by liveness; no comparator, map iteration, or tie-breaking policy changed",
+    "floating_point": "N/A - DCE graph pruning does not evaluate floating-point operations or rewrite equation payloads",
+    "rng": "N/A - no RNG state, seeding, or random primitive path is touched",
+    "unsafe_code": "unchanged - no unsafe code added",
+    "golden_output_sha256": "9c4c856e948a9c072901c3dc7baf124ec91e59bd2dc42d804c94791f848c77d5",
+    "semantic_digest": "3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8"
+  },
+  "validation": [
+    {
+      "command": "cargo fmt -p fj-interpreters --check",
+      "runner": "local formatter",
+      "result": "pass"
+    },
+    {
+      "command": "git diff --check -- crates/fj-interpreters/src/partial_eval.rs",
+      "runner": "local git",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_interpreters_dce_forward_order_pass24_2026-06-02.golden.sha256",
+      "runner": "local sha256sum",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-interpreters/src/partial_eval.rs",
+      "runner": "local ubs",
+      "result": "nonzero due pre-existing fj-interpreters monolith inventory; findings include test unwrap/assert/index inventories and an Instant::now false-positive, none in the DCE hunk"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-proof-pass24b cargo test -p fj-interpreters dce --lib -- --nocapture",
+      "runner": "rch vmi1153651",
+      "result": "pass: 9 dce tests"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-proof-pass24-full cargo test -p fj-interpreters --lib -- --nocapture",
+      "runner": "rch vmi1156319",
+      "result": "pass: 130 lib tests"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-check-pass24 cargo check -p fj-interpreters --all-targets",
+      "runner": "rch vmi1153651",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-interpreters-clippy-pass24 cargo clippy -p fj-interpreters --all-targets --no-deps -- -D warnings",
+      "runner": "rch vmi1153651",
+      "result": "pass"
+    }
+  ],
+  "decision": {
+    "keep_change": true,
+    "reason": "Profile-backed top fj-interpreters DCE benchmark improved by 18.66 percent on the same RCH worker with unchanged DCE golden digest and focused crate-scoped validation."
+  }
+}
