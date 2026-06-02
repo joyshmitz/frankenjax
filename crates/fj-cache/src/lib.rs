@@ -144,14 +144,20 @@ impl CachePayloadSink for Sha256 {
 
 #[inline]
 fn write_usize_decimal<S: CachePayloadSink>(sink: &mut S, value: usize) {
+    if value < 10 {
+        let bytes = [b'0' + value as u8];
+        sink.write_bytes(&bytes);
+        return;
+    }
+    if value < 100 {
+        let bytes = [b'0' + (value / 10) as u8, b'0' + (value % 10) as u8];
+        sink.write_bytes(&bytes);
+        return;
+    }
+
     let mut buf = [0_u8; 20];
     let mut cursor = buf.len();
     let mut remaining = value;
-
-    if remaining == 0 {
-        sink.write_bytes(b"0");
-        return;
-    }
 
     while remaining > 0 {
         cursor -= 1;
@@ -1148,5 +1154,23 @@ mod tests {
             key.digest_hex.chars().all(|c| c.is_ascii_hexdigit()),
             "digest should be valid hex"
         );
+    }
+
+    #[derive(Default)]
+    struct VecSink(Vec<u8>);
+
+    impl super::CachePayloadSink for VecSink {
+        fn write_bytes(&mut self, bytes: &[u8]) {
+            self.0.extend_from_slice(bytes);
+        }
+    }
+
+    #[test]
+    fn write_usize_decimal_matches_standard_decimal_boundaries() {
+        for value in [0_usize, 1, 9, 10, 42, 99, 100, 999, usize::MAX] {
+            let mut sink = VecSink::default();
+            super::write_usize_decimal(&mut sink, value);
+            assert_eq!(sink.0, value.to_string().as_bytes());
+        }
     }
 }

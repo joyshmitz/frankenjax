@@ -1,0 +1,89 @@
+{
+  "bead": "frankenjax-7rdw",
+  "date": "2026-06-02",
+  "agent": "IcyGlacier",
+  "skills": [
+    "profiling-software-performance",
+    "extreme-software-optimization",
+    "repeatedly-apply-skill"
+  ],
+  "target": {
+    "crate": "fj-cache",
+    "function": "write_usize_decimal",
+    "criterion_benchmark": "cache_key/streaming/10eqn_program",
+    "profile_basis": "rch Criterion cache_baseline ranked cache-key construction as the hottest fj-cache surface in this pass."
+  },
+  "baseline_profile": {
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-profile rch exec -- cargo bench -p fj-cache --bench cache_baseline -- --sample-size 10 --measurement-time 1 --warm-up-time 1",
+    "worker": "vmi1227854",
+    "results_ns_mean": {
+      "cache_key_streaming_10eqn_program": 559.31,
+      "cache_key_owned_10eqn_program": 502.18,
+      "cache_key_owned_empty_program": 398.05,
+      "cache_lookup_hit_in_memory": 311.92,
+      "compatibility_matrix_row": 82.984,
+      "cache_lookup_miss_in_memory": 77.758
+    }
+  },
+  "rejected_candidate": {
+    "lever": "byte-buffer lowercase digest hex emission",
+    "reason": "Criterion rebench worsened cache_key/streaming/10eqn_program on worker vmi1156319 from the prior worker baseline shape to 774.07 ns mean, so the candidate was reverted and not shipped."
+  },
+  "opportunity_matrix": {
+    "hotspot": "write_len_prefixed -> write_usize_decimal during canonical cache-key payload streaming",
+    "impact": 2,
+    "confidence": 4,
+    "effort": 1,
+    "score": 8.0,
+    "decision": "ship"
+  },
+  "one_lever": {
+    "description": "Fast-path one- and two-digit usize decimal length frames before falling back to the existing stack-buffer reverse digit loop.",
+    "scope": "Only decimal formatting for length prefixes changed; payload field order, labels, delimiters, SHA-256 input bytes, and digest hex formatting remain otherwise unchanged."
+  },
+  "benchmarks": {
+    "primary_same_worker": {
+      "worker": "vmi1227854",
+      "before_mean_ns": 559.31,
+      "after_mean_ns": 478.68,
+      "delta_percent": -14.41,
+      "speedup": 1.168
+    },
+    "paired_ab_same_worker": {
+      "worker": "vmi1156319",
+      "before_mean_ns": 762.54,
+      "after_mean_ns": 708.78,
+      "delta_percent": -7.05,
+      "speedup": 1.076
+    }
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "yes: write_len_prefixed still writes decimal length, colon, payload bytes, semicolon in the same order for every field.",
+    "tie_breaking_unchanged": "N/A: cache-key payload construction has no tie-breaking.",
+    "floating_point": "N/A: no floating-point operations are introduced or reordered.",
+    "rng": "N/A: no RNG state is read or written.",
+    "errors": "unchanged: write_usize_decimal is infallible before and after.",
+    "unsafe": "none: crate remains #![forbid(unsafe_code)].",
+    "golden_cache_key_digests": [
+      "e26dbe3826d170f0c5b279392919ebb7fc28d2f6165a836f59c827a65ff8540d",
+      "5be109dd4dbf409f4bdf42d75bb797de2e474a2388610c0d591c45fa6d37fc4e",
+      "bcf7cdbaac5a737150e3955476f3531acc94ea92c6c547f90df580610b291ca6"
+    ],
+    "golden_output_sha256": "8727132aecc3f9893cf395dc61827aec19685ddb625f51555c6a58f083575d7a",
+    "golden_verification": "sha256sum -c artifacts/performance/evidence/fj_cache_decimal_len_framing_pass12_2026-06-02.golden.sha256"
+  },
+  "validation": [
+    "rustfmt --edition 2024 --check crates/fj-cache/src/lib.rs",
+    "git diff --check -- crates/fj-cache/src/lib.rs",
+    "rch exec -- cargo check -p fj-cache --all-targets",
+    "rch exec -- cargo test -p fj-cache --all-targets",
+    "rch exec -- cargo clippy -p fj-cache --all-targets -- -D warnings",
+    "ubs crates/fj-cache/src/lib.rs (exit 0; warning inventory only)",
+    "sha256sum -c artifacts/performance/evidence/fj_cache_decimal_len_framing_pass12_2026-06-02.golden.sha256",
+    "jq . artifacts/performance/evidence/fj_cache_decimal_len_framing_pass12_2026-06-02.json"
+  ],
+  "notes": [
+    "A subagent pass for this target hit a usage limit; the optimization loop continued serially with explicit rch baseline, rebench, and proof artifacts.",
+    "The dirty worktree also contains separate fj-cache in-memory key-storage work for a different bead; this evidence and commit intentionally isolate only decimal length framing."
+  ]
+}
