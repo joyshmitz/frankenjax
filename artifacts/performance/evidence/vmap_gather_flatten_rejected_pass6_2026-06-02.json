@@ -1,0 +1,100 @@
+{
+  "schema_version": "frankenjax.optimization-pass-evidence.v1",
+  "bead_ids": ["frankenjax-khpu"],
+  "pass": 6,
+  "captured_at_iso": "2026-06-02T01:25:49Z",
+  "target": "fj-dispatch vmap gather/scatter shifted hotspot family",
+  "profile_backed_target": {
+    "source": "fresh rch Criterion baseline for vmap multiplier family",
+    "worker": "vmi1227854",
+    "command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-khpu-vmap-pass6 rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_gather|vmap_scatter|vmap_dot_i64|vmap_scan|vmap_switch|vmap_while' --sample-size 20 --measurement-time 3 --warm-up-time 1",
+    "top_rows_by_midpoint": [
+      {
+        "benchmark": "vmap_scatter/batched_indices_updates",
+        "midpoint_ms": 12.875
+      },
+      {
+        "benchmark": "vmap_gather/batched_operand_shared_indices",
+        "midpoint_ms": 4.7739
+      },
+      {
+        "benchmark": "vmap_gather/batched_operand_batched_indices",
+        "midpoint_ms": 4.4142
+      },
+      {
+        "benchmark": "vmap_scan/functional_sub_jaxpr_add_emit_128x64",
+        "midpoint_us": 586.32
+      }
+    ]
+  },
+  "candidate": {
+    "one_lever": "Flatten batched gather operands from [B, N, ...] to [B*N, ...], offset per-batch indices, and call eval_gather once instead of using the generic loop-and-stack fallback.",
+    "status": "rejected_and_removed",
+    "reason": "The candidate regressed the targeted gather rows on the rch worker selected for the after run, so it did not meet the >=2.0 keep threshold.",
+    "after_benchmark": {
+      "worker": "ts2",
+      "same_worker_as_baseline": false,
+      "command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-khpu-bench-after rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_gather|vmap_scatter|vmap_dot_i64|vmap_scan|vmap_switch|vmap_while' --sample-size 20 --measurement-time 3 --warm-up-time 1",
+      "rows": [
+        {
+          "benchmark": "vmap_gather/batched_indices",
+          "midpoint_us": 430.15
+        },
+        {
+          "benchmark": "vmap_gather/batched_operand_shared_indices",
+          "midpoint_ms": 42.699
+        },
+        {
+          "benchmark": "vmap_gather/batched_operand_batched_indices",
+          "midpoint_ms": 33.012
+        },
+        {
+          "benchmark": "vmap_scatter/batched_indices_updates",
+          "midpoint_ms": 20.613
+        }
+      ]
+    }
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 3.0,
+    "effort": 2.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "decision": "reject",
+    "rationale": "Candidate did not produce a real win and the retained source tree has no fj-dispatch diff."
+  },
+  "behavior_proof": {
+    "retained_code_change": "none",
+    "ordering": "No retained source change; transform order, gather index order, dispatch order, and ledger evidence ordering are unchanged.",
+    "tie_breaking": "No retained comparator, map iteration, branch-selection, or fallback tie-breaker change.",
+    "floating_point": "No retained primitive evaluation, AD arithmetic, dtype, or tolerance change.",
+    "rng": "No retained RNG primitive, seed, state, or ordering change.",
+    "strict_hardened": "No retained compatibility-mode or unknown-feature handling change.",
+    "golden_output_payload": "pass6_no_source_change\nhead=5fc45d7e35d98463b8331a3050316b234c2fb8d4\nbatching.rs=bc6a5672ab9f0983726d82cf2207bd2490eb2198763e37879abe8dc5779cd294\ndispatch_baseline.rs=94959ef60a079a58c1fa86e5f14ec9fe2ec17380a77230d6eabda11b95ab9f8d\nretained_source_diff=none\n",
+    "golden_output_sha256": "40e93a6f1ee5feaa506cdb78dbb34c9a9b157b7ce6b615592f3351ab60cdf1cf"
+  },
+  "validation": [
+    {
+      "command": "rch exec -- cargo check -p fj-dispatch --all-targets",
+      "result": "pass",
+      "notes": "Candidate compiled before rejection."
+    },
+    {
+      "command": "rch exec -- cargo test -p fj-dispatch --all-targets",
+      "result": "pass",
+      "notes": "Candidate behavior suite passed before rejection: 223 unit tests, 55 dispatch_p2c004_suite tests, and benchmark harness smoke tests."
+    },
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-dispatch/src/batching.rs",
+      "result": "pass"
+    },
+    {
+      "command": "git diff --quiet -- crates/fj-dispatch/src/batching.rs crates/fj-dispatch/benches/dispatch_baseline.rs",
+      "result": "pass"
+    }
+  ],
+  "next_profile_notes": [
+    "The generic batched-operand gather path remains a hotspot but the flattened-index single-call approach is not viable as implemented.",
+    "The scatter midpoint remains larger than gather on the pass-6 baseline; next passes should re-profile before selecting any scatter-specific lever."
+  ]
+}
