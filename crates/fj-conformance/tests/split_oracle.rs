@@ -196,23 +196,28 @@ fn oracle_split_3d_axis2() {
 // ======================== Unequal Splits (sizes param) ========================
 
 #[test]
-fn oracle_split_unequal_two_three() {
-    // Split [5] with sizes [2, 3] - returns first section
+fn oracle_split_unequal_two_three_fails_closed() {
+    // Uneven split sizes [2, 3] can't be packed into V1's single-output
+    // rectangular tensor model, so Split fails closed (commit 92442040) rather
+    // than silently returning only the first section — which diverged from JAX's
+    // multi-array result and corrupted any transform through the dropped section.
     let input = make_i64_tensor(&[5], vec![1, 2, 3, 4, 5]);
-    let result =
-        eval_primitive(Primitive::Split, &[input], &split_params_sizes(0, &[2, 3])).unwrap();
-    assert_eq!(extract_shape(&result), vec![2]);
-    assert_eq!(extract_i64_vec(&result), vec![1, 2]);
+    let result = eval_primitive(Primitive::Split, &[input], &split_params_sizes(0, &[2, 3]));
+    assert!(
+        result.is_err(),
+        "uneven split must be rejected, not silently truncated: {result:?}"
+    );
 }
 
 #[test]
-fn oracle_split_unequal_three_two() {
-    // Split [5] with sizes [3, 2] - returns first section
+fn oracle_split_unequal_three_two_fails_closed() {
+    // Symmetric uneven case [3, 2] — also fails closed.
     let input = make_i64_tensor(&[5], vec![1, 2, 3, 4, 5]);
-    let result =
-        eval_primitive(Primitive::Split, &[input], &split_params_sizes(0, &[3, 2])).unwrap();
-    assert_eq!(extract_shape(&result), vec![3]);
-    assert_eq!(extract_i64_vec(&result), vec![1, 2, 3]);
+    let result = eval_primitive(Primitive::Split, &[input], &split_params_sizes(0, &[3, 2]));
+    assert!(
+        result.is_err(),
+        "uneven split must be rejected, not silently truncated: {result:?}"
+    );
 }
 
 // ======================== Float Tests ========================
