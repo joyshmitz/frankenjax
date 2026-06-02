@@ -1,0 +1,69 @@
+{
+  "bead": "frankenjax-suxf",
+  "pass": 23,
+  "date": "2026-06-02",
+  "subsystem": "fj-egraph",
+  "profile_targets": [
+    "egraph/optimize_add_zero",
+    "egraph/optimize_mul_one"
+  ],
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-profile-pass23 cargo bench -p fj-egraph --bench egraph_baseline -- --sample-size 40 --measurement-time 2 --warm-up-time 1",
+    "worker": "vmi1153651",
+    "add_zero_mean_us": 8.9266,
+    "add_zero_ci_us": [8.7508, 9.1472],
+    "mul_one_mean_us": 9.2561,
+    "mul_one_ci_us": [9.1156, 9.4094],
+    "profile_rank_notes": "Single-equation safe/default Add/Mul literal cases were the smallest egraph calls still paying full egg setup."
+  },
+  "after": {
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-profile-pass23-after cargo bench -p fj-egraph --bench egraph_baseline -- --sample-size 40 --measurement-time 2 --warm-up-time 1",
+    "worker": "vmi1153651",
+    "add_zero_mean_us": 1.4878,
+    "add_zero_ci_us": [1.4341, 1.5591],
+    "mul_one_mean_us": 1.4836,
+    "mul_one_ci_us": [1.4482, 1.5242]
+  },
+  "delta": {
+    "add_zero_speedup": 6.0,
+    "add_zero_mean_reduction_pct": 83.33,
+    "mul_one_speedup": 6.24,
+    "mul_one_mean_reduction_pct": 83.97,
+    "score": 20.0,
+    "score_formula": "Impact 5 x Confidence 4 / Effort 1"
+  },
+  "lever": {
+    "type": "safe-mode no-op fast path",
+    "description": "For a safe/default one-equation Add or Mul segment with exactly one literal and one variable input, emit the existing literal-first commutative canonical equation directly instead of building/running egg.",
+    "scope": "Only numerical_safety_mode=true, single-output, param-free, effect-free, sub-jaxpr-free Add/Mul equations. Aggressive-mode reductions and all other segments continue through the existing egraph path."
+  },
+  "isomorphism": {
+    "add_fingerprint": "in=[v0,]const=[]out=[v1,]eqn:add(f64bits:0,v0,)->v1,{}|",
+    "mul_fingerprint": "in=[v0,]const=[]out=[v1,]eqn:mul(f64bits:4607182418800017408,v0,)->v1,{}|",
+    "proof": [
+      "The fast path does not reduce x+0 or x*1 in safe/default mode; it only emits the same literal-first commutative form already produced by extraction for these single-literal Add/Mul cases.",
+      "Output VarId is preserved and outvar_remap is identity for all segment outvars.",
+      "It is gated off for aggressive mode, multi-equation segments, multi-output equations, params, effects, and sub-jaxprs.",
+      "The focused golden test evaluates both original and optimized programs at f64 3.5 and asserts identical Value output, including dtype.",
+      "No RNG is involved; no floating-point operation order changes because the equation remains a single Add or Mul with the same operands and output."
+    ],
+    "golden_artifact": "artifacts/performance/evidence/fj_egraph_single_identity_pass23_2026-06-02.golden",
+    "golden_sha256": "901efcc2f56cabde9e3726f7f15247b25e5dae2a6ea3c028195c1915ee245b09"
+  },
+  "validation": [
+    "cargo fmt -p fj-egraph",
+    "git diff --check -- crates/fj-egraph/src/lib.rs",
+    "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-proof-pass23 cargo test -p fj-egraph --lib safe_single_literal_commutative_fast_path_keeps_canonical_order -- --nocapture (remote vmi1156319, 1 passed, exit 0)",
+    "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-proof-pass23 cargo test -p fj-egraph --lib -- --nocapture (remote vmi1156319, 142 passed, exit 0)",
+    "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-profile-pass23-after cargo bench -p fj-egraph --bench egraph_baseline -- --sample-size 40 --measurement-time 2 --warm-up-time 1 (remote vmi1153651, exit 0)",
+    "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-check-pass23 cargo check -p fj-egraph --all-targets (remote vmi1227854, exit 0)",
+    "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-clippy-pass23 cargo clippy -p fj-egraph --all-targets --no-deps -- -D warnings (remote vmi1227854, exit 0)",
+    "sha256sum -c artifacts/performance/evidence/fj_egraph_single_identity_pass23_2026-06-02.golden.sha256 (OK)",
+    "jq . artifacts/performance/evidence/fj_egraph_single_identity_pass23_2026-06-02.json (valid JSON)",
+    "ubs crates/fj-egraph/src/lib.rs (exit 0; no critical findings, fmt/clippy clean)"
+  ],
+  "rejected_candidate": {
+    "bead": "frankenjax-0ukt",
+    "summary": "fj-cache bytes_to_hex byte-buffer candidate preserved behavior but regressed key construction; source diff reverted and bead closed rejected."
+  }
+}

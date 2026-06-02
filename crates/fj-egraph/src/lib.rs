@@ -2789,6 +2789,10 @@ fn optimize_supported_segment(
     next_var: &mut u32,
     config: &OptimizationConfig,
 ) -> SegmentOptimization {
+    if let Some(optimized) = fast_path_safe_single_literal_commutative_segment(jaxpr, config) {
+        return optimized;
+    }
+
     let (expr, var_map) = match jaxpr_to_egraph(jaxpr) {
         Ok(lowered) => lowered,
         Err(_) => {
@@ -2852,6 +2856,49 @@ fn optimize_supported_segment(
         equations: merged_equations,
         outvar_remap,
     }
+}
+
+fn fast_path_safe_single_literal_commutative_segment(
+    jaxpr: &Jaxpr,
+    config: &OptimizationConfig,
+) -> Option<SegmentOptimization> {
+    if !config.numerical_safety_mode || jaxpr.equations.len() != 1 {
+        return None;
+    }
+
+    let equation = &jaxpr.equations[0];
+    if !matches!(equation.primitive, Primitive::Add | Primitive::Mul)
+        || equation.inputs.len() != 2
+        || equation.outputs.len() != 1
+        || !equation.params.is_empty()
+        || !equation.effects.is_empty()
+        || !equation.sub_jaxprs.is_empty()
+    {
+        return None;
+    }
+
+    let inputs = match (equation.inputs[0].clone(), equation.inputs[1].clone()) {
+        (Atom::Lit(lit), Atom::Var(var)) | (Atom::Var(var), Atom::Lit(lit)) => {
+            smallvec![Atom::Lit(lit), Atom::Var(var)]
+        }
+        _ => return None,
+    };
+
+    Some(SegmentOptimization {
+        equations: vec![Equation {
+            primitive: equation.primitive,
+            inputs,
+            outputs: equation.outputs.clone(),
+            params: BTreeMap::new(),
+            effects: vec![],
+            sub_jaxprs: vec![],
+        }],
+        outvar_remap: jaxpr
+            .outvars
+            .iter()
+            .map(|outvar| (*outvar, *outvar))
+            .collect(),
+    })
 }
 
 fn build_egraph_with_id_map(expr: &RecExpr<FjLang>) -> (egg::EGraph<FjLang, ()>, Vec<Id>) {
@@ -3233,6 +3280,65 @@ mod tests {
         let opt_out =
             eval_jaxpr(&optimized, &[Value::scalar_i64(3), Value::scalar_i64(4)]).unwrap();
         assert_eq!(orig_out, opt_out);
+    }
+
+    #[test]
+    fn safe_single_literal_commutative_fast_path_keeps_canonical_order()
+    -> Result<(), fj_interpreters::InterpreterError> {
+        let cases = [
+            (
+                "add",
+                Jaxpr::new(
+                    vec![VarId(0)],
+                    vec![],
+                    vec![VarId(1)],
+                    vec![Equation {
+                        primitive: Primitive::Add,
+                        inputs: smallvec![Atom::Var(VarId(0)), Atom::Lit(Literal::from_f64(0.0))],
+                        outputs: smallvec![VarId(1)],
+                        effects: vec![],
+                        params: BTreeMap::new(),
+                        sub_jaxprs: vec![],
+                    }],
+                ),
+                "in=[v0,]const=[]out=[v1,]eqn:add(f64bits:0,v0,)->v1,{}|",
+            ),
+            (
+                "mul",
+                Jaxpr::new(
+                    vec![VarId(0)],
+                    vec![],
+                    vec![VarId(1)],
+                    vec![Equation {
+                        primitive: Primitive::Mul,
+                        inputs: smallvec![Atom::Var(VarId(0)), Atom::Lit(Literal::from_f64(1.0))],
+                        outputs: smallvec![VarId(1)],
+                        effects: vec![],
+                        params: BTreeMap::new(),
+                        sub_jaxprs: vec![],
+                    }],
+                ),
+                "in=[v0,]const=[]out=[v1,]eqn:mul(f64bits:4607182418800017408,v0,)->v1,{}|",
+            ),
+        ];
+
+        for (name, jaxpr, expected_fingerprint) in cases {
+            let optimized = optimize_jaxpr(&jaxpr);
+            assert_eq!(
+                optimized.canonical_fingerprint(),
+                expected_fingerprint,
+                "{name} should preserve the existing literal-first extraction order"
+            );
+
+            let args = [Value::scalar_f64(3.5)];
+            assert_eq!(
+                eval_jaxpr(&jaxpr, &args)?,
+                eval_jaxpr(&optimized, &args)?,
+                "{name} fast path should preserve observable value and dtype"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]
