@@ -447,6 +447,12 @@ pub fn apply_batch_rule(
         Primitive::Qr | Primitive::Svd | Primitive::Eigh => {
             batch_passthrough_leading(primitive, inputs, params)
         }
+        // Det → scalar, Solve → x. Single-output; per-slice eval + stack is the
+        // vmap. batch_passthrough_leading handles Solve's partial batching
+        // (e.g. batched A with shared b) by broadcasting unbatched inputs.
+        Primitive::Det | Primitive::Solve => {
+            batch_passthrough_leading(primitive, inputs, params)
+        }
         Primitive::Fft | Primitive::Ifft | Primitive::Rfft | Primitive::Irfft => {
             batch_fft_like(primitive, inputs, params)
         }
@@ -473,6 +479,11 @@ pub fn apply_batch_rule(
         // ── Control flow ───────────────────────────────────────
         Primitive::Cond => batch_cond(inputs, params),
         Primitive::Scan => batch_scan(inputs, params),
+        // associative_scan runs an associative combine over a single array
+        // axis. vmap = run the whole scan independently per batch slice; the
+        // per-slice operand carries the original (unbatched) axis param, so
+        // batch_passthrough_leading evaluates it correctly.
+        Primitive::AssociativeScan => batch_passthrough_leading(primitive, inputs, params),
         Primitive::While => batch_while(inputs, params),
         Primitive::Switch => batch_switch(inputs, params),
 
@@ -8336,6 +8347,71 @@ mod tests {
             &extract_f64_vec(&result.value),
             &[2.0, 0.0, 1.0, 2.0_f64.sqrt(), 3.0, 0.0, 1.0, 1.0],
         );
+    }
+
+    #[test]
+    fn test_batch_trace_det_leading_batch_dim() {
+        // vmap(det) over [2,2,2]: det([[4,2],[2,3]])=8, det([[9,3],[3,2]])=9.
+        let input = BatchTracer::batched(
+            make_f64_tensor(&[2, 2, 2], &[4.0, 2.0, 2.0, 3.0, 9.0, 3.0, 3.0, 2.0]),
+            0,
+        );
+
+        let result = apply_batch_rule(Primitive::Det, &[input], &BTreeMap::new()).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let tensor = result.value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2]);
+        assert_f64_close(&extract_f64_vec(&result.value), &[8.0, 9.0]);
+    }
+
+    #[test]
+    fn test_batch_trace_solve_both_inputs_batched() {
+        // vmap(solve): A0=2I, b0=[2,4] -> [1,2]; A1=4I, b1=[8,4] -> [2,1].
+        let a = BatchTracer::batched(
+            make_f64_tensor(&[2, 2, 2], &[2.0, 0.0, 0.0, 2.0, 4.0, 0.0, 0.0, 4.0]),
+            0,
+        );
+        let b = BatchTracer::batched(make_f64_tensor(&[2, 2], &[2.0, 4.0, 8.0, 4.0]), 0);
+
+        let result = apply_batch_rule(Primitive::Solve, &[a, b], &BTreeMap::new()).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let tensor = result.value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2, 2]);
+        assert_f64_close(&extract_f64_vec(&result.value), &[1.0, 2.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn test_batch_trace_solve_shared_rhs() {
+        // vmap(solve, in_axes=(0, None)): batched A, shared b=[2,2].
+        // A0=2I -> x0=[1,1]; A1=I -> x1=[2,2].
+        let a = BatchTracer::batched(
+            make_f64_tensor(&[2, 2, 2], &[2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0]),
+            0,
+        );
+        let b = BatchTracer::unbatched(make_f64_vector(&[2.0, 2.0]));
+
+        let result = apply_batch_rule(Primitive::Solve, &[a, b], &BTreeMap::new()).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let tensor = result.value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2, 2]);
+        assert_f64_close(&extract_f64_vec(&result.value), &[1.0, 1.0, 2.0, 2.0]);
+    }
+
+    #[test]
+    fn test_batch_trace_associative_scan_leading_batch_dim() {
+        // vmap(associative_scan add) over [2,3]: each row prefix-summed
+        // independently. [1,2,3]->[1,3,6]; [4,5,6]->[4,9,15].
+        let input =
+            BatchTracer::batched(make_f64_tensor(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 0);
+        let mut params = BTreeMap::new();
+        params.insert("body_op".to_owned(), "add".to_owned());
+
+        let result =
+            apply_batch_rule(Primitive::AssociativeScan, &[input], &params).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let tensor = result.value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2, 3]);
+        assert_f64_close(&extract_f64_vec(&result.value), &[1.0, 3.0, 6.0, 4.0, 9.0, 15.0]);
     }
 
     #[test]
