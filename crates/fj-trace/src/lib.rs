@@ -309,11 +309,62 @@ pub struct NestedTraceSummary {
     pub frames: Vec<NestedTraceFrameSummary>,
 }
 
+fn tracer_aval_slot(tracer_id: TracerId) -> Option<usize> {
+    usize::try_from(tracer_id.0.checked_sub(1)?).ok()
+}
+
+fn dense_tracer_aval(
+    tracer_avals: &[ShapedArray],
+    tracer_id: TracerId,
+) -> Result<&ShapedArray, TraceError> {
+    tracer_aval_slot(tracer_id)
+        .and_then(|slot| tracer_avals.get(slot))
+        .ok_or(TraceError::UnboundTracerInput { tracer_id })
+}
+
+fn dense_var_slot(
+    tracer_to_var: &[Option<VarId>],
+    tracer_id: TracerId,
+) -> Result<usize, TraceError> {
+    let slot =
+        usize::try_from(tracer_id.0).map_err(|_| TraceError::UnboundTracerInput { tracer_id })?;
+    if slot == 0 || slot >= tracer_to_var.len() {
+        return Err(TraceError::UnboundTracerInput { tracer_id });
+    }
+    Ok(slot)
+}
+
+fn dense_var(tracer_to_var: &[Option<VarId>], tracer_id: TracerId) -> Result<VarId, TraceError> {
+    let slot = dense_var_slot(tracer_to_var, tracer_id)?;
+    tracer_to_var
+        .get(slot)
+        .copied()
+        .flatten()
+        .ok_or(TraceError::UnboundTracerInput { tracer_id })
+}
+
+fn ensure_dense_var(
+    tracer_to_var: &mut [Option<VarId>],
+    next_var: &mut u32,
+    tracer_id: TracerId,
+) -> Result<VarId, TraceError> {
+    let slot = dense_var_slot(tracer_to_var, tracer_id)?;
+    let var = tracer_to_var
+        .get_mut(slot)
+        .ok_or(TraceError::UnboundTracerInput { tracer_id })?
+        .get_or_insert_with(|| {
+            let var = VarId(*next_var);
+            *next_var += 1;
+            var
+        });
+    Ok(*var)
+}
+
 #[derive(Debug, Clone)]
 pub struct SimpleTraceContext {
     next_tracer_id: u32,
     next_trace_id: u64,
-    tracer_avals: BTreeMap<TracerId, ShapedArray>,
+    tracer_avals: Vec<ShapedArray>,
     const_values: BTreeMap<TracerId, Value>,
     frame_stack: Vec<TraceFrame>,
 }
@@ -340,7 +391,7 @@ impl SimpleTraceContext {
         Self {
             next_tracer_id: 1,
             next_trace_id: 2,
-            tracer_avals: BTreeMap::new(),
+            tracer_avals: Vec::new(),
             const_values: BTreeMap::new(),
             frame_stack: vec![Self::root_frame()],
         }
@@ -498,14 +549,12 @@ impl SimpleTraceContext {
     fn allocate_tracer(&mut self, aval: ShapedArray) -> TracerId {
         let tracer_id = TracerId(self.next_tracer_id);
         self.next_tracer_id += 1;
-        self.tracer_avals.insert(tracer_id, aval);
+        self.tracer_avals.push(aval);
         tracer_id
     }
 
     fn tracer_aval(&self, tracer_id: TracerId) -> Result<&ShapedArray, TraceError> {
-        self.tracer_avals
-            .get(&tracer_id)
-            .ok_or(TraceError::UnboundTracerInput { tracer_id })
+        dense_tracer_aval(&self.tracer_avals, tracer_id)
     }
 
     fn infer_primitive_output_avals(
@@ -2163,48 +2212,35 @@ impl SimpleTraceContext {
     }
 
     fn build_closed_jaxpr(&mut self, frame: TraceFrame) -> Result<ClosedJaxpr, TraceError> {
-        let mut tracer_to_var: BTreeMap<TracerId, VarId> = BTreeMap::new();
+        let dense_var_len =
+            usize::try_from(self.next_tracer_id).map_err(|_| TraceError::CompositionViolation)?;
+        let mut tracer_to_var = vec![None; dense_var_len];
         let mut next_var = 1_u32;
 
-        let ensure_var = |tracer_to_var: &mut BTreeMap<TracerId, VarId>,
-                          next_var: &mut u32,
-                          tracer_id: TracerId| {
-            *tracer_to_var.entry(tracer_id).or_insert_with(|| {
-                let var = VarId(*next_var);
-                *next_var += 1;
-                var
-            })
-        };
-
         for tracer_id in &frame.in_ids {
-            ensure_var(&mut tracer_to_var, &mut next_var, *tracer_id);
+            ensure_dense_var(&mut tracer_to_var, &mut next_var, *tracer_id)?;
         }
         for tracer_id in &frame.const_ids {
-            ensure_var(&mut tracer_to_var, &mut next_var, *tracer_id);
+            ensure_dense_var(&mut tracer_to_var, &mut next_var, *tracer_id)?;
         }
 
         let mut equations = Vec::with_capacity(frame.equations.len());
         for eqn in &frame.equations {
             let mut in_atoms: SmallVec<[Atom; 4]> = SmallVec::with_capacity(eqn.inputs.len());
             for input_id in &eqn.inputs {
-                let var =
-                    tracer_to_var
-                        .get(input_id)
-                        .copied()
-                        .ok_or(TraceError::UnboundTracerInput {
-                            tracer_id: *input_id,
-                        })?;
+                let var = dense_var(&tracer_to_var, *input_id)?;
                 in_atoms.push(Atom::Var(var));
             }
 
             let mut out_vars: SmallVec<[VarId; 2]> = SmallVec::with_capacity(eqn.outputs.len());
             for output_id in &eqn.outputs {
-                if tracer_to_var.contains_key(output_id) {
+                let output_slot = dense_var_slot(&tracer_to_var, *output_id)?;
+                if tracer_to_var.get(output_slot).copied().flatten().is_some() {
                     return Err(TraceError::OutputShadowing {
                         tracer_id: *output_id,
                     });
                 }
-                let out_var = ensure_var(&mut tracer_to_var, &mut next_var, *output_id);
+                let out_var = ensure_dense_var(&mut tracer_to_var, &mut next_var, *output_id)?;
                 out_vars.push(out_var);
             }
 
@@ -2221,27 +2257,13 @@ impl SimpleTraceContext {
         let invars = frame
             .in_ids
             .iter()
-            .map(|tracer_id| {
-                tracer_to_var
-                    .get(tracer_id)
-                    .copied()
-                    .ok_or(TraceError::UnboundTracerInput {
-                        tracer_id: *tracer_id,
-                    })
-            })
+            .map(|tracer_id| dense_var(&tracer_to_var, *tracer_id))
             .collect::<Result<Vec<_>, _>>()?;
 
         let constvars = frame
             .const_ids
             .iter()
-            .map(|tracer_id| {
-                tracer_to_var
-                    .get(tracer_id)
-                    .copied()
-                    .ok_or(TraceError::UnboundTracerInput {
-                        tracer_id: *tracer_id,
-                    })
-            })
+            .map(|tracer_id| dense_var(&tracer_to_var, *tracer_id))
             .collect::<Result<Vec<_>, _>>()?;
 
         let out_ids = if frame.last_output_ids.is_empty() {
@@ -2253,12 +2275,9 @@ impl SimpleTraceContext {
         let outvars = out_ids
             .iter()
             .map(|tracer_id| {
-                tracer_to_var
-                    .get(tracer_id)
-                    .copied()
-                    .ok_or(TraceError::UnresolvedOutvar {
-                        tracer_id: *tracer_id,
-                    })
+                dense_var(&tracer_to_var, *tracer_id).map_err(|_| TraceError::UnresolvedOutvar {
+                    tracer_id: *tracer_id,
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -2348,11 +2367,7 @@ impl TraceToJaxpr for SimpleTraceContext {
         }
 
         for (idx, tracer_id) in frame.in_ids.iter().enumerate() {
-            let Some(actual_aval) = self.tracer_avals.get(tracer_id) else {
-                return Err(TraceError::UnboundTracerInput {
-                    tracer_id: *tracer_id,
-                });
-            };
+            let actual_aval = self.tracer_aval(*tracer_id)?;
             if actual_aval != &trace.in_avals[idx] {
                 return Err(TraceError::InvalidAbstractValue);
             }
@@ -2363,11 +2378,7 @@ impl TraceToJaxpr for SimpleTraceContext {
                 return Err(TraceError::InvalidAbstractValue);
             }
             for (idx, tracer_id) in frame.last_output_ids.iter().enumerate() {
-                let Some(actual_aval) = self.tracer_avals.get(tracer_id) else {
-                    return Err(TraceError::UnboundTracerInput {
-                        tracer_id: *tracer_id,
-                    });
-                };
+                let actual_aval = self.tracer_aval(*tracer_id)?;
                 if actual_aval != &trace.out_avals[idx] {
                     return Err(TraceError::InvalidAbstractValue);
                 }
@@ -8308,6 +8319,34 @@ mod tests {
     }
 
     #[test]
+    fn test_make_jaxpr_chain_5ops_canonical_golden() {
+        use super::make_jaxpr;
+        let aval = ShapedArray {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        };
+
+        let closed = make_jaxpr(
+            |inputs| {
+                let a = &inputs[0];
+                let b = &inputs[1];
+                let c = a + b;
+                let d = &c * a;
+                let e = &d + b;
+                let f = &e * &c;
+                vec![&f + &d]
+            },
+            vec![aval.clone(), aval],
+        )
+        .unwrap();
+
+        assert_eq!(
+            closed.jaxpr.canonical_fingerprint(),
+            "in=[v1,v2,]const=[]out=[v7,]eqn:add(v1,v2,)->v3,{}|eqn:mul(v3,v1,)->v4,{}|eqn:add(v4,v2,)->v5,{}|eqn:mul(v5,v3,)->v6,{}|eqn:add(v6,v4,)->v7,{}|"
+        );
+    }
+
+    #[test]
     fn test_make_jaxpr_vector_shape_inference() {
         // Trace with vector inputs, verify shape propagation
         use super::make_jaxpr;
@@ -8552,7 +8591,11 @@ mod tests {
                 },
             ]);
             let out = ctx
-                .process_primitive(Primitive::Solve, &[TracerId(1), TracerId(2)], BTreeMap::new())
+                .process_primitive(
+                    Primitive::Solve,
+                    &[TracerId(1), TracerId(2)],
+                    BTreeMap::new(),
+                )
                 .unwrap();
             assert_eq!(out.len(), 1);
             let x = ctx.tracer_aval(out[0]).unwrap();

@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "project": "frankenjax",
+  "bead": "frankenjax-mcqr.3",
+  "pass": 27,
+  "crate": "fj-trace",
+  "date_utc": "2026-06-02",
+  "skill_loop": [
+    "repeatedly-apply-skill",
+    "extreme-software-optimization",
+    "alien-graveyard",
+    "alien-artifact-coding"
+  ],
+  "profile_target": {
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- cargo bench -p fj-trace --bench trace_baseline -- --sample-size 80 --measurement-time 3",
+    "worker": "vmi1153651",
+    "top_endpoint": "trace/make_jaxpr_chain_5ops",
+    "mean": "4.3045 us",
+    "confidence_interval": "[4.1204 us, 4.5236 us]",
+    "next_endpoints": [
+      {
+        "endpoint": "trace/make_jaxpr_vector_add",
+        "mean": "2.0380 us"
+      },
+      {
+        "endpoint": "trace/make_jaxpr_add",
+        "mean": "1.6493 us"
+      }
+    ]
+  },
+  "optimization": {
+    "lever": "Replace trace-local monotonic TracerId -> ShapedArray and TracerId -> VarId ordered-map lookups with dense Vec-backed slots.",
+    "files": [
+      "crates/fj-trace/src/lib.rs"
+    ],
+    "alien_graveyard_card": {
+      "symptom": "Hot trace construction path spends time in ordered-map lookups for monotonically allocated integer identifiers.",
+      "primitive": "Cache-local dense layout / optimal memory layout for monotonic IDs.",
+      "expected_value": 6.0,
+      "fallback": "Return TraceError through checked dense-slot helpers; if allocation monotonicity changes, restore ordered-map semantics or add an explicit sparse fallback."
+    },
+    "alien_artifact": {
+      "artifact": "Dense trace-local ID store",
+      "proof_obligations": [
+        "TracerId allocation remains monotonic from 1.",
+        "VarId assignment order remains invars, constvars, then equation outputs in original equation order.",
+        "Equation order, output order, params, and sub-jaxprs are not reordered.",
+        "Unbound tracer and unresolved output errors remain fail-closed TraceError results.",
+        "No floating-point operations or RNG are introduced or reordered."
+      ]
+    }
+  },
+  "keeper_benchmark": {
+    "baseline": {
+      "commit": "6534cabb",
+      "checkout": "/data/projects/frankenjax-baseline-mcqr3-1780427040",
+      "worker": "vmi1149989",
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- cargo bench -p fj-trace --bench trace_baseline -- --sample-size 80 --measurement-time 3",
+      "means": {
+        "trace/make_jaxpr_identity": "238.00 ns",
+        "trace/make_jaxpr_add": "646.66 ns",
+        "trace/make_jaxpr_mul": "710.28 ns",
+        "trace/make_jaxpr_poly_x2+x": "818.43 ns",
+        "trace/make_jaxpr_chain_5ops": "2.3527 us",
+        "trace/make_jaxpr_vector_add": "1.4765 us"
+      }
+    },
+    "after": {
+      "worker": "vmi1149989",
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- cargo bench -p fj-trace --bench trace_baseline -- --sample-size 80 --measurement-time 3",
+      "means": {
+        "trace/make_jaxpr_identity": "228.11 ns",
+        "trace/make_jaxpr_add": "469.84 ns",
+        "trace/make_jaxpr_mul": "480.61 ns",
+        "trace/make_jaxpr_poly_x2+x": "649.12 ns",
+        "trace/make_jaxpr_chain_5ops": "2.3471 us",
+        "trace/make_jaxpr_vector_add": "673.79 ns"
+      }
+    },
+    "speedups": {
+      "trace/make_jaxpr_identity": "1.04x",
+      "trace/make_jaxpr_add": "1.38x",
+      "trace/make_jaxpr_mul": "1.48x",
+      "trace/make_jaxpr_poly_x2+x": "1.26x",
+      "trace/make_jaxpr_chain_5ops": "1.00x",
+      "trace/make_jaxpr_vector_add": "2.19x"
+    },
+    "score": {
+      "impact": 3,
+      "confidence": 4,
+      "effort": 2,
+      "value": 6.0
+    },
+    "residual": "trace/make_jaxpr_chain_5ops remained effectively unchanged in the keeper same-worker pair and needs a separate equation-clone/residual-graph pass."
+  },
+  "behavior_proof": {
+    "ordering": "preserved: dense helpers assign VarId in the same explicit invar, constvar, equation-output traversal order; equations/outvars keep Vec order.",
+    "tie_breaking": "not applicable: trace construction has no tie-breaking policy.",
+    "floating_point": "not applicable to trace construction; no f64 arithmetic path changed.",
+    "rng": "not applicable: no RNG path touched.",
+    "error_classes": "preserved through checked dense-slot helpers returning TraceError::UnboundTracerInput, TraceError::UnresolvedOutvar, or TraceError::CompositionViolation instead of panicking.",
+    "golden": {
+      "file": "artifacts/performance/evidence/fj_trace_dense_tracer_store_pass27_2026-06-02.golden",
+      "sha256": "c2e73a3134b13238c5a75665c3983a4246151e1ea4bb9e4add776dd715e0086e",
+      "check_command": "sha256sum -c artifacts/performance/evidence/fj_trace_dense_tracer_store_pass27_2026-06-02.golden.sha256"
+    }
+  },
+  "validation": [
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-trace/src/lib.rs",
+      "result": "pass"
+    },
+    {
+      "command": "git diff --check -- crates/fj-trace/src/lib.rs artifacts/performance/evidence/fj_trace_dense_tracer_store_pass27_2026-06-02.golden artifacts/performance/evidence/fj_trace_dense_tracer_store_pass27_2026-06-02.golden.sha256",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- cargo check -p fj-trace --all-targets",
+      "worker": "vmi1153651",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- cargo test -p fj-trace -- --nocapture",
+      "worker": "vmi1264463",
+      "result": "pass: 141 unit tests, 9 integration tests"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- cargo clippy -p fj-trace --all-targets -- -D warnings",
+      "worker": "vmi1227854",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-trace/src/lib.rs",
+      "result": "exit 0; 0 critical findings; remaining warnings are pre-existing fj-trace inventory"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_trace_dense_tracer_store_pass27_2026-06-02.golden.sha256",
+      "result": "pass"
+    }
+  ],
+  "non_keeper_notes": [
+    "A local fallback attempt outside /data/projects was ignored because RCH failed open locally.",
+    "An after-run on vmi1227854 before the final checked-helper tightening showed chain_5ops 2.0585 us, but the keeper pair uses the final code state on vmi1149989."
+  ]
+}

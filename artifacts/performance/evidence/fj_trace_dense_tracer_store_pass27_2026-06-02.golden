@@ -1,0 +1,6 @@
+scenario=trace/make_jaxpr_chain_5ops
+canonical_fingerprint=in=[v1,v2,]const=[]out=[v7,]eqn:add(v1,v2,)->v3,{}|eqn:mul(v3,v1,)->v4,{}|eqn:add(v4,v2,)->v5,{}|eqn:mul(v5,v3,)->v6,{}|eqn:add(v6,v4,)->v7,{}|
+ordering=preserved
+tie_breaking=n/a
+floating_point=n/a_trace_only
+rng=n/a
