@@ -109,7 +109,7 @@ pub struct CacheStats {
 /// The `Send + Sync` bound on `CacheBackend` enables wrapping in `Arc<Mutex<_>>`.
 #[derive(Debug, Default)]
 pub struct InMemoryCache {
-    entries: HashMap<String, CachedArtifact>,
+    entries: HashMap<CacheKey, CachedArtifact>,
 }
 
 impl InMemoryCache {
@@ -121,15 +121,15 @@ impl InMemoryCache {
 
 impl CacheBackend for InMemoryCache {
     fn get(&self, key: &CacheKey) -> Option<CachedArtifact> {
-        self.entries.get(&key.as_string()).cloned()
+        self.entries.get(key).cloned()
     }
 
     fn put(&mut self, key: &CacheKey, artifact: CachedArtifact) {
-        self.entries.insert(key.as_string(), artifact);
+        self.entries.insert(key.clone(), artifact);
     }
 
     fn evict(&mut self, key: &CacheKey) -> bool {
-        self.entries.remove(&key.as_string()).is_some()
+        self.entries.remove(key).is_some()
     }
 
     fn stats(&self) -> CacheStats {
@@ -383,6 +383,13 @@ mod tests {
         }
     }
 
+    fn test_key_with_namespace(namespace: &'static str, digest: &str) -> CacheKey {
+        CacheKey {
+            namespace,
+            digest_hex: digest.to_owned(),
+        }
+    }
+
     fn test_artifact(data: &[u8]) -> CachedArtifact {
         CachedArtifact {
             data: data.to_vec(),
@@ -403,6 +410,24 @@ mod tests {
 
         assert!(cache.evict(&key));
         assert!(cache.get(&key).is_none());
+        assert_eq!(cache.stats().entry_count, 0);
+    }
+
+    #[test]
+    fn in_memory_keys_include_namespace_and_digest() {
+        let mut cache = InMemoryCache::new();
+        let current_namespace_key = test_key_with_namespace("fjx-v2", "aabb");
+        let legacy_namespace_key = test_key_with_namespace("fjx-v1", "aabb");
+
+        cache.put(&current_namespace_key, test_artifact(b"current"));
+
+        assert!(cache.get(&legacy_namespace_key).is_none());
+        assert_eq!(
+            cache.get(&current_namespace_key),
+            Some(test_artifact(b"current"))
+        );
+        assert!(!cache.evict(&legacy_namespace_key));
+        assert!(cache.evict(&current_namespace_key));
         assert_eq!(cache.stats().entry_count, 0);
     }
 

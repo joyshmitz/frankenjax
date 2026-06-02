@@ -11,6 +11,7 @@ pub use backend::CachedArtifact;
 use fj_core::{CompatibilityMode, Jaxpr, Transform};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 pub const CACHE_KEY_NAMESPACE: &str = "fjx-v2";
 const CACHE_KEY_PAYLOAD_VERSION: &str = "2";
@@ -26,10 +27,18 @@ pub struct CacheKeyInput {
     pub unknown_incompatible_features: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheKey {
     pub namespace: &'static str,
     pub digest_hex: String,
+}
+
+impl Hash for CacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(self.namespace.as_bytes());
+        state.write_u8(b'-');
+        state.write(self.digest_hex.as_bytes());
+    }
 }
 
 impl CacheKey {

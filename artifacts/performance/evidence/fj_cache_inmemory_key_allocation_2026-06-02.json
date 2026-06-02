@@ -1,0 +1,72 @@
+{
+  "bead": "frankenjax-40ob",
+  "crate": "fj-cache",
+  "date": "2026-06-02",
+  "lever": "Store InMemoryCache entries by CacheKey and hash canonical key bytes without allocating CacheKey::as_string() on lookup.",
+  "golden_sha256": "9acfc41fbc9c06a8120d161100e7befee8d641ceaf3a02c064f13ff002b8689c",
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-baseline-40ob cargo bench -p fj-cache --bench cache_baseline -- cache_lookup --sample-size 60 --measurement-time 3 --warm-up-time 1",
+    "worker": "vmi1153651",
+    "hit_in_memory_ns": {
+      "low": 322.52,
+      "mean": 328.99,
+      "high": 335.89
+    },
+    "miss_in_memory_ns": {
+      "low": 43.314,
+      "mean": 45.234,
+      "high": 47.664
+    }
+  },
+  "after": {
+    "primary": {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-after-40ob-v2 cargo bench -p fj-cache --bench cache_baseline -- cache_lookup --sample-size 60 --measurement-time 3 --warm-up-time 1",
+      "worker": "vmi1156319",
+      "hit_in_memory_ns": {
+        "low": 262.19,
+        "mean": 266.60,
+        "high": 271.19
+      },
+      "miss_in_memory_ns": {
+        "low": 12.604,
+        "mean": 13.070,
+        "high": 13.411
+      }
+    },
+    "repeat": {
+      "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-after-40ob-v2-repeat cargo bench -p fj-cache --bench cache_baseline -- cache_lookup --sample-size 60 --measurement-time 3 --warm-up-time 1",
+      "worker": "vmi1227854",
+      "hit_in_memory_ns": {
+        "low": 200.61,
+        "mean": 220.74,
+        "high": 247.29
+      },
+      "miss_in_memory_ns": {
+        "low": 9.6098,
+        "mean": 12.585,
+        "high": 17.305
+      }
+    }
+  },
+  "conservative_delta": {
+    "hit_speedup": 1.234,
+    "miss_speedup": 3.461
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 3,
+    "effort": 2,
+    "value": 4.5
+  },
+  "behavior_proof": {
+    "namespace_digest_identity_preserved": true,
+    "hit_miss_semantics_preserved": true,
+    "artifact_clone_semantics_preserved": true,
+    "put_overwrite_semantics_preserved": true,
+    "evict_semantics_preserved": true,
+    "ordering_tie_breaking_changed": false,
+    "floating_point_changed": false,
+    "rng_changed": false,
+    "error_behavior_changed": false
+  }
+}

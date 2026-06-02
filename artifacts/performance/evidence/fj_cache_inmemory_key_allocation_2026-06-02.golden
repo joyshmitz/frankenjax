@@ -1,0 +1,44 @@
+frankenjax-40ob fj-cache in-memory key allocation proof
+
+Profile target:
+- rch Criterion profile, fj-cache cache_baseline, worker vmi1153651
+- cache_lookup/hit/in_memory: 334.07 ns mean [323.52, 345.19]
+- cache_lookup/miss/in_memory: 50.841 ns mean [45.858, 56.472]
+- focused baseline before edit, worker vmi1153651
+- cache_lookup/hit/in_memory: 328.99 ns mean [322.52, 335.89]
+- cache_lookup/miss/in_memory: 45.234 ns mean [43.314, 47.664]
+
+One optimization lever:
+- InMemoryCache now stores entries by CacheKey instead of allocating CacheKey::as_string() for get, put, and evict.
+- CacheKey hashing writes the canonical namespace + '-' + digest bytes without allocating.
+- FileCache path construction and serialized cache-key string behavior are unchanged.
+
+Rebench evidence:
+- rejected intermediate after-run, worker vmi1153651: hit 379.31 ns [336.66, 441.03], miss 16.883 ns [15.169, 18.830]
+- retained refined after-run, worker vmi1156319: hit 266.60 ns [262.19, 271.19], miss 13.070 ns [12.604, 13.411]
+- retained refined repeat, worker vmi1227854: hit 220.74 ns [200.61, 247.29], miss 12.585 ns [9.6098, 17.305]
+- conservative delta against focused baseline: hit 328.99 -> 266.60 ns, 1.234x faster; miss 45.234 -> 13.070 ns, 3.461x faster.
+
+Isomorphism proof:
+- Key identity is still namespace plus digest. The added regression proves fjx-v2/aabb and fjx-v1/aabb do not alias.
+- Hit semantics are unchanged: get returns a cloned CachedArtifact for an existing key.
+- Miss semantics are unchanged: get returns None for absent keys and namespace-mismatched keys.
+- Put overwrite semantics are unchanged: HashMap insertion under equal CacheKey values replaces the prior artifact.
+- Evict semantics are unchanged: evict removes exactly the matching key and returns whether an entry existed.
+- Stats semantics are unchanged: entry_count remains entries.len(), total_bytes remains the sum of artifact byte lengths.
+- Ordering and tie-breaking are not involved; HashMap iteration order is not observable through CacheBackend.
+- Floating-point behavior is not involved; no arithmetic changed.
+- RNG behavior is not involved; no randomness changed.
+- Error behavior is unchanged; InMemoryCache get/put/evict remain infallible and FileCache is untouched.
+
+Validation:
+- cargo fmt -p fj-cache --check
+- RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-check-40ob-v2 cargo check -p fj-cache --all-targets
+- RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-test-40ob-v2 cargo test -p fj-cache in_memory -- --nocapture
+- RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-clippy-40ob-v2 cargo clippy -p fj-cache --all-targets --no-deps -- -D warnings
+- RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-after-40ob-v2 cargo bench -p fj-cache --bench cache_baseline -- cache_lookup --sample-size 60 --measurement-time 3 --warm-up-time 1
+- RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-cache-after-40ob-v2-repeat cargo bench -p fj-cache --bench cache_baseline -- cache_lookup --sample-size 60 --measurement-time 3 --warm-up-time 1
+- ubs crates/fj-cache/src/backend.rs crates/fj-cache/src/lib.rs
+
+Score:
+- Impact 3, Confidence 3, Effort 2 => 4.5. Keep threshold 2.0.
