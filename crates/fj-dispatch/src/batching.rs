@@ -509,6 +509,12 @@ fn apply_batch_rule_multi(
         // the per-slice batcher preserves that per-element semantics and
         // stacks both outputs, matching JAX's top_k batch rule.
         Primitive::TopK => batch_passthrough_leading_multi(primitive, inputs, params),
+        // Slogdet → (sign, logabsdet) scalars. Per-slice eval + stack along
+        // axis 0 is the correct vmap; scalar outputs stack into rank-1
+        // [batch] vectors. (Eig is left fail-closed: it returns complex
+        // eigenvalues/vectors whose ordering is implementation-defined, so a
+        // batched rule needs a complex-aware conformance check first.)
+        Primitive::Slogdet => batch_passthrough_leading_multi(primitive, inputs, params),
         _ => apply_batch_rule(primitive, inputs, params).map(|result| vec![result]),
     }
 }
@@ -6483,6 +6489,22 @@ mod tests {
             outputs[0].value.as_tensor().unwrap().shape.dims,
             vec![2, 2, 1]
         );
+    }
+
+    #[test]
+    fn test_batch_trace_slogdet_multi_leading_batch_dim() {
+        // vmap over slogdet() must batch both scalar outputs (sign,
+        // logabsdet) into rank-1 [batch] vectors.
+        let m0 = make_f64_matrix(2, 2, &[2.0, 0.0, 0.0, 3.0]); // det 6
+        let m1 = make_f64_matrix(2, 2, &[1.0, 2.0, 3.0, 4.0]); // det -2
+        let input = BatchTracer::batched(
+            make_f64_tensor(&[2, 2, 2], &[2.0, 0.0, 0.0, 3.0, 1.0, 2.0, 3.0, 4.0]),
+            0,
+        );
+        let outputs = apply_batch_rule_multi(Primitive::Slogdet, &[input], &BTreeMap::new()).unwrap();
+        assert_multi_matches_slice_oracle(Primitive::Slogdet, &outputs, &[m0, m1], &BTreeMap::new());
+        assert_eq!(outputs[0].value.as_tensor().unwrap().shape.dims, vec![2]);
+        assert_eq!(outputs[1].value.as_tensor().unwrap().shape.dims, vec![2]);
     }
 
     fn assert_eigh_matches_slice_oracle(outputs: &[BatchTracer], matrices: &[Value]) {
