@@ -827,6 +827,10 @@ impl SimpleTraceContext {
             Primitive::Svd => infer_svd(inputs, params),
             Primitive::TriangularSolve => infer_triangular_solve(inputs),
             Primitive::Eigh => infer_eigh(inputs),
+            Primitive::Det => infer_det(inputs),
+            Primitive::Slogdet => infer_slogdet(inputs),
+            Primitive::Eig => infer_eig(inputs),
+            Primitive::Solve => infer_solve(inputs),
             Primitive::Fft => infer_fft(inputs),
             Primitive::Ifft => infer_ifft(inputs),
             Primitive::Rfft => infer_rfft(inputs, params),
@@ -1600,6 +1604,17 @@ impl SimpleTraceContext {
                 }
                 Ok(vec![inputs[0].clone()])
             }
+            // associative_scan output shape/dtype = input (prefix scan in place)
+            Primitive::AssociativeScan => {
+                if inputs.len() != 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: format!("expected 1 input, got {}", inputs.len()),
+                    });
+                }
+                Ok(vec![inputs[0].clone()])
+            }
+            Primitive::TopK => infer_top_k(inputs, params),
             Primitive::Argsort => {
                 // Argsort: output shape = input shape, dtype = I64
                 if inputs.len() != 1 {
@@ -2144,7 +2159,6 @@ impl SimpleTraceContext {
                     shape: Shape { dims: out_dims },
                 }])
             }
-            _ => Err(TraceError::UnsupportedPrimitive { primitive }),
         }
     }
 
@@ -2886,6 +2900,169 @@ fn infer_eigh(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
             },
         },
         input.clone(),
+    ])
+}
+
+fn infer_det(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
+    let primitive = Primitive::Det;
+    let input = expect_single_matrix_input(primitive, inputs)?;
+    if input.shape.rank() != 2 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!(
+                "det expects a 2-D square matrix, got rank {}",
+                input.shape.rank()
+            ),
+        });
+    }
+    expect_square_trailing_dims(primitive, input)?;
+    // eval_det computes on the real part and returns an F64 scalar.
+    Ok(vec![ShapedArray {
+        dtype: DType::F64,
+        shape: Shape { dims: Vec::new() },
+    }])
+}
+
+fn infer_slogdet(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
+    let primitive = Primitive::Slogdet;
+    let input = expect_single_matrix_input(primitive, inputs)?;
+    if input.shape.rank() != 2 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!(
+                "slogdet expects a 2-D square matrix, got rank {}",
+                input.shape.rank()
+            ),
+        });
+    }
+    expect_square_trailing_dims(primitive, input)?;
+    // eval_slogdet returns (sign, logabsdet) as F64 scalars.
+    let scalar = ShapedArray {
+        dtype: DType::F64,
+        shape: Shape { dims: Vec::new() },
+    };
+    Ok(vec![scalar.clone(), scalar])
+}
+
+fn infer_eig(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
+    let primitive = Primitive::Eig;
+    let input = expect_single_matrix_input(primitive, inputs)?;
+    if input.shape.rank() != 2 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!(
+                "eig expects a 2-D square matrix, got rank {}",
+                input.shape.rank()
+            ),
+        });
+    }
+    let n = expect_square_trailing_dims(primitive, input)?;
+    // eval_eig returns (eigenvalues [n], eigenvectors [n, n]) as Complex128.
+    Ok(vec![
+        ShapedArray {
+            dtype: DType::Complex128,
+            shape: Shape { dims: vec![n] },
+        },
+        ShapedArray {
+            dtype: DType::Complex128,
+            shape: Shape { dims: vec![n, n] },
+        },
+    ])
+}
+
+fn infer_solve(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
+    let primitive = Primitive::Solve;
+    if inputs.len() != 2 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!("expected 2 inputs (A, b), got {}", inputs.len()),
+        });
+    }
+    let a = &inputs[0];
+    let b = &inputs[1];
+    if a.shape.rank() != 2 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!(
+                "solve expects a 2-D square matrix A, got rank {}",
+                a.shape.rank()
+            ),
+        });
+    }
+    let n = expect_square_trailing_dims(primitive, a)?;
+    if b.shape.rank() == 0 || b.shape.dims[0] != n {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!(
+                "solve: b leading dim must equal {n}, got shape {:?}",
+                b.shape.dims
+            ),
+        });
+    }
+    // eval_solve promotes integer/bool inputs to a floating dtype; the result
+    // shape matches b ([n] or [n, k]).
+    let output_dtype = match promote_dtype(a.dtype, b.dtype) {
+        dt @ (DType::F16 | DType::BF16 | DType::F32 | DType::F64) => dt,
+        _ => DType::F64,
+    };
+    Ok(vec![ShapedArray {
+        dtype: output_dtype,
+        shape: b.shape.clone(),
+    }])
+}
+
+fn infer_top_k(
+    inputs: &[ShapedArray],
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<ShapedArray>, TraceError> {
+    let primitive = Primitive::TopK;
+    if inputs.len() != 1 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!("expected 1 input, got {}", inputs.len()),
+        });
+    }
+    let input = &inputs[0];
+    let rank = input.shape.rank();
+    if rank == 0 {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: "top_k operand must have >= 1 dimension".to_owned(),
+        });
+    }
+    let raw = params.get("k").ok_or(TraceError::MissingPrimitiveParam {
+        primitive,
+        key: "k",
+    })?;
+    let k: u32 = raw
+        .trim()
+        .parse()
+        .map_err(|_| TraceError::InvalidPrimitiveParam {
+            primitive,
+            key: "k",
+            value: raw.clone(),
+        })?;
+    let axis_size = input.shape.dims[rank - 1];
+    if k > axis_size {
+        return Err(TraceError::ShapeInferenceFailed {
+            primitive,
+            detail: format!("top_k k={k} exceeds last-axis size {axis_size}"),
+        });
+    }
+    let mut out_dims = input.shape.dims.clone();
+    out_dims[rank - 1] = k;
+    // eval_top_k returns (values: same dtype, indices: I64), both [..., k].
+    Ok(vec![
+        ShapedArray {
+            dtype: input.dtype,
+            shape: Shape {
+                dims: out_dims.clone(),
+            },
+        },
+        ShapedArray {
+            dtype: DType::I64,
+            shape: Shape { dims: out_dims },
+        },
     ])
 }
 
@@ -8310,6 +8487,111 @@ mod tests {
         let result = fj_interpreters::eval_jaxpr(&closed.jaxpr, &[input]).unwrap();
         let vals = result[0].as_tensor().unwrap().to_f64_vec().unwrap();
         assert_eq!(vals, vec![10.0, 26.0, 42.0]);
+    }
+
+    #[test]
+    fn shape_inference_det_slogdet_eig_solve_topk_assoc_scan() {
+        let scalar = Shape { dims: vec![] };
+        // Det: [3,3] -> F64 scalar.
+        {
+            let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                dtype: DType::F64,
+                shape: Shape { dims: vec![3, 3] },
+            }]);
+            let out = ctx
+                .process_primitive(Primitive::Det, &[TracerId(1)], BTreeMap::new())
+                .unwrap();
+            assert_eq!(out.len(), 1);
+            let a = ctx.tracer_aval(out[0]).unwrap();
+            assert_eq!(a.dtype, DType::F64);
+            assert_eq!(a.shape, scalar);
+        }
+        // Slogdet: [3,3] -> (F64 scalar, F64 scalar).
+        {
+            let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                dtype: DType::F64,
+                shape: Shape { dims: vec![3, 3] },
+            }]);
+            let out = ctx
+                .process_primitive(Primitive::Slogdet, &[TracerId(1)], BTreeMap::new())
+                .unwrap();
+            assert_eq!(out.len(), 2);
+            for o in &out {
+                let a = ctx.tracer_aval(*o).unwrap();
+                assert_eq!(a.dtype, DType::F64);
+                assert_eq!(a.shape, scalar);
+            }
+        }
+        // Eig: [3,3] -> (Complex128 [3], Complex128 [3,3]).
+        {
+            let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                dtype: DType::F64,
+                shape: Shape { dims: vec![3, 3] },
+            }]);
+            let out = ctx
+                .process_primitive(Primitive::Eig, &[TracerId(1)], BTreeMap::new())
+                .unwrap();
+            assert_eq!(out.len(), 2);
+            let w = ctx.tracer_aval(out[0]).unwrap();
+            let v = ctx.tracer_aval(out[1]).unwrap();
+            assert_eq!(w.dtype, DType::Complex128);
+            assert_eq!(w.shape, Shape { dims: vec![3] });
+            assert_eq!(v.dtype, DType::Complex128);
+            assert_eq!(v.shape, Shape { dims: vec![3, 3] });
+        }
+        // Solve: A[3,3], b[3] -> F64 [3].
+        {
+            let mut ctx = SimpleTraceContext::with_inputs(vec![
+                ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape { dims: vec![3, 3] },
+                },
+                ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape { dims: vec![3] },
+                },
+            ]);
+            let out = ctx
+                .process_primitive(Primitive::Solve, &[TracerId(1), TracerId(2)], BTreeMap::new())
+                .unwrap();
+            assert_eq!(out.len(), 1);
+            let x = ctx.tracer_aval(out[0]).unwrap();
+            assert_eq!(x.dtype, DType::F64);
+            assert_eq!(x.shape, Shape { dims: vec![3] });
+        }
+        // TopK: [2,5] k=3 -> (values F64 [2,3], indices I64 [2,3]).
+        {
+            let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                dtype: DType::F64,
+                shape: Shape { dims: vec![2, 5] },
+            }]);
+            let mut params = BTreeMap::new();
+            params.insert("k".to_owned(), "3".to_owned());
+            let out = ctx
+                .process_primitive(Primitive::TopK, &[TracerId(1)], params)
+                .unwrap();
+            assert_eq!(out.len(), 2);
+            let vals = ctx.tracer_aval(out[0]).unwrap();
+            let idx = ctx.tracer_aval(out[1]).unwrap();
+            assert_eq!(vals.dtype, DType::F64);
+            assert_eq!(vals.shape, Shape { dims: vec![2, 3] });
+            assert_eq!(idx.dtype, DType::I64);
+            assert_eq!(idx.shape, Shape { dims: vec![2, 3] });
+        }
+        // AssociativeScan: [4] -> [4] same dtype.
+        {
+            let mut ctx = SimpleTraceContext::with_inputs(vec![ShapedArray {
+                dtype: DType::F64,
+                shape: Shape { dims: vec![4] },
+            }]);
+            let out = ctx
+                .process_primitive(Primitive::AssociativeScan, &[TracerId(1)], BTreeMap::new())
+                .unwrap();
+            assert_eq!(out.len(), 1);
+            let a = ctx.tracer_aval(out[0]).unwrap();
+            assert_eq!(a.dtype, DType::F64);
+            assert_eq!(a.shape, Shape { dims: vec![4] });
+        }
     }
 
     #[test]
