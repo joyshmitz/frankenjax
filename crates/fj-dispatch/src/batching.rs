@@ -505,6 +505,10 @@ fn apply_batch_rule_multi(
         // stacked fast path; the generic per-slice batcher runs lu() on each
         // batch element and stacks every output, matching JAX's batched LU.
         Primitive::Lu => batch_passthrough_leading_multi(primitive, inputs, params),
+        // TopK is multi-output (values, indices) and reduces the last axis;
+        // the per-slice batcher preserves that per-element semantics and
+        // stacks both outputs, matching JAX's top_k batch rule.
+        Primitive::TopK => batch_passthrough_leading_multi(primitive, inputs, params),
         _ => apply_batch_rule(primitive, inputs, params).map(|result| vec![result]),
     }
 }
@@ -6438,6 +6442,47 @@ mod tests {
         );
         let outputs = apply_batch_rule_multi(Primitive::Lu, &[input], &BTreeMap::new()).unwrap();
         assert_multi_matches_slice_oracle(Primitive::Lu, &outputs, &[m0, m1], &BTreeMap::new());
+    }
+
+    #[test]
+    fn test_batch_trace_topk_multi_leading_batch_dim() {
+        // vmap over top_k() must batch both outputs (values, indices),
+        // reducing the last axis per batch element.
+        let params = BTreeMap::from([("k".to_owned(), "2".to_owned())]);
+        let v0 = make_f64_tensor(&[4], &[3.0, 1.0, 4.0, 2.0]);
+        let v1 = make_f64_tensor(&[4], &[9.0, 7.0, 8.0, 6.0]);
+        let input = BatchTracer::batched(
+            make_f64_tensor(&[2, 4], &[3.0, 1.0, 4.0, 2.0, 9.0, 7.0, 8.0, 6.0]),
+            0,
+        );
+        let outputs = apply_batch_rule_multi(Primitive::TopK, &[input], &params).unwrap();
+        assert_multi_matches_slice_oracle(Primitive::TopK, &outputs, &[v0, v1], &params);
+        assert_eq!(outputs[0].value.as_tensor().unwrap().shape.dims, vec![2, 2]);
+    }
+
+    #[test]
+    fn test_batch_trace_topk_multi_nonleading_batch_dim() {
+        // Batch dim at axis 1; move_batch_dim_to_front must transpose to
+        // [batch, rows, cols] while top_k still reduces the last axis.
+        let params = BTreeMap::from([("k".to_owned(), "1".to_owned())]);
+        let v0 = make_f64_matrix(2, 3, &[5.0, 2.0, 8.0, 1.0, 9.0, 4.0]);
+        let v1 = make_f64_matrix(2, 3, &[7.0, 3.0, 6.0, 0.0, 2.0, 10.0]);
+        let input = BatchTracer::batched(
+            make_f64_tensor(
+                &[2, 2, 3],
+                &[
+                    5.0, 2.0, 8.0, 7.0, 3.0, 6.0, // row 0, both lanes
+                    1.0, 9.0, 4.0, 0.0, 2.0, 10.0, // row 1, both lanes
+                ],
+            ),
+            1,
+        );
+        let outputs = apply_batch_rule_multi(Primitive::TopK, &[input], &params).unwrap();
+        assert_multi_matches_slice_oracle(Primitive::TopK, &outputs, &[v0, v1], &params);
+        assert_eq!(
+            outputs[0].value.as_tensor().unwrap().shape.dims,
+            vec![2, 2, 1]
+        );
     }
 
     fn assert_eigh_matches_slice_oracle(outputs: &[BatchTracer], matrices: &[Value]) {
