@@ -1,0 +1,7 @@
+frankenjax-mcqr.1 fj-lax F64 unary elementwise fast path golden
+
+primitive_set: sin, exp
+input_order: [-0.0, 0.0, 0.125, -1.5, PI, +inf, -inf, quiet_nan_payload_0x42]
+output_contract: concatenate sin output F64Bits followed by exp output F64Bits in input order
+serde_json_sha256: 05f74679299f58d4736eaa85fee8265afdc992a428f9cf4e260fd36b1297e2c7
+proof: each output bit is produced by the same scalar f64 operation used by the generic path; malformed F64 tensors fall through to the existing TypeMismatch path
