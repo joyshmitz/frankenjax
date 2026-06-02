@@ -1,0 +1,56 @@
+{
+  "pass": 7,
+  "bead": "frankenjax-xxwa",
+  "crate": "fj-cache",
+  "target": "cache_lookup/hit/in_memory",
+  "profile_backed_target": {
+    "baseline_command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-xxwa-cache-baseline rch exec -- cargo bench -p fj-cache --bench cache_baseline -- --sample-size 20 --measurement-time 3 --warm-up-time 1",
+    "baseline_worker": "ts2",
+    "baseline_midpoint_ns": 448.63,
+    "baseline_interval_ns": [444.58, 452.90],
+    "hyperfine_command": "hyperfine --warmup 3 --runs 10 --show-output 'CARGO_TARGET_DIR=/data/tmp/frankenjax-xxwa-hf-baseline rch exec -- cargo bench -p fj-cache --bench cache_baseline -- cache_lookup/hit/in_memory --sample-size 10 --measurement-time 1 --warm-up-time 1'",
+    "hyperfine_wall_seconds_mean": 34.025,
+    "hyperfine_wall_seconds_stddev": 8.387,
+    "hyperfine_wall_seconds_range": [29.848, 57.642]
+  },
+  "change": {
+    "lever": "Compare freshly computed SHA-256 digest bytes directly against stored lowercase hex during CacheManager::get, avoiding allocation of an intermediate hex String on hit lookup.",
+    "files": ["crates/fj-cache/src/lib.rs"],
+    "single_lever": true,
+    "unsafe": false
+  },
+  "after": {
+    "command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-xxwa-cache-after rch exec -- cargo bench -p fj-cache --bench cache_baseline -- cache_lookup/hit/in_memory --sample-size 20 --measurement-time 3 --warm-up-time 1",
+    "worker": "ts2",
+    "midpoint_ns": 365.86,
+    "interval_ns": [362.53, 368.57],
+    "midpoint_delta_ns": -82.77,
+    "midpoint_delta_percent": -18.45
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 4,
+    "effort": 2,
+    "score": 6.0,
+    "kept": true
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "yes; lookup still performs exactly one backend get and returns Hit, Corrupted, or Miss from the same branches.",
+    "tie_breaking_unchanged": "N/A; no ordering or priority decisions are introduced.",
+    "floating_point": "N/A; no floating-point operations.",
+    "rng": "N/A; no random inputs or seeds.",
+    "cache_key_determinism": "unchanged; build_cache_key and sha256_hex remain intact, and existing golden cache-key tests passed.",
+    "integrity_semantics": "unchanged; lowercase exact digest hits, uppercase digest, short digest, and wrong digest reject exactly like String equality with a lowercase actual hex string.",
+    "golden_outputs": "sha256sum -c artifacts/performance/evidence/fj_cache_lookup_hex_compare_pass7_2026-06-02.golden.sha256 passed",
+    "golden_sha256": "19dc51e31897469421a211fc1f3f021d757f570f897c8bd48fda928505c7e075"
+  },
+  "validation": [
+    "rustfmt --edition 2024 crates/fj-cache/src/lib.rs",
+    "git diff --check -- crates/fj-cache/src/lib.rs",
+    "rustfmt --edition 2024 --check crates/fj-cache/src/lib.rs",
+    "ubs crates/fj-cache/src/lib.rs (exit 0; no critical findings)",
+    "CARGO_TARGET_DIR=/data/tmp/frankenjax-xxwa-fj-cache-verify rch exec -- cargo check -p fj-cache --all-targets",
+    "CARGO_TARGET_DIR=/data/tmp/frankenjax-xxwa-fj-cache-verify2 rch exec -- cargo test -p fj-cache --all-targets (94 tests passed plus bench harness smoke)",
+    "CARGO_TARGET_DIR=/data/tmp/frankenjax-xxwa-fj-cache-verify2 rch exec -- cargo clippy -p fj-cache --all-targets --no-deps -- -D warnings"
+  ]
+}

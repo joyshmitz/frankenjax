@@ -316,8 +316,7 @@ impl CacheManager {
         match self.backend.get(key) {
             Some(artifact) => {
                 // Verify integrity.
-                let actual_hex = sha256_hex(&artifact.data);
-                if actual_hex == artifact.integrity_sha256_hex {
+                if sha256_matches_hex(&artifact.data, &artifact.integrity_sha256_hex) {
                     CacheLookup::Hit {
                         data: artifact.data,
                     }
@@ -368,6 +367,28 @@ pub fn bytes_to_hex(bytes: &[u8]) -> String {
         out.push(HEX_LUT[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+fn sha256_matches_hex(data: &[u8], expected_hex: &str) -> bool {
+    const HEX_LUT: &[u8; 16] = b"0123456789abcdef";
+    const SHA256_HEX_LEN: usize = 64;
+
+    let expected = expected_hex.as_bytes();
+    if expected.len() != SHA256_HEX_LEN {
+        return false;
+    }
+
+    let digest = Sha256::digest(data);
+    for (index, byte) in digest.iter().enumerate() {
+        let hex_index = index * 2;
+        if expected[hex_index] != HEX_LUT[(byte >> 4) as usize]
+            || expected[hex_index + 1] != HEX_LUT[(byte & 0x0f) as usize]
+        {
+            return false;
+        }
+    }
+
+    true
 }
 
 /// Compute SHA-256 hex digest of arbitrary bytes.
@@ -766,6 +787,28 @@ mod tests {
     }
 
     // ── CacheManager integration tests ─────────────────────────────
+
+    #[test]
+    fn sha256_hex_match_preserves_lowercase_digest_semantics() {
+        let digest = super::sha256_hex(b"clean payload");
+        assert_eq!(
+            digest,
+            "0af9d4307c44c5114c1cc33f6b9484940f60e188bd54f686189c82d73ad82df0"
+        );
+        assert!(super::sha256_matches_hex(b"clean payload", &digest));
+        assert!(!super::sha256_matches_hex(
+            b"clean payload",
+            &digest.to_ascii_uppercase()
+        ));
+
+        let short_digest = digest
+            .strip_prefix('0')
+            .expect("clean payload digest starts with zero");
+        assert!(!super::sha256_matches_hex(b"clean payload", short_digest));
+
+        let wrong_digest = format!("1{short_digest}");
+        assert!(!super::sha256_matches_hex(b"clean payload", &wrong_digest));
+    }
 
     #[test]
     fn cache_manager_in_memory_hit_miss_cycle() {

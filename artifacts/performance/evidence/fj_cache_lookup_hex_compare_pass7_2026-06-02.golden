@@ -1,0 +1,13 @@
+fj-cache pass7 golden output
+payload.clean=clean payload
+payload.clean.sha256_hex=0af9d4307c44c5114c1cc33f6b9484940f60e188bd54f686189c82d73ad82df0
+payload.cached_result=cached_result
+payload.cached_result.sha256_hex=b7fdb20618bde31df5d0ac09c9aed3e5f77e912698460495b708ec00ea860706
+lookup.match.lowercase=Hit(data=clean payload)
+lookup.match.uppercase=Corrupted
+lookup.match.short_digest=Corrupted
+lookup.match.wrong_digest=Corrupted
+ordering=unchanged
+tie_breaking=unchanged
+floating_point=N/A
+rng=N/A
