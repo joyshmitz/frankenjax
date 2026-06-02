@@ -1,0 +1,68 @@
+{
+  "bead": "frankenjax-5ucv",
+  "date": "2026-06-02",
+  "crate": "fj-core",
+  "profile_target": {
+    "benchmark": "core/jaxpr_clone_large",
+    "source": "rch Criterion fj-core profile",
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-core-profile-pass18 cargo bench -p fj-core --bench core_baseline -- --sample-size 40 --warm-up-time 1 --measurement-time 2"
+  },
+  "ranked_hotspots": [
+    {
+      "rank": 1,
+      "benchmark": "core/jaxpr_clone_large",
+      "mean_us": 2.3611,
+      "confidence_interval_us": [2.2854, 2.4646],
+      "category": "clone/allocation"
+    },
+    {
+      "rank": 2,
+      "benchmark": "core/jaxpr_validate_large",
+      "mean_ns": 770.73,
+      "confidence_interval_ns": [730.48, 814.68],
+      "category": "validation/hashset"
+    },
+    {
+      "rank": 3,
+      "benchmark": "core/tensor_value_new_1k",
+      "mean_ns": 354.8,
+      "confidence_interval_ns": [345.56, 366.11],
+      "category": "tensor construction"
+    }
+  ],
+  "candidate": {
+    "lever_count": 1,
+    "lever": "Manual Equation Clone that special-cases empty params/effects/sub_jaxprs instead of derived Clone.",
+    "kept": false,
+    "rejection_reason": "Same-worker focused rebench regressed the target mean, so the source diff was dropped."
+  },
+  "candidate_check": {
+    "command": "RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-core-check-pass18 cargo check -p fj-core --all-targets",
+    "worker": "vmi1153651",
+    "result": "passed"
+  },
+  "candidate_rebench": {
+    "worker": "vmi1227854",
+    "samples": 60,
+    "warm_up_seconds": 1,
+    "measurement_seconds": 3,
+    "mean_us": 2.4225,
+    "confidence_interval_us": [2.3454, 2.5171],
+    "outliers": "11 high outliers among 60 measurements"
+  },
+  "delta": {
+    "baseline_us": 2.3611,
+    "candidate_us": 2.4225,
+    "speedup": 0.9747,
+    "mean_change_percent": 2.6
+  },
+  "score": {
+    "impact": 0,
+    "confidence": 3,
+    "effort": 1,
+    "impact_times_confidence_div_effort": 0.0,
+    "keep": false
+  },
+  "source_state": "No fj-core source diff retained after rejection.",
+  "ubs_note": "UBS on crates/fj-core/src/lib.rs exited 1 due pre-existing file-wide findings at prior HEAD: test-only panic inventory and an Instant::now security-token heuristic false positive. These were not part of the candidate lever and were not changed."
+}
