@@ -1,0 +1,83 @@
+{
+  "pass": 36,
+  "bead": "frankenjax-ggpw",
+  "crate": "fj-dispatch",
+  "date": "2026-06-03",
+  "lever": "batched-operand rank-1 gather direct path",
+  "status": "rejected",
+  "score": 0.0,
+  "profile_target": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-profile-pass36-20260603 rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- --sample-size 20 --warm-up-time 1 --measurement-time 2",
+    "worker": "vmi1153651",
+    "vmap_gather_batched_operand_shared_indices_ms": {
+      "low": 27.953,
+      "mean": 28.519,
+      "high": 29.065
+    },
+    "vmap_gather_batched_operand_batched_indices_ms": {
+      "low": 27.959,
+      "mean": 29.168,
+      "high": 30.612
+    }
+  },
+  "focused_baseline": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-gather-pass36-baseline-20260603 rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_gather/(batched_operand_shared_indices|batched_operand_batched_indices)' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1227854",
+    "vmap_gather_batched_operand_shared_indices_ms": {
+      "low": 3.0363,
+      "mean": 3.1843,
+      "high": 3.3046
+    },
+    "vmap_gather_batched_operand_batched_indices_ms": {
+      "low": 3.0111,
+      "mean": 3.0936,
+      "high": 3.1679
+    }
+  },
+  "candidate_rebench": [
+    {
+      "variant": "direct path with cloned axis-0 operand",
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-gather-pass36-after-20260603 rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_gather/(batched_operand_shared_indices|batched_operand_batched_indices)' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+      "worker": "vmi1227854",
+      "vmap_gather_batched_operand_shared_indices_ms": {
+        "low": 21.032,
+        "mean": 21.349,
+        "high": 21.647
+      },
+      "vmap_gather_batched_operand_batched_indices_ms": {
+        "low": 21.753,
+        "mean": 22.152,
+        "high": 22.596
+      }
+    },
+    {
+      "variant": "direct path borrowing axis-0 operand and indices",
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-gather-pass36-after2-20260603 rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_gather/(batched_operand_shared_indices|batched_operand_batched_indices)' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+      "worker": "vmi1156319",
+      "vmap_gather_batched_operand_shared_indices_ms": {
+        "low": 29.217,
+        "mean": 29.900,
+        "high": 30.562
+      },
+      "vmap_gather_batched_operand_batched_indices_ms": {
+        "low": 22.713,
+        "mean": 23.993,
+        "high": 26.001
+      }
+    }
+  ],
+  "behavior_proof": {
+    "golden_sha256": "e131a02069898c37c19e05b75587cab83a85edda617edd45eaa44ef84a5f99ba",
+    "ordering": "candidate preserved batch-major row-major gather output ordering in focused unit and integration tests",
+    "tie_breaking": "gather has no comparison or tie-breaking behavior",
+    "floating_point": "candidate copied Literal values without introducing floating-point arithmetic",
+    "rng": "gather has no RNG state",
+    "source_restored": true
+  },
+  "verification": [
+    "cargo fmt -p fj-dispatch --check",
+    "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-gather-pass36-test2-20260603 rch exec -- cargo test -p fj-dispatch gather_batched_operand -- --nocapture",
+    "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-gather-pass36-clippy2-20260603 rch exec -- cargo clippy -p fj-dispatch --all-targets -- -D warnings"
+  ],
+  "decision": "Rejected. The only same-worker after run regressed both focused Criterion rows versus the focused baseline, and the borrow-refined candidate still failed to show a clear real win. No source diff retained."
+}

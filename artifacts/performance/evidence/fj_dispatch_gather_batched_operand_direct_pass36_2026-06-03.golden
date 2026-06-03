@@ -1,0 +1,29 @@
+fj-dispatch batched-operand gather direct-path candidate golden
+
+source tests:
+- batching::tests::test_batch_trace_gather_batched_operand_shared_indices
+- batching::tests::test_batch_trace_gather_batched_operand_shared_indices_rank3_partial_slice
+- batching::tests::test_batch_trace_gather_batched_operand_batched_indices
+- dispatch_p2c004_suite::test_batch_rule_gather_batched_operand
+
+shared_indices:
+- batch_dim: Some(0)
+- output_shape: [2, 2]
+- output_i64: [40, 20, 80, 60]
+
+rank3_partial_slice:
+- batch_dim: Some(0)
+- output_shape: [2, 2, 2]
+- output_i64: [8, 9, 0, 1, 108, 109, 100, 101]
+
+batched_indices:
+- batch_dim: Some(0)
+- output_shape: [2, 2]
+- output_i64: [10, 30, 80, 60]
+
+isomorphism:
+- Ordering preserved: output remains batch-major, row-major within each gathered slice.
+- Tie-breaking preserved: gather has no comparisons or ties.
+- Floating point preserved: candidate only copied Literal values; no FP arithmetic was introduced.
+- RNG preserved: gather path has no RNG state or sampling.
+- Error behavior preserved for retained tree: unsupported and invalid cases still use existing fallback after source restoration.
