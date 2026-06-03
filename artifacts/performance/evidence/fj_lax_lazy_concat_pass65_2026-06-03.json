@@ -1,0 +1,104 @@
+{
+  "artifact": "fj_lax_lazy_concat_pass65_2026-06-03",
+  "bead": "frankenjax-6alq6",
+  "pass": 65,
+  "status": "kept",
+  "score": {
+    "impact": 4.0,
+    "confidence": 4.0,
+    "effort": 3.0,
+    "impact_x_confidence_over_effort": 5.33,
+    "keeper_threshold": 2.0
+  },
+  "target": {
+    "crate": "fj-lax",
+    "bench_filter": "eval/concat_axis",
+    "profile_backed": true,
+    "baseline_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass65-eval-profile cargo bench -p fj-lax --bench lax_baseline -- eval/ --sample-size 10 --measurement-time 1 --warm-up-time 1",
+    "rebench_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass65-concat-bench cargo bench -p fj-lax --bench lax_baseline -- eval/concat_axis --sample-size 10 --measurement-time 1 --warm-up-time 1"
+  },
+  "benchmarks": [
+    {
+      "name": "eval/concat_axis1_3x256x128_f64",
+      "baseline_worker": "ts1",
+      "baseline_us": {
+        "low": 52.831,
+        "mean": 54.183,
+        "high": 56.09
+      },
+      "rebench_worker": "ts2",
+      "rebench_us": {
+        "low": 28.899,
+        "mean": 28.971,
+        "high": 29.064
+      },
+      "speedup_midpoint": 1.8703,
+      "speedup_conservative_interval": 1.8171
+    },
+    {
+      "name": "eval/concat_axis0_3x128x256_f64",
+      "baseline_worker": "ts1",
+      "baseline_us": {
+        "low": 47.158,
+        "mean": 49.319,
+        "high": 50.871
+      },
+      "rebench_worker": "ts2",
+      "rebench_us": {
+        "low": 0.3412,
+        "mean": 0.34277,
+        "high": 0.3445
+      },
+      "speedup_midpoint": 143.8865,
+      "speedup_conservative_interval": 136.8868
+    }
+  ],
+  "lever": {
+    "summary": "Add LiteralBufferStorage::Concat and route eval_concatenate through lazy buffer slices instead of eagerly copying output blocks.",
+    "changed_files": [
+      "crates/fj-core/src/lib.rs",
+      "crates/fj-lax/src/tensor_ops.rs"
+    ],
+    "one_lever": true,
+    "alien_primitive": "zero-copy rope-style data layout"
+  },
+  "proof": {
+    "golden_file": "artifacts/performance/evidence/fj_lax_lazy_concat_pass65_2026-06-03.golden",
+    "golden_sha256": "c67aa4b2763cbefe2a143b5e09bb26c20f9561494c080d6ddac5ffbd051cbaef",
+    "isomorphism": {
+      "ordering": "Row-major concat block order is unchanged; the lazy storage records the exact source slices in evaluation order.",
+      "tie_breaking": "No tie-breaking surface exists for Concatenate.",
+      "floating_point": "No arithmetic is introduced or reordered; F64 bit patterns are copied only during materialization.",
+      "rng": "No RNG surface exists.",
+      "errors": "Existing dtype, rank, dimension, shape, element-count, and checked-size errors are preserved; concat slice construction adds fail-closed overflow validation."
+    },
+    "focused_tests": [
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass65-core-tests2 cargo test -p fj-core concat_pass65 -- --nocapture",
+        "result": "pass: 1 test"
+      },
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass65-lax-tests2 cargo test -p fj-lax concatenate_pass65 -- --nocapture",
+        "result": "pass: 1 test"
+      }
+    ],
+    "quality_gates": [
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass65-check2 cargo check -p fj-core -p fj-lax --all-targets",
+        "result": "pass"
+      },
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass65-clippy2 cargo clippy -p fj-core -p fj-lax --all-targets --no-deps -- -D warnings",
+        "result": "pass"
+      },
+      {
+        "command": "rustfmt --edition 2024 --check crates/fj-core/src/lib.rs crates/fj-lax/src/tensor_ops.rs",
+        "result": "pass"
+      },
+      {
+        "command": "ubs crates/fj-core/src/lib.rs crates/fj-lax/src/tensor_ops.rs",
+        "result": "nonzero from existing file-wide findings; no introduced pass65 panic/expect surface remained after cleanup"
+      }
+    ]
+  }
+}

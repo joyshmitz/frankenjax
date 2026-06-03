@@ -1,0 +1,36 @@
+bead: frankenjax-6alq6
+pass: 65
+lever: lazy LiteralBuffer concat storage for eval_concatenate
+target: fj-lax eval/concat_axis*
+
+core_literal_buffer_concat_expected:
+  len: 5
+  as_f64_slice: none
+  materialized_order:
+    - I64(1)
+    - I64(2)
+    - F64Bits(0x400c000000000000)
+    - F64Bits(0x8000000000000000)
+    - I64(0)
+  serde_json: [1,2,3.5,-0.0,0]
+  mutation_after_clone_preserves_original: true
+  invalid_out_of_range_slice_rejected: true
+
+fj_lax_concatenate_axis0_expected:
+  dtype: F64
+  shape: [5]
+  as_f64_slice: none
+  materialized_order:
+    - F64Bits(0x3ff0000000000000)
+    - F64Bits(0x4000000000000000)
+    - F64Bits(0x4008000000000000)
+    - F64Bits(0x4010000000000000)
+    - F64Bits(0x4014000000000000)
+  mutation_after_materialization_preserves_tail: true
+
+isomorphism:
+  order: row-major concat block order is unchanged
+  tie_breaking: no tie-breaking surface
+  floating_point: no arithmetic is introduced or reordered; literal bit patterns are copied on materialization
+  rng: no RNG surface
+  errors: dtype, rank, dimension, shape, size, and overflow validations are preserved

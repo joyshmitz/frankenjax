@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
+use fj_core::{DType, Literal, LiteralBuffer, Primitive, Shape, TensorValue, Value};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -990,17 +990,23 @@ pub(crate) fn eval_concatenate(
     let inner = checked_shape_element_count(primitive, "concatenate inner", &out_dims[axis + 1..])?;
     let outer = checked_shape_element_count(primitive, "concatenate outer", &out_dims[..axis])?;
 
-    let mut elements = Vec::with_capacity(total);
+    let mut parts = Vec::with_capacity(outer.saturating_mul(tensors.len()));
     for o in 0..outer {
         for t in &tensors {
             let block = t.shape.dims[axis] as usize * inner;
             let start = o * block;
-            elements.extend_from_slice(&t.elements[start..start + block]);
+            parts.push((t.elements.clone(), start, block));
         }
     }
+    let elements =
+        LiteralBuffer::from_concat_slices(parts).ok_or_else(|| EvalError::Unsupported {
+            primitive,
+            detail: "concatenate slice spans overflow output bounds".to_owned(),
+        })?;
+    debug_assert_eq!(elements.len(), total);
 
     let dtype = tensors[0].dtype;
-    Ok(Value::Tensor(TensorValue::new(
+    Ok(Value::Tensor(TensorValue::new_with_literal_buffer(
         dtype,
         Shape { dims: out_dims },
         elements,
@@ -5067,6 +5073,39 @@ mod tests {
         }
         let _ = axis;
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn concatenate_pass65_lazy_output_preserves_tensor_contract() -> Result<(), String> {
+        let a = v_f64(&[1.0, 2.0]);
+        let b = v_f64(&[3.0, 4.0, 5.0]);
+        let p = params(&[("dimension", "0")]);
+        let result = eval_concatenate(&[a, b], &p).map_err(|err| err.to_string())?;
+        let Value::Tensor(mut tensor) = result else {
+            return Err("expected tensor".to_owned());
+        };
+
+        assert_eq!(tensor.dtype, DType::F64);
+        assert_eq!(tensor.shape.dims, vec![5]);
+        assert!(
+            tensor.elements.as_f64_slice().is_none(),
+            "concat output remains literal-observable storage"
+        );
+        assert_eq!(
+            tensor.elements.to_vec(),
+            vec![
+                Literal::from_f64(1.0),
+                Literal::from_f64(2.0),
+                Literal::from_f64(3.0),
+                Literal::from_f64(4.0),
+                Literal::from_f64(5.0),
+            ]
+        );
+
+        tensor.elements[0] = Literal::from_f64(9.0);
+        assert_eq!(tensor.elements[0], Literal::from_f64(9.0));
+        assert_eq!(tensor.elements[1], Literal::from_f64(2.0));
+        Ok(())
     }
 
     // ── Reverse ──

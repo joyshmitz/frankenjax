@@ -995,6 +995,17 @@ enum LiteralBufferStorage {
         patches: Arc<Vec<(usize, Literal)>>,
         literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
     },
+    Concat {
+        parts: Arc<Vec<LiteralBufferSlice>>,
+        len: usize,
+        literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
+    },
+}
+
+struct LiteralBufferSlice {
+    buffer: LiteralBuffer,
+    start: usize,
+    len: usize,
 }
 
 impl LiteralBuffer {
@@ -1037,6 +1048,34 @@ impl LiteralBuffer {
     }
 
     #[must_use]
+    pub fn from_concat_slices(slices: Vec<(Self, usize, usize)>) -> Option<Self> {
+        let mut len = 0_usize;
+        let mut parts = Vec::with_capacity(slices.len());
+        for (buffer, start, part_len) in slices {
+            let end = start.checked_add(part_len)?;
+            if end > buffer.len() {
+                return None;
+            }
+            len = len.checked_add(part_len)?;
+            if part_len != 0 {
+                parts.push(LiteralBufferSlice {
+                    buffer,
+                    start,
+                    len: part_len,
+                });
+            }
+        }
+
+        Some(Self {
+            storage: LiteralBufferStorage::Concat {
+                parts: Arc::new(parts),
+                len,
+                literals: Arc::new(OnceLock::new()),
+            },
+        })
+    }
+
+    #[must_use]
     pub fn as_slice(&self) -> &[Literal] {
         match &self.storage {
             LiteralBufferStorage::Literals(elements) => elements.as_slice(),
@@ -1057,6 +1096,13 @@ impl LiteralBuffer {
                     ))
                 })
                 .as_slice(),
+            LiteralBufferStorage::Concat {
+                parts,
+                len,
+                literals,
+            } => literals
+                .get_or_init(|| Arc::new(materialize_concat_slices(parts, *len)))
+                .as_slice(),
         }
     }
 
@@ -1066,6 +1112,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(_) => None,
             LiteralBufferStorage::F64 { values, .. } => Some(values.as_slice()),
             LiteralBufferStorage::RepeatedPatches { .. } => None,
+            LiteralBufferStorage::Concat { .. } => None,
         }
     }
 
@@ -1075,6 +1122,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(elements) => elements.len(),
             LiteralBufferStorage::F64 { values, .. } => values.len(),
             LiteralBufferStorage::RepeatedPatches { base, repeats, .. } => base.len() * repeats,
+            LiteralBufferStorage::Concat { len, .. } => *len,
         }
     }
 
@@ -1091,7 +1139,9 @@ impl LiteralBuffer {
     fn make_mut(&mut self) -> &mut Vec<Literal> {
         if matches!(
             self.storage,
-            LiteralBufferStorage::F64 { .. } | LiteralBufferStorage::RepeatedPatches { .. }
+            LiteralBufferStorage::F64 { .. }
+                | LiteralBufferStorage::RepeatedPatches { .. }
+                | LiteralBufferStorage::Concat { .. }
         ) {
             let elements = self.as_slice().to_vec();
             self.storage = LiteralBufferStorage::Literals(Arc::new(elements));
@@ -1099,9 +1149,9 @@ impl LiteralBuffer {
 
         match &mut self.storage {
             LiteralBufferStorage::Literals(elements) => Arc::make_mut(elements),
-            LiteralBufferStorage::F64 { .. } | LiteralBufferStorage::RepeatedPatches { .. } => {
-                unreachable!("lazy buffer was materialized")
-            }
+            LiteralBufferStorage::F64 { .. }
+            | LiteralBufferStorage::RepeatedPatches { .. }
+            | LiteralBufferStorage::Concat { .. } => unreachable!("lazy buffer was materialized"),
         }
     }
 
@@ -1153,6 +1203,17 @@ impl Clone for LiteralBuffer {
                     base: Arc::clone(base),
                     repeats: *repeats,
                     patches: Arc::clone(patches),
+                    literals: Arc::clone(literals),
+                },
+            },
+            LiteralBufferStorage::Concat {
+                parts,
+                len,
+                literals,
+            } => Self {
+                storage: LiteralBufferStorage::Concat {
+                    parts: Arc::clone(parts),
+                    len: *len,
                     literals: Arc::clone(literals),
                 },
             },
@@ -1264,6 +1325,19 @@ impl IntoIterator for LiteralBuffer {
 
                 materialize_repeated_patches(&base, repeats, &patches).into_iter()
             }
+            LiteralBufferStorage::Concat {
+                parts,
+                len,
+                literals,
+            } => {
+                if let Some(materialized) = literals.get() {
+                    return Arc::try_unwrap(Arc::clone(materialized))
+                        .unwrap_or_else(|elements| (*elements).clone())
+                        .into_iter();
+                }
+
+                materialize_concat_slices(&parts, len).into_iter()
+            }
         }
     }
 }
@@ -1313,6 +1387,15 @@ fn materialize_repeated_patches(
         if let Some(slot) = elements.get_mut(index) {
             *slot = literal;
         }
+    }
+    elements
+}
+
+fn materialize_concat_slices(parts: &[LiteralBufferSlice], len: usize) -> Vec<Literal> {
+    let mut elements = Vec::with_capacity(len);
+    for part in parts {
+        let end = part.start + part.len;
+        elements.extend_from_slice(&part.buffer.as_slice()[part.start..end]);
     }
     elements
 }
@@ -5552,6 +5635,50 @@ mod tests {
         assert_eq!(original.as_slice(), expected.as_slice());
         assert_eq!(buffer[0], Literal::I64(7));
         assert_eq!(buffer[1], Literal::I64(10));
+    }
+
+    #[test]
+    fn concat_pass65_literal_buffer_materializes_in_slice_order() -> Result<(), String> {
+        let left = LiteralBuffer::new(vec![Literal::I64(0), Literal::I64(1), Literal::I64(2)]);
+        let right = LiteralBuffer::from_f64_values(vec![3.5, -0.0, 7.25]);
+        let mut buffer = LiteralBuffer::from_concat_slices(vec![
+            (left.clone(), 1, 2),
+            (right.clone(), 0, 2),
+            (left.clone(), 0, 1),
+        ])
+        .ok_or_else(|| "valid concat slices should construct".to_owned())?;
+        let expected = vec![
+            Literal::I64(1),
+            Literal::I64(2),
+            Literal::from_f64(3.5),
+            Literal::from_f64(-0.0),
+            Literal::I64(0),
+        ];
+
+        assert_eq!(buffer.len(), 5);
+        assert!(!buffer.is_empty());
+        assert!(buffer.as_f64_slice().is_none());
+        assert_eq!(buffer.as_slice(), expected.as_slice());
+        assert_eq!(buffer.to_vec(), expected);
+        assert_eq!(buffer[3], Literal::from_f64(-0.0));
+        assert_eq!(
+            serde_json::to_string(&buffer).map_err(|err| err.to_string())?,
+            serde_json::to_string(&expected).map_err(|err| err.to_string())?
+        );
+        assert_eq!(buffer.clone().into_iter().collect::<Vec<_>>(), expected);
+        assert_eq!(buffer, expected);
+
+        assert!(
+            LiteralBuffer::from_concat_slices(vec![(left.clone(), 2, 2)]).is_none(),
+            "out-of-range concat slices should be rejected"
+        );
+
+        let original = buffer.clone();
+        buffer[0] = Literal::I64(9);
+        assert_eq!(original.as_slice(), expected.as_slice());
+        assert_eq!(buffer[0], Literal::I64(9));
+        assert_eq!(buffer[1], Literal::I64(2));
+        Ok(())
     }
 
     #[test]
