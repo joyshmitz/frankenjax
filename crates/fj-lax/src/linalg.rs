@@ -2168,33 +2168,34 @@ pub fn solve_multi_rhs(a: &[f64], b: &[f64], n: usize, m: usize) -> Option<Vec<f
     Some(result)
 }
 
-/// Least-squares solution to Ax = b using the normal equations.
+/// Minimum-norm least-squares solution to Ax = b, matching `jnp.linalg.lstsq`.
 ///
-/// Matches `jnp.linalg.lstsq(a, b)` for overdetermined systems.
+/// Returns the `x` minimizing `||Ax - b||₂` and, among minimizers, the one with
+/// smallest `||x||₂` — i.e. `x = A⁺ b` via the Moore-Penrose pseudoinverse.
 ///
-/// Returns the least-squares solution x that minimizes ||Ax - b||^2.
+/// The previous form solved the normal equations `solve(AᵀA, Aᵀb)`, which
+/// returned `None` for rank-deficient `A` (the Gram matrix is singular) where
+/// JAX returns the SVD min-norm solution, and squared the condition number. For
+/// full-rank systems this yields the same unique least-squares solution.
 pub fn lstsq(a: &[f64], m: usize, n: usize, b: &[f64]) -> Option<Vec<f64>> {
-    let mut ata = vec![0.0; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            let mut sum = 0.0;
-            for k in 0..m {
-                sum += a[k * n + i] * a[k * n + j];
-            }
-            ata[i * n + j] = sum;
-        }
+    if m == 0 || n == 0 {
+        return Some(vec![0.0; n]);
     }
 
-    let mut atb = vec![0.0; n];
+    // NumPy/JAX default cutoff: singular values <= rcond·σ_max are dropped.
+    let rcond = (m.max(n) as f64) * f64::EPSILON;
+    let p = pinv(a, m, n, rcond); // n×m
+
+    // x = A⁺ b  (n-vector).
+    let mut x = vec![0.0; n];
     for i in 0..n {
         let mut sum = 0.0;
-        for k in 0..m {
-            sum += a[k * n + i] * b[k];
+        for j in 0..m {
+            sum += p[i * m + j] * b[j];
         }
-        atb[i] = sum;
+        x[i] = sum;
     }
-
-    solve(&ata, &atb, n)
+    Some(x)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -3435,5 +3436,38 @@ mod tests {
         }
         assert!((ata_x[0] - atb[0]).abs() < 1e-8);
         assert!((ata_x[1] - atb[1]).abs() < 1e-8);
+    }
+
+    #[test]
+    fn lstsq_rank_deficient_returns_min_norm_solution() {
+        // Rank-1 3x2 system (column 2 = 2*column 1): AᵀA is singular, so the old
+        // solve(AᵀA, Aᵀb) returned None. JAX returns the SVD min-norm solution;
+        // the pinv-based path must return a finite x satisfying the least-squares
+        // optimality condition AᵀA x = Aᵀ b.
+        let a = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0]; // 3x2, rank 1
+        let b = [1.0, 2.0, 3.0];
+        let x = lstsq(&a, 3, 2, &b).expect("rank-deficient lstsq must still return a solution");
+        assert_eq!(x.len(), 2);
+        assert!(x.iter().all(|v| v.is_finite()));
+
+        // AᵀA x ≈ Aᵀ b (normal equations hold for any least-squares minimizer).
+        for i in 0..2 {
+            let mut atax = 0.0;
+            let mut atb = 0.0;
+            for j in 0..2 {
+                let mut ata = 0.0;
+                for k in 0..3 {
+                    ata += a[k * 2 + i] * a[k * 2 + j];
+                }
+                atax += ata * x[j];
+            }
+            for k in 0..3 {
+                atb += a[k * 2 + i] * b[k];
+            }
+            assert!(
+                (atax - atb).abs() < 1e-8,
+                "normal equation {i} violated: {atax} vs {atb}"
+            );
+        }
     }
 }
