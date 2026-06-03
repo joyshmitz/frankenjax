@@ -1,0 +1,23 @@
+artifact=fj_lax_eig_upper_triangular_rq_pass51_2026-06-03
+bead=frankenjax-p1vbf.4
+crate=fj-lax
+primitive=Primitive::Eig
+kernel=eig_qr_iteration T = R * Q
+
+golden_kind=bit_exact_output_equivalence
+proof_tests=upper_triangular_matrix_mul_bit_identical_to_dense_zero_lower,eig_qr_iteration_upper_triangular_rq_bit_identical_to_dense_reference
+
+helper_input_n=13
+helper_input_a=upper triangular, lower entries exactly 0.0, a[i,k]=cos(((i*17)+(k*11)+3)*0.019) for k>=i
+helper_input_b=b[idx]=(sin(((idx*23)+5)*0.013),0.0)
+helper_assertion=upper_triangular_matrix_mul(a,b,n)[idx].to_bits == matrix_mul(a,b,n)[idx].to_bits for all 169 outputs
+
+eig_input_n=6
+eig_input_a=diagonal n+i*0.25+3.0, offdiag=((i*5+j*7+2)%9)*0.125-0.5
+eig_reference=100 iterations of the prior dense T=matrix_mul(R,Q) QR loop with unchanged q_total accumulation
+eig_assertion=eig_qr_iteration(a,n) eigenvalue and eigenvector f64 bit patterns exactly equal dense-reference outputs
+
+ordering=preserve ascending-k accumulation for all nonzero R terms; skip only k<i entries that QR leaves as exact initialized zero
+tie_breaking=no pivoting, sorting, comparison threshold, convergence threshold, or output ordering change
+floating_point=no reassociation of nonzero terms, no SIMD, no unsafe, no BLAS/LAPACK/MKL/XLA, no FMA forcing, no mixed precision
+rng=no random state or nondeterministic iteration path

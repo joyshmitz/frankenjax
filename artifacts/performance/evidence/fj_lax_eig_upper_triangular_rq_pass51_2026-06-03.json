@@ -1,0 +1,120 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_eig_upper_triangular_rq_pass51_2026-06-03",
+  "date": "2026-06-03",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-p1vbf.4",
+  "parent_bead": "frankenjax-p1vbf",
+  "pass": 51,
+  "crate": "fj-lax",
+  "skill_pass": "repeatedly-apply-skill pass 51 -> extreme-software-optimization",
+  "alien_source": {
+    "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#9.6",
+    "primitive": "communication-avoiding / structured dense-linear-algebra kernels",
+    "applied_slice": "Exploit the exact upper-triangular structure of R inside the eig QR loop before the deeper Hessenberg/shifted-QR primitive."
+  },
+  "target": {
+    "profile_backing": "After the QR fast path, fresh RCH fj-lax linalg profiling kept linalg/eig_48x48_f64 as the top row. The current QR iteration performs T = R * Q as a dense multiply even though R from Gram-Schmidt is upper triangular.",
+    "baseline_command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline linalg/eig_48x48_f64",
+    "bench_rows": [
+      "linalg/eig_48x48_f64"
+    ]
+  },
+  "one_lever": {
+    "name": "upper-triangular RQ multiply in eig QR iteration",
+    "files": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "description": "Route only eig_qr_iteration's T = R * Q update through upper_triangular_matrix_mul. The q_total eigenvector accumulation remains on the existing dense matrix_mul path."
+  },
+  "benchmark": {
+    "baseline": {
+      "worker": "vmi1156319",
+      "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline linalg/eig_48x48_f64",
+      "linalg_eig_48x48_f64_midpoint_ms": 28.262,
+      "linalg_eig_48x48_f64_ci_ms": [
+        27.853,
+        28.698
+      ]
+    },
+    "after": {
+      "worker": "vmi1156319",
+      "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline linalg/eig_48x48_f64",
+      "linalg_eig_48x48_f64_midpoint_ms": 25.086,
+      "linalg_eig_48x48_f64_ci_ms": [
+        24.65,
+        25.527
+      ]
+    },
+    "delta": {
+      "linalg_eig_48x48_f64_speedup_x": 1.127,
+      "midpoint_reduction_percent": 11.2,
+      "confidence": "same worker, same benchmark row, non-overlapping Criterion intervals"
+    },
+    "score": {
+      "impact": 2.0,
+      "confidence": 5.0,
+      "effort": 1.0,
+      "impact_x_confidence_over_effort": 10.0,
+      "decision": "keep"
+    }
+  },
+  "isomorphism_proof": {
+    "ordering": "The dense reference loops k in ascending order from 0..n. R has exact initialized zero entries for k < i, so upper_triangular_matrix_mul starts at k = i and preserves ascending-k order for every nonzero term.",
+    "tie_breaking": "No pivoting, sorting, dispatch priority, convergence threshold, or output ordering changed.",
+    "floating_point": "Only exact lower-triangular zero products are skipped. Nonzero products and additions are evaluated in the same sequence as the dense reference. No unsafe code, SIMD, BLAS, LAPACK, MKL, XLA, FMA forcing, reassociation, or mixed precision is introduced.",
+    "rng": "No random state, seed, sampling order, or nondeterministic iteration path changed.",
+    "shape_and_dtype": "Eig output shapes and Complex128 wrapping are unchanged.",
+    "golden_tests": [
+      "upper_triangular_matrix_mul_bit_identical_to_dense_zero_lower",
+      "eig_qr_iteration_upper_triangular_rq_bit_identical_to_dense_reference"
+    ]
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_eig_upper_triangular_rq_pass51_2026-06-03.golden",
+    "sha256": "7bfc0636206bcab5e2a856526f6f176159ea1770f17f5cd882f6c8157a6a339c",
+    "check_command": "sha256sum -c artifacts/performance/evidence/fj_lax_eig_upper_triangular_rq_pass51_2026-06-03.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline linalg/eig_48x48_f64",
+      "result": "baseline pass on vmi1156319; midpoint 28.262 ms"
+    },
+    {
+      "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline linalg/eig_48x48_f64",
+      "result": "candidate pass on vmi1156319; midpoint 25.086 ms"
+    },
+    {
+      "command": "rch exec -- cargo test -p fj-lax upper_triangular -- --nocapture",
+      "result": "pass on vmi1227854; 2 passed"
+    },
+    {
+      "command": "rch exec -- cargo check -p fj-lax --all-targets",
+      "result": "pass on vmi1227854"
+    },
+    {
+      "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+      "result": "pass on vmi1149989"
+    },
+    {
+      "command": "rch exec -- cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "blocked by existing fj-core dependency lint crates/fj-core/src/lib.rs:678 clippy::nonminimal_bool"
+    },
+    {
+      "command": "cargo fmt -p fj-lax -- --check",
+      "result": "blocked by pre-existing formatting drift outside this edit surface in crates/fj-lax/src/lib.rs"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_eig_upper_triangular_rq_pass51_2026-06-03.golden.sha256",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/linalg.rs artifacts/performance/evidence/fj_lax_eig_upper_triangular_rq_pass51_2026-06-03.json artifacts/performance/evidence/fj_lax_eig_upper_triangular_rq_pass51_2026-06-03.golden artifacts/performance/evidence/fj_lax_eig_upper_triangular_rq_pass51_2026-06-03.golden.sha256",
+      "result": "nonzero from existing linalg.rs panic/unwrap/direct-index inventory; UBS embedded fmt/check/clippy sections passed"
+    }
+  ],
+  "notes": [
+    "This is a structured-kernel step, not the endpoint. The next deeper eig primitive remains Hessenberg reduction with shifted/deflated QR if the profile keeps eig at the top.",
+    "No rejected source from the earlier SVD or real-Q experiments is retained."
+  ]
+}

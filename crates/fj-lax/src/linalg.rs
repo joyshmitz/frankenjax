@@ -1685,8 +1685,10 @@ fn eig_qr_iteration(a: &[f64], n: usize) -> EigQrResult {
     for _iter in 0..100 {
         let (q, r) = qr_decomposition(&t, n);
 
-        // T = R * Q
-        t = matrix_mul(&r, &q, n);
+        // T = R * Q. R is upper triangular by construction, so the lower
+        // exact-zero half of this multiply can be skipped without changing
+        // the ascending-k accumulation order for any nonzero term.
+        t = upper_triangular_matrix_mul(&r, &q, n);
 
         // Accumulate Q (real * real -> real).
         q_total = matrix_mul(&q_total, &q, n);
@@ -1781,6 +1783,22 @@ fn matrix_mul(a: &[f64], b: &[(f64, f64)], n: usize) -> Vec<f64> {
         let a_row = i * n;
         let c_row = i * n;
         for k in 0..n {
+            let a_ik = a[a_row + k];
+            let b_row = k * n;
+            for j in 0..n {
+                c[c_row + j] += a_ik * b[b_row + j].0;
+            }
+        }
+    }
+    c
+}
+
+fn upper_triangular_matrix_mul(a: &[f64], b: &[(f64, f64)], n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; n * n];
+    for i in 0..n {
+        let a_row = i * n;
+        let c_row = i * n;
+        for k in i..n {
             let a_ik = a[a_row + k];
             let b_row = k * n;
             for j in 0..n {
@@ -3714,6 +3732,87 @@ mod tests {
                 ref_cplx[idx].1.to_bits(),
                 "im {idx}"
             );
+        }
+    }
+
+    #[test]
+    fn upper_triangular_matrix_mul_bit_identical_to_dense_zero_lower() {
+        let n = 13usize;
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for k in i..n {
+                a[i * n + k] = ((i * 17 + k * 11 + 3) as f64 * 0.019).cos();
+            }
+        }
+        let b: Vec<(f64, f64)> = (0..n * n)
+            .map(|idx| (((idx * 23 + 5) as f64 * 0.013).sin(), 0.0))
+            .collect();
+
+        let dense = matrix_mul(&a, &b, n);
+        let triangular = upper_triangular_matrix_mul(&a, &b, n);
+        for idx in 0..n * n {
+            assert_eq!(
+                triangular[idx].to_bits(),
+                dense[idx].to_bits(),
+                "triangular multiply mismatch at {idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn eig_qr_iteration_upper_triangular_rq_bit_identical_to_dense_reference() {
+        let n = 6usize;
+        let a: Vec<f64> = (0..n * n)
+            .map(|idx| {
+                let i = idx / n;
+                let j = idx % n;
+                if i == j {
+                    n as f64 + i as f64 * 0.25 + 3.0
+                } else {
+                    ((i * 5 + j * 7 + 2) % 9) as f64 * 0.125 - 0.5
+                }
+            })
+            .collect();
+
+        let (got_values, got_vectors) = eig_qr_iteration(&a, n);
+        let (want_values, want_vectors) = {
+            let mut t = a.clone();
+            let mut q_total = vec![0.0_f64; n * n];
+            for i in 0..n {
+                q_total[i * n + i] = 1.0;
+            }
+
+            for _iter in 0..100 {
+                let (q, r) = qr_decomposition(&t, n);
+                t = matrix_mul(&r, &q, n);
+                q_total = matrix_mul(&q_total, &q, n);
+
+                let mut max_off_diag = 0.0f64;
+                for i in 0..n {
+                    for j in 0..n {
+                        if i != j {
+                            max_off_diag = max_off_diag.max(t[i * n + j].abs());
+                        }
+                    }
+                }
+                if max_off_diag < 1e-10 {
+                    break;
+                }
+            }
+
+            let eigenvalues: Vec<(f64, f64)> = (0..n).map(|i| (t[i * n + i], 0.0)).collect();
+            let eigenvectors: Vec<(f64, f64)> =
+                q_total.into_iter().map(|v| (v, 0.0)).collect();
+            (eigenvalues, eigenvectors)
+        };
+
+        for idx in 0..n {
+            assert_eq!(got_values[idx].0.to_bits(), want_values[idx].0.to_bits());
+            assert_eq!(got_values[idx].1.to_bits(), want_values[idx].1.to_bits());
+        }
+        for idx in 0..n * n {
+            assert_eq!(got_vectors[idx].0.to_bits(), want_vectors[idx].0.to_bits());
+            assert_eq!(got_vectors[idx].1.to_bits(), want_vectors[idx].1.to_bits());
         }
     }
 
