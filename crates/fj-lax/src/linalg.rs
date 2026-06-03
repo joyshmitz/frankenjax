@@ -1766,15 +1766,62 @@ pub fn det(a: &[f64], n: usize) -> f64 {
 ///
 /// Returns (sign, logabsdet) where det(a) = sign * exp(logabsdet).
 /// Matches `jnp.linalg.slogdet(a)`.
+///
+/// Accumulates `logabsdet = Σ ln|U_ii|` directly from the LU factors rather
+/// than forming `det(a)` and taking its log: the determinant of a large matrix
+/// routinely exceeds f64 range (e.g. a 200×200 matrix with diagonal ≈100 has
+/// det ≈ 1e400 → +inf, or ≈1e-400 → 0), and `log(det)` would then yield ±inf
+/// where JAX/LAPACK return a finite `logabsdet`. Avoiding the product is the
+/// entire reason slogdet exists. Singular detection keeps `det`'s `< 1e-15`
+/// pivot threshold so that behavior is unchanged.
 pub fn slogdet(a: &[f64], n: usize) -> (f64, f64) {
-    let d = det(a, n);
-    if d == 0.0 {
-        (0.0, f64::NEG_INFINITY)
-    } else if d > 0.0 {
-        (1.0, d.ln())
-    } else {
-        (-1.0, (-d).ln())
+    if n == 0 {
+        // det of the empty matrix is 1; log|1| = 0.
+        return (1.0, 0.0);
     }
+
+    let mut lu = a.to_vec();
+    let mut sign = 1.0_f64;
+    let mut logabsdet = 0.0_f64;
+
+    for k in 0..n {
+        // Partial pivot: largest-magnitude entry in column k at/below the diagonal.
+        let mut max_val = lu[k * n + k].abs();
+        let mut max_row = k;
+        for i in (k + 1)..n {
+            let val = lu[i * n + k].abs();
+            if val > max_val {
+                max_val = val;
+                max_row = i;
+            }
+        }
+
+        if max_val < 1e-15 {
+            return (0.0, f64::NEG_INFINITY); // singular
+        }
+
+        if max_row != k {
+            for j in 0..n {
+                lu.swap(k * n + j, max_row * n + j);
+            }
+            sign = -sign;
+        }
+
+        let pivot = lu[k * n + k];
+        if pivot < 0.0 {
+            sign = -sign;
+        }
+        logabsdet += pivot.abs().ln();
+
+        for i in (k + 1)..n {
+            let factor = lu[i * n + k] / pivot;
+            for j in (k + 1)..n {
+                lu[i * n + j] -= factor * lu[k * n + j];
+            }
+        }
+    }
+
+    (sign, logabsdet)
 }
 
 // ── Matrix Inverse ──────────────────────────────────────────────────
@@ -2812,6 +2859,54 @@ mod tests {
         let (sign, logabsdet) = slogdet(&a, 2);
         assert!((sign - (-1.0)).abs() < 1e-10);
         assert!((logabsdet - (2.0_f64).ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn slogdet_sign_from_negative_diagonal() {
+        // Odd count of negative diagonal entries => sign -1 (det = -6).
+        let a = [-2.0, 0.0, 0.0, 3.0];
+        let (sign, logabsdet) = slogdet(&a, 2);
+        assert!((sign - (-1.0)).abs() < 1e-10);
+        assert!((logabsdet - (6.0_f64).ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn slogdet_no_overflow_large_determinant() {
+        // diag(100) over 200 dims => det = 100^200 = 1e400, which OVERFLOWS f64.
+        // Forming det() then log() yields +inf; slogdet must accumulate logs and
+        // return the finite 200*ln(100), matching jnp.linalg.slogdet.
+        let n = 200;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            a[i * n + i] = 100.0;
+        }
+        let (sign, logabsdet) = slogdet(&a, n);
+        assert_eq!(sign, 1.0);
+        assert!(
+            logabsdet.is_finite(),
+            "logabsdet must be finite, got {logabsdet}"
+        );
+        let expected = n as f64 * 100.0_f64.ln();
+        assert!((logabsdet - expected).abs() < 1e-6);
+        // The naive log(det) path would have failed: det() overflows to +inf.
+        assert!(det(&a, n).is_infinite());
+    }
+
+    #[test]
+    fn slogdet_no_underflow_tiny_determinant() {
+        // diag(0.01) over 200 dims => det = 1e-400 UNDERFLOWS to 0; slogdet must
+        // return the finite 200*ln(0.01).
+        let n = 200;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            a[i * n + i] = 0.01;
+        }
+        let (sign, logabsdet) = slogdet(&a, n);
+        assert_eq!(sign, 1.0);
+        let expected = n as f64 * 0.01_f64.ln();
+        assert!((logabsdet - expected).abs() < 1e-6);
+        // The naive log(det) path would have failed: det() underflows to 0.
+        assert_eq!(det(&a, n), 0.0);
     }
 
     // ── Inverse tests ───────────────────────────────────────────────
