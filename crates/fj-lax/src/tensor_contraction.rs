@@ -167,13 +167,23 @@ fn index_to_contracted_coords(idx: usize, axes: &[usize], shape: &[usize]) -> Ve
 /// Matches `jnp.matmul(a, b)` for 2D arrays.
 pub fn matmul_2d(a: &[f64], m: usize, k: usize, b: &[f64], n: usize) -> Vec<f64> {
     let mut result = vec![0.0; m * n];
+    // i-k-j loop order: the inner j-loop streams a contiguous row of B and a
+    // contiguous row of C, instead of the i-j-k order's stride-`n` walk down a
+    // column of B (a cache miss per multiply). For each output element c[i][j]
+    // the contributions are still accumulated in ascending-l order
+    // (c[i][j] += a[i][l]*b[l][j] for l = 0,1,...,k-1), exactly as before, so
+    // the floating-point result is bit-for-bit identical.
     for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0;
-            for l in 0..k {
-                sum += a[i * k + l] * b[l * n + j];
+        let a_row = i * k;
+        let c_row = i * n;
+        for l in 0..k {
+            let a_il = a[a_row + l];
+            let b_row = l * n;
+            let dst = &mut result[c_row..c_row + n];
+            let src = &b[b_row..b_row + n];
+            for j in 0..n {
+                dst[j] += a_il * src[j];
             }
-            result[i * n + j] = sum;
         }
     }
     result
@@ -274,6 +284,36 @@ mod tests {
         assert!((result[1] - 22.0).abs() < 1e-10);
         assert!((result[2] - 43.0).abs() < 1e-10);
         assert!((result[3] - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn matmul_2d_ikj_bit_identical_to_ijk() {
+        // The i-k-j kernel must equal the textbook i-j-k accumulation
+        // (ascending-l order) bit-for-bit, including rounding.
+        let (m, k, n) = (17usize, 23usize, 19usize);
+        let a: Vec<f64> = (0..m * k)
+            .map(|i| (i as f64 * 0.123_45).sin() * 3.0)
+            .collect();
+        let b: Vec<f64> = (0..k * n)
+            .map(|i| (i as f64 * 0.067_89).cos() * 2.0)
+            .collect();
+
+        let got = matmul_2d(&a, m, k, &b, n);
+
+        // Reference: original i-j-k order.
+        let mut want = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for l in 0..k {
+                    sum += a[i * k + l] * b[l * n + j];
+                }
+                want[i * n + j] = sum;
+            }
+        }
+        for idx in 0..m * n {
+            assert_eq!(got[idx].to_bits(), want[idx].to_bits(), "mismatch at {idx}");
+        }
     }
 
     #[test]

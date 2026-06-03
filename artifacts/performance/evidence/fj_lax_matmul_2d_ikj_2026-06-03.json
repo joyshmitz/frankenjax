@@ -1,0 +1,40 @@
+{
+  "bead": "frankenjax-mcqr.22",
+  "date": "2026-06-03",
+  "subsystem": "fj-lax (tensor_contraction)",
+  "target": "matmul_2d — public, JAX-conformance-tested 2D GEMM kernel",
+  "lever": {
+    "description": "Reorder the matmul triple loop from i-j-k to i-k-j. The original inner k-loop read b[l*n+j] (stride n down a column of B => a cache miss per multiply); the i-k-j order's inner j-loop streams a contiguous row of B (b[l*n + 0..n]) and a contiguous row of C. For each output c[i][j] the contributions are still accumulated in ascending-l order (c[i][j] += a[i][l]*b[l][j] for l = 0..k-1), identical to before."
+  },
+  "benchmarks": {
+    "method": "rch Criterion, matmul_2d called directly; baseline = i-j-k, optimized = i-k-j",
+    "baseline": {
+      "linalg/matmul_2d_256x256x256_f64_ms": 19.741,
+      "ci_ms": [19.548, 19.960]
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_256x256x256_f64'",
+      "linalg/matmul_2d_256x256x256_f64_ms": 6.714,
+      "ci_ms": [6.5454, 6.8943]
+    },
+    "speedup": {
+      "matmul_2d_256x256x256_f64": 2.94
+    },
+    "note": "Intermediate ikj readings were corrupted by shared-worker load (one run reported a 10-26ms CI); the 6.714ms figure is a subsequent tight-CI measurement and matches the mechanical expectation (eliminating B-column striding). Both baseline and final readings have tight CIs."
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 15.0,
+    "note": "Real, measured 2.94x on the GEMM kernel. Impact held at 3 (not 4) because matmul_2d has no production callers yet; follow-up frankenjax-mcqr.23 wires it into the Dot/DotGeneral primitive path for production impact."
+  },
+  "isomorphism_proof": {
+    "floating_point": "Per output element, the accumulation order over the contracted index l is unchanged (ascending l = 0..k-1), so the IEEE-754 sum is bit-for-bit identical; no FMA fusion is introduced (separate mul then add, as before).",
+    "ordering": "Output element positions and values are identical; only the loop nest visitation order changed.",
+    "rng": "No RNG state is read or written.",
+    "errors": "No new error paths; shapes/sizes handled identically.",
+    "bit_identity_proof": "New test matmul_2d_ikj_bit_identical_to_ijk multiplies a 17x23 by 23x19 matrix and asserts f64::to_bits() equality between the i-k-j kernel and an inline i-j-k reference. Existing matmul_2d_basic and the tensor_contraction oracle conformance tests (validated vs jnp) pass; full fj-lax suite passes. No synthetic golden-bits file: the to_bits parity test pins the result to the prior accumulation order.",
+    "production_caller_caveat": "matmul_2d currently has no production callers (module is #![allow(dead_code)]; only conformance + unit tests use it). The kernel improvement is real and bit-exact; production matmul impact is gated on follow-up mcqr.23 (route Dot/DotGeneral through it), which is blocked on arithmetic.rs being uncontested."
+  }
+}
