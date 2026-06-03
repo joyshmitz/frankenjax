@@ -1,0 +1,71 @@
+{
+  "artifact": "fj_lax_dense_f64_transpose_pass53_2026-06-03",
+  "status": "rejected",
+  "bead": "frankenjax-mcqr.30.7",
+  "crate": "fj-lax",
+  "target": "eval/transpose_256x256_f64",
+  "profile_backing": {
+    "source": "fresh rch Criterion baseline before source edit",
+    "worker": "vmi1227854",
+    "time_us_low": 187.73,
+    "time_us_mid": 189.35,
+    "time_us_high": 190.91
+  },
+  "lever": {
+    "name": "dense F64 transpose output path",
+    "description": "For rank-2 permutation [1,0], attempted to emit well-formed F64 transpose output through TensorValue::new_f64_values while preserving the exact tiled source-index mapping and falling back for malformed declared-F64 tensors.",
+    "alien_primitive": "cache-local typed/SoA layout for vectorized data movement",
+    "source_diff_retained": false
+  },
+  "isomorphism_proof": {
+    "index_order": "candidate wrote out[j * rows + i] = in[i * cols + j], identical to the existing rank-2 tiled literal path",
+    "floating_point": "transpose performs no arithmetic; F64Bits were reconstructed with f64::from_bits, preserving signed zero and NaN payloads",
+    "rng": "not used",
+    "tie_breaking": "not applicable",
+    "errors": "arity, permutation parsing/validation, stride overflow checks, empty tensors, non-F64 tensors, and malformed declared-F64 tensors kept existing paths"
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_dense_f64_transpose_pass53_2026-06-03.rejected.golden",
+    "sha256": "074e2db617a00c4f4b6414cabe25723a67e4b7bca06eaf3af9299587057bf1f7",
+    "sha256_check": "sha256sum -c artifacts/performance/evidence/fj_lax_dense_f64_transpose_pass53_2026-06-03.rejected.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "rch exec -- cargo test -p fj-lax transpose_rank2 -- --nocapture",
+      "worker": "vmi1153651",
+      "result": "pass",
+      "details": "4 tests passed in the candidate state: dense input bit preservation, literal input bit preservation, malformed fallback, and non-block-aligned rank-2 transpose"
+    },
+    {
+      "command": "rustfmt --check crates/fj-lax/src/tensor_ops.rs",
+      "worker": "local",
+      "result": "pass"
+    }
+  ],
+  "rebench": {
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline eval/transpose_256x256_f64",
+    "worker": "vmi1153651",
+    "time_us_low": 395.21,
+    "time_us_mid": 401.41,
+    "time_us_high": 407.99,
+    "speedup_vs_baseline_mid": 0.4717117162003936,
+    "outliers": "7/100; 1 low mild, 1 high mild, 5 high severe"
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 0.8,
+    "effort": 2.0,
+    "score": 0.0,
+    "keep_threshold": 2.0,
+    "decision": "reject and restore source"
+  },
+  "subagent_review": {
+    "agent": "Lovelace",
+    "finding": "Value semantics are preserved only with strict gating, but LiteralBuffer::as_f64_slice is public, so changing output storage is representation-observable. Pack from as_f64_slice first for dense inputs; avoid Literal::as_f64 because it coerces non-F64 literals."
+  },
+  "next_primitive": {
+    "target": "producer-side dense transpose/typed layout route",
+    "reason": "The output-wrapper attempt doubled latency; the next pass should avoid literal materialization before transpose by keeping the producing operation and transpose in typed dense storage, rather than wrapping a literal-backed output after the fact.",
+    "target_ratio": ">=2.0x on a dense-input transpose profile row"
+  }
+}

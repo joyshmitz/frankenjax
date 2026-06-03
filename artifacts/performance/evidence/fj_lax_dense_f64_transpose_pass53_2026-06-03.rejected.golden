@@ -1,0 +1,9 @@
+frankenjax-mcqr.30.7 pass53 rejected golden
+target=eval/transpose_256x256_f64
+baseline=vmi1227854 187.73us..190.91us midpoint=189.35us
+candidate=vmi1153651 395.21us..407.99us midpoint=401.41us
+candidate_status=rejected_regression
+source_diff_retained=false
+isomorphism_attempt=rank2 out[j*rows+i]=in[i*cols+j], no arithmetic, no rng, no tie-breaking, strict Literal::F64Bits for literal-backed F64, malformed declared-F64 fallback
+subagent_risk=LiteralBuffer::as_f64_slice is public; dense output is representation-observable, acceptable only inside explicit dense-storage migration and not as a hidden semantic change
+next_primitive=producer-side dense transpose/typed layout route that avoids literal materialization before the transpose kernel
