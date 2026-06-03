@@ -1,0 +1,1 @@
+in=[v0,]const=[]out=[v12,]eqn:mul(v0,v0,)->v7,{}|eqn:mul(v7,f64bits:4607182418800017408,)->v8,{}|eqn:mul(v0,v7,)->v9,{}|eqn:add(v9,f64bits:0,)->v10,{}|eqn:add(v10,v8,)->v11,{}|eqn:add(v0,v11,)->v12,{}|

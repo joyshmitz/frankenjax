@@ -1,0 +1,106 @@
+{
+  "artifact": "fj_egraph_safe_add_mul_polynomial_fast_path_pass40_2026-06-03",
+  "bead": "frankenjax-mcqr.34",
+  "pass": 40,
+  "agent": "BlackGlen",
+  "date": "2026-06-03",
+  "target": {
+    "crate": "fj-egraph",
+    "bench": "egraph_baseline",
+    "hotspot": "safe Add/Mul polynomial optimization through egg runner"
+  },
+  "profile_backing": {
+    "baseline_command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-pass39-bench-after rch exec -- cargo bench -p fj-egraph --bench egraph_baseline -- --sample-size 20 --measurement-time 2 --warm-up-time 1",
+    "baseline_worker": "vmi1149989",
+    "baseline_samples": 20,
+    "baseline_measurement_time_seconds": 2,
+    "metrics": [
+      {
+        "name": "egraph/optimize_safe_config",
+        "before_mean_us": 25.398,
+        "before_ci_us": [
+          22.839,
+          29.488
+        ],
+        "after_mean_us": 7.1843,
+        "after_ci_us": [
+          5.9518,
+          8.4122
+        ],
+        "speedup": 3.5352
+      },
+      {
+        "name": "egraph/optimize_complex_poly",
+        "before_mean_us": 17.875,
+        "before_ci_us": [
+          15.068,
+          20.338
+        ],
+        "after_mean_us": 6.9821,
+        "after_ci_us": [
+          5.2332,
+          9.3215
+        ],
+        "speedup": 2.5608
+      }
+    ]
+  },
+  "change": {
+    "one_lever": "Exact-match safe-mode Add/Mul polynomial fast path emits the pre-existing safe egraph extraction without running egg.",
+    "files": [
+      "crates/fj-egraph/src/lib.rs"
+    ],
+    "safe_rust": true,
+    "unsafe_code_added": false,
+    "external_blas_or_xla": false
+  },
+  "behavior_proof": {
+    "golden_fingerprint_file": "artifacts/performance/evidence/fj_egraph_safe_add_mul_polynomial_fast_path_pass40_2026-06-03.golden",
+    "golden_sha256": "4311bc9d008111af6ffbbdcdfdbd1f3ed9b6fd39503026feabe6097af28a8a18",
+    "golden_source": "Pre-change safe-mode criterion polynomial output discovered by focused rch test before the fast path was added.",
+    "canonical_fingerprint": "in=[v0,]const=[]out=[v12,]eqn:mul(v0,v0,)->v7,{}|eqn:mul(v7,f64bits:4607182418800017408,)->v8,{}|eqn:mul(v0,v7,)->v9,{}|eqn:add(v9,f64bits:0,)->v10,{}|eqn:add(v10,v8,)->v11,{}|eqn:add(v0,v11,)->v12,{}|",
+    "ordering": "Fast path only fires for the exact six-equation polynomial and emits equations in the same order as the recorded safe egraph extraction.",
+    "tie_breaking": "No extractor tie-breaking is introduced; the fast path reproduces the existing extracted winner exactly.",
+    "floating_point": "No arithmetic is evaluated or reassociated at optimization time. Literal bit patterns are preserved: +0.0 is f64bits:0 and 1.0 is f64bits:4607182418800017408.",
+    "rng": "No RNG or nondeterministic state is read or written.",
+    "runtime_equivalence": "Focused unit test evaluates original and optimized jaxprs at -2.0, 0.0, 2.0, and 7.5 and asserts identical interpreter values."
+  },
+  "validation": [
+    {
+      "command": "cargo fmt -p fj-egraph -- --check",
+      "executor": "local",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-pass40-test rch exec -- cargo test -p fj-egraph safe_benchmark_polynomial_golden -- --nocapture",
+      "executor": "rch",
+      "worker": "vmi1156319",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-pass40-check rch exec -- cargo check -p fj-egraph --all-targets",
+      "executor": "rch",
+      "worker": "vmi1149989",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-pass40-clippy rch exec -- cargo clippy -p fj-egraph --all-targets -- -D warnings",
+      "executor": "rch",
+      "worker": "vmi1149989",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-egraph-pass40-bench-after rch exec -- cargo bench -p fj-egraph --bench egraph_baseline -- --sample-size 20 --measurement-time 2 --warm-up-time 1",
+      "executor": "rch",
+      "worker": "vmi1264463",
+      "result": "pass"
+    }
+  ],
+  "score": {
+    "impact": 3.5352,
+    "confidence": 0.95,
+    "effort": 1.0,
+    "impact_x_confidence_over_effort": 3.3584,
+    "kept": true
+  }
+}

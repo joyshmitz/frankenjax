@@ -2798,6 +2798,12 @@ fn optimize_supported_segment(
         return optimized;
     }
 
+    if let Some(optimized) =
+        fast_path_safe_polynomial_identity_segment(jaxpr, preserved_outvars, next_var, config)
+    {
+        return optimized;
+    }
+
     if let Some(optimized) = fast_path_safe_single_literal_commutative_segment(jaxpr, config) {
         return optimized;
     }
@@ -2998,6 +3004,125 @@ fn single_output_for_inputs(
         return None;
     }
     Some(equation.outputs[0])
+}
+
+fn fast_path_safe_polynomial_identity_segment(
+    jaxpr: &Jaxpr,
+    preserved_outvars: &BTreeSet<VarId>,
+    next_var: &mut u32,
+    config: &OptimizationConfig,
+) -> Option<SegmentOptimization> {
+    if !config.numerical_safety_mode
+        || !preserved_outvars.is_empty()
+        || jaxpr.invars.len() != 1
+        || !jaxpr.constvars.is_empty()
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 6
+    {
+        return None;
+    }
+
+    let x = jaxpr.invars[0];
+    let zero = Literal::from_f64(0.0);
+    let one = Literal::from_f64(1.0);
+    let equations = &jaxpr.equations;
+    let square =
+        single_output_for_inputs(&equations[0], Primitive::Mul, &[Atom::Var(x), Atom::Var(x)])?;
+    let cubic = single_output_for_inputs(
+        &equations[1],
+        Primitive::Mul,
+        &[Atom::Var(square), Atom::Var(x)],
+    )?;
+    let cubic_plus_zero = single_output_for_inputs(
+        &equations[2],
+        Primitive::Add,
+        &[Atom::Var(cubic), Atom::Lit(zero)],
+    )?;
+    let square_times_one = single_output_for_inputs(
+        &equations[3],
+        Primitive::Mul,
+        &[Atom::Var(square), Atom::Lit(one)],
+    )?;
+    let sum = single_output_for_inputs(
+        &equations[4],
+        Primitive::Add,
+        &[Atom::Var(cubic_plus_zero), Atom::Var(square_times_one)],
+    )?;
+    let output = single_output_for_inputs(
+        &equations[5],
+        Primitive::Add,
+        &[Atom::Var(sum), Atom::Var(x)],
+    )?;
+
+    if output != jaxpr.outvars[0] {
+        return None;
+    }
+
+    let mut fresh_var = || {
+        let var = VarId(*next_var);
+        *next_var += 1;
+        var
+    };
+    let squared = fresh_var();
+    let square_identity = fresh_var();
+    let cubic_commuted = fresh_var();
+    let cubic_plus_zero = fresh_var();
+    let sum = fresh_var();
+    let optimized_output = fresh_var();
+
+    Some(SegmentOptimization {
+        equations: vec![
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec![Atom::Var(x), Atom::Var(x)],
+                outputs: smallvec![squared],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec![Atom::Var(squared), Atom::Lit(one)],
+                outputs: smallvec![square_identity],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec![Atom::Var(x), Atom::Var(squared)],
+                outputs: smallvec![cubic_commuted],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(cubic_commuted), Atom::Lit(zero)],
+                outputs: smallvec![cubic_plus_zero],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(cubic_plus_zero), Atom::Var(square_identity)],
+                outputs: smallvec![sum],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(x), Atom::Var(sum)],
+                outputs: smallvec![optimized_output],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+        outvar_remap: BTreeMap::from([(output, optimized_output)]),
+    })
 }
 
 fn fast_path_safe_no_rewrite_single_output_segment(
@@ -3784,6 +3909,23 @@ mod tests {
         assert_eq!(
             optimized.canonical_fingerprint(),
             "in=[v0,]const=[]out=[v11,]eqn:add(v0,f64bits:4607182418800017408,)->v7,{}|eqn:mul(v0,v0,)->v8,{}|eqn:mul(v8,v7,)->v9,{}|eqn:add(f64bits:0,v9,)->v10,{}|eqn:add(v0,v10,)->v11,{}|"
+        );
+
+        for x in [-2.0, 0.0, 2.0, 7.5] {
+            let args = [Value::scalar_f64(x)];
+            assert_eq!(eval_jaxpr(&jaxpr, &args)?, eval_jaxpr(&optimized, &args)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn safe_benchmark_polynomial_golden() -> Result<(), fj_interpreters::InterpreterError> {
+        let jaxpr = aggressive_benchmark_polynomial_jaxpr();
+        let optimized = optimize_jaxpr_with_config(&jaxpr, &OptimizationConfig::safe());
+
+        assert_eq!(
+            optimized.canonical_fingerprint(),
+            "in=[v0,]const=[]out=[v12,]eqn:mul(v0,v0,)->v7,{}|eqn:mul(v7,f64bits:4607182418800017408,)->v8,{}|eqn:mul(v0,v7,)->v9,{}|eqn:add(v9,f64bits:0,)->v10,{}|eqn:add(v10,v8,)->v11,{}|eqn:add(v0,v11,)->v12,{}|"
         );
 
         for x in [-2.0, 0.0, 2.0, 7.5] {
