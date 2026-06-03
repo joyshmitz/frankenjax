@@ -91,7 +91,7 @@ fn oracle_erf_one() {
     assert_close(
         extract_f64_scalar(&result),
         0.8427007929497149,
-        1e-6,
+        1e-12,
         "erf(1)",
     );
 }
@@ -103,7 +103,7 @@ fn oracle_erf_neg_one() {
     assert_close(
         extract_f64_scalar(&result),
         -0.8427007929497149,
-        1e-6,
+        1e-12,
         "erf(-1)",
     );
 }
@@ -116,7 +116,7 @@ fn oracle_erf_two() {
     assert_close(
         extract_f64_scalar(&result),
         0.9953222650189527,
-        1e-6,
+        1e-12,
         "erf(2)",
     );
 }
@@ -129,7 +129,7 @@ fn oracle_erf_half() {
     assert_close(
         extract_f64_scalar(&result),
         0.5204998778130465,
-        1e-6,
+        1e-12,
         "erf(0.5)",
     );
 }
@@ -191,7 +191,7 @@ fn oracle_erf_odd_function() {
         assert_close(
             extract_f64_scalar(&neg_result),
             -extract_f64_scalar(&pos_result),
-            1e-6,
+            1e-12,
             &format!("erf(-{}) = -erf({})", x, x),
         );
     }
@@ -258,10 +258,10 @@ fn oracle_erf_1d() {
     assert_eq!(extract_shape(&result), vec![5]);
     let vals = extract_f64_vec(&result);
 
-    assert_close(vals[0], -0.8427007929497149, 1e-6, "erf(-1)");
+    assert_close(vals[0], -0.8427007929497149, 1e-12, "erf(-1)");
     assert_eq!(vals[1], 0.0, "erf(0)");
-    assert_close(vals[2], 0.5204998778130465, 1e-6, "erf(0.5)");
-    assert_close(vals[3], 0.8427007929497149, 1e-6, "erf(1)");
+    assert_close(vals[2], 0.5204998778130465, 1e-12, "erf(0.5)");
+    assert_close(vals[3], 0.8427007929497149, 1e-12, "erf(1)");
     assert_eq!(vals[4], 1.0, "erf(inf)");
 }
 
@@ -275,9 +275,9 @@ fn oracle_erf_2d() {
     let vals = extract_f64_vec(&result);
 
     assert_eq!(vals[0], 0.0);
-    assert_close(vals[1], 0.8427007929497149, 1e-6, "erf(1)");
-    assert_close(vals[2], -0.8427007929497149, 1e-6, "erf(-1)");
-    assert_close(vals[3], 0.9953222650189527, 1e-6, "erf(2)");
+    assert_close(vals[1], 0.8427007929497149, 1e-12, "erf(1)");
+    assert_close(vals[2], -0.8427007929497149, 1e-12, "erf(-1)");
+    assert_close(vals[3], 0.9953222650189527, 1e-12, "erf(2)");
 }
 
 // ====================== MONOTONICITY ======================
@@ -317,7 +317,7 @@ fn oracle_erf_erfc_relationship() {
         assert_close(
             erf_val + erfc_val,
             1.0,
-            1e-6,
+            1e-12,
             &format!("erf({}) + erfc({}) = 1", x, x),
         );
     }
