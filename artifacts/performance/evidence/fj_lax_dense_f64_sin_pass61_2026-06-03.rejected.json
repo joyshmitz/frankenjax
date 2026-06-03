@@ -1,0 +1,44 @@
+{
+  "artifact": "fj_lax_dense_f64_sin_pass61_2026-06-03",
+  "bead": "frankenjax-6fvjw",
+  "pass": 61,
+  "status": "rejected",
+  "source_retained": false,
+  "profile_target": {
+    "crate": "fj-lax",
+    "benchmark": "eval/sin_64k_f64",
+    "reason": "top non-linalg production row in the post-pass60 RCH eval sweep"
+  },
+  "baseline": {
+    "worker": "vmi1227854",
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass61-eval-profile cargo bench -p fj-lax --bench lax_baseline -- eval/ --sample-size 10 --measurement-time 1 --warm-up-time 1",
+    "low_us": 756.67,
+    "mid_us": 775.02,
+    "high_us": 783.40
+  },
+  "candidate": {
+    "lever": "route dense F64 unary tensor inputs through LiteralBuffer::as_f64_slice and TensorValue::new_f64_values",
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass61-bench-sin cargo bench -p fj-lax --bench lax_baseline -- eval/sin_64k_f64 --sample-size 20 --measurement-time 2 --warm-up-time 1",
+    "low_us": 827.84,
+    "mid_us": 830.50,
+    "high_us": 833.31
+  },
+  "score": {
+    "impact": 0,
+    "confidence": 4,
+    "effort": 1,
+    "value": 0.0,
+    "keep_threshold": 2.0
+  },
+  "behavior_proof": {
+    "candidate_tests": [
+      "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass61-fast-path-tests cargo test -p fj-lax fast_path -- --nocapture"
+    ],
+    "candidate_tests_result": "21 passed before source restore",
+    "dense_vs_literal_fixture_sha256": "fbefbae01eb564c9cca9aec56e8c03bf8052e42be318ce29f3206af18f86f28d",
+    "isomorphism": "row-major order, per-element f64::sin bits, dtype, malformed fallback, tie-breaking, floating-point operation order, and RNG surface unchanged"
+  },
+  "decision": "rejected because the candidate rebench regressed the profiled target; production source was restored",
+  "next_primitive": "deeper dense transcendental algorithm, not output-storage wrapping"
+}
