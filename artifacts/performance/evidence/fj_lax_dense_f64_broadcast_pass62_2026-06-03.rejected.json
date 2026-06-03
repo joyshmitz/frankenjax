@@ -1,0 +1,44 @@
+{
+  "artifact": "fj_lax_dense_f64_broadcast_pass62_2026-06-03",
+  "bead": "frankenjax-r3waf",
+  "pass": 62,
+  "status": "rejected",
+  "source_retained": false,
+  "profile_target": {
+    "crate": "fj-lax",
+    "benchmark": "eval/add_broadcast_bias_1k_f64",
+    "reason": "post-pass60 eval profile row with mixed literal [256,4] plus dense [4] F64 bias broadcast"
+  },
+  "baseline": {
+    "worker": "vmi1227854",
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass62-broadcast-baseline cargo bench -p fj-lax --bench lax_baseline -- eval/add_broadcast_bias_1k_f64 --sample-size 30 --measurement-time 2 --warm-up-time 1",
+    "low_us": 9.8319,
+    "mid_us": 10.170,
+    "high_us": 10.658
+  },
+  "candidate": {
+    "lever": "teach broadcast_binary_f64 to borrow dense F64 storage on mixed dense/literal operands and emit dense F64 output while preserving literal-only output storage",
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass62-broadcast-candidate cargo bench -p fj-lax --bench lax_baseline -- eval/add_broadcast_bias_1k_f64 --sample-size 30 --measurement-time 2 --warm-up-time 1",
+    "low_us": 16.753,
+    "mid_us": 16.953,
+    "high_us": 17.232
+  },
+  "score": {
+    "impact": 0,
+    "confidence": 4,
+    "effort": 1,
+    "value": 0.0,
+    "keep_threshold": 2.0
+  },
+  "behavior_proof": {
+    "candidate_tests": [
+      "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass62-broadcast-tests cargo test -p fj-lax broadcast_binary_f64 -- --nocapture"
+    ],
+    "candidate_tests_result": "2 passed; 0 failed; 1043 filtered out before source restore",
+    "golden_output_sha256": "08568cc7743a9a15f2dc817723e16d063ea9e1cd8f6b260a7539406037a8a1f5",
+    "isomorphism": "row-major broadcast index order, per-element float_op use, dtype, tie-breaking, floating-point operation order, RNG surface, literal-only storage, and malformed literal fallback unchanged"
+  },
+  "decision": "rejected because the candidate rebench regressed the profiled target; production source was restored",
+  "next_primitive": "deeper broadcast kernel rewrite, not dense output wrapping"
+}

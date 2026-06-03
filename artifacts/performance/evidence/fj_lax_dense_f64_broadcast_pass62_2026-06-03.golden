@@ -1,0 +1,21 @@
+pass=62
+bead=frankenjax-r3waf
+status=rejected
+target=eval/add_broadcast_bias_1k_f64
+candidate=dense_aware_mixed_f64_broadcast_gather
+profile_baseline_worker=vmi1227854
+profile_baseline_us_low=9.8319
+profile_baseline_us_mid=10.170
+profile_baseline_us_high=10.658
+candidate_rebench_worker=ts2
+candidate_rebench_us_low=16.753
+candidate_rebench_us_mid=16.953
+candidate_rebench_us_high=17.232
+candidate_score=0.0
+source_retained=false
+behavior_proof=passed_broadcast_binary_f64_tests_before_restore
+proof_command=RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass62-broadcast-tests cargo test -p fj-lax broadcast_binary_f64 -- --nocapture
+proof_result=2 passed; 0 failed; 1043 filtered out
+isomorphism=row_major_broadcast_index_order_preserved;existing_float_op_reused;tie_breaking_unchanged;no_rng_surface;literal_only_storage_preserved;malformed_literal_fallback_preserved
+decision=rejected_because_candidate_rebench_regressed_profile_target
+next_primitive=deeper_broadcast_kernel_rewrite_not_dense_output_wrapping
