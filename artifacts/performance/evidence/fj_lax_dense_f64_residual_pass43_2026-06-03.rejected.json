@@ -1,0 +1,96 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "bead": "frankenjax-mcqr.30.2",
+  "parent_bead": "frankenjax-mcqr.30",
+  "pass": 43,
+  "date": "2026-06-03",
+  "crate": "fj-lax",
+  "target": "eval/add_64k_f64_vec",
+  "skill_pass": "repeatedly-apply-skill pass 43 -> extreme-software-optimization",
+  "status": "rejected",
+  "profile_backed_target": {
+    "bead_source": "frankenjax-mcqr.30 was in_progress and assigned to IcyGlacier; frankenjax-mcqr.30.2 was opened for this narrow residual pass.",
+    "hotspot": "After pass42 LiteralBuffer, eval/add_64k_f64_vec remained slower than eval/add_64k_f64_dense_ref.",
+    "alien_graveyard_lineage": [
+      "/data/projects/.scratch/no_gaps_directive.txt calls for pure safe-Rust SIMD/dense elementwise kernels with one-lever proof gates.",
+      "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md identifies SIMD/tiled numeric kernels and cache-local dense layout as the relevant primitive family."
+    ]
+  },
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass43-baseline-20260603 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/add_64k_f64' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1149989",
+    "eval_add_64k_f64_vec_mean_us": 72.467,
+    "eval_add_64k_f64_vec_ci_us": [67.809, 76.693],
+    "eval_add_64k_f64_dense_ref_mean_us": 32.445,
+    "eval_add_64k_f64_dense_ref_ci_us": [32.100, 32.870],
+    "sample_size": 30,
+    "warm_up_seconds": 1,
+    "measurement_seconds": 3
+  },
+  "candidates": [
+    {
+      "lever": "Replace the current push loop in eval_same_shape_f64_map with exact-size Iterator::collect::<Option<Vec<_>>>() while preserving the malformed-tensor None fallback.",
+      "single_lever": true,
+      "unsafe": false,
+      "kept_in_source": false,
+      "after_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass43-after-20260603 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/add_64k_f64' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+      "after_worker": "vmi1149989",
+      "after_eval_add_64k_f64_vec_mean_us": 120.60,
+      "after_eval_add_64k_f64_vec_ci_us": [113.46, 126.93],
+      "after_eval_add_64k_f64_dense_ref_mean_us": 57.489,
+      "after_eval_add_64k_f64_dense_ref_ci_us": [54.197, 60.300],
+      "score": 0.0,
+      "decision": "rejected; same-worker regression vs baseline"
+    },
+    {
+      "lever": "Specialize only Primitive::Add to remove the generic closure-shaped eval_same_shape_f64_map call while keeping identical F64Bits checks and fallback.",
+      "single_lever": true,
+      "unsafe": false,
+      "kept_in_source": false,
+      "after_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass43-add-specialized-20260603 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/add_64k_f64' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+      "after_worker": "vmi1153651",
+      "after_eval_add_64k_f64_vec_mean_us": 163.30,
+      "after_eval_add_64k_f64_vec_ci_us": [159.12, 167.97],
+      "after_eval_add_64k_f64_dense_ref_mean_us": 67.060,
+      "after_eval_add_64k_f64_dense_ref_ci_us": [65.279, 69.236],
+      "score": 0.0,
+      "decision": "rejected; clear regression and no same-worker confirmation warranted"
+    }
+  ],
+  "isomorphism_proof": {
+    "ordering": "Both rejected candidates preserved the same row-major zip iteration and output push order as the current fast path.",
+    "tie_breaking": "N/A. Elementwise Add performs no comparisons or tie-breaking.",
+    "floating_point": "Both rejected candidates used the same f64::from_bits(lhs) + f64::from_bits(rhs) operation and Literal::from_f64 output encoding.",
+    "rng": "N/A. Elementwise Add consumes no random state.",
+    "malformed_tensor_fallback": "Both candidates returned Ok(None) for non-F64Bits elements in a declared-F64 tensor, preserving fallback to the generic literal path."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_dense_f64_residual_pass43_2026-06-03.golden",
+    "sha256": "f4ad337858563d63c3144a11d0522553ad9524e67c0e4cd9f7e2662eafb6615a",
+    "check_command": "sha256sum -c artifacts/performance/evidence/fj_lax_dense_f64_residual_pass43_2026-06-03.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "git diff -- crates/fj-lax/src/arithmetic.rs",
+      "result": "empty after restoring both rejected candidates"
+    },
+    {
+      "command": "jq empty artifacts/performance/evidence/fj_lax_dense_f64_residual_pass43_2026-06-03.rejected.json",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_dense_f64_residual_pass43_2026-06-03.golden.sha256",
+      "result": "pass"
+    }
+  ],
+  "decision": {
+    "threshold": 2.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "source_restored": true,
+    "reason": "Residual micro-specialization does not attack the current storage/output representation bottleneck. The next useful mcqr.30 pass should be a real dense typed storage/output lever, not a loop-shape microchange."
+  },
+  "notes": [
+    "No C BLAS, MKL, XLA, unsafe code, stash, reset, clean, or file deletion was used.",
+    "The delegated subagent for this pass failed with a usage-limit error before editing; the orchestrator used the repeatedly-apply-skill fallback and executed the pass locally."
+  ]
+}
