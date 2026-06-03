@@ -297,6 +297,35 @@ fn bench_eig_48(c: &mut Criterion) {
     });
 }
 
+fn bench_cholesky_128_f64(c: &mut Criterion) {
+    // Real SPD matrix A = B^T B + n*I (diagonally dominant, positive definite).
+    let n = 128usize;
+    let base: Vec<f64> = (0..n * n)
+        .map(|idx| (((idx % 7) as f64) - 3.0) * 0.5)
+        .collect();
+    let mut a = vec![0.0f64; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut s = 0.0;
+            for k in 0..n {
+                s += base[k * n + i] * base[k * n + j];
+            }
+            a[i * n + j] = s + if i == j { n as f64 } else { 0.0 };
+        }
+    }
+    let m = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: Shape {
+            dims: vec![n as u32, n as u32],
+        },
+        elements: a.into_iter().map(Literal::from_f64).collect(),
+    });
+    let p = no_params();
+    c.bench_function("linalg/cholesky_128x128_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cholesky, std::slice::from_ref(&m), &p))
+    });
+}
+
 fn bench_matmul_2d_256(c: &mut Criterion) {
     // Public conformance-tested GEMM kernel: 256x256 @ 256x256.
     let (m, k, n) = (256usize, 256usize, 256usize);
@@ -774,6 +803,7 @@ criterion_group!(
     bench_dot_100,
     bench_dot_256_matrix_f64,
     bench_eig_48,
+    bench_cholesky_128_f64,
     bench_matmul_2d_256,
     bench_solve_24x24_24rhs,
     bench_concat_axis1_3x_f64,

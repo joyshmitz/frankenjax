@@ -230,12 +230,30 @@ pub(crate) fn eval_cholesky(
 
     let mut l = vec![(0.0_f64, 0.0_f64); m * m];
 
+    // For a real input matrix L stays purely real, so the O(m^3) inner
+    // accumulation can use real arithmetic (1 mul + 1 add per term) instead of
+    // complex_mul/complex_conj/complex_add (which compute guaranteed-zero
+    // imaginary parts). The downstream diagonal sqrt and complex_div remain
+    // unchanged, so the factor is bit-for-bit identical (for real operands
+    // complex_mul((a,0), conj((b,0))).re = a*b and the accumulated imaginary
+    // part is 0.0).
+    let real_input = !matches!(dtype, DType::Complex64 | DType::Complex128);
+
     for i in 0..m {
         for j in 0..=i {
-            let mut sum = (0.0_f64, 0.0_f64);
-            for k in 0..j {
-                sum = complex_add(sum, complex_mul(l[i * m + k], complex_conj(l[j * m + k])));
-            }
+            let sum = if real_input {
+                let mut acc = 0.0_f64;
+                for k in 0..j {
+                    acc += l[i * m + k].0 * l[j * m + k].0;
+                }
+                (acc, 0.0)
+            } else {
+                let mut sum = (0.0_f64, 0.0_f64);
+                for k in 0..j {
+                    sum = complex_add(sum, complex_mul(l[i * m + k], complex_conj(l[j * m + k])));
+                }
+                sum
+            };
 
             if i == j {
                 let diag_val = complex_sub(a[i * m + i], sum);
@@ -2176,6 +2194,69 @@ mod tests {
                 "L[{},{}]: got {got}, expected {exp}",
                 i / 3,
                 i % 3
+            );
+        }
+    }
+
+    #[test]
+    fn cholesky_real_fast_path_bit_identical_to_complex_path() {
+        // Factor the same real SPD matrix via the real fast path (F64 input)
+        // and the complex path (same values as Complex128, imag 0). The factor
+        // real parts must be bit-for-bit identical and the complex path's imag
+        // parts must be exactly zero.
+        let n = 6usize;
+        let mut base = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                base[i * n + j] = ((i * 7 + j * 3) % 5) as f64 - 2.0;
+            }
+        }
+        // A = base^T base + n*I  (symmetric positive definite, deterministic).
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += base[k * n + i] * base[k * n + j];
+                }
+                a[i * n + j] = s + if i == j { n as f64 } else { 0.0 };
+            }
+        }
+
+        let a_real = make_matrix(n, n, &a);
+        let a_complex = Value::Tensor(
+            TensorValue::new(
+                DType::Complex128,
+                Shape {
+                    dims: vec![n as u32, n as u32],
+                },
+                a.iter()
+                    .map(|&v| Literal::from_complex128(v, 0.0))
+                    .collect(),
+            )
+            .unwrap(),
+        );
+
+        let Value::Tensor(lr) = eval_cholesky(&[a_real], &BTreeMap::new()).unwrap() else {
+            panic!("real result not a tensor");
+        };
+        let Value::Tensor(lc) = eval_cholesky(&[a_complex], &BTreeMap::new()).unwrap() else {
+            panic!("complex result not a tensor");
+        };
+        for idx in 0..n * n {
+            let re_real = match lr.elements[idx] {
+                Literal::F64Bits(b) => b,
+                other => panic!("real factor element not F64Bits: {other:?}"),
+            };
+            let (re_cplx, im_cplx) = match lc.elements[idx] {
+                Literal::Complex128Bits(re, im) => (re, im),
+                other => panic!("complex factor element not Complex128Bits: {other:?}"),
+            };
+            assert_eq!(re_real, re_cplx, "real-part bits differ at {idx}");
+            assert_eq!(
+                im_cplx,
+                0.0_f64.to_bits(),
+                "complex factor imag nonzero at {idx}"
             );
         }
     }

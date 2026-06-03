@@ -1,0 +1,39 @@
+{
+  "bead": "frankenjax-mcqr.28",
+  "date": "2026-06-03",
+  "subsystem": "fj-lax (linalg)",
+  "target": "eval_cholesky inner accumulation (Cholesky primitive)",
+  "lever": {
+    "description": "eval_cholesky stores L as complex and runs its O(n^3) inner accumulation with complex_mul/complex_conj/complex_add (~8 flops/term) even for real inputs, where L is provably real (a real SPD matrix factors to a real lower-triangular L). For a real dtype, accumulate the inner sum with real f64 mul+add (2 flops/term) and pass (acc, 0.0) to the unchanged downstream logic. The diagonal positive-definite check, sqrt, and off-diagonal complex_div are untouched, so L is bit-for-bit identical. Complex/Hermitian inputs keep the complex path."
+  },
+  "benchmarks": {
+    "method": "rch Criterion, eval_primitive(Cholesky, 128x128 real SPD); same-worker back-to-back; baseline = complex inner loop, optimized = real inner loop",
+    "baseline": {
+      "linalg/cholesky_128x128_f64_us": 498.75,
+      "ci_us": [488.15, 511.40]
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'linalg/cholesky_128x128_f64'",
+      "linalg/cholesky_128x128_f64_us": 354.85,
+      "ci_us": [347.79, 362.44]
+    },
+    "speedup": {
+      "cholesky_128x128_f64": 1.41
+    },
+    "note": "Non-overlapping CIs. The win is the inner-loop flop reduction; the O(n^2) complex_div/sqrt steps are unchanged (kept for bit-parity), bounding the speedup."
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 15.0,
+    "note": "Algorithmic flop reduction (eliminates guaranteed-zero complex arithmetic). Real, production (Cholesky), bit-exact."
+  },
+  "isomorphism_proof": {
+    "floating_point": "For real operands complex_mul((a,0), complex_conj((b,0))).re = a*b - 0*(-0) = a*b and the accumulated imaginary part is 0.0; complex_add of (re,0) terms keeps im 0.0. The real inner loop accumulates the same sum(a*b) in the same ascending-k order, then constructs (acc, 0.0). complex_sub/sqrt/complex_div downstream consume identical (re, 0.0) values, producing bit-identical L.",
+    "ordering": "Inner accumulation order over k unchanged.",
+    "rng": "No RNG state is read or written.",
+    "errors": "The not-positive-definite check (diag <= 0 or |imag| > 1e-10) is unchanged and still runs on the same diag_val.",
+    "bit_identity_proof": "New test cholesky_real_fast_path_bit_identical_to_complex_path factors the same 6x6 real SPD matrix as F64 (real path) and as Complex128 (complex path) and asserts f64::to_bits() equality of the factor real parts and that the complex path's imaginary parts are exactly zero. Existing cholesky SPD/roundtrip unit tests and the linalg oracle conformance plus 1010/1010 fj-lax tests pass."
+  }
+}
