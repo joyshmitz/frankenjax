@@ -1,0 +1,9 @@
+frankenjax-mcqr.30.6
+pass: 47
+target: fj-lax reduce_window rank2 F64 3x3 SAME sum
+input_fixture: 64x64 real_matrix fixture from crates/fj-lax/benches/lax_baseline.rs
+params: reduce_op=sum; window_dimensions=3,3; window_strides=1,1; padding=SAME
+output_bits_fixture_id: 693388d434dacc2e3367b7853eb9c5da6ea1e03db144ef64138087dc971e3aee
+isomorphism: row-major output order preserved; each interior cell keeps the old nine-add order; border loops keep the old row-major clipped-window order; no RNG or tie-breaking surface; malformed declared-F64 tensors fall back to the literal path.
+baseline_rch: vmi1149989 eval/reduce_window_64x64_3x3_same_f64 midpoint 182.92 us [171.90, 193.87]
+after_rch: vmi1264463 eval/reduce_window_64x64_3x3_same_f64 midpoint 52.977 us [48.668, 58.488]

@@ -1,0 +1,62 @@
+{
+  "artifact": "fj_lax_reduce_window_packed_f64_pass47_2026-06-03",
+  "bead": "frankenjax-mcqr.30.6",
+  "parent_bead": "frankenjax-mcqr.30",
+  "agent": "IcyGlacier",
+  "pass": 47,
+  "date": "2026-06-03",
+  "crate": "fj-lax",
+  "target": "eval/reduce_window_64x64_3x3_same_f64",
+  "profile_basis": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass47-baseline-20260603 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/reduce_window_64x64_3x3_same_f64' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1149989",
+    "low_us": 171.90,
+    "mid_us": 182.92,
+    "high_us": 193.87
+  },
+  "lever": {
+    "kind": "layout-cache",
+    "description": "Pack literal-backed rank-2 F64 3x3 SAME reduce_window input once into a contiguous f64 slab, then run the existing row-major clipped-border and nine-add interior order over that slab. Dense F64 inputs borrow their existing slab; malformed declared-F64 tensors fall back to the literal path.",
+    "alien_primitive": "vectorized execution over cache-local scalar slabs; compiled runtime artifact is a packed F64 view rather than repeated enum decoding"
+  },
+  "after": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass47-after-20260603 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/reduce_window_64x64_3x3_same_f64' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1264463",
+    "low_us": 48.668,
+    "mid_us": 52.977,
+    "high_us": 58.488
+  },
+  "speedup_midpoint": 3.452,
+  "score": {
+    "impact": 4,
+    "confidence": 4,
+    "effort": 2,
+    "value": 8.0
+  },
+  "isomorphism_proof": {
+    "ordering": "Row-major output order is unchanged. Interior cells preserve the exact old nine-add sequence: top row left-to-right, center row left-to-right, bottom row left-to-right. Border cells preserve the old clipped-window row-major loop order.",
+    "floating_point": "Only Literal decoding is moved out of the inner loop. F64 bits are converted with f64::from_bits, and additions occur in the same order as before.",
+    "tie_breaking": "No comparison or tie-breaking behavior is involved in sum reduce_window.",
+    "rng": "No RNG state or random primitive is touched.",
+    "fallback": "Non-F64 literal storage in a declared-F64 tensor returns None from the packed view and executes the pre-existing literal path."
+  },
+  "golden": {
+    "output_bits_fixture_id": "693388d434dacc2e3367b7853eb9c5da6ea1e03db144ef64138087dc971e3aee",
+    "file": "artifacts/performance/evidence/fj_lax_reduce_window_packed_f64_pass47_2026-06-03.golden",
+    "sha256": "3eadbe8819bff4b60a9a7cd700cd88aaed0ed9b86b2b8a9f72954e65da467e97"
+  },
+  "validation": [
+    "cargo fmt -p fj-lax -- --check",
+    "git diff --check -- crates/fj-lax/src/lib.rs",
+    "sha256sum -c artifacts/performance/evidence/fj_lax_reduce_window_packed_f64_pass47_2026-06-03.golden.sha256",
+    "jq . artifacts/performance/evidence/fj_lax_reduce_window_packed_f64_pass47_2026-06-03.json >/dev/null",
+    "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass47-test-20260603 rch exec -- cargo test -p fj-lax reduce_window_rank2_f64_same_sum --lib -- --nocapture",
+    "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass47-check-20260603 rch exec -- cargo check -p fj-lax --all-targets",
+    "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass47-clippy-20260603 rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings"
+  ],
+  "ubs": {
+    "command": "ubs crates/fj-lax/src/lib.rs",
+    "exit_code": 1,
+    "result": "Existing monolithic fj-lax inventory: clippy/fmt/check clean inside UBS, but UBS reports pre-existing panic/test and warning surfaces outside this patch."
+  }
+}

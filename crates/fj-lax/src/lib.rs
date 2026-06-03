@@ -22,6 +22,7 @@ pub use type_promotion::promote_dtype as promote_dtype_public;
 pub use arithmetic::eval_igamma_grad_a;
 
 use fj_core::{Literal, Primitive, Shape, TensorValue, Value, ValueError};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use arithmetic::{
@@ -2391,11 +2392,141 @@ fn reduce_window_rank2_f64_sum_3x3_border(
     accum
 }
 
+fn reduce_window_f64_values(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
+    if let Some(values) = tensor.elements.as_f64_slice() {
+        return Some(Cow::Borrowed(values));
+    }
+
+    let mut values = Vec::with_capacity(tensor.elements.len());
+    for literal in tensor.elements.iter().copied() {
+        let Literal::F64Bits(bits) = literal else {
+            return None;
+        };
+        values.push(f64::from_bits(bits));
+    }
+    Some(Cow::Owned(values))
+}
+
+#[inline]
+fn reduce_window_rank2_f64_sum_3x3_border_values(
+    values: &[f64],
+    input_rows: usize,
+    input_cols: usize,
+    out_row: usize,
+    out_col: usize,
+) -> f64 {
+    let row_start = out_row.saturating_sub(1);
+    let row_end = out_row.saturating_add(2).min(input_rows);
+    let col_start = out_col.saturating_sub(1);
+    let col_end = out_col.saturating_add(2).min(input_cols);
+    let mut accum = 0.0;
+
+    for input_row in row_start..row_end {
+        let row_offset = input_row * input_cols;
+        for input_col in col_start..col_end {
+            accum += values[row_offset + input_col];
+        }
+    }
+
+    accum
+}
+
+fn eval_reduce_window_rank2_f64_sum_3x3_same_values(
+    values: &[f64],
+    tensor: &TensorValue,
+    out_dims: &[u32],
+    total_output: usize,
+) -> Result<Value, EvalError> {
+    let input_rows = tensor.shape.dims[0] as usize;
+    let input_cols = tensor.shape.dims[1] as usize;
+
+    let mut output_values = Vec::with_capacity(total_output);
+    if input_rows <= 2 || input_cols <= 2 {
+        for out_row in 0..input_rows {
+            for out_col in 0..input_cols {
+                output_values.push(reduce_window_rank2_f64_sum_3x3_border_values(
+                    values, input_rows, input_cols, out_row, out_col,
+                ));
+            }
+        }
+    } else {
+        for out_col in 0..input_cols {
+            output_values.push(reduce_window_rank2_f64_sum_3x3_border_values(
+                values, input_rows, input_cols, 0, out_col,
+            ));
+        }
+
+        for out_row in 1..(input_rows - 1) {
+            output_values.push(reduce_window_rank2_f64_sum_3x3_border_values(
+                values, input_rows, input_cols, out_row, 0,
+            ));
+
+            let top_row_offset = (out_row - 1) * input_cols;
+            let center_row_offset = out_row * input_cols;
+            let bottom_row_offset = (out_row + 1) * input_cols;
+            for out_col in 1..(input_cols - 1) {
+                let left_col = out_col - 1;
+                let top_left = top_row_offset + left_col;
+                let center_left = center_row_offset + left_col;
+                let bottom_left = bottom_row_offset + left_col;
+                let mut accum = 0.0;
+                accum += values[top_left];
+                accum += values[top_left + 1];
+                accum += values[top_left + 2];
+                accum += values[center_left];
+                accum += values[center_left + 1];
+                accum += values[center_left + 2];
+                accum += values[bottom_left];
+                accum += values[bottom_left + 1];
+                accum += values[bottom_left + 2];
+                output_values.push(accum);
+            }
+
+            output_values.push(reduce_window_rank2_f64_sum_3x3_border_values(
+                values,
+                input_rows,
+                input_cols,
+                out_row,
+                input_cols - 1,
+            ));
+        }
+
+        for out_col in 0..input_cols {
+            output_values.push(reduce_window_rank2_f64_sum_3x3_border_values(
+                values,
+                input_rows,
+                input_cols,
+                input_rows - 1,
+                out_col,
+            ));
+        }
+    }
+
+    Ok(Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: out_dims.to_vec(),
+            },
+            output_values,
+        )
+        .map_err(EvalError::InvalidTensor)?,
+    ))
+}
+
 fn eval_reduce_window_rank2_f64_sum_3x3_same(
     tensor: &TensorValue,
     out_dims: &[u32],
     total_output: usize,
 ) -> Result<Value, EvalError> {
+    if let Some(values) = reduce_window_f64_values(tensor) {
+        return eval_reduce_window_rank2_f64_sum_3x3_same_values(
+            values.as_ref(),
+            tensor,
+            out_dims,
+            total_output,
+        );
+    }
+
     let input_rows = tensor.shape.dims[0] as usize;
     let input_cols = tensor.shape.dims[1] as usize;
     let elements = &tensor.elements;
@@ -9192,6 +9323,10 @@ mod tests {
         let tensor = out.as_tensor().expect("expected tensor");
         assert_eq!(tensor.dtype, DType::F64);
         assert_eq!(tensor.shape.dims, vec![64, 64]);
+        assert!(
+            tensor.elements.as_f64_slice().is_some(),
+            "well-formed F64 reduce_window output should stay dense"
+        );
         let output_bits: Vec<u64> = tensor
             .elements
             .iter()
@@ -9203,6 +9338,32 @@ mod tests {
             digest,
             "693388d434dacc2e3367b7853eb9c5da6ea1e03db144ef64138087dc971e3aee"
         );
+    }
+
+    #[test]
+    fn reduce_window_rank2_f64_same_sum_malformed_literal_fallback() {
+        let input = Value::Tensor(TensorValue {
+            dtype: DType::F64,
+            shape: Shape { dims: vec![1, 1] },
+            elements: vec![Literal::I64(7)].into(),
+        });
+
+        let out = eval_primitive(
+            Primitive::ReduceWindow,
+            &[input],
+            &rw_params_with_padding("sum", "3,3", "1,1", "SAME"),
+        )
+        .unwrap();
+
+        let tensor = out.as_tensor().expect("expected tensor");
+        assert_eq!(tensor.dtype, DType::F64);
+        assert_eq!(tensor.shape.dims, vec![1, 1]);
+        assert!(
+            tensor.elements.as_f64_slice().is_none(),
+            "malformed declared-F64 tensor should keep the literal fallback"
+        );
+        let got = tensor.elements[0].as_f64().expect("F64 fallback output");
+        assert_eq!(got.to_bits(), 7.0_f64.to_bits());
     }
 
     #[test]
