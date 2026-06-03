@@ -228,41 +228,56 @@ pub(crate) fn eval_cholesky(
         });
     }
 
-    let mut l = vec![(0.0_f64, 0.0_f64); m * m];
-
-    // For a real input matrix L stays purely real, so the O(m^3) inner
-    // accumulation can use real arithmetic (1 mul + 1 add per term) instead of
-    // complex_mul/complex_conj/complex_add (which compute guaranteed-zero
-    // imaginary parts). The downstream diagonal sqrt and complex_div remain
-    // unchanged, so the factor is bit-for-bit identical (for real operands
-    // complex_mul((a,0), conj((b,0))).re = a*b and the accumulated imaginary
-    // part is 0.0).
+    // For a real input matrix L stays purely real, so we factor entirely in a
+    // contiguous `Vec<f64>` instead of the interleaved `Vec<(f64,f64)>`. This
+    // keeps the O(m^3) inner accumulation reading two stride-1 f64 rows (the
+    // complex buffer strides every `.0` access by 16 bytes, halving effective
+    // cache-line utilization and the load throughput). Bit-for-bit identical:
+    // the accumulation order is unchanged, and the scalar diagonal/off-diagonal
+    // updates replicate complex_sub/complex_div exactly for real operands
+    // (complex_sub((x,0),(s,0)) = x-s; complex_div((n,0),(d,0)).re = n*d/(d*d),
+    // which is NOT n/d in IEEE-754, so we preserve the multiply-then-divide).
     let real_input = !matches!(dtype, DType::Complex64 | DType::Complex128);
 
-    for i in 0..m {
-        for j in 0..=i {
-            let sum = if real_input {
+    if real_input {
+        let mut lr = vec![0.0_f64; m * m];
+        for i in 0..m {
+            for j in 0..=i {
+                // Stride-1 dot product over the first `j` entries of rows i and
+                // j (sequential accumulation, identical IEEE-754 order — no SIMD
+                // reassociation, so the result is bit-for-bit unchanged).
                 let mut acc = 0.0_f64;
                 for k in 0..j {
-                    acc += l[i * m + k].0 * l[j * m + k].0;
+                    acc += lr[i * m + k] * lr[j * m + k];
                 }
-                (acc, 0.0)
-            } else {
-                let mut sum = (0.0_f64, 0.0_f64);
-                for k in 0..j {
-                    sum = complex_add(sum, complex_mul(l[i * m + k], complex_conj(l[j * m + k])));
+                if i == j {
+                    // JAX's lax.linalg.cholesky does NOT raise for non-positive-
+                    // definite input (it must be jittable): it returns NaN where
+                    // the factorization fails, which then propagates through the
+                    // divisions below (matching jnp.linalg.cholesky; NumPy raises
+                    // LinAlgError instead — a deliberate JAX-vs-NumPy difference).
+                    lr[i * m + j] = (a[i * m + i].0 - acc).sqrt();
+                } else {
+                    let numer = a[i * m + j].0 - acc;
+                    let djj = lr[j * m + j];
+                    lr[i * m + j] = (numer * djj) / (djj * djj);
                 }
-                sum
-            };
+            }
+        }
+        let l: Vec<(f64, f64)> = lr.into_iter().map(|x| (x, 0.0)).collect();
+        return complex_matrix_to_value(m, m, &l, dtype);
+    }
+
+    let mut l = vec![(0.0_f64, 0.0_f64); m * m];
+    for i in 0..m {
+        for j in 0..=i {
+            let mut sum = (0.0_f64, 0.0_f64);
+            for k in 0..j {
+                sum = complex_add(sum, complex_mul(l[i * m + k], complex_conj(l[j * m + k])));
+            }
 
             if i == j {
                 let diag_val = complex_sub(a[i * m + i], sum);
-                // JAX's lax.linalg.cholesky does NOT raise for non-positive-
-                // definite input (it must be jittable) — it returns NaN where
-                // the factorization fails. sqrt of a non-positive diagonal
-                // yields NaN/0 that then propagates through the divisions below,
-                // matching jnp.linalg.cholesky. (This is a deliberate
-                // JAX-vs-NumPy difference: NumPy raises LinAlgError instead.)
                 l[i * m + j] = (diag_val.0.sqrt(), 0.0);
             } else {
                 let numer = complex_sub(a[i * m + j], sum);
