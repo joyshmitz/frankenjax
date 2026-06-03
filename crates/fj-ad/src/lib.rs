@@ -425,12 +425,16 @@ fn forward_with_tape(jaxpr: &Jaxpr, args: &[Value]) -> Result<ForwardResult, AdE
             env.insert(*var, val.clone());
         }
 
+        // `output_values` is no longer needed after this point (env already has
+        // its own clones), so move it into the tape instead of cloning the whole
+        // Vec a second time. For tensor-valued intermediates this elides an O(n)
+        // copy per equation; the stored values are identical.
         tape.entries.push(TapeEntry {
             primitive: eqn.primitive,
             inputs: input_var_ids,
             outputs: out_var_ids,
             input_values: resolved,
-            output_values: output_values.clone(),
+            output_values,
             params: eqn.params.clone(),
         });
     }

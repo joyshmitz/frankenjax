@@ -122,10 +122,56 @@ fn build_exp_log_jaxpr() -> Jaxpr {
     )
 }
 
+fn build_vector_reduce_jaxpr() -> Jaxpr {
+    // f(x) = sum(x*x + x): the intermediates v1 (x*x) and v2 (x*x + x) are
+    // full-length tensors, so the forward pass stores tensor-valued
+    // output_values on the tape (exercises the per-equation clone).
+    Jaxpr::new(
+        vec![VarId(0)],
+        vec![],
+        vec![VarId(3)],
+        vec![
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(0))],
+                outputs: smallvec![VarId(1)],
+                params: BTreeMap::new(),
+                effects: Vec::new(),
+                sub_jaxprs: Vec::new(),
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(0))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+                effects: Vec::new(),
+                sub_jaxprs: Vec::new(),
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec![Atom::Var(VarId(2))],
+                outputs: smallvec![VarId(3)],
+                params: BTreeMap::new(),
+                effects: Vec::new(),
+                sub_jaxprs: Vec::new(),
+            },
+        ],
+    )
+}
+
 fn bench_grad_square(c: &mut Criterion) {
     let jaxpr = build_square_jaxpr();
     let args = vec![Value::scalar_f64(3.0)];
     c.bench_function("ad/grad_square", |b| b.iter(|| grad_jaxpr(&jaxpr, &args)));
+}
+
+fn bench_grad_vector_1k(c: &mut Criterion) {
+    let jaxpr = build_vector_reduce_jaxpr();
+    let data: Vec<f64> = (0..1024).map(|i| i as f64 * 0.001).collect();
+    let args = vec![Value::vector_f64(&data).unwrap()];
+    c.bench_function("ad/grad_sum_x2_plus_x_1k", |b| {
+        b.iter(|| grad_jaxpr(&jaxpr, &args))
+    });
 }
 
 fn bench_grad_polynomial(c: &mut Criterion) {
@@ -188,6 +234,7 @@ fn bench_jvp_trig(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_grad_square,
+    bench_grad_vector_1k,
     bench_grad_polynomial,
     bench_grad_trig,
     bench_grad_exp_log,
