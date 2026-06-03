@@ -1,0 +1,38 @@
+{
+  "bead": "frankenjax-mcqr.10",
+  "date": "2026-06-02",
+  "subsystem": "fj-lax",
+  "target": "F64 clamp with scalar bounds (clamp(min, x, max) and legacy (x, min, max) orders)",
+  "lever": {
+    "description": "Add clamp_f64_scalar_bounds fast path to eval_clamp's two scalar-bounds tensor arms: when x is an F64 tensor and both bounds are F64Bits scalars, extract lo/hi once and loop clamp_f64 directly, skipping the per-element clamp_literal 3-tuple match and bound re-extraction. Returns None (fall through) for non-F64 inputs."
+  },
+  "benchmarks": {
+    "baseline": {
+      "note": "fast-path guards temporarily removed; generic per-element clamp_literal path",
+      "tool": "rch Criterion",
+      "clamp_1k_f64_mean_us": 9.3197
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/clamp_1k_f64'",
+      "clamp_1k_f64_mean_us": 1.4978
+    },
+    "speedup": {
+      "clamp_1k_f64": 6.222
+    }
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 15.0
+  },
+  "isomorphism_proof": {
+    "ordering": "Output elements produced in tensor index order; identical clamp per position.",
+    "floating_point": "Calls the same clamp_f64 the generic path uses for all-F64Bits operands; clamp_literal(F64,F64,F64) = from_f64(clamp_f64(...)), an exact match.",
+    "tie_breaking": "None introduced; NaN propagation (any-NaN -> canonical NaN) and -0.0 preserved (golden indices 3,4).",
+    "rng": "No RNG state is read or written.",
+    "errors": "Only F64 tensor x with F64 scalar bounds takes the fast path; other dtypes, tensor bounds, and malformed literals use the generic path.",
+    "unit_test": "fj-lax arithmetic::tests::clamp_f64_tensor_scalar_bounds_fast_path_bit_identical (both operand orders; NaN/-0.0/+-inf); 996/996 fj-lax tests pass.",
+    "golden_output_sha256": "bc96dcf6085cf63833a936cd362766831573fb937a1e4080d2bb5d0c125c25e5"
+  }
+}

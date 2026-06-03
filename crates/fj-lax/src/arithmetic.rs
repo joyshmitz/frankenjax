@@ -2369,6 +2369,39 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         }
     }
 
+    // Fast path for an F64 tensor with F64 scalar bounds (the common
+    // clamp(min, x, max) pattern). Bit-for-bit identical to the generic
+    // per-element path: for all-F64Bits operands `clamp_literal` computes
+    // `Literal::from_f64(clamp_f64(lo, x, hi))` (ignoring target_dtype), which
+    // is exactly what this does, but it extracts the bounds once and skips the
+    // per-element 3-tuple match. Returns None for non-F64 inputs.
+    fn clamp_f64_scalar_bounds(
+        x: &TensorValue,
+        lo: Literal,
+        hi: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        if x.dtype != DType::F64 {
+            return Ok(None);
+        }
+        let (Literal::F64Bits(lo_bits), Literal::F64Bits(hi_bits)) = (lo, hi) else {
+            return Ok(None);
+        };
+        let lof = f64::from_bits(lo_bits);
+        let hif = f64::from_bits(hi_bits);
+        let mut elements = Vec::with_capacity(x.elements.len());
+        for &elem in &x.elements {
+            let Literal::F64Bits(xb) = elem else {
+                return Ok(None);
+            };
+            elements.push(Literal::from_f64(clamp_f64(lof, f64::from_bits(xb), hif)));
+        }
+        Ok(Some(Value::Tensor(TensorValue::new(
+            DType::F64,
+            x.shape.clone(),
+            elements,
+        )?)))
+    }
+
     match (&inputs[0], &inputs[1], &inputs[2]) {
         (Value::Scalar(lo), Value::Scalar(x), Value::Scalar(hi)) => {
             let result = clamp_literal(*lo, *x, *hi, None)
@@ -2377,6 +2410,9 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         }
         // JAX order: clamp(min, x, max) with scalar bounds
         (Value::Scalar(lo), Value::Tensor(x), Value::Scalar(hi)) => {
+            if let Some(value) = clamp_f64_scalar_bounds(x, *lo, *hi)? {
+                return Ok(value);
+            }
             let mut elements = Vec::with_capacity(x.elements.len());
             for elem in x.elements.iter().copied() {
                 elements.push(
@@ -2392,6 +2428,9 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         }
         // Legacy (x, lo, hi) order kept for compatibility
         (Value::Tensor(x), Value::Scalar(lo), Value::Scalar(hi)) => {
+            if let Some(value) = clamp_f64_scalar_bounds(x, *lo, *hi)? {
+                return Ok(value);
+            }
             let mut elements = Vec::with_capacity(x.elements.len());
             for elem in x.elements.iter().copied() {
                 elements.push(
@@ -5282,6 +5321,43 @@ mod tests {
     fn clamp_scalar_above_max() {
         let result = eval_clamp(Primitive::Clamp, &[s_f64(15.0), s_f64(0.0), s_f64(10.0)]).unwrap();
         assert!((extract_f64(&result) - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn clamp_f64_tensor_scalar_bounds_fast_path_bit_identical() {
+        // F64 tensor with scalar bounds, both operand orders, with NaN / -0.0 /
+        // +-inf, must match the scalar clamp_f64 reference bit-for-bit.
+        let x_data = [-1.0, 0.5, 2.0, f64::NAN, -0.0, 1.0, f64::INFINITY];
+        let lo = 0.0_f64;
+        let hi = 1.0_f64;
+        let reference = |lo: f64, x: f64, hi: f64| -> f64 {
+            if lo.is_nan() || x.is_nan() || hi.is_nan() {
+                return f64::NAN;
+            }
+            let lower_bounded = if x < lo { lo } else { x };
+            if lower_bounded > hi {
+                hi
+            } else {
+                lower_bounded
+            }
+        };
+        let expected: Vec<Literal> = x_data
+            .iter()
+            .map(|&x| Literal::from_f64(reference(lo, x, hi)))
+            .collect();
+
+        // JAX order: clamp(min, x, max)
+        let r1 = eval_clamp(Primitive::Clamp, &[s_f64(lo), v_f64(&x_data), s_f64(hi)]).unwrap();
+        // Legacy order: clamp(x, min, max)
+        let r2 = eval_clamp(Primitive::Clamp, &[v_f64(&x_data), s_f64(lo), s_f64(hi)]).unwrap();
+        for r in [r1, r2] {
+            let Value::Tensor(tensor) = r else {
+                panic!("expected tensor");
+            };
+            assert_eq!(tensor.dtype, DType::F64);
+            // Raw-bit comparison distinguishes -0.0 and NaN payloads.
+            assert_eq!(tensor.elements, expected);
+        }
     }
 
     // ── Dot product ──

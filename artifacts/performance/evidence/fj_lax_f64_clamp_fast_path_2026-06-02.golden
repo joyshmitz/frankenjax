@@ -1,0 +1,11 @@
+frankenjax-mcqr.10 fj-lax F64 clamp scalar-bounds fast path golden
+
+primitive: clamp(min, x, max) with F64 tensor x and F64 scalar bounds
+min: 0.0
+max: 1.0
+x: [-1.0, 0.5, 2.0, NaN, -0.0, 1.0, +inf]
+output_contract: F64Bits, output[i] = clamp_f64(min, x[i], max) where any-NaN -> NaN,
+  else min(max(min, x), max) via (if x<lo {lo} else {x}) then (if >hi {hi} else it)
+serde_json_bits: [0,4602678819172646912,4607182418800017408,9221120237041090560,9223372036854775808,4607182418800017408,4607182418800017408]
+serde_json_sha256: bc96dcf6085cf63833a936cd362766831573fb937a1e4080d2bb5d0c125c25e5
+proof: for all-F64Bits operands the generic clamp_literal computes Literal::from_f64(clamp_f64(lo, x, hi)) (ignoring target_dtype); the fast path calls the same clamp_f64 with bounds extracted once, so output bits are identical including -0.0 (index 4, clamped to -0.0 since -0.0 !< 0.0 and -0.0 !> 1.0) and canonical NaN (index 3). Non-F64 operands fall through to the generic path.
