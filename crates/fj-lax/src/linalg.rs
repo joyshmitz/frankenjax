@@ -1895,83 +1895,102 @@ pub fn inv(a: &[f64], n: usize) -> Option<Vec<f64>> {
     Some(result)
 }
 
-/// Compute the Moore-Penrose pseudoinverse via SVD.
+/// Compute the Moore-Penrose pseudoinverse, matching `jnp.linalg.pinv(a, rcond)`.
 ///
-/// Matches `jnp.linalg.pinv(a, rcond)`.
+/// Uses the symmetric eigendecomposition of the smaller Gram matrix (`AᵀA` when
+/// `m >= n`, else `AAᵀ`): the eigenvalues are the squared singular values, so
+/// `A⁺ = (AᵀA)⁺ Aᵀ` (resp. `Aᵀ (AAᵀ)⁺`) where the Gram pseudoinverse drops every
+/// eigenvalue `λ` with singular value `√λ <= rcond·σ_max` (i.e. `λ <= rcond²·λ_max`),
+/// exactly as JAX's SVD-based `pinv` truncates small singular values.
+///
+/// The previous `(AᵀA)⁻¹ Aᵀ` normal-equations form (a) ignored `rcond` entirely,
+/// (b) returned all-zeros for rank-deficient inputs (because `inv(AᵀA)` failed on
+/// the singular Gram matrix) where JAX returns the true pseudoinverse, and
+/// (c) squared the condition number. For full-rank inputs the result is the same
+/// unique Moore-Penrose inverse.
 pub fn pinv(a: &[f64], m: usize, n: usize, rcond: f64) -> Vec<f64> {
     if m == 0 || n == 0 {
         return vec![0.0; n * m];
     }
 
-    // For very small matrices, use direct formula
-    if m == 1 && n == 1 {
-        let val = a[0];
-        if val.abs() < rcond {
-            return vec![0.0];
-        }
-        return vec![1.0 / val];
-    }
-
-    // Compute A^T * A or A * A^T depending on which is smaller
     if m >= n {
-        // A^+ = (A^T A)^{-1} A^T for tall/square matrices
-        let mut ata = vec![0.0; n * n];
+        // Gram matrix G = AᵀA (n×n, symmetric PSD).
+        let mut g = vec![0.0; n * n];
         for i in 0..n {
             for j in 0..n {
                 let mut sum = 0.0;
                 for k in 0..m {
                     sum += a[k * n + i] * a[k * n + j];
                 }
-                ata[i * n + j] = sum;
+                g[i * n + j] = sum;
             }
         }
-
-        if let Some(ata_inv) = inv(&ata, n) {
-            // A^+ = (A^T A)^{-1} A^T
-            let mut result = vec![0.0; n * m];
-            for i in 0..n {
-                for j in 0..m {
-                    let mut sum = 0.0;
-                    for k in 0..n {
-                        sum += ata_inv[i * n + k] * a[j * n + k];
-                    }
-                    result[i * m + j] = sum;
+        let g_pinv = gram_pseudoinverse(&mut g, n, rcond);
+        // A⁺ = G⁺ Aᵀ  (n×m): result[r][col] = Σ_c G⁺[r][c]·Aᵀ[c][col] = Σ_c G⁺[r][c]·a[col][c]
+        let mut result = vec![0.0; n * m];
+        for r in 0..n {
+            for col in 0..m {
+                let mut sum = 0.0;
+                for c in 0..n {
+                    sum += g_pinv[r * n + c] * a[col * n + c];
                 }
+                result[r * m + col] = sum;
             }
-            result
-        } else {
-            vec![0.0; n * m]
         }
+        result
     } else {
-        // A^+ = A^T (A A^T)^{-1} for wide matrices
-        let mut aat = vec![0.0; m * m];
+        // Gram matrix G = AAᵀ (m×m, symmetric PSD).
+        let mut g = vec![0.0; m * m];
         for i in 0..m {
             for j in 0..m {
                 let mut sum = 0.0;
                 for k in 0..n {
                     sum += a[i * n + k] * a[j * n + k];
                 }
-                aat[i * m + j] = sum;
+                g[i * m + j] = sum;
             }
         }
+        let g_pinv = gram_pseudoinverse(&mut g, m, rcond);
+        // A⁺ = Aᵀ G⁺  (n×m): result[r][col] = Σ_c Aᵀ[r][c]·G⁺[c][col] = Σ_c a[c][r]·G⁺[c][col]
+        let mut result = vec![0.0; n * m];
+        for r in 0..n {
+            for col in 0..m {
+                let mut sum = 0.0;
+                for c in 0..m {
+                    sum += a[c * n + r] * g_pinv[c * m + col];
+                }
+                result[r * m + col] = sum;
+            }
+        }
+        result
+    }
+}
 
-        if let Some(aat_inv) = inv(&aat, m) {
-            // A^+ = A^T (A A^T)^{-1}
-            let mut result = vec![0.0; n * m];
-            for i in 0..n {
-                for j in 0..m {
-                    let mut sum = 0.0;
-                    for k in 0..m {
-                        sum += a[k * n + i] * aat_inv[k * m + j];
-                    }
-                    result[i * m + j] = sum;
+/// Pseudoinverse of a symmetric PSD `d×d` Gram matrix via Jacobi
+/// eigendecomposition: `G⁺ = Σ_i (1/λ_i) vᵢ vᵢᵀ` over eigenvalues with
+/// `√λ_i > rcond·√λ_max` (singular-value cutoff, matching JAX). `g` is consumed
+/// (overwritten by the eigensolver).
+fn gram_pseudoinverse(g: &mut [f64], d: usize, rcond: f64) -> Vec<f64> {
+    let (lambdas, v) = jacobi_eigendecomposition(g, d);
+    let lambda_max = lambdas.iter().copied().fold(0.0_f64, f64::max);
+    // √λ_i > rcond·√λ_max  ⇔  λ_i > rcond²·λ_max
+    let cutoff = rcond * rcond * lambda_max;
+    let mut g_pinv = vec![0.0; d * d];
+    for i in 0..d {
+        if lambdas[i] > cutoff && lambdas[i] > 0.0 {
+            let inv_l = 1.0 / lambdas[i];
+            for r in 0..d {
+                let vri = v[r * d + i];
+                if vri == 0.0 {
+                    continue;
+                }
+                for c in 0..d {
+                    g_pinv[r * d + c] += inv_l * vri * v[c * d + i];
                 }
             }
-            result
-        } else {
-            vec![0.0; n * m]
         }
     }
+    g_pinv
 }
 
 // ── Norms ───────────────────────────────────────────────────────────
@@ -2974,6 +2993,43 @@ mod tests {
         let a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         let p = pinv(&a, 3, 2, 1e-15);
         assert_eq!(p.len(), 2 * 3); // n x m
+    }
+
+    #[test]
+    fn pinv_rank_deficient_satisfies_moore_penrose() {
+        // Rank-1 3x2 matrix (column 2 = 2 * column 1). AᵀA is singular, so the
+        // old (AᵀA)⁻¹Aᵀ form returned all-zeros; the SVD/eigendecomposition pinv
+        // returns the true Moore-Penrose inverse, which must satisfy A A⁺ A = A.
+        let m = 3;
+        let n = 2;
+        let a = [1.0, 2.0, 2.0, 4.0, 3.0, 6.0]; // rows: (1,2),(2,4),(3,6)
+        let p = pinv(&a, m, n, 1e-12);
+        assert_eq!(p.len(), n * m);
+
+        // A A⁺ A == A  (Moore-Penrose identity 1).
+        for i in 0..m {
+            for j in 0..n {
+                // (A A⁺)[i][l] = Σ_k A[i][k] A⁺[k][l]; then · A[l][j].
+                let mut val = 0.0;
+                for l in 0..m {
+                    let mut aap = 0.0;
+                    for k in 0..n {
+                        aap += a[i * n + k] * p[k * m + l];
+                    }
+                    val += aap * a[l * n + j];
+                }
+                assert!(
+                    (val - a[i * n + j]).abs() < 1e-9,
+                    "A A+ A[{i},{j}] = {val}, expected {}",
+                    a[i * n + j]
+                );
+            }
+        }
+        // And the pseudoinverse is non-trivial (the old path returned all-zeros).
+        assert!(
+            p.iter().any(|&x| x.abs() > 1e-6),
+            "pinv must not be all-zeros"
+        );
     }
 
     // ── Norm tests ──────────────────────────────────────────────────
