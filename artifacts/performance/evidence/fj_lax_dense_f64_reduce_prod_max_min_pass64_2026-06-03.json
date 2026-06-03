@@ -1,0 +1,80 @@
+{
+    "bead": "frankenjax-mcqr.30.10",
+    "pass": 64,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/reduce_max_64k_f64",
+    "lever_summary": "Generalize the dense F64 full-reduction fast path (eval_dense_f64_full_reduce, formerly _sum) from ReduceSum-only to also cover ReduceProd/ReduceMax/ReduceMin, so those reductions over dense F64 tensors fold LiteralBuffer::as_f64_slice() directly instead of materializing the 24-byte Vec<Literal> and matching as_f64() per element.",
+    "baseline": {
+        "description": "Same-process Vec<Literal>-backed reference bench (eval/reduce_max_64k_f64_literal_ref), forced down the generic per-element path; measured on the same worker as the final to isolate the data-model win from cross-worker CPU variance.",
+        "worker": "vmi1153651",
+        "low_us": 571.113,
+        "mid_us": 585.271,
+        "high_us": 600.775,
+        "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- reduce_max_64k_f64 --save-baseline maxpair"
+    },
+    "final_benchmark": {
+        "description": "Dense vector_f64 input (eval/reduce_max_64k_f64) hitting the generalized fast path.",
+        "worker": "vmi1153651",
+        "low_us": 152.435,
+        "mid_us": 157.877,
+        "high_us": 165.005,
+        "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- reduce_max_64k_f64 --save-baseline maxpair"
+    },
+    "speedup": {
+        "midpoint_x": 3.707,
+        "conservative_x": 3.461
+    },
+    "companion_reduce_sum_same_worker": {
+        "note": "ReduceSum dense vs Vec<Literal> measured in one process on vmi1153651 (cleaner same-worker companion to the mcqr.30.9 cross-worker pass60 number).",
+        "dense_mid_us": 67.895,
+        "literal_mid_us": 537.221,
+        "speedup_midpoint_x": 7.913
+    },
+    "score": {
+        "impact": 4.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 8.0,
+        "kept": true
+    },
+    "alien_graveyard": {
+        "primitive": "vectorized execution / dense SoA layout",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "avoid object-at-a-time Literal materialization by folding contiguous F64 storage directly; same primitive as mcqr.30.9, now extended to the prod/max/min reductions"
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/reduction.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "eval_dense_f64_full_reduce guard widened from `primitive != ReduceSum` to `!matches!(primitive, ReduceSum | ReduceProd | ReduceMax | ReduceMin)`; single call site and fold loop unchanged. Added same-worker Vec<Literal> reference benches for sum and max."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: same left-to-right element order; rank-0 shortcut still precedes the fast path",
+        "floating_point": "unchanged: the caller's float_op (ReduceProd 1.0/a*b, ReduceMax -inf/jax_max_f64, ReduceMin +inf/jax_min_f64) is applied sequentially with the same float_init seed; no reassociation, pairwise/SIMD reduction tree, or fast-math",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "unchanged: as_f64_slice() is Some only for F64 dense storage; complex, integral, F32/F16/BF16, and malformed declared-F64 (Literal-backed) inputs return None and fall through to the existing generic paths",
+        "nan_propagation": "jax_max_f64/jax_min_f64 return canonical f64::NAN (0x7ff8000000000000) on any NaN operand in both fast and generic paths",
+        "golden_max_min_output_bits": "0x7ff8000000000000"
+    },
+    "validation": [
+        {
+            "name": "reduction_parity_and_unit_tests",
+            "worker": "remote (rch)",
+            "command": "rch exec -- cargo test -p fj-lax --lib reduction",
+            "result": "passed: 29 tests (incl. dense_f64_full_reduce_prod_max_min_bit_identical_to_literal_path)"
+        },
+        {
+            "name": "check_all_targets",
+            "command": "rch exec -- cargo check -p fj-lax --all-targets",
+            "result": "passed"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}

@@ -1,0 +1,17 @@
+frankenjax-mcqr.30.10 pass64 golden
+target=eval/reduce_max_64k_f64
+lever=generalize eval_dense_f64_full_reduce from ReduceSum-only to ReduceSum|ReduceProd|ReduceMax|ReduceMin
+baseline_ref=eval/reduce_max_64k_f64_literal_ref (same-process Vec<Literal> path)
+baseline_worker=vmi1153651
+baseline_criterion=571.113us..600.775us midpoint=585.271us
+final_worker=vmi1153651
+final_criterion=152.435us..165.005us midpoint=157.877us
+speedup_midpoint=3.707x
+speedup_conservative=3.461x
+companion_reduce_sum_same_worker=dense 67.895us vs literal 537.221us = 7.913x
+score=8.0
+alien_primitive=vectorized execution / dense SoA layout, alien_cs_graveyard section 8.2
+source_change=ReduceProd/ReduceMax/ReduceMin full dense DType::F64 tensors fold LiteralBuffer::as_f64_slice directly via the widened eval_dense_f64_full_reduce guard
+golden_max_min_output_bits=0x7ff8000000000000
+isomorphism=rank-0 shortcut remains before the fast path; dense F64 full reductions keep the same left-to-right fold from the caller float_init through the caller float_op (ReduceProd 1.0/mul, ReduceMax -inf/jax_max_f64, ReduceMin +inf/jax_min_f64); output is the same F64 scalar via reduce_real_literal; axes, complex, integral, F32/F16/BF16, malformed declared-F64, ordering, tie-breaking, RNG, and error semantics are unchanged; jax_max_f64/jax_min_f64 return canonical f64::NAN on any NaN operand in both paths
+validation=RCH cargo test -p fj-lax --lib reduction passed 29 tests incl dense_f64_full_reduce_prod_max_min_bit_identical_to_literal_path; RCH cargo check -p fj-lax --all-targets passed; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed

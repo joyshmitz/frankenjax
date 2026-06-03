@@ -58,14 +58,31 @@ fn reduce_real_literal(dtype: DType, value: f64) -> Literal {
     }
 }
 
+/// Dense F64 full-reduction fast path for `ReduceSum`/`ReduceProd`/`ReduceMax`/
+/// `ReduceMin`. Folds the contiguous `f64` backing store directly instead of
+/// materializing the 24-byte `Literal` enum and matching `as_f64()` per element
+/// (moving 8 bytes/element instead of 24).
+///
+/// Bit-for-bit identical to the generic `Vec<Literal>` float fold below: the
+/// caller supplies the same `float_init` seed and `float_op` (e.g. `ReduceProd`
+/// => `1.0`/`a*b`, `ReduceMax` => `-inf`/`jax_max_f64`), we apply them in the
+/// same ascending element order with no reassociation, and the output is the
+/// same `reduce_real_literal(F64, acc)` (`reduce_real_output_dtype(F64) == F64`).
+/// `as_f64_slice()` is `Some` only for F64 dense storage, where
+/// `slice[i] == as_slice()[i].as_f64()` exactly, so a malformed declared-F64
+/// tensor (`Literal` storage) returns `None` and falls through unchanged.
 #[inline]
-fn eval_dense_f64_full_reduce_sum(
+fn eval_dense_f64_full_reduce(
     primitive: Primitive,
     tensor: &TensorValue,
     float_init: f64,
     float_op: &impl Fn(f64, f64) -> f64,
 ) -> Option<Value> {
-    if primitive != Primitive::ReduceSum || tensor.dtype != DType::F64 {
+    if !matches!(
+        primitive,
+        Primitive::ReduceSum | Primitive::ReduceProd | Primitive::ReduceMax | Primitive::ReduceMin
+    ) || tensor.dtype != DType::F64
+    {
         return None;
     }
     let values = tensor.elements.as_f64_slice()?;
@@ -165,7 +182,7 @@ pub(crate) fn eval_reduce(
             }
 
             if let Some(value) =
-                eval_dense_f64_full_reduce_sum(primitive, tensor, float_init, &float_op)
+                eval_dense_f64_full_reduce(primitive, tensor, float_init, &float_op)
             {
                 return Ok(value);
             }
@@ -1158,6 +1175,56 @@ mod tests {
         .unwrap();
 
         assert_eq!(extract_f64_bits(&result), 9.5_f64.to_bits());
+    }
+
+    /// Bit-exact parity for the generalized dense F64 full-reduction fast path
+    /// across ReduceProd/ReduceMax/ReduceMin (ReduceSum is covered above): a
+    /// dense `vector_f64` input (fast path) must produce the same scalar bits as
+    /// the `Vec<Literal>`-backed tensor (generic loop) for every primitive,
+    /// including NaN/±inf/signed-zero edge cases. Routes through the real
+    /// `eval_primitive` dispatcher so the exact `float_init`/`float_op` per
+    /// primitive are exercised.
+    #[test]
+    fn dense_f64_full_reduce_prod_max_min_bit_identical_to_literal_path() {
+        let data = std::hint::black_box([
+            1.5,
+            -0.0,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            -3.25,
+            f64::INFINITY,
+            0.0,
+            f64::NEG_INFINITY,
+            2.0,
+        ]);
+        let params = BTreeMap::new();
+        for primitive in [
+            Primitive::ReduceProd,
+            Primitive::ReduceMax,
+            Primitive::ReduceMin,
+        ] {
+            let dense = Value::vector_f64(&data).unwrap();
+            assert!(dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+            let literal = v_f64(&data);
+            assert!(
+                literal
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_f64_slice()
+                    .is_none()
+            );
+
+            let dense_result =
+                crate::eval_primitive(primitive, std::slice::from_ref(&dense), &params).unwrap();
+            let literal_result =
+                crate::eval_primitive(primitive, std::slice::from_ref(&literal), &params).unwrap();
+
+            assert_eq!(
+                extract_f64_bits(&dense_result),
+                extract_f64_bits(&literal_result),
+                "dense/literal mismatch for {primitive:?}"
+            );
+        }
     }
 
     #[test]

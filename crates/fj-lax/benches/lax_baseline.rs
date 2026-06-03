@@ -493,6 +493,62 @@ fn bench_reduce_sum_64k_f64(c: &mut Criterion) {
     });
 }
 
+// Reference: the same 64k F64 reduction over a NON-dense `Vec<Literal>`-backed
+// tensor, which falls through to the generic per-element `as_f64()` loop (the
+// pre-dense path). Run in the same process as `bench_reduce_sum_64k_f64` so the
+// dense-vs-Literal ratio is measured on one worker, isolating the data-model
+// win from cross-worker CPU variance.
+fn bench_reduce_sum_64k_f64_literal_reference(c: &mut Criterion) {
+    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::from_f64(i as f64 * 0.001))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            elements,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/reduce_sum_64k_f64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+// Generalized dense fast path now also covers ReduceMax (and Prod/Min). These
+// two measure the dense-vs-Literal ratio for the max case on one worker — the
+// branch in `jax_max_f64` is present in both paths, so the win is the same
+// data-model (8 vs 24 bytes/element, no enum match) the sum benches show.
+fn bench_reduce_max_64k_f64(c: &mut Criterion) {
+    let data: Vec<f64> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| i as f64 * 0.001)
+        .collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/reduce_max_64k_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceMax, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_max_64k_f64_literal_reference(c: &mut Criterion) {
+    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::from_f64(i as f64 * 0.001))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            elements,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/reduce_max_64k_f64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceMax, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_window_64x64(c: &mut Criterion) {
     let input = real_matrix(64, 64);
     let mut params = BTreeMap::new();
@@ -926,6 +982,9 @@ criterion_group!(
     bench_transpose_256x256_f64,
     bench_reduce_sum_1k,
     bench_reduce_sum_64k_f64,
+    bench_reduce_sum_64k_f64_literal_reference,
+    bench_reduce_max_64k_f64,
+    bench_reduce_max_64k_f64_literal_reference,
     bench_reduce_window_64x64,
     bench_sin_1k,
     bench_sin_64k,
