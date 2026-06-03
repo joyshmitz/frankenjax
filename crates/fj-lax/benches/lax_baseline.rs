@@ -145,6 +145,24 @@ fn bench_lt_scalar_1k_f64_vector(c: &mut Criterion) {
     });
 }
 
+fn bench_add_broadcast_bias_1k_f64(c: &mut Criterion) {
+    // Bias-add pattern: [256, 4] + [4] -> [256, 4] (1024 output elements).
+    let lhs_data: Vec<f64> = (0..1024).map(|i| i as f64 * 0.001).collect();
+    let lhs = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape { dims: vec![256, 4] },
+            lhs_data.into_iter().map(Literal::from_f64).collect(),
+        )
+        .unwrap(),
+    );
+    let rhs = Value::vector_f64(&[0.25, -0.5, 1.5, -2.0]).unwrap();
+    let p = no_params();
+    c.bench_function("eval/add_broadcast_bias_1k_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Add, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 fn bench_nextafter_1k(c: &mut Criterion) {
     let lhs = real_vector(1000);
     let rhs_data: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.05).cos()).collect();
@@ -589,6 +607,7 @@ criterion_group!(
     bench_tensor_sub_scalar_1k_f64_vector,
     bench_eq_1k_f64_vector,
     bench_lt_scalar_1k_f64_vector,
+    bench_add_broadcast_bias_1k_f64,
     bench_nextafter_1k,
     bench_dot_100,
     bench_reduce_sum_1k,

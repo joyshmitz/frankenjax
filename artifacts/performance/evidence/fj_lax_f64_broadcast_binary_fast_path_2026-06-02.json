@@ -1,0 +1,41 @@
+{
+  "bead": "frankenjax-mcqr.11",
+  "date": "2026-06-02",
+  "subsystem": "fj-lax",
+  "target": "F64 NumPy-broadcast binary ops (add/sub/mul/div/max/min/... ) e.g. bias-add [N,D]+[D]",
+  "lever": {
+    "description": "Add broadcast_binary_f64 fast path to broadcast_binary_tensors: for F64/F64 operands, reuse the identical broadcast index math (flat_to_multi_into + broadcast_flat_index) but apply the passed float_op directly to the gathered f64 values, skipping the per-element binary_literal_op dispatch (promote_dtype + 2x literal_dtype + 2x literal_to_numeric_f64 + literal_from_numeric_f64). Works for every binary primitive since float_op carries the operation. Returns None (fall through) on any non-F64Bits gathered element."
+  },
+  "benchmarks": {
+    "baseline": {
+      "note": "fast-path guard temporarily removed; generic binary_literal_op broadcast path",
+      "tool": "rch Criterion",
+      "add_broadcast_bias_1k_f64_mean_us": 132.80,
+      "add_broadcast_bias_1k_f64_ci_us": [97.29, 174.41]
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/add_broadcast_bias_1k_f64'",
+      "add_broadcast_bias_1k_f64_mean_us": 9.205,
+      "add_broadcast_bias_1k_f64_ci_us": [9.09, 9.32]
+    },
+    "speedup": {
+      "add_broadcast_bias_1k_f64_mean": 14.43,
+      "add_broadcast_bias_1k_f64_conservative_vs_baseline_floor": 10.57
+    }
+  },
+  "score": {
+    "impact": 4,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 20.0
+  },
+  "isomorphism_proof": {
+    "ordering": "Identical broadcast index math (flat_to_multi_into + broadcast_flat_index) and row-major flat output order.",
+    "floating_point": "Applies the same float_op the generic path uses for F64 (binary_literal_op(F64,F64) = from_f64(float_op(...))); exact per-element.",
+    "tie_breaking": "None introduced; NaN/-0.0/+-inf preserved (golden indices 1,2,3).",
+    "rng": "No RNG state is read or written.",
+    "errors": "Only F64/F64 broadcasts take the fast path; other dtypes/malformed literals fall through to the generic binary_literal_op path.",
+    "unit_test": "fj-lax arithmetic::tests::broadcast_binary_f64_fast_path_bit_identical (row [3] and column [2,1] broadcasts, add/sub/mul/div, NaN/-0.0/+-inf); 997/997 fj-lax tests pass.",
+    "golden_output_sha256": "345c747183e35c06a782b72ce261c51fafbd8a64f124d18f72dcebbf4f7eb86f"
+  }
+}

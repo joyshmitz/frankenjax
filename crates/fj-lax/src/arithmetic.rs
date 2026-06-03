@@ -887,6 +887,29 @@ fn broadcast_binary_tensors(
     let lhs_strides = broadcast_strides(&lhs.shape, &out_shape);
     let rhs_strides = broadcast_strides(&rhs.shape, &out_shape);
 
+    // F64⊗F64 fast path: the generic binary_literal_op reduces to
+    // `Literal::from_f64(float_op(a, b))` for F64 operands (out dtype F64 hits
+    // the float branch), so apply float_op directly to the broadcast-gathered
+    // values and skip the per-element promote_dtype / literal_to_numeric_f64 /
+    // literal_from_numeric_f64 dispatch. Same broadcast index math => identical
+    // element order and bits. Bails to the generic path on any non-F64Bits
+    // element. Works for every binary primitive since float_op carries the op.
+    if lhs.dtype == DType::F64
+        && rhs.dtype == DType::F64
+        && let Some(value) = broadcast_binary_f64(
+            lhs,
+            rhs,
+            &out_shape,
+            out_count,
+            &out_strides,
+            &lhs_strides,
+            &rhs_strides,
+            float_op,
+        )?
+    {
+        return Ok(value);
+    }
+
     let mut multi = Vec::with_capacity(out_strides.len());
     let mut elements = Vec::with_capacity(out_count);
     for flat_idx in 0..out_count {
@@ -901,6 +924,47 @@ fn broadcast_binary_tensors(
 
     let dtype = promote_dtype(lhs.dtype, rhs.dtype);
     Ok(Value::Tensor(TensorValue::new(dtype, out_shape, elements)?))
+}
+
+/// F64 broadcast binary fast path. Produces output elements in the same
+/// row-major flat order as the generic broadcast loop using identical index
+/// math, applying `float_op` directly to the gathered F64 values. Bit-for-bit
+/// identical to the generic path for F64 operands (where binary_literal_op is
+/// `from_f64(float_op(from_bits(l), from_bits(r)))`). Returns `Ok(None)` if any
+/// gathered element is not `F64Bits`, so the caller falls through to generic.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn broadcast_binary_f64(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    out_shape: &Shape,
+    out_count: usize,
+    out_strides: &[usize],
+    lhs_strides: &[usize],
+    rhs_strides: &[usize],
+    float_op: &impl Fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    let mut multi = Vec::with_capacity(out_strides.len());
+    let mut elements = Vec::with_capacity(out_count);
+    for flat_idx in 0..out_count {
+        flat_to_multi_into(flat_idx, out_strides, &mut multi);
+        let lhs_idx = broadcast_flat_index(&multi, lhs_strides);
+        let rhs_idx = broadcast_flat_index(&multi, rhs_strides);
+
+        let (Literal::F64Bits(lhs_bits), Literal::F64Bits(rhs_bits)) =
+            (lhs.elements[lhs_idx], rhs.elements[rhs_idx])
+        else {
+            return Ok(None);
+        };
+        let out = float_op(f64::from_bits(lhs_bits), f64::from_bits(rhs_bits));
+        elements.push(Literal::from_f64(out));
+    }
+
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::F64,
+        out_shape.clone(),
+        elements,
+    )?)))
 }
 
 fn broadcast_shape(lhs: &Shape, rhs: &Shape) -> Option<Shape> {
@@ -4844,6 +4908,71 @@ mod tests {
                 .collect();
             // Compare raw bits so NaN payloads and -0.0 are distinguished.
             assert_eq!(tensor.elements, expected, "{primitive:?} bit mismatch");
+        }
+    }
+
+    #[test]
+    fn broadcast_binary_f64_fast_path_bit_identical() {
+        // 2x3 broadcast against a row-vector [3] and a column-vector [2,1],
+        // across add/sub/mul/div with NaN / -0.0 / +-inf. Each output element
+        // must match lhs op rhs computed with the same broadcasting.
+        fn t(dims: Vec<u32>, data: &[f64]) -> (Value, Vec<f64>) {
+            let v = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims },
+                    data.iter().map(|&x| Literal::from_f64(x)).collect(),
+                )
+                .unwrap(),
+            );
+            (v, data.to_vec())
+        }
+        let lhs_data = [1.5, -0.0, f64::INFINITY, f64::NAN, 7.0, -3.25]; // 2x3
+        let row = [2.0, -4.0, 0.0]; // [3]
+        let col = [5.0, f64::NEG_INFINITY]; // [2,1]
+        for primitive in [
+            Primitive::Add,
+            Primitive::Sub,
+            Primitive::Mul,
+            Primitive::Div,
+        ] {
+            let op = |a: f64, b: f64| match primitive {
+                Primitive::Add => a + b,
+                Primitive::Sub => a - b,
+                Primitive::Mul => a * b,
+                Primitive::Div => a / b,
+                _ => unreachable!(),
+            };
+            let int_op = |a: i64, b: i64| match primitive {
+                Primitive::Add => a.wrapping_add(b),
+                Primitive::Sub => a.wrapping_sub(b),
+                Primitive::Mul => a.wrapping_mul(b),
+                _ => a.checked_div(b).unwrap_or(0),
+            };
+            // row broadcast: out[r,c] = lhs[r*3+c] op row[c]
+            let (lhs, _) = t(vec![2, 3], &lhs_data);
+            let (rhs, _) = t(vec![3], &row);
+            let result = eval_binary_elementwise(primitive, &[lhs, rhs], int_op, op).unwrap();
+            let Value::Tensor(tensor) = result else {
+                panic!("expected tensor");
+            };
+            let expected: Vec<Literal> = (0..6)
+                .map(|i| Literal::from_f64(op(lhs_data[i], row[i % 3])))
+                .collect();
+            assert_eq!(tensor.elements, expected, "{primitive:?} row-broadcast");
+            assert_eq!(tensor.shape.dims, vec![2, 3]);
+
+            // column broadcast: out[r,c] = lhs[r*3+c] op col[r]
+            let (lhs, _) = t(vec![2, 3], &lhs_data);
+            let (rhs, _) = t(vec![2, 1], &col);
+            let result = eval_binary_elementwise(primitive, &[lhs, rhs], int_op, op).unwrap();
+            let Value::Tensor(tensor) = result else {
+                panic!("expected tensor");
+            };
+            let expected: Vec<Literal> = (0..6)
+                .map(|i| Literal::from_f64(op(lhs_data[i], col[i / 3])))
+                .collect();
+            assert_eq!(tensor.elements, expected, "{primitive:?} col-broadcast");
         }
     }
 

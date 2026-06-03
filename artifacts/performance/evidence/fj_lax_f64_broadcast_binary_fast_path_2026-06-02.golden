@@ -1,0 +1,9 @@
+frankenjax-mcqr.11 fj-lax F64 broadcast binary-op fast path golden
+
+primitive: add (representative; all binary ops share the path via float_op)
+lhs: shape [2,3] = [1.5, -0.0, +inf, NaN, 7.0, -3.25]
+rhs: shape [3] (row broadcast) = [2.0, -4.0, 0.0]
+output_contract: shape [2,3], row-major flat order, out[r,c] = lhs[r*3+c] + rhs[c]
+serde_json_bits: [4615063718147915776,13839561654909534208,9218868437227405312,9221120237041090560,4613937818241073152,13837872805049270272]
+serde_json_sha256: 345c747183e35c06a782b72ce261c51fafbd8a64f124d18f72dcebbf4f7eb86f
+proof: for F64 operands the generic binary_literal_op computes Literal::from_f64(float_op(from_bits(l), from_bits(r))) (out dtype F64 -> float branch); the fast path uses the exact same broadcast index math (flat_to_multi_into + broadcast_flat_index) and applies the same float_op, so element order and bits are identical, including -0.0+2.0 = 2.0 (index 1 bits differ since -0.0 is lhs), +inf-4.0 = +inf (index 2), NaN+5.0 = NaN (index 3, canonical). Non-F64Bits elements fall through to the generic path.
