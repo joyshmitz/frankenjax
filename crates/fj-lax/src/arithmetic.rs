@@ -2713,18 +2713,68 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
     }
 }
 
-/// Approximate erf using Abramowitz & Stegun formula (max error ~1.5e-7).
+/// High-accuracy `erf` (agrees with JAX/scipy to ~1e-12 or better, vs the old
+/// Abramowitz & Stegun 7.1.26 form's ~1.5e-7).
+///
+/// Two stable elementary series (no magic rational-Chebyshev constants):
+/// - `|x| < 3.5`: the Maclaurin series `erf(x) = (2/√π) Σ (-1)ⁿ x^(2n+1)/(n!(2n+1))`,
+///   excellent for the common range (`|x| ≤ 2` reaches ~1e-15; cancellation grows
+///   to ~3e-12 by 3.5).
+/// - `3.5 ≤ |x| < 6`: `erf = 1 - erfc` with `erfc` from its asymptotic series
+///   `e^{-x²}/(x√π) Σ (-1)ⁿ (2n-1)!!/(2x²)ⁿ`, summed until the terms stop
+///   shrinking (asymptotic divergence) — accurate to ~f64 there.
+/// - `|x| ≥ 6`: `erf` is `±1` to f64 precision (`erfc(6) ≈ 2e-17`).
 pub(crate) fn erf_approx(x: f64) -> f64 {
+    use std::f64::consts::FRAC_2_SQRT_PI; // 2/√π
     if x == 0.0 {
-        return x;
+        return x; // preserve signed zero
     }
-    let sign = x.signum();
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.3275911 * x);
-    let poly = t
-        * (0.254829592
-            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    sign * (1.0 - poly * (-x * x).exp())
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+
+    if ax < 3.5 {
+        let x2 = ax * ax;
+        let mut term = ax; // n = 0: x^1 / (0! · 1)
+        let mut sum = ax;
+        let mut n = 1.0_f64;
+        loop {
+            // tₙ = tₙ₋₁ · (-x²/n) · (2n-1)/(2n+1)
+            term *= -x2 / n * (2.0 * n - 1.0) / (2.0 * n + 1.0);
+            sum += term;
+            if term.abs() <= sum.abs() * f64::EPSILON || n > 200.0 {
+                break;
+            }
+            n += 1.0;
+        }
+        sign * FRAC_2_SQRT_PI * sum
+    } else if ax < 6.0 {
+        let x2 = ax * ax;
+        let mut term = 1.0_f64;
+        let mut sum = 1.0_f64;
+        let mut prev_abs = f64::INFINITY;
+        let mut n = 1.0_f64;
+        loop {
+            // tₙ = tₙ₋₁ · -(2n-1)/(2x²)
+            term *= -(2.0 * n - 1.0) / (2.0 * x2);
+            let mag = term.abs();
+            if mag > prev_abs {
+                break; // asymptotic series started to diverge
+            }
+            sum += term;
+            prev_abs = mag;
+            if mag <= f64::EPSILON || n > 100.0 {
+                break;
+            }
+            n += 1.0;
+        }
+        let erfc = (-x2).exp() / (ax * std::f64::consts::PI.sqrt()) * sum;
+        sign * (1.0 - erfc)
+    } else {
+        sign // erf(±6) == ±1.0 to f64 precision
+    }
 }
 
 const LANCZOS_COEFFS: [f64; 9] = [
@@ -5652,6 +5702,40 @@ mod tests {
     fn erf_saturation() {
         assert!((erf_approx(5.0) - 1.0).abs() < 1e-6);
         assert!((erf_approx(-5.0) + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn erf_high_accuracy_and_seam_continuity() {
+        // Confirmed scipy/JAX values (also pinned in fj-conformance erf_oracle).
+        // The new erf agrees to ~1e-12; the old A&S 7.1.26 form was only ~1.5e-7.
+        for (x, expected) in [
+            (0.5_f64, 0.5204998778130465_f64),
+            (1.0, 0.8427007929497149),
+            (2.0, 0.9953222650189527),
+        ] {
+            let got = erf_approx(x);
+            assert!(
+                (got - expected).abs() < 1e-12,
+                "erf({x}) = {got}, want {expected}, diff {}",
+                (got - expected).abs()
+            );
+            assert!((erf_approx(-x) + got).abs() < 1e-15, "odd symmetry at {x}");
+        }
+        // The Maclaurin branch (just below 3.5) and the asymptotic-erfc branch
+        // (>= 3.5) must agree at the seam — catches a wrong large-x series. The
+        // points straddle 3.5 by only 1e-7, so the true erf change there
+        // (~erf'(3.5)*1e-7 ≈ 5e-13) is far below the 1e-9 agreement bound.
+        assert!(
+            (erf_approx(3.4999999) - erf_approx(3.5)).abs() < 1e-9,
+            "seam discontinuity at |x|=3.5"
+        );
+        // Monotone toward 1; exactly ±1 past ~6.
+        assert!(erf_approx(3.0) < erf_approx(4.0) && erf_approx(4.0) < erf_approx(5.0));
+        assert!(erf_approx(5.0) > 0.999_999_999_9 && erf_approx(5.0) < 1.0);
+        assert_eq!(erf_approx(6.5), 1.0);
+        assert_eq!(erf_approx(-6.5), -1.0);
+        assert_eq!(erf_approx(0.0), 0.0);
+        assert!(erf_approx(f64::NAN).is_nan());
     }
 
     #[test]

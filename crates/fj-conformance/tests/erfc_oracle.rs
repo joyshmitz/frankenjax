@@ -79,22 +79,23 @@ fn ref_erfc(x: f64) -> f64 {
     1.0 - ref_erf(x)
 }
 
-// Approximation of erf using Horner's method (Abramowitz and Stegun approximation)
+// True erf (scipy/JAX, full f64 precision) for the points these oracle tests
+// exercise. The previous body re-implemented fj-lax's old Abramowitz & Stegun
+// approximation, so `ref_erfc = 1 - ref_erf` was a CIRCULAR self-comparison that
+// passed at 1e-14 only because both sides shared the same ~1.5e-7-accurate
+// approximation — it could not detect erf inaccuracy. fj-lax's erf is now
+// high-accuracy, so reference against the true values instead.
 fn ref_erf(x: f64) -> f64 {
-    let a1 = 0.254829592;
-    let a2 = -0.284496736;
-    let a3 = 1.421413741;
-    let a4 = -1.453152027;
-    let a5 = 1.061405429;
-    let p = 0.3275911;
-
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-
-    let t = 1.0 / (1.0 + p * x);
-    let y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * (-x * x).exp();
-
-    sign * y
+    let v = match (x.abs() * 10.0).round() as i64 {
+        0 => 0.0,
+        5 => 0.520_499_877_813_046_5,  // erf(0.5)
+        10 => 0.842_700_792_949_714_9, // erf(1.0)
+        20 => 0.995_322_265_018_952_7, // erf(2.0)
+        30 => 0.999_977_909_503_001_4, // erf(3.0)
+        40 => 0.999_999_984_582_742_1, // erf(4.0)
+        other => panic!("ref_erf: unsupported oracle test point {x} (key {other})"),
+    };
+    if x < 0.0 { -v } else { v }
 }
 
 // ======================== Zero ========================
@@ -366,7 +367,7 @@ fn oracle_erfc_2d() {
 
     assert_close(vals[0], ref_erfc(-2.0), 1e-14, "erfc(-2)");
     assert_close(vals[2], 1.0, 1e-14, "erfc(0)");
-    assert_close(vals[5], ref_erfc(3.0), 1e-14, "erfc(3)");
+    assert_close(vals[5], ref_erfc(3.0), 1e-12, "erfc(3)");
 }
 
 // ======================== 3D Tensor ========================
@@ -378,7 +379,7 @@ fn oracle_erfc_3d() {
     assert_eq!(extract_shape(&result), vec![2, 2, 2]);
     let vals = extract_f64_vec(&result);
 
-    assert_close(vals[0], ref_erfc(-3.0), 1e-14, "erfc(-3)");
+    assert_close(vals[0], ref_erfc(-3.0), 1e-12, "erfc(-3)");
     assert_close(vals[3], 1.0, 1e-14, "erfc(0)");
     assert_close(vals[7], ref_erfc(4.0), 1e-14, "erfc(4)");
 }
