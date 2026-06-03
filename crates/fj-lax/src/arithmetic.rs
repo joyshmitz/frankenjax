@@ -34,10 +34,9 @@ pub(crate) fn eval_binary_elementwise(
         )?)),
         (Value::Tensor(lhs), Value::Tensor(rhs)) => {
             if lhs.shape == rhs.shape {
-                if primitive == Primitive::Mul
-                    && lhs.dtype == DType::F64
+                if lhs.dtype == DType::F64
                     && rhs.dtype == DType::F64
-                    && let Some(value) = eval_same_shape_f64_mul(lhs, rhs)?
+                    && let Some(value) = eval_same_shape_f64_binop(primitive, lhs, rhs)?
                 {
                     return Ok(value);
                 }
@@ -100,18 +99,44 @@ pub(crate) fn eval_binary_elementwise(
     }
 }
 
+/// Same-shape F64⊗F64 elementwise fast path for the arithmetic binops whose
+/// per-lane operation is plain IEEE-754 f64 arithmetic (`+`, `-`, `*`, `/`).
+///
+/// This is bit-for-bit identical to the generic `binary_literal_op` path: for
+/// `DType::F64` operands that path computes `Literal::from_f64(float_op(a, b))`
+/// with the same closures used here (see `lib.rs`: Add `|a,b| a+b`, Sub
+/// `|a,b| a-b`, Mul `|a,b| a*b`, Div `|a,b| a/b`). It only skips the per-element
+/// enum/promotion dispatch, so output bits, ordering, NaN/inf behavior and
+/// errors are unchanged. Returns `Ok(None)` for any primitive or element that
+/// is not the F64 fast case, letting the caller fall through to the generic path.
 #[inline]
-fn eval_same_shape_f64_mul(
+fn eval_same_shape_f64_binop(
+    primitive: Primitive,
     lhs: &TensorValue,
     rhs: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    match primitive {
+        Primitive::Add => eval_same_shape_f64_map(lhs, rhs, |a, b| a + b),
+        Primitive::Sub => eval_same_shape_f64_map(lhs, rhs, |a, b| a - b),
+        Primitive::Mul => eval_same_shape_f64_map(lhs, rhs, |a, b| a * b),
+        Primitive::Div => eval_same_shape_f64_map(lhs, rhs, |a, b| a / b),
+        _ => Ok(None),
+    }
+}
+
+#[inline]
+fn eval_same_shape_f64_map(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    op: impl Fn(f64, f64) -> f64,
 ) -> Result<Option<Value>, EvalError> {
     let mut elements = Vec::with_capacity(lhs.elements.len());
     for (left, right) in lhs.elements.iter().zip(&rhs.elements) {
         let (Literal::F64Bits(left_bits), Literal::F64Bits(right_bits)) = (*left, *right) else {
             return Ok(None);
         };
-        let product = f64::from_bits(left_bits) * f64::from_bits(right_bits);
-        elements.push(Literal::from_f64(product));
+        let out = op(f64::from_bits(left_bits), f64::from_bits(right_bits));
+        elements.push(Literal::from_f64(out));
     }
 
     Ok(Some(Value::Tensor(TensorValue::new(
@@ -4636,6 +4661,37 @@ mod tests {
             eval_binary_elementwise(Primitive::Add, &[a, b], |a, b| a + b, |a, b| a + b).unwrap();
         let vals = extract_f64_vec(&result);
         assert_eq!(vals, vec![5.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn same_shape_f64_add_sub_div_fast_path_bit_identical_to_scalar() {
+        // Adversarial F64 inputs: signed zero, infinities, NaN, div-by-zero,
+        // 0/0, and ordinary values. The same-shape F64 fast path must produce
+        // bits identical to the per-element scalar op (`Literal::from_f64`).
+        let lhs_data = [1.5, -0.0, f64::INFINITY, f64::NAN, 7.0, -3.25, 0.0];
+        let rhs_data = [2.0, 3.0, -4.0, 5.0, 0.0, f64::NEG_INFINITY, 0.0];
+        for primitive in [Primitive::Add, Primitive::Sub, Primitive::Div] {
+            let scalar = |x: f64, y: f64| match primitive {
+                Primitive::Add => x + y,
+                Primitive::Sub => x - y,
+                Primitive::Div => x / y,
+                _ => unreachable!(),
+            };
+            let a = v_f64(&lhs_data);
+            let b = v_f64(&rhs_data);
+            let result = eval_binary_elementwise(primitive, &[a, b], |x, y| x + y, scalar).unwrap();
+            let Value::Tensor(tensor) = result else {
+                panic!("expected tensor for {primitive:?}");
+            };
+            assert_eq!(tensor.dtype, DType::F64);
+            let expected: Vec<Literal> = lhs_data
+                .iter()
+                .zip(rhs_data.iter())
+                .map(|(&x, &y)| Literal::from_f64(scalar(x, y)))
+                .collect();
+            // Compare raw bits so NaN payloads and -0.0 are distinguished.
+            assert_eq!(tensor.elements, expected, "{primitive:?} bit mismatch");
+        }
     }
 
     #[test]

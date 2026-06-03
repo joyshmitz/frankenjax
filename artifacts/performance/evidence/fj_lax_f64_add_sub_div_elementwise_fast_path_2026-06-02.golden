@@ -1,0 +1,8 @@
+frankenjax-mcqr.5 fj-lax F64 same-shape add/sub/div fast path golden
+
+primitive_set: add, sub, div
+input_order: lhs [1.5, -0.0, -2.0], rhs [2.0, 3.0, -4.0]
+output_contract: output F64Bits in input order, one row per primitive [add, sub, div]
+serde_json_bits: [[4615063718147915776,4613937818241073152,13841813454723219456],[13826050856027422720,13837309855095848960,4611686018427387904],[4604930618986332160,9223372036854775808,4602678819172646912]]
+serde_json_sha256: f0777547efb028acf3a78802c6aa1c3c11fc9da302593a563f4594a72a91fe12
+proof: each output bit is produced by the same scalar f64 +/-// expression used by the generic binary_literal_op path (lib.rs Add |a,b| a+b, Sub |a,b| a-b, Div |a,b| a/b), then stored with to_bits; malformed or non-F64 tensors fall through to the existing generic path
