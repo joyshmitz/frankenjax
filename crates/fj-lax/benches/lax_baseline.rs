@@ -549,6 +549,84 @@ fn bench_reduce_max_64k_f64_literal_reference(c: &mut Criterion) {
     });
 }
 
+// Axis (partial) F64 reduction over a 256x256 matrix: the dense fast path uses
+// an incremental out-index odometer over the contiguous f64 slice instead of
+// decoding each element's full multi-index (flat_to_multi_into +
+// multi_to_out_flat) and matching as_f64() on a 24-byte Literal. axis=1 reduces
+// the contiguous inner axis (slowly-varying out_idx, good locality); axis=0
+// reduces the strided outer axis (fast-cycling out_idx). Each is paired with a
+// Vec<Literal>-backed reference run in the same process for same-worker ratios.
+const REDUCE_AXIS_N: u32 = 256;
+
+fn axis_reduce_dense_input() -> Value {
+    let n = REDUCE_AXIS_N as usize;
+    let data: Vec<f64> = (0..n * n).map(|i| i as f64 * 0.001).collect();
+    Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![REDUCE_AXIS_N, REDUCE_AXIS_N],
+            },
+            data,
+        )
+        .unwrap(),
+    )
+}
+
+fn axis_reduce_literal_input() -> Value {
+    let n = REDUCE_AXIS_N as usize;
+    let elements: Vec<Literal> = (0..n * n)
+        .map(|i| Literal::from_f64(i as f64 * 0.001))
+        .collect();
+    Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape {
+                dims: vec![REDUCE_AXIS_N, REDUCE_AXIS_N],
+            },
+            elements,
+        )
+        .unwrap(),
+    )
+}
+
+fn axis_params(axis: &str) -> BTreeMap<String, String> {
+    let mut p = BTreeMap::new();
+    p.insert("axes".to_owned(), axis.to_owned());
+    p
+}
+
+fn bench_reduce_sum_256_axis1_f64(c: &mut Criterion) {
+    let input = axis_reduce_dense_input();
+    let p = axis_params("1");
+    c.bench_function("eval/reduce_sum_256_axis1_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_sum_256_axis1_f64_literal_reference(c: &mut Criterion) {
+    let input = axis_reduce_literal_input();
+    let p = axis_params("1");
+    c.bench_function("eval/reduce_sum_256_axis1_f64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_sum_256_axis0_f64(c: &mut Criterion) {
+    let input = axis_reduce_dense_input();
+    let p = axis_params("0");
+    c.bench_function("eval/reduce_sum_256_axis0_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_sum_256_axis0_f64_literal_reference(c: &mut Criterion) {
+    let input = axis_reduce_literal_input();
+    let p = axis_params("0");
+    c.bench_function("eval/reduce_sum_256_axis0_f64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_window_64x64(c: &mut Criterion) {
     let input = real_matrix(64, 64);
     let mut params = BTreeMap::new();
@@ -985,6 +1063,10 @@ criterion_group!(
     bench_reduce_sum_64k_f64_literal_reference,
     bench_reduce_max_64k_f64,
     bench_reduce_max_64k_f64_literal_reference,
+    bench_reduce_sum_256_axis1_f64,
+    bench_reduce_sum_256_axis1_f64_literal_reference,
+    bench_reduce_sum_256_axis0_f64,
+    bench_reduce_sum_256_axis0_f64_literal_reference,
     bench_reduce_window_64x64,
     bench_sin_1k,
     bench_sin_64k,

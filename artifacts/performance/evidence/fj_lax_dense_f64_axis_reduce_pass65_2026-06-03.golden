@@ -1,0 +1,13 @@
+frankenjax-mcqr.30.11 pass65 golden
+target=eval/reduce_sum_256_axis1_f64
+lever=dense F64 axis-reduction odometer fast path (dense_f64_axis_reduce); contiguous as_f64_slice fold with incremental row-major out-index odometer, replacing per-element flat_to_multi_into + multi_to_out_flat decode and 24-byte Literal as_f64() match
+method=same-worker dense vs Vec<Literal> reference bench, run in one process on vmi1153651
+worker=vmi1153651
+axis1_inner_contiguous=dense 254.980us [251.673, 259.168] vs literal 2125.698us [2081.499, 2173.942] = 8.34x mid, 8.03x conservative
+axis0_outer_strided=dense 183.989us [182.980, 185.077] vs literal 1923.922us [1878.865, 1972.697] = 10.46x mid, 10.15x conservative
+score=10.0
+alien_primitive=vectorized execution / dense SoA layout + incremental index odometer, alien_cs_graveyard section 8.2
+source_change=eval_reduce_axes float branch calls dense_f64_axis_reduce first; falls back to the unchanged generic Vec<Literal> decode loop when the tensor is not dense F64
+isomorphism=contiguous slice visited in ascending flat order identical to `for flat_idx in 0..total`; out_idx odometer exactly reproduces multi_to_out_flat(flat_to_multi_into(flat)) (row-major over out_dims ordered by kept_axes, reduced axes contribute 0, innermost axis fastest); same float_init seed and caller float_op applied sequentially with no reassociation; same reduce_real_literal(F64) output; complex/integral/F32/F16/BF16/Literal-backed F64 inputs and full-axis reductions take the unchanged paths
+golden_edge_values=NaN payload 0x7ff8000000000001, +inf, -inf, -0.0, +0.0 in the rank-3 parity fixture all reduce bit-identically between dense and Literal storage
+validation=RCH cargo test -p fj-lax --lib reduction passed 30 tests incl dense_f64_axis_reduce_bit_identical_to_literal_path (rank-3, 4 reductions, 8 axis subsets); RCH cargo check -p fj-lax --all-targets passed; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed

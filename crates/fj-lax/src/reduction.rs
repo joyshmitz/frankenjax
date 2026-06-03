@@ -273,6 +273,72 @@ pub(crate) fn eval_reduce(
 }
 
 /// Axis-aware reduction: reduces tensor along specified axes, producing a tensor output.
+/// Dense F64 axis (partial) reduction fast path. Returns `Some(result)` — the
+/// reduced f64 accumulators, length `out_count` — when the tensor is dense F64,
+/// else `None` so the caller runs the generic `Vec<Literal>` loop unchanged.
+///
+/// Bit-for-bit identical to that loop: it visits the contiguous backing slice
+/// in ascending flat order (matching `for flat_idx in 0..total`), seeds every
+/// accumulator with `float_init`, and applies the same `float_op` in the same
+/// order, so for each output cell the inputs accumulate in the same sequence
+/// (no reassociation). The destination `out_idx` is maintained incrementally by
+/// a row-major odometer that exactly reproduces
+/// `multi_to_out_flat(flat_to_multi_into(flat))`: the innermost axis varies
+/// fastest (input stride 1), each axis contributes `out_axis_stride[axis]` to
+/// the output flat index (row-major over `out_dims`, which is ordered by
+/// `kept_axes`), and reduced axes contribute 0. This removes both the
+/// per-element multi-index decode and the 24-byte `Literal` materialization.
+/// `as_f64_slice()` is `Some` only for F64 dense storage (a well-formed tensor
+/// whose element count matches the shape), so no malformed-input case reaches
+/// here and the generic path's per-element overflow checks are unnecessary
+/// (`out_idx` stays within `0..out_count`).
+#[inline]
+fn dense_f64_axis_reduce(
+    tensor: &TensorValue,
+    kept_axes: &[usize],
+    out_dims: &[u32],
+    out_count: usize,
+    float_init: f64,
+    float_op: &impl Fn(f64, f64) -> f64,
+) -> Option<Vec<f64>> {
+    let values = tensor.elements.as_f64_slice()?;
+    let dims = &tensor.shape.dims;
+    let rank = dims.len();
+    if rank == 0 {
+        return None;
+    }
+
+    let mut out_axis_stride = vec![0_usize; rank];
+    let mut stride = 1_usize;
+    for (k, &axis) in kept_axes.iter().enumerate().rev() {
+        out_axis_stride[axis] = stride;
+        stride *= out_dims[k] as usize;
+    }
+
+    let mut result = vec![float_init; out_count];
+    let mut coord = vec![0_usize; rank];
+    let mut out_idx = 0_usize;
+    for &value in values {
+        result[out_idx] = float_op(result[out_idx], value);
+        // Row-major odometer over the input index; maintain out_idx in lockstep.
+        let mut ax = rank - 1;
+        loop {
+            coord[ax] += 1;
+            out_idx += out_axis_stride[ax];
+            if coord[ax] < dims[ax] as usize {
+                break;
+            }
+            coord[ax] = 0;
+            out_idx -= out_axis_stride[ax] * dims[ax] as usize;
+            if ax == 0 {
+                break;
+            }
+            ax -= 1;
+        }
+    }
+    Some(result)
+}
+
 pub(crate) fn eval_reduce_axes(
     primitive: Primitive,
     inputs: &[Value],
@@ -457,32 +523,39 @@ pub(crate) fn eval_reduce_axes(
                     elements,
                 )?))
             } else {
-                let mut result = try_filled_vec(
-                    primitive,
-                    "reduction float accumulator",
-                    out_count,
-                    float_init,
-                )?;
-                let total = tensor.elements.len();
-                let mut multi = Vec::with_capacity(strides.len());
-                for flat_idx in 0..total {
-                    flat_to_multi_into(flat_idx, &strides, &mut multi);
-                    let out_idx = multi_to_out_flat(
+                let result = if let Some(values) = dense_f64_axis_reduce(
+                    tensor, &kept_axes, &out_dims, out_count, float_init, &float_op,
+                ) {
+                    values
+                } else {
+                    let mut result = try_filled_vec(
                         primitive,
-                        "reduction output",
-                        &multi,
-                        &kept_axes,
-                        &out_dims,
+                        "reduction float accumulator",
+                        out_count,
+                        float_init,
                     )?;
-                    let val =
-                        tensor.elements[flat_idx]
-                            .as_f64()
-                            .ok_or(EvalError::TypeMismatch {
-                                primitive,
-                                detail: "expected numeric tensor",
-                            })?;
-                    result[out_idx] = float_op(result[out_idx], val);
-                }
+                    let total = tensor.elements.len();
+                    let mut multi = Vec::with_capacity(strides.len());
+                    for flat_idx in 0..total {
+                        flat_to_multi_into(flat_idx, &strides, &mut multi);
+                        let out_idx = multi_to_out_flat(
+                            primitive,
+                            "reduction output",
+                            &multi,
+                            &kept_axes,
+                            &out_dims,
+                        )?;
+                        let val =
+                            tensor.elements[flat_idx]
+                                .as_f64()
+                                .ok_or(EvalError::TypeMismatch {
+                                    primitive,
+                                    detail: "expected numeric tensor",
+                                })?;
+                        result[out_idx] = float_op(result[out_idx], val);
+                    }
+                    result
+                };
                 let out_dtype = reduce_real_output_dtype(tensor.dtype);
                 let elements: Vec<Literal> = result
                     .into_iter()
@@ -1294,6 +1367,89 @@ mod tests {
             |a, b| a + b,
         );
         assert!(result.is_err());
+    }
+
+    /// Bit-exact parity for the dense F64 axis-reduction odometer fast path: a
+    /// dense `new_f64_values` tensor (fast path) must produce element-for-element
+    /// identical bits to the `Vec<Literal>`-backed tensor (generic decode loop)
+    /// for ReduceSum/Prod/Max/Min across every axis subset of a rank-3 tensor,
+    /// including NaN/±inf/signed-zero values. Routes through `eval_primitive` so
+    /// the real per-primitive float_init/float_op are exercised.
+    #[test]
+    fn dense_f64_axis_reduce_bit_identical_to_literal_path() {
+        let dims = vec![2_u32, 3, 4];
+        let n = 2 * 3 * 4;
+        let data: Vec<f64> = (0..n)
+            .map(|i| match i {
+                5 => f64::from_bits(0x7ff8_0000_0000_0001),
+                7 => f64::INFINITY,
+                11 => f64::NEG_INFINITY,
+                13 => -0.0,
+                17 => 0.0,
+                _ => (i as f64 - 9.5) * 0.375,
+            })
+            .collect();
+
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
+        assert!(dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        let literal = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            literal
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_none()
+        );
+
+        for primitive in [
+            Primitive::ReduceSum,
+            Primitive::ReduceProd,
+            Primitive::ReduceMax,
+            Primitive::ReduceMin,
+        ] {
+            for axes in ["0", "1", "2", "0,1", "0,2", "1,2", "-1", "0,-1"] {
+                let mut params = BTreeMap::new();
+                params.insert("axes".to_owned(), axes.to_owned());
+
+                let dense_out =
+                    crate::eval_primitive(primitive, std::slice::from_ref(&dense), &params)
+                        .unwrap();
+                let literal_out =
+                    crate::eval_primitive(primitive, std::slice::from_ref(&literal), &params)
+                        .unwrap();
+
+                let dense_t = dense_out.as_tensor().unwrap();
+                let literal_t = literal_out.as_tensor().unwrap();
+                assert_eq!(
+                    dense_t.shape.dims, literal_t.shape.dims,
+                    "{primitive:?} {axes}"
+                );
+                let dense_bits: Vec<u64> = dense_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap().to_bits())
+                    .collect();
+                let literal_bits: Vec<u64> = literal_t
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap().to_bits())
+                    .collect();
+                assert_eq!(
+                    dense_bits, literal_bits,
+                    "mismatch {primitive:?} axes={axes}"
+                );
+            }
+        }
     }
 
     // ── Reduce along axes ──

@@ -1,0 +1,73 @@
+{
+    "bead": "frankenjax-mcqr.30.11",
+    "pass": 65,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/reduce_sum_256_axis1_f64",
+    "lever_summary": "Dense F64 axis (partial) reduction fast path. eval_reduce_axes' float branch decoded each input element's full multi-index (flat_to_multi_into + multi_to_out_flat) and matched as_f64() on the 24-byte Literal enum. New dense_f64_axis_reduce folds LiteralBuffer::as_f64_slice() directly using a row-major odometer that maintains the output flat index incrementally, removing both the per-element index decode (algorithmic) and the enum materialization (data-model).",
+    "alien_graveyard": {
+        "primitive": "vectorized execution / dense SoA layout + incremental index odometer (strength reduction of per-element address arithmetic)",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "replace tuple-at-a-time Literal decode and full multi-index recomputation with a contiguous f64 sweep whose destination index is advanced by a carry odometer (O(1) amortized per element)"
+    },
+    "method": "Same-worker comparison on vmi1153651: the dense-storage fast path vs a Vec<Literal>-backed reference bench (eval/reduce_sum_256_axis{0,1}_f64_literal_ref) run in the same process, so the ratio isolates the lever from cross-worker CPU variance (the dense input previously hit the same generic decode loop after one-time Literal materialization).",
+    "results": {
+        "axis1_inner_contiguous": {
+            "dense_ns": 254980.1,
+            "dense_ci_ns": [251672.5, 259168.3],
+            "literal_ns": 2125698.4,
+            "literal_ci_ns": [2081498.9, 2173942.4],
+            "speedup_midpoint_x": 8.34,
+            "speedup_conservative_x": 8.03
+        },
+        "axis0_outer_strided": {
+            "dense_ns": 183989.3,
+            "dense_ci_ns": [182980.0, 185077.2],
+            "literal_ns": 1923921.6,
+            "literal_ci_ns": [1878865.4, 1972696.9],
+            "speedup_midpoint_x": 10.46,
+            "speedup_conservative_x": 10.15
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- reduce_sum_256_axis --save-baseline axisafter",
+    "score": {
+        "impact": 5.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 10.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/reduction.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added dense_f64_axis_reduce(tensor, kept_axes, out_dims, out_count, float_init, float_op) -> Option<Vec<f64>>; eval_reduce_axes' float branch tries it first and falls back to the unchanged generic loop when None (non-dense / non-F64)."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: the contiguous slice is visited in ascending flat order, identical to `for flat_idx in 0..total`; each output cell accumulates its inputs in the same sequence",
+        "index_mapping": "the odometer's out_idx exactly reproduces multi_to_out_flat(flat_to_multi_into(flat)): out_axis_stride is row-major over out_dims ordered by kept_axes, reduced axes contribute 0, innermost axis varies fastest (input stride 1)",
+        "floating_point": "unchanged: same float_init seed and caller float_op (ReduceSum +, ReduceProd *, ReduceMax jax_max_f64, ReduceMin jax_min_f64) applied sequentially; no reassociation or SIMD reduction tree",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "as_f64_slice() is Some only for well-formed F64 dense storage (element count matches shape), so out_idx stays within 0..out_count and no malformed-input / overflow case reaches the fast path; complex, integral, F32/F16/BF16, and Literal-backed F64 inputs return None and run the unchanged generic loop; full-reduction (all axes) still delegates to eval_reduce before this branch",
+        "output_dtype": "unchanged: reduce_real_output_dtype(F64) == F64; result built via the same reduce_real_literal mapping"
+    },
+    "validation": [
+        {
+            "name": "reduction_parity_and_unit_tests",
+            "command": "rch exec -- cargo test -p fj-lax --lib reduction",
+            "result": "passed: 30 tests (incl. dense_f64_axis_reduce_bit_identical_to_literal_path: rank-3, all 4 reductions, 8 axis subsets, NaN/inf/signed-zero)"
+        },
+        {
+            "name": "check_all_targets",
+            "command": "rch exec -- cargo check -p fj-lax --all-targets",
+            "result": "passed"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}
