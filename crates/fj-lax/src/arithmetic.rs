@@ -152,6 +152,20 @@ fn eval_same_shape_f64_map(
     rhs: &TensorValue,
     op: impl Fn(f64, f64) -> f64,
 ) -> Result<Option<Value>, EvalError> {
+    if let (Some(lhs_values), Some(rhs_values)) =
+        (lhs.elements.as_f64_slice(), rhs.elements.as_f64_slice())
+    {
+        let values = lhs_values
+            .iter()
+            .zip(rhs_values)
+            .map(|(&left, &right)| op(left, right))
+            .collect::<Vec<_>>();
+        return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+            lhs.shape.clone(),
+            values,
+        )?)));
+    }
+
     let mut elements = Vec::with_capacity(lhs.elements.len());
     for (left, right) in lhs.elements.iter().zip(&rhs.elements) {
         let (Literal::F64Bits(left_bits), Literal::F64Bits(right_bits)) = (*left, *right) else {
@@ -2954,13 +2968,20 @@ fn polygamma_asymptotic(n: i64, x: f64) -> f64 {
     sum += sign * factorial((n - 1) as u32) as f64 * pow;
 
     pow *= inv;
-    sum += sign * n_fact * 0.5 * pow;
+    sum += sign * n_fact * 0.5 * pow; // half-term, pow = inv^(n+1)
 
-    // Use more terms (k=1..6) for better accuracy
+    // Bernoulli corrections (DLMF 5.15.8): Σ_k B_2k · (2k+n-1)!/(2k)! · z^{-(2k+n)}
+    // for k=1..6. The coefficient is rising_factorial(2k+1, n-1) = (2k+n-1)!/(2k)!,
+    // and term k has power n+2k. The previous code used the wrong power (n+2k+1,
+    // because it multiplied by inv² *before* the k=1 term) and the wrong factorial
+    // rising_factorial(n+1, 2k-1), which dropped the leading correction entirely —
+    // e.g. ~1.6e-7 error for trigamma(1) at the x=100 shift point.
+    let inv2 = inv * inv;
+    let mut bpow = pow * inv; // inv^{n+2}, the k=1 power
     for k in 1..=6 {
-        let rising = rising_factorial(n as u32 + 1, 2 * k as u32 - 1);
-        pow *= inv * inv;
-        sum += sign * bernoulli[2 * k] * rising as f64 * pow;
+        let rising = rising_factorial(2 * k as u32 + 1, n as u32 - 1);
+        sum += sign * bernoulli[2 * k] * rising as f64 * bpow;
+        bpow *= inv2;
     }
     sum
 }
@@ -5150,16 +5171,22 @@ mod tests {
     }
 
     #[test]
-    fn same_shape_f64_add_sub_div_fast_path_bit_identical_to_scalar() {
+    fn dense_f64_pass44_same_shape_arithmetic_fast_path_bit_identical_to_scalar() {
         // Adversarial F64 inputs: signed zero, infinities, NaN, div-by-zero,
         // 0/0, and ordinary values. The same-shape F64 fast path must produce
         // bits identical to the per-element scalar op (`Literal::from_f64`).
         let lhs_data = [1.5, -0.0, f64::INFINITY, f64::NAN, 7.0, -3.25, 0.0];
         let rhs_data = [2.0, 3.0, -4.0, 5.0, 0.0, f64::NEG_INFINITY, 0.0];
-        for primitive in [Primitive::Add, Primitive::Sub, Primitive::Div] {
+        for primitive in [
+            Primitive::Add,
+            Primitive::Sub,
+            Primitive::Mul,
+            Primitive::Div,
+        ] {
             let scalar = |x: f64, y: f64| match primitive {
                 Primitive::Add => x + y,
                 Primitive::Sub => x - y,
+                Primitive::Mul => x * y,
                 Primitive::Div => x / y,
                 _ => unreachable!(),
             };
@@ -5170,6 +5197,10 @@ mod tests {
                 panic!("expected tensor for {primitive:?}");
             };
             assert_eq!(tensor.dtype, DType::F64);
+            assert!(
+                tensor.elements.as_f64_slice().is_some(),
+                "{primitive:?} should keep dense F64 output"
+            );
             let expected: Vec<Literal> = lhs_data
                 .iter()
                 .zip(rhs_data.iter())
@@ -5181,7 +5212,7 @@ mod tests {
     }
 
     #[test]
-    fn same_shape_f64_max_min_fast_path_bit_identical_to_scalar() {
+    fn dense_f64_pass44_same_shape_max_min_fast_path_bit_identical_to_scalar() {
         // Max/Min route through the same-shape F64 fast path using the crate's
         // NaN-propagating `jax_max_f64`/`jax_min_f64`. The result must be bit-
         // identical to the per-element scalar op, including NaN propagation
@@ -5208,6 +5239,10 @@ mod tests {
                 panic!("expected tensor for {primitive:?}");
             };
             assert_eq!(tensor.dtype, DType::F64);
+            assert!(
+                tensor.elements.as_f64_slice().is_some(),
+                "{primitive:?} should keep dense F64 output"
+            );
             let expected: Vec<Literal> = lhs_data
                 .iter()
                 .zip(rhs_data.iter())
@@ -5215,6 +5250,28 @@ mod tests {
                 .collect();
             assert_eq!(tensor.elements, expected, "{primitive:?} bit mismatch");
         }
+    }
+
+    #[test]
+    fn dense_f64_pass44_declared_f64_malformed_tensor_still_falls_back() {
+        let lhs = Value::Tensor(
+            TensorValue::new(DType::F64, Shape::vector(1), vec![Literal::I64(2)]).unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(DType::F64, Shape::vector(1), vec![Literal::I64(5)]).unwrap(),
+        );
+        let result =
+            eval_binary_elementwise(Primitive::Add, &[lhs, rhs], |a, b| a + b, |a, b| a + b)
+                .unwrap();
+        let Value::Tensor(tensor) = result else {
+            panic!("expected tensor");
+        };
+        assert_eq!(tensor.dtype, DType::F64);
+        assert_eq!(tensor.elements, vec![Literal::I64(7)]);
+        assert!(
+            tensor.elements.as_f64_slice().is_none(),
+            "malformed literal-backed tensor must not become dense"
+        );
     }
 
     #[test]
