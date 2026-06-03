@@ -1,0 +1,110 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "bead": "frankenjax-0o2i",
+  "pass": 39,
+  "date": "2026-06-03",
+  "crate": "fj-lax",
+  "target": "eval/nextafter_1k_f64",
+  "skill_pass": "repeatedly-apply-skill pass 39 -> extreme-software-optimization",
+  "profile_backed_target": {
+    "source": "BlackGlen inbox on 2026-06-03 reported eval/nextafter_1k_f64 around 11.170 us after fj-lax I64 comparison work.",
+    "fresh_baseline_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-nextafter-pass39-baseline-20260603 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- eval/nextafter_1k_f64 --sample-size 30 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1153651",
+    "mean_us": 22.912,
+    "ci_us": [22.328, 23.439],
+    "sample_size": 30,
+    "warm_up_seconds": 1,
+    "measurement_seconds": 3
+  },
+  "optimization": {
+    "lever": "Same-shape DType::F64 tensor-tensor fast path in eval_nextafter.",
+    "files_changed": [
+      "crates/fj-lax/src/arithmetic.rs",
+      "artifacts/performance/evidence/fj_lax_nextafter_f64_pass39_2026-06-03.golden",
+      "artifacts/performance/evidence/fj_lax_nextafter_f64_pass39_2026-06-03.golden.sha256",
+      "artifacts/performance/evidence/fj_lax_nextafter_f64_pass39_2026-06-03.json"
+    ],
+    "guard": "both operands are tensors; shapes are equal; both declared dtypes are F64; every element is Literal::F64Bits",
+    "single_lever": true,
+    "unsafe": false
+  },
+  "benchmark": {
+    "baseline": {
+      "worker": "vmi1153651",
+      "mean_us": 22.912,
+      "ci_us": [22.328, 23.439]
+    },
+    "after": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-nextafter-pass39-after-20260603 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- eval/nextafter_1k_f64 --sample-size 30 --warm-up-time 1 --measurement-time 3",
+      "worker": "vmi1149989",
+      "mean_us": 2.3604,
+      "ci_us": [2.1872, 2.5276],
+      "sample_size": 30,
+      "warm_up_seconds": 1,
+      "measurement_seconds": 3
+    },
+    "speedup": 9.706829350957,
+    "delta_percent": -89.697974860335,
+    "worker_caveat": "Baseline and after are both remote RCH Criterion runs but landed on different workers. RCH exec does not expose a worker pin flag; the speedup is large enough to clear the keep threshold despite the cross-worker caveat."
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 4,
+    "effort": 1,
+    "impact_x_confidence_over_effort": 20,
+    "kept": true
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "Yes. The fast path emits one output per pair in the same zipped row-major tensor order as the generic equal-shape broadcast loop.",
+    "dtype_and_shape": "Yes. The fast path returns DType::F64 with lhs.shape.clone(), matching the generic same-F64 tensor output dtype and equal-shape broadcast output shape.",
+    "floating_point": "Identical for the guarded case. It calls the existing next_after_f64 helper with the same f64::from_bits operands and stores results through Literal::from_f64, preserving NaN, signed zero, equal operand, and one-ULP behavior.",
+    "malformed_tensor_fallback": "Yes. Declared-F64 tensors containing any non-F64Bits literal return None and fall through to the generic per-element path.",
+    "tie_breaking": "N/A. Nextafter has no ordering ties beyond x == y, which still returns y through the existing helper.",
+    "rng": "N/A. Nextafter is deterministic and consumes no random state.",
+    "scope": "Only equal-shape F64 tensor-tensor Nextafter changes. Scalar, tensor-scalar, scalar-tensor, F32, mixed dtype, broadcast, and shape-error paths are unchanged.",
+    "golden_output": "artifacts/performance/evidence/fj_lax_nextafter_f64_pass39_2026-06-03.golden",
+    "golden_sha256": "55cd2c25745b4baeeed781e211dc1ce74f10ae0cb4451bf9d6876d7dccae3572"
+  },
+  "validation": [
+    {
+      "command": "cargo fmt -p fj-lax --check",
+      "result": "pass"
+    },
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/arithmetic.rs",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-nextafter-pass39-test-20260603 rch exec -- cargo test -p fj-lax nextafter -- --nocapture",
+      "worker": "vmi1264463",
+      "result": "pass; 7 passed, 1008 filtered out before cleanup of the new test failure branch"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-nextafter-pass39-test2-20260603 rch exec -- cargo test -p fj-lax nextafter_same_shape_f64_tensor_matches_scalar_bits -- --nocapture",
+      "worker": "vmi1293453",
+      "result": "pass after UBS-driven cleanup; 1 passed, 1014 filtered out"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-nextafter-pass39-check-20260603 rch exec -- cargo check -p fj-lax --all-targets",
+      "worker": "vmi1153651",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-nextafter-pass39-clippy2-20260603 rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+      "worker": "vmi1153651",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_nextafter_f64_pass39_2026-06-03.golden.sha256",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/arithmetic.rs",
+      "result": "exit 1 due existing monolithic test panic/unwrap/assert/indexing inventory; direct panic count is 9 after removing the new test panic branch, with no unsafe code and no clippy/fmt/check failure"
+    }
+  ],
+  "notes": [
+    "No stash, reset, destructive cleanup, or file deletion was performed.",
+    "No C BLAS, MKL, XLA, unsafe code, or foreign numeric kernel linkage was introduced."
+  ]
+}

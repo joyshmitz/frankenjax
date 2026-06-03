@@ -4728,11 +4728,42 @@ pub(crate) fn eval_nextafter(primitive: Primitive, inputs: &[Value]) -> Result<V
         }
     }
 
+    #[inline]
+    fn next_after_same_shape_f64_tensor(
+        lhs: &TensorValue,
+        rhs: &TensorValue,
+    ) -> Result<Option<Value>, EvalError> {
+        let mut elements = Vec::with_capacity(lhs.elements.len());
+        for (left, right) in lhs.elements.iter().zip(&rhs.elements) {
+            let (Literal::F64Bits(left), Literal::F64Bits(right)) = (*left, *right) else {
+                return Ok(None);
+            };
+            elements.push(Literal::from_f64(next_after_f64(
+                f64::from_bits(left),
+                f64::from_bits(right),
+            )));
+        }
+
+        Ok(Some(Value::Tensor(TensorValue::new(
+            DType::F64,
+            lhs.shape.clone(),
+            elements,
+        )?)))
+    }
+
     match (&inputs[0], &inputs[1]) {
         (Value::Scalar(lhs), Value::Scalar(rhs)) => {
             Ok(Value::Scalar(next_after_literal(primitive, *lhs, *rhs)?))
         }
         (Value::Tensor(lhs), Value::Tensor(rhs)) => {
+            if lhs.dtype == DType::F64
+                && rhs.dtype == DType::F64
+                && lhs.shape == rhs.shape
+                && let Some(value) = next_after_same_shape_f64_tensor(lhs, rhs)?
+            {
+                return Ok(value);
+            }
+
             let out_shape =
                 broadcast_shape(&lhs.shape, &rhs.shape).ok_or(EvalError::ShapeMismatch {
                     primitive,
@@ -6135,6 +6166,42 @@ mod tests {
         assert!(vals[0] > 1.0);
         assert!(vals[1] < 2.0);
         assert!(vals[2] < 0.0);
+    }
+
+    #[test]
+    fn nextafter_same_shape_f64_tensor_matches_scalar_bits() {
+        let lhs = [1.0, 1.0, 0.0, -0.0, 5.0, f64::NAN, f64::from_bits(1)];
+        let rhs = [2.0, 0.0, 1.0, -1.0, 5.0, 1.0, 0.0];
+        let result = match eval_nextafter(Primitive::Nextafter, &[v_f64(&lhs), v_f64(&rhs)]) {
+            Ok(result) => result,
+            Err(err) => {
+                assert_eq!(err.to_string(), "", "unexpected tensor nextafter error");
+                return;
+            }
+        };
+        let result_bits = extract_f64_bits_vec(&result);
+        let expected_bits = lhs
+            .iter()
+            .zip(rhs)
+            .map(|(&left, right)| {
+                match eval_nextafter(Primitive::Nextafter, &[s_f64(left), s_f64(right)]) {
+                    Ok(Value::Scalar(Literal::F64Bits(bits))) => bits,
+                    Ok(result) => {
+                        assert!(
+                            matches!(result, Value::Scalar(Literal::F64Bits(_))),
+                            "expected scalar F64Bits output"
+                        );
+                        0
+                    }
+                    Err(err) => {
+                        assert_eq!(err.to_string(), "", "unexpected scalar nextafter error");
+                        0
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(result_bits, expected_bits);
     }
 
     // ── SelectN ──
