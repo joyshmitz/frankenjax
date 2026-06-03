@@ -3869,6 +3869,9 @@ fn batch_scan_scalar_sequences(
     if inputs.len() != 2 {
         return Ok(None);
     }
+    if let Some(result) = batch_scan_i64_add_shared_init_batch0(inputs, params)? {
+        return Ok(Some(result));
+    }
     let Some(xs_batch_dim) = inputs[1].batch_dim else {
         return Ok(None);
     };
@@ -3925,6 +3928,77 @@ fn batch_scan_scalar_sequences(
         .unwrap_or(xs.dtype);
 
     TensorValue::new(dtype, Shape::vector(batch_size as u32), outputs)
+        .map(|tensor| Some(BatchTracer::batched(Value::Tensor(tensor), 0)))
+        .map_err(|e| BatchError::TensorError(e.to_string()))
+}
+
+fn batch_scan_i64_add_shared_init_batch0(
+    inputs: &[BatchTracer],
+    params: &BTreeMap<String, String>,
+) -> Result<Option<BatchTracer>, BatchError> {
+    if inputs[0].batch_dim.is_some()
+        || inputs[1].batch_dim != Some(0)
+        || params
+            .get("body_op")
+            .is_some_and(|body_op| body_op.as_str() != "add")
+    {
+        return Ok(None);
+    }
+
+    let init = match &inputs[0].value {
+        Value::Scalar(Literal::I64(value)) => *value,
+        Value::Tensor(tensor)
+            if tensor.dtype == DType::I64
+                && tensor.shape == Shape::scalar()
+                && tensor.elements.len() == 1 =>
+        {
+            let Literal::I64(value) = tensor.elements[0] else {
+                return Ok(None);
+            };
+            value
+        }
+        _ => return Ok(None),
+    };
+
+    let Some(xs) = inputs[1].value.as_tensor() else {
+        return Ok(None);
+    };
+    if xs.dtype != DType::I64 || xs.rank() != 2 {
+        return Ok(None);
+    }
+    let batch_size = xs.shape.dims[0] as usize;
+    let scan_len = xs.shape.dims[1] as usize;
+    let expected_len = batch_size
+        .checked_mul(scan_len)
+        .ok_or_else(|| BatchError::TensorError("scan input size overflowed".to_owned()))?;
+    if xs.elements.len() != expected_len {
+        return Ok(None);
+    }
+
+    let reverse = params.get("reverse").is_some_and(|value| value == "true");
+    let mut outputs = Vec::with_capacity(batch_size);
+    for batch_idx in 0..batch_size {
+        let mut carry = init;
+        let row_offset = batch_idx * scan_len;
+        if reverse {
+            for scan_idx in (0..scan_len).rev() {
+                let Literal::I64(x) = xs.elements[row_offset + scan_idx] else {
+                    return Ok(None);
+                };
+                carry = carry.wrapping_add(x);
+            }
+        } else {
+            for scan_idx in 0..scan_len {
+                let Literal::I64(x) = xs.elements[row_offset + scan_idx] else {
+                    return Ok(None);
+                };
+                carry = carry.wrapping_add(x);
+            }
+        }
+        outputs.push(Literal::I64(carry));
+    }
+
+    TensorValue::new(DType::I64, Shape::vector(batch_size as u32), outputs)
         .map(|tensor| Some(BatchTracer::batched(Value::Tensor(tensor), 0)))
         .map_err(|e| BatchError::TensorError(e.to_string()))
 }
@@ -8012,6 +8086,25 @@ mod tests {
         let result = apply_batch_rule(Primitive::Scan, &[init, xs], &params).unwrap();
         assert_eq!(result.batch_dim, Some(0));
         assert_eq!(extract_i64_vec(&result.value), vec![6, 60]);
+    }
+
+    #[test]
+    fn test_batch_trace_scan_shared_i64_add_wraps_and_defaults() {
+        let init = BatchTracer::unbatched(Value::scalar_i64(i64::MAX));
+        let xs = BatchTracer::batched(make_i64_matrix(2, 2, &[1, 2, i64::MAX, 3]), 0);
+
+        let result = apply_batch_rule(Primitive::Scan, &[init, xs], &BTreeMap::new())
+            .expect("default add scan should preserve i64 wrapping");
+
+        assert_eq!(result.batch_dim, Some(0));
+        assert_eq!(result.value.as_tensor().unwrap().dtype, DType::I64);
+        assert_eq!(
+            extract_i64_vec(&result.value),
+            vec![
+                i64::MAX.wrapping_add(1).wrapping_add(2),
+                i64::MAX.wrapping_add(i64::MAX).wrapping_add(3),
+            ]
+        );
     }
 
     #[test]

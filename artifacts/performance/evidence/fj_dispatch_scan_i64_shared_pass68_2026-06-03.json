@@ -1,0 +1,84 @@
+{
+  "bead": "frankenjax-mcqr.43",
+  "pass": 68,
+  "crate": "fj-dispatch",
+  "target": "vmap_scan/shared_init_batched_xs_128x64",
+  "profile_context": {
+    "full_reprofile_after_pass67_ts2": {
+      "vmap_scan/shared_init_batched_xs_128x64": {
+        "low_us": 121.92,
+        "mean_us": 122.42,
+        "high_us": 122.90
+      },
+      "vmap_scan/shared_init_batched_xs_max_128x64": {
+        "low_us": 120.19,
+        "mean_us": 120.50,
+        "high_us": 120.83
+      },
+      "vmap_scan/shared_init_batched_xs_f32_add_128x64": {
+        "low_us": 108.11,
+        "mean_us": 108.23,
+        "high_us": 108.37
+      }
+    }
+  },
+  "baseline": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/shared_init_batched_xs_128x64 --quiet",
+    "worktree": "/data/projects/.scratch/frankenjax-pass68-baseline",
+    "head": "b73e8a2479322fc3fa79b3533b8e35035fed59f8",
+    "worker": "ts2",
+    "low_us": 119.73,
+    "mean_us": 120.05,
+    "high_us": 120.43
+  },
+  "after": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/shared_init_batched_xs_128x64 --quiet",
+    "worktree": "/data/projects/.scratch/frankenjax-pass68-bench",
+    "head": "b73e8a2479322fc3fa79b3533b8e35035fed59f8 + Pass68 patch",
+    "worker": "ts2",
+    "low_us": 51.473,
+    "mean_us": 51.733,
+    "high_us": 52.014
+  },
+  "speedup": {
+    "mean": 2.320,
+    "conservative_interval": 2.302
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 5,
+    "effort": 2,
+    "value": 12.5
+  },
+  "lever": "Exact borrowed row-major I64 add scan path for shared scalar init, batch axis 0, rank-2 xs. It bypasses move_batch_dim_to_front cloning and the per-element Literal operation matcher.",
+  "isomorphism_proof": {
+    "acceptance": "Only accepts unbatched I64 scalar or scalar-tensor init, I64 rank-2 xs with batch_dim 0, body_op missing or add, valid row-major element count. All other cases fall back to the previous scalar scan path.",
+    "ordering": "Rows are emitted in ascending batch index. Within each row, scan_idx order matches the prior forward/reverse loops.",
+    "arithmetic": "Uses i64::wrapping_add, matching the prior apply_scan_scalar_op Add branch and fj-lax signed integer add semantics.",
+    "tie_breaking": "No scheduling, sorting, branch-selection, or tie-breaking behavior is touched.",
+    "floating_point": "No F32/F64 path is accepted by the new helper; existing FP behavior falls back unchanged.",
+    "rng": "No RNG state or sampling behavior is touched."
+  },
+  "golden": {
+    "file": "artifacts/performance/evidence/fj_dispatch_scan_i64_shared_pass68_2026-06-03.golden",
+    "output_vector_sha256": "5b717b7e35d63224f82ec8377a47f07d8c7f40a098f1c45b4e3175723dc81a0c",
+    "wrapping_default_add_case": [
+      -9223372036854775806,
+      1
+    ]
+  },
+  "validation": [
+    "rch exec -- cargo test -p fj-dispatch scan_batched_xs -- --nocapture (shared tree; 7 tests passed)",
+    "rch exec -- cargo test -p fj-dispatch scan_shared_i64_add -- --nocapture (shared tree; 1 test passed)",
+    "rch exec -- cargo test -p fj-dispatch (clean patched worktree; 247 unit tests, 55 integration tests, doc-tests passed)",
+    "rch exec -- cargo check -p fj-dispatch --all-targets (clean patched worktree; passed)",
+    "rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings (clean patched worktree; passed)",
+    "cargo fmt --check -p fj-dispatch (shared tree; passed)",
+    "git diff --check -- crates/fj-dispatch/src/batching.rs (shared tree; passed)",
+    "ubs crates/fj-dispatch/src/batching.rs (exit 0; critical 0)"
+  ],
+  "notes": [
+    "The shared working tree had unrelated dirty fj-lax/src/reduction.rs edits that made RCH bench fail with missing local variable `strides`; clean detached worktrees were used for the fair baseline/rebench and crate build gates.",
+    "No peer-owned fj-lax or backend-cpu files were edited or staged by this pass."
+  ]
+}
