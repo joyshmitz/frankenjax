@@ -1,0 +1,106 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "bead": "frankenjax-mcqr.17",
+  "pass": 32,
+  "date": "2026-06-03",
+  "crate": "fj-lax",
+  "target": "eval/add_1k_i64_vec",
+  "skill_pass": "repeatedly-apply-skill pass 32 -> extreme-software-optimization",
+  "profile_backed_target": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-profile-pass32 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- --sample-size 20 --warm-up-time 1 --measurement-time 2",
+    "worker": "vmi1149989",
+    "mean_us": 21.968,
+    "ci_us": [21.715, 22.264]
+  },
+  "optimization": {
+    "lever": "Same-shape I64 tensor Add fast path in eval_binary_elementwise.",
+    "files_changed": [
+      "crates/fj-lax/src/arithmetic.rs",
+      "artifacts/performance/evidence/fj_lax_i64_add_pass32_2026-06-03.golden",
+      "artifacts/performance/evidence/fj_lax_i64_add_pass32_2026-06-03.golden.sha256",
+      "artifacts/performance/evidence/fj_lax_i64_add_pass32_2026-06-03.json"
+    ],
+    "guard": "primitive == Add; both operands are tensors; shapes are equal; both declared dtypes are I64; every element is Literal::I64",
+    "single_lever": true,
+    "unsafe": false
+  },
+  "benchmark": {
+    "baseline": {
+      "worker": "vmi1149989",
+      "mean_us": 21.968,
+      "ci_us": [21.715, 22.264]
+    },
+    "after": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-rebench-pass32 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- eval/add_1k_i64_vec --sample-size 60 --warm-up-time 1 --measurement-time 3",
+      "worker": "vmi1149989",
+      "mean_us": 1.7441,
+      "ci_us": [1.7067, 1.78],
+      "sample_size": 60,
+      "warm_up_seconds": 1,
+      "measurement_seconds": 3
+    },
+    "speedup": 12.595608049997,
+    "delta_percent": -92.060724690459,
+    "worker_caveat": "Baseline and after were both remote RCH measurements on vmi1149989."
+  },
+  "score": {
+    "impact": 4,
+    "confidence": 5,
+    "effort": 1,
+    "impact_x_confidence_over_effort": 20,
+    "kept": true
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "Yes. The fast path emits one output per pair in the same zipped row-major tensor order as the generic same-shape loop.",
+    "dtype_and_shape": "Yes. The fast path returns DType::I64 with lhs.shape.clone(), matching promote_dtype(I64, I64) and same-shape generic output shape.",
+    "integer_semantics": "Identical for public Add. The fast path applies the same int_op closure as the generic binary_literal_op loop; eval_primitive supplies i64::wrapping_add.",
+    "malformed_tensor_fallback": "Yes. Declared-I64 tensors containing any non-I64 literal return None and fall through to the generic per-element path.",
+    "floating_point": "N/A. The kept path only accepts Literal::I64 elements.",
+    "tie_breaking": "N/A. Add has no comparisons or ties.",
+    "rng": "N/A. Add is deterministic and consumes no random state.",
+    "scope": "Only same-shape I64 tensor Add changes. Scalar, broadcast, mixed dtype, Sub, Mul, Div, complex, F64, and shape-error paths are unchanged.",
+    "golden_output": "artifacts/performance/evidence/fj_lax_i64_add_pass32_2026-06-03.golden",
+    "golden_sha256": "ffb9e599d61ea6db17eb80bb75faf06e30800b06a3829987ad776965e7ac0c3e"
+  },
+  "validation": [
+    {
+      "command": "cargo fmt -p fj-lax",
+      "result": "pass"
+    },
+    {
+      "command": "cargo fmt -p fj-lax --check",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-check-pass32 rch exec -- cargo check -p fj-lax --all-targets",
+      "worker": "vmi1227854",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-clippy-pass32 rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+      "worker": "vmi1293453",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-test-pass32-remote rch exec -- cargo test -p fj-lax --all-targets",
+      "result": "pass locally after RCH project-exclusion fallback; 1000 tests plus lax_baseline bench target smoke checks. Not counted as remote proof."
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-test-pass32-focused rch exec -- cargo test -p fj-lax same_shape_i64_add_fast_path_matches_generic_edge_values -- --nocapture",
+      "worker": "vmi1167313",
+      "result": "pass; 1 passed, 1006 filtered out"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/arithmetic.rs",
+      "result": "exit 1 due existing monolithic test assert/panic/unwrap inventory; no new production fast-path issue identified"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_i64_add_pass32_2026-06-03.golden.sha256",
+      "result": "pass"
+    }
+  ],
+  "notes": [
+    "A full all-target test attempt fell back locally after RCH admission denied it; that local run is recorded for context only and is not counted as remote proof.",
+    "No stash, reset, revert, destructive cleanup, or file deletion was performed."
+  ]
+}

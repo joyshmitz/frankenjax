@@ -40,6 +40,13 @@ pub(crate) fn eval_binary_elementwise(
                 {
                     return Ok(value);
                 }
+                if primitive == Primitive::Add
+                    && lhs.dtype == DType::I64
+                    && rhs.dtype == DType::I64
+                    && let Some(value) = eval_same_shape_i64_add(lhs, rhs, &int_op)?
+                {
+                    return Ok(value);
+                }
 
                 let mut elements = Vec::with_capacity(lhs.elements.len());
                 for (left, right) in lhs
@@ -149,6 +156,33 @@ fn eval_same_shape_f64_map(
 
     Ok(Some(Value::Tensor(TensorValue::new(
         DType::F64,
+        lhs.shape.clone(),
+        elements,
+    )?)))
+}
+
+/// Same-shape I64 tensor Add fast path.
+///
+/// This preserves the public `Primitive::Add` integer semantics by applying the
+/// same `int_op` closure as the generic `binary_literal_op` loop. The public
+/// dispatcher supplies `i64::wrapping_add`, so overflow behavior is unchanged.
+/// Returning `Ok(None)` for non-I64 elements preserves malformed-tensor fallback.
+#[inline]
+fn eval_same_shape_i64_add(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    int_op: &impl Fn(i64, i64) -> i64,
+) -> Result<Option<Value>, EvalError> {
+    let mut elements = Vec::with_capacity(lhs.elements.len());
+    for (left, right) in lhs.elements.iter().zip(&rhs.elements) {
+        let (Literal::I64(left), Literal::I64(right)) = (*left, *right) else {
+            return Ok(None);
+        };
+        elements.push(Literal::I64(int_op(left, right)));
+    }
+
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::I64,
         lhs.shape.clone(),
         elements,
     )?)))
@@ -4962,6 +4996,63 @@ mod tests {
             // Compare raw bits so NaN payloads and -0.0 are distinguished.
             assert_eq!(tensor.elements, expected, "{primitive:?} bit mismatch");
         }
+    }
+
+    #[test]
+    fn same_shape_i64_add_fast_path_matches_generic_edge_values() -> Result<(), String> {
+        let lhs_data = [0, 1, -1, i64::MAX, i64::MIN, 1_234_567_890_123_456_789];
+        let rhs_data = [0, -1, i64::MAX, 1, -1, -987_654_321_098_765_432];
+        let lhs = matrix_i64(2, 3, &lhs_data);
+        let rhs = matrix_i64(2, 3, &rhs_data);
+        let int_op = |a: i64, b: i64| a.wrapping_add(b);
+        let float_op = |a: f64, b: f64| a + b;
+        let result = eval_binary_elementwise(Primitive::Add, &[lhs, rhs], int_op, float_op)
+            .map_err(|err| format!("{err:?}"))?;
+        let Value::Tensor(tensor) = result else {
+            return Err("expected tensor".to_owned());
+        };
+        let expected = lhs_data
+            .iter()
+            .zip(rhs_data.iter())
+            .map(|(&left, &right)| {
+                binary_literal_op(
+                    Literal::I64(left),
+                    Literal::I64(right),
+                    Primitive::Add,
+                    &int_op,
+                    &float_op,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("{err:?}"))?;
+        assert_eq!(tensor.dtype, DType::I64);
+        assert_eq!(tensor.shape.dims, vec![2, 3]);
+        assert_eq!(tensor.elements, expected);
+
+        let malformed_lhs = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2] },
+                vec![Literal::from_f64(1.5), Literal::I64(2)],
+            )
+            .map_err(|err| format!("{err:?}"))?,
+        );
+        let malformed_rhs = tensor_i64(vec![2], &[3, 4]);
+        let result = eval_binary_elementwise(
+            Primitive::Add,
+            &[malformed_lhs, malformed_rhs],
+            int_op,
+            float_op,
+        )
+        .map_err(|err| format!("{err:?}"))?;
+        let Value::Tensor(tensor) = result else {
+            return Err("expected tensor".to_owned());
+        };
+        assert_eq!(
+            tensor.elements,
+            vec![Literal::from_f64(4.5), Literal::I64(6)]
+        );
+        Ok(())
     }
 
     #[test]
