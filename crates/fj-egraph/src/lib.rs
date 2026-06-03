@@ -2802,6 +2802,12 @@ fn optimize_supported_segment(
         return optimized;
     }
 
+    if let Some(optimized) =
+        fast_path_safe_no_rewrite_single_output_segment(jaxpr, preserved_outvars, next_var, config)
+    {
+        return optimized;
+    }
+
     let (expr, var_map) = match jaxpr_to_egraph(jaxpr) {
         Ok(lowered) => lowered,
         Err(_) => {
@@ -2992,6 +2998,93 @@ fn single_output_for_inputs(
         return None;
     }
     Some(equation.outputs[0])
+}
+
+fn fast_path_safe_no_rewrite_single_output_segment(
+    jaxpr: &Jaxpr,
+    preserved_outvars: &BTreeSet<VarId>,
+    next_var: &mut u32,
+    config: &OptimizationConfig,
+) -> Option<SegmentOptimization> {
+    if !config.numerical_safety_mode
+        || !preserved_outvars.is_empty()
+        || !jaxpr.constvars.is_empty()
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.is_empty()
+        || jaxpr.equations.iter().any(|equation| {
+            equation.outputs.len() != 1
+                || !equation.params.is_empty()
+                || !equation.effects.is_empty()
+                || !equation.sub_jaxprs.is_empty()
+                || safe_rewrite_may_match(equation.primitive)
+        })
+    {
+        return None;
+    }
+
+    let interface_vars: BTreeSet<VarId> = jaxpr.invars.iter().copied().collect();
+    let mut remap = BTreeMap::new();
+    let mut equations = Vec::with_capacity(jaxpr.equations.len());
+
+    for equation in &jaxpr.equations {
+        let inputs = equation
+            .inputs
+            .iter()
+            .map(|atom| match atom {
+                Atom::Var(var) => Atom::Var(*remap.get(var).unwrap_or(var)),
+                Atom::Lit(lit) => Atom::Lit(*lit),
+            })
+            .collect();
+        let outputs = equation
+            .outputs
+            .iter()
+            .map(|outvar| {
+                if interface_vars.contains(outvar) {
+                    *outvar
+                } else {
+                    let remapped = VarId(*next_var);
+                    *next_var += 1;
+                    remap.insert(*outvar, remapped);
+                    remapped
+                }
+            })
+            .collect();
+
+        equations.push(Equation {
+            primitive: equation.primitive,
+            inputs,
+            outputs,
+            params: BTreeMap::new(),
+            effects: vec![],
+            sub_jaxprs: vec![],
+        });
+    }
+
+    let original_outvar = jaxpr.outvars[0];
+    Some(SegmentOptimization {
+        equations,
+        outvar_remap: BTreeMap::from([(
+            original_outvar,
+            *remap.get(&original_outvar).unwrap_or(&original_outvar),
+        )]),
+    })
+}
+
+fn safe_rewrite_may_match(primitive: Primitive) -> bool {
+    matches!(
+        primitive,
+        Primitive::Add
+            | Primitive::Mul
+            | Primitive::Sub
+            | Primitive::Square
+            | Primitive::Sign
+            | Primitive::Pow
+            | Primitive::Erf
+            | Primitive::Copy
+            | Primitive::BitwiseAnd
+            | Primitive::BitwiseOr
+            | Primitive::BitwiseXor
+    )
 }
 
 fn fast_path_safe_single_literal_commutative_segment(
@@ -3471,6 +3564,86 @@ mod tests {
                 eval_jaxpr(&jaxpr, &args)?,
                 eval_jaxpr(&optimized, &args)?,
                 "{name} fast path should preserve observable value and dtype"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn safe_no_rewrite_chain_fast_path_keeps_fresh_var_order()
+    -> Result<(), fj_interpreters::InterpreterError> {
+        let cases = [
+            (
+                "double_neg",
+                Jaxpr::new(
+                    vec![VarId(0)],
+                    vec![],
+                    vec![VarId(2)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Neg,
+                            inputs: smallvec![Atom::Var(VarId(0))],
+                            outputs: smallvec![VarId(1)],
+                            effects: vec![],
+                            params: BTreeMap::new(),
+                            sub_jaxprs: vec![],
+                        },
+                        Equation {
+                            primitive: Primitive::Neg,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(2)],
+                            effects: vec![],
+                            params: BTreeMap::new(),
+                            sub_jaxprs: vec![],
+                        },
+                    ],
+                ),
+                "in=[v0,]const=[]out=[v4,]eqn:neg(v0,)->v3,{}|eqn:neg(v3,)->v4,{}|",
+                Value::scalar_f64(-3.5),
+            ),
+            (
+                "exp_log",
+                Jaxpr::new(
+                    vec![VarId(0)],
+                    vec![],
+                    vec![VarId(2)],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Exp,
+                            inputs: smallvec![Atom::Var(VarId(0))],
+                            outputs: smallvec![VarId(1)],
+                            effects: vec![],
+                            params: BTreeMap::new(),
+                            sub_jaxprs: vec![],
+                        },
+                        Equation {
+                            primitive: Primitive::Log,
+                            inputs: smallvec![Atom::Var(VarId(1))],
+                            outputs: smallvec![VarId(2)],
+                            effects: vec![],
+                            params: BTreeMap::new(),
+                            sub_jaxprs: vec![],
+                        },
+                    ],
+                ),
+                "in=[v0,]const=[]out=[v4,]eqn:exp(v0,)->v3,{}|eqn:log(v3,)->v4,{}|",
+                Value::scalar_f64(7.0),
+            ),
+        ];
+
+        for (name, jaxpr, expected_fingerprint, arg) in cases {
+            let optimized = optimize_jaxpr_with_config(&jaxpr, &OptimizationConfig::safe());
+            assert_eq!(
+                optimized.canonical_fingerprint(),
+                expected_fingerprint,
+                "{name} should preserve the existing no-rewrite fresh-var order"
+            );
+            let args = [arg];
+            assert_eq!(
+                eval_jaxpr(&jaxpr, &args)?,
+                eval_jaxpr(&optimized, &args)?,
+                "{name} safe no-rewrite fast path should preserve values"
             );
         }
 

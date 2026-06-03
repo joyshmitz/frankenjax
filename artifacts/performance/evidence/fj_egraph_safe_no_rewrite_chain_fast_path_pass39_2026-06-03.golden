@@ -1,0 +1,2 @@
+double_neg_canonical_fingerprint=in=[v0,]const=[]out=[v4,]eqn:neg(v0,)->v3,{}|eqn:neg(v3,)->v4,{}|
+exp_log_canonical_fingerprint=in=[v0,]const=[]out=[v4,]eqn:exp(v0,)->v3,{}|eqn:log(v3,)->v4,{}|
