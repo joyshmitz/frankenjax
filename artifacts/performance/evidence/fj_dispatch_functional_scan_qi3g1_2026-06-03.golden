@@ -1,0 +1,39 @@
+fj-dispatch functional scan add-emit golden outputs
+
+bead: frankenjax-qi3g1
+recorded: 2026-06-03
+profile target:
+- source: rch Criterion full fj-dispatch profile after pass63
+- command: rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- --quiet
+- row: vmap_scan/functional_sub_jaxpr_add_emit_128x64
+- mean: 427.16 us [419.35, 437.62] on ts2
+
+focused baseline:
+- command: rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/functional_sub_jaxpr_add_emit_128x64 --quiet
+- mean: 400.43 us [398.63, 402.30] on ts2
+
+candidate rebench:
+- command: rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/functional_sub_jaxpr_add_emit_128x64 --quiet
+- mean: 39.634 us [38.748, 40.563] on ts1
+- mean speedup: 10.10x
+- conservative interval speedup: 9.82x
+- score: 12.5 (Impact 5 * Confidence 5 / Effort 2)
+
+golden outputs:
+- forward carry: [6, 60]
+- forward y row-major: [1, 3, 6, 10, 30, 60]
+- reverse carry: [6, 60]
+- reverse y row-major: [6, 5, 3, 60, 50, 30]
+- wrapping carry: [-9223372036854775806]
+- wrapping y row-major: [-9223372036854775808, -9223372036854775806]
+
+isomorphism proof:
+- one lever: specialize only the exact no-const one-carry I64 scan body `carry + x -> carry; carry + 0 -> y`.
+- ordering preserved: forward iterates scan_idx 0..scan_len and writes each y at the same row-major offset as the generic path.
+- reverse ordering preserved: reverse iterates scan_idx in descending order, then writes y to the original input-order slot, matching the generic push-then-reverse behavior.
+- carry/y shape ordering preserved: outputs remain [batched final carry, batched ys] with batch dimension 0.
+- tie-breaking unchanged: no scatter, comparison, sorting, or conflict-resolution surface exists for this scan body.
+- floating-point unchanged: the direct path admits only DType::I64 tensors; all FP inputs and bodies fall back to generic scan evaluation.
+- integer overflow unchanged: additions use wrapping_add, matching the existing I64 Add semantics; the golden wrapping case pins i64::MAX + 1 + 2.
+- RNG unchanged: no random primitive or seed state is read or written.
+- fallback preserved: multi-carry, non-I64, non-rank2, constvar, effectful, parameterized, non-Add, non-Add0, or nested-sub_jaxpr scan bodies return None and use the existing interpreter loop.

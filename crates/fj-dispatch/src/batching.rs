@@ -4664,6 +4664,12 @@ fn batch_scan_sub_jaxpr(
         .get("reverse")
         .is_some_and(|value| value == "true");
 
+    if let Some(outputs) =
+        batch_scan_add_emit_carry_i64(body_jaxpr, carry_inputs, &xs, batch_size, scan_len, reverse)?
+    {
+        return Ok(outputs);
+    }
+
     let scan_indices: Box<dyn Iterator<Item = usize>> = if reverse {
         Box::new((0..scan_len).rev())
     } else {
@@ -4704,6 +4710,125 @@ fn batch_scan_sub_jaxpr(
         outputs.push(stack_batched_scan_outputs(values)?);
     }
     Ok(outputs)
+}
+
+fn batch_scan_add_emit_carry_i64(
+    body_jaxpr: &Jaxpr,
+    carry_inputs: &[BatchTracer],
+    xs: &Value,
+    batch_size: usize,
+    scan_len: usize,
+    reverse: bool,
+) -> Result<Option<Vec<BatchTracer>>, BatchError> {
+    if carry_inputs.len() != 1 || !scan_body_is_add_emit_carry_i64(body_jaxpr) {
+        return Ok(None);
+    }
+    let Value::Tensor(xs_tensor) = xs else {
+        return Ok(None);
+    };
+    if xs_tensor.dtype != DType::I64 || xs_tensor.rank() != 2 {
+        return Ok(None);
+    }
+    if xs_tensor.shape.dims[0] as usize != batch_size
+        || xs_tensor.shape.dims[1] as usize != scan_len
+    {
+        return Ok(None);
+    }
+    let expected_len = batch_size
+        .checked_mul(scan_len)
+        .ok_or_else(|| BatchError::TensorError("scan output size overflowed".to_owned()))?;
+    if xs_tensor.elements.len() != expected_len {
+        return Ok(None);
+    }
+    let init_values = scan_scalar_initial_values(&carry_inputs[0], batch_size)?;
+    if init_values.len() != batch_size {
+        return Ok(None);
+    }
+
+    let mut final_carry = Vec::with_capacity(batch_size);
+    let mut ys = vec![Literal::I64(0); expected_len];
+    for (batch_idx, init) in init_values.into_iter().enumerate() {
+        let Literal::I64(mut carry) = init else {
+            return Ok(None);
+        };
+        let row_offset = batch_idx * scan_len;
+        if reverse {
+            for scan_idx in (0..scan_len).rev() {
+                let Literal::I64(x) = xs_tensor.elements[row_offset + scan_idx] else {
+                    return Ok(None);
+                };
+                carry = carry.wrapping_add(x);
+                ys[row_offset + scan_idx] = Literal::I64(carry);
+            }
+        } else {
+            for scan_idx in 0..scan_len {
+                let Literal::I64(x) = xs_tensor.elements[row_offset + scan_idx] else {
+                    return Ok(None);
+                };
+                carry = carry.wrapping_add(x);
+                ys[row_offset + scan_idx] = Literal::I64(carry);
+            }
+        }
+        final_carry.push(Literal::I64(carry));
+    }
+
+    let carry = TensorValue::new(
+        DType::I64,
+        Shape::vector(xs_tensor.shape.dims[0]),
+        final_carry,
+    )
+    .map_err(|error| BatchError::TensorError(error.to_string()))?;
+    let y = TensorValue::new(
+        DType::I64,
+        Shape {
+            dims: vec![xs_tensor.shape.dims[0], xs_tensor.shape.dims[1]],
+        },
+        ys,
+    )
+    .map_err(|error| BatchError::TensorError(error.to_string()))?;
+
+    Ok(Some(vec![
+        BatchTracer::batched(Value::Tensor(carry), 0),
+        BatchTracer::batched(Value::Tensor(y), 0),
+    ]))
+}
+
+fn scan_body_is_add_emit_carry_i64(body_jaxpr: &Jaxpr) -> bool {
+    if !body_jaxpr.constvars.is_empty()
+        || body_jaxpr.invars.len() != 2
+        || body_jaxpr.outvars.len() != 2
+        || body_jaxpr.equations.len() != 2
+    {
+        return false;
+    }
+
+    let add_carry = &body_jaxpr.equations[0];
+    let emit = &body_jaxpr.equations[1];
+    if add_carry.primitive != Primitive::Add
+        || emit.primitive != Primitive::Add
+        || !add_carry.params.is_empty()
+        || !emit.params.is_empty()
+        || !add_carry.sub_jaxprs.is_empty()
+        || !emit.sub_jaxprs.is_empty()
+        || !add_carry.effects.is_empty()
+        || !emit.effects.is_empty()
+        || add_carry.outputs.len() != 1
+        || emit.outputs.len() != 1
+        || add_carry.inputs.len() != 2
+        || emit.inputs.len() != 2
+    {
+        return false;
+    }
+
+    let carry = Atom::Var(body_jaxpr.invars[0]);
+    let xs = Atom::Var(body_jaxpr.invars[1]);
+    let sum = Atom::Var(add_carry.outputs[0]);
+    add_carry.outputs[0] == body_jaxpr.outvars[0]
+        && emit.outputs[0] == body_jaxpr.outvars[1]
+        && ((add_carry.inputs[0] == carry && add_carry.inputs[1] == xs)
+            || (add_carry.inputs[0] == xs && add_carry.inputs[1] == carry))
+        && ((emit.inputs[0] == sum && emit.inputs[1] == Atom::Lit(Literal::I64(0)))
+            || (emit.inputs[0] == Atom::Lit(Literal::I64(0)) && emit.inputs[1] == sum))
 }
 
 fn scan_const_to_body_tracer(tracer: &BatchTracer) -> Result<BatchTracer, BatchError> {
@@ -7749,6 +7874,26 @@ mod tests {
         assert_eq!(
             extract_i64_vec(&outputs[1].value),
             vec![6, 5, 3, 60, 50, 30]
+        );
+    }
+
+    #[test]
+    fn test_batch_eval_jaxpr_scan_sub_jaxprs_add_emit_wraps_i64() {
+        let jaxpr = make_scan_sub_jaxpr_control_flow_jaxpr(false);
+        let outputs = batch_eval_jaxpr(
+            &jaxpr,
+            &[
+                BatchTracer::unbatched(Value::scalar_i64(i64::MAX)),
+                BatchTracer::batched(make_i64_matrix(1, 2, &[1, 2]), 0),
+            ],
+        )
+        .expect("add-emit scan should preserve wrapping i64 semantics");
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(extract_i64_vec(&outputs[0].value), vec![i64::MIN + 2]);
+        assert_eq!(
+            extract_i64_vec(&outputs[1].value),
+            vec![i64::MIN, i64::MIN + 2]
         );
     }
 

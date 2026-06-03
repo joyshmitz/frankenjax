@@ -1,0 +1,95 @@
+{
+  "bead": "frankenjax-qi3g1",
+  "recorded_at": "2026-06-03T18:21:44-04:00",
+  "crate": "fj-dispatch",
+  "target": "vmap_scan/functional_sub_jaxpr_add_emit_128x64",
+  "profile_backed_target": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- --quiet",
+    "worker": "ts2",
+    "mean_us": 427.16,
+    "ci_low_us": 419.35,
+    "ci_high_us": 437.62,
+    "rank_after_pass63": 1
+  },
+  "focused_baseline": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/functional_sub_jaxpr_add_emit_128x64 --quiet",
+    "worker": "ts2",
+    "mean_us": 400.43,
+    "ci_low_us": 398.63,
+    "ci_high_us": 402.30
+  },
+  "candidate_rebench": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/functional_sub_jaxpr_add_emit_128x64 --quiet",
+    "worker": "ts1",
+    "mean_us": 39.634,
+    "ci_low_us": 38.748,
+    "ci_high_us": 40.563,
+    "speedup_mean": 10.10,
+    "speedup_conservative": 9.82
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 5,
+    "effort": 2,
+    "value": 12.5,
+    "kept": true
+  },
+  "one_lever": "Specialize the exact no-const one-carry I64 functional scan body `carry + x -> carry; carry + 0 -> y` into a row-major segmented prefix scan.",
+  "alien_primitive": {
+    "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md:1445-1448",
+    "primitive": "nested-data-parallel segmented arrays with seg_scan",
+    "adaptation": "The vmap scan batch is represented as independent row segments and evaluated as per-row prefix scans without per-step scalar sub-jaxpr materialization."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_dispatch_functional_scan_qi3g1_2026-06-03.golden",
+    "sha256": "28b9d02889825fffcb3ae7022bf378ca8e2e1308eb1c39db07f6822ed7c080bb",
+    "forward_carry": [6, 60],
+    "forward_y_row_major": [1, 3, 6, 10, 30, 60],
+    "reverse_carry": [6, 60],
+    "reverse_y_row_major": [6, 5, 3, 60, 50, 30],
+    "wrapping_carry": [-9223372036854775806],
+    "wrapping_y_row_major": [-9223372036854775808, -9223372036854775806]
+  },
+  "isomorphism": {
+    "ordering": "Forward visits scan_idx ascending; reverse visits descending but writes each y to its original input-order slot, matching the generic reverse scan output order.",
+    "tie_breaking": "Not applicable: the scan body has no conflicts, sorting, comparisons, or scatter updates.",
+    "floating_point": "Identical by exclusion: the direct path accepts only DType::I64 rank-2 xs; FP inputs fall back to generic scan evaluation.",
+    "integer_overflow": "Uses wrapping_add, matching the existing I64 Add semantics; a golden test pins i64::MAX + 1 + 2.",
+    "rng": "Unchanged: no RNG primitive, seed, or state is read or written.",
+    "fallback": "Any non-exact body shape, constvar, effect, params, nested sub-jaxpr, non-I64 input, non-rank2 input, or multi-carry scan returns None and uses the existing generic path."
+  },
+  "validation": [
+    {
+      "command": "rch exec -- cargo test -p fj-dispatch scan_sub_jaxprs -- --nocapture",
+      "result": "passed 4 focused scan tests including forward, reverse, wrapping, and multi-carry fallback"
+    },
+    {
+      "command": "rch exec -- cargo test -p fj-dispatch",
+      "result": "passed 245 unit tests, 55 integration tests, and doctests"
+    },
+    {
+      "command": "rch exec -- cargo check -p fj-dispatch --all-targets",
+      "result": "passed"
+    },
+    {
+      "command": "rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check -p fj-dispatch",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- crates/fj-dispatch/src/batching.rs artifacts/performance/evidence/fj_dispatch_functional_scan_qi3g1_2026-06-03.golden",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-dispatch/src/batching.rs",
+      "result": "exit 0; critical issues 0; warning inventory unchanged at file scope"
+    }
+  ],
+  "notes": [
+    "RCH validation ran crate-scoped only.",
+    "Shared peer edits in fj-core/fj-lax were present in the worktree during validation and are not part of this staged lever."
+  ]
+}
