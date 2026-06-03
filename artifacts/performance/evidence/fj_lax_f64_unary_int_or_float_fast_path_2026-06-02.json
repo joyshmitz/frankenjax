@@ -1,0 +1,38 @@
+{
+  "bead": "frankenjax-mcqr.14",
+  "date": "2026-06-02",
+  "subsystem": "fj-lax",
+  "target": "F64 eval_unary_int_or_float Tensor arm (Square, Sign)",
+  "lever": {
+    "description": "Reuse the existing eval_unary_f64_tensor_fast_path at the top of eval_unary_int_or_float's Tensor arm. Previously Square/Sign over F64 tensors ran a full per-element `match literal { ... }` over every Literal variant plus an out-dtype match; the fast path loops F64Bits directly applying float_op. Returns None (fall through) for non-F64 tensors."
+  },
+  "benchmarks": {
+    "baseline": {
+      "note": "fast-path guard temporarily removed; generic per-element variant match",
+      "tool": "rch Criterion",
+      "square_1k_f64_mean_us": 4.6734
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/square_1k_f64'",
+      "square_1k_f64_mean_us": 1.1640
+    },
+    "speedup": {
+      "square_1k_f64": 4.015
+    }
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 15.0
+  },
+  "isomorphism_proof": {
+    "ordering": "Output elements produced in tensor index order; identical mapping per position.",
+    "floating_point": "from_f64(float_op(from_bits(b))) (generic) == F64Bits(float_op(from_bits(b)).to_bits()) (fast path); the same float_op closures are used.",
+    "tie_breaking": "None introduced; square(-0.0)=+0.0, sign(-0.0)=-0.0, NaN->canonical NaN, +-inf preserved.",
+    "rng": "No RNG state is read or written.",
+    "errors": "Only F64 tensors take the fast path; other dtypes/malformed literals use the generic per-element variant match.",
+    "unit_test": "fj-lax arithmetic::tests::unary_int_or_float_f64_fast_path_bit_identical (square + sign, -0.0/NaN/+-inf); 998/998 fj-lax tests pass.",
+    "golden_output_sha256": "f49a5c12c21d9555d344de066bc5bee6c65e57805c5ae0bd200533e0b776f35d"
+  }
+}

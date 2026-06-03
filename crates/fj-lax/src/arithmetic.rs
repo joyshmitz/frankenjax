@@ -786,6 +786,12 @@ fn eval_binary_elementwise_complex(
         (Value::Tensor(lhs), Value::Tensor(rhs)) => {
             let out_dtype = complex_binary_output_dtype(lhs.dtype, rhs.dtype);
             if lhs.shape == rhs.shape {
+                if primitive == Primitive::Mul
+                    && let Some(value) = eval_same_shape_complex128_mul(lhs, rhs)?
+                {
+                    return Ok(value);
+                }
+
                 let mut elements = Vec::with_capacity(lhs.elements.len());
                 for (left, right) in lhs
                     .elements
@@ -864,6 +870,45 @@ fn eval_binary_elementwise_complex(
             )?))
         }
     }
+}
+
+/// Same-shape Complex128 tensor multiply fast path.
+///
+/// The generic complex path converts each literal into `(f64, f64)`, dispatches
+/// `Primitive::Mul`, then rebuilds `Literal::Complex128Bits`. This path applies
+/// the identical formula (`ar*br - ai*bi`, `ar*bi + ai*br`) in the same element
+/// order, skipping the per-element enum and primitive dispatch.
+#[inline]
+fn eval_same_shape_complex128_mul(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    if lhs.dtype != DType::Complex128 || rhs.dtype != DType::Complex128 {
+        return Ok(None);
+    }
+
+    let mut elements = Vec::with_capacity(lhs.elements.len());
+    for (&left, &right) in lhs.elements.iter().zip(&rhs.elements) {
+        let (Literal::Complex128Bits(ar_bits, ai_bits), Literal::Complex128Bits(br_bits, bi_bits)) =
+            (left, right)
+        else {
+            return Ok(None);
+        };
+        let ar = f64::from_bits(ar_bits);
+        let ai = f64::from_bits(ai_bits);
+        let br = f64::from_bits(br_bits);
+        let bi = f64::from_bits(bi_bits);
+        elements.push(Literal::from_complex128(
+            ar * br - ai * bi,
+            ar * bi + ai * br,
+        ));
+    }
+
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::Complex128,
+        lhs.shape.clone(),
+        elements,
+    )?)))
 }
 
 /// Full NumPy multi-dim broadcasting for two tensors.
@@ -1816,6 +1861,14 @@ pub(crate) fn eval_unary_int_or_float(
             },
         },
         Value::Tensor(tensor) => {
+            // F64 fast path (e.g. Square, Sign over F64 tensors): the generic
+            // arm below computes `Literal::from_f64(float_op(f64::from_bits(b)))`
+            // for F64Bits, which is exactly what eval_unary_f64_tensor_fast_path
+            // does (from_f64(x) == F64Bits(x.to_bits())), so it is bit-for-bit
+            // identical while skipping the per-element variant match.
+            if let Some(result) = eval_unary_f64_tensor_fast_path(tensor, &float_op) {
+                return result;
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in tensor.elements.iter().copied() {
                 let out = match literal {
@@ -4909,6 +4962,83 @@ mod tests {
             // Compare raw bits so NaN payloads and -0.0 are distinguished.
             assert_eq!(tensor.elements, expected, "{primitive:?} bit mismatch");
         }
+    }
+
+    #[test]
+    fn unary_int_or_float_f64_fast_path_bit_identical() {
+        // Square and Sign over an F64 tensor must match the per-element generic
+        // arm bit-for-bit, including -0.0 (Sign preserves it), NaN and +-inf.
+        let data = [
+            -2.0,
+            0.0,
+            -0.0,
+            3.5,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let params = BTreeMap::new();
+
+        // Square: float_op = |x| x * x
+        let result = crate::eval_primitive(Primitive::Square, &[v_f64(&data)], &params).unwrap();
+        let Value::Tensor(tensor) = result else {
+            panic!("expected tensor");
+        };
+        assert_eq!(tensor.dtype, DType::F64);
+        let expected: Vec<Literal> = data.iter().map(|&x| Literal::from_f64(x * x)).collect();
+        assert_eq!(tensor.elements, expected, "square");
+
+        // Sign: NaN -> NaN, x==0.0 -> x (keeps -0.0), else x.signum()
+        let sign = |x: f64| {
+            if x.is_nan() {
+                f64::NAN
+            } else if x == 0.0 {
+                x
+            } else {
+                x.signum()
+            }
+        };
+        let result = crate::eval_primitive(Primitive::Sign, &[v_f64(&data)], &params).unwrap();
+        let Value::Tensor(tensor) = result else {
+            panic!("expected tensor");
+        };
+        let expected: Vec<Literal> = data.iter().map(|&x| Literal::from_f64(sign(x))).collect();
+        assert_eq!(tensor.elements, expected, "sign");
+    }
+
+    #[test]
+    fn same_shape_complex128_mul_fast_path_bit_identical() {
+        let lhs = [
+            (1.5, -2.0),
+            (-0.0, 3.0),
+            (f64::INFINITY, -4.0),
+            (f64::from_bits(0x7ff8_0000_0000_1234), 5.0),
+        ];
+        let rhs = [
+            (2.0, 0.5),
+            (f64::NEG_INFINITY, -0.0),
+            (-1.25, f64::INFINITY),
+            (6.0, f64::from_bits(0x7ff8_0000_0000_5678)),
+        ];
+        let params = BTreeMap::new();
+        let result = crate::eval_primitive(
+            Primitive::Mul,
+            &[v_complex128(&lhs), v_complex128(&rhs)],
+            &params,
+        )
+        .unwrap();
+        let Value::Tensor(tensor) = result else {
+            panic!("expected tensor");
+        };
+        assert_eq!(tensor.dtype, DType::Complex128);
+        let expected: Vec<Literal> = lhs
+            .iter()
+            .zip(rhs.iter())
+            .map(|(&(ar, ai), &(br, bi))| {
+                Literal::from_complex128(ar * br - ai * bi, ar * bi + ai * br)
+            })
+            .collect();
+        assert_eq!(tensor.elements, expected);
     }
 
     #[test]

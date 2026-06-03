@@ -1,0 +1,8 @@
+frankenjax-mcqr.14 fj-lax F64 eval_unary_int_or_float fast path golden
+
+primitives: square (|x| x*x), sign (NaN->NaN, x==0.0->x, else x.signum())
+input: F64 tensor [-2.0, 0.0, -0.0, 3.5, NaN, +inf, -inf]
+output_contract: F64Bits in input order; rows [square, sign]
+serde_json_bits: [[4616189618054758400,0,0,4623085754984169472,9221120237041090560,9218868437227405312,9218868437227405312],[13830554455654793216,0,9223372036854775808,4607182418800017408,9221120237041090560,4607182418800017408,13830554455654793216]]
+serde_json_sha256: f49a5c12c21d9555d344de066bc5bee6c65e57805c5ae0bd200533e0b776f35d
+proof: the generic Tensor arm computes Literal::from_f64(float_op(f64::from_bits(b))) for F64Bits; eval_unary_f64_tensor_fast_path computes Literal::F64Bits(float_op(f64::from_bits(b)).to_bits()), and from_f64(x) == F64Bits(x.to_bits()), so bits are identical. Edge cases preserved: square(-0.0)=+0.0 (index 2 = 0), sign(-0.0)=-0.0 (sign index 2 = 0x8000000000000000), NaN->NaN (canonical), +-inf squared=+inf, sign(+-inf)=+-1.0. Non-F64 tensors fall through to the generic per-element variant match.
