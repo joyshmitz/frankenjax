@@ -3,6 +3,7 @@
 mod arithmetic;
 pub mod array_creation;
 mod comparison;
+pub mod dense;
 pub mod einsum;
 mod fft;
 pub mod linalg;
