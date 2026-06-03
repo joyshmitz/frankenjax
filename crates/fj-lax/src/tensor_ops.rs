@@ -2683,7 +2683,7 @@ fn quantize_f64(value: f64, exponent_bits: u32, mantissa_bits: u32) -> f64 {
 
     let bits = value.to_bits();
     let sign = bits & (1_u64 << 63);
-    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let mut exp = ((bits >> 52) & 0x7ff) as i32;
     let mut mant = bits & ((1_u64 << 52) - 1);
 
     if exp == 0 {
@@ -2704,8 +2704,33 @@ fn quantize_f64(value: f64, exponent_bits: u32, mantissa_bits: u32) -> f64 {
     }
 
     if mant_bits < 52 {
+        // Round the mantissa to `mant_bits` bits, to nearest with ties-to-even
+        // (XLA reduce_precision semantics — NOT truncation).
         let drop = 52 - mant_bits;
-        mant = (mant >> drop) << drop;
+        let truncated = (mant >> drop) << drop;
+        let remainder = mant & ((1_u64 << drop) - 1);
+        let half = 1_u64 << (drop - 1);
+        let round_up = remainder > half || (remainder == half && (truncated >> drop) & 1 == 1);
+        mant = truncated;
+        if round_up {
+            mant += 1_u64 << drop;
+            if mant >> 52 != 0 {
+                // Mantissa carried into the exponent (e.g. 1.111… → 10.0).
+                mant = 0;
+                exp += 1;
+            }
+        }
+    }
+
+    // A round-up carry can push the exponent past the reduced format's range
+    // (or the f64 finite range) → ±infinity.
+    let overflow = if exp_bits < 11 {
+        exp - 1023 > (1_i32 << (exp_bits - 1)) - 1
+    } else {
+        exp >= 0x7ff
+    };
+    if overflow {
+        return f64::from_bits(sign | (0x7ff_u64 << 52));
     }
 
     f64::from_bits(sign | ((exp as u64) << 52) | mant)
@@ -2724,7 +2749,7 @@ fn quantize_f32(value: f32, exponent_bits: u32, mantissa_bits: u32) -> f32 {
 
     let bits = value.to_bits();
     let sign = bits & (1_u32 << 31);
-    let exp = ((bits >> 23) & 0xff) as i32;
+    let mut exp = ((bits >> 23) & 0xff) as i32;
     let mut mant = bits & ((1_u32 << 23) - 1);
 
     if exp == 0 {
@@ -2745,8 +2770,29 @@ fn quantize_f32(value: f32, exponent_bits: u32, mantissa_bits: u32) -> f32 {
     }
 
     if mant_bits < 23 {
+        // Round to nearest, ties-to-even (XLA reduce_precision semantics).
         let drop = 23 - mant_bits;
-        mant = (mant >> drop) << drop;
+        let truncated = (mant >> drop) << drop;
+        let remainder = mant & ((1_u32 << drop) - 1);
+        let half = 1_u32 << (drop - 1);
+        let round_up = remainder > half || (remainder == half && (truncated >> drop) & 1 == 1);
+        mant = truncated;
+        if round_up {
+            mant += 1_u32 << drop;
+            if mant >> 23 != 0 {
+                mant = 0;
+                exp += 1;
+            }
+        }
+    }
+
+    let overflow = if exp_bits < 8 {
+        exp - 127 > (1_i32 << (exp_bits - 1)) - 1
+    } else {
+        exp >= 0xff
+    };
+    if overflow {
+        return f32::from_bits(sign | (0xff_u32 << 23));
     }
 
     f32::from_bits(sign | ((exp as u32) << 23) | mant)

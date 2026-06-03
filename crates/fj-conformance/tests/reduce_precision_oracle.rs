@@ -158,6 +158,32 @@ fn oracle_reduce_precision_f64_low_mantissa() {
 }
 
 #[test]
+fn oracle_reduce_precision_rounds_ties_to_even_not_truncate() {
+    // XLA reduce_precision rounds the mantissa to nearest, ties-to-even — the
+    // previous implementation truncated, giving e.g. 1.0 for 1.09375. Here
+    // exp_bits=11 keeps the full f64 exponent; only the mantissa is reduced to
+    // 3 bits.
+    let cases = [
+        (1.09375_f64, 1.125_f64), // dropped bits > half -> round up (truncation gave 1.0)
+        (1.0625, 1.0),            // exactly half, kept mantissa even -> round down
+        (1.1875, 1.25),           // exactly half, kept mantissa odd -> round up (to even)
+    ];
+    for (input, expected) in cases {
+        let result = eval_primitive(
+            Primitive::ReducePrecision,
+            &[Value::Scalar(Literal::from_f64(input))],
+            &precision_params(11, 3),
+        )
+        .unwrap();
+        let v = extract_f64_vec(&result)[0];
+        assert!(
+            (v - expected).abs() < 1e-15,
+            "reduce_precision({input}, mant=3) = {v}, expected {expected}"
+        );
+    }
+}
+
+#[test]
 fn oracle_reduce_precision_f64_idempotent() {
     // Applying reduce_precision twice should give same result
     let input = Value::Scalar(Literal::from_f64(3.17));
