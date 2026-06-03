@@ -1,0 +1,135 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "bead": "frankenjax-j5j7",
+  "pass": 44,
+  "date": "2026-06-03",
+  "crate": "fj-dispatch",
+  "target": "dispatch_latency/vmap/rank2_add_one_in_axes_1",
+  "skill_pass": "repeatedly-apply-skill pass 44 -> extreme-software-optimization",
+  "no_gaps_directive": {
+    "external_blas_lapack_xla": false,
+    "safe_rust": true,
+    "primitive": "Fuse the residual rank-2 axis-1 I64 AddOne vmap transpose and scalar add in the existing safe-Rust BatchTrace path.",
+    "alien_graveyard_lineage": [
+      "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md: cache-local loop interchange and fused data-parallel primitive application."
+    ]
+  },
+  "profile_backed_target": {
+    "bead_source": "No ready [perf] bead was available outside the peer-owned fj-core/fj-lax lane, so frankenjax-j5j7 was filed from the fresh fj-dispatch Criterion profile.",
+    "fresh_baseline_command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- dispatch_latency",
+    "baseline_worker": "vmi1153651",
+    "target_mean_us": 200.88,
+    "target_ci_us": [196.91, 205.47],
+    "nearby_rows_us": {
+      "dispatch_latency/vmap/vector_add_one": {
+        "mean": 6.1387,
+        "ci": [6.0471, 6.2337]
+      },
+      "dispatch_latency/vmap/rank2_add_one": {
+        "mean": 6.3226,
+        "ci": [6.0974, 6.5733]
+      },
+      "dispatch_latency/vmap/constant_scalar_out_axes_none": {
+        "mean": 9.4647,
+        "ci": [8.7807, 10.302]
+      }
+    },
+    "target_gap": "The axis-1 rank-2 AddOne path was 31.77x slower than the same rank-2 AddOne axis-0 row and 32.72x slower than vector AddOne, showing transpose/loop overhead after pass29."
+  },
+  "optimization": {
+    "lever": "In batch_binary_elementwise, before moving batch_dim=1 to front and then evaluating Add generically, directly emit the transposed rank-2 I64 tensor with the scalar Add already applied.",
+    "files_changed": [
+      "crates/fj-dispatch/src/batching.rs",
+      "crates/fj-dispatch/src/lib.rs",
+      "artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.golden",
+      "artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.golden.sha256",
+      "artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.json"
+    ],
+    "guard": "Primitive::Add, batch_dim == 1, batched value is rank-2 DType::I64 tensor, scalar value is Literal::I64, and every stored tensor literal is Literal::I64.",
+    "fallback": "All non-matching primitive, dtype, rank, axis, non-scalar, and malformed-literal cases return None and use the existing move_batch_dim_to_front plus eval_primitive path.",
+    "single_lever": true,
+    "unsafe": false
+  },
+  "benchmark": {
+    "baseline": {
+      "worker": "vmi1153651",
+      "mean_us": 200.88,
+      "ci_us": [196.91, 205.47]
+    },
+    "after": {
+      "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- dispatch_latency/vmap/rank2_add_one_in_axes_1",
+      "worker": "vmi1149989",
+      "mean_us": 13.579,
+      "ci_us": [13.189, 14.033]
+    },
+    "speedup_mean": 14.794904420052,
+    "delta_percent": -93.240740739745,
+    "worker_caveat": "Baseline and after were both remote RCH Criterion runs but landed on different workers. The target delta is large enough to clear the score threshold despite worker variance."
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 4,
+    "effort": 1,
+    "impact_x_confidence_over_effort": 20,
+    "kept": true
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "Yes. The fused loop emits output[col, row] from source[row, col], exactly matching move_batch_dim_to_front for rank-2 axis-1 row-major tensors.",
+    "arithmetic": "Literal::I64(value.wrapping_add(scalar)) preserves the existing I64 Add semantics for this path. Add with an I64 scalar is commutative under wrapping addition, so scalar-left and scalar-right arms remain equivalent.",
+    "shape_and_dtype": "Yes. Output shape is [cols, rows] and dtype remains DType::I64, matching the old batch-dim move-to-front result.",
+    "tie_breaking": "N/A. Add has no comparisons or ties.",
+    "floating_point": "N/A for the optimized guard. Floating-point paths are excluded by the DType::I64 and Literal::I64 guards.",
+    "rng": "N/A. The path consumes no random state.",
+    "error_behavior": "Preserved by fallback for all mismatched and malformed cases.",
+    "golden_output_sha256": "29d48dbffb8ba3bc95e29416bbe470cd18432ffd471b8ec7ef068c3b7a61b3ef",
+    "golden_file": "artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.golden",
+    "golden_file_sha256": "4387e8be1e057d5886df68172b970f2916a3d539c2fa8608b3c0fef7b42c8b81"
+  },
+  "validation": [
+    {
+      "command": "cargo fmt -p fj-dispatch -- --check",
+      "worker": "local",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo test -p fj-dispatch --release test_in_axes_1_i64_add_one_bench_shape_golden_sha256 -- --nocapture",
+      "worker": "vmi1149989",
+      "result": "pass; 1 test passed, 241 filtered out"
+    },
+    {
+      "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- dispatch_latency/vmap/rank2_add_one_in_axes_1",
+      "worker": "vmi1149989",
+      "result": "mean 13.579 us [13.189, 14.033]"
+    },
+    {
+      "command": "rch exec -- cargo check -p fj-dispatch --all-targets",
+      "worker": "vmi1153651",
+      "result": "pass"
+    },
+    {
+      "command": "rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings",
+      "worker": "vmi1153651",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-dispatch/src/batching.rs crates/fj-dispatch/src/lib.rs",
+      "worker": "local",
+      "result": "exit 0; no criticals; existing warning/info inventory remains"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.golden.sha256",
+      "worker": "local",
+      "result": "pass"
+    },
+    {
+      "command": "jq . artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.json",
+      "worker": "local",
+      "result": "valid JSON"
+    },
+    {
+      "command": "git diff --check -- crates/fj-dispatch/src/batching.rs crates/fj-dispatch/src/lib.rs artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.golden artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.golden.sha256 artifacts/performance/evidence/fj_dispatch_axis1_i64_add_fused_pass44_2026-06-03.json",
+      "worker": "local",
+      "result": "pass"
+    }
+  ]
+}

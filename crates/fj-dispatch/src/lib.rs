@@ -2659,6 +2659,56 @@ mod tests {
     }
 
     #[test]
+    fn test_in_axes_1_i64_add_one_bench_shape_golden_sha256() {
+        let matrix = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![64, 128],
+                },
+                (0_i64..(64 * 128)).map(fj_core::Literal::I64).collect(),
+            )
+            .expect("matrix"),
+        );
+        let mut opts = BTreeMap::new();
+        opts.insert("vmap_in_axes".to_owned(), "1".to_owned());
+        let response = dispatch(DispatchRequest {
+            mode: CompatibilityMode::Strict,
+            ledger: ledger(ProgramSpec::AddOne, &[Transform::Vmap]),
+            args: vec![matrix],
+            backend: "cpu".to_owned(),
+            compile_options: opts,
+            custom_hook: None,
+            unknown_incompatible_features: vec![],
+        })
+        .expect("vmap in_axes=1 should succeed through BatchTrace");
+
+        let output = response.outputs[0].as_tensor().expect("tensor");
+        assert_eq!(
+            output.shape,
+            Shape {
+                dims: vec![128, 64],
+            }
+        );
+        let vals: Vec<i64> = output
+            .elements
+            .iter()
+            .map(|literal| literal.as_i64().expect("expected i64 element"))
+            .collect();
+        assert_eq!(&vals[..8], &[1, 129, 257, 385, 513, 641, 769, 897]);
+        assert_eq!(
+            &vals[vals.len() - 8..],
+            &[7296, 7424, 7552, 7680, 7808, 7936, 8064, 8192]
+        );
+        let digest =
+            fj_test_utils::fixture_id_from_json(&(output.shape.dims.clone(), vals)).unwrap();
+        assert_eq!(
+            digest,
+            "29d48dbffb8ba3bc95e29416bbe470cd18432ffd471b8ec7ef068c3b7a61b3ef"
+        );
+    }
+
+    #[test]
     fn test_in_axes_1_second_dim() {
         // in_axes=1 batches along second dimension.
         // Input shape [2, 3]: batch along axis 1 gives batch_size=3, each slice is [2].

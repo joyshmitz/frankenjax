@@ -1,0 +1,22 @@
+scenario: fj-dispatch vmap in_axes=1 fused rank-2 I64 scalar Add
+bead: frankenjax-j5j7
+input_dtype: I64
+input_shape: [64, 128]
+input_row_major: 0..8191
+transforms: [Vmap]
+compile_options:
+  vmap_in_axes: "1"
+primitive: Add
+scalar: 1
+output_shape: [128, 64]
+output_sha256: 29d48dbffb8ba3bc95e29416bbe470cd18432ffd471b8ec7ef068c3b7a61b3ef
+output_first8: [1, 129, 257, 385, 513, 641, 769, 897]
+output_last8: [7296, 7424, 7552, 7680, 7808, 7936, 8064, 8192]
+isomorphism:
+  mapped_axis_order: preserved as source axis-1 order 0..127
+  row_major_element_order: preserved by emitting source[row, col] into output[col, row]
+  arithmetic: I64 wrapping_add scalar semantics preserved
+  tie_breaking: not applicable
+  floating_point: not applicable
+  rng: not applicable
+  error_behavior: non-Add, non-I64, non-rank2, non-axis1, and malformed element paths remain on the existing fallback

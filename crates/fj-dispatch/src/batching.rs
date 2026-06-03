@@ -626,6 +626,11 @@ fn batch_binary_elementwise(
             });
         }
         (Some(bd), None) if matches!(b.value, Value::Scalar(_)) => {
+            if let Some(result) =
+                fuse_rank2_axis1_i64_scalar_add_move_to_front(primitive, &a.value, &b.value, bd)?
+            {
+                return Ok(result);
+            }
             let a_val = move_batch_dim_to_front(&a.value, bd)?;
             let result = eval_primitive(primitive, &[a_val, b.value.clone()], params)
                 .map_err(|e| BatchError::EvalError(e.to_string()))?;
@@ -635,6 +640,11 @@ fn batch_binary_elementwise(
             });
         }
         (None, Some(bd)) if matches!(a.value, Value::Scalar(_)) => {
+            if let Some(result) =
+                fuse_rank2_axis1_i64_scalar_add_move_to_front(primitive, &b.value, &a.value, bd)?
+            {
+                return Ok(result);
+            }
             let b_val = move_batch_dim_to_front(&b.value, bd)?;
             let result = eval_primitive(primitive, &[a.value.clone(), b_val], params)
                 .map_err(|e| BatchError::EvalError(e.to_string()))?;
@@ -653,6 +663,53 @@ fn batch_binary_elementwise(
         value: result,
         batch_dim: out_batch_dim,
     })
+}
+
+#[inline]
+fn fuse_rank2_axis1_i64_scalar_add_move_to_front(
+    primitive: Primitive,
+    batched_value: &Value,
+    scalar_value: &Value,
+    batch_dim: usize,
+) -> Result<Option<BatchTracer>, BatchError> {
+    if primitive != Primitive::Add || batch_dim != 1 {
+        return Ok(None);
+    }
+
+    let (Value::Tensor(tensor), Value::Scalar(Literal::I64(scalar))) =
+        (batched_value, scalar_value)
+    else {
+        return Ok(None);
+    };
+    if tensor.dtype != DType::I64 || tensor.rank() != 2 {
+        return Ok(None);
+    }
+
+    let rows = tensor.shape.dims[0] as usize;
+    let cols = tensor.shape.dims[1] as usize;
+    let mut elements = Vec::with_capacity(tensor.elements.len());
+    for col in 0..cols {
+        for row in 0..rows {
+            let idx = row * cols + col;
+            let Literal::I64(value) = tensor.elements[idx] else {
+                return Ok(None);
+            };
+            elements.push(Literal::I64(value.wrapping_add(*scalar)));
+        }
+    }
+
+    let moved = TensorValue::new(
+        DType::I64,
+        Shape {
+            dims: vec![cols as u32, rows as u32],
+        },
+        elements,
+    )
+    .map_err(|e| BatchError::TensorError(e.to_string()))?;
+    Ok(Some(BatchTracer {
+        value: Value::Tensor(moved),
+        batch_dim: Some(0),
+    }))
 }
 
 fn batch_select(
