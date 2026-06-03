@@ -105,6 +105,46 @@ fn bench_div_1k_f64_vector(c: &mut Criterion) {
     });
 }
 
+// ── Large-array elementwise: quantifies the mcqr.30 data-model gap ──
+// `Vec<Literal>` stores each F64 as a 24-byte enum (the Complex128Bits variant
+// fixes the size), so a 64k F64 add moves ~3x the bytes of native f64 and the
+// per-element match blocks autovectorization. These two benches measure the
+// current path against a contiguous-f64 reference (same clone + add work) to
+// size the achievable win from dense storage. The reference is bench-local
+// (not shipped lib code).
+fn bench_add_64k_f64_vec(c: &mut Criterion) {
+    let data: Vec<f64> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| i as f64 * 0.001)
+        .collect();
+    let lhs = Value::vector_f64(&data).unwrap();
+    let rhs = Value::vector_f64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/add_64k_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Add, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_add_64k_f64_dense_reference(c: &mut Criterion) {
+    let a: Vec<f64> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| i as f64 * 0.001)
+        .collect();
+    let b: Vec<f64> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| i as f64 * 0.001)
+        .collect();
+    c.bench_function("eval/add_64k_f64_dense_ref", |bencher| {
+        // Mirror the eval path's input clone, then a contiguous (autovectorized)
+        // f64 add — the achievable cost under a dense storage model.
+        bencher.iter(|| {
+            let a2 = a.clone();
+            let b2 = b.clone();
+            a2.iter()
+                .zip(b2.iter())
+                .map(|(x, y)| x + y)
+                .collect::<Vec<f64>>()
+        })
+    });
+}
+
 fn bench_scalar_mul_1k_f64_vector(c: &mut Criterion) {
     let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.001).collect();
     let scalar = Value::scalar_f64(3.5);
@@ -794,6 +834,8 @@ criterion_group!(
     bench_mul_1k_vector,
     bench_add_1k_f64_vector,
     bench_div_1k_f64_vector,
+    bench_add_64k_f64_vec,
+    bench_add_64k_f64_dense_reference,
     bench_scalar_mul_1k_f64_vector,
     bench_tensor_sub_scalar_1k_f64_vector,
     bench_eq_1k_f64_vector,
