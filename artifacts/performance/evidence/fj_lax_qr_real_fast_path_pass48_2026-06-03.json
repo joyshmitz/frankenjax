@@ -1,0 +1,110 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_qr_real_fast_path_pass48_2026-06-03",
+  "date": "2026-06-03",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-p1vbf.1",
+  "parent_bead": "frankenjax-p1vbf",
+  "pass": 48,
+  "crate": "fj-lax",
+  "skill_pass": "repeatedly-apply-skill pass 48 -> extreme-software-optimization",
+  "alien_source": {
+    "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#9.6",
+    "primitive": "communication-avoiding / data-movement-aware QR family",
+    "applied_slice": "Bit-exact Part A: remove guaranteed-zero complex lanes from real QR scratch before larger blocked/CA-QR work."
+  },
+  "target": {
+    "profile_backing": "frankenjax-p1vbf identifies fj-lax QR/LU/eig/SVD real linalg kernels as still paying complex scratch costs for real inputs. The new Criterion target linalg/qr_128x128_f64 isolates eval_qr on a real F64 128x128 matrix.",
+    "baseline_command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-pass48-qr-baseline-target rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_128x128_f64 --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "bench_rows": [
+      "linalg/qr_128x128_f64"
+    ]
+  },
+  "one_lever": {
+    "name": "real-valued QR Householder fast path",
+    "files": [
+      "crates/fj-lax/src/linalg.rs",
+      "crates/fj-lax/benches/lax_baseline.rs"
+    ],
+    "description": "Non-complex rank-2 QR inputs whose extracted f64 scratch has no exact zero entries now use a real f64 Householder implementation and convert through matrix_to_value at the API boundary. Complex inputs and exact-zero real matrices continue through the existing complex zero-imaginary path to preserve signed-zero edge behavior."
+  },
+  "benchmark": {
+    "baseline": {
+      "worker": "vmi1149989",
+      "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-pass48-qr-baseline-target rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_128x128_f64 --sample-size 20 --warm-up-time 1 --measurement-time 3",
+      "linalg_qr_128x128_f64_midpoint_us": 1070.0,
+      "linalg_qr_128x128_f64_ci_us": [
+        1059.2,
+        1085.1
+      ]
+    },
+    "after": {
+      "worker": "vmi1149989",
+      "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-pass48-qr-candidate-target rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_128x128_f64 --sample-size 20 --warm-up-time 1 --measurement-time 3",
+      "linalg_qr_128x128_f64_midpoint_us": 857.05,
+      "linalg_qr_128x128_f64_ci_us": [
+        830.73,
+        876.42
+      ]
+    },
+    "delta": {
+      "linalg_qr_128x128_f64_speedup_x": 1.248,
+      "midpoint_reduction_percent": 19.9,
+      "confidence": "same worker and non-overlapping Criterion intervals"
+    },
+    "score": {
+      "impact": 3.0,
+      "confidence": 5.0,
+      "effort": 2.0,
+      "impact_x_confidence_over_effort": 7.5,
+      "decision": "keep"
+    }
+  },
+  "isomorphism_proof": {
+    "ordering": "The real fast path preserves the same Householder traversal: reflector construction in ascending j, reflector application in ascending col and ascending row, Q reconstruction in reverse j with ascending col and row.",
+    "tie_breaking": "No comparisons, pivoting, sorting, or dispatch priority changed. The real route is gated only by dtype and exact-zero presence; exact-zero inputs retain the old complex path.",
+    "floating_point": "For nonzero real inputs, complex_abs/reduction and complex_mul/complex_sub collapse to the same real scalar operations used by the new f64 path. The code does not use unsafe, SIMD, BLAS, LAPACK, MKL, XLA, FMA forcing, reassociation, or mixed precision.",
+    "rng": "No random state, seed, sampling order, or nondeterministic iteration path changed.",
+    "shape_and_dtype": "Q and R shapes, full_matrices handling, and matrix_to_value dtype conversion match the existing API output contract.",
+    "fallback": "Real matrices containing any exact 0.0 continue through the complex zero-imaginary implementation so signed-zero-sensitive phase behavior stays bit-identical."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_qr_real_fast_path_pass48_2026-06-03.golden",
+    "sha256": "282fa19f1724ae5d2a1a36754e627fb311d11aa029b636a2431b95f1424ecc89",
+    "check_command": "sha256sum -c artifacts/performance/evidence/fj_lax_qr_real_fast_path_pass48_2026-06-03.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-pass48-qr-tests rch exec -- cargo test -p fj-lax qr_real -- --nocapture",
+      "result": "pass on vmi1153651; 2 passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-pass48-qr-baseline-target rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_128x128_f64 --sample-size 20 --warm-up-time 1 --measurement-time 3",
+      "result": "baseline pass on vmi1149989; midpoint 1.0700 ms"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-pass48-qr-candidate-target rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_128x128_f64 --sample-size 20 --warm-up-time 1 --measurement-time 3",
+      "result": "candidate pass on vmi1149989; midpoint 857.05 us"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-pass48-qr-check rch exec -- cargo check -p fj-lax --all-targets",
+      "result": "pass on vmi1156319"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-pass48-qr-clippy rch exec -- cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "pass on vmi1227854"
+    },
+    {
+      "command": "cargo fmt --check -p fj-lax",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/linalg.rs crates/fj-lax/benches/lax_baseline.rs",
+      "result": "nonzero from existing test/bench panic and unwrap inventory; embedded fmt/check/clippy sections passed"
+    }
+  ],
+  "notes": [
+    "This keeps behavior parity absolute and moves only the real-valued QR scratch representation. It is the first bit-exact slice under frankenjax-p1vbf Part A.",
+    "The next no-gaps target remains deeper blocked/communication-avoiding QR once tolerance proof obligations are established for reordered floating-point accumulation."
+  ]
+}

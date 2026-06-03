@@ -366,6 +366,50 @@ fn bench_cholesky_128_f64(c: &mut Criterion) {
     });
 }
 
+fn bench_qr_128_f64(c: &mut Criterion) {
+    let n = 128usize;
+    let m = real_matrix(n, n);
+    let p = no_params();
+    c.bench_function("linalg/qr_128x128_f64", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::Qr, std::slice::from_ref(&m), &p))
+    });
+}
+
+fn bench_lu_128_f64(c: &mut Criterion) {
+    let n = 128usize;
+    let mut data = Vec::with_capacity(n * n);
+    for i in 0..n {
+        for j in 0..n {
+            let v = if i == j {
+                (n as f64) + (i as f64) * 0.25 + 7.0
+            } else {
+                (((i * 19 + j * 23) % 13) as f64) * 0.125 - 0.75
+            };
+            data.push(v);
+        }
+    }
+    let m = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: Shape {
+            dims: vec![n as u32, n as u32],
+        },
+        elements: data.into_iter().map(Literal::from_f64).collect(),
+    });
+    let p = no_params();
+    c.bench_function("linalg/lu_128x128_f64", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::Lu, std::slice::from_ref(&m), &p))
+    });
+}
+
+fn bench_svd_48_f64(c: &mut Criterion) {
+    let n = 48usize;
+    let m = real_matrix(n, n);
+    let p = no_params();
+    c.bench_function("linalg/svd_48x48_f64", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::Svd, std::slice::from_ref(&m), &p))
+    });
+}
+
 fn bench_matmul_2d_256(c: &mut Criterion) {
     // Public conformance-tested GEMM kernel: 256x256 @ 256x256.
     let (m, k, n) = (256usize, 256usize, 256usize);
@@ -846,6 +890,9 @@ criterion_group!(
     bench_dot_256_matrix_f64,
     bench_eig_48,
     bench_cholesky_128_f64,
+    bench_qr_128_f64,
+    bench_lu_128_f64,
+    bench_svd_48_f64,
     bench_matmul_2d_256,
     bench_solve_24x24_24rhs,
     bench_concat_axis1_3x_f64,

@@ -423,14 +423,21 @@ pub(crate) fn eval_qr(
         });
     }
 
+    let full_matrices = params
+        .get("full_matrices")
+        .is_some_and(|v| v.trim() == "true");
+
+    if !matches!(inputs[0].dtype(), DType::Complex64 | DType::Complex128) {
+        let (m, n, a, dtype) = extract_matrix(primitive, &inputs[0])?;
+        if a.iter().all(|v| *v != 0.0) {
+            return eval_qr_real_matrix(m, n, a, dtype, full_matrices);
+        }
+    }
+
     let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
     let k = m.min(n);
     let zero = (0.0, 0.0);
     let one = (1.0, 0.0);
-
-    let full_matrices = params
-        .get("full_matrices")
-        .is_some_and(|v| v.trim() == "true");
 
     let mut r = a;
     let mut v_store: Vec<Vec<(f64, f64)>> = Vec::with_capacity(k);
@@ -524,6 +531,114 @@ pub(crate) fn eval_qr(
 
     let q_val = complex_matrix_to_value(m, q_cols, &q, dtype)?;
     let r_val = complex_matrix_to_value(r_rows, n, &r_out, dtype)?;
+
+    Ok(vec![q_val, r_val])
+}
+
+fn eval_qr_real_matrix(
+    m: usize,
+    n: usize,
+    a: Vec<f64>,
+    dtype: DType,
+    full_matrices: bool,
+) -> Result<Vec<Value>, EvalError> {
+    let k = m.min(n);
+
+    let mut r = a;
+    let mut v_store: Vec<Vec<f64>> = Vec::with_capacity(k);
+    let mut tau_store: Vec<f64> = Vec::with_capacity(k);
+
+    for j in 0..k {
+        let mut v: Vec<f64> = (j..m).map(|i| r[i * n + j]).collect();
+        let norm_v = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+        let v0_abs = (v[0] * v[0]).sqrt();
+        let alpha = if v0_abs > 0.0 {
+            let phase = v[0] / v0_abs;
+            -norm_v * phase
+        } else {
+            -norm_v
+        };
+        v[0] -= alpha;
+        let v_norm_sq: f64 = v.iter().map(|x| x * x).sum();
+
+        if v_norm_sq > f64::EPSILON * 1e4 {
+            let tau = 2.0 / v_norm_sq;
+
+            for col in j..n {
+                let mut dot = 0.0;
+                for (vi, row) in v.iter().zip(j..m) {
+                    dot += *vi * r[row * n + col];
+                }
+                let tau_dot = tau * dot;
+                for (vi, row) in v.iter().zip(j..m) {
+                    r[row * n + col] -= *vi * tau_dot;
+                }
+            }
+
+            v_store.push(v);
+            tau_store.push(tau);
+        } else {
+            v_store.push(vec![0.0; m - j]);
+            tau_store.push(0.0);
+        }
+    }
+
+    let q_cols = if full_matrices { m } else { k };
+    let mut q = vec![0.0; m * q_cols];
+
+    for i in 0..q_cols.min(m) {
+        q[i * q_cols + i] = 1.0;
+    }
+
+    for j in (0..k).rev() {
+        let v = &v_store[j];
+        let tau = tau_store[j];
+        if (tau * tau).sqrt() < f64::EPSILON {
+            continue;
+        }
+
+        for col in j..q_cols {
+            let mut dot = 0.0;
+            for (vi, row) in v.iter().zip(j..m) {
+                dot += *vi * q[row * q_cols + col];
+            }
+            let tau_dot = tau * dot;
+            for (vi, row) in v.iter().zip(j..m) {
+                q[row * q_cols + col] -= *vi * tau_dot;
+            }
+        }
+    }
+
+    let r_rows = if full_matrices { m } else { k };
+    let mut r_out = vec![0.0; r_rows * n];
+    for i in 0..r_rows {
+        for jj in i..n {
+            r_out[i * n + jj] = r[i * n + jj];
+        }
+    }
+
+    for i in 0..k {
+        let diag = r_out[i * n + i];
+        let diag_abs = (diag * diag).sqrt();
+        if diag_abs > f64::EPSILON {
+            let phase = (diag * diag_abs) / (diag_abs * diag_abs);
+            for jj in 0..n {
+                r_out[i * n + jj] *= phase;
+            }
+            for row in 0..m {
+                q[row * q_cols + i] *= phase;
+            }
+        }
+    }
+    for i in 1..r_rows {
+        for jj in 0..i.min(n) {
+            r_out[i * n + jj] = 0.0;
+        }
+    }
+
+    let q_val = matrix_to_value(m, q_cols, &q, dtype)?;
+    let r_val = matrix_to_value(r_rows, n, &r_out, dtype)?;
 
     Ok(vec![q_val, r_val])
 }
@@ -2228,6 +2343,75 @@ mod tests {
         }
     }
 
+    fn assert_real_qr_matches_complex_zero_imag(n: usize, a: &[f64]) {
+        let real_input = make_matrix(n, n, a);
+        let complex_input = Value::Tensor(
+            TensorValue::new(
+                DType::Complex128,
+                Shape {
+                    dims: vec![n as u32, n as u32],
+                },
+                a.iter()
+                    .map(|&v| Literal::from_complex128(v, 0.0))
+                    .collect(),
+            )
+            .unwrap(),
+        );
+
+        let real_result = eval_qr(&[real_input], &BTreeMap::new()).unwrap();
+        let complex_result = eval_qr(&[complex_input], &BTreeMap::new()).unwrap();
+        assert_eq!(real_result.len(), complex_result.len());
+
+        for (output_idx, (real_output, complex_output)) in
+            real_result.iter().zip(complex_result.iter()).enumerate()
+        {
+            assert!(
+                matches!(real_output, Value::Tensor(_)),
+                "real QR output {output_idx} is not a tensor"
+            );
+            assert!(
+                matches!(complex_output, Value::Tensor(_)),
+                "complex QR output {output_idx} is not a tensor"
+            );
+
+            let Value::Tensor(real_tensor) = real_output else {
+                return;
+            };
+            let Value::Tensor(complex_tensor) = complex_output else {
+                return;
+            };
+
+            assert_eq!(real_tensor.shape, complex_tensor.shape);
+            assert_eq!(real_tensor.elements.len(), complex_tensor.elements.len());
+
+            for idx in 0..real_tensor.elements.len() {
+                assert!(
+                    matches!(real_tensor.elements[idx], Literal::F64Bits(_)),
+                    "real QR output element is not F64Bits"
+                );
+                assert!(
+                    matches!(complex_tensor.elements[idx], Literal::Complex128Bits(..)),
+                    "complex QR output element is not Complex128Bits"
+                );
+
+                let real_bits = match real_tensor.elements[idx] {
+                    Literal::F64Bits(bits) => bits,
+                    _ => 0,
+                };
+                let (complex_re, complex_im) = match complex_tensor.elements[idx] {
+                    Literal::Complex128Bits(re, im) => (re, im),
+                    _ => (0, 0),
+                };
+                assert_eq!(real_bits, complex_re, "output {output_idx} real bits {idx}");
+                assert_eq!(
+                    f64::from_bits(complex_im),
+                    0.0,
+                    "output {output_idx} imag bits {idx}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn cholesky_2x2_identity() {
         let identity = make_matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
@@ -2649,6 +2833,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn qr_real_fast_path_bit_identical_to_complex_zero_imag_path() {
+        let n = 7usize;
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = if i == j {
+                    (n as f64) + (i as f64) * 0.375 + 5.0
+                } else {
+                    (((i * 17 + j * 29 + 3) % 23) as f64 + 0.5) * 0.125 - 1.25
+                };
+            }
+        }
+
+        assert_real_qr_matches_complex_zero_imag(n, &a);
+    }
+
+    #[test]
+    fn qr_real_zero_input_preserves_complex_zero_imag_path_bits() {
+        let n = 5usize;
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = if i == j {
+                    (n as f64) + 2.0
+                } else if (i + j) % 3 == 0 {
+                    0.0
+                } else {
+                    ((i * 11 + j * 7 + 1) % 17) as f64 * 0.125 - 0.75
+                };
+            }
+        }
+
+        assert_real_qr_matches_complex_zero_imag(n, &a);
     }
 
     #[test]

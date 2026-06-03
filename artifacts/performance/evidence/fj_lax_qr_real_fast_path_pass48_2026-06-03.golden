@@ -1,0 +1,13 @@
+artifact=fj_lax_qr_real_fast_path_pass48_2026-06-03
+primitive=Qr
+fast_path=real F64 Householder path for non-complex rank-2 tensors whose extracted f64 scratch has no exact zero entries
+fallback=any exact zero entry, Complex64, or Complex128 continues through the existing complex Householder implementation
+representative_fast_input=n=7; a[i,j]=if i==j { 7.0 + i*0.375 + 5.0 } else { (((i*17 + j*29 + 3) % 23) + 0.5) * 0.125 - 1.25 }
+representative_fallback_input=n=5; a[i,j]=if i==j { 7.0 } else if (i+j)%3==0 { 0.0 } else { ((i*11 + j*7 + 1) % 17) * 0.125 - 0.75 }
+fast_q_r_bits_equal_complex_zero_imag_path=true
+fallback_q_r_bits_equal_complex_zero_imag_path=true
+output_shapes_equal_complex_zero_imag_path=true
+complex_imaginary_output_bits_zero=true
+ordering=Householder reflector loops remain j ascending, col ascending, row ascending; Q reconstruction remains reverse-j then col ascending then row ascending
+floating_point=real fast path performs the same scalar real arithmetic implied by the complex zero-imaginary path; no reassociation, SIMD, unsafe, BLAS, LAPACK, MKL, or XLA
+rng=none
