@@ -1584,33 +1584,46 @@ fn normalize_vector(v: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
 }
 
 fn qr_decomposition(a: &[f64], n: usize) -> (Vec<(f64, f64)>, Vec<f64>) {
-    // Simple Gram-Schmidt QR for V1
-    let mut q = vec![(0.0, 0.0); n * n];
+    // Classical Gram-Schmidt QR (V1). Q is built and consumed column by column,
+    // so the columns are kept in contiguous buffers (`q_cols`) and the original
+    // A column j is extracted once (`col_j`). This makes the dot-product and
+    // axpy inner loops stride-1 instead of striding by `n` down a column of the
+    // row-major matrices (a cache miss per element). The accumulation order over
+    // k is unchanged, so q and r are bit-for-bit identical to the row-major form.
     let mut r = vec![0.0; n * n];
+    let mut q_cols: Vec<Vec<f64>> = Vec::with_capacity(n);
 
     for j in 0..n {
-        // Copy column j to v
-        let mut v: Vec<f64> = (0..n).map(|i| a[i * n + j]).collect();
+        let col_j: Vec<f64> = (0..n).map(|k| a[k * n + j]).collect();
+        let mut v = col_j.clone();
 
-        // Orthogonalize against previous columns
-        for i in 0..j {
+        for (i, q_col_i) in q_cols.iter().enumerate() {
             let mut dot = 0.0;
             for k in 0..n {
-                dot += q[k * n + i].0 * a[k * n + j];
+                dot += q_col_i[k] * col_j[k];
             }
             r[i * n + j] = dot;
             for k in 0..n {
-                v[k] -= dot * q[k * n + i].0;
+                v[k] -= dot * q_col_i[k];
             }
         }
 
-        // Normalize
         let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
         r[j * n + j] = norm;
+        let mut q_col_j = vec![0.0; n];
         if norm > 1e-15 {
             for k in 0..n {
-                q[k * n + j] = (v[k] / norm, 0.0);
+                q_col_j[k] = v[k] / norm;
             }
+        }
+        q_cols.push(q_col_j);
+    }
+
+    // Reassemble row-major Q with zero imaginary parts.
+    let mut q = vec![(0.0, 0.0); n * n];
+    for (j, q_col_j) in q_cols.iter().enumerate() {
+        for k in 0..n {
+            q[k * n + j] = (q_col_j[k], 0.0);
         }
     }
 
@@ -3020,6 +3033,46 @@ mod tests {
                     "mismatch at row {i} col {j}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn qr_decomposition_contiguous_bit_identical_to_rowmajor() {
+        let n = 9usize;
+        let a: Vec<f64> = (0..n * n)
+            .map(|i| (i as f64 * 0.211).sin() * 4.0 + (i as f64 * 0.037).cos())
+            .collect();
+
+        let (q_new, r_new) = qr_decomposition(&a, n);
+
+        // Inline reference: the prior row-major Gram-Schmidt.
+        let mut q = vec![(0.0f64, 0.0f64); n * n];
+        let mut r = vec![0.0f64; n * n];
+        for j in 0..n {
+            let mut v: Vec<f64> = (0..n).map(|i| a[i * n + j]).collect();
+            for i in 0..j {
+                let mut dot = 0.0;
+                for k in 0..n {
+                    dot += q[k * n + i].0 * a[k * n + j];
+                }
+                r[i * n + j] = dot;
+                for k in 0..n {
+                    v[k] -= dot * q[k * n + i].0;
+                }
+            }
+            let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            r[j * n + j] = norm;
+            if norm > 1e-15 {
+                for k in 0..n {
+                    q[k * n + j] = (v[k] / norm, 0.0);
+                }
+            }
+        }
+
+        for idx in 0..n * n {
+            assert_eq!(q_new[idx].0.to_bits(), q[idx].0.to_bits(), "q.re {idx}");
+            assert_eq!(q_new[idx].1.to_bits(), q[idx].1.to_bits(), "q.im {idx}");
+            assert_eq!(r_new[idx].to_bits(), r[idx].to_bits(), "r {idx}");
         }
     }
 

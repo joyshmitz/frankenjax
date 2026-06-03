@@ -1,0 +1,40 @@
+{
+  "bead": "frankenjax-mcqr.25",
+  "date": "2026-06-03",
+  "subsystem": "fj-lax (linalg)",
+  "target": "qr_decomposition (classical Gram-Schmidt QR) used by eval_eig (Eig primitive)",
+  "lever": {
+    "description": "The Gram-Schmidt inner loops read Q columns (q[k*n+i]) and the original A column j (a[k*n+j]) with stride n down columns of the row-major matrices (a cache miss per element), and re-extracted A's column j inside the orthogonalization loop for every previous column. Reworked to extract A column j once into a contiguous buffer (col_j) and keep each Q column in a contiguous buffer (q_cols[i]); the dot-product and axpy inner loops are now stride-1. Q is reassembled row-major at the end. The accumulation order over k is unchanged."
+  },
+  "benchmarks": {
+    "method": "rch Criterion, eval_primitive_multi(Eig, 48x48 f64); baseline = row-major Gram-Schmidt (HEAD, already with the matmul ikj win), optimized = contiguous-column Gram-Schmidt",
+    "baseline": {
+      "linalg/eig_48x48_f64_ms": 48.499,
+      "ci_ms": [46.626, 50.571]
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'linalg/eig_48x48_f64'",
+      "linalg/eig_48x48_f64_ms": 37.900,
+      "ci_ms": [37.281, 38.521]
+    },
+    "speedup": {
+      "eig_48x48_f64_this_lever": 1.28,
+      "eig_48x48_f64_cumulative_with_matmul_ikj": 1.62
+    },
+    "note": "Non-overlapping CIs. This lever targets the Gram-Schmidt step that the prior matmul ikj win (mcqr.24) left untouched; cumulative eig speedup vs the original i-j-k+row-major code is ~1.62x (61.5ms -> 37.9ms)."
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 15.0,
+    "note": "Realized 1.28x (this lever) on a real production LAPACK primitive (Eig), bit-exact."
+  },
+  "isomorphism_proof": {
+    "floating_point": "Dot products accumulate over k in ascending order exactly as before (dot += q_col_i[k]*col_j[k] equals dot += q[k*n+i].0*a[k*n+j]); the axpy v[k] -= dot*q_col_i[k] is unchanged; norm and normalization identical. Bit-for-bit identical q and r.",
+    "ordering": "Only memory layout of intermediates changed; no reordering of any reduction.",
+    "rng": "No RNG state is read or written.",
+    "errors": "Singular-column handling (norm <= 1e-15 leaves the Q column zero) preserved.",
+    "bit_identity_proof": "New test qr_decomposition_contiguous_bit_identical_to_rowmajor builds a 9x9 matrix and asserts f64::to_bits() equality of q (real+imag) and r vs an inline row-major Gram-Schmidt reference. eig/svd oracle conformance + 1007/1007 fj-lax tests pass. No synthetic golden-bits file: the to_bits parity test pins the result."
+  }
+}
