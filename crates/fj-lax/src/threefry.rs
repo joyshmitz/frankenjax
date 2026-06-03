@@ -193,7 +193,10 @@ pub fn random_categorical(
                 num_samples,
                 num_categories,
             })?;
-    let uniforms = random_uniform(key, total, 0.0, 1.0);
+    // Gumbel-max trick with JAX's gumbel noise: -log(-log(uniform(finfo.tiny, 1)))
+    // (matches `random_gumbel` / jax.random.gumbel — minval=tiny, no upper clamp).
+    let tiny = f64::from(f32::MIN_POSITIVE);
+    let uniforms = random_uniform(key, total, tiny, 1.0);
 
     let mut result = Vec::with_capacity(num_samples);
     for s in 0..num_samples {
@@ -201,9 +204,7 @@ pub fn random_categorical(
         let mut best_val = f64::NEG_INFINITY;
         for c in 0..num_categories {
             let u = uniforms[s * num_categories + c];
-            // Gumbel noise: -log(-log(u)), clamp u away from 0 and 1
-            let clamped = u.clamp(1e-30, 1.0 - 1e-10);
-            let gumbel = -(-clamped.ln()).ln();
+            let gumbel = -(-u.ln()).ln();
             let val = logits[c] + gumbel;
             if val > best_val {
                 best_val = val;
@@ -236,13 +237,16 @@ pub fn random_exponential(key: PRNGKey, count: usize, rate: f64) -> Vec<f64> {
 /// Uses inverse transform: X = loc - scale * ln(-ln(U)) where U ~ Uniform(0,1).
 #[must_use]
 pub fn random_gumbel(key: PRNGKey, count: usize, loc: f64, scale: f64) -> Vec<f64> {
-    let uniforms = random_uniform(key, count, 0.0, 1.0);
+    // JAX's `_gumbel`: -log(-log(uniform(finfo.tiny, 1))), generalized here with
+    // loc/scale (loc + scale*standard). The RNG core is JAX-f32-mode bit-exact,
+    // so use the f32 `tiny` as the uniform lower bound. The previous form drew
+    // uniform(0,1) and clamped to [1e-30, 1-1e-10] — JAX uses minval=tiny (not
+    // 1e-30, which only matters at the rare u==0 sample) and has no upper clamp.
+    let tiny = f64::from(f32::MIN_POSITIVE);
+    let uniforms = random_uniform(key, count, tiny, 1.0);
     uniforms
         .into_iter()
-        .map(|u| {
-            let clamped = u.clamp(1e-30, 1.0 - 1e-10);
-            loc - scale * (-clamped.ln()).ln()
-        })
+        .map(|u| loc - scale * (-u.ln()).ln())
         .collect()
 }
 
