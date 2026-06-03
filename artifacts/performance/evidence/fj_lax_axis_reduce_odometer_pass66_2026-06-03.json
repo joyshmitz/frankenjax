@@ -1,0 +1,73 @@
+{
+    "bead": "frankenjax-mcqr.30.12",
+    "pass": 66,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/reduce_sum_256_axis1_i64",
+    "lever_summary": "Extend the pass65 dense-F64 axis-reduction odometer to the remaining eval_reduce_axes branches (integral i64, complex, non-dense float fallback) via a shared OutIndexOdometer. Replaces the dtype-independent per-element multi-index decode (flat_to_multi_into Vec allocation + multi_to_out_flat kept-axes loop, per element) with an incremental out_idx advanced in O(1) amortized. i64 (and complex) have no dense storage, so this isolates the decode-removal win; dense_f64_axis_reduce was refactored onto the same odometer.",
+    "alien_graveyard": {
+        "primitive": "strength reduction of per-element address arithmetic (incremental index odometer)",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "carry-propagating odometer replaces full multi-index decode + recomputation that was O(rank) work plus a heap allocation per element"
+    },
+    "method": "Same-worker A/B on ts2 confirmed by an unchanged calibration bench (eval/reduce_sum_64k_f64, a full reduction this change does not touch): decode-baseline calib 76353.1ns vs odometer calib 75718.2ns = 0.8% worker-speed delta, so the i64 ratios need no normalization. Baseline produced by git-stashing reduction.rs back to pass65 (decode loops) and rebuilding.",
+    "results": {
+        "axis1_inner_contiguous_i64": {
+            "decode_ns": 1271919.5,
+            "decode_ci_ns": [1267413.3, 1277094.1],
+            "odometer_ns": 420088.8,
+            "odometer_ci_ns": [414539.0, 425806.2],
+            "speedup_midpoint_x": 3.03,
+            "speedup_conservative_x": 2.98
+        },
+        "axis0_outer_strided_i64": {
+            "decode_ns": 1275422.2,
+            "decode_ci_ns": [1270938.2, 1280282.2],
+            "odometer_ns": 426952.1,
+            "odometer_ci_ns": [420519.5, 433495.4],
+            "speedup_midpoint_x": 2.99,
+            "speedup_conservative_x": 2.93
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'reduce_sum_256_axis._i64|reduce_sum_64k_f64$' --save-baseline {cB|cA}",
+    "score": {
+        "impact": 4.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 8.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/reduction.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added struct OutIndexOdometer { dims, out_axis_stride, coord, out_idx } with next_index(); the complex, integral, and float-fallback loops in eval_reduce_axes iterate tensor.elements.iter() and call odometer.next_index() instead of flat_to_multi_into + multi_to_out_flat. The now-unused `strides` binding in eval_reduce_axes was removed (flat_to_multi_into / multi_to_out_flat / checked_strides remain used by the bitwise and cumulative paths)."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: tensor.elements.iter() visits elements in ascending flat order (identical to `for flat_idx in 0..total`); each output cell accumulates its inputs in the same sequence",
+        "index_mapping": "OutIndexOdometer.next_index() reproduces multi_to_out_flat(flat_to_multi_into(flat)) for flat = 0,1,2,...: out_axis_stride is row-major over out_dims ordered by kept_axes, reduced axes contribute 0, innermost axis varies fastest",
+        "floating_point": "unchanged: same float_init/int_init seeds and the same caller ops (int_op, float_op, complex component-wise float_op, complex_lex_cmp for max/min, complex prod via (re,im) cross terms) applied in the same order; no reassociation",
+        "tie_breaking": "unchanged (complex max/min still use complex_lex_cmp / total_cmp)",
+        "rng": "not applicable",
+        "errors": "elements.iter() yields exactly product(dims) items (TensorValue invariant) so out_idx stays within 0..out_count; the same as_i64()/as_f64()/literal_to_complex_parts type checks run per element and return the same errors; full-axis reductions still delegate to eval_reduce before this branch",
+        "output_dtype": "unchanged: integral -> I64, complex -> input dtype via complex_literal_from_parts, float -> reduce_real_output_dtype/reduce_real_literal"
+    },
+    "validation": [
+        {
+            "name": "reduction_parity_and_unit_tests",
+            "command": "rch exec -- cargo test -p fj-lax --lib reduction",
+            "result": "passed: 30 tests (incl. dense_f64_axis_reduce_bit_identical_to_literal_path and the value-anchored reduce_axes_sum_rows/cols/3d tests covering integral + float odometer outputs)"
+        },
+        {
+            "name": "check_all_targets",
+            "command": "rch exec -- cargo check -p fj-lax --all-targets",
+            "result": "passed"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}

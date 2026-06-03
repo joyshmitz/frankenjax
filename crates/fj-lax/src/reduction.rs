@@ -302,41 +302,73 @@ fn dense_f64_axis_reduce(
     float_op: &impl Fn(f64, f64) -> f64,
 ) -> Option<Vec<f64>> {
     let values = tensor.elements.as_f64_slice()?;
-    let dims = &tensor.shape.dims;
-    let rank = dims.len();
-    if rank == 0 {
+    if tensor.shape.dims.is_empty() {
         return None;
     }
+    let mut odometer = OutIndexOdometer::new(&tensor.shape.dims, kept_axes, out_dims);
+    let mut result = vec![float_init; out_count];
+    for &value in values {
+        let out_idx = odometer.next_index();
+        result[out_idx] = float_op(result[out_idx], value);
+    }
+    Some(result)
+}
 
-    let mut out_axis_stride = vec![0_usize; rank];
-    let mut stride = 1_usize;
-    for (k, &axis) in kept_axes.iter().enumerate().rev() {
-        out_axis_stride[axis] = stride;
-        stride *= out_dims[k] as usize;
+/// Incremental row-major output-index odometer for axis (partial) reductions.
+///
+/// `next_index()` returns the output flat index for the input element at the
+/// current ascending flat position, then advances — reproducing
+/// `multi_to_out_flat(flat_to_multi_into(flat))` for `flat = 0, 1, 2, …` without
+/// the per-element multi-index decode (a `Vec` allocation + a `kept_axes` loop
+/// each step). The innermost axis varies fastest (input stride 1); each axis
+/// contributes `out_axis_stride[axis]` to the output flat index (row-major over
+/// `out_dims`, which is ordered by `kept_axes`); reduced axes contribute 0. The
+/// emitted sequence is therefore bit-identical to the generic decode loop, so
+/// every accumulator sees its inputs in the same order. Must only be stepped
+/// `product(dims)` times; the final step harmlessly wraps all coordinates to 0.
+struct OutIndexOdometer {
+    dims: Vec<usize>,
+    out_axis_stride: Vec<usize>,
+    coord: Vec<usize>,
+    out_idx: usize,
+}
+
+impl OutIndexOdometer {
+    fn new(dims: &[u32], kept_axes: &[usize], out_dims: &[u32]) -> Self {
+        let rank = dims.len();
+        let mut out_axis_stride = vec![0_usize; rank];
+        let mut stride = 1_usize;
+        for (k, &axis) in kept_axes.iter().enumerate().rev() {
+            out_axis_stride[axis] = stride;
+            stride *= out_dims[k] as usize;
+        }
+        Self {
+            dims: dims.iter().map(|&d| d as usize).collect(),
+            out_axis_stride,
+            coord: vec![0_usize; rank],
+            out_idx: 0,
+        }
     }
 
-    let mut result = vec![float_init; out_count];
-    let mut coord = vec![0_usize; rank];
-    let mut out_idx = 0_usize;
-    for &value in values {
-        result[out_idx] = float_op(result[out_idx], value);
-        // Row-major odometer over the input index; maintain out_idx in lockstep.
-        let mut ax = rank - 1;
+    #[inline]
+    fn next_index(&mut self) -> usize {
+        let current = self.out_idx;
+        let mut ax = self.dims.len() - 1;
         loop {
-            coord[ax] += 1;
-            out_idx += out_axis_stride[ax];
-            if coord[ax] < dims[ax] as usize {
+            self.coord[ax] += 1;
+            self.out_idx += self.out_axis_stride[ax];
+            if self.coord[ax] < self.dims[ax] {
                 break;
             }
-            coord[ax] = 0;
-            out_idx -= out_axis_stride[ax] * dims[ax] as usize;
+            self.coord[ax] = 0;
+            self.out_idx -= self.out_axis_stride[ax] * self.dims[ax];
             if ax == 0 {
                 break;
             }
             ax -= 1;
         }
+        current
     }
-    Some(result)
 }
 
 pub(crate) fn eval_reduce_axes(
@@ -402,7 +434,6 @@ pub(crate) fn eval_reduce_axes(
 
             // For each output element, iterate over the reduced axes and accumulate
             let kept_axes: Vec<usize> = (0..rank).filter(|i| !axes_sorted.contains(i)).collect();
-            let strides = checked_strides(primitive, "reduction input", &tensor.shape.dims)?;
 
             if is_complex {
                 if !matches!(
@@ -435,18 +466,10 @@ pub(crate) fn eval_reduce_axes(
                     out_count,
                     init_im,
                 )?;
-                let total = tensor.elements.len();
-                let mut multi = Vec::with_capacity(strides.len());
-                for flat_idx in 0..total {
-                    flat_to_multi_into(flat_idx, &strides, &mut multi);
-                    let out_idx = multi_to_out_flat(
-                        primitive,
-                        "reduction output",
-                        &multi,
-                        &kept_axes,
-                        &out_dims,
-                    )?;
-                    let (re, im) = literal_to_complex_parts(primitive, tensor.elements[flat_idx])?;
+                let mut odometer = OutIndexOdometer::new(&tensor.shape.dims, &kept_axes, &out_dims);
+                for literal in tensor.elements.iter() {
+                    let out_idx = odometer.next_index();
+                    let (re, im) = literal_to_complex_parts(primitive, *literal)?;
                     match primitive {
                         Primitive::ReduceProd => {
                             let acc_re = result_re[out_idx];
@@ -496,24 +519,13 @@ pub(crate) fn eval_reduce_axes(
                     out_count,
                     int_init,
                 )?;
-                let total = tensor.elements.len();
-                let mut multi = Vec::with_capacity(strides.len());
-                for flat_idx in 0..total {
-                    flat_to_multi_into(flat_idx, &strides, &mut multi);
-                    let out_idx = multi_to_out_flat(
+                let mut odometer = OutIndexOdometer::new(&tensor.shape.dims, &kept_axes, &out_dims);
+                for literal in tensor.elements.iter() {
+                    let out_idx = odometer.next_index();
+                    let val = literal.as_i64().ok_or(EvalError::TypeMismatch {
                         primitive,
-                        "reduction output",
-                        &multi,
-                        &kept_axes,
-                        &out_dims,
-                    )?;
-                    let val =
-                        tensor.elements[flat_idx]
-                            .as_i64()
-                            .ok_or(EvalError::TypeMismatch {
-                                primitive,
-                                detail: "expected i64 tensor",
-                            })?;
+                        detail: "expected i64 tensor",
+                    })?;
                     result[out_idx] = int_op(result[out_idx], val);
                 }
                 let elements: Vec<Literal> = result.into_iter().map(Literal::I64).collect();
@@ -534,24 +546,14 @@ pub(crate) fn eval_reduce_axes(
                         out_count,
                         float_init,
                     )?;
-                    let total = tensor.elements.len();
-                    let mut multi = Vec::with_capacity(strides.len());
-                    for flat_idx in 0..total {
-                        flat_to_multi_into(flat_idx, &strides, &mut multi);
-                        let out_idx = multi_to_out_flat(
+                    let mut odometer =
+                        OutIndexOdometer::new(&tensor.shape.dims, &kept_axes, &out_dims);
+                    for literal in tensor.elements.iter() {
+                        let out_idx = odometer.next_index();
+                        let val = literal.as_f64().ok_or(EvalError::TypeMismatch {
                             primitive,
-                            "reduction output",
-                            &multi,
-                            &kept_axes,
-                            &out_dims,
-                        )?;
-                        let val =
-                            tensor.elements[flat_idx]
-                                .as_f64()
-                                .ok_or(EvalError::TypeMismatch {
-                                    primitive,
-                                    detail: "expected numeric tensor",
-                                })?;
+                            detail: "expected numeric tensor",
+                        })?;
                         result[out_idx] = float_op(result[out_idx], val);
                     }
                     result

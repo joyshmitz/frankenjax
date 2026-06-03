@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.12 pass66 golden
+target=eval/reduce_sum_256_axis1_i64
+lever=shared OutIndexOdometer for eval_reduce_axes integral/complex/float-fallback branches; incremental out_idx replaces per-element flat_to_multi_into + multi_to_out_flat decode (dense_f64_axis_reduce refactored onto the same odometer)
+method=same-worker A/B on ts2, validated by unchanged calibration bench eval/reduce_sum_64k_f64 (decode 76353.1ns vs odometer 75718.2ns = 0.8% worker delta); decode baseline via git stash of reduction.rs to pass65
+worker=ts2
+axis1_inner_contiguous_i64=decode 1271.920us [1267.413, 1277.094] vs odometer 420.089us [414.539, 425.806] = 3.03x mid, 2.98x conservative
+axis0_outer_strided_i64=decode 1275.422us [1270.938, 1280.282] vs odometer 426.952us [420.520, 433.495] = 2.99x mid, 2.93x conservative
+score=8.0
+alien_primitive=strength reduction of per-element address arithmetic (incremental index odometer), alien_cs_graveyard section 8.2
+source_change=eval_reduce_axes complex/integral/float-fallback loops iterate tensor.elements.iter() with OutIndexOdometer.next_index() instead of decoding each element's full multi-index; unused `strides` binding removed (helpers still used by bitwise/cumulative paths)
+isomorphism=elements.iter() visits ascending flat order identical to `for flat_idx in 0..total`; odometer reproduces multi_to_out_flat(flat_to_multi_into(flat)) (row-major over out_dims ordered by kept_axes, reduced axes contribute 0, innermost axis fastest); same int_init/float_init seeds and same int_op/float_op/complex ops in the same order with no reassociation; same per-element type checks and errors; same output dtype; full-axis reductions still delegate to eval_reduce
+validation=RCH cargo test -p fj-lax --lib reduction passed 30 tests; RCH cargo check -p fj-lax --all-targets passed; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed

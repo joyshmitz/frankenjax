@@ -627,6 +627,40 @@ fn bench_reduce_sum_256_axis0_f64_literal_reference(c: &mut Criterion) {
     });
 }
 
+// Integral axis reduction (i64, no dense storage exists for i64) — measures the
+// per-element multi-index decode removal alone (the odometer), since the
+// data-model 24-byte match is unchanged for Vec<Literal> i64 storage.
+fn axis_reduce_i64_input() -> Value {
+    let n = REDUCE_AXIS_N as usize;
+    let elements: Vec<Literal> = (0..n * n).map(|i| Literal::I64(i as i64)).collect();
+    Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape {
+                dims: vec![REDUCE_AXIS_N, REDUCE_AXIS_N],
+            },
+            elements,
+        )
+        .unwrap(),
+    )
+}
+
+fn bench_reduce_sum_256_axis1_i64(c: &mut Criterion) {
+    let input = axis_reduce_i64_input();
+    let p = axis_params("1");
+    c.bench_function("eval/reduce_sum_256_axis1_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_sum_256_axis0_i64(c: &mut Criterion) {
+    let input = axis_reduce_i64_input();
+    let p = axis_params("0");
+    c.bench_function("eval/reduce_sum_256_axis0_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_window_64x64(c: &mut Criterion) {
     let input = real_matrix(64, 64);
     let mut params = BTreeMap::new();
@@ -1067,6 +1101,8 @@ criterion_group!(
     bench_reduce_sum_256_axis1_f64_literal_reference,
     bench_reduce_sum_256_axis0_f64,
     bench_reduce_sum_256_axis0_f64_literal_reference,
+    bench_reduce_sum_256_axis1_i64,
+    bench_reduce_sum_256_axis0_i64,
     bench_reduce_window_64x64,
     bench_sin_1k,
     bench_sin_64k,
