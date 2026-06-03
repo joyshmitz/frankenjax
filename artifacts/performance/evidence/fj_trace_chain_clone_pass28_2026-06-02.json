@@ -1,0 +1,56 @@
+{
+  "bead": "frankenjax-mcqr.4",
+  "pass": 28,
+  "crate": "fj-trace",
+  "target": "trace/make_jaxpr_chain_5ops",
+  "timestamp_utc": "2026-06-02T23:21:29Z",
+  "baseline": {
+    "source": "clean detached HEAD worktree at 200e7635",
+    "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-trace-pass28-head-baseline-remote rch exec -- cargo bench -p fj-trace --bench trace_baseline -- trace/make_jaxpr_chain_5ops --sample-size 100 --measurement-time 3 --warm-up-time 1",
+    "worker": "vmi1156319",
+    "low_us": 3.3433,
+    "mean_us": 3.4242,
+    "high_us": 3.5199
+  },
+  "after": {
+    "source": "working tree with move-based TraceFrame finalization",
+    "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-trace-pass28-after-remote2 rch exec -- cargo bench -p fj-trace --bench trace_baseline -- trace/make_jaxpr_chain_5ops --sample-size 100 --measurement-time 3 --warm-up-time 1",
+    "worker": "vmi1293453",
+    "low_us": 1.5743,
+    "mean_us": 1.6004,
+    "high_us": 1.6265
+  },
+  "rejected_measurements": [
+    {
+      "reason": "local fallback outside rch remote proof policy",
+      "mean_us": 1.6247,
+      "context": "clean HEAD worktree under /data/tmp fell outside rch canonical root"
+    },
+    {
+      "reason": "local fallback outside rch remote proof policy",
+      "mean_us": 1.6761,
+      "context": "after-run during temporary worker pressure"
+    }
+  ],
+  "speedup": 2.1395901022072246,
+  "score": {
+    "impact": 4,
+    "confidence": 3,
+    "effort": 2,
+    "value": 6.0
+  },
+  "alien_primitive": {
+    "source": "alien-graveyard data-layout / clone-elision primitive",
+    "recommendation": "consume immutable trace-frame payloads during finalization instead of cloning empty params/sub_jaxprs and last-output IDs",
+    "fallback": "retain generic cloned sub_jaxpr behavior for non-empty control-flow payloads so fingerprint caches are reset as before"
+  },
+  "lever": "Move TraceFrame internals into ClosedJaxpr construction so scalar chain equations transfer params/sub_jaxprs and output-id lists without clones.",
+  "isomorphism": {
+    "ordering_preserved": "Trace equations are iterated in original Vec order, inputs/outputs are traversed in original SmallVec order, and invars/constvars/outvars are derived from the same tracer-id order.",
+    "tie_breaking": "No tie-breaking logic is present in trace finalization.",
+    "floating_point": "N/A; this changes trace IR construction only, not numeric evaluation or scalar operation order.",
+    "rng": "N/A; no random state is read or written.",
+    "errors": "Dense VarId lookup, output-shadowing, unresolved-outvar, and const-value error branches are unchanged.",
+    "golden_sha256": "cb6e29c8a7cb0093603d38407643adf7e73abbc2b063e4d634af23a0165d88e3"
+  }
+}

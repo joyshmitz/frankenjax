@@ -2212,28 +2212,44 @@ impl SimpleTraceContext {
     }
 
     fn build_closed_jaxpr(&mut self, frame: TraceFrame) -> Result<ClosedJaxpr, TraceError> {
+        let TraceFrame {
+            trace_id: _,
+            in_ids,
+            const_ids,
+            equations: trace_equations,
+            last_output_ids,
+        } = frame;
+
         let dense_var_len =
             usize::try_from(self.next_tracer_id).map_err(|_| TraceError::CompositionViolation)?;
         let mut tracer_to_var = vec![None; dense_var_len];
         let mut next_var = 1_u32;
 
-        for tracer_id in &frame.in_ids {
+        for tracer_id in &in_ids {
             ensure_dense_var(&mut tracer_to_var, &mut next_var, *tracer_id)?;
         }
-        for tracer_id in &frame.const_ids {
+        for tracer_id in &const_ids {
             ensure_dense_var(&mut tracer_to_var, &mut next_var, *tracer_id)?;
         }
 
-        let mut equations = Vec::with_capacity(frame.equations.len());
-        for eqn in &frame.equations {
-            let mut in_atoms: SmallVec<[Atom; 4]> = SmallVec::with_capacity(eqn.inputs.len());
-            for input_id in &eqn.inputs {
+        let mut equations = Vec::with_capacity(trace_equations.len());
+        for eqn in trace_equations {
+            let TraceEquation {
+                primitive,
+                inputs,
+                outputs,
+                params,
+                sub_jaxprs,
+            } = eqn;
+
+            let mut in_atoms: SmallVec<[Atom; 4]> = SmallVec::with_capacity(inputs.len());
+            for input_id in &inputs {
                 let var = dense_var(&tracer_to_var, *input_id)?;
                 in_atoms.push(Atom::Var(var));
             }
 
-            let mut out_vars: SmallVec<[VarId; 2]> = SmallVec::with_capacity(eqn.outputs.len());
-            for output_id in &eqn.outputs {
+            let mut out_vars: SmallVec<[VarId; 2]> = SmallVec::with_capacity(outputs.len());
+            for output_id in &outputs {
                 let output_slot = dense_var_slot(&tracer_to_var, *output_id)?;
                 if tracer_to_var.get(output_slot).copied().flatten().is_some() {
                     return Err(TraceError::OutputShadowing {
@@ -2244,32 +2260,38 @@ impl SimpleTraceContext {
                 out_vars.push(out_var);
             }
 
+            let finalized_sub_jaxprs = if sub_jaxprs.is_empty() {
+                sub_jaxprs
+            } else {
+                // Preserve Jaxpr::Clone behavior for non-empty control-flow payloads:
+                // the clone intentionally resets each fingerprint cache.
+                sub_jaxprs.to_vec()
+            };
+
             equations.push(Equation {
-                primitive: eqn.primitive,
+                primitive,
                 inputs: in_atoms,
                 outputs: out_vars,
-                params: eqn.params.clone(),
+                params,
                 effects: vec![],
-                sub_jaxprs: eqn.sub_jaxprs.clone(),
+                sub_jaxprs: finalized_sub_jaxprs,
             });
         }
 
-        let invars = frame
-            .in_ids
+        let invars = in_ids
             .iter()
             .map(|tracer_id| dense_var(&tracer_to_var, *tracer_id))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let constvars = frame
-            .const_ids
+        let constvars = const_ids
             .iter()
             .map(|tracer_id| dense_var(&tracer_to_var, *tracer_id))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let out_ids = if frame.last_output_ids.is_empty() {
-            frame.in_ids.clone()
+        let out_ids = if last_output_ids.is_empty() {
+            &in_ids
         } else {
-            frame.last_output_ids.clone()
+            &last_output_ids
         };
 
         let outvars = out_ids
@@ -2281,8 +2303,7 @@ impl SimpleTraceContext {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let const_values = frame
-            .const_ids
+        let const_values = const_ids
             .iter()
             .map(|tracer_id| {
                 self.const_values
