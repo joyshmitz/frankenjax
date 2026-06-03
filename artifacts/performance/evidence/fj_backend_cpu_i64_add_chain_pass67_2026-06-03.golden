@@ -1,0 +1,31 @@
+bead: frankenjax-enyd2
+pass: 67
+lever: direct threaded terminal scalar I64 Add chains in fj-backend-cpu dependency scheduler
+target: backend_scheduler_cutover/dependency_chain and backend_execute/dependency_chain_512
+
+profile:
+  backend_scheduler_cutover/dependency_chain/512:
+    baseline: 56.657 us [55.846, 57.545] on ts1
+    rebench: 15.371 us [15.179, 15.712] on ts1
+    speedup_midpoint: 3.6857
+  backend_scheduler_cutover/dependency_chain/1000:
+    baseline: 121.57 us [118.46, 126.23] on ts1
+    rebench: 39.549 us [39.017, 40.643] on ts1
+    speedup_midpoint: 3.0740
+  backend_execute/dependency_chain_512:
+    baseline: 56.397 us [56.105, 56.752] on ts1
+    rebench: 15.388 us [15.157, 15.886] on ts1
+    speedup_midpoint: 3.6651
+
+golden_outputs:
+  wrapping_order_input_i64_max_chain2: I64(-9223372036854775807)
+  visible_intermediate_fallback_input7_outvars_2_4: [I64(8), I64(10)]
+  terminal_chain_512_input7: I64(519)
+  terminal_chain_1000_input7: I64(1007)
+
+isomorphism:
+  order: accepted chains evaluate source equations in order and only when each Add consumes the previous output
+  tie_breaking: accepted chains have no competing ready equations; visible intermediates and nonterminal outputs fall back
+  floating_point: no floating-point equations are accepted by this fast path
+  rng: no RNG surface
+  errors: missing inputs, non-Add primitives, params, effects, sub-jaxprs, and multi-output programs keep the existing scheduler path

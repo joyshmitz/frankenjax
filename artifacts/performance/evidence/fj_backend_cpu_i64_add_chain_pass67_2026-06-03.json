@@ -1,0 +1,160 @@
+{
+  "artifact": "fj_backend_cpu_i64_add_chain_pass67_2026-06-03",
+  "bead": "frankenjax-enyd2",
+  "pass": 67,
+  "status": "kept",
+  "score": {
+    "impact": 4.0,
+    "confidence": 4.0,
+    "effort": 2.0,
+    "impact_x_confidence_over_effort": 8.0,
+    "keeper_threshold": 2.0
+  },
+  "target": {
+    "crate": "fj-backend-cpu",
+    "bench_filters": [
+      "backend_scheduler_cutover/dependency_chain",
+      "backend_execute/dependency_chain_512"
+    ],
+    "profile_backed": true,
+    "baseline_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-backend-pass67-profile cargo bench -p fj-backend-cpu --bench backend_baseline -- --sample-size 10 --measurement-time 1 --warm-up-time 1",
+    "rebench_cutover_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass67-backend-bench cargo bench -p fj-backend-cpu --bench backend_baseline -- backend_scheduler_cutover/dependency_chain --sample-size 10 --measurement-time 1 --warm-up-time 1",
+    "rebench_execute_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass67-backend-exec-bench cargo bench -p fj-backend-cpu --bench backend_baseline -- backend_execute/dependency_chain_512 --sample-size 10 --measurement-time 1 --warm-up-time 1"
+  },
+  "benchmarks": [
+    {
+      "name": "backend_scheduler_cutover/dependency_chain/255",
+      "baseline_worker": "ts1",
+      "baseline_us": {
+        "low": 27.09,
+        "mean": 27.632,
+        "high": 28.253
+      },
+      "rebench_worker": "ts1",
+      "rebench_us": {
+        "low": 7.2179,
+        "mean": 7.4655,
+        "high": 7.8465
+      },
+      "speedup_midpoint": 3.702,
+      "speedup_conservative_interval": 3.452
+    },
+    {
+      "name": "backend_scheduler_cutover/dependency_chain/256",
+      "baseline_worker": "ts1",
+      "baseline_us": {
+        "low": 27.306,
+        "mean": 27.339,
+        "high": 27.369
+      },
+      "rebench_worker": "ts1",
+      "rebench_us": {
+        "low": 7.2129,
+        "mean": 7.3734,
+        "high": 7.5022
+      },
+      "speedup_midpoint": 3.708,
+      "speedup_conservative_interval": 3.64
+    },
+    {
+      "name": "backend_scheduler_cutover/dependency_chain/512",
+      "baseline_worker": "ts1",
+      "baseline_us": {
+        "low": 55.846,
+        "mean": 56.657,
+        "high": 57.545
+      },
+      "rebench_worker": "ts1",
+      "rebench_us": {
+        "low": 15.179,
+        "mean": 15.371,
+        "high": 15.712
+      },
+      "speedup_midpoint": 3.686,
+      "speedup_conservative_interval": 3.554
+    },
+    {
+      "name": "backend_scheduler_cutover/dependency_chain/1000",
+      "baseline_worker": "ts1",
+      "baseline_us": {
+        "low": 118.46,
+        "mean": 121.57,
+        "high": 126.23
+      },
+      "rebench_worker": "ts1",
+      "rebench_us": {
+        "low": 39.017,
+        "mean": 39.549,
+        "high": 40.643
+      },
+      "speedup_midpoint": 3.074,
+      "speedup_conservative_interval": 2.915
+    },
+    {
+      "name": "backend_execute/dependency_chain_512",
+      "baseline_worker": "ts1",
+      "baseline_us": {
+        "low": 56.105,
+        "mean": 56.397,
+        "high": 56.752
+      },
+      "rebench_worker": "ts1",
+      "rebench_us": {
+        "low": 15.157,
+        "mean": 15.388,
+        "high": 15.886
+      },
+      "speedup_midpoint": 3.665,
+      "speedup_conservative_interval": 3.531
+    }
+  ],
+  "lever": {
+    "summary": "Detect terminal single-output scalar I64 Add chains and accumulate them with a direct state-machine loop instead of per-equation HashMap lookup plus generic primitive evaluation.",
+    "changed_files": [
+      "crates/fj-backend-cpu/src/executor.rs"
+    ],
+    "one_lever": true,
+    "unsafe": false,
+    "alien_primitive": "direct-threaded state-machine evaluator"
+  },
+  "proof": {
+    "golden_file": "artifacts/performance/evidence/fj_backend_cpu_i64_add_chain_pass67_2026-06-03.golden",
+    "golden_sha256": "d9bb9639149d132f38106a258e8a6397bb8eeb038d8ac7557053e9349d9a639d",
+    "isomorphism": {
+      "ordering": "Accepted chains evaluate equations in source order and only when each Add consumes the immediately previous output.",
+      "tie_breaking": "Accepted chains have no competing ready equations; visible intermediates, nonterminal outputs, non-Add primitives, params, effects, sub-jaxprs, and multi-output programs fall back to the existing scheduler.",
+      "floating_point": "No floating-point equations are accepted by the fast path.",
+      "rng": "No RNG surface exists.",
+      "integer_semantics": "I64 addition uses wrapping_add, matching the existing runtime overflow behavior and verified with i64::MAX.",
+      "errors": "Missing inputs and malformed equations keep the existing fail-closed scheduler/evaluator path."
+    },
+    "focused_tests": [
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass67-backend-tests cargo test -p fj-backend-cpu dependency_scheduler_direct_i64_add_chain -- --nocapture",
+        "result": "pass: 2 tests"
+      },
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass67-backend-all-tests cargo test -p fj-backend-cpu -- --nocapture",
+        "result": "pass: 63 tests plus doc tests"
+      }
+    ],
+    "quality_gates": [
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass67-backend-check cargo check -p fj-backend-cpu --all-targets",
+        "result": "pass"
+      },
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-pass67-backend-clippy cargo clippy -p fj-backend-cpu --all-targets -- -D warnings",
+        "result": "pass"
+      },
+      {
+        "command": "cargo fmt --check -p fj-backend-cpu",
+        "result": "pass"
+      },
+      {
+        "command": "ubs crates/fj-backend-cpu/src/executor.rs",
+        "result": "pass: exit 0, critical 0; existing warning inventory remains"
+      }
+    ]
+  }
+}

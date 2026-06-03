@@ -6,7 +6,7 @@
 //!
 //! Contract: p2c006.strict.inv001 (CPU always available).
 
-use fj_core::{Atom, DType, Equation, Jaxpr, Value, VarId};
+use fj_core::{Atom, DType, Equation, Jaxpr, Literal, Primitive, Value, VarId};
 use fj_interpreters::{InterpreterError, eval_equation_outputs, eval_equation_single};
 use fj_runtime::backend::{Backend, BackendCapabilities, BackendError};
 use fj_runtime::buffer::Buffer;
@@ -413,6 +413,17 @@ fn execute_linear_topological_segment(
     max_ready_wave: &mut usize,
 ) -> Result<bool, InterpreterError> {
     let segment_len = segment_end - segment_start;
+    if execute_terminal_i64_add_chain_segment(
+        jaxpr,
+        segment_start,
+        segment_end,
+        env,
+        remaining,
+        max_ready_wave,
+    )? {
+        return Ok(true);
+    }
+
     let mut previous_output = None;
     for equation in &jaxpr.equations[segment_start..segment_end] {
         for atom in &equation.inputs {
@@ -434,6 +445,84 @@ fn execute_linear_topological_segment(
     }
     *remaining -= segment_len;
 
+    Ok(true)
+}
+
+fn add_chain_step(
+    equation: &Equation,
+    current_var: VarId,
+) -> Result<Option<(VarId, i64)>, InterpreterError> {
+    if equation.primitive != Primitive::Add
+        || !equation.params.is_empty()
+        || !equation.effects.is_empty()
+        || !equation.sub_jaxprs.is_empty()
+        || equation.inputs.len() != 2
+    {
+        return Ok(None);
+    }
+
+    let out_var = single_output_var(equation)?;
+    match (&equation.inputs[0], &equation.inputs[1]) {
+        (Atom::Var(var), Atom::Lit(Literal::I64(offset)))
+        | (Atom::Lit(Literal::I64(offset)), Atom::Var(var))
+            if *var == current_var =>
+        {
+            Ok(Some((out_var, *offset)))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn execute_terminal_i64_add_chain_segment(
+    jaxpr: &Jaxpr,
+    segment_start: usize,
+    segment_end: usize,
+    env: &mut HashMap<VarId, Value>,
+    remaining: &mut usize,
+    max_ready_wave: &mut usize,
+) -> Result<bool, InterpreterError> {
+    if segment_start >= segment_end
+        || segment_end != jaxpr.equations.len()
+        || jaxpr.outvars.len() != 1
+    {
+        return Ok(false);
+    }
+
+    let last_output = single_output_var(&jaxpr.equations[segment_end - 1])?;
+    if jaxpr.outvars[0] != last_output {
+        return Ok(false);
+    }
+
+    let mut current_var = match jaxpr.equations[segment_start]
+        .inputs
+        .iter()
+        .find_map(|atom| {
+            if let Atom::Var(var) = atom {
+                Some(*var)
+            } else {
+                None
+            }
+        }) {
+        Some(var) => var,
+        None => return Ok(false),
+    };
+
+    let mut current_value = match env.get(&current_var) {
+        Some(Value::Scalar(Literal::I64(value))) => *value,
+        _ => return Ok(false),
+    };
+
+    for equation in &jaxpr.equations[segment_start..segment_end] {
+        let Some((out_var, offset)) = add_chain_step(equation, current_var)? else {
+            return Ok(false);
+        };
+        current_value = current_value.wrapping_add(offset);
+        current_var = out_var;
+    }
+
+    env.insert(last_output, Value::scalar_i64(current_value));
+    *remaining -= segment_end - segment_start;
+    *max_ready_wave = (*max_ready_wave).max(1);
     Ok(true)
 }
 
@@ -1188,6 +1277,35 @@ mod tests {
             evaluate_jaxpr_parallel_inner(&jaxpr, &[Value::scalar_i64(7)], &mut max_ready_wave);
 
         assert_eq!(result, Ok(vec![Value::scalar_i64(7 + length as i64)]));
+        assert_eq!(max_ready_wave, 1);
+    }
+
+    #[test]
+    fn dependency_scheduler_direct_i64_add_chain_preserves_wrapping_order() {
+        let jaxpr = make_dependency_chain_jaxpr(2);
+        let mut max_ready_wave = 0_usize;
+        let result = evaluate_jaxpr_parallel_inner(
+            &jaxpr,
+            &[Value::scalar_i64(i64::MAX)],
+            &mut max_ready_wave,
+        );
+
+        assert_eq!(result, Ok(vec![Value::scalar_i64(i64::MIN + 1)]));
+        assert_eq!(max_ready_wave, 1);
+    }
+
+    #[test]
+    fn dependency_scheduler_direct_i64_add_chain_preserves_visible_intermediates() {
+        let mut jaxpr = make_dependency_chain_jaxpr(3);
+        jaxpr.outvars = vec![VarId(2), VarId(4)];
+        let mut max_ready_wave = 0_usize;
+        let result =
+            evaluate_jaxpr_parallel_inner(&jaxpr, &[Value::scalar_i64(7)], &mut max_ready_wave);
+
+        assert_eq!(
+            result,
+            Ok(vec![Value::scalar_i64(8), Value::scalar_i64(10)])
+        );
         assert_eq!(max_ready_wave, 1);
     }
 
