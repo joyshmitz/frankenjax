@@ -1,0 +1,33 @@
+scenario: fj-dispatch segmented batched-operand gather direct path
+bead: frankenjax-yty34
+pass: 59
+primitive: Gather
+operand_dtype: I64
+operand_shape: [2, 4]
+operand_batch_dim: 0
+operand_row_major: [10, 20, 30, 40, 50, 60, 70, 80]
+shared_indices:
+  shape: [2]
+  row_major: [3, 1]
+  output_shape: [2, 2]
+  output_batch_dim: 0
+  output_row_major: [40, 20, 80, 60]
+batched_indices:
+  shape: [2, 2]
+  batch_dim: 0
+  row_major: [0, 2, 3, 1]
+  output_shape: [2, 2]
+  output_batch_dim: 0
+  output_row_major: [10, 30, 80, 60]
+fill_or_drop_shared_indices:
+  shape: [3]
+  row_major: [3, 4, 1]
+  output_shape: [2, 3]
+  output_batch_dim: 0
+  output_row_major: [40, -9223372036854775808, 20, 80, -9223372036854775808, 60]
+isomorphism:
+  ordering: preserved as batch lanes are visited in axis-0 order, then index literals in row-major order, then slice elements in row-major order
+  tie_breaking: not applicable; gather is a pure read-only selection
+  floating_point: preserved; the lever only copies Literal values and performs no arithmetic or reassociation
+  rng: not applicable
+  out_of_bounds: preserved; fill_or_drop emits the same dtype fill literal as fj-lax eval_gather

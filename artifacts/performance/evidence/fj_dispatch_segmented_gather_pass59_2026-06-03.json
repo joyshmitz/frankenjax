@@ -1,0 +1,127 @@
+{
+  "schema_version": "frankenjax.performance_evidence.v1",
+  "pass": 59,
+  "bead": "frankenjax-yty34",
+  "crate": "fj-dispatch",
+  "target": "vmap_gather/batched_operand_shared_indices and vmap_gather/batched_operand_batched_indices",
+  "profile_backed_target": {
+    "worker": "vmi1293453",
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- --quiet",
+    "baseline_us": {
+      "vmap_gather/batched_operand_shared_indices": 548.59,
+      "vmap_gather/batched_operand_batched_indices": 609.56
+    },
+    "nearby_rows_us": {
+      "vmap_gather/batched_indices": 28.059,
+      "vmap_scatter/batched_indices_updates": 350.83,
+      "vmap_eigh/batched_matrix_3x3": 292.12
+    }
+  },
+  "lever": {
+    "description": "Route batched-operand gather through a segmented row-major copy path when axis-0 gather slices are size 1, avoiding per-batch slice/eval/stack fallback.",
+    "alien_primitives": [
+      "nested data-parallel flattening",
+      "segmented arrays",
+      "vectorized row-major slice copy"
+    ],
+    "safe_rust_only": true,
+    "external_blas_or_xla": false
+  },
+  "after": {
+    "worker": "vmi1293453",
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_gather --quiet",
+    "after_us": {
+      "vmap_gather/batched_operand_shared_indices": {
+        "low": 21.957,
+        "median": 23.297,
+        "high": 25.011
+      },
+      "vmap_gather/batched_operand_batched_indices": {
+        "low": 21.425,
+        "median": 22.070,
+        "high": 22.815
+      }
+    },
+    "speedup_median": {
+      "vmap_gather/batched_operand_shared_indices": 23.5477,
+      "vmap_gather/batched_operand_batched_indices": 27.6194
+    },
+    "improvement_percent": {
+      "vmap_gather/batched_operand_shared_indices": 95.753,
+      "vmap_gather/batched_operand_batched_indices": 96.379
+    }
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 4,
+    "effort": 1,
+    "value": 20.0,
+    "keep": true
+  },
+  "isomorphism_proof": {
+    "ordering": "Preserved: the direct path visits batch lanes in axis-0 order, then index literals in row-major order, then slice elements in the same row-major order as fj-lax eval_gather.",
+    "tie_breaking": "Not applicable: gather is read-only selection with no duplicate-write arbitration.",
+    "floating_point": "Preserved bit-for-bit: the lever copies Literal values and performs no arithmetic, reassociation, comparison, rounding, or dtype conversion.",
+    "rng": "Not applicable: gather has no RNG state or seed consumption.",
+    "out_of_bounds": "Preserved: clip/promise clamp to the final per-lane row and fill/drop emits the same dtype fill literal as fj-lax eval_gather.",
+    "fallbacks": "Unsupported gather modes, incompatible slice sizes, scalar operands, rank-1 batched operands, empty gather dimensions, and mismatched batch sizes stay on the existing fallback."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_dispatch_segmented_gather_pass59_2026-06-03.golden",
+    "sha256": "f9c21a6dc2a8453292e556dde06b17e057f94951011af990eb333dad74df9dad"
+  },
+  "validation": {
+    "completed": [
+      {
+        "command": "rch exec -- cargo test -p fj-dispatch gather -- --nocapture",
+        "worker": "vmi1167313",
+        "result": "passed; 6 gather unit tests and 3 dispatch-suite gather tests"
+      },
+      {
+        "command": "rch exec -- cargo check -p fj-dispatch --all-targets",
+        "worker": "vmi1153651",
+        "result": "passed"
+      },
+      {
+        "command": "rch exec -- cargo test -p fj-dispatch",
+        "worker": "vmi1227854",
+        "result": "passed; 243 lib tests, 55 dispatch-suite tests, 0 doctests"
+      },
+      {
+        "command": "rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings",
+        "worker": "vmi1149989",
+        "result": "passed"
+      },
+      {
+        "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_gather --quiet",
+        "worker": "vmi1293453",
+        "result": "shared median 23.297 us; batched median 22.070 us"
+      },
+      {
+        "command": "cargo fmt --check -p fj-dispatch",
+        "worker": "local",
+        "result": "passed"
+      },
+      {
+        "command": "sha256sum -c artifacts/performance/evidence/fj_dispatch_segmented_gather_pass59_2026-06-03.golden.sha256",
+        "worker": "local",
+        "result": "passed"
+      },
+      {
+        "command": "jq . artifacts/performance/evidence/fj_dispatch_segmented_gather_pass59_2026-06-03.json",
+        "worker": "local",
+        "result": "valid JSON"
+      },
+      {
+        "command": "git diff --check -- changed files",
+        "worker": "local",
+        "result": "passed"
+      },
+      {
+        "command": "ubs crates/fj-dispatch/src/batching.rs .beads/issues.jsonl .skill-loop-progress.md artifacts/performance/evidence/fj_dispatch_segmented_gather_pass59_2026-06-03.json artifacts/performance/evidence/fj_dispatch_segmented_gather_pass59_2026-06-03.golden artifacts/performance/evidence/fj_dispatch_segmented_gather_pass59_2026-06-03.golden.sha256",
+        "worker": "local",
+        "result": "exit 0; no criticals; existing broad fj-dispatch warning inventory remains"
+      }
+    ]
+  }
+}

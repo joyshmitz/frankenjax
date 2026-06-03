@@ -1652,7 +1652,323 @@ fn batch_gather(
         return Ok(BatchTracer::batched(result, 0));
     }
 
+    if let Some(result) = batch_gather_batched_operand_direct(operand, indices, params)? {
+        return Ok(result);
+    }
+
     batch_passthrough_leading(Primitive::Gather, inputs, params)
+}
+
+#[derive(Clone, Copy)]
+enum GatherIndexMode {
+    Clip,
+    FillOrDrop,
+    PromiseInBounds,
+}
+
+fn batch_gather_batched_operand_direct(
+    operand: &BatchTracer,
+    indices: &BatchTracer,
+    params: &BTreeMap<String, String>,
+) -> Result<Option<BatchTracer>, BatchError> {
+    let Some(operand_batch_dim) = operand.batch_dim else {
+        return Ok(None);
+    };
+
+    let operand_value = move_batch_dim_to_front(&operand.value, operand_batch_dim)?;
+    let Value::Tensor(operand_tensor) = &operand_value else {
+        return Ok(None);
+    };
+    if operand_tensor.rank() < 2 {
+        return Ok(None);
+    }
+
+    let mode = match parse_gather_index_mode(params) {
+        Some(mode) => mode,
+        None => return Ok(None),
+    };
+    let slice_sizes = parse_param_usize_list(params, "slice_sizes")?;
+    let unbatched_rank = operand_tensor.rank() - 1;
+    if slice_sizes.len() != unbatched_rank || slice_sizes.first().copied() != Some(1) {
+        return Ok(None);
+    }
+
+    let unbatched_dims = &operand_tensor.shape.dims[1..];
+    for (&slice_size, &dim) in slice_sizes.iter().zip(unbatched_dims) {
+        if slice_size > dim as usize {
+            return Ok(None);
+        }
+    }
+
+    let batch_size = operand_tensor.shape.dims[0] as usize;
+    let gather_dim = operand_tensor.shape.dims[1] as usize;
+    if gather_dim == 0 {
+        return Ok(None);
+    }
+
+    let indices_value = match indices.batch_dim {
+        Some(batch_dim) => {
+            let index_batch_size = get_batch_size(&indices.value, batch_dim)?;
+            if index_batch_size != batch_size {
+                return Ok(None);
+            }
+            move_batch_dim_to_front(&indices.value, batch_dim)?
+        }
+        None => indices.value.clone(),
+    };
+
+    let prepared_indices = prepare_gather_indices(&indices_value, indices.batch_dim, batch_size)?;
+    let trailing_slice_dims: Vec<u32> = slice_sizes
+        .iter()
+        .skip(1)
+        .map(|&size| {
+            u32::try_from(size)
+                .map_err(|_| BatchError::EvalError(format!("slice size {size} exceeds u32 range")))
+        })
+        .collect::<Result<_, _>>()?;
+    let slice_elems = checked_product_usize(&trailing_slice_dims, "gather slice")?;
+
+    let mut out_dims =
+        Vec::with_capacity(1 + prepared_indices.per_batch_shape.len() + trailing_slice_dims.len());
+    out_dims.push(operand_tensor.shape.dims[0]);
+    out_dims.extend_from_slice(&prepared_indices.per_batch_shape);
+    out_dims.extend_from_slice(&trailing_slice_dims);
+    let output_elems = checked_product_usize(&out_dims, "gather output")?;
+    if output_elems == 0 {
+        let tensor = TensorValue::new(operand_tensor.dtype, Shape { dims: out_dims }, Vec::new())
+            .map_err(|e| BatchError::TensorError(e.to_string()))?;
+        return Ok(Some(BatchTracer::batched(Value::Tensor(tensor), 0)));
+    }
+
+    let mut elements = Vec::with_capacity(output_elems);
+    let fill_lit = gather_fill_literal_for_dtype(operand_tensor.dtype);
+    let operand_strides = row_major_strides(&operand_tensor.shape.dims)?;
+    let operand_elements = operand_tensor.elements.as_slice();
+    let trailing_slice_is_contiguous = slice_sizes
+        .iter()
+        .skip(1)
+        .zip(unbatched_dims.iter().skip(1))
+        .all(|(&slice_size, &dim)| slice_size == dim as usize);
+
+    for batch_index in 0..batch_size {
+        let batch_offset = batch_index
+            .checked_mul(operand_strides[0])
+            .ok_or_else(|| BatchError::EvalError("gather batch offset overflow".to_owned()))?;
+        for literal in prepared_indices.literals_for_batch(batch_index) {
+            let raw_index = gather_index_literal_to_usize(literal)?;
+            let Some(resolved_index) = resolve_gather_index(raw_index, gather_dim, mode) else {
+                elements.extend(std::iter::repeat_n(fill_lit, slice_elems));
+                continue;
+            };
+            let base_offset =
+                batch_offset
+                    .checked_add(resolved_index.checked_mul(operand_strides[1]).ok_or_else(
+                        || BatchError::EvalError("gather row offset overflow".to_owned()),
+                    )?)
+                    .ok_or_else(|| {
+                        BatchError::EvalError("gather base offset overflow".to_owned())
+                    })?;
+
+            if trailing_slice_is_contiguous {
+                let end = base_offset.checked_add(slice_elems).ok_or_else(|| {
+                    BatchError::EvalError("gather contiguous slice end overflow".to_owned())
+                })?;
+                let slice = operand_elements.get(base_offset..end).ok_or_else(|| {
+                    BatchError::EvalError(
+                        "gather contiguous slice exceeds operand element count".to_owned(),
+                    )
+                })?;
+                elements.extend_from_slice(slice);
+                continue;
+            }
+
+            gather_partial_slice_elements(
+                operand_elements,
+                &operand_strides,
+                base_offset,
+                &slice_sizes,
+                &mut elements,
+            )?;
+        }
+    }
+
+    let tensor = TensorValue::new(operand_tensor.dtype, Shape { dims: out_dims }, elements)
+        .map_err(|e| BatchError::TensorError(e.to_string()))?;
+    Ok(Some(BatchTracer::batched(Value::Tensor(tensor), 0)))
+}
+
+struct PreparedGatherIndices {
+    per_batch_shape: Vec<u32>,
+    per_batch_len: usize,
+    storage: PreparedGatherIndexStorage,
+}
+
+enum PreparedGatherIndexStorage {
+    Shared(Vec<Literal>),
+    Batched(Vec<Literal>),
+}
+
+impl PreparedGatherIndices {
+    fn literals_for_batch(&self, batch_index: usize) -> &[Literal] {
+        match &self.storage {
+            PreparedGatherIndexStorage::Shared(elements) => elements,
+            PreparedGatherIndexStorage::Batched(elements) => {
+                let start = batch_index * self.per_batch_len;
+                &elements[start..start + self.per_batch_len]
+            }
+        }
+    }
+}
+
+fn prepare_gather_indices(
+    value: &Value,
+    batch_dim: Option<usize>,
+    batch_size: usize,
+) -> Result<PreparedGatherIndices, BatchError> {
+    match (batch_dim, value) {
+        (None, Value::Scalar(literal)) => Ok(PreparedGatherIndices {
+            per_batch_shape: Vec::new(),
+            per_batch_len: 1,
+            storage: PreparedGatherIndexStorage::Shared(vec![*literal]),
+        }),
+        (None, Value::Tensor(tensor)) => Ok(PreparedGatherIndices {
+            per_batch_shape: tensor.shape.dims.clone(),
+            per_batch_len: tensor.elements.len(),
+            storage: PreparedGatherIndexStorage::Shared(tensor.elements.to_vec()),
+        }),
+        (Some(_), Value::Tensor(tensor)) => {
+            if tensor.shape.dims.first().copied().map(|dim| dim as usize) != Some(batch_size) {
+                return Err(BatchError::EvalError(format!(
+                    "gather index batch size must be {batch_size}"
+                )));
+            }
+            let per_batch_shape = tensor.shape.dims[1..].to_vec();
+            let per_batch_len = checked_product_usize(&per_batch_shape, "gather indices")?;
+            Ok(PreparedGatherIndices {
+                per_batch_shape,
+                per_batch_len,
+                storage: PreparedGatherIndexStorage::Batched(tensor.elements.to_vec()),
+            })
+        }
+        (Some(_), Value::Scalar(_)) => Err(BatchError::BatchDimOutOfBounds {
+            batch_dim: 0,
+            rank: 0,
+        }),
+    }
+}
+
+fn parse_gather_index_mode(params: &BTreeMap<String, String>) -> Option<GatherIndexMode> {
+    match params.get("index_mode").map(String::as_str) {
+        None | Some("clip") => Some(GatherIndexMode::Clip),
+        Some("fill" | "drop" | "fill_or_drop") => Some(GatherIndexMode::FillOrDrop),
+        Some("promise_in_bounds" | "promise") => Some(GatherIndexMode::PromiseInBounds),
+        Some(_) => None,
+    }
+}
+
+fn resolve_gather_index(index: usize, dim: usize, mode: GatherIndexMode) -> Option<usize> {
+    if index < dim {
+        Some(index)
+    } else {
+        match mode {
+            GatherIndexMode::FillOrDrop => None,
+            GatherIndexMode::Clip | GatherIndexMode::PromiseInBounds => Some(dim - 1),
+        }
+    }
+}
+
+fn gather_index_literal_to_usize(literal: &Literal) -> Result<usize, BatchError> {
+    match literal {
+        Literal::I64(value) if *value >= 0 => Ok(*value as usize),
+        Literal::I64(value) => Err(BatchError::EvalError(format!("negative index {value}"))),
+        Literal::U32(value) => Ok(*value as usize),
+        Literal::U64(value) => usize::try_from(*value)
+            .map_err(|_| BatchError::EvalError(format!("index {value} exceeds usize range"))),
+        Literal::Bool(value) => Ok(usize::from(*value)),
+        other => Err(BatchError::EvalError(format!(
+            "unsupported gather index literal {other:?}"
+        ))),
+    }
+}
+
+fn gather_fill_literal_for_dtype(dtype: DType) -> Literal {
+    match dtype {
+        DType::F64 => Literal::F64Bits(f64::NAN.to_bits()),
+        DType::F32 => Literal::F32Bits(f32::NAN.to_bits()),
+        DType::F16 => Literal::from_f16_f64(f64::NAN),
+        DType::BF16 => Literal::from_bf16_f64(f64::NAN),
+        DType::I32 => Literal::I64(i64::from(i32::MIN)),
+        DType::I64 => Literal::I64(i64::MIN),
+        DType::U32 => Literal::U32(u32::MAX),
+        DType::U64 => Literal::U64(u64::MAX),
+        DType::Bool => Literal::Bool(true),
+        DType::Complex64 => Literal::Complex64Bits(f32::NAN.to_bits(), 0),
+        DType::Complex128 => Literal::Complex128Bits(f64::NAN.to_bits(), 0),
+    }
+}
+
+fn gather_partial_slice_elements(
+    operand_elements: &[Literal],
+    operand_strides: &[usize],
+    base_offset: usize,
+    slice_sizes: &[usize],
+    elements: &mut Vec<Literal>,
+) -> Result<(), BatchError> {
+    let slice_elems = checked_product_usize(&slice_sizes[1..], "gather slice")?;
+    let mut slice_coords = vec![0_usize; slice_sizes.len().saturating_sub(1)];
+
+    for _ in 0..slice_elems {
+        let mut flat = base_offset;
+        for (axis, &coord) in slice_coords.iter().enumerate() {
+            let offset = coord
+                .checked_mul(operand_strides[axis + 2])
+                .ok_or_else(|| {
+                    BatchError::EvalError(format!("gather offset overflow on axis {}", axis + 1))
+                })?;
+            flat = flat
+                .checked_add(offset)
+                .ok_or_else(|| BatchError::EvalError("gather flat offset overflow".to_owned()))?;
+        }
+        let element = operand_elements.get(flat).ok_or_else(|| {
+            BatchError::EvalError("gather offset exceeds operand element count".to_owned())
+        })?;
+        elements.push(*element);
+
+        for axis in (0..slice_coords.len()).rev() {
+            slice_coords[axis] += 1;
+            if slice_coords[axis] < slice_sizes[axis + 1] {
+                break;
+            }
+            slice_coords[axis] = 0;
+        }
+    }
+
+    Ok(())
+}
+
+fn row_major_strides(dims: &[u32]) -> Result<Vec<usize>, BatchError> {
+    let mut strides = vec![1_usize; dims.len()];
+    let mut stride = 1_usize;
+    for (index, &dim) in dims.iter().enumerate().rev() {
+        strides[index] = stride;
+        stride = stride.checked_mul(dim as usize).ok_or_else(|| {
+            BatchError::EvalError("row-major stride computation overflow".to_owned())
+        })?;
+    }
+    Ok(strides)
+}
+
+fn checked_product_usize<T>(dims: &[T], context: &str) -> Result<usize, BatchError>
+where
+    T: Copy + TryInto<usize>,
+{
+    dims.iter().try_fold(1_usize, |acc, &dim| {
+        let dim = dim
+            .try_into()
+            .map_err(|_| BatchError::EvalError(format!("{context} dimension exceeds usize")))?;
+        acc.checked_mul(dim)
+            .ok_or_else(|| BatchError::EvalError(format!("{context} element count overflow")))
+    })
 }
 
 fn batch_scatter(
@@ -8194,6 +8510,26 @@ mod tests {
         assert_eq!(result.batch_dim, Some(0));
         assert_eq!(result.value.as_tensor().unwrap().shape.dims, vec![2, 2]);
         assert_eq!(extract_i64_vec(&result.value), vec![10, 30, 80, 60]);
+    }
+
+    #[test]
+    fn test_batch_trace_gather_batched_operand_fill_or_drop() {
+        let operand =
+            BatchTracer::batched(make_i64_matrix(2, 4, &[10, 20, 30, 40, 50, 60, 70, 80]), 0);
+        let indices = BatchTracer::unbatched(make_i64_vector(&[3, 4, 1]));
+        let params = BTreeMap::from([
+            ("index_mode".to_owned(), "fill_or_drop".to_owned()),
+            ("slice_sizes".to_owned(), "1".to_owned()),
+        ]);
+
+        let result = apply_batch_rule(Primitive::Gather, &[operand, indices], &params).unwrap();
+
+        assert_eq!(result.batch_dim, Some(0));
+        assert_eq!(result.value.as_tensor().unwrap().shape.dims, vec![2, 3]);
+        assert_eq!(
+            extract_i64_vec(&result.value),
+            vec![40, i64::MIN, 20, 80, i64::MIN, 60]
+        );
     }
 
     #[test]
