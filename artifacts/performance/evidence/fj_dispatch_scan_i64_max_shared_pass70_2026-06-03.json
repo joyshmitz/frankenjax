@@ -1,0 +1,92 @@
+{
+  "bead": "frankenjax-mcqr.44",
+  "pass": 70,
+  "crate": "fj-dispatch",
+  "target": "vmap_scan/shared_init_batched_xs_max_128x64",
+  "profile_context": {
+    "full_reprofile_after_pass69_ts2": {
+      "head": "204f465b6fcbb9463890619f7336e81e89b722c2",
+      "vmap_scan/shared_init_batched_xs_max_128x64": {
+        "low_us": 121.81,
+        "mean_us": 122.20,
+        "high_us": 122.59
+      },
+      "vmap_scan/shared_init_batched_xs_f32_add_128x64": {
+        "low_us": 110.03,
+        "mean_us": 110.51,
+        "high_us": 111.03
+      },
+      "vmap_while/batched_scalar_f32_add_128": {
+        "low_us": 113.74,
+        "mean_us": 114.10,
+        "high_us": 114.50
+      },
+      "eval_jaxpr_throughput/chain_add/1000": {
+        "low_us": 124.89,
+        "mean_us": 125.45,
+        "high_us": 126.04
+      }
+    }
+  },
+  "baseline": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/shared_init_batched_xs_max_128x64 --noplot",
+    "worktree": "/data/projects/.scratch/frankenjax-pass70-bench-1780529419",
+    "head": "9dc8c8374454cc81d18e2389e0412d6fdc473e31",
+    "worker": "ts2",
+    "low_us": 121.56,
+    "mean_us": 121.98,
+    "high_us": 122.42
+  },
+  "after": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/shared_init_batched_xs_max_128x64 --noplot",
+    "worktree": "/data/projects/.scratch/frankenjax-pass70-bench-1780529419",
+    "head": "9dc8c8374454cc81d18e2389e0412d6fdc473e31 + Pass70 patch",
+    "worker": "ts2",
+    "low_us": 47.764,
+    "mean_us": 48.040,
+    "high_us": 48.349
+  },
+  "speedup": {
+    "mean": 2.539,
+    "conservative_interval": 2.513
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 5,
+    "effort": 2,
+    "value": 12.5
+  },
+  "lever": "Exact borrowed row-major I64 max scan path for shared scalar init, batch axis 0, rank-2 xs. It bypasses move_batch_dim_to_front cloning and the per-element Literal operation matcher.",
+  "isomorphism_proof": {
+    "acceptance": "Only accepts unbatched I64 scalar or scalar-tensor init, I64 rank-2 xs with batch_dim 0, explicit body_op=max, and valid row-major element count. All other cases fall back to the previous scalar scan path.",
+    "ordering": "Rows are emitted in ascending batch index. Within each row, scan_idx order matches the prior forward/reverse loops.",
+    "arithmetic": "Uses i64::max, matching the prior apply_scan_scalar_op Max branch and signed integer max semantics.",
+    "tie_breaking": "Equal I64 values produce the same observable Literal::I64 value; no ordering, scheduling, sorting, branch-selection, or identity-bearing tie surface changes.",
+    "floating_point": "No F32/F64 path is accepted by the new helper; existing FP max behavior falls back unchanged.",
+    "rng": "No RNG state or sampling behavior is touched."
+  },
+  "golden": {
+    "file": "artifacts/performance/evidence/fj_dispatch_scan_i64_max_shared_pass70_2026-06-03.golden",
+    "sha256": "b71bace6079f86322ae7fe0716dd4f972200e4cc3de271626181588bca58f760",
+    "bench_output": "128 lanes of Literal::I64(16)",
+    "signed_reverse_case": [
+      3,
+      2
+    ]
+  },
+  "validation": [
+    "rch exec -- cargo test -p fj-dispatch scan_shared_i64_max -- --nocapture (shared tree; 1 test passed)",
+    "rch exec -- cargo test -p fj-dispatch (shared tree; 248 unit tests, 55 integration tests, doc-tests passed)",
+    "rch exec -- cargo check -p fj-dispatch --all-targets (shared tree; passed)",
+    "rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings (shared tree; passed)",
+    "cargo fmt --check -p fj-dispatch (shared tree; passed)",
+    "sha256sum -c artifacts/performance/evidence/fj_dispatch_scan_i64_max_shared_pass70_2026-06-03.golden.sha256 (passed)",
+    "jq . artifacts/performance/evidence/fj_dispatch_scan_i64_max_shared_pass70_2026-06-03.json >/dev/null (passed)",
+    "git diff --check -- crates/fj-dispatch/src/batching.rs (passed)",
+    "ubs crates/fj-dispatch/src/batching.rs (exit 0; critical 0; existing file-wide warnings only)"
+  ],
+  "notes": [
+    "A peer backend-cpu commit advanced main from 9dc8c837 to fac2739b after the A/B run. It touched only backend-cpu, backend evidence, .beads/issues.jsonl, and .skill-loop-progress.md, so the dispatch scan-max benchmark remains isolated to this lever.",
+    "No peer-owned fj-lax, fj-core, or fj-backend-cpu files are edited or staged by this pass."
+  ]
+}
