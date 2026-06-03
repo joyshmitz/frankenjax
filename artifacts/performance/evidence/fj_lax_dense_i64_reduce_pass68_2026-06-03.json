@@ -1,0 +1,79 @@
+{
+    "bead": "frankenjax-mcqr.30.14",
+    "pass": 68,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/reduce_sum_64k_i64",
+    "lever_summary": "Wire the pass67 dense i64 storage into the i64 reduction paths. The full reduction (eval_reduce integral branch) folds LiteralBuffer::as_i64_slice() directly; the axis reduction (eval_reduce_axes integral branch) drives the OutIndexOdometer over the contiguous i64 slice. Both skip the per-element Literal::I64 match and the 24-byte enum stride.",
+    "alien_graveyard": {
+        "primitive": "dense SoA / typed columnar storage applied to reductions",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "consume the contiguous i64 backing store added in mcqr.30.13 so integer reductions become tight native-i64 folds the compiler can vectorize, instead of tagged-union materialization + match"
+    },
+    "method": "Same-worker comparison on ts2: dense (new_i64_values / vector_i64) input vs a Vec<Literal>-backed reference bench run in the same process, isolating the data-model win from cross-worker CPU variance.",
+    "results": {
+        "full_reduce_64k_i64": {
+            "dense_ns": 12794.0,
+            "dense_ci_ns": [12728.6, 12872.4],
+            "literal_ns": 215093.2,
+            "literal_ci_ns": [214667.6, 215560.7],
+            "speedup_midpoint_x": 16.81,
+            "speedup_conservative_x": 16.68,
+            "note": "headline: flat fold, no odometer overhead, so the data-model win dominates"
+        },
+        "axis1_inner_contiguous_i64": {
+            "dense_ns": 210306.0,
+            "dense_ci_ns": [209147.2, 211851.0],
+            "literal_ns": 417326.0,
+            "literal_ci_ns": [413931.1, 422212.1],
+            "speedup_midpoint_x": 1.98,
+            "speedup_conservative_x": 1.95,
+            "note": "secondary: the pass66 odometer already removed the dominant per-element decode, so the residual data-model win here is ~2x (no-gaps completeness)"
+        },
+        "axis0_outer_strided_i64": {
+            "dense_ns": 212175.0,
+            "dense_ci_ns": [211309.0, 213395.9],
+            "literal_ns": 424348.1,
+            "literal_ci_ns": [413432.7, 437762.1],
+            "speedup_midpoint_x": 2.00,
+            "speedup_conservative_x": 1.94
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'reduce_sum_64k_i64|reduce_sum_256_axis._i64' --save-baseline {i64full|i64red}",
+    "score": {
+        "impact": 5.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 10.0,
+        "kept": true,
+        "basis": "headline full-reduce 16.68x conservative; axis reductions ~2x are no-gaps completeness on the same lever"
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/reduction.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "eval_reduce integral branch: as_i64_slice() fast fold returning Value::scalar_i64; eval_reduce_axes integral branch: as_i64_slice() drives the odometer. Both fall back to the unchanged Vec<Literal> loop when as_i64_slice() is None."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: the i64 slice is folded in ascending flat order (full) / odometer order (axis), identical to the generic loops",
+        "integer_op": "unchanged: same int_init seed and int_op (ReduceSum a+b, ReduceProd a*b, ReduceMax i64::max, ReduceMin i64::min) applied in the same order; overflow behavior identical (same op) on both paths",
+        "index_mapping": "axis path reuses OutIndexOdometer.next_index(), unchanged from pass66",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "as_i64_slice() is Some only for I64 dense storage (element count matches shape); I32 / Literal-backed / malformed declared-I64 inputs return None and run the unchanged generic loop (which still type-checks each element)",
+        "output_dtype": "unchanged: full -> scalar_i64; axis -> DType::I64 tensor"
+    },
+    "validation": [
+        {
+            "name": "dense_i64_reduce_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib reduction",
+            "result": "passed: 31 tests incl. dense_i64_reduce_bit_identical_to_literal_path (Sum/Prod/Max/Min, full + all axis subsets, negatives + zero)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}

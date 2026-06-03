@@ -505,6 +505,36 @@ fn bench_solve_24x24_24rhs(c: &mut Criterion) {
     });
 }
 
+// Large-array i64 FULL reduction: unlike the axis reductions (which already pay
+// the odometer's index work), the full reduce is a flat fold, so dense i64
+// storage removes the dominant per-element Literal::I64 match + 24-byte stride.
+fn bench_reduce_sum_64k_i64(c: &mut Criterion) {
+    let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64).collect();
+    let input = Value::vector_i64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/reduce_sum_64k_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_sum_64k_i64_literal_reference(c: &mut Criterion) {
+    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN as i64)
+        .map(Literal::I64)
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            elements,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/reduce_sum_64k_i64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_sum_1k(c: &mut Criterion) {
     let data: Vec<i64> = (0..1000).collect();
     let input = Value::vector_i64(&data).unwrap();
@@ -666,7 +696,21 @@ fn bench_reduce_sum_256_axis0_f64_literal_reference(c: &mut Criterion) {
 // Integral axis reduction (i64, no dense storage exists for i64) — measures the
 // per-element multi-index decode removal alone (the odometer), since the
 // data-model 24-byte match is unchanged for Vec<Literal> i64 storage.
-fn axis_reduce_i64_input() -> Value {
+fn axis_reduce_i64_dense_input() -> Value {
+    let n = REDUCE_AXIS_N as usize;
+    let data: Vec<i64> = (0..(n * n) as i64).collect();
+    Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![REDUCE_AXIS_N, REDUCE_AXIS_N],
+            },
+            data,
+        )
+        .unwrap(),
+    )
+}
+
+fn axis_reduce_i64_literal_input() -> Value {
     let n = REDUCE_AXIS_N as usize;
     let elements: Vec<Literal> = (0..n * n).map(|i| Literal::I64(i as i64)).collect();
     Value::Tensor(
@@ -682,17 +726,33 @@ fn axis_reduce_i64_input() -> Value {
 }
 
 fn bench_reduce_sum_256_axis1_i64(c: &mut Criterion) {
-    let input = axis_reduce_i64_input();
+    let input = axis_reduce_i64_dense_input();
     let p = axis_params("1");
     c.bench_function("eval/reduce_sum_256_axis1_i64", |bencher| {
         bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
     });
 }
 
+fn bench_reduce_sum_256_axis1_i64_literal_reference(c: &mut Criterion) {
+    let input = axis_reduce_i64_literal_input();
+    let p = axis_params("1");
+    c.bench_function("eval/reduce_sum_256_axis1_i64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_sum_256_axis0_i64(c: &mut Criterion) {
-    let input = axis_reduce_i64_input();
+    let input = axis_reduce_i64_dense_input();
     let p = axis_params("0");
     c.bench_function("eval/reduce_sum_256_axis0_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_sum_256_axis0_i64_literal_reference(c: &mut Criterion) {
+    let input = axis_reduce_i64_literal_input();
+    let p = axis_params("0");
+    c.bench_function("eval/reduce_sum_256_axis0_i64_literal_ref", |bencher| {
         bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
     });
 }
@@ -1140,7 +1200,11 @@ criterion_group!(
     bench_reduce_sum_256_axis0_f64,
     bench_reduce_sum_256_axis0_f64_literal_reference,
     bench_reduce_sum_256_axis1_i64,
+    bench_reduce_sum_256_axis1_i64_literal_reference,
     bench_reduce_sum_256_axis0_i64,
+    bench_reduce_sum_256_axis0_i64_literal_reference,
+    bench_reduce_sum_64k_i64,
+    bench_reduce_sum_64k_i64_literal_reference,
     bench_reduce_window_64x64,
     bench_sin_1k,
     bench_sin_64k,

@@ -1,0 +1,14 @@
+frankenjax-mcqr.30.14 pass68 golden
+target=eval/reduce_sum_64k_i64
+lever=dense i64 reduction fast paths — full reduce folds as_i64_slice() directly; axis reduce drives OutIndexOdometer over the i64 slice
+method=same-worker dense vs Vec<Literal> reference bench, run in one process on ts2
+worker=ts2
+full_reduce_64k_i64=dense 12.794us [12.729, 12.872] vs literal 215.093us [214.668, 215.561] = 16.81x mid, 16.68x conservative
+axis1_inner_contiguous_i64=dense 210.306us [209.147, 211.851] vs literal 417.326us [413.931, 422.212] = 1.98x mid, 1.95x conservative
+axis0_outer_strided_i64=dense 212.175us [211.309, 213.396] vs literal 424.348us [413.433, 437.762] = 2.00x mid, 1.94x conservative
+score=10.0
+alien_primitive=dense SoA / typed columnar storage applied to reductions, alien_cs_graveyard section 8.2
+source_change=eval_reduce integral branch folds as_i64_slice() (returns scalar_i64); eval_reduce_axes integral branch drives OutIndexOdometer over as_i64_slice(); both fall back to the unchanged Vec<Literal> loop when not dense i64
+isomorphism=same fold order (ascending flat / odometer); same int_init seed and int_op (ReduceSum a+b, ReduceProd a*b, ReduceMax i64::max, ReduceMin i64::min); overflow behavior identical on both paths; axis out_idx via the pass66 odometer unchanged; as_i64_slice() Some only for I64 dense storage so I32/Literal/malformed declared-I64 inputs fall back; output scalar_i64 (full) / I64 tensor (axis)
+golden_note=axis reductions are ~2x (the pass66 odometer already removed the dominant decode); the full reduce is the 16.68x headline; both bit-identical to the literal path across Sum/Prod/Max/Min and all axis subsets
+validation=RCH cargo test -p fj-lax --lib reduction passed 31 tests incl dense_i64_reduce_bit_identical_to_literal_path; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed

@@ -247,6 +247,19 @@ pub(crate) fn eval_reduce(
 
             // Full reduction: flatten to scalar
             if is_integral {
+                // Dense i64 fast path: fold the contiguous `i64` backing slice
+                // directly. Bit-for-bit identical to the generic loop below —
+                // same `int_init` seed, same ascending order, same `int_op`,
+                // same `Value::scalar_i64` output — but skips the per-element
+                // `Literal::I64` match and the 24-byte enum stride.
+                // `as_i64_slice()` is `Some` only for I64 dense storage.
+                if let Some(values) = tensor.elements.as_i64_slice() {
+                    let mut acc = int_init;
+                    for &val in values {
+                        acc = int_op(acc, val);
+                    }
+                    return Ok(Value::scalar_i64(acc));
+                }
                 let mut acc = int_init;
                 for literal in &tensor.elements {
                     let val = literal.as_i64().ok_or(EvalError::TypeMismatch {
@@ -520,13 +533,25 @@ pub(crate) fn eval_reduce_axes(
                     int_init,
                 )?;
                 let mut odometer = OutIndexOdometer::new(&tensor.shape.dims, &kept_axes, &out_dims);
-                for literal in tensor.elements.iter() {
-                    let out_idx = odometer.next_index();
-                    let val = literal.as_i64().ok_or(EvalError::TypeMismatch {
-                        primitive,
-                        detail: "expected i64 tensor",
-                    })?;
-                    result[out_idx] = int_op(result[out_idx], val);
+                // Dense i64 fast path: drive the odometer over the contiguous
+                // `i64` backing slice, skipping the per-element `Literal::I64`
+                // match and 24-byte stride. Bit-identical to the generic loop
+                // (same order, out_idx sequence, int_op). `as_i64_slice()` is
+                // `Some` only for I64 dense storage.
+                if let Some(values) = tensor.elements.as_i64_slice() {
+                    for &val in values {
+                        let out_idx = odometer.next_index();
+                        result[out_idx] = int_op(result[out_idx], val);
+                    }
+                } else {
+                    for literal in tensor.elements.iter() {
+                        let out_idx = odometer.next_index();
+                        let val = literal.as_i64().ok_or(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "expected i64 tensor",
+                        })?;
+                        result[out_idx] = int_op(result[out_idx], val);
+                    }
                 }
                 let elements: Vec<Literal> = result.into_iter().map(Literal::I64).collect();
                 Ok(Value::Tensor(TensorValue::new(
@@ -1356,6 +1381,79 @@ mod tests {
         )
         .unwrap();
         assert_eq!(extract_i64(&result), 60);
+    }
+
+    /// Bit-exact parity for the dense-i64 reduction fast paths (full reduction
+    /// and axis reduction) vs the `Vec<Literal>` path, across
+    /// ReduceSum/Prod/Max/Min and every axis subset. Routes through
+    /// `eval_primitive` so the real per-primitive int_init/int_op run. Values
+    /// are kept small (incl. negatives + a zero) so the plain (non-wrapping)
+    /// sum/prod int_ops do not overflow — overflow behavior is identical on
+    /// both paths anyway and is covered for Add by the elementwise tests.
+    #[test]
+    fn dense_i64_reduce_bit_identical_to_literal_path() {
+        let dims = vec![2_u32, 3, 4];
+        let n = 2 * 3 * 4;
+        let data: Vec<i64> = (0..n)
+            .map(|i| match i % 7 {
+                0 => 0,
+                1 => 2,
+                2 => -3,
+                3 => 1,
+                4 => -1,
+                5 => 3,
+                _ => -2,
+            })
+            .collect();
+
+        let dense = Value::Tensor(
+            TensorValue::new_i64_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
+        assert!(dense.as_tensor().unwrap().elements.as_i64_slice().is_some());
+        let literal = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            literal
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_i64_slice()
+                .is_none()
+        );
+
+        let int_results = |v: &Value, params: &BTreeMap<String, String>, prim: Primitive| {
+            let out = crate::eval_primitive(prim, std::slice::from_ref(v), params).unwrap();
+            match out {
+                Value::Scalar(l) => vec![l.as_i64().unwrap()],
+                Value::Tensor(t) => t.elements.iter().map(|l| l.as_i64().unwrap()).collect(),
+            }
+        };
+
+        for prim in [
+            Primitive::ReduceSum,
+            Primitive::ReduceProd,
+            Primitive::ReduceMax,
+            Primitive::ReduceMin,
+        ] {
+            // Full reduction (no axes) + each axis subset.
+            for axes in ["", "0", "1", "2", "0,1", "1,2", "0,2", "-1"] {
+                let mut params = BTreeMap::new();
+                if !axes.is_empty() {
+                    params.insert("axes".to_owned(), axes.to_owned());
+                }
+                assert_eq!(
+                    int_results(&dense, &params, prim),
+                    int_results(&literal, &params, prim),
+                    "mismatch {prim:?} axes={axes:?}"
+                );
+            }
+        }
     }
 
     #[test]
