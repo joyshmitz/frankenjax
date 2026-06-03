@@ -1826,6 +1826,44 @@ pub(crate) fn eval_unary_int_or_float(
 }
 
 /// Select operation: select(cond, on_true, on_false) -> on_true where cond else on_false.
+/// Same-shape `select(Bool cond, F64 on_true, F64 on_false)` fast path.
+///
+/// Bit-for-bit identical to the generic path: for F64 on_true/on_false the
+/// generic path computes `select_literal_as_dtype(selected, F64)` which, for an
+/// F64Bits value, is `Literal::from_f64(f64::from_bits(bits))` — an identity on
+/// the bits. This picks the selected operand's bits directly, skipping the
+/// per-element bool-condition coercion and dtype-conversion dispatch. Returns
+/// `Ok(None)` if any condition element is not `Bool` or any operand element is
+/// not `F64Bits`, so the caller falls through to the generic path.
+#[inline]
+fn select_f64_same_shape_fast_path(
+    cond: &TensorValue,
+    on_true: &TensorValue,
+    on_false: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    let mut elements = Vec::with_capacity(cond.elements.len());
+    for ((c, t), f) in cond
+        .elements
+        .iter()
+        .zip(&on_true.elements)
+        .zip(&on_false.elements)
+    {
+        let Literal::Bool(flag) = *c else {
+            return Ok(None);
+        };
+        let (Literal::F64Bits(true_bits), Literal::F64Bits(false_bits)) = (*t, *f) else {
+            return Ok(None);
+        };
+        elements.push(Literal::F64Bits(if flag { true_bits } else { false_bits }));
+    }
+
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::F64,
+        cond.shape.clone(),
+        elements,
+    )?)))
+}
+
 pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() != 3 {
         return Err(EvalError::ArityMismatch {
@@ -1858,6 +1896,13 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                     primitive,
                     detail: "select requires all inputs to have the same shape".to_owned(),
                 });
+            }
+            if cond.dtype == DType::Bool
+                && on_true.dtype == DType::F64
+                && on_false.dtype == DType::F64
+                && let Some(value) = select_f64_same_shape_fast_path(cond, on_true, on_false)?
+            {
+                return Ok(value);
             }
             let dtype = promote_dtype(on_true.dtype, on_false.dtype);
             let mut elements = Vec::with_capacity(cond.elements.len());
@@ -5182,6 +5227,41 @@ mod tests {
         )
         .unwrap();
         assert!((extract_f64(&result) - 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn select_f64_same_shape_fast_path_bit_identical() {
+        // Bool cond + F64/F64 same-shape select must pick the selected operand's
+        // bits exactly (including -0.0, NaN, +-inf) and match the generic path.
+        let cond_flags = [true, false, true, false, true, false];
+        let true_data = [1.5, -0.0, f64::INFINITY, f64::NAN, -2.5, 0.0];
+        let false_data = [-9.0, f64::NEG_INFINITY, 3.0, -0.0, f64::NAN, 8.25];
+        let cond = Value::Tensor(
+            TensorValue::new(
+                DType::Bool,
+                Shape {
+                    dims: vec![cond_flags.len() as u32],
+                },
+                cond_flags.iter().map(|&b| Literal::Bool(b)).collect(),
+            )
+            .unwrap(),
+        );
+        let result = eval_select(
+            Primitive::Select,
+            &[cond, v_f64(&true_data), v_f64(&false_data)],
+        )
+        .unwrap();
+        let Value::Tensor(tensor) = result else {
+            panic!("expected tensor");
+        };
+        assert_eq!(tensor.dtype, DType::F64);
+        let expected: Vec<Literal> = cond_flags
+            .iter()
+            .zip(true_data.iter().zip(false_data.iter()))
+            .map(|(&flag, (&t, &f))| Literal::from_f64(if flag { t } else { f }))
+            .collect();
+        // Raw-bit comparison distinguishes -0.0 and NaN payloads.
+        assert_eq!(tensor.elements, expected);
     }
 
     // ── Clamp ──

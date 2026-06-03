@@ -1,0 +1,10 @@
+frankenjax-mcqr.9 fj-lax F64 same-shape select fast path golden
+
+primitive: select (Bool cond, F64 on_true, F64 on_false), same shape
+cond: [true, false, true, false, true, false]
+on_true:  [1.5, -0.0, +inf, NaN, -2.5, 0.0]
+on_false: [-9.0, -inf, 3.0, -0.0, NaN, 8.25]
+output_contract: F64Bits, output[i] = on_true[i] if cond[i] else on_false[i]
+serde_json_bits: [4609434218613702656,18442240474082181120,9218868437227405312,9223372036854775808,13836183955189006336,4620833955170484224]
+serde_json_sha256: 08990a48b09c32d4b93dc55764fc4992eec0505e8782fe186b8a2e2fb688dc0f
+proof: the generic path computes select_literal_as_dtype(selected, F64) which for an F64Bits value is Literal::from_f64(f64::from_bits(bits)) — an identity on the bits; the fast path picks the selected operand's F64Bits directly, so output bits are identical (incl. -0.0 at index 3 and NaN at index 4). Non-Bool conditions or non-F64 operands fall through to the generic path.

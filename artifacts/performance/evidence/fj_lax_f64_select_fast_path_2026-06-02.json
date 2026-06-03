@@ -1,0 +1,38 @@
+{
+  "bead": "frankenjax-mcqr.9",
+  "date": "2026-06-02",
+  "subsystem": "fj-lax",
+  "target": "F64 same-shape select (Bool cond, F64 on_true, F64 on_false)",
+  "lever": {
+    "description": "Add select_f64_same_shape_fast_path to eval_select's Tensor/Tensor/Tensor arm: when cond is Bool and both operands are F64 same-shape, pick the selected operand's F64Bits directly, skipping the per-element select_bool_condition coercion and select_literal_as_dtype conversion. Returns None (fall through) if any cond element is not Bool or any operand element is not F64Bits."
+  },
+  "benchmarks": {
+    "baseline": {
+      "note": "fast-path guard temporarily removed; generic select_literal_as_dtype path",
+      "tool": "rch Criterion",
+      "select_1k_f64_mean_us": 28.529
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/select_1k_f64'",
+      "select_1k_f64_mean_us": 2.534
+    },
+    "speedup": {
+      "select_1k_f64": 11.26
+    }
+  },
+  "score": {
+    "impact": 4,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 20.0
+  },
+  "isomorphism_proof": {
+    "ordering": "Output elements produced in tensor index order; the same operand is selected per position as the generic path.",
+    "floating_point": "select_literal_as_dtype(value, F64) is Literal::from_f64(f64::from_bits(bits)) for F64Bits, an identity; the fast path picks the same bits directly.",
+    "tie_breaking": "None introduced; -0.0 and NaN payloads preserved (golden indices 3,4).",
+    "rng": "No RNG state is read or written.",
+    "errors": "Only Bool cond + F64/F64 same-shape selects take the fast path; non-Bool conditions, non-F64 operands, scalar operands, and shape mismatches use the generic path.",
+    "unit_test": "fj-lax arithmetic::tests::select_f64_same_shape_fast_path_bit_identical (incl. -0.0, NaN, +-inf); 995/995 fj-lax tests pass.",
+    "golden_output_sha256": "08990a48b09c32d4b93dc55764fc4992eec0505e8782fe186b8a2e2fb688dc0f"
+  }
+}
