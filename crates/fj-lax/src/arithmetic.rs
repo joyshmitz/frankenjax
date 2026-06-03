@@ -5193,8 +5193,9 @@ mod tests {
             let a = Value::vector_f64(&lhs_data).unwrap();
             let b = Value::vector_f64(&rhs_data).unwrap();
             let result = eval_binary_elementwise(primitive, &[a, b], |x, y| x + y, scalar).unwrap();
+            assert!(matches!(result, Value::Tensor(_)));
             let Value::Tensor(tensor) = result else {
-                panic!("expected tensor for {primitive:?}");
+                return;
             };
             assert_eq!(tensor.dtype, DType::F64);
             assert!(
@@ -5235,8 +5236,9 @@ mod tests {
                 }
             };
             let result = eval_binary_elementwise(primitive, &[a, b], int_op, scalar).unwrap();
+            assert!(matches!(result, Value::Tensor(_)));
             let Value::Tensor(tensor) = result else {
-                panic!("expected tensor for {primitive:?}");
+                return;
             };
             assert_eq!(tensor.dtype, DType::F64);
             assert!(

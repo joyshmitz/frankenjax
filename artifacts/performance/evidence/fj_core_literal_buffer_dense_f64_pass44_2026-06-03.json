@@ -106,7 +106,7 @@
     },
     {
       "command": "ubs crates/fj-core/src/lib.rs crates/fj-lax/src/arithmetic.rs",
-      "result": "exit 1 from file-wide pre-existing test panic/unwrap inventories and heuristic findings; UBS internal fmt, clippy, cargo check, test build, cargo-audit, and cargo-deny subchecks were clean"
+      "result": "exit 1 from 11 file-wide pre-existing test panic/heuristic findings plus existing warnings; the four new direct test panic macros were removed, and UBS internal fmt, clippy, cargo check, test build, cargo-audit, and cargo-deny subchecks were clean"
     }
   ],
   "notes": [

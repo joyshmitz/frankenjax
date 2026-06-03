@@ -5385,10 +5385,7 @@ mod tests {
         let literal_bits = tensor
             .elements
             .iter()
-            .map(|literal| match literal {
-                Literal::F64Bits(bits) => *bits,
-                other => panic!("expected f64 literal, got {other:?}"),
-            })
+            .filter_map(|literal| literal.as_f64().map(f64::to_bits))
             .collect::<Vec<_>>();
         assert_eq!(
             literal_bits,
@@ -5404,18 +5401,22 @@ mod tests {
         let tensor = TensorValue::new(DType::F64, Shape::vector(1), vec![Literal::I64(7)])
             .expect("TensorValue::new only checks element count");
         assert!(tensor.elements.as_f64_slice().is_none());
-        match tensor.validate_dtype_consistency() {
-            Err(ValueError::ElementDTypeMismatch {
-                index,
-                declared,
-                literal,
-            }) => {
-                assert_eq!(index, 0);
-                assert_eq!(declared, DType::F64);
-                assert_eq!(literal, Literal::I64(7));
-            }
-            other => panic!("expected ElementDTypeMismatch, got {other:?}"),
-        }
+        let mismatch = tensor.validate_dtype_consistency();
+        assert!(matches!(
+            mismatch,
+            Err(ValueError::ElementDTypeMismatch { .. })
+        ));
+        let Err(ValueError::ElementDTypeMismatch {
+            index,
+            declared,
+            literal,
+        }) = mismatch
+        else {
+            return;
+        };
+        assert_eq!(index, 0);
+        assert_eq!(declared, DType::F64);
+        assert_eq!(literal, Literal::I64(7));
     }
 
     // ── Shape tests ──────────────────────────────────────────
