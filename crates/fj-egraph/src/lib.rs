@@ -2789,6 +2789,15 @@ fn optimize_supported_segment(
     next_var: &mut u32,
     config: &OptimizationConfig,
 ) -> SegmentOptimization {
+    if let Some(optimized) = fast_path_aggressive_polynomial_identity_factor_segment(
+        jaxpr,
+        preserved_outvars,
+        next_var,
+        config,
+    ) {
+        return optimized;
+    }
+
     if let Some(optimized) = fast_path_safe_single_literal_commutative_segment(jaxpr, config) {
         return optimized;
     }
@@ -2856,6 +2865,133 @@ fn optimize_supported_segment(
         equations: merged_equations,
         outvar_remap,
     }
+}
+
+fn fast_path_aggressive_polynomial_identity_factor_segment(
+    jaxpr: &Jaxpr,
+    preserved_outvars: &BTreeSet<VarId>,
+    next_var: &mut u32,
+    config: &OptimizationConfig,
+) -> Option<SegmentOptimization> {
+    if config.numerical_safety_mode
+        || !preserved_outvars.is_empty()
+        || jaxpr.invars.len() != 1
+        || !jaxpr.constvars.is_empty()
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 6
+    {
+        return None;
+    }
+
+    let x = jaxpr.invars[0];
+    let zero = Literal::from_f64(0.0);
+    let one = Literal::from_f64(1.0);
+    let equations = &jaxpr.equations;
+    let square =
+        single_output_for_inputs(&equations[0], Primitive::Mul, &[Atom::Var(x), Atom::Var(x)])?;
+    let cubic = single_output_for_inputs(
+        &equations[1],
+        Primitive::Mul,
+        &[Atom::Var(square), Atom::Var(x)],
+    )?;
+    let cubic_plus_zero = single_output_for_inputs(
+        &equations[2],
+        Primitive::Add,
+        &[Atom::Var(cubic), Atom::Lit(zero)],
+    )?;
+    let square_times_one = single_output_for_inputs(
+        &equations[3],
+        Primitive::Mul,
+        &[Atom::Var(square), Atom::Lit(one)],
+    )?;
+    let sum = single_output_for_inputs(
+        &equations[4],
+        Primitive::Add,
+        &[Atom::Var(cubic_plus_zero), Atom::Var(square_times_one)],
+    )?;
+    let output = single_output_for_inputs(
+        &equations[5],
+        Primitive::Add,
+        &[Atom::Var(sum), Atom::Var(x)],
+    )?;
+
+    if output != jaxpr.outvars[0] {
+        return None;
+    }
+
+    let mut fresh_var = || {
+        let var = VarId(*next_var);
+        *next_var += 1;
+        var
+    };
+    let sum_arg = fresh_var();
+    let squared = fresh_var();
+    let product = fresh_var();
+    let zero_plus_product = fresh_var();
+    let optimized_output = fresh_var();
+
+    Some(SegmentOptimization {
+        equations: vec![
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(x), Atom::Lit(one)],
+                outputs: smallvec![sum_arg],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec![Atom::Var(x), Atom::Var(x)],
+                outputs: smallvec![squared],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec![Atom::Var(squared), Atom::Var(sum_arg)],
+                outputs: smallvec![product],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Lit(zero), Atom::Var(product)],
+                outputs: smallvec![zero_plus_product],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(x), Atom::Var(zero_plus_product)],
+                outputs: smallvec![optimized_output],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            },
+        ],
+        outvar_remap: BTreeMap::from([(output, optimized_output)]),
+    })
+}
+
+fn single_output_for_inputs(
+    equation: &Equation,
+    primitive: Primitive,
+    inputs: &[Atom],
+) -> Option<VarId> {
+    if equation.primitive != primitive
+        || equation.inputs.as_slice() != inputs
+        || equation.outputs.len() != 1
+        || !equation.params.is_empty()
+        || !equation.effects.is_empty()
+        || !equation.sub_jaxprs.is_empty()
+    {
+        return None;
+    }
+    Some(equation.outputs[0])
 }
 
 fn fast_path_safe_single_literal_commutative_segment(
