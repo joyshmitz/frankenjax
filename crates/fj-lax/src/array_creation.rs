@@ -138,9 +138,16 @@ pub fn linspace(start: f64, stop: f64, num: usize, endpoint: bool) -> Result<Val
         (stop - start) / num as f64
     };
 
-    let elements: Vec<Literal> = (0..num)
+    let mut elements: Vec<Literal> = (0..num)
         .map(|i| Literal::from_f64(start + step * i as f64))
         .collect();
+
+    // JAX/NumPy pin the final sample to exactly `stop` when `endpoint=True`,
+    // overriding the `start + step*(num-1)` value (which drifts by up to an ULP).
+    // `jnp.linspace` does `out = out.at[-1].set(stop)`; reproduce it bit-for-bit.
+    if endpoint && num > 1 {
+        elements[num - 1] = Literal::from_f64(stop);
+    }
 
     let tensor = TensorValue::new(
         DType::F64,
@@ -159,23 +166,30 @@ pub fn linspace(start: f64, stop: f64, num: usize, endpoint: bool) -> Result<Val
 pub fn arange(start: f64, stop: f64, step: f64) -> Result<Value, ValueError> {
     assert!(step != 0.0, "arange step cannot be zero");
 
-    let mut elements = Vec::new();
-    let mut current = start;
-
-    if step > 0.0 {
-        while current < stop {
-            elements.push(Literal::from_f64(current));
-            current += step;
-        }
+    // JAX/NumPy size the result once as `ceil((stop - start) / step)` (clamped to
+    // >= 0) and compute each value as `start + step*i`. The previous iterative
+    // form (`current += step`) accumulates rounding error, so it could cross the
+    // half-open boundary at a different index and return a DIFFERENT element
+    // count than JAX — e.g. arange(0, 0.9, 0.3): 0.3+0.3+0.3 = 0.8999… < 0.9 so
+    // the loop emitted 4 elements, whereas JAX's ceil(0.9/0.3)=ceil(2.999…)=3.
+    let raw = ((stop - start) / step).ceil();
+    let n = if raw.is_finite() && raw > 0.0 {
+        raw as usize
     } else {
-        while current > stop {
-            elements.push(Literal::from_f64(current));
-            current += step;
-        }
-    }
+        0
+    };
 
-    let n = elements.len() as u32;
-    let tensor = TensorValue::new(DType::F64, Shape { dims: vec![n] }, elements)?;
+    let elements: Vec<Literal> = (0..n)
+        .map(|i| Literal::from_f64(start + step * i as f64))
+        .collect();
+
+    let tensor = TensorValue::new(
+        DType::F64,
+        Shape {
+            dims: vec![n as u32],
+        },
+        elements,
+    )?;
     Ok(Value::Tensor(tensor))
 }
 
@@ -538,6 +552,53 @@ mod tests {
     #[should_panic(expected = "step cannot be zero")]
     fn test_arange_zero_step_panics() {
         let _ = arange(0.0, 5.0, 0.0);
+    }
+
+    #[test]
+    fn test_linspace_endpoint_is_bit_exact_stop() {
+        // JAX pins out[-1] to exactly `stop` (endpoint=True). For stops whose
+        // step doesn't divide evenly, `start + step*(num-1)` drifts by an ULP;
+        // the pin must make the final element bit-identical to `stop`.
+        for &(start, stop, num) in &[(0.0, 1.0, 5usize), (0.0, 2.3, 7), (-1.0, 3.7, 13)] {
+            let v = linspace(start, stop, num, true).unwrap();
+            let vals = extract_f64(&v);
+            assert_eq!(vals.len(), num);
+            assert_eq!(
+                vals[num - 1].to_bits(),
+                stop.to_bits(),
+                "linspace({start},{stop},{num}) endpoint not pinned to stop"
+            );
+        }
+        // endpoint=false must NOT pin the last sample to stop.
+        let open = extract_f64(&linspace(0.0, 1.0, 5, false).unwrap());
+        assert!((open[4] - 0.8).abs() < 1e-12 && open[4] != 1.0);
+        // num == 1 is just [start].
+        assert_eq!(
+            extract_f64(&linspace(5.0, 10.0, 1, true).unwrap()),
+            vec![5.0]
+        );
+    }
+
+    #[test]
+    fn test_arange_count_matches_jax_ceil_formula() {
+        // Element count is ceil((stop-start)/step), matching JAX/NumPy — NOT the
+        // iterative-accumulation count. arange(0,0.9,0.3): ceil(0.9/0.3)=3 even
+        // though 0.3+0.3+0.3 < 0.9 (which the old loop counted as 4).
+        let v = extract_f64(&arange(0.0, 0.9, 0.3).unwrap());
+        assert_eq!(
+            v.len(),
+            3,
+            "arange(0,0.9,0.3) must have ceil(0.9/0.3)=3 elements"
+        );
+        // Values are start + step*i (exact for 0.25 stride), not accumulated.
+        let q = extract_f64(&arange(0.0, 1.0, 0.25).unwrap());
+        assert_eq!(q, vec![0.0, 0.25, 0.5, 0.75]);
+        for (i, &val) in q.iter().enumerate() {
+            assert_eq!(val.to_bits(), (0.0 + 0.25 * i as f64).to_bits());
+        }
+        // start == stop and overshoot-only ranges are empty.
+        assert!(extract_f64(&arange(5.0, 5.0, 1.0).unwrap()).is_empty());
+        assert!(extract_f64(&arange(5.0, 6.0, -1.0).unwrap()).is_empty());
     }
 
     #[test]
