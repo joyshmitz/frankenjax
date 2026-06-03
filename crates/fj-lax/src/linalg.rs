@@ -1943,8 +1943,16 @@ pub fn matrix_norm_inf(a: &[f64], m: usize, n: usize) -> f64 {
 /// Matches `jnp.linalg.solve(a, b)`.
 ///
 /// Returns None if the matrix is singular.
-pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
-    if a.len() != n * n || b.len() != n {
+/// LU-factorize an `n`x`n` matrix in place with partial (row) pivoting.
+///
+/// Returns `(lu, p)` where `lu` packs the unit-lower `L` (strictly below the
+/// diagonal) and `U` (on/above the diagonal), and `p` is the row permutation.
+/// Returns `None` for a singular matrix (pivot magnitude `< 1e-14`). The
+/// elimination order and pivot rule depend only on `A`, so a single factor can
+/// drive any number of right-hand sides with results bit-identical to factoring
+/// per RHS.
+fn lu_factor(a: &[f64], n: usize) -> Option<(Vec<f64>, Vec<usize>)> {
+    if a.len() != n * n {
         return None;
     }
 
@@ -1982,6 +1990,13 @@ pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
         }
     }
 
+    Some((lu, p))
+}
+
+/// Solve `Ax = b` from a precomputed LU factorization via forward then back
+/// substitution. Arithmetic and ordering match the inline substitution `solve`
+/// previously performed, so the result is bit-for-bit identical.
+fn lu_solve(lu: &[f64], p: &[usize], b: &[f64], n: usize) -> Vec<f64> {
     let mut pb = vec![0.0; n];
     for i in 0..n {
         pb[i] = b[p[i]];
@@ -2005,17 +2020,30 @@ pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
         x[i] = sum / lu[i * n + i];
     }
 
-    Some(x)
+    x
+}
+
+pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
+    if a.len() != n * n || b.len() != n {
+        return None;
+    }
+    let (lu, p) = lu_factor(a, n)?;
+    Some(lu_solve(&lu, &p, b, n))
 }
 
 /// Solve the linear system Ax = b for multiple right-hand sides.
 ///
-/// A is n x n, B is n x m, returns X which is n x m.
+/// A is n x n, B is n x m, returns X which is n x m. The LU factorization is
+/// computed once and reused across all `m` columns (previously `A` was
+/// re-factorized per column: O(n^3 * m) -> O(n^3 + n^2 * m)). Bit-for-bit
+/// identical: every column previously received the same factorization of the
+/// same `A`.
 pub fn solve_multi_rhs(a: &[f64], b: &[f64], n: usize, m: usize) -> Option<Vec<f64>> {
+    let (lu, p) = lu_factor(a, n)?;
     let mut result = vec![0.0; n * m];
     for j in 0..m {
         let rhs: Vec<f64> = (0..n).map(|i| b[i * m + j]).collect();
-        let x = solve(a, &rhs, n)?;
+        let x = lu_solve(&lu, &p, &rhs, n);
         for i in 0..n {
             result[i * m + j] = x[i];
         }
@@ -2947,6 +2975,45 @@ mod tests {
         assert!((x[1] - 2.0).abs() < 1e-10);
         assert!((x[2] - 3.0).abs() < 1e-10);
         assert!((x[3] - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn solve_multi_rhs_bit_identical_to_per_column_solve() {
+        // The shared-factorization multi-RHS path must produce bit-for-bit the
+        // same result as solving each RHS column independently (which is what
+        // the previous per-column-refactor implementation did).
+        let n = 7usize;
+        let m = 5usize;
+        // Deterministic, well-conditioned (diagonally dominant) A.
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = if i == j {
+                    (n as f64) + (i as f64) * 0.5 + 3.0
+                } else {
+                    ((i * 31 + j * 17) % 11) as f64 * 0.25 - 1.0
+                };
+            }
+        }
+        let mut b = vec![0.0f64; n * m];
+        for i in 0..n {
+            for j in 0..m {
+                b[i * m + j] = ((i * 13 + j * 7 + 1) % 19) as f64 * 0.5 - 4.0;
+            }
+        }
+
+        let multi = solve_multi_rhs(&a, &b, n, m).expect("non-singular");
+        for j in 0..m {
+            let rhs: Vec<f64> = (0..n).map(|i| b[i * m + j]).collect();
+            let single = solve(&a, &rhs, n).expect("non-singular");
+            for i in 0..n {
+                assert_eq!(
+                    multi[i * m + j].to_bits(),
+                    single[i].to_bits(),
+                    "mismatch at row {i} col {j}"
+                );
+            }
+        }
     }
 
     // ── Least squares tests ─────────────────────────────────────────

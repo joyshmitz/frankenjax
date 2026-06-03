@@ -1,0 +1,36 @@
+{
+  "bead": "frankenjax-mcqr.19",
+  "date": "2026-06-02",
+  "subsystem": "fj-lax (linalg)",
+  "target": "Multi-right-hand-side linear solve (lax.linalg.solve with matrix B)",
+  "lever": {
+    "description": "solve_multi_rhs previously called solve(A, rhs_col) for each of the m RHS columns; each solve re-ran the full O(n^3) LU factorization of A. Refactored solve into lu_factor (partial-pivot LU) + lu_solve (forward/back substitution): solve = factor + solve; solve_multi_rhs factors A once and substitutes per column. Complexity O(n^3 * m) -> O(n^3 + n^2 * m)."
+  },
+  "benchmarks": {
+    "method": "rch Criterion, same worker; baseline = solve_multi_rhs reverted to per-column solve (re-factor), optimized = single lu_factor reused via lu_solve",
+    "baseline": {
+      "eval/solve_24x24_24rhs_f64_us": 162.36
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/solve_24x24_24rhs_f64'",
+      "eval/solve_24x24_24rhs_f64_us": 23.658
+    },
+    "speedup": {
+      "solve_24x24_24rhs_f64": 6.863
+    }
+  },
+  "score": {
+    "impact": 4,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 20.0
+  },
+  "isomorphism_proof": {
+    "math": "Partial-pivot LU factorization (pivot choice + elimination) depends only on A, so the single factorization equals the one each per-column solve previously computed. lu_solve performs the same forward/back substitution arithmetic in the same order as the prior inline substitution.",
+    "ordering": "Output written in the same [row*m + col] layout; per-column substitution order unchanged.",
+    "tie_breaking": "Pivot selection rule (first strictly-greater |value|, threshold 1e-14) unchanged.",
+    "rng": "No RNG state is read or written.",
+    "errors": "Singular-matrix detection (pivot magnitude < 1e-14 -> None) preserved; single-RHS solve(), lstsq(), and eval_solve(b_cols==1) are unaffected (solve() still factor+solve, bit-identical).",
+    "bit_identity_proof": "New unit test linalg::tests::solve_multi_rhs_bit_identical_to_per_column_solve asserts, via f64::to_bits(), that solve_multi_rhs(A,B) equals solving each column independently with solve() (the prior per-column-refactor behavior) for a 7x7 x 5-RHS deterministic system. All 7 linalg solve tests + the full fj-lax suite pass. No separate golden-bits file: the to_bits parity test pins the result to the previous semantics directly."
+  }
+}

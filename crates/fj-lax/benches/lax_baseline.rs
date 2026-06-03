@@ -184,6 +184,45 @@ fn bench_dot_100(c: &mut Criterion) {
     });
 }
 
+fn bench_solve_24x24_24rhs(c: &mut Criterion) {
+    // Multi-RHS linear solve: A (24x24, diagonally dominant => non-singular)
+    // and B (24x24). Exercises solve_multi_rhs, which factorizes A once.
+    let n = 24usize;
+    let m = 24usize;
+    let mut a_elems = Vec::with_capacity(n * n);
+    for i in 0..n {
+        for j in 0..n {
+            let v = if i == j {
+                (n as f64) + (i as f64) * 0.5 + 3.0
+            } else {
+                (((i * 31 + j * 17) % 11) as f64) * 0.25 - 1.0
+            };
+            a_elems.push(Literal::from_f64(v));
+        }
+    }
+    let a = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: Shape {
+            dims: vec![n as u32, n as u32],
+        },
+        elements: a_elems,
+    });
+    let b_data: Vec<f64> = (0..n * m)
+        .map(|i| ((i * 13 + 1) % 19) as f64 * 0.5 - 4.0)
+        .collect();
+    let b = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: Shape {
+            dims: vec![n as u32, m as u32],
+        },
+        elements: b_data.into_iter().map(Literal::from_f64).collect(),
+    });
+    let p = no_params();
+    c.bench_function("eval/solve_24x24_24rhs_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Solve, &[a.clone(), b.clone()], &p))
+    });
+}
+
 fn bench_reduce_sum_1k(c: &mut Criterion) {
     let data: Vec<i64> = (0..1000).collect();
     let input = Value::vector_i64(&data).unwrap();
@@ -610,6 +649,7 @@ criterion_group!(
     bench_add_broadcast_bias_1k_f64,
     bench_nextafter_1k,
     bench_dot_100,
+    bench_solve_24x24_24rhs,
     bench_reduce_sum_1k,
     bench_reduce_window_64x64,
     bench_sin_1k,
