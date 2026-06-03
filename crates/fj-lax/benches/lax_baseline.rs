@@ -1,6 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
-use fj_lax::eval_primitive;
+use fj_lax::{eval_primitive, eval_primitive_multi};
 use std::collections::BTreeMap;
 
 const LARGE_ELEMENTWISE_LEN: usize = 65_536;
@@ -256,6 +256,34 @@ fn bench_transpose_256x256_f64(c: &mut Criterion) {
     p.insert("permutation".to_owned(), "1,0".to_owned());
     c.bench_function("eval/transpose_256x256_f64", |bencher| {
         bencher.iter(|| eval_primitive(Primitive::Transpose, std::slice::from_ref(&m), &p))
+    });
+}
+
+fn bench_eig_48(c: &mut Criterion) {
+    // Real eigendecomposition (Eig) via QR iteration: ~100 iterations, each
+    // doing two O(n^3) internal matrix multiplies (matrix_mul / _complex).
+    let n = 48usize;
+    let data: Vec<f64> = (0..n * n)
+        .map(|idx| {
+            let i = idx / n;
+            let j = idx % n;
+            if i == j {
+                (n as f64) + (i as f64)
+            } else {
+                (((i * 7 + j * 13) % 5) as f64) - 2.0
+            }
+        })
+        .collect();
+    let m = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: Shape {
+            dims: vec![n as u32, n as u32],
+        },
+        elements: data.into_iter().map(Literal::from_f64).collect(),
+    });
+    let p = no_params();
+    c.bench_function("linalg/eig_48x48_f64", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::Eig, std::slice::from_ref(&m), &p))
     });
 }
 
@@ -734,6 +762,7 @@ criterion_group!(
     bench_add_broadcast_bias_1k_f64,
     bench_nextafter_1k,
     bench_dot_100,
+    bench_eig_48,
     bench_matmul_2d_256,
     bench_solve_24x24_24rhs,
     bench_concat_axis1_3x_f64,

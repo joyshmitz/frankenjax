@@ -1618,32 +1618,39 @@ fn qr_decomposition(a: &[f64], n: usize) -> (Vec<(f64, f64)>, Vec<f64>) {
 }
 
 fn matrix_mul(a: &[f64], b: &[(f64, f64)], n: usize) -> Vec<f64> {
+    // i-k-j order: the inner j-loop streams a contiguous row of B and C rather
+    // than the i-j-k order's stride-n walk down a column of B. Each c[i][j]
+    // still accumulates ascending-k, so the result is bit-for-bit identical.
     let mut c = vec![0.0; n * n];
     for i in 0..n {
-        for j in 0..n {
-            let mut sum = 0.0;
-            for k in 0..n {
-                sum += a[i * n + k] * b[k * n + j].0;
+        let a_row = i * n;
+        let c_row = i * n;
+        for k in 0..n {
+            let a_ik = a[a_row + k];
+            let b_row = k * n;
+            for j in 0..n {
+                c[c_row + j] += a_ik * b[b_row + j].0;
             }
-            c[i * n + j] = sum;
         }
     }
     c
 }
 
 fn matrix_mul_complex(a: &[(f64, f64)], b: &[(f64, f64)], n: usize) -> Vec<(f64, f64)> {
+    // i-k-j order (see matrix_mul). Real and imaginary parts each accumulate
+    // ascending-k exactly as before, so the result is bit-for-bit identical.
     let mut c = vec![(0.0, 0.0); n * n];
     for i in 0..n {
-        for j in 0..n {
-            let mut re = 0.0;
-            let mut im = 0.0;
-            for k in 0..n {
-                let (ar, ai) = a[i * n + k];
-                let (br, bi) = b[k * n + j];
-                re += ar * br - ai * bi;
-                im += ar * bi + ai * br;
+        let a_row = i * n;
+        let c_row = i * n;
+        for k in 0..n {
+            let (ar, ai) = a[a_row + k];
+            let b_row = k * n;
+            for j in 0..n {
+                let (br, bi) = b[b_row + j];
+                c[c_row + j].0 += ar * br - ai * bi;
+                c[c_row + j].1 += ar * bi + ai * br;
             }
-            c[i * n + j] = (re, im);
         }
     }
     c
@@ -3013,6 +3020,67 @@ mod tests {
                     "mismatch at row {i} col {j}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn matrix_mul_ikj_bit_identical_to_ijk() {
+        let n = 11usize;
+        let a: Vec<f64> = (0..n * n).map(|i| (i as f64 * 0.137).sin() * 2.0).collect();
+        let b_re: Vec<f64> = (0..n * n).map(|i| (i as f64 * 0.071).cos() * 1.5).collect();
+        let b_im: Vec<f64> = (0..n * n).map(|i| (i as f64 * 0.091).sin() * 0.5).collect();
+        let b: Vec<(f64, f64)> = b_re
+            .iter()
+            .zip(b_im.iter())
+            .map(|(&r, &i)| (r, i))
+            .collect();
+        let a_cplx: Vec<(f64, f64)> = a.iter().map(|&v| (v, v * 0.25)).collect();
+
+        // Reference: i-j-k accumulation.
+        let mut ref_real = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += a[i * n + k] * b[k * n + j].0;
+                }
+                ref_real[i * n + j] = s;
+            }
+        }
+        let mut ref_cplx = vec![(0.0f64, 0.0f64); n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let (mut re, mut im) = (0.0, 0.0);
+                for k in 0..n {
+                    let (ar, ai) = a_cplx[i * n + k];
+                    let (br, bi) = b[k * n + j];
+                    re += ar * br - ai * bi;
+                    im += ar * bi + ai * br;
+                }
+                ref_cplx[i * n + j] = (re, im);
+            }
+        }
+
+        let got_real = matrix_mul(&a, &b, n);
+        for idx in 0..n * n {
+            assert_eq!(
+                got_real[idx].to_bits(),
+                ref_real[idx].to_bits(),
+                "real {idx}"
+            );
+        }
+        let got_cplx = matrix_mul_complex(&a_cplx, &b, n);
+        for idx in 0..n * n {
+            assert_eq!(
+                got_cplx[idx].0.to_bits(),
+                ref_cplx[idx].0.to_bits(),
+                "re {idx}"
+            );
+            assert_eq!(
+                got_cplx[idx].1.to_bits(),
+                ref_cplx[idx].1.to_bits(),
+                "im {idx}"
+            );
         }
     }
 

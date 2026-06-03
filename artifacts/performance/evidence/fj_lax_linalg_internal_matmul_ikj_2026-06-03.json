@@ -1,0 +1,39 @@
+{
+  "bead": "frankenjax-mcqr.24",
+  "date": "2026-06-03",
+  "subsystem": "fj-lax (linalg)",
+  "target": "Internal GEMMs matrix_mul / matrix_mul_complex used by eval_eig (Eig primitive, real eigendecomposition via QR iteration)",
+  "lever": {
+    "description": "Reorder matrix_mul and matrix_mul_complex from i-j-k to i-k-j loop order. The original inner k-loop read b[k*n+j] (stride n down a column of B = a cache miss per multiply); the i-k-j inner j-loop streams a contiguous row of B and a contiguous row of C. Each output element still accumulates over k in ascending order (real and imaginary parts independently for the complex variant), so the result is bit-for-bit identical."
+  },
+  "benchmarks": {
+    "method": "rch Criterion, eval_primitive_multi(Eig, 48x48 f64); baseline = i-j-k matmuls, optimized = i-k-j",
+    "baseline": {
+      "linalg/eig_48x48_f64_ms": 61.482,
+      "ci_ms": [59.632, 63.597]
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'linalg/eig_48x48_f64'",
+      "linalg/eig_48x48_f64_ms": 44.418,
+      "ci_ms": [43.605, 45.275]
+    },
+    "speedup": {
+      "eig_48x48_f64": 1.38
+    },
+    "note": "eval_eig runs ~100 QR iterations, each with three O(n^3) operations: qr_decomposition (Gram-Schmidt) and the two matmuls optimized here. Reordering only the two matmuls yields 1.38x on the full primitive; the Gram-Schmidt step (not touched) is the remaining cost. Non-overlapping CIs."
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 15.0,
+    "note": "Realized 1.38x on a real production LAPACK primitive (Eig), bit-exact. Below 2x speedup because the optimized matmuls are ~2/3 of each iteration's matmul-class work and Gram-Schmidt QR is untouched."
+  },
+  "isomorphism_proof": {
+    "floating_point": "Per output element the accumulation order over k is unchanged (ascending k = 0..n-1); the complex variant accumulates re and im independently in the same order. IEEE-754 sums are bit-for-bit identical; no FMA fusion introduced.",
+    "ordering": "Only loop-nest visitation order changed; output positions/values identical.",
+    "rng": "No RNG state is read or written.",
+    "errors": "No new error paths.",
+    "bit_identity_proof": "New test matrix_mul_ikj_bit_identical_to_ijk multiplies 11x11 real and complex matrices and asserts f64::to_bits() equality (real + imaginary) vs inline i-j-k references. Existing eig/eigh/svd/qr unit + oracle conformance tests and the full fj-lax suite (1006/1006) pass. No synthetic golden-bits file: the to_bits parity test pins the result to the prior accumulation order."
+  }
+}
