@@ -1,0 +1,39 @@
+frankenjax-6cdy pass37 rejected scatter batched-indices behavior golden
+
+target:
+  crate: fj-dispatch
+  primitive: LaxScatterOverwrite
+  transform: vmap
+  in_axes: none,0,0
+
+unit_cases:
+  batched_indices_updates_direct:
+    operand: [0, 0, 0, 0]
+    indices: [[1, 3], [0, 2]]
+    updates: [[10, 20], [30, 40]]
+    output_shape: [2, 4]
+    output: [0, 10, 0, 20, 30, 0, 40, 0]
+  duplicates_keep_last_update_direct:
+    operand: [0, 0, 0]
+    indices: [[1, 1, 2], [0, 0, 2]]
+    updates: [[10, 20, 30], [40, 50, 60]]
+    output_shape: [2, 3]
+    output: [0, 20, 30, 50, 0, 60]
+  unbatched_index_batched_updates_direct:
+    operand: [0, 0, 0]
+    indices: [1]
+    updates: [[5], [7]]
+    output_shape: [2, 3]
+    output: [0, 5, 0, 0, 7, 0]
+  add_mode_keeps_batches_independent:
+    operand: [1, 1, 1]
+    indices: [[1, 1], [0, 1]]
+    updates: [[2, 3], [4, 5]]
+    output_shape: [2, 3]
+    output: [1, 6, 1, 10, 1, 1]
+
+isomorphism:
+  ordering: row-major input traversal and batch-major output layout are preserved
+  tie_breaking: duplicate scatter indices retain last update in traversal order
+  floating_point: not applicable; rejected lever only touched integral overwrite initialization
+  rng: not applicable; no random inputs or state

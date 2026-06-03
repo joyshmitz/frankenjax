@@ -1,0 +1,71 @@
+{
+  "bead": "frankenjax-6cdy",
+  "pass": 37,
+  "status": "rejected",
+  "date": "2026-06-03",
+  "crate": "fj-dispatch",
+  "hotspot": "vmap_scatter/batched_indices_updates",
+  "profile_backed_target": {
+    "source": "pass36 fj-dispatch full profile",
+    "worker": "vmi1153651",
+    "mean_ms": 23.703,
+    "ci_ms": [22.884, 24.647]
+  },
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-scatter-pass37-baseline-20260603 rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_scatter/batched_indices_updates' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1293453",
+    "mean_ms": 9.5462,
+    "ci_ms": [9.2955, 9.8333],
+    "samples": 30,
+    "warm_up_seconds": 1,
+    "measurement_seconds": 3
+  },
+  "lever": {
+    "description": "Special-case repeated rank-1 scatter operand initialization when every operand literal is identical, using vec![first; output_len] instead of extending the operand slice once per batch.",
+    "alien_graveyard_inspiration": [
+      "scatter/gather copy avoidance",
+      "structural sharing/copy-on-write copy avoidance"
+    ],
+    "source_diff_retained": false
+  },
+  "proof": {
+    "format": {
+      "command": "cargo fmt -p fj-dispatch --check",
+      "result": "pass"
+    },
+    "tests": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-scatter-pass37-test-20260603 rch exec -- cargo test -p fj-dispatch scatter -- --nocapture",
+      "worker": "vmi1227854",
+      "result": "pass",
+      "unit_tests": 4,
+      "p2c_tests": 3
+    },
+    "clippy": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-scatter-pass37-clippy-20260603 rch exec -- cargo clippy -p fj-dispatch --all-targets -- -D warnings",
+      "worker": "vmi1153651",
+      "result": "pass"
+    },
+    "golden_output_sha256": "29f539ce4ca698a38c578af9464d83f3e842461a9e968ab2ae1c40165cb9d05f",
+    "isomorphism": {
+      "ordering": "row-major input traversal and batch-major output layout preserved",
+      "tie_breaking": "duplicate scatter indices keep the last update in traversal order",
+      "floating_point": "not applicable; integral overwrite scatter only",
+      "rng": "not applicable"
+    }
+  },
+  "after": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-dispatch-scatter-pass37-after-20260603 rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_scatter/batched_indices_updates' --sample-size 30 --warm-up-time 1 --measurement-time 3",
+    "worker": "vmi1153651",
+    "mean_ms": 26.234,
+    "ci_ms": [25.522, 27.001],
+    "samples": 30,
+    "warm_up_seconds": 1,
+    "measurement_seconds": 3
+  },
+  "decision": {
+    "score": 0.0,
+    "threshold": 2.0,
+    "reason": "The candidate did not produce a real win. It regressed against the pass baseline and also failed to beat the earlier same-worker profile row on vmi1153651.",
+    "source_restored": true
+  }
+}
