@@ -65,6 +65,10 @@ pub(crate) fn eval_binary_elementwise(
             }
         }
         (Value::Scalar(lhs), Value::Tensor(rhs)) => {
+            if let Some(value) = eval_f64_scalar_broadcast_binop(primitive, *lhs, rhs, true)? {
+                return Ok(value);
+            }
+
             let mut elements = Vec::with_capacity(rhs.elements.len());
             for right in rhs.elements.iter().copied() {
                 elements.push(binary_literal_op(
@@ -81,6 +85,10 @@ pub(crate) fn eval_binary_elementwise(
             )?))
         }
         (Value::Tensor(lhs), Value::Scalar(rhs)) => {
+            if let Some(value) = eval_f64_scalar_broadcast_binop(primitive, *rhs, lhs, false)? {
+                return Ok(value);
+            }
+
             let mut elements = Vec::with_capacity(lhs.elements.len());
             for left in lhs.elements.iter().copied() {
                 elements.push(binary_literal_op(
@@ -142,6 +150,67 @@ fn eval_same_shape_f64_map(
     Ok(Some(Value::Tensor(TensorValue::new(
         DType::F64,
         lhs.shape.clone(),
+        elements,
+    )?)))
+}
+
+/// F64 scalar/tensor broadcast fast path for the arithmetic binops whose
+/// per-lane operation is plain IEEE-754 f64 arithmetic (`+`, `-`, `*`, `/`).
+///
+/// `scalar_on_left` distinguishes `Scalar ⊗ Tensor` (`op(scalar, elem)`) from
+/// `Tensor ⊗ Scalar` (`op(elem, scalar)`), preserving operand order for the
+/// non-commutative `Sub`/`Div` cases. Bit-for-bit identical to the generic
+/// `binary_literal_op` path: for F64 operands that path computes
+/// `Literal::from_f64(float_op(a, b))` with the same closures (lib.rs). Returns
+/// `Ok(None)` for any non-F64 scalar/element or non-fast-path primitive so the
+/// caller falls through to the generic per-element loop.
+#[inline]
+fn eval_f64_scalar_broadcast_binop(
+    primitive: Primitive,
+    scalar: Literal,
+    tensor: &TensorValue,
+    scalar_on_left: bool,
+) -> Result<Option<Value>, EvalError> {
+    let Literal::F64Bits(scalar_bits) = scalar else {
+        return Ok(None);
+    };
+    if tensor.dtype != DType::F64 {
+        return Ok(None);
+    }
+    let scalar = f64::from_bits(scalar_bits);
+    match primitive {
+        Primitive::Add => f64_scalar_broadcast_map(scalar, tensor, scalar_on_left, |a, b| a + b),
+        Primitive::Sub => f64_scalar_broadcast_map(scalar, tensor, scalar_on_left, |a, b| a - b),
+        Primitive::Mul => f64_scalar_broadcast_map(scalar, tensor, scalar_on_left, |a, b| a * b),
+        Primitive::Div => f64_scalar_broadcast_map(scalar, tensor, scalar_on_left, |a, b| a / b),
+        _ => Ok(None),
+    }
+}
+
+#[inline]
+fn f64_scalar_broadcast_map(
+    scalar: f64,
+    tensor: &TensorValue,
+    scalar_on_left: bool,
+    op: impl Fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    let mut elements = Vec::with_capacity(tensor.elements.len());
+    for &elem in &tensor.elements {
+        let Literal::F64Bits(bits) = elem else {
+            return Ok(None);
+        };
+        let value = f64::from_bits(bits);
+        let out = if scalar_on_left {
+            op(scalar, value)
+        } else {
+            op(value, scalar)
+        };
+        elements.push(Literal::from_f64(out));
+    }
+
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::F64,
+        tensor.shape.clone(),
         elements,
     )?)))
 }
@@ -4691,6 +4760,57 @@ mod tests {
                 .collect();
             // Compare raw bits so NaN payloads and -0.0 are distinguished.
             assert_eq!(tensor.elements, expected, "{primitive:?} bit mismatch");
+        }
+    }
+
+    #[test]
+    fn f64_scalar_broadcast_fast_path_bit_identical_to_scalar() {
+        // Both operand orders for the non-commutative ops, with adversarial
+        // values, must match the per-element scalar op bit-for-bit.
+        let tensor_data = [1.5, -0.0, f64::INFINITY, f64::NAN, 7.0, -3.25, 0.0];
+        let scalar = 2.5_f64;
+        for primitive in [
+            Primitive::Add,
+            Primitive::Sub,
+            Primitive::Mul,
+            Primitive::Div,
+        ] {
+            let op = |x: f64, y: f64| match primitive {
+                Primitive::Add => x + y,
+                Primitive::Sub => x - y,
+                Primitive::Mul => x * y,
+                Primitive::Div => x / y,
+                _ => unreachable!(),
+            };
+            for scalar_on_left in [true, false] {
+                let scalar_val = Value::Scalar(Literal::from_f64(scalar));
+                let tensor_val = v_f64(&tensor_data);
+                let inputs = if scalar_on_left {
+                    [scalar_val, tensor_val]
+                } else {
+                    [tensor_val, scalar_val]
+                };
+                let result = eval_binary_elementwise(primitive, &inputs, |x, y| x + y, op).unwrap();
+                let Value::Tensor(tensor) = result else {
+                    panic!("expected tensor for {primitive:?}");
+                };
+                assert_eq!(tensor.dtype, DType::F64);
+                let expected: Vec<Literal> = tensor_data
+                    .iter()
+                    .map(|&e| {
+                        let out = if scalar_on_left {
+                            op(scalar, e)
+                        } else {
+                            op(e, scalar)
+                        };
+                        Literal::from_f64(out)
+                    })
+                    .collect();
+                assert_eq!(
+                    tensor.elements, expected,
+                    "{primitive:?} scalar_on_left={scalar_on_left} bit mismatch"
+                );
+            }
         }
     }
 

@@ -105,6 +105,26 @@ fn bench_div_1k_f64_vector(c: &mut Criterion) {
     });
 }
 
+fn bench_scalar_mul_1k_f64_vector(c: &mut Criterion) {
+    let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.001).collect();
+    let scalar = Value::scalar_f64(3.5);
+    let tensor = Value::vector_f64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/scalar_mul_1k_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Mul, &[scalar.clone(), tensor.clone()], &p))
+    });
+}
+
+fn bench_tensor_sub_scalar_1k_f64_vector(c: &mut Criterion) {
+    let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.001).collect();
+    let tensor = Value::vector_f64(&data).unwrap();
+    let scalar = Value::scalar_f64(0.25);
+    let p = no_params();
+    c.bench_function("eval/tensor_sub_scalar_1k_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Sub, &[tensor.clone(), scalar.clone()], &p))
+    });
+}
+
 fn bench_nextafter_1k(c: &mut Criterion) {
     let lhs = real_vector(1000);
     let rhs_data: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.05).cos()).collect();
@@ -545,6 +565,8 @@ criterion_group!(
     bench_mul_1k_vector,
     bench_add_1k_f64_vector,
     bench_div_1k_f64_vector,
+    bench_scalar_mul_1k_f64_vector,
+    bench_tensor_sub_scalar_1k_f64_vector,
     bench_nextafter_1k,
     bench_dot_100,
     bench_reduce_sum_1k,

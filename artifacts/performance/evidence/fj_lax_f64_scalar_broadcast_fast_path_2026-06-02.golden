@@ -1,0 +1,11 @@
+frankenjax-mcqr.6 fj-lax F64 scalar/tensor broadcast fast path golden
+
+primitive_set: add, sub, mul, div (scalar-on-left and scalar-on-right)
+scalar: 2.5
+tensor: [1.5, -0.0, -2.0]
+output_contract: output F64Bits in input order; rows in order
+  [add_L, add_R, sub_L, sub_R, mul_L, mul_R, div_L, div_R]
+  where _L = op(scalar, elem) (Scalar ⊗ Tensor), _R = op(elem, scalar) (Tensor ⊗ Scalar)
+serde_json_bits: [[4616189618054758400,4612811918334230528,4602678819172646912],[4616189618054758400,4612811918334230528,4602678819172646912],[4607182418800017408,4612811918334230528,4616752568008179712],[13830554455654793216,13836183955189006336,13840124604862955520],[4615626668101337088,9223372036854775808,13840687554816376832],[4615626668101337088,9223372036854775808,13840687554816376832],[4610184818551597739,18442240474082181120,13831680355561635840],[4603579539098121011,9223372036854775808,13828753015803845018]]
+serde_json_sha256: 2971086bd4204558a0f93218080467f6460cf51bf6e727e879fc0477f3055175
+proof: each output bit is produced by the same scalar f64 +,-,*,/ expression used by the generic binary_literal_op path (lib.rs Add |a,b| a+b, Sub |a,b| a-b, Mul |a,b| a*b, Div |a,b| a/b), in the same operand order (scalar_on_left preserves Scalar⊗Tensor vs Tensor⊗Scalar), then stored with to_bits; non-F64 scalar/elements or non-fast-path primitives fall through to the existing generic path. -0.0, +/-inf (2.5/-0.0 = -inf) and signed zero are preserved.
