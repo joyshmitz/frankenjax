@@ -97,10 +97,13 @@ fn oracle_bessel_i0e_one() {
     let input = make_f64_tensor(&[], vec![1.0]);
     let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    // I0e(1) ~ 0.46575959...
+    // True I0e(1) = exp(-1)*I0(1) = 0.46575960759364043 (scipy.special.i0e,
+    // matches JAX/XLA Cephes). The previous assertion locked in the old
+    // Abramowitz & Stegun value 0.46575959666109185 (~1.1e-8 too small) at a
+    // 1e-10 tolerance — a circular oracle that masked the inaccuracy.
     assert!(
-        (actual - 0.46575959666109185).abs() < 1e-10,
-        "I0e(1) ~ 0.4658, got {}",
+        (actual - 0.46575960759364043).abs() < 1e-12,
+        "I0e(1) = 0.46575960759364043, got {}",
         actual
     );
 }
@@ -170,10 +173,13 @@ fn oracle_bessel_i1e_one() {
     let input = make_f64_tensor(&[], vec![1.0]);
     let result = eval_primitive(Primitive::BesselI1e, &[input], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    // I1e(1) ~ 0.20791041...
+    // True I1e(1) = exp(-1)*I1(1) = 0.2079104153497085 (scipy.special.i1e,
+    // matches JAX/XLA Cephes). The previous assertion locked in the old
+    // Abramowitz & Stegun value 0.207910412991402 (~2.4e-9 too small) at a
+    // 1e-10 tolerance — a circular oracle that masked the inaccuracy.
     assert!(
-        (actual - 0.207910412991402).abs() < 1e-10,
-        "I1e(1) ~ 0.2079, got {}",
+        (actual - 0.2079104153497085).abs() < 1e-12,
+        "I1e(1) = 0.2079104153497085, got {}",
         actual
     );
 }
@@ -207,6 +213,54 @@ fn oracle_bessel_i1e_nan() {
     let input = make_f64_tensor(&[], vec![f64::NAN]);
     let result = eval_primitive(Primitive::BesselI1e, &[input], &no_params()).unwrap();
     assert!(extract_f64_scalar(&result).is_nan(), "I1e(NaN) = NaN");
+}
+
+// ============== Accuracy vs true values (JAX/XLA Cephes) ==============
+
+#[test]
+fn oracle_bessel_i0e_i1e_accuracy_table() {
+    // Reference values from scipy.special.i0e/i1e (== JAX/XLA Cephes). The 1e-12
+    // tolerance is far tighter than the old ~1e-7 Abramowitz & Stegun error, so
+    // it is a genuine (non-circular) accuracy guard, not a snapshot of fj's own
+    // approximation.
+    let table: &[(f64, f64, f64)] = &[
+        (0.5, 0.64503527044914999, 0.15642080318487173),
+        (2.0, 0.308508322553671, 0.21526928924893771),
+        (3.75, 0.21445705123004871, 0.18296842093089091),
+        (5.0, 0.18354081260932834, 0.16397226694454234),
+        (8.0, 0.14343178185685029, 0.13414249329269812),
+        (10.0, 0.1278333371634286, 0.12126268138445551),
+        (50.0, 0.056561626647454184, 0.055993123892895395),
+        (100.0, 0.03994437929909668, 0.039744153025130249),
+    ];
+    for &(x, ref_i0e, ref_i1e) in table {
+        let i0e = extract_f64_scalar(
+            &eval_primitive(
+                Primitive::BesselI0e,
+                &[make_f64_tensor(&[], vec![x])],
+                &no_params(),
+            )
+            .unwrap(),
+        );
+        let i1e = extract_f64_scalar(
+            &eval_primitive(
+                Primitive::BesselI1e,
+                &[make_f64_tensor(&[], vec![x])],
+                &no_params(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            (i0e - ref_i0e).abs() < 1e-12,
+            "I0e({x}) = {ref_i0e}, got {i0e} (err {:.2e})",
+            (i0e - ref_i0e).abs()
+        );
+        assert!(
+            (i1e - ref_i1e).abs() < 1e-12,
+            "I1e({x}) = {ref_i1e}, got {i1e} (err {:.2e})",
+            (i1e - ref_i1e).abs()
+        );
+    }
 }
 
 // ======================== Tensor Shapes ========================
