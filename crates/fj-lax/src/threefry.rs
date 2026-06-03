@@ -217,19 +217,17 @@ pub fn random_categorical(
 
 /// Generate exponentially distributed samples with rate parameter `rate` (λ).
 ///
-/// Matches JAX's `jax.random.exponential(key, shape)` scaled by `1/rate`.
-/// Uses inverse transform: X = -ln(U) / rate where U ~ Uniform(0,1).
+/// Matches JAX's `jax.random.exponential(key, shape)` (rate 1) scaled by
+/// `1/rate`. JAX computes `-log1p(-u)` rather than `-log(u)`, deliberately
+/// taking `1 - u` so the log domain is `(0, 1]` instead of `[0, 1)`: at `u = 0`
+/// the result is exactly `0` and, since `uniform` is half-open `[0, 1)`, `u < 1`
+/// keeps it finite — so no ad-hoc clamp is needed. The previous `-ln(max(u,
+/// 1e-30))` both paired `u -> X` on the opposite tail from JAX and bolted on a
+/// clamp hack, diverging from JAX bit-for-bit.
 #[must_use]
 pub fn random_exponential(key: PRNGKey, count: usize, rate: f64) -> Vec<f64> {
     let uniforms = random_uniform(key, count, 0.0, 1.0);
-    uniforms
-        .into_iter()
-        .map(|u| {
-            // Clamp away from 0 to avoid -ln(0) = inf
-            let clamped = u.max(1e-30);
-            -clamped.ln() / rate
-        })
-        .collect()
+    uniforms.into_iter().map(|u| -(-u).ln_1p() / rate).collect()
 }
 
 /// Generate Gumbel-distributed samples with location `loc` and scale `scale`.
@@ -1126,6 +1124,33 @@ mod tests {
             exponentials.iter().all(|&v| v >= 0.0),
             "exponential values should be non-negative"
         );
+    }
+
+    #[test]
+    fn test_exponential_matches_jax_log1p_transform() {
+        // JAX: exponential(key) = -log1p(-uniform(key)); fj scales by 1/rate.
+        // Pin the exact transform against fj's (JAX-matched) uniform stream so a
+        // regression to -log(u) or a clamp hack is caught bit-for-bit.
+        let key = random_key(7);
+        let n = 256;
+        let u = random_uniform(key, n, 0.0, 1.0);
+        let e1 = random_exponential(key, n, 1.0);
+        let e2 = random_exponential(key, n, 2.5);
+        assert_eq!(e1.len(), n);
+        for i in 0..n {
+            let base = -(-u[i]).ln_1p();
+            assert_eq!(
+                e1[i].to_bits(),
+                base.to_bits(),
+                "rate=1 transform must equal -log1p(-u) at {i}"
+            );
+            assert_eq!(
+                e2[i].to_bits(),
+                (base / 2.5).to_bits(),
+                "rate=2.5 must be the rate=1 base divided by rate at {i}"
+            );
+            assert!(e1[i] >= 0.0 && e1[i].is_finite());
+        }
     }
 
     #[test]
