@@ -137,25 +137,28 @@ pub fn selu(x: &[f64]) -> Vec<f64> {
         .collect()
 }
 
-/// Softplus: log(1 + exp(x))
+/// Numerically-stable scalar softplus matching `jax.nn.softplus(x) =
+/// jnp.logaddexp(x, 0)`.
 ///
-/// Uses numerically stable formulation to avoid overflow.
-/// Matches `jax.nn.softplus(x)`.
+/// Uses the exact identity `softplus(x) = max(x, 0) + log1p(exp(-|x|))`, which
+/// is finite for every `x` (the `exp` argument is ≤ 0, so no overflow) and
+/// reproduces JAX's `logaddexp` to f64 precision with no discontinuity. The
+/// previous implementation switched to the approximations `x` (for `x > 20`)
+/// and `exp(x)` (for `x < -20`), dropping the `log1p(exp(-|x|))` correction
+/// term — e.g. `softplus(21.0)` returned `21.0` instead of JAX's
+/// `21.0 + 7.58e-10`. `NaN`/`±inf` propagate as JAX does.
+#[inline]
+#[must_use]
+fn softplus_scalar(v: f64) -> f64 {
+    v.max(0.0) + (-v.abs()).exp().ln_1p()
+}
+
+/// Softplus: log(1 + exp(x)) = logaddexp(x, 0)
+///
+/// Numerically stable for all inputs (no overflow). Matches `jax.nn.softplus(x)`.
 #[must_use]
 pub fn softplus(x: &[f64]) -> Vec<f64> {
-    x.iter()
-        .map(|&v| {
-            if v > 20.0 {
-                // For large x, softplus(x) ≈ x
-                v
-            } else if v < -20.0 {
-                // For large negative x, softplus(x) ≈ exp(x)
-                v.exp()
-            } else {
-                (1.0 + v.exp()).ln()
-            }
-        })
-        .collect()
+    x.iter().map(|&v| softplus_scalar(v)).collect()
 }
 
 /// Softsign: x / (1 + |x|)
@@ -171,18 +174,7 @@ pub fn softsign(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.mish(x)`.
 #[must_use]
 pub fn mish(x: &[f64]) -> Vec<f64> {
-    x.iter()
-        .map(|&v| {
-            let sp = if v > 20.0 {
-                v
-            } else if v < -20.0 {
-                v.exp()
-            } else {
-                (1.0 + v.exp()).ln()
-            };
-            v * sp.tanh()
-        })
-        .collect()
+    x.iter().map(|&v| v * softplus_scalar(v).tanh()).collect()
 }
 
 /// Log sigmoid: log(sigmoid(x)) = -softplus(-x)
@@ -191,19 +183,8 @@ pub fn mish(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.log_sigmoid(x)`.
 #[must_use]
 pub fn log_sigmoid(x: &[f64]) -> Vec<f64> {
-    x.iter()
-        .map(|&v| {
-            if v > 20.0 {
-                // For large x, log_sigmoid(x) ≈ 0
-                0.0
-            } else if v < -20.0 {
-                // For large negative x, log_sigmoid(x) ≈ x
-                v
-            } else {
-                -(1.0 + (-v).exp()).ln()
-            }
-        })
-        .collect()
+    // log(sigmoid(x)) = -softplus(-x); reuse the exact stable softplus.
+    x.iter().map(|&v| -softplus_scalar(-v)).collect()
 }
 
 /// Compute log-sum-exp in a numerically stable way.
@@ -450,6 +431,45 @@ mod tests {
         assert!(approx_eq(y[0], -100.0, 1.0)); // approximately -100
         assert!(approx_eq(y[1], -std::f64::consts::LN_2, 1e-5)); // ln(0.5)
         assert!(approx_eq(y[2], 0.0, 1e-10));
+    }
+
+    #[test]
+    fn test_softplus_exact_logaddexp_no_threshold() {
+        // softplus(x) == logaddexp(x, 0) == max(x,0) + log1p(exp(-|x|)) for ALL x.
+        // The previous ±20 threshold approximation dropped the log1p correction
+        // term outside [-20, 20]; e.g. softplus(21) was 21.0 exactly. Pin the
+        // exact value and prove the correction term is retained.
+        let xs: [f64; 10] = [-50.0, -25.0, -21.0, -5.0, 0.0, 5.0, 21.0, 25.0, 50.0, 100.0];
+        for &x in &xs {
+            let logaddexp = x.max(0.0) + (-x.abs()).exp().ln_1p();
+            let got = softplus(&[x])[0];
+            assert_eq!(
+                got.to_bits(),
+                logaddexp.to_bits(),
+                "softplus({x}) bit mismatch"
+            );
+            assert!(got.is_finite(), "softplus({x}) must be finite");
+        }
+        // The correction term is retained just past the old +20 cut, where the
+        // previous threshold approximation returned exactly 21.0 (the loop above
+        // already pins the full bit-exact value against logaddexp at x = 21).
+        assert!(
+            softplus(&[21.0])[0] > 21.0,
+            "softplus(21) must keep the log1p term"
+        );
+
+        // mish and log_sigmoid are defined via the same exact softplus.
+        for &x in &xs {
+            let m = mish(&[x])[0];
+            assert_eq!(m.to_bits(), (x * softplus(&[x])[0].tanh()).to_bits());
+            let ls = log_sigmoid(&[x])[0];
+            assert_eq!(ls.to_bits(), (-softplus(&[-x])[0]).to_bits());
+        }
+
+        // ±inf / NaN propagate as JAX's logaddexp does.
+        assert_eq!(softplus(&[f64::INFINITY])[0], f64::INFINITY);
+        assert_eq!(softplus(&[f64::NEG_INFINITY])[0], 0.0);
+        assert!(softplus(&[f64::NAN])[0].is_nan());
     }
 
     #[test]
