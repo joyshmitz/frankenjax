@@ -1,0 +1,13 @@
+frankenjax-mcqr.8 fj-lax F64 comparison fast path golden
+
+primitive_set: eq, ne, lt, le, gt, ge (same-shape, scalar-on-left, scalar-on-right)
+scalar: 0.0
+lhs: [1.5, -0.0, +inf, NaN]
+rhs: [2.0, 0.0, -4.0, NaN]
+output_contract: Bool results as 0/1 in input order; rows grouped per op in order
+  [eq_same, eq_scalarL, eq_scalarR, ne_same, ne_scalarL, ne_scalarR, lt_*, le_*, gt_*, ge_*]
+  where _same = op(lhs[i], rhs[i]); _scalarL = op(scalar, rhs[i]) (Scalar ⊗ Tensor);
+  _scalarR = op(lhs[i], scalar) (Tensor ⊗ Scalar)
+serde_json_bits: [[0,1,0,0],[0,1,0,0],[0,1,0,0],[1,0,1,1],[1,0,1,1],[1,0,1,1],[1,0,0,0],[1,0,0,0],[0,0,0,0],[1,1,0,0],[1,1,0,0],[0,1,0,0],[0,0,1,0],[0,0,1,0],[1,0,1,0],[0,1,1,0],[0,1,1,0],[1,1,1,0]]
+serde_json_sha256: ec33ecdec497020a46f8476d3dc037d0023b5b909510c3f2eef04882295a0136
+proof: each output bool is produced by the same float_cmp closure the generic compare_literals path applies for F64 operands (Eq |a,b| a==b, Ne a!=b, Lt a<b, Le a<=b, Gt a>b, Ge a>=b), evaluated on f64::from_bits values, with scalar_on_left preserving operand order; the fast path only skips the complex-operand check and the integral literal_to_i128 probe. NaN ordering (all comparisons false except ne) and signed-zero equality (-0.0 == 0.0) are preserved. Non-F64 operands fall through to the generic path.

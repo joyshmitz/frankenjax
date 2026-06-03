@@ -99,6 +99,13 @@ pub(crate) fn eval_comparison(
         }
         (Value::Tensor(lhs), Value::Tensor(rhs)) => {
             if lhs.shape == rhs.shape {
+                if lhs.dtype == DType::F64
+                    && rhs.dtype == DType::F64
+                    && let Some(value) = eval_same_shape_f64_compare(lhs, rhs, &float_cmp)?
+                {
+                    return Ok(value);
+                }
+
                 let mut elements = Vec::with_capacity(lhs.elements.len());
                 for (lhs, rhs) in lhs
                     .elements
@@ -149,6 +156,10 @@ pub(crate) fn eval_comparison(
             )?))
         }
         (Value::Scalar(lhs), Value::Tensor(rhs)) => {
+            if let Some(value) = eval_f64_scalar_compare(*lhs, rhs, true, &float_cmp)? {
+                return Ok(value);
+            }
+
             let mut elements = Vec::with_capacity(rhs.elements.len());
             for rhs in rhs.elements.iter().copied() {
                 elements.push(Literal::Bool(compare_literals(
@@ -162,6 +173,10 @@ pub(crate) fn eval_comparison(
             )?))
         }
         (Value::Tensor(lhs), Value::Scalar(rhs)) => {
+            if let Some(value) = eval_f64_scalar_compare(*rhs, lhs, false, &float_cmp)? {
+                return Ok(value);
+            }
+
             let mut elements = Vec::with_capacity(lhs.elements.len());
             for lhs in lhs.elements.iter().copied() {
                 elements.push(Literal::Bool(compare_literals(
@@ -177,9 +192,152 @@ pub(crate) fn eval_comparison(
     }
 }
 
+/// Same-shape F64⊗F64 comparison fast path producing a `DType::Bool` tensor.
+///
+/// Bit-for-bit identical to the generic `compare_literals` path: for F64
+/// operands that path falls through to `float_cmp(lhs.as_f64(), rhs.as_f64())`,
+/// which is exactly what this applies here (same closure), skipping the
+/// complex-operand check and the integral `literal_to_i128` probe per element.
+/// Returns `Ok(None)` if any element is not `F64Bits` so the caller falls
+/// through to the generic path.
+#[inline]
+fn eval_same_shape_f64_compare(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    float_cmp: &impl Fn(f64, f64) -> bool,
+) -> Result<Option<Value>, EvalError> {
+    let mut elements = Vec::with_capacity(lhs.elements.len());
+    for (left, right) in lhs.elements.iter().zip(&rhs.elements) {
+        let (Literal::F64Bits(left_bits), Literal::F64Bits(right_bits)) = (*left, *right) else {
+            return Ok(None);
+        };
+        elements.push(Literal::Bool(float_cmp(
+            f64::from_bits(left_bits),
+            f64::from_bits(right_bits),
+        )));
+    }
+
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::Bool,
+        lhs.shape.clone(),
+        elements,
+    )?)))
+}
+
+/// F64 scalar/tensor broadcast comparison fast path producing a `DType::Bool`
+/// tensor. `scalar_on_left` preserves operand order (`Scalar ⊗ Tensor` vs
+/// `Tensor ⊗ Scalar`) for the asymmetric ordered comparisons. Bit-for-bit
+/// identical to the generic `compare_literals` path for F64 operands. Returns
+/// `Ok(None)` for non-F64 scalar/elements so the caller uses the generic path.
+#[inline]
+fn eval_f64_scalar_compare(
+    scalar: Literal,
+    tensor: &TensorValue,
+    scalar_on_left: bool,
+    float_cmp: &impl Fn(f64, f64) -> bool,
+) -> Result<Option<Value>, EvalError> {
+    let Literal::F64Bits(scalar_bits) = scalar else {
+        return Ok(None);
+    };
+    if tensor.dtype != DType::F64 {
+        return Ok(None);
+    }
+    let scalar = f64::from_bits(scalar_bits);
+    let mut elements = Vec::with_capacity(tensor.elements.len());
+    for &elem in &tensor.elements {
+        let Literal::F64Bits(bits) = elem else {
+            return Ok(None);
+        };
+        let value = f64::from_bits(bits);
+        let out = if scalar_on_left {
+            float_cmp(scalar, value)
+        } else {
+            float_cmp(value, scalar)
+        };
+        elements.push(Literal::Bool(out));
+    }
+
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::Bool,
+        tensor.shape.clone(),
+        elements,
+    )?)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn f64_compare_fast_paths_bit_identical_to_scalar() {
+        // Same-shape and both scalar-broadcast orders, all six comparisons,
+        // with NaN / +-inf / signed zero, must match the per-element scalar
+        // comparison exactly (Bool output).
+        let lhs = [
+            1.5,
+            -0.0,
+            f64::INFINITY,
+            f64::NAN,
+            7.0,
+            -3.25,
+            0.0,
+            f64::NEG_INFINITY,
+        ];
+        let rhs = [2.0, 0.0, -4.0, 5.0, 7.0, -3.25, f64::NAN, f64::NEG_INFINITY];
+        let scalar = 0.0_f64;
+        let params = BTreeMap::new();
+        for p in [
+            Primitive::Eq,
+            Primitive::Ne,
+            Primitive::Lt,
+            Primitive::Le,
+            Primitive::Gt,
+            Primitive::Ge,
+        ] {
+            let fcmp = |a: f64, b: f64| match p {
+                Primitive::Eq => a == b,
+                Primitive::Ne => a != b,
+                Primitive::Lt => a < b,
+                Primitive::Le => a <= b,
+                Primitive::Gt => a > b,
+                Primitive::Ge => a >= b,
+                _ => unreachable!(),
+            };
+            let extract = |v: Value| -> Vec<bool> {
+                let Value::Tensor(t) = v else {
+                    panic!("expected tensor for {p:?}");
+                };
+                assert_eq!(t.dtype, DType::Bool);
+                t.elements
+                    .iter()
+                    .map(|e| matches!(e, Literal::Bool(true)))
+                    .collect()
+            };
+
+            // same-shape
+            let got =
+                extract(crate::eval_primitive(p, &[v_f64(&lhs), v_f64(&rhs)], &params).unwrap());
+            let want: Vec<bool> = lhs
+                .iter()
+                .zip(rhs.iter())
+                .map(|(&a, &b)| fcmp(a, b))
+                .collect();
+            assert_eq!(got, want, "{p:?} same-shape mismatch");
+
+            // scalar on left: Scalar ⊗ Tensor
+            let got =
+                extract(crate::eval_primitive(p, &[s_f64(scalar), v_f64(&rhs)], &params).unwrap());
+            let want: Vec<bool> = rhs.iter().map(|&b| fcmp(scalar, b)).collect();
+            assert_eq!(got, want, "{p:?} scalar-left mismatch");
+
+            // scalar on right: Tensor ⊗ Scalar
+            let got =
+                extract(crate::eval_primitive(p, &[v_f64(&lhs), s_f64(scalar)], &params).unwrap());
+            let want: Vec<bool> = lhs.iter().map(|&a| fcmp(a, scalar)).collect();
+            assert_eq!(got, want, "{p:?} scalar-right mismatch");
+        }
+    }
 
     fn s_f64(v: f64) -> Value {
         Value::Scalar(Literal::from_f64(v))

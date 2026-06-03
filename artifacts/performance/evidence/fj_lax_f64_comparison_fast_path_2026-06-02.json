@@ -1,0 +1,41 @@
+{
+  "bead": "frankenjax-mcqr.8",
+  "date": "2026-06-02",
+  "subsystem": "fj-lax",
+  "target": "F64 comparison eq/ne/lt/le/gt/ge (same-shape + both scalar-broadcast orders) -> Bool",
+  "lever": {
+    "description": "Add F64 fast paths to eval_comparison: eval_same_shape_f64_compare for same-shape F64 tensors and eval_f64_scalar_compare for the Scalar⊗Tensor / Tensor⊗Scalar broadcast branches (scalar_on_left preserves order). Both apply the already-provided float_cmp closure directly to f64::from_bits values, producing Literal::Bool, skipping the complex-operand check and per-element literal_to_i128 integral probe in compare_literals. Non-F64 operands return None and fall through to the generic path."
+  },
+  "benchmarks": {
+    "baseline": {
+      "note": "fast-path guards temporarily removed; generic compare_literals path",
+      "tool": "rch Criterion",
+      "eq_1k_f64_mean_us": 19.809,
+      "lt_scalar_1k_f64_mean_us": 10.744
+    },
+    "after": {
+      "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'eval/(eq_1k_f64|lt_scalar_1k_f64)_vec'",
+      "eq_1k_f64_mean_us": 4.123,
+      "lt_scalar_1k_f64_mean_us": 3.472
+    },
+    "speedup": {
+      "eq_1k_f64": 4.804,
+      "lt_scalar_1k_f64": 3.094
+    }
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "impact_times_confidence_over_effort": 15.0
+  },
+  "isomorphism_proof": {
+    "ordering": "Output elements produced in tensor index order; scalar_on_left preserves Scalar⊗Tensor vs Tensor⊗Scalar operand order for the asymmetric ordered comparisons.",
+    "floating_point": "Each output bool is float_cmp(from_bits(a), from_bits(b)) with the same closure the generic path uses for F64; comparisons are exact and deterministic.",
+    "tie_breaking": "None introduced. NaN ordering (false for eq/lt/le/gt/ge, true for ne) and -0.0 == 0.0 preserved.",
+    "rng": "No RNG state is read or written.",
+    "errors": "Only F64 same-shape and F64 scalar/F64 tensor comparisons take the fast path; other dtypes/malformed literals/multi-dim broadcasts return None and use the generic path.",
+    "unit_test": "fj-lax comparison::tests::f64_compare_fast_paths_bit_identical_to_scalar (all 6 ops, both orders, NaN/+-inf/-0.0); 994/994 fj-lax tests pass.",
+    "golden_output_sha256": "ec33ecdec497020a46f8476d3dc037d0023b5b909510c3f2eef04882295a0136"
+  }
+}
