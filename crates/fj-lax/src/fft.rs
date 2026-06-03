@@ -56,8 +56,8 @@ fn make_complex_literal(re: f64, im: f64, dtype: DType) -> Literal {
 /// Build a real Literal from an f64 value, preserving the tensor's logical dtype.
 fn make_real_literal(val: f64, dtype: DType) -> Literal {
     match dtype {
-        DType::BF16 => Literal::from_bf16_f32(val as f32),
-        DType::F16 => Literal::from_f16_f32(val as f32),
+        DType::BF16 => Literal::from_bf16_f64(val),
+        DType::F16 => Literal::from_f16_f64(val),
         DType::F32 => Literal::from_f32(val as f32),
         _ => Literal::from_f64(val),
     }

@@ -51,8 +51,8 @@ fn reduce_real_output_dtype(input_dtype: DType) -> DType {
 
 fn reduce_real_literal(dtype: DType, value: f64) -> Literal {
     match dtype {
-        DType::BF16 => Literal::from_bf16_f32(value as f32),
-        DType::F16 => Literal::from_f16_f32(value as f32),
+        DType::BF16 => Literal::from_bf16_f64(value),
+        DType::F16 => Literal::from_f16_f64(value),
         DType::F32 => Literal::from_f32(value as f32),
         _ => Literal::from_f64(value),
     }

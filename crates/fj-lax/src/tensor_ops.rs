@@ -2360,32 +2360,6 @@ pub(crate) fn eval_convert_element_type(
     }
 }
 
-/// Round `x` from f64 to f32 using round-to-odd: exact values pass through;
-/// otherwise return whichever of the two bracketing f32 values has an odd
-/// mantissa LSB. Composing this with a round-to-nearest f32->f16/bf16 narrowing
-/// yields a correctly single-rounded f64->f16/bf16 (Boldo–Melquiond), avoiding
-/// the double rounding that `x as f32` followed by narrowing would introduce at
-/// f16/bf16 half-ULP tie points. f32's 24 significand bits suffice for both f16
-/// (11) and bf16 (8).
-fn f64_to_f32_round_to_odd(x: f64) -> f32 {
-    let nearest = x as f32;
-    if !nearest.is_finite() || f64::from(nearest) == x || (nearest.to_bits() & 1) == 1 {
-        return nearest; // non-finite, exact, or already odd
-    }
-    // `nearest` is finite, even, and `x` was rounded: switch to the odd neighbor
-    // on the toward-x side. Moving an f32 toward larger values is `bits + 1` for
-    // non-negative and `bits - 1` for negative (and vice versa toward smaller).
-    let bits = nearest.to_bits();
-    let toward_larger = x > f64::from(nearest);
-    let negative = (bits >> 31) == 1;
-    let neighbor = if toward_larger == !negative {
-        bits + 1
-    } else {
-        bits - 1
-    };
-    f32::from_bits(neighbor)
-}
-
 fn convert_literal(lit: Literal, target: DType) -> Result<Literal, EvalError> {
     let f64_val = || -> Option<f64> {
         match lit {
@@ -2457,8 +2431,8 @@ fn convert_literal(lit: Literal, target: DType) -> Result<Literal, EvalError> {
         // Round f64 -> f16/bf16 in a single step (round-to-nearest-even) like
         // XLA's ConvertElementType. The round-to-odd f32 intermediate prevents
         // the double rounding that a plain `as f32` would cause near a tie.
-        DType::F16 => Literal::from_f16_f32(f64_to_f32_round_to_odd(f64_val().unwrap_or(0.0))),
-        DType::BF16 => Literal::from_bf16_f32(f64_to_f32_round_to_odd(f64_val().unwrap_or(0.0))),
+        DType::F16 => Literal::from_f16_f64(f64_val().unwrap_or(0.0)),
+        DType::BF16 => Literal::from_bf16_f64(f64_val().unwrap_or(0.0)),
         DType::I64 | DType::I32 => Literal::I64(i64_val().unwrap_or(0)),
         DType::U64 => Literal::U64(u64_val().unwrap_or(0)),
         DType::U32 => Literal::U32(u64_val().unwrap_or(0) as u32),
@@ -2591,8 +2565,8 @@ fn literal_from_index_for_dtype(
         DType::U64 => Ok(Literal::U64(index as u64)),
         DType::F64 => Ok(Literal::from_f64(index as f64)),
         DType::F32 => Ok(Literal::from_f32(index as f32)),
-        DType::BF16 => Ok(Literal::from_bf16_f32(index as f32)),
-        DType::F16 => Ok(Literal::from_f16_f32(index as f32)),
+        DType::BF16 => Ok(Literal::from_bf16_f64(index as f64)),
+        DType::F16 => Ok(Literal::from_f16_f64(index as f64)),
         DType::Complex64 => Ok(Literal::from_complex64(index as f32, 0.0)),
         DType::Complex128 => Ok(Literal::from_complex128(index as f64, 0.0)),
         DType::Bool => Err(EvalError::Unsupported {
@@ -3062,8 +3036,8 @@ pub(crate) fn eval_one_hot(
             DType::I64 | DType::I32 => Literal::I64(val as i64),
             DType::U32 => Literal::U32(val as u32),
             DType::U64 => Literal::U64(val as u64),
-            DType::BF16 => Literal::from_bf16_f32(val as f32),
-            DType::F16 => Literal::from_f16_f32(val as f32),
+            DType::BF16 => Literal::from_bf16_f64(val),
+            DType::F16 => Literal::from_f16_f64(val),
             DType::F32 => Literal::from_f32(val as f32),
             DType::F64 => Literal::from_f64(val),
             DType::Bool => Literal::Bool(val != 0.0),
@@ -3779,8 +3753,8 @@ fn parse_conv_padding(
 
 fn conv_float_literal_from_f64(dtype: DType, value: f64) -> Literal {
     match dtype {
-        DType::BF16 => Literal::from_bf16_f32(value as f32),
-        DType::F16 => Literal::from_f16_f32(value as f32),
+        DType::BF16 => Literal::from_bf16_f64(value),
+        DType::F16 => Literal::from_f16_f64(value),
         DType::F32 => Literal::from_f32(value as f32),
         _ => Literal::from_f64(value),
     }
@@ -3791,8 +3765,8 @@ fn conv_literal_from_complex(dtype: DType, re: f64, im: f64) -> Literal {
         DType::Complex64 => Literal::from_complex64(re as f32, im as f32),
         DType::Complex128 => Literal::from_complex128(re, im),
         // For real dtypes, ignore imaginary part (shouldn't happen in valid conv)
-        DType::BF16 => Literal::from_bf16_f32(re as f32),
-        DType::F16 => Literal::from_f16_f32(re as f32),
+        DType::BF16 => Literal::from_bf16_f64(re),
+        DType::F16 => Literal::from_f16_f64(re),
         DType::F32 => Literal::from_f32(re as f32),
         _ => Literal::from_f64(re),
     }

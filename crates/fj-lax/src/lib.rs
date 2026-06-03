@@ -2146,8 +2146,8 @@ const fn reduce_window_output_dtype(input_dtype: fj_core::DType) -> fj_core::DTy
 
 fn reduce_window_literal_from_f64(dtype: fj_core::DType, value: f64) -> fj_core::Literal {
     match dtype {
-        fj_core::DType::BF16 => fj_core::Literal::from_bf16_f32(value as f32),
-        fj_core::DType::F16 => fj_core::Literal::from_f16_f32(value as f32),
+        fj_core::DType::BF16 => fj_core::Literal::from_bf16_f64(value),
+        fj_core::DType::F16 => fj_core::Literal::from_f16_f64(value),
         fj_core::DType::F32 => fj_core::Literal::from_f32(value as f32),
         _ => fj_core::Literal::from_f64(value),
     }

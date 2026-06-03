@@ -313,8 +313,8 @@ fn complex_literal_from_f64_parts(out_dtype: DType, re: f64, im: f64) -> Literal
 
 fn real_literal_from_f64(dtype: DType, value: f64) -> Literal {
     match dtype {
-        DType::BF16 => Literal::from_bf16_f32(value as f32),
-        DType::F16 => Literal::from_f16_f32(value as f32),
+        DType::BF16 => Literal::from_bf16_f64(value),
+        DType::F16 => Literal::from_f16_f64(value),
         DType::F32 => Literal::from_f32(value as f32),
         _ => Literal::from_f64(value),
     }
@@ -1727,8 +1727,8 @@ pub(crate) fn eval_unary_elementwise(
             let result = op(value);
             let out_lit = match literal {
                 Literal::F32Bits(_) => Literal::from_f32(result as f32),
-                Literal::BF16Bits(_) => Literal::from_bf16_f32(result as f32),
-                Literal::F16Bits(_) => Literal::from_f16_f32(result as f32),
+                Literal::BF16Bits(_) => Literal::from_bf16_f64(result),
+                Literal::F16Bits(_) => Literal::from_f16_f64(result),
                 Literal::F64Bits(_) => Literal::from_f64(result),
                 _ => Literal::from_f64(result),
             };
@@ -1772,8 +1772,8 @@ pub(crate) fn eval_unary_elementwise(
                     detail: "expected numeric tensor elements",
                 })?;
                 let out = match out_dtype {
-                    DType::BF16 => Literal::from_bf16_f32(mapped as f32),
-                    DType::F16 => Literal::from_f16_f32(mapped as f32),
+                    DType::BF16 => Literal::from_bf16_f64(mapped),
+                    DType::F16 => Literal::from_f16_f64(mapped),
                     DType::F32 => Literal::from_f32(mapped as f32),
                     _ => Literal::from_f64(mapped),
                 };
@@ -1865,7 +1865,7 @@ pub(crate) fn eval_unary_int_or_float(
                         detail: "expected numeric scalar, got bf16",
                     })?;
                 // Preserve BF16 dtype — F32/F64 arms already preserve.
-                Ok(Value::Scalar(Literal::from_bf16_f32(float_op(val) as f32)))
+                Ok(Value::Scalar(Literal::from_bf16_f64(float_op(val))))
             }
             Literal::F16Bits(bits) => {
                 let val = Literal::F16Bits(bits)
@@ -1875,7 +1875,7 @@ pub(crate) fn eval_unary_int_or_float(
                         detail: "expected numeric scalar, got f16",
                     })?;
                 // Preserve F16 dtype — F32/F64 arms already preserve.
-                Ok(Value::Scalar(Literal::from_f16_f32(float_op(val) as f32)))
+                Ok(Value::Scalar(Literal::from_f16_f64(float_op(val))))
             }
             Literal::F32Bits(bits) => Ok(Value::scalar_f32(
                 float_op(f64::from(f32::from_bits(bits))) as f32,
@@ -1938,7 +1938,7 @@ pub(crate) fn eval_unary_int_or_float(
                                     primitive,
                                     detail: "expected numeric tensor elements, got bf16",
                                 })?;
-                        Literal::from_bf16_f32(float_op(val) as f32)
+                        Literal::from_bf16_f64(float_op(val))
                     }
                     Literal::F16Bits(bits) => {
                         let val =
@@ -1948,7 +1948,7 @@ pub(crate) fn eval_unary_int_or_float(
                                     primitive,
                                     detail: "expected numeric tensor elements, got f16",
                                 })?;
-                        Literal::from_f16_f32(float_op(val) as f32)
+                        Literal::from_f16_f64(float_op(val))
                     }
                     Literal::F32Bits(bits) => {
                         Literal::from_f32(float_op(f64::from(f32::from_bits(bits))) as f32)

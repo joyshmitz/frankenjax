@@ -661,6 +661,42 @@ impl Literal {
         Self::F16Bits(f16::from_f32(value).to_bits())
     }
 
+    /// Round f64 -> f32 with round-to-odd: exact values pass through, otherwise
+    /// return whichever of the two bracketing f32 values has an odd mantissa LSB.
+    /// Composing this with a round-to-nearest f32 -> f16/bf16 narrowing yields a
+    /// correctly single-rounded f64 -> f16/bf16 (Boldo–Melquiond), avoiding the
+    /// double rounding of `value as f32` followed by narrowing. f32's 24
+    /// significand bits suffice for both f16 (11) and bf16 (8).
+    fn f64_to_f32_round_to_odd(x: f64) -> f32 {
+        let nearest = x as f32;
+        if !nearest.is_finite() || f64::from(nearest) == x || (nearest.to_bits() & 1) == 1 {
+            return nearest; // non-finite, exact, or already odd
+        }
+        let bits = nearest.to_bits();
+        let toward_larger = x > f64::from(nearest);
+        let negative = (bits >> 31) == 1;
+        let neighbor = if toward_larger == !negative {
+            bits + 1
+        } else {
+            bits - 1
+        };
+        f32::from_bits(neighbor)
+    }
+
+    /// f64 -> bf16, correctly single-rounded (round-to-nearest-even) like XLA,
+    /// via a round-to-odd f32 intermediate (see [`Self::f64_to_f32_round_to_odd`]).
+    #[must_use]
+    pub fn from_bf16_f64(value: f64) -> Self {
+        Self::BF16Bits(bf16::from_f32(Self::f64_to_f32_round_to_odd(value)).to_bits())
+    }
+
+    /// f64 -> f16, correctly single-rounded (round-to-nearest-even) like XLA, via
+    /// a round-to-odd f32 intermediate (see [`Self::f64_to_f32_round_to_odd`]).
+    #[must_use]
+    pub fn from_f16_f64(value: f64) -> Self {
+        Self::F16Bits(f16::from_f32(Self::f64_to_f32_round_to_odd(value)).to_bits())
+    }
+
     #[must_use]
     pub fn from_f32(value: f32) -> Self {
         Self::F32Bits(value.to_bits())
@@ -5457,6 +5493,42 @@ mod tests {
             dims: vec![u32::MAX, u32::MAX, u32::MAX, 0],
         };
         assert_eq!(s.element_count(), Some(0));
+    }
+
+    // ── f64 -> f16/bf16 single-rounding (round-to-odd) ───────
+
+    #[test]
+    fn from_f16_f64_single_rounds_not_double() {
+        // Input just above the f16 tie between 0x3C00 (1.0) and 0x3C01:
+        // 1 + 2^-11 is exactly halfway; +2^-30 nudges it above the tie, so a
+        // correct single rounding gives 0x3C01. Rounding f64->f32 first loses
+        // the +2^-30 (below f32 half-ULP), leaving an exact tie that round-to-
+        // even sends back down to 0x3C00 — the double-rounding bug.
+        let x = 1.00048828125_f64 + 2f64.powi(-30);
+        let Literal::F16Bits(bits) = Literal::from_f16_f64(x) else {
+            panic!("expected F16Bits");
+        };
+        assert_eq!(bits, 0x3C01, "f64->f16 must single-round (XLA parity)");
+        // Naive double rounding would land on 0x3C00.
+        assert_eq!(half::f16::from_f32(x as f32).to_bits(), 0x3C00);
+    }
+
+    #[test]
+    fn from_f16_bf16_f64_preserve_exact_and_special() {
+        // Exact values and non-finites pass through unchanged.
+        for x in [0.0_f64, -0.0, 1.0, -2.0, f64::INFINITY, f64::NEG_INFINITY] {
+            let Literal::F16Bits(b16) = Literal::from_f16_f64(x) else {
+                unreachable!()
+            };
+            assert_eq!(b16, half::f16::from_f64(x).to_bits(), "f16 {x}");
+            let Literal::BF16Bits(bb) = Literal::from_bf16_f64(x) else {
+                unreachable!()
+            };
+            assert_eq!(bb, half::bf16::from_f64(x).to_bits(), "bf16 {x}");
+        }
+        assert!(
+            matches!(Literal::from_f16_f64(f64::NAN), Literal::F16Bits(b) if b & 0x7C00 == 0x7C00 && b & 0x03FF != 0)
+        );
     }
 
     // ── TensorValue edge cases ───────────────────────────────

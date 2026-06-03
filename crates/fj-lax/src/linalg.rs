@@ -116,8 +116,8 @@ fn complex_matrix_to_value(
         .map(|&(re, im)| match dtype {
             DType::Complex64 => Literal::from_complex64(re as f32, im as f32),
             DType::Complex128 => Literal::from_complex128(re, im),
-            DType::BF16 => Literal::from_bf16_f32(re as f32),
-            DType::F16 => Literal::from_f16_f32(re as f32),
+            DType::BF16 => Literal::from_bf16_f64(re),
+            DType::F16 => Literal::from_f16_f64(re),
             DType::F32 => Literal::from_f32(re as f32),
             _ => Literal::from_f64(re),
         })
@@ -192,8 +192,8 @@ fn matrix_to_value(m: usize, n: usize, data: &[f64], dtype: DType) -> Result<Val
 
 fn linalg_literal_from_f64(dtype: DType, value: f64) -> Literal {
     match dtype {
-        DType::BF16 => Literal::from_bf16_f32(value as f32),
-        DType::F16 => Literal::from_f16_f32(value as f32),
+        DType::BF16 => Literal::from_bf16_f64(value),
+        DType::F16 => Literal::from_f16_f64(value),
         DType::F32 => Literal::from_f32(value as f32),
         _ => Literal::from_f64(value),
     }

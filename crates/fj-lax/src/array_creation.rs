@@ -75,8 +75,8 @@ pub fn full(shape: &[u32], fill_value: f64, dtype: DType) -> Result<Value, Value
         DType::Bool => vec![Literal::Bool(fill_value != 0.0); size],
         DType::Complex64 => vec![Literal::from_complex64(fill_value as f32, 0.0); size],
         DType::Complex128 => vec![Literal::from_complex128(fill_value, 0.0); size],
-        DType::F16 => vec![Literal::from_f16_f32(fill_value as f32); size],
-        DType::BF16 => vec![Literal::from_bf16_f32(fill_value as f32); size],
+        DType::F16 => vec![Literal::from_f16_f64(fill_value); size],
+        DType::BF16 => vec![Literal::from_bf16_f64(fill_value); size],
     };
     let tensor = TensorValue::new(
         dtype,
