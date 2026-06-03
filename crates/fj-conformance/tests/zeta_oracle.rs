@@ -75,7 +75,7 @@ fn oracle_zeta_2_q1() {
     let actual = extract_f64_scalar(&result);
     let expected = PI * PI / 6.0;
     assert!(
-        (actual - expected).abs() < 1e-4,
+        (actual - expected).abs() < 1e-10,
         "zeta(2, 1) = π²/6 ≈ {}, got {}",
         expected,
         actual
@@ -91,7 +91,7 @@ fn oracle_zeta_4_q1() {
     let actual = extract_f64_scalar(&result);
     let expected = PI.powi(4) / 90.0;
     assert!(
-        (actual - expected).abs() < 1e-4,
+        (actual - expected).abs() < 1e-10,
         "zeta(4, 1) = π⁴/90 ≈ {}, got {}",
         expected,
         actual
@@ -107,7 +107,7 @@ fn oracle_zeta_3_q1() {
     let actual = extract_f64_scalar(&result);
     let expected = 1.2020569031595942;
     assert!(
-        (actual - expected).abs() < 1e-4,
+        (actual - expected).abs() < 1e-10,
         "zeta(3, 1) ≈ {}, got {}",
         expected,
         actual
@@ -125,7 +125,7 @@ fn oracle_zeta_2_q2() {
     let actual = extract_f64_scalar(&result);
     let expected = PI * PI / 6.0 - 1.0;
     assert!(
-        (actual - expected).abs() < 1e-4,
+        (actual - expected).abs() < 1e-10,
         "zeta(2, 2) = π²/6 - 1 ≈ {}, got {}",
         expected,
         actual
@@ -142,7 +142,7 @@ fn oracle_zeta_2_q_half() {
     let actual = extract_f64_scalar(&result);
     let expected = PI * PI / 2.0;
     assert!(
-        (actual - expected).abs() < 1e-3,
+        (actual - expected).abs() < 1e-10,
         "zeta(2, 0.5) ≈ π²/2 = {}, got {}",
         expected,
         actual
@@ -160,7 +160,7 @@ fn oracle_zeta_large_x() {
     let actual = extract_f64_scalar(&result);
     // ζ(10, 1) ≈ 1.000994575...
     assert!(
-        (actual - 1.0).abs() < 0.01,
+        (actual - 1.0009945751278180).abs() < 1e-10,
         "zeta(10, 1) ≈ 1, got {}",
         actual
     );
@@ -230,9 +230,9 @@ fn oracle_zeta_vector() {
     let result = eval_primitive(Primitive::Zeta, &[x, q], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![3]);
     let vals = extract_f64_vec(&result);
-    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-4);
-    assert!((vals[1] - 1.2020569031595942).abs() < 1e-4);
-    assert!((vals[2] - PI.powi(4) / 90.0).abs() < 1e-4);
+    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-10);
+    assert!((vals[1] - 1.2020569031595942).abs() < 1e-10);
+    assert!((vals[2] - PI.powi(4) / 90.0).abs() < 1e-10);
 }
 
 #[test]
@@ -242,10 +242,10 @@ fn oracle_zeta_2d() {
     let result = eval_primitive(Primitive::Zeta, &[x, q], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 2]);
     let vals = extract_f64_vec(&result);
-    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-4);
-    assert!((vals[1] - 1.2020569031595942).abs() < 1e-4);
-    assert!((vals[2] - PI.powi(4) / 90.0).abs() < 1e-4);
-    assert!((vals[3] - (PI * PI / 6.0 - 1.0)).abs() < 1e-4);
+    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-10);
+    assert!((vals[1] - 1.2020569031595942).abs() < 1e-10);
+    assert!((vals[2] - PI.powi(4) / 90.0).abs() < 1e-10);
+    assert!((vals[3] - (PI * PI / 6.0 - 1.0)).abs() < 1e-10);
 }
 
 // ======================== Broadcast tests ========================
@@ -256,7 +256,7 @@ fn oracle_zeta_all_scalars_broadcast() {
     let q = scalar_f64(1.0);
     let result = eval_primitive(Primitive::Zeta, &[x, q], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
-    assert!((actual - PI * PI / 6.0).abs() < 1e-4);
+    assert!((actual - PI * PI / 6.0).abs() < 1e-10);
 }
 
 #[test]
@@ -267,9 +267,9 @@ fn oracle_zeta_scalar_x_tensor_q_broadcast() {
     let result = eval_primitive(Primitive::Zeta, &[x, q], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![3]);
     let vals = extract_f64_vec(&result);
-    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-4);
-    assert!((vals[1] - (PI * PI / 6.0 - 1.0)).abs() < 1e-4);
-    assert!((vals[2] - PI * PI / 2.0).abs() < 1e-3);
+    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-10);
+    assert!((vals[1] - (PI * PI / 6.0 - 1.0)).abs() < 1e-10);
+    assert!((vals[2] - PI * PI / 2.0).abs() < 1e-10);
 }
 
 #[test]
@@ -280,9 +280,9 @@ fn oracle_zeta_tensor_x_scalar_q_broadcast() {
     let result = eval_primitive(Primitive::Zeta, &[x, q], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![3]);
     let vals = extract_f64_vec(&result);
-    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-4);
-    assert!((vals[1] - 1.2020569031595942).abs() < 1e-4);
-    assert!((vals[2] - PI.powi(4) / 90.0).abs() < 1e-4);
+    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-10);
+    assert!((vals[1] - 1.2020569031595942).abs() < 1e-10);
+    assert!((vals[2] - PI.powi(4) / 90.0).abs() < 1e-10);
 }
 
 #[test]
@@ -293,9 +293,9 @@ fn oracle_zeta_singleton_x_vector_q_broadcast() {
     let result = eval_primitive(Primitive::Zeta, &[x, q], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![3]);
     let vals = extract_f64_vec(&result);
-    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-4);
-    assert!((vals[1] - (PI * PI / 6.0 - 1.0)).abs() < 1e-4);
-    assert!((vals[2] - PI * PI / 2.0).abs() < 1e-3);
+    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-10);
+    assert!((vals[1] - (PI * PI / 6.0 - 1.0)).abs() < 1e-10);
+    assert!((vals[2] - PI * PI / 2.0).abs() < 1e-10);
 }
 
 #[test]
@@ -308,14 +308,14 @@ fn oracle_zeta_column_x_matrix_q_broadcast() {
     let vals = extract_f64_vec(&result);
     // Row 0: zeta(2, 1) = π²/6
     let z2 = PI * PI / 6.0;
-    assert!((vals[0] - z2).abs() < 1e-4);
-    assert!((vals[1] - z2).abs() < 1e-4);
-    assert!((vals[2] - z2).abs() < 1e-4);
+    assert!((vals[0] - z2).abs() < 1e-10);
+    assert!((vals[1] - z2).abs() < 1e-10);
+    assert!((vals[2] - z2).abs() < 1e-10);
     // Row 1: zeta(3, 1) = Apéry's constant
     let z3 = 1.2020569031595942;
-    assert!((vals[3] - z3).abs() < 1e-4);
-    assert!((vals[4] - z3).abs() < 1e-4);
-    assert!((vals[5] - z3).abs() < 1e-4);
+    assert!((vals[3] - z3).abs() < 1e-10);
+    assert!((vals[4] - z3).abs() < 1e-10);
+    assert!((vals[5] - z3).abs() < 1e-10);
 }
 
 #[test]
@@ -336,13 +336,13 @@ fn oracle_zeta_different_ranks_broadcast() {
     assert_eq!(extract_shape(&result), vec![2, 3]);
     let vals = extract_f64_vec(&result);
     // All q=1, so we get Riemann zeta
-    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-4);
-    assert!((vals[1] - 1.2020569031595942).abs() < 1e-4);
-    assert!((vals[2] - PI.powi(4) / 90.0).abs() < 1e-4);
+    assert!((vals[0] - PI * PI / 6.0).abs() < 1e-10);
+    assert!((vals[1] - 1.2020569031595942).abs() < 1e-10);
+    assert!((vals[2] - PI.powi(4) / 90.0).abs() < 1e-10);
     // Same pattern repeated for row 1
-    assert!((vals[3] - PI * PI / 6.0).abs() < 1e-4);
-    assert!((vals[4] - 1.2020569031595942).abs() < 1e-4);
-    assert!((vals[5] - PI.powi(4) / 90.0).abs() < 1e-4);
+    assert!((vals[3] - PI * PI / 6.0).abs() < 1e-10);
+    assert!((vals[4] - 1.2020569031595942).abs() < 1e-10);
+    assert!((vals[5] - PI.powi(4) / 90.0).abs() < 1e-10);
 }
 
 #[test]

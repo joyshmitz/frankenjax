@@ -3597,17 +3597,46 @@ pub(crate) fn hurwitz_zeta_approx(x: f64, q: f64) -> f64 {
         return f64::NAN;
     }
 
+    // Euler-Maclaurin summation for the Hurwitz zeta ζ(s, q) = Σ (n+q)^{-s}:
+    // sum the first N terms directly, then approximate the tail Σ_{n≥N} with the
+    // integral + half-term + Bernoulli corrections. This reaches ~1e-13 for s>1
+    // with N=10, M=8, whereas the previous naive 10000-term truncation left an
+    // O(N^{1-s}/(s-1)) tail error (~1e-4 at s=2, far worse as s→1).
+    const N: usize = 10;
+    // c_j = B_{2j} / (2j)! for j = 1..=8 (Bernoulli numbers over factorials).
+    const C: [f64; 8] = [
+        1.0 / 12.0,
+        -1.0 / 720.0,
+        1.0 / 30240.0,
+        -1.0 / 1_209_600.0,
+        1.0 / 47_900_160.0,
+        -691.0 / 1_307_674_368_000.0,
+        1.0 / 74_724_249_600.0,
+        -3617.0 / 10_670_622_842_880_000.0,
+    ];
+
+    let s = x;
     let mut sum = 0.0;
-    for n in 0..10000 {
-        let term = 1.0 / (n as f64 + q).powf(x);
-        if term.is_nan() || term.is_infinite() {
-            break;
-        }
-        sum += term;
-        if term < sum.abs() * 1e-15 {
-            break;
-        }
+    for n in 0..N {
+        sum += (n as f64 + q).powf(-s);
     }
+
+    let a = N as f64 + q; // (N + q)
+    let a_pow = a.powf(-s); // (N+q)^{-s}
+    sum += a * a_pow / (s - 1.0); // integral term (N+q)^{1-s}/(s-1)
+    sum += 0.5 * a_pow; // half-term
+
+    // Bernoulli corrections: Σ_j c_j · (s)_{2j-1} · (N+q)^{-s-2j+1}
+    let a_inv2 = 1.0 / (a * a);
+    let mut poch = s; // rising factorial (s)_1
+    let mut a_factor = a_pow / a; // (N+q)^{-s-1}
+    for (idx, &c) in C.iter().enumerate() {
+        sum += c * poch * a_factor;
+        let j = (idx + 1) as f64;
+        poch *= (s + 2.0 * j - 1.0) * (s + 2.0 * j);
+        a_factor *= a_inv2;
+    }
+
     sum
 }
 
@@ -5752,6 +5781,32 @@ mod tests {
         // ψ(1) = -γ ≈ -0.5772156649
         let euler_gamma = 0.5772156649;
         assert!((digamma_approx(1.0) + euler_gamma).abs() < 1e-4);
+    }
+
+    #[test]
+    fn hurwitz_zeta_high_accuracy() {
+        // Euler-Maclaurin zeta agrees with true scipy/JAX values to ~1e-12
+        // (the old naive truncated sum was only ~1e-4 at s=2). Riemann zeta is
+        // ζ(s) = hurwitz_zeta(s, 1); also check genuine Hurwitz cases (q ≠ 1).
+        let cases = [
+            (2.0, 1.0, PI * PI / 6.0),       // ζ(2) = π²/6
+            (3.0, 1.0, 1.2020569031595943),  // Apéry's constant
+            (4.0, 1.0, PI.powi(4) / 90.0),   // ζ(4) = π⁴/90
+            (5.0, 1.0, 1.0369277551433699),  // ζ(5)
+            (6.0, 1.0, PI.powi(6) / 945.0),  // ζ(6) = π⁶/945
+            (2.0, 2.0, PI * PI / 6.0 - 1.0), // ζ(2,2) = ζ(2) - 1
+            (2.0, 0.5, PI * PI / 2.0),       // ζ(2,1/2) = π²/2
+        ];
+        for (s, q, expected) in cases {
+            let got = hurwitz_zeta_approx(s, q);
+            assert!(
+                (got - expected).abs() < 1e-11,
+                "zeta({s},{q}) = {got}, want {expected}, diff {}",
+                (got - expected).abs()
+            );
+        }
+        assert!(hurwitz_zeta_approx(1.0, 1.0).is_infinite()); // pole at s=1
+        assert!(hurwitz_zeta_approx(2.0, f64::NAN).is_nan());
     }
 
     #[test]
