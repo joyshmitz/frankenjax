@@ -99,6 +99,12 @@ pub(crate) fn eval_comparison(
         }
         (Value::Tensor(lhs), Value::Tensor(rhs)) => {
             if lhs.shape == rhs.shape {
+                if lhs.dtype == DType::I64
+                    && rhs.dtype == DType::I64
+                    && let Some(value) = eval_same_shape_i64_compare(lhs, rhs, &int_cmp)?
+                {
+                    return Ok(value);
+                }
                 if lhs.dtype == DType::F64
                     && rhs.dtype == DType::F64
                     && let Some(value) = eval_same_shape_f64_compare(lhs, rhs, &float_cmp)?
@@ -224,6 +230,33 @@ fn eval_same_shape_f64_compare(
     )?)))
 }
 
+/// Same-shape I64 x I64 comparison fast path producing a `DType::Bool` tensor.
+///
+/// This is identical to the generic `compare_literals` path for `I64` pairs:
+/// that path converts both literals losslessly to `i128` and applies the same
+/// integer comparison closure. It only skips per-element enum dispatch and
+/// float/complex probes.
+#[inline]
+fn eval_same_shape_i64_compare(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    int_cmp: &impl Fn(i128, i128) -> bool,
+) -> Result<Option<Value>, EvalError> {
+    let mut elements = Vec::with_capacity(lhs.elements.len());
+    for (left, right) in lhs.elements.iter().zip(&rhs.elements) {
+        let (Literal::I64(left), Literal::I64(right)) = (*left, *right) else {
+            return Ok(None);
+        };
+        elements.push(Literal::Bool(int_cmp(i128::from(left), i128::from(right))));
+    }
+
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::Bool,
+        lhs.shape.clone(),
+        elements,
+    )?)))
+}
+
 /// F64 scalar/tensor broadcast comparison fast path producing a `DType::Bool`
 /// tensor. `scalar_on_left` preserves operand order (`Scalar ⊗ Tensor` vs
 /// `Tensor ⊗ Scalar`) for the asymmetric ordered comparisons. Bit-for-bit
@@ -339,6 +372,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn i64_compare_fast_path_matches_integer_closure_order() -> Result<(), EvalError> {
+        let lhs = [-5, 0, 7, i64::MIN, i64::MAX, 42];
+        let rhs = [-5, 1, -7, i64::MAX, i64::MIN, 42];
+        let params = BTreeMap::new();
+
+        for p in [
+            Primitive::Eq,
+            Primitive::Ne,
+            Primitive::Lt,
+            Primitive::Le,
+            Primitive::Gt,
+            Primitive::Ge,
+        ] {
+            let icmp = |a: i128, b: i128| match p {
+                Primitive::Eq => a == b,
+                Primitive::Ne => a != b,
+                Primitive::Lt => a < b,
+                Primitive::Le => a <= b,
+                Primitive::Gt => a > b,
+                Primitive::Ge => a >= b,
+                _ => false,
+            };
+            let fcmp = |a: f64, b: f64| match p {
+                Primitive::Eq => a == b,
+                Primitive::Ne => a != b,
+                Primitive::Lt => a < b,
+                Primitive::Le => a <= b,
+                Primitive::Gt => a > b,
+                Primitive::Ge => a >= b,
+                _ => false,
+            };
+            let want: Vec<bool> = lhs
+                .iter()
+                .zip(rhs.iter())
+                .map(|(&a, &b)| icmp(i128::from(a), i128::from(b)))
+                .collect();
+
+            let dispatch_inputs = [v_i64(&lhs)?, v_i64(&rhs)?];
+            let via_dispatch = crate::eval_primitive(p, &dispatch_inputs, &params)?;
+            assert_eq!(
+                extract_bools(&via_dispatch),
+                want,
+                "{p:?} dispatch i64 same-shape mismatch"
+            );
+
+            let direct_inputs = [v_i64(&lhs)?, v_i64(&rhs)?];
+            let direct = eval_comparison(p, &direct_inputs, icmp, fcmp)?;
+            assert_eq!(
+                extract_bools(&direct),
+                want,
+                "{p:?} direct i64 same-shape mismatch"
+            );
+        }
+
+        Ok(())
+    }
+
     fn s_f64(v: f64) -> Value {
         Value::Scalar(Literal::from_f64(v))
     }
@@ -356,6 +447,15 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+    fn v_i64(data: &[i64]) -> Result<Value, EvalError> {
+        Ok(Value::Tensor(TensorValue::new(
+            DType::I64,
+            fj_core::Shape {
+                dims: vec![data.len() as u32],
+            },
+            data.iter().copied().map(Literal::I64).collect(),
+        )?))
     }
     fn extract_bool(val: &Value) -> bool {
         match val {

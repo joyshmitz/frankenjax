@@ -1,0 +1,57 @@
+{
+  "pass": 36,
+  "bead": "frankenjax-mcqr.31",
+  "crate": "fj-lax",
+  "change": "same-shape I64 comparison fast path",
+  "profile_target": "eval/eq_1k_i64",
+  "baseline": {
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass36-profile rch exec -- cargo bench -p fj-lax --bench lax_baseline -- --sample-size 10 --measurement-time 1 --warm-up-time 1",
+    "worker": "vmi1156319",
+    "criterion_ci_us": [27.537, 27.757, 28.030]
+  },
+  "candidate": {
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass36-i64-eq-candidate rch exec -- cargo bench -p fj-lax --bench lax_baseline -- eval/eq_1k_i64 --sample-size 30 --measurement-time 2 --warm-up-time 1",
+    "worker": "vmi1156319",
+    "criterion_ci_us": [3.2680, 3.3492, 3.4553]
+  },
+  "speedup_midpoint": 8.285,
+  "score": {
+    "impact": 4,
+    "confidence": 5,
+    "effort": 1,
+    "value": 20.0
+  },
+  "isomorphism": {
+    "ordering_preserved": "yes: same-shape tensors are consumed with the same row-major zip order as the generic compare_literals loop",
+    "tie_breaking_unchanged": "n/a: comparisons produce independent Bool lanes with no tie policy",
+    "floating_point": "n/a: fast path is gated to DType::I64 and falls through for F64 and malformed elements",
+    "rng": "n/a",
+    "error_behavior": "unchanged: arity, shape/broadcast mismatch, dtype mismatch, and non-I64 malformed literals fall through to the existing generic path"
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_i64_eq_pass36_2026-06-03.golden",
+    "sha256": "d185af94a5211b2197f23b79f18f6e9a7044e5060776a8848f739dbb1d877df2",
+    "verified_command": "sha256sum -c artifacts/performance/evidence/fj_lax_i64_eq_pass36_2026-06-03.golden.sha256"
+  },
+  "validation": [
+    "cargo fmt -p fj-lax --check",
+    "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass36-check2 rch exec -- cargo check -p fj-lax --all-targets",
+    "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass36-clippy3 rch exec -- cargo clippy -p fj-lax --all-targets -- -D warnings",
+    "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-pass36-focused-test5 rch exec -- cargo test -p fj-lax comparison::tests --lib",
+    "sha256sum -c artifacts/performance/evidence/fj_lax_i64_eq_pass36_2026-06-03.golden.sha256"
+  ],
+  "ubs": {
+    "command": "ubs crates/fj-lax/src/comparison.rs",
+    "result": "nonzero due pre-existing comparison.rs test panic/unwrap/assert/indexing inventory; new pass removed its added unwrap and unreachable findings",
+    "remaining_critical": "pre-existing panic!(\"expected tensor for {p:?}\") in f64_compare_fast_paths_bit_identical_to_scalar"
+  },
+  "tracker": {
+    "closed_bead": "frankenjax-mcqr.31",
+    "jsonl_sync": "deferred because IcyGlacier held exclusive reservations on .beads/issues.jsonl and .skill-loop-progress.md during closeout"
+  },
+  "known_unrelated_failure": {
+    "command": "rch exec -- cargo test -p fj-lax --all-targets",
+    "result": "1011 passed, 1 failed",
+    "failure": "linalg::tests::qr_real_fast_path_bit_identical_to_complex_path in pre-existing dirty crates/fj-lax/src/linalg.rs peer edit"
+  }
+}
