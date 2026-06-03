@@ -72,7 +72,7 @@ fn oracle_lgamma_three() {
     let input = Value::Scalar(Literal::from_f64(3.0));
     let result = eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    assert!((vals[0] - 2.0_f64.ln()).abs() < 0.01);
+    assert!((vals[0] - 2.0_f64.ln()).abs() < 1e-10);
 }
 
 #[test]
@@ -81,7 +81,7 @@ fn oracle_lgamma_four() {
     let input = Value::Scalar(Literal::from_f64(4.0));
     let result = eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    assert!((vals[0] - 6.0_f64.ln()).abs() < 0.01);
+    assert!((vals[0] - 6.0_f64.ln()).abs() < 1e-10);
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn oracle_lgamma_five() {
     let input = Value::Scalar(Literal::from_f64(5.0));
     let result = eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    assert!((vals[0] - 24.0_f64.ln()).abs() < 0.01);
+    assert!((vals[0] - 24.0_f64.ln()).abs() < 1e-10);
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn oracle_lgamma_half() {
     let result = eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
     let expected = (std::f64::consts::PI.sqrt()).ln();
-    assert!((vals[0] - expected).abs() < 0.01);
+    assert!((vals[0] - expected).abs() < 1e-10);
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn oracle_lgamma_negative_half() {
     let result = eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
     let expected = (2.0 * std::f64::consts::PI.sqrt()).ln();
-    assert!((vals[0] - expected).abs() < 0.01);
+    assert!((vals[0] - expected).abs() < 1e-10);
 }
 
 #[test]
@@ -119,10 +119,10 @@ fn oracle_lgamma_1d() {
     let result = eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![4]);
     let vals = extract_f64_vec(&result);
-    assert!(vals[0].abs() < 0.01); // lgamma(1) = 0
-    assert!(vals[1].abs() < 0.01); // lgamma(2) = 0
-    assert!((vals[2] - 2.0_f64.ln()).abs() < 0.01); // lgamma(3) = ln(2)
-    assert!((vals[3] - 6.0_f64.ln()).abs() < 0.01); // lgamma(4) = ln(6)
+    assert!(vals[0].abs() < 1e-10); // lgamma(1) = 0
+    assert!(vals[1].abs() < 1e-10); // lgamma(2) = 0
+    assert!((vals[2] - 2.0_f64.ln()).abs() < 1e-10); // lgamma(3) = ln(2)
+    assert!((vals[3] - 6.0_f64.ln()).abs() < 1e-10); // lgamma(4) = ln(6)
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn oracle_lgamma_large() {
     let result = eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
     // lgamma(10) = ln(9!) = ln(362880) ≈ 12.8018
-    assert!((vals[0] - 362880.0_f64.ln()).abs() < 0.01);
+    assert!((vals[0] - 362880.0_f64.ln()).abs() < 1e-10);
 }
 
 // ======================== Digamma Tests ========================
@@ -155,8 +155,8 @@ fn oracle_digamma_one() {
     let input = Value::Scalar(Literal::from_f64(1.0));
     let result = eval_primitive(Primitive::Digamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    let euler_mascheroni = 0.5772156649;
-    assert!((vals[0] - (-euler_mascheroni)).abs() < 0.01);
+    let euler_mascheroni = 0.5772156649015329;
+    assert!((vals[0] - (-euler_mascheroni)).abs() < 1e-10);
 }
 
 #[test]
@@ -165,8 +165,8 @@ fn oracle_digamma_two() {
     let input = Value::Scalar(Literal::from_f64(2.0));
     let result = eval_primitive(Primitive::Digamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    let euler_mascheroni = 0.5772156649;
-    assert!((vals[0] - (1.0 - euler_mascheroni)).abs() < 0.01);
+    let euler_mascheroni = 0.5772156649015329;
+    assert!((vals[0] - (1.0 - euler_mascheroni)).abs() < 1e-10);
 }
 
 #[test]
@@ -175,8 +175,8 @@ fn oracle_digamma_three() {
     let input = Value::Scalar(Literal::from_f64(3.0));
     let result = eval_primitive(Primitive::Digamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    let euler_mascheroni = 0.5772156649;
-    assert!((vals[0] - (1.5 - euler_mascheroni)).abs() < 0.01);
+    let euler_mascheroni = 0.5772156649015329;
+    assert!((vals[0] - (1.5 - euler_mascheroni)).abs() < 1e-10);
 }
 
 #[test]
@@ -185,9 +185,9 @@ fn oracle_digamma_half() {
     let input = Value::Scalar(Literal::from_f64(0.5));
     let result = eval_primitive(Primitive::Digamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    let euler_mascheroni = 0.5772156649;
+    let euler_mascheroni = 0.5772156649015329;
     let expected = -euler_mascheroni - 2.0 * 2.0_f64.ln();
-    assert!((vals[0] - expected).abs() < 0.05);
+    assert!((vals[0] - expected).abs() < 1e-10);
 }
 
 #[test]
@@ -196,9 +196,9 @@ fn oracle_digamma_negative_half() {
     let input = Value::Scalar(Literal::from_f64(-0.5));
     let result = eval_primitive(Primitive::Digamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
-    let euler_mascheroni = 0.5772156649;
+    let euler_mascheroni = 0.5772156649015329;
     let expected = 2.0 - euler_mascheroni - 2.0 * 2.0_f64.ln();
-    assert!((vals[0] - expected).abs() < 0.05);
+    assert!((vals[0] - expected).abs() < 1e-10);
 }
 
 #[test]
@@ -223,12 +223,15 @@ fn oracle_digamma_2d() {
 
 #[test]
 fn oracle_digamma_large() {
-    // For large x, digamma(x) ≈ ln(x) - 1/(2x)
+    // Asymptotic leading-order sanity check: digamma(x) ≈ ln(x) - 1/(2x) for
+    // large x. The reference keeps only two terms, so it deliberately differs
+    // from the true (accurate) digamma by the next term ~1/(12x²) ≈ 8.3e-6 at
+    // x=100; hence a 1e-4 bound (not the 1e-10 used for exact-value tests below).
     let input = Value::Scalar(Literal::from_f64(100.0));
     let result = eval_primitive(Primitive::Digamma, &[input], &no_params()).unwrap();
     let vals = extract_f64_vec(&result);
     let approx = 100.0_f64.ln() - 1.0 / 200.0;
-    assert!((vals[0] - approx).abs() < 0.01);
+    assert!((vals[0] - approx).abs() < 1e-4);
 }
 
 #[test]
@@ -250,7 +253,7 @@ fn oracle_lgamma_single_element() {
     let result = eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![1]);
     let vals = extract_f64_vec(&result);
-    assert!(vals[0].abs() < 0.01);
+    assert!(vals[0].abs() < 1e-10);
 }
 
 #[test]
@@ -259,8 +262,8 @@ fn oracle_digamma_single_element() {
     let result = eval_primitive(Primitive::Digamma, &[input], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![1]);
     let vals = extract_f64_vec(&result);
-    let euler_mascheroni = 0.5772156649;
-    assert!((vals[0] - (-euler_mascheroni)).abs() < 0.01);
+    let euler_mascheroni = 0.5772156649015329;
+    assert!((vals[0] - (-euler_mascheroni)).abs() < 1e-10);
 }
 
 // ======================== Special Values ========================
@@ -457,7 +460,10 @@ fn oracle_digamma_complex64_positive_real() {
     let result = eval_primitive(Primitive::Digamma, &[input], &no_params())
         .expect("digamma complex64 should succeed");
     let vals = extract_complex64_vec(&result);
-    assert!((vals[0].0 - (-0.5772)).abs() < 0.01, "digamma(1) ≈ -0.5772");
+    assert!(
+        (vals[0].0 - (-0.5772156649015329)).abs() < 1e-10,
+        "digamma(1) ≈ -0.5772"
+    );
 }
 
 #[test]
@@ -507,7 +513,7 @@ fn metamorphic_lgamma_recurrence_relation() {
         let diff = lgamma_n1 - lgamma_n;
         let expected = n_f.ln();
         assert!(
-            (diff - expected).abs() < 0.01,
+            (diff - expected).abs() < 1e-10,
             "lgamma({n}+1) - lgamma({n}) should equal ln({n}) = {expected}, got {diff}"
         );
     }
@@ -530,7 +536,7 @@ fn metamorphic_digamma_recurrence_relation() {
         let diff = digamma_n1 - digamma_n;
         let expected = 1.0 / n_f;
         assert!(
-            (diff - expected).abs() < 0.01,
+            (diff - expected).abs() < 1e-10,
             "digamma({n}+1) - digamma({n}) should equal 1/{n} = {expected}, got {diff}"
         );
     }
@@ -547,7 +553,7 @@ fn metamorphic_lgamma_factorial_sequence() {
         let lgamma_val =
             extract_f64_vec(&eval_primitive(Primitive::Lgamma, &[input], &no_params()).unwrap())[0];
         assert!(
-            (lgamma_val - expected_log_factorial).abs() < 0.01,
+            (lgamma_val - expected_log_factorial).abs() < 1e-10,
             "lgamma({}) should equal ln({}!) = {}, got {}",
             n + 1,
             n,
