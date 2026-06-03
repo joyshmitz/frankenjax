@@ -1,0 +1,12 @@
+frankenjax-p1vbf.8 pass57 kept golden
+target=linalg/eig_48x48_f64
+profile=vmi1167313 eig48=27.616ms[26.492,28.760]
+same_worker_reference=vmi1227854 eig48=12.512ms[12.270,12.757]
+candidate=vmi1227854 eig48=11.892ms[11.562,12.229]
+source_diff_retained=true
+isomorphism=real-Q layout only; QR Gram-Schmidt dot/axpy order unchanged; RQ and q_total matrix multiply k order unchanged; public eigenvectors wrap f64 as Complex128 zero-imag exactly as before; no rng/tie-breaking/error changes
+tests=rch cargo test -p fj-lax linalg::tests passed 73 tests on vmi1153651
+check=rch cargo check -p fj-lax --all-targets passed on vmi1153651
+clippy=rch cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed on vmi1149989
+fmt=cargo fmt -p fj-lax -- --check blocked only by pre-existing crates/fj-lax/src/lib.rs line 5375 drift outside this pass
+next_primitive=profile after commit; if eig remains hot attack shifted/deflated QR or packed real Hessenberg layout, otherwise resume recursive/cache-oblivious GEMM from the no-gaps queue

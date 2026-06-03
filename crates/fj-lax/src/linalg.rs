@@ -1727,7 +1727,7 @@ fn normalize_vector(v: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
     }
 }
 
-fn qr_decomposition(a: &[f64], n: usize) -> (Vec<(f64, f64)>, Vec<f64>) {
+fn qr_decomposition(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     // Classical Gram-Schmidt QR (V1). Q is built and consumed column by column,
     // so the columns are kept in contiguous buffers (`q_cols`) and the original
     // A column j is extracted once (`col_j`). This makes the dot-product and
@@ -1763,18 +1763,19 @@ fn qr_decomposition(a: &[f64], n: usize) -> (Vec<(f64, f64)>, Vec<f64>) {
         q_cols.push(q_col_j);
     }
 
-    // Reassemble row-major Q with zero imaginary parts.
-    let mut q = vec![(0.0, 0.0); n * n];
+    // Reassemble row-major Q. eval_eig's QR path is purely real; the public
+    // Complex128 wrapping happens only after q_total is fully accumulated.
+    let mut q = vec![0.0; n * n];
     for (j, q_col_j) in q_cols.iter().enumerate() {
         for k in 0..n {
-            q[k * n + j] = (q_col_j[k], 0.0);
+            q[k * n + j] = q_col_j[k];
         }
     }
 
     (q, r)
 }
 
-fn matrix_mul(a: &[f64], b: &[(f64, f64)], n: usize) -> Vec<f64> {
+fn matrix_mul(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     // i-k-j order: the inner j-loop streams a contiguous row of B and C rather
     // than the i-j-k order's stride-n walk down a column of B. Each c[i][j]
     // still accumulates ascending-k, so the result is bit-for-bit identical.
@@ -1786,14 +1787,14 @@ fn matrix_mul(a: &[f64], b: &[(f64, f64)], n: usize) -> Vec<f64> {
             let a_ik = a[a_row + k];
             let b_row = k * n;
             for j in 0..n {
-                c[c_row + j] += a_ik * b[b_row + j].0;
+                c[c_row + j] += a_ik * b[b_row + j];
             }
         }
     }
     c
 }
 
-fn upper_triangular_matrix_mul(a: &[f64], b: &[(f64, f64)], n: usize) -> Vec<f64> {
+fn upper_triangular_matrix_mul(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut c = vec![0.0; n * n];
     for i in 0..n {
         let a_row = i * n;
@@ -1802,7 +1803,7 @@ fn upper_triangular_matrix_mul(a: &[f64], b: &[(f64, f64)], n: usize) -> Vec<f64
             let a_ik = a[a_row + k];
             let b_row = k * n;
             for j in 0..n {
-                c[c_row + j] += a_ik * b[b_row + j].0;
+                c[c_row + j] += a_ik * b[b_row + j];
             }
         }
     }
@@ -3668,8 +3669,7 @@ mod tests {
         }
 
         for idx in 0..n * n {
-            assert_eq!(q_new[idx].0.to_bits(), q[idx].0.to_bits(), "q.re {idx}");
-            assert_eq!(q_new[idx].1.to_bits(), q[idx].1.to_bits(), "q.im {idx}");
+            assert_eq!(q_new[idx].to_bits(), q[idx].0.to_bits(), "q.re {idx}");
             assert_eq!(r_new[idx].to_bits(), r[idx].to_bits(), "r {idx}");
         }
     }
@@ -3712,7 +3712,7 @@ mod tests {
             }
         }
 
-        let got_real = matrix_mul(&a, &b, n);
+        let got_real = matrix_mul(&a, &b_re, n);
         for idx in 0..n * n {
             assert_eq!(
                 got_real[idx].to_bits(),
@@ -3744,8 +3744,8 @@ mod tests {
                 a[i * n + k] = ((i * 17 + k * 11 + 3) as f64 * 0.019).cos();
             }
         }
-        let b: Vec<(f64, f64)> = (0..n * n)
-            .map(|idx| (((idx * 23 + 5) as f64 * 0.013).sin(), 0.0))
+        let b: Vec<f64> = (0..n * n)
+            .map(|idx| ((idx * 23 + 5) as f64 * 0.013).sin())
             .collect();
 
         let dense = matrix_mul(&a, &b, n);
@@ -3801,8 +3801,7 @@ mod tests {
             }
 
             let eigenvalues: Vec<(f64, f64)> = (0..n).map(|i| (t[i * n + i], 0.0)).collect();
-            let eigenvectors: Vec<(f64, f64)> =
-                q_total.into_iter().map(|v| (v, 0.0)).collect();
+            let eigenvectors: Vec<(f64, f64)> = q_total.into_iter().map(|v| (v, 0.0)).collect();
             (eigenvalues, eigenvectors)
         };
 

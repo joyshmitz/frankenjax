@@ -1,0 +1,84 @@
+{
+  "bead": "frankenjax-p1vbf.8",
+  "pass": 57,
+  "status": "kept",
+  "date": "2026-06-03",
+  "agent": "IcyGlacier",
+  "skill_loop": {
+    "driver": "repeatedly-apply-skill",
+    "skill": "extreme-software-optimization",
+    "deepening": "after repeated GEMM micro-lever rejects, switched to a structural real-data-layout primitive from the alien-graveyard no-gaps queue"
+  },
+  "target": {
+    "crate": "fj-lax",
+    "benchmark": "linalg/eig_48x48_f64",
+    "hotspot_basis": "fresh RCH linalg profile after pass56: eig_48x48_f64 27.616 ms [26.492, 28.760] on vmi1167313, second only to GEMM; prior GEMM register, parallel, and SIMD levers failed the keep gate"
+  },
+  "lever": {
+    "name": "real-Q eig QR layout",
+    "description": "Keep QR/eig Q matrices as contiguous real f64 buffers internally instead of Vec<(f64, f64)> with guaranteed-zero imaginary parts; convert to Complex128 only at the public eig output boundary.",
+    "single_lever": true,
+    "alien_primitive": "compressed representation / zero-imaginary data-layout specialization",
+    "affected_file": "crates/fj-lax/src/linalg.rs"
+  },
+  "baseline": {
+    "profile_worker": "vmi1167313",
+    "profile_mean_ms": 27.616,
+    "profile_ci_ms": [26.492, 28.760],
+    "same_worker_reference_worker": "vmi1227854",
+    "same_worker_reference_mean_ms": 12.512,
+    "same_worker_reference_ci_ms": [12.270, 12.757]
+  },
+  "after": {
+    "worker": "vmi1227854",
+    "mean_ms": 11.892,
+    "ci_ms": [11.562, 12.229],
+    "speedup_vs_same_worker_reference": 1.052,
+    "interval_note": "same-worker reference upper/lower intervals do not overlap: reference low 12.270 ms, candidate high 12.229 ms"
+  },
+  "score": {
+    "impact": 2.0,
+    "confidence": 4.0,
+    "effort": 2.5,
+    "value": 3.2,
+    "keep_threshold": 2.0
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "QR Gram-Schmidt loops keep the same j/i/k order; RQ and q_total multiplies keep ascending k accumulation order.",
+    "tie_breaking_unchanged": "No branches choose among equal candidates; convergence and iteration-count behavior are unchanged.",
+    "floating_point": "Arithmetic order and real values are unchanged; only guaranteed-zero imaginary tuple storage is removed internally, and final public Complex128 output wraps each f64 as (v, 0.0).",
+    "rng_preserved": "No RNG used or introduced.",
+    "errors_preserved": "Function arity, shape, dtype, and convergence paths are unchanged."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_eig_real_q_layout_pass57_2026-06-03.golden",
+    "sha256": "474e89bab282ed5273749161ab1de1956c7eb8231fda51bc158c68f1ec279d43",
+    "checksum_path": "artifacts/performance/evidence/fj_lax_eig_real_q_layout_pass57_2026-06-03.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-eig-layout-pass57-test-20260603 rch exec -- cargo test -p fj-lax linalg::tests -- --nocapture",
+      "worker": "vmi1153651",
+      "result": "passed, 73 tests"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-eig-layout-pass57-check-20260603 rch exec -- cargo check -p fj-lax --all-targets",
+      "worker": "vmi1153651",
+      "result": "passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-fj-lax-eig-layout-pass57-clippy-20260603 rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+      "worker": "vmi1149989",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt -p fj-lax -- --check",
+      "result": "blocked by pre-existing unrelated crates/fj-lax/src/lib.rs:5375 formatting drift; touched linalg.rs lines are rustfmt-clean"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/linalg.rs .skill-loop-progress.md artifacts/performance/evidence/fj_lax_eig_real_q_layout_pass57_2026-06-03.golden artifacts/performance/evidence/fj_lax_eig_real_q_layout_pass57_2026-06-03.golden.sha256 artifacts/performance/evidence/fj_lax_eig_real_q_layout_pass57_2026-06-03.json",
+      "result": "exit 1 from pre-existing linalg.rs panic/unwrap/direct-indexing inventory outside this lever; no UBS finding points to the changed real-Q layout lines"
+    }
+  ],
+  "next_profile_target": "Re-run fj-lax linalg profile after commit; if eig remains dominant, attack shifted/deflated QR or packed real Hessenberg layout; otherwise resume recursive/cache-oblivious GEMM."
+}
