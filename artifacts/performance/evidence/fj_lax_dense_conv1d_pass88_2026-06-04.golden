@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.33 pass88 golden
+target=eval/conv1d_1024x16_5x32_f64_vec
+lever=dense f64 1D convolution — read both operands from as_f64_slice, f64 multiply-accumulate, new_f64_values, bypassing the per-multiply Literal materialize+match in the conv_1d hot loop
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2 (1x1024x16 input, 5x16x32 kernel, SAME)
+worker=ts2
+conv1d_1x1024x16_5x16x32_same=dense 10708.958us [10694.493, 10724.702] vs literal 31176.431us [31104.717, 31258.238] = 2.91x mid, 2.90x conservative
+score=8.0
+alien_primitive=dense SoA + direct convolution over contiguous typed storage, alien_cs_graveyard section 8.2
+source_change=eval_conv_1d gains a dense f64 fast path before the generic non-complex loop (out_dtype==F64, both operands as_f64_slice); complex/non-dense/mixed fall through unchanged
+isomorphism=same n/w/co + k/ci iteration and padding-bounds skip; same lhs_idx/rhs_idx math; acc from 0.0 accumulating lhs*rhs in the same order; for dense f64 src[idx]==as_f64().unwrap_or(0.0); output from_f64; SAME+VALID + strides validated; same batch-offset overflow check
+golden_note=bit-identical to the generic path across valid/same x stride 1/2 multi-channel, dense vs Literal by bits
+validation=RCH cargo test -p fj-lax --lib --release conv passed 23 tests incl dense_f64_conv_1d_matches_generic; RCH cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings passed
