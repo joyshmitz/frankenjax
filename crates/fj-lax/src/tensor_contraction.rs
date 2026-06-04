@@ -166,39 +166,82 @@ fn index_to_contracted_coords(idx: usize, axes: &[usize], shape: &[usize]) -> Ve
 ///
 /// Matches `jnp.matmul(a, b)` for 2D arrays.
 pub fn matmul_2d(a: &[f64], m: usize, k: usize, b: &[f64], n: usize) -> Vec<f64> {
-    let mut result = vec![0.0; m * n];
-
-    // i-k-j loop order: the inner j-loop streams a contiguous row of B and a
-    // contiguous row of C, instead of the i-j-k order's stride-`n` walk down a
-    // column of B (a cache miss per multiply). For each output element c[i][j]
-    // the contributions are still accumulated in ascending-l order
-    // (c[i][j] += a[i][l]*b[l][j] for l = 0,1,...,k-1), exactly as before, so
-    // the floating-point result is bit-for-bit identical.
+    // Parallelize large products across disjoint output ROW-BLOCKS (scoped
+    // threads, no external dependency, 100% safe). Threading is gated to large
+    // matmuls: at 256³ (~16.7M FMAs) the serial i-k-j is already L2-served and
+    // thread/bandwidth overhead REGRESSES it (~0.74×), but at 512³ (~134M FMAs)
+    // row-block threading is ~3.7× (worker-corrected, RCH). The threshold keeps
+    // small/medium matmuls on the zero-overhead serial path.
     //
-    // NOTE (pass110, rejected micro-architectural levers at 256³ on the RCH
-    // workers — see artifacts/performance/evidence/fj_lax_gemm_blocking_rejected_*):
-    //   * NB×KB cache-blocking REGRESSED to ~0.60× — the full-width contiguous
-    //     inner loop is already prefetcher-friendly and B (512 KB) is served from
-    //     L2, so narrow panels + C re-streaming across k-blocks only added cost.
-    //   * 4-row M-axis register-tiling (4× B reuse) gave only ~1.09× — the kernel
-    //     is already near compute/L2 bound, not B-bandwidth bound, at this size.
-    // The real >=2× lever is a different axis: a threaded per-row GEMM (bit-exact,
-    // each output row summed ascending-l by one thread) or an explicit std::simd
-    // MR×NR microkernel. Kept the scalar i-k-j kernel; both attempts reverted.
-    for i in 0..m {
-        let a_row = i * k;
-        let c_row = i * n;
+    // (pass110: single-thread NBxKB cache-blocking REGRESSED ~0.60× and 4-row M
+    // register-tiling gave ~1.09× — the serial kernel is already L2-served, so
+    // the remaining axis is parallelism.)
+    const PARALLEL_MIN_OPS: usize = 1 << 26; // ~67M FMAs (~406³); 256³ stays serial
+    let ops = m.saturating_mul(k).saturating_mul(n);
+    let threads = if ops >= PARALLEL_MIN_OPS {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(m.max(1))
+    } else {
+        1
+    };
+    matmul_2d_with_threads(a, m, k, b, n, threads)
+}
+
+/// `matmul_2d` driver with an explicit thread count (1 = serial). Splitting the
+/// output into disjoint contiguous row-blocks across scoped threads is bit-for-bit
+/// identical to the serial kernel: every output row is computed by exactly one
+/// thread accumulating in ascending-`l` order (see matmul_2d_threaded_bit_identical
+/// and dot_rank2_matmul_f64_matches_row_major_ijk_bits).
+fn matmul_2d_with_threads(
+    a: &[f64],
+    m: usize,
+    k: usize,
+    b: &[f64],
+    n: usize,
+    threads: usize,
+) -> Vec<f64> {
+    let mut result = vec![0.0; m * n];
+    if m == 0 || n == 0 || k == 0 {
+        return result;
+    }
+    if threads <= 1 {
+        matmul_2d_row_block(a, k, b, n, 0, &mut result);
+        return result;
+    }
+
+    let rows_per = m.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = result.as_mut_slice();
+        let mut row_start = 0usize;
+        while row_start < m {
+            let chunk_rows = rows_per.min(m - row_start);
+            let (block, tail) = rest.split_at_mut(chunk_rows * n);
+            rest = tail;
+            let rs = row_start;
+            scope.spawn(move || matmul_2d_row_block(a, k, b, n, rs, block));
+            row_start += chunk_rows;
+        }
+    });
+    result
+}
+
+/// Compute a contiguous block of output rows (starting at `row_start`,
+/// `block.len() / n` rows) of the m×n product into `block`, via the i-k-j
+/// kernel. Each output element accumulates `a[i][l]*b[l][j]` in ascending-`l`
+/// order — bit-for-bit identical to the serial whole-matrix kernel.
+fn matmul_2d_row_block(a: &[f64], k: usize, b: &[f64], n: usize, row_start: usize, block: &mut [f64]) {
+    for (ri, c_row) in block.chunks_mut(n).enumerate() {
+        let a_row = (row_start + ri) * k;
         for l in 0..k {
             let a_il = a[a_row + l];
-            let b_row = l * n;
-            let dst = &mut result[c_row..c_row + n];
-            let src = &b[b_row..b_row + n];
+            let src = &b[l * n..l * n + n];
             for j in 0..n {
-                dst[j] += a_il * src[j];
+                c_row[j] += a_il * src[j];
             }
         }
     }
-    result
 }
 
 /// Outer product of two vectors.
@@ -325,6 +368,28 @@ mod tests {
         }
         for idx in 0..m * n {
             assert_eq!(got[idx].to_bits(), want[idx].to_bits(), "mismatch at {idx}");
+        }
+    }
+
+    #[test]
+    fn matmul_2d_threaded_bit_identical() {
+        // The multi-threaded row-block driver must equal the serial kernel
+        // bit-for-bit, including a thread count that exceeds the row count (so
+        // some threads get empty/partial blocks) and a partial last block.
+        let (m, k, n) = (13usize, 17usize, 11usize);
+        let a: Vec<f64> = (0..m * k).map(|i| (i as f64 * 0.019).sin() * 3.0 - 0.7).collect();
+        let b: Vec<f64> = (0..k * n).map(|i| (i as f64 * 0.023).cos() * 1.9 + 0.2).collect();
+        let serial = super::matmul_2d_with_threads(&a, m, k, &b, n, 1);
+        for threads in [2usize, 3, 4, 8, 16, 32] {
+            let parallel = super::matmul_2d_with_threads(&a, m, k, &b, n, threads);
+            assert_eq!(serial.len(), parallel.len());
+            for idx in 0..serial.len() {
+                assert_eq!(
+                    serial[idx].to_bits(),
+                    parallel[idx].to_bits(),
+                    "threads={threads} mismatch at {idx}"
+                );
+            }
         }
     }
 

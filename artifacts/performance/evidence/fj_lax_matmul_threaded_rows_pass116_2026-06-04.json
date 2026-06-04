@@ -1,0 +1,18 @@
+{
+  "pass": 116,
+  "crate": "fj-lax",
+  "target": "matmul_2d (reachable via Primitive::DotGeneral/Dot rank-2 f64 -> rank2_f64_matmul -> matmul_2d), bench eval/dot_512x512x512_f64",
+  "function": "tensor_contraction::matmul_2d (scoped-thread row-block parallelism, std::thread::scope, no new dep)",
+  "lever": "Parallelize the rank-2 f64 GEMM across disjoint output ROW-BLOCKS using std::thread::scope (100% safe, no external dependency). Gated to large products (>=67M FMAs, ~406^3) so small/medium matmuls keep the zero-overhead serial path. This is the directive's parallelization axis: pass110 showed single-thread cache-blocking (0.60x) and register-tiling (1.09x) could not clear 2x because the serial i-k-j is already L2-served.",
+  "isomorphism": "BIT-EXACT. Each output row c[i][..] is computed entirely by one thread via the same i-k-j kernel accumulating a[i][l]*b[l][j] in ascending-l order; row-blocks are disjoint. Proven by matmul_2d_threaded_bit_identical (thread counts 2/3/4/8/16/32 incl. > row count, to_bits vs serial) + dot_rank2_matmul_f64_matches_row_major_ijk_bits + matmul_2d_large_bit_identical_to_ijk. 11/11 matmul tests pass.",
+  "baseline_512_ms": 45.110,
+  "candidate_512_ms": 10.582,
+  "calibration_baseline_us": 9.4214,
+  "calibration_candidate_us": 8.2526,
+  "speedup_512_worker_corrected": 3.73,
+  "speedup_256_note": "256^3 (16.7M FMAs) measured 0.74x threaded (regression: thread+bandwidth overhead vs L2-served serial) -> EXCLUDED by the 67M threshold; stays serial, unchanged.",
+  "score": "impact 5 (matmul/dot_general is THE reachable hot numerical core) x confidence 5 (bit-exact, thread-count-robust) / effort 2 = 12.5",
+  "tests": "fj-lax matmul 11/11 (incl matmul_2d_threaded_bit_identical); clippy -D warnings clean.",
+  "bench_note": "Measured via temporary 512^3 bench in foreign-dirty lax_baseline.rs (restored, not committed). Serial baseline obtained by forcing PARALLEL_MIN_OPS=usize::MAX in-place. Only tensor_contraction.rs committed.",
+  "date": "2026-06-04"
+}
