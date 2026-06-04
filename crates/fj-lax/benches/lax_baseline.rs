@@ -1107,6 +1107,19 @@ fn bench_sort_64k_f64(c: &mut Criterion) {
     });
 }
 
+// Dense f64 Argmax over a 64k axis: dense fast path (pass101) vs the generic
+// per-element sort_key/compare_sort_keys scan.
+fn bench_argmax_64k_f64(c: &mut Criterion) {
+    let data: Vec<f64> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| ((i as f64) * 1.000_173).sin() * 1e6 - (i as f64))
+        .collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/argmax_64k_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Argmax, std::slice::from_ref(&input), &p))
+    });
+}
+
 // F32 sort: previously the generic O(n log n) comparison path (F32 is
 // Literal-backed); now the LSD radix path (pass98). Same data shape as the f64
 // bench.
@@ -2309,6 +2322,7 @@ criterion_group!(
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
     bench_sort_64k_f64,
+    bench_argmax_64k_f64,
     bench_sort_64k_f32,
     bench_sort_64k_u32,
     bench_sort_calib_reduce_64k_i64,

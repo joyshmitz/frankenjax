@@ -1,0 +1,11 @@
+pass101 golden — fj-lax: dense f64/i64 Argmax/Argmin fast path
+target=eval/argmax_64k_f64 (extremum_along_axis)
+lever=dense data-model fast path. argmax/argmin scanned each element via sort_key(literal)+compare_sort_keys (SortKey enum construction + match per element). Added dense f64 (as_f64_slice, v.total_cmp(&best)) and i64 (as_i64_slice, v cmp best) scans with the SAME strict-greater(max)/strict-less(min) update so the FIRST occurrence wins ties — bypassing the per-element Literal machinery. Non-dense / other dtypes fall through to the generic scan.
+method=same-bench A/B on RCH Criterion; baseline = git-stashed extremum_along_axis (generic scan; dense f64 falls through); normalized by eval/sort_calib_reduce_64k_i64 (ReduceSum, UNAFFECTED) calibration.
+calibration_reduce=candidate 13.576us vs baseline 21.437us -> baseline worker 1.58x slower
+argmax_64k_f64=baseline 1025.8us [990.36, 1071.8] vs candidate 156.79us [151.77, 162.71] = 6.54x raw -> 4.14x worker-corrected
+score=impact 4 (argmax/argmin ubiquitous in ML: classification, sampling, retrieval) x confidence 5 (BIT-EXACT indices vs the generic scan; argmax_argmin_dense_matches_generic parity test + 6 argm tests pass) / effort 2 = 10.0
+alien_primitive=dense SoA scan over contiguous typed storage with a typed comparator, replacing tagged-union per-element materialize+dispatch (alien_cs_graveyard dense-storage / SoA section)
+isomorphism=BIT-IDENTICAL index output to the generic scan. Generic uses compare_sort_keys(key,best): for F64 SortKey::Float -> f64::total_cmp, for I64 -> i64 cmp, updating best only on strict Greater (max) / Less (min) so the first occurrence wins ties. Dense path uses v.total_cmp(&best) (F64) / v cmp best (I64) with the identical strict update and best initialized to in-slice index 0 — same NaN ordering (total_cmp), same +-0 / +-inf handling, same first-occurrence tie indices. Output is Literal::I64 indices either way.
+golden_note=argmax_argmin_dense_matches_generic: dense-vs-Literal argmax AND argmin on a 7x300 f64 tensor (axis 1) over NaN/+-inf/+-0/duplicated-extremum, plus an i64 dense-vs-Literal case, indices compared exactly. 6 argm tests pass.
+validation=RCH cargo test -p fj-lax --release argm: 6 passed; RCH cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings: clean.

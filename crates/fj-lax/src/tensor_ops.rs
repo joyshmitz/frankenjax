@@ -3759,7 +3759,79 @@ fn extremum_along_axis(
 
     let mut result_elements = Vec::with_capacity(outer_count);
 
-    for outer in 0..outer_count {
+    // Row-major base offset (in-slice index 0) for output position `outer`,
+    // shared by the dense fast paths below.
+    let base_of = |outer: usize| -> Result<usize, EvalError> {
+        let mut idx = outer;
+        let mut flat = 0_usize;
+        for ax in (0..rank).rev() {
+            if ax == axis {
+                continue;
+            }
+            let dim = tensor.shape.dims[ax] as usize;
+            if dim == 0 {
+                return Err(EvalError::Unsupported {
+                    primitive,
+                    detail: "argmin/argmax encountered zero non-axis dimension".to_owned(),
+                });
+            }
+            let offset = (idx % dim).checked_mul(strides[ax]).ok_or_else(|| {
+                EvalError::Unsupported {
+                    primitive,
+                    detail: "argmin/argmax flat offset multiplication overflowed".to_owned(),
+                }
+            })?;
+            flat = flat
+                .checked_add(offset)
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "argmin/argmax flat offset addition overflowed".to_owned(),
+                })?;
+            idx /= dim;
+        }
+        Ok(flat)
+    };
+
+    // Dense fast paths: scan the contiguous typed slice with the same comparison
+    // (F64 total_cmp / I64 cmp) and strict-greater/less update so the FIRST
+    // occurrence wins ties — bit-identical indices to the generic
+    // sort_key/compare_sort_keys scan, without the per-element Literal machinery.
+    if let Some(values) = tensor.elements.as_f64_slice() {
+        for outer in 0..outer_count {
+            let base = base_of(outer)?;
+            let mut best_idx = 0_usize;
+            let mut best = values[base];
+            for i in 1..axis_dim {
+                let v = values[base + i * axis_stride];
+                let better = if find_max {
+                    v.total_cmp(&best) == std::cmp::Ordering::Greater
+                } else {
+                    v.total_cmp(&best) == std::cmp::Ordering::Less
+                };
+                if better {
+                    best_idx = i;
+                    best = v;
+                }
+            }
+            result_elements.push(Literal::I64(best_idx as i64));
+        }
+    } else if let Some(values) = tensor.elements.as_i64_slice() {
+        for outer in 0..outer_count {
+            let base = base_of(outer)?;
+            let mut best_idx = 0_usize;
+            let mut best = values[base];
+            for i in 1..axis_dim {
+                let v = values[base + i * axis_stride];
+                let better = if find_max { v > best } else { v < best };
+                if better {
+                    best_idx = i;
+                    best = v;
+                }
+            }
+            result_elements.push(Literal::I64(best_idx as i64));
+        }
+    } else {
+        for outer in 0..outer_count {
         let base = {
             let mut idx = outer;
             let mut flat = 0_usize;
@@ -3841,6 +3913,7 @@ fn extremum_along_axis(
         }
 
         result_elements.push(Literal::I64(best_idx as i64));
+        }
     }
 
     if result_shape.dims.is_empty() {
@@ -6367,6 +6440,89 @@ mod tests {
         let result = eval_argmax(Primitive::Argmax, &[x], &BTreeMap::new()).unwrap();
         let idx = result.as_i64_scalar().expect("expected scalar i64 result");
         assert_eq!(idx, 4);
+    }
+
+    #[test]
+    fn argmax_argmin_dense_matches_generic() {
+        // Dense f64 (as_f64_slice) takes the dense fast path; the same data as a
+        // Literal-backed tensor takes the generic sort_key/compare_sort_keys path.
+        // Indices must match exactly over NaN / +-inf / +-0 / dups (incl. tie
+        // first-occurrence) for both argmax and argmin, on a 2D tensor (axis 1).
+        let rows = 7usize;
+        let cols = 300usize; // >= a few so ties/extrema vary per row
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| match i % 17 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                4 => 0.0,
+                5 => 7.0, // duplicated extremum to exercise first-occurrence ties
+                _ => ((i as f64) * 1.000_173).sin() * 10.0 - (i as f64) * 0.001,
+            })
+            .collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let dense = || Value::Tensor(TensorValue::new_f64_values(shape.clone(), data.clone()).unwrap());
+        let literal = || {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    shape.clone(),
+                    data.iter().copied().map(Literal::from_f64).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        assert!(dense().as_tensor().unwrap().elements.as_f64_slice().is_some());
+        assert!(literal().as_tensor().unwrap().elements.as_f64_slice().is_none());
+        let p = params(&[("axis", "1")]);
+
+        for prim in [Primitive::Argmax, Primitive::Argmin] {
+            let eval = |v: Value| -> Vec<i64> {
+                let r = if prim == Primitive::Argmax {
+                    eval_argmax(prim, &[v], &p).unwrap()
+                } else {
+                    eval_argmin(prim, &[v], &p).unwrap()
+                };
+                extract_i64_vec(&r)
+            };
+            assert_eq!(eval(dense()), eval(literal()), "{prim:?} dense vs generic");
+        }
+
+        // I64 dense path too.
+        let idata: Vec<i64> = (0..rows * cols)
+            .map(|i| ((i as i64).wrapping_mul(2_654_435_761)) ^ (i as i64 % 9))
+            .collect();
+        let idense =
+            Value::Tensor(TensorValue::new_i64_values(shape.clone(), idata.clone()).unwrap());
+        let iliteral = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                shape.clone(),
+                idata.iter().copied().map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            extract_i64_vec(
+                &eval_argmax(Primitive::Argmax, std::slice::from_ref(&idense), &p).unwrap()
+            ),
+            extract_i64_vec(
+                &eval_argmax(Primitive::Argmax, std::slice::from_ref(&iliteral), &p).unwrap()
+            ),
+            "i64 argmax dense vs generic"
+        );
+        assert_eq!(
+            extract_i64_vec(
+                &eval_argmin(Primitive::Argmin, std::slice::from_ref(&idense), &p).unwrap()
+            ),
+            extract_i64_vec(
+                &eval_argmin(Primitive::Argmin, std::slice::from_ref(&iliteral), &p).unwrap()
+            ),
+            "i64 argmin dense vs generic"
+        );
     }
 
     #[test]
