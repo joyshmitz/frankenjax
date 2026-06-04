@@ -1,0 +1,31 @@
+{
+    "pass": 90,
+    "date": "2026-06-04",
+    "crate": "fj-dispatch",
+    "kind": "profile + next-target identification (NO-CEILING pivot, not a micro-lever)",
+    "worker": "single-run rch dispatch_baseline",
+    "hot_families_us": {
+        "vmap_eigh/batched_matrix_3x3": 241.5,
+        "vmap_svd/batched_matrix_3x2": 169.3,
+        "vmap_qr/batched_matrix_3x2": 136.9,
+        "eval_jaxpr_throughput/chain_add/1000": 117.0,
+        "vmap_while/functional_sub_jaxpr_sub_two_128": 89.9,
+        "vmap_dot_i64/paired_vectors": 84.9,
+        "vmap_scan/shared_init_batched_xs_128x64": 52.1,
+        "vmap_gather/batched_indices": 42.1,
+        "dispatch_latency/jit/scalar_add": 4.2,
+        "dispatch_latency/vmap/vector_add_one": 4.7
+    },
+    "findings": [
+        "Batched linalg (eigh/svd/qr over 512 small matrices) is the top cost, but the dispatch layer is ALREADY scratch-optimized (batch_eigh_multi/batch_qr_multi/batch_svd_multi reuse EighScratch/matrix buffers across the batch). The residual cost is the per-matrix iterative kernel (Jacobi eigh, Householder QR). A closed-form 3x3 symmetric eigensolver / register-blocked small-matrix QR is a different complexity class, but it CHANGES OUTPUT BITS vs the current Jacobi/Householder, so it cannot be proven via the isomorphism + golden-sha256 discipline; it requires JAX-tolerance parity re-validation against a non-circular oracle. Tracked as a separate algorithm-swap workstream, NOT an isomorphic optimization.",
+        "eval_jaxpr interpreter loop (fj-interpreters eval_jaxpr_with_consts) costs ~117ns/equation (chain_add/1000 117us, /100 11.9us, perfectly linear). Two heap Vec<Value> allocations per equation (resolve_equation_inputs + eval_primitive_multi's vec![v] for single-output prims). A scratch-buffer + direct-eval_primitive rewrite was prototyped this session: measured ~1.23x (95us vs 117us @1000, consistent 1.24x @100 -> real per-eqn effect, not noise) -- below the >=2x bar, reverted. The remaining cost is eval_primitive dispatch + the FxHashMap env, not allocation; a flat slot-array env (different memory layout) is estimated insufficient alone. The genuinely-different swing is a COMPILED interpreter: lower the jaxpr to a flat opcode/closure stream with pre-resolved variable slots (register allocation), eliminating per-equation hashing AND primitive re-dispatch.",
+        "dispatch() fixed per-call pipeline overhead is ~4.2us for a trivial scalar_add jit -- paid by EVERY jit/vmap/grad call. It rebuilds BackendRegistry+Box<CpuBackend> per call, runs verify_transform_composition + simulate_nested_trace_contexts + build_cache_key_ref every call, and unconditionally constructs the evidence ledger + effect_trace/nested_trace_frame_trace strings via format!+join. Much of this is behavior-contracted (e2e_p2c004_evidence_ledger_audit_trail) so it is bit-exact-fiddly, but a per-signature COMPILATION CACHE (the JAX jit model: memoize the traced+transformed executable plan keyed by the already-computed cache_key) would skip trace+transform+composition-proof on repeat dispatch while still emitting the per-call audit ledger -- bit-exact outputs."
+    ],
+    "next_target": {
+        "primitive": "per-signature dispatch compilation cache (memoized executable plan)",
+        "alien_technique": "memoization / compiled-interpreter lowering (flat opcode stream + register-allocated slots)",
+        "target_ratio": ">=2x on dispatch_latency/jit/scalar_add (4.2us -> <2us) and eval_jaxpr_throughput (compiled stream removes per-eqn hash + re-dispatch)",
+        "discipline": "bit-exact: identical outputs + identical evidence ledger; isomorphism + golden-sha256 provable"
+    },
+    "note": "This is a pivot artifact per the NO-CEILING addendum's REPORTING RULE: fj-lax dense-data-model vein is built out for high-value f64/i64 ops; the next swings are in fj-dispatch/fj-interpreters execution-model structure (compilation cache, compiled interpreter) and in algorithm-swap small-matrix linalg (separate parity-revalidation track). Not a 'maxed out' report."
+}
