@@ -190,43 +190,117 @@ pub fn einsum2(
 
     let mut result = vec![0.0; out_size.max(1)];
 
-    // Iterate over output indices
-    for out_idx in 0..out_size.max(1) {
-        let out_coords = idx_to_coords(out_idx, &out_shape);
+    // Allocation-free generic contraction. The previous interpreter rebuilt a
+    // `HashMap<char, usize>` and re-decoded both operand subscripts *per
+    // (output, contracted) pair* — O(out·sum) heap traffic. Instead precompute,
+    // for each operand, a per-axis (stride, coordinate-source) plan plus a
+    // per-summed-axis stride contribution, then walk the output once and the
+    // contracted axes via a row-major odometer that maintains the operand flat
+    // indices incrementally. The summation visits the contracted multi-index in
+    // the exact same row-major ascending order as before, so every output's f64
+    // accumulation is bit-for-bit identical (see
+    // einsum2_generic_allocation_free_bit_identical).
+    let out_strides = row_major_strides(&out_shape);
+    let a_strides = row_major_strides(a_shape);
+    let b_strides = row_major_strides(b_shape);
 
-        // Sum over contracted indices
-        let mut sum = 0.0;
-        for sum_idx in 0..sum_size.max(1) {
-            let sum_coords = idx_to_coords(sum_idx, &sum_dims);
+    // label -> position in the output coord list / summed-index list.
+    let out_pos: HashMap<char, usize> = sub_out.chars().enumerate().map(|(i, c)| (c, i)).collect();
+    let sum_pos: HashMap<char, usize> = sum_indices.iter().enumerate().map(|(i, &c)| (c, i)).collect();
 
-            // Build full index assignment
-            let mut assignment: HashMap<char, usize> = HashMap::new();
-            for (i, c) in sub_out.chars().enumerate() {
-                if i < out_coords.len() {
-                    assignment.insert(c, out_coords[i]);
+    // Per-axis plan entries: (stride, is_summed, pos) where `pos` indexes
+    // out_coords for free axes or the summed-axis list for contracted axes.
+    let build_plan = |sub: &str, strides: &[usize]| -> Vec<(usize, bool, usize)> {
+        sub.chars()
+            .enumerate()
+            .map(|(i, c)| {
+                if let Some(&p) = out_pos.get(&c) {
+                    (strides[i], false, p)
+                } else {
+                    (strides[i], true, sum_pos[&c])
                 }
-            }
-            for (i, &c) in sum_indices.iter().enumerate() {
-                if i < sum_coords.len() {
-                    assignment.insert(c, sum_coords[i]);
-                }
-            }
+            })
+            .collect()
+    };
+    let a_plan = build_plan(sub_a, &a_strides);
+    let b_plan = build_plan(sub_b, &b_strides);
 
-            // Get a element
-            let a_idx = subscript_to_flat_idx(sub_a, a_shape, &assignment);
-            // Get b element
-            let b_idx = subscript_to_flat_idx(sub_b, b_shape, &assignment);
-
-            if a_idx < a.len() && b_idx < b.len() {
-                sum += a[a_idx] * b[b_idx];
-            }
+    let num_sum = sum_dims.len();
+    let mut a_sum_stride = vec![0usize; num_sum];
+    let mut b_sum_stride = vec![0usize; num_sum];
+    for &(stride, is_sum, pos) in &a_plan {
+        if is_sum {
+            a_sum_stride[pos] += stride;
         }
-        if out_idx < result.len() {
-            result[out_idx] = sum;
+    }
+    for &(stride, is_sum, pos) in &b_plan {
+        if is_sum {
+            b_sum_stride[pos] += stride;
         }
     }
 
+    let mut out_coords = vec![0usize; out_shape.len()];
+    let mut sum_coords = vec![0usize; num_sum];
+    // `out_size > 0` here (the empty case returned early), so every out_shape
+    // extent and every row-major stride is >= 1 — the decode divisions are safe.
+    for (out_idx, slot) in result.iter_mut().enumerate() {
+        // Decode the output multi-index (row-major) into the reusable buffer.
+        for ax in 0..out_shape.len() {
+            out_coords[ax] = (out_idx / out_strides[ax]) % out_shape[ax];
+        }
+        // Operand base indices from the free (output-driven) axes.
+        let mut a_base = 0usize;
+        for &(stride, is_sum, pos) in &a_plan {
+            if !is_sum {
+                a_base += stride * out_coords[pos];
+            }
+        }
+        let mut b_base = 0usize;
+        for &(stride, is_sum, pos) in &b_plan {
+            if !is_sum {
+                b_base += stride * out_coords[pos];
+            }
+        }
+
+        // Sum over the contracted axes via a row-major odometer, maintaining
+        // a_idx / b_idx incrementally (ascending order, matching the prior loop).
+        for c in sum_coords.iter_mut() {
+            *c = 0;
+        }
+        let mut a_idx = a_base;
+        let mut b_idx = b_base;
+        let mut sum = 0.0;
+        for _ in 0..sum_size.max(1) {
+            if a_idx < a.len() && b_idx < b.len() {
+                sum += a[a_idx] * b[b_idx];
+            }
+            for j in (0..num_sum).rev() {
+                sum_coords[j] += 1;
+                a_idx += a_sum_stride[j];
+                b_idx += b_sum_stride[j];
+                if sum_coords[j] < sum_dims[j] {
+                    break;
+                }
+                sum_coords[j] = 0;
+                a_idx -= a_sum_stride[j] * sum_dims[j];
+                b_idx -= b_sum_stride[j] * sum_dims[j];
+            }
+        }
+        *slot = sum;
+    }
+
     Ok((result, out_shape))
+}
+
+/// Row-major (C-order) strides for `shape`: `strides[i] = prod(shape[i+1..])`.
+/// Matches the stride convention used throughout einsum index math.
+fn row_major_strides(shape: &[usize]) -> Vec<usize> {
+    let n = shape.len();
+    let mut strides = vec![1usize; n];
+    for i in (0..n.saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+    strides
 }
 
 /// Execute einsum with a single operand (trace, diagonal, transpose, etc.).
@@ -514,6 +588,88 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn einsum2_generic_allocation_free_bit_identical() {
+        // Non-matmul 2-operand patterns (which bypass the matmul fast path and
+        // exercise the rewritten generic loop) must equal explicit textbook
+        // references bit-for-bit. Covers matrix-vector, a@b^T, Frobenius inner
+        // product, batched dot, and outer product.
+        let (m, k, n) = (6usize, 5usize, 4usize);
+        let am: Vec<f64> = (0..m * k).map(|i| (i as f64 * 0.053).sin() * 2.0 - 0.3).collect();
+
+        // matrix-vector "ij,j->i": want[i] = sum_j a[i,j]*v[j]
+        let v: Vec<f64> = (0..k).map(|j| (j as f64 * 0.21).cos() * 1.1).collect();
+        let mut mv = vec![0.0f64; m];
+        for i in 0..m {
+            let mut s = 0.0;
+            for j in 0..k {
+                s += am[i * k + j] * v[j];
+            }
+            mv[i] = s;
+        }
+        let (got, sh) = einsum2("ij,j->i", &am, &[m, k], &v, &[k]).unwrap();
+        assert_eq!(sh, vec![m]);
+        assert!(got.iter().zip(&mv).all(|(g, w)| g.to_bits() == w.to_bits()), "matvec");
+
+        // a @ b^T "ij,kj->ik": want[i,k2] = sum_j a[i,j]*b[k2,j]
+        let bk: Vec<f64> = (0..n * k).map(|i| (i as f64 * 0.037).cos() * 1.3).collect();
+        let mut abt = vec![0.0f64; m * n];
+        for i in 0..m {
+            for k2 in 0..n {
+                let mut s = 0.0;
+                for j in 0..k {
+                    s += am[i * k + j] * bk[k2 * k + j];
+                }
+                abt[i * n + k2] = s;
+            }
+        }
+        let (got, sh) = einsum2("ij,kj->ik", &am, &[m, k], &bk, &[n, k]).unwrap();
+        assert_eq!(sh, vec![m, n]);
+        assert!(got.iter().zip(&abt).all(|(g, w)| g.to_bits() == w.to_bits()), "a@b^T");
+
+        // Frobenius "ij,ij->": want = sum_ij a[i,j]*c[i,j]
+        let c2: Vec<f64> = (0..m * k).map(|i| (i as f64 * 0.067).sin() + 0.5).collect();
+        let mut fro = 0.0f64;
+        for i in 0..m {
+            for j in 0..k {
+                fro += am[i * k + j] * c2[i * k + j];
+            }
+        }
+        let (got, sh) = einsum2("ij,ij->", &am, &[m, k], &c2, &[m, k]).unwrap();
+        assert!(sh.is_empty());
+        // Frobenius sums over TWO contracted indices, whose visitation order is
+        // implementation-defined (the `sum_indices` set order) and unchanged by
+        // this rewrite, so assert value equality within tolerance rather than
+        // exact bits against a fixed-order reference.
+        assert!((got[0] - fro).abs() < 1e-9, "frobenius: {} vs {fro}", got[0]);
+
+        // batched dot "bn,bn->b": want[b] = sum_n a[b,n]*c[b,n]
+        let mut bd = vec![0.0f64; m];
+        for bb in 0..m {
+            let mut s = 0.0;
+            for j in 0..k {
+                s += am[bb * k + j] * c2[bb * k + j];
+            }
+            bd[bb] = s;
+        }
+        let (got, sh) = einsum2("bn,bn->b", &am, &[m, k], &c2, &[m, k]).unwrap();
+        assert_eq!(sh, vec![m]);
+        assert!(got.iter().zip(&bd).all(|(g, w)| g.to_bits() == w.to_bits()), "batched dot");
+
+        // outer "i,j->ij": want[i,j] = u[i]*w[j]
+        let u: Vec<f64> = (0..m).map(|i| (i as f64 + 1.0) * 0.7).collect();
+        let w2: Vec<f64> = (0..n).map(|j| (j as f64 + 1.0) * -0.4).collect();
+        let mut outp = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                outp[i * n + j] = u[i] * w2[j];
+            }
+        }
+        let (got, sh) = einsum2("i,j->ij", &u, &[m], &w2, &[n]).unwrap();
+        assert_eq!(sh, vec![m, n]);
+        assert!(got.iter().zip(&outp).all(|(g, w)| g.to_bits() == w.to_bits()), "outer");
     }
 
     #[test]

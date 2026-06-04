@@ -1,0 +1,17 @@
+{
+  "pass": 114,
+  "crate": "fj-lax",
+  "target": "einsum2 generic contraction (non-matmul 2-operand patterns), bench eval/einsum_abt_256_f64 (\"ij,kj->ik\" = a@b^T)",
+  "function": "fj_lax::einsum::einsum2 generic loop (allocation-free plan + odometer)",
+  "lever": "Replace the generic einsum2 interpreter loop — which rebuilt a HashMap<char,usize> and re-decoded both operand subscripts per (output, contracted) pair — with a precomputed per-operand (stride, coordinate-source) plan + per-summed-axis stride, then a single output walk and a row-major odometer over the contracted axes maintaining a_idx/b_idx incrementally. Eliminates all per-iteration heap traffic. Benefits every non-matmul 2-operand einsum (matrix-vector ij,j->i; a@b^T ij,kj->ik; Frobenius ij,ij->; batched dot bn,bn->b; outer i,j->ij) that bypasses the matmul fast path.",
+  "isomorphism": "BIT-EXACT for single-contracted-index (and zero-sum) patterns: same row-major ascending contraction order, identical per-axis stride*coord index math (matches subscript_to_flat_idx), same output layout. Proven by einsum2_generic_allocation_free_bit_identical (matvec, a@b^T, batched dot, outer = to_bits equality vs textbook references; Frobenius = value-within-tol since its 2-index sum order is set-defined and unchanged by this rewrite). 12/12 einsum unit tests pass.",
+  "baseline_ms": 6363.7,
+  "candidate_ms": 50.829,
+  "calibration_candidate_us": 20.811,
+  "speedup_raw": 125.0,
+  "note": "baseline = old HashMap-per-(output,contracted)-pair loop (a@b^T 256x256x256: criterion warmup estimate 636.37s/100 = 6363.7 ms/call). candidate 50.829 ms. ~125x raw; magnitude dwarfs worker variance. Clears the 2x bar by >60x.",
+  "score": "impact 5 (jnp.einsum core op; matvec/a@b^T/batched-dot all extremely common in ML) x confidence 5 (bit-exact unit tests, identical index math) / effort 2 = 12.5",
+  "tests": "fj-lax einsum 12/12 (incl einsum2_generic_allocation_free_bit_identical); clippy -D warnings clean. fj-conformance einsum_oracle NOT runnable (crate broken by foreign unresolved UU conflict markers in oracle_recapture.rs - pre-existing).",
+  "bench_note": "Measured via temporary bench in the foreign-dirty lax_baseline.rs (restored, not committed). Baseline obtained by temporarily reinstating the old loop in-place (git stash unreliable here due to persistent UU conflicts). Only einsum.rs committed.",
+  "date": "2026-06-04"
+}
