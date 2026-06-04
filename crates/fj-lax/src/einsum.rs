@@ -157,6 +157,18 @@ pub fn einsum2(
         }
     }
 
+    // Fast path: the standard 2-D single-contraction matrix product
+    // "XY,YZ->XZ" (distinct X,Y,Z). The generic path below allocates a HashMap
+    // and decodes coordinates *per (output, contracted) pair* — O(out·sum) with
+    // per-iteration heap traffic — whereas this is exactly `matmul_2d`. Both sum
+    // the single contracted index Y in ascending order into result[X·dimZ + Z],
+    // so the f64 output is bit-for-bit identical (see einsum2_matmul_fast_path_
+    // bit_identical). Degenerate (zero-size) dims fall through to the generic
+    // path, which is already correct and trivially cheap there.
+    if let Some(fast) = try_einsum2_matmul(sub_a, sub_b, &sub_out, a, a_shape, b, b_shape) {
+        return Ok(fast);
+    }
+
     // Compute output shape
     let out_shape: Vec<usize> = sub_out.chars().map(|c| index_dims[&c]).collect();
 
@@ -322,6 +334,54 @@ pub fn einsum1(
     Ok((result, out_shape))
 }
 
+/// Detect the standard 2-D single-contraction matrix product "XY,YZ->XZ"
+/// (with X, Y, Z three distinct index labels and all extents non-zero) and
+/// evaluate it via the contiguous `matmul_2d` kernel instead of the generic
+/// per-element contraction loop.
+///
+/// Returns `None` for any other pattern (repeated/batched/transposed indices,
+/// non-rank-2 operands, a zero-size extent), leaving the generic path to handle
+/// it. The kernel accumulates the contracted index `Y` in ascending order into
+/// `result[X*dimZ + Z]` — identical summation order and output layout to the
+/// generic loop — so the result is bit-for-bit identical.
+fn try_einsum2_matmul(
+    sub_a: &str,
+    sub_b: &str,
+    sub_out: &str,
+    a: &[f64],
+    a_shape: &[usize],
+    b: &[f64],
+    b_shape: &[usize],
+) -> Option<(Vec<f64>, Vec<usize>)> {
+    let sa: Vec<char> = sub_a.chars().collect();
+    let sb: Vec<char> = sub_b.chars().collect();
+    let so: Vec<char> = sub_out.chars().collect();
+    if sa.len() != 2 || sb.len() != 2 || so.len() != 2 {
+        return None;
+    }
+    let (x, y) = (sa[0], sa[1]);
+    let (y2, z) = (sb[0], sb[1]);
+    // "XY,YZ->XZ": a's trailing index is the contracted one, shared with b's
+    // leading index; the output is exactly the two free indices in order.
+    if y != y2 || so[0] != x || so[1] != z {
+        return None;
+    }
+    // Require three distinct labels (rules out trace/diagonal/broadcast forms
+    // like "ii,ij->ij" that the generic path must handle).
+    if x == y || y == z || x == z {
+        return None;
+    }
+    let m = a_shape[0];
+    let k = a_shape[1];
+    let n = b_shape[1];
+    // Caller already validated b_shape[0] == k via index_dims; re-check defensively.
+    if b_shape[0] != k || m == 0 || k == 0 || n == 0 {
+        return None;
+    }
+    let out = crate::tensor_contraction::matmul_2d(a, m, k, b, n);
+    Some((out, vec![m, n]))
+}
+
 fn idx_to_coords(mut idx: usize, shape: &[usize]) -> Vec<usize> {
     if shape.is_empty() {
         return vec![];
@@ -367,6 +427,39 @@ fn subscript_to_flat_idx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn einsum2_matmul_fast_path_bit_identical() {
+        // The matmul fast path must equal the textbook ascending-contracted-index
+        // reference bit-for-bit, at a size that exercises real summation rounding.
+        // Also covers the alternate labelling "ik,kj->ij" (same positional form).
+        let (m, k, n) = (12usize, 31usize, 17usize);
+        let a: Vec<f64> = (0..m * k).map(|i| (i as f64 * 0.073).sin() * 2.5).collect();
+        let b: Vec<f64> = (0..k * n).map(|i| (i as f64 * 0.041).cos() * 1.7).collect();
+
+        let mut want = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut s = 0.0;
+                for l in 0..k {
+                    s += a[i * k + l] * b[l * n + j];
+                }
+                want[i * n + j] = s;
+            }
+        }
+
+        for subs in ["ij,jk->ik", "ik,kj->ij", "ab,bc->ac"] {
+            let (got, shape) = einsum2(subs, &a, &[m, k], &b, &[k, n]).unwrap();
+            assert_eq!(shape, vec![m, n], "shape for {subs}");
+            for idx in 0..m * n {
+                assert_eq!(
+                    got[idx].to_bits(),
+                    want[idx].to_bits(),
+                    "{subs} mismatch at {idx}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn einsum_matrix_mul() {

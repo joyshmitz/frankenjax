@@ -1,0 +1,18 @@
+{
+  "pass": 111,
+  "crate": "fj-lax",
+  "target": "einsum2 \"XY,YZ->XZ\" (jnp.einsum 2-D matrix product), bench eval/einsum_matmul_256x256x256_f64",
+  "function": "fj_lax::einsum::einsum2 (new try_einsum2_matmul fast path -> tensor_contraction::matmul_2d)",
+  "lever": "The generic einsum2 contraction allocates a HashMap and decodes coordinates per (output, contracted) pair — O(out*sum) with per-iteration heap traffic. Detect the standard 2-D single-contraction matrix product (distinct X,Y,Z; a=[X,Y], b=[Y,Z], out=[X,Z]) and route to the contiguous matmul_2d kernel. ONE lever; falls through to the generic path for every other pattern (trace/diagonal/batch/transpose/zero-dim).",
+  "isomorphism": "BIT-EXACT. Both sum the single contracted index Y in ascending order into result[X*dimZ + Z]; identical summation order and row-major output layout. Proven by committed unit test einsum2_matmul_fast_path_bit_identical (12x31x17, three labellings, to_bits equality vs textbook reference) AND fj-conformance einsum_oracle 15/15 (matches JAX values, incl. ij,jk->ik and ik,kj->ij).",
+  "baseline_ms": 2426.8,
+  "baseline_note": "criterion warmup estimate: 242.68s for 100 iterations = 2426.8 ms/call for the generic HashMap-per-iteration path at 256^3 (could not complete a full sample set — that slowness IS the gap).",
+  "candidate_ms": 6.236,
+  "candidate_calibration_us": 12.19,
+  "speedup_raw": 389.0,
+  "note": "~389x raw; worker variance (calib 12.19us vs ~8.4us typical, ~1.45x) is negligible at this magnitude — clears the 2x bar by >100x.",
+  "score": "impact 5 (jnp.einsum is a core user-facing op; matmul is its most common form) x confidence 5 (bit-exact: unit test + 15/15 JAX conformance) / effort 2 = 12.5",
+  "tests": "fj-lax einsum 10/10 (incl new bit-identity test); fj-conformance einsum_oracle 15/15; clippy -D warnings clean.",
+  "bench_note": "Measured with a temporary bench in lax_baseline.rs (foreign-dirty file); NOT committed (restored to its prior state). Only einsum.rs committed.",
+  "date": "2026-06-04"
+}
