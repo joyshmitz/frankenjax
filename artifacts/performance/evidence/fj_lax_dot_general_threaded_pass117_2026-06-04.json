@@ -1,0 +1,18 @@
+{
+  "pass": 117,
+  "crate": "fj-lax",
+  "target": "eval_dot_general general contraction loop (batched matmul / attention / higher-rank tensordot; reachable via Primitive::DotGeneral), bench eval/dot_general_batched_8x256x256x256_f64",
+  "function": "arithmetic::eval_dot_general (scoped-thread output-space parallelism, std::thread::scope, no new dep)",
+  "lever": "Parallelize the general dot_general contraction across the OUTPUT index space using std::thread::scope. Each output element is an independent ascending-k reduction addressed by flat index o (decomposed batch-major x lhs_free x rhs_free, matching the serial push order); worker threads fill disjoint output ranges. Covers batched matmul (the rank-2 fast path is 2-D only) and all higher-rank contractions. Gated to >=67M total multiply-adds so small/normal contractions keep the (verbatim, untouched) serial path.",
+  "isomorphism": "BIT-EXACT. compute(o) replicates the serial loop's exact index math + dot_accumulate (ascending-k) and writes element o at its serial flat position. Proven by dot_general_parallel_bit_identical (4x256x256x256 = 67.1M, threaded, to_bits vs textbook per-batch reference) + serial dot_general tests unchanged (5/5). Serial nested loop kept verbatim (zero regression risk for sub-threshold cases).",
+  "baseline_ms": 6260.0,
+  "candidate_ms": 128.19,
+  "calibration_candidate_us": 8.3642,
+  "speedup_raw": 49.0,
+  "worker_cores": "~48-64 (RCH Contabo); 49x raw reflects output-space parallelism across many cores. Even heavily worker-discounted (>=20x) it clears the 2x bar by 10x+.",
+  "note": "baseline = serial general loop (criterion warmup estimate 625.76s/100 = 6.26s/call at 8x256^3). candidate threaded 128.19ms. KNOWN follow-up: routing batched standard matmul to per-batch matmul_2d (the fast kernel) would cut the absolute time ~20x further; this lever threads the existing general kernel (also speeds non-matmul higher-rank contractions).",
+  "score": "impact 5 (DotGeneral = the hottest reachable ML op: batched matmul/attention) x confidence 5 (bit-exact, serial path untouched) / effort 3 = 8.3",
+  "tests": "fj-lax dot_general 6/6 (incl dot_general_parallel_bit_identical); clippy -D warnings clean.",
+  "bench_note": "Measured via temporary bench in foreign-dirty lax_baseline.rs (restored, not committed). Serial baseline via in-place DG_PARALLEL_MIN_OPS=usize::MAX toggle. Only arithmetic.rs committed.",
+  "date": "2026-06-04"
+}

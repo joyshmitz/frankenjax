@@ -4711,8 +4711,6 @@ pub(crate) fn eval_dot_general(
         return Ok(value);
     }
 
-    let mut elements = Vec::with_capacity(output_count);
-
     let lhs_strides = compute_strides(&lhs.shape.dims);
     let rhs_strides = compute_strides(&rhs.shape.dims);
 
@@ -4721,6 +4719,98 @@ pub(crate) fn eval_dot_general(
     let rhs_free_ranges: Vec<u32> = rhs_free_dims.iter().map(|&d| rhs.shape.dims[d]).collect();
     let contract_ranges: Vec<u32> = lhs_contracting.iter().map(|&d| lhs.shape.dims[d]).collect();
 
+    // Parallelize large contractions (batched matmul / attention, higher-rank
+    // tensordot) across the output index space. Each output element is an
+    // independent ascending-`k` reduction with the same index math as the serial
+    // nested loop, computed at the same flat position, so the result is
+    // bit-for-bit identical (see dot_general_parallel_bit_identical). Gated to
+    // large total work so small/normal contractions keep the serial path below.
+    const DG_PARALLEL_MIN_OPS: usize = 1 << 26; // ~67M multiply-adds
+    let total_ops = output_count.saturating_mul(contracting_size.max(1));
+    let dg_threads = if total_ops >= DG_PARALLEL_MIN_OPS {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(output_count.max(1))
+    } else {
+        1
+    };
+    if dg_threads > 1 {
+        let lhs_el = lhs.elements.as_slice();
+        let rhs_el = rhs.elements.as_slice();
+        let bs = batch_size.max(1);
+        let lfs = lhs_free_size.max(1);
+        let rfs = rhs_free_size.max(1);
+        let csz = contracting_size.max(1);
+        // Per-output-element reduction, addressed by flat output index `o`
+        // (decomposing as batch-major × lhs_free × rhs_free, matching the serial
+        // push order). Shared immutably across worker threads.
+        let compute = |o: usize| -> Result<Literal, EvalError> {
+            let rhs_free_flat = o % rfs;
+            let t = o / rfs;
+            let lhs_free_flat = t % lfs;
+            let batch_flat = (t / lfs) % bs;
+            let batch_idx = linear_to_multi_index(batch_flat, &batch_ranges);
+            let lhs_free_idx = linear_to_multi_index(lhs_free_flat, &lhs_free_ranges);
+            let rhs_free_idx = linear_to_multi_index(rhs_free_flat, &rhs_free_ranges);
+            dot_accumulate(primitive, output_kind, csz, |k| {
+                let contract_idx = linear_to_multi_index(k, &contract_ranges);
+                let mut lhs_index = 0usize;
+                for (i, &d) in lhs_batch.iter().enumerate() {
+                    lhs_index += batch_idx.get(i).copied().unwrap_or(0) * lhs_strides[d];
+                }
+                for (i, &d) in lhs_free_dims.iter().enumerate() {
+                    lhs_index += lhs_free_idx.get(i).copied().unwrap_or(0) * lhs_strides[d];
+                }
+                for (i, &d) in lhs_contracting.iter().enumerate() {
+                    lhs_index += contract_idx.get(i).copied().unwrap_or(0) * lhs_strides[d];
+                }
+                let mut rhs_index = 0usize;
+                for (i, &d) in rhs_batch.iter().enumerate() {
+                    rhs_index += batch_idx.get(i).copied().unwrap_or(0) * rhs_strides[d];
+                }
+                for (i, &d) in rhs_free_dims.iter().enumerate() {
+                    rhs_index += rhs_free_idx.get(i).copied().unwrap_or(0) * rhs_strides[d];
+                }
+                for (i, &d) in rhs_contracting.iter().enumerate() {
+                    rhs_index += contract_idx.get(i).copied().unwrap_or(0) * rhs_strides[d];
+                }
+                (lhs_el[lhs_index], rhs_el[rhs_index])
+            })
+        };
+
+        let mut elements = vec![Literal::I64(0); output_count];
+        let chunk = output_count.div_ceil(dg_threads);
+        let compute_ref = &compute;
+        std::thread::scope(|scope| -> Result<(), EvalError> {
+            let mut handles = Vec::new();
+            let mut rest = elements.as_mut_slice();
+            let mut start = 0usize;
+            while start < output_count {
+                let len = chunk.min(output_count - start);
+                let (blk, tail) = rest.split_at_mut(len);
+                rest = tail;
+                let s = start;
+                handles.push(scope.spawn(move || -> Result<(), EvalError> {
+                    for (i, slot) in blk.iter_mut().enumerate() {
+                        *slot = compute_ref(s + i)?;
+                    }
+                    Ok(())
+                }));
+                start += len;
+            }
+            for h in handles {
+                h.join().map_err(|_| EvalError::Unsupported {
+                    primitive,
+                    detail: "dot_general worker thread panicked".into(),
+                })??;
+            }
+            Ok(())
+        })?;
+        return dot_output_value(dtype, output_dims, elements);
+    }
+
+    let mut elements = Vec::with_capacity(output_count);
     for batch_idx in MultiIndexIterator::new(&batch_ranges) {
         for lhs_free_idx in MultiIndexIterator::new(&lhs_free_ranges) {
             for rhs_free_idx in MultiIndexIterator::new(&rhs_free_ranges) {
@@ -7358,6 +7448,41 @@ mod tests {
         assert_eq!(t.shape.dims, vec![2, 3]);
         let vals = extract_f64_vec(&Value::Tensor(t));
         assert_eq!(vals, vec![3.0, 4.0, 5.0, 6.0, 8.0, 10.0]);
+    }
+
+    #[test]
+    fn dot_general_parallel_bit_identical() {
+        // A batched matmul large enough (4·256·256·256 = 67.1M FMAs) to engage
+        // the threaded output-space path must equal the textbook per-batch,
+        // ascending-k reference bit-for-bit.
+        let (bt, m, k, n) = (4usize, 256usize, 256usize, 256usize);
+        let a_data: Vec<f64> = (0..bt * m * k).map(|i| ((i % 97) as f64 * 0.013).sin()).collect();
+        let b_data: Vec<f64> = (0..bt * k * n).map(|i| ((i % 89) as f64 * 0.017).cos()).collect();
+        let a = tensor_f64(vec![bt as u32, m as u32, k as u32], &a_data);
+        let b = tensor_f64(vec![bt as u32, k as u32, n as u32], &b_data);
+        let mut params = BTreeMap::new();
+        params.insert("lhs_contracting_dims".to_string(), "2".to_string());
+        params.insert("rhs_contracting_dims".to_string(), "1".to_string());
+        params.insert("lhs_batch_dims".to_string(), "0".to_string());
+        params.insert("rhs_batch_dims".to_string(), "0".to_string());
+        let got = extract_f64_vec(&eval_dot_general(&[a, b], &params).unwrap());
+
+        let mut want = vec![0.0f64; bt * m * n];
+        for bb in 0..bt {
+            for i in 0..m {
+                for j in 0..n {
+                    let mut s = 0.0;
+                    for l in 0..k {
+                        s += a_data[(bb * m + i) * k + l] * b_data[(bb * k + l) * n + j];
+                    }
+                    want[(bb * m + i) * n + j] = s;
+                }
+            }
+        }
+        assert_eq!(got.len(), want.len());
+        for idx in 0..want.len() {
+            assert_eq!(got[idx].to_bits(), want[idx].to_bits(), "mismatch at {idx}");
+        }
     }
 
     #[test]
