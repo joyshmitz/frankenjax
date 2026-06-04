@@ -5375,8 +5375,8 @@ mod tests {
         let mut params = BTreeMap::new();
         params.insert("slice_sizes".into(), "1,0".into());
 
-        let result = eval_primitive(Primitive::Gather, &[operand, Value::scalar_i64(2)], &params)
-            .unwrap();
+        let result =
+            eval_primitive(Primitive::Gather, &[operand, Value::scalar_i64(2)], &params).unwrap();
         let tensor = result.as_tensor().unwrap();
         assert_eq!(tensor.shape.dims, vec![0]);
         assert!(tensor.elements.is_empty());
