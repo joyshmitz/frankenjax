@@ -376,34 +376,79 @@ pub fn einsum1(
 
     let mut result = vec![0.0; out_size.max(1)];
 
-    for out_idx in 0..out_size.max(1) {
-        let out_coords = idx_to_coords(out_idx, &out_shape);
+    // Allocation-free single-operand contraction (same technique as einsum2's
+    // generic loop): precompute a per-axis (stride, coordinate-source) plan plus
+    // a per-summed-axis stride contribution, then walk the output once and the
+    // summed axes via a row-major odometer that maintains the operand flat index
+    // incrementally. Eliminates the per-(output, summed)-pair `HashMap` rebuild +
+    // subscript re-decode. Repeated labels (trace "ii->", diagonal "ii->i") fold
+    // into summed strides — `subscript_to_flat_idx` summed each occurrence's
+    // stride×coord, so do we; for a single contracted axis the row-major
+    // ascending order is unambiguous, hence bit-for-bit identical (see
+    // einsum1_allocation_free_bit_identical).
+    let out_strides = row_major_strides(&out_shape);
+    let a_strides = row_major_strides(a_shape);
+    let out_pos: HashMap<char, usize> = sub_out.chars().enumerate().map(|(i, c)| (c, i)).collect();
+    // Unique summed labels + their extents, captured from one iteration so the
+    // odometer axes and dims stay aligned.
+    let sum_labels: Vec<char> = unique_sum.iter().copied().collect();
+    let sum_extent: Vec<usize> = sum_labels.iter().map(|&c| index_dims[&c]).collect();
+    let sum_pos: HashMap<char, usize> = sum_labels.iter().enumerate().map(|(j, &c)| (c, j)).collect();
 
+    // Per-axis plan: (stride, is_summed, pos) where pos indexes out_coords (free)
+    // or the summed-axis list (summed).
+    let a_plan: Vec<(usize, bool, usize)> = sub_a
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            if let Some(&p) = out_pos.get(&c) {
+                (a_strides[i], false, p)
+            } else {
+                (a_strides[i], true, sum_pos[&c])
+            }
+        })
+        .collect();
+    let num_sum = sum_extent.len();
+    let mut a_sum_stride = vec![0usize; num_sum];
+    for &(stride, is_sum, pos) in &a_plan {
+        if is_sum {
+            a_sum_stride[pos] += stride;
+        }
+    }
+
+    let mut out_coords = vec![0usize; out_shape.len()];
+    let mut sum_coords = vec![0usize; num_sum];
+    // out_size > 0 here, so every out extent / stride is >= 1 (decode is safe).
+    for (out_idx, slot) in result.iter_mut().enumerate() {
+        for ax in 0..out_shape.len() {
+            out_coords[ax] = (out_idx / out_strides[ax]) % out_shape[ax];
+        }
+        let mut a_base = 0usize;
+        for &(stride, is_sum, pos) in &a_plan {
+            if !is_sum {
+                a_base += stride * out_coords[pos];
+            }
+        }
+        for c in sum_coords.iter_mut() {
+            *c = 0;
+        }
+        let mut a_idx = a_base;
         let mut sum = 0.0;
-        for sum_idx in 0..sum_size.max(1) {
-            let sum_coords = idx_to_coords(sum_idx, &sum_dims);
-
-            let mut assignment: HashMap<char, usize> = HashMap::new();
-            for (i, c) in sub_out.chars().enumerate() {
-                if i < out_coords.len() {
-                    assignment.insert(c, out_coords[i]);
-                }
-            }
-            let unique_sum_vec: Vec<char> = unique_sum.iter().copied().collect();
-            for (i, &c) in unique_sum_vec.iter().enumerate() {
-                if i < sum_coords.len() {
-                    assignment.insert(c, sum_coords[i]);
-                }
-            }
-
-            let a_idx = subscript_to_flat_idx(sub_a, a_shape, &assignment);
+        for _ in 0..sum_size.max(1) {
             if a_idx < a.len() {
                 sum += a[a_idx];
             }
+            for j in (0..num_sum).rev() {
+                sum_coords[j] += 1;
+                a_idx += a_sum_stride[j];
+                if sum_coords[j] < sum_extent[j] {
+                    break;
+                }
+                sum_coords[j] = 0;
+                a_idx -= a_sum_stride[j] * sum_extent[j];
+            }
         }
-        if out_idx < result.len() {
-            result[out_idx] = sum;
-        }
+        *slot = sum;
     }
 
     Ok((result, out_shape))
@@ -509,48 +554,6 @@ fn try_einsum2_matmul(
     out_shape.push(m);
     out_shape.push(n);
     Some((out, out_shape))
-}
-
-fn idx_to_coords(mut idx: usize, shape: &[usize]) -> Vec<usize> {
-    if shape.is_empty() {
-        return vec![];
-    }
-    let mut coords = vec![0; shape.len()];
-    for i in (0..shape.len()).rev() {
-        if shape[i] > 0 {
-            coords[i] = idx % shape[i];
-            idx /= shape[i];
-        }
-    }
-    coords
-}
-
-fn subscript_to_flat_idx(
-    subscript: &str,
-    shape: &[usize],
-    assignment: &HashMap<char, usize>,
-) -> usize {
-    // Compute strides for row-major layout
-    let chars: Vec<char> = subscript.chars().collect();
-    let ndim = chars.len().min(shape.len());
-    if ndim == 0 {
-        return 0;
-    }
-
-    let mut strides = vec![1usize; ndim];
-    for i in (0..ndim.saturating_sub(1)).rev() {
-        strides[i] = strides[i + 1] * shape[i + 1];
-    }
-
-    let mut idx = 0;
-    for (i, &c) in chars.iter().enumerate() {
-        if i < ndim
-            && let Some(&coord) = assignment.get(&c)
-        {
-            idx += coord * strides[i];
-        }
-    }
-    idx
 }
 
 #[cfg(test)]
@@ -670,6 +673,72 @@ mod tests {
         let (got, sh) = einsum2("i,j->ij", &u, &[m], &w2, &[n]).unwrap();
         assert_eq!(sh, vec![m, n]);
         assert!(got.iter().zip(&outp).all(|(g, w)| g.to_bits() == w.to_bits()), "outer");
+    }
+
+    #[test]
+    fn einsum1_allocation_free_bit_identical() {
+        // Single-operand patterns (transpose, diagonal, trace, single-axis sum)
+        // must equal explicit textbook references bit-for-bit; multi-axis sum is
+        // checked within tolerance (its visitation order is set-defined).
+        let (r, c) = (5usize, 7usize);
+        let m: Vec<f64> = (0..r * c).map(|i| (i as f64 * 0.041).sin() * 2.0 - 0.4).collect();
+
+        // transpose "ij->ji": want[j,i] = m[i,j]
+        let mut tr = vec![0.0f64; c * r];
+        for i in 0..r {
+            for j in 0..c {
+                tr[j * r + i] = m[i * c + j];
+            }
+        }
+        let (got, sh) = einsum1("ij->ji", &m, &[r, c]).unwrap();
+        assert_eq!(sh, vec![c, r]);
+        assert!(got.iter().zip(&tr).all(|(g, w)| g.to_bits() == w.to_bits()), "transpose");
+
+        // single-axis reduction "ij->i": want[i] = sum_j m[i,j]
+        let mut rs = vec![0.0f64; r];
+        for i in 0..r {
+            let mut s = 0.0;
+            for j in 0..c {
+                s += m[i * c + j];
+            }
+            rs[i] = s;
+        }
+        let (got, sh) = einsum1("ij->i", &m, &[r, c]).unwrap();
+        assert_eq!(sh, vec![r]);
+        assert!(got.iter().zip(&rs).all(|(g, w)| g.to_bits() == w.to_bits()), "row sum");
+
+        // square cases: diagonal "ii->i" and trace "ii->"
+        let n = 6usize;
+        let sq: Vec<f64> = (0..n * n).map(|i| (i as f64 * 0.07).cos() * 1.5).collect();
+        let mut diag = vec![0.0f64; n];
+        let mut trace = 0.0f64;
+        for i in 0..n {
+            diag[i] = sq[i * n + i];
+            trace += sq[i * n + i];
+        }
+        let (got, sh) = einsum1("ii->i", &sq, &[n, n]).unwrap();
+        assert_eq!(sh, vec![n]);
+        assert!(got.iter().zip(&diag).all(|(g, w)| g.to_bits() == w.to_bits()), "diagonal");
+        let (got, sh) = einsum1("ii->", &sq, &[n, n]).unwrap();
+        assert!(sh.is_empty());
+        assert_eq!(got[0].to_bits(), trace.to_bits(), "trace");
+
+        // multi-axis sum "ijk->i": value within tolerance (sum order set-defined).
+        let (d0, d1, d2) = (4usize, 3usize, 5usize);
+        let t3: Vec<f64> = (0..d0 * d1 * d2).map(|i| (i as f64 * 0.013).sin()).collect();
+        let mut want3 = vec![0.0f64; d0];
+        for i in 0..d0 {
+            let mut s = 0.0;
+            for j in 0..d1 {
+                for k in 0..d2 {
+                    s += t3[(i * d1 + j) * d2 + k];
+                }
+            }
+            want3[i] = s;
+        }
+        let (got, sh) = einsum1("ijk->i", &t3, &[d0, d1, d2]).unwrap();
+        assert_eq!(sh, vec![d0]);
+        assert!(got.iter().zip(&want3).all(|(g, w)| (g - w).abs() < 1e-9), "3d sum");
     }
 
     #[test]

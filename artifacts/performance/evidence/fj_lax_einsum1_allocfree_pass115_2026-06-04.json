@@ -1,0 +1,19 @@
+{
+  "pass": 115,
+  "crate": "fj-lax",
+  "target": "einsum1 single-operand contraction (transpose/diagonal/trace/reduction), bench eval/einsum1_transpose_512_f64 (\"ij->ji\")",
+  "function": "fj_lax::einsum::einsum1 (allocation-free plan + odometer); removed now-dead idx_to_coords + subscript_to_flat_idx helpers",
+  "lever": "Apply the same allocation-free plan+odometer rewrite used for einsum2 to the single-operand path: precompute a per-axis (stride, coordinate-source) plan + per-summed-axis stride, walk the output once and the summed axes via a row-major odometer maintaining a_idx incrementally. Eliminates the per-(output,summed)-pair HashMap rebuild + subscript re-decode for transpose/diagonal/trace/reduction. Repeated labels (trace 'ii->', diagonal 'ii->i') fold into summed/base strides exactly as subscript_to_flat_idx summed each occurrence.",
+  "isomorphism": "BIT-EXACT for transpose/diagonal/trace/single-axis-sum (unambiguous row-major ascending order, identical per-axis stride*coord math). Proven by einsum1_allocation_free_bit_identical (transpose/row-sum/diagonal/trace = to_bits vs textbook; multi-axis sum = value-within-tol since its order is set-defined and unchanged). 13/13 einsum unit tests pass.",
+  "baseline_ms": 34.317,
+  "candidate_ms": 2.5694,
+  "calibration_baseline_us": 8.9236,
+  "calibration_candidate_us": 12.807,
+  "speedup_raw": 13.4,
+  "speedup_worker_corrected": 19.2,
+  "note": "transpose 512x512 via einsum: old HashMap-per-element loop 34.317ms -> 2.5694ms allocation-free. ~13.4x raw / ~19x worker-corrected. Completes the einsum HashMap-pathology removal across the full jnp.einsum surface (1-op + 2-op).",
+  "score": "impact 4 (jnp.einsum single-operand: transpose/diagonal/trace/reduction) x confidence 5 (bit-exact unit tests) / effort 2 = 10",
+  "tests": "fj-lax einsum 13/13 (incl einsum1_allocation_free_bit_identical); clippy -D warnings clean (removed 2 now-dead helpers). fj-conformance einsum_oracle NOT runnable (crate broken by foreign unresolved UU conflict markers - pre-existing).",
+  "bench_note": "Measured via temporary bench in foreign-dirty lax_baseline.rs (restored, not committed). Baseline via temporary in-place reinstatement of the old HashMap loop (git stash unreliable due to persistent UU conflicts). Only einsum.rs committed.",
+  "date": "2026-06-04"
+}
