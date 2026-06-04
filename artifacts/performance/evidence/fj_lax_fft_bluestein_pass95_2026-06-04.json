@@ -1,0 +1,32 @@
+{
+    "pass": 95,
+    "date": "2026-06-04",
+    "crate": "fj-lax",
+    "kind": "algorithmic complexity-class replacement (O(n^2) -> O(n log n))",
+    "target": "non-power-of-two FFT (fft.rs fft_1d_into/ifft_1d_into)",
+    "lever_summary": "Replace the direct O(n^2) DFT fallback for non-power-of-two FFT lengths with Bluestein's chirp-z transform: the length-n DFT becomes a length-m=next_pow2(2n-1) convolution evaluated with the existing radix-2 power-of-two FFT, giving O(n log n). Power-of-two lengths keep Cooley-Tukey unchanged.",
+    "method": "same-bench A/B on RCH Criterion; baseline = git-stashed fft.rs (O(n^2) dft_1d) with the new non-pow2 benches present; candidate = Bluestein.",
+    "results": {
+        "fft_1000_complex128": {"baseline_us": 2058.4, "candidate_us": 160.45, "speedup_x": 12.8},
+        "fft_1009_prime_complex128": {"baseline_us": 1606.9, "candidate_us": 160.79, "speedup_x": 10.0}
+    },
+    "score": {"impact": 5.0, "confidence": 5.0, "effort": 2.0, "impact_times_confidence_over_effort": 12.5, "kept": true},
+    "change": {
+        "files": ["crates/fj-lax/src/fft.rs", "crates/fj-lax/benches/lax_baseline.rs"],
+        "lever": "Added bluestein_dft_into (chirp-z via radix2_fft_1d_into); fft_1d_into/ifft_1d_into route non-power-of-two to it. dft_1d/idft_1d/precompute_twiddles became #[cfg(test)] DFT references; removed the now-unused test-only radix2_fft_1d. Added eval/fft_1000_complex128 and eval/fft_1009_prime_complex128 benches."
+    },
+    "parity": {
+        "type": "tolerance-parity-revalidation (FFT is inherently floating-tolerance, not bit-exact); Bluestein != old direct-DFT bits but computes the same transform",
+        "validations": [
+            "bluestein_matches_direct_dft_across_sizes: Bluestein vs O(n^2) dft_1d/idft_1d at 1e-9 across n in {3,5,6,7,9,10,11,12,15,17,100,257,1000}, forward+inverse+roundtrip",
+            "non_power_of_two_lengths_match_dft_reference: 1e-10",
+            "fj-conformance linalg_fft_oracle_parity (real jnp.fft captures): passes -> matches JAX within oracle tolerance"
+        ]
+    },
+    "validation": [
+        {"name": "fft_tests", "command": "rch exec -- cargo test -p fj-lax --release fft", "result": "30 passed"},
+        {"name": "jax_fft_oracle", "command": "rch exec -- cargo test -p fj-conformance --release --test linalg_fft_oracle_parity", "result": "passed"},
+        {"name": "clippy", "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings", "result": "clean"}
+    ],
+    "note": "Genuine different-complexity-class win per the NO-CEILING addendum (not a micro-lever). 100% safe Rust on the existing radix-2 kernel; no C/FFTW/MKL. Next: batched FFT (eval_fft applies fft_1d_into per row over the last axis) could reuse Bluestein scratch (a/b/fa/fb/prod/conv) across rows to cut per-row allocation."
+}

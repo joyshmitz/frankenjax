@@ -200,6 +200,7 @@ fn extract_tensor_complex(
 
 /// Precompute n-th roots of unity: e^{-2πi·k/n} for k = 0..n (forward DFT).
 /// Returns (cos, sin) pairs for lookup by index.
+#[cfg(test)]
 #[inline]
 fn precompute_twiddles(n: usize, inverse: bool) -> Vec<(f64, f64)> {
     let sign = if inverse { 1.0 } else { -1.0 };
@@ -216,6 +217,10 @@ fn precompute_twiddles(n: usize, inverse: bool) -> Vec<(f64, f64)> {
 /// X[k] = Σ_{j=0}^{n-1} x[j] * e^{-2πi·j·k/n}
 ///
 /// Uses precomputed twiddle factors to reduce trig calls from O(n²) to O(n).
+///
+/// Retained as the O(n²) reference for validating the [`bluestein_dft_into`]
+/// fast path in tests; production non-power-of-two transforms use Bluestein.
+#[cfg(test)]
 fn dft_1d(input: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let n = input.len();
     if n == 0 {
@@ -243,6 +248,10 @@ fn dft_1d(input: &[(f64, f64)]) -> Vec<(f64, f64)> {
 /// x[j] = (1/n) Σ_{k=0}^{n-1} X[k] * e^{2πi·j·k/n}
 ///
 /// Uses precomputed twiddle factors to reduce trig calls from O(n²) to O(n).
+///
+/// Retained as the O(n²) reference for validating the [`bluestein_dft_into`]
+/// fast path in tests; production non-power-of-two transforms use Bluestein.
+#[cfg(test)]
 fn idft_1d(input: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let n = input.len();
     if n == 0 {
@@ -265,6 +274,85 @@ fn idft_1d(input: &[(f64, f64)]) -> Vec<(f64, f64)> {
         *out = (re_sum * inv_n, im_sum * inv_n);
     }
     output
+}
+
+/// Bluestein's algorithm (chirp-z transform): the length-`n` DFT for ARBITRARY
+/// `n` in O(n log n), by re-expressing the transform as a convolution evaluated
+/// with power-of-two radix-2 FFTs — replacing the O(n²) direct [`dft_1d`] for
+/// non-power-of-two lengths.
+///
+/// `inverse == false` matches [`dft_1d`] (X[k] = Σ x[j]·e^{-2πi·jk/n}); `inverse
+/// == true` matches [`idft_1d`] (the +sign transform scaled by 1/n). The result
+/// is bit-different from the direct DFT but agrees to floating tolerance (both
+/// compute the same mathematical transform).
+///
+/// Derivation: with W = e^{sign·2πi/n}, jk = (j²+k²−(k−j)²)/2 gives
+/// W^{jk} = chirp[j]·chirp[k]·conj(chirp[k−j]) where chirp[t] = e^{sign·πi·t²/n},
+/// so X[k] = chirp[k]·Σ_j (x[j]·chirp[j])·conj(chirp[k−j]) — a convolution of
+/// a[j] = x[j]·chirp[j] with the kernel conj(chirp). The chirp exponent is
+/// 2n-periodic in t², so t²·mod·2n keeps the angle small and accurate.
+fn bluestein_dft_into(input: &[(f64, f64)], output: &mut Vec<(f64, f64)>, inverse: bool) {
+    let n = input.len();
+    output.clear();
+    if n == 0 {
+        return;
+    }
+    if n == 1 {
+        // Length-1 DFT and its (1/1-scaled) inverse are both the identity.
+        output.push(input[0]);
+        return;
+    }
+
+    let sign = if inverse { 1.0 } else { -1.0 };
+    let two_n = 2_u128 * n as u128;
+    let chirp = |t: usize| -> (f64, f64) {
+        let m2 = ((t as u128 * t as u128) % two_n) as f64;
+        let angle = sign * PI * m2 / (n as f64);
+        let (s, c) = angle.sin_cos();
+        (c, s)
+    };
+
+    // Convolution length: a power of two >= 2n-1, so the circular convolution of
+    // the padded sequences equals the linear convolution Bluestein requires.
+    let m = (2 * n - 1).next_power_of_two();
+
+    let mut a = vec![(0.0_f64, 0.0_f64); m];
+    let mut b = vec![(0.0_f64, 0.0_f64); m];
+
+    for j in 0..n {
+        let (cr, ci) = chirp(j);
+        let (xr, xi) = input[j];
+        a[j] = (xr * cr - xi * ci, xr * ci + xi * cr);
+    }
+    // Kernel g[d] = conj(chirp[d]); symmetric-extended so the size-m circular
+    // convolution reproduces the linear convolution at indices 0..n.
+    b[0] = (1.0, 0.0);
+    for j in 1..n {
+        let (cr, ci) = chirp(j);
+        let g = (cr, -ci);
+        b[j] = g;
+        b[m - j] = g;
+    }
+
+    let mut fa = Vec::new();
+    let mut fb = Vec::new();
+    radix2_fft_1d_into(&a, &mut fa, false);
+    radix2_fft_1d_into(&b, &mut fb, false);
+
+    let mut prod = vec![(0.0_f64, 0.0_f64); m];
+    for (p, (&(ar, ai), &(br, bi))) in prod.iter_mut().zip(fa.iter().zip(fb.iter())) {
+        *p = (ar * br - ai * bi, ar * bi + ai * br);
+    }
+
+    let mut conv = Vec::new();
+    radix2_fft_1d_into(&prod, &mut conv, true);
+
+    let inv_n = if inverse { 1.0 / (n as f64) } else { 1.0 };
+    output.reserve(n);
+    for (k, &(vr, vi)) in conv.iter().take(n).enumerate() {
+        let (cr, ci) = chirp(k);
+        output.push(((cr * vr - ci * vi) * inv_n, (cr * vi + ci * vr) * inv_n));
+    }
 }
 
 fn bit_reverse_permute(values: &mut [(f64, f64)]) {
@@ -337,92 +425,34 @@ fn radix2_fft_1d_into(input: &[(f64, f64)], output: &mut Vec<(f64, f64)>, invers
 }
 
 #[cfg(test)]
-fn radix2_fft_1d(input: &[(f64, f64)], inverse: bool) -> Vec<(f64, f64)> {
-    let n = input.len();
-    if n <= 1 {
-        return input.to_vec();
-    }
-
-    let mut output = input.to_vec();
-    bit_reverse_permute(&mut output);
-
-    let mut len = 2_usize;
-    while len <= n {
-        let half = len / 2;
-        let angle = if inverse {
-            2.0 * PI / (len as f64)
-        } else {
-            -2.0 * PI / (len as f64)
-        };
-        let (sin_step, cos_step) = angle.sin_cos();
-
-        for start in (0..n).step_by(len) {
-            let mut twiddle_re = 1.0;
-            let mut twiddle_im = 0.0;
-
-            for offset in 0..half {
-                let even = output[start + offset];
-                let odd = output[start + offset + half];
-                let rotated_re = odd.0 * twiddle_re - odd.1 * twiddle_im;
-                let rotated_im = odd.0 * twiddle_im + odd.1 * twiddle_re;
-
-                output[start + offset] = (even.0 + rotated_re, even.1 + rotated_im);
-                output[start + offset + half] = (even.0 - rotated_re, even.1 - rotated_im);
-
-                let next_re = twiddle_re * cos_step - twiddle_im * sin_step;
-                let next_im = twiddle_re * sin_step + twiddle_im * cos_step;
-                twiddle_re = next_re;
-                twiddle_im = next_im;
-            }
-        }
-
-        len *= 2;
-    }
-
-    if inverse {
-        let inv_n = 1.0 / (n as f64);
-        for value in &mut output {
-            value.0 *= inv_n;
-            value.1 *= inv_n;
-        }
-    }
-
-    output
-}
-
-#[cfg(test)]
 fn fft_1d(input: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    if input.len().is_power_of_two() {
-        radix2_fft_1d(input, false)
-    } else {
-        dft_1d(input)
-    }
+    let mut output = Vec::new();
+    fft_1d_into(input, &mut output);
+    output
 }
 
 fn fft_1d_into(input: &[(f64, f64)], output: &mut Vec<(f64, f64)>) {
     if input.len().is_power_of_two() {
         radix2_fft_1d_into(input, output, false);
     } else {
-        output.clear();
-        output.extend(dft_1d(input));
+        // Non-power-of-two: Bluestein O(n log n) instead of the O(n²) direct DFT.
+        bluestein_dft_into(input, output, false);
     }
 }
 
 #[cfg(test)]
 fn ifft_1d(input: &[(f64, f64)]) -> Vec<(f64, f64)> {
-    if input.len().is_power_of_two() {
-        radix2_fft_1d(input, true)
-    } else {
-        idft_1d(input)
-    }
+    let mut output = Vec::new();
+    ifft_1d_into(input, &mut output);
+    output
 }
 
 fn ifft_1d_into(input: &[(f64, f64)], output: &mut Vec<(f64, f64)>) {
     if input.len().is_power_of_two() {
         radix2_fft_1d_into(input, output, true);
     } else {
-        output.clear();
-        output.extend(idft_1d(input));
+        // Non-power-of-two: Bluestein O(n log n) instead of the O(n²) direct IDFT.
+        bluestein_dft_into(input, output, true);
     }
 }
 
@@ -837,7 +867,9 @@ mod tests {
     }
 
     #[test]
-    fn non_power_of_two_lengths_use_dft_reference() {
+    fn non_power_of_two_lengths_match_dft_reference() {
+        // Non-power-of-two now routes through Bluestein (O(n log n)); it agrees
+        // with the direct O(n²) DFT/IDFT reference to floating tolerance.
         let input = [
             (1.0, 0.5),
             (2.0, -1.0),
@@ -846,8 +878,27 @@ mod tests {
             (4.0, -2.0),
             (-3.0, 1.25),
         ];
-        assert_eq!(fft_1d(&input), dft_1d(&input));
-        assert_eq!(ifft_1d(&input), idft_1d(&input));
+        assert_complex_close(&fft_1d(&input), &dft_1d(&input), 1e-10);
+        assert_complex_close(&ifft_1d(&input), &idft_1d(&input), 1e-10);
+    }
+
+    #[test]
+    fn bluestein_matches_direct_dft_across_sizes() {
+        // Bluestein vs the direct DFT/IDFT reference across assorted
+        // non-power-of-two lengths, including primes and composites.
+        for &n in &[3usize, 5, 6, 7, 9, 10, 11, 12, 15, 17, 100, 257, 1000] {
+            let input: Vec<(f64, f64)> = (0..n)
+                .map(|j| {
+                    let j = j as f64;
+                    ((j * 0.37).sin() * 2.0 - 0.5, (j * 0.11).cos() + 0.25 * j)
+                })
+                .collect();
+            assert_complex_close(&fft_1d(&input), &dft_1d(&input), 1e-9);
+            assert_complex_close(&ifft_1d(&input), &idft_1d(&input), 1e-9);
+            // Round-trip: ifft(fft(x)) == x.
+            let round = ifft_1d(&fft_1d(&input));
+            assert_complex_close(&round, &input, 1e-9);
+        }
     }
 
     // ── FFT tests ────────────────────────────────────────────

@@ -1750,6 +1750,26 @@ fn bench_ifft_256(c: &mut Criterion) {
     });
 }
 
+// Non-power-of-two length: exercises the Bluestein O(n log n) path (the old
+// fallback was the O(n²) direct DFT). 1000 is non-power-of-two and composite.
+fn bench_fft_1000(c: &mut Criterion) {
+    let input = complex_vector(1000);
+    let p = no_params();
+    c.bench_function("eval/fft_1000_complex128", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Fft, std::slice::from_ref(&input), &p))
+    });
+}
+
+// 1009 is prime — the worst case for any radix decomposition; Bluestein still
+// runs in O(n log n) via a length-2048 convolution.
+fn bench_fft_1009_prime(c: &mut Criterion) {
+    let input = complex_vector(1009);
+    let p = no_params();
+    c.bench_function("eval/fft_1009_prime_complex128", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Fft, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_rfft_256(c: &mut Criterion) {
     let input = real_vector(256);
     let p = no_params();
@@ -2214,6 +2234,8 @@ criterion_group!(
     bench_complex_is_finite_1k,
     bench_fft_256,
     bench_ifft_256,
+    bench_fft_1000,
+    bench_fft_1009_prime,
     bench_rfft_256,
     bench_irfft_256,
     bench_reshape,
