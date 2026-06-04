@@ -1,0 +1,147 @@
+{
+  "bead": "frankenjax-mcqr.46",
+  "duplicate_bead": "frankenjax-mcqr.47",
+  "pass": 72,
+  "created_at": "2026-06-04",
+  "crate": "fj-dispatch",
+  "target": "vmap_while/batched_scalar_f32_add_128",
+  "lever": "Specialize the dense F32 batch-axis-0 while loop with add body and lt condition into an independent per-lane state-machine path before the generic while batching fallback.",
+  "source_files": [
+    "crates/fj-dispatch/src/batching.rs"
+  ],
+  "evidence_files": {
+    "golden": "artifacts/performance/evidence/fj_dispatch_while_f32_add_lt_batch0_pass72_2026-06-04.golden",
+    "golden_sha256_file": "artifacts/performance/evidence/fj_dispatch_while_f32_add_lt_batch0_pass72_2026-06-04.golden.sha256",
+    "golden_sha256": "e5716144c566525c9e66be33218f00a3c41d96e55aaf01f28c7bb0ba0b82a0d4"
+  },
+  "profile": {
+    "baseline": {
+      "source": "frankenjax-mcqr.46 recorded RCH Criterion row",
+      "worker": "ts2",
+      "time_us": {
+        "lower": 120.86,
+        "mean": 121.38,
+        "upper": 121.95
+      }
+    },
+    "final_rebench": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass72-f32-while-finalbench rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_while/batched_scalar_f32_add_128 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3",
+      "worker": "ts2",
+      "time_us": {
+        "lower": 17.131,
+        "mean": 17.501,
+        "upper": 17.970
+      }
+    },
+    "speedup": {
+      "mean_ratio": 6.9356,
+      "conservative_ratio": 6.7257
+    }
+  },
+  "score": {
+    "impact": 5.0,
+    "confidence": 5.0,
+    "effort": 2.0,
+    "impact_times_confidence_over_effort": 12.5,
+    "decision": "keep"
+  },
+  "alien_inputs": {
+    "graveyard_docs": [
+      "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md",
+      "/data/projects/alien_cs_graveyard/high_level_summary_of_frankensuite_planned_and_implemented_features_and_concepts.md"
+    ],
+    "harvested_primitive": "branchless/vector-lane state-machine specialization for a hot independent-lane loop",
+    "artifact_coding_obligations": [
+      "Each lane follows the same recurrence as the scalar while: carry_0 = init_i; carry_{n+1} = carry_n + step_i while carry_n < threshold_i.",
+      "The direct path is accepted only when the recurrence surface is exactly F32 Add/Lt over scalar or rank-1 batch-axis-0 tensors.",
+      "All non-matching surfaces return None and continue through the existing generic batching implementation."
+    ]
+  },
+  "isomorphism_proof": {
+    "accepted_surface": [
+      "Exactly three inputs: init, step, threshold.",
+      "body_op is absent or add.",
+      "cond_op is absent or lt.",
+      "At least one input has batch_dim Some(0), and every batched input uses batch axis 0 with matching size.",
+      "Inputs are F32 scalars, scalar F32 tensors, or rank-1 F32 tensors with F32Bits literals."
+    ],
+    "fallback_surface": [
+      "Non-F32 values.",
+      "Nonzero batch axes.",
+      "Mismatched batch sizes.",
+      "Non-add bodies or non-lt conditions.",
+      "Functional sub-jaxpr while forms.",
+      "Malformed tensor literals or unexpected literal widths."
+    ],
+    "ordering": "Each lane is evaluated independently in ascending batch-index order, and output element i is produced from input lane i.",
+    "floating_point": "Each lane uses the same Rust f32 addition sequence as the scalar loop. No reassociation, reduction tree, widening, narrowing, or fused operation is introduced.",
+    "comparison_nan": "The loop condition uses partial_cmp Less; NaN produces no Less result and exits, matching the existing scalar less-than condition.",
+    "max_iter": "The direct path performs the same bounded number of body updates and returns the same while_loop exceeded max iterations error surface when iteration equals max_iter.",
+    "rng": "No RNG surface exists.",
+    "tie_breaking": "No tie-breaking surface exists."
+  },
+  "golden_case": {
+    "init": [
+      0.0,
+      10.0,
+      "NaN",
+      4.0
+    ],
+    "step": 2.0,
+    "threshold": [
+      5.0,
+      25.0,
+      10.0,
+      20.0
+    ],
+    "max_iter": 32,
+    "output_values": [
+      6.0,
+      26.0,
+      "NaN",
+      20.0
+    ],
+    "output_bits_or_class": [
+      "0x40c00000",
+      "0x41d00000",
+      "NaN",
+      "0x41a00000"
+    ],
+    "max_iter_error_substring": "while_loop exceeded max iterations (1)"
+  },
+  "validation": [
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass72-f32-while-tests rch exec -- cargo test -p fj-dispatch dense_f32_add_lt -- --nocapture",
+      "result": "pass; 2 focused tests passed on ts2"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass72-fj-dispatch-test rch exec -- cargo test -p fj-dispatch --all-targets",
+      "result": "pass; 252 unit tests and 55 integration tests passed on ts2; bench harness smoke succeeded"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass72-fj-dispatch-check rch exec -- cargo check -p fj-dispatch --all-targets",
+      "result": "pass on ts2"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass72-fj-dispatch-clippy rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings",
+      "result": "pass on ts2"
+    },
+    {
+      "command": "cargo fmt --check -p fj-dispatch",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-dispatch/src/batching.rs",
+      "result": "exit 0; 0 critical findings; clippy and formatting clean; broad legacy warning inventory unchanged"
+    },
+    {
+      "command": "git diff --check -- crates/fj-dispatch/src/batching.rs",
+      "result": "pass"
+    }
+  ],
+  "coordination": {
+    "agent": "BlackThrush",
+    "bead_claim": "frankenjax-mcqr.46 assigned to BlackThrush",
+    "file_reservation": "Agent Mail reservation failed because the mailbox activity lock was busy; proceeded under Beads claim and avoided unrelated dirty files."
+  }
+}

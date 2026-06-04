@@ -4204,6 +4204,9 @@ fn batch_while(
     if let Some(result) = batch_while_i64_add_lt_batch0(inputs, params)? {
         return Ok(result);
     }
+    if let Some(result) = batch_while_f32_add_lt_batch0(inputs, params)? {
+        return Ok(result);
+    }
     if let Some(result) = batch_while_scalar_loop(inputs, params)? {
         return Ok(result);
     }
@@ -4333,6 +4336,139 @@ fn while_i64_batch0_values(input: &BatchTracer, batch_size: usize) -> Option<I64
                 return None;
             }
             tensor.elements.as_i64_slice().map(I64Batch0Values::Slice)
+        }
+        Some(_) => None,
+    }
+}
+
+enum F32Batch0Values<'a> {
+    Scalar(f32),
+    Slice(&'a [Literal]),
+}
+
+impl F32Batch0Values<'_> {
+    fn at(&self, index: usize) -> f32 {
+        match self {
+            Self::Scalar(value) => *value,
+            Self::Slice(values) => match values[index] {
+                Literal::F32Bits(bits) => f32::from_bits(bits),
+                _ => unreachable!("f32 while direct path prevalidates tensor literal width"),
+            },
+        }
+    }
+}
+
+fn batch_while_f32_add_lt_batch0(
+    inputs: &[BatchTracer],
+    params: &BTreeMap<String, String>,
+) -> Result<Option<BatchTracer>, BatchError> {
+    if inputs.len() != 3
+        || params
+            .get("body_op")
+            .is_some_and(|body_op| body_op.as_str() != "add")
+        || params
+            .get("cond_op")
+            .is_some_and(|cond_op| cond_op.as_str() != "lt")
+    {
+        return Ok(None);
+    }
+
+    let Some(batch_size) = while_f32_batch0_size(inputs)? else {
+        return Ok(None);
+    };
+    let Some(init_values) = while_f32_batch0_values(&inputs[0], batch_size) else {
+        return Ok(None);
+    };
+    let Some(step_values) = while_f32_batch0_values(&inputs[1], batch_size) else {
+        return Ok(None);
+    };
+    let Some(threshold_values) = while_f32_batch0_values(&inputs[2], batch_size) else {
+        return Ok(None);
+    };
+
+    let max_iter = params
+        .get("max_iter")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1000);
+    let mut outputs = Vec::with_capacity(batch_size);
+    for batch_idx in 0..batch_size {
+        let mut carry = init_values.at(batch_idx);
+        let step = step_values.at(batch_idx);
+        let threshold = threshold_values.at(batch_idx);
+        let mut iteration = 0_usize;
+        while iteration < max_iter {
+            if !matches!(
+                carry.partial_cmp(&threshold),
+                Some(std::cmp::Ordering::Less)
+            ) {
+                break;
+            }
+            carry += step;
+            iteration += 1;
+        }
+        if iteration == max_iter {
+            return Err(BatchError::EvalError(format!(
+                "{} exceeded max iterations ({max_iter})",
+                Primitive::While.as_str()
+            )));
+        }
+        outputs.push(Literal::from_f32(carry));
+    }
+
+    TensorValue::new(DType::F32, Shape::vector(batch_size as u32), outputs)
+        .map(|tensor| Some(BatchTracer::batched(Value::Tensor(tensor), 0)))
+        .map_err(|e| BatchError::TensorError(e.to_string()))
+}
+
+fn while_f32_batch0_size(inputs: &[BatchTracer]) -> Result<Option<usize>, BatchError> {
+    let mut batch_size = None;
+    for input in inputs {
+        match input.batch_dim {
+            None => {}
+            Some(0) => {
+                let size = get_batch_size(&input.value, 0)?;
+                if batch_size.is_some_and(|existing| existing != size) {
+                    return Ok(None);
+                }
+                batch_size = Some(size);
+            }
+            Some(_) => return Ok(None),
+        }
+    }
+    Ok(batch_size)
+}
+
+fn while_f32_batch0_values(input: &BatchTracer, batch_size: usize) -> Option<F32Batch0Values<'_>> {
+    match input.batch_dim {
+        None => match &input.value {
+            Value::Scalar(Literal::F32Bits(bits)) => {
+                Some(F32Batch0Values::Scalar(f32::from_bits(*bits)))
+            }
+            Value::Tensor(tensor)
+                if tensor.dtype == DType::F32
+                    && tensor.shape == Shape::scalar()
+                    && tensor.elements.len() == 1 =>
+            {
+                match tensor.elements[0] {
+                    Literal::F32Bits(bits) => Some(F32Batch0Values::Scalar(f32::from_bits(bits))),
+                    _ => None,
+                }
+            }
+            _ => None,
+        },
+        Some(0) => {
+            let tensor = input.value.as_tensor()?;
+            if tensor.dtype != DType::F32
+                || tensor.rank() != 1
+                || tensor.elements.len() != batch_size
+                || !tensor
+                    .elements
+                    .iter()
+                    .all(|literal| matches!(literal, Literal::F32Bits(_)))
+            {
+                return None;
+            }
+            Some(F32Batch0Values::Slice(tensor.elements.as_slice()))
         }
         Some(_) => None,
     }
@@ -6145,6 +6281,12 @@ mod tests {
                 data.iter().map(|&x| Literal::from_f32(x)).collect(),
             )
             .unwrap(),
+        )
+    }
+
+    fn make_f32_scalar_tensor(value: f32) -> Value {
+        Value::Tensor(
+            TensorValue::new(DType::F32, Shape::scalar(), vec![Literal::from_f32(value)]).unwrap(),
         )
     }
 
@@ -8532,6 +8674,44 @@ mod tests {
         let init = BatchTracer::batched(Value::vector_i64(&[0]).unwrap(), 0);
         let step = BatchTracer::batched(Value::vector_i64(&[10]).unwrap(), 0);
         let threshold = BatchTracer::batched(Value::vector_i64(&[10]).unwrap(), 0);
+        let params = BTreeMap::from([
+            ("body_op".to_owned(), "add".to_owned()),
+            ("cond_op".to_owned(), "lt".to_owned()),
+            ("max_iter".to_owned(), "1".to_owned()),
+        ]);
+
+        let err =
+            apply_batch_rule(Primitive::While, &[init, step, threshold], &params).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("while_loop exceeded max iterations (1)")
+        );
+    }
+
+    #[test]
+    fn test_batch_trace_while_dense_f32_add_lt_batch0_direct_path_preserves_nan_exit() {
+        let init = BatchTracer::batched(make_f32_vector(&[0.0, 10.0, f32::NAN, 4.0]), 0);
+        let step = BatchTracer::unbatched(make_f32_scalar_tensor(2.0));
+        let threshold = BatchTracer::batched(make_f32_vector(&[5.0, 25.0, 10.0, 20.0]), 0);
+        let params = BTreeMap::from([("max_iter".to_owned(), "32".to_owned())]);
+
+        let result = apply_batch_rule(Primitive::While, &[init, step, threshold], &params)
+            .expect("dense f32 while add/lt should batch directly");
+
+        assert_eq!(result.batch_dim, Some(0));
+        assert_eq!(result.value.dtype(), DType::F32);
+        let values = extract_f32_vec(&result.value);
+        assert!((values[0] - 6.0).abs() <= 1e-5, "{} != 6", values[0]);
+        assert!((values[1] - 26.0).abs() <= 1e-5, "{} != 26", values[1]);
+        assert!(values[2].is_nan());
+        assert!((values[3] - 20.0).abs() <= 1e-5, "{} != 20", values[3]);
+    }
+
+    #[test]
+    fn test_batch_trace_while_dense_f32_add_lt_preserves_max_iter_boundary() {
+        let init = BatchTracer::batched(make_f32_vector(&[0.0]), 0);
+        let step = BatchTracer::unbatched(Value::scalar_f32(10.0));
+        let threshold = BatchTracer::unbatched(make_f32_scalar_tensor(10.0));
         let params = BTreeMap::from([
             ("body_op".to_owned(), "add".to_owned()),
             ("cond_op".to_owned(), "lt".to_owned()),

@@ -1,0 +1,29 @@
+frankenjax-mcqr.46 fj-dispatch F32 while add/lt batch-axis-0 direct path golden outputs
+pass: 72
+target: vmap_while/batched_scalar_f32_add_128
+
+profile-backed baseline:
+  source: frankenjax-mcqr.46 recorded RCH Criterion row
+  worker: ts2
+  time_us_ci: [120.86, 121.38, 121.95]
+
+final rebench:
+  command: RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass72-f32-while-finalbench rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_while/batched_scalar_f32_add_128 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3
+  worker: ts2
+  time_us_ci: [17.131, 17.501, 17.970]
+
+focused isomorphism output case:
+  init: [0.0, 10.0, NaN, 4.0]
+  step: 2.0
+  threshold: [5.0, 25.0, 10.0, 20.0]
+  max_iter: 32
+  output_values: [6.0, 26.0, NaN, 20.0]
+  output_bits_or_class: [0x40c00000, 0x41d00000, NaN, 0x41a00000]
+  max_iter_error_substring: while_loop exceeded max iterations (1)
+
+isomorphism invariants:
+  lane ordering: output lane i is computed from input lane i in ascending batch-index order.
+  floating point: each body step uses one f32 add in the same order as the scalar loop; no reassociation or reduction tree is introduced.
+  comparison: cond uses partial_cmp Less, so NaN exits exactly like the scalar less-than condition.
+  rng_tie_breaking: no RNG and no tie-breaking surface in this primitive.
+  fallback: non-F32, non-axis-0, mismatched, functional-sub-jaxpr, non-add, or non-lt inputs fall through to the existing generic while batching path.
