@@ -2698,6 +2698,109 @@ fn eval_reduce_window_rank2_f64_sum(
     ))
 }
 
+/// Dense rank-2 F64 max/min reduce_window (maxpool/minpool). Reads the operand
+/// straight from its contiguous `as_f64_slice()` backing and writes a dense f64
+/// output, bypassing the generic path's per-window-element Literal
+/// materialization + `reduce_window_accumulate_literal` match. Bit-for-bit
+/// identical to the generic path for F64: same in-bounds-only window iteration
+/// and padding skip, same `-inf`/`+inf` initial accumulator, and the same
+/// `jax_max_f64`/`jax_min_f64` (NaN-propagating) combiner. `is_max` selects max
+/// vs min. Caller gates on rank==2, F64, dense storage, and reduce_op in max/min.
+#[allow(clippy::too_many_arguments)]
+fn eval_reduce_window_rank2_f64_max_min(
+    primitive: Primitive,
+    tensor: &TensorValue,
+    window_dims: &[usize],
+    strides: &[usize],
+    out_dims: &[u32],
+    pad_lows: &[usize],
+    total_output: usize,
+    is_max: bool,
+) -> Result<Value, EvalError> {
+    let Some(src) = tensor.elements.as_f64_slice() else {
+        // Gated by the caller; defensively fall back is impossible here.
+        return Err(reduce_window_unsupported(
+            primitive,
+            "dense f64 max/min reduce_window requires dense storage",
+        ));
+    };
+    let input_rows = tensor.shape.dims[0] as usize;
+    let input_cols = tensor.shape.dims[1] as usize;
+    let out_rows = out_dims[0] as usize;
+    let out_cols = out_dims[1] as usize;
+    let window_rows = window_dims[0];
+    let window_cols = window_dims[1];
+    let stride_rows = strides[0];
+    let stride_cols = strides[1];
+    let pad_rows = pad_lows[0];
+    let pad_cols = pad_lows[1];
+    let init = if is_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+
+    let mut output = Vec::with_capacity(total_output);
+    for out_row in 0..out_rows {
+        let row_base = out_row.checked_mul(stride_rows).ok_or_else(|| {
+            reduce_window_unsupported(primitive, "reduce_window window index overflow")
+        })?;
+        for out_col in 0..out_cols {
+            let col_base = out_col.checked_mul(stride_cols).ok_or_else(|| {
+                reduce_window_unsupported(primitive, "reduce_window window index overflow")
+            })?;
+            let mut accum = init;
+            for window_row in 0..window_rows {
+                let padded_row = row_base.checked_add(window_row).ok_or_else(|| {
+                    reduce_window_unsupported(primitive, "reduce_window window index overflow")
+                })?;
+                if padded_row < pad_rows {
+                    continue;
+                }
+                let input_row = padded_row - pad_rows;
+                if input_row >= input_rows {
+                    continue;
+                }
+                let row_offset = input_row.checked_mul(input_cols).ok_or_else(|| {
+                    reduce_window_unsupported(primitive, "reduce_window flat index overflow")
+                })?;
+                for window_col in 0..window_cols {
+                    let padded_col = col_base.checked_add(window_col).ok_or_else(|| {
+                        reduce_window_unsupported(primitive, "reduce_window window index overflow")
+                    })?;
+                    if padded_col < pad_cols {
+                        continue;
+                    }
+                    let input_col = padded_col - pad_cols;
+                    if input_col >= input_cols {
+                        continue;
+                    }
+                    let flat_input_idx = row_offset.checked_add(input_col).ok_or_else(|| {
+                        reduce_window_unsupported(primitive, "reduce_window flat index overflow")
+                    })?;
+                    let v = src[flat_input_idx];
+                    accum = if is_max {
+                        jax_max_f64(accum, v)
+                    } else {
+                        jax_min_f64(accum, v)
+                    };
+                }
+            }
+            output.push(accum);
+        }
+    }
+
+    Ok(Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: out_dims.to_vec(),
+            },
+            output,
+        )
+        .map_err(EvalError::InvalidTensor)?,
+    ))
+}
+
 /// Evaluate ReduceWindow: apply a reduction over sliding windows of a tensor.
 ///
 /// inputs: [tensor]
@@ -2786,6 +2889,23 @@ fn eval_reduce_window(
             )
             .map_err(EvalError::InvalidTensor)?,
         ));
+    }
+
+    if tensor.dtype == fj_core::DType::F64
+        && rank == 2
+        && matches!(reduce_op, "max" | "min")
+        && tensor.elements.as_f64_slice().is_some()
+    {
+        return eval_reduce_window_rank2_f64_max_min(
+            primitive,
+            tensor,
+            &window_dims,
+            &strides,
+            &out_dims,
+            &pad_lows,
+            total_output,
+            reduce_op == "max",
+        );
     }
 
     if tensor.dtype == fj_core::DType::F64 && rank == 2 && reduce_window_sum_like(reduce_op) {
@@ -8802,6 +8922,80 @@ mod tests {
             );
         } else {
             assert!(matches!(out, Value::Tensor(_)), "expected tensor");
+        }
+    }
+
+    #[test]
+    fn dense_f64_reduce_window_max_min_matches_generic() {
+        // Dense f64 rank-2 max/min reduce_window (the new fast path) must be
+        // bit-identical to the generic Literal path, incl NaN/+-inf and SAME/
+        // VALID padding. Dense operand via new_f64_values, literal via new (forces
+        // the generic path since as_f64_slice() is None).
+        let rows = 7usize;
+        let cols = 9usize;
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| match i % 11 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                _ => ((i as f64) * 0.37).sin() * 10.0 - (i as f64),
+            })
+            .collect();
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        let literal = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data.iter().copied().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            literal
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_none()
+        );
+        let bits = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect()
+        };
+        for op in ["max", "min"] {
+            for (win, stride, pad) in [
+                ("3,3", "1,1", "SAME"),
+                ("2,2", "2,2", "VALID"),
+                ("3,2", "1,1", "VALID"),
+            ] {
+                let p = rw_params_with_padding(op, win, stride, pad);
+                let d = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense), &p)
+                    .unwrap();
+                let l = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&literal), &p)
+                    .unwrap();
+                assert_eq!(
+                    d.as_tensor().unwrap().shape.dims,
+                    l.as_tensor().unwrap().shape.dims,
+                    "{op} {win} {pad} shape"
+                );
+                assert_eq!(bits(&d), bits(&l), "{op} {win} {stride} {pad}");
+            }
         }
     }
 

@@ -1,0 +1,60 @@
+{
+    "bead": "frankenjax-mcqr.30.30",
+    "pass": 85,
+    "date": "2026-06-04",
+    "crate": "fj-lax",
+    "target": "eval/maxpool_256x256_f64_vec",
+    "lever_summary": "Dense rank-2 F64 max/min reduce_window (maxpool/minpool). This case went fully generic — per-window-element tensor.elements[idx] Literal materialization + reduce_window_accumulate_literal enum dispatch. New eval_reduce_window_rank2_f64_max_min reads the operand from as_f64_slice() and accumulates in f64 via jax_max_f64/jax_min_f64, emitting a dense f64 output.",
+    "alien_graveyard": {
+        "primitive": "dense SoA + stencil/windowed reduction over contiguous typed storage",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "evaluate the pooling stencil over contiguous native f64 with a typed combiner instead of materializing + dispatching a tagged-union per window element"
+    },
+    "method": "Same-worker comparison on ts2: dense (new_f64_values) operand vs a Vec<Literal>-backed operand (forces the generic path) run in the same process; identical 3x3 SAME maxpool params.",
+    "results": {
+        "maxpool_256x256_f64_3x3_same": {
+            "dense_ns": 2599537.4,
+            "dense_ci_ns": [2590863.7, 2609335.0],
+            "generic_literal_ns": 12592337.4,
+            "generic_literal_ci_ns": [12559763.5, 12625915.9],
+            "speedup_midpoint_x": 4.84,
+            "speedup_conservative_x": 4.81
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- maxpool_256x256_f64 --save-baseline mp",
+    "score": {
+        "impact": 5.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 10.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/lib.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added eval_reduce_window_rank2_f64_max_min (reads as_f64_slice, jax_max_f64/jax_min_f64 accumulate, new_f64_values output). eval_reduce_window routes rank-2 F64 max/min with dense storage to it before the generic path; non-dense / other ranks / other dtypes fall through unchanged."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: same out-position iteration and in-window iteration with the same padding skip (padded_pos < pad_low or input_pos >= dim -> skipped)",
+        "combiner": "unchanged: initial accumulator -inf (max) / +inf (min); per in-bounds element jax_max_f64 / jax_min_f64 (NaN-propagating) — identical to the generic ReduceWindowAccumulator::F64 path; output via from_f64 (reduce_window_output_dtype(F64) == F64)",
+        "padding": "SAME and VALID both validated; geometry (out_dims, pad_lows) computed by the shared caller code, identical to the generic path",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "same checked_mul/checked_add window/flat index overflow checks; gated on as_f64_slice() Some so only well-formed dense F64 reaches it; non-dense F64 falls through to the generic path",
+        "output_dtype": "F64"
+    },
+    "validation": [
+        {
+            "name": "dense_maxpool_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib --release reduce_window",
+            "result": "passed: 28 tests incl dense_f64_reduce_window_max_min_matches_generic (max/min x 3x3 SAME, 2x2 VALID, 3x2 VALID; NaN/+-inf/-0; dense vs Literal/generic by bits)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings",
+            "result": "passed (release dodges shared-target proc-macro rmeta drift in debug)"
+        }
+    ]
+}

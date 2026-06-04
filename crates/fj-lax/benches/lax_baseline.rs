@@ -1282,6 +1282,58 @@ fn bench_reduce_window_64x64(c: &mut Criterion) {
     });
 }
 
+// 256x256 f64 maxpool (3x3 SAME): dense rank-2 f64 max path (pass85) vs the
+// generic Literal reduce_window. Same process for a same-worker ratio.
+fn maxpool_params() -> BTreeMap<String, String> {
+    let mut p = BTreeMap::new();
+    p.insert("reduce_op".to_owned(), "max".to_owned());
+    p.insert("window_dimensions".to_owned(), "3,3".to_owned());
+    p.insert("window_strides".to_owned(), "1,1".to_owned());
+    p.insert("padding".to_owned(), "SAME".to_owned());
+    p
+}
+
+fn bench_maxpool_256x256_f64_vec(c: &mut Criterion) {
+    let n = 256usize;
+    let data: Vec<f64> = (0..n * n)
+        .map(|i| ((i as f64) * 0.123).sin() * 100.0)
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let p = maxpool_params();
+    c.bench_function("eval/maxpool_256x256_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_maxpool_256x256_f64_literal_reference(c: &mut Criterion) {
+    let n = 256usize;
+    let elements: Vec<Literal> = (0..n * n)
+        .map(|i| Literal::from_f64(((i as f64) * 0.123).sin() * 100.0))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            elements,
+        )
+        .unwrap(),
+    );
+    let p = maxpool_params();
+    c.bench_function("eval/maxpool_256x256_f64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_sin_1k(c: &mut Criterion) {
     let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.001).collect();
     let input = Value::vector_f64(&data).unwrap();
@@ -1955,6 +2007,8 @@ criterion_group!(
     bench_topk_64k_k128_i64_vec,
     bench_topk_64k_k128_i64_literal_reference,
     bench_reduce_window_64x64,
+    bench_maxpool_256x256_f64_vec,
+    bench_maxpool_256x256_f64_literal_reference,
     bench_sin_1k,
     bench_sin_64k,
     bench_exp_1k,

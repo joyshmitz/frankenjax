@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.30 pass85 golden
+target=eval/maxpool_256x256_f64_vec
+lever=dense rank-2 f64 max/min reduce_window (eval_reduce_window_rank2_f64_max_min) reading as_f64_slice + jax_max_f64/jax_min_f64 accumulate, bypassing the generic per-window Literal materialize + reduce_window_accumulate_literal dispatch
+method=same-worker dense vs Vec<Literal> (generic-path) reference benches, run in one process on ts2 (256x256, 3x3 SAME)
+worker=ts2
+maxpool_256x256_f64_3x3_same=dense 2599.537us [2590.864, 2609.335] vs generic 12592.337us [12559.764, 12625.916] = 4.84x mid, 4.81x conservative
+score=10.0
+alien_primitive=dense SoA + stencil/windowed reduction over contiguous typed storage, alien_cs_graveyard section 8.2
+source_change=eval_reduce_window_rank2_f64_max_min reads as_f64_slice, accumulates f64 via jax_max_f64/jax_min_f64, emits new_f64_values; eval_reduce_window routes rank-2 F64 max/min with dense storage to it before the generic path
+isomorphism=same out-position + in-window iteration with the same padding skip; initial -inf (max) / +inf (min); per in-bounds element jax_max_f64/jax_min_f64 (NaN-propagating) identical to the generic ReduceWindowAccumulator::F64 path; output from_f64; SAME + VALID padding validated; same overflow checks; non-dense/other-rank/other-dtype fall through unchanged
+golden_note=bit-identical to the generic path across max/min x 3x3 SAME / 2x2 VALID / 3x2 VALID with NaN/+-inf/-0, dense vs Literal by bits
+validation=RCH cargo test -p fj-lax --lib --release reduce_window passed 28 tests incl dense_f64_reduce_window_max_min_matches_generic; RCH cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings passed
