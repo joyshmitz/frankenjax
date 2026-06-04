@@ -1,0 +1,21 @@
+{
+    "pass": 89,
+    "date": "2026-06-04",
+    "crate": "fj-lax",
+    "status": "rejected",
+    "target": "eval/transpose_256x256_f64",
+    "lever": "Dense f64/i64 cache-blocked 2D transpose: same tile walk over as_f64_slice/as_i64_slice into a dense typed output, bypassing the Vec<Literal> materialization. Bit-exact (parity test dense_transpose_2d_matches_literal_path passed, f64+i64, non-square multi-block).",
+    "result": {
+        "worker": "ts2",
+        "dense_ns": 247094.5,
+        "literal_ns": 316359.3,
+        "speedup_x": 1.28,
+        "kept": false,
+        "reason": "Below the Score>=2.0 bar. Transpose is ALREADY cache-blocked (prior pass), so it is memory-bandwidth bound on the blocked strided-write access pattern; the data-model delta (24 vs 8 bytes/elem) only yields ~1.28x once blocking has made the access cache-local. Reverted; not shipped."
+    },
+    "other_findings": [
+        "fj-core IR ops profiled (rch core_baseline): all sub-microsecond (jaxpr_clone_large 3.4us slowest, validate_large 0.91us, tensor_value_new_1k 0.69us) — not worth a dense lever; the big absolute costs remain the fj-lax tensor kernels (already densified) and fj-dispatch transform overhead.",
+        "i64 conv hits conv_float_literal_from_f64's '_ => from_f64' arm, emitting F64Bits into an I64-declared tensor (filed bead frankenjax-twuhs) — so a dense i64 conv is NOT a clean bit-exact drop-in until that dtype inconsistency is resolved."
+    ],
+    "next": "The fj-lax dense data-model is complete for the high-value f64/i64 cases (elementwise, broadcast, compare, reductions, sort/topk, select, scan, gather, scatter, pooling, conv1d/2d). Remaining fj-lax dense candidates are either already-optimized (transpose, blocked) yielding <2x, or blocked on the i64-conv dtype bug. Next real swing requires a fj-dispatch transform/vmap/jit profile (a different crate / hot family), not more fj-lax dtype variants. GEMM blocking is closed bit-exact (col8/4x4/packed-B/column-panel/full-B all rejected)."
+}
