@@ -1,0 +1,35 @@
+bead: frankenjax-mcqr.50
+pass: 77
+target: fj-dispatch vmap_eigh/batched_matrix_3x3
+worker: rch ts2 ubuntu@192.168.1.124
+baseline_command: rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3
+baseline_code: pass76 pre-lever code path, restored manually with apply_patch for same-worker comparison
+baseline_time: 264.09 us [262.98, 265.62]
+after_command: rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3
+after_code: n=3 Eigh/Jacobi specialization with stable total_cmp sort network
+after_time: 239.72 us [238.36, 241.01]
+mean_speedup: 1.1017x
+conservative_speedup: 1.0912x
+score: 12.5 = Impact 5.0 * Confidence 5.0 / Effort 2.0
+
+isomorphism:
+- scope: n == 3 Eigh/Jacobi only; generic n != 3 path is unchanged.
+- pivot order: Jacobi off-diagonal scan remains (0,1), (0,2), (1,2), with strict greater-than updates, preserving tie-breaking.
+- floating point: theta branch, FRAC_PI_4 equality case, atan expression, sin_cos use, row rotation expressions, diagonal recomputation, and zeroing semantics are preserved.
+- ordering: output eigenvalue ordering still uses total_cmp ascending. The 3-element compare-swap network swaps only on is_lt(), so equal values preserve stable old-column order.
+- output layout: v_sorted[row * 3 + new_col] still selects eigenvectors[row * 3 + old_col].
+- randomness: no RNG touched.
+- unsafe: no unsafe code introduced.
+
+golden_sha256_tests:
+- test_batch_trace_eigh_multi_leading_batch_dim_golden_sha256: de40295687095bc622bd73074d24337004f440bdd2cc65d8a8759dfb5cf0b106
+- test_batch_trace_eigh_multi_rank3_golden_sha256: 1dc99b980e9600f888e0c05c77537a6e4f1abc64276e09d204f3163634defeb7
+
+validation:
+- rch exec -- cargo test -p fj-dispatch test_batch_trace_eigh_multi -- --nocapture: 6 passed, including both golden SHA tests
+- rch exec -- cargo test -p fj-dispatch --all-targets: 256 unit tests, 55 integration tests, bench harness smoke passed
+- rch exec -- cargo check -p fj-dispatch --all-targets: passed
+- rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings: passed
+- cargo fmt --check -p fj-dispatch: passed
+- git diff --check: passed
+- ubs crates/fj-dispatch/src/batching.rs: exit 0, critical 0

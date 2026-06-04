@@ -1,0 +1,62 @@
+{
+  "bead": "frankenjax-mcqr.50",
+  "pass": 77,
+  "date": "2026-06-04",
+  "agent": "BlackThrush",
+  "target": "fj-dispatch vmap_eigh/batched_matrix_3x3",
+  "worker": "ts2 ubuntu@192.168.1.124",
+  "profile_target": {
+    "source": "post-pass76 rch profile",
+    "time": "270.72 us [266.35, 274.64]",
+    "rank": 1
+  },
+  "benchmark": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "baseline": {
+      "code": "pass76 pre-lever code path, manually restored with apply_patch for same-worker comparison",
+      "worker": "ts2",
+      "low_us": 262.98,
+      "mean_us": 264.09,
+      "high_us": 265.62
+    },
+    "after": {
+      "code": "n=3 Eigh/Jacobi specialization with stable total_cmp sort network",
+      "worker": "ts2",
+      "low_us": 238.36,
+      "mean_us": 239.72,
+      "high_us": 241.01
+    },
+    "mean_speedup": 1.1017,
+    "conservative_speedup": 1.0912
+  },
+  "score": {
+    "impact": 5.0,
+    "confidence": 5.0,
+    "effort": 2.0,
+    "value": 12.5
+  },
+  "isomorphism": {
+    "scope": "Only n == 3 Eigh/Jacobi dispatch changes; generic n != 3 path is unchanged.",
+    "pivot_order": "Jacobi off-diagonal scan order remains (0,1), (0,2), (1,2), with strict greater-than replacement.",
+    "floating_point": "Theta branch, atan expression, sin_cos, row rotations, diagonal recomputation, and zeroing semantics are preserved.",
+    "ordering": "Eigenvalue ordering still uses total_cmp ascending; compare-swap uses is_lt so equal values keep stable old-column order.",
+    "layout": "v_sorted[row * 3 + new_col] selects eigenvectors[row * 3 + old_col].",
+    "rng": "No RNG touched.",
+    "unsafe": "No unsafe code introduced."
+  },
+  "golden_output": {
+    "artifact": "artifacts/performance/evidence/fj_dispatch_eigh_3x3_specialized_pass77_2026-06-04.golden",
+    "sha256": "95a2e9ace7009eae038fcc57f94f752f801ddd60de0efb8d57af31172de6a453",
+    "leading_batch_digest": "de40295687095bc622bd73074d24337004f440bdd2cc65d8a8759dfb5cf0b106",
+    "rank3_digest": "1dc99b980e9600f888e0c05c77537a6e4f1abc64276e09d204f3163634defeb7"
+  },
+  "validation": [
+    "rch exec -- cargo test -p fj-dispatch test_batch_trace_eigh_multi -- --nocapture: 6 passed, including both golden SHA tests",
+    "rch exec -- cargo test -p fj-dispatch --all-targets: 256 unit tests, 55 integration tests, bench harness smoke passed",
+    "rch exec -- cargo check -p fj-dispatch --all-targets: passed",
+    "rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings: passed",
+    "cargo fmt --check -p fj-dispatch: passed",
+    "git diff --check: passed",
+    "ubs crates/fj-dispatch/src/batching.rs: exit 0, critical 0"
+  ]
+}

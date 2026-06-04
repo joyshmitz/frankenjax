@@ -3137,6 +3137,11 @@ fn append_eigh_decomposition(
 }
 
 fn eigh_decompose_matrix_into(a: &mut [f64], n: usize, scratch: &mut EighScratch) {
+    if n == 3 {
+        eigh_decompose_matrix_3x3_into(a, scratch);
+        return;
+    }
+
     jacobi_eigendecomposition_matrix_into(a, n, &mut scratch.jacobi);
     let eigenvalues = &scratch.jacobi.eigenvalues;
     let eigenvectors = &scratch.jacobi.eigenvectors;
@@ -3157,6 +3162,41 @@ fn eigh_decompose_matrix_into(a: &mut [f64], n: usize, scratch: &mut EighScratch
     }
 }
 
+fn eigh_decompose_matrix_3x3_into(a: &mut [f64], scratch: &mut EighScratch) {
+    jacobi_eigendecomposition_matrix_3x3_into(a, &mut scratch.jacobi);
+    let eigenvalues = &scratch.jacobi.eigenvalues;
+    let eigenvectors = &scratch.jacobi.eigenvectors;
+
+    let mut col0 = 0;
+    let mut col1 = 1;
+    let mut col2 = 2;
+    if eigenvalues[col1].total_cmp(&eigenvalues[col0]).is_lt() {
+        std::mem::swap(&mut col0, &mut col1);
+    }
+    if eigenvalues[col2].total_cmp(&eigenvalues[col1]).is_lt() {
+        std::mem::swap(&mut col1, &mut col2);
+    }
+    if eigenvalues[col1].total_cmp(&eigenvalues[col0]).is_lt() {
+        std::mem::swap(&mut col0, &mut col1);
+    }
+
+    scratch.w_sorted.resize(3, 0.0_f64);
+    scratch.w_sorted[0] = eigenvalues[col0];
+    scratch.w_sorted[1] = eigenvalues[col1];
+    scratch.w_sorted[2] = eigenvalues[col2];
+
+    scratch.v_sorted.resize(9, 0.0_f64);
+    scratch.v_sorted[0] = eigenvectors[col0];
+    scratch.v_sorted[1] = eigenvectors[col1];
+    scratch.v_sorted[2] = eigenvectors[col2];
+    scratch.v_sorted[3] = eigenvectors[3 + col0];
+    scratch.v_sorted[4] = eigenvectors[3 + col1];
+    scratch.v_sorted[5] = eigenvectors[3 + col2];
+    scratch.v_sorted[6] = eigenvectors[6 + col0];
+    scratch.v_sorted[7] = eigenvectors[6 + col1];
+    scratch.v_sorted[8] = eigenvectors[6 + col2];
+}
+
 fn jacobi_eigendecomposition_matrix(a: &mut [f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     let mut scratch = JacobiScratch::with_order(n);
     jacobi_eigendecomposition_matrix_into(a, n, &mut scratch);
@@ -3169,6 +3209,11 @@ fn jacobi_eigendecomposition_matrix(a: &mut [f64], n: usize) -> (Vec<f64>, Vec<f
 }
 
 fn jacobi_eigendecomposition_matrix_into(a: &mut [f64], n: usize, scratch: &mut JacobiScratch) {
+    if n == 3 {
+        jacobi_eigendecomposition_matrix_3x3_into(a, scratch);
+        return;
+    }
+
     scratch.eigenvectors.resize(n * n, 0.0_f64);
     scratch.eigenvectors.fill(0.0_f64);
     for i in 0..n {
@@ -3238,6 +3283,119 @@ fn jacobi_eigendecomposition_matrix_into(a: &mut [f64], n: usize, scratch: &mut 
 
     scratch.eigenvalues.clear();
     scratch.eigenvalues.extend((0..n).map(|i| a[i * n + i]));
+}
+
+#[inline]
+fn jacobi_eigendecomposition_matrix_3x3_into(a: &mut [f64], scratch: &mut JacobiScratch) {
+    debug_assert_eq!(a.len(), 9);
+
+    let eigenvectors = &mut scratch.eigenvectors;
+    eigenvectors.resize(9, 0.0_f64);
+    eigenvectors[0] = 1.0;
+    eigenvectors[1] = 0.0;
+    eigenvectors[2] = 0.0;
+    eigenvectors[3] = 0.0;
+    eigenvectors[4] = 1.0;
+    eigenvectors[5] = 0.0;
+    eigenvectors[6] = 0.0;
+    eigenvectors[7] = 0.0;
+    eigenvectors[8] = 1.0;
+
+    let max_iter = 900;
+    let tol = f64::EPSILON * 1e2;
+
+    for _ in 0..max_iter {
+        let mut max_val = 0.0_f64;
+        let mut p = 0;
+        let mut q = 1;
+
+        let value = a[1].abs();
+        if value > max_val {
+            max_val = value;
+            p = 0;
+            q = 1;
+        }
+        let value = a[2].abs();
+        if value > max_val {
+            max_val = value;
+            p = 0;
+            q = 2;
+        }
+        let value = a[5].abs();
+        if value > max_val {
+            max_val = value;
+            p = 1;
+            q = 2;
+        }
+
+        if max_val < tol {
+            break;
+        }
+
+        let p_row = p * 3;
+        let q_row = q * 3;
+        let app = a[p_row + p];
+        let aqq = a[q_row + q];
+        let apq = a[p_row + q];
+
+        let theta = if (app - aqq).abs() < f64::EPSILON {
+            std::f64::consts::FRAC_PI_4
+        } else {
+            0.5 * (2.0 * apq / (app - aqq)).atan()
+        };
+
+        let (sin_t, cos_t) = theta.sin_cos();
+
+        let new_row_p0 = cos_t * a[p_row] + sin_t * a[q_row];
+        let new_row_q0 = -sin_t * a[p_row] + cos_t * a[q_row];
+        let new_row_p1 = cos_t * a[p_row + 1] + sin_t * a[q_row + 1];
+        let new_row_q1 = -sin_t * a[p_row + 1] + cos_t * a[q_row + 1];
+        let new_row_p2 = cos_t * a[p_row + 2] + sin_t * a[q_row + 2];
+        let new_row_q2 = -sin_t * a[p_row + 2] + cos_t * a[q_row + 2];
+        let new_row_p = [new_row_p0, new_row_p1, new_row_p2];
+        let new_row_q = [new_row_q0, new_row_q1, new_row_q2];
+
+        a[p_row] = new_row_p0;
+        a[q_row] = new_row_q0;
+        a[p] = new_row_p0;
+        a[q] = new_row_q0;
+
+        a[p_row + 1] = new_row_p1;
+        a[q_row + 1] = new_row_q1;
+        a[3 + p] = new_row_p1;
+        a[3 + q] = new_row_q1;
+
+        a[p_row + 2] = new_row_p2;
+        a[q_row + 2] = new_row_q2;
+        a[6 + p] = new_row_p2;
+        a[6 + q] = new_row_q2;
+
+        a[p_row + p] = cos_t * new_row_p[p] + sin_t * new_row_p[q];
+        a[q_row + q] = -sin_t * new_row_q[p] + cos_t * new_row_q[q];
+        a[p_row + q] = 0.0;
+        a[q_row + p] = 0.0;
+
+        let v = &mut scratch.eigenvectors;
+        let vip = v[p];
+        let viq = v[q];
+        v[p] = cos_t * vip + sin_t * viq;
+        v[q] = -sin_t * vip + cos_t * viq;
+
+        let vip = v[3 + p];
+        let viq = v[3 + q];
+        v[3 + p] = cos_t * vip + sin_t * viq;
+        v[3 + q] = -sin_t * vip + cos_t * viq;
+
+        let vip = v[6 + p];
+        let viq = v[6 + q];
+        v[6 + p] = cos_t * vip + sin_t * viq;
+        v[6 + q] = -sin_t * vip + cos_t * viq;
+    }
+
+    scratch.eigenvalues.resize(3, 0.0_f64);
+    scratch.eigenvalues[0] = a[0];
+    scratch.eigenvalues[1] = a[4];
+    scratch.eigenvalues[2] = a[8];
 }
 
 fn batch_svd_multi(
