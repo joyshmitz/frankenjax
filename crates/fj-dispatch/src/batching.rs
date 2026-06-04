@@ -3049,6 +3049,7 @@ fn batch_eigh_multi(
     let mut v_elements = Vec::with_capacity(batch_size * m * m);
 
     let mut matrix = Vec::with_capacity(matrix_len);
+    let mut scratch = EighScratch::with_order(m);
     for batch in 0..batch_size {
         let base = batch * matrix_len;
         matrix.clear();
@@ -3059,9 +3060,13 @@ fn batch_eigh_multi(
                 )
             })?);
         }
-        let (w, v) = eigh_decompose_matrix(&mut matrix, m);
-        w_elements.extend(w.into_iter().map(Literal::from_f64));
-        v_elements.extend(v.into_iter().map(Literal::from_f64));
+        append_eigh_decomposition(
+            &mut matrix,
+            m,
+            &mut scratch,
+            &mut w_elements,
+            &mut v_elements,
+        );
     }
 
     let w_shape = Shape {
@@ -3081,33 +3086,99 @@ fn batch_eigh_multi(
     Ok(vec![w, v])
 }
 
-fn eigh_decompose_matrix(a: &mut [f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    let (eigenvalues, eigenvectors) = jacobi_eigendecomposition_matrix(a, n);
-    let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a_idx, &b_idx| eigenvalues[a_idx].total_cmp(&eigenvalues[b_idx]));
+struct JacobiScratch {
+    eigenvalues: Vec<f64>,
+    eigenvectors: Vec<f64>,
+    new_row_p: Vec<f64>,
+    new_row_q: Vec<f64>,
+}
 
-    let mut w_sorted = vec![0.0_f64; n];
-    let mut v_sorted = vec![0.0_f64; n * n];
-    for (new_col, &old_col) in indices.iter().enumerate() {
-        w_sorted[new_col] = eigenvalues[old_col];
-        for row in 0..n {
-            v_sorted[row * n + new_col] = eigenvectors[row * n + old_col];
+impl JacobiScratch {
+    fn with_order(n: usize) -> Self {
+        let matrix_len = n * n;
+        Self {
+            eigenvalues: Vec::with_capacity(n),
+            eigenvectors: Vec::with_capacity(matrix_len),
+            new_row_p: Vec::with_capacity(n),
+            new_row_q: Vec::with_capacity(n),
         }
     }
+}
 
-    (w_sorted, v_sorted)
+struct EighScratch {
+    jacobi: JacobiScratch,
+    indices: Vec<usize>,
+    w_sorted: Vec<f64>,
+    v_sorted: Vec<f64>,
+}
+
+impl EighScratch {
+    fn with_order(n: usize) -> Self {
+        let matrix_len = n * n;
+        Self {
+            jacobi: JacobiScratch::with_order(n),
+            indices: Vec::with_capacity(n),
+            w_sorted: Vec::with_capacity(n),
+            v_sorted: Vec::with_capacity(matrix_len),
+        }
+    }
+}
+
+fn append_eigh_decomposition(
+    a: &mut [f64],
+    n: usize,
+    scratch: &mut EighScratch,
+    w_elements: &mut Vec<Literal>,
+    v_elements: &mut Vec<Literal>,
+) {
+    eigh_decompose_matrix_into(a, n, scratch);
+    w_elements.extend(scratch.w_sorted.iter().copied().map(Literal::from_f64));
+    v_elements.extend(scratch.v_sorted.iter().copied().map(Literal::from_f64));
+}
+
+fn eigh_decompose_matrix_into(a: &mut [f64], n: usize, scratch: &mut EighScratch) {
+    jacobi_eigendecomposition_matrix_into(a, n, &mut scratch.jacobi);
+    let eigenvalues = &scratch.jacobi.eigenvalues;
+    let eigenvectors = &scratch.jacobi.eigenvectors;
+
+    scratch.indices.clear();
+    scratch.indices.extend(0..n);
+    scratch
+        .indices
+        .sort_by(|&a_idx, &b_idx| eigenvalues[a_idx].total_cmp(&eigenvalues[b_idx]));
+
+    scratch.w_sorted.resize(n, 0.0_f64);
+    scratch.v_sorted.resize(n * n, 0.0_f64);
+    for (new_col, &old_col) in scratch.indices.iter().enumerate() {
+        scratch.w_sorted[new_col] = eigenvalues[old_col];
+        for row in 0..n {
+            scratch.v_sorted[row * n + new_col] = eigenvectors[row * n + old_col];
+        }
+    }
 }
 
 fn jacobi_eigendecomposition_matrix(a: &mut [f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    let mut v = vec![0.0_f64; n * n];
+    let mut scratch = JacobiScratch::with_order(n);
+    jacobi_eigendecomposition_matrix_into(a, n, &mut scratch);
+    let JacobiScratch {
+        eigenvalues,
+        eigenvectors,
+        ..
+    } = scratch;
+    (eigenvalues, eigenvectors)
+}
+
+fn jacobi_eigendecomposition_matrix_into(a: &mut [f64], n: usize, scratch: &mut JacobiScratch) {
+    scratch.eigenvectors.resize(n * n, 0.0_f64);
+    scratch.eigenvectors.fill(0.0_f64);
     for i in 0..n {
-        v[i * n + i] = 1.0;
+        scratch.eigenvectors[i * n + i] = 1.0;
     }
 
     let max_iter = 100 * n * n;
     let tol = f64::EPSILON * 1e2;
-    let mut new_row_p = vec![0.0; n];
-    let mut new_row_q = vec![0.0; n];
+    scratch.new_row_p.resize(n, 0.0_f64);
+    scratch.new_row_q.resize(n, 0.0_f64);
 
     for _ in 0..max_iter {
         let mut max_val = 0.0_f64;
@@ -3141,32 +3212,32 @@ fn jacobi_eigendecomposition_matrix(a: &mut [f64], n: usize) -> (Vec<f64>, Vec<f
         let (sin_t, cos_t) = theta.sin_cos();
 
         for i in 0..n {
-            new_row_p[i] = cos_t * a[p * n + i] + sin_t * a[q * n + i];
-            new_row_q[i] = -sin_t * a[p * n + i] + cos_t * a[q * n + i];
+            scratch.new_row_p[i] = cos_t * a[p * n + i] + sin_t * a[q * n + i];
+            scratch.new_row_q[i] = -sin_t * a[p * n + i] + cos_t * a[q * n + i];
         }
 
         for i in 0..n {
-            a[p * n + i] = new_row_p[i];
-            a[q * n + i] = new_row_q[i];
-            a[i * n + p] = new_row_p[i];
-            a[i * n + q] = new_row_q[i];
+            a[p * n + i] = scratch.new_row_p[i];
+            a[q * n + i] = scratch.new_row_q[i];
+            a[i * n + p] = scratch.new_row_p[i];
+            a[i * n + q] = scratch.new_row_q[i];
         }
 
-        a[p * n + p] = cos_t * new_row_p[p] + sin_t * new_row_p[q];
-        a[q * n + q] = -sin_t * new_row_q[p] + cos_t * new_row_q[q];
+        a[p * n + p] = cos_t * scratch.new_row_p[p] + sin_t * scratch.new_row_p[q];
+        a[q * n + q] = -sin_t * scratch.new_row_q[p] + cos_t * scratch.new_row_q[q];
         a[p * n + q] = 0.0;
         a[q * n + p] = 0.0;
 
         for i in 0..n {
-            let vip = v[i * n + p];
-            let viq = v[i * n + q];
-            v[i * n + p] = cos_t * vip + sin_t * viq;
-            v[i * n + q] = -sin_t * vip + cos_t * viq;
+            let vip = scratch.eigenvectors[i * n + p];
+            let viq = scratch.eigenvectors[i * n + q];
+            scratch.eigenvectors[i * n + p] = cos_t * vip + sin_t * viq;
+            scratch.eigenvectors[i * n + q] = -sin_t * vip + cos_t * viq;
         }
     }
 
-    let eigenvalues: Vec<f64> = (0..n).map(|i| a[i * n + i]).collect();
-    (eigenvalues, v)
+    scratch.eigenvalues.clear();
+    scratch.eigenvalues.extend((0..n).map(|i| a[i * n + i]));
 }
 
 fn batch_svd_multi(
@@ -7839,6 +7910,45 @@ mod tests {
         assert_eq!(
             digest,
             "de40295687095bc622bd73074d24337004f440bdd2cc65d8a8759dfb5cf0b106"
+        );
+    }
+
+    #[test]
+    fn test_batch_trace_eigh_multi_rank3_golden_sha256() {
+        let input = BatchTracer::batched(
+            make_f64_tensor(
+                &[2, 3, 3],
+                [
+                    2.0, 0.1, 0.0, 0.1, 3.0, 0.2, 0.0, 0.2, 4.0, 2.07, 0.1, 0.0, 0.1, 3.07, 0.2,
+                    0.0, 0.2, 4.07,
+                ]
+                .as_slice(),
+            ),
+            0,
+        );
+
+        let outputs = apply_batch_rule_multi(Primitive::Eigh, &[input], &BTreeMap::new()).unwrap();
+        let w = outputs[0].value.as_tensor().unwrap();
+        let v = outputs[1].value.as_tensor().unwrap();
+        let w_bits: Vec<u64> = extract_f64_vec(&outputs[0].value)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect();
+        let v_bits: Vec<u64> = extract_f64_vec(&outputs[1].value)
+            .into_iter()
+            .map(f64::to_bits)
+            .collect();
+        let digest = fj_test_utils::fixture_id_from_json(&(
+            w.shape.dims.clone(),
+            w_bits,
+            v.shape.dims.clone(),
+            v_bits,
+        ))
+        .unwrap();
+
+        assert_eq!(
+            digest,
+            "1dc99b980e9600f888e0c05c77537a6e4f1abc64276e09d204f3163634defeb7"
         );
     }
 

@@ -1,0 +1,32 @@
+frankenjax-mcqr.49 fj-dispatch Eigh decomposition scratch reuse golden outputs
+pass: 76
+target: vmap_eigh/batched_matrix_3x3
+
+profile-backed baseline:
+  source: same-turn focused RCH criterion baseline before editing
+  command: rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3
+  worker: ts2
+  time_us_ci: [312.93, 314.34, 315.86]
+
+final rebench:
+  command: rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3
+  worker: ts2
+  time_us_ci: [263.02, 263.74, 264.64]
+
+focused isomorphism output cases:
+  leading batch_dim 0:
+    matrix0: [[2.0, 0.0], [0.0, 3.0]]
+    matrix1: [[4.0, 1.0], [1.0, 4.0]]
+    expected: stack_axis0(eval_primitive_multi(Eigh, matrix0), eval_primitive_multi(Eigh, matrix1))
+    w_shape: [2, 2]
+    v_shape: [2, 2, 2]
+  in-code golden digest:
+    test: test_batch_trace_eigh_multi_leading_batch_dim_golden_sha256
+    digest: de40295687095bc622bd73074d24337004f440bdd2cc65d8a8759dfb5cf0b106
+
+isomorphism invariants:
+  ordering: batch slice order, Jacobi pivot scan order, row update order, eigenvalue total_cmp ordering, and output construction order are unchanged.
+  tie_breaking: eigenvalue ordering remains indices.sort_by with eigenvalues[a].total_cmp(eigenvalues[b]).
+  floating_point: the same sin_cos calls and multiply/add/sub expressions execute in the same per-iteration order; only Vec allocation lifetime changes.
+  rng: no RNG state is read or written.
+  fallback: batch shape, rank, non-square, multi-input, and nonleading fallback/error surfaces are unchanged.

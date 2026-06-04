@@ -1,0 +1,96 @@
+{
+  "bead": "frankenjax-mcqr.49",
+  "pass": 76,
+  "crate": "fj-dispatch",
+  "target": "vmap_eigh/batched_matrix_3x3",
+  "profile_backed": true,
+  "lever": "Reuse Eigh/Jacobi decomposition scratch buffers across batched matrices instead of allocating eigenvalue, eigenvector, index, and sorted-output buffers per slice.",
+  "source_files": [
+    "crates/fj-dispatch/src/batching.rs"
+  ],
+  "baseline": {
+    "source": "same-turn focused RCH criterion baseline before editing",
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "worker": "ts2",
+    "time_us": {
+      "lower": 312.93,
+      "mean": 314.34,
+      "upper": 315.86
+    }
+  },
+  "rebench": {
+    "command": "rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "worker": "ts2",
+    "time_us": {
+      "lower": 263.02,
+      "mean": 263.74,
+      "upper": 264.64
+    }
+  },
+  "speedup": {
+    "mean": 1.1919,
+    "conservative": 1.1825
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "value": 15.0,
+    "decision": "keep"
+  },
+  "alien_inputs": [
+    "arena/slab reuse: move fixed-size matrix decomposition scratch allocation out of the hot batched Eigh slice loop",
+    "preserve the existing numerical algorithm and operation order while reducing allocator traffic"
+  ],
+  "isomorphism_proof": {
+    "ordering": "Batch slice order, Jacobi p/q pivot scan, row update loops, eigenvector update loops, eigenvalue sorting, and output append order execute unchanged.",
+    "tie_breaking": "Eigenvalue sorting remains indices.sort_by with f64::total_cmp on computed eigenvalues.",
+    "floating_point": "Each matrix row element, eigenvector element, and eigenvalue is computed by the same sin_cos and multiply/add/sub expressions in the same order; only Vec allocation lifetime changes.",
+    "rng": "No RNG state is read or written.",
+    "fallback": "Input validation, shape/rank errors, non-square errors, batch fallback, and nonleading batch movement are unchanged."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_dispatch_eigh_decomposition_scratch_pass76_2026-06-04.golden",
+    "sha256": "1f9664d4f4cc680ce95164c2f21b5f9875a28cd5600d985e52a60906d5ffa844",
+    "in_code_digest": "de40295687095bc622bd73074d24337004f440bdd2cc65d8a8759dfb5cf0b106",
+    "verified_by": "sha256sum -c artifacts/performance/evidence/fj_dispatch_eigh_decomposition_scratch_pass76_2026-06-04.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "rch exec -- cargo test -p fj-dispatch --all-targets",
+      "worker": "vmi1153651",
+      "result": "255 unit tests passed; 55 integration tests passed; dispatch_baseline bench harness smoke passed"
+    },
+    {
+      "command": "rch exec -- cargo check -p fj-dispatch --all-targets",
+      "worker": "vmi1149989",
+      "result": "passed"
+    },
+    {
+      "command": "rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings",
+      "worker": "vmi1149989",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check -p fj-dispatch",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- crates/fj-dispatch/src/batching.rs artifacts/performance/evidence/fj_dispatch_eigh_decomposition_scratch_pass76_2026-06-04.golden artifacts/performance/evidence/fj_dispatch_eigh_decomposition_scratch_pass76_2026-06-04.golden.sha256",
+      "result": "passed"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_dispatch_eigh_decomposition_scratch_pass76_2026-06-04.golden.sha256",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-dispatch/src/batching.rs",
+      "result": "exit 0; 0 critical findings; existing file-wide warning inventory remains"
+    }
+  ],
+  "coordination": {
+    "agent": "BlackThrush",
+    "bead_claim": "frankenjax-mcqr.49 assigned to BlackThrush",
+    "file_reservation": "Agent Mail reservation mutation blocked by split-brain mailbox lock from unrelated FrankenNumPy inbox processes; proceeded under the Beads claim and avoided unrelated dirty files."
+  }
+}
