@@ -3875,6 +3875,9 @@ fn batch_scan_scalar_sequences(
     if let Some(result) = batch_scan_i64_max_shared_init_batch0(inputs, params)? {
         return Ok(Some(result));
     }
+    if let Some(result) = batch_scan_f32_add_shared_init_batch0(inputs, params)? {
+        return Ok(Some(result));
+    }
     let Some(xs_batch_dim) = inputs[1].batch_dim else {
         return Ok(None);
     };
@@ -4071,6 +4074,77 @@ fn batch_scan_i64_max_shared_init_batch0(
     }
 
     TensorValue::new(DType::I64, Shape::vector(batch_size as u32), outputs)
+        .map(|tensor| Some(BatchTracer::batched(Value::Tensor(tensor), 0)))
+        .map_err(|e| BatchError::TensorError(e.to_string()))
+}
+
+fn batch_scan_f32_add_shared_init_batch0(
+    inputs: &[BatchTracer],
+    params: &BTreeMap<String, String>,
+) -> Result<Option<BatchTracer>, BatchError> {
+    if inputs[0].batch_dim.is_some()
+        || inputs[1].batch_dim != Some(0)
+        || params
+            .get("body_op")
+            .is_some_and(|body_op| body_op.as_str() != "add")
+    {
+        return Ok(None);
+    }
+
+    let init = match &inputs[0].value {
+        Value::Scalar(Literal::F32Bits(bits)) => f32::from_bits(*bits),
+        Value::Tensor(tensor)
+            if tensor.dtype == DType::F32
+                && tensor.shape == Shape::scalar()
+                && tensor.elements.len() == 1 =>
+        {
+            let Literal::F32Bits(bits) = tensor.elements[0] else {
+                return Ok(None);
+            };
+            f32::from_bits(bits)
+        }
+        _ => return Ok(None),
+    };
+
+    let Some(xs) = inputs[1].value.as_tensor() else {
+        return Ok(None);
+    };
+    if xs.dtype != DType::F32 || xs.rank() != 2 {
+        return Ok(None);
+    }
+    let batch_size = xs.shape.dims[0] as usize;
+    let scan_len = xs.shape.dims[1] as usize;
+    let expected_len = batch_size
+        .checked_mul(scan_len)
+        .ok_or_else(|| BatchError::TensorError("scan input size overflowed".to_owned()))?;
+    if xs.elements.len() != expected_len {
+        return Ok(None);
+    }
+
+    let reverse = params.get("reverse").is_some_and(|value| value == "true");
+    let mut outputs = Vec::with_capacity(batch_size);
+    for batch_idx in 0..batch_size {
+        let mut carry = init;
+        let row_offset = batch_idx * scan_len;
+        if reverse {
+            for scan_idx in (0..scan_len).rev() {
+                let Literal::F32Bits(bits) = xs.elements[row_offset + scan_idx] else {
+                    return Ok(None);
+                };
+                carry += f32::from_bits(bits);
+            }
+        } else {
+            for scan_idx in 0..scan_len {
+                let Literal::F32Bits(bits) = xs.elements[row_offset + scan_idx] else {
+                    return Ok(None);
+                };
+                carry += f32::from_bits(bits);
+            }
+        }
+        outputs.push(Literal::from_f32(carry));
+    }
+
+    TensorValue::new(DType::F32, Shape::vector(batch_size as u32), outputs)
         .map(|tensor| Some(BatchTracer::batched(Value::Tensor(tensor), 0)))
         .map_err(|e| BatchError::TensorError(e.to_string()))
 }
@@ -8522,6 +8596,47 @@ mod tests {
         assert_eq!(result.batch_dim, Some(0));
         assert_eq!(result.value.dtype(), DType::F32);
         assert_f32_close(&extract_f32_vec(&result.value), &[6.5, 60.5]);
+    }
+
+    #[test]
+    fn test_batch_trace_scan_shared_f32_add_direct_path_preserves_reverse_order() {
+        let init = BatchTracer::unbatched(make_f32_scalar_tensor(1.0e20));
+        let xs = BatchTracer::batched(make_f32_matrix(2, 2, &[-1.0e20, 3.0, 4.0, -1.0e20]), 0);
+
+        let forward = apply_batch_rule(
+            Primitive::Scan,
+            &[init.clone(), xs.clone()],
+            &BTreeMap::from([("body_op".to_owned(), "add".to_owned())]),
+        )
+        .expect("f32 shared add scan should use direct row-major path");
+        let reverse = apply_batch_rule(
+            Primitive::Scan,
+            &[init, xs],
+            &BTreeMap::from([
+                ("body_op".to_owned(), "add".to_owned()),
+                ("reverse".to_owned(), "true".to_owned()),
+            ]),
+        )
+        .expect("f32 shared add reverse scan should preserve reverse order");
+
+        assert_eq!(forward.value.dtype(), DType::F32);
+        assert_eq!(reverse.value.dtype(), DType::F32);
+        assert_f32_close(&extract_f32_vec(&forward.value), &[3.0, 0.0]);
+        assert_f32_close(&extract_f32_vec(&reverse.value), &[0.0, 4.0]);
+    }
+
+    #[test]
+    fn test_batch_trace_scan_shared_f32_add_direct_path_preserves_nan_exitless_fold() {
+        let init = BatchTracer::unbatched(Value::scalar_f32(0.5));
+        let xs = BatchTracer::batched(make_f32_matrix(2, 2, &[1.0, f32::NAN, 2.0, 3.0]), 0);
+        let result = apply_batch_rule(Primitive::Scan, &[init, xs], &BTreeMap::new())
+            .expect("default f32 add scan should batch directly");
+
+        let values = extract_f32_vec(&result.value);
+        assert_eq!(result.batch_dim, Some(0));
+        assert_eq!(result.value.dtype(), DType::F32);
+        assert!(values[0].is_nan());
+        assert!((values[1] - 5.5).abs() <= 1e-5, "{} != 5.5", values[1]);
     }
 
     #[test]

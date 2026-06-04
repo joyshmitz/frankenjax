@@ -1,0 +1,31 @@
+frankenjax-0h5tq fj-dispatch F32 shared-init scan add direct path golden outputs
+pass: 73
+target: vmap_scan/shared_init_batched_xs_f32_add_128x64
+
+profile-backed baseline:
+  command: RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass73-f32-scan-baseline rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/shared_init_batched_xs_f32_add_128x64 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3
+  worker: ts2
+  time_us_ci: [108.00, 108.34, 108.65]
+
+final rebench:
+  command: RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass73-f32-scan-rebench rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/shared_init_batched_xs_f32_add_128x64 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3
+  worker: ts2
+  time_us_ci: [47.334, 47.511, 47.702]
+
+focused isomorphism output cases:
+  reverse-order case:
+    init: 1.0e20
+    xs_rows: [[-1.0e20, 3.0], [4.0, -1.0e20]]
+    forward_output: [3.0, 0.0]
+    reverse_output: [0.0, 4.0]
+  nan case:
+    init: 0.5
+    xs_rows: [[1.0, NaN], [2.0, 3.0]]
+    output: [NaN, 5.5]
+
+isomorphism invariants:
+  ordering: row-major batch axis 0 preserved; scan order follows reverse=false forward order and reverse=true reverse order.
+  tie_breaking: no branch-dependent tie breaking introduced.
+  floating_point: output uses scalar f32 accumulation in the same per-row scan order; NaN propagation is unchanged.
+  rng: no RNG state is read or written.
+  fallback: non-F32, non-rank2, batched init, non-axis0, and non-add body_op inputs keep the generic path.

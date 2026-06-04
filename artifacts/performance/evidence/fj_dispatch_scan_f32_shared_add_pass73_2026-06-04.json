@@ -1,0 +1,108 @@
+{
+  "bead": "frankenjax-0h5tq",
+  "pass": 73,
+  "crate": "fj-dispatch",
+  "target": "vmap_scan/shared_init_batched_xs_f32_add_128x64",
+  "profile_backed": true,
+  "lever": "Specialize exact dense F32 rank-2 shared-init Add scan with batch axis 0 into a direct row-major per-lane state-machine path.",
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass73-f32-scan-baseline rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/shared_init_batched_xs_f32_add_128x64 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "worker": "ts2",
+    "time_us": {
+      "lower": 108.00,
+      "mean": 108.34,
+      "upper": 108.65
+    }
+  },
+  "rebench": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass73-f32-scan-rebench rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_scan/shared_init_batched_xs_f32_add_128x64 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "worker": "ts2",
+    "time_us": {
+      "lower": 47.334,
+      "mean": 47.511,
+      "upper": 47.702
+    }
+  },
+  "speedup": {
+    "mean": 2.2803,
+    "conservative": 2.2641
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 5,
+    "effort": 2,
+    "value": 12.5
+  },
+  "alien_inputs": [
+    "replace generic per-slice interpreter dispatch with a direct row-major state-machine primitive",
+    "preserve exact scalar F32 accumulation order instead of changing the numerical algorithm"
+  ],
+  "isomorphism_proof": {
+    "ordering": "Batch axis 0 row order is unchanged; scan order is forward for reverse=false and descending for reverse=true.",
+    "tie_breaking": "No comparison or tie-breaking behavior is introduced.",
+    "floating_point": "Each row accumulates with scalar f32 += in the same scan order; NaN propagation remains exitless and order-dependent.",
+    "rng": "No RNG state is read or written.",
+    "fallback": "All non-exact cases fall through to the existing generic scan path."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_dispatch_scan_f32_shared_add_pass73_2026-06-04.golden",
+    "sha256": "e56c38bad73cc567e327a65327f69486a1afafa89f506f9e81057d3280e1a467",
+    "cases": [
+      {
+        "name": "reverse-order",
+        "init": "1.0e20",
+        "xs_rows": [["-1.0e20", "3.0"], ["4.0", "-1.0e20"]],
+        "forward_output": ["3.0", "0.0"],
+        "reverse_output": ["0.0", "4.0"]
+      },
+      {
+        "name": "nan-exitless-fold",
+        "init": "0.5",
+        "xs_rows": [["1.0", "NaN"], ["2.0", "3.0"]],
+        "output": ["NaN", "5.5"]
+      }
+    ]
+  },
+  "validation": [
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass73-f32-scan-tests rch exec -- cargo test -p fj-dispatch shared_f32_add -- --nocapture",
+      "worker": "ts1",
+      "result": "2 unit tests passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass73-fj-dispatch-test rch exec -- cargo test -p fj-dispatch --all-targets",
+      "worker": "ts2",
+      "result": "254 unit tests passed; 55 integration tests passed; bench harness smoke passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass73-fj-dispatch-check rch exec -- cargo check -p fj-dispatch --all-targets",
+      "worker": "ts2",
+      "result": "passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass73-fj-dispatch-clippy rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings",
+      "worker": "ts2",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check -p fj-dispatch",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- crates/fj-dispatch/src/batching.rs",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-dispatch/src/batching.rs",
+      "result": "exit 0; 0 critical findings; UBS fmt/clippy/build checks clean; existing broad warning inventory remains"
+    }
+  ],
+  "coordination": {
+    "bead_claim": "br update frankenjax-0h5tq --status in_progress --assignee BlackThrush",
+    "file_reservation": {
+      "attempted": true,
+      "command": "am file_reservations reserve /data/projects/frankenjax BlackThrush crates/fj-dispatch/src/batching.rs --ttl 3600 --exclusive --reason frankenjax-0h5tq",
+      "result": "failed: mailbox activity lock busy"
+    }
+  }
+}
