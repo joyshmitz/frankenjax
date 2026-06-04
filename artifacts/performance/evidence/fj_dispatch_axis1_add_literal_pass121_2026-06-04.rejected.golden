@@ -1,0 +1,5 @@
+pass121 axis1 vmap add-literal rejected golden
+shape=[128,64]
+first8=[1,129,257,385,513,641,769,897]
+last8=[7296,7424,7552,7680,7808,7936,8064,8192]
+fixture_digest=29d48dbffb8ba3bc95e29416bbe470cd18432ffd471b8ec7ef068c3b7a61b3ef

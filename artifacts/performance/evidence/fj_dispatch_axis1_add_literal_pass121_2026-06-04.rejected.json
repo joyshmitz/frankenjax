@@ -1,0 +1,33 @@
+{
+  "pass": 121,
+  "bead": "frankenjax-l4jkv",
+  "crate": "fj-dispatch",
+  "target": "dispatch_latency/vmap/rank2_add_one_in_axes_1",
+  "status": "rejected",
+  "profile_evidence": {
+    "post_pass119_profile_ts2": "40.556us [40.073,41.184]",
+    "focused_baseline_ts2": "40.077us [39.494,40.613]"
+  },
+  "candidate": {
+    "lever": "Add a dispatch-layer BatchTrace direct kernel for single-input, single-equation I64 Add with a literal and resolved in_axes=1, producing the default out_axes=0 transposed layout without per-equation BatchTrace interpreter scaffolding.",
+    "same_worker_rebench_ts2": "46.116us [45.698,46.599]",
+    "midpoint_speedup": 0.8690,
+    "conservative_speedup": 0.8475,
+    "score": 0.0,
+    "decision": "Source diff removed; no slower code kept."
+  },
+  "behavior_proof": {
+    "ordering": "Candidate wrote output in the same default vmap out-axis row-major order: columns become leading batch lanes, rows remain inner order.",
+    "tie_breaking": "No comparisons or tie-breaking are introduced.",
+    "floating_point": "Accepted path was I64-only; no FP operations are introduced.",
+    "rng": "No RNG state is read or written.",
+    "fallbacks": "Only exact one-equation I64 add-literal Jaxprs with resolved in_axes=1 were accepted; all other cases fell back to existing dispatch.",
+    "rch_tests": "cargo test -p fj-dispatch test_in_axes_1 -- --nocapture passed on ts2: 3 passed, 0 failed."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_dispatch_axis1_add_literal_pass121_2026-06-04.rejected.golden",
+    "sha256": "e9002a06671fa417bdc8cd13985f841fc257fadc88e5e6e64fadccc69019fb93",
+    "fixture_digest": "29d48dbffb8ba3bc95e29416bbe470cd18432ffd471b8ec7ef068c3b7a61b3ef"
+  },
+  "next_primitive": "Do not repeat direct axis-1 add kernels. Two rejected micro/dispatch kernels now point to a different attack: linalg-local QR/SVD/Eigh kernels when ownership clears, or a broader dispatch evidence/cache construction primitive with profiling that shows response scaffolding dominates."
+}
