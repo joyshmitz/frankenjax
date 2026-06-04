@@ -4012,9 +4012,7 @@ fn batch_scan_i64_max_shared_init_batch0(
 ) -> Result<Option<BatchTracer>, BatchError> {
     if inputs[0].batch_dim.is_some()
         || inputs[1].batch_dim != Some(0)
-        || !params
-            .get("body_op")
-            .is_some_and(|body_op| body_op.as_str() == "max")
+        || params.get("body_op").map(String::as_str) != Some("max")
     {
         return Ok(None);
     }
