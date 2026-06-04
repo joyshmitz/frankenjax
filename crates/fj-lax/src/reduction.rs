@@ -648,6 +648,18 @@ pub(crate) fn eval_reduce_bitwise_axes(
             match tensor.dtype {
                 DType::Bool => {
                     if reduce_all_axes {
+                        // Dense bool fast path: fold the contiguous `bool` slice
+                        // directly. Bit-identical to the generic loop below — same
+                        // bool_init seed, ascending order, bool_op — but skips the
+                        // per-element Literal::Bool match and 24-byte enum stride.
+                        // as_bool_slice() is Some only for Bool dense storage.
+                        if let Some(values) = tensor.elements.as_bool_slice() {
+                            let mut acc = bool_init;
+                            for &val in values {
+                                acc = bool_op(acc, val);
+                            }
+                            return Ok(Value::scalar_bool(acc));
+                        }
                         let mut acc = bool_init;
                         for literal in &tensor.elements {
                             let val = match literal {
@@ -1451,6 +1463,69 @@ mod tests {
                     int_results(&dense, &params, prim),
                     int_results(&literal, &params, prim),
                     "mismatch {prim:?} axes={axes:?}"
+                );
+            }
+        }
+    }
+
+    /// Bit-exact parity for the dense-bool full-reduction fast path (ReduceAnd /
+    /// ReduceOr) vs the Vec<Literal> path, over all-true/all-false/mixed inputs.
+    #[test]
+    fn dense_bool_reduce_bit_identical_to_literal_path() {
+        for pattern in 0..4 {
+            let n = 600usize;
+            let data: Vec<bool> = (0..n)
+                .map(|i| match pattern {
+                    0 => true,
+                    1 => false,
+                    2 => i != 300, // single false
+                    _ => i % 2 == 0,
+                })
+                .collect();
+            let dense = Value::Tensor(
+                TensorValue::new_bool_values(
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    data.clone(),
+                )
+                .unwrap(),
+            );
+            assert!(
+                dense
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_bool_slice()
+                    .is_some()
+            );
+            let literal = Value::Tensor(
+                TensorValue::new(
+                    DType::Bool,
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    data.iter().copied().map(Literal::Bool).collect(),
+                )
+                .unwrap(),
+            );
+            assert!(
+                literal
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_bool_slice()
+                    .is_none()
+            );
+            let params = BTreeMap::new();
+            for prim in [Primitive::ReduceAnd, Primitive::ReduceOr] {
+                let d = crate::eval_primitive(prim, std::slice::from_ref(&dense), &params).unwrap();
+                let l =
+                    crate::eval_primitive(prim, std::slice::from_ref(&literal), &params).unwrap();
+                assert_eq!(
+                    d.as_scalar_literal(),
+                    l.as_scalar_literal(),
+                    "{prim:?} pattern={pattern}"
                 );
             }
         }

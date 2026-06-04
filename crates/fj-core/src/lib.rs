@@ -893,15 +893,9 @@ impl Value {
     }
 
     pub fn vector_bool(values: &[bool]) -> Result<Self, ValueError> {
-        let elements = values
-            .iter()
-            .copied()
-            .map(Literal::Bool)
-            .collect::<Vec<_>>();
-        Ok(Self::Tensor(TensorValue::new(
-            DType::Bool,
+        Ok(Self::Tensor(TensorValue::new_bool_values(
             Shape::vector(values.len() as u32),
-            elements,
+            values.to_vec(),
         )?))
     }
 
@@ -991,6 +985,10 @@ enum LiteralBufferStorage {
         values: Arc<Vec<i64>>,
         literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
     },
+    Bool {
+        values: Arc<Vec<bool>>,
+        literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
+    },
     RepeatedPatches {
         base: Arc<Vec<Literal>>,
         repeats: usize,
@@ -1032,6 +1030,16 @@ impl LiteralBuffer {
     pub fn from_i64_values(values: Vec<i64>) -> Self {
         Self {
             storage: LiteralBufferStorage::I64 {
+                values: Arc::new(values),
+                literals: Arc::new(OnceLock::new()),
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn from_bool_values(values: Vec<bool>) -> Self {
+        Self {
+            storage: LiteralBufferStorage::Bool {
                 values: Arc::new(values),
                 literals: Arc::new(OnceLock::new()),
             },
@@ -1097,6 +1105,9 @@ impl LiteralBuffer {
             LiteralBufferStorage::I64 { values, literals } => literals
                 .get_or_init(|| Arc::new(values.iter().copied().map(Literal::I64).collect()))
                 .as_slice(),
+            LiteralBufferStorage::Bool { values, literals } => literals
+                .get_or_init(|| Arc::new(values.iter().copied().map(Literal::Bool).collect()))
+                .as_slice(),
             LiteralBufferStorage::RepeatedPatches {
                 base,
                 repeats,
@@ -1127,6 +1138,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(_) => None,
             LiteralBufferStorage::F64 { values, .. } => Some(values.as_slice()),
             LiteralBufferStorage::I64 { .. } => None,
+            LiteralBufferStorage::Bool { .. } => None,
             LiteralBufferStorage::RepeatedPatches { .. } => None,
             LiteralBufferStorage::Concat { .. } => None,
         }
@@ -1138,6 +1150,19 @@ impl LiteralBuffer {
             LiteralBufferStorage::I64 { values, .. } => Some(values.as_slice()),
             LiteralBufferStorage::Literals(_)
             | LiteralBufferStorage::F64 { .. }
+            | LiteralBufferStorage::Bool { .. }
+            | LiteralBufferStorage::RepeatedPatches { .. }
+            | LiteralBufferStorage::Concat { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_bool_slice(&self) -> Option<&[bool]> {
+        match &self.storage {
+            LiteralBufferStorage::Bool { values, .. } => Some(values.as_slice()),
+            LiteralBufferStorage::Literals(_)
+            | LiteralBufferStorage::F64 { .. }
+            | LiteralBufferStorage::I64 { .. }
             | LiteralBufferStorage::RepeatedPatches { .. }
             | LiteralBufferStorage::Concat { .. } => None,
         }
@@ -1149,6 +1174,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(elements) => elements.len(),
             LiteralBufferStorage::F64 { values, .. } => values.len(),
             LiteralBufferStorage::I64 { values, .. } => values.len(),
+            LiteralBufferStorage::Bool { values, .. } => values.len(),
             LiteralBufferStorage::RepeatedPatches { base, repeats, .. } => base.len() * repeats,
             LiteralBufferStorage::Concat { len, .. } => *len,
         }
@@ -1169,6 +1195,7 @@ impl LiteralBuffer {
             self.storage,
             LiteralBufferStorage::F64 { .. }
                 | LiteralBufferStorage::I64 { .. }
+                | LiteralBufferStorage::Bool { .. }
                 | LiteralBufferStorage::RepeatedPatches { .. }
                 | LiteralBufferStorage::Concat { .. }
         ) {
@@ -1180,6 +1207,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(elements) => Arc::make_mut(elements),
             LiteralBufferStorage::F64 { .. }
             | LiteralBufferStorage::I64 { .. }
+            | LiteralBufferStorage::Bool { .. }
             | LiteralBufferStorage::RepeatedPatches { .. }
             | LiteralBufferStorage::Concat { .. } => unreachable!("lazy buffer was materialized"),
         }
@@ -1225,6 +1253,12 @@ impl Clone for LiteralBuffer {
             },
             LiteralBufferStorage::I64 { values, literals } => Self {
                 storage: LiteralBufferStorage::I64 {
+                    values: Arc::clone(values),
+                    literals: Arc::clone(literals),
+                },
+            },
+            LiteralBufferStorage::Bool { values, literals } => Self {
+                storage: LiteralBufferStorage::Bool {
                     values: Arc::clone(values),
                     literals: Arc::clone(literals),
                 },
@@ -1358,6 +1392,20 @@ impl IntoIterator for LiteralBuffer {
                     .iter()
                     .copied()
                     .map(Literal::I64)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
+            LiteralBufferStorage::Bool { values, literals } => {
+                if let Some(materialized) = literals.get() {
+                    return Arc::try_unwrap(Arc::clone(materialized))
+                        .unwrap_or_else(|elements| (*elements).clone())
+                        .into_iter();
+                }
+
+                values
+                    .iter()
+                    .copied()
+                    .map(Literal::Bool)
                     .collect::<Vec<_>>()
                     .into_iter()
             }
@@ -1539,6 +1587,26 @@ impl TensorValue {
             dtype: DType::I64,
             shape,
             elements: LiteralBuffer::from_i64_values(values),
+        })
+    }
+
+    pub fn new_bool_values(shape: Shape, values: Vec<bool>) -> Result<Self, ValueError> {
+        let expected_count = shape.element_count().ok_or(ValueError::ShapeOverflow {
+            shape: shape.clone(),
+        })?;
+
+        if expected_count != values.len() as u64 {
+            return Err(ValueError::ElementCountMismatch {
+                shape,
+                expected_count,
+                actual_count: values.len(),
+            });
+        }
+
+        Ok(Self {
+            dtype: DType::Bool,
+            shape,
+            elements: LiteralBuffer::from_bool_values(values),
         })
     }
 

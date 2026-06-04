@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.24 pass80 golden
+target=eval/reduce_and_64k_bool_vec
+lever=dense Bool tensor storage (LiteralBufferStorage::Bool, 1 byte/elem) + dense bool full-reduction fold via as_bool_slice
+method=same-worker dense vs Vec<Literal> reference bench, run in one process on vmi1167313
+worker=vmi1167313
+reduce_and_64k_bool=dense 1.276us [1.244, 1.307] vs literal 45.675us [44.912, 46.440] = 35.80x mid, 34.35x conservative
+score=10.0
+alien_primitive=dense SoA / succinct typed storage (1-byte bool vs 24-byte tagged union), alien_cs_graveyard section 8.2
+source_change=fj-core LiteralBufferStorage::Bool { values: Arc<Vec<bool>>, lazy literals } with from_bool_values/as_bool_slice/as_slice/len/make_mut/Clone/IntoIterator; TensorValue::new_bool_values; Value::vector_bool dense; fj-lax eval_reduce_bitwise_axes DType::Bool reduce_all folds as_bool_slice directly
+isomorphism=contiguous bool slice folded in ascending order with the same bool_init seed and bool_op (ReduceAnd &&, ReduceOr ||); as_slice() lazily materializes the identical Vec<Literal::Bool> so Debug/PartialEq/serde/Deref/indexing/consumers are byte-identical; make_mut COW-materializes to Literals like F64/I64; Literal-backed/malformed Bool inputs fall back to the unchanged Literal loop; output scalar_bool
+golden_note=bit-identical to the Literal path across all-true/all-false/single-false/alternating for ReduceAnd + ReduceOr; foundational variant enabling future dense comparison-outputs / select-cond / All/Any
+validation=RCH cargo test -p fj-lax --lib --release passed 1058 tests incl dense_bool_reduce_bit_identical_to_literal_path; RCH cargo test -p fj-core --lib passed 130; RCH cargo clippy -p fj-core -p fj-lax --release --all-targets --no-deps -- -D warnings passed (release dodges a shared-target proc-macro rmeta drift in debug)

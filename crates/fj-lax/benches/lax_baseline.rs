@@ -830,6 +830,35 @@ fn bench_reduce_sum_64k_i64_literal_reference(c: &mut Criterion) {
     });
 }
 
+// 64k bool ReduceAnd full reduction: dense bool storage fold (pass80) vs the
+// Vec<Literal> per-element match, run in the same process for a same-worker ratio.
+fn bench_reduce_and_64k_bool_vec(c: &mut Criterion) {
+    let data: Vec<bool> = (0..LARGE_ELEMENTWISE_LEN).map(|i| i != 40_000).collect();
+    let input = Value::vector_bool(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/reduce_and_64k_bool_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceAnd, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_and_64k_bool_literal_reference(c: &mut Criterion) {
+    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::Bool(i != 40_000))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::Bool,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            elements,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/reduce_and_64k_bool_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceAnd, std::slice::from_ref(&input), &p))
+    });
+}
+
 // 64k i64 ascending sort: exercises the LSD radix path (pass74) vs the prior
 // comparison sort. Pseudo-random keys (negatives, wide range, duplicates) so the
 // sort does real work; ascending is the default direction.
@@ -1681,6 +1710,8 @@ criterion_group!(
     bench_reduce_sum_256_axis0_i64_literal_reference,
     bench_reduce_sum_64k_i64,
     bench_reduce_sum_64k_i64_literal_reference,
+    bench_reduce_and_64k_bool_vec,
+    bench_reduce_and_64k_bool_literal_reference,
     bench_sort_64k_i64,
     bench_sort_64k_f64,
     bench_sort_calib_reduce_64k_i64,
