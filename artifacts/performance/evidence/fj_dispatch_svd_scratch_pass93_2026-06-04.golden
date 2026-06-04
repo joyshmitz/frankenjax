@@ -1,0 +1,15 @@
+pass93 golden — fj-dispatch batched SVD scratch reuse (batched-linalg arena trilogy: eigh/QR/SVD)
+target=vmap_svd/batched_matrix_3x2 (batch_svd_multi / svd_decompose_matrix)
+lever=arena/scratch reuse: carry the SVD working buffers (ata, the Jacobi eigensolver buffers, sort indices, sigma, v_sorted, thin u, u_out, vt) in an SvdScratch reused across every matrix in the vmapped batch, instead of allocating them fresh per matrix. Reuses jacobi_eigendecomposition_matrix_into (the existing reused-buffer Jacobi) instead of the allocating wrapper (now removed as dead code). Arithmetic unchanged.
+method=same-worker A/B with vmap_eigh/batched_matrix_3x3 as a worker-speed calibration (eigh untouched by this change); candidate and stashed-baseline ran in separate RCH Criterion processes on different-speed workers, normalized by the in-process svd/eigh ratio.
+candidate_svd=154.26us [150.16, 159.37]  candidate_eigh=280.84us
+baseline_svd=170.60us [162.15, 178.62]   baseline_eigh=240.04us
+candidate_svd_over_eigh=154.26/280.84=0.5493
+baseline_svd_over_eigh=170.60/240.04=0.7107
+normalized_speedup=0.7107/0.5493=1.29x
+note=weaker than pass92 QR (1.46x): for a 3x2 SVD the Jacobi eigensolve of AtA and the output Literal conversion dominate, so per-slice allocation was a smaller fraction. This completes the batched-linalg arena vein (eigh has EighScratch, QR pass92, SVD here); the next batched-linalg swing is algorithmic (closed-form/blocked small-matrix solvers, a JAX-tolerance parity-revalidation track), NOT more arena tuning.
+score=impact 3 (vmap_svd is the #2 fj-dispatch cost) x confidence 5 (bit-exact: 4 batched-SVD tests incl full_matrices + full 256+55 suite pass; arithmetic identical) / effort 2 = 7.5
+alien_primitive=arena/slab/bump allocation reuse across a batch (alien_cs_graveyard arena/scratch strategies)
+isomorphism=bit-for-bit identical U, sigma, Vt. Same AtA (upper+lower fill), same jacobi_eigendecomposition_matrix_into eigendecomposition (identical to the removed wrapper it replaced), same descending total_cmp index sort, same sigma=sqrt(max(lambda,0)), same v_sorted permutation, same U=A*v_sorted/sigma with the sigma>EPSILON*1e4 guard, same thin/full Vt transpose, same extend_orthogonal_columns for full U. Only allocation strategy changed: ata/indices/sigma/v_sorted/u/u_out/vt and the Jacobi buffers are cleared+reused; reuse-safety verified (jacobi clears eigenvalues + resizes eigenvectors each call; all scratch buffers clear+resize before write).
+golden_note=test_batch_trace_svd_multi_{leading,nonleading}_batch_dim, _full_matrices, _matrix_rank_error_preserved assert exact U/sigma/Vt values and pass unchanged; full fj-dispatch suite 256+55 green.
+validation=RCH cargo test -p fj-dispatch --release: 256 + 55 passed; RCH cargo clippy -p fj-dispatch --release --all-targets --no-deps -- -D warnings clean (after removing the now-unused jacobi_eigendecomposition_matrix wrapper).

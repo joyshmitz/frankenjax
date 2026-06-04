@@ -1,0 +1,24 @@
+{
+    "pass": 93,
+    "date": "2026-06-04",
+    "crate": "fj-dispatch",
+    "bead": "frankenjax-5rvc7",
+    "target": "vmap_svd/batched_matrix_3x2 (batch_svd_multi / svd_decompose_matrix)",
+    "lever_summary": "Arena/scratch reuse for batched SVD (A=U S Vt via eigendecomposition of AtA). svd_decompose_matrix allocated ~8 buffers/slice (ata, Jacobi eigenvalues+eigenvectors, indices, sigma, v_sorted, u, u_out, vt). Now all live in an SvdScratch reused across the batch; reuses jacobi_eigendecomposition_matrix_into (the existing reused-buffer Jacobi) and removes the now-dead allocating wrapper. Arithmetic unchanged.",
+    "method": "Same-worker A/B normalized by vmap_eigh (untouched) as worker-speed calibration; candidate and stashed-baseline ran on different-speed workers, normalized via in-process svd/eigh ratio.",
+    "results": {
+        "candidate_svd_us": 154.26, "candidate_eigh_us": 280.84,
+        "baseline_svd_us": 170.60, "baseline_eigh_us": 240.04,
+        "raw_speedup_x": 1.106,
+        "normalized_speedup_x": 1.29,
+        "normalization": "in-process svd/eigh: baseline 0.7107 vs candidate 0.5493 -> 1.29x"
+    },
+    "score": {"impact": 3.0, "confidence": 5.0, "effort": 2.0, "impact_times_confidence_over_effort": 7.5, "kept": true},
+    "change": {"files": ["crates/fj-dispatch/src/batching.rs"], "lever": "Added SvdScratch {jacobi, ata, indices, sigma, v_sorted, u, u_out, vt}; svd_decompose_matrix takes &mut SvdScratch, clears+reuses each buffer, writes U/sigma/Vt into u_out/sigma/vt; batch_svd_multi allocates one SvdScratch before the loop. Derived Default on JacobiScratch; removed the unused jacobi_eigendecomposition_matrix allocating wrapper."},
+    "isomorphism": {"arithmetic": "identical AtA, Jacobi eigendecomposition, descending total_cmp sort, sigma/U/Vt formulas + thresholds; only allocation strategy changed", "output": "bit-for-bit identical U, sigma, Vt"},
+    "validation": [
+        {"name": "svd_and_full_suite", "command": "rch exec -- cargo test -p fj-dispatch --release", "result": "256 + 55 passed incl all test_batch_trace_svd_multi_* (assert exact U/sigma/Vt)"},
+        {"name": "clippy_deny_warnings", "command": "rch exec -- cargo clippy -p fj-dispatch --release --all-targets --no-deps -- -D warnings", "result": "clean (after removing dead wrapper)"}
+    ],
+    "note": "1.29x (worker-corrected) — weaker than pass92 QR (1.46x) because for 3x2 SVD the Jacobi eigensolve + output Literal conversion dominate over allocation. This COMPLETES the batched-linalg arena vein (eigh EighScratch / QR pass92 / SVD pass93). Diminishing returns on the arena lever => the next batched-linalg swing is ALGORITHMIC (closed-form/blocked small-matrix solvers), filed as frankenjax-* on the parity-revalidation track, NOT more arena tuning."
+}

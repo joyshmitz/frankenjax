@@ -3122,11 +3122,29 @@ fn batch_eigh_multi(
     Ok(vec![w, v])
 }
 
+#[derive(Default)]
 struct JacobiScratch {
     eigenvalues: Vec<f64>,
     eigenvectors: Vec<f64>,
     new_row_p: Vec<f64>,
     new_row_q: Vec<f64>,
+}
+
+/// Reusable working buffers for batched SVD (`A = U Σ Vᵀ` via eigendecomposition
+/// of `AᵀA`). Carrying these across every matrix in a vmapped batch removes the
+/// per-matrix heap traffic — `ata`, the Jacobi eigensolver buffers, the sort
+/// indices, `sigma`, `v_sorted`, the thin `u`, and the `u_out`/`vt` outputs —
+/// that dominated the decomposition cost for small matrices.
+#[derive(Default)]
+struct SvdScratch {
+    jacobi: JacobiScratch,
+    ata: Vec<f64>,
+    indices: Vec<usize>,
+    sigma: Vec<f64>,
+    v_sorted: Vec<f64>,
+    u: Vec<f64>,
+    u_out: Vec<f64>,
+    vt: Vec<f64>,
 }
 
 impl JacobiScratch {
@@ -3231,17 +3249,6 @@ fn eigh_decompose_matrix_3x3_into(a: &mut [f64], scratch: &mut EighScratch) {
     scratch.v_sorted[6] = eigenvectors[6 + col0];
     scratch.v_sorted[7] = eigenvectors[6 + col1];
     scratch.v_sorted[8] = eigenvectors[6 + col2];
-}
-
-fn jacobi_eigendecomposition_matrix(a: &mut [f64], n: usize) -> (Vec<f64>, Vec<f64>) {
-    let mut scratch = JacobiScratch::with_order(n);
-    jacobi_eigendecomposition_matrix_into(a, n, &mut scratch);
-    let JacobiScratch {
-        eigenvalues,
-        eigenvectors,
-        ..
-    } = scratch;
-    (eigenvalues, eigenvectors)
 }
 
 fn jacobi_eigendecomposition_matrix_into(a: &mut [f64], n: usize, scratch: &mut JacobiScratch) {
@@ -3481,6 +3488,7 @@ fn batch_svd_multi(
     let mut vt_elements = Vec::with_capacity(batch_size * vt_rows * n);
 
     let mut matrix = Vec::with_capacity(matrix_len);
+    let mut svd_scratch = SvdScratch::default();
     for batch in 0..batch_size {
         let base = batch * matrix_len;
         matrix.clear();
@@ -3489,10 +3497,10 @@ fn batch_svd_multi(
                 BatchError::EvalError("type mismatch for svd: expected numeric elements".to_owned())
             })?);
         }
-        let (u, s, vt) = svd_decompose_matrix(m, n, &matrix, full_matrices);
-        u_elements.extend(u.into_iter().map(Literal::from_f64));
-        s_elements.extend(s.into_iter().map(Literal::from_f64));
-        vt_elements.extend(vt.into_iter().map(Literal::from_f64));
+        svd_decompose_matrix(m, n, &matrix, full_matrices, &mut svd_scratch);
+        u_elements.extend(svd_scratch.u_out.iter().copied().map(Literal::from_f64));
+        s_elements.extend(svd_scratch.sigma.iter().copied().map(Literal::from_f64));
+        vt_elements.extend(svd_scratch.vt.iter().copied().map(Literal::from_f64));
     }
 
     let u_shape = Shape {
@@ -3519,15 +3527,35 @@ fn batch_svd_multi(
     Ok(vec![u, s, vt])
 }
 
+/// SVD of a single `m x n` matrix via eigendecomposition of `AᵀA`, writing U
+/// into `scratch.u_out`, the singular values into `scratch.sigma`, and Vᵀ into
+/// `scratch.vt`. Every working buffer lives in `scratch` and is cleared+reused
+/// per call, so a batched SVD over same-shaped matrices performs no per-matrix
+/// allocation (the Jacobi eigensolver reuses `scratch.jacobi`). The arithmetic
+/// is identical to the prior per-call implementation — same `AᵀA`, same Jacobi
+/// eigendecomposition, same descending `total_cmp` ordering, same σ/U/Vᵀ
+/// formulas and thresholds — so the outputs are bit-for-bit unchanged.
 fn svd_decompose_matrix(
     m: usize,
     n: usize,
     a: &[f64],
     full_matrices: bool,
-) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    scratch: &mut SvdScratch,
+) {
+    let SvdScratch {
+        jacobi,
+        ata,
+        indices,
+        sigma,
+        v_sorted,
+        u,
+        u_out,
+        vt,
+    } = scratch;
     let k = m.min(n);
 
-    let mut ata = vec![0.0_f64; n * n];
+    ata.clear();
+    ata.resize(n * n, 0.0_f64);
     for i in 0..n {
         for j in i..n {
             let mut dot = 0.0;
@@ -3539,12 +3567,18 @@ fn svd_decompose_matrix(
         }
     }
 
-    let (eigenvalues, v) = jacobi_eigendecomposition_matrix(&mut ata, n);
-    let mut indices: Vec<usize> = (0..n).collect();
+    jacobi_eigendecomposition_matrix_into(ata, n, jacobi);
+    let eigenvalues = &jacobi.eigenvalues;
+    let v = &jacobi.eigenvectors;
+
+    indices.clear();
+    indices.extend(0..n);
     indices.sort_by(|&a_idx, &b_idx| eigenvalues[b_idx].total_cmp(&eigenvalues[a_idx]));
 
-    let mut sigma = vec![0.0_f64; k];
-    let mut v_sorted = vec![0.0_f64; n * n];
+    sigma.clear();
+    sigma.resize(k, 0.0_f64);
+    v_sorted.clear();
+    v_sorted.resize(n * n, 0.0_f64);
     for (new_col, &old_col) in indices.iter().enumerate() {
         if new_col < k {
             sigma[new_col] = eigenvalues[old_col].max(0.0).sqrt();
@@ -3554,7 +3588,8 @@ fn svd_decompose_matrix(
         }
     }
 
-    let mut u = vec![0.0_f64; m * k];
+    u.clear();
+    u.resize(m * k, 0.0_f64);
     for i in 0..m {
         for j in 0..k {
             if sigma[j] > f64::EPSILON * 1e4 {
@@ -3568,31 +3603,32 @@ fn svd_decompose_matrix(
     }
 
     let u_cols = if full_matrices { m } else { k };
-    let u_out = if full_matrices && u_cols > k {
-        extend_orthogonal_columns_matrix(&u, m, k, u_cols)
+    u_out.clear();
+    if full_matrices && u_cols > k {
+        // Rare full-matrices path: keep the existing column-extension helper
+        // (its output is value-identical) and copy into the reused buffer.
+        let extended = extend_orthogonal_columns_matrix(u.as_slice(), m, k, u_cols);
+        u_out.extend_from_slice(&extended);
     } else {
-        u
-    };
+        u_out.extend_from_slice(u);
+    }
 
-    let vt = if full_matrices {
-        let mut vt = vec![0.0_f64; n * n];
+    vt.clear();
+    if full_matrices {
+        vt.resize(n * n, 0.0_f64);
         for i in 0..n {
             for j in 0..n {
                 vt[i * n + j] = v_sorted[j * n + i];
             }
         }
-        vt
     } else {
-        let mut vt = vec![0.0_f64; k * n];
+        vt.resize(k * n, 0.0_f64);
         for i in 0..k {
             for j in 0..n {
                 vt[i * n + j] = v_sorted[j * n + i];
             }
         }
-        vt
-    };
-
-    (u_out, sigma, vt)
+    }
 }
 
 fn extend_orthogonal_columns_matrix(u: &[f64], m: usize, k: usize, m_full: usize) -> Vec<f64> {
