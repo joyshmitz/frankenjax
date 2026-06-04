@@ -1,0 +1,103 @@
+{
+  "bead": "frankenjax-94ig9",
+  "pass": 74,
+  "crate": "fj-dispatch",
+  "target": "vmap_eigh/batched_matrix_3x3",
+  "profile_backed": true,
+  "lever": "Avoid move_batch_dim_to_front for Eigh batching when the batch dimension is already leading.",
+  "profile_discovery": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass74-dispatch-profile rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- --noplot --sample-size 10 --warm-up-time 1 --measurement-time 2",
+    "worker": "vmi1153651",
+    "top_row": "vmap_eigh/batched_matrix_3x3",
+    "time_us": {
+      "lower": 549.81,
+      "mean": 573.76,
+      "upper": 604.31
+    }
+  },
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass74-eigh-baseline rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "worker": "ts2",
+    "time_us": {
+      "lower": 391.37,
+      "mean": 401.64,
+      "upper": 411.31
+    }
+  },
+  "rebench": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass74-eigh-rebench rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --noplot --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "worker": "ts2",
+    "time_us": {
+      "lower": 368.92,
+      "mean": 371.56,
+      "upper": 373.73
+    }
+  },
+  "speedup": {
+    "mean": 1.0809,
+    "conservative": 1.0472
+  },
+  "score": {
+    "impact": 1.5,
+    "confidence": 4,
+    "effort": 1,
+    "value": 6.0
+  },
+  "alien_inputs": [
+    "zero-copy framing: skip a semantically no-op tensor-axis move for already-normalized input layout",
+    "state/layout specialization before numerical kernel changes"
+  ],
+  "isomorphism_proof": {
+    "ordering": "Leading batch row-major storage is consumed directly; nonleading batch still uses the existing move_batch_dim_to_front path.",
+    "tie_breaking": "Eigenvalue sorting remains total_cmp on the computed eigenvalues.",
+    "floating_point": "Jacobi iteration, matrix element order, sin_cos calls, and output construction are unchanged.",
+    "rng": "No RNG state is read or written.",
+    "fallback": "Rank, square-matrix, arity, and nonleading error/fallback surfaces remain unchanged."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_dispatch_eigh_axis0_move_pass74_2026-06-04.golden",
+    "sha256": "7dfe59a6a401b1c2f4c20201c0ae932deacc61832ffadd652ecfad0fba60729f"
+  },
+  "validation": [
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass74-eigh-tests rch exec -- cargo test -p fj-dispatch eigh_multi -- --nocapture",
+      "worker": "ts2",
+      "result": "4 unit tests passed; leading and nonleading Eigh batching match slice oracle"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass74-fj-dispatch-test rch exec -- cargo test -p fj-dispatch --all-targets",
+      "worker": "ts2",
+      "result": "254 unit tests passed; 55 integration tests passed; bench harness smoke passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass74-fj-dispatch-check rch exec -- cargo check -p fj-dispatch --all-targets",
+      "worker": "vmi1149989",
+      "result": "passed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-pass74-fj-dispatch-clippy rch exec -- cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings",
+      "worker": "ts2",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check -p fj-dispatch",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- crates/fj-dispatch/src/batching.rs",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-dispatch/src/batching.rs",
+      "result": "exit 0; 0 critical findings; UBS fmt/clippy/build checks clean; existing broad warning inventory remains"
+    }
+  ],
+  "coordination": {
+    "bead_claim": "br update frankenjax-94ig9 --status in_progress --assignee BlackThrush",
+    "file_reservation": {
+      "attempted": true,
+      "command": "am file_reservations reserve /data/projects/frankenjax BlackThrush crates/fj-dispatch/src/batching.rs --ttl 3600 --exclusive --reason frankenjax-94ig9",
+      "result": "failed: mailbox activity lock busy"
+    }
+  }
+}
