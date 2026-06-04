@@ -1,0 +1,69 @@
+{
+    "bead": "frankenjax-mcqr.30.17",
+    "pass": 71,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/add_broadcast_256_i64_vec",
+    "lever_summary": "Dense multi-dim broadcast via an incremental BroadcastOdometer. broadcast_binary_tensors decoded each output element's multi-index (flat_to_multi_into + two broadcast_flat_index dot-products) and gathered Literals from materialized Vec<Literal>. The odometer maintains both broadcast source offsets incrementally; broadcast_binary_f64 gains a dense as_f64_slice() tier and a new broadcast_binary_i64 folds as_i64_slice() (no i64 broadcast fast path existed before — i64 went fully generic).",
+    "alien_graveyard": {
+        "primitive": "strength reduction of per-element address arithmetic (incremental index odometer) + dense SoA gather",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "the broadcast analog of the reduction OutIndexOdometer (mcqr.30.11/.12): a carry odometer advances both operand offsets in O(1) amortized while gathering from contiguous typed slices"
+    },
+    "method": "Same-worker comparison on ts2: dense (new_*_values / vector_*) inputs vs Vec<Literal>-backed reference benches run in the same process. The f64 literal reference exercises the prior materialize+decode f64 broadcast path; the i64 literal reference exercises the fully generic binary_literal_op broadcast loop.",
+    "results": {
+        "add_broadcast_256_i64": {
+            "dense_ns": 235966.6,
+            "dense_ci_ns": [234466.9, 237727.5],
+            "literal_ns": 1863525.2,
+            "literal_ci_ns": [1856829.8, 1872601.7],
+            "speedup_midpoint_x": 7.90,
+            "speedup_conservative_x": 7.81,
+            "note": "headline: i64 broadcast previously had no fast path (per-element binary_literal_op with promote/try_from)"
+        },
+        "add_broadcast_256_f64": {
+            "dense_ns": 256485.3,
+            "dense_ci_ns": [255155.7, 258072.8],
+            "literal_ns": 1112606.7,
+            "literal_ci_ns": [1105040.2, 1122500.5],
+            "speedup_midpoint_x": 4.34,
+            "speedup_conservative_x": 4.28,
+            "note": "improves the existing f64 broadcast path by removing the per-element decode + Literal materialization"
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- add_broadcast_256 --save-baseline bcast",
+    "score": {
+        "impact": 5.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 10.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/arithmetic.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added struct BroadcastOdometer { dims, lhs_strides, rhs_strides, coord, lhs_idx, rhs_idx } with next() -> (usize, usize). broadcast_binary_f64 gains a leading dense as_f64_slice() + odometer tier (Literal-gather path retained as fallback). New broadcast_binary_i64 (dense as_i64_slice() + odometer) wired into broadcast_binary_tensors after the f64 attempt; both return None (generic fallback) when not dense."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: output produced in the same ascending row-major flat order; the odometer reproduces broadcast_flat_index(flat_to_multi(flat), strides) for both operands (broadcast-aware strides are 0 on broadcast axes)",
+        "op": "unchanged: same float_op / int_op carrying per-primitive semantics applied to the gathered values; for I64xI64 binary_literal_op returns Literal::I64(int_op(a,b)) and promote_dtype(I64,I64)==I64, for F64xF64 Literal::from_f64(float_op(a,b))",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "dense tiers fire only when both operands expose as_f64_slice()/as_i64_slice() (well-formed dense storage); Literal-backed / mixed-dtype / promoting cases fall back to the unchanged generic broadcast loop",
+        "output_dtype": "F64 (dense f64 path) / I64 (dense i64 path), matching the generic promote_dtype result"
+    },
+    "validation": [
+        {
+            "name": "dense_broadcast_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib",
+            "result": "passed: 1052 tests incl new dense_broadcast_bit_identical_to_literal_path (5 broadcast shapes x Add/Sub/Mul, f64 + i64)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}

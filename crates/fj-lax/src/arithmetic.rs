@@ -1064,6 +1064,62 @@ fn eval_same_shape_complex128_mul(
 }
 
 /// Full NumPy multi-dim broadcasting for two tensors.
+/// Incremental dual-index odometer for NumPy multi-dim broadcasting. `next()`
+/// returns `(lhs_idx, rhs_idx)` — the broadcast-gathered source offsets for the
+/// output element at the current ascending flat position — then advances,
+/// reproducing `broadcast_flat_index(flat_to_multi(flat), strides)` for both
+/// operands without the per-element `Vec` decode + two stride dot-products. The
+/// broadcast-aware strides are 0 on broadcast axes, so an axis that broadcasts
+/// simply leaves that operand's index unchanged as it varies. Must be stepped
+/// exactly `product(out_dims)` times; the final step harmlessly wraps to 0.
+struct BroadcastOdometer {
+    dims: Vec<usize>,
+    lhs_strides: Vec<usize>,
+    rhs_strides: Vec<usize>,
+    coord: Vec<usize>,
+    lhs_idx: usize,
+    rhs_idx: usize,
+}
+
+impl BroadcastOdometer {
+    fn new(out_dims: &[u32], lhs_strides: &[usize], rhs_strides: &[usize]) -> Self {
+        Self {
+            dims: out_dims.iter().map(|&d| d as usize).collect(),
+            lhs_strides: lhs_strides.to_vec(),
+            rhs_strides: rhs_strides.to_vec(),
+            coord: vec![0_usize; out_dims.len()],
+            lhs_idx: 0,
+            rhs_idx: 0,
+        }
+    }
+
+    #[inline]
+    fn next(&mut self) -> (usize, usize) {
+        let current = (self.lhs_idx, self.rhs_idx);
+        let rank = self.dims.len();
+        if rank == 0 {
+            return current;
+        }
+        let mut ax = rank - 1;
+        loop {
+            self.coord[ax] += 1;
+            self.lhs_idx += self.lhs_strides[ax];
+            self.rhs_idx += self.rhs_strides[ax];
+            if self.coord[ax] < self.dims[ax] {
+                break;
+            }
+            self.coord[ax] = 0;
+            self.lhs_idx -= self.lhs_strides[ax] * self.dims[ax];
+            self.rhs_idx -= self.rhs_strides[ax] * self.dims[ax];
+            if ax == 0 {
+                break;
+            }
+            ax -= 1;
+        }
+        current
+    }
+}
+
 fn broadcast_binary_tensors(
     primitive: Primitive,
     lhs: &TensorValue,
@@ -1107,6 +1163,24 @@ fn broadcast_binary_tensors(
         return Ok(value);
     }
 
+    // I64⊗I64 dense broadcast fast path: for I64 operands binary_literal_op
+    // returns Literal::I64(int_op(a, b)) and promote_dtype(I64, I64) == I64, so
+    // a dense int_op fold over the broadcast-gathered i64 values is identical.
+    if lhs.dtype == DType::I64
+        && rhs.dtype == DType::I64
+        && let Some(value) = broadcast_binary_i64(
+            lhs,
+            rhs,
+            &out_shape,
+            out_count,
+            &lhs_strides,
+            &rhs_strides,
+            int_op,
+        )?
+    {
+        return Ok(value);
+    }
+
     let mut multi = Vec::with_capacity(out_strides.len());
     let mut elements = Vec::with_capacity(out_count);
     for flat_idx in 0..out_count {
@@ -1121,6 +1195,40 @@ fn broadcast_binary_tensors(
 
     let dtype = promote_dtype(lhs.dtype, rhs.dtype);
     Ok(Value::Tensor(TensorValue::new(dtype, out_shape, elements)?))
+}
+
+/// I64 dense broadcast binary fast path mirroring [`broadcast_binary_f64`]: gather
+/// the broadcast source offsets from the contiguous `as_i64_slice()` backings via
+/// a [`BroadcastOdometer`] (no per-element multi-index decode), apply `int_op`,
+/// and emit dense i64. Bit-for-bit identical to the generic broadcast loop for
+/// I64⊗I64 (same gather indices in the same row-major order, same `int_op`,
+/// `promote_dtype(I64, I64) == I64`). Returns `Ok(None)` unless both operands are
+/// I64 dense storage, so the caller falls through to the generic path.
+#[inline]
+fn broadcast_binary_i64(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    out_shape: &Shape,
+    out_count: usize,
+    lhs_strides: &[usize],
+    rhs_strides: &[usize],
+    int_op: &impl Fn(i64, i64) -> i64,
+) -> Result<Option<Value>, EvalError> {
+    let (Some(lhs_values), Some(rhs_values)) =
+        (lhs.elements.as_i64_slice(), rhs.elements.as_i64_slice())
+    else {
+        return Ok(None);
+    };
+    let mut odometer = BroadcastOdometer::new(&out_shape.dims, lhs_strides, rhs_strides);
+    let mut values = Vec::with_capacity(out_count);
+    for _ in 0..out_count {
+        let (lhs_idx, rhs_idx) = odometer.next();
+        values.push(int_op(lhs_values[lhs_idx], rhs_values[rhs_idx]));
+    }
+    Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+        out_shape.clone(),
+        values,
+    )?)))
 }
 
 /// F64 broadcast binary fast path. Produces output elements in the same
@@ -1141,6 +1249,24 @@ fn broadcast_binary_f64(
     rhs_strides: &[usize],
     float_op: &impl Fn(f64, f64) -> f64,
 ) -> Result<Option<Value>, EvalError> {
+    // Dense tier: gather from the contiguous f64 backings via the incremental
+    // BroadcastOdometer — same row-major gather order and indices as the generic
+    // decode, but no per-element Vec decode or 24-byte Literal materialization.
+    if let (Some(lhs_values), Some(rhs_values)) =
+        (lhs.elements.as_f64_slice(), rhs.elements.as_f64_slice())
+    {
+        let mut odometer = BroadcastOdometer::new(&out_shape.dims, lhs_strides, rhs_strides);
+        let mut values = Vec::with_capacity(out_count);
+        for _ in 0..out_count {
+            let (lhs_idx, rhs_idx) = odometer.next();
+            values.push(float_op(lhs_values[lhs_idx], rhs_values[rhs_idx]));
+        }
+        return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+            out_shape.clone(),
+            values,
+        )?)));
+    }
+
     let mut multi = Vec::with_capacity(out_strides.len());
     let mut elements = Vec::with_capacity(out_count);
     for flat_idx in 0..out_count {
@@ -5279,6 +5405,97 @@ mod tests {
             let lit_st =
                 crate::eval_primitive(prim, &[scalar.clone(), lit_vec(&data)], &p).unwrap();
             assert_eq!(ints(&dense_st), ints(&lit_st), "scalar⊗tensor {prim:?}");
+        }
+    }
+
+    /// Bit-exact parity for the dense multi-dim broadcast fast paths (i64 + f64)
+    /// via the BroadcastOdometer, across several broadcast shapes and ops, vs the
+    /// Vec<Literal>-backed generic broadcast loop. Covers row-broadcast,
+    /// col-broadcast, rank expansion, and a 3-D case.
+    #[test]
+    fn dense_broadcast_bit_identical_to_literal_path() {
+        let shapes: [(Vec<u32>, Vec<u32>); 5] = [
+            (vec![4, 5], vec![5]),    // row vector broadcast over rows
+            (vec![4, 5], vec![4, 1]), // column broadcast
+            (vec![3, 1], vec![1, 6]), // outer-product style
+            (vec![2, 3, 4], vec![4]), // rank expansion + trailing broadcast
+            (vec![2, 1, 4], vec![1, 3, 1]),
+        ];
+        let prod = |d: &[u32]| d.iter().map(|&x| x as usize).product::<usize>();
+
+        for (ls, rs) in shapes {
+            let ln = prod(&ls);
+            let rn = prod(&rs);
+            let lf: Vec<f64> = (0..ln).map(|i| (i as f64 - 3.5) * 0.25).collect();
+            let rf: Vec<f64> = (0..rn).map(|i| (i as f64 + 1.0) * 0.5).collect();
+            let li: Vec<i64> = (0..ln as i64).map(|i| i - 3).collect();
+            let ri: Vec<i64> = (0..rn as i64).map(|i| i + 1).collect();
+
+            let dense_f = |d: &[f64], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new_f64_values(Shape { dims: s.to_vec() }, d.to_vec()).unwrap(),
+                )
+            };
+            let lit_f = |d: &[f64], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims: s.to_vec() },
+                        d.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                )
+            };
+            let dense_i = |d: &[i64], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new_i64_values(Shape { dims: s.to_vec() }, d.to_vec()).unwrap(),
+                )
+            };
+            let lit_i = |d: &[i64], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::I64,
+                        Shape { dims: s.to_vec() },
+                        d.iter().copied().map(Literal::I64).collect(),
+                    )
+                    .unwrap(),
+                )
+            };
+            let bits = |v: &Value| -> Vec<u64> {
+                v.as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().map(|f| f.to_bits()).unwrap_or(0))
+                    .collect()
+            };
+            let ints = |v: &Value| -> Vec<i64> {
+                v.as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| l.as_i64().unwrap())
+                    .collect()
+            };
+            let p = std::collections::BTreeMap::new();
+
+            for prim in [Primitive::Add, Primitive::Sub, Primitive::Mul] {
+                let df = crate::eval_primitive(prim, &[dense_f(&lf, &ls), dense_f(&rf, &rs)], &p)
+                    .unwrap();
+                let lfr =
+                    crate::eval_primitive(prim, &[lit_f(&lf, &ls), lit_f(&rf, &rs)], &p).unwrap();
+                assert_eq!(
+                    df.as_tensor().unwrap().shape.dims,
+                    lfr.as_tensor().unwrap().shape.dims
+                );
+                assert_eq!(bits(&df), bits(&lfr), "f64 {prim:?} {ls:?} {rs:?}");
+
+                let di = crate::eval_primitive(prim, &[dense_i(&li, &ls), dense_i(&ri, &rs)], &p)
+                    .unwrap();
+                let lir =
+                    crate::eval_primitive(prim, &[lit_i(&li, &ls), lit_i(&ri, &rs)], &p).unwrap();
+                assert_eq!(ints(&di), ints(&lir), "i64 {prim:?} {ls:?} {rs:?}");
+            }
         }
     }
 

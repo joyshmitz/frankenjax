@@ -1,0 +1,13 @@
+frankenjax-mcqr.30.17 pass71 golden
+target=eval/add_broadcast_256_i64_vec
+lever=dense multi-dim broadcast via incremental BroadcastOdometer; broadcast_binary_f64 dense as_f64_slice tier + new broadcast_binary_i64 dense as_i64_slice, replacing per-element flat_to_multi_into + 2x broadcast_flat_index decode and Literal materialization
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2 (bias [256,256] + [256] -> [256,256])
+worker=ts2
+add_broadcast_256_i64=dense 235.967us [234.467, 237.728] vs literal 1863.525us [1856.830, 1872.602] = 7.90x mid, 7.81x conservative
+add_broadcast_256_f64=dense 256.485us [255.156, 258.073] vs literal 1112.607us [1105.040, 1122.501] = 4.34x mid, 4.28x conservative
+score=10.0
+alien_primitive=incremental index odometer + dense SoA gather, alien_cs_graveyard section 8.2
+source_change=BroadcastOdometer { dims, lhs_strides, rhs_strides, coord, lhs_idx, rhs_idx }.next()->(usize,usize); broadcast_binary_f64 leading dense tier (Literal-gather retained as fallback); new broadcast_binary_i64 wired into broadcast_binary_tensors after the f64 attempt; both fall back to the generic loop when not dense
+isomorphism=same ascending row-major output order; odometer reproduces broadcast_flat_index(flat_to_multi(flat), strides) for both operands (broadcast-aware strides 0 on broadcast axes); same float_op/int_op per primitive; F64xF64 -> from_f64(float_op), I64xI64 -> Literal::I64(int_op) with promote_dtype(I64,I64)=I64; Literal-backed/mixed/promoting inputs fall back to the unchanged generic broadcast loop
+golden_note=i64 broadcast had no prior fast path (fully generic binary_literal_op) hence the larger 7.90x; f64 improves the existing materialize+decode path 4.34x; both bit-identical across 5 broadcast shapes x Add/Sub/Mul
+validation=RCH cargo test -p fj-lax --lib passed 1052 tests incl dense_broadcast_bit_identical_to_literal_path; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed
