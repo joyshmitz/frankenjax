@@ -3775,6 +3775,73 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_in_dim_dense_matches_literal_path() {
+        // The dense (F64/I64) broadcast fast path and the Literal-backed generic
+        // path must produce identical elements (same replication index math).
+        use fj_core::{DType, Shape, TensorValue};
+        let mut params = BTreeMap::new();
+        params.insert("shape".into(), "4,3,5".into()); // broadcast [3] over axes 0,2
+        params.insert("broadcast_dimensions".into(), "1".into());
+
+        // f64: dense vs Literal-backed.
+        let fdata = [1.5_f64, -2.0, 3.25];
+        let f_dense = Value::vector_f64(&fdata).unwrap();
+        let f_lit = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(3),
+                fdata.iter().copied().map(fj_core::Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(f_dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        assert!(f_lit.as_tensor().unwrap().elements.as_f64_slice().is_none());
+        let dense_out =
+            eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&f_dense), &params)
+                .unwrap();
+        let lit_out =
+            eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&f_lit), &params)
+                .unwrap();
+        let bits = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect()
+        };
+        assert_eq!(dense_out.as_tensor().unwrap().shape.dims, vec![4, 3, 5]);
+        assert_eq!(bits(&dense_out), bits(&lit_out), "f64 broadcast dense vs generic");
+
+        // i64: dense vs Literal-backed.
+        let idata = [7_i64, -8, 9];
+        let i_dense = Value::vector_i64(&idata).unwrap();
+        let i_lit = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape::vector(3),
+                idata.iter().copied().map(fj_core::Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let i_dense_out =
+            eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&i_dense), &params)
+                .unwrap();
+        let i_lit_out =
+            eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&i_lit), &params)
+                .unwrap();
+        let ivals = |v: &Value| -> Vec<i64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_i64().unwrap())
+                .collect()
+        };
+        assert_eq!(ivals(&i_dense_out), ivals(&i_lit_out), "i64 broadcast dense vs generic");
+    }
+
+    #[test]
     fn broadcast_in_dim_empty_huge_tensor_returns_empty_tensor() {
         let huge = u32::MAX;
         let input = Value::Tensor(

@@ -786,32 +786,43 @@ pub(crate) fn eval_broadcast_in_dim(
             let in_dims = &tensor.shape.dims;
             let in_strides = checked_row_major_strides(primitive, "broadcast_in_dim", in_dims)?;
 
-            let mut elements = Vec::with_capacity(total);
-            let mut out_coords = vec![0_usize; out_rank];
-
-            for _ in 0..total {
-                // Map output coords to input index.
-                let mut in_flat = 0_usize;
-                for (out_axis, mapping) in out_to_in.iter().enumerate() {
-                    if let Some(in_axis) = mapping {
-                        let in_dim = in_dims[*in_axis] as usize;
-                        // If input dim is 1, broadcast (coord maps to 0).
-                        let coord = if in_dim == 1 { 0 } else { out_coords[out_axis] };
-                        in_flat += coord * in_strides[*in_axis];
-                    }
-                }
-                elements.push(tensor.elements[in_flat]);
-
-                // Increment output coordinates (row-major order).
-                for axis in (0..out_rank).rev() {
-                    out_coords[axis] += 1;
-                    if out_coords[axis] < target_dims[axis] as usize {
-                        break;
-                    }
-                    out_coords[axis] = 0;
-                }
+            // Dense-output fast paths: replicate directly from the contiguous
+            // typed slice into dense storage (new_*_values), bypassing the input
+            // Literal materialization and the Vec<Literal> output build. The
+            // replication index math is identical to the generic path
+            // (broadcast_replicate), so the output is bit-for-bit unchanged.
+            if let Some(src) = tensor.elements.as_f64_slice() {
+                let out = broadcast_replicate(
+                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                );
+                return Ok(Value::Tensor(TensorValue::new_f64_values(
+                    Shape { dims: target_dims },
+                    out,
+                )?));
+            }
+            if let Some(src) = tensor.elements.as_i64_slice() {
+                let out = broadcast_replicate(
+                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                );
+                return Ok(Value::Tensor(TensorValue::new_i64_values(
+                    Shape { dims: target_dims },
+                    out,
+                )?));
+            }
+            if let Some(src) = tensor.elements.as_bool_slice() {
+                let out = broadcast_replicate(
+                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                );
+                return Ok(Value::Tensor(TensorValue::new_bool_values(
+                    Shape { dims: target_dims },
+                    out,
+                )?));
             }
 
+            let src = tensor.elements.as_slice();
+            let elements = broadcast_replicate(
+                total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+            );
             Ok(Value::Tensor(TensorValue::new(
                 tensor.dtype,
                 Shape { dims: target_dims },
@@ -819,6 +830,43 @@ pub(crate) fn eval_broadcast_in_dim(
             )?))
         }
     }
+}
+
+/// Row-major broadcast replication shared by `eval_broadcast_in_dim`'s dense and
+/// generic paths: for each of `total` output positions (iterated in row-major
+/// order), map the output coordinate to the source flat index (input dims of
+/// size 1 map to 0) and copy `src[in_flat]`. Generic over the element type so the
+/// dense (f64/i64/bool) and Literal paths share identical index math.
+fn broadcast_replicate<T: Copy>(
+    total: usize,
+    out_rank: usize,
+    target_dims: &[u32],
+    out_to_in: &[Option<usize>],
+    in_dims: &[u32],
+    in_strides: &[usize],
+    src: &[T],
+) -> Vec<T> {
+    let mut out = Vec::with_capacity(total);
+    let mut out_coords = vec![0_usize; out_rank];
+    for _ in 0..total {
+        let mut in_flat = 0_usize;
+        for (out_axis, mapping) in out_to_in.iter().enumerate() {
+            if let Some(in_axis) = mapping {
+                let in_dim = in_dims[*in_axis] as usize;
+                let coord = if in_dim == 1 { 0 } else { out_coords[out_axis] };
+                in_flat += coord * in_strides[*in_axis];
+            }
+        }
+        out.push(src[in_flat]);
+        for axis in (0..out_rank).rev() {
+            out_coords[axis] += 1;
+            if out_coords[axis] < target_dims[axis] as usize {
+                break;
+            }
+            out_coords[axis] = 0;
+        }
+    }
+    out
 }
 
 fn parse_broadcast_target_dims(

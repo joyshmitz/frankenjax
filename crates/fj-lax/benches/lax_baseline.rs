@@ -1121,6 +1121,19 @@ fn bench_convert_64k_f64_to_i64(c: &mut Criterion) {
     });
 }
 
+// BroadcastInDim: replicate a length-256 f64 vector to [256, 256] (64k output).
+// Dense fast path (pass104, new_f64_values) vs generic Vec<Literal> build.
+fn bench_broadcast_256_to_256x256_f64(c: &mut Criterion) {
+    let data: Vec<f64> = (0..256).map(|i| (i as f64) * 0.5 - 3.0).collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("shape".to_owned(), "256,256".to_owned());
+    p.insert("broadcast_dimensions".to_owned(), "1".to_owned());
+    c.bench_function("eval/broadcast_256_to_256x256_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&input), &p))
+    });
+}
+
 // Descending f64 sort over a 64k axis: complement-key radix path (pass102) vs
 // the generic O(n log n) descending comparison sort.
 fn bench_sort_64k_f64_descending(c: &mut Criterion) {
@@ -2354,6 +2367,7 @@ criterion_group!(
     bench_argmax_64k_f64,
     bench_sort_64k_f64_descending,
     bench_convert_64k_f64_to_i64,
+    bench_broadcast_256_to_256x256_f64,
     bench_sort_64k_f32,
     bench_sort_64k_u32,
     bench_sort_calib_reduce_64k_i64,

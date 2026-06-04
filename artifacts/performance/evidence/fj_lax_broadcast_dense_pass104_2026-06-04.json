@@ -1,0 +1,20 @@
+{
+    "pass": 104, "date": "2026-06-04", "crate": "fj-lax",
+    "kind": "dense data-model fast path with dense output for BroadcastInDim",
+    "target": "eval/broadcast_256_to_256x256_f64 (eval_broadcast_in_dim)",
+    "lever_summary": "BroadcastInDim replicated input into a full-size Vec<Literal>. Added a dense fast path: dense source (F64/I64/Bool slice) replicated via a generic-over-T row-major index kernel (broadcast_replicate) directly into new_*_values dense storage, bypassing input materialization + the Vec<Literal> output. Generic path now also shares broadcast_replicate.",
+    "method": "same-bench A/B; baseline = stashed generic Vec<Literal> broadcast; normalized by eval/sort_calib_reduce_64k_i64 (ReduceSum, unaffected).",
+    "results": {
+        "calibration_reduce_us": {"candidate": 12.726, "baseline": 8.6829, "candidate_worker_slower_x": 1.466},
+        "broadcast_256_to_256x256_f64": {"baseline_us": 596.10, "candidate_us": 313.17, "raw_x": 1.90, "worker_corrected_x": 2.79}
+    },
+    "score": {"impact": 4.0, "confidence": 5.0, "effort": 2.0, "impact_times_confidence_over_effort": 10.0, "kept": true},
+    "change": {"files": ["crates/fj-lax/src/tensor_ops.rs", "crates/fj-lax/benches/lax_baseline.rs"],
+        "lever": "Factored broadcast_replicate<T: Copy>; eval_broadcast_in_dim routes dense F64/I64/Bool sources to new_*_values output, generic for the rest. Added eval/broadcast_256_to_256x256_f64 bench + broadcast_in_dim_dense_matches_literal_path test."},
+    "isomorphism": {"type": "BIT-IDENTICAL: broadcast_replicate implements identical row-major odometer + in_flat mapping for dense and Literal element types; dense output value-equal to Literal-backed", "validation": "broadcast_in_dim_dense_matches_literal_path (f64/i64) + 10 broadcast_in_dim tests pass"},
+    "validation": [
+        {"name": "broadcast_tests", "command": "rch exec -- cargo test -p fj-lax --release broadcast_in_dim", "result": "10 passed"},
+        {"name": "clippy", "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings", "result": "clean"}
+    ],
+    "note": "2.79x (vs Convert's 14.8x) because the per-element odometer remains the dominant cost; the win is removing input materialization + Vec<Literal> output. Dense vein now covers reductions/cumulative/argmax/elementwise/convert/broadcast."
+}
