@@ -1,0 +1,8 @@
+frankenjax pass119 rank1 gather direct path
+target: fj-dispatch vmap_gather/batched_indices
+normal output i64: [40,20,10,30,30,20]
+nonleading batch output i64: [10,30,20,20,10,30]
+fill_or_drop output i64: [10,-9223372036854775808,20,-9223372036854775808,30,20]
+baseline_us_midpoint: 43.050
+candidate_us_midpoint: 13.472
+source kept: true

@@ -1696,6 +1696,11 @@ fn batch_gather(
                 "gather indices must be tensor".into(),
             ));
         }
+        if let Some(result) =
+            batch_gather_unbatched_operand_rank1_indices_direct(operand, &indices_value, params)?
+        {
+            return Ok(result);
+        }
         let result = eval_primitive(
             Primitive::Gather,
             &[operand.value.clone(), indices_value],
@@ -1717,6 +1722,62 @@ enum GatherIndexMode {
     Clip,
     FillOrDrop,
     PromiseInBounds,
+}
+
+fn batch_gather_unbatched_operand_rank1_indices_direct(
+    operand: &BatchTracer,
+    indices_value: &Value,
+    params: &BTreeMap<String, String>,
+) -> Result<Option<BatchTracer>, BatchError> {
+    let Value::Tensor(operand_tensor) = &operand.value else {
+        return Ok(None);
+    };
+    let Value::Tensor(indices_tensor) = indices_value else {
+        return Ok(None);
+    };
+    if operand_tensor.rank() != 1 {
+        return Ok(None);
+    }
+
+    let mode = match parse_gather_index_mode(params) {
+        Some(mode) => mode,
+        None => return Ok(None),
+    };
+    let slice_sizes = parse_param_usize_list(params, "slice_sizes")?;
+    if slice_sizes.as_slice() != [1] {
+        return Ok(None);
+    }
+
+    let gather_dim = operand_tensor.shape.dims[0] as usize;
+    if gather_dim == 0 {
+        return Ok(None);
+    }
+
+    let output_elems = checked_product_usize(&indices_tensor.shape.dims, "gather output")?;
+    if output_elems != indices_tensor.elements.len() {
+        return Ok(None);
+    }
+
+    let fill_lit = gather_fill_literal_for_dtype(operand_tensor.dtype);
+    let operand_elements = operand_tensor.elements.as_slice();
+    let mut elements = Vec::with_capacity(output_elems);
+    for literal in indices_tensor.elements.iter() {
+        let raw_index = gather_index_literal_to_usize(literal)?;
+        match resolve_gather_index(raw_index, gather_dim, mode) {
+            Some(resolved_index) => elements.push(operand_elements[resolved_index]),
+            None => elements.push(fill_lit),
+        }
+    }
+
+    let tensor = TensorValue::new(
+        operand_tensor.dtype,
+        Shape {
+            dims: indices_tensor.shape.dims.clone(),
+        },
+        elements,
+    )
+    .map_err(|e| BatchError::TensorError(e.to_string()))?;
+    Ok(Some(BatchTracer::batched(Value::Tensor(tensor), 0)))
 }
 
 fn batch_gather_batched_operand_direct(
@@ -10217,6 +10278,25 @@ mod tests {
         assert_eq!(result.batch_dim, Some(0));
         assert_eq!(result.value.as_tensor().unwrap().shape.dims, vec![2, 3]);
         assert_eq!(extract_i64_vec(&result.value), vec![10, 30, 20, 20, 10, 30]);
+    }
+
+    #[test]
+    fn test_batch_trace_gather_batched_indices_direct_fill_or_drop() {
+        let operand = BatchTracer::unbatched(make_i64_vector(&[10, 20, 30]));
+        let indices = BatchTracer::batched(make_i64_matrix(2, 3, &[0, 3, 1, 4, 2, 1]), 0);
+        let params = BTreeMap::from([
+            ("index_mode".to_owned(), "fill_or_drop".to_owned()),
+            ("slice_sizes".to_owned(), "1".to_owned()),
+        ]);
+
+        let result = apply_batch_rule(Primitive::Gather, &[operand, indices], &params).unwrap();
+
+        assert_eq!(result.batch_dim, Some(0));
+        assert_eq!(result.value.as_tensor().unwrap().shape.dims, vec![2, 3]);
+        assert_eq!(
+            extract_i64_vec(&result.value),
+            vec![10, i64::MIN, 20, i64::MIN, 30, 20]
+        );
     }
 
     #[test]

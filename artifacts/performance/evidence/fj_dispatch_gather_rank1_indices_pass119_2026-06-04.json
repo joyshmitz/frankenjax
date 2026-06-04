@@ -1,0 +1,46 @@
+{
+  "project": "frankenjax",
+  "pass": 119,
+  "bead": "frankenjax-74xqs",
+  "status": "shipped",
+  "target": "fj-dispatch vmap_gather/batched_indices",
+  "baseline": {
+    "worker": "ts2",
+    "command": "cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_gather/batched_indices' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "time_us_midpoint": 43.050,
+    "confidence_interval_us": [42.774, 43.379]
+  },
+  "candidate": {
+    "worker": "ts2",
+    "lever": "Direct rank-1 unbatched operand plus batched tensor indices gather path in BatchTrace",
+    "time_us_midpoint": 13.472,
+    "confidence_interval_us": [13.383, 13.561]
+  },
+  "speedup": {
+    "midpoint": 3.195516,
+    "conservative": 3.153385
+  },
+  "score": {
+    "impact": 4,
+    "confidence": 4,
+    "effort": 2,
+    "ice": 8.0
+  },
+  "isomorphism": {
+    "ordering": "Moved indices are traversed in row-major order and output shape remains the moved indices shape.",
+    "tie_breaking": "N/A; gather copies one literal per index.",
+    "floating_point": "No arithmetic; copied operand literals preserve exact bits. F64 fill behavior remains dtype fill NaN when applicable.",
+    "rng": "N/A",
+    "index_modes": "Existing parse_gather_index_mode, resolve_gather_index, gather_index_literal_to_usize, and gather_fill_literal_for_dtype helpers are reused.",
+    "fallbacks": "Unknown index mode, scalar moved indices, non-rank1 operands, empty operands, and non-slice_sizes=1 cases fall through to the previous generic gather path."
+  },
+  "validation": {
+    "focused_tests": "RCH cargo test -p fj-dispatch test_batch_trace_gather_batched -- --nocapture: 7 passed",
+    "check": "RCH cargo check -p fj-dispatch --all-targets: passed",
+    "lib_tests": "RCH cargo test -p fj-dispatch --lib: 260 passed",
+    "clippy": "RCH cargo clippy -p fj-dispatch --all-targets --no-deps -- -D warnings: passed; normal deps clippy blocked by unrelated peer-dirty fj-lax/src/einsum.rs",
+    "fmt": "cargo fmt -p fj-dispatch --check: passed",
+    "diff_check": "git diff --check -- crates/fj-dispatch/src/batching.rs: passed",
+    "ubs": "ubs crates/fj-dispatch/src/batching.rs: 0 critical issues; existing file-wide warning inventory remains"
+  }
+}
