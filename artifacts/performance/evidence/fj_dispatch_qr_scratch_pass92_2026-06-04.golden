@@ -1,0 +1,15 @@
+pass92 golden — fj-dispatch batched Householder QR scratch reuse
+target=vmap_qr/batched_matrix_3x2 (batch_qr_multi / qr_decompose_matrix)
+lever=arena/scratch reuse: carry the QR working buffers (r working copy, the Vec<Vec<f64>> Householder reflector store, tau, and both Q/R output buffers) in a QrScratch reused across every matrix in the vmapped batch, instead of allocating them fresh per matrix. The Householder arithmetic is unchanged.
+method=same-worker A/B with vmap_eigh/batched_matrix_3x3 as a worker-speed calibration (eigh is untouched by this change). raw candidate vs stashed-baseline benches run in separate RCH Criterion processes; normalized by the in-process qr/eigh ratio to cancel cross-worker variance.
+worker_note=candidate process eigh 151.25us, baseline process eigh 234.09us (worker speed differs 1.55x) — hence normalize by the in-process qr/eigh ratio.
+raw_candidate_qr=57.512us [55.795, 59.523]
+raw_baseline_qr=130.11us [122.73, 137.56]
+candidate_qr_over_eigh=57.512/151.25=0.3803
+baseline_qr_over_eigh=130.11/234.09=0.5558
+normalized_speedup=0.5558/0.3803=1.46x
+score=impact 3 (top-3 fj-dispatch cost; batched QR is common in ML/linalg vmap) x confidence 5 (bit-exact: 6 batched-QR tests + full 256+55 fj-dispatch suite pass; arithmetic identical) / effort 2 = 7.5
+alien_primitive=arena/slab/bump allocation reuse across a batch (alien_cs_graveyard arena/scratch strategies) applied to the per-matrix decomposition work buffers
+isomorphism=bit-for-bit identical Q and R. Same Householder reflections in the same order (j=0..k), same v=(j..m) column extraction, same norm/alpha/v[0]-=alpha, same v_norm_sq>EPSILON*1e4 threshold, same tau=2/v_norm_sq, same R update and back-accumulated Q, same diagonal-sign normalization. Only the allocation strategy changed: r/v_store/tau/q_out/r_out are cleared+reused rather than freshly allocated; the v_norm_sq<=threshold branch zeroes the (reused) reflector exactly as the original stored a fresh zero vector (and tau==0 makes the Q loop skip it).
+golden_note=test_batch_trace_qr_multi_{leading,nonleading}_batch_dim, _full_matrices, _matrix_rank_error_preserved, and the qr binding tests assert exact Q/R values and pass unchanged; full fj-dispatch suite 256+55 green.
+validation=RCH cargo test -p fj-dispatch --release: 256 + 55 passed (incl all qr tests). (clippy run separately.)

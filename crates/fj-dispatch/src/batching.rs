@@ -2886,6 +2886,7 @@ fn batch_qr_multi(
     let mut q_elements = Vec::with_capacity(batch_size * m * q_cols);
     let mut r_elements = Vec::with_capacity(batch_size * r_rows * n);
     let mut matrix = Vec::with_capacity(matrix_len);
+    let mut qr_scratch = QrScratch::default();
     for batch in 0..batch_size {
         let base = batch * matrix_len;
         matrix.clear();
@@ -2894,9 +2895,9 @@ fn batch_qr_multi(
                 BatchError::EvalError("type mismatch for qr: expected numeric elements".to_owned())
             })?);
         }
-        let (q, r) = qr_decompose_matrix(m, n, &matrix, full_matrices);
-        q_elements.extend(q.into_iter().map(Literal::from_f64));
-        r_elements.extend(r.into_iter().map(Literal::from_f64));
+        qr_decompose_matrix(m, n, &matrix, full_matrices, &mut qr_scratch);
+        q_elements.extend(qr_scratch.q_out.iter().copied().map(Literal::from_f64));
+        r_elements.extend(qr_scratch.r_out.iter().copied().map(Literal::from_f64));
     }
 
     let q_shape = Shape {
@@ -2916,19 +2917,53 @@ fn batch_qr_multi(
     Ok(vec![q, r])
 }
 
+/// Reusable working buffers for batched Householder QR. Carrying these across
+/// every matrix in a vmapped batch removes the per-matrix heap traffic
+/// (`r.to_vec()`, the `Vec<Vec<f64>>` reflector store, `tau`, and both output
+/// buffers) that dominated the decomposition cost for small matrices.
+#[derive(Default)]
+struct QrScratch {
+    r: Vec<f64>,
+    v_store: Vec<Vec<f64>>,
+    tau_store: Vec<f64>,
+    q_out: Vec<f64>,
+    r_out: Vec<f64>,
+}
+
+/// Householder QR of a single `m x n` matrix, writing Q into `scratch.q_out`
+/// and R into `scratch.r_out`. Every working buffer lives in `scratch` and is
+/// cleared+reused per call, so a batched QR over same-shaped matrices performs
+/// no per-matrix allocation. The arithmetic is identical to the prior
+/// per-call implementation — same Householder reflections applied in the same
+/// order, same `v_norm_sq` threshold, same diagonal-sign normalization — so the
+/// Q and R outputs are bit-for-bit unchanged.
 fn qr_decompose_matrix(
     m: usize,
     n: usize,
     matrix: &[f64],
     full_matrices: bool,
-) -> (Vec<f64>, Vec<f64>) {
+    scratch: &mut QrScratch,
+) {
+    let QrScratch {
+        r,
+        v_store,
+        tau_store,
+        q_out,
+        r_out,
+    } = scratch;
     let k = m.min(n);
-    let mut r = matrix.to_vec();
-    let mut v_store: Vec<Vec<f64>> = Vec::with_capacity(k);
-    let mut tau_store: Vec<f64> = Vec::with_capacity(k);
+
+    r.clear();
+    r.extend_from_slice(matrix);
+    tau_store.clear();
+    while v_store.len() < k {
+        v_store.push(Vec::new());
+    }
 
     for j in 0..k {
-        let mut v: Vec<f64> = (j..m).map(|i| r[i * n + j]).collect();
+        let v = &mut v_store[j];
+        v.clear();
+        v.extend((j..m).map(|i| r[i * n + j]));
         let norm_v = v.iter().map(|x| x * x).sum::<f64>().sqrt();
         let alpha = if v[0] >= 0.0 { -norm_v } else { norm_v };
         v[0] -= alpha;
@@ -2945,18 +2980,20 @@ fn qr_decompose_matrix(
                     r[row * n + col] -= tau * vi * dot;
                 }
             }
-            v_store.push(v);
             tau_store.push(tau);
         } else {
-            v_store.push(vec![0.0; m - j]);
+            // Original stored a zero reflector here; tau == 0 means the Q loop
+            // skips it, so its contents do not affect the output.
+            v.iter_mut().for_each(|x| *x = 0.0);
             tau_store.push(0.0);
         }
     }
 
     let q_cols = if full_matrices { m } else { k };
-    let mut q = vec![0.0_f64; m * q_cols];
+    q_out.clear();
+    q_out.resize(m * q_cols, 0.0);
     for i in 0..q_cols.min(m) {
-        q[i * q_cols + i] = 1.0;
+        q_out[i * q_cols + i] = 1.0;
     }
 
     for j in (0..k).rev() {
@@ -2969,16 +3006,17 @@ fn qr_decompose_matrix(
         for col in j..q_cols {
             let mut dot = 0.0;
             for (vi, row) in v.iter().zip(j..m) {
-                dot += vi * q[row * q_cols + col];
+                dot += vi * q_out[row * q_cols + col];
             }
             for (vi, row) in v.iter().zip(j..m) {
-                q[row * q_cols + col] -= tau * vi * dot;
+                q_out[row * q_cols + col] -= tau * vi * dot;
             }
         }
     }
 
     let r_rows = if full_matrices { m } else { k };
-    let mut r_out = vec![0.0_f64; r_rows * n];
+    r_out.clear();
+    r_out.resize(r_rows * n, 0.0);
     for i in 0..r_rows {
         for j in i..n {
             r_out[i * n + j] = r[i * n + j];
@@ -2991,12 +3029,10 @@ fn qr_decompose_matrix(
                 r_out[i * n + j] = -r_out[i * n + j];
             }
             for row in 0..m {
-                q[row * q_cols + i] = -q[row * q_cols + i];
+                q_out[row * q_cols + i] = -q_out[row * q_cols + i];
             }
         }
     }
-
-    (q, r_out)
 }
 
 fn batch_eigh_multi(

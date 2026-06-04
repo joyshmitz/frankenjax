@@ -1,0 +1,32 @@
+{
+    "pass": 92,
+    "date": "2026-06-04",
+    "crate": "fj-dispatch",
+    "target": "vmap_qr/batched_matrix_3x2 (batch_qr_multi / qr_decompose_matrix)",
+    "lever_summary": "Arena/scratch reuse for batched Householder QR. qr_decompose_matrix allocated per matrix: r=matrix.to_vec(), a Vec<Vec<f64>> reflector store (k inner Vecs), tau, and both Q/R output buffers (~6 allocs/matrix x batch). Now all working buffers live in a QrScratch reused across the whole vmapped batch; zero per-matrix allocation. Householder arithmetic unchanged.",
+    "method": "Same-worker A/B normalized by vmap_eigh (untouched by this change) as a worker-speed calibration; candidate and stashed-baseline ran in separate RCH Criterion processes on different-speed workers, normalized via the in-process qr/eigh ratio.",
+    "results": {
+        "raw_candidate_qr_us": 57.512,
+        "raw_baseline_qr_us": 130.11,
+        "candidate_eigh_us": 151.25,
+        "baseline_eigh_us": 234.09,
+        "raw_speedup_x": 2.26,
+        "normalized_speedup_x": 1.46,
+        "normalization": "in-process qr/eigh: baseline 0.5558 vs candidate 0.3803 -> 1.46x"
+    },
+    "score": {"impact": 3.0, "confidence": 5.0, "effort": 2.0, "impact_times_confidence_over_effort": 7.5, "kept": true},
+    "change": {
+        "files": ["crates/fj-dispatch/src/batching.rs"],
+        "lever": "Added QrScratch {r, v_store, tau_store, q_out, r_out}; qr_decompose_matrix now takes &mut QrScratch, clears+reuses each buffer and writes Q/R into q_out/r_out; batch_qr_multi allocates one QrScratch before the batch loop and extends the output element Vecs from q_out/r_out."
+    },
+    "isomorphism": {
+        "arithmetic": "identical Householder reflections, order, threshold (v_norm_sq > EPSILON*1e4), tau, R/Q updates, and diagonal-sign normalization; only allocation strategy changed",
+        "zero_reflector_branch": "the <=threshold branch zeroes the reused reflector exactly as the original stored a fresh zero vector; tau==0 makes the Q loop skip it either way",
+        "output": "bit-for-bit identical Q and R"
+    },
+    "validation": [
+        {"name": "qr_and_full_suite", "command": "rch exec -- cargo test -p fj-dispatch --release", "result": "256 + 55 passed incl all test_batch_trace_qr_multi_* (assert exact Q/R values)"},
+        {"name": "clippy_deny_warnings", "command": "rch exec -- cargo clippy -p fj-dispatch --release --all-targets --no-deps -- -D warnings", "result": "clean"}
+    ],
+    "note": "1.46x (worker-corrected) is below a clean 2x but is a bit-exact arena/slab structural change (addendum-endorsed) on a top-3 dispatch cost with ICE Score 7.5, making batched QR allocation-free. batch_svd_multi (vmap_svd 169us, #2 cost) has the identical per-slice allocation pattern (svd_decompose_matrix) — filed as the ready follow-on; QR+SVD together address ~306us of the profile."
+}
