@@ -1,0 +1,23 @@
+{
+    "pass": 94,
+    "date": "2026-06-04",
+    "kind": "reconnaissance + lr0pf feasibility de-risking (no perf lever shipped; ripple/blocker analysis)",
+    "profiled_this_session": {
+        "fj-backend-cpu": "top costs are tensor compute on large tensors (tensor_branched_fanin/16x4x4096 2975us -> routes to already-densified fj-lax kernels) and the scheduler (dependency_chain/1000 83us, pass45-optimized). No fresh bit-exact >=2x lever.",
+        "prior_sessions": "fj-dispatch (interpreter pass91, batched-linalg arena pass92/93), fj-ad (<=13.4us), fj-egraph (<=2.4us opt-in). Clean bit-exact >=2x veins are tapped."
+    },
+    "parity_gaps_verified_closed": {
+        "lgamma": "arithmetic.rs:3078 already uses Lanczos (LANCZOS_COEFFS/LANCZOS_G) + reflection — NOT crude; MEMORY note was stale",
+        "bessel_i0e_i1e": "arithmetic.rs uses chbevl with the exact Cephes coefficients XLA/JAX use; bessel_oracle 29/29 pass",
+        "erf": "previously fixed ~1e-12 (per MEMORY)"
+    },
+    "lr0pf_closed_form_eigh_feasibility": {
+        "target": "vmap_eigh 241us (#1 dispatch cost); closed-form analytic 3x3 symmetric eigensolver replacing iterative Jacobi; target >=2x (O(1) vs iterative sweeps)",
+        "ripple_e2e": "CONTAINED — eigh appears in e2e goldens only as {\"function\":\"eigh\",\"pass\":true} (boolean ran-without-error), NOT numerical outputs; numerical bit changes do NOT break committed e2e gate logs as long as eigh still succeeds",
+        "ripple_tests": "batch eigh tests use assert_eigh_matches_slice_oracle (batched output must match single eval_eigh slice-by-slice). So the closed-form path must be applied to BOTH the batched kernel (fj-dispatch batching.rs append_eigh_decomposition/JacobiScratch 3x3) AND the single eval_eigh (fj-lax linalg.rs:1268 / jacobi_eigendecomposition:1081) to keep them consistent.",
+        "parity_bar": "must pass the JAX conformance oracle (eigh 2x2 identity / 2x2 symmetric / 3x3 symmetric) at tol 1e-10, matching JAX eigenvalue ascending order + eigenvector sign convention; handle degenerate (identity) + near-degenerate (catastrophic cancellation) cases",
+        "blocker_this_session": "crates/fj-lax/src/linalg.rs (home of single eval_eigh + jacobi_eigendecomposition) has 122 lines of uncommitted FOREIGN agent WIP; editing it now would bundle/conflict. Closed-form eigh needs a session where linalg.rs is clear.",
+        "implementation_plan": "1) implement closed-form 3x3 symmetric eigensolver (analytic char-cubic via trig, e.g. Smith/Kopp) as a shared helper; 2) wire into BOTH batched append_eigh_decomposition (3x3) and single eval_eigh; 3) JAX-order (ascending) + eigenvector sign normalization to match the oracle; 4) Jacobi fallback for ill-conditioned/degenerate; 5) validate: conformance eigh oracle 1e-10 + slice-oracle batched==single + reconstruction A=V diag(w) V^T; 6) re-bench vmap_eigh, target >=2x."
+    },
+    "decision": "No clean bit-exact >=2x perf lever available this session without (a) gambling absolute parity on the closed-form eigh swap or (b) editing foreign-WIP linalg.rs. Per the NO-CEILING reporting rule, the next swing is lr0pf (closed-form eigh, target >=2x on 241us) — now de-risked with the ripple/blocker analysis above so it is a tractable focused effort once linalg.rs is clear. Dense-f64 batched-linalg output was evaluated and rejected (only ~2.5%/10% of eigh/QR cost; decomposition kernel dominates)."
+}
