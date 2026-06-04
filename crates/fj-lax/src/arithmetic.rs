@@ -1072,7 +1072,7 @@ fn eval_same_shape_complex128_mul(
 /// broadcast-aware strides are 0 on broadcast axes, so an axis that broadcasts
 /// simply leaves that operand's index unchanged as it varies. Must be stepped
 /// exactly `product(out_dims)` times; the final step harmlessly wraps to 0.
-struct BroadcastOdometer {
+pub(crate) struct BroadcastOdometer {
     dims: Vec<usize>,
     lhs_strides: Vec<usize>,
     rhs_strides: Vec<usize>,
@@ -1082,7 +1082,7 @@ struct BroadcastOdometer {
 }
 
 impl BroadcastOdometer {
-    fn new(out_dims: &[u32], lhs_strides: &[usize], rhs_strides: &[usize]) -> Self {
+    pub(crate) fn new(out_dims: &[u32], lhs_strides: &[usize], rhs_strides: &[usize]) -> Self {
         Self {
             dims: out_dims.iter().map(|&d| d as usize).collect(),
             lhs_strides: lhs_strides.to_vec(),
@@ -1094,7 +1094,7 @@ impl BroadcastOdometer {
     }
 
     #[inline]
-    fn next(&mut self) -> (usize, usize) {
+    pub(crate) fn next(&mut self) -> (usize, usize) {
         let current = (self.lhs_idx, self.rhs_idx);
         let rank = self.dims.len();
         if rank == 0 {

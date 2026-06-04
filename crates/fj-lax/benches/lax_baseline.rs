@@ -436,6 +436,104 @@ fn bench_add_broadcast_256_i64_literal_reference(c: &mut Criterion) {
     });
 }
 
+// Large multi-dim broadcast COMPARISON (Lt, bias [256,256] vs [256] -> Bool
+// [256,256]): the dense BroadcastOdometer compare fast paths (pass73) vs
+// Vec<Literal> references run in the same process. f64/i64 literal refs hit the
+// generic per-element compare_literals broadcast loop.
+fn bench_lt_broadcast_256_i64_vec(c: &mut Criterion) {
+    let lhs = Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![BCAST_N, BCAST_N],
+            },
+            (0..(BCAST_N * BCAST_N) as i64).collect(),
+        )
+        .unwrap(),
+    );
+    let rhs = Value::vector_i64(&(0..BCAST_N as i64).map(|i| i * 257).collect::<Vec<_>>()).unwrap();
+    let p = no_params();
+    c.bench_function("eval/lt_broadcast_256_i64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_lt_broadcast_256_i64_literal_reference(c: &mut Criterion) {
+    let lhs = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape {
+                dims: vec![BCAST_N, BCAST_N],
+            },
+            (0..(BCAST_N * BCAST_N) as i64).map(Literal::I64).collect(),
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape {
+                dims: vec![BCAST_N],
+            },
+            (0..BCAST_N as i64).map(|i| Literal::I64(i * 257)).collect(),
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/lt_broadcast_256_i64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_lt_broadcast_256_f64_vec(c: &mut Criterion) {
+    let lhs = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![BCAST_N, BCAST_N],
+            },
+            (0..(BCAST_N * BCAST_N) as i64)
+                .map(|i| i as f64 * 0.001)
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let rhs = Value::vector_f64(&(0..BCAST_N).map(|i| i as f64 * 0.5).collect::<Vec<_>>()).unwrap();
+    let p = no_params();
+    c.bench_function("eval/lt_broadcast_256_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_lt_broadcast_256_f64_literal_reference(c: &mut Criterion) {
+    let lhs = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape {
+                dims: vec![BCAST_N, BCAST_N],
+            },
+            (0..(BCAST_N * BCAST_N))
+                .map(|i| Literal::from_f64(i as f64 * 0.001))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape {
+                dims: vec![BCAST_N],
+            },
+            (0..BCAST_N)
+                .map(|i| Literal::from_f64(i as f64 * 0.5))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/lt_broadcast_256_f64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 fn bench_nextafter_1k(c: &mut Criterion) {
     let lhs = real_vector(1000);
     let rhs_data: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.05).cos()).collect();
@@ -1385,6 +1483,10 @@ criterion_group!(
     bench_add_broadcast_256_f64_literal_reference,
     bench_add_broadcast_256_i64_vec,
     bench_add_broadcast_256_i64_literal_reference,
+    bench_lt_broadcast_256_i64_vec,
+    bench_lt_broadcast_256_i64_literal_reference,
+    bench_lt_broadcast_256_f64_vec,
+    bench_lt_broadcast_256_f64_literal_reference,
     bench_nextafter_1k,
     bench_dot_100,
     bench_dot_256_matrix_f64,

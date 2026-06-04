@@ -1,0 +1,68 @@
+{
+    "bead": "frankenjax-mcqr.30.18",
+    "pass": 73,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/lt_broadcast_256_f64_vec",
+    "lever_summary": "Dense multi-dim broadcast comparison. The comparison.rs Tensor<>Tensor non-same-shape branch ran per-element compare_literals with a flat_to_multi decode over Vec<Literal>, with no f64/i64 broadcast-compare fast path. Reuse the shared BroadcastOdometer (now pub(crate)) to gather both source offsets incrementally from contiguous as_f64_slice()/as_i64_slice() backings, applying float_cmp/int_cmp directly. Bool output (no dense Bool storage).",
+    "alien_graveyard": {
+        "primitive": "incremental index odometer + dense SoA gather (applied to comparison broadcast)",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "reuse the pass71 arithmetic BroadcastOdometer in the comparison path so masking/where-style broadcast comparisons skip the per-element multi-index decode and Literal materialization"
+    },
+    "method": "Same-worker comparison on ts2: dense (new_*_values / vector_*) inputs vs Vec<Literal>-backed reference benches run in the same process. The literal references exercise the prior fully-generic compare_literals broadcast loop (neither f64 nor i64 had a broadcast-compare fast path).",
+    "results": {
+        "lt_broadcast_256_f64": {
+            "dense_ns": 317574.8,
+            "dense_ci_ns": [316184.2, 319031.8],
+            "literal_ns": 2951182.3,
+            "literal_ci_ns": [2899886.1, 3013787.8],
+            "speedup_midpoint_x": 9.29,
+            "speedup_conservative_x": 9.09
+        },
+        "lt_broadcast_256_i64": {
+            "dense_ns": 287096.9,
+            "dense_ci_ns": [286451.0, 287889.6],
+            "literal_ns": 2528881.6,
+            "literal_ci_ns": [2410431.1, 2653864.8],
+            "speedup_midpoint_x": 8.81,
+            "speedup_conservative_x": 8.37
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- lt_broadcast_256 --save-baseline bcmp",
+    "score": {
+        "impact": 5.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 10.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/arithmetic.rs",
+            "crates/fj-lax/src/comparison.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Made BroadcastOdometer (struct + new + next) pub(crate) in arithmetic.rs. comparison.rs broadcast branch gains leading dense i64 then dense f64 odometer tiers before the generic compare_literals loop; both fall back when operands are not dense typed storage."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: output produced in the same ascending row-major flat order; the odometer reproduces broadcast_flat_index(flat_to_multi(flat), strides) for both operands (broadcast-aware strides 0 on broadcast axes)",
+        "comparison_op": "unchanged: for F64xF64 compare_literals falls to float_cmp(as_f64, as_f64) and for I64xI64 to int_cmp(i128::from, i128::from); the dense tiers apply exactly those closures to the gathered values, so NaN / +-inf / signed-zero results are identical",
+        "output_dtype": "Bool tensor, identical to the generic path",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "dense tiers fire only when both operands expose as_f64_slice()/as_i64_slice(); Literal-backed / mixed / complex / promoting cases fall back to the unchanged generic compare_literals broadcast loop"
+    },
+    "validation": [
+        {
+            "name": "dense_broadcast_compare_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib",
+            "result": "passed: 1053 tests incl new dense_broadcast_compare_bit_identical_to_literal_path (4 broadcast shapes x 6 comparisons, f64 with NaN/inf/signed-zero + i64)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}

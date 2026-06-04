@@ -1,0 +1,13 @@
+frankenjax-mcqr.30.18 pass73 golden
+target=eval/lt_broadcast_256_f64_vec
+lever=dense multi-dim broadcast comparison via shared BroadcastOdometer (pub(crate)) + dense as_f64_slice/as_i64_slice gather, replacing per-element compare_literals + flat_to_multi decode
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2 (bias [256,256] cmp [256] -> Bool [256,256])
+worker=ts2
+lt_broadcast_256_f64=dense 317.575us [316.184, 319.032] vs literal 2951.182us [2899.886, 3013.788] = 9.29x mid, 9.09x conservative
+lt_broadcast_256_i64=dense 287.097us [286.451, 287.890] vs literal 2528.882us [2410.431, 2653.865] = 8.81x mid, 8.37x conservative
+score=10.0
+alien_primitive=incremental index odometer + dense SoA gather, alien_cs_graveyard section 8.2
+source_change=BroadcastOdometer made pub(crate) in arithmetic.rs; comparison.rs broadcast branch gains dense i64 then dense f64 odometer tiers before the generic compare_literals loop; both fall back when not dense typed storage
+isomorphism=same ascending row-major output order; odometer reproduces broadcast_flat_index(flat_to_multi(flat), strides) for both operands (broadcast-aware strides 0 on broadcast axes); F64xF64 -> float_cmp(as_f64), I64xI64 -> int_cmp(i128::from) identical incl NaN/+-inf/signed-zero; Bool output identical; Literal-backed/mixed/complex/promoting inputs fall back to the unchanged generic loop
+golden_note=neither f64 nor i64 had a broadcast-compare fast path before (fully generic compare_literals) hence both ~9x; bit-identical across 4 broadcast shapes x 6 comparisons
+validation=RCH cargo test -p fj-lax --lib passed 1053 tests incl dense_broadcast_compare_bit_identical_to_literal_path; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed

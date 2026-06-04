@@ -142,6 +142,54 @@ pub(crate) fn eval_comparison(
             let lhs_strides = broadcast_strides(&lhs.shape, &out_shape);
             let rhs_strides = broadcast_strides(&rhs.shape, &out_shape);
 
+            // Dense broadcast-compare fast paths via the shared BroadcastOdometer:
+            // gather the two source offsets incrementally (no per-element
+            // flat_to_multi decode) from the contiguous typed slices, and apply
+            // the same cmp closure. Bit-for-bit identical to the generic
+            // compare_literals path for F64⊗F64 (float_cmp on as_f64) and I64⊗I64
+            // (int_cmp on i128::from). Bool output (no dense Bool storage).
+            if let (Some(left), Some(right)) =
+                (lhs.elements.as_i64_slice(), rhs.elements.as_i64_slice())
+            {
+                let mut odo = crate::arithmetic::BroadcastOdometer::new(
+                    &out_shape.dims,
+                    &lhs_strides,
+                    &rhs_strides,
+                );
+                let mut elements = Vec::with_capacity(out_count);
+                for _ in 0..out_count {
+                    let (li, ri) = odo.next();
+                    elements.push(Literal::Bool(int_cmp(
+                        i128::from(left[li]),
+                        i128::from(right[ri]),
+                    )));
+                }
+                return Ok(Value::Tensor(TensorValue::new(
+                    DType::Bool,
+                    out_shape,
+                    elements,
+                )?));
+            }
+            if let (Some(left), Some(right)) =
+                (lhs.elements.as_f64_slice(), rhs.elements.as_f64_slice())
+            {
+                let mut odo = crate::arithmetic::BroadcastOdometer::new(
+                    &out_shape.dims,
+                    &lhs_strides,
+                    &rhs_strides,
+                );
+                let mut elements = Vec::with_capacity(out_count);
+                for _ in 0..out_count {
+                    let (li, ri) = odo.next();
+                    elements.push(Literal::Bool(float_cmp(left[li], right[ri])));
+                }
+                return Ok(Value::Tensor(TensorValue::new(
+                    DType::Bool,
+                    out_shape,
+                    elements,
+                )?));
+            }
+
             let mut elements = Vec::with_capacity(out_count);
             for flat_idx in 0..out_count {
                 let multi = flat_to_multi(flat_idx, &out_strides);
@@ -555,6 +603,99 @@ mod tests {
                 &crate::eval_primitive(p, &[scalar_l.clone(), lit()], &params).unwrap(),
             );
             assert_eq!(d, l, "{p:?} scalar⊗tensor dense vs literal");
+        }
+    }
+
+    /// Bit-exact parity for the dense multi-dim broadcast-compare fast paths
+    /// (f64 + i64) via the BroadcastOdometer, across several broadcast shapes and
+    /// all six comparisons, vs the Vec<Literal>-backed generic broadcast loop.
+    /// f64 includes NaN/+-inf/signed-zero.
+    #[test]
+    fn dense_broadcast_compare_bit_identical_to_literal_path() {
+        let shapes: [(Vec<u32>, Vec<u32>); 4] = [
+            (vec![4, 5], vec![5]),
+            (vec![4, 5], vec![4, 1]),
+            (vec![3, 1], vec![1, 6]),
+            (vec![2, 3, 4], vec![4]),
+        ];
+        let prod = |d: &[u32]| d.iter().map(|&x| x as usize).product::<usize>();
+        let params = BTreeMap::new();
+
+        for (ls, rs) in shapes {
+            let ln = prod(&ls);
+            let rn = prod(&rs);
+            let lf: Vec<f64> = (0..ln)
+                .map(|i| match i % 5 {
+                    0 => f64::NAN,
+                    1 => f64::INFINITY,
+                    2 => -0.0,
+                    3 => f64::NEG_INFINITY,
+                    _ => (i as f64 - 3.0) * 0.5,
+                })
+                .collect();
+            let rf: Vec<f64> = (0..rn).map(|i| (i as f64 - 2.0) * 0.5).collect();
+            let li: Vec<i64> = (0..ln as i64).map(|i| i - 4).collect();
+            let ri: Vec<i64> = (0..rn as i64).map(|i| i - 2).collect();
+
+            let dense_f = |d: &[f64], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new_f64_values(Shape { dims: s.to_vec() }, d.to_vec()).unwrap(),
+                )
+            };
+            let lit_f = |d: &[f64], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims: s.to_vec() },
+                        d.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                )
+            };
+            let dense_i = |d: &[i64], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new_i64_values(Shape { dims: s.to_vec() }, d.to_vec()).unwrap(),
+                )
+            };
+            let lit_i = |d: &[i64], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::I64,
+                        Shape { dims: s.to_vec() },
+                        d.iter().copied().map(Literal::I64).collect(),
+                    )
+                    .unwrap(),
+                )
+            };
+
+            for p in [
+                Primitive::Eq,
+                Primitive::Ne,
+                Primitive::Lt,
+                Primitive::Le,
+                Primitive::Gt,
+                Primitive::Ge,
+            ] {
+                let df = extract_bools(
+                    &crate::eval_primitive(p, &[dense_f(&lf, &ls), dense_f(&rf, &rs)], &params)
+                        .unwrap(),
+                );
+                let lfr = extract_bools(
+                    &crate::eval_primitive(p, &[lit_f(&lf, &ls), lit_f(&rf, &rs)], &params)
+                        .unwrap(),
+                );
+                assert_eq!(df, lfr, "f64 {p:?} {ls:?} {rs:?}");
+
+                let di = extract_bools(
+                    &crate::eval_primitive(p, &[dense_i(&li, &ls), dense_i(&ri, &rs)], &params)
+                        .unwrap(),
+                );
+                let lir = extract_bools(
+                    &crate::eval_primitive(p, &[lit_i(&li, &ls), lit_i(&ri, &rs)], &params)
+                        .unwrap(),
+                );
+                assert_eq!(di, lir, "i64 {p:?} {ls:?} {rs:?}");
+            }
         }
     }
 
