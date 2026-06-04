@@ -1,0 +1,67 @@
+{
+    "bead": "frankenjax-mcqr.30.20",
+    "pass": 75,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/sort_64k_f64",
+    "lever_summary": "Dense f64 ascending sort/argsort via a stable LSD radix keyed by an IEEE total-order bit transform. f64_total_order_key maps f64 bits to a u64 whose unsigned order equals f64::total_cmp (the generic sort path's F64 comparator). sort_along_axis_dense_f64 gathers from as_f64_slice(), radix-orders (O(n)), and writes a dense f64 output (sort) or dense i64 indices (argsort), bypassing the SortKey/Literal machinery. Shared radix_pairs_ascending + for_each_sort_slice helpers; the pass74 i64 path was refactored onto them.",
+    "alien_graveyard": {
+        "primitive": "radix sort (non-comparison, O(n)) over IEEE total-order keys + dense SoA gather",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "float radix via the monotone bit transform (flip-all-but-sign for negatives, flip sign for positives) so byte-wise unsigned order reproduces total_cmp; the f64 analog of the pass74 i64 radix"
+    },
+    "method": "Same-worker-calibrated A/B: baseline = tensor_ops.rs git-stashed to the comparison sort; an unchanged full-i64-reduce calibration bench ran alongside in both runs to normalize cross-worker CPU speed. speedup = (baseline_sort/baseline_calib) / (after_sort/after_calib).",
+    "results": {
+        "sort_64k_f64": {
+            "baseline_comparison_sort": {
+                "sort_ns": 12939243.1,
+                "calib_reduce_ns": 10615.0
+            },
+            "after_dense_radix": {
+                "sort_ns": 1902862.7,
+                "sort_ci_ns": [1837401.7, 1974237.9],
+                "calib_reduce_ns": 6547.6,
+                "calib_ci_ns": [6346.5, 6754.4]
+            },
+            "after_normalized_to_baseline_worker_ns": 3085540.0,
+            "speedup_calibrated_midpoint_x": 4.19,
+            "speedup_calibrated_conservative_x": 3.92
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'sort_64k_f64|sort_calib_reduce_64k_i64' --save-baseline {fB|fA}",
+    "score": {
+        "impact": 4.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 8.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/tensor_ops.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added f64_total_order_key + sort_along_axis_dense_f64; extracted radix_pairs_ascending and for_each_sort_slice (shared with the refactored sort_along_axis_dense_i64). sort_along_axis calls the i64 then f64 dense path for ascending; returns to the generic comparison path otherwise."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: the generic F64 comparator is lhs.total_cmp(&rhs); f64_total_order_key reproduces std total_cmp's transform (flip all but sign for negatives) then flips the sign bit so byte-wise unsigned radix order == total_cmp order, including -NaN < -inf < ... < -0 < +0 < ... < +inf < +NaN and distinct NaN payloads (keys derive from to_bits, like total_cmp)",
+        "stability": "LSD radix is stable and the per-slice gather visits in-slice indices ascending, so equal keys keep original order, matching the stable sort_by",
+        "direction": "ascending only; descending uses the comparison sort",
+        "outputs": "sort emits a dense f64 output; argsort emits dense i64 in-slice indices — the same fields the generic path writes",
+        "tie_breaking": "stable, identical to the generic stable sort",
+        "rng": "not applicable",
+        "errors": "returns None (generic path) for non-dense / non-F64 / short axes / non-dividing shapes; no new error classes"
+    },
+    "validation": [
+        {
+            "name": "radix_f64_sort_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib sort",
+            "result": "passed: 13 tests incl radix_sort_f64_ascending_matches_comparison_sort (n=1000 with NaN / payload-NaN / +-inf / +-0 / dups; dense vs Literal/generic sort+argsort compared by bits) and the pass74 i64 cases"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}

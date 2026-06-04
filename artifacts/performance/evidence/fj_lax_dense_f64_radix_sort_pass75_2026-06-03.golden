@@ -1,0 +1,14 @@
+frankenjax-mcqr.30.20 pass75 golden
+target=eval/sort_64k_f64
+lever=dense f64 ascending sort/argsort via total_cmp-bit stable LSD radix (sort_along_axis_dense_f64 + f64_total_order_key), bypassing the SortKey/Literal machinery
+method=same-worker-calibrated A/B (baseline = tensor_ops.rs stashed to comparison sort); unchanged full-i64-reduce calibration bench normalizes cross-worker speed
+baseline_comparison_sort_ns=12939243.1 calib=10615.0
+after_dense_radix_ns=1902862.7 [1837401.7, 1974237.9] calib=6547.6 [6346.5, 6754.4]
+after_normalized_to_baseline_worker_ns=3085540
+speedup_calibrated=4.19x mid, 3.92x conservative
+score=8.0
+alien_primitive=radix sort (non-comparison, O(n)) over IEEE total-order keys + dense SoA gather, alien_cs_graveyard section 8.2
+source_change=f64_total_order_key maps f64 bits to a u64 whose unsigned order == f64::total_cmp; sort_along_axis_dense_f64 gathers as_f64_slice, stable LSD radix, dense f64 output / i64 indices; shared radix_pairs_ascending + for_each_sort_slice (i64 path refactored onto them); sort_along_axis calls i64 then f64 dense path for ascending, else generic comparison path
+isomorphism=generic F64 comparator is total_cmp; f64_total_order_key reproduces std total_cmp's transform + sign flip so byte-wise unsigned radix order == total_cmp order incl -NaN<-inf<...<-0<+0<...<+inf<+NaN and distinct NaN payloads (keys from to_bits); LSD radix stable and gather visits in-slice indices ascending so equal keys keep original order (matching stable sort_by); ascending only (descending uses comparison sort); sort emits dense f64, argsort emits dense i64 indices; non-dense/non-F64/short-axis inputs use the generic path
+golden_note=bit-identical to the comparison path for sort + argsort across NaN/payload-NaN/+-inf/+-0/duplicates; verified dense-vs-Literal by output bits
+validation=RCH cargo test -p fj-lax --lib sort passed 13 tests incl radix_sort_f64_ascending_matches_comparison_sort; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed
