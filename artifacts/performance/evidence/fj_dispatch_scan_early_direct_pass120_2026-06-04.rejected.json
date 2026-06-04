@@ -1,0 +1,32 @@
+{
+  "pass": 120,
+  "bead": "frankenjax-v3jey",
+  "crate": "fj-dispatch",
+  "target": "vmap_scan/functional_sub_jaxpr_add_emit_128x64",
+  "status": "rejected",
+  "profile_evidence": {
+    "post_pass119_profile_ts2": "50.238us [49.441,51.244]",
+    "focused_baseline_ts2": "51.430us [51.146,51.590]"
+  },
+  "candidate": {
+    "lever": "Move existing batch_scan_add_emit_carry_i64 direct path before generic body-const, carry, and per-output scaffolding allocation while preserving the zero-length output guard.",
+    "same_worker_rebench_ts2": "54.714us [54.606,54.869]",
+    "midpoint_speedup": 0.9400,
+    "conservative_speedup": 0.9312,
+    "score": 0.0,
+    "decision": "Source diff removed; no slower code kept."
+  },
+  "behavior_proof": {
+    "ordering": "Accepted direct path would still emit row-major carry and y values, and reverse mode keeps input-order y values by writing each scan index position directly.",
+    "tie_breaking": "No comparisons or tie-breaking are introduced.",
+    "floating_point": "Target is I64-only; no FP operations are introduced.",
+    "rng": "No RNG state is read or written.",
+    "fallbacks": "The direct-path recognizer and all existing guards were unchanged; nonmatching scan bodies would still use the generic path.",
+    "rch_tests": "cargo test -p fj-dispatch test_batch_eval_jaxpr_scan_sub_jaxprs -- --nocapture passed on ts1: 4 passed, 0 failed."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_dispatch_scan_early_direct_pass120_2026-06-04.rejected.golden",
+    "sha256": "027908046ce969661b6ca9d7c00a9f4a6c9663ae0c8a8e08b65e1d552b2bcddf"
+  },
+  "next_primitive": "Do not repeat the scan scaffolding micro-lever. Next attack should use a different primitive from the post-pass119 profile, such as axis-1 vmap layout specialization or a linalg-local algorithmic kernel once ownership clears."
+}
