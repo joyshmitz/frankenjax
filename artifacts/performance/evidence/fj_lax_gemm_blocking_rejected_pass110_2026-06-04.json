@@ -1,0 +1,27 @@
+{
+  "pass": 110,
+  "crate": "fj-lax",
+  "target": "eval/dot_256x256x256_f64 (tensor_contraction::matmul_2d, the rank-2 f64 dot kernel)",
+  "outcome": "REJECTED - both micro-architectural GEMM levers below the 2x bar; reverted to the scalar i-k-j kernel. Kept a new large-size bit-identity regression test.",
+  "levers_tried": [
+    {
+      "lever": "NB×KB cache-blocking (NB=128,KB=128), jj/kk outer loops, bit-exact ascending-l",
+      "candidate_us": 7466.0,
+      "calibration_us": 8.4005,
+      "result": "REGRESSION ~0.60x worker-corrected. Full-width contiguous inner loop already prefetcher-friendly; B (512KB) served from L2; narrow 128-wide panels + C re-streaming across 2 k-blocks added overhead with no realized B-reuse."
+    },
+    {
+      "lever": "4-row M-axis register-tiling (each B element reused for 4 outputs in registers), bit-exact ascending-l, scalar tail",
+      "candidate_us": 6176.0,
+      "calibration_us": 12.607,
+      "result": "~1.09x worker-corrected (within calib-variance noise; calib swung 8.4->12.6us across runs). Kernel is near compute/L2 bound at 256^3, not B-bandwidth bound, so 4x B-reuse barely helps."
+    }
+  ],
+  "baseline_ikj_us": 4785.0,
+  "baseline_calibration_us": 8.9673,
+  "diagnosis": "At 256^3 on the RCH Contabo workers the i-k-j kernel is already near single-thread compute / L2 bound. Micro-architectural reuse tricks on the SAME serial kernel cannot reach 2x. Per NO-CEILING this is the signal to change axis, not keep tuning block sizes.",
+  "next_lever": "Threaded per-row GEMM (rayon par over output rows; bit-exact since each output row is summed ascending-l by a single thread) targeting ~Ncore x; OR an explicit std::simd f64xN MR×NR microkernel. Needs a dep/owner decision on threading in eval; file as a fresh bead.",
+  "bit_exactness_kept": "matmul_2d remains scalar i-k-j (ascending-l), bit-identical to i-j-k. New test matmul_2d_large_bit_identical_to_ijk (m=130,k=300,n=290) guards future reworks.",
+  "validation": "fj-lax matmul tests 8/8 pass; clippy -D warnings clean.",
+  "date": "2026-06-04"
+}

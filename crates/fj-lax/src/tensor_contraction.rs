@@ -167,12 +167,24 @@ fn index_to_contracted_coords(idx: usize, axes: &[usize], shape: &[usize]) -> Ve
 /// Matches `jnp.matmul(a, b)` for 2D arrays.
 pub fn matmul_2d(a: &[f64], m: usize, k: usize, b: &[f64], n: usize) -> Vec<f64> {
     let mut result = vec![0.0; m * n];
+
     // i-k-j loop order: the inner j-loop streams a contiguous row of B and a
     // contiguous row of C, instead of the i-j-k order's stride-`n` walk down a
     // column of B (a cache miss per multiply). For each output element c[i][j]
     // the contributions are still accumulated in ascending-l order
     // (c[i][j] += a[i][l]*b[l][j] for l = 0,1,...,k-1), exactly as before, so
     // the floating-point result is bit-for-bit identical.
+    //
+    // NOTE (pass110, rejected micro-architectural levers at 256³ on the RCH
+    // workers — see artifacts/performance/evidence/fj_lax_gemm_blocking_rejected_*):
+    //   * NB×KB cache-blocking REGRESSED to ~0.60× — the full-width contiguous
+    //     inner loop is already prefetcher-friendly and B (512 KB) is served from
+    //     L2, so narrow panels + C re-streaming across k-blocks only added cost.
+    //   * 4-row M-axis register-tiling (4× B reuse) gave only ~1.09× — the kernel
+    //     is already near compute/L2 bound, not B-bandwidth bound, at this size.
+    // The real >=2× lever is a different axis: a threaded per-row GEMM (bit-exact,
+    // each output row summed ascending-l by one thread) or an explicit std::simd
+    // MR×NR microkernel. Kept the scalar i-k-j kernel; both attempts reverted.
     for i in 0..m {
         let a_row = i * k;
         let c_row = i * n;
@@ -301,6 +313,37 @@ mod tests {
         let got = matmul_2d(&a, m, k, &b, n);
 
         // Reference: original i-j-k order.
+        let mut want = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for l in 0..k {
+                    sum += a[i * k + l] * b[l * n + j];
+                }
+                want[i * n + j] = sum;
+            }
+        }
+        for idx in 0..m * n {
+            assert_eq!(got[idx].to_bits(), want[idx].to_bits(), "mismatch at {idx}");
+        }
+    }
+
+    #[test]
+    fn matmul_2d_large_bit_identical_to_ijk() {
+        // Large, non-power-of-two dims (m=130, k=300, n=290) — guards the
+        // matmul_2d kernel's bit-exact ascending-l accumulation at sizes well
+        // past L1/L2, where future blocking/tiling/SIMD reworks are most
+        // tempting. Must equal the textbook i-j-k accumulation bit-for-bit.
+        let (m, k, n) = (130usize, 300usize, 290usize);
+        let a: Vec<f64> = (0..m * k)
+            .map(|i| (i as f64 * 0.013_57).sin() * 3.0 - 1.0)
+            .collect();
+        let b: Vec<f64> = (0..k * n)
+            .map(|i| (i as f64 * 0.004_21).cos() * 2.0 + 0.5)
+            .collect();
+
+        let got = matmul_2d(&a, m, k, &b, n);
+
         let mut want = vec![0.0f64; m * n];
         for i in 0..m {
             for j in 0..n {
