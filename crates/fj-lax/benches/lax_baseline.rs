@@ -1805,6 +1805,16 @@ fn bench_rfft_256(c: &mut Criterion) {
     });
 }
 
+// Batched non-power-of-two real FFT: 64 rows of length 1000. Exercises the
+// shared Bluestein plan (built once, reused across all 64 rows) in eval_rfft.
+fn bench_rfft_batch_64x1000(c: &mut Criterion) {
+    let input = real_matrix(64, 1000);
+    let p = no_params();
+    c.bench_function("eval/rfft_batch_64x1000_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Rfft, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_irfft_256(c: &mut Criterion) {
     let mut params = BTreeMap::new();
     params.insert("fft_length".to_owned(), "256".to_owned());
@@ -2265,6 +2275,7 @@ criterion_group!(
     bench_fft_1009_prime,
     bench_fft_batch_128x1000,
     bench_rfft_256,
+    bench_rfft_batch_64x1000,
     bench_irfft_256,
     bench_reshape,
     bench_gather_128_rows_16_cols,

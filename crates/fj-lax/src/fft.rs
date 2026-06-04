@@ -710,6 +710,11 @@ pub(crate) fn eval_rfft(
     // Reuse buffers across batch iterations to avoid O(batch_size) allocations
     let mut padded = vec![(0.0, 0.0); fft_length];
     let mut transformed = Vec::with_capacity(fft_length);
+    // Non-power-of-two transform length: build the Bluestein plan once and reuse
+    // it across every row (chirp table + kernel FFT are identical per row).
+    let plan = (fft_length > 1 && !fft_length.is_power_of_two())
+        .then(|| BluesteinPlan::new(fft_length, false));
+    let mut scratch = BluesteinScratch::default();
 
     for batch in 0..batch_size {
         let start = batch * input_last;
@@ -719,7 +724,10 @@ pub(crate) fn eval_rfft(
         padded[..copy_len].copy_from_slice(&batch_slice[..copy_len]);
         padded[copy_len..].fill((0.0, 0.0));
 
-        fft_1d_into(&padded, &mut transformed);
+        match &plan {
+            Some(plan) => plan.apply_into(&padded, &mut scratch, &mut transformed),
+            None => fft_1d_into(&padded, &mut transformed),
+        }
 
         // Keep only the first fft_length/2 + 1 elements
         for &(re, im) in &transformed[..out_last] {
@@ -798,6 +806,11 @@ pub(crate) fn eval_irfft(
     // Reuse buffers across batch iterations to avoid O(batch_size) allocations
     let mut full = vec![(0.0, 0.0); fft_length];
     let mut transformed = Vec::with_capacity(fft_length);
+    // Non-power-of-two transform length: build the inverse Bluestein plan once
+    // and reuse it across every row.
+    let plan = (fft_length > 1 && !fft_length.is_power_of_two())
+        .then(|| BluesteinPlan::new(fft_length, true));
+    let mut scratch = BluesteinScratch::default();
 
     for batch in 0..batch_size {
         let start = batch * input_last;
@@ -822,7 +835,10 @@ pub(crate) fn eval_irfft(
             }
         }
 
-        ifft_1d_into(&full, &mut transformed);
+        match &plan {
+            Some(plan) => plan.apply_into(&full, &mut scratch, &mut transformed),
+            None => ifft_1d_into(&full, &mut transformed),
+        }
 
         // Take real part only
         for &(re, _) in &transformed {

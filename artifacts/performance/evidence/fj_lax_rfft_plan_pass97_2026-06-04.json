@@ -1,0 +1,22 @@
+{
+    "pass": 97, "date": "2026-06-04", "crate": "fj-lax",
+    "kind": "structural: extend pass96 Bluestein plan reuse to rfft/irfft (bit-exact)",
+    "target": "eval/rfft_batch_64x1000_f64 (eval_rfft/eval_irfft non-power-of-two batched path)",
+    "lever_summary": "Apply the pass96 FFTW-style BluesteinPlan (chirp table + kernel FFT, built once) + reusable BluesteinScratch to eval_rfft and eval_irfft for non-power-of-two transform lengths, instead of one-shot fft_1d_into/ifft_1d_into per row.",
+    "method": "same-bench A/B; baseline = stashed per-row Bluestein; normalized by eval/fft_1000_complex128 (eval_fft path, unaffected by this rfft/irfft change) calibration.",
+    "results": {
+        "calibration_fft_1000_us": {"candidate": 128.32, "baseline": 135.95, "worker_ratio": 1.059},
+        "rfft_batch_64x1000": {"baseline_ms": 8.710, "candidate_ms": 6.288, "raw_x": 1.385, "worker_corrected_x": 1.31}
+    },
+    "score": {"impact": 3.0, "confidence": 5.0, "effort": 2.0, "impact_times_confidence_over_effort": 7.5, "kept": true},
+    "change": {"files": ["crates/fj-lax/src/fft.rs", "crates/fj-lax/benches/lax_baseline.rs"],
+        "lever": "eval_rfft/eval_irfft build a BluesteinPlan once for non-pow2 fft_length and call plan.apply_into per row (forward plan for rfft, inverse for irfft). Added eval/rfft_batch_64x1000 bench."},
+    "isomorphism": {"type": "BIT-IDENTICAL to committed per-row Bluestein (plan hoisted out of the row loop); 30 fft tests + JAX oracle (incl rfft/irfft) pass"},
+    "rejected_sub_lever": "real-FFT half-size PACKING for rfft (pack N reals into N/2 complex + unpack): measured REGRESSION at N=256 (~1.18x slower normalized), ~1.05x at N=4096 — unpack + buffers offset the half-size FFT saving. Reverted, not shipped.",
+    "validation": [
+        {"name": "fft_tests", "command": "rch exec -- cargo test -p fj-lax --release fft", "result": "30 passed"},
+        {"name": "jax_oracle", "command": "rch exec -- cargo test -p fj-conformance --release --test linalg_fft_oracle_parity", "result": "passed"},
+        {"name": "clippy", "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings", "result": "clean"}
+    ],
+    "note": "1.31x bit-exact completion of the FFT-family plan reuse (pass96 fft/ifft -> pass97 rfft/irfft). The FFT vein's big algorithmic wins (pass95 12.8x non-pow2, pass96 2.17x batched fft) are realized; remaining FFT levers are sub-2x. Next big swing should be a different primitive."
+}
