@@ -3507,6 +3507,114 @@ fn extremum_along_axis(
     }
 }
 
+/// Minimum axis length at which the dense i64 radix path is used (the per-slice
+/// 8 byte passes + 256-bucket counting overhead is only amortized over a long
+/// enough slice; below this the generic comparison path is fine).
+const RADIX_SORT_MIN_AXIS: usize = 256;
+
+/// Dense i64 ascending sort/argsort along `axis`, bypassing the generic
+/// `SortKey`/`Literal` machinery entirely: gather the slice's i64 values
+/// straight from the contiguous `as_i64_slice()` backing, stably order them with
+/// a sign-flipped LSD radix (O(n) vs the comparison path's O(n log n)), and
+/// write a dense i64 output. Returns `None` (caller uses the generic path) unless
+/// the tensor is I64 dense storage, ascending, and every slice is long enough.
+///
+/// Bit-for-bit identical to the generic ascending path: for I64 the comparator
+/// is `a.cmp(&b)`, which the sign-flipped byte order reproduces exactly; LSD
+/// radix is stable and the per-slice gather visits original indices ascending,
+/// so equal keys keep their original order (matching the stable `sort_by`). Sort
+/// emits the reordered values; argsort emits the in-slice original indices —
+/// the same fields the generic path writes.
+fn sort_along_axis_dense_i64(
+    tensor: &TensorValue,
+    axis: usize,
+    return_indices: bool,
+) -> Result<Option<Value>, EvalError> {
+    let Some(values) = tensor.elements.as_i64_slice() else {
+        return Ok(None);
+    };
+    let primitive = if return_indices {
+        Primitive::Argsort
+    } else {
+        Primitive::Sort
+    };
+    let rank = tensor.shape.rank();
+    let axis_dim = tensor.shape.dims[axis] as usize;
+    if axis_dim < RADIX_SORT_MIN_AXIS {
+        return Ok(None);
+    }
+
+    let strides = checked_row_major_strides(primitive, "sort", &tensor.shape.dims)?;
+    let axis_stride = strides[axis];
+    let total = tensor.elements.len();
+    if !total.is_multiple_of(axis_dim) {
+        return Ok(None);
+    }
+    let outer_count = total / axis_dim;
+
+    let mut out = vec![0_i64; total];
+    // (sign-flipped key, original in-slice index) pairs + ping-pong scratch.
+    let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
+    let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
+
+    for outer in 0..outer_count {
+        // Row-major base offset of this slice (all axes except `axis`).
+        let base = {
+            let mut idx = outer;
+            let mut flat = 0_usize;
+            for ax in (0..rank).rev() {
+                if ax == axis {
+                    continue;
+                }
+                let dim = tensor.shape.dims[ax] as usize;
+                flat += (idx % dim) * strides[ax];
+                idx /= dim;
+            }
+            flat
+        };
+
+        pairs.clear();
+        for i in 0..axis_dim {
+            let v = values[base + i * axis_stride];
+            pairs.push(((v as u64) ^ (1_u64 << 63), i as u32));
+        }
+
+        // Stable ascending LSD radix on the u64 key (8 byte passes).
+        for byte in 0..8 {
+            let shift = byte * 8;
+            let mut counts = [0_usize; 256];
+            for &(key, _) in pairs.iter() {
+                counts[((key >> shift) & 0xff) as usize] += 1;
+            }
+            let mut sum = 0_usize;
+            for c in counts.iter_mut() {
+                let count = *c;
+                *c = sum;
+                sum += count;
+            }
+            for &pair in pairs.iter() {
+                let bucket = ((pair.0 >> shift) & 0xff) as usize;
+                scratch[counts[bucket]] = pair;
+                counts[bucket] += 1;
+            }
+            std::mem::swap(&mut pairs, &mut scratch);
+        }
+
+        for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+            let dst = base + out_pos * axis_stride;
+            out[dst] = if return_indices {
+                i64::from(orig)
+            } else {
+                values[base + orig as usize * axis_stride]
+            };
+        }
+    }
+
+    let out_value =
+        TensorValue::new_i64_values(tensor.shape.clone(), out).map_err(EvalError::InvalidTensor)?;
+    Ok(Some(Value::Tensor(out_value)))
+}
+
 /// Sort or argsort a tensor along a given axis.
 fn sort_along_axis(
     primitive: Primitive,
@@ -3528,6 +3636,15 @@ fn sort_along_axis(
             TensorValue::new(result_dtype, tensor.shape.clone(), vec![])
                 .map_err(EvalError::InvalidTensor)?,
         ));
+    }
+
+    // Dense i64 ascending fast path (radix, no Literal machinery). Returns None
+    // for descending, non-I64, non-dense, or short axes -> generic path below.
+    if tensor.dtype == DType::I64
+        && !descending
+        && let Some(value) = sort_along_axis_dense_i64(tensor, axis, return_indices)?
+    {
+        return Ok(value);
     }
 
     let strides = checked_row_major_strides(primitive, "sort", &tensor.shape.dims)?;
@@ -5199,6 +5316,84 @@ mod tests {
         ]);
         let result = eval_sort(Primitive::Sort, &[x], &p).unwrap();
         assert_eq!(extract_f64_vec(&result), vec![4.0, 3.0, 1.0]);
+    }
+
+    #[test]
+    fn radix_sort_i64_ascending_matches_comparison_sort() {
+        // Large enough (>= RADIX_SORT_MIN_AXIS) to exercise the LSD radix path,
+        // with negatives, duplicates, and i64::MIN/MAX. Sort + argsort must match
+        // a stable comparison reference exactly (including tie order).
+        let n = 1000usize;
+        let data: Vec<i64> = (0..n)
+            .map(|i| match i % 11 {
+                0 => i64::MIN,
+                1 => i64::MAX,
+                2 => 0,
+                3 => -1,
+                4 => 7,
+                5 => -((i as i64) % 50),
+                _ => ((i as i64) * 2654435761).wrapping_rem(100_003) - 50_000,
+            })
+            .collect();
+
+        let asc = params(&[("dimension", "0"), ("descending", "false")]);
+
+        // Sort parity vs Rust stable sort.
+        let sorted = extract_i64_vec(
+            &eval_sort(Primitive::Sort, &[Value::vector_i64(&data).unwrap()], &asc).unwrap(),
+        );
+        let mut want = data.clone();
+        want.sort();
+        assert_eq!(sorted, want, "radix sort values");
+
+        // Argsort parity vs stable argsort by (value, original index).
+        let got_idx = extract_i64_vec(
+            &eval_argsort(
+                Primitive::Argsort,
+                &[Value::vector_i64(&data).unwrap()],
+                &asc,
+            )
+            .unwrap(),
+        );
+        let mut want_idx: Vec<i64> = (0..n as i64).collect();
+        want_idx.sort_by(|&a, &b| {
+            data[a as usize]
+                .cmp(&data[b as usize])
+                .then_with(|| a.cmp(&b))
+        });
+        assert_eq!(got_idx, want_idx, "radix argsort indices");
+
+        // Multi-slice: [4, 300] sort along last (contiguous) axis, each row
+        // independently, all rows long enough for radix.
+        let rows = 4usize;
+        let cols = 300usize;
+        let mat: Vec<i64> = (0..rows * cols)
+            .map(|i| ((i as i64) * 48271).wrapping_rem(7919) - 4000)
+            .collect();
+        let mat_tensor = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                mat.clone(),
+            )
+            .unwrap(),
+        );
+        let mat_sorted = extract_i64_vec(
+            &eval_sort(
+                Primitive::Sort,
+                &[mat_tensor],
+                &params(&[("dimension", "1")]),
+            )
+            .unwrap(),
+        );
+        let mut mat_want = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            let mut row = mat[r * cols..(r + 1) * cols].to_vec();
+            row.sort();
+            mat_want.extend_from_slice(&row);
+        }
+        assert_eq!(mat_sorted, mat_want, "radix per-row sort");
     }
 
     // ── Argsort ──

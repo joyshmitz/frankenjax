@@ -1,0 +1,74 @@
+{
+    "bead": "frankenjax-mcqr.30.19",
+    "pass": 74,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/sort_64k_i64",
+    "lever_summary": "Dense i64 ascending sort/argsort via a sign-flipped stable LSD radix that bypasses the generic SortKey/Literal machinery. The new sort_along_axis_dense_i64 gathers each slice's i64 values straight from as_i64_slice(), radix-orders them (O(n)), and writes a dense i64 output — no Vec<Literal> materialization, no per-element sort_key, no Literal write-back.",
+    "diagnosis": "An initial in-place LSD radix that reused the generic indexed (orig_idx, SortKey) pipeline gave NO win (10.83ms vs 10.50ms baseline): the hot path is dominated by the per-element SortKey/Literal machinery, not the comparison count. Per the no-ceiling addendum this signalled optimizing the wrong thing; the fix was the data-model bypass (dense gather + raw-u64 radix + dense output), combined with the O(n) algorithm.",
+    "alien_graveyard": {
+        "primitive": "radix sort (non-comparison, O(n) for fixed-width integer keys) + dense SoA gather",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "replace the comparison sort (O(n log n)) over a 24-byte tagged-union with a stable LSD radix over contiguous native i64, the integer-key analog of the pattern-defeating/radix sort techniques"
+    },
+    "method": "Same-worker-calibrated A/B: baseline = tensor_ops.rs git-stashed to the comparison sort; an unchanged calibration bench (full i64 reduce) ran alongside in both runs to normalize cross-worker CPU speed. speedup = (baseline_sort/baseline_calib) / (after_sort/after_calib).",
+    "results": {
+        "sort_64k_i64": {
+            "baseline_comparison_sort": {
+                "worker": "ts1",
+                "sort_ns": 10504105.4,
+                "calib_reduce_ns": 9606.8
+            },
+            "after_dense_radix": {
+                "worker": "vmi1149989",
+                "sort_ns": 1376232.6,
+                "sort_ci_ns": [1274449.8, 1488674.4],
+                "calib_reduce_ns": 11170.6,
+                "calib_ci_ns": [10267.5, 12185.0]
+            },
+            "worker_calib_delta_pct": 16.3,
+            "speedup_calibrated_midpoint_x": 8.87,
+            "speedup_calibrated_conservative_x": 7.54
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'sort_64k_i64|sort_calib_reduce_64k_i64' --save-baseline {sortB|sortA2}",
+    "score": {
+        "impact": 5.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 10.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/tensor_ops.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added sort_along_axis_dense_i64 (gather as_i64_slice -> (sign-flipped u64 key, in-slice index) pairs -> 8-pass stable LSD radix -> dense i64 output). sort_along_axis calls it first when dtype==I64 && !descending; returns None (generic path) for descending / non-I64 / non-dense / axis<256."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: for I64 the generic comparator is a.cmp(&b); the sign-flipped (v as u64 ^ 1<<63) byte order reproduces signed i64 order exactly; LSD radix is stable and the per-slice gather visits in-slice indices ascending, so equal keys keep their original order, matching the stable sort_by",
+        "direction": "ascending only; descending falls back to the comparison sort (whose stable tie order a radix-then-reverse would not preserve)",
+        "outputs": "sort emits the reordered i64 values; argsort emits the in-slice original indices — the same fields the generic path writes; output dtype I64 (sort) / I64 (argsort)",
+        "tie_breaking": "stable, identical to the generic stable sort",
+        "rng": "not applicable",
+        "errors": "returns None (generic path) for non-dense / non-I64 / short axes / non-dividing shapes; no new error classes"
+    },
+    "validation": [
+        {
+            "name": "radix_sort_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib sort",
+            "result": "passed: 12 tests incl radix_sort_i64_ascending_matches_comparison_sort (n=1000 with negatives/dups/i64::MIN/MAX, sort + argsort vs Rust stable sort, + [4,300] multi-slice per-row)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        },
+        {
+            "name": "full_fj_lax_lib_suite",
+            "command": "rch exec -- cargo test -p fj-lax --lib",
+            "result": "passed: 1054 tests"
+        }
+    ]
+}

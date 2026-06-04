@@ -1,0 +1,17 @@
+frankenjax-mcqr.30.19 pass74 golden
+target=eval/sort_64k_i64
+lever=dense i64 ascending sort/argsort via sign-flipped stable LSD radix (sort_along_axis_dense_i64) bypassing the SortKey/Literal machinery; gather as_i64_slice -> radix -> dense i64 output
+diagnosis=in-place radix over the generic (orig_idx, SortKey) pipeline gave no win (10.83ms vs 10.50ms) because the per-element Literal machinery dominates; the data-model bypass + O(n) radix is the real lever
+method=same-worker-calibrated A/B (baseline = tensor_ops.rs stashed to comparison sort); unchanged full-i64-reduce calibration bench normalizes cross-worker speed
+baseline_worker=ts1
+baseline_comparison_sort_ns=10504105.4 calib=9606.8
+after_worker=vmi1149989
+after_dense_radix_ns=1376232.6 [1274449.8, 1488674.4] calib=11170.6 [10267.5, 12185.0]
+worker_calib_delta=16.3%
+speedup_calibrated=8.87x mid, 7.54x conservative
+score=10.0
+alien_primitive=radix sort (non-comparison, O(n) integer keys) + dense SoA gather, alien_cs_graveyard section 8.2
+source_change=sort_along_axis_dense_i64 gathers as_i64_slice into (sign-flipped u64 key, in-slice index) pairs, 8-pass stable LSD radix, dense i64 output; sort_along_axis calls it first for dtype==I64 && !descending && axis>=256, else the unchanged generic comparison path
+isomorphism=for I64 the generic comparator is a.cmp(&b), reproduced exactly by the sign-flipped (v^1<<63) byte order; LSD radix is stable and the gather visits in-slice indices ascending so equal keys keep original order (matching stable sort_by); ascending only (descending uses the comparison sort); sort emits reordered values, argsort emits in-slice original indices; returns to generic path for non-dense/non-I64/short-axis/non-dividing inputs
+golden_note=bit-identical to the comparison path for sort + argsort across negatives/duplicates/i64::MIN/MAX and a [4,300] multi-slice per-row case
+validation=RCH cargo test -p fj-lax --lib sort passed 12 tests incl radix_sort_i64_ascending_matches_comparison_sort; RCH full fj-lax lib suite 1054 passed; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed

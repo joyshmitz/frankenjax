@@ -830,6 +830,33 @@ fn bench_reduce_sum_64k_i64_literal_reference(c: &mut Criterion) {
     });
 }
 
+// 64k i64 ascending sort: exercises the LSD radix path (pass74) vs the prior
+// comparison sort. Pseudo-random keys (negatives, wide range, duplicates) so the
+// sort does real work; ascending is the default direction.
+fn bench_sort_64k_i64(c: &mut Criterion) {
+    let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64)
+        .map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_003) - 500_000)
+        .collect();
+    let input = Value::vector_i64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("dimension".to_owned(), "0".to_owned());
+    p.insert("descending".to_owned(), "false".to_owned());
+    c.bench_function("eval/sort_64k_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Sort, std::slice::from_ref(&input), &p))
+    });
+}
+
+// Calibration: an unchanged op (full i64 reduce) used to confirm the radix A/B
+// pair ran on the same worker (its ratio should be ~1.0 across the two runs).
+fn bench_sort_calib_reduce_64k_i64(c: &mut Criterion) {
+    let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64).collect();
+    let input = Value::vector_i64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/sort_calib_reduce_64k_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_sum_1k(c: &mut Criterion) {
     let data: Vec<i64> = (0..1000).collect();
     let input = Value::vector_i64(&data).unwrap();
@@ -1516,6 +1543,8 @@ criterion_group!(
     bench_reduce_sum_256_axis0_i64_literal_reference,
     bench_reduce_sum_64k_i64,
     bench_reduce_sum_64k_i64_literal_reference,
+    bench_sort_64k_i64,
+    bench_sort_calib_reduce_64k_i64,
     bench_reduce_window_64x64,
     bench_sin_1k,
     bench_sin_64k,
