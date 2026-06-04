@@ -1,0 +1,19 @@
+{
+  "pass": 107,
+  "crate": "fj-lax",
+  "target": "eval/one_hot_2048x512_f64",
+  "function": "eval_one_hot",
+  "lever": "Replace per-output-element O(rank) flat-index decode with fill-off + sparse scatter-on; O(total) + O(indices) instead of O(total*rank); dense F64/I64/Bool output via new_*_values.",
+  "baseline_us": 11581.0,
+  "candidate_us": 164.09,
+  "calibration_baseline_us": 8.1041,
+  "calibration_candidate_us": 13.015,
+  "speedup_raw": 70.6,
+  "speedup_worker_corrected": 113.0,
+  "score": 12.5,
+  "isomorphism": "bit-identical; output position is off unless its class-axis coord equals the input index in [0,nc); scatter writes exactly those on-positions at out_base+idx*class_stride.",
+  "golden": "fj_lax_one_hot_scatter_pass107_2026-06-04.golden",
+  "golden_sha256": "83ef1bd53b78a1a56bd2afd6764335021bdde75def8e9805d12e0bc528ebb231",
+  "tests": "one_hot_fill_scatter_matches_reference + 7 one_hot tests pass; clippy -D warnings clean",
+  "date": "2026-06-04"
+}

@@ -1159,6 +1159,19 @@ fn bench_pad_256x256_to_258x258_f64(c: &mut Criterion) {
     });
 }
 
+// OneHot: 2048 i64 indices -> num_classes=512 f64 (~1M output). Fill+scatter
+// dense fast path (pass107) vs the generic per-element decode + Vec<Literal>.
+fn bench_one_hot_2048x512_f64(c: &mut Criterion) {
+    let data: Vec<i64> = (0..2048).map(|i| (i as i64 * 7) % 512).collect();
+    let input = Value::vector_i64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("num_classes".to_owned(), "512".to_owned());
+    p.insert("dtype".to_owned(), "f64".to_owned());
+    c.bench_function("eval/one_hot_2048x512_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::OneHot, std::slice::from_ref(&input), &p))
+    });
+}
+
 // Rev (reverse both axes of a 256x256 f64 tensor): dense odometer-gather fast
 // path (pass106) vs the generic per-element vec![0;rank] + decode + Vec<Literal>.
 fn bench_rev_256x256_f64(c: &mut Criterion) {
@@ -2415,6 +2428,7 @@ criterion_group!(
     bench_broadcast_256_to_256x256_f64,
     bench_pad_256x256_to_258x258_f64,
     bench_rev_256x256_f64,
+    bench_one_hot_2048x512_f64,
     bench_sort_64k_f32,
     bench_sort_64k_u32,
     bench_sort_calib_reduce_64k_i64,

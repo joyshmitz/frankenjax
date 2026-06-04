@@ -3482,7 +3482,6 @@ pub(crate) fn eval_one_hot(
             primitive,
             detail: "one_hot output element count overflows usize".to_owned(),
         })?;
-    let mut elements = Vec::with_capacity(total);
     let input_strides = checked_row_major_strides(primitive, "one_hot", &input_shape)?;
     let output_strides = checked_row_major_strides(primitive, "one_hot", &out_dims)?;
 
@@ -3501,38 +3500,87 @@ pub(crate) fn eval_one_hot(
         }
     };
 
-    for out_flat in 0..total {
-        let mut remaining = out_flat;
-        let mut input_flat = 0_usize;
-        let mut input_axis = 0_usize;
-        let mut class_index = 0_usize;
+    // One-hot is structurally a fill-with-off + scatter-on: the output is all
+    // `off_value` except, for each input index `i` with `0 <= idx[i] < nc`, the
+    // single position (input coords with the class axis = idx[i]) set to
+    // `on_value`. This replaces the O(total * rank) per-element decode with an
+    // O(total) fill + O(indices) scatter. The scatter destination is computed
+    // from the input flat index `i` (decoded to input coords) mapped to the
+    // output via the inserted class axis. Bit-identical to the per-element form.
+    let input_rank = input_shape.len();
+    let class_stride = output_strides[axis];
+    let in_to_out_stride: Vec<usize> = (0..input_rank)
+        .map(|j| output_strides[if j < axis { j } else { j + 1 }])
+        .collect();
 
-        for (out_axis, &stride) in output_strides.iter().enumerate() {
-            let coord = remaining / stride;
-            remaining %= stride;
-
-            if out_axis == axis {
-                class_index = coord;
-            } else if !input_shape.is_empty() {
-                input_flat += coord * input_strides[input_axis];
-                input_axis += 1;
-            }
-        }
-
-        let idx = indices[input_flat];
-        let val = if idx >= 0 && (idx as usize) == class_index {
-            on_value
-        } else {
-            off_value
-        };
-        elements.push(literal_for(val));
+    let tensor = match dtype {
+        DType::F64 => TensorValue::new_f64_values(
+            Shape { dims: out_dims },
+            one_hot_scatter(
+                on_value, off_value, total, &indices, nc, input_rank, &input_strides,
+                &in_to_out_stride, class_stride,
+            ),
+        ),
+        DType::I64 => TensorValue::new_i64_values(
+            Shape { dims: out_dims },
+            one_hot_scatter(
+                on_value as i64, off_value as i64, total, &indices, nc, input_rank,
+                &input_strides, &in_to_out_stride, class_stride,
+            ),
+        ),
+        DType::Bool => TensorValue::new_bool_values(
+            Shape { dims: out_dims },
+            one_hot_scatter(
+                on_value != 0.0, off_value != 0.0, total, &indices, nc, input_rank,
+                &input_strides, &in_to_out_stride, class_stride,
+            ),
+        ),
+        // Dtypes without dense storage (I32/U32/U64/F32/F16/BF16/Complex): still
+        // fill+scatter, but over Literals (matching literal_for exactly).
+        _ => TensorValue::new(
+            dtype,
+            Shape { dims: out_dims },
+            one_hot_scatter(
+                literal_for(on_value), literal_for(off_value), total, &indices, nc, input_rank,
+                &input_strides, &in_to_out_stride, class_stride,
+            ),
+        ),
     }
+    .map_err(EvalError::InvalidTensor)?;
+    Ok(Value::Tensor(tensor))
+}
 
-    Ok(Value::Tensor(TensorValue::new(
-        dtype,
-        Shape { dims: out_dims },
-        elements,
-    )?))
+/// One-hot fill+scatter shared by `eval_one_hot`'s dense and Literal paths:
+/// start from an all-`off` output and, for each input flat index `i` whose value
+/// `idx[i]` is in `[0, nc)`, set the single on-position (input coords mapped into
+/// the output with the class axis = `idx[i]`). Generic over the element type.
+#[allow(clippy::too_many_arguments)]
+fn one_hot_scatter<T: Copy>(
+    on: T,
+    off: T,
+    total: usize,
+    indices: &[i64],
+    nc: usize,
+    input_rank: usize,
+    input_strides: &[usize],
+    in_to_out_stride: &[usize],
+    class_stride: usize,
+) -> Vec<T> {
+    let mut out = vec![off; total];
+    for (i, &idx) in indices.iter().enumerate() {
+        if idx < 0 || idx as usize >= nc {
+            continue; // index outside [0, nc): the whole row stays `off`
+        }
+        let mut rem = i;
+        let mut out_base = 0_usize;
+        for j in 0..input_rank {
+            let c = rem / input_strides[j];
+            rem %= input_strides[j];
+            out_base += c * in_to_out_stride[j];
+        }
+        out[out_base + idx as usize * class_stride] = on;
+    }
+    out
 }
 
 /// Sort: sort elements along a specified axis (default: last axis).
@@ -6318,6 +6366,65 @@ mod tests {
         assert_eq!(vals[4], 0.0);
         assert_eq!(vals[5], 1.0);
         assert_eq!(vals[10], 1.0);
+    }
+
+    #[test]
+    fn one_hot_fill_scatter_matches_reference() {
+        // Validate the fill+scatter one_hot (non-last axis, out-of-range indices)
+        // against an independent reference built from the spec, for the dense f64
+        // path; and confirm a Literal-dtype (i32) result has the same on/off
+        // pattern (same shape, on at the right positions).
+        let in_rows = 2usize;
+        let in_cols = 3usize;
+        // indices incl out-of-range (-1 and 5) which must yield all-off rows.
+        let idata = [0_i64, 2, -1, 1, 5, 3];
+        let indices = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape {
+                    dims: vec![in_rows as u32, in_cols as u32],
+                },
+                idata.iter().copied().map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let nc = 4usize; // class axis inserted at axis 1 -> out [2,4,3]
+        let p = params(&[
+            ("num_classes", "4"),
+            ("axis", "1"),
+            ("dtype", "f64"),
+            ("on_value", "1"),
+            ("off_value", "0"),
+        ]);
+        let out = eval_one_hot(std::slice::from_ref(&indices), &p).unwrap();
+        assert_eq!(extract_shape(&out), vec![in_rows as u32, nc as u32, in_cols as u32]);
+        let got = extract_f64_vec(&out);
+
+        // Reference: out[r, c, k] = 1 if idata[r*in_cols + k] == c else 0.
+        let mut expected = vec![0.0_f64; in_rows * nc * in_cols];
+        for r in 0..in_rows {
+            for k in 0..in_cols {
+                let idx = idata[r * in_cols + k];
+                if idx >= 0 && (idx as usize) < nc {
+                    expected[r * (nc * in_cols) + (idx as usize) * in_cols + k] = 1.0;
+                }
+            }
+        }
+        assert_eq!(got, expected, "one_hot f64 fill+scatter vs reference");
+
+        // i32 (Literal path, exact dtype): on/off pattern + dtype preserved.
+        let p32 = params(&[("num_classes", "4"), ("axis", "1"), ("dtype", "i32")]);
+        let out32 = eval_one_hot(std::slice::from_ref(&indices), &p32).unwrap();
+        assert_eq!(out32.as_tensor().unwrap().dtype, DType::I32);
+        let vals32: Vec<i64> = out32
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        let expected32: Vec<i64> = expected.iter().map(|&v| v as i64).collect();
+        assert_eq!(vals32, expected32, "one_hot i32 fill+scatter vs reference");
     }
 
     // ── Scatter ──
