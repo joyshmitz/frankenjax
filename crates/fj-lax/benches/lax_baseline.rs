@@ -1574,6 +1574,52 @@ fn bench_gather_128_rows_16_cols(c: &mut Criterion) {
     });
 }
 
+// Large contiguous gather (256x256 f64 operand, gather 256 rows reversed):
+// dense fast path (pass83) vs the Vec<Literal> copy. Same process for a
+// same-worker ratio.
+fn bench_gather_256x256_f64_vec(c: &mut Criterion) {
+    let n = 256usize;
+    let data: Vec<f64> = (0..n * n).map(|i| i as f64 * 0.001).collect();
+    let operand = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let indices = Value::vector_i64(&(0..n as i64).rev().collect::<Vec<_>>()).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("slice_sizes".into(), "1,256".into());
+    c.bench_function("eval/gather_256x256_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Gather, &[operand.clone(), indices.clone()], &p))
+    });
+}
+
+fn bench_gather_256x256_f64_literal_reference(c: &mut Criterion) {
+    let n = 256usize;
+    let elements: Vec<Literal> = (0..n * n)
+        .map(|i| Literal::from_f64(i as f64 * 0.001))
+        .collect();
+    let operand = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            elements,
+        )
+        .unwrap(),
+    );
+    let indices = Value::vector_i64(&(0..n as i64).rev().collect::<Vec<_>>()).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("slice_sizes".into(), "1,256".into());
+    c.bench_function("eval/gather_256x256_f64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Gather, &[operand.clone(), indices.clone()], &p))
+    });
+}
+
 fn bench_scatter_128_rows_16_cols(c: &mut Criterion) {
     let operand = Value::Tensor(
         TensorValue::new(
@@ -1824,6 +1870,8 @@ criterion_group!(
     bench_irfft_256,
     bench_reshape,
     bench_gather_128_rows_16_cols,
+    bench_gather_256x256_f64_vec,
+    bench_gather_256x256_f64_literal_reference,
     bench_scatter_128_rows_16_cols,
     bench_slice_64_rows_16_cols,
     bench_dynamic_slice_64_rows_16_cols,

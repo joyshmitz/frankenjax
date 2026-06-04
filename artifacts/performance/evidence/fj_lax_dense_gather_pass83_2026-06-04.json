@@ -1,0 +1,59 @@
+{
+    "bead": "frankenjax-mcqr.30.27",
+    "pass": 83,
+    "date": "2026-06-04",
+    "crate": "fj-lax",
+    "target": "eval/gather_256x256_f64_vec",
+    "lever_summary": "Dense F64/I64 contiguous gather. The contiguous gather path (trailing slice == operand dims) copied Vec<Literal> slices (materializing a dense operand to 24-byte enums on first access) into a Vec<Literal> output. New dense path copies contiguous typed slices straight from as_f64_slice()/as_i64_slice() into a dense typed output (8 vs 24 bytes/elem, no materialization).",
+    "alien_graveyard": {
+        "primitive": "dense SoA / typed columnar storage applied to gather",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "copy contiguous native-typed slices (extend_from_slice / memcpy) instead of materializing + copying 24-byte tagged-union elements"
+    },
+    "method": "Same-worker comparison on ts2: dense (new_f64_values) operand vs a Vec<Literal>-backed operand run in the same process; shared i64 indices and slice_sizes.",
+    "results": {
+        "gather_256x256_f64": {
+            "dense_ns": 20861.7,
+            "dense_ci_ns": [20751.6, 20974.5],
+            "literal_ns": 56024.7,
+            "literal_ci_ns": [55612.9, 56476.4],
+            "speedup_midpoint_x": 2.69,
+            "speedup_conservative_x": 2.65
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- gather_256x256_f64 --save-baseline gath",
+    "score": {
+        "impact": 4.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 8.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/tensor_ops.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "In eval_gather's trailing_slice_is_contiguous branch, a dense_contiguous_gather macro handles F64 (as_f64_slice, fill NaN, new_f64_values) and I64 (as_i64_slice, fill i64::MIN, new_i64_values) before the unchanged Vec<Literal> copy loop; falls through for non-dense / other dtypes."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: same resolved index order, same contiguous slice ranges [idx*slice_elems .. +slice_elems]",
+        "fill": "unchanged: out-of-bounds (FILL_OR_DROP None) slices emit the per-dtype fill — F64 NaN (== gather_fill_literal(F64) = F64Bits(NaN.to_bits())), I64 i64::MIN (== gather_fill_literal(I64)) — repeated slice_elems times",
+        "errors": "unchanged: same checked_mul/checked_add overflow checks and the same 'slice exceeds operand element count' bound (src.len() == operand.elements.len())",
+        "index_modes": "clip and fill_or_drop both validated; resolved indices computed by the shared resolve_axis0_index before the dense branch",
+        "rng": "not applicable",
+        "output_dtype": "F64 / I64 (operand dtype preserved)"
+    },
+    "validation": [
+        {
+            "name": "dense_gather_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib --release gather",
+            "result": "passed incl dense_gather_contiguous_matches_literal_path ([32,40] full-row gather, OOB indices, clip + fill_or_drop, f64 by bits + i64)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings",
+            "result": "passed (release dodges shared-target proc-macro rmeta drift in debug)"
+        }
+    ]
+}

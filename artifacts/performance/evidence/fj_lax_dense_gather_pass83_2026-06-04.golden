@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.27 pass83 golden
+target=eval/gather_256x256_f64_vec
+lever=dense F64/I64 contiguous gather — copy contiguous typed slices from as_f64_slice/as_i64_slice into a dense output, bypassing the Vec<Literal> materialize + copy
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2 (256x256 operand, gather 256 rows reversed)
+worker=ts2
+gather_256x256_f64=dense 20.862us [20.752, 20.975] vs literal 56.025us [55.613, 56.476] = 2.69x mid, 2.65x conservative
+score=8.0
+alien_primitive=dense SoA / typed columnar storage applied to gather, alien_cs_graveyard section 8.2
+source_change=eval_gather trailing_slice_is_contiguous branch: dense_contiguous_gather macro for F64 (as_f64_slice, fill NaN, new_f64_values) and I64 (as_i64_slice, fill i64::MIN, new_i64_values) before the unchanged Vec<Literal> copy loop
+isomorphism=same resolved index order and contiguous slice ranges; OOB FILL_OR_DROP slices emit the per-dtype fill (F64 NaN, I64 i64::MIN) matching gather_fill_literal; same checked_mul/checked_add overflow + slice-exceeds-operand bounds errors; clip + fill_or_drop modes validated; operand dtype preserved
+golden_note=bit-identical to the Vec<Literal> path incl out-of-bounds indices under clip and fill_or_drop, f64 by bits + i64
+validation=RCH cargo test -p fj-lax --lib --release gather passed incl dense_gather_contiguous_matches_literal_path; RCH cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings passed

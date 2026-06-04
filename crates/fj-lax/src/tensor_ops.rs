@@ -1588,6 +1588,55 @@ pub(crate) fn eval_gather(
         .all(|(&slice_size, &dim)| slice_size == dim as usize);
 
     if trailing_slice_is_contiguous {
+        // Dense F64/I64 fast path: copy contiguous slices straight from the typed
+        // backing into a dense typed output, bypassing the Vec<Literal>
+        // materialization (8 vs 24 bytes/elem). Bit-identical to the generic copy
+        // below — same resolved indices, same slice ranges, same per-dtype fill
+        // (F64 -> NaN, I64 -> i64::MIN) and overflow/bounds errors.
+        macro_rules! dense_contiguous_gather {
+            ($slice:expr, $fill:expr, $ctor:path) => {{
+                let src = $slice;
+                let mut out = Vec::with_capacity(total);
+                for &resolved_idx in &resolved {
+                    let Some(idx) = resolved_idx else {
+                        out.extend(std::iter::repeat_n($fill, slice_elems));
+                        continue;
+                    };
+                    let base_offset =
+                        idx.checked_mul(slice_elems)
+                            .ok_or_else(|| EvalError::Unsupported {
+                                primitive,
+                                detail: "gather base offset overflows usize".to_owned(),
+                            })?;
+                    let end = base_offset.checked_add(slice_elems).ok_or_else(|| {
+                        EvalError::Unsupported {
+                            primitive,
+                            detail: "gather contiguous slice end overflows usize".to_owned(),
+                        }
+                    })?;
+                    if end > src.len() {
+                        return Err(EvalError::Unsupported {
+                            primitive,
+                            detail: "gather contiguous slice exceeds operand element count"
+                                .to_owned(),
+                        });
+                    }
+                    out.extend_from_slice(&src[base_offset..end]);
+                }
+                return Ok(Value::Tensor($ctor(Shape { dims: out_dims }, out)?));
+            }};
+        }
+        if operand.dtype == DType::F64
+            && let Some(src) = operand.elements.as_f64_slice()
+        {
+            dense_contiguous_gather!(src, f64::NAN, TensorValue::new_f64_values);
+        }
+        if operand.dtype == DType::I64
+            && let Some(src) = operand.elements.as_i64_slice()
+        {
+            dense_contiguous_gather!(src, i64::MIN, TensorValue::new_i64_values);
+        }
+
         for &resolved_idx in &resolved {
             let Some(idx) = resolved_idx else {
                 // FILL_OR_DROP out-of-bounds slice: emit the fill value.
@@ -6197,6 +6246,77 @@ mod tests {
             extract_i64_vec(&lof[1]),
             "f64 topk indices"
         );
+    }
+
+    /// Bit-exact parity for the dense F64/I64 contiguous-gather fast path vs the
+    /// Vec<Literal> copy: gather full rows of a [rows, cols] operand by index
+    /// (slice_sizes = [1, cols]), including out-of-bounds indices under clip and
+    /// fill_or_drop. Dense operand via new_*_values, literal via new.
+    #[test]
+    fn dense_gather_contiguous_matches_literal_path() {
+        let rows = 32usize;
+        let cols = 40usize;
+        let dims = vec![rows as u32, cols as u32];
+        let idx = Value::vector_i64(&[0, 5, 31, 999, 1, 7, 31, 0, 12, 999]).unwrap();
+        for mode in ["clip", "fill_or_drop"] {
+            let params = params(&[("slice_sizes", "1,40"), ("index_mode", mode)]);
+
+            let f: Vec<f64> = (0..rows * cols).map(|i| (i as f64 - 100.0) * 0.5).collect();
+            let dense_f = Value::Tensor(
+                TensorValue::new_f64_values(Shape { dims: dims.clone() }, f.clone()).unwrap(),
+            );
+            assert!(
+                dense_f
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_f64_slice()
+                    .is_some()
+            );
+            let lit_f = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: dims.clone() },
+                    f.iter().copied().map(Literal::from_f64).collect(),
+                )
+                .unwrap(),
+            );
+            let bits = |v: &Value| -> Vec<u64> {
+                v.as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap().to_bits())
+                    .collect()
+            };
+            let d = super::eval_gather(&[dense_f, idx.clone()], &params).unwrap();
+            let l = super::eval_gather(&[lit_f, idx.clone()], &params).unwrap();
+            assert_eq!(
+                d.as_tensor().unwrap().shape.dims,
+                l.as_tensor().unwrap().shape.dims
+            );
+            assert_eq!(bits(&d), bits(&l), "f64 gather mode={mode}");
+
+            let n: Vec<i64> = (0..(rows * cols) as i64).map(|i| i - 50).collect();
+            let dense_i = Value::Tensor(
+                TensorValue::new_i64_values(Shape { dims: dims.clone() }, n.clone()).unwrap(),
+            );
+            let lit_i = Value::Tensor(
+                TensorValue::new(
+                    DType::I64,
+                    Shape { dims: dims.clone() },
+                    n.iter().copied().map(Literal::I64).collect(),
+                )
+                .unwrap(),
+            );
+            let di = super::eval_gather(&[dense_i, idx.clone()], &params).unwrap();
+            let li = super::eval_gather(&[lit_i, idx.clone()], &params).unwrap();
+            assert_eq!(
+                extract_i64_vec(&di),
+                extract_i64_vec(&li),
+                "i64 gather mode={mode}"
+            );
+        }
     }
 
     #[test]
