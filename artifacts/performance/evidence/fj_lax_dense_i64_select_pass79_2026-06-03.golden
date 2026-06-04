@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.22 pass79 golden
+target=eval/select_64k_i64_vec
+lever=dense I64 same-shape Select fast path (select_i64_same_shape_fast_path) reading both branches from as_i64_slice, emitting dense i64; bypasses the generic per-element select_literal_as_dtype machinery
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2 (64k, shared Bool cond)
+worker=ts2
+select_64k_i64=dense 115.179us [114.898, 115.538] vs literal 2666.757us [2653.366, 2680.270] = 23.15x mid, 22.97x conservative
+score=10.0
+alien_primitive=dense SoA / typed columnar storage applied to ternary select, alien_cs_graveyard section 8.2
+source_change=select_i64_same_shape_fast_path picks on_true[i]/on_false[i] from as_i64_slice per the bool cond[i], emits new_i64_values; eval_select calls it after the f64 fast path for Bool cond + I64/I64 branches; falls back to the generic path otherwise
+isomorphism=elementwise same index order; selects on_true[i] when cond[i] is Literal::Bool(true) else on_false[i] (same as select_bool_condition for a Bool tensor); for I64xI64 promote_dtype is I64 and select_literal_as_dtype returns the chosen Literal::I64 unchanged so the dense output is identical; non-Bool cond element or non-dense branch -> Ok(None) -> unchanged generic path; output dtype I64
+golden_note=cond (Bool) still read per element since no dense Bool storage exists; only the i64 branches + output go dense; bit-identical to the generic path incl i64::MIN/MAX and both cond flags
+validation=RCH cargo test -p fj-lax --lib select passed 28 tests incl select_i64_dense_fast_path_matches_generic; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed

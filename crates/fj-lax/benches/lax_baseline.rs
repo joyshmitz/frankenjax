@@ -1267,6 +1267,63 @@ fn bench_select_1k(c: &mut Criterion) {
     });
 }
 
+// 64k i64 select: dense branch fast path (pass79) vs the generic per-element
+// select_literal_as_dtype path. Bool cond is shared (no dense Bool storage);
+// only the branch storage differs (dense i64 vs Vec<Literal>). Same process.
+fn bench_select_64k_i64_vec(c: &mut Criterion) {
+    let cond_elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::Bool(i % 3 == 0))
+        .collect();
+    let cond = Value::Tensor(TensorValue {
+        dtype: DType::Bool,
+        shape: Shape {
+            dims: vec![LARGE_ELEMENTWISE_LEN as u32],
+        },
+        elements: cond_elements.into(),
+    });
+    let t: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64).collect();
+    let f: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64).map(|i| -i).collect();
+    let inputs = [
+        cond,
+        Value::vector_i64(&t).unwrap(),
+        Value::vector_i64(&f).unwrap(),
+    ];
+    let p = no_params();
+    c.bench_function("eval/select_64k_i64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Select, &inputs, &p))
+    });
+}
+
+fn bench_select_64k_i64_literal_reference(c: &mut Criterion) {
+    let cond_elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::Bool(i % 3 == 0))
+        .collect();
+    let cond = Value::Tensor(TensorValue {
+        dtype: DType::Bool,
+        shape: Shape {
+            dims: vec![LARGE_ELEMENTWISE_LEN as u32],
+        },
+        elements: cond_elements.into(),
+    });
+    let lit = |sign: i64| {
+        Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+                (0..LARGE_ELEMENTWISE_LEN as i64)
+                    .map(|i| Literal::I64(sign * i))
+                    .collect(),
+            )
+            .unwrap(),
+        )
+    };
+    let inputs = [cond, lit(1), lit(-1)];
+    let p = no_params();
+    c.bench_function("eval/select_64k_i64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Select, &inputs, &p))
+    });
+}
+
 fn bench_complex_mul_1k(c: &mut Criterion) {
     let lhs = complex_vector(1000);
     let rhs = complex_vector(1000);
@@ -1640,6 +1697,8 @@ criterion_group!(
     bench_integer_pow_1k,
     bench_clamp_1k,
     bench_select_1k,
+    bench_select_64k_i64_vec,
+    bench_select_64k_i64_literal_reference,
     bench_complex_mul_1k,
     bench_complex_ctor_1k,
     bench_complex_conj_1k,

@@ -2259,6 +2259,41 @@ fn select_f64_same_shape_fast_path(
     )?)))
 }
 
+/// Dense I64 same-shape `select` fast path: pick `on_true[i]` / `on_false[i]`
+/// per the bool `cond[i]`, reading both branches straight from their contiguous
+/// `as_i64_slice()` backings and emitting a dense i64 output. Bit-for-bit
+/// identical to the generic path: for I64/I64 `promote_dtype` is I64 and
+/// `select_literal_as_dtype` returns the chosen `Literal::I64` unchanged. It
+/// skips the per-element promote/literal_to_i128 machinery and the 24-byte enum
+/// stride on the branches. `cond` is still read per element because no dense Bool
+/// storage exists. Returns `Ok(None)` unless both branches are dense I64 storage
+/// and every `cond` element is `Literal::Bool`.
+#[inline]
+fn select_i64_same_shape_fast_path(
+    cond: &TensorValue,
+    on_true: &TensorValue,
+    on_false: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    let (Some(true_values), Some(false_values)) = (
+        on_true.elements.as_i64_slice(),
+        on_false.elements.as_i64_slice(),
+    ) else {
+        return Ok(None);
+    };
+    let conds = cond.elements.as_slice();
+    let mut out = Vec::with_capacity(conds.len());
+    for (i, c) in conds.iter().enumerate() {
+        let Literal::Bool(flag) = *c else {
+            return Ok(None);
+        };
+        out.push(if flag { true_values[i] } else { false_values[i] });
+    }
+    Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+        cond.shape.clone(),
+        out,
+    )?)))
+}
+
 pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() != 3 {
         return Err(EvalError::ArityMismatch {
@@ -2296,6 +2331,13 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                 && on_true.dtype == DType::F64
                 && on_false.dtype == DType::F64
                 && let Some(value) = select_f64_same_shape_fast_path(cond, on_true, on_false)?
+            {
+                return Ok(value);
+            }
+            if cond.dtype == DType::Bool
+                && on_true.dtype == DType::I64
+                && on_false.dtype == DType::I64
+                && let Some(value) = select_i64_same_shape_fast_path(cond, on_true, on_false)?
             {
                 return Ok(value);
             }
@@ -6610,6 +6652,69 @@ mod tests {
             .collect();
         // Raw-bit comparison distinguishes -0.0 and NaN payloads.
         assert_eq!(tensor.elements, expected);
+    }
+
+    #[test]
+    fn select_i64_dense_fast_path_matches_generic() {
+        // Dense i64 select (vector_i64 branches) must match the Literal-backed
+        // generic path element-for-element, incl i64::MIN/MAX and both cond flags.
+        let n = 600usize;
+        let cond_flags: Vec<bool> = (0..n).map(|i| i % 3 == 0 || i % 7 == 1).collect();
+        let t: Vec<i64> = (0..n as i64)
+            .map(|i| i.wrapping_mul(2_654_435_761) - 5)
+            .collect();
+        let f: Vec<i64> = (0..n)
+            .map(|i| match i % 5 {
+                0 => i64::MIN,
+                1 => i64::MAX,
+                _ => -(i as i64) * 3,
+            })
+            .collect();
+        let cond = Value::Tensor(
+            TensorValue::new(
+                DType::Bool,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                cond_flags.iter().map(|&b| Literal::Bool(b)).collect(),
+            )
+            .unwrap(),
+        );
+        let lit = |d: &[i64]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::I64,
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    d.iter().copied().map(Literal::I64).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let dense_t = Value::vector_i64(&t).unwrap();
+        let dense_f = Value::vector_i64(&f).unwrap();
+        assert!(
+            dense_t
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_i64_slice()
+                .is_some()
+        );
+
+        let dense = eval_select(Primitive::Select, &[cond.clone(), dense_t, dense_f]).unwrap();
+        let generic = eval_select(Primitive::Select, &[cond, lit(&t), lit(&f)]).unwrap();
+        let ints = |v: &Value| -> Vec<i64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_i64().unwrap())
+                .collect()
+        };
+        assert_eq!(dense.as_tensor().unwrap().dtype, DType::I64);
+        assert_eq!(ints(&dense), ints(&generic));
     }
 
     // ── Clamp ──

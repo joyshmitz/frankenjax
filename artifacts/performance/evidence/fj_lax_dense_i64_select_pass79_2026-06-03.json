@@ -1,0 +1,59 @@
+{
+    "bead": "frankenjax-mcqr.30.22",
+    "pass": 79,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/select_64k_i64_vec",
+    "lever_summary": "Dense I64 same-shape Select fast path. Select(cond, on_true, on_false) for I64 branches previously ran the generic per-element select_literal_as_dtype (promote_dtype + literal_to_i128 + i64::try_from + reconstruct) — only an f64 (still Literal-based) fast path existed. New select_i64_same_shape_fast_path reads both branches from as_i64_slice() and emits a dense i64 output (cond, a Bool tensor, is still read per element — no dense Bool storage exists).",
+    "alien_graveyard": {
+        "primitive": "dense SoA / typed columnar storage applied to ternary select",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "consume the contiguous i64 backing for the select branches instead of per-element tagged-union promotion dispatch"
+    },
+    "method": "Same-worker comparison on ts2: dense (vector_i64) branches vs Vec<Literal>-backed branches run in the same process; the shared Bool cond is identical, so only the branch storage path differs.",
+    "results": {
+        "select_64k_i64": {
+            "dense_ns": 115178.7,
+            "dense_ci_ns": [114898.3, 115538.4],
+            "literal_ns": 2666757.1,
+            "literal_ci_ns": [2653366.1, 2680269.7],
+            "speedup_midpoint_x": 23.15,
+            "speedup_conservative_x": 22.97
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- select_64k_i64 --save-baseline sel",
+    "score": {
+        "impact": 5.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 10.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/arithmetic.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added select_i64_same_shape_fast_path(cond, on_true, on_false); eval_select calls it after the existing f64 fast path when cond is Bool and both branches are I64. Falls back to the generic path (Ok(None)) unless both branches are I64 dense storage and every cond element is Literal::Bool."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: elementwise, same index order",
+        "selection": "unchanged: per element picks on_true[i] if cond[i] is Literal::Bool(true) else on_false[i] — same as select_bool_condition for a Bool tensor; for I64xI64 promote_dtype is I64 and select_literal_as_dtype returns the chosen Literal::I64 unchanged, so the dense output is identical",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "returns Ok(None) -> generic path unless both branches are I64 dense and every cond element is Literal::Bool; a non-Bool cond element or non-dense branch falls back, preserving the generic path's behavior/errors exactly; output dtype I64",
+        "output_dtype": "I64"
+    },
+    "validation": [
+        {
+            "name": "dense_i64_select_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib select",
+            "result": "passed: 28 tests incl new select_i64_dense_fast_path_matches_generic (n=600, i64::MIN/MAX, both cond flags, dense vs Literal element-for-element)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}
