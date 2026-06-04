@@ -1735,6 +1735,99 @@ pub(crate) fn eval_gather(
     )?))
 }
 
+/// Dense F64/I64 scatter fast path (axis-0 slice scatter): scatter directly over
+/// a clone of the contiguous typed operand backing, reading update slices from
+/// the typed updates backing, bypassing the `Vec<Literal>` materialization and
+/// per-element Literal dispatch. Bit-for-bit identical to the generic path —
+/// same resolved indices, same slice ranges, overwrite via copy_from_slice and
+/// add via `a + b` (F64) / `a.wrapping_add(b)` (I64), matching binary_literal_op
+/// Add. Returns `None` unless both operand and updates are the same F64/I64 dense
+/// storage.
+fn eval_scatter_dense(
+    operand: &TensorValue,
+    updates: &TensorValue,
+    index_vals: &[usize],
+    slice_elems: usize,
+    dim0: usize,
+    index_mode: IndexMode,
+    add_mode: bool,
+) -> Result<Option<Value>, EvalError> {
+    let primitive = Primitive::Scatter;
+    macro_rules! scatter_typed {
+        ($op:expr, $upd:expr, $ctor:path, $add_fn:expr) => {{
+            let mut out = $op.to_vec();
+            let upd_src = $upd;
+            for (i, &raw_idx) in index_vals.iter().enumerate() {
+                let Some(idx) = resolve_axis0_index(raw_idx, dim0, index_mode) else {
+                    continue;
+                };
+                let base = idx
+                    .checked_mul(slice_elems)
+                    .ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: "scatter base offset overflows usize".to_owned(),
+                    })?;
+                let uoff = i
+                    .checked_mul(slice_elems)
+                    .ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: "scatter update offset overflows usize".to_owned(),
+                    })?;
+                let rend = base
+                    .checked_add(slice_elems)
+                    .ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: "scatter result slice end overflows usize".to_owned(),
+                    })?;
+                let uend = uoff
+                    .checked_add(slice_elems)
+                    .ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: "scatter update slice end overflows usize".to_owned(),
+                    })?;
+                if rend > out.len() {
+                    return Err(EvalError::Unsupported {
+                        primitive,
+                        detail: "scatter result slice exceeds operand element count".to_owned(),
+                    });
+                }
+                if uend > upd_src.len() {
+                    return Err(EvalError::Unsupported {
+                        primitive,
+                        detail: "scatter update slice exceeds update element count".to_owned(),
+                    });
+                }
+                if add_mode {
+                    for j in 0..slice_elems {
+                        out[base + j] = $add_fn(out[base + j], upd_src[uoff + j]);
+                    }
+                } else {
+                    out[base..rend].copy_from_slice(&upd_src[uoff..uend]);
+                }
+            }
+            return Ok(Some(Value::Tensor($ctor(operand.shape.clone(), out)?)));
+        }};
+    }
+    if operand.dtype == DType::F64
+        && let (Some(op), Some(upd)) = (
+            operand.elements.as_f64_slice(),
+            updates.elements.as_f64_slice(),
+        )
+    {
+        scatter_typed!(op, upd, TensorValue::new_f64_values, |a: f64, b: f64| a + b);
+    }
+    if operand.dtype == DType::I64
+        && let (Some(op), Some(upd)) = (
+            operand.elements.as_i64_slice(),
+            updates.elements.as_i64_slice(),
+        )
+    {
+        scatter_typed!(op, upd, TensorValue::new_i64_values, |a: i64, b: i64| a
+            .wrapping_add(b));
+    }
+    Ok(None)
+}
+
 /// Scatter: update positions in an operand tensor using indices and update values.
 ///
 /// Simplified semantics (1-D index scatter):
@@ -1879,6 +1972,21 @@ pub(crate) fn eval_scatter(
 
     if expected_update_elems == 0 {
         return Ok(Value::Tensor(operand.clone()));
+    }
+
+    // Dense F64/I64 fast path: scatter over the contiguous typed backing,
+    // bypassing the Vec<Literal> materialization. Returns None for non-dense /
+    // other dtypes -> generic below.
+    if let Some(value) = eval_scatter_dense(
+        operand,
+        updates,
+        &index_vals,
+        slice_elems,
+        dim0,
+        index_mode,
+        add_mode,
+    )? {
+        return Ok(value);
     }
 
     let mut result_elements = operand.elements.to_vec();
@@ -6252,6 +6360,119 @@ mod tests {
     /// Vec<Literal> copy: gather full rows of a [rows, cols] operand by index
     /// (slice_sizes = [1, cols]), including out-of-bounds indices under clip and
     /// fill_or_drop. Dense operand via new_*_values, literal via new.
+    /// Bit-exact parity for the dense F64/I64 scatter fast path vs the
+    /// Vec<Literal> path: overwrite and add modes, full-row updates into a
+    /// [rows, cols] operand, including out-of-bounds indices (fill_or_drop drops,
+    /// clip clamps). Dense via new_*_values, literal via new.
+    #[test]
+    fn dense_scatter_matches_literal_path() {
+        let rows = 16usize;
+        let cols = 24usize;
+        let dims = vec![rows as u32, cols as u32];
+        let idxs = [0_i64, 3, 15, 99, 1, 15]; // 99 OOB, 15 repeated (add accumulates)
+        let n_upd = idxs.len();
+        let idx = Value::vector_i64(&idxs).unwrap();
+        let upd_dims = vec![n_upd as u32, cols as u32];
+
+        for mode in ["overwrite", "add"] {
+            for imode in ["fill_or_drop", "clip"] {
+                let p = params(&[("mode", mode), ("index_mode", imode)]);
+
+                // f64
+                let opf: Vec<f64> = (0..rows * cols).map(|i| i as f64 * 0.5 - 10.0).collect();
+                let updf: Vec<f64> = (0..n_upd * cols).map(|i| i as f64 * 0.25 + 1.0).collect();
+                let mk_f = |d: &[f64], dm: &[u32], dense: bool| {
+                    if dense {
+                        Value::Tensor(
+                            TensorValue::new_f64_values(Shape { dims: dm.to_vec() }, d.to_vec())
+                                .unwrap(),
+                        )
+                    } else {
+                        Value::Tensor(
+                            TensorValue::new(
+                                DType::F64,
+                                Shape { dims: dm.to_vec() },
+                                d.iter().copied().map(Literal::from_f64).collect(),
+                            )
+                            .unwrap(),
+                        )
+                    }
+                };
+                let bits = |v: &Value| -> Vec<u64> {
+                    v.as_tensor()
+                        .unwrap()
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap().to_bits())
+                        .collect()
+                };
+                let d = super::eval_scatter(
+                    &[
+                        mk_f(&opf, &dims, true),
+                        idx.clone(),
+                        mk_f(&updf, &upd_dims, true),
+                    ],
+                    &p,
+                )
+                .unwrap();
+                let l = super::eval_scatter(
+                    &[
+                        mk_f(&opf, &dims, false),
+                        idx.clone(),
+                        mk_f(&updf, &upd_dims, false),
+                    ],
+                    &p,
+                )
+                .unwrap();
+                assert_eq!(bits(&d), bits(&l), "f64 scatter mode={mode} imode={imode}");
+
+                // i64
+                let opi: Vec<i64> = (0..(rows * cols) as i64).map(|i| i - 30).collect();
+                let updi: Vec<i64> = (0..(n_upd * cols) as i64).map(|i| i * 2 + 1).collect();
+                let mk_i = |d: &[i64], dm: &[u32], dense: bool| {
+                    if dense {
+                        Value::Tensor(
+                            TensorValue::new_i64_values(Shape { dims: dm.to_vec() }, d.to_vec())
+                                .unwrap(),
+                        )
+                    } else {
+                        Value::Tensor(
+                            TensorValue::new(
+                                DType::I64,
+                                Shape { dims: dm.to_vec() },
+                                d.iter().copied().map(Literal::I64).collect(),
+                            )
+                            .unwrap(),
+                        )
+                    }
+                };
+                let di = super::eval_scatter(
+                    &[
+                        mk_i(&opi, &dims, true),
+                        idx.clone(),
+                        mk_i(&updi, &upd_dims, true),
+                    ],
+                    &p,
+                )
+                .unwrap();
+                let li = super::eval_scatter(
+                    &[
+                        mk_i(&opi, &dims, false),
+                        idx.clone(),
+                        mk_i(&updi, &upd_dims, false),
+                    ],
+                    &p,
+                )
+                .unwrap();
+                assert_eq!(
+                    extract_i64_vec(&di),
+                    extract_i64_vec(&li),
+                    "i64 scatter mode={mode} imode={imode}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn dense_gather_contiguous_matches_literal_path() {
         let rows = 32usize;

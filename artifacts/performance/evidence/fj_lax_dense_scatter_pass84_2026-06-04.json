@@ -1,0 +1,59 @@
+{
+    "bead": "frankenjax-mcqr.30.28",
+    "pass": 84,
+    "date": "2026-06-04",
+    "crate": "fj-lax",
+    "target": "eval/scatter_256x256_f64_vec",
+    "lever_summary": "Dense F64/I64 scatter. eval_scatter materialized operand.elements.to_vec() (a dense operand becomes a 24-byte Vec<Literal>) then copied/added Literal slices. New eval_scatter_dense scatters over a clone of the contiguous as_f64_slice()/as_i64_slice() operand, reading update slices from the typed updates backing — overwrite via copy_from_slice, add via a+b (F64) / a.wrapping_add(b) (I64) — and returns a dense output, bypassing all Literal machinery.",
+    "alien_graveyard": {
+        "primitive": "dense SoA / typed columnar storage applied to scatter",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "scatter contiguous native-typed slices instead of materializing + copying/adding 24-byte tagged-union elements"
+    },
+    "method": "Same-worker comparison on ts2: dense (new_f64_values) operand + updates vs Vec<Literal>-backed operand + updates run in the same process; shared i64 indices.",
+    "results": {
+        "scatter_256x256_f64": {
+            "dense_ns": 34375.9,
+            "dense_ci_ns": [34119.4, 34661.2],
+            "literal_ns": 105419.9,
+            "literal_ci_ns": [104738.1, 106143.5],
+            "speedup_midpoint_x": 3.07,
+            "speedup_conservative_x": 3.02
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- scatter_256x256_f64 --save-baseline scat",
+    "score": {
+        "impact": 4.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 8.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/tensor_ops.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added eval_scatter_dense(operand, updates, index_vals, slice_elems, dim0, index_mode, add_mode); eval_scatter calls it after the empty-update early return, returning None (generic path) unless both operand and updates are the same F64/I64 dense storage."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: same resolved index iteration order, same per-index base/update slice ranges; repeated indices apply in the same order (last-write-wins for overwrite, accumulate for add)",
+        "combiner": "unchanged: overwrite via copy_from_slice; add via a+b (F64) / a.wrapping_add(b) (I64), matching binary_literal_op(Add) for those dtypes",
+        "index_modes": "fill_or_drop (drops OOB) and clip (clamps) both validated; resolved by the shared resolve_axis0_index before the dense branch",
+        "errors": "same checked_mul/checked_add overflow checks and the same slice-exceeds bounds checks (against the typed slice lengths == element counts)",
+        "rng": "not applicable",
+        "output_dtype": "F64 / I64 (operand dtype preserved)"
+    },
+    "validation": [
+        {
+            "name": "dense_scatter_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib --release scatter",
+            "result": "passed: 16 tests incl dense_scatter_matches_literal_path (overwrite + add x fill_or_drop + clip, OOB + repeated indices, f64 by bits + i64)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings",
+            "result": "passed (release dodges shared-target proc-macro rmeta drift in debug)"
+        }
+    ]
+}

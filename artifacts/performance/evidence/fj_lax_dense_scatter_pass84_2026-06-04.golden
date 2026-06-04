@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.28 pass84 golden
+target=eval/scatter_256x256_f64_vec
+lever=dense F64/I64 scatter — scatter over a clone of the contiguous typed operand backing, reading typed update slices, bypassing the Vec<Literal> materialize + copy/add
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2 (256x256 operand, overwrite 256 rows reversed, clip)
+worker=ts2
+scatter_256x256_f64=dense 34.376us [34.119, 34.661] vs literal 105.420us [104.738, 106.144] = 3.07x mid, 3.02x conservative
+score=8.0
+alien_primitive=dense SoA / typed columnar storage applied to scatter, alien_cs_graveyard section 8.2
+source_change=eval_scatter_dense scatters over a clone of as_f64_slice/as_i64_slice (overwrite via copy_from_slice, add via a+b for f64 / wrapping_add for i64) and returns new_f64_values/new_i64_values; eval_scatter calls it after the empty-update early return, else the unchanged Vec<Literal> path
+isomorphism=same resolved index order and per-index base/update slice ranges; repeated indices apply in the same order (last-write-wins overwrite, accumulate add); overwrite copy_from_slice; add matches binary_literal_op(Add) (f64 a+b, i64 wrapping_add); fill_or_drop + clip OOB modes validated; same overflow/bounds errors; operand dtype preserved
+golden_note=bit-identical to the Vec<Literal> path across overwrite+add modes x fill_or_drop+clip OOB with repeated indices, f64 by bits + i64
+validation=RCH cargo test -p fj-lax --lib --release scatter passed 16 tests incl dense_scatter_matches_literal_path; RCH cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings passed
