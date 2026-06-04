@@ -3251,13 +3251,39 @@ pub(crate) fn eval_argmax(
     eval_arg_extremum(primitive, inputs, params, true)
 }
 
+const TOP_K_PARTIAL_SELECT_MAX_DENOM: usize = 4;
+
+#[inline]
+fn top_k_pair_cmp(lhs: &(u64, u32), rhs: &(u64, u32)) -> Ordering {
+    lhs.0.cmp(&rhs.0).then_with(|| lhs.1.cmp(&rhs.1))
+}
+
+#[inline]
+fn order_top_k_pairs(pairs: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>, k: usize) {
+    if k == 0 {
+        return;
+    }
+    if k <= pairs.len() / TOP_K_PARTIAL_SELECT_MAX_DENOM {
+        let kth = k - 1;
+        pairs.select_nth_unstable_by(kth, top_k_pair_cmp);
+        pairs[..k].sort_unstable_by(top_k_pair_cmp);
+    } else {
+        if scratch.len() != pairs.len() {
+            scratch.resize(pairs.len(), (0, 0));
+        }
+        radix_pairs_ascending(pairs, scratch);
+    }
+}
+
 /// Dense i64/f64 TopK fast path over the last (contiguous) axis: for each slice,
-/// stably ascending-radix the `(complement key, in-slice index)` pairs and take
-/// the first `k`. The complement (`!total_order_key`) turns the ascending radix
-/// into descending-by-value, and stability keeps equal values in ascending
-/// in-slice index order — exactly the generic comparator
-/// `compare_sort_keys(b, a).then(a_idx.cmp(b_idx))`. Returns `None` (generic
-/// path) for non-dense / non-i64/f64 storage or short axes.
+/// order `(complement key, in-slice index)` pairs and take the first `k`. The
+/// complement (`!total_order_key`) turns ascending order into
+/// descending-by-value, and the in-slice index keeps equal values in ascending
+/// tie order — exactly the generic comparator
+/// `compare_sort_keys(b, a).then(a_idx.cmp(b_idx))`. Small `k` uses exact
+/// partial selection and sorts only the selected prefix; large `k` keeps the
+/// stable LSD radix sort. Returns `None` (generic path) for non-dense /
+/// non-i64/f64 storage or short axes.
 fn eval_top_k_dense(
     tensor: &TensorValue,
     k: usize,
@@ -3269,7 +3295,7 @@ fn eval_top_k_dense(
         return Ok(None);
     }
     let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(stride);
-    let mut scratch: Vec<(u64, u32)> = vec![(0, 0); stride];
+    let mut scratch: Vec<(u64, u32)> = Vec::new();
     let mut out_idx: Vec<i64> = Vec::with_capacity(n_slices * k);
 
     if let Some(values) = tensor.elements.as_i64_slice() {
@@ -3280,7 +3306,7 @@ fn eval_top_k_dense(
             for (i, &v) in values[base..base + stride].iter().enumerate() {
                 pairs.push((!((v as u64) ^ (1_u64 << 63)), i as u32));
             }
-            radix_pairs_ascending(&mut pairs, &mut scratch);
+            order_top_k_pairs(&mut pairs, &mut scratch, k);
             for &(_, orig) in pairs.iter().take(k) {
                 out_vals.push(values[base + orig as usize]);
                 out_idx.push(i64::from(orig));
@@ -3314,7 +3340,7 @@ fn eval_top_k_dense(
             for (i, &v) in values[base..base + stride].iter().enumerate() {
                 pairs.push((!f64_total_order_key(v), i as u32));
             }
-            radix_pairs_ascending(&mut pairs, &mut scratch);
+            order_top_k_pairs(&mut pairs, &mut scratch, k);
             for &(_, orig) in pairs.iter().take(k) {
                 out_vals.push(values[base + orig as usize]);
                 out_idx.push(i64::from(orig));

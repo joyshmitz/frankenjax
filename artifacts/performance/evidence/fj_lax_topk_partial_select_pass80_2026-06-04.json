@@ -1,0 +1,102 @@
+{
+  "bead": "frankenjax-mcqr.30.23",
+  "pass": 80,
+  "date": "2026-06-04",
+  "crate": "fj-lax",
+  "targets": [
+    "eval/topk_64k_k128_f64_vec",
+    "eval/topk_64k_k128_i64_vec"
+  ],
+  "lever_summary": "Exact partial selection for dense TopK when k is small relative to the last-axis length. The previous dense path full-sorted every (complement key, in-slice index) pair by radix before taking k. The new path uses select_nth_unstable_by over the total pair order and sorts only pairs[..k], keeping the existing full radix path for large k.",
+  "profile": {
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- eval/ --noplot --sample-size 10 --warm-up-time 1 --measurement-time 2",
+    "worker": "ts2",
+    "observations": {
+      "topk_64k_k128_f64_vec_us": {
+        "mean": 2594.6,
+        "ci": [2555.9, 2628.8]
+      },
+      "topk_64k_k128_i64_vec_us": {
+        "mean": 1623.1,
+        "ci": [1607.2, 1639.1]
+      }
+    }
+  },
+  "rebench": {
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- topk_64k_k128 --noplot --sample-size 10 --warm-up-time 1 --measurement-time 2",
+    "worker": "ts2",
+    "results": {
+      "topk_64k_k128_f64_vec_us": {
+        "mean": 258.81,
+        "ci": [258.59, 259.22],
+        "speedup_midpoint_x": 10.03,
+        "speedup_conservative_x": 9.86
+      },
+      "topk_64k_k128_i64_vec_us": {
+        "mean": 263.13,
+        "ci": [262.52, 263.88],
+        "speedup_midpoint_x": 6.17,
+        "speedup_conservative_x": 6.09
+      }
+    }
+  },
+  "verification_rebench": {
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- topk_64k_k128 --noplot --sample-size 10 --warm-up-time 1 --measurement-time 2",
+    "worker": "vmi1149989",
+    "results": {
+      "topk_64k_k128_f64_vec_us": {
+        "mean": 230.42,
+        "ci": [174.82, 282.77],
+        "speedup_vs_profile_midpoint_x": 11.26
+      },
+      "topk_64k_k128_f64_literal_ref_us": {
+        "mean": 9666.2,
+        "ci": [9254.1, 10071.0]
+      },
+      "topk_64k_k128_i64_vec_us": {
+        "mean": 148.61,
+        "ci": [131.5, 168.89],
+        "speedup_vs_profile_midpoint_x": 10.92
+      },
+      "topk_64k_k128_i64_literal_ref_us": {
+        "mean": 5310.1,
+        "ci": [5038.3, 5525.4]
+      }
+    }
+  },
+  "score": {
+    "impact": 5.0,
+    "confidence": 5.0,
+    "effort": 2.0,
+    "impact_times_confidence_over_effort": 12.5,
+    "kept": true
+  },
+  "alien_graveyard": {
+    "primitive": "order-statistic partial selection / adaptive partial sort",
+    "sources": [
+      "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.6 database cracking partial sort around a pivot",
+      "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2 radix/non-comparison dense ordering work"
+    ]
+  },
+  "change": {
+    "files": [
+      "crates/fj-lax/src/tensor_ops.rs"
+    ],
+    "lever": "Added top_k_pair_cmp and order_top_k_pairs. Small-k dense TopK uses select_nth_unstable_by(k - 1, top_k_pair_cmp), then sort_unstable_by(top_k_pair_cmp) on the selected prefix. Large-k dense TopK keeps radix_pairs_ascending with lazy scratch allocation."
+  },
+  "isomorphism": {
+    "ordering": "unchanged: ascending (complement key, original index) equals descending value order with ascending in-slice index ties, matching compare_sort_keys(b,a).then(a_idx.cmp(b_idx))",
+    "tie_breaking": "unchanged: original index is part of the total comparator, so instability in select_nth_unstable_by cannot reorder equal values incorrectly",
+    "floating_point": "identical: f64_total_order_key is unchanged and output values are copied from the original dense slice by index, preserving NaN payloads, signed zero, infinities, and all f64 bits",
+    "rng": "not applicable",
+    "fallbacks": "unchanged: non-dense/non-i64-f64/short-axis inputs return None to the generic path; large k uses the previous radix path",
+    "errors": "unchanged: eval_top_k validation and generic fallback are untouched"
+  },
+  "validation": [
+    {
+      "name": "top_k_parity",
+      "command": "rch exec -- cargo test -p fj-lax --lib top_k -- --nocapture",
+      "result": "passed: 5 tests including radix_top_k_dense_matches_generic"
+    }
+  ]
+}

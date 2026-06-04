@@ -1,0 +1,19 @@
+frankenjax-mcqr.30.23 pass80 golden
+target=eval/topk_64k_k128_{f64,i64}_vec
+lever=partial-select dense TopK for small k
+method=select_nth_unstable_by over total (complement value key, original index) order, then sort selected prefix; keep full radix path for large k
+profile_baseline_worker=ts2
+profile_baseline_f64=2594.6us [2555.9, 2628.8]
+profile_baseline_i64=1623.1us [1607.2, 1639.1]
+verification_rebench_worker=vmi1149989
+verification_rebench_f64=230.42us [174.82, 282.77]
+verification_rebench_f64_literal_ref=9666.2us [9254.1, 10071.0]
+verification_rebench_i64=148.61us [131.50, 168.89]
+verification_rebench_i64_literal_ref=5310.1us [5038.3, 5525.4]
+speedup_vs_profile_midpoint_f64=11.26x
+speedup_vs_profile_midpoint_i64=10.92x
+score=12.5
+alien_primitive=order-statistic partial selection / adaptive partial sort
+isomorphism=ordering unchanged because the comparator key is total: complement value key followed by original in-slice index. Tie-breaking unchanged because original index is part of the selected order. Floating-point output is copied by original index from the dense f64 slice, preserving NaN payloads, signed zeros, infinities, and all bits. RNG is not used. Non-dense, non-i64/f64, invalid, and large-k cases keep existing fallback/error behavior.
+golden_note=bit-identical to the generic comparison path for values and indices across i64 ties and f64 NaN/+-inf/+-0/duplicate ties; verified dense-vs-Literal multi-slice [3,800].
+validation=RCH cargo test -p fj-lax --lib top_k -- --nocapture passed 5 tests including radix_top_k_dense_matches_generic; RCH cargo check -p fj-core --all-targets passed after the in-flight dense-storage tree completed.
