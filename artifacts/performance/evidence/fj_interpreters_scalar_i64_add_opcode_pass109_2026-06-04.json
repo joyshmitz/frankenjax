@@ -1,0 +1,84 @@
+{
+  "pass": 109,
+  "bead": "frankenjax-7d3dd",
+  "crate": "fj-interpreters",
+  "date": "2026-06-04",
+  "target": "eval_jaxpr_throughput/chain_add",
+  "profile_basis": "ready [perf] bead frankenjax-7d3dd, filed from pass91 residual interpreter profile: eval_primitive dispatch dominates flat-slot interpreter chain throughput",
+  "lever": "scalar I64 literal-right Add-chain opcode fast path before the dense and hashed interpreter environments",
+  "worker": "ts2",
+  "baseline_command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-7d3dd-baseline-20260604 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- eval_jaxpr_throughput/chain_add --sample-size 100 --measurement-time 3 --warm-up-time 1",
+  "rebench_command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-7d3dd-rebench-20260604 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo bench -p fj-dispatch --bench dispatch_baseline -- eval_jaxpr_throughput/chain_add --sample-size 100 --measurement-time 3 --warm-up-time 1",
+  "benchmarks": [
+    {
+      "case": "chain_add/10",
+      "baseline_ns": {
+        "lower": 811.73,
+        "mid": 820.74,
+        "upper": 829.41
+      },
+      "candidate_ns": {
+        "lower": 44.391,
+        "mid": 44.449,
+        "upper": 44.512
+      },
+      "speedup_midpoint": 18.47,
+      "speedup_conservative": 18.24
+    },
+    {
+      "case": "chain_add/100",
+      "baseline_ns": {
+        "lower": 6967.1,
+        "mid": 7051.2,
+        "upper": 7131.0
+      },
+      "candidate_ns": {
+        "lower": 295.87,
+        "mid": 296.83,
+        "upper": 298.17
+      },
+      "speedup_midpoint": 23.75,
+      "speedup_conservative": 23.37
+    },
+    {
+      "case": "chain_add/1000",
+      "baseline_ns": {
+        "lower": 68191.0,
+        "mid": 69034.0,
+        "upper": 69834.0
+      },
+      "candidate_ns": {
+        "lower": 2958.5,
+        "mid": 2979.3,
+        "upper": 3007.9
+      },
+      "speedup_midpoint": 23.17,
+      "speedup_conservative": 22.67
+    }
+  ],
+  "score": {
+    "impact": 10.0,
+    "confidence": 1.0,
+    "effort": 1.0,
+    "impact_x_confidence_div_effort": 10.0
+  },
+  "isomorphism_proof": [
+    "The fast path runs only after the existing const/input arity checks, so arity error ordering is preserved.",
+    "The guard accepts only one input, one output, no constvars, no const values, no jaxpr/equation effects, at least one equation, Primitive::Add only, empty params, empty sub_jaxprs, one output per equation, and input atoms exactly Var(previous), Lit(I64(rhs)).",
+    "On any guard miss the function returns None and eval_jaxpr_with_consts continues into the existing dense or hashed interpreter path; guard-miss tests compare literal-left, F64 literal, params, effects, sub_jaxpr, and wrong-outvar cases against eval_jaxpr_hashed_env.",
+    "Accepted programs have no floating-point values, no RNG, no tie-breaking, and no side effects. Integer semantics are preserved with i64::wrapping_add, matching the existing Primitive::Add I64 scalar behavior.",
+    "Output ordering is preserved because the guard requires exactly one outvar equal to the last equation output and returns exactly one Value in the original outvar order."
+  ],
+  "golden": "fj_interpreters_scalar_i64_add_opcode_pass109_2026-06-04.golden",
+  "golden_sha256": "e396a5e0366b0f7ca8e02036eae1704ec08315d0d41680ead72e1cbe2eb987fc",
+  "validation": [
+    "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-7d3dd-test2-20260604 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo test -p fj-interpreters scalar_i64_add_chain -- --nocapture",
+    "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-7d3dd-validate-check-20260604 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo check -p fj-interpreters --all-targets",
+    "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-7d3dd-validate-test-20260604 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo test -p fj-interpreters -- --nocapture",
+    "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-7d3dd-validate-clippy-20260604 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo clippy -p fj-interpreters --all-targets -- -D warnings",
+    "rustfmt --edition 2024 --check crates/fj-interpreters/src/lib.rs",
+    "ubs crates/fj-interpreters/src/lib.rs",
+    "sha256sum -c artifacts/performance/evidence/fj_interpreters_scalar_i64_add_opcode_pass109_2026-06-04.golden.sha256"
+  ],
+  "status": "kept"
+}

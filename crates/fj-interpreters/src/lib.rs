@@ -752,6 +752,10 @@ pub fn eval_jaxpr_with_consts(
         });
     }
 
+    if let Some(result) = try_eval_scalar_i64_add_chain(jaxpr, const_values, args) {
+        return result;
+    }
+
     // The tracer mints variables densely and sequentially (`ensure_dense_var`
     // in fj-trace), so the defined-variable ids are a compact range. When that
     // holds we evaluate against a flat `Vec<Option<Value>>` indexed by
@@ -778,6 +782,53 @@ pub fn eval_jaxpr_with_consts(
     } else {
         eval_jaxpr_hashed_env(jaxpr, const_values, args)
     }
+}
+
+fn try_eval_scalar_i64_add_chain(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || jaxpr.invars.len() != 1
+        || jaxpr.outvars.len() != 1
+        || !jaxpr.effects.is_empty()
+        || jaxpr.equations.is_empty()
+    {
+        return None;
+    }
+
+    let mut current_var = jaxpr.invars[0];
+    let mut accumulator = match args.first()? {
+        Value::Scalar(Literal::I64(value)) => *value,
+        Value::Scalar(_) | Value::Tensor(_) => return None,
+    };
+
+    for equation in &jaxpr.equations {
+        if equation.primitive != Primitive::Add
+            || !equation.params.is_empty()
+            || !equation.sub_jaxprs.is_empty()
+            || !equation.effects.is_empty()
+            || equation.outputs.len() != 1
+        {
+            return None;
+        }
+
+        match equation.inputs.as_slice() {
+            [Atom::Var(var), Atom::Lit(Literal::I64(rhs))] if *var == current_var => {
+                accumulator = accumulator.wrapping_add(*rhs);
+                current_var = equation.outputs[0];
+            }
+            _ => return None,
+        }
+    }
+
+    if jaxpr.outvars[0] != current_var {
+        return None;
+    }
+
+    Some(Ok(vec![Value::scalar_i64(accumulator)]))
 }
 
 /// Flat slot-array interpreter environment (hot path). `slots` must be
@@ -880,7 +931,7 @@ fn eval_jaxpr_hashed_env(
 
 #[cfg(test)]
 mod tests {
-    use super::{InterpreterError, eval_jaxpr, eval_jaxpr_with_consts};
+    use super::{InterpreterError, eval_jaxpr, eval_jaxpr_hashed_env, eval_jaxpr_with_consts};
     use fj_core::{
         Atom, DType, Equation, Jaxpr, Literal, Primitive, ProgramSpec, Shape, TensorValue, Value,
         VarId, build_program,
@@ -988,6 +1039,115 @@ mod tests {
             eval_jaxpr(&chain_jaxpr_with_base(5_000_000), &args).expect("hashed env evaluates");
         assert_eq!(dense, vec![Value::scalar_i64(36)]);
         assert_eq!(dense, hashed);
+    }
+
+    fn scalar_i64_add_literal_chain(addends: &[i64]) -> Jaxpr {
+        let equations = addends
+            .iter()
+            .enumerate()
+            .map(|(idx, addend)| Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![
+                    Atom::Var(VarId((idx + 1) as u32)),
+                    Atom::Lit(Literal::I64(*addend))
+                ],
+                outputs: smallvec![VarId((idx + 2) as u32)],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            })
+            .collect();
+        Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId((addends.len() + 1) as u32)],
+            equations,
+        )
+    }
+
+    #[test]
+    fn scalar_i64_add_chain_fast_path_matches_hashed_interpreter() {
+        for len in [1_usize, 10, 1000] {
+            let addends: Vec<i64> = (0..len)
+                .map(|idx| ((idx as i64) * 17).wrapping_sub(31))
+                .collect();
+            let jaxpr = scalar_i64_add_literal_chain(&addends);
+            let args = [Value::scalar_i64(123)];
+            let fast = eval_jaxpr(&jaxpr, &args).expect("fast path evaluates");
+            let hashed = eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("hashed path evaluates");
+            assert_eq!(fast, hashed, "chain length {len}");
+        }
+    }
+
+    #[test]
+    fn scalar_i64_add_chain_fast_path_preserves_wrapping() {
+        let jaxpr = scalar_i64_add_literal_chain(&[1, 2]);
+        let outputs =
+            eval_jaxpr(&jaxpr, &[Value::scalar_i64(i64::MAX)]).expect("wrapping chain evaluates");
+        assert_eq!(
+            outputs,
+            vec![Value::scalar_i64(i64::MAX.wrapping_add(1).wrapping_add(2))]
+        );
+    }
+
+    #[test]
+    fn scalar_i64_add_chain_guard_misses_fall_back() {
+        let mut literal_left = scalar_i64_add_literal_chain(&[5]);
+        literal_left.equations[0].inputs =
+            smallvec![Atom::Lit(Literal::I64(5)), Atom::Var(VarId(1))];
+        let args = [Value::scalar_i64(7)];
+        assert_eq!(
+            eval_jaxpr(&literal_left, &args),
+            eval_jaxpr_hashed_env(&literal_left, &[], &args),
+            "literal-left add should use the generic path"
+        );
+
+        let mut f64_literal = scalar_i64_add_literal_chain(&[5]);
+        f64_literal.equations[0].inputs[1] = Atom::Lit(Literal::from_f64(5.0));
+        assert_eq!(
+            eval_jaxpr(&f64_literal, &args),
+            eval_jaxpr_hashed_env(&f64_literal, &[], &args),
+            "f64 literal add should use the generic path"
+        );
+
+        let mut params = scalar_i64_add_literal_chain(&[5]);
+        params.equations[0]
+            .params
+            .insert("unused".into(), "1".into());
+        assert_eq!(
+            eval_jaxpr(&params, &args),
+            eval_jaxpr_hashed_env(&params, &[], &args),
+            "non-empty params should use the generic path"
+        );
+
+        let mut effects = scalar_i64_add_literal_chain(&[5]);
+        effects.equations[0].effects.push("ordered".into());
+        assert_eq!(
+            eval_jaxpr(&effects, &args),
+            eval_jaxpr_hashed_env(&effects, &[], &args),
+            "equation effects should use the generic path"
+        );
+
+        let mut sub_jaxpr = scalar_i64_add_literal_chain(&[5]);
+        sub_jaxpr.equations[0].sub_jaxprs.push(Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(1)],
+            vec![],
+        ));
+        assert_eq!(
+            eval_jaxpr(&sub_jaxpr, &args),
+            eval_jaxpr_hashed_env(&sub_jaxpr, &[], &args),
+            "sub-jaxpr equations should use the generic path"
+        );
+
+        let mut wrong_outvar = scalar_i64_add_literal_chain(&[5]);
+        wrong_outvar.outvars[0] = VarId(99);
+        assert_eq!(
+            eval_jaxpr(&wrong_outvar, &args),
+            eval_jaxpr_hashed_env(&wrong_outvar, &[], &args),
+            "non-final outvars should keep the generic error behavior"
+        );
     }
 
     #[test]
@@ -1832,6 +1992,23 @@ mod tests {
                 let jaxpr = build_program(ProgramSpec::AddOne);
                 let result = eval_jaxpr(&jaxpr, &[Value::scalar_i64(a)]);
                 prop_assert!(result.is_ok());
+            }
+
+            #[test]
+            fn prop_scalar_i64_add_chain_fast_path_matches_hashed(
+                start in any::<i64>(),
+                addends in prop::collection::vec(any::<i64>(), 1..32)
+            ) {
+                let jaxpr = scalar_i64_add_literal_chain(&addends);
+                let args = [Value::scalar_i64(start)];
+                let fast = eval_jaxpr(&jaxpr, &args).expect("fast path should evaluate");
+                let hashed = eval_jaxpr_hashed_env(&jaxpr, &[], &args)
+                    .expect("hashed path should evaluate");
+                let expected = addends
+                    .iter()
+                    .fold(start, |acc, addend| acc.wrapping_add(*addend));
+                prop_assert_eq!(&fast, &hashed);
+                prop_assert_eq!(&fast, &vec![Value::scalar_i64(expected)]);
             }
 
             #[test]

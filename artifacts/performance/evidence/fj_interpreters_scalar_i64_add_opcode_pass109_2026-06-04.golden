@@ -1,0 +1,17 @@
+pass109 golden - fj-interpreters scalar I64 Add opcode fast path
+target bead: frankenjax-7d3dd
+
+case overflow_chain:
+  input: I64(9223372036854775807)
+  addends: [1, 2]
+  output: I64(-9223372036854775806)
+
+case mixed_chain:
+  input: I64(123)
+  addends: [-31, -14, 3, 20, 37, 54, 71, 88, 105, 122]
+  output: I64(578)
+
+guard matrix:
+  literal-left add, F64 literal add, non-empty params, equation effects,
+  sub-jaxpr equations, and non-final outvars all fall back to the hashed
+  interpreter oracle.
