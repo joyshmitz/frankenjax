@@ -1,0 +1,14 @@
+frankenjax-p1vbf.13 pass85 rejected eig QR scratch-reuse candidate
+head=5557f35bc59b99eb176a49d25eaf078e189a34cd
+linalg_rs_sha256=d4984a774376ea6feae401ed3a6a247c36354ecf8ea781a3f93577a4a805d2f0
+retained_source_diff=none
+proof=rch exec -- cargo test -p fj-lax linalg::tests --lib -- --nocapture
+proof_result=73 linalg tests passed, including eig_qr_iteration_upper_triangular_rq_bit_identical_to_dense_reference
+profile_worker=ts2
+profile_linalg_eig_48x48_f64_ms=17.863 [17.731,17.949]
+candidate_rebench_1_ms=17.602 [17.507,17.718]
+candidate_rebench_2_ms=17.498 [17.324,17.779]
+score=1.6 impact 1.4 confidence 4.5 effort 4.0
+decision=rejected_and_removed
+isomorphism=ordering, QR iteration order, convergence scan order, diagonal extraction, eigenvector layout, floating-point expression order, tie-breaking, RNG absence, and Complex128 wrapping were unchanged in the candidate proof; retained tree has no source change
+next_primitive=shifted/deflated QR with Hessenberg real layout or a behavior-contract bead for FP-reordering eig algorithms, not another allocation-lifetime micro-lever

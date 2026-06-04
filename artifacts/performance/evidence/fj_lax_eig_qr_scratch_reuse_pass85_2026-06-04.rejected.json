@@ -1,0 +1,138 @@
+{
+  "schema_version": "frankenjax.optimization-pass-evidence.v1",
+  "artifact": "fj_lax_eig_qr_scratch_reuse_pass85_2026-06-04",
+  "bead_ids": [
+    "frankenjax-p1vbf.13",
+    "frankenjax-p1vbf"
+  ],
+  "skill_pass": "repeatedly-apply-skill pass85 -> extreme-software-optimization",
+  "status": "rejected_and_removed",
+  "captured_at_iso": "2026-06-04T05:39:00Z",
+  "crate": "fj-lax",
+  "target": "linalg/eig_48x48_f64",
+  "profile_backed_target": {
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/ --noplot --sample-size 10 --warm-up-time 1 --measurement-time 2",
+    "worker": "ts2",
+    "top_rows_by_midpoint": [
+      {
+        "benchmark": "linalg/matmul_2d_512x512x512_f64",
+        "midpoint_ms": 34.380,
+        "ci_ms": [
+          34.230,
+          34.586
+        ]
+      },
+      {
+        "benchmark": "linalg/eig_48x48_f64",
+        "midpoint_ms": 17.863,
+        "ci_ms": [
+          17.731,
+          17.949
+        ]
+      },
+      {
+        "benchmark": "linalg/svd_48x48_f64",
+        "midpoint_ms": 3.2845,
+        "ci_ms": [
+          3.2643,
+          3.2962
+        ]
+      }
+    ],
+    "selection_reason": "Recent pass82-pass84 GEMM traversal variants failed the keep gate, so this pass pivoted to the next non-GEMM linalg hotspot."
+  },
+  "alien_graveyard": {
+    "primitive_family": "communication-avoiding/cache-local linear algebra scratch movement",
+    "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 9.6 CA-QR/TSQR and cache-local dense submatrix kernels",
+    "applied_slice": "Moved fixed-size QR-iteration scratch allocation out of the eig hot loop without changing the current V1 QR iteration algorithm."
+  },
+  "candidate": {
+    "one_lever": "Reusable scratch buffers for qr_decomposition, R*Q, and q_total*Q inside eig_qr_iteration.",
+    "files_touched_before_rejection": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "source_state_after_rejection": "restored; git diff is empty for crates/fj-lax/src/linalg.rs",
+    "reason": "The midpoint win was only 1.5-2.0% and the confirmation interval overlapped the baseline. Score 1.6 is below the >=2.0 keep threshold for this amount of code."
+  },
+  "benchmarks": {
+    "baseline": {
+      "worker": "ts2",
+      "benchmark": "linalg/eig_48x48_f64",
+      "midpoint_ms": 17.863,
+      "ci_ms": [
+        17.731,
+        17.949
+      ]
+    },
+    "candidate_rebench_1": {
+      "worker": "ts2",
+      "command": "RCH_WORKER=ts2 RCH_WORKERS=ts2 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/eig_48x48_f64 --noplot --sample-size 10 --warm-up-time 1 --measurement-time 2",
+      "midpoint_ms": 17.602,
+      "ci_ms": [
+        17.507,
+        17.718
+      ],
+      "speedup_midpoint_x": 1.0148,
+      "speedup_conservative_x": 1.0007
+    },
+    "candidate_rebench_2": {
+      "worker": "ts2",
+      "command": "RCH_WORKER=ts2 RCH_WORKERS=ts2 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/eig_48x48_f64 --noplot --sample-size 10 --warm-up-time 1 --measurement-time 2",
+      "midpoint_ms": 17.498,
+      "ci_ms": [
+        17.324,
+        17.779
+      ],
+      "speedup_midpoint_x": 1.0209,
+      "speedup_conservative_x": 0.9973
+    }
+  },
+  "score": {
+    "impact": 1.4,
+    "confidence": 4.5,
+    "effort": 4.0,
+    "impact_x_confidence_over_effort": 1.575,
+    "decision": "reject",
+    "rationale": "The measured signal is real enough to record but not strong enough to keep; next work should replace the eig primitive family rather than move another allocation."
+  },
+  "behavior_proof": {
+    "retained_code_change": "none",
+    "candidate_test_command": "rch exec -- cargo test -p fj-lax linalg::tests --lib -- --nocapture",
+    "candidate_test_result": "pass: 73 linalg tests, including eig_qr_iteration_upper_triangular_rq_bit_identical_to_dense_reference",
+    "ordering": "Candidate preserved QR iteration order, Gram-Schmidt column order, R*Q order, q_total*Q order, off-diagonal scan order, diagonal extraction order, and row-major eigenvector output order. Retained code has no source diff.",
+    "tie_breaking": "Eig path has no comparator/tie-breaking changes; retained code has no source diff.",
+    "floating_point": "Candidate kept the same f64 multiply/add/sub/sqrt expressions in the same loop order. Retained code has no source diff.",
+    "rng": "No RNG state or random primitive is involved.",
+    "errors": "Arity, square-matrix, dtype extraction, and Complex128 wrapping behavior are unchanged; retained code has no source diff.",
+    "golden_output_path": "artifacts/performance/evidence/fj_lax_eig_qr_scratch_reuse_pass85_2026-06-04.rejected.golden",
+    "golden_output_sha256": "da8bd7efb3eb679760978f47a33696e6140a24647179c0ad0fc88d843bad4087"
+  },
+  "validation": [
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs",
+      "result": "pass"
+    },
+    {
+      "command": "cargo fmt -p fj-lax --check",
+      "result": "blocked_by_preexisting_formatting_drift",
+      "notes": "Reported formatting diffs in crates/fj-lax/benches/lax_baseline.rs, crates/fj-lax/src/arithmetic.rs, and crates/fj-lax/src/lib.rs; those files were not edited by this pass."
+    },
+    {
+      "command": "rch exec -- cargo test -p fj-lax linalg::tests --lib -- --nocapture",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_eig_qr_scratch_reuse_pass85_2026-06-04.rejected.golden.sha256",
+      "result": "pass"
+    },
+    {
+      "command": "git diff --quiet -- crates/fj-lax/src/linalg.rs",
+      "result": "pass"
+    }
+  ],
+  "next_primitive": {
+    "target": "linalg/eig_48x48_f64",
+    "primitive": "shifted/deflated QR with packed Hessenberg real layout, or a behavior-contract bead for FP-reordering eig algorithms",
+    "reason": "Scratch lifetime movement is the wrong depth after this rejection; the remaining eig cost is algorithmic QR iteration work."
+  }
+}
