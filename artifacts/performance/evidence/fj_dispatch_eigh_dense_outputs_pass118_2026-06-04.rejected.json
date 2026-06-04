@@ -1,0 +1,37 @@
+{
+  "project": "frankenjax",
+  "pass": 118,
+  "bead": "frankenjax-9zgbn",
+  "status": "rejected",
+  "target": "fj-dispatch vmap_eigh/batched_matrix_3x3",
+  "profile_target": {
+    "source": "post-pass117 RCH fj-dispatch profile on ts2",
+    "time_us_midpoint": 160.21,
+    "confidence_interval_us": [160.06, 160.38]
+  },
+  "focused_baseline": {
+    "worker": "ts1",
+    "command": "cargo bench -p fj-dispatch --bench dispatch_baseline -- 'vmap_eigh/batched_matrix_3x3' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "time_us_midpoint": 102.80,
+    "confidence_interval_us": [100.92, 104.99]
+  },
+  "candidate": {
+    "worker": "ts2",
+    "lever": "accumulate F64 batched Eigh outputs as dense Vec<f64> and return TensorValue::new_f64_values",
+    "time_us_midpoint": 156.54,
+    "confidence_interval_us": [156.03, 157.21]
+  },
+  "decision": {
+    "kept": false,
+    "score": 0.0,
+    "reason": "Candidate regressed against the focused untouched-source baseline and was only 1.023x versus the broader same-worker profile row, below the Score>=2.0 keep threshold. Source diff was removed."
+  },
+  "behavior_proof": {
+    "focused_tests": "RCH cargo test -p fj-dispatch test_batch_trace_eigh_multi -- --nocapture passed 7 tests in candidate state",
+    "ordering": "Candidate preserved batch-major output order and per-slice eigenvalue/eigenvector order before rejection.",
+    "tie_breaking": "No sorting tie rule was changed; the same append_eigh_decomposition/eigh_decompose_matrix_into logic produced values.",
+    "floating_point": "Candidate used the same decomposition and copied f64 results directly, but it was rejected for performance.",
+    "rng": "N/A",
+    "golden_digest": "9c8554df967d304b2570460fc5db4fca86602577232fcf8b01177fcd41cd365f"
+  }
+}

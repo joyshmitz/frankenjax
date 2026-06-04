@@ -1,0 +1,5 @@
+frankenjax pass118 rejected Eigh dense-output proof
+target: fj-dispatch vmap_eigh/batched_matrix_3x3
+candidate focused tests: cargo test -p fj-dispatch test_batch_trace_eigh_multi passed 7 tests
+rank3 golden digest: 9c8554df967d304b2570460fc5db4fca86602577232fcf8b01177fcd41cd365f
+source kept: false
