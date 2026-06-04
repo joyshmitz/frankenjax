@@ -1107,6 +1107,31 @@ fn bench_sort_64k_f64(c: &mut Criterion) {
     });
 }
 
+// F32 sort: previously the generic O(n log n) comparison path (F32 is
+// Literal-backed); now the LSD radix path (pass98). Same data shape as the f64
+// bench.
+fn bench_sort_64k_f32(c: &mut Criterion) {
+    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::F32Bits((((i as f32) * 1.000_173).sin() * 1e3 - (i as f32)).to_bits()))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: vec![LARGE_ELEMENTWISE_LEN as u32],
+            },
+            elements,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("dimension".to_owned(), "0".to_owned());
+    p.insert("descending".to_owned(), "false".to_owned());
+    c.bench_function("eval/sort_64k_f32", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Sort, std::slice::from_ref(&input), &p))
+    });
+}
+
 // Calibration: an unchanged op (full i64 reduce) used to confirm the radix A/B
 // pair ran on the same worker (its ratio should be ~1.0 across the two runs).
 fn bench_sort_calib_reduce_64k_i64(c: &mut Criterion) {
@@ -2240,6 +2265,7 @@ criterion_group!(
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
     bench_sort_64k_f64,
+    bench_sort_64k_f32,
     bench_sort_calib_reduce_64k_i64,
     bench_topk_64k_k128_f64_vec,
     bench_topk_64k_k128_f64_literal_reference,

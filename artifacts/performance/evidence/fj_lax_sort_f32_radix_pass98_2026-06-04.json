@@ -1,0 +1,20 @@
+{
+    "pass": 98, "date": "2026-06-04", "crate": "fj-lax",
+    "kind": "algorithmic complexity-class replacement (O(n log n) -> O(n)) for F32 sort/argsort",
+    "target": "eval/sort_64k_f32 (sort_along_axis F32 path)",
+    "lever_summary": "F32 (Literal-backed, no dense storage) fell to the generic O(n log n) comparison sort. New sort_along_axis_f32_radix keys by f64_total_order_key(literal.as_f64()) and LSD-radix sorts in O(n); triggers for F32 ascending with axis_dim>=256.",
+    "method": "same-bench A/B; baseline = stashed generic comparison sort; normalized by eval/sort_calib_reduce_64k_i64 (ReduceSum, unaffected) calibration.",
+    "results": {
+        "calibration_reduce_us": {"candidate": 7.4725, "baseline": 8.0419, "worker_ratio": 1.076},
+        "sort_64k_f32": {"baseline_ms": 7.5544, "candidate_ms": 2.3540, "raw_x": 3.21, "worker_corrected_x": 2.98}
+    },
+    "score": {"impact": 4.0, "confidence": 5.0, "effort": 2.0, "impact_times_confidence_over_effort": 10.0, "kept": true},
+    "change": {"files": ["crates/fj-lax/src/tensor_ops.rs", "crates/fj-lax/benches/lax_baseline.rs"],
+        "lever": "Added sort_along_axis_f32_radix; sort_along_axis routes F32 ascending to it (after the F64 dense path). Added eval/sort_64k_f32 bench + radix_sort_f32_ascending_matches_total_cmp_reference test."},
+    "isomorphism": {"type": "BIT-IDENTICAL output permutation to the generic comparison path (both stable; f64_total_order_key reproduces f64::total_cmp on as_f64); sort emits reordered original F32 literals, argsort same i64 indices", "validation": "radix_sort_f32_ascending_matches_total_cmp_reference (NaN/inf/-0/payload/dups by bits) + 14 sort tests pass"},
+    "validation": [
+        {"name": "sort_tests", "command": "rch exec -- cargo test -p fj-lax --release sort", "result": "14 passed"},
+        {"name": "clippy", "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings", "result": "clean"}
+    ],
+    "note": "Generalizes trivially to BF16/F16 (same SortKey::Float(as_f64) path) and U32/U64/I32 keys — filed as follow-on."
+}

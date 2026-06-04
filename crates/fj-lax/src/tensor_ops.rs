@@ -3951,6 +3951,94 @@ fn sort_along_axis_dense_f64(
     Ok(Some(Value::Tensor(out_value)))
 }
 
+/// Ascending radix sort/argsort along `axis` for F32 tensors. F32 has no dense
+/// storage variant (it is Literal-backed), but the generic path keys F32 via
+/// `literal.as_f64()` → `SortKey::Float` → `f64::total_cmp`; keying the radix by
+/// `f64_total_order_key(literal.as_f64())` reproduces that ordering exactly, and
+/// both the generic `sort_by` and LSD radix are stable, so the output permutation
+/// is bit-for-bit identical — in O(n) radix passes instead of O(n log n)
+/// comparisons. Sort emits the reordered original F32 literals; argsort emits
+/// dense i64 in-slice indices. Returns `None` (generic path) for non-F32, short
+/// axes, or any element that is not numerically orderable via `as_f64`.
+fn sort_along_axis_f32_radix(
+    tensor: &TensorValue,
+    axis: usize,
+    return_indices: bool,
+) -> Result<Option<Value>, EvalError> {
+    if tensor.dtype != DType::F32 {
+        return Ok(None);
+    }
+    let axis_dim = tensor.shape.dims[axis] as usize;
+    if axis_dim < RADIX_SORT_MIN_AXIS {
+        return Ok(None);
+    }
+    let primitive = if return_indices {
+        Primitive::Argsort
+    } else {
+        Primitive::Sort
+    };
+    let rank = tensor.shape.rank();
+    let strides = checked_row_major_strides(primitive, "sort", &tensor.shape.dims)?;
+    let axis_stride = strides[axis];
+    let total = tensor.elements.len();
+    if !total.is_multiple_of(axis_dim) {
+        return Ok(None);
+    }
+    let outer_count = total / axis_dim;
+
+    // Materialize the literals once and pre-extract f64 keys; bail to the generic
+    // path if any element is not numerically orderable (matches the generic
+    // `sort_key` fallibility without diverging behavior).
+    let elems = tensor.elements.as_slice();
+    let mut values = Vec::with_capacity(total);
+    for lit in elems.iter() {
+        match lit.as_f64() {
+            Some(v) => values.push(v),
+            None => return Ok(None),
+        }
+    }
+
+    let mut out_idx = vec![0_i64; total];
+    let mut out_lit = elems.to_vec();
+    let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
+    let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
+
+    for_each_sort_slice(
+        rank,
+        axis,
+        &tensor.shape.dims,
+        &strides,
+        outer_count,
+        |base| {
+            pairs.clear();
+            for i in 0..axis_dim {
+                pairs.push((
+                    f64_total_order_key(values[base + i * axis_stride]),
+                    i as u32,
+                ));
+            }
+            radix_pairs_ascending(&mut pairs, &mut scratch);
+            for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                let dst = base + out_pos * axis_stride;
+                if return_indices {
+                    out_idx[dst] = i64::from(orig);
+                } else {
+                    out_lit[dst] = elems[base + orig as usize * axis_stride];
+                }
+            }
+        },
+    );
+
+    let out_value = if return_indices {
+        TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+            .map_err(EvalError::InvalidTensor)?
+    } else {
+        TensorValue::new(DType::F32, tensor.shape.clone(), out_lit)
+            .map_err(EvalError::InvalidTensor)?
+    };
+    Ok(Some(Value::Tensor(out_value)))
+}
+
 /// Invoke `f(base)` for each sort slice's row-major base offset (the flat offset
 /// of in-slice index 0, over all axes except `axis`), in ascending `outer`.
 #[inline]
@@ -4037,6 +4125,11 @@ fn sort_along_axis(
         }
         if tensor.dtype == DType::F64
             && let Some(value) = sort_along_axis_dense_f64(tensor, axis, return_indices)?
+        {
+            return Ok(value);
+        }
+        if tensor.dtype == DType::F32
+            && let Some(value) = sort_along_axis_f32_radix(tensor, axis, return_indices)?
         {
             return Ok(value);
         }
@@ -5966,6 +6059,63 @@ mod tests {
         let d_arg = extract_i64_vec(&eval_argsort(Primitive::Argsort, &[dense()], &asc).unwrap());
         let l_arg = extract_i64_vec(&eval_argsort(Primitive::Argsort, &[literal()], &asc).unwrap());
         assert_eq!(d_arg, l_arg, "radix f64 argsort vs generic");
+    }
+
+    #[test]
+    fn radix_sort_f32_ascending_matches_total_cmp_reference() {
+        // F32 sort/argsort now uses the LSD radix path (axis >= 256). Validate it
+        // against an independent stable `f64::total_cmp(as_f64)` reference — the
+        // exact ordering the generic comparison path applies to F32 — over data
+        // including NaN / +-inf / +-0 / NaN-payload / dups, compared by bits.
+        let n = 1000usize;
+        let data: Vec<f32> = (0..n)
+            .map(|i| match i % 11 {
+                0 => f32::NAN,
+                1 => f32::INFINITY,
+                2 => f32::NEG_INFINITY,
+                3 => -0.0,
+                4 => 0.0,
+                5 => f32::from_bits(0x7fc0_0001), // NaN with payload
+                6 => -1.5,
+                _ => ((i as f32) * 1.000_173).sin() * 1e3 - (i as f32),
+            })
+            .collect();
+
+        let tensor = || {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    data.iter().map(|&v| Literal::F32Bits(v.to_bits())).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let asc = params(&[("dimension", "0"), ("descending", "false")]);
+
+        // Reference: stable sort of indices by total_cmp on the f64 promotion.
+        let mut idx: Vec<usize> = (0..n).collect();
+        idx.sort_by(|&a, &b| (data[a] as f64).total_cmp(&(data[b] as f64)));
+        let expected_bits: Vec<u32> = idx.iter().map(|&i| data[i].to_bits()).collect();
+        let expected_arg: Vec<i64> = idx.iter().map(|&i| i as i64).collect();
+
+        let sorted = eval_sort(Primitive::Sort, &[tensor()], &asc).unwrap();
+        let got_bits: Vec<u32> = sorted
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F32Bits(b) => *b,
+                other => panic!("expected F32Bits, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(got_bits, expected_bits, "radix f32 sort vs total_cmp reference");
+
+        let arg = extract_i64_vec(&eval_argsort(Primitive::Argsort, &[tensor()], &asc).unwrap());
+        assert_eq!(arg, expected_arg, "radix f32 argsort vs total_cmp reference");
     }
 
     // ── Argsort ──

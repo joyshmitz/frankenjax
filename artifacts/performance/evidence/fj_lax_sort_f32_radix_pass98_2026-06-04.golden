@@ -1,0 +1,12 @@
+pass98 golden — fj-lax: F32 sort/argsort via LSD radix (O(n log n) comparison -> O(n) radix)
+target=eval/sort_64k_f32 (sort_along_axis F32 path)
+lever=ALGORITHM REPLACEMENT (different complexity class). F32 has no dense storage variant, so F32 sort/argsort fell to the generic O(n log n) comparison sort (sort_by + compare_sort_keys over SortKey::Float(as_f64).total_cmp). New sort_along_axis_f32_radix keys each element by f64_total_order_key(literal.as_f64()) and LSD-radix sorts (O(n)). Triggers for F32, ascending, axis_dim >= 256; descending/short axes fall through to generic.
+method=same-bench A/B on RCH Criterion; baseline = git-stashed tensor_ops.rs (generic comparison sort for F32); candidate = radix. Normalized by eval/sort_calib_reduce_64k_i64 (a ReduceSum, UNAFFECTED by this change) as a worker-speed calibration.
+calibration_reduce=candidate 7.4725us vs baseline 8.0419us -> workers differ 1.076x
+sort_64k_f32=baseline 7.5544ms [7.3149, 7.8139] vs candidate 2.3540ms [2.2610, 2.4482] = 3.21x raw -> 2.98x worker-corrected
+score=impact 4 (F32 is the default ML float; sort/argsort/topk common) x confidence 5 (BIT-EXACT permutation vs the generic comparison path; parity test + 14 sort tests pass) / effort 2 = 10.0
+alien_primitive=LSD radix sort over fixed-width keys (O(n) vs comparison O(n log n)); reuses the existing radix_pairs_ascending + f64_total_order_key. 100% safe Rust, no external sort.
+isomorphism=BIT-IDENTICAL output permutation to the generic comparison path. The generic path keys F32 as SortKey::Float(literal.as_f64()) compared by f64::total_cmp via the STABLE slice::sort_by; f64_total_order_key reproduces total_cmp as an ascending u64 key, and LSD radix_pairs_ascending is STABLE, so ties preserve original order identically. Sort emits the reordered ORIGINAL F32 literals (exact bits, incl NaN payloads / signed zeros); argsort emits the same i64 in-slice indices. NaN/+-inf/-0 handled via the same as_f64 conversion both paths use.
+golden_note=radix_sort_f32_ascending_matches_total_cmp_reference: F32 sort + argsort over n=1000 incl NaN/+-inf/+-0/NaN-payload/dups, compared by bits against an independent stable f64::total_cmp(as_f64) reference. 14 sort tests pass.
+validation=RCH cargo test -p fj-lax --release sort: 14 passed (incl radix_sort_f32_ascending_matches_total_cmp_reference); RCH cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings: clean.
+followup=trivially generalizes to BF16/F16 (same SortKey::Float(as_f64) path) and to U32/U64/I32 keys; TopK F32 still uses its own path.
