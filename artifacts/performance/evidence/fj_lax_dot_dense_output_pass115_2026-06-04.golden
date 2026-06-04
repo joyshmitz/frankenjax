@@ -1,0 +1,19 @@
+fj-lax rank-2 F64 Dot dense-output pass115 golden
+case: 3x4 @ 4x2, row-major, ascending-k accumulation
+shape: [3, 2]
+dtype: F64
+bits:
+0x403bc00000000000
+0xc054580000000000
+0x403c600000000000
+0x405cc60000000000
+0xc084dc0000000000
+0x4080d50000000000
+values:
+27.75
+-81.375
+28.375
+115.09375
+-667.5
+538.625
+serialization_contract: LiteralBuffer::serialize uses as_slice(), so dense F64 and literal-backed F64 serialize to the same ordered Literal sequence.

@@ -1,0 +1,76 @@
+{
+  "pass": 115,
+  "bead": "frankenjax-5vqfx",
+  "crate": "fj-lax",
+  "date": "2026-06-04",
+  "target": "eval/dot_256x256x256_f64",
+  "profile_basis": "Ready [perf][no-gaps] bead frankenjax-5vqfx targeted rank-2 F64 GEMM/Dot after prior profile and pass110 comment identified dot_256x256x256 as the residual GEMM path. Fresh RCH baseline also measured raw matmul_2d_256x256x256_f64 as a control.",
+  "rejected_probe": {
+    "lever": "threaded per-row matmul_2d using std::thread::scope",
+    "result": "rejected before commit; same original ts2 baseline eval/dot 7.3707 ms and matmul_2d 4.5660 ms, candidate eval/dot 7.3507 ms and matmul_2d 4.5113 ms, below keep threshold"
+  },
+  "kept_lever": "rank-2 F64 Dot now keeps matmul_2d output in dense F64 LiteralBuffer storage instead of converting the returned Vec<f64> into Vec<Literal>. dot_f64_elements also borrows already-dense F64 inputs with Cow and keeps literal-backed inputs on the existing checked copy path.",
+  "baseline_command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-5vqfx-dot-dense-control-baseline cargo bench -p fj-lax --bench lax_baseline -- 'dot_256x256x256_f64|matmul_2d_256x256x256_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+  "rebench_command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-5vqfx-dot-dense-final-rebench cargo bench -p fj-lax --bench lax_baseline -- 'dot_256x256x256_f64|matmul_2d_256x256x256_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+  "benchmarks": [
+    {
+      "case": "eval/dot_256x256x256_f64",
+      "baseline_worker": "ts1",
+      "baseline_ms": {
+        "lower": 4.5330,
+        "mid": 4.5976,
+        "upper": 4.6547
+      },
+      "candidate_worker": "ts1",
+      "candidate_ms": {
+        "lower": 3.1770,
+        "mid": 3.1906,
+        "upper": 3.2060
+      },
+      "speedup_midpoint": 1.441,
+      "speedup_conservative": 1.414
+    },
+    {
+      "case": "linalg/matmul_2d_256x256x256_f64 control",
+      "baseline_worker": "ts1",
+      "baseline_ms": {
+        "lower": 2.8481,
+        "mid": 2.9006,
+        "upper": 2.9608
+      },
+      "candidate_worker": "ts1",
+      "candidate_ms": {
+        "lower": 3.0073,
+        "mid": 3.0769,
+        "upper": 3.1410
+      },
+      "note": "Raw matmul control was slightly slower in the candidate run, so the eval/dot win is not explained by faster worker/runtime conditions."
+    }
+  ],
+  "score": {
+    "impact": 4.0,
+    "confidence": 4.0,
+    "effort": 2.0,
+    "impact_x_confidence_div_effort": 8.0
+  },
+  "isomorphism_proof": [
+    "The accepted rank-2 F64 fast path still calls matmul_2d with the same m, k, n, lhs, and rhs slices. matmul_2d preserves each output cell's ascending-k accumulation order, so floating-point rounding and NaN/inf propagation are unchanged.",
+    "Literal-backed F64 inputs still scan tensor.elements in row-major order and reject malformed non-F64 literals by returning None, which falls back to the generic dot path. Dense-backed F64 inputs borrow the same row-major f64 slice instead of copying it.",
+    "The output tensor shape and dtype are unchanged. For non-scalar rank-2 outputs, the same Vec<f64> returned by matmul_2d is wrapped with TensorValue::new_f64_values instead of first mapping each value through Literal::from_f64 and TensorValue::new.",
+    "LiteralBuffer equality, indexing, iteration, IntoIterator, Debug, and Serialize all materialize or view the same ordered Literal sequence via as_slice(), so observable element order and JSON serialization are unchanged. The golden freezes the output bits for a 3x4 @ 4x2 dot case.",
+    "No RNG, tie-breaking, sorting, or transform ordering is touched."
+  ],
+  "golden": "fj_lax_dot_dense_output_pass115_2026-06-04.golden",
+  "golden_sha256": "89284461995aa6679d9ad1ef274f1cd12dbcba54422b8f14892449dbf87c9eee",
+  "validation": [
+    "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-5vqfx-dot-dense-tests cargo test -p fj-lax dot_rank2 --lib -- --nocapture (3 passed)",
+    "cargo fmt -p fj-lax --check",
+    "git diff --check -- crates/fj-lax/src/arithmetic.rs",
+    "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-5vqfx-dot-dense-check cargo check -p fj-lax --all-targets",
+    "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-5vqfx-dot-dense-libtest cargo test -p fj-lax --lib (1082 passed)",
+    "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-5vqfx-dot-dense-clippy cargo clippy -p fj-lax --all-targets -- -D warnings",
+    "ubs crates/fj-lax/src/arithmetic.rs (exit 1 from pre-existing test panic/unwrap/direct-index inventories in this file; no unsafe blocks and cargo fmt/clippy/check/test subchecks clean)",
+    "sha256sum -c artifacts/performance/evidence/fj_lax_dot_dense_output_pass115_2026-06-04.golden.sha256"
+  ],
+  "status": "kept"
+}

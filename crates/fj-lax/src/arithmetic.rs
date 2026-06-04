@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::EvalError;
@@ -2286,7 +2287,11 @@ fn select_i64_same_shape_fast_path(
         let Literal::Bool(flag) = *c else {
             return Ok(None);
         };
-        out.push(if flag { true_values[i] } else { false_values[i] });
+        out.push(if flag {
+            true_values[i]
+        } else {
+            false_values[i]
+        });
     }
     Ok(Some(Value::Tensor(TensorValue::new_i64_values(
         cond.shape.clone(),
@@ -4359,15 +4364,24 @@ fn rank2_f64_matmul(
     else {
         return Ok(None);
     };
-    let elements = matmul_2d(&lhs_values, m, k, &rhs_values, n)
-        .into_iter()
-        .map(Literal::from_f64)
-        .collect();
+    let values = matmul_2d(&lhs_values, m, k, &rhs_values, n);
+    if output_dims.is_empty() {
+        return Ok(Some(Value::Scalar(Literal::from_f64(values[0]))));
+    }
 
-    dot_output_value(DType::F64, output_dims.to_vec(), elements).map(Some)
+    Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+        Shape {
+            dims: output_dims.to_vec(),
+        },
+        values,
+    )?)))
 }
 
-fn dot_f64_elements(tensor: &TensorValue) -> Option<Vec<f64>> {
+fn dot_f64_elements(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
+    if let Some(values) = tensor.elements.as_f64_slice() {
+        return Some(Cow::Borrowed(values));
+    }
+
     let mut values = Vec::with_capacity(tensor.elements.len());
     for &literal in &tensor.elements {
         let Literal::F64Bits(bits) = literal else {
@@ -4375,7 +4389,7 @@ fn dot_f64_elements(tensor: &TensorValue) -> Option<Vec<f64>> {
         };
         values.push(f64::from_bits(bits));
     }
-    Some(values)
+    Some(Cow::Owned(values))
 }
 
 fn eval_tensor_dot(
