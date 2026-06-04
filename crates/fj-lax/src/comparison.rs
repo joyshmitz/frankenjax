@@ -165,6 +165,9 @@ pub(crate) fn eval_comparison(
             if let Some(value) = eval_f64_scalar_compare(*lhs, rhs, true, &float_cmp)? {
                 return Ok(value);
             }
+            if let Some(value) = eval_i64_scalar_compare(*lhs, rhs, true, &int_cmp)? {
+                return Ok(value);
+            }
 
             let mut elements = Vec::with_capacity(rhs.elements.len());
             for rhs in rhs.elements.iter().copied() {
@@ -180,6 +183,9 @@ pub(crate) fn eval_comparison(
         }
         (Value::Tensor(lhs), Value::Scalar(rhs)) => {
             if let Some(value) = eval_f64_scalar_compare(*rhs, lhs, false, &float_cmp)? {
+                return Ok(value);
+            }
+            if let Some(value) = eval_i64_scalar_compare(*rhs, lhs, false, &int_cmp)? {
                 return Ok(value);
             }
 
@@ -242,6 +248,28 @@ fn eval_same_shape_i64_compare(
     rhs: &TensorValue,
     int_cmp: &impl Fn(i128, i128) -> bool,
 ) -> Result<Option<Value>, EvalError> {
+    // Dense i64 fast path: read both contiguous `i64` backing slices directly,
+    // skipping the per-element `Literal::I64` match + 24-byte enum stride.
+    // Bit-for-bit identical to the generic loop below — same `int_cmp` applied
+    // to `i128::from(value)` in the same element order, same Bool output.
+    // `as_i64_slice()` is `Some` only for I64 dense storage. (The Bool output is
+    // still `Vec<Literal>` — no dense Bool storage exists — so the win is on the
+    // input side.)
+    if let (Some(left_values), Some(right_values)) =
+        (lhs.elements.as_i64_slice(), rhs.elements.as_i64_slice())
+    {
+        let elements: Vec<Literal> = left_values
+            .iter()
+            .zip(right_values)
+            .map(|(&left, &right)| Literal::Bool(int_cmp(i128::from(left), i128::from(right))))
+            .collect();
+        return Ok(Some(Value::Tensor(TensorValue::new(
+            DType::Bool,
+            lhs.shape.clone(),
+            elements,
+        )?)));
+    }
+
     let mut elements = Vec::with_capacity(lhs.elements.len());
     for (left, right) in lhs.elements.iter().zip(&rhs.elements) {
         let (Literal::I64(left), Literal::I64(right)) = (*left, *right) else {
@@ -253,6 +281,46 @@ fn eval_same_shape_i64_compare(
     Ok(Some(Value::Tensor(TensorValue::new(
         DType::Bool,
         lhs.shape.clone(),
+        elements,
+    )?)))
+}
+
+/// I64 scalar⊗tensor broadcast comparison fast path producing a `DType::Bool`
+/// tensor. `scalar_on_left` preserves operand order for asymmetric ordered
+/// comparisons. Bit-for-bit identical to the generic `compare_literals` path for
+/// I64 operands (`int_cmp(i128::from(a), i128::from(b))`). Returns `Ok(None)`
+/// unless the scalar is `I64` and the tensor is I64 dense storage.
+#[inline]
+fn eval_i64_scalar_compare(
+    scalar: Literal,
+    tensor: &TensorValue,
+    scalar_on_left: bool,
+    int_cmp: &impl Fn(i128, i128) -> bool,
+) -> Result<Option<Value>, EvalError> {
+    let Literal::I64(scalar) = scalar else {
+        return Ok(None);
+    };
+    if tensor.dtype != DType::I64 {
+        return Ok(None);
+    }
+    let Some(values) = tensor.elements.as_i64_slice() else {
+        return Ok(None);
+    };
+    let scalar = i128::from(scalar);
+    let elements: Vec<Literal> = values
+        .iter()
+        .map(|&v| {
+            let value = i128::from(v);
+            Literal::Bool(if scalar_on_left {
+                int_cmp(scalar, value)
+            } else {
+                int_cmp(value, scalar)
+            })
+        })
+        .collect();
+    Ok(Some(Value::Tensor(TensorValue::new(
+        DType::Bool,
+        tensor.shape.clone(),
         elements,
     )?)))
 }
@@ -428,6 +496,66 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    /// Dense i64 compare fast paths (same-shape + both scalar-broadcast orders)
+    /// must be bit-identical to the Vec<Literal> path across all six comparisons,
+    /// including i64::MIN/MAX. Dense input via vector_i64, literal via v_i64.
+    #[test]
+    fn dense_i64_compare_bit_identical_to_literal_path() {
+        let data: Vec<i64> = vec![-5, 0, 7, i64::MIN, i64::MAX, 42, -1, 1000];
+        let other: Vec<i64> = vec![-5, 1, -7, i64::MAX, i64::MIN, 42, 1000, -1];
+        let params = BTreeMap::new();
+        let dense = || Value::vector_i64(&data).unwrap();
+        let dense_other = || Value::vector_i64(&other).unwrap();
+        let lit = || v_i64(&data).unwrap();
+        let lit_other = || v_i64(&other).unwrap();
+        let scalar_d = Value::scalar_i64(42);
+        let scalar_l = Value::Scalar(Literal::I64(42));
+
+        for p in [
+            Primitive::Eq,
+            Primitive::Ne,
+            Primitive::Lt,
+            Primitive::Le,
+            Primitive::Gt,
+            Primitive::Ge,
+        ] {
+            // same-shape: assert dense input has dense storage, then compare.
+            assert!(
+                dense()
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_i64_slice()
+                    .is_some()
+            );
+            assert!(lit().as_tensor().unwrap().elements.as_i64_slice().is_none());
+            let d = extract_bools(
+                &crate::eval_primitive(p, &[dense(), dense_other()], &params).unwrap(),
+            );
+            let l =
+                extract_bools(&crate::eval_primitive(p, &[lit(), lit_other()], &params).unwrap());
+            assert_eq!(d, l, "{p:?} same-shape dense vs literal");
+
+            // Tensor ⊗ Scalar
+            let d = extract_bools(
+                &crate::eval_primitive(p, &[dense(), scalar_d.clone()], &params).unwrap(),
+            );
+            let l = extract_bools(
+                &crate::eval_primitive(p, &[lit(), scalar_l.clone()], &params).unwrap(),
+            );
+            assert_eq!(d, l, "{p:?} tensor⊗scalar dense vs literal");
+
+            // Scalar ⊗ Tensor
+            let d = extract_bools(
+                &crate::eval_primitive(p, &[scalar_d.clone(), dense()], &params).unwrap(),
+            );
+            let l = extract_bools(
+                &crate::eval_primitive(p, &[scalar_l.clone(), lit()], &params).unwrap(),
+            );
+            assert_eq!(d, l, "{p:?} scalar⊗tensor dense vs literal");
+        }
     }
 
     fn s_f64(v: f64) -> Value {

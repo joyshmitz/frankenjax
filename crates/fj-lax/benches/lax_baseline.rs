@@ -236,6 +236,47 @@ fn bench_scalar_mul_64k_i64_literal_reference(c: &mut Criterion) {
     });
 }
 
+// Dense i64 comparisons (pass70): same-shape Lt + scalar-broadcast Lt, each
+// paired with a Vec<Literal> reference run in the same process for a same-worker
+// ratio. The scalar reference path runs the heavy generic compare_literals.
+fn bench_lt_64k_i64_vec(c: &mut Criterion) {
+    let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64).collect();
+    let lhs = Value::vector_i64(&data).unwrap();
+    let rhs = Value::vector_i64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/lt_64k_i64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_lt_64k_i64_literal_reference(c: &mut Criterion) {
+    let lhs = i64_literal_vec_64k();
+    let rhs = i64_literal_vec_64k();
+    let p = no_params();
+    c.bench_function("eval/lt_64k_i64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_lt_scalar_64k_i64_vec(c: &mut Criterion) {
+    let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64).collect();
+    let tensor = Value::vector_i64(&data).unwrap();
+    let scalar = Value::scalar_i64(32_768);
+    let p = no_params();
+    c.bench_function("eval/lt_scalar_64k_i64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[tensor.clone(), scalar.clone()], &p))
+    });
+}
+
+fn bench_lt_scalar_64k_i64_literal_reference(c: &mut Criterion) {
+    let tensor = i64_literal_vec_64k();
+    let scalar = Value::scalar_i64(32_768);
+    let p = no_params();
+    c.bench_function("eval/lt_scalar_64k_i64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[tensor.clone(), scalar.clone()], &p))
+    });
+}
+
 fn bench_scalar_mul_1k_f64_vector(c: &mut Criterion) {
     let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.001).collect();
     let scalar = Value::scalar_f64(3.5);
@@ -1230,6 +1271,10 @@ criterion_group!(
     bench_mul_64k_i64_literal_reference,
     bench_scalar_mul_64k_i64_vec,
     bench_scalar_mul_64k_i64_literal_reference,
+    bench_lt_64k_i64_vec,
+    bench_lt_64k_i64_literal_reference,
+    bench_lt_scalar_64k_i64_vec,
+    bench_lt_scalar_64k_i64_literal_reference,
     bench_scalar_mul_1k_f64_vector,
     bench_tensor_sub_scalar_1k_f64_vector,
     bench_eq_1k_f64_vector,

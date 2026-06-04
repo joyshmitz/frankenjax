@@ -1,0 +1,13 @@
+frankenjax-mcqr.30.16 pass70 golden
+target=eval/lt_scalar_64k_i64_vec
+lever=dense i64 comparison fast paths — same-shape reads two as_i64_slice; new eval_i64_scalar_compare for I64 scalar<->tensor (both orders)
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2
+worker=ts2
+lt_scalar_64k_i64=dense 59.709us [58.383, 61.154] vs literal 412.122us [408.672, 416.642] = 6.90x mid, 6.68x conservative
+lt_64k_i64_same_shape=dense 50.062us [49.479, 50.693] vs literal 128.835us [127.780, 129.953] = 2.57x mid, 2.52x conservative
+score=8.0
+alien_primitive=dense SoA / typed columnar storage applied to comparisons, alien_cs_graveyard section 8.2
+source_change=eval_same_shape_i64_compare gains an as_i64_slice dense fast path; eval_i64_scalar_compare added and wired into both scalar arms after the F64 scalar-compare attempt; both fall back to the unchanged generic compare_literals path when not dense i64
+isomorphism=element order preserved; scalar broadcast preserves operand order via scalar_on_left for Lt/Le/Gt/Ge; for I64xI64 compare_literals returns int_cmp(i128::from(a), i128::from(b)) and the fast paths apply the same dispatcher int_cmp with the same i128 widening; Bool output identical (no dense Bool storage); Literal-backed/mixed/non-I64-scalar inputs fall back to the generic path
+golden_note=headline scalar-lt 6.90x because the generic scalar path runs compare_literals per element; same-shape lt 2.57x; both bit-identical to the Vec<Literal> path across all six comparisons incl i64::MIN/MAX
+validation=RCH cargo test -p fj-lax --lib comparison passed 17 tests incl dense_i64_compare_bit_identical_to_literal_path; RCH cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings passed

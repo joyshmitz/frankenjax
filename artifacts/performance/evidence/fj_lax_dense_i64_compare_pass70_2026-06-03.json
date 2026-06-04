@@ -1,0 +1,68 @@
+{
+    "bead": "frankenjax-mcqr.30.16",
+    "pass": 70,
+    "date": "2026-06-03",
+    "crate": "fj-lax",
+    "target": "eval/lt_scalar_64k_i64_vec",
+    "lever_summary": "Wire the pass67 dense i64 storage into eval_comparison. The same-shape i64 compare reads both contiguous as_i64_slice() slices directly, and a new eval_i64_scalar_compare handles I64 scalar<->tensor in both operand orders (the generic scalar path ran the heavy compare_literals per element). Output is a Bool tensor (no dense Bool storage exists), so the win is on the input side.",
+    "alien_graveyard": {
+        "primitive": "dense SoA / typed columnar storage applied to comparisons",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "consume the contiguous i64 backing store (mcqr.30.13) in the comparison path instead of per-element tagged-union dispatch"
+    },
+    "method": "Same-worker comparison on ts2: dense (vector_i64) inputs vs Vec<Literal>-backed reference benches run in the same process, isolating the data-model win from cross-worker CPU variance.",
+    "results": {
+        "lt_scalar_64k_i64": {
+            "dense_ns": 59708.6,
+            "dense_ci_ns": [58383.1, 61154.1],
+            "literal_ns": 412121.9,
+            "literal_ci_ns": [408671.8, 416641.9],
+            "speedup_midpoint_x": 6.90,
+            "speedup_conservative_x": 6.68,
+            "note": "headline: the generic scalar-broadcast path runs compare_literals (promote/literal_to_i128) per element; the dense path is a tight int_cmp fold"
+        },
+        "lt_64k_i64_same_shape": {
+            "dense_ns": 50061.8,
+            "dense_ci_ns": [49478.6, 50693.0],
+            "literal_ns": 128834.8,
+            "literal_ci_ns": [127780.2, 129952.7],
+            "speedup_midpoint_x": 2.57,
+            "speedup_conservative_x": 2.52
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'lt_64k_i64|lt_scalar_64k_i64' --save-baseline i64cmp",
+    "score": {
+        "impact": 4.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 8.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/comparison.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "eval_same_shape_i64_compare gains an as_i64_slice() dense fast path; new eval_i64_scalar_compare wired into both Scalar(*)Tensor and Tensor(*)Scalar arms after the F64 scalar-compare attempt. Both fall back to the unchanged generic path when not dense i64."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: slices read in element order; scalar broadcast preserves operand order via scalar_on_left for the asymmetric ordered comparisons (Lt/Le/Gt/Ge)",
+        "comparison_op": "unchanged: for I64xI64 compare_literals returns int_cmp(i128::from(a), i128::from(b)); the fast paths apply the same dispatcher int_cmp with the same i128 widening",
+        "output_dtype": "Bool tensor, identical to the generic path (Bool has no dense storage; output stays Vec<Literal>)",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "as_i64_slice() is Some only for I64 dense storage; mixed/Literal-backed/non-I64-scalar inputs return None and run the unchanged generic compare_literals loop"
+    },
+    "validation": [
+        {
+            "name": "i64_compare_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib comparison",
+            "result": "passed: 17 tests incl new dense_i64_compare_bit_identical_to_literal_path (same-shape + both scalar orders, all 6 comparisons, i64::MIN/MAX)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+            "result": "passed"
+        }
+    ]
+}
