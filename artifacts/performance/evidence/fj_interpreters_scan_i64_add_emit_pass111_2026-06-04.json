@@ -49,7 +49,7 @@
     "Integer arithmetic uses i64::wrapping_add, matching Primitive::Add I64 scalar behavior. There is no floating-point, RNG, tie-breaking, or side-effect behavior in the accepted fragment."
   ],
   "golden": "fj_interpreters_scan_i64_add_emit_pass111_2026-06-04.golden",
-  "golden_sha256": "PENDING",
+  "golden_sha256": "8fe4b8e75705b40ff5a3c4329f1a5ceed14a5a70c4e341085c548d11bdea2ef1",
   "validation": [
     "cargo fmt -p fj-interpreters --check",
     "git diff --check -- crates/fj-interpreters/src/lib.rs",

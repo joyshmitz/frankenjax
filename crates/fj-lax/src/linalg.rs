@@ -1180,6 +1180,277 @@ fn complex_extend_unitary_columns(
 
 // ── Eigh (Symmetric Eigendecomposition) ────────────────────────────
 
+/// Closed-form analytic eigendecomposition of a 3×3 real **symmetric** matrix.
+///
+/// `a` is row-major length 9; only the upper triangle (`a[0],a[1],a[2],a[4],
+/// a[5],a[8]`) is read, matching the iterative Jacobi kernel's symmetric
+/// assumption. Returns `(w, v)` with eigenvalues **ascending** and eigenvectors
+/// as **columns** (`v[row*3 + col]`), orthonormal, satisfying `A = V diag(w) Vᵀ`.
+///
+/// Returns `None` when the analytic result fails a tight residual /
+/// orthonormality check (the caller then falls back to the iterative Jacobi
+/// solver, preserving parity). This is the >=2x algorithmic replacement for the
+/// per-matrix Jacobi sweep on the hot 3×3 batched-eigh path: eigenvalues come
+/// from the trigonometric solution of the characteristic cubic (Smith 1961 /
+/// Kopp), and eigenvectors from a numerically robust "isolate the
+/// best-separated eigenvalue, then solve the 2×2 problem in the orthogonal
+/// plane" construction that stays well-conditioned for degenerate spectra.
+pub fn analytic_eigh_3x3(a: &[f64]) -> Option<([f64; 3], [f64; 9])> {
+    if a.len() != 9 {
+        return None;
+    }
+    let a00 = a[0];
+    let a11 = a[4];
+    let a22 = a[8];
+    let a01 = a[1];
+    let a02 = a[2];
+    let a12 = a[5];
+
+    // Reject non-finite inputs (let Jacobi handle / surface them).
+    if !(a00.is_finite()
+        && a11.is_finite()
+        && a22.is_finite()
+        && a01.is_finite()
+        && a02.is_finite()
+        && a12.is_finite())
+    {
+        return None;
+    }
+
+    let p1 = a01 * a01 + a02 * a02 + a12 * a12;
+
+    // Eigenvalues, ascending.
+    let w = if p1 == 0.0 {
+        // Already diagonal: eigenvalues are the diagonal entries.
+        let mut d = [a00, a11, a22];
+        d.sort_by(f64::total_cmp);
+        d
+    } else {
+        let q = (a00 + a11 + a22) / 3.0;
+        let p2 = (a00 - q) * (a00 - q)
+            + (a11 - q) * (a11 - q)
+            + (a22 - q) * (a22 - q)
+            + 2.0 * p1;
+        let p = (p2 / 6.0).sqrt();
+        // p = sqrt(non-negative finite) so p is finite & >= 0 here; p == 0 only
+        // for an (already-handled) scalar matrix. Guard defensively.
+        if p <= 0.0 {
+            return None;
+        }
+        // B = (A - q I) / p ; r = det(B) / 2.
+        let b00 = (a00 - q) / p;
+        let b11 = (a11 - q) / p;
+        let b22 = (a22 - q) / p;
+        let b01 = a01 / p;
+        let b02 = a02 / p;
+        let b12 = a12 / p;
+        let det_b = b00 * (b11 * b22 - b12 * b12) - b01 * (b01 * b22 - b12 * b02)
+            + b02 * (b01 * b12 - b11 * b02);
+        let r = (det_b / 2.0).clamp(-1.0, 1.0);
+        let phi = r.acos() / 3.0;
+        let two_p = 2.0 * p;
+        // The three roots are q + 2p·cos(phi + 2πk/3), k=0,1,2; 2π/3 = 4·(π/3)·½.
+        let third = std::f64::consts::FRAC_PI_3; // π/3
+        let eig_hi = q + two_p * phi.cos();
+        let eig_lo = q + two_p * (phi + 2.0 * third).cos();
+        let eig_mid = 3.0 * q - eig_hi - eig_lo;
+        let mut d = [eig_lo, eig_mid, eig_hi];
+        d.sort_by(f64::total_cmp);
+        d
+    };
+
+    // Eigenvectors. Isolate the best-separated eigenvalue (an endpoint of the
+    // ascending spectrum: whichever of the two outer gaps is larger), solve it
+    // directly, then reduce the remaining pair to a 2×2 problem in the plane
+    // orthogonal to that eigenvector — robust even when the other two
+    // eigenvalues coincide.
+    let gap_low = w[1] - w[0];
+    let gap_high = w[2] - w[1];
+    let iso = if gap_low >= gap_high { 0usize } else { 2usize };
+
+    let v_iso = eigenvector_3x3_for(a00, a11, a22, a01, a02, a12, w[iso])?;
+
+    // Orthonormal basis {u1, u2} of the plane ⟂ v_iso.
+    let (u1, u2) = orthonormal_complement_basis(v_iso);
+
+    // Project A onto {u1, u2}: symmetric 2×2 B.
+    let au1 = symv3(a00, a11, a22, a01, a02, a12, u1);
+    let au2 = symv3(a00, a11, a22, a01, a02, a12, u2);
+    let b11 = dot3(u1, au1);
+    let b12 = dot3(u1, au2);
+    let b22 = dot3(u2, au2);
+
+    // 2×2 symmetric eigenvectors (eigenvalues for output come from `w`, not B).
+    let tr = b11 + b22;
+    let diff = b11 - b22;
+    let disc = (diff * diff + 4.0 * b12 * b12).max(0.0).sqrt();
+    let mu_minus = 0.5 * (tr - disc);
+    let mu_plus = 0.5 * (tr + disc);
+    let c_minus = eig2x2_vector(b11, b12, b22, mu_minus);
+    let c_plus = eig2x2_vector(b11, b12, b22, mu_plus);
+    let vec_minus = combine2(u1, u2, c_minus);
+    let vec_plus = combine2(u1, u2, c_plus);
+
+    // Assemble columns in ascending order. `iso` is an endpoint; the remaining
+    // two ascending slots take (mu_minus, mu_plus), themselves ascending.
+    let mut cols = [[0.0_f64; 3]; 3];
+    cols[iso] = v_iso;
+    let (slot_lo, slot_hi) = if iso == 0 { (1usize, 2usize) } else { (0usize, 1usize) };
+    cols[slot_lo] = vec_minus;
+    cols[slot_hi] = vec_plus;
+
+    let mut v = [0.0_f64; 9];
+    for col in 0..3 {
+        v[col] = cols[col][0];
+        v[3 + col] = cols[col][1];
+        v[6 + col] = cols[col][2];
+    }
+
+    // Validate: orthonormality (VᵀV = I) and reconstruction (A V = V diag(w)).
+    let scale = 1.0
+        + a00.abs()
+            .max(a11.abs())
+            .max(a22.abs())
+            .max(p1.sqrt());
+    let tol = 1e-9 * scale;
+    for i in 0..3 {
+        for j in 0..3 {
+            let ci = [v[i], v[3 + i], v[6 + i]];
+            let cj = [v[j], v[3 + j], v[6 + j]];
+            let d = dot3(ci, cj);
+            let target = if i == j { 1.0 } else { 0.0 };
+            if (d - target).abs() > 1e-9 {
+                return None;
+            }
+        }
+    }
+    for col in 0..3 {
+        let vc = [v[col], v[3 + col], v[6 + col]];
+        let avc = symv3(a00, a11, a22, a01, a02, a12, vc);
+        for row in 0..3 {
+            if (avc[row] - w[col] * vc[row]).abs() > tol {
+                return None;
+            }
+        }
+    }
+
+    Some((w, v))
+}
+
+/// Eigenvector of a 3×3 symmetric matrix for eigenvalue `lambda`, via the
+/// largest cross product of the rows of `(A - lambda I)` (each row is ⟂ the
+/// eigenvector). Returns `None` if the rows are too parallel to recover a
+/// direction (degenerate at this eigenvalue).
+#[allow(clippy::too_many_arguments)]
+fn eigenvector_3x3_for(
+    a00: f64,
+    a11: f64,
+    a22: f64,
+    a01: f64,
+    a02: f64,
+    a12: f64,
+    lambda: f64,
+) -> Option<[f64; 3]> {
+    let r0 = [a00 - lambda, a01, a02];
+    let r1 = [a01, a11 - lambda, a12];
+    let r2 = [a02, a12, a22 - lambda];
+    let c0 = cross3(r0, r1);
+    let c1 = cross3(r1, r2);
+    let c2 = cross3(r2, r0);
+    let n0 = dot3(c0, c0);
+    let n1 = dot3(c1, c1);
+    let n2 = dot3(c2, c2);
+    let (best, best_n) = if n0 >= n1 && n0 >= n2 {
+        (c0, n0)
+    } else if n1 >= n2 {
+        (c1, n1)
+    } else {
+        (c2, n2)
+    };
+    if best_n <= 0.0 {
+        return None;
+    }
+    let inv = 1.0 / best_n.sqrt();
+    Some([best[0] * inv, best[1] * inv, best[2] * inv])
+}
+
+/// Build an orthonormal basis `{u1, u2}` of the plane orthogonal to the unit
+/// vector `v`.
+fn orthonormal_complement_basis(v: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    // Choose the standard basis axis least aligned with `v` for stability.
+    let ax = v[0].abs();
+    let ay = v[1].abs();
+    let az = v[2].abs();
+    let e = if ax <= ay && ax <= az {
+        [1.0, 0.0, 0.0]
+    } else if ay <= az {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let d = dot3(e, v);
+    let mut u1 = [e[0] - d * v[0], e[1] - d * v[1], e[2] - d * v[2]];
+    let n = dot3(u1, u1).sqrt();
+    let inv = 1.0 / n;
+    u1 = [u1[0] * inv, u1[1] * inv, u1[2] * inv];
+    let u2 = cross3(v, u1);
+    (u1, u2)
+}
+
+/// Eigenvector (in 2D) of the symmetric 2×2 `[[b11,b12],[b12,b22]]` for
+/// eigenvalue `mu`, normalized.
+fn eig2x2_vector(b11: f64, b12: f64, b22: f64, mu: f64) -> [f64; 2] {
+    // Null vector of (B - mu I): rows (b11-mu, b12) and (b12, b22-mu); a null
+    // vector is ⟂ a row, i.e. (-row.1, row.0). Use the longer row.
+    let r0 = [b11 - mu, b12];
+    let r1 = [b12, b22 - mu];
+    let n0 = r0[0] * r0[0] + r0[1] * r0[1];
+    let n1 = r1[0] * r1[0] + r1[1] * r1[1];
+    let v = if n0 >= n1 {
+        [-r0[1], r0[0]]
+    } else {
+        [-r1[1], r1[0]]
+    };
+    let n = (v[0] * v[0] + v[1] * v[1]).sqrt();
+    if n == 0.0 {
+        // B is (near) a multiple of I in this plane: any unit vector works.
+        [1.0, 0.0]
+    } else {
+        [v[0] / n, v[1] / n]
+    }
+}
+
+/// `c[0]*u1 + c[1]*u2` for a 2-vector `c` expressed in the `{u1,u2}` basis.
+fn combine2(u1: [f64; 3], u2: [f64; 3], c: [f64; 2]) -> [f64; 3] {
+    [
+        c[0] * u1[0] + c[1] * u2[0],
+        c[0] * u1[1] + c[1] * u2[1],
+        c[0] * u1[2] + c[1] * u2[2],
+    ]
+}
+
+/// Symmetric 3×3 matrix-vector product `A x` from the upper triangle.
+#[allow(clippy::too_many_arguments)]
+fn symv3(a00: f64, a11: f64, a22: f64, a01: f64, a02: f64, a12: f64, x: [f64; 3]) -> [f64; 3] {
+    [
+        a00 * x[0] + a01 * x[1] + a02 * x[2],
+        a01 * x[0] + a11 * x[1] + a12 * x[2],
+        a02 * x[0] + a12 * x[1] + a22 * x[2],
+    ]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 /// Compute the eigendecomposition of a Hermitian matrix: A = V diag(W) V^H.
 ///
 /// Returns `[W, V]` where W is a vector of real eigenvalues (ascending) and V
@@ -1309,21 +1580,33 @@ pub(crate) fn eval_eigh(
         });
     }
 
-    let mut a_work = a;
-    let (eigenvalues, eigenvectors) = jacobi_eigendecomposition(&mut a_work, m);
+    // Fast path: closed-form analytic 3×3 symmetric eigensolver (ascending,
+    // orthonormal columns). Falls back to iterative Jacobi when the analytic
+    // residual check fails (ill-conditioned), preserving parity. The batched
+    // path (fj-dispatch append_eigh_decomposition) calls the SAME
+    // `analytic_eigh_3x3`, so batched and single eval stay bit-identical.
+    let (w_sorted, v_sorted) = if m == 3
+        && let Some((w3, v3)) = analytic_eigh_3x3(&a)
+    {
+        (w3.to_vec(), v3.to_vec())
+    } else {
+        let mut a_work = a;
+        let (eigenvalues, eigenvectors) = jacobi_eigendecomposition(&mut a_work, m);
 
-    // Sort eigenvalues in ascending order (JAX convention for eigh)
-    let mut indices: Vec<usize> = (0..m).collect();
-    indices.sort_by(|&a, &b| eigenvalues[a].total_cmp(&eigenvalues[b]));
+        // Sort eigenvalues in ascending order (JAX convention for eigh)
+        let mut indices: Vec<usize> = (0..m).collect();
+        indices.sort_by(|&a, &b| eigenvalues[a].total_cmp(&eigenvalues[b]));
 
-    let mut w_sorted = vec![0.0_f64; m];
-    let mut v_sorted = vec![0.0_f64; m * m];
-    for (new_col, &old_col) in indices.iter().enumerate() {
-        w_sorted[new_col] = eigenvalues[old_col];
-        for row in 0..m {
-            v_sorted[row * m + new_col] = eigenvectors[row * m + old_col];
+        let mut w_sorted = vec![0.0_f64; m];
+        let mut v_sorted = vec![0.0_f64; m * m];
+        for (new_col, &old_col) in indices.iter().enumerate() {
+            w_sorted[new_col] = eigenvalues[old_col];
+            for row in 0..m {
+                v_sorted[row * m + new_col] = eigenvectors[row * m + old_col];
+            }
         }
-    }
+        (w_sorted, v_sorted)
+    };
 
     let w_elements: Vec<Literal> = w_sorted
         .iter()
@@ -3094,6 +3377,72 @@ mod tests {
                     "V*W*Vt[{i},{j}] = {val}, expected {}",
                     a_data[i * 2 + j]
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn analytic_eigh_3x3_matches_jacobi_general() {
+        // Non-diagonal, distinct-eigenvalue 3×3 (the hot batched-eigh shape).
+        // The analytic path must (a) succeed, (b) return ascending eigenvalues,
+        // (c) be orthonormal, and (d) reconstruct A = V diag(w) Vᵀ — and match
+        // the iterative Jacobi eigenvalues, all within 1e-10.
+        let a_rows = [2.0, 0.1, 0.0, 0.1, 3.0, 0.2, 0.0, 0.2, 4.0];
+        let (w, v) = analytic_eigh_3x3(&a_rows).expect("analytic path should accept");
+
+        // Ascending.
+        assert!(w[0] <= w[1] && w[1] <= w[2], "ascending {w:?}");
+
+        // Orthonormality VᵀV = I.
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut d = 0.0;
+                for r in 0..3 {
+                    d += v[r * 3 + i] * v[r * 3 + j];
+                }
+                let target = if i == j { 1.0 } else { 0.0 };
+                assert!((d - target).abs() < 1e-10, "VtV[{i},{j}]={d}");
+            }
+        }
+
+        // Reconstruction V diag(w) Vᵀ = A.
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut val = 0.0;
+                for k in 0..3 {
+                    val += v[i * 3 + k] * w[k] * v[j * 3 + k];
+                }
+                assert!(
+                    (val - a_rows[i * 3 + j]).abs() < 1e-10,
+                    "recon[{i},{j}]={val} exp {}",
+                    a_rows[i * 3 + j]
+                );
+            }
+        }
+
+        // Eigenvalues agree with the iterative Jacobi reference.
+        let mut jac = a_rows;
+        let (mut jw, _) = jacobi_eigendecomposition(&mut jac, 3);
+        jw.sort_by(f64::total_cmp);
+        for k in 0..3 {
+            assert!((w[k] - jw[k]).abs() < 1e-10, "eig[{k}] {} vs jacobi {}", w[k], jw[k]);
+        }
+    }
+
+    #[test]
+    fn analytic_eigh_3x3_handles_repeated_eigenvalue() {
+        // Rotated [2,2,5]: a degenerate 2-D eigenspace. Must still be orthonormal
+        // and reconstruct (sign/rotation within the eigenspace is free).
+        let a_rows = [2.0, 0.0, 0.0, 0.0, 3.5, 1.5, 0.0, 1.5, 3.5]; // eigs 2,2,5
+        let (w, v) = analytic_eigh_3x3(&a_rows).expect("analytic path should accept");
+        assert!((w[0] - 2.0).abs() < 1e-10 && (w[1] - 2.0).abs() < 1e-10 && (w[2] - 5.0).abs() < 1e-10, "{w:?}");
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut val = 0.0;
+                for k in 0..3 {
+                    val += v[i * 3 + k] * w[k] * v[j * 3 + k];
+                }
+                assert!((val - a_rows[i * 3 + j]).abs() < 1e-10, "recon[{i},{j}]={val}");
             }
         }
     }

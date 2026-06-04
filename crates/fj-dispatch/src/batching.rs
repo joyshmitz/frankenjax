@@ -9,6 +9,7 @@ use fj_core::{
     VarId,
 };
 use fj_interpreters::{eval_equation_outputs, eval_jaxpr_with_consts};
+use fj_lax::linalg::analytic_eigh_3x3;
 use fj_lax::{eval_primitive, eval_primitive_multi, promote_dtype_public};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeMap;
@@ -3217,6 +3218,18 @@ fn eigh_decompose_matrix_into(a: &mut [f64], n: usize, scratch: &mut EighScratch
 }
 
 fn eigh_decompose_matrix_3x3_into(a: &mut [f64], scratch: &mut EighScratch) {
+    // Fast path: closed-form analytic 3×3 symmetric eigensolver, shared with the
+    // single-matrix `fj_lax::eval_eigh` path so batched and per-slice results
+    // are bit-identical. Falls back to the iterative Jacobi sweep below when the
+    // analytic residual check rejects (ill-conditioned), preserving parity.
+    if let Some((w3, v3)) = analytic_eigh_3x3(a) {
+        scratch.w_sorted.clear();
+        scratch.w_sorted.extend_from_slice(&w3);
+        scratch.v_sorted.clear();
+        scratch.v_sorted.extend_from_slice(&v3);
+        return;
+    }
+
     jacobi_eigendecomposition_matrix_3x3_into(a, &mut scratch.jacobi);
     let eigenvalues = &scratch.jacobi.eigenvalues;
     let eigenvectors = &scratch.jacobi.eigenvectors;
@@ -8178,7 +8191,7 @@ mod tests {
 
         assert_eq!(
             digest,
-            "1dc99b980e9600f888e0c05c77537a6e4f1abc64276e09d204f3163634defeb7"
+            "9c8554df967d304b2570460fc5db4fca86602577232fcf8b01177fcd41cd365f"
         );
     }
 
