@@ -1,0 +1,56 @@
+{
+  "pass": 110,
+  "bead": "frankenjax-t9h93",
+  "crate": "fj-interpreters",
+  "date": "2026-06-04",
+  "target": "dce/all_used/1000eq",
+  "profile_basis": "Fresh RCH Criterion profile after pass109 ranked dce/all_used/1000eq as the largest disjoint fj-interpreters row at 85.576 us on ts2.",
+  "lever": "guarded linear-chain all-used DCE fast path",
+  "status": "rejected",
+  "source_kept": false,
+  "baseline": {
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 CARGO_TARGET_DIR=/data/tmp/frankenjax-dce-baseline-20260604 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- cargo bench -p fj-interpreters --bench pe_baseline -- dce/all_used --sample-size 100 --measurement-time 3 --warm-up-time 1",
+    "dce/all_used/10eq": {
+      "lower_us": 1.0512,
+      "mid_us": 1.0567,
+      "upper_us": 1.0630
+    },
+    "dce/all_used/100eq": {
+      "lower_us": 9.4468,
+      "mid_us": 9.5103,
+      "upper_us": 9.5793
+    },
+    "dce/all_used/1000eq": {
+      "lower_us": 85.493,
+      "mid_us": 86.286,
+      "upper_us": 87.196
+    }
+  },
+  "candidate": {
+    "worker": "ts2",
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-t9h93-dce-rebench cargo bench -p fj-interpreters --bench pe_baseline -- dce/all_used/1000eq --sample-size 40 --measurement-time 2 --warm-up-time 1 --noplot",
+    "dce/all_used/1000eq": {
+      "lower_us": 85.548,
+      "mid_us": 87.297,
+      "upper_us": 88.774
+    }
+  },
+  "benchmark_delta": {
+    "midpoint_speedup": 0.988419,
+    "delta_percent": 1.172,
+    "decision": "reject - same-worker midpoint is slower than the recorded baseline and confidence intervals overlap"
+  },
+  "behavior_proof": [
+    "Candidate passed RCH cargo test -p fj-interpreters dce --lib -- --nocapture on ts1: 10 focused DCE tests, including the existing large-chain golden hash.",
+    "A guard-miss regression covered a single used output with a dead side equation, proving the candidate did not shortcut all-output-used cases blindly.",
+    "The candidate was removed manually after rejection; git diff for crates/fj-interpreters/src/partial_eval.rs was empty before closing the bead."
+  ],
+  "score": {
+    "impact": 0.0,
+    "confidence": 1.0,
+    "effort": 1.0,
+    "impact_x_confidence_div_effort": 0.0
+  },
+  "next_pivot": "Do not retry guarded DCE all-used shortcuts. Attack a deeper structural primitive around partial_eval/staging clone pressure or scan execution."
+}
