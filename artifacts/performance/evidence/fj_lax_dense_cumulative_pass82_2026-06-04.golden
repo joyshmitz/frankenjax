@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.26 pass82 golden
+target=eval/cumsum_64k_f64_vec
+lever=dense F64/I64 cumulative scan (eval_cumulative_dense) scanning the contiguous as_f64_slice/as_i64_slice per line, bypassing the Vec<Literal> materialize + per-element Literal scan
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2
+worker=ts2
+cumsum_64k_f64=dense 91.557us [91.298, 91.882] vs literal 1061.253us [1052.356, 1070.602] = 11.59x mid, 11.45x conservative
+score=10.0
+alien_primitive=dense SoA / typed columnar storage applied to prefix scan, alien_cs_graveyard section 8.2
+source_change=eval_cumulative_dense scans a clone of the dense typed backing per line and returns new_f64_values/new_i64_values; eval_cumulative calls it after parsing axis/reverse, else the unchanged generic Vec<Literal> path
+isomorphism=same per-line base offset and ascending/reversed scan order; same float_init/int_init seed and float_op/int_op (Cumsum +, Cumprod *, Cummax jax_max_f64/i64::max, Cummin jax_min_f64/i64::min); F64 output from_f64(acc) (reduce_real_output_dtype(F64)==F64), I64 output Literal::I64(acc); complex/F32/F16/BF16/Literal-backed/empty inputs use the generic path; output dtype preserved
+golden_note=bit-identical to the generic path across Cumsum/Cumprod/Cummax/Cummin x forward/reverse x axis 0/1 on a multi-line [3,40] tensor (f64 by bits + i64)
+validation=RCH cargo test -p fj-lax --lib --release reduction passed 34 tests incl dense_cumulative_bit_identical_to_literal_path; RCH cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings passed

@@ -917,6 +917,109 @@ fn multi_to_out_flat(
 
 /// Cumulative scan along a specified axis. Output shape matches input.
 /// If no axis param, defaults to axis 0.
+/// Dense F64/I64 cumulative-scan fast path. Scans each line along `axis`
+/// directly over a clone of the contiguous typed backing and returns a dense
+/// output, bypassing the `Vec<Literal>` materialization (`to_vec`) and the
+/// per-element `as_f64()`/`as_i64()` + Literal write of the generic path.
+/// Bit-for-bit identical: same per-line `float_init`/`int_init` seed, same
+/// ascending (or reversed) order, same `float_op`/`int_op`, and the same output
+/// literal (`reduce_real_output_dtype(F64) == F64` -> `from_f64`; I64 ->
+/// `Literal::I64`). Returns `None` unless the tensor is F64 or I64 dense storage.
+#[inline]
+fn eval_cumulative_dense(
+    tensor: &TensorValue,
+    axis: usize,
+    reverse: bool,
+    int_init: i64,
+    float_init: f64,
+    int_op: &impl Fn(i64, i64) -> i64,
+    float_op: &impl Fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    let primitive = Primitive::Cumsum; // only used for stride-overflow error context
+    let rank = tensor.shape.rank();
+    let axis_dim = tensor.shape.dims[axis] as usize;
+    let total = tensor.elements.len();
+    if axis_dim == 0 || total == 0 {
+        return Ok(None);
+    }
+    let strides = checked_strides(primitive, "cumulative input", &tensor.shape.dims)?;
+    let axis_stride = strides[axis];
+    let outer_count = total / axis_dim;
+
+    // Shared per-line base-offset closure (all axes except `axis`).
+    let line_base = |outer: usize| -> usize {
+        let mut idx = outer;
+        let mut flat = 0_usize;
+        for ax in (0..rank).rev() {
+            if ax == axis {
+                continue;
+            }
+            let dim = tensor.shape.dims[ax] as usize;
+            flat += (idx % dim) * strides[ax];
+            idx /= dim;
+        }
+        flat
+    };
+
+    if tensor.dtype == DType::F64 {
+        let Some(src) = tensor.elements.as_f64_slice() else {
+            return Ok(None);
+        };
+        let mut out = src.to_vec();
+        for outer in 0..outer_count {
+            let base = line_base(outer);
+            let mut acc = float_init;
+            if reverse {
+                for i in (0..axis_dim).rev() {
+                    let fi = base + i * axis_stride;
+                    acc = float_op(acc, out[fi]);
+                    out[fi] = acc;
+                }
+            } else {
+                for i in 0..axis_dim {
+                    let fi = base + i * axis_stride;
+                    acc = float_op(acc, out[fi]);
+                    out[fi] = acc;
+                }
+            }
+        }
+        return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+            tensor.shape.clone(),
+            out,
+        )?)));
+    }
+
+    if tensor.dtype == DType::I64 {
+        let Some(src) = tensor.elements.as_i64_slice() else {
+            return Ok(None);
+        };
+        let mut out = src.to_vec();
+        for outer in 0..outer_count {
+            let base = line_base(outer);
+            let mut acc = int_init;
+            if reverse {
+                for i in (0..axis_dim).rev() {
+                    let fi = base + i * axis_stride;
+                    acc = int_op(acc, out[fi]);
+                    out[fi] = acc;
+                }
+            } else {
+                for i in 0..axis_dim {
+                    let fi = base + i * axis_stride;
+                    acc = int_op(acc, out[fi]);
+                    out[fi] = acc;
+                }
+            }
+        }
+        return Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+            tensor.shape.clone(),
+            out,
+        )?)));
+    }
+
+    Ok(None)
+}
+
 pub(crate) fn eval_cumulative(
     primitive: Primitive,
     inputs: &[Value],
@@ -961,6 +1064,15 @@ pub(crate) fn eval_cumulative(
                 });
             }
             let reverse = parse_bool_param(primitive, params, "reverse", false)?;
+
+            // Dense F64/I64 fast path: scan the contiguous typed backing directly,
+            // skipping the Vec<Literal> materialization + per-element Literal
+            // dispatch. Returns None for non-dense / non-F64/I64 -> generic below.
+            if let Some(value) = eval_cumulative_dense(
+                tensor, axis, reverse, int_init, float_init, &int_op, &float_op,
+            )? {
+                return Ok(value);
+            }
 
             let is_integral = tensor.dtype == DType::I64 || tensor.dtype == DType::I32;
             let is_complex = matches!(tensor.dtype, DType::Complex64 | DType::Complex128);
@@ -1896,6 +2008,94 @@ mod tests {
     }
 
     // ── Cumulative ──
+
+    /// Bit-exact parity for the dense F64/I64 cumulative fast path vs the
+    /// Vec<Literal> generic path, across Cumsum/Cumprod/Cummax/Cummin, forward +
+    /// reverse, on a multi-line [3,40] tensor. Routes through eval_primitive so
+    /// the real per-primitive init/op run. Small bounded values avoid prod
+    /// overflow (identical on both paths anyway).
+    #[test]
+    fn dense_cumulative_bit_identical_to_literal_path() {
+        let rows = 3usize;
+        let cols = 40usize;
+        let dims = vec![rows as u32, cols as u32];
+        let f: Vec<f64> = (0..rows * cols)
+            .map(|i| match i % 7 {
+                0 => 0.0,
+                1 => -1.5,
+                2 => 2.0,
+                3 => -0.5,
+                _ => 1.25,
+            })
+            .collect();
+        let n: Vec<i64> = (0..(rows * cols) as i64).map(|i| (i % 5) - 2).collect();
+
+        let dense_f = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, f.clone()).unwrap(),
+        );
+        assert!(
+            dense_f
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_some()
+        );
+        let lit_f = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: dims.clone() },
+                f.iter().copied().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        let dense_i = Value::Tensor(
+            TensorValue::new_i64_values(Shape { dims: dims.clone() }, n.clone()).unwrap(),
+        );
+        let lit_i = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: dims.clone() },
+                n.iter().copied().map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
+        let fbits = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect()
+        };
+        let ints = |v: &Value| -> Vec<i64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_i64().unwrap())
+                .collect()
+        };
+
+        for prim in [
+            Primitive::Cumsum,
+            Primitive::Cumprod,
+            Primitive::Cummax,
+            Primitive::Cummin,
+        ] {
+            for (axis, rev) in [("0", "false"), ("1", "false"), ("1", "true"), ("0", "true")] {
+                let mut p = BTreeMap::new();
+                p.insert("axis".to_owned(), axis.to_owned());
+                p.insert("reverse".to_owned(), rev.to_owned());
+                let df = crate::eval_primitive(prim, std::slice::from_ref(&dense_f), &p).unwrap();
+                let lf = crate::eval_primitive(prim, std::slice::from_ref(&lit_f), &p).unwrap();
+                assert_eq!(fbits(&df), fbits(&lf), "f64 {prim:?} axis={axis} rev={rev}");
+                let di = crate::eval_primitive(prim, std::slice::from_ref(&dense_i), &p).unwrap();
+                let li = crate::eval_primitive(prim, std::slice::from_ref(&lit_i), &p).unwrap();
+                assert_eq!(ints(&di), ints(&li), "i64 {prim:?} axis={axis} rev={rev}");
+            }
+        }
+    }
 
     #[test]
     fn cumsum_vector() {

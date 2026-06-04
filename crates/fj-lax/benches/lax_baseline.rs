@@ -901,6 +901,39 @@ fn bench_reduce_and_256_axis1_bool_literal_reference(c: &mut Criterion) {
     });
 }
 
+// 64k f64 Cumsum: dense scan fast path (pass82) vs the Vec<Literal> materialize +
+// per-element Literal scan. Same process for a same-worker ratio.
+fn bench_cumsum_64k_f64_vec(c: &mut Criterion) {
+    let data: Vec<f64> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| i as f64 * 0.001)
+        .collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cumsum_64k_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cumsum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_cumsum_64k_f64_literal_reference(c: &mut Criterion) {
+    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::from_f64(i as f64 * 0.001))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            elements,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cumsum_64k_f64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cumsum, std::slice::from_ref(&input), &p))
+    });
+}
+
 // 64k i64 ascending sort: exercises the LSD radix path (pass74) vs the prior
 // comparison sort. Pseudo-random keys (negatives, wide range, duplicates) so the
 // sort does real work; ascending is the default direction.
@@ -1756,6 +1789,8 @@ criterion_group!(
     bench_reduce_and_64k_bool_literal_reference,
     bench_reduce_and_256_axis1_bool_vec,
     bench_reduce_and_256_axis1_bool_literal_reference,
+    bench_cumsum_64k_f64_vec,
+    bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
     bench_sort_64k_f64,
     bench_sort_calib_reduce_64k_i64,

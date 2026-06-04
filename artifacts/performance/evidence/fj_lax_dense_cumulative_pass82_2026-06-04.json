@@ -1,0 +1,60 @@
+{
+    "bead": "frankenjax-mcqr.30.26",
+    "pass": 82,
+    "date": "2026-06-04",
+    "crate": "fj-lax",
+    "target": "eval/cumsum_64k_f64_vec",
+    "lever_summary": "Dense F64/I64 cumulative scan. eval_cumulative materialized the input to a Vec<Literal> (to_vec) and scanned each line per-element with as_f64()/as_i64() reads + reduce_real_literal/Literal::I64 writes. New eval_cumulative_dense scans a clone of the contiguous as_f64_slice()/as_i64_slice() backing per line and returns a dense output, bypassing all Literal materialization and per-element dispatch.",
+    "alien_graveyard": {
+        "primitive": "dense SoA / typed columnar storage applied to prefix scan",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "scan contiguous native f64/i64 in place instead of materializing + reading/writing a 24-byte tagged-union per element; the cumulative analog of the dense reductions"
+    },
+    "method": "Same-worker comparison on ts2: dense (vector_f64) input vs a Vec<Literal>-backed reference run in the same process.",
+    "results": {
+        "cumsum_64k_f64": {
+            "dense_ns": 91557.4,
+            "dense_ci_ns": [91297.6, 91882.0],
+            "literal_ns": 1061252.6,
+            "literal_ci_ns": [1052355.5, 1070601.6],
+            "speedup_midpoint_x": 11.59,
+            "speedup_conservative_x": 11.45
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- cumsum_64k_f64 --save-baseline cum",
+    "score": {
+        "impact": 5.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 10.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/reduction.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "Added eval_cumulative_dense(tensor, axis, reverse, int_init, float_init, int_op, float_op); eval_cumulative calls it after parsing axis/reverse, returning None (generic path) for non-dense / non-F64/I64. Per-line base offset and scan order match the generic loop exactly."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: same per-line base offset, same ascending (or reversed) scan order along the axis; each element read once before its overwrite",
+        "op": "unchanged: same per-line float_init/int_init seed and float_op/int_op (Cumsum +, Cumprod *, Cummax jax_max_f64/i64::max, Cummin jax_min_f64/i64::min) applied in the same order",
+        "output": "F64: reduce_real_output_dtype(F64)==F64 so output literal is from_f64(acc), matching new_f64_values; I64: Literal::I64(acc) matching new_i64_values",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "as_f64_slice()/as_i64_slice() are Some only for F64/I64 dense storage; complex, F32/F16/BF16, and Literal-backed inputs return None and run the unchanged generic path; empty axis/total returns None (generic handles the empty early-return); stride overflow is checked identically",
+        "output_dtype": "F64 / I64 (input dtype preserved)"
+    },
+    "validation": [
+        {
+            "name": "dense_cumulative_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib --release reduction",
+            "result": "passed: 34 tests incl dense_cumulative_bit_identical_to_literal_path (Cumsum/Cumprod/Cummax/Cummin x forward/reverse x axis 0/1, multi-line [3,40], f64 by bits + i64)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings",
+            "result": "passed (release dodges shared-target proc-macro rmeta drift in debug)"
+        }
+    ]
+}
