@@ -1,0 +1,60 @@
+{
+    "bead": "frankenjax-mcqr.30.31",
+    "pass": 86,
+    "date": "2026-06-04",
+    "crate": "fj-lax",
+    "target": "eval/sumpool_256x256_f64_vec",
+    "lever_summary": "Dense rank-2 F64 sum reduce_window general path. The non-3x3-SAME sum loop (e.g. 2x2 stride 2 VALID sumpool/avgpool) read tensor.elements[idx].as_f64() per window element (Literal materialization). Added a dense fast path that reads the operand from as_f64_slice(), accumulates in f64, and emits new_f64_values, before the unchanged Literal loop. The 3x3-SAME ultra-specialized sub-path is untouched.",
+    "alien_graveyard": {
+        "primitive": "dense SoA + stencil/windowed reduction over contiguous typed storage",
+        "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 8.2",
+        "mapping": "evaluate the pooling stencil over contiguous native f64 instead of materializing + reading a tagged-union per window element"
+    },
+    "method": "Same-worker comparison on ts2: dense (new_f64_values) operand vs a Vec<Literal>-backed operand run in the same process; identical 2x2 stride 2 VALID sumpool params.",
+    "results": {
+        "sumpool_256x256_f64_2x2_s2_valid": {
+            "dense_ns": 204263.4,
+            "dense_ci_ns": [203269.8, 205414.2],
+            "literal_ns": 559517.8,
+            "literal_ci_ns": [552606.2, 566527.5],
+            "speedup_midpoint_x": 2.74,
+            "speedup_conservative_x": 2.69
+        }
+    },
+    "command": "rch exec -- cargo bench -p fj-lax --bench lax_baseline -- sumpool_256x256_f64 --save-baseline sp",
+    "score": {
+        "impact": 4.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "impact_times_confidence_over_effort": 8.0,
+        "kept": true
+    },
+    "change": {
+        "files": [
+            "crates/fj-lax/src/lib.rs",
+            "crates/fj-lax/benches/lax_baseline.rs"
+        ],
+        "lever": "eval_reduce_window_rank2_f64_sum gains an as_f64_slice() dense loop (f64 accumulate, new_f64_values output) before the Literal loop; the 3x3-SAME early return and the Literal fallback are unchanged."
+    },
+    "isomorphism": {
+        "ordering": "unchanged: same out-position and in-window iteration, same padding skip, same ascending + accumulation from 0.0",
+        "value": "for dense f64, src[idx] == as_f64().unwrap_or(0.0) (the generic reads as_f64().unwrap_or(0.0)); output via from_f64 (new_f64_values)",
+        "padding": "SAME and VALID both validated",
+        "tie_breaking": "not applicable",
+        "rng": "not applicable",
+        "errors": "same checked_mul/checked_add window/flat overflow checks; gated on as_f64_slice() Some so non-dense F64 uses the Literal loop",
+        "output_dtype": "F64"
+    },
+    "validation": [
+        {
+            "name": "dense_sumpool_parity",
+            "command": "rch exec -- cargo test -p fj-lax --lib --release reduce_window",
+            "result": "passed: 30 tests incl dense_f64_reduce_window_sum_matches_generic (2x2 VALID, 3x2 VALID, 2x3 SAME; NaN/+-inf/-0; dense vs Literal/generic by bits)"
+        },
+        {
+            "name": "clippy_deny_warnings",
+            "command": "rch exec -- cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings",
+            "result": "passed (release dodges shared-target proc-macro rmeta drift in debug)"
+        }
+    ]
+}

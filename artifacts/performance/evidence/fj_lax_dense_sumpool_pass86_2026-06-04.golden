@@ -1,0 +1,12 @@
+frankenjax-mcqr.30.31 pass86 golden
+target=eval/sumpool_256x256_f64_vec
+lever=dense rank-2 f64 sum reduce_window general path — read as_f64_slice + f64 accumulate + new_f64_values, before the Literal loop (3x3-SAME sub-path untouched)
+method=same-worker dense vs Vec<Literal> reference benches, run in one process on ts2 (256x256, 2x2 stride2 VALID)
+worker=ts2
+sumpool_256x256_f64_2x2_s2_valid=dense 204.263us [203.270, 205.414] vs literal 559.518us [552.606, 566.528] = 2.74x mid, 2.69x conservative
+score=8.0
+alien_primitive=dense SoA + stencil/windowed reduction over contiguous typed storage, alien_cs_graveyard section 8.2
+source_change=eval_reduce_window_rank2_f64_sum gains an as_f64_slice dense loop before the Literal loop; 3x3-SAME early return + Literal fallback unchanged
+isomorphism=same out-position + in-window iteration, padding skip, ascending + accumulation from 0.0; for dense f64 src[idx]==as_f64().unwrap_or(0.0); output from_f64; SAME+VALID validated; same overflow checks; non-dense F64 uses the Literal loop
+golden_note=bit-identical to the generic path across 2x2 VALID / 3x2 VALID / 2x3 SAME with NaN/+-inf/-0, dense vs Literal by bits
+validation=RCH cargo test -p fj-lax --lib --release reduce_window passed 30 tests incl dense_f64_reduce_window_sum_matches_generic; RCH cargo clippy -p fj-lax --release --all-targets --no-deps -- -D warnings passed

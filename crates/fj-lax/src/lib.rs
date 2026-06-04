@@ -2638,6 +2638,74 @@ fn eval_reduce_window_rank2_f64_sum(
         return eval_reduce_window_rank2_f64_sum_3x3_same(tensor, out_dims, total_output);
     }
 
+    // Dense fast path: read the operand straight from its contiguous f64 backing
+    // and write a dense f64 output, bypassing the per-window-element Literal
+    // materialization. Bit-identical to the generic loop below — same in-bounds
+    // window iteration, same ascending `+` accumulation from 0.0, same from_f64
+    // output (for dense f64, src[idx] == as_f64().unwrap_or(0.0)).
+    if let Some(src) = tensor.elements.as_f64_slice() {
+        let mut output = Vec::with_capacity(total_output);
+        for out_row in 0..out_rows {
+            let row_base = out_row.checked_mul(stride_rows).ok_or_else(|| {
+                reduce_window_unsupported(primitive, "reduce_window window index overflow")
+            })?;
+            for out_col in 0..out_cols {
+                let col_base = out_col.checked_mul(stride_cols).ok_or_else(|| {
+                    reduce_window_unsupported(primitive, "reduce_window window index overflow")
+                })?;
+                let mut accum = 0.0;
+                for window_row in 0..window_rows {
+                    let padded_row = row_base.checked_add(window_row).ok_or_else(|| {
+                        reduce_window_unsupported(primitive, "reduce_window window index overflow")
+                    })?;
+                    if padded_row < pad_rows {
+                        continue;
+                    }
+                    let input_row = padded_row - pad_rows;
+                    if input_row >= input_rows {
+                        continue;
+                    }
+                    let row_offset = input_row.checked_mul(input_cols).ok_or_else(|| {
+                        reduce_window_unsupported(primitive, "reduce_window flat index overflow")
+                    })?;
+                    for window_col in 0..window_cols {
+                        let padded_col = col_base.checked_add(window_col).ok_or_else(|| {
+                            reduce_window_unsupported(
+                                primitive,
+                                "reduce_window window index overflow",
+                            )
+                        })?;
+                        if padded_col < pad_cols {
+                            continue;
+                        }
+                        let input_col = padded_col - pad_cols;
+                        if input_col >= input_cols {
+                            continue;
+                        }
+                        let flat_input_idx =
+                            row_offset.checked_add(input_col).ok_or_else(|| {
+                                reduce_window_unsupported(
+                                    primitive,
+                                    "reduce_window flat index overflow",
+                                )
+                            })?;
+                        accum += src[flat_input_idx];
+                    }
+                }
+                output.push(accum);
+            }
+        }
+        return Ok(Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: out_dims.to_vec(),
+                },
+                output,
+            )
+            .map_err(EvalError::InvalidTensor)?,
+        ));
+    }
+
     let mut output_elements = Vec::with_capacity(total_output);
     for out_row in 0..out_rows {
         let row_base = out_row.checked_mul(stride_rows).ok_or_else(|| {
@@ -8996,6 +9064,76 @@ mod tests {
                 );
                 assert_eq!(bits(&d), bits(&l), "{op} {win} {stride} {pad}");
             }
+        }
+    }
+
+    #[test]
+    fn dense_f64_reduce_window_sum_matches_generic() {
+        // Dense f64 rank-2 SUM reduce_window general path (non-3x3-SAME shapes,
+        // which hit the dense loop) must be bit-identical to the generic Literal
+        // path, incl NaN/+-inf and SAME/VALID padding.
+        let rows = 7usize;
+        let cols = 9usize;
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| match i % 11 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                3 => -0.0,
+                _ => ((i as f64) * 0.37).sin() * 10.0 - (i as f64),
+            })
+            .collect();
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        let literal = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data.iter().copied().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            literal
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_none()
+        );
+        let bits = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect()
+        };
+        for (win, stride, pad) in [
+            ("2,2", "2,2", "VALID"),
+            ("3,2", "1,1", "VALID"),
+            ("2,3", "1,1", "SAME"),
+        ] {
+            let p = rw_params_with_padding("sum", win, stride, pad);
+            let d =
+                eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense), &p).unwrap();
+            let l = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&literal), &p)
+                .unwrap();
+            assert_eq!(
+                d.as_tensor().unwrap().shape.dims,
+                l.as_tensor().unwrap().shape.dims,
+                "sum {win} {pad} shape"
+            );
+            assert_eq!(bits(&d), bits(&l), "sum {win} {stride} {pad}");
         }
     }
 
