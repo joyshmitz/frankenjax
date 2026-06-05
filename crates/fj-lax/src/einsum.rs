@@ -764,7 +764,8 @@ mod tests {
         }
 
         // 1 batch dim (bsz flattened) and 2 batch dims [b0,b1].
-        let cases: [(&str, Vec<usize>, Vec<usize>, Vec<usize>); 2] = [
+        type BatchedMatmulCase = (&'static str, Vec<usize>, Vec<usize>, Vec<usize>);
+        let cases: [BatchedMatmulCase; 2] = [
             ("bij,bjk->bik", vec![bsz, m, k], vec![bsz, k, n], vec![bsz, m, n]),
             (
                 "cdij,cdjk->cdik",

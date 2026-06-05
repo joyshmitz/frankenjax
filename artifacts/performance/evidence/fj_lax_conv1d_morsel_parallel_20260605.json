@@ -1,0 +1,79 @@
+{
+  "pass": 124,
+  "bead": "frankenjax-mcqr.52",
+  "crate": "fj-lax",
+  "target": "eval_conv rank-1 f64 dense fast path, benchmark eval/conv1d_1024x16_5x32_f64_vec",
+  "profile_backed_target": {
+    "profile_command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-dustyforest-profile cargo bench -p fj-lax --bench lax_baseline -- --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot",
+    "worker": "ts1",
+    "finding": "claimed eig benchmark was hottest, so the disjoint fj-lax dense conv1d row was selected: eval/conv1d_1024x16_5x32_f64_vec 6.9094 ms [6.8226, 7.0233]."
+  },
+  "lever": "Split large dense f64 conv1d output spaces into scoped-thread morsels over flat output indices. Each output element remains an independent serial k/ci reduction, and each worker writes a disjoint output slice at the exact flat position used by the original push order.",
+  "alien_primitive": "alien-graveyard vectorized execution / morsel-driven parallelism over independent output tuples; implemented in safe Rust with std::thread::scope and no dependency or FFI.",
+  "isomorphism": {
+    "ordering": "Flat output order is unchanged: n ascending, w ascending, co ascending. Thread chunks are disjoint contiguous flat ranges and are joined before TensorValue construction.",
+    "tie_breaking": "No comparisons or ties are introduced.",
+    "floating_point": "For every output element, the inner reduction still executes k ascending then ci ascending with the same lhs index, rhs index, multiplication, and addition sequence. No reassociation, SIMD, unsafe, BLAS, LAPACK, MKL, XLA, or mixed precision.",
+    "rng": "None.",
+    "golden_sha256": "see fj_lax_conv1d_morsel_parallel_20260605.golden.sha256",
+    "proof_test": "conv_1d_parallel_dense_matches_literal_bits compares dense threaded f64 outputs to the literal-backed generic path by f64::to_bits for same, same_lower, and valid stride 2."
+  },
+  "baseline": {
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-dustyforest-conv-baseline-remote cargo bench -p fj-lax --bench lax_baseline -- 'eval/conv1d_1024x16_5x32_f64_(vec|literal_ref)|eval/conv2d_32x32x8_3x3x16_f64_vec' --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot",
+    "worktree": "/data/projects/.scratch/frankenjax-dustyforest-baseline-20260605",
+    "revision": "HEAD 6e8c75f5, clean detached baseline before this lever",
+    "worker": "ts2",
+    "conv2d_control_ms": {
+      "low": 4.7306,
+      "mean": 4.7400,
+      "high": 4.7526
+    },
+    "conv1d_dense_ms": {
+      "low": 10.692,
+      "mean": 10.727,
+      "high": 10.764
+    },
+    "conv1d_literal_ref_ms": {
+      "low": 31.888,
+      "mean": 32.072,
+      "high": 32.259
+    }
+  },
+  "candidate": {
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-dustyforest-conv-after2 cargo bench -p fj-lax --bench lax_baseline -- 'eval/conv1d_1024x16_5x32_f64_(vec|literal_ref)|eval/conv2d_32x32x8_3x3x16_f64_vec' --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot",
+    "worktree": "/data/projects/frankenjax",
+    "worker": "ts2",
+    "conv2d_control_ms": {
+      "low": 4.7464,
+      "mean": 4.7542,
+      "high": 4.7599
+    },
+    "conv1d_dense_ms": {
+      "low": 0.89110,
+      "mean": 0.90794,
+      "high": 0.91888
+    },
+    "conv1d_literal_ref_ms": {
+      "low": 30.007,
+      "mean": 30.216,
+      "high": 30.431
+    }
+  },
+  "result": {
+    "raw_speedup": 11.81,
+    "conservative_speedup_high_over_low": 11.64,
+    "control_ratio_candidate_over_baseline": 1.003,
+    "score": "impact 5 (profiled dense conv1d execution hotspot) x confidence 5 (same-worker RCH, stable conv2d control, bit-exact proof) / effort 2 = 12.5",
+    "decision": "keep"
+  },
+  "tests": [
+    "RCH remote ts1 cargo test -p fj-lax conv_1d_parallel_dense_matches_literal_bits -- --nocapture: pass",
+    "RCH remote vmi1153651 cargo check -p fj-lax --all-targets: pass",
+    "RCH remote ts2 cargo clippy -p fj-lax --all-targets -- -D warnings: pass after test-only BatchedMatmulCase alias for an existing einsum.rs all-targets lint",
+    "RCH remote ts1 cargo test -p fj-lax --lib: pass, 1097 passed",
+    "sha256sum -c fj_lax_conv1d_morsel_parallel_20260605.golden.sha256: pass",
+    "rustfmt --edition 2024 --check crates/fj-lax/src/tensor_ops.rs: pass; rustfmt check on reserved einsum.rs still reports pre-existing formatting drift outside the test-only alias",
+    "UBS on touched proof/code paths: returned existing file-wide test panic/indexing warnings; no unsafe blocks; scan-reported formatting/clippy/check/test-build clean"
+  ],
+  "date": "2026-06-05"
+}

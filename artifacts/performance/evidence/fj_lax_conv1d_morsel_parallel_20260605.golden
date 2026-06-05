@@ -1,0 +1,16 @@
+artifact=fj_lax_conv1d_morsel_parallel_20260605
+bead=frankenjax-mcqr.52
+primitive=Conv rank-1 f64 dense fast path
+profile_target=eval/conv1d_1024x16_5x32_f64_vec
+profile_evidence=RCH full fj-lax profile on ts1 found conv1d dense at 6.9094 ms mean after claimed eig work; focused ts1 baseline was 6.8586 ms mean
+lever=output-space morsel parallelism using std::thread::scope over disjoint flat output ranges
+serial_fallback=small work and non-f64/non-dense/complex cases keep the existing serial or generic path
+representative_input=batch=1,width=1024,c_in=16,kernel_w=5,c_out=32; padding same, same_lower, valid stride 2
+dense_vs_literal_bits_equal=true
+output_shape_equal=true
+ordering=flat output order remains batch-major, then output width, then output channel; each thread writes its assigned flat positions only
+tie_breaking=none
+floating_point=for every output element, accumulation still runs k ascending, ci ascending, with the same multiply then add sequence; no reassociation, SIMD, unsafe, BLAS, LAPACK, MKL, XLA, or mixed precision
+rng=none
+golden_test=conv_1d_parallel_dense_matches_literal_bits
+rch_test=RCH remote ts1 cargo test -p fj-lax conv_1d_parallel_dense_matches_literal_bits -- --nocapture
