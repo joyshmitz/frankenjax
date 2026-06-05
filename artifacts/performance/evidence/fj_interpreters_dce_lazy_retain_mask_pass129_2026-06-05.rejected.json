@@ -1,0 +1,57 @@
+{
+  "artifact_version": 1,
+  "date": "2026-06-05",
+  "bead": "frankenjax-c5twh",
+  "status": "rejected",
+  "crate": "fj-interpreters",
+  "target": "dce/all_used/1000eq",
+  "profile_source": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-interpreters-profile-20260605 cargo bench -p fj-interpreters --bench pe_baseline -- --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot",
+    "worker": "ts2",
+    "profile_rows_us": {
+      "partial_eval/all_known/1000eq": 82.062,
+      "dce/all_used/1000eq": 84.739,
+      "staging/full_pipeline/chain_100eq": 8.0859
+    }
+  },
+  "baseline": {
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-c5twh-baseline cargo bench -p fj-interpreters --bench pe_baseline -- 'dce/all_used/1000eq' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "mean_us": 91.575,
+    "ci_low_us": 88.947,
+    "ci_high_us": 93.756
+  },
+  "candidate": {
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-c5twh-candidate cargo bench -p fj-interpreters --bench pe_baseline -- 'dce/all_used/1000eq' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "mean_us": 89.299,
+    "ci_low_us": 87.325,
+    "ci_high_us": 90.951
+  },
+  "delta": {
+    "midpoint_speedup": 1.0255,
+    "conservative_speedup": 0.9779,
+    "confidence_interval_overlap": true,
+    "score": 0.77,
+    "score_formula": "Impact x Confidence / Effort",
+    "decision": "reject"
+  },
+  "behavior_proof": {
+    "source_kept": false,
+    "test_command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-c5twh-dce-tests cargo test -p fj-interpreters --lib dce -- --nocapture",
+    "test_summary": "10 passed; 0 failed; 130 filtered",
+    "golden_dce_large_chain_sha256": "3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8",
+    "isomorphism": [
+      "retained equation ordering unchanged",
+      "used output mask semantics unchanged",
+      "used input mask semantics unchanged",
+      "DCE has no floating-point, RNG, or tie-breaking surface"
+    ],
+    "evidence_golden_sha256": "4cbdd9eeb608c0b42c6fa0d093fa72785009438ca663da010518a198cd15ed9a"
+  },
+  "next_deeper_primitive": {
+    "name": "Reusable Jaxpr def-use adjacency index for DCE and partial evaluation",
+    "target_ratio": ">=1.25x on dce/all_used/1000eq and >=1.25x on partial_eval/all_known/1000eq before keep",
+    "proof_obligation": "all existing DCE golden hashes unchanged; output order and used-input masks identical"
+  }
+}

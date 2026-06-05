@@ -1,0 +1,24 @@
+bead=frankenjax-c5twh
+target=fj-interpreters dce/all_used/1000eq
+lever=lazy retain_eqn bitmap for large all-retained DCE
+status=rejected
+reason=ambiguous same-worker micro-win; confidence intervals overlap and Score<2.0
+
+baseline_worker=ts2
+baseline_command=RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-c5twh-baseline cargo bench -p fj-interpreters --bench pe_baseline -- 'dce/all_used/1000eq' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot
+baseline_dce_all_used_1000eq_us=91.575
+baseline_interval_us=[88.947,93.756]
+
+candidate_worker=ts2
+candidate_command=RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-c5twh-candidate cargo bench -p fj-interpreters --bench pe_baseline -- 'dce/all_used/1000eq' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot
+candidate_dce_all_used_1000eq_us=89.299
+candidate_interval_us=[87.325,90.951]
+midpoint_speedup=1.0255
+conservative_speedup=0.9779
+score=0.77
+
+behavior_validation=RCH cargo test -p fj-interpreters --lib dce -- --nocapture: 10 passed, 0 failed, 130 filtered
+golden_dce_large_chain_sha256=3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8
+isomorphism=ordering preserved; output mask preserved; used-input mask preserved; no floating-point/RNG/tie-breaking surface in DCE
+source_kept=false
+next_deeper_primitive=replace allocation-heavy DCE/PE graph walks with a reusable def-use adjacency index or cached VarId bounds generated at Jaxpr construction, then prove all DCE golden hashes unchanged
