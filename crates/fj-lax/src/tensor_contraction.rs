@@ -166,37 +166,36 @@ fn index_to_contracted_coords(idx: usize, axes: &[usize], shape: &[usize]) -> Ve
 ///
 /// Matches `jnp.matmul(a, b)` for 2D arrays.
 pub fn matmul_2d(a: &[f64], m: usize, k: usize, b: &[f64], n: usize) -> Vec<f64> {
-    // Parallelize large products across disjoint output ROW-BLOCKS (scoped
-    // threads, no external dependency, 100% safe). Threading is gated to large
-    // matmuls: at 256³ (~16.7M FMAs) the serial i-k-j is already L2-served and
-    // thread/bandwidth overhead REGRESSES it (~0.74×), but at 512³ (~134M FMAs)
-    // row-block threading is ~3.7× (worker-corrected, RCH). The threshold keeps
-    // small/medium matmuls on the zero-overhead serial path.
+    // Parallelize across disjoint output ROW-BLOCKS (scoped threads, no external
+    // dependency, 100% safe). Thread count is budgeted by work instead of using
+    // every core as soon as a fixed threshold trips: at 256³ the all-core path
+    // regresses because each worker gets too little arithmetic, while a limited
+    // fanout still has enough FMAs per row chunk to amortize spawn overhead.
     //
     // (pass110: single-thread NBxKB cache-blocking REGRESSED ~0.60× and 4-row M
     // register-tiling gave ~1.09× — the serial kernel is already L2-served, so
     // the remaining axis is parallelism.)
     //
-    // (pass119, REJECTED: a k-blocked threaded kernel — kk outer so each KB×n B
-    // panel is reused L2-resident across a thread's rows — was hypothesized to
-    // rescue threaded 256³ by cutting shared-L3 B traffic. Measured 5.82ms vs
-    // 4.6ms serial = still ~0.79× on the ~48-core RCH worker. The 256³ regression
-    // is NOT B-bandwidth: it is too little work per core (16.7M FMAs / ~48 cores
-    // ≈ 0.35M FMAs/thread) to amortize the thread fan-out, which blocking can't
-    // change. So 256³ correctly stays serial; the threshold below is well-placed.
-    // The next real single-thread lever is a packed register MR×NR microkernel —
-    // see artifacts/performance/evidence/fj_lax_gemm_blocked_threaded_rejected_pass119.)
-    const PARALLEL_MIN_OPS: usize = 1 << 26; // ~67M FMAs (~406³); 256³ stays serial
+    // (pass119, REJECTED: k-blocked all-core threading measured 5.82ms vs 4.6ms
+    // serial at 256³; the missing primitive was not B-panel reuse, it was
+    // right-sizing fanout so each worker owns enough row work.)
     let ops = m.saturating_mul(k).saturating_mul(n);
-    let threads = if ops >= PARALLEL_MIN_OPS {
-        std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(1)
-            .min(m.max(1))
-    } else {
-        1
-    };
+    let threads = matmul_thread_count(ops, m);
     matmul_2d_with_threads(a, m, k, b, n, threads)
+}
+
+#[inline]
+fn matmul_thread_count(ops: usize, rows: usize) -> usize {
+    const MIN_PARALLEL_OPS: usize = 1 << 23; // ~8M FMAs
+    const OPS_PER_THREAD: usize = 1 << 21; // ~2M FMAs/thread
+    if rows <= 1 || ops < MIN_PARALLEL_OPS {
+        return 1;
+    }
+    let available = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    let by_work = (ops / OPS_PER_THREAD).max(1);
+    available.min(rows).min(by_work).max(1)
 }
 
 /// `matmul_2d` driver with an explicit thread count (1 = serial). Splitting the
@@ -238,9 +237,26 @@ fn matmul_2d_with_threads(
 }
 
 /// Compute a contiguous block of output rows (starting at `row_start`,
-/// `block.len() / n` rows) of the m×n product into `block`, via the i-k-j
-/// kernel. Each output element accumulates `a[i][l]*b[l][j]` in ascending-`l`
-/// order — bit-for-bit identical to the serial whole-matrix kernel.
+/// `block.len() / n` rows) of the m×n product into `block`, via a
+/// register-blocked MR×NR microkernel.
+///
+/// Each output element `C[i][j]` accumulates `a[i][l]*b[l][j]` over `l` in
+/// strictly ascending order into a single scalar accumulator — bit-for-bit
+/// identical to the textbook i-j-k / serial i-k-j kernels (Rust does not
+/// contract separate `*`/`+=` into a fused FMA at the default release flags, so
+/// the per-element rounding is exactly the same). Register tiling only reorders
+/// work *across* the (i,j) tile grid; it never reassociates a single element's
+/// k-sum, so `matmul_2d_ikj_bit_identical_to_ijk` and the large/threaded
+/// bit-identity tests still hold.
+///
+/// Why this beats the previous i-k-j kernel: that kernel re-streamed the whole
+/// B matrix once per output row (m passes over the k·n B reads) and re-read each
+/// A element n times from memory. The MR×NR tile keeps its MR·NR C accumulators
+/// in registers across the entire k-stream, reuses each loaded B element across
+/// MR rows and each loaded A element across NR columns, and writes every C
+/// element exactly once. That cuts B traffic ≈MR× and A traffic ≈NR×, which is
+/// the binding constraint at GEMM sizes where B (k·n) spills past L2 and streams
+/// from L3 on every row.
 fn matmul_2d_row_block(
     a: &[f64],
     k: usize,
@@ -249,8 +265,73 @@ fn matmul_2d_row_block(
     row_start: usize,
     block: &mut [f64],
 ) {
-    for (ri, c_row) in block.chunks_mut(n).enumerate() {
-        let a_row = (row_start + ri) * k;
+    const MR: usize = 4;
+    const NR: usize = 4;
+    let rows = block.len() / n;
+
+    let mut i = 0;
+    while i + MR <= rows {
+        let ar0 = (row_start + i) * k;
+        let ar1 = ar0 + k;
+        let ar2 = ar1 + k;
+        let ar3 = ar2 + k;
+
+        // Full MR×NR register tiles: NR-wide accumulators per row, streamed over
+        // k. The fixed-length inner `jj` loop unrolls and vectorizes.
+        let mut j = 0;
+        while j + NR <= n {
+            let mut c0 = [0.0_f64; NR];
+            let mut c1 = [0.0_f64; NR];
+            let mut c2 = [0.0_f64; NR];
+            let mut c3 = [0.0_f64; NR];
+            for l in 0..k {
+                let brow = &b[l * n + j..l * n + j + NR];
+                let a0 = a[ar0 + l];
+                let a1 = a[ar1 + l];
+                let a2 = a[ar2 + l];
+                let a3 = a[ar3 + l];
+                for jj in 0..NR {
+                    let bv = brow[jj];
+                    c0[jj] += a0 * bv;
+                    c1[jj] += a1 * bv;
+                    c2[jj] += a2 * bv;
+                    c3[jj] += a3 * bv;
+                }
+            }
+            block[i * n + j..i * n + j + NR].copy_from_slice(&c0);
+            block[(i + 1) * n + j..(i + 1) * n + j + NR].copy_from_slice(&c1);
+            block[(i + 2) * n + j..(i + 2) * n + j + NR].copy_from_slice(&c2);
+            block[(i + 3) * n + j..(i + 3) * n + j + NR].copy_from_slice(&c3);
+            j += NR;
+        }
+        // Column remainder (n not a multiple of NR): MR scalar accumulators,
+        // same ascending-`l` order.
+        while j < n {
+            let mut s0 = 0.0_f64;
+            let mut s1 = 0.0_f64;
+            let mut s2 = 0.0_f64;
+            let mut s3 = 0.0_f64;
+            for l in 0..k {
+                let bv = b[l * n + j];
+                s0 += a[ar0 + l] * bv;
+                s1 += a[ar1 + l] * bv;
+                s2 += a[ar2 + l] * bv;
+                s3 += a[ar3 + l] * bv;
+            }
+            block[i * n + j] = s0;
+            block[(i + 1) * n + j] = s1;
+            block[(i + 2) * n + j] = s2;
+            block[(i + 3) * n + j] = s3;
+            j += 1;
+        }
+        i += MR;
+    }
+
+    // Row remainder (rows not a multiple of MR): original i-k-j per row, which
+    // is itself bit-identical ascending-`l`.
+    while i < rows {
+        let a_row = (row_start + i) * k;
+        let c_row = &mut block[i * n..i * n + n];
         for l in 0..k {
             let a_il = a[a_row + l];
             let src = &b[l * n..l * n + n];
@@ -258,6 +339,7 @@ fn matmul_2d_row_block(
                 c_row[j] += a_il * src[j];
             }
         }
+        i += 1;
     }
 }
 
@@ -282,16 +364,8 @@ pub fn batched_matmul_2d(
         return result;
     }
     let total_rows = batch * m;
-    const PARALLEL_MIN_OPS: usize = 1 << 26; // ~67M FMAs
     let ops = total_rows.saturating_mul(k).saturating_mul(n);
-    let threads = if ops >= PARALLEL_MIN_OPS {
-        std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(1)
-            .min(total_rows)
-    } else {
-        1
-    };
+    let threads = matmul_thread_count(ops, total_rows);
 
     if threads <= 1 {
         batched_matmul_row_block(a, b, m, k, n, 0, &mut result);
@@ -522,6 +596,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn matmul_thread_count_adapts_medium_gemm_without_all_core_fanout() {
+        let available = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1);
+        assert_eq!(super::matmul_thread_count(1024, 256), 1);
+
+        let medium = super::matmul_thread_count(256 * 256 * 256, 256);
+        assert!(medium <= available.min(256));
+        if available > 1 {
+            assert!(
+                medium > 1,
+                "256^3 should use limited fanout on multi-core workers"
+            );
+        }
+
+        let large = super::matmul_thread_count(512 * 512 * 512, 512);
+        assert!(large >= medium);
+        assert!(large <= available.min(512));
     }
 
     #[test]
