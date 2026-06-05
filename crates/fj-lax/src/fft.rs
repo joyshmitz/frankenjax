@@ -45,14 +45,6 @@ fn real_dtype_for(dtype: DType) -> DType {
     }
 }
 
-/// Build a complex Literal from (re, im) in the given complex dtype.
-fn make_complex_literal(re: f64, im: f64, dtype: DType) -> Literal {
-    match dtype {
-        DType::Complex64 => Literal::from_complex64(re as f32, im as f32),
-        _ => Literal::from_complex128(re, im),
-    }
-}
-
 /// Build a real Literal from an f64 value, preserving the tensor's logical dtype.
 fn make_real_literal(val: f64, dtype: DType) -> Literal {
     match dtype {
@@ -188,6 +180,16 @@ fn extract_tensor_complex(
     // (Complex128: exact f64; Complex64: the same f32→f64 widening).
     if let Some(dense) = tensor.elements.as_complex_slice() {
         return Ok((tensor.shape.clone(), tensor.dtype, dense.to_vec()));
+    }
+
+    // Dense real-F64 input (e.g. RFFT operand): read the packed f64 slice and lift
+    // each value to `(v, 0.0)` — bit-identical to `literal_to_complex` on an
+    // `F64Bits` literal, without the per-element enum match.
+    if tensor.dtype == DType::F64
+        && let Some(reals) = tensor.elements.as_f64_slice()
+    {
+        let elements: Vec<(f64, f64)> = reals.iter().map(|&v| (v, 0.0)).collect();
+        return Ok((tensor.shape.clone(), tensor.dtype, elements));
     }
 
     let elements: Vec<(f64, f64)> = tensor
@@ -876,40 +878,103 @@ pub(crate) fn eval_rfft(
     replace_last_axis_len(primitive, &mut out_dims, out_last)?;
     let out_shape = Shape { dims: out_dims };
 
-    let mut out_elements: Vec<Literal> = Vec::with_capacity(output_count);
     let copy_len = fft_length.min(input_last);
-
-    // Reuse buffers across batch iterations to avoid O(batch_size) allocations
-    let mut padded = vec![(0.0, 0.0); fft_length];
-    let mut transformed = Vec::with_capacity(fft_length);
     // Non-power-of-two transform length: build the Bluestein plan once and reuse
     // it across every row (chirp table + kernel FFT are identical per row).
     let plan = (fft_length > 1 && !fft_length.is_power_of_two())
         .then(|| BluesteinPlan::new(fft_length, false));
+
+    // Dense complex output, one row-block per thread for large batches. Each row
+    // is independent (pad -> transform -> keep Hermitian half), so this is
+    // bit-identical to the serial path.
+    let mut out_values: Vec<(f64, f64)> = vec![(0.0, 0.0); output_count];
+    const PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144
+    let threads = if output_count >= PARALLEL_MIN_ELEMS && batch_size > 1 {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(batch_size)
+    } else {
+        1
+    };
+
+    if threads <= 1 {
+        rfft_rows_into(
+            &elements,
+            plan.as_ref(),
+            fft_length,
+            input_last,
+            copy_len,
+            out_last,
+            0,
+            batch_size,
+            &mut out_values,
+        );
+    } else {
+        let rows_per = batch_size.div_ceil(threads);
+        let plan_ref = plan.as_ref();
+        let elements_ref = &elements;
+        std::thread::scope(|scope| {
+            let mut rest: &mut [(f64, f64)] = out_values.as_mut_slice();
+            let mut row0 = 0usize;
+            while row0 < batch_size {
+                let rows = rows_per.min(batch_size - row0);
+                let (blk, tail) = rest.split_at_mut(rows * out_last);
+                rest = tail;
+                scope.spawn(move || {
+                    rfft_rows_into(
+                        elements_ref,
+                        plan_ref,
+                        fft_length,
+                        input_last,
+                        copy_len,
+                        out_last,
+                        row0,
+                        rows,
+                        blk,
+                    );
+                });
+                row0 += rows;
+            }
+        });
+    }
+
+    let tensor = TensorValue::new_complex_values(out_dtype, out_shape, out_values)
+        .map_err(EvalError::InvalidTensor)?;
+    Ok(Value::Tensor(tensor))
+}
+
+/// Transform `rows` real-input rows (starting at `row_start`) into the dense
+/// complex `out_blk` for RFFT: zero-pad/truncate each length-`input_last` row to
+/// `fft_length`, run the forward transform, and keep the first `out_last`
+/// Hermitian-half outputs. Owns its per-row scratch so it is callable serially or
+/// from one thread per row-block.
+#[allow(clippy::too_many_arguments)]
+fn rfft_rows_into(
+    elements: &[(f64, f64)],
+    plan: Option<&BluesteinPlan>,
+    fft_length: usize,
+    input_last: usize,
+    copy_len: usize,
+    out_last: usize,
+    row_start: usize,
+    rows: usize,
+    out_blk: &mut [(f64, f64)],
+) {
+    let mut padded = vec![(0.0, 0.0); fft_length];
+    let mut transformed = Vec::with_capacity(fft_length);
     let mut scratch = BluesteinScratch::default();
-
-    for batch in 0..batch_size {
-        let start = batch * input_last;
+    for r in 0..rows {
+        let start = (row_start + r) * input_last;
         let batch_slice = &elements[start..start + input_last];
-
-        // Zero-pad or truncate to fft_length (reuse buffer)
         padded[..copy_len].copy_from_slice(&batch_slice[..copy_len]);
         padded[copy_len..].fill((0.0, 0.0));
-
-        match &plan {
+        match plan {
             Some(plan) => plan.apply_into(&padded, &mut scratch, &mut transformed),
             None => fft_1d_into(&padded, &mut transformed),
         }
-
-        // Keep only the first fft_length/2 + 1 elements
-        for &(re, im) in &transformed[..out_last] {
-            out_elements.push(make_complex_literal(re, im, out_dtype));
-        }
+        out_blk[r * out_last..r * out_last + out_last].copy_from_slice(&transformed[..out_last]);
     }
-
-    let tensor =
-        TensorValue::new(out_dtype, out_shape, out_elements).map_err(EvalError::InvalidTensor)?;
-    Ok(Value::Tensor(tensor))
 }
 
 // ── IRFFT ────────────────────────────────────────────────────────────
@@ -1190,6 +1255,53 @@ mod tests {
                 "{prim:?}: threaded batch output must match per-row serial bit-for-bit"
             );
         }
+    }
+
+    /// Threading isomorphism proof for the dense RFFT: a batched real FFT large
+    /// enough to fan out across threads must produce, row for row, exactly the
+    /// same bits as transforming each real row on its own (serial path).
+    #[test]
+    fn threaded_batch_rfft_matches_per_row_serial() {
+        let p = BTreeMap::new();
+        let rows = 2048_usize;
+        let cols = 256_usize; // out_last=129; 2048*129 = 264_192 >= 1<<18 -> threaded
+        let row_data: Vec<Vec<f64>> = (0..rows)
+            .map(|r| {
+                (0..cols)
+                    .map(|c| {
+                        let x = (r * cols + c) as f64;
+                        (x * 0.0009765625).sin() + 0.3 * (x * 0.002).cos()
+                    })
+                    .collect()
+            })
+            .collect();
+        let out_last = cols / 2 + 1;
+        assert!(rows * out_last >= (1usize << 18) && rows > 1);
+
+        let flat: Vec<f64> = row_data.iter().flatten().copied().collect();
+        let batched_input = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                flat,
+            )
+            .unwrap(),
+        );
+        let batched = eval_rfft(std::slice::from_ref(&batched_input), &p).unwrap();
+        let batched_bits = complex_bits(&batched);
+
+        let mut expected: Vec<(u64, u64)> = Vec::with_capacity(rows * out_last);
+        for data in &row_data {
+            let single = make_real_vector(data);
+            let single_out = eval_rfft(std::slice::from_ref(&single), &p).unwrap();
+            expected.extend(complex_bits(&single_out));
+        }
+
+        assert_eq!(
+            batched_bits, expected,
+            "threaded batch RFFT must match per-row serial bit-for-bit"
+        );
     }
 
     /// Golden-output regression guard for frankenjax-6294o. Pins the bit-exact

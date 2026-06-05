@@ -1,0 +1,17 @@
+{
+  "crate": "fj-lax (fft)",
+  "target": "FFT family on REAL inputs (fft/ifft/rfft of f64 signals). After the complex dense work (d9aedc64), eval_fft was threaded but extract_tensor_complex still materialized Literals for real input, and eval_rfft was still serial with Literal output — so real-signal FFT stayed Amdahl-bound by the serial extract, exactly the complex bottleneck one step removed.",
+  "lever": "Two parts: (1) extract_tensor_complex gains a dense real-f64 fast path — when the input is F64 and exposes as_f64_slice(), bulk-read the packed slice and lift each value to (v, 0.0), bit-identical to literal_to_complex on an F64Bits literal, with no per-element enum match. (2) eval_rfft rewritten to the threaded dense form (per-row pad->transform->Hermitian-half via a reusable rfft_rows_into fn, dense complex output, std::thread::scope over row-blocks, PARALLEL_MIN_ELEMS=1<<18). Literal inputs keep their existing paths (zero regression).",
+  "isomorphism": "BIT-EXACT. threaded_batch_rfft_matches_per_row_serial (2048x256 real, threaded == per-row serial). The dense-f64 extract lifts to (v,0.0) identical to the Literal path; covered by the existing rfft value tests + the dense==literal FFT tests. 1097 fj-lax tests pass.",
+  "measurements": {
+    "fft_batch_2048x256_real_dense_input_ms": { "before_no_dense_f64_extract": 12.54, "after": 7.41, "ratio": 1.69 },
+    "rfft_batch_2048x256_serial_literal_baseline_ms": 12.85,
+    "rfft_batch_2048x256_threaded_dense_literal_input_ms": 10.85,
+    "rfft_batch_2048x256_threaded_dense_f64_input_ms": 7.28,
+    "rfft_dense_input_vs_serial_baseline_ratio": 1.77,
+    "rfft_within_binary_dense_vs_literal_ratio": 1.49
+  },
+  "honest_assessment": "1.5-1.8x — a real, bit-exact, zero-regression completion of the dense-input fast path for REAL FFT inputs (the unblocker that lets the already-threaded transform run without serial Literal materialization). BELOW the Score>=2.0 bar as an isolated lever because (a) threading shipped separately in d9aedc64, and (b) rfft's serial baseline is already lean (Hermitian-half output, simple real extract). NOT a 1.1x micro-tweak — it removes the serial Amdahl extract for real signals.",
+  "next_deeper_lever": "Half-length real-FFT: compute an N-point rfft via an N/2-point COMPLEX FFT (pack reals x[2k]+i*x[2k+1]) + O(N) twiddle recombination — ~2x fewer butterflies. Target >2x on rfft. CAVEAT: changes floating-point operation order vs the current full-FFT path, so it needs a tolerance/parity proof against JAX rather than bit-identical-to-old; even-N only (odd/non-pow2 keep the full-FFT/Bluestein path).",
+  "date": "2026-06-05"
+}

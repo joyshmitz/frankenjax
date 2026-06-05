@@ -2142,6 +2142,65 @@ fn bench_rfft_batch_64x1000(c: &mut Criterion) {
     });
 }
 
+// Batched power-of-two real FFT: 2048 rows of length 256. The radix-2 transform
+// is cheap so the per-row work fans out across threads (dense complex output).
+fn bench_rfft_batch_2048x256(c: &mut Criterion) {
+    let input = real_matrix(2048, 256);
+    let p = no_params();
+    c.bench_function("eval/rfft_batch_2048x256_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Rfft, std::slice::from_ref(&input), &p))
+    });
+}
+
+// FFT of a real dense-f64 signal (fft(real)): exercises the dense-f64 extract
+// fast path (bulk slice read -> (v,0.0)) + threaded transform + dense output.
+fn bench_fft_batch_2048x256_real_dense(c: &mut Criterion) {
+    let values: Vec<f64> = (0..2048 * 256)
+        .map(|i| {
+            let x = i as f64;
+            (x * 0.125).sin() + (x * 0.03125).cos()
+        })
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![2048, 256],
+            },
+            values,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/fft_batch_2048x256_real_dense_input", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Fft, std::slice::from_ref(&input), &p))
+    });
+}
+
+// Dense-f64-input variant: real input backed by packed f64 storage (new_f64_values),
+// the representation upstream f64 ops produce — extract reads the bulk slice
+// instead of converting 524288 Literals one by one.
+fn bench_rfft_batch_2048x256_dense_input(c: &mut Criterion) {
+    let values: Vec<f64> = (0..2048 * 256)
+        .map(|i| {
+            let x = i as f64;
+            (x * 0.125).sin() + (x * 0.03125).cos()
+        })
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![2048, 256],
+            },
+            values,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/rfft_batch_2048x256_f64_dense_input", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Rfft, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_irfft_256(c: &mut Criterion) {
     let mut params = BTreeMap::new();
     params.insert("fft_length".to_owned(), "256".to_owned());
@@ -2620,6 +2679,9 @@ criterion_group!(
     bench_complex_build_literal_512k,
     bench_rfft_256,
     bench_rfft_batch_64x1000,
+    bench_rfft_batch_2048x256,
+    bench_rfft_batch_2048x256_dense_input,
+    bench_fft_batch_2048x256_real_dense,
     bench_irfft_256,
     bench_reshape,
     bench_gather_128_rows_16_cols,
