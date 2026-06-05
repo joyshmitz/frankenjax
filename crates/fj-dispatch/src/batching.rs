@@ -8630,13 +8630,53 @@ mod tests {
             }
         }
 
-        for (actual, expected_slices) in outputs.iter().zip(expected_by_output) {
+        for (idx, (actual, expected_slices)) in outputs.iter().zip(expected_by_output).enumerate() {
             let expected = Value::Tensor(TensorValue::stack_axis0(&expected_slices).unwrap());
-            assert_eq!(
-                actual.value.as_tensor().unwrap().shape.dims,
-                expected.as_tensor().unwrap().shape.dims
-            );
-            assert_f64_close(&extract_f64_vec(&actual.value), &extract_f64_vec(&expected));
+            let dims = actual.value.as_tensor().unwrap().shape.dims.clone();
+            assert_eq!(dims, expected.as_tensor().unwrap().shape.dims);
+            let actual_vec = extract_f64_vec(&actual.value);
+            let expected_vec = extract_f64_vec(&expected);
+            if idx == 0 {
+                // Output 0 is the eigenvalue vector: ascending and sign-unambiguous.
+                assert_f64_close(&actual_vec, &expected_vec);
+            } else {
+                // Output 1 is the eigenvector matrix. The batched kernel
+                // (batch_eigh_multi) and the per-slice oracle (fj-lax's eigh) are
+                // independent valid eigensolvers, so each eigenvector column is
+                // only defined up to an arbitrary ± sign. Compare each column up
+                // to that sign rather than element-wise (the eigenvalues already
+                // pin the spectrum and the column ordering).
+                assert_eigvecs_close_up_to_sign(&dims, &actual_vec, &expected_vec);
+            }
+        }
+    }
+
+    /// Assert two stacks of eigenvector matrices agree up to a per-column sign.
+    /// Eigenvectors are stored as columns (`V[row*n + col]`, see fj-lax eigh), and
+    /// the sign of each eigenvector is mathematically arbitrary, so a column
+    /// matches if it equals the reference column or its negation within tolerance.
+    fn assert_eigvecs_close_up_to_sign(dims: &[u32], actual: &[f64], expected: &[f64]) {
+        assert_eq!(actual.len(), expected.len());
+        let n = *dims.last().unwrap() as usize;
+        assert!(n > 0 && actual.len() % (n * n) == 0, "eigenvector dims {dims:?}");
+        let batch = actual.len() / (n * n);
+        for b in 0..batch {
+            let base = b * n * n;
+            for col in 0..n {
+                let mut max_same: f64 = 0.0;
+                let mut max_flip: f64 = 0.0;
+                for row in 0..n {
+                    let a = actual[base + row * n + col];
+                    let e = expected[base + row * n + col];
+                    max_same = max_same.max((a - e).abs());
+                    max_flip = max_flip.max((a + e).abs());
+                }
+                assert!(
+                    max_same <= 1e-10 || max_flip <= 1e-10,
+                    "eigenvector column {col} (batch {b}) differs beyond sign: \
+                     max|v-e|={max_same}, max|v+e|={max_flip}"
+                );
+            }
         }
     }
 
