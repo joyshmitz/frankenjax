@@ -627,8 +627,11 @@ pub fn eval_primitive(
             params,
             i64::MIN,
             f64::NEG_INFINITY,
-            |a, b| a.max(b),
-            |a, b| a.max(b),
+            i64::max,
+            // NaN-propagating max (XLA `Max` / lax.cummax), NOT Rust `f64::max`
+            // which drops NaN. Matches ReduceMax and elementwise Max so a NaN in
+            // the prefix poisons the running maximum, as JAX does.
+            jax_max_f64,
         ),
         Primitive::Cummin => eval_cumulative(
             primitive,
@@ -636,8 +639,8 @@ pub fn eval_primitive(
             params,
             i64::MAX,
             f64::INFINITY,
-            |a, b| a.min(b),
-            |a, b| a.min(b),
+            i64::min,
+            jax_min_f64,
         ),
         // Sorting
         Primitive::Sort => eval_sort(primitive, inputs, params),
@@ -7178,6 +7181,36 @@ mod tests {
         } else {
             assert!(matches!(out, Value::Tensor(_)), "expected tensor");
         }
+    }
+
+    #[test]
+    fn cummax_cummin_propagate_nan_like_jax() {
+        // jnp.cummax/cummin use the NaN-propagating XLA max/min: once a NaN appears
+        // in the prefix it poisons the running extremum. Rust f64::max/min would
+        // wrongly drop the NaN.
+        let nan_bits = |v: &Value| -> Vec<bool> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().is_nan())
+                .collect()
+        };
+        let cummax = eval_primitive(
+            Primitive::Cummax,
+            &[Value::vector_f64(&[1.0, f64::NAN, 2.0, 0.5]).unwrap()],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(nan_bits(&cummax), vec![false, true, true, true], "cummax");
+
+        let cummin = eval_primitive(
+            Primitive::Cummin,
+            &[Value::vector_f64(&[3.0, f64::NAN, 1.0, 5.0]).unwrap()],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(nan_bits(&cummin), vec![false, true, true, true], "cummin");
     }
 
     #[test]

@@ -2458,8 +2458,9 @@ mod tests {
                 (|a: f64, b: f64| a + b) as fn(f64, f64) -> f64,
             ),
             (Primitive::Cumprod, (|a, b| a * b) as fn(f64, f64) -> f64),
-            (Primitive::Cummax, (|a, b| a.max(b)) as fn(f64, f64) -> f64),
-            (Primitive::Cummin, (|a, b| a.min(b)) as fn(f64, f64) -> f64),
+            // NaN-propagating max/min, matching jnp.cummax/cummin (XLA Max/Min).
+            (Primitive::Cummax, crate::jax_max_f64 as fn(f64, f64) -> f64),
+            (Primitive::Cummin, crate::jax_min_f64 as fn(f64, f64) -> f64),
         ] {
             let init = match prim {
                 Primitive::Cumprod => 1.0,
