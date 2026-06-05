@@ -1,0 +1,76 @@
+{
+  "artifact_version": 1,
+  "date": "2026-06-05",
+  "bead": "frankenjax-p1vbf.27",
+  "parent_bead": "frankenjax-p1vbf",
+  "status": "rejected",
+  "crate": "fj-lax",
+  "target": "linalg/qr_1024x1024_f64",
+  "profile_source": {
+    "source": "Profile-backed residual bead from the post-QR microkernel reprofile; QR1024 remained the top fj-lax linalg row and the bead required a flat Householder reflector arena lever.",
+    "prior_reprofile_ms": {
+      "worker": "ts1",
+      "mean": 93.084,
+      "ci_low": 90.555,
+      "ci_high": 95.870
+    }
+  },
+  "baseline": {
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf27-baseline2 cargo bench -p fj-lax --bench lax_baseline -- 'linalg/qr_1024x1024_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "mean_ms": 126.23,
+    "ci_low_ms": 122.85,
+    "ci_high_ms": 130.29
+  },
+  "candidate": {
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf27-candidate cargo bench -p fj-lax --bench lax_baseline -- 'linalg/qr_1024x1024_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "mean_ms": 126.96,
+    "ci_low_ms": 126.17,
+    "ci_high_ms": 127.90
+  },
+  "delta": {
+    "midpoint_speedup": 0.9942,
+    "conservative_speedup": 0.9605,
+    "confidence_interval_overlap": true,
+    "score": {
+      "impact": 0,
+      "confidence": 4,
+      "effort": 1,
+      "value": 0.0,
+      "keep_threshold": 2.0,
+      "decision": "reject"
+    }
+  },
+  "lever": {
+    "description": "Replace Vec<Vec<f64>> Householder reflector storage with one preallocated flat Vec<f64> arena plus reflector offsets.",
+    "one_lever_scope": [
+      "crates/fj-lax/src/linalg.rs eval_qr_real_matrix reflector storage"
+    ],
+    "source_kept": false
+  },
+  "behavior_proof": {
+    "unit_tests": "RCH cargo test -p fj-lax --lib qr_ -- --nocapture: 10 passed; 0 failed; 1120 filtered",
+    "conformance_tests": "RCH cargo test -p fj-conformance --test linalg_oracle qr -- --nocapture: 8 passed; 0 failed; 48 filtered",
+    "golden_output_sha256": "6119fc5cf4759d8cdcd9c34d89a79de89d205203730814fc06aa52bf57ff262b",
+    "evidence_golden_sha256": "e540199b7032bdb442161d1807015b9c0166c831957c3ce23060cd1b3c933436",
+    "isomorphism": [
+      "Reflector construction order unchanged.",
+      "Tau threshold behavior unchanged.",
+      "Per-column row accumulation order unchanged.",
+      "Reverse Q application order unchanged.",
+      "Diagonal sign normalization unchanged.",
+      "QR has no RNG surface and no tie-breaking surface.",
+      "Candidate source was reverted after the failed keep gate."
+    ]
+  },
+  "formatting": {
+    "git_diff_check": "git diff --check -- crates/fj-lax/src/linalg.rs: passed",
+    "cargo_fmt_package_check": "cargo fmt -p fj-lax -- --check failed on pre-existing formatting drift across fj-lax files outside this rejected source hunk"
+  },
+  "next_deeper_primitive": {
+    "name": "Dedicated QR rank-k panel-update microkernel with behavior-contract bead for blocked WY or communication-avoiding QR",
+    "target_ratio": ">=2.0x on QR1024/QR2048 rows before keep",
+    "proof_obligation": "Establish JAX-tolerance parity contract before changing floating-point association; preserve dtype, shape, sign-normalization, and error behavior; golden digest or conformance oracle evidence required."
+  }
+}

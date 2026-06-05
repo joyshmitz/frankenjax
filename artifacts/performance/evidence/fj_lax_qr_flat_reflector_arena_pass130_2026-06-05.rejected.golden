@@ -1,0 +1,10 @@
+bead=frankenjax-p1vbf.27
+status=rejected
+target=linalg/qr_1024x1024_f64
+worker=ts2
+baseline_ms=126.23 [122.85,130.29]
+candidate_ms=126.96 [126.17,127.90]
+midpoint_speedup=0.9942
+conservative_speedup=0.9605
+qr_real_path_golden_output_digest=6119fc5cf4759d8cdcd9c34d89a79de89d205203730814fc06aa52bf57ff262b
+decision=reject_flat_reflector_arena_no_source_kept
