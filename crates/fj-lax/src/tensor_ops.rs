@@ -5,6 +5,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::EvalError;
+use crate::tensor_contraction::matmul_2d;
 use crate::type_promotion::{binary_literal_op, promote_dtype};
 
 /// Parse a comma-separated list of i64 values from a param string.
@@ -5297,6 +5298,11 @@ fn eval_conv_1d(
 }
 
 /// 2D convolution: lhs=[N, H, W, C_in], rhs=[KH, KW, C_in, C_out]
+/// Minimum convolution FMA count (output_elems × KH·KW·Cin) above which the
+/// dense F64 conv2d uses the im2col + GEMM path instead of the direct loop.
+/// Below it the im2col buffer allocation + copy isn't worth it.
+const CONV_IM2COL_MIN_OPS: usize = 1 << 16;
+
 fn eval_conv_2d(
     primitive: Primitive,
     lhs: &TensorValue,
@@ -5387,6 +5393,64 @@ fn eval_conv_2d(
         && let (Some(lhs_src), Some(rhs_src)) =
             (lhs.elements.as_f64_slice(), rhs.elements.as_f64_slice())
     {
+        // im2col + GEMM fast path. The kernel `rhs_src` is laid out
+        // [KH,KW,Cin,Cout] row-major, which is exactly the [(KH·KW·Cin) × Cout]
+        // matrix the GEMM needs. Gathering each output position's receptive
+        // field into a row of an im2col matrix (KH·KW·Cin wide, zero-filled for
+        // out-of-bounds/padding) turns the convolution into one cache-blocked,
+        // auto-threaded `matmul_2d`. Bit-for-bit identical to the direct loop
+        // below for finite inputs: the GEMM accumulates each output in ascending
+        // (kh,kw,ci) order — the same order — and the zero-padded out-of-bounds
+        // taps add `0.0` (a no-op on a finite partial sum, exactly as the direct
+        // loop's `continue` skips them). The GEMM also vectorizes over Cout,
+        // which the direct scalar-accumulate cannot.
+        let kdim = kernel_h
+            .checked_mul(kernel_w)
+            .and_then(|v| v.checked_mul(c_in))
+            .ok_or_else(|| EvalError::Unsupported {
+                primitive,
+                detail: "conv im2col kdim overflow".into(),
+            })?;
+        let conv_ops = total.saturating_mul(kdim);
+        if conv_ops >= CONV_IM2COL_MIN_OPS && kdim > 0 {
+            let kw_c_in = kernel_w * c_in;
+            let mut col = vec![0.0_f64; total / c_out * kdim];
+            for n in 0..batch {
+                let n_offset = n * height_width_c_in;
+                for oh in 0..out_h {
+                    for ow in 0..out_w {
+                        let row = (n * out_h + oh) * out_w + ow;
+                        let row_base = row * kdim;
+                        for kh in 0..kernel_h {
+                            let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
+                            if in_h < 0 || (in_h as usize) >= height {
+                                continue;
+                            }
+                            let h_offset = (in_h as usize) * width_c_in;
+                            for kw in 0..kernel_w {
+                                let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
+                                if in_w < 0 || (in_w as usize) >= width {
+                                    continue;
+                                }
+                                let src_base = n_offset + h_offset + (in_w as usize) * c_in;
+                                let col_base = row_base + kh * kw_c_in + kw * c_in;
+                                col[col_base..col_base + c_in]
+                                    .copy_from_slice(&lhs_src[src_base..src_base + c_in]);
+                            }
+                        }
+                    }
+                }
+            }
+            let num_rows = total / c_out;
+            let out = matmul_2d(&col, num_rows, kdim, rhs_src, c_out);
+            return Ok(Value::Tensor(TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![batch as u32, out_h as u32, out_w as u32, c_out as u32],
+                },
+                out,
+            )?));
+        }
+
         let mut out = Vec::with_capacity(total);
         for n in 0..batch {
             let n_offset =
@@ -6283,6 +6347,97 @@ mod tests {
                 bits(&dense),
                 bits(&literal),
                 "conv1d bits for {padding}/{stride}"
+            );
+        }
+    }
+
+    #[test]
+    fn conv_2d_im2col_dense_matches_literal_bits() {
+        // Size chosen so the dense F64 path takes im2col + GEMM (ops >=
+        // CONV_IM2COL_MIN_OPS) while the Vec<Literal> path takes the direct
+        // loop — comparing their output bits proves im2col == direct.
+        let (batch, height, width, c_in) = (2usize, 16usize, 16usize, 8usize);
+        let (kernel_h, kernel_w, c_out) = (3usize, 3usize, 16usize);
+        let out_elems = batch * height * width * c_out; // SAME padding keeps H,W
+        assert!(
+            out_elems * kernel_h * kernel_w * c_in >= CONV_IM2COL_MIN_OPS,
+            "test must exercise the im2col path"
+        );
+
+        // Edge values in LHS (signed zero / inf / NaN); kernel stays finite so
+        // the out-of-bounds zero taps remain exact no-ops (0·w == 0).
+        let lhs_data: Vec<f64> = (0..batch * height * width * c_in)
+            .map(|i| match i % 211 {
+                0 => -0.0,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => f64::from_bits(0x7ff8_0000_0000_0001),
+                _ => ((i as f64) * 0.013).sin() * 2.0,
+            })
+            .collect();
+        let rhs_data: Vec<f64> = (0..kernel_h * kernel_w * c_in * c_out)
+            .map(|i| ((i as f64) * 0.017).cos())
+            .collect();
+
+        let mk = |data: &[f64], dims: Vec<u32>, dense: bool| {
+            if dense {
+                Value::Tensor(TensorValue::new_f64_values(Shape { dims }, data.to_vec()).unwrap())
+            } else {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims },
+                        data.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                )
+            }
+        };
+        let bits = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect()
+        };
+
+        let lhs_dims = vec![batch as u32, height as u32, width as u32, c_in as u32];
+        let rhs_dims = vec![
+            kernel_h as u32,
+            kernel_w as u32,
+            c_in as u32,
+            c_out as u32,
+        ];
+        for (padding, stride) in [("same", "1"), ("valid", "1"), ("valid", "2")] {
+            let p = params(&[("padding", padding), ("strides", stride)]);
+            let dense = eval_conv(
+                Primitive::Conv,
+                &[
+                    mk(&lhs_data, lhs_dims.clone(), true),
+                    mk(&rhs_data, rhs_dims.clone(), true),
+                ],
+                &p,
+            )
+            .unwrap();
+            let literal = eval_conv(
+                Primitive::Conv,
+                &[
+                    mk(&lhs_data, lhs_dims.clone(), false),
+                    mk(&rhs_data, rhs_dims.clone(), false),
+                ],
+                &p,
+            )
+            .unwrap();
+            assert_eq!(
+                dense.as_tensor().unwrap().shape.dims,
+                literal.as_tensor().unwrap().shape.dims,
+                "conv2d shape for {padding}/{stride}"
+            );
+            assert_eq!(
+                bits(&dense),
+                bits(&literal),
+                "conv2d im2col vs direct bits for {padding}/{stride}"
             );
         }
     }

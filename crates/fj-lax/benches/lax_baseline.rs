@@ -1204,6 +1204,44 @@ fn bench_conv2d_32x32x8_3x3x16_f64_literal_reference(c: &mut Criterion) {
     });
 }
 
+// CNN-layer conv2d: batch 4, 64x64x32 input, 3x3x64 kernel, SAME. Large enough
+// that the dense im2col + GEMM trailing matmul auto-threads — the regime where
+// im2col decisively beats the direct scalar-accumulate loop.
+fn bench_conv2d_64x64x32_3x3x64_f64(c: &mut Criterion) {
+    let (batch, h, w, c_in) = (4usize, 64usize, 64usize, 32usize);
+    let (kh, kw, c_out) = (3usize, 3usize, 64usize);
+    let lhs_data: Vec<f64> = (0..batch * h * w * c_in)
+        .map(|i| ((i as f64) * 0.0011).sin())
+        .collect();
+    let rhs_data: Vec<f64> = (0..kh * kw * c_in * c_out)
+        .map(|i| ((i as f64) * 0.0019).cos())
+        .collect();
+    let lhs = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![batch as u32, h as u32, w as u32, c_in as u32],
+            },
+            lhs_data,
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![kh as u32, kw as u32, c_in as u32, c_out as u32],
+            },
+            rhs_data,
+        )
+        .unwrap(),
+    );
+    let mut p = no_params();
+    p.insert("padding".to_owned(), "same".to_owned());
+    p.insert("strides".to_owned(), "1".to_owned());
+    c.bench_function("eval/conv2d_64x64x32_3x3x64_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Conv, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 // 1D conv (1x1024x16 input, 5x16x32 kernel, SAME): dense f64 conv_1d path
 // (pass88) vs the generic per-multiply Literal path. Same process.
 fn conv1d_inputs(dense: bool) -> (Value, Value) {
@@ -3043,6 +3081,7 @@ criterion_group!(
     bench_matmul_2d_256,
     bench_matmul_2d_512,
     bench_conv2d_32x32x8_3x3x16_f64_vec,
+    bench_conv2d_64x64x32_3x3x64_f64,
     bench_conv2d_32x32x8_3x3x16_f64_literal_reference,
     bench_conv1d_1024x16_5x32_f64_vec,
     bench_conv1d_1024x16_5x32_f64_literal_reference,
