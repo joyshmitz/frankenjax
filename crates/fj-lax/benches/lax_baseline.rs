@@ -2198,6 +2198,17 @@ fn bench_complex_exp_256k_dense(c: &mut Criterion) {
     });
 }
 
+// 256k dense-complex128 Pow: complex_pow = log + mul + exp per element (very
+// compute-heavy) — exercises the dense + threaded complex binary map.
+fn bench_complex_pow_256k_dense(c: &mut Criterion) {
+    let lhs = complex_vector_dense(1 << 18);
+    let rhs = complex_vector_dense(1 << 18);
+    let p = no_params();
+    c.bench_function("eval/pow_256k_complex128_dense", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Pow, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 fn bench_complex_abs_1k(c: &mut Criterion) {
     let input = complex_vector(1000);
     let p = no_params();
@@ -2897,6 +2908,7 @@ criterion_group!(
     bench_complex_neg_1k,
     bench_complex_expm1_1k,
     bench_complex_exp_256k_dense,
+    bench_complex_pow_256k_dense,
     bench_complex_abs_1k,
     bench_complex_real_1k,
     bench_complex_imag_1k,

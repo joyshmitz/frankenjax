@@ -24,6 +24,21 @@ fn is_expensive_binary(primitive: Primitive) -> bool {
     )
 }
 
+/// Complex binary ops whose per-element cost is several complex transcendentals
+/// (so threading the dense same-shape case pays). `apply_complex_binary` is
+/// infallible for each of these.
+#[inline]
+fn is_expensive_complex_binary(primitive: Primitive) -> bool {
+    matches!(
+        primitive,
+        Primitive::Pow | Primitive::Atan2 | Primitive::LogAddExp | Primitive::XLogY
+    )
+}
+
+/// Complex unary/binary transcendentals cost several real transcendentals per
+/// element, so they amortize the thread fan-out at a low element count.
+const COMPLEX_UNARY_PARALLEL_MIN: usize = 1 << 13; // 8_192
+
 /// Threaded scalar⊗tensor (or tensor⊗scalar) fast path for the expensive binary
 /// ops. Mirrors [`eval_same_shape_f64_expensive_parallel`] for the broadcast case
 /// (e.g. `x ** 2.0`), applying the identical `float_op` so it is bit-for-bit
@@ -1092,6 +1107,51 @@ fn eval_binary_elementwise_complex(
                     return Ok(value);
                 }
 
+                // Threaded dense fast path for the EXPENSIVE complex binary ops
+                // (Pow/Atan2/XLogY/LogAddExp — each several complex transcendentals
+                // per element). `apply_complex_binary` is infallible for these, and
+                // the packed values + dtype narrowing match the serial path, so this
+                // is bit-for-bit identical.
+                if is_expensive_complex_binary(primitive)
+                    && let (Some(a), Some(b)) = (
+                        lhs.elements.as_complex_slice(),
+                        rhs.elements.as_complex_slice(),
+                    )
+                    && a.len() >= COMPLEX_UNARY_PARALLEL_MIN
+                {
+                    let n = a.len();
+                    let threads = std::thread::available_parallelism()
+                        .map(|p| p.get())
+                        .unwrap_or(1)
+                        .min(n);
+                    if threads > 1 {
+                        let mut out = vec![(0.0f64, 0.0f64); n];
+                        let chunk = n.div_ceil(threads);
+                        std::thread::scope(|scope| {
+                            let mut rest: &mut [(f64, f64)] = out.as_mut_slice();
+                            let mut start = 0usize;
+                            while start < n {
+                                let len = chunk.min(n - start);
+                                let (blk, tail) = rest.split_at_mut(len);
+                                rest = tail;
+                                let s = start;
+                                scope.spawn(move || {
+                                    for (i, o) in blk.iter_mut().enumerate() {
+                                        *o = apply_complex_binary(primitive, a[s + i], b[s + i])
+                                            .unwrap_or((f64::NAN, f64::NAN));
+                                    }
+                                });
+                                start += len;
+                            }
+                        });
+                        return Ok(Value::Tensor(TensorValue::new_complex_values(
+                            out_dtype,
+                            lhs.shape.clone(),
+                            out,
+                        )?));
+                    }
+                }
+
                 let mut elements = Vec::with_capacity(lhs.elements.len());
                 for (left, right) in lhs
                     .elements
@@ -1939,7 +1999,7 @@ pub(crate) fn eval_imag(primitive: Primitive, inputs: &[Value]) -> Result<Value,
 fn eval_unary_complex_map(
     primitive: Primitive,
     inputs: &[Value],
-    op: impl Fn(f64, f64) -> (f64, f64),
+    op: impl Fn(f64, f64) -> (f64, f64) + Sync,
 ) -> Result<Value, EvalError> {
     if inputs.len() != 1 {
         return Err(EvalError::ArityMismatch {
@@ -1963,6 +2023,48 @@ fn eval_unary_complex_map(
     match &inputs[0] {
         Value::Scalar(lit) => Ok(Value::Scalar(map_literal(*lit)?)),
         Value::Tensor(tensor) => {
+            // Dense + threaded fast path: complex transcendentals (exp/log/sin/
+            // tanh/…) cost several real transcendentals per element. When the
+            // operand is dense-complex-backed and large, apply `op` across scoped
+            // threads into a dense output — bit-for-bit identical to the serial map.
+            if matches!(tensor.dtype, DType::Complex64 | DType::Complex128)
+                && let Some(dense) = tensor.elements.as_complex_slice()
+                && dense.len() >= COMPLEX_UNARY_PARALLEL_MIN
+            {
+                let n = dense.len();
+                let threads = std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(1)
+                    .min(n);
+                if threads > 1 {
+                    let mut out = vec![(0.0f64, 0.0f64); n];
+                    let chunk = n.div_ceil(threads);
+                    let op_ref = &op;
+                    std::thread::scope(|scope| {
+                        let mut rest: &mut [(f64, f64)] = out.as_mut_slice();
+                        let mut start = 0usize;
+                        while start < n {
+                            let len = chunk.min(n - start);
+                            let (blk, tail) = rest.split_at_mut(len);
+                            rest = tail;
+                            let s = start;
+                            scope.spawn(move || {
+                                for (i, o) in blk.iter_mut().enumerate() {
+                                    let (re, im) = dense[s + i];
+                                    *o = op_ref(re, im);
+                                }
+                            });
+                            start += len;
+                        }
+                    });
+                    return Ok(Value::Tensor(TensorValue::new_complex_values(
+                        tensor.dtype,
+                        tensor.shape.clone(),
+                        out,
+                    )?));
+                }
+            }
+
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for lit in tensor.elements.iter().copied() {
                 elements.push(map_literal(lit)?);
@@ -6680,6 +6782,58 @@ mod tests {
             let from_dense =
                 crate::eval_primitive(prim, std::slice::from_ref(&dense), &BTreeMap::new())
                     .unwrap();
+            assert_eq!(
+                bits(&from_lit),
+                bits(&from_dense),
+                "{prim:?} dense threaded != literal serial"
+            );
+        }
+    }
+
+    /// Isomorphism proof for the threaded dense complex-binary path: a large
+    /// same-shape dense-c128 Pow/Atan2/XLogY/LogAddExp (>= 1<<13, threaded) must
+    /// equal the Literal-backed serial map bit-for-bit.
+    #[test]
+    fn threaded_dense_complex_binary_bit_identical_to_literal() {
+        let n = 1usize << 13;
+        let a: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let x = i as f64;
+                (1.0 + (x * 0.011).sin(), (x * 0.0073).cos() - 0.3)
+            })
+            .collect();
+        let b: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let x = i as f64;
+                (0.5 + (x * 0.017).cos(), (x * 0.0091).sin() + 0.2)
+            })
+            .collect();
+        let la = v_complex128(&a);
+        let lb = v_complex128(&b);
+        let da = v_complex128_dense(&a);
+        let db = v_complex128_dense(&b);
+        let bits = |v: &Value| -> Vec<(u64, u64)> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::Complex128Bits(re, im) => (*re, *im),
+                    other => panic!("expected c128, got {other:?}"),
+                })
+                .collect()
+        };
+        let prims = [
+            Primitive::Pow,
+            Primitive::Atan2,
+            Primitive::XLogY,
+            Primitive::LogAddExp,
+        ];
+        for prim in prims {
+            let from_lit =
+                crate::eval_primitive(prim, &[la.clone(), lb.clone()], &BTreeMap::new()).unwrap();
+            let from_dense =
+                crate::eval_primitive(prim, &[da.clone(), db.clone()], &BTreeMap::new()).unwrap();
             assert_eq!(
                 bits(&from_lit),
                 bits(&from_dense),

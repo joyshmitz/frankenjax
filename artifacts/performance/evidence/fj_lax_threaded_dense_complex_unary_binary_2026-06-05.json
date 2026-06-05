@@ -1,0 +1,13 @@
+{
+  "crate": "fj-lax (arithmetic)",
+  "target": "Complex unary transcendentals (exp/log/sin/tanh/... via eval_unary_complex_map) AND complex binary transcendentals (Pow/Atan2/XLogY/LogAddExp via eval_binary_elementwise_complex). Both were serial AND Literal-backed; complex_exp = exp+sin+cos and complex_pow = log+mul+exp per element (several real transcendentals).",
+  "lever": "Dense + threaded fast path in both: when operand(s) are dense-complex-backed (as_complex_slice) and large (>= 1<<13), apply the per-element complex op across scoped threads into a dense output via new_complex_values — no per-Literal decode/rebuild. Unary op gained + Sync; binary uses the infallible apply_complex_binary for the expensive ops (is_expensive_complex_binary). Bit-identical to the serial Literal map (same op, same dtype narrowing).",
+  "isomorphism": "BIT-EXACT. threaded_dense_complex_unary_bit_identical_to_literal (Exp/Log/Tanh/Sin) + threaded_dense_complex_binary_bit_identical_to_literal (Pow/Atan2/XLogY/LogAddExp), each dense-threaded == Literal-serial bit-for-bit. 1109 fj-lax tests pass (verified on rch remote build).",
+  "measurements_same_session_back_to_back": {
+    "exp_256k_complex128_dense": { "before_serial_ms": 12.15, "after_threaded_ms": 5.59, "ratio": 2.17 },
+    "pow_256k_complex128_dense": { "before_serial_ms": 34.47, "after_threaded_ms": 5.98, "ratio": 5.76 }
+  },
+  "decision": "SHIP. Complex unary exp 2.17x, complex binary pow 5.76x (covers the whole complex transcendental family). Bit-exact, extends dense Complex storage (6294o).",
+  "note_on_prior_commit": "This RE-LANDS the complex-unary threaded path that commit 7ff581c3 intended but lost: that commit's eval_unary_complex_map impl edits were clobbered by a concurrently-editing agent on the shared arithmetic.rs (rch's artifact-retrieve overwrote the local file with the concurrent version), so only the test+bench landed and HEAD's map stayed serial. Committed here via git directly (no rch between re-apply and commit) so the impl persists. The content was remote-verified before the clobber.",
+  "date": "2026-06-05"
+}
