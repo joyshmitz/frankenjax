@@ -2621,6 +2621,17 @@ fn bench_exp_64k(c: &mut Criterion) {
     });
 }
 
+// 1M elements: above PARALLEL_MIN_ELEMS (262144), so the compute-bound exp fans
+// out across cores. Measures the serial→threaded migration for exp/ln/sin/cos/tan.
+fn bench_exp_1m(c: &mut Criterion) {
+    let data: Vec<f64> = (0..4 * LARGE_RANDOM_LEN).map(|i| (i as f64) * 1e-6 - 8.0).collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/exp_4m_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Exp, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_square_1k(c: &mut Criterion) {
     let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.001).collect();
     let input = Value::vector_f64(&data).unwrap();
@@ -3565,6 +3576,7 @@ criterion_group!(
     bench_sin_64k,
     bench_exp_1k,
     bench_exp_64k,
+    bench_exp_1m,
     bench_square_1k,
     bench_integer_pow_1k,
     bench_clamp_1k,

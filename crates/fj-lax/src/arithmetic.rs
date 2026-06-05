@@ -2460,7 +2460,7 @@ pub(crate) fn eval_exp(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| complex_exp((a, b)))
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::exp)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::exp)
     }
 }
 
@@ -2468,7 +2468,7 @@ pub(crate) fn eval_log(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| complex_log((a, b)))
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::ln)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::ln)
     }
 }
 
@@ -2478,7 +2478,7 @@ pub(crate) fn eval_sin(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             (a.sin() * b.cosh(), a.cos() * b.sinh())
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::sin)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::sin)
     }
 }
 
@@ -2488,7 +2488,7 @@ pub(crate) fn eval_cos(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             (a.cos() * b.cosh(), -a.sin() * b.sinh())
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::cos)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::cos)
     }
 }
 
@@ -2499,7 +2499,7 @@ pub(crate) fn eval_tan(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             ((2.0 * a).sin() / denom, (2.0 * b).sinh() / denom)
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::tan)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::tan)
     }
 }
 
