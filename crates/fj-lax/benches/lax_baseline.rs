@@ -1021,6 +1021,15 @@ fn bench_qr_128_f64(c: &mut Criterion) {
     });
 }
 
+fn bench_qr_1024_f64(c: &mut Criterion) {
+    let n = 1024usize;
+    let m = real_matrix(n, n);
+    let p = no_params();
+    c.bench_function("linalg/qr_1024x1024_f64", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::Qr, std::slice::from_ref(&m), &p))
+    });
+}
+
 fn bench_lu_128_f64(c: &mut Criterion) {
     let n = 128usize;
     let mut data = Vec::with_capacity(n * n);
@@ -3101,6 +3110,7 @@ criterion_group!(
     bench_cholesky_512_f64,
     bench_cholesky_1024_f64,
     bench_qr_128_f64,
+    bench_qr_1024_f64,
     bench_lu_128_f64,
     bench_lu_1024_f64,
     bench_svd_48_f64,

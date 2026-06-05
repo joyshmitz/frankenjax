@@ -665,16 +665,7 @@ fn eval_qr_real_matrix(
         if v_norm_sq > f64::EPSILON * 1e4 {
             let tau = 2.0 / v_norm_sq;
 
-            for col in j..n {
-                let mut dot = 0.0;
-                for (vi, row) in v.iter().zip(j..m) {
-                    dot += *vi * r[row * n + col];
-                }
-                let tau_dot = tau * dot;
-                for (vi, row) in v.iter().zip(j..m) {
-                    r[row * n + col] -= *vi * tau_dot;
-                }
-            }
+            apply_real_householder_columns(&mut r, n, j, j, n, &v, tau);
 
             v_store.push(v);
             tau_store.push(tau);
@@ -698,16 +689,7 @@ fn eval_qr_real_matrix(
             continue;
         }
 
-        for col in j..q_cols {
-            let mut dot = 0.0;
-            for (vi, row) in v.iter().zip(j..m) {
-                dot += *vi * q[row * q_cols + col];
-            }
-            let tau_dot = tau * dot;
-            for (vi, row) in v.iter().zip(j..m) {
-                q[row * q_cols + col] -= *vi * tau_dot;
-            }
-        }
+        apply_real_householder_columns(&mut q, q_cols, j, j, q_cols, v, tau);
     }
 
     let r_rows = if full_matrices { m } else { k };
@@ -741,6 +723,47 @@ fn eval_qr_real_matrix(
     let r_val = matrix_to_value(r_rows, n, &r_out, dtype)?;
 
     Ok(vec![q_val, r_val])
+}
+
+const QR_REFLECTOR_COL_TILE: usize = 8;
+
+fn apply_real_householder_columns(
+    matrix: &mut [f64],
+    row_stride: usize,
+    row_start: usize,
+    col_start: usize,
+    col_end: usize,
+    v: &[f64],
+    tau: f64,
+) {
+    debug_assert!(col_start <= col_end);
+    debug_assert!(col_end <= row_stride);
+
+    let mut col = col_start;
+    while col < col_end {
+        let width = QR_REFLECTOR_COL_TILE.min(col_end - col);
+        let mut dots = [0.0_f64; QR_REFLECTOR_COL_TILE];
+
+        for (row_offset, &vi) in v.iter().enumerate() {
+            let row_base = (row_start + row_offset) * row_stride + col;
+            for (lane, dot) in dots.iter_mut().take(width).enumerate() {
+                *dot += vi * matrix[row_base + lane];
+            }
+        }
+
+        for dot in dots.iter_mut().take(width) {
+            *dot *= tau;
+        }
+
+        for (row_offset, &vi) in v.iter().enumerate() {
+            let row_base = (row_start + row_offset) * row_stride + col;
+            for (lane, &tau_dot) in dots.iter().take(width).enumerate() {
+                matrix[row_base + lane] -= vi * tau_dot;
+            }
+        }
+
+        col += width;
+    }
 }
 
 // ── LU Decomposition ───────────────────────────────────────────────
@@ -3907,6 +3930,79 @@ mod tests {
         }
 
         assert_real_qr_matches_complex_zero_imag(n, &a);
+    }
+
+    #[test]
+    fn qr_tiled_reflector_bit_identical_to_scalar_column_loop() {
+        let rows = 11usize;
+        let cols = 13usize;
+        let row_start = 3usize;
+        let col_start = 2usize;
+        let col_end = cols;
+        let tau = 0.3125f64;
+        let v: Vec<f64> = (row_start..rows)
+            .map(|i| ((i * 17 + 5) as f64).sin() * 0.5 + 1.0)
+            .collect();
+        let mut scalar: Vec<f64> = (0..rows * cols)
+            .map(|idx| ((idx * 19 + 7) as f64).cos() * 0.25 + idx as f64 * 0.001)
+            .collect();
+        let mut tiled = scalar.clone();
+
+        for col in col_start..col_end {
+            let mut dot = 0.0;
+            for (row_offset, &vi) in v.iter().enumerate() {
+                dot += vi * scalar[(row_start + row_offset) * cols + col];
+            }
+            let tau_dot = tau * dot;
+            for (row_offset, &vi) in v.iter().enumerate() {
+                scalar[(row_start + row_offset) * cols + col] -= vi * tau_dot;
+            }
+        }
+
+        apply_real_householder_columns(&mut tiled, cols, row_start, col_start, col_end, &v, tau);
+
+        for (idx, (expected, actual)) in scalar.iter().zip(tiled.iter()).enumerate() {
+            assert_eq!(
+                expected.to_bits(),
+                actual.to_bits(),
+                "tiled reflector changed bits at element {idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn qr_real_path_golden_output_digest() {
+        let n = 7usize;
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = if i == j {
+                    (n as f64) + (i as f64) * 0.375 + 5.0
+                } else {
+                    (((i * 17 + j * 29 + 3) % 23) as f64 + 0.5) * 0.125 - 1.25
+                };
+            }
+        }
+
+        let input = make_matrix(n, n, &a);
+        let result = eval_qr(&[input], &BTreeMap::new()).unwrap();
+        let mut output_bits = Vec::new();
+        for value in &result {
+            let Value::Tensor(tensor) = value else {
+                panic!("QR output must be tensor");
+            };
+            output_bits.extend(tensor.elements.iter().map(|literal| {
+                literal
+                    .as_f64()
+                    .expect("real QR output must contain f64")
+                    .to_bits()
+            }));
+        }
+
+        assert_eq!(
+            fj_test_utils::fixture_id_from_json(&output_bits).unwrap(),
+            "6119fc5cf4759d8cdcd9c34d89a79de89d205203730814fc06aa52bf57ff262b"
+        );
     }
 
     #[test]

@@ -1,0 +1,44 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "pass": 127,
+  "bead": "frankenjax-p1vbf.24",
+  "crate": "fj-lax",
+  "target": "linalg/qr_1024x1024_f64",
+  "lever": "column-tiled real Householder reflector dot/update loops",
+  "profile_backing": "Ready perf bead frankenjax-p1vbf.24 identified QR reflector column walks as the blocked-QR residual after generic matmul_2d panel updates regressed.",
+  "baseline": {
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf24-qr1024-baseline-head cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_1024x1024_f64 --sample-size 10 --measurement-time 2 --warm-up-time 1 --noplot",
+    "range_ms": [244.60, 246.75, 248.86]
+  },
+  "candidate": {
+    "worker": "ts2",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf24-qr1024-tiled cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_1024x1024_f64 --sample-size 10 --measurement-time 2 --warm-up-time 1 --noplot",
+    "range_ms": [49.466, 51.927, 54.434]
+  },
+  "speedup": {
+    "midpoint": 4.751860643004027,
+    "conservative": 4.493514348017783
+  },
+  "score": {
+    "impact": 4.751860643004027,
+    "confidence": 0.95,
+    "effort": 1.0,
+    "impact_x_confidence_over_effort": 4.514267610853826
+  },
+  "isomorphism": {
+    "ordering": "Each affected output column still accumulates reflector dot products in ascending row order; reflector generation, reverse Q application order, diagonal sign normalization, Q/R shapes, and fallback guards are unchanged.",
+    "floating_point": "Per-column add/mul/sub order is unchanged. The new tile only interleaves independent columns inside each row; no reduction order, FMA intent, pivot/tie rule, or RNG surface exists.",
+    "golden_sha256": "6119fc5cf4759d8cdcd9c34d89a79de89d205203730814fc06aa52bf57ff262b"
+  },
+  "validation": [
+    "RCH ts2 cargo test -p fj-lax --lib qr_ -- --nocapture: 10 passed",
+    "RCH ts2 cargo test -p fj-conformance --test linalg_oracle qr -- --nocapture: 8 passed",
+    "RCH ts1 cargo test -p fj-conformance --test linalg_higher_rank qr -- --nocapture: 2 passed",
+    "RCH ts2 cargo check -p fj-lax --all-targets: passed",
+    "RCH ts2 cargo clippy -p fj-lax --all-targets -- -D warnings: passed",
+    "git diff --check on QR changed files: passed",
+    "cargo fmt -p fj-lax --check: blocked by pre-existing formatting drift outside the QR hunk; the QR hunk itself is diff-check clean",
+    "UBS on linalg.rs and lax_baseline.rs: nonzero due existing panic/indexing inventories; embedded fmt/clippy/check/test subchecks clean"
+  ]
+}
