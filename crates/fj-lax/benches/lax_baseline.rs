@@ -1047,6 +1047,34 @@ fn bench_lu_128_f64(c: &mut Criterion) {
     });
 }
 
+fn bench_lu_1024_f64(c: &mut Criterion) {
+    // Large square LU: exercises the cache-blocked right-looking path (min(m,n)
+    // >= LU_BLOCK_THRESHOLD) whose trailing update runs on the GEMM microkernel.
+    let n = 1024usize;
+    let mut data = Vec::with_capacity(n * n);
+    for i in 0..n {
+        for j in 0..n {
+            let v = if i == j {
+                (n as f64) + (i as f64) * 0.25 + 7.0
+            } else {
+                (((i * 19 + j * 23) % 13) as f64) * 0.125 - 0.75
+            };
+            data.push(v);
+        }
+    }
+    let m = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: Shape {
+            dims: vec![n as u32, n as u32],
+        },
+        elements: data.into_iter().map(Literal::from_f64).collect(),
+    });
+    let p = no_params();
+    c.bench_function("linalg/lu_1024x1024_f64", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::Lu, std::slice::from_ref(&m), &p))
+    });
+}
+
 fn bench_svd_48_f64(c: &mut Criterion) {
     let n = 48usize;
     let m = real_matrix(n, n);
@@ -3074,6 +3102,7 @@ criterion_group!(
     bench_cholesky_1024_f64,
     bench_qr_128_f64,
     bench_lu_128_f64,
+    bench_lu_1024_f64,
     bench_svd_48_f64,
     bench_svd_48_complex_path,
     bench_svd_48_full_f64,

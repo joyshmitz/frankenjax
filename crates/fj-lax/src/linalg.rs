@@ -845,12 +845,18 @@ fn eval_lu_complex_matrix(
     Ok(vec![lu_val, pivots_val, perm_val])
 }
 
-fn eval_lu_real_matrix(
-    m: usize,
-    n: usize,
-    mut lu: Vec<f64>,
-    dtype: DType,
-) -> Result<Vec<Value>, EvalError> {
+/// Panel width for the cache-blocked right-looking LU.
+const LU_BLOCK_SIZE: usize = 128;
+/// Matrices with `min(m, n)` at least this large take the blocked LU; below it
+/// the scalar kernel runs (keeping the small-n bit-identical invariant and the
+/// conformance goldens, which only cover small matrices).
+const LU_BLOCK_THRESHOLD: usize = 256;
+
+/// Scalar right-looking LU with partial pivoting, factoring `lu` in place and
+/// returning `(pivots, perm)`. This is the reference kernel: each output element
+/// accumulates its rank-1 updates in column order, bit-for-bit matching the
+/// complex-zero-imag path (see lu_real_fast_path_bit_identical_to_complex…).
+fn lu_factor_real_scalar(lu: &mut [f64], m: usize, n: usize) -> (Vec<i64>, Vec<i64>) {
     let k = m.min(n);
     let mut pivots: Vec<i64> = (0..k as i64).collect();
     let mut perm: Vec<i64> = (0..m as i64).collect();
@@ -889,6 +895,143 @@ fn eval_lu_real_matrix(
             }
         }
     }
+
+    (pivots, perm)
+}
+
+/// Cache-blocked right-looking LU with partial pivoting (LAPACK `getrf` shape),
+/// factoring `lu` in place and returning `(pivots, perm)` in the same format as
+/// `lu_factor_real_scalar`.
+///
+/// For each panel of `LU_BLOCK_SIZE` columns it (1) factors the panel over all
+/// rows below — pivoting on the full column and swapping whole rows, with the
+/// rank-1 updates confined to the panel's own columns; (2) forward-solves the
+/// trailing block row `U12 = L11⁻¹·A12`; and (3) applies the Schur update
+/// `A22 -= L21·U12` as one cache-blocked, auto-threaded `matmul_2d`. The trailing
+/// update is the O(n³) cost, so it now runs at GEMM-microkernel speed instead of
+/// strided scalar rank-1 sweeps.
+///
+/// Not bit-identical to the scalar kernel: the GEMM accumulates a block of panel
+/// columns in one reordered sum rather than as sequential rank-1 subtractions, so
+/// the trailing values (and, on ties, the pivot choice) can differ in the last
+/// ulp. It is numerically equivalent — `P·A = L·U` holds to machine precision —
+/// which is exactly the guarantee JAX's blocked LAPACK `getrf` provides, and is
+/// verified by reconstruction parity against the scalar kernel.
+fn lu_factor_real_blocked(lu: &mut [f64], m: usize, n: usize) -> (Vec<i64>, Vec<i64>) {
+    let k = m.min(n);
+    let mut pivots: Vec<i64> = (0..k as i64).collect();
+    let mut perm: Vec<i64> = (0..m as i64).collect();
+    let nb = LU_BLOCK_SIZE;
+
+    let mut j = 0;
+    while j < k {
+        let jb = nb.min(k - j);
+        let panel_end = j + jb;
+
+        // (1) Factor the panel columns [j, panel_end) over rows [j, m). Pivot on
+        //     the full column and swap whole rows (so the already-factored left
+        //     columns and the untouched trailing columns stay row-consistent);
+        //     rank-1 updates touch only the panel's own columns.
+        for col in j..panel_end {
+            let mut max_val = (lu[col * n + col] * lu[col * n + col]).sqrt();
+            let mut max_row = col;
+            for row in (col + 1)..m {
+                let candidate = lu[row * n + col];
+                let val = (candidate * candidate).sqrt();
+                if val > max_val {
+                    max_val = val;
+                    max_row = row;
+                }
+            }
+
+            pivots[col] = max_row as i64;
+            if max_row != col {
+                perm.swap(col, max_row);
+                for jj in 0..n {
+                    lu.swap(col * n + jj, max_row * n + jj);
+                }
+            }
+
+            let diag = lu[col * n + col];
+            if (diag * diag).sqrt() < f64::EPSILON * 1e-10 {
+                continue;
+            }
+            for row in (col + 1)..m {
+                let factor = (lu[row * n + col] * diag) / (diag * diag);
+                lu[row * n + col] = factor;
+                for jj in (col + 1)..panel_end {
+                    lu[row * n + jj] -= factor * lu[col * n + jj];
+                }
+            }
+        }
+
+        // (2) Forward-solve U12 = L11⁻¹ · A12 (panel rows × trailing columns).
+        //     L11 is unit lower-triangular; A12 was row-swapped but not yet
+        //     rank-1 updated by the panel.
+        if panel_end < n {
+            for ri in 1..jb {
+                let r = j + ri;
+                for t in 0..ri {
+                    let l_rt = lu[r * n + (j + t)];
+                    if l_rt != 0.0 {
+                        let trow = j + t;
+                        for jj in panel_end..n {
+                            lu[r * n + jj] -= l_rt * lu[trow * n + jj];
+                        }
+                    }
+                }
+            }
+        }
+
+        // (3) Trailing Schur update A22 -= L21 · U12 via blocked GEMM.
+        let rows_below = m - panel_end;
+        let cols_right = n - panel_end.min(n);
+        if rows_below > 0 && cols_right > 0 {
+            let mut l21 = vec![0.0_f64; rows_below * jb];
+            for p in 0..rows_below {
+                let src = (panel_end + p) * n + j;
+                let dst = p * jb;
+                l21[dst..dst + jb].copy_from_slice(&lu[src..src + jb]);
+            }
+            let mut u12 = vec![0.0_f64; jb * cols_right];
+            for t in 0..jb {
+                let src = (j + t) * n + panel_end;
+                let dst = t * cols_right;
+                u12[dst..dst + cols_right].copy_from_slice(&lu[src..src + cols_right]);
+            }
+            let prod = matmul_2d(&l21, rows_below, jb, &u12, cols_right);
+            for p in 0..rows_below {
+                let row = (panel_end + p) * n + panel_end;
+                let pr = p * cols_right;
+                for q in 0..cols_right {
+                    lu[row + q] -= prod[pr + q];
+                }
+            }
+        }
+
+        j = panel_end;
+    }
+
+    (pivots, perm)
+}
+
+fn eval_lu_real_matrix(
+    m: usize,
+    n: usize,
+    mut lu: Vec<f64>,
+    dtype: DType,
+) -> Result<Vec<Value>, EvalError> {
+    let k = m.min(n);
+    // Large factorizations take the cache-blocked right-looking path whose
+    // O(n³) Schur update runs at GEMM speed; small ones stay on the scalar
+    // kernel, preserving the bit-identical-to-complex-path invariant and the
+    // small-n conformance goldens (blocked reorders the trailing sum, so it is
+    // numerically equivalent but not bit-identical — see lu_factor_real_blocked).
+    let (pivots, perm) = if k >= LU_BLOCK_THRESHOLD {
+        lu_factor_real_blocked(&mut lu, m, n)
+    } else {
+        lu_factor_real_scalar(&mut lu, m, n)
+    };
 
     let lu_val = matrix_to_value(m, n, &lu, dtype)?;
 
@@ -3848,6 +3991,59 @@ mod tests {
                 reconstructed[i]
             );
         }
+    }
+
+    #[test]
+    fn lu_blocked_path_reconstructs_and_matches_scalar() {
+        // k = 300 >= LU_BLOCK_THRESHOLD exercises the cache-blocked LU. The
+        // blocked factorization must (a) numerically match the scalar kernel and
+        // (b) satisfy P·A = L·U to machine precision. Blocked is NOT required to
+        // be bit-identical (the GEMM reorders the trailing sum), only equivalent.
+        let n = 300usize;
+        assert!(n >= LU_BLOCK_THRESHOLD, "n must hit the blocked path");
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for jc in 0..n {
+                a[i * n + jc] = if i == jc {
+                    (n as f64) + (i as f64) * 0.125 + 3.0
+                } else {
+                    (((i * 31 + jc * 17 + 5) % 29) as f64 - 14.0) * 0.05
+                };
+            }
+        }
+
+        // (a) Scalar vs blocked factorization agree to tolerance. The matrix is
+        //     diagonally dominant, so partial pivoting takes the diagonal in both
+        //     and the pivot/permutation vectors are identical.
+        let mut a_scalar = a.clone();
+        let (piv_s, perm_s) = lu_factor_real_scalar(&mut a_scalar, n, n);
+        let mut a_blocked = a.clone();
+        let (piv_b, perm_b) = lu_factor_real_blocked(&mut a_blocked, n, n);
+        assert_eq!(piv_s, piv_b, "blocked pivots diverge from scalar");
+        assert_eq!(perm_s, perm_b, "blocked perm diverges from scalar");
+        let mut max_diff = 0.0f64;
+        for idx in 0..n * n {
+            max_diff = max_diff.max((a_scalar[idx] - a_blocked[idx]).abs());
+        }
+        assert!(max_diff < 1e-9, "blocked vs scalar LU differ by {max_diff}");
+
+        // (b) Reconstruction P·A = L·U from the blocked output.
+        let lu = &a_blocked;
+        let perm = &perm_b;
+        let mut residual = 0.0f64;
+        for i in 0..n {
+            for jc in 0..n {
+                let mut s = 0.0f64;
+                let lim = i.min(jc);
+                for t in 0..=lim {
+                    let l_it = if t == i { 1.0 } else { lu[i * n + t] };
+                    s += l_it * lu[t * n + jc];
+                }
+                let pa = a[perm[i] as usize * n + jc];
+                residual = residual.max((pa - s).abs());
+            }
+        }
+        assert!(residual < 1e-7, "blocked P·A = L·U residual too large: {residual}");
     }
 
     #[test]
