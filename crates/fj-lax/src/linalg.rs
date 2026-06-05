@@ -219,53 +219,17 @@ pub(crate) fn eval_cholesky(
         });
     }
 
-    let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
+    if !matches!(inputs[0].dtype(), DType::Complex64 | DType::Complex128) {
+        let (m, n, a, dtype) = extract_matrix(primitive, &inputs[0])?;
+        return eval_cholesky_real_matrix(m, n, a, dtype);
+    }
 
+    let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
     if m != n {
         return Err(EvalError::Unsupported {
             primitive,
             detail: format!("Cholesky requires a square matrix, got {m}x{n}"),
         });
-    }
-
-    // For a real input matrix L stays purely real, so we factor entirely in a
-    // contiguous `Vec<f64>` instead of the interleaved `Vec<(f64,f64)>`. This
-    // keeps the O(m^3) inner accumulation reading two stride-1 f64 rows (the
-    // complex buffer strides every `.0` access by 16 bytes, halving effective
-    // cache-line utilization and the load throughput). Bit-for-bit identical:
-    // the accumulation order is unchanged, and the scalar diagonal/off-diagonal
-    // updates replicate complex_sub/complex_div exactly for real operands
-    // (complex_sub((x,0),(s,0)) = x-s; complex_div((n,0),(d,0)).re = n*d/(d*d),
-    // which is NOT n/d in IEEE-754, so we preserve the multiply-then-divide).
-    let real_input = !matches!(dtype, DType::Complex64 | DType::Complex128);
-
-    if real_input {
-        let mut lr = vec![0.0_f64; m * m];
-        for i in 0..m {
-            for j in 0..=i {
-                // Stride-1 dot product over the first `j` entries of rows i and
-                // j (sequential accumulation, identical IEEE-754 order — no SIMD
-                // reassociation, so the result is bit-for-bit unchanged).
-                let mut acc = 0.0_f64;
-                for k in 0..j {
-                    acc += lr[i * m + k] * lr[j * m + k];
-                }
-                if i == j {
-                    // JAX's lax.linalg.cholesky does NOT raise for non-positive-
-                    // definite input (it must be jittable): it returns NaN where
-                    // the factorization fails, which then propagates through the
-                    // divisions below (matching jnp.linalg.cholesky; NumPy raises
-                    // LinAlgError instead — a deliberate JAX-vs-NumPy difference).
-                    lr[i * m + j] = (a[i * m + i].0 - acc).sqrt();
-                } else {
-                    let numer = a[i * m + j].0 - acc;
-                    let djj = lr[j * m + j];
-                    lr[i * m + j] = (numer * djj) / (djj * djj);
-                }
-            }
-        }
-        let l: Vec<(f64, f64)> = lr.into_iter().map(|x| (x, 0.0)).collect();
-        return complex_matrix_to_value(m, m, &l, dtype);
     }
 
     let mut l = vec![(0.0_f64, 0.0_f64); m * m];
@@ -287,6 +251,41 @@ pub(crate) fn eval_cholesky(
     }
 
     complex_matrix_to_value(m, m, &l, dtype)
+}
+
+fn eval_cholesky_real_matrix(
+    m: usize,
+    n: usize,
+    a: Vec<f64>,
+    dtype: DType,
+) -> Result<Value, EvalError> {
+    let primitive = Primitive::Cholesky;
+
+    if m != n {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("Cholesky requires a square matrix, got {m}x{n}"),
+        });
+    }
+
+    let mut l = vec![0.0_f64; m * m];
+    for i in 0..m {
+        for j in 0..=i {
+            let mut acc = 0.0_f64;
+            for k in 0..j {
+                acc += l[i * m + k] * l[j * m + k];
+            }
+            if i == j {
+                l[i * m + j] = (a[i * m + i] - acc).sqrt();
+            } else {
+                let numer = a[i * m + j] - acc;
+                let djj = l[j * m + j];
+                l[i * m + j] = (numer * djj) / (djj * djj);
+            }
+        }
+    }
+
+    matrix_to_value(m, m, &l, dtype)
 }
 
 // ── Triangular solve ────────────────────────────────────────────────
@@ -2898,6 +2897,37 @@ mod tests {
                 "complex factor imag nonzero at {idx}"
             );
         }
+    }
+
+    #[test]
+    fn cholesky_real_fast_path_preserves_f32_dtype_and_shape() {
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::from_f32(4.0),
+                    Literal::from_f32(2.0),
+                    Literal::from_f32(2.0),
+                    Literal::from_f32(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+
+        let Value::Tensor(t) = eval_cholesky(&[input], &BTreeMap::new()).unwrap() else {
+            panic!("expected tensor");
+        };
+
+        assert_eq!(t.dtype, DType::F32);
+        assert_eq!(t.shape.dims, vec![2, 2]);
+        t.validate_dtype_consistency()
+            .expect("F32 Cholesky output must contain only F32Bits elements");
+        assert!(
+            t.elements
+                .iter()
+                .all(|literal| matches!(literal, Literal::F32Bits(_)))
+        );
     }
 
     #[test]
