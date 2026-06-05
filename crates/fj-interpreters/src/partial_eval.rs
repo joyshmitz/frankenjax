@@ -435,9 +435,7 @@ pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
         }
     }
 
-    const DCE_FORWARD_CLONE_MIN_EQNS: usize = 256;
-
-    let retained_eqns = if jaxpr.equations.len() < DCE_FORWARD_CLONE_MIN_EQNS {
+    let retained_eqns = if jaxpr.equations.is_empty() {
         let mut retained_eqns = Vec::with_capacity(jaxpr.equations.len());
         for eqn in jaxpr.equations.iter().rev() {
             let outputs_needed = eqn.outputs.iter().any(|v| needed[v.0 as usize]);

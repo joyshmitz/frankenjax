@@ -1,0 +1,141 @@
+{
+  "bead": "frankenjax-kqtzy",
+  "pass": 132,
+  "title": "[perf][no-gaps] fj-interpreters DCE all-used shallow-retention path after EquationList",
+  "date": "2026-06-05",
+  "skill_loop": [
+    "repeatedly-apply-skill",
+    "extreme-software-optimization"
+  ],
+  "profile_backed_target": {
+    "source": "Post-frankenjax-lsjey RCH ts1 fj-interpreters pe_baseline profile",
+    "hot_rows": {
+      "dce/all_used/10eq": {
+        "lower_ns": 651.63,
+        "mid_ns": 668.64,
+        "upper_ns": 694.07
+      },
+      "dce/all_used/100eq": {
+        "lower_us": 5.7294,
+        "mid_us": 5.9284,
+        "upper_us": 6.1691
+      },
+      "dce/all_used/1000eq": {
+        "lower_us": 5.6132,
+        "mid_us": 5.6838,
+        "upper_us": 5.7913
+      }
+    }
+  },
+  "lever": {
+    "description": "Route every non-empty DCE graph through the retained-count path so all-retained graphs can shallow-clone EquationList storage. Empty Jaxprs retain the old zero-iteration Vec path.",
+    "files": [
+      "crates/fj-interpreters/src/partial_eval.rs"
+    ],
+    "single_lever": true
+  },
+  "baseline": {
+    "worker": "ts1",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-kqtzy-focused-baseline cargo bench -p fj-interpreters --bench pe_baseline -- 'dce/all_used/(10eq|100eq|1000eq)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "rows": {
+      "dce/all_used/10eq": {
+        "lower_ns": 721.04,
+        "mid_ns": 733.89,
+        "upper_ns": 750.38
+      },
+      "dce/all_used/100eq": {
+        "lower_us": 6.3945,
+        "mid_us": 6.4882,
+        "upper_us": 6.6165
+      },
+      "dce/all_used/1000eq": {
+        "lower_us": 5.8077,
+        "mid_us": 5.8814,
+        "upper_us": 5.9459
+      }
+    }
+  },
+  "after": {
+    "worker": "ts1",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-kqtzy-final2 cargo bench -p fj-interpreters --bench pe_baseline -- 'dce/all_used/(10eq|100eq|1000eq)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "rows": {
+      "dce/all_used/10eq": {
+        "lower_ns": 201.05,
+        "mid_ns": 203.16,
+        "upper_ns": 205.63
+      },
+      "dce/all_used/100eq": {
+        "lower_us": 1.1251,
+        "mid_us": 1.1820,
+        "upper_us": 1.2404
+      },
+      "dce/all_used/1000eq": {
+        "lower_us": 10.762,
+        "mid_us": 10.940,
+        "upper_us": 11.135,
+        "scored": false,
+        "note": "Not scored. The baseline and candidate both use the retained-count branch for 1000eq; the slower row is treated as worker/run noise, not a claimed win."
+      }
+    }
+  },
+  "speedup": {
+    "scored_rows": {
+      "dce/all_used/10eq": {
+        "midpoint_speedup": 3.612,
+        "conservative_speedup": 3.506
+      },
+      "dce/all_used/100eq": {
+        "midpoint_speedup": 5.490,
+        "conservative_speedup": 5.156
+      }
+    },
+    "score": {
+      "impact": 4.0,
+      "confidence": 3.0,
+      "effort": 1.0,
+      "impact_x_confidence_div_effort": 12.0,
+      "keep": true
+    }
+  },
+  "isomorphism_proof": {
+    "ordering": "Preserved. The selective-retention path emits equations by forward iterating the original EquationList with retain_eqn flags, matching original equation order. The all-retained fast path returns the same ordered EquationList storage.",
+    "tie_breaking": "No tie-breaking exists in DCE liveness; the same output mask and reverse liveness walk determine retained equations.",
+    "floating_point": "No floating-point arithmetic is introduced or removed; the pass only prunes or retains IR equations.",
+    "rng": "No RNG state or randomness is read or written.",
+    "empty_graphs": "The empty Jaxpr case remains on the old reverse-then-reverse Vec path and performs zero iterations.",
+    "used_inputs_and_outputs": "The needed bitset seeding, input mask construction, and retained outvar zip/filter logic are unchanged.",
+    "golden_sha256": "3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8",
+    "golden_test": "partial_eval::tests::test_dce_all_used_large_chain_golden_hash"
+  },
+  "verification": [
+    {
+      "command": "cargo fmt --check -p fj-interpreters",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-kqtzy-check cargo check -p fj-interpreters --lib",
+      "result": "pass",
+      "note": "Existing fj-lax dead_code warning for jacobi_eigendecomposition observed outside this bead."
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-kqtzy-test cargo test -p fj-interpreters --lib partial_eval -- --nocapture",
+      "result": "pass",
+      "tests": "70 passed, 0 failed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-kqtzy-conformance cargo test -p fj-conformance --test pe_staging_oracle -- --nocapture",
+      "result": "pass",
+      "tests": "20 passed, 0 failed"
+    },
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-kqtzy-clippy cargo clippy -p fj-interpreters --all-targets --no-deps -- -D warnings",
+      "result": "pass",
+      "note": "Dependency linting excluded to avoid the unrelated fj-lax warning masking this crate."
+    },
+    {
+      "command": "ubs crates/fj-interpreters/src/partial_eval.rs",
+      "result": "nonzero_preexisting_inventory",
+      "note": "UBS fmt, clippy, cargo check, tests-build, cargo-audit, and cargo-deny sections passed. Existing inventories include test unwraps/asserts/indexing and a known Instant::now false positive; no unsafe block was found."
+    }
+  ]
+}
