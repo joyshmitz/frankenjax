@@ -5,6 +5,7 @@
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 
 use crate::EvalError;
+use crate::tensor_contraction::matmul_2d;
 use crate::type_promotion::promote_dtype;
 
 type ComplexScalar = (f64, f64);
@@ -268,6 +269,23 @@ fn eval_cholesky_real_matrix(
         });
     }
 
+    // Small matrices keep the scalar Cholesky–Banachiewicz kernel (bit-identical
+    // to the complex path — see cholesky_real_fast_path_bit_identical_*). Large
+    // matrices use the cache-blocked right-looking factorization, which is
+    // GEMM-bound and far faster but reorders the FP accumulation (verified by
+    // reconstruction + scalar-parity within tolerance, not bit-identity).
+    let l = if m >= CHOLESKY_BLOCK_THRESHOLD {
+        cholesky_real_blocked(m, &a)
+    } else {
+        cholesky_real_scalar(m, &a)
+    };
+
+    matrix_to_value(m, m, &l, dtype)
+}
+
+/// Scalar lower-triangular Cholesky (Cholesky–Banachiewicz), row by row.
+/// Returns `L` (m×m, strict upper triangle zero) with `A = L Lᵀ`.
+fn cholesky_real_scalar(m: usize, a: &[f64]) -> Vec<f64> {
     let mut l = vec![0.0_f64; m * m];
     for i in 0..m {
         for j in 0..=i {
@@ -284,8 +302,91 @@ fn eval_cholesky_real_matrix(
             }
         }
     }
+    l
+}
 
-    matrix_to_value(m, m, &l, dtype)
+/// Block size for the right-looking Cholesky panel.
+const CHOLESKY_BLOCK_SIZE: usize = 128;
+/// Matrices at least this large use the blocked Cholesky; below it the scalar
+/// kernel runs (keeping the small-n bit-identical invariant).
+const CHOLESKY_BLOCK_THRESHOLD: usize = 256;
+
+/// Cache-blocked right-looking Cholesky: A = L Lᵀ, returning lower-triangular L
+/// (strict upper zero). For each diagonal block it factors the block (scalar),
+/// solves the sub-diagonal panel against L11ᵀ, then applies the symmetric Schur
+/// update A22 -= L21 L21ᵀ via the cache-blocked GEMM (`matmul_2d`). The trailing
+/// update is the O(n³) cost and runs at GEMM speed instead of strided scalar
+/// dot products. Not bit-identical to the scalar kernel (GEMM reorders the sum),
+/// but numerically equivalent — verified by reconstruction + scalar parity.
+fn cholesky_real_blocked(n: usize, a_in: &[f64]) -> Vec<f64> {
+    let mut a = a_in.to_vec(); // lower triangle becomes L in place
+    let nb = CHOLESKY_BLOCK_SIZE;
+
+    let mut j = 0;
+    while j < n {
+        let jb = nb.min(n - j);
+
+        // (a) Factor the jb×jb diagonal block (already-updated Schur complement).
+        for c in 0..jb {
+            let mut d = a[(j + c) * n + (j + c)];
+            for t in 0..c {
+                let v = a[(j + c) * n + (j + t)];
+                d -= v * v;
+            }
+            let diag = d.sqrt();
+            a[(j + c) * n + (j + c)] = diag;
+            for r in (c + 1)..jb {
+                let mut s = a[(j + r) * n + (j + c)];
+                for t in 0..c {
+                    s -= a[(j + r) * n + (j + t)] * a[(j + c) * n + (j + t)];
+                }
+                a[(j + r) * n + (j + c)] = s / diag;
+            }
+        }
+
+        let rem = n - (j + jb);
+        if rem > 0 {
+            // (b) Panel solve: L21 = A21 · L11^{-T} (rows j+jb..n, cols j..j+jb).
+            for r in (j + jb)..n {
+                for c in 0..jb {
+                    let mut s = a[r * n + (j + c)];
+                    for t in 0..c {
+                        s -= a[r * n + (j + t)] * a[(j + c) * n + (j + t)];
+                    }
+                    a[r * n + (j + c)] = s / a[(j + c) * n + (j + c)];
+                }
+            }
+
+            // (c) Trailing symmetric update A22 -= L21 · L21ᵀ via blocked GEMM.
+            let mut l21 = vec![0.0_f64; rem * jb];
+            let mut l21t = vec![0.0_f64; jb * rem];
+            for p in 0..rem {
+                for c in 0..jb {
+                    let v = a[(j + jb + p) * n + (j + c)];
+                    l21[p * jb + c] = v;
+                    l21t[c * rem + p] = v;
+                }
+            }
+            let prod = matmul_2d(&l21, rem, jb, &l21t, rem);
+            for p in 0..rem {
+                let row = (j + jb + p) * n + (j + jb);
+                let pr = p * rem;
+                for q in 0..rem {
+                    a[row + q] -= prod[pr + q];
+                }
+            }
+        }
+
+        j += jb;
+    }
+
+    // Zero the strict upper triangle to match the scalar kernel's L layout.
+    for i in 0..n {
+        for jj in (i + 1)..n {
+            a[i * n + jj] = 0.0;
+        }
+    }
+    a
 }
 
 // ── Triangular solve ────────────────────────────────────────────────
@@ -3156,6 +3257,66 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn cholesky_blocked_matches_scalar_and_reconstructs() {
+        // n >= CHOLESKY_BLOCK_THRESHOLD exercises the cache-blocked right-looking
+        // kernel. The Cholesky factor is unique (positive diagonal), so the
+        // blocked result must match the scalar kernel to near machine precision
+        // and reconstruct A = L Lᵀ.
+        let n = 300usize;
+        let base: Vec<f64> = (0..n * n)
+            .map(|idx| (((idx % 13) as f64) - 6.0) * 0.25)
+            .collect();
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += base[k * n + i] * base[k * n + j];
+                }
+                a[i * n + j] = s + if i == j { n as f64 } else { 0.0 };
+            }
+        }
+        assert!(n >= CHOLESKY_BLOCK_THRESHOLD, "n must hit the blocked path");
+
+        let l_blocked = cholesky_real_blocked(n, &a);
+        let l_scalar = cholesky_real_scalar(n, &a);
+
+        // Strict upper triangle is zero.
+        for i in 0..n {
+            for jj in (i + 1)..n {
+                assert_eq!(l_blocked[i * n + jj], 0.0, "upper[{i}][{jj}] nonzero");
+            }
+        }
+
+        // Blocked vs scalar agree to near machine precision (unique factor).
+        for idx in 0..n * n {
+            let denom = 1.0 + l_scalar[idx].abs();
+            assert!(
+                (l_blocked[idx] - l_scalar[idx]).abs() <= 1e-9 * denom,
+                "blocked vs scalar differ at {idx}: {} vs {}",
+                l_blocked[idx],
+                l_scalar[idx]
+            );
+        }
+
+        // Reconstruction L Lᵀ ≈ A on the lower triangle.
+        let scale = a.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
+        for i in 0..n {
+            for j in 0..=i {
+                let mut acc = 0.0;
+                for k in 0..=j {
+                    acc += l_blocked[i * n + k] * l_blocked[j * n + k];
+                }
+                assert!(
+                    (acc - a[i * n + j]).abs() <= 1e-9 * scale,
+                    "reconstruction[{i}][{j}] {acc} vs {}",
+                    a[i * n + j]
+                );
             }
         }
     }
