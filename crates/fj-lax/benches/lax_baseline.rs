@@ -41,6 +41,27 @@ fn complex_matrix(rows: usize, cols: usize) -> Value {
     })
 }
 
+// Dense `(re, im)` f64-backed complex128 vector (the `as_complex_slice` fast
+// path) — the steady-state representation upstream complex ops now produce.
+fn complex_vector_dense(len: usize) -> Value {
+    let values: Vec<(f64, f64)> = (0..len)
+        .map(|i| {
+            let x = i as f64;
+            ((x * 0.125).sin(), (x * 0.25).cos())
+        })
+        .collect();
+    Value::Tensor(
+        TensorValue::new_complex_values(
+            DType::Complex128,
+            Shape {
+                dims: vec![len as u32],
+            },
+            values,
+        )
+        .unwrap(),
+    )
+}
+
 // Same logical data as `complex_matrix`, but backed by dense `(re, im)` f64
 // storage (the `as_complex_slice` fast path) instead of per-element `Literal`s.
 // This is the steady-state representation a complex pipeline produces upstream.
@@ -1902,6 +1923,26 @@ fn bench_complex_mul_1k(c: &mut Criterion) {
     });
 }
 
+fn bench_complex_mul_1m_literal(c: &mut Criterion) {
+    let lhs = complex_vector(1 << 20);
+    let rhs = complex_vector(1 << 20);
+    let inputs = [lhs, rhs];
+    let p = no_params();
+    c.bench_function("eval/complex_mul_1m_complex128_literal", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Mul, &inputs, &p))
+    });
+}
+
+fn bench_complex_mul_1m_dense(c: &mut Criterion) {
+    let lhs = complex_vector_dense(1 << 20);
+    let rhs = complex_vector_dense(1 << 20);
+    let inputs = [lhs, rhs];
+    let p = no_params();
+    c.bench_function("eval/complex_mul_1m_complex128_dense", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Mul, &inputs, &p))
+    });
+}
+
 fn bench_complex_ctor_1k(c: &mut Criterion) {
     let real = real_vector(1000);
     let imag = real_vector(1000);
@@ -2558,6 +2599,8 @@ criterion_group!(
     bench_select_64k_i64_vec,
     bench_select_64k_i64_literal_reference,
     bench_complex_mul_1k,
+    bench_complex_mul_1m_literal,
+    bench_complex_mul_1m_dense,
     bench_complex_ctor_1k,
     bench_complex_conj_1k,
     bench_complex_neg_1k,

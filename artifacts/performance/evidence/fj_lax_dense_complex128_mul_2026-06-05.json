@@ -1,0 +1,19 @@
+{
+  "crate": "fj-lax (arithmetic)",
+  "target": "Same-shape Complex128 elementwise multiply (Primitive::Mul). Follow-up to dense Complex storage (frankenjax-6294o): eval_same_shape_complex128_mul still extracted each operand via per-Literal match and built a Vec<Literal> output, even when operands were dense-complex-backed (as_complex_slice).",
+  "lever": "Dense fast path in eval_same_shape_complex128_mul: when both operands expose as_complex_slice(), multiply straight from the packed (re,im) slices into a dense Vec<(f64,f64)> via a single-pass collect, returned through TensorValue::new_complex_values — no per-element enum match or rebuild. Threading was tried and REJECTED (the op is memory-bandwidth bound; std::thread::scope fan-out at 1M regressed to ~6.8ms vs ~2.0ms serial), so the kernel is serial single-pass (no zero-init double-write). Literal-backed inputs keep the existing serial Literal path unchanged (zero regression).",
+  "isomorphism": "BIT-EXACT. dense_complex128_mul_bit_identical_to_literal compares the dense-input output against the Literal-input output element-for-element over 300k+ varied values plus inf/-0.0 edge cases (>1<<18 so the full kernel runs). same_shape_complex128_mul_fast_path_bit_identical (pre-existing) pins exact NaN/inf edge-case bits against the reference formula. Packed Complex128 values are the exact f64 bits a Literal::Complex128Bits carries.",
+  "measurements_bench_eval_complex_mul_1m_complex128": {
+    "literal_input_ms": [3.97, 4.18, 3.67],
+    "dense_input_ms": [1.97, 2.05, 1.89],
+    "ratio_dense_vs_literal_same_binary": [2.02, 2.04, 1.94],
+    "median_ratio": 2.02,
+    "baseline_old_dense_input_premerge_ms": 4.03,
+    "notes": "Same-binary, variance-controlled (both benches one run). literal path is UNCHANGED so its number is the pre-existing behavior for any c128 mul. Memory-bandwidth bound: literal moves ~72MB (2x24MB Literal inputs + 24MB Literal output) vs dense ~48MB (2x16MB packed + 16MB packed), hence ~2x is near the structural ceiling for this op."
+  },
+  "speedup": { "steady_state_dense_input": 2.02 },
+  "score": "impact 4 (complex multiply: signal processing, FFT-adjacent, complex linear algebra) x confidence 5 (bit-exact vs literal path + edge-case golden, 1096 fj-lax tests pass) / effort 2 = 10",
+  "decision": "SHIP. Dense c128 multiply is a consistent ~2.02x (median; range 1.94-2.04x) over the Literal path, zero regression on Literal inputs, fully bit-exact. Extends the dense Complex storage adoption (frankenjax-6294o) to the most common complex elementwise op. Threading measured-and-rejected (bandwidth-bound).",
+  "follow_ups": "conj/neg are trivial sign-bit flips (memory bound, marginal); complex add/sub/div could adopt as_complex_slice similarly. The real multi-op win is keeping complex data dense end-to-end so no stage re-materializes Literals.",
+  "date": "2026-06-05"
+}

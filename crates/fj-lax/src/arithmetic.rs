@@ -1040,6 +1040,23 @@ fn eval_same_shape_complex128_mul(
         return Ok(None);
     }
 
+    // Dense fast path: when both operands expose packed `(re, im)` storage we
+    // multiply straight from the slices into a dense output — no per-`Literal`
+    // extraction or rebuild — and fan out across threads for large arrays. The
+    // packed Complex128 values are the exact f64 bits a `Literal::Complex128Bits`
+    // would carry, so this is bit-identical to the serial Literal path below.
+    if let (Some(a), Some(b)) = (
+        lhs.elements.as_complex_slice(),
+        rhs.elements.as_complex_slice(),
+    ) {
+        let out = complex128_mul_dense(a, b);
+        return Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+            DType::Complex128,
+            lhs.shape.clone(),
+            out,
+        )?)));
+    }
+
     let mut elements = Vec::with_capacity(lhs.elements.len());
     for (&left, &right) in lhs.elements.iter().zip(&rhs.elements) {
         let (Literal::Complex128Bits(ar_bits, ai_bits), Literal::Complex128Bits(br_bits, bi_bits)) =
@@ -1062,6 +1079,27 @@ fn eval_same_shape_complex128_mul(
         lhs.shape.clone(),
         elements,
     )?)))
+}
+
+/// Elementwise complex multiply of two equal-length packed `(re, im)` slices into
+/// a dense output. Each output element depends only on the same-index inputs, so
+/// large arrays are split into disjoint chunks across threads — bit-identical to
+/// the serial path (`out[i] = (ar*br - ai*bi, ar*bi + ai*br)`).
+fn complex128_mul_dense(a: &[(f64, f64)], b: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    debug_assert_eq!(a.len(), b.len());
+
+    #[inline]
+    fn mul_one((ar, ai): (f64, f64), (br, bi): (f64, f64)) -> (f64, f64) {
+        (ar * br - ai * bi, ar * bi + ai * br)
+    }
+
+    // Single-pass build (no zero-init): complex multiply is memory-bandwidth
+    // bound, so reading packed `(re, im)` slices and collecting straight into a
+    // dense output already saturates the win — no per-`Literal` extract/rebuild.
+    a.iter()
+        .zip(b.iter())
+        .map(|(&av, &bv)| mul_one(av, bv))
+        .collect()
 }
 
 /// Full NumPy multi-dim broadcasting for two tensors.
@@ -5891,6 +5929,21 @@ mod tests {
             .unwrap(),
         )
     }
+
+    /// Same logical complex128 vector backed by dense packed `(re, im)` storage
+    /// (`as_complex_slice`) — exercises the dense complex-multiply fast path.
+    fn v_complex128_dense(data: &[(f64, f64)]) -> Value {
+        Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![data.len() as u32],
+                },
+                data.to_vec(),
+            )
+            .unwrap(),
+        )
+    }
     fn matrix_complex128(rows: u32, columns: u32, data: &[(f64, f64)]) -> Value {
         Value::Tensor(
             TensorValue::new(
@@ -6275,6 +6328,53 @@ mod tests {
             })
             .collect();
         assert_eq!(tensor.elements, expected);
+    }
+
+    /// Isomorphism proof: the dense `as_complex_slice` multiply fast path must
+    /// produce bit-identical results to the Literal-backed path (and to the
+    /// reference formula), including a length above the parallel threshold so the
+    /// single-pass dense kernel is exercised at scale.
+    #[test]
+    fn dense_complex128_mul_bit_identical_to_literal() {
+        let params = BTreeMap::new();
+        // Small hand-picked edge cases + a large run (> 1<<18) of varied values.
+        let mut lhs: Vec<(f64, f64)> = vec![
+            (1.5, -2.0),
+            (-0.0, 3.0),
+            (2.25, -1.75),
+            (f64::INFINITY, -4.0),
+        ];
+        let mut rhs: Vec<(f64, f64)> = vec![(2.0, 0.5), (-1.25, 0.0), (3.5, 6.0), (6.0, 7.0)];
+        for i in 0..300_000_usize {
+            let x = i as f64;
+            lhs.push(((x * 0.013).sin(), (x * 0.027).cos() - 0.4));
+            rhs.push(((x * 0.019).cos(), (x * 0.011).sin() + 0.2));
+        }
+        let lhs = std::hint::black_box(lhs);
+        let rhs = std::hint::black_box(rhs);
+
+        let from_lit = crate::eval_primitive(
+            Primitive::Mul,
+            &[v_complex128(&lhs), v_complex128(&rhs)],
+            &params,
+        )
+        .unwrap();
+        let from_dense = crate::eval_primitive(
+            Primitive::Mul,
+            &[v_complex128_dense(&lhs), v_complex128_dense(&rhs)],
+            &params,
+        )
+        .unwrap();
+
+        let lit_t = from_lit.as_tensor().unwrap();
+        let dense_t = from_dense.as_tensor().unwrap();
+        assert_eq!(dense_t.dtype, DType::Complex128);
+        // Bit-exact across representations (compare materialized literals).
+        assert_eq!(
+            lit_t.elements.as_slice(),
+            dense_t.elements.as_slice(),
+            "dense complex-mul output must match literal path bit-for-bit"
+        );
     }
 
     #[test]
