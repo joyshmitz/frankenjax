@@ -101,3 +101,7 @@ artifacts/
 # NTM session state
 .ntm/
 .claude/settings.local.json
+
+# Ephemeral agent/skill scratch (repo-janitor 2026-06-04)
+.skill-loop-progress.md
+.skill-loop-progress-*.md
