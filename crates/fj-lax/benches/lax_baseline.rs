@@ -1,9 +1,12 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
+use fj_lax::threefry::{random_key, random_normal, random_uniform};
 use fj_lax::{eval_primitive, eval_primitive_multi};
 use std::collections::BTreeMap;
+use std::hint::black_box;
 
 const LARGE_ELEMENTWISE_LEN: usize = 65_536;
+const LARGE_RANDOM_LEN: usize = 1_048_576;
 
 fn no_params() -> BTreeMap<String, String> {
     BTreeMap::new()
@@ -114,6 +117,20 @@ fn real_matrix(rows: usize, cols: usize) -> Value {
         },
         elements: elements.into(),
     })
+}
+
+fn bench_random_uniform_1m(c: &mut Criterion) {
+    let key = random_key(0x1234_5678_9ABC_DEF0);
+    c.bench_function("random/uniform_1m_f64", |bencher| {
+        bencher.iter(|| black_box(random_uniform(key, LARGE_RANDOM_LEN, -1.0, 1.0)));
+    });
+}
+
+fn bench_random_normal_1m(c: &mut Criterion) {
+    let key = random_key(0x0F0E_0D0C_0B0A_0908);
+    c.bench_function("random/normal_1m_f64", |bencher| {
+        bencher.iter(|| black_box(random_normal(key, LARGE_RANDOM_LEN)));
+    });
 }
 
 fn bench_add_scalar(c: &mut Criterion) {
@@ -3412,6 +3429,8 @@ fn bench_dispatch_overhead(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_dispatch_overhead,
+    bench_random_uniform_1m,
+    bench_random_normal_1m,
     bench_add_scalar,
     bench_add_1k_vector,
     bench_mul_1k_vector,

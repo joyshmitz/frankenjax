@@ -180,12 +180,77 @@ fn generate_u32_bits(key: PRNGKey, count: usize) -> Vec<u32> {
 /// were captured without x64 mode, so uniform/normal use f32 precision internally.
 #[must_use]
 pub fn random_uniform(key: PRNGKey, count: usize, minval: f64, maxval: f64) -> Vec<f64> {
-    let bits = generate_u32_bits(key, count);
+    use std::simd::{Simd, num::SimdUint};
+
+    const LANES: usize = 8;
+    const KS_PARITY: u32 = 0x1BD1_1BDA;
+    // 2^-23. The scalar mantissa step `f32::from_bits((m>>9)|0x3F800000) - 1.0`
+    // (a value in [1,2) minus 1) equals `(m>>9) as f64 * 2^-23` EXACTLY: `m>>9`
+    // is 23 bits, so both `1 + (m>>9)·2^-23` (f32) and `(m>>9)·2^-23` (f64) are
+    // representable and the subtraction is exact. So the SIMD path computes the
+    // unit directly in f64 (no f32 round-trip), bit-for-bit identical to the
+    // scalar formula — proven by `simd_uniform_matches_scalar_bits`.
+    const INV_2POW23: f64 = 1.0 / 8_388_608.0;
+
+    let [k0, k1] = key.0;
+    let ks2 = k0 ^ k1 ^ KS_PARITY;
+    let ksched = [k0, k1, ks2];
     let scale = maxval - minval;
-    bits.into_iter()
-        .map(|u32_val| {
-            // Keep 23 mantissa bits, set exponent to 1.0 ([1.0, 2.0) in f32)
-            let mantissa = u32_val >> 9;
+
+    let mut out: Vec<f64> = Vec::with_capacity(count);
+    let chunks = count / LANES;
+
+    let k0v: Simd<u32, LANES> = Simd::splat(k0);
+    let k1v: Simd<u32, LANES> = Simd::splat(k1);
+    let lane_off: Simd<u32, LANES> = Simd::from_array(std::array::from_fn(|r| r as u32));
+    let inv2_23: Simd<f64, LANES> = Simd::splat(INV_2POW23);
+    let scalev: Simd<f64, LANES> = Simd::splat(scale);
+    let minv: Simd<f64, LANES> = Simd::splat(minval);
+
+    // Fused threefry → f64 uniform straight into the output: no intermediate
+    // Vec<u32>, mantissa conversion vectorized. Same lane stream + exact-f64 unit
+    // formula as the scalar path, so the bits are identical.
+    for c in 0..chunks {
+        let base = (c * LANES) as u32;
+        let mut x0 = k0v;
+        let mut x1 = (Simd::splat(base) + lane_off) + k1v;
+        for round in 0..NUM_ROUNDS {
+            x0 += x1;
+            let r = ROTATIONS[round % 8];
+            let rotated = (x1 << Simd::splat(r)) | (x1 >> Simd::splat(32 - r));
+            x1 = rotated ^ x0;
+            if (round + 1) % 4 == 0 {
+                let inject_idx = (round + 1) / 4;
+                x0 += Simd::splat(ksched[inject_idx % 3]);
+                x1 += Simd::splat(ksched[(inject_idx + 1) % 3].wrapping_add(inject_idx as u32));
+            }
+        }
+        let mantissa = (x0 ^ x1) >> Simd::splat(9_u32);
+        let unit = mantissa.cast::<f64>() * inv2_23;
+        let res = minv + unit * scalev;
+        out.extend_from_slice(res.as_array());
+    }
+
+    // Scalar tail (count % LANES): same exact-f64 unit formula.
+    for i in (chunks * LANES)..count {
+        let [a, b] = threefry2x32(key.0, [0, i as u32]);
+        let mantissa = (a ^ b) >> 9;
+        out.push(minval + f64::from(mantissa) * INV_2POW23 * scale);
+    }
+
+    out
+}
+
+/// Scalar reference for [`random_uniform`] using the original f32-bitcast mantissa
+/// formula, over the scalar bit generator. Retained as the bit-identity oracle
+/// (`simd_uniform_matches_scalar_bits`) and the A/B benchmark baseline.
+#[must_use]
+pub fn random_uniform_scalar(key: PRNGKey, count: usize, minval: f64, maxval: f64) -> Vec<f64> {
+    let scale = maxval - minval;
+    (0..count)
+        .map(|i| {
+            let [a, b] = threefry2x32(key.0, [0, i as u32]);
+            let mantissa = (a ^ b) >> 9;
             let float_bits = mantissa | 0x3F80_0000_u32;
             let unit = f64::from(f32::from_bits(float_bits) - 1.0);
             minval + unit * scale
@@ -748,6 +813,37 @@ mod tests {
                 })
                 .collect();
             assert_eq!(simd, scalar, "key={key:?} large count={count}");
+        }
+    }
+
+    #[test]
+    fn simd_uniform_matches_scalar_bits() {
+        // The fused SIMD-f64 random_uniform must be BIT-for-bit identical to the
+        // original f32-bitcast scalar formula (random_uniform_scalar) — the f64
+        // mantissa shortcut (m·2^-23) only holds if it reproduces every bit. Cover
+        // keys, ranges, and tail lengths; JAX RNG parity is absolute.
+        for key in [
+            PRNGKey([0, 0]),
+            PRNGKey([7, 0]),
+            PRNGKey([0x9E37_79B9, 0x1234_5678]),
+            PRNGKey([u32::MAX, u32::MAX]),
+        ] {
+            for &(lo, hi) in &[(0.0_f64, 1.0_f64), (-1.0, 1.0), (-3.5, 7.25), (100.0, 100.5)] {
+                for count in 0..=19usize {
+                    let simd = random_uniform(key, count, lo, hi);
+                    let scalar = random_uniform_scalar(key, count, lo, hi);
+                    assert_eq!(simd.len(), scalar.len());
+                    for (s, r) in simd.iter().zip(scalar.iter()) {
+                        assert_eq!(s.to_bits(), r.to_bits(), "key={key:?} range=({lo},{hi})");
+                    }
+                }
+                let count = 9_973;
+                let simd = random_uniform(key, count, lo, hi);
+                let scalar = random_uniform_scalar(key, count, lo, hi);
+                for (s, r) in simd.iter().zip(scalar.iter()) {
+                    assert_eq!(s.to_bits(), r.to_bits(), "key={key:?} big range=({lo},{hi})");
+                }
+            }
         }
     }
 
