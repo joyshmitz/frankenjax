@@ -4443,11 +4443,32 @@ fn f64_total_order_key(value: f64) -> u64 {
     (transformed as u64) ^ (1_u64 << 63)
 }
 
+/// Sort/argsort radix key matching JAX/numpy `sort` NaN handling, which differs
+/// from `total_cmp` (and from `top_k`): every NaN — EITHER sign — ranks as the
+/// single maximum, so ascending sort sends all NaN to the end (stable, by
+/// original index since equal keys keep input order) and the descending
+/// complement key (`!key`) sends them to the front, exactly as
+/// `jnp.sort(descending=...)` does (verified against JAX 0.10.1). Non-NaN values
+/// keep `f64_total_order_key`'s order, which already matches JAX for finite/inf
+/// and the −0.0 < +0.0 tie. `u64::MAX` is collision-free: the only f64 bit
+/// patterns whose key reaches `u64::MAX` are themselves NaN. Used ONLY by
+/// sort/argsort; `top_k` keeps `f64_total_order_key` (it treats +NaN as max but
+/// −NaN as min, per `lax.top_k`).
+#[inline]
+fn f64_sort_order_key(value: f64) -> u64 {
+    if value.is_nan() {
+        u64::MAX
+    } else {
+        f64_total_order_key(value)
+    }
+}
+
 /// Dense F64 ascending sort/argsort along `axis`, mirroring
-/// [`sort_along_axis_dense_i64`] but keyed by [`f64_total_order_key`]. Sort emits
+/// [`sort_along_axis_dense_i64`] but keyed by [`f64_sort_order_key`]. Sort emits
 /// a dense f64 output; argsort emits dense i64 in-slice indices. Bit-for-bit
 /// identical to the generic ascending path (whose F64 comparator is
-/// `total_cmp`). Returns `None` (generic path) for non-F64-dense or short axes.
+/// `compare_sort_keys_nan_last`). Returns `None` (generic path) for non-F64-dense
+/// or short axes.
 fn sort_along_axis_dense_f64(
     tensor: &TensorValue,
     axis: usize,
@@ -4493,7 +4514,7 @@ fn sort_along_axis_dense_f64(
             pairs.clear();
             for i in 0..axis_dim {
                 pairs.push((
-                    f64_total_order_key(values[base + i * axis_stride]) ^ key_mask,
+                    f64_sort_order_key(values[base + i * axis_stride]) ^ key_mask,
                     i as u32,
                 ));
             }
@@ -4520,10 +4541,11 @@ fn sort_along_axis_dense_f64(
 
 /// Ascending radix sort/argsort along `axis` for Literal-backed numeric tensors
 /// that have no dense storage variant (F32/F16/BF16, U32/U64, I32). The generic
-/// path keys these via `compare_sort_keys` — `SortKey::Float(as_f64).total_cmp`
-/// for floats, unsigned `cmp` for U32/U64, signed `cmp` for integers. Each maps
-/// to an ascending `u64` radix key that reproduces that exact order:
-/// `f64_total_order_key(as_f64)` (float), `as_u64` (unsigned), and
+/// path keys these via `compare_sort_keys_nan_last` — `SortKey::Float(as_f64)`
+/// with NaN-last (else `total_cmp`) for floats, unsigned `cmp` for U32/U64,
+/// signed `cmp` for integers. Each maps to an ascending `u64` radix key that
+/// reproduces that exact order:
+/// `f64_sort_order_key(as_f64)` (float), `as_u64` (unsigned), and
 /// `(as_i64 as u64) ^ (1<<63)` (signed). Both the generic `sort_by` and LSD radix
 /// are stable, so the output permutation is bit-for-bit identical — in O(n) radix
 /// passes instead of O(n log n) comparisons. Sort emits the reordered original
@@ -4576,7 +4598,7 @@ fn sort_along_axis_literal_radix(
     for lit in elems.iter() {
         let key = match kind {
             KeyKind::Float => match lit.as_f64() {
-                Some(v) => f64_total_order_key(v),
+                Some(v) => f64_sort_order_key(v),
                 None => return Ok(None),
             },
             KeyKind::Unsigned => match lit.as_u64() {
@@ -4818,9 +4840,9 @@ fn sort_along_axis(
         }
 
         if descending {
-            indexed.sort_by(|a, b| compare_sort_keys(b.1, a.1));
+            indexed.sort_by(|a, b| compare_sort_keys_nan_last(b.1, a.1));
         } else {
-            indexed.sort_by(|a, b| compare_sort_keys(a.1, b.1));
+            indexed.sort_by(|a, b| compare_sort_keys_nan_last(a.1, b.1));
         }
 
         for (out_pos, &(orig_idx, _)) in indexed.iter().enumerate() {
@@ -4967,6 +4989,26 @@ fn sort_key_rank(key: SortKey) -> u8 {
         SortKey::Unsigned(_) => 2,
         SortKey::Float(_) => 3,
         SortKey::Complex(..) => 4,
+    }
+}
+
+/// `compare_sort_keys` for the generic sort/argsort path, matching JAX/numpy
+/// `sort`: every float NaN (either sign) is the maximum and all NaN compare
+/// EQUAL (so a stable sort keeps them in input order). This is the comparison
+/// twin of [`f64_sort_order_key`] — together they keep the radix and generic
+/// sort paths bit-identical while sending NaN to the end (ascending) / front
+/// (descending). Non-NaN floats and every other key kind defer to
+/// `compare_sort_keys` (plain `total_cmp`), which `top_k` and `argmin/argmax`
+/// keep using unchanged.
+fn compare_sort_keys_nan_last(lhs: SortKey, rhs: SortKey) -> Ordering {
+    match (lhs, rhs) {
+        (SortKey::Float(l), SortKey::Float(r)) => match (l.is_nan(), r.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => l.total_cmp(&r),
+        },
+        (lhs, rhs) => compare_sort_keys(lhs, rhs),
     }
 }
 
@@ -7534,11 +7576,13 @@ mod tests {
     }
 
     #[test]
-    fn radix_sort_f32_ascending_matches_total_cmp_reference() {
+    fn radix_sort_f32_ascending_matches_jax_nan_last_reference() {
         // F32 sort/argsort now uses the LSD radix path (axis >= 256). Validate it
-        // against an independent stable `f64::total_cmp(as_f64)` reference — the
-        // exact ordering the generic comparison path applies to F32 — over data
-        // including NaN / +-inf / +-0 / NaN-payload / dups, compared by bits.
+        // against an independent stable JAX/numpy reference — finite/inf by
+        // total_cmp, ALL NaN (either sign) equal-and-last — over data including
+        // NaN / +-inf / +-0 / NaN-payload / dups, compared by bits. Note the two
+        // distinct +NaN payloads (0x7fc00000, 0x7fc00001) must stay in INPUT
+        // order at the end (NaN-equal), not payload order (which total_cmp gives).
         let n = 1000usize;
         let data: Vec<f32> = (0..n)
             .map(|i| match i % 11 {
@@ -7569,9 +7613,18 @@ mod tests {
         };
         let asc = params(&[("dimension", "0"), ("descending", "false")]);
 
-        // Reference: stable sort of indices by total_cmp on the f64 promotion.
+        // Reference: stable sort by the JAX/numpy sort order — NaN (either sign)
+        // equal-and-last, finite/inf by total_cmp — on the f64 promotion.
         let mut idx: Vec<usize> = (0..n).collect();
-        idx.sort_by(|&a, &b| (data[a] as f64).total_cmp(&(data[b] as f64)));
+        idx.sort_by(|&a, &b| {
+            let (x, y) = (data[a] as f64, data[b] as f64);
+            match (x.is_nan(), y.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                (false, false) => x.total_cmp(&y),
+            }
+        });
         let expected_bits: Vec<u32> = idx.iter().map(|&i| data[i].to_bits()).collect();
         let expected_arg: Vec<i64> = idx.iter().map(|&i| i as i64).collect();
 
@@ -7588,14 +7641,87 @@ mod tests {
             .collect();
         assert_eq!(
             got_bits, expected_bits,
-            "radix f32 sort vs total_cmp reference"
+            "radix f32 sort vs JAX nan-last reference"
         );
 
         let arg = extract_i64_vec(&eval_argsort(Primitive::Argsort, &[tensor()], &asc).unwrap());
         assert_eq!(
             arg, expected_arg,
-            "radix f32 argsort vs total_cmp reference"
+            "radix f32 argsort vs JAX nan-last reference"
         );
+    }
+
+    #[test]
+    fn sort_argsort_nan_placement_matches_jax() {
+        // Pins fj sort/argsort to JAX 0.10.1 jnp.sort/argsort (CPU): NaN of EITHER
+        // sign is the maximum and all NaN compare EQUAL — ascending sends them to
+        // the END, descending to the FRONT, both in input (stable) order — while
+        // finite/inf keep IEEE order with -0.0 < +0.0. Sort-specific: top_k keeps
+        // +NaN-max / -NaN-min (f64_total_order_key), unchanged. Sibling of ds6ny.
+        let neg_nan = f32::from_bits(0xFFC0_0000);
+        let pos_nan = f32::NAN; // 0x7FC0_0000
+        let asc = params(&[("dimension", "0"), ("descending", "false")]);
+        let desc = params(&[("dimension", "0"), ("descending", "true")]);
+        let f32t = |vals: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape {
+                        dims: vec![vals.len() as u32],
+                    },
+                    vals.iter().map(|&v| Literal::F32Bits(v.to_bits())).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let args = |t: &Value, p| extract_i64_vec(&eval_argsort(Primitive::Argsort, std::slice::from_ref(t), p).unwrap());
+
+        // arr indices:   0        1    2        3    4
+        let arr = [1.0_f32, pos_nan, 2.0, neg_nan, 0.0];
+        let t = f32t(&arr);
+        // jnp.argsort: asc [4,0,2,1,3]; desc [1,3,2,0,4] (NaN kept in input order)
+        assert_eq!(args(&t, &asc), vec![4, 0, 2, 1, 3], "asc argsort");
+        assert_eq!(args(&t, &desc), vec![1, 3, 2, 0, 4], "desc argsort");
+        let asc_bits: Vec<u32> = eval_sort(Primitive::Sort, std::slice::from_ref(&t), &asc)
+            .unwrap()
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F32Bits(b) => *b,
+                o => panic!("expected F32Bits, got {o:?}"),
+            })
+            .collect();
+        assert_eq!(
+            asc_bits,
+            vec![
+                0.0_f32.to_bits(),
+                1.0_f32.to_bits(),
+                2.0_f32.to_bits(),
+                pos_nan.to_bits(),
+                neg_nan.to_bits(),
+            ],
+            "asc sorted bits: finite then NaN in input order"
+        );
+
+        // ±0.0: -0.0 < +0.0 ascending; descending reverses to +0.0 before -0.0.
+        let z = f32t(&[5.0, -0.0, 0.0, -5.0]);
+        assert_eq!(args(&z, &asc), vec![3, 1, 2, 0], "asc ±0: -5,-0,+0,5");
+        assert_eq!(args(&z, &desc), vec![0, 2, 1, 3], "desc ±0: 5,+0,-0,-5");
+
+        // Large (>=256) dense f64 to exercise the radix path: both NaN land last
+        // (asc) / first (desc), in input order (-NaN@100 before +NaN@400).
+        let mut big: Vec<f64> = (0..512).map(|i| (i as f64).sin()).collect();
+        big[100] = f64::from_bits(0xFFF8_0000_0000_0000); // -NaN
+        big[400] = f64::NAN; // +NaN
+        let bt = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![512] }, big).unwrap(),
+        );
+        let asc_idx = args(&bt, &asc);
+        assert_eq!(&asc_idx[510..], &[100, 400], "asc f64 radix: NaN last, input order");
+        let desc_idx = args(&bt, &desc);
+        assert_eq!(&desc_idx[..2], &[100, 400], "desc f64 radix: NaN first, input order");
     }
 
     #[test]
