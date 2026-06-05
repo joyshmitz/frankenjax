@@ -1,0 +1,41 @@
+frankenjax optimization evidence golden
+artifact: fj_lax_eig_cell_accumulator_pass123_2026-06-05.rejected
+status: rejected_and_removed
+beads: frankenjax-p1vbf.17, frankenjax-p1vbf
+target: fj-lax linalg/eig_48x48_f64
+
+profile-backed baseline:
+  command: RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-post-lu-profile cargo bench -p fj-lax --bench lax_baseline -- linalg/ --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot
+  worker: ts2
+  linalg/eig_48x48_f64: [17.184 ms 17.361 ms 17.614 ms]
+
+candidate:
+  one_lever: replace eig helper matrix_mul and upper_triangular_matrix_mul repeated row updates with four-column scalar cell accumulators
+  source_state_after_rejection: crates/fj-lax/src/linalg.rs restored; git diff is empty for that file
+  ordering: k accumulation remained ascending for each output cell during the candidate
+  tie_breaking: no comparator or tie-breaking path changed
+  floating_point: candidate kept f64 multiplication/addition order per cell, but changed memory update shape
+  rng: no RNG path involved
+
+candidate proof:
+  command: RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass123-eig-mul-proof2 cargo test -p fj-lax matrix_mul -- --nocapture
+  worker: ts2
+  result: pass, 4 tests
+  tests: linalg::tests::matrix_mul_ikj_bit_identical_to_ijk; linalg::tests::upper_triangular_matrix_mul_bit_identical_to_dense_zero_lower; einsum::tests::einsum_matrix_mul; tensor_contraction::tests::tensordot_matrix_mul
+
+  command: RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass123-eig-iter-proof cargo test -p fj-lax eig_qr_iteration_upper_triangular_rq_bit_identical_to_dense_reference -- --nocapture
+  worker: ts2
+  result: pass, 1 test
+  test: linalg::tests::eig_qr_iteration_upper_triangular_rq_bit_identical_to_dense_reference
+
+candidate benchmark:
+  command: RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass123-eig-mul-candidate cargo bench -p fj-lax --bench lax_baseline -- linalg/eig_48x48_f64 --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot
+  worker: ts2
+  linalg/eig_48x48_f64: [21.816 ms 21.897 ms 21.971 ms]
+  midpoint_speedup: 0.793x
+  conservative_speedup: 0.782x
+
+decision:
+  score: reject, below Score>=2.0 keep gate
+  reason: same-worker candidate regressed from 17.361 ms to 21.897 ms
+  next_primitive: shifted/deflated QR over packed Hessenberg real layout, with an explicit eig floating-point behavior contract before any retained FP reordering

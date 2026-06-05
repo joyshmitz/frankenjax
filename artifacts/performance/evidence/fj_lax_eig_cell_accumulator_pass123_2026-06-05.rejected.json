@@ -1,0 +1,104 @@
+{
+  "schema_version": "frankenjax.optimization-pass-evidence.v1",
+  "artifact": "fj_lax_eig_cell_accumulator_pass123_2026-06-05.rejected",
+  "bead_ids": [
+    "frankenjax-p1vbf.17",
+    "frankenjax-p1vbf"
+  ],
+  "skill_pass": "repeatedly-apply-skill pass123 -> extreme-software-optimization",
+  "status": "rejected_and_removed",
+  "captured_at_iso": "2026-06-05T00:57:16Z",
+  "crate": "fj-lax",
+  "target": "linalg/eig_48x48_f64",
+  "profile_backed_target": {
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-post-lu-profile cargo bench -p fj-lax --bench lax_baseline -- linalg/ --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot",
+    "worker": "ts2",
+    "benchmark": "linalg/eig_48x48_f64",
+    "midpoint_ms": 17.361,
+    "ci_ms": [
+      17.184,
+      17.614
+    ],
+    "selection_reason": "Post-pass122 profile made eig the slowest remaining fj-lax linalg benchmark after LU dropped to 0.548 ms."
+  },
+  "alien_graveyard": {
+    "primitive_family": "cache-local dense linear algebra update scheduling",
+    "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md section 9.6 CA-QR/TSQR and cache-local dense submatrix kernels",
+    "applied_slice": "Tried an eig-local small GEMM write-elision layout before replacing the eig primitive family."
+  },
+  "candidate": {
+    "one_lever": "Replace eig helper matrix_mul and upper_triangular_matrix_mul repeated row updates with four-column scalar cell accumulators.",
+    "files_touched_before_rejection": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "source_state_after_rejection": "restored; git diff is empty for crates/fj-lax/src/linalg.rs",
+    "reason": "Same-worker candidate regressed the profiled eig benchmark from 17.361 ms to 21.897 ms."
+  },
+  "benchmarks": {
+    "baseline": {
+      "worker": "ts2",
+      "benchmark": "linalg/eig_48x48_f64",
+      "midpoint_ms": 17.361,
+      "ci_ms": [
+        17.184,
+        17.614
+      ]
+    },
+    "candidate_rebench": {
+      "worker": "ts2",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass123-eig-mul-candidate cargo bench -p fj-lax --bench lax_baseline -- linalg/eig_48x48_f64 --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot",
+      "midpoint_ms": 21.897,
+      "ci_ms": [
+        21.816,
+        21.971
+      ],
+      "speedup_midpoint_x": 0.79285,
+      "speedup_conservative_x": 0.78212
+    }
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 5.0,
+    "effort": 2.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "decision": "reject",
+    "rationale": "The one-lever candidate slowed the profile-backed target and was removed."
+  },
+  "behavior_proof": {
+    "retained_code_change": "none",
+    "candidate_test_commands": [
+      {
+        "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass123-eig-mul-proof2 cargo test -p fj-lax matrix_mul -- --nocapture",
+        "worker": "ts2",
+        "result": "pass: 4 tests"
+      },
+      {
+        "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass123-eig-iter-proof cargo test -p fj-lax eig_qr_iteration_upper_triangular_rq_bit_identical_to_dense_reference -- --nocapture",
+        "worker": "ts2",
+        "result": "pass: 1 test"
+      }
+    ],
+    "ordering": "Candidate accumulated each output cell in ascending k order; retained code has no source diff.",
+    "tie_breaking": "No comparator or tie-breaking path was changed; retained code has no source diff.",
+    "floating_point": "Candidate preserved per-cell f64 operation order, but the retained tree has no source diff after rejection.",
+    "rng": "No RNG state or random primitive is involved.",
+    "errors": "Arity, square-matrix, dtype extraction, and Complex128 wrapping behavior are unchanged; retained code has no source diff.",
+    "golden_output_path": "artifacts/performance/evidence/fj_lax_eig_cell_accumulator_pass123_2026-06-05.rejected.golden",
+    "golden_output_sha256": "917c80bef3e5edbd8344a517546fc55e5e96d5995cdabd101ad6769c661c8f0f"
+  },
+  "validation": [
+    {
+      "command": "git diff --quiet -- crates/fj-lax/src/linalg.rs",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_eig_cell_accumulator_pass123_2026-06-05.rejected.golden.sha256",
+      "result": "pass"
+    }
+  ],
+  "next_primitive": {
+    "target": "linalg/eig_48x48_f64",
+    "primitive": "shifted/deflated QR over a packed Hessenberg real layout, gated by an explicit eig floating-point behavior contract",
+    "reason": "A second eig micro-shape change regressed or failed the keep gate; the next pass must replace the algorithmic primitive instead of tuning the existing dense helper update."
+  }
+}
