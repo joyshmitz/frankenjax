@@ -1841,7 +1841,7 @@ pub(crate) fn eval_sinh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
             (a.sinh() * b.cos(), a.cosh() * b.sin())
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::sinh)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::sinh)
     }
 }
 
@@ -1851,7 +1851,7 @@ pub(crate) fn eval_cosh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
             (a.cosh() * b.cos(), a.sinh() * b.sin())
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::cosh)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::cosh)
     }
 }
 
@@ -1862,7 +1862,7 @@ pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
             ((2.0 * a).sinh() / denom, (2.0 * b).sin() / denom)
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::tanh)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::tanh)
     }
 }
 
@@ -1875,7 +1875,7 @@ pub(crate) fn eval_asinh(primitive: Primitive, inputs: &[Value]) -> Result<Value
             complex_log(w)
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::asinh)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::asinh)
     }
 }
 
@@ -1888,7 +1888,7 @@ pub(crate) fn eval_acosh(primitive: Primitive, inputs: &[Value]) -> Result<Value
             complex_log(w)
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::acosh)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::acosh)
     }
 }
 
@@ -1902,7 +1902,7 @@ pub(crate) fn eval_atanh(primitive: Primitive, inputs: &[Value]) -> Result<Value
             (0.5 * log.0, 0.5 * log.1)
         })
     } else {
-        eval_unary_elementwise(primitive, inputs, f64::atanh)
+        eval_unary_elementwise_parallel(primitive, inputs, f64::atanh)
     }
 }
 
@@ -2030,7 +2030,7 @@ pub(crate) fn eval_unary_elementwise_parallel(
         && tensor.dtype == DType::F64
         && let Some(src) = tensor.elements.as_f64_slice()
     {
-        const PARALLEL_MIN_ELEMS: usize = 1 << 16; // 65_536 — enough transcendental work to amortize threads
+        const PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144 — enough work to amortize the thread fan-out even for the cheaper kept ops
         let n = src.len();
         let threads = if n >= PARALLEL_MIN_ELEMS {
             std::thread::available_parallelism()
@@ -4167,11 +4167,11 @@ pub(crate) fn bessel_i1e_approx(x: f64) -> f64 {
 }
 
 pub(crate) fn eval_bessel_i0e(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
-    eval_unary_elementwise(primitive, inputs, bessel_i0e_approx)
+    eval_unary_elementwise_parallel(primitive, inputs, bessel_i0e_approx)
 }
 
 pub(crate) fn eval_bessel_i1e(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
-    eval_unary_elementwise(primitive, inputs, bessel_i1e_approx)
+    eval_unary_elementwise_parallel(primitive, inputs, bessel_i1e_approx)
 }
 
 fn dot_result_is_integral(lhs: &TensorValue, rhs: &TensorValue) -> bool {

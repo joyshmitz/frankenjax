@@ -1,0 +1,18 @@
+{
+  "pass": 121,
+  "crate": "fj-lax",
+  "target": "expensive (software) transcendental elementwise: tanh/sinh/cosh/asinh/acosh/atanh + bessel_i0e/i1e (over large dense-F64), bench eval/tanh_1m_f64",
+  "function": "arithmetic: route eval_tanh/eval_sinh/eval_cosh/eval_asinh/eval_acosh/eval_atanh/eval_bessel_i0e/eval_bessel_i1e to eval_unary_elementwise_parallel (added pass120)",
+  "lever": "Extend pass120's threaded transcendental elementwise to the hyperbolic / inverse-hyperbolic / Bessel ops (software-implemented, compute-bound). Measured-and-EXCLUDED the cheap hardware intrinsics exp/log/sin/cos/tan (only ~1.9x at 1M — memory-bound, with near-threshold over-spawn risk), keeping them on the serial path. Raised the shared threshold to 1<<18 (262144) so the cheaper kept ops amortize the thread fan-out.",
+  "isomorphism": "BIT-EXACT (each element independent, out[i]=op(src[i])). Covered by lgamma_parallel_bit_identical (the shared eval_unary_elementwise_parallel path, pass120) + tanh/sinh/cosh value tests (6 pass). Cheap-op serial path unchanged.",
+  "measurements_1m_f64": {
+    "tanh_serial_ms": 19.760, "tanh_threaded_ms": 6.0723, "tanh_speedup_worker_corrected": 4.6,
+    "exp_serial_ms": 7.8063, "exp_threaded_ms": 5.7305, "exp_speedup_worker_corrected": 1.9,
+    "calibration_serial_us": 8.9847, "calibration_threaded_us": 12.699
+  },
+  "decision": "Route the EXPENSIVE software transcendentals (tanh 4.6x and the hyperbolic/inverse/Bessel family); leave the cheap hardware intrinsics (exp/log/sin/cos/tan, ~1.9x, memory-bound) serial — they don't clear the 2x bar and risk near-threshold over-spawn.",
+  "score": "impact 5 (tanh = ubiquitous activation; sinh/cosh/asinh/acosh/atanh/bessel common in scientific ML) x confidence 5 (bit-exact, cheap ops measured-and-excluded) / effort 2 = 12.5",
+  "tests": "fj-lax tanh 6/6; lib transcendental + lgamma_parallel_bit_identical pass; clippy -D warnings clean.",
+  "bench_note": "Temporary exp/tanh benches in foreign-dirty lax_baseline.rs (restored, not committed). Serial baselines via in-place PARALLEL_MIN_ELEMS=usize::MAX toggle. Only arithmetic.rs committed.",
+  "date": "2026-06-04"
+}
