@@ -444,6 +444,52 @@ fn bench_add_broadcast_col_1024x1024_i64(c: &mut Criterion) {
     });
 }
 
+fn bench_lt_broadcast_row_1024x1024_f64(c: &mut Criterion) {
+    // Row broadcast [1024,1024] < [1024], f64 → Bool mask (thresholding).
+    let n = 1024usize;
+    let mat: Vec<f64> = (0..n * n).map(|i| i as f64 * 1e-4).collect();
+    let row: Vec<f64> = (0..n).map(|i| i as f64 * 100.0).collect();
+    let lhs = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            mat,
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_f64_values(Shape { dims: vec![n as u32] }, row).unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/lt_broadcast_row_1024x1024_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_lt_broadcast_row_1024x1024_i64(c: &mut Criterion) {
+    // Row broadcast [1024,1024] < [1024], i64 → Bool mask.
+    let n = 1024usize;
+    let mat: Vec<i64> = (0..(n * n) as i64).collect();
+    let row: Vec<i64> = (0..n as i64).map(|i| i * 1000).collect();
+    let lhs = Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            mat,
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_i64_values(Shape { dims: vec![n as u32] }, row).unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/lt_broadcast_row_1024x1024_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Lt, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 fn bench_mul_broadcast_row_512x512_c128(c: &mut Criterion) {
     // Row broadcast [512,512] * [512], Complex128 (per-channel modulation).
     let n = 512usize;
@@ -3247,6 +3293,8 @@ criterion_group!(
     bench_add_broadcast_col_1024x1024_f64,
     bench_add_broadcast_row_1024x1024_i64,
     bench_add_broadcast_col_1024x1024_i64,
+    bench_lt_broadcast_row_1024x1024_f64,
+    bench_lt_broadcast_row_1024x1024_i64,
     bench_mul_broadcast_row_512x512_c128,
     bench_mul_broadcast_col_512x512_c128,
     bench_add_64k_f64_dense_reference,

@@ -1460,6 +1460,80 @@ impl BroadcastOdometer {
     }
 }
 
+/// Visit every output element of a broadcast in row-major order, calling
+/// `f(lhs_idx, rhs_idx)` once per element. An outer odometer over the leading
+/// dims plus a tight contiguous inner loop over the last axis (the inner stride
+/// is always 0 or 1 for a valid broadcast) replaces the per-element
+/// [`BroadcastOdometer`] carry, which vectorizes far better. The visited
+/// `(lhs_idx, rhs_idx)` sequence is identical to `BroadcastOdometer`'s, so any
+/// caller stays bit-for-bit identical to the per-element decode.
+#[inline]
+pub(crate) fn broadcast_visit_row_major(
+    out_dims: &[u32],
+    lhs_strides: &[usize],
+    rhs_strides: &[usize],
+    mut f: impl FnMut(usize, usize),
+) {
+    let rank = out_dims.len();
+    let out_count: usize = out_dims.iter().map(|&d| d as usize).product();
+    if out_count == 0 {
+        return;
+    }
+    if rank == 0 {
+        f(0, 0);
+        return;
+    }
+    let inner = out_dims[rank - 1] as usize;
+    let inner_ls = lhs_strides[rank - 1];
+    let inner_rs = rhs_strides[rank - 1];
+    let outer = out_count / inner;
+    let mut coord = vec![0usize; rank - 1];
+    let mut lb = 0usize;
+    let mut rb = 0usize;
+    for _ in 0..outer {
+        match (inner_ls, inner_rs) {
+            (1, 1) => {
+                for k in 0..inner {
+                    f(lb + k, rb + k);
+                }
+            }
+            (1, 0) => {
+                for k in 0..inner {
+                    f(lb + k, rb);
+                }
+            }
+            (0, 1) => {
+                for k in 0..inner {
+                    f(lb, rb + k);
+                }
+            }
+            _ => {
+                for k in 0..inner {
+                    f(lb + k * inner_ls, rb + k * inner_rs);
+                }
+            }
+        }
+        if rank >= 2 {
+            let mut ax = rank - 2;
+            loop {
+                coord[ax] += 1;
+                lb += lhs_strides[ax];
+                rb += rhs_strides[ax];
+                if coord[ax] < out_dims[ax] as usize {
+                    break;
+                }
+                coord[ax] = 0;
+                lb -= lhs_strides[ax] * out_dims[ax] as usize;
+                rb -= rhs_strides[ax] * out_dims[ax] as usize;
+                if ax == 0 {
+                    break;
+                }
+                ax -= 1;
+            }
+        }
+    }
+}
+
 fn broadcast_binary_tensors(
     primitive: Primitive,
     lhs: &TensorValue,

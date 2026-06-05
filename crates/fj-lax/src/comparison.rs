@@ -151,19 +151,18 @@ pub(crate) fn eval_comparison(
             if let (Some(left), Some(right)) =
                 (lhs.elements.as_i64_slice(), rhs.elements.as_i64_slice())
             {
-                let mut odo = crate::arithmetic::BroadcastOdometer::new(
+                let mut elements = Vec::with_capacity(out_count);
+                crate::arithmetic::broadcast_visit_row_major(
                     &out_shape.dims,
                     &lhs_strides,
                     &rhs_strides,
+                    |li, ri| {
+                        elements.push(Literal::Bool(int_cmp(
+                            i128::from(left[li]),
+                            i128::from(right[ri]),
+                        )));
+                    },
                 );
-                let mut elements = Vec::with_capacity(out_count);
-                for _ in 0..out_count {
-                    let (li, ri) = odo.next();
-                    elements.push(Literal::Bool(int_cmp(
-                        i128::from(left[li]),
-                        i128::from(right[ri]),
-                    )));
-                }
                 return Ok(Value::Tensor(TensorValue::new(
                     DType::Bool,
                     out_shape,
@@ -173,16 +172,15 @@ pub(crate) fn eval_comparison(
             if let (Some(left), Some(right)) =
                 (lhs.elements.as_f64_slice(), rhs.elements.as_f64_slice())
             {
-                let mut odo = crate::arithmetic::BroadcastOdometer::new(
+                let mut elements = Vec::with_capacity(out_count);
+                crate::arithmetic::broadcast_visit_row_major(
                     &out_shape.dims,
                     &lhs_strides,
                     &rhs_strides,
+                    |li, ri| {
+                        elements.push(Literal::Bool(float_cmp(left[li], right[ri])));
+                    },
                 );
-                let mut elements = Vec::with_capacity(out_count);
-                for _ in 0..out_count {
-                    let (li, ri) = odo.next();
-                    elements.push(Literal::Bool(float_cmp(left[li], right[ri])));
-                }
                 return Ok(Value::Tensor(TensorValue::new(
                     DType::Bool,
                     out_shape,
