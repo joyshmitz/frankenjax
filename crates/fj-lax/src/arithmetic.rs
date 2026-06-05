@@ -2013,6 +2013,62 @@ pub(crate) fn eval_unary_elementwise(
     }
 }
 
+/// Threaded variant of [`eval_unary_elementwise`] for the COMPUTE-bound
+/// transcendentals (lgamma, digamma, erf_inv, …) whose per-element cost
+/// dominates memory traffic, so threading over elements scales (unlike cheap
+/// memory-bound ops such as neg/abs, which stay on the serial path). Threads
+/// `op` across a large dense-F64 tensor with scoped threads — each element is
+/// independent, so the result is bit-for-bit identical to the serial map (see
+/// lgamma_parallel_bit_identical). Falls back to the serial path for scalars,
+/// non-F64, complex, Literal-backed, or small inputs.
+pub(crate) fn eval_unary_elementwise_parallel(
+    primitive: Primitive,
+    inputs: &[Value],
+    op: impl Fn(f64) -> f64 + Sync,
+) -> Result<Value, EvalError> {
+    if let [Value::Tensor(tensor)] = inputs
+        && tensor.dtype == DType::F64
+        && let Some(src) = tensor.elements.as_f64_slice()
+    {
+        const PARALLEL_MIN_ELEMS: usize = 1 << 16; // 65_536 — enough transcendental work to amortize threads
+        let n = src.len();
+        let threads = if n >= PARALLEL_MIN_ELEMS {
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1)
+                .min(n)
+        } else {
+            1
+        };
+        if threads > 1 {
+            let mut out = vec![0.0f64; n];
+            let chunk = n.div_ceil(threads);
+            let op_ref = &op;
+            std::thread::scope(|scope| {
+                let mut rest: &mut [f64] = out.as_mut_slice();
+                let mut start = 0usize;
+                while start < n {
+                    let len = chunk.min(n - start);
+                    let (blk, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let s = start;
+                    scope.spawn(move || {
+                        for (i, o) in blk.iter_mut().enumerate() {
+                            *o = op_ref(src[s + i]);
+                        }
+                    });
+                    start += len;
+                }
+            });
+            return Ok(Value::Tensor(TensorValue::new_f64_values(
+                tensor.shape.clone(),
+                out,
+            )?));
+        }
+    }
+    eval_unary_elementwise(primitive, inputs, op)
+}
+
 fn eval_unary_f64_tensor_fast_path(
     tensor: &TensorValue,
     op: &impl Fn(f64) -> f64,
@@ -3338,11 +3394,11 @@ pub(crate) fn erf_inv_approx(x: f64) -> f64 {
 }
 
 pub(crate) fn eval_lgamma(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
-    eval_unary_elementwise(primitive, inputs, lgamma_approx)
+    eval_unary_elementwise_parallel(primitive, inputs, lgamma_approx)
 }
 
 pub(crate) fn eval_digamma(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
-    eval_unary_elementwise(primitive, inputs, digamma_approx)
+    eval_unary_elementwise_parallel(primitive, inputs, digamma_approx)
 }
 
 pub(crate) fn eval_polygamma(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
@@ -3448,7 +3504,7 @@ fn polygamma_literal_to_f64(lit: Literal, primitive: Primitive) -> Result<f64, E
 }
 
 pub(crate) fn eval_erf_inv(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
-    eval_unary_elementwise(primitive, inputs, erf_inv_approx)
+    eval_unary_elementwise_parallel(primitive, inputs, erf_inv_approx)
 }
 
 fn igamma_series(a: f64, x: f64) -> f64 {
@@ -7533,6 +7589,24 @@ mod tests {
         assert_eq!(t.shape.dims, vec![2, 3]);
         let vals = extract_f64_vec(&Value::Tensor(t));
         assert_eq!(vals, vec![3.0, 4.0, 5.0, 6.0, 8.0, 10.0]);
+    }
+
+    #[test]
+    fn lgamma_parallel_bit_identical() {
+        // A large dense-F64 tensor (>65_536) engages the threaded transcendental
+        // path; it must equal the serial elementwise map bit-for-bit.
+        let n = 70_000usize;
+        let data: Vec<f64> = (0..n).map(|i| 0.5 + (i % 997) as f64 * 0.01).collect();
+        let input = tensor_f64(vec![n as u32], &data);
+        let parallel = extract_f64_vec(&eval_lgamma(Primitive::Lgamma, std::slice::from_ref(&input)).unwrap());
+        let serial =
+            extract_f64_vec(&eval_unary_elementwise(Primitive::Lgamma, &[input], lgamma_approx).unwrap());
+        assert_eq!(parallel.len(), serial.len());
+        for idx in 0..n {
+            assert_eq!(parallel[idx].to_bits(), serial[idx].to_bits(), "mismatch at {idx}");
+        }
+        // also spot-check vs a direct reference value
+        assert_eq!(parallel[0].to_bits(), lgamma_approx(data[0]).to_bits());
     }
 
     #[test]

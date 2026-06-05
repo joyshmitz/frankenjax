@@ -1,0 +1,18 @@
+{
+  "pass": 120,
+  "crate": "fj-lax",
+  "target": "compute-bound transcendental elementwise (Lgamma/Digamma/ErfInv over large dense-F64 tensors), bench eval/lgamma_1m_f64",
+  "function": "arithmetic::eval_unary_elementwise_parallel; routed eval_lgamma, eval_digamma, eval_erf_inv to it",
+  "lever": "Thread the elementwise map for COMPUTE-bound transcendentals (lgamma/digamma/erf_inv — Lanczos/asymptotic, ~20+ns/element) across a large dense-F64 tensor with std::thread::scope (100% safe, no dep). Each element independent. Cheap memory-bound unary ops (neg/abs/sign) are NOT routed here — they stay on the serial path (threading would regress bandwidth-bound work). Gated >=65536 elements.",
+  "isomorphism": "BIT-EXACT. out[i] = op(src[i]); each element independent, identical to the serial map. Proven by lgamma_parallel_bit_identical (70k elements, parallel vs serial eval_unary_elementwise, to_bits) + a direct lgamma_approx reference spot-check; existing lgamma value/property tests pass.",
+  "baseline_ms": 23.331,
+  "candidate_ms": 6.4515,
+  "calibration_baseline_us": 12.779,
+  "calibration_candidate_us": 12.922,
+  "speedup_worker_corrected": 3.66,
+  "note": "lgamma over 1M f64: serial 23.331ms -> threaded 6.4515ms = ~3.66x (raw 3.62x, calib ~equal). Same win applies to digamma and erf_inv (same routing). Sub-linear vs core count = partial memory-binding / thread overhead, still well past 2x.",
+  "score": "impact 4 (lgamma/digamma/erf_inv: Gamma/Beta/Dirichlet log-densities + gradients in probabilistic ML; gelu-adjacent) x confidence 5 (bit-exact, cheap ops excluded) / effort 2 = 10",
+  "tests": "fj-lax lgamma 7/7 (incl lgamma_parallel_bit_identical); clippy -D warnings clean.",
+  "bench_note": "Measured via temporary bench in foreign-dirty lax_baseline.rs (restored, not committed). Serial baseline via in-place PARALLEL_MIN_ELEMS=usize::MAX toggle. Only arithmetic.rs committed.",
+  "date": "2026-06-04"
+}
