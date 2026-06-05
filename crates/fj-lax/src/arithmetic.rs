@@ -1184,10 +1184,98 @@ fn eval_binary_elementwise_complex(
                     })?;
 
                 let out_count = out_shape.element_count().unwrap_or(0) as usize;
-                let out_strides = compute_strides(&out_shape.dims);
                 let lhs_strides = broadcast_strides(&lhs.shape, &out_shape);
                 let rhs_strides = broadcast_strides(&rhs.shape, &out_shape);
 
+                // Dense Complex broadcast fast path: read the contiguous (re,im)
+                // backings and apply the op directly, replacing the per-element
+                // flat→multi decode + Literal unpack/repack. Uses the same
+                // outer-odometer + contiguous-inner traversal as the f64/i64
+                // broadcast fast paths, so the (lhs_idx, rhs_idx) visited per
+                // output element is the same row-major sequence. Bit-for-bit
+                // identical: complex_binary_literal_op already delegates to
+                // apply_complex_binary, and new_complex_values applies the same
+                // out_dtype narrowing (see eval_same_shape / the threaded path).
+                if let (Some(a), Some(b)) = (
+                    lhs.elements.as_complex_slice(),
+                    rhs.elements.as_complex_slice(),
+                ) {
+                    let rank = out_shape.dims.len();
+                    let mut out: Vec<(f64, f64)> = Vec::with_capacity(out_count);
+                    if rank >= 1 && out_count > 0 {
+                        let inner = out_shape.dims[rank - 1] as usize;
+                        let inner_ls = lhs_strides[rank - 1];
+                        let inner_rs = rhs_strides[rank - 1];
+                        let outer = out_count / inner;
+                        let mut coord = vec![0usize; rank.saturating_sub(1)];
+                        let mut lb = 0usize;
+                        let mut rb = 0usize;
+                        for _ in 0..outer {
+                            match (inner_ls, inner_rs) {
+                                (1, 1) => {
+                                    for k in 0..inner {
+                                        out.push(apply_complex_binary(
+                                            primitive,
+                                            a[lb + k],
+                                            b[rb + k],
+                                        )?);
+                                    }
+                                }
+                                (1, 0) => {
+                                    let rv = b[rb];
+                                    for k in 0..inner {
+                                        out.push(apply_complex_binary(primitive, a[lb + k], rv)?);
+                                    }
+                                }
+                                (0, 1) => {
+                                    let lv = a[lb];
+                                    for k in 0..inner {
+                                        out.push(apply_complex_binary(primitive, lv, b[rb + k])?);
+                                    }
+                                }
+                                _ => {
+                                    for k in 0..inner {
+                                        out.push(apply_complex_binary(
+                                            primitive,
+                                            a[lb + k * inner_ls],
+                                            b[rb + k * inner_rs],
+                                        )?);
+                                    }
+                                }
+                            }
+                            if rank >= 2 {
+                                let mut ax = rank - 2;
+                                loop {
+                                    coord[ax] += 1;
+                                    lb += lhs_strides[ax];
+                                    rb += rhs_strides[ax];
+                                    if coord[ax] < out_shape.dims[ax] as usize {
+                                        break;
+                                    }
+                                    coord[ax] = 0;
+                                    lb -= lhs_strides[ax] * out_shape.dims[ax] as usize;
+                                    rb -= rhs_strides[ax] * out_shape.dims[ax] as usize;
+                                    if ax == 0 {
+                                        break;
+                                    }
+                                    ax -= 1;
+                                }
+                            }
+                        }
+                    } else {
+                        let mut odometer =
+                            BroadcastOdometer::new(&out_shape.dims, &lhs_strides, &rhs_strides);
+                        for _ in 0..out_count {
+                            let (li, ri) = odometer.next();
+                            out.push(apply_complex_binary(primitive, a[li], b[ri])?);
+                        }
+                    }
+                    return Ok(Value::Tensor(TensorValue::new_complex_values(
+                        out_dtype, out_shape, out,
+                    )?));
+                }
+
+                let out_strides = compute_strides(&out_shape.dims);
                 let mut multi = Vec::with_capacity(out_strides.len());
                 let mut elements = Vec::with_capacity(out_count);
                 for flat_idx in 0..out_count {
@@ -7170,6 +7258,78 @@ mod tests {
                 .map(|i| Literal::from_f64(op(lhs_data[i], col[i / 3])))
                 .collect();
             assert_eq!(tensor.elements, expected, "{primitive:?} col-broadcast");
+        }
+    }
+
+    #[test]
+    fn complex_broadcast_dense_bit_identical_to_literal_path() {
+        // The dense Complex128 broadcast fast path must equal the literal-backed
+        // fallback (per-element complex_binary_literal_op) bit-for-bit, across
+        // broadcast shapes covering (1,1)/(1,0)/(0,1) + rank-3 carries, with
+        // NaN / -0.0 / ±inf operands and add/sub/mul/div.
+        let shapes: [(Vec<u32>, Vec<u32>); 4] = [
+            (vec![4, 5], vec![5]),
+            (vec![4, 5], vec![4, 1]),
+            (vec![3, 1], vec![1, 6]),
+            (vec![2, 3, 4], vec![4]),
+        ];
+        let edge = [
+            (1.5, -2.0),
+            (-0.0, 0.0),
+            (f64::INFINITY, -1.0),
+            (f64::NAN, 3.0),
+            (0.0, f64::NEG_INFINITY),
+            (-3.25, -0.0),
+        ];
+        let prod = |d: &[u32]| d.iter().map(|&x| x as usize).product::<usize>();
+        let p = std::collections::BTreeMap::new();
+        let bits = |v: &Value| -> Vec<(u64, u64)> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::Complex128Bits(re, im) => (*re, *im),
+                    other => panic!("expected Complex128, got {other:?}"),
+                })
+                .collect()
+        };
+        for (ls, rs) in shapes {
+            let lf: Vec<(f64, f64)> = (0..prod(&ls)).map(|i| edge[i % edge.len()]).collect();
+            let rf: Vec<(f64, f64)> = (0..prod(&rs)).map(|i| edge[(i + 2) % edge.len()]).collect();
+            let dense = |d: &[(f64, f64)], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new_complex_values(
+                        DType::Complex128,
+                        Shape { dims: s.to_vec() },
+                        d.to_vec(),
+                    )
+                    .unwrap(),
+                )
+            };
+            let lit = |d: &[(f64, f64)], s: &[u32]| {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::Complex128,
+                        Shape { dims: s.to_vec() },
+                        d.iter()
+                            .map(|&(re, im)| Literal::Complex128Bits(re.to_bits(), im.to_bits()))
+                            .collect(),
+                    )
+                    .unwrap(),
+                )
+            };
+            for prim in [Primitive::Add, Primitive::Sub, Primitive::Mul, Primitive::Div] {
+                let d =
+                    crate::eval_primitive(prim, &[dense(&lf, &ls), dense(&rf, &rs)], &p).unwrap();
+                let l = crate::eval_primitive(prim, &[lit(&lf, &ls), lit(&rf, &rs)], &p).unwrap();
+                assert_eq!(
+                    d.as_tensor().unwrap().shape.dims,
+                    l.as_tensor().unwrap().shape.dims,
+                    "{prim:?} {ls:?}/{rs:?} shape"
+                );
+                assert_eq!(bits(&d), bits(&l), "{prim:?} {ls:?}/{rs:?} bits");
+            }
         }
     }
 

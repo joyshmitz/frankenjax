@@ -444,6 +444,66 @@ fn bench_add_broadcast_col_1024x1024_i64(c: &mut Criterion) {
     });
 }
 
+fn bench_mul_broadcast_row_512x512_c128(c: &mut Criterion) {
+    // Row broadcast [512,512] * [512], Complex128 (per-channel modulation).
+    let n = 512usize;
+    let mat: Vec<(f64, f64)> = (0..n * n)
+        .map(|i| (i as f64 * 1e-4, i as f64 * 2e-4))
+        .collect();
+    let row: Vec<(f64, f64)> = (0..n).map(|i| (i as f64 * 3e-4, -(i as f64) * 1e-4)).collect();
+    let lhs = Value::Tensor(
+        TensorValue::new_complex_values(
+            DType::Complex128,
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            mat,
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_complex_values(DType::Complex128, Shape { dims: vec![n as u32] }, row)
+            .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/mul_broadcast_row_512x512_c128", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Mul, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_mul_broadcast_col_512x512_c128(c: &mut Criterion) {
+    // Column broadcast [512,512] * [512,1], Complex128.
+    let n = 512usize;
+    let mat: Vec<(f64, f64)> = (0..n * n)
+        .map(|i| (i as f64 * 1e-4, i as f64 * 2e-4))
+        .collect();
+    let col: Vec<(f64, f64)> = (0..n).map(|i| (i as f64 * 3e-4, -(i as f64) * 1e-4)).collect();
+    let lhs = Value::Tensor(
+        TensorValue::new_complex_values(
+            DType::Complex128,
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            mat,
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_complex_values(
+            DType::Complex128,
+            Shape {
+                dims: vec![n as u32, 1],
+            },
+            col,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/mul_broadcast_col_512x512_c128", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Mul, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 fn bench_add_64k_f64_vec(c: &mut Criterion) {
     let data: Vec<f64> = (0..LARGE_ELEMENTWISE_LEN)
         .map(|i| i as f64 * 0.001)
@@ -3187,6 +3247,8 @@ criterion_group!(
     bench_add_broadcast_col_1024x1024_f64,
     bench_add_broadcast_row_1024x1024_i64,
     bench_add_broadcast_col_1024x1024_i64,
+    bench_mul_broadcast_row_512x512_c128,
+    bench_mul_broadcast_col_512x512_c128,
     bench_add_64k_f64_dense_reference,
     bench_add_64k_i64_vec,
     bench_add_64k_i64_literal_reference,
