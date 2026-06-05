@@ -1,0 +1,119 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_lu_real_fast_path_pass122_2026-06-05",
+  "date": "2026-06-05",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-p1vbf",
+  "pass": 122,
+  "crate": "fj-lax",
+  "skill_pass": "repeatedly-apply-skill pass 122 -> extreme-software-optimization",
+  "alien_source": {
+    "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md#9.6",
+    "primitive": "communication-avoiding / data-movement-aware LU family",
+    "applied_slice": "Bit-exact first slice before blocked/CA-LU: route real LU through f64 scratch instead of carrying guaranteed-zero imaginary lanes."
+  },
+  "target": {
+    "profile_backing": "frankenjax-p1vbf tracks fj-lax real linalg kernels as active no-gaps perf work. The Criterion target linalg/lu_128x128_f64 isolates eval_lu on a real F64 128x128 matrix and showed complex zero-imaginary scratch as avoidable work.",
+    "baseline_command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/lu_128x128_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "bench_rows": [
+      "linalg/lu_128x128_f64"
+    ]
+  },
+  "one_lever": {
+    "name": "real-valued LU partial-pivot fast path",
+    "files": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "description": "Non-complex rank-2 LU inputs now use a real f64 partial-pivot factorization scratch and convert through matrix_to_value at the API boundary. Complex64 and Complex128 inputs continue through the factored complex implementation."
+  },
+  "benchmark": {
+    "baseline": {
+      "worker": "ts2",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/lu_128x128_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+      "linalg_lu_128x128_f64_midpoint_us": 1274.2,
+      "linalg_lu_128x128_f64_ci_us": [
+        1267.5,
+        1282.3
+      ]
+    },
+    "after": {
+      "worker": "ts2",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-candidate cargo bench -p fj-lax --bench lax_baseline -- 'linalg/lu_128x128_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+      "linalg_lu_128x128_f64_midpoint_us": 551.48,
+      "linalg_lu_128x128_f64_ci_us": [
+        547.11,
+        557.43
+      ]
+    },
+    "delta": {
+      "linalg_lu_128x128_f64_speedup_x": 2.31,
+      "conservative_speedup_x": 2.27,
+      "midpoint_reduction_percent": 56.7,
+      "confidence": "same worker ts2 and non-overlapping Criterion intervals"
+    },
+    "score": {
+      "impact": 5.0,
+      "confidence": 5.0,
+      "effort": 2.0,
+      "impact_x_confidence_over_effort": 12.5,
+      "decision": "keep"
+    }
+  },
+  "isomorphism_proof": {
+    "ordering": "The real path preserves the existing LU traversal: columns ascend, pivot scan rows ascend, row swaps update row elements in ascending j, and elimination visits rows then trailing columns ascending.",
+    "tie_breaking": "The pivot comparison remains strict >, so equal-magnitude pivots keep the first row exactly as the complex path does.",
+    "floating_point": "For zero-imaginary real inputs, complex absolute value, division, multiply, and subtract collapse to the same real scalar operations used here. The proof cases compare exact Literal bits against the factored old complex zero-imaginary path, including signed-zero and infinity inputs. No unsafe, SIMD, BLAS, LAPACK, MKL, XLA, FMA forcing, reassociation, or mixed precision is used.",
+    "rng": "No random state, seed, sampling order, or nondeterministic iteration path changed.",
+    "shape_and_dtype": "LU matrix, pivot, and permutation shapes and dtypes match the existing API output contract.",
+    "fallback": "Complex64 and Complex128 continue through the existing complex implementation."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_lu_real_fast_path_pass122_2026-06-05.golden",
+    "sha256": "17714bf846ab4adc66badc152e98371365951068b6ac049591906a817115f439",
+    "check_command": "sha256sum -c artifacts/performance/evidence/fj_lax_lu_real_fast_path_pass122_2026-06-05.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-final-proof cargo test -p fj-lax lu_real_fast_path_bit_identical_to_complex_zero_imag_path -- --nocapture",
+      "result": "pass on ts2; 1 passed"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/lu_128x128_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+      "result": "baseline pass on ts2; midpoint 1.2742 ms"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-candidate cargo bench -p fj-lax --bench lax_baseline -- 'linalg/lu_128x128_f64' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+      "result": "candidate pass on ts2; midpoint 551.48 us"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-check cargo check -p fj-lax --all-targets",
+      "result": "pass on ts2"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-libtest cargo test -p fj-lax --lib",
+      "result": "pass on ts2; 1090 passed"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_FORCE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass122-lu-clippy cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "blocked by pre-existing baseline lint in crates/fj-lax/src/einsum.rs:767 (clippy::type_complexity); the same command failed on the clean baseline worktree before this LU change"
+    },
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs",
+      "result": "pass"
+    },
+    {
+      "command": "cargo fmt -p fj-lax --check",
+      "result": "blocked by pre-existing formatting drift outside this lever in fj-lax files; touched linalg.rs passed file-scoped rustfmt check"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_lu_real_fast_path_pass122_2026-06-05.golden.sha256",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/linalg.rs artifacts/performance/evidence/fj_lax_lu_real_fast_path_pass122_2026-06-05.golden artifacts/performance/evidence/fj_lax_lu_real_fast_path_pass122_2026-06-05.golden.sha256 artifacts/performance/evidence/fj_lax_lu_real_fast_path_pass122_2026-06-05.json",
+      "result": "exit 1 from existing file-wide test panic/unwrap/direct-index inventory in linalg.rs; no unsafe blocks; embedded formatting, clippy, cargo check, and test-build subchecks were clean"
+    }
+  ],
+  "status": "kept",
+  "next_no_gaps_target": "Continue frankenjax-p1vbf with blocked/communication-avoiding LU or tournament-pivoting panels once a profile-backed LU row remains after this real-scratch removal."
+}

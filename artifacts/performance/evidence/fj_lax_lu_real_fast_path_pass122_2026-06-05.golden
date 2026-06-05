@@ -1,0 +1,14 @@
+artifact=fj_lax_lu_real_fast_path_pass122_2026-06-05
+primitive=Lu
+fast_path=real f64 partial-pivot LU path for non-complex rank-2 tensors
+fallback=Complex64 and Complex128 continue through the existing complex LU implementation
+representative_fast_input=m=7,n=5; a[i,j]=if i==j { 7.0 + i*0.375 + 1.5 } else { (((i*17 + j*29 + 3) % 23) + 0.25) * 0.125 - 1.375 }; rows 0 and 2 swapped for pivot exercise
+representative_adversarial_input=m=4,n=3; includes -0.0, 0.0, INFINITY, and NEG_INFINITY
+real_lu_bits_equal_complex_zero_imag_path=true
+pivots_equal_complex_zero_imag_path=true
+permutation_equal_complex_zero_imag_path=true
+output_shapes_equal_complex_zero_imag_path=true
+ordering=columns ascend; pivot scan rows ascend with strict >; row swaps j ascend; elimination rows ascend then trailing columns ascend
+tie_breaking=strict > pivot comparison keeps the first maximum row exactly as the existing complex path does
+floating_point=real fast path performs the same scalar real arithmetic implied by the complex zero-imaginary path; no reassociation, SIMD, unsafe, BLAS, LAPACK, MKL, XLA, or mixed precision
+rng=none

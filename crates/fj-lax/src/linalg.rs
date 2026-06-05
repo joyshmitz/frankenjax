@@ -666,7 +666,21 @@ pub(crate) fn eval_lu(
         });
     }
 
+    if !matches!(inputs[0].dtype(), DType::Complex64 | DType::Complex128) {
+        let (m, n, a, dtype) = extract_matrix(primitive, &inputs[0])?;
+        return eval_lu_real_matrix(m, n, a, dtype);
+    }
+
     let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
+    eval_lu_complex_matrix(m, n, a, dtype)
+}
+
+fn eval_lu_complex_matrix(
+    m: usize,
+    n: usize,
+    a: Vec<(f64, f64)>,
+    dtype: DType,
+) -> Result<Vec<Value>, EvalError> {
     let k = m.min(n);
 
     let mut lu = a;
@@ -711,6 +725,73 @@ pub(crate) fn eval_lu(
     let lu_val = complex_matrix_to_value(m, n, &lu, dtype)?;
 
     // Upstream JAX returns pivots and permutation as int32 (see lax.linalg.lu)
+    let pivots_lits: Vec<Literal> = pivots.iter().map(|&p| Literal::I64(p)).collect();
+    let pivots_shape = Shape {
+        dims: vec![k as u32],
+    };
+    let pivots_val = Value::Tensor(
+        TensorValue::new(DType::I32, pivots_shape, pivots_lits)
+            .map_err(EvalError::InvalidTensor)?,
+    );
+
+    let perm_lits: Vec<Literal> = perm.iter().map(|&p| Literal::I64(p)).collect();
+    let perm_shape = Shape {
+        dims: vec![m as u32],
+    };
+    let perm_val = Value::Tensor(
+        TensorValue::new(DType::I32, perm_shape, perm_lits).map_err(EvalError::InvalidTensor)?,
+    );
+
+    Ok(vec![lu_val, pivots_val, perm_val])
+}
+
+fn eval_lu_real_matrix(
+    m: usize,
+    n: usize,
+    mut lu: Vec<f64>,
+    dtype: DType,
+) -> Result<Vec<Value>, EvalError> {
+    let k = m.min(n);
+    let mut pivots: Vec<i64> = (0..k as i64).collect();
+    let mut perm: Vec<i64> = (0..m as i64).collect();
+
+    for col in 0..k {
+        let mut max_val = (lu[col * n + col] * lu[col * n + col]).sqrt();
+        let mut max_row = col;
+        for row in (col + 1)..m {
+            let candidate = lu[row * n + col];
+            let val = (candidate * candidate).sqrt();
+            if val > max_val {
+                max_val = val;
+                max_row = row;
+            }
+        }
+
+        pivots[col] = max_row as i64;
+
+        if max_row != col {
+            perm.swap(col, max_row);
+            for j in 0..n {
+                lu.swap(col * n + j, max_row * n + j);
+            }
+        }
+
+        let diag = lu[col * n + col];
+        if (diag * diag).sqrt() < f64::EPSILON * 1e-10 {
+            continue;
+        }
+
+        for row in (col + 1)..m {
+            let factor = (lu[row * n + col] * diag) / (diag * diag);
+            lu[row * n + col] = factor;
+            for j in (col + 1)..n {
+                lu[row * n + j] -= factor * lu[col * n + j];
+            }
+        }
+    }
+
+    let lu_val = matrix_to_value(m, n, &lu, dtype)?;
+
     let pivots_lits: Vec<Literal> = pivots.iter().map(|&p| Literal::I64(p)).collect();
     let pivots_shape = Shape {
         dims: vec![k as u32],
@@ -1227,10 +1308,7 @@ pub fn analytic_eigh_3x3(a: &[f64]) -> Option<([f64; 3], [f64; 9])> {
         d
     } else {
         let q = (a00 + a11 + a22) / 3.0;
-        let p2 = (a00 - q) * (a00 - q)
-            + (a11 - q) * (a11 - q)
-            + (a22 - q) * (a22 - q)
-            + 2.0 * p1;
+        let p2 = (a00 - q) * (a00 - q) + (a11 - q) * (a11 - q) + (a22 - q) * (a22 - q) + 2.0 * p1;
         let p = (p2 / 6.0).sqrt();
         // p = sqrt(non-negative finite) so p is finite & >= 0 here; p == 0 only
         // for an (already-handled) scalar matrix. Guard defensively.
@@ -1295,7 +1373,11 @@ pub fn analytic_eigh_3x3(a: &[f64]) -> Option<([f64; 3], [f64; 9])> {
     // two ascending slots take (mu_minus, mu_plus), themselves ascending.
     let mut cols = [[0.0_f64; 3]; 3];
     cols[iso] = v_iso;
-    let (slot_lo, slot_hi) = if iso == 0 { (1usize, 2usize) } else { (0usize, 1usize) };
+    let (slot_lo, slot_hi) = if iso == 0 {
+        (1usize, 2usize)
+    } else {
+        (0usize, 1usize)
+    };
     cols[slot_lo] = vec_minus;
     cols[slot_hi] = vec_plus;
 
@@ -1307,11 +1389,7 @@ pub fn analytic_eigh_3x3(a: &[f64]) -> Option<([f64; 3], [f64; 9])> {
     }
 
     // Validate: orthonormality (VᵀV = I) and reconstruction (A V = V diag(w)).
-    let scale = 1.0
-        + a00.abs()
-            .max(a11.abs())
-            .max(a22.abs())
-            .max(p1.sqrt());
+    let scale = 1.0 + a00.abs().max(a11.abs()).max(a22.abs()).max(p1.sqrt());
     let tol = 1e-9 * scale;
     for i in 0..3 {
         for j in 0..3 {
@@ -3258,6 +3336,74 @@ mod tests {
     }
 
     #[test]
+    fn lu_real_fast_path_bit_identical_to_complex_zero_imag_path() {
+        fn assert_real_lu_matches_complex_zero_imag(m: usize, n: usize, a: Vec<f64>) {
+            let real_result = eval_lu_real_matrix(m, n, a.clone(), DType::F64).unwrap();
+            let complex_zero_imag = a.iter().map(|&value| (value, 0.0)).collect();
+            let reference_result =
+                eval_lu_complex_matrix(m, n, complex_zero_imag, DType::F64).unwrap();
+
+            assert_eq!(real_result.len(), reference_result.len());
+            for (output_idx, (real_output, reference_output)) in
+                real_result.iter().zip(reference_result.iter()).enumerate()
+            {
+                if let (Value::Tensor(real_tensor), Value::Tensor(reference_tensor)) =
+                    (real_output, reference_output)
+                {
+                    assert_eq!(real_tensor.dtype, reference_tensor.dtype);
+                    assert_eq!(real_tensor.shape, reference_tensor.shape);
+                    assert_eq!(real_tensor.elements.len(), reference_tensor.elements.len());
+                    for idx in 0..real_tensor.elements.len() {
+                        assert_eq!(
+                            real_tensor.elements[idx], reference_tensor.elements[idx],
+                            "output {output_idx} element {idx}"
+                        );
+                    }
+                } else {
+                    assert!(
+                        matches!(
+                            (real_output, reference_output),
+                            (Value::Tensor(_), Value::Tensor(_))
+                        ),
+                        "LU output {output_idx} should be tensors"
+                    );
+                }
+            }
+        }
+
+        let (m, n) = (7usize, 5usize);
+        let mut pivoting = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                pivoting[i * n + j] = if i == j {
+                    (m as f64) + (i as f64) * 0.375 + 1.5
+                } else {
+                    (((i * 17 + j * 29 + 3) % 23) as f64 + 0.25) * 0.125 - 1.375
+                };
+            }
+        }
+        pivoting.swap(0, 2 * n);
+        pivoting.swap(1, 2 * n + 1);
+        assert_real_lu_matches_complex_zero_imag(m, n, pivoting);
+
+        let adversarial = vec![
+            3.0,
+            -0.0,
+            2.0,
+            f64::INFINITY,
+            0.0,
+            -5.0,
+            -0.0,
+            -1.25,
+            4.0,
+            f64::NEG_INFINITY,
+            0.0,
+            -0.5,
+        ];
+        assert_real_lu_matches_complex_zero_imag(4, 3, adversarial);
+    }
+
+    #[test]
     fn lu_rejects_scalar() {
         let scalar = Value::Scalar(Literal::from_f64(1.0));
         assert!(eval_lu(&[scalar], &BTreeMap::new()).is_err());
@@ -3425,7 +3571,12 @@ mod tests {
         let (mut jw, _) = jacobi_eigendecomposition(&mut jac, 3);
         jw.sort_by(f64::total_cmp);
         for k in 0..3 {
-            assert!((w[k] - jw[k]).abs() < 1e-10, "eig[{k}] {} vs jacobi {}", w[k], jw[k]);
+            assert!(
+                (w[k] - jw[k]).abs() < 1e-10,
+                "eig[{k}] {} vs jacobi {}",
+                w[k],
+                jw[k]
+            );
         }
     }
 
@@ -3435,14 +3586,20 @@ mod tests {
         // and reconstruct (sign/rotation within the eigenspace is free).
         let a_rows = [2.0, 0.0, 0.0, 0.0, 3.5, 1.5, 0.0, 1.5, 3.5]; // eigs 2,2,5
         let (w, v) = analytic_eigh_3x3(&a_rows).expect("analytic path should accept");
-        assert!((w[0] - 2.0).abs() < 1e-10 && (w[1] - 2.0).abs() < 1e-10 && (w[2] - 5.0).abs() < 1e-10, "{w:?}");
+        assert!(
+            (w[0] - 2.0).abs() < 1e-10 && (w[1] - 2.0).abs() < 1e-10 && (w[2] - 5.0).abs() < 1e-10,
+            "{w:?}"
+        );
         for i in 0..3 {
             for j in 0..3 {
                 let mut val = 0.0;
                 for k in 0..3 {
                     val += v[i * 3 + k] * w[k] * v[j * 3 + k];
                 }
-                assert!((val - a_rows[i * 3 + j]).abs() < 1e-10, "recon[{i},{j}]={val}");
+                assert!(
+                    (val - a_rows[i * 3 + j]).abs() < 1e-10,
+                    "recon[{i},{j}]={val}"
+                );
             }
         }
     }
