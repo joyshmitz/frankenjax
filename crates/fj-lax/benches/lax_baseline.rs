@@ -392,6 +392,58 @@ fn bench_add_broadcast_col_1024x1024_f64(c: &mut Criterion) {
     });
 }
 
+fn bench_add_broadcast_row_1024x1024_i64(c: &mut Criterion) {
+    // Row broadcast [1024,1024] + [1024], i64 (integer bias-add / index math).
+    let n = 1024usize;
+    let mat: Vec<i64> = (0..n * n).map(|i| i as i64).collect();
+    let row: Vec<i64> = (0..n).map(|i| i as i64 * 3).collect();
+    let lhs = Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            mat,
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_i64_values(Shape { dims: vec![n as u32] }, row).unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/add_broadcast_row_1024x1024_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Add, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_add_broadcast_col_1024x1024_i64(c: &mut Criterion) {
+    // Column broadcast [1024,1024] + [1024,1], i64.
+    let n = 1024usize;
+    let mat: Vec<i64> = (0..n * n).map(|i| i as i64).collect();
+    let col: Vec<i64> = (0..n).map(|i| i as i64 * 3).collect();
+    let lhs = Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            mat,
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![n as u32, 1],
+            },
+            col,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/add_broadcast_col_1024x1024_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Add, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 fn bench_add_64k_f64_vec(c: &mut Criterion) {
     let data: Vec<f64> = (0..LARGE_ELEMENTWISE_LEN)
         .map(|i| i as f64 * 0.001)
@@ -3133,6 +3185,8 @@ criterion_group!(
     bench_add_64k_f64_vec,
     bench_add_broadcast_row_1024x1024_f64,
     bench_add_broadcast_col_1024x1024_f64,
+    bench_add_broadcast_row_1024x1024_i64,
+    bench_add_broadcast_col_1024x1024_i64,
     bench_add_64k_f64_dense_reference,
     bench_add_64k_i64_vec,
     bench_add_64k_i64_literal_reference,

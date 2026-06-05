@@ -1493,11 +1493,78 @@ fn broadcast_binary_i64(
     else {
         return Ok(None);
     };
-    let mut odometer = BroadcastOdometer::new(&out_shape.dims, lhs_strides, rhs_strides);
+    let rank = out_shape.dims.len();
     let mut values = Vec::with_capacity(out_count);
-    for _ in 0..out_count {
-        let (lhs_idx, rhs_idx) = odometer.next();
-        values.push(int_op(lhs_values[lhs_idx], rhs_values[rhs_idx]));
+    if rank >= 1 && out_count > 0 {
+        // Contiguous-inner fast path (see broadcast_binary_f64): outer odometer
+        // over leading dims + a tight inner loop over the contiguous last axis,
+        // branched on the inner strides. The (lhs_idx, rhs_idx) per element is
+        // identical to the generic odometer, so `int_op`, operands and order are
+        // unchanged — bit-for-bit identical — while the inner run vectorizes.
+        let inner = out_shape.dims[rank - 1] as usize;
+        let inner_ls = lhs_strides[rank - 1];
+        let inner_rs = rhs_strides[rank - 1];
+        let outer = out_count / inner;
+        let mut coord = vec![0usize; rank.saturating_sub(1)];
+        let mut lb = 0usize;
+        let mut rb = 0usize;
+        for _ in 0..outer {
+            match (inner_ls, inner_rs) {
+                (1, 1) => {
+                    let l = &lhs_values[lb..lb + inner];
+                    let r = &rhs_values[rb..rb + inner];
+                    for k in 0..inner {
+                        values.push(int_op(l[k], r[k]));
+                    }
+                }
+                (1, 0) => {
+                    let l = &lhs_values[lb..lb + inner];
+                    let rv = rhs_values[rb];
+                    for &lv in l {
+                        values.push(int_op(lv, rv));
+                    }
+                }
+                (0, 1) => {
+                    let lv = lhs_values[lb];
+                    let r = &rhs_values[rb..rb + inner];
+                    for &rv in r {
+                        values.push(int_op(lv, rv));
+                    }
+                }
+                _ => {
+                    for k in 0..inner {
+                        values.push(int_op(
+                            lhs_values[lb + k * inner_ls],
+                            rhs_values[rb + k * inner_rs],
+                        ));
+                    }
+                }
+            }
+            if rank >= 2 {
+                let mut ax = rank - 2;
+                loop {
+                    coord[ax] += 1;
+                    lb += lhs_strides[ax];
+                    rb += rhs_strides[ax];
+                    if coord[ax] < out_shape.dims[ax] as usize {
+                        break;
+                    }
+                    coord[ax] = 0;
+                    lb -= lhs_strides[ax] * out_shape.dims[ax] as usize;
+                    rb -= rhs_strides[ax] * out_shape.dims[ax] as usize;
+                    if ax == 0 {
+                        break;
+                    }
+                    ax -= 1;
+                }
+            }
+        }
+    } else {
+        let mut odometer = BroadcastOdometer::new(&out_shape.dims, lhs_strides, rhs_strides);
+        for _ in 0..out_count {
+            let (lhs_idx, rhs_idx) = odometer.next();
+            values.push(int_op(lhs_values[lhs_idx], rhs_values[rhs_idx]));
+        }
     }
     Ok(Some(Value::Tensor(TensorValue::new_i64_values(
         out_shape.clone(),
