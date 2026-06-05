@@ -403,7 +403,10 @@ pub fn eval_primitive(
             params,
             0_i64,
             0.0,
-            |a, b| a + b,
+            // Explicit two's-complement wrapping on integer overflow, matching
+            // XLA's `Add` (and the elementwise `Add` / `integer_pow`). Plain `+`
+            // would panic in debug builds and only happened to wrap in release.
+            i64::wrapping_add,
             |a, b| a + b,
         ),
         Primitive::ReduceMax => eval_reduce_axes(
@@ -430,7 +433,7 @@ pub fn eval_primitive(
             params,
             1_i64,
             1.0,
-            |a, b| a * b,
+            i64::wrapping_mul,
             |a, b| a * b,
         ),
         Primitive::ReduceAnd => eval_reduce_bitwise_axes(
@@ -609,7 +612,7 @@ pub fn eval_primitive(
             params,
             0_i64,
             0.0,
-            |a, b| a + b,
+            i64::wrapping_add,
             |a, b| a + b,
         ),
         Primitive::Cumprod => eval_cumulative(
@@ -618,7 +621,7 @@ pub fn eval_primitive(
             params,
             1_i64,
             1.0,
-            |a, b| a * b,
+            i64::wrapping_mul,
             |a, b| a * b,
         ),
         Primitive::Cummax => eval_cumulative(
@@ -7168,6 +7171,42 @@ mod tests {
         let mut p = axis_params(axis);
         p.insert("reverse".to_owned(), "true".to_owned());
         p
+    }
+
+    #[test]
+    fn integer_reduce_and_cumulative_wrap_on_overflow() {
+        // XLA integer Add/Mul wrap two's-complement; the reduce/scan reducers
+        // must too (and must not panic in debug builds). i64::MAX + 1 == i64::MIN.
+        let sum = eval_primitive(
+            Primitive::ReduceSum,
+            &[Value::vector_i64(&[i64::MAX, 1]).unwrap()],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(sum.as_i64_scalar().unwrap(), i64::MIN);
+
+        let prod = eval_primitive(
+            Primitive::ReduceProd,
+            &[Value::vector_i64(&[i64::MAX, 4]).unwrap()],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(prod.as_i64_scalar().unwrap(), i64::MAX.wrapping_mul(4));
+
+        let cumsum = eval_primitive(
+            Primitive::Cumsum,
+            &[Value::vector_i64(&[i64::MAX, 1, 1]).unwrap()],
+            &no_params(),
+        )
+        .unwrap();
+        let vals: Vec<i64> = cumsum
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        assert_eq!(vals, vec![i64::MAX, i64::MIN, i64::MIN + 1]);
     }
 
     #[test]
