@@ -1442,6 +1442,66 @@ fn apply_bitwise_binary_i64(primitive: Primitive, lhs: i64, rhs: i64) -> i64 {
     }
 }
 
+/// Bitwise (= logical) `and`/`or`/`xor` on `Bool`. JAX lowers `logical_and`,
+/// bool `&`, and even bool `*` to `lax.bitwise_and` on the bool (PRED) dtype
+/// (jax/_src/numpy/ufuncs.py), so the eval layer must accept Bool operands and
+/// return a Bool result rather than erroring. Shifts are undefined on Bool
+/// (JAX promotes bool→int before a shift), so they return `None`.
+fn apply_bitwise_binary_bool(primitive: Primitive, lhs: bool, rhs: bool) -> Option<bool> {
+    match primitive {
+        Primitive::BitwiseAnd => Some(lhs & rhs),
+        Primitive::BitwiseOr => Some(lhs | rhs),
+        Primitive::BitwiseXor => Some(lhs ^ rhs),
+        _ => None,
+    }
+}
+
+fn bool_shift_unsupported(primitive: Primitive) -> EvalError {
+    EvalError::TypeMismatch {
+        primitive,
+        detail: "shift ops are undefined on bool",
+    }
+}
+
+/// `Bool` scalar ⊗ `Bool` tensor bitwise op. and/or/xor are commutative, so the
+/// scalar position is irrelevant. Reads the dense Bool backing when available and
+/// emits a dense Bool result.
+fn eval_bitwise_bool_scalar_tensor(
+    primitive: Primitive,
+    scalar: bool,
+    tensor: &TensorValue,
+) -> Result<Value, EvalError> {
+    if !matches!(
+        primitive,
+        Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor
+    ) {
+        return Err(bool_shift_unsupported(primitive));
+    }
+    if let Some(values) = tensor.elements.as_bool_slice() {
+        let out: Vec<bool> = values
+            .iter()
+            .map(|&v| apply_bitwise_binary_bool(primitive, scalar, v).unwrap_or(false))
+            .collect();
+        return Ok(Value::Tensor(
+            TensorValue::new_bool_values(tensor.shape.clone(), out)
+                .map_err(EvalError::InvalidTensor)?,
+        ));
+    }
+    let mut out = Vec::with_capacity(tensor.elements.len());
+    for el in tensor.elements.iter() {
+        let fj_core::Literal::Bool(v) = el else {
+            return Err(EvalError::TypeMismatch {
+                primitive,
+                detail: "bitwise bool op requires bool tensor",
+            });
+        };
+        out.push(apply_bitwise_binary_bool(primitive, scalar, *v).unwrap_or(false));
+    }
+    Ok(Value::Tensor(
+        TensorValue::new_bool_values(tensor.shape.clone(), out).map_err(EvalError::InvalidTensor)?,
+    ))
+}
+
 fn apply_bitwise_binary_u32(primitive: Primitive, lhs: u32, rhs: u32) -> u32 {
     match primitive {
         Primitive::BitwiseAnd => lhs & rhs,
@@ -1548,6 +1608,14 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     }
     match (&inputs[0], &inputs[1]) {
         // Scalar-Scalar
+        (Value::Scalar(fj_core::Literal::Bool(a)), Value::Scalar(fj_core::Literal::Bool(b))) => {
+            apply_bitwise_binary_bool(primitive, *a, *b)
+                .map(Value::scalar_bool)
+                .ok_or(EvalError::TypeMismatch {
+                    primitive,
+                    detail: "shift ops are undefined on bool",
+                })
+        }
         (Value::Scalar(fj_core::Literal::I64(a)), Value::Scalar(fj_core::Literal::I64(b))) => Ok(
             Value::scalar_i64(apply_bitwise_binary_i64(primitive, *a, *b)),
         ),
@@ -1557,6 +1625,18 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         (Value::Scalar(fj_core::Literal::U64(a)), Value::Scalar(fj_core::Literal::U64(b))) => Ok(
             Value::scalar_u64(apply_bitwise_binary_u64(primitive, *a, *b)),
         ),
+
+        // Scalar-Tensor broadcast (Bool)
+        (Value::Scalar(fj_core::Literal::Bool(scalar)), Value::Tensor(tensor))
+            if tensor.dtype == fj_core::DType::Bool =>
+        {
+            eval_bitwise_bool_scalar_tensor(primitive, *scalar, tensor)
+        }
+        (Value::Tensor(tensor), Value::Scalar(fj_core::Literal::Bool(scalar)))
+            if tensor.dtype == fj_core::DType::Bool =>
+        {
+            eval_bitwise_bool_scalar_tensor(primitive, *scalar, tensor)
+        }
 
         // Scalar-Tensor broadcast
         (Value::Scalar(fj_core::Literal::I64(scalar)), Value::Tensor(tensor))
@@ -1835,6 +1915,56 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                             .map_err(EvalError::InvalidTensor)?,
                     ))
                 }
+                fj_core::DType::Bool => {
+                    if !matches!(
+                        primitive,
+                        Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor
+                    ) {
+                        return Err(bool_shift_unsupported(primitive));
+                    }
+                    // Dense Bool broadcast via the shared contiguous-inner traversal.
+                    if let (Some(av), Some(bv)) =
+                        (a.elements.as_bool_slice(), b.elements.as_bool_slice())
+                    {
+                        let mut out = Vec::with_capacity(out_count);
+                        crate::arithmetic::broadcast_visit_row_major(
+                            &out_shape.dims,
+                            &a_strides,
+                            &b_strides,
+                            |ai, bi| {
+                                out.push(
+                                    apply_bitwise_binary_bool(primitive, av[ai], bv[bi])
+                                        .unwrap_or(false),
+                                );
+                            },
+                        );
+                        return Ok(Value::Tensor(
+                            TensorValue::new_bool_values(out_shape, out)
+                                .map_err(EvalError::InvalidTensor)?,
+                        ));
+                    }
+                    let mut elements = Vec::with_capacity(out_count);
+                    for flat_idx in 0..out_count {
+                        let multi = bitwise_flat_to_multi(flat_idx, &out_strides);
+                        let a_idx = bitwise_broadcast_flat_index(&multi, &a_strides);
+                        let b_idx = bitwise_broadcast_flat_index(&multi, &b_strides);
+                        let (fj_core::Literal::Bool(x), fj_core::Literal::Bool(y)) =
+                            (&a.elements[a_idx], &b.elements[b_idx])
+                        else {
+                            return Err(EvalError::TypeMismatch {
+                                primitive,
+                                detail: "bitwise bool op requires bool tensors",
+                            });
+                        };
+                        elements.push(fj_core::Literal::Bool(
+                            apply_bitwise_binary_bool(primitive, *x, *y).unwrap_or(false),
+                        ));
+                    }
+                    Ok(Value::Tensor(
+                        TensorValue::new(fj_core::DType::Bool, out_shape, elements)
+                            .map_err(EvalError::InvalidTensor)?,
+                    ))
+                }
                 _ => Err(EvalError::TypeMismatch {
                     primitive,
                     detail: "bitwise ops require integer types",
@@ -1935,6 +2065,44 @@ fn eval_bitwise_tensor_same_shape(
             }
             Ok(Value::Tensor(
                 TensorValue::new(fj_core::DType::U64, a.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        fj_core::DType::Bool => {
+            // JAX lowers logical_and/or/xor and bool `&|^*` to lax.bitwise_* on
+            // Bool, so accept Bool operands and emit a dense Bool result. Reads
+            // the contiguous bool backing when available.
+            if !matches!(
+                primitive,
+                Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor
+            ) {
+                return Err(bool_shift_unsupported(primitive));
+            }
+            if let (Some(av), Some(bv)) =
+                (a.elements.as_bool_slice(), b.elements.as_bool_slice())
+            {
+                let out: Vec<bool> = av
+                    .iter()
+                    .zip(bv)
+                    .map(|(&x, &y)| apply_bitwise_binary_bool(primitive, x, y).unwrap_or(false))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_bool_values(a.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
+            let mut out = Vec::with_capacity(a.elements.len());
+            for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
+                let (fj_core::Literal::Bool(x), fj_core::Literal::Bool(y)) = (ea, eb) else {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "bitwise bool op requires bool tensors",
+                    });
+                };
+                out.push(apply_bitwise_binary_bool(primitive, *x, *y).unwrap_or(false));
+            }
+            Ok(Value::Tensor(
+                TensorValue::new_bool_values(a.shape.clone(), out)
                     .map_err(EvalError::InvalidTensor)?,
             ))
         }
@@ -8864,6 +9032,63 @@ mod tests {
         let b = Value::scalar_i64(0b1010);
         let out = eval_primitive(Primitive::BitwiseAnd, &[a, b], &no_params()).unwrap();
         assert_eq!(out.as_i64_scalar().unwrap(), 0b1000);
+    }
+
+    #[test]
+    fn bitwise_bool_and_or_xor() {
+        // JAX lowers logical_and/or/xor (and bool `&|^*`) to lax.bitwise_* on
+        // Bool, so these must produce a Bool result, not error.
+        let mk = |data: &[bool], dims: Vec<u32>| {
+            Value::Tensor(TensorValue::new_bool_values(Shape { dims }, data.to_vec()).unwrap())
+        };
+        let bits = |v: &Value| -> Vec<bool> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| matches!(l, Literal::Bool(true)))
+                .collect()
+        };
+        let a = [true, true, false, false];
+        let b = [true, false, true, false];
+
+        // Same-shape.
+        for (prim, expected) in [
+            (Primitive::BitwiseAnd, vec![true, false, false, false]),
+            (Primitive::BitwiseOr, vec![true, true, true, false]),
+            (Primitive::BitwiseXor, vec![false, true, true, false]),
+        ] {
+            let out =
+                eval_primitive(prim, &[mk(&a, vec![4]), mk(&b, vec![4])], &no_params()).unwrap();
+            assert_eq!(out.as_tensor().unwrap().dtype, DType::Bool, "{prim:?} dtype");
+            assert_eq!(bits(&out), expected, "{prim:?} same-shape");
+        }
+
+        // Scalar ⊗ tensor.
+        let out = eval_primitive(
+            Primitive::BitwiseAnd,
+            &[Value::scalar_bool(true), mk(&a, vec![4])],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(bits(&out), vec![true, true, false, false], "scalar&tensor");
+
+        // Broadcast [2,2] | [2].
+        let out = eval_primitive(
+            Primitive::BitwiseOr,
+            &[mk(&[true, false, false, false], vec![2, 2]), mk(&[false, true], vec![2])],
+            &no_params(),
+        )
+        .unwrap();
+        assert_eq!(bits(&out), vec![true, true, false, true], "broadcast or");
+
+        // Shifts remain undefined on bool.
+        assert!(eval_primitive(
+            Primitive::ShiftLeft,
+            &[mk(&a, vec![4]), mk(&b, vec![4])],
+            &no_params()
+        )
+        .is_err());
     }
 
     #[test]
