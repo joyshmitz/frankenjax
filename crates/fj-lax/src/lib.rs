@@ -2129,6 +2129,10 @@ fn apply_bitwise_unary_literal_with_dtype(
     dtype: Option<fj_core::DType>,
 ) -> Option<fj_core::Literal> {
     match (primitive, literal) {
+        (Primitive::BitwiseNot, fj_core::Literal::Bool(value)) => {
+            // JAX lowers logical_not / bool `~` to lax.bitwise_not on Bool.
+            Some(fj_core::Literal::Bool(!value))
+        }
         (Primitive::BitwiseNot, fj_core::Literal::I64(value)) => {
             Some(fj_core::Literal::I64(!value))
         }
@@ -2213,6 +2217,18 @@ fn eval_bitwise_unary(primitive: Primitive, inputs: &[Value]) -> Result<Value, E
             Ok(Value::Scalar(out))
         }
         Value::Tensor(t) => {
+            // Dense Bool BitwiseNot (= logical_not / `~mask`): read the contiguous
+            // bool backing and emit a dense Bool result, avoiding 24-byte Literals.
+            if primitive == Primitive::BitwiseNot
+                && t.dtype == fj_core::DType::Bool
+                && let Some(values) = t.elements.as_bool_slice()
+            {
+                let out: Vec<bool> = values.iter().map(|&v| !v).collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_bool_values(t.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
             let out_dtype = unary_bitwise_output_dtype(primitive, t.dtype);
             let elements: Result<Vec<_>, _> = t
                 .elements
@@ -9105,6 +9121,26 @@ mod tests {
         let b = Value::scalar_i64(0b1010);
         let out = eval_primitive(Primitive::BitwiseXor, &[a, b], &no_params()).unwrap();
         assert_eq!(out.as_i64_scalar().unwrap(), 0b0110);
+    }
+
+    #[test]
+    fn bitwise_not_bool_is_logical_not() {
+        // JAX lowers logical_not / bool `~` to lax.bitwise_not on Bool, which must
+        // return the negated bool, not error.
+        let m = Value::Tensor(
+            TensorValue::new_bool_values(Shape { dims: vec![4] }, vec![true, false, true, false])
+                .unwrap(),
+        );
+        let out = eval_primitive(Primitive::BitwiseNot, &[m], &no_params()).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.dtype, DType::Bool);
+        let vals: Vec<bool> = t.elements.iter().map(|l| matches!(l, Literal::Bool(true))).collect();
+        assert_eq!(vals, vec![false, true, false, true]);
+
+        // Scalar bool too.
+        let s = eval_primitive(Primitive::BitwiseNot, &[Value::scalar_bool(true)], &no_params())
+            .unwrap();
+        assert!(matches!(s, Value::Scalar(Literal::Bool(false))));
     }
 
     #[test]
