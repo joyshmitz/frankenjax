@@ -269,11 +269,58 @@ pub fn random_normal(key: PRNGKey, count: usize) -> Vec<f64> {
     let lo = f64::from(f32::from_bits((-1.0_f32).to_bits() - 1)); // nextafter_f32(-1.0, 0.0)
     let hi = 1.0_f64;
     let uniforms = random_uniform(key, count, lo, hi);
+    random_normal_from_uniforms(&uniforms)
+}
+
+const RANDOM_NORMAL_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+
+fn random_normal_from_uniforms(uniforms: &[f64]) -> Vec<f64> {
+    let count = uniforms.len();
+    let threads = if count >= RANDOM_NORMAL_PARALLEL_MIN_ELEMS {
+        std::thread::available_parallelism()
+            .map(|parallelism| parallelism.get())
+            .unwrap_or(1)
+    } else {
+        1
+    };
+    random_normal_from_uniforms_with_threads(uniforms, threads)
+}
+
+fn random_normal_from_uniforms_serial(uniforms: &[f64]) -> Vec<f64> {
     let sqrt2 = std::f64::consts::SQRT_2;
     uniforms
-        .into_iter()
-        .map(|u| sqrt2 * crate::arithmetic::erf_inv_approx(u))
+        .iter()
+        .map(|&u| sqrt2 * crate::arithmetic::erf_inv_approx(u))
         .collect()
+}
+
+fn random_normal_from_uniforms_with_threads(uniforms: &[f64], threads: usize) -> Vec<f64> {
+    let count = uniforms.len();
+    let threads = threads.min(count);
+    if threads <= 1 {
+        return random_normal_from_uniforms_serial(uniforms);
+    }
+
+    let mut out = vec![0.0_f64; count];
+    let chunk = count.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < count {
+            let len = chunk.min(count - start);
+            let (out_block, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let input_block = &uniforms[start..start + len];
+            scope.spawn(move || {
+                let sqrt2 = std::f64::consts::SQRT_2;
+                for (slot, &u) in out_block.iter_mut().zip(input_block) {
+                    *slot = sqrt2 * crate::arithmetic::erf_inv_approx(u);
+                }
+            });
+            start += len;
+        }
+    });
+    out
 }
 
 /// Generate Bernoulli random boolean values with probability `p` of being true.
@@ -828,7 +875,12 @@ mod tests {
             PRNGKey([0x9E37_79B9, 0x1234_5678]),
             PRNGKey([u32::MAX, u32::MAX]),
         ] {
-            for &(lo, hi) in &[(0.0_f64, 1.0_f64), (-1.0, 1.0), (-3.5, 7.25), (100.0, 100.5)] {
+            for &(lo, hi) in &[
+                (0.0_f64, 1.0_f64),
+                (-1.0, 1.0),
+                (-3.5, 7.25),
+                (100.0, 100.5),
+            ] {
                 for count in 0..=19usize {
                     let simd = random_uniform(key, count, lo, hi);
                     let scalar = random_uniform_scalar(key, count, lo, hi);
@@ -841,10 +893,42 @@ mod tests {
                 let simd = random_uniform(key, count, lo, hi);
                 let scalar = random_uniform_scalar(key, count, lo, hi);
                 for (s, r) in simd.iter().zip(scalar.iter()) {
-                    assert_eq!(s.to_bits(), r.to_bits(), "key={key:?} big range=({lo},{hi})");
+                    assert_eq!(
+                        s.to_bits(),
+                        r.to_bits(),
+                        "key={key:?} big range=({lo},{hi})"
+                    );
                 }
             }
         }
+    }
+
+    #[test]
+    fn threaded_random_normal_transform_matches_serial() {
+        let key = random_key(0xCAFE_BABE_F00D_F00D);
+        let lo = f64::from(f32::from_bits((-1.0_f32).to_bits() - 1));
+        let uniforms = random_uniform(key, 70_003, lo, 1.0);
+        let serial = random_normal_from_uniforms_serial(&uniforms);
+        for threads in [2usize, 3, 7, 16, 64] {
+            let threaded = random_normal_from_uniforms_with_threads(&uniforms, threads);
+            assert_eq!(threaded, serial, "threads={threads}");
+        }
+    }
+
+    #[test]
+    fn random_normal_threaded_golden_sha256() {
+        let mut streams = Vec::new();
+        for seed in [0_u64, 1, 0x1234_5678_9ABC_DEF0, u64::MAX] {
+            let key = random_key(seed);
+            for count in [0_usize, 1, 7, 8, 9, 64, 257, 4096] {
+                streams.push((seed, count, random_normal(key, count)));
+            }
+        }
+        let digest = fj_test_utils::fixture_id_from_json(&streams).expect("normal digest");
+        assert_eq!(
+            digest, "982d444c8f93dd7331fff1e2141e40ee967f6698a7a12cbeef104d38b6c6c29b",
+            "random_normal golden SHA-256 changed"
+        );
     }
 
     #[test]
