@@ -925,6 +925,137 @@ fn multi_to_out_flat(
 /// ascending (or reversed) order, same `float_op`/`int_op`, and the same output
 /// literal (`reduce_real_output_dtype(F64) == F64` -> `from_f64`; I64 ->
 /// `Literal::I64`). Returns `None` unless the tensor is F64 or I64 dense storage.
+///
+/// Minimum element count before a cumulative scan fans out across threads.
+const CUMULATIVE_PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144
+
+/// Serial cumulative scan from contiguous input lines into contiguous output
+/// lines. Each line is independent, and every line still accumulates in the
+/// exact same element order as the generic path.
+#[inline]
+fn scan_contiguous_lines_from<T, F>(
+    src: &[T],
+    out: &mut [T],
+    axis_dim: usize,
+    reverse: bool,
+    init: T,
+    op: &F,
+) where
+    T: Copy,
+    F: Fn(T, T) -> T + ?Sized,
+{
+    for (src_line, out_line) in src.chunks(axis_dim).zip(out.chunks_mut(axis_dim)) {
+        let mut acc = init;
+        if reverse {
+            for (src_value, out_value) in src_line.iter().zip(out_line.iter_mut()).rev() {
+                acc = op(acc, *src_value);
+                *out_value = acc;
+            }
+        } else {
+            for (src_value, out_value) in src_line.iter().zip(out_line.iter_mut()) {
+                acc = op(acc, *src_value);
+                *out_value = acc;
+            }
+        }
+    }
+}
+
+/// Serial cumulative scan over already-contiguous output lines. This is the
+/// fast path for one-line or small scans where cloning the dense input and
+/// mutating in place beats direct-output setup overhead.
+#[inline]
+fn scan_contiguous_lines_in_place<T, F>(
+    out: &mut [T],
+    axis_dim: usize,
+    reverse: bool,
+    init: T,
+    op: &F,
+) where
+    T: Copy,
+    F: Fn(T, T) -> T + ?Sized,
+{
+    for line in out.chunks_mut(axis_dim) {
+        let mut acc = init;
+        if reverse {
+            for x in line.iter_mut().rev() {
+                acc = op(acc, *x);
+                *x = acc;
+            }
+        } else {
+            for x in line.iter_mut() {
+                acc = op(acc, *x);
+                *x = acc;
+            }
+        }
+    }
+}
+
+/// Build a cumulative-scan output for contiguous input lines. The old dense path
+/// cloned the input and then mutated the clone into prefixes, which read and
+/// wrote the entire dense buffer once before doing the scan. This writes prefix
+/// outputs directly from the typed source slice. Forward serial scans use
+/// `push` so each output element is written once; reverse or threaded scans use
+/// an initialized buffer and fill disjoint whole-line blocks.
+fn scan_contiguous_lines_to_vec<T, F>(
+    src: &[T],
+    axis_dim: usize,
+    reverse: bool,
+    init: T,
+    op: F,
+) -> Vec<T>
+where
+    T: Copy + Send + Sync,
+    F: Fn(T, T) -> T + Sync,
+{
+    let outer = src.len() / axis_dim.max(1);
+    let threads = if src.len() >= CUMULATIVE_PARALLEL_MIN_ELEMS && outer > 1 {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(outer)
+    } else {
+        1
+    };
+
+    if threads <= 1 {
+        if reverse {
+            let mut out = vec![init; src.len()];
+            scan_contiguous_lines_from(src, &mut out, axis_dim, true, init, &op);
+            return out;
+        }
+
+        let mut out = Vec::with_capacity(src.len());
+        for line in src.chunks(axis_dim) {
+            let mut acc = init;
+            for &value in line {
+                acc = op(acc, value);
+                out.push(acc);
+            }
+        }
+        return out;
+    }
+
+    let mut out = vec![init; src.len()];
+    let lines_per = outer.div_ceil(threads);
+    let block = lines_per * axis_dim;
+    let op_ref = &op;
+    std::thread::scope(|scope| {
+        let mut src_rest = src;
+        let mut out_rest: &mut [T] = out.as_mut_slice();
+        while !src_rest.is_empty() {
+            let take = block.min(src_rest.len());
+            let (src_block, src_tail) = src_rest.split_at(take);
+            let (out_block, out_tail) = out_rest.split_at_mut(take);
+            src_rest = src_tail;
+            out_rest = out_tail;
+            scope.spawn(move || {
+                scan_contiguous_lines_from(src_block, out_block, axis_dim, reverse, init, op_ref);
+            });
+        }
+    });
+    out
+}
+
 #[inline]
 fn eval_cumulative_dense(
     tensor: &TensorValue,
@@ -932,8 +1063,8 @@ fn eval_cumulative_dense(
     reverse: bool,
     int_init: i64,
     float_init: f64,
-    int_op: &impl Fn(i64, i64) -> i64,
-    float_op: &impl Fn(f64, f64) -> f64,
+    int_op: &(impl Fn(i64, i64) -> i64 + Sync),
+    float_op: &(impl Fn(f64, f64) -> f64 + Sync),
 ) -> Result<Option<Value>, EvalError> {
     let primitive = Primitive::Cumsum; // only used for stride-overflow error context
     let rank = tensor.shape.rank();
@@ -965,24 +1096,37 @@ fn eval_cumulative_dense(
         let Some(src) = tensor.elements.as_f64_slice() else {
             return Ok(None);
         };
-        let mut out = src.to_vec();
-        for outer in 0..outer_count {
-            let base = line_base(outer);
-            let mut acc = float_init;
-            if reverse {
-                for i in (0..axis_dim).rev() {
-                    let fi = base + i * axis_stride;
-                    acc = float_op(acc, out[fi]);
-                    out[fi] = acc;
-                }
-            } else {
-                for i in 0..axis_dim {
-                    let fi = base + i * axis_stride;
-                    acc = float_op(acc, out[fi]);
-                    out[fi] = acc;
+        let out = if axis_stride == 1 && total >= CUMULATIVE_PARALLEL_MIN_ELEMS && outer_count > 1 {
+            // Large contiguous last-axis scans with many independent lines:
+            // write dense output directly and split whole-line blocks across
+            // threads. One-line/small scans keep the clone+in-place path below,
+            // which is measurably faster and preserves the same per-line order.
+            scan_contiguous_lines_to_vec(src, axis_dim, reverse, float_init, float_op)
+        } else if axis_stride == 1 {
+            let mut out = src.to_vec();
+            scan_contiguous_lines_in_place(&mut out, axis_dim, reverse, float_init, float_op);
+            out
+        } else {
+            let mut out = src.to_vec();
+            for outer in 0..outer_count {
+                let base = line_base(outer);
+                let mut acc = float_init;
+                if reverse {
+                    for i in (0..axis_dim).rev() {
+                        let fi = base + i * axis_stride;
+                        acc = float_op(acc, out[fi]);
+                        out[fi] = acc;
+                    }
+                } else {
+                    for i in 0..axis_dim {
+                        let fi = base + i * axis_stride;
+                        acc = float_op(acc, out[fi]);
+                        out[fi] = acc;
+                    }
                 }
             }
-        }
+            out
+        };
         return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
             tensor.shape.clone(),
             out,
@@ -993,24 +1137,33 @@ fn eval_cumulative_dense(
         let Some(src) = tensor.elements.as_i64_slice() else {
             return Ok(None);
         };
-        let mut out = src.to_vec();
-        for outer in 0..outer_count {
-            let base = line_base(outer);
-            let mut acc = int_init;
-            if reverse {
-                for i in (0..axis_dim).rev() {
-                    let fi = base + i * axis_stride;
-                    acc = int_op(acc, out[fi]);
-                    out[fi] = acc;
-                }
-            } else {
-                for i in 0..axis_dim {
-                    let fi = base + i * axis_stride;
-                    acc = int_op(acc, out[fi]);
-                    out[fi] = acc;
+        let out = if axis_stride == 1 && total >= CUMULATIVE_PARALLEL_MIN_ELEMS && outer_count > 1 {
+            scan_contiguous_lines_to_vec(src, axis_dim, reverse, int_init, int_op)
+        } else if axis_stride == 1 {
+            let mut out = src.to_vec();
+            scan_contiguous_lines_in_place(&mut out, axis_dim, reverse, int_init, int_op);
+            out
+        } else {
+            let mut out = src.to_vec();
+            for outer in 0..outer_count {
+                let base = line_base(outer);
+                let mut acc = int_init;
+                if reverse {
+                    for i in (0..axis_dim).rev() {
+                        let fi = base + i * axis_stride;
+                        acc = int_op(acc, out[fi]);
+                        out[fi] = acc;
+                    }
+                } else {
+                    for i in 0..axis_dim {
+                        let fi = base + i * axis_stride;
+                        acc = int_op(acc, out[fi]);
+                        out[fi] = acc;
+                    }
                 }
             }
-        }
+            out
+        };
         return Ok(Some(Value::Tensor(TensorValue::new_i64_values(
             tensor.shape.clone(),
             out,
@@ -1026,8 +1179,8 @@ pub(crate) fn eval_cumulative(
     params: &std::collections::BTreeMap<String, String>,
     int_init: i64,
     float_init: f64,
-    int_op: impl Fn(i64, i64) -> i64,
-    float_op: impl Fn(f64, f64) -> f64,
+    int_op: impl Fn(i64, i64) -> i64 + Sync,
+    float_op: impl Fn(f64, f64) -> f64 + Sync,
 ) -> Result<Value, EvalError> {
     if inputs.len() != 1 {
         return Err(EvalError::ArityMismatch {
@@ -2093,6 +2246,84 @@ mod tests {
                 let di = crate::eval_primitive(prim, std::slice::from_ref(&dense_i), &p).unwrap();
                 let li = crate::eval_primitive(prim, std::slice::from_ref(&lit_i), &p).unwrap();
                 assert_eq!(ints(&di), ints(&li), "i64 {prim:?} axis={axis} rev={rev}");
+            }
+        }
+    }
+
+    /// Isomorphism proof for the parallel cumulative scan: a last-axis scan large
+    /// enough to fan out across threads (rows*cols >= 1<<18, rows > 1) must match,
+    /// element for element, an independent per-line serial reference. Lines are
+    /// independent so the threaded result is identical to serial.
+    #[test]
+    fn threaded_cumulative_matches_serial_reference() {
+        let rows = 4096usize;
+        let cols = 128usize; // 4096*128 = 524_288 >= 1<<18 -> threaded
+        assert!(rows * cols >= (1usize << 18) && rows > 1);
+        let f: Vec<f64> = (0..rows * cols)
+            .map(|i| match i % 257 {
+                0 => -0.0,
+                1 => f64::NAN,
+                2 => f64::INFINITY,
+                3 => f64::NEG_INFINITY,
+                _ => ((i % 13) as f64) - 6.0 + 0.5 * ((i % 4) as f64),
+            })
+            .collect();
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                f.clone(),
+            )
+            .unwrap(),
+        );
+
+        for (prim, op) in [
+            (
+                Primitive::Cumsum,
+                (|a: f64, b: f64| a + b) as fn(f64, f64) -> f64,
+            ),
+            (Primitive::Cumprod, (|a, b| a * b) as fn(f64, f64) -> f64),
+            (Primitive::Cummax, (|a, b| a.max(b)) as fn(f64, f64) -> f64),
+            (Primitive::Cummin, (|a, b| a.min(b)) as fn(f64, f64) -> f64),
+        ] {
+            let init = match prim {
+                Primitive::Cumprod => 1.0,
+                Primitive::Cummax => f64::NEG_INFINITY,
+                Primitive::Cummin => f64::INFINITY,
+                _ => 0.0,
+            };
+            for &rev in &[false, true] {
+                let mut p = BTreeMap::new();
+                p.insert("axis".to_owned(), "1".to_owned());
+                p.insert("reverse".to_owned(), rev.to_string());
+                let got = crate::eval_primitive(prim, std::slice::from_ref(&dense), &p).unwrap();
+                let got: Vec<u64> = got
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap().to_bits())
+                    .collect();
+                // Independent per-line serial reference.
+                let mut expect: Vec<u64> = Vec::with_capacity(rows * cols);
+                for line in f.chunks(cols) {
+                    let mut acc = init;
+                    let mut row: Vec<f64> = vec![0.0; cols];
+                    if rev {
+                        for i in (0..cols).rev() {
+                            acc = op(acc, line[i]);
+                            row[i] = acc;
+                        }
+                    } else {
+                        for i in 0..cols {
+                            acc = op(acc, line[i]);
+                            row[i] = acc;
+                        }
+                    }
+                    expect.extend(row.iter().map(|v| v.to_bits()));
+                }
+                assert_eq!(got, expect, "{prim:?} rev={rev} threaded != serial");
             }
         }
     }

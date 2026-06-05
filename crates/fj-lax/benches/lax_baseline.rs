@@ -1100,6 +1100,38 @@ fn bench_cumsum_64k_f64_vec(c: &mut Criterion) {
     });
 }
 
+// 4M f64 Cumsum along a single long axis (outer_count == 1): only chunked
+// parallel-prefix can speed this up (line-threading does nothing with one line).
+fn bench_cumsum_4m_f64_1d(c: &mut Criterion) {
+    let data: Vec<f64> = (0..1 << 22).map(|i| (i as f64) * 0.001).collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cumsum_4m_f64_1d", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cumsum, std::slice::from_ref(&input), &p))
+    });
+}
+
+// 4096x1024 f64 Cumsum along the last axis (4096 independent lines): exercises
+// line-parallel scan over the outer dimension.
+fn bench_cumsum_4096x1024_f64_axis1(c: &mut Criterion) {
+    let data: Vec<f64> = (0..4096 * 1024).map(|i| (i as f64) * 0.001).collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![4096, 1024],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "1".to_owned());
+    c.bench_function("eval/cumsum_4096x1024_f64_axis1", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cumsum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_cumsum_64k_f64_literal_reference(c: &mut Criterion) {
     let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
         .map(|i| Literal::from_f64(i as f64 * 0.001))
@@ -1160,7 +1192,13 @@ fn bench_convert_64k_f64_to_i64(c: &mut Criterion) {
     let mut p = BTreeMap::new();
     p.insert("new_dtype".to_owned(), "i64".to_owned());
     c.bench_function("eval/convert_64k_f64_to_i64", |bencher| {
-        bencher.iter(|| eval_primitive(Primitive::ConvertElementType, std::slice::from_ref(&input), &p))
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::ConvertElementType,
+                std::slice::from_ref(&input),
+                &p,
+            )
+        })
     });
 }
 
@@ -2076,9 +2114,7 @@ fn bench_fft_batch_2048x256_dense_input(c: &mut Criterion) {
     let p = no_params();
     c.bench_function(
         "eval/fft_batch_2048x256_complex128_dense_input",
-        |bencher| {
-            bencher.iter(|| eval_primitive(Primitive::Fft, std::slice::from_ref(&input), &p))
-        },
+        |bencher| bencher.iter(|| eval_primitive(Primitive::Fft, std::slice::from_ref(&input), &p)),
     );
 }
 
@@ -2623,6 +2659,8 @@ criterion_group!(
     bench_reduce_and_256_axis1_bool_vec,
     bench_reduce_and_256_axis1_bool_literal_reference,
     bench_cumsum_64k_f64_vec,
+    bench_cumsum_4m_f64_1d,
+    bench_cumsum_4096x1024_f64_axis1,
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
     bench_sort_64k_f64,

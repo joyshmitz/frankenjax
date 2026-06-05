@@ -1,0 +1,14 @@
+{
+  "bead": "frankenjax-zwfc0",
+  "crate": "fj-lax (reduction)",
+  "target": "eval_cumulative_dense (Cumsum/Cumprod/Cummax/Cummin over dense F64/I64). The scan looped over outer_count independent lines serially; the per-element accumulator op (&impl Fn) does not inline, making it compute-bound (~10x slower than memory-bound for 4M f64).",
+  "lever": "The outer lines of a cumulative scan are independent. For contiguous last-axis scans (axis_stride==1) that are large (>=1<<18) with many lines, write the dense output directly and split whole-line blocks across threads (scan_contiguous_lines_to_vec / scan_contiguous_lines_from). Forward serial scans push each output once (no clone); reverse / threaded fill an initialized buffer in disjoint line-blocks; one-line/small scans keep the clone+in-place path. Op closures gained a + Sync bound. NOTE: implementation developed in the shared working tree (collaborative across the agent swarm); landed here to prevent it being stranded uncommitted across context resets.",
+  "isomorphism": "BIT-EXACT. dense_cumulative_bit_identical_to_literal_path (dense fast path == generic Literal path, all 4 ops x axis x reverse) and threaded_cumulative_matches_serial_reference (4096x128 >= 1<<18, threaded == independent per-line serial, cumsum/cumprod/cummax x forward/reverse). Lines are independent and per-line element order is unchanged, so threading cannot alter results. 1100 fj-lax tests pass.",
+  "measurements": {
+    "cumsum_4096x1024_f64_axis1 (4096 lines)": { "before_serial_ms": 34.53, "after_threaded_ms": 11.36, "ratio": 3.04 },
+    "cumsum_4m_f64_1d (single line)": { "before_serial_ms": 34.55, "after_ms": 25.7, "ratio": 1.34 }
+  },
+  "decision": "SHIP. 3.04x on the many-lines contiguous scan (the common ML case: cumulative over an inner axis of a [batch, seq, feat] tensor), zero regression (small/strided/single-line keep their prior path). Single-line scan is only 1.34x — it needs chunked parallel-prefix (Blelloch), filed as the follow-up.",
+  "follow_ups": "Single-line / few-long-lines cumulative scan: chunked parallel-prefix (local scan per chunk in parallel -> serial scan of chunk totals -> parallel add offsets) to parallelize the dependency chain. Non-contiguous (strided) axis scans remain serial.",
+  "date": "2026-06-05"
+}
