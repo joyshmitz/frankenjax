@@ -369,8 +369,9 @@ fn dense_f64_axis_reduce(
     // extent, o over the `block = out_count` kept columns. The inner loop over `o`
     // is a contiguous read + contiguous accumulate (vectorizable for `+`/`*`), and
     // each output column accumulates k in ascending order — identical to the
-    // odometer's emission order. Threads own disjoint column ranges (each does the
-    // full k-loop), so the result is bit-for-bit identical to the serial fold.
+    // odometer's emission order. This keeps a single deterministic fold per
+    // column while replacing the generic per-element odometer update with a
+    // tight row-slice loop.
     let rank = tensor.shape.dims.len();
     let kept_is_trailing_suffix = !kept_axes.is_empty()
         && *kept_axes.last().unwrap() == rank - 1

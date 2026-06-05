@@ -1439,19 +1439,12 @@ fn broadcast_binary_i64(
     )?)))
 }
 
-/// F64 broadcast binary fast path. Produces output elements in the same
-/// row-major flat order as the generic broadcast loop using identical index
-/// math, applying `float_op` directly to the gathered F64 values. Bit-for-bit
-/// identical to the generic path for F64 operands (where binary_literal_op is
-/// `from_f64(float_op(from_bits(l), from_bits(r)))`). Returns `Ok(None)` if any
-/// gathered element is not `F64Bits`, so the caller falls through to generic.
-#[inline]
-#[allow(clippy::too_many_arguments)]
 /// Threaded broadcast fast path for the expensive binary ops. Returns `None`
 /// unless both operands are dense F64 (caller already checked the op + size).
 /// Each thread decodes its own output flat-index range to broadcast-gathered
 /// operand indices and applies the identical `float_op` — bit-for-bit identical
 /// to the serial gather, just split across the output space.
+#[inline]
 #[allow(clippy::too_many_arguments)]
 fn broadcast_binary_f64_expensive_parallel(
     lhs: &TensorValue,
@@ -1499,6 +1492,14 @@ fn broadcast_binary_f64_expensive_parallel(
         .map(Value::Tensor)
 }
 
+/// F64 broadcast binary fast path. Produces output elements in the same
+/// row-major flat order as the generic broadcast loop using identical index
+/// math, applying `float_op` directly to the gathered F64 values. Bit-for-bit
+/// identical to the generic path for F64 operands (where binary_literal_op is
+/// `from_f64(float_op(from_bits(l), from_bits(r)))`). Returns `Ok(None)` if any
+/// gathered element is not `F64Bits`, so the caller falls through to generic.
+#[inline]
+#[allow(clippy::too_many_arguments)]
 fn broadcast_binary_f64(
     lhs: &TensorValue,
     rhs: &TensorValue,
