@@ -154,6 +154,35 @@ fn bench_add_1k_f64_vector(c: &mut Criterion) {
     });
 }
 
+// Broadcast Pow: [1024,1] ** [1,1024] -> [1024,1024] (~1M outputs). Each output
+// is an independent powf on broadcast-gathered operands — compute-bound, threads.
+fn bench_pow_broadcast_1024x1024_f64(c: &mut Criterion) {
+    let a: Vec<f64> = (0..1024).map(|i| 1.0 + (i % 97) as f64 * 0.01).collect();
+    let b: Vec<f64> = (0..1024).map(|i| 0.5 + (i % 13) as f64 * 0.1).collect();
+    let lhs = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![1024, 1],
+            },
+            a,
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![1, 1024],
+            },
+            b,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/pow_broadcast_1024x1024_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Pow, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 // 1M-element same-shape Pow (a^b via f64::powf): per-element powf (~tens of ns)
 // dominates memory traffic, so the elementwise op is compute-bound and threads.
 fn bench_pow_1m_f64_vec(c: &mut Criterion) {
@@ -2699,6 +2728,7 @@ criterion_group!(
     bench_add_1k_vector,
     bench_mul_1k_vector,
     bench_add_1k_f64_vector,
+    bench_pow_broadcast_1024x1024_f64,
     bench_pow_1m_f64_vec,
     bench_pow_scalar_1m_f64_vec,
     bench_pow_scalar_1m_f64_literal_reference,

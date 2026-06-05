@@ -1311,7 +1311,7 @@ fn broadcast_binary_tensors(
     lhs: &TensorValue,
     rhs: &TensorValue,
     int_op: &impl Fn(i64, i64) -> i64,
-    float_op: &impl Fn(f64, f64) -> f64,
+    float_op: &(impl Fn(f64, f64) -> f64 + Sync),
 ) -> Result<Value, EvalError> {
     let out_shape = broadcast_shape(&lhs.shape, &rhs.shape).ok_or(EvalError::ShapeMismatch {
         primitive,
@@ -1325,6 +1325,28 @@ fn broadcast_binary_tensors(
     // Compute broadcast-aware strides for lhs and rhs
     let lhs_strides = broadcast_strides(&lhs.shape, &out_shape);
     let rhs_strides = broadcast_strides(&rhs.shape, &out_shape);
+
+    // Expensive binary ops (Pow/Atan2/Hypot/…) over a large broadcast: each output
+    // element is an independent transcendental on broadcast-gathered operands, so
+    // thread over the output flat range. Per-thread per-element index decode is
+    // amortized by the expensive float op. Bit-identical to the serial gather.
+    if is_expensive_binary(primitive)
+        && lhs.dtype == DType::F64
+        && rhs.dtype == DType::F64
+        && out_count >= EXPENSIVE_BINARY_PARALLEL_MIN
+        && let Some(value) = broadcast_binary_f64_expensive_parallel(
+            lhs,
+            rhs,
+            &out_shape,
+            out_count,
+            &out_strides,
+            &lhs_strides,
+            &rhs_strides,
+            float_op,
+        )
+    {
+        return Ok(value);
+    }
 
     // F64⊗F64 fast path: the generic binary_literal_op reduces to
     // `Literal::from_f64(float_op(a, b))` for F64 operands (out dtype F64 hits
@@ -1425,6 +1447,58 @@ fn broadcast_binary_i64(
 /// gathered element is not `F64Bits`, so the caller falls through to generic.
 #[inline]
 #[allow(clippy::too_many_arguments)]
+/// Threaded broadcast fast path for the expensive binary ops. Returns `None`
+/// unless both operands are dense F64 (caller already checked the op + size).
+/// Each thread decodes its own output flat-index range to broadcast-gathered
+/// operand indices and applies the identical `float_op` — bit-for-bit identical
+/// to the serial gather, just split across the output space.
+#[allow(clippy::too_many_arguments)]
+fn broadcast_binary_f64_expensive_parallel(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    out_shape: &Shape,
+    out_count: usize,
+    out_strides: &[usize],
+    lhs_strides: &[usize],
+    rhs_strides: &[usize],
+    float_op: &(impl Fn(f64, f64) -> f64 + Sync),
+) -> Option<Value> {
+    let (lhs_values, rhs_values) = (lhs.elements.as_f64_slice()?, rhs.elements.as_f64_slice()?);
+    let threads = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1)
+        .min(out_count);
+    if threads <= 1 {
+        return None;
+    }
+    let mut out = vec![0.0f64; out_count];
+    let chunk = out_count.div_ceil(threads);
+    let op_ref = float_op;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < out_count {
+            let len = chunk.min(out_count - start);
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let s = start;
+            scope.spawn(move || {
+                let mut multi: Vec<usize> = Vec::with_capacity(out_strides.len());
+                for (i, o) in blk.iter_mut().enumerate() {
+                    flat_to_multi_into(s + i, out_strides, &mut multi);
+                    let lhs_idx = broadcast_flat_index(&multi, lhs_strides);
+                    let rhs_idx = broadcast_flat_index(&multi, rhs_strides);
+                    *o = op_ref(lhs_values[lhs_idx], rhs_values[rhs_idx]);
+                }
+            });
+            start += len;
+        }
+    });
+    TensorValue::new_f64_values(out_shape.clone(), out)
+        .ok()
+        .map(Value::Tensor)
+}
+
 fn broadcast_binary_f64(
     lhs: &TensorValue,
     rhs: &TensorValue,
@@ -6670,6 +6744,60 @@ mod tests {
                 .map(|i| Literal::from_f64(op(lhs_data[i], col[i / 3])))
                 .collect();
             assert_eq!(tensor.elements, expected, "{primitive:?} col-broadcast");
+        }
+    }
+
+    /// Isomorphism proof for the threaded expensive-broadcast path: a large
+    /// `[N,1] op [1,M]` Pow/Atan2 (output >= 1<<16) must equal the element-wise
+    /// reference `out[i*M+j] = op(a[i], b[j])`, bit-for-bit (same broadcast indices,
+    /// same float op, just split across the output space).
+    #[test]
+    fn threaded_expensive_broadcast_bit_identical_to_reference() {
+        let (n, m) = (512usize, 256usize); // 131072 outputs -> threaded
+        assert!(n * m >= (1usize << 16));
+        let a: Vec<f64> = (0..n).map(|i| 1.0 + (i % 97) as f64 * 0.01).collect();
+        let b: Vec<f64> = (0..m).map(|j| 0.25 + (j % 13) as f64 * 0.1).collect();
+        let lhs = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32, 1],
+                },
+                a.clone(),
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![1, m as u32],
+                },
+                b.clone(),
+            )
+            .unwrap(),
+        );
+        for (prim, refop) in [
+            (
+                Primitive::Pow,
+                (|x: f64, y: f64| x.powf(y)) as fn(f64, f64) -> f64,
+            ),
+            (Primitive::Atan2, (|x, y| x.atan2(y)) as fn(f64, f64) -> f64),
+        ] {
+            let got =
+                crate::eval_primitive(prim, &[lhs.clone(), rhs.clone()], &BTreeMap::new()).unwrap();
+            let got: Vec<u64> = got
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect();
+            let mut expect: Vec<u64> = Vec::with_capacity(n * m);
+            for &ai in &a {
+                for &bj in &b {
+                    expect.push(refop(ai, bj).to_bits());
+                }
+            }
+            assert_eq!(got, expect, "{prim:?} broadcast threaded != reference");
         }
     }
 

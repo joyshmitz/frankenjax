@@ -1,0 +1,13 @@
+{
+  "bead": "frankenjax-vsf5s",
+  "crate": "fj-lax (arithmetic)",
+  "target": "Multi-dim broadcast of the expensive binary ops Pow/Atan2/Hypot/LogAddExp/XLogY (e.g. [N,1] ** [1,M]). broadcast_binary_f64 gathered via a serial BroadcastOdometer; expensive ops with broadcasting ran serially.",
+  "lever": "broadcast_binary_f64_expensive_parallel: for an expensive op over a large (>= 1<<16) F64⊗F64 broadcast, thread over the output flat-index range. Each thread decodes its own range (flat_to_multi_into + broadcast_flat_index) to the broadcast-gathered operand indices and applies the identical float_op into a disjoint output block. The per-element index decode is amortized by the expensive transcendental. Completes the expensive-binary parallelization: same-shape (jo7l8) + scalar-broadcast (mj1a0) + multi-dim broadcast (this).",
+  "isomorphism": "BIT-EXACT. threaded_expensive_broadcast_bit_identical_to_reference ([512,1] op [1,256] -> 131072 outputs, Pow/Atan2 == element-wise out[i*M+j]=op(a[i],b[j]), bit-for-bit). Same broadcast indices, same float op, disjoint output writes. 1104 fj-lax tests pass.",
+  "measurements_same_session_back_to_back": {
+    "pow_broadcast_1024x1024_f64 ([1024,1] ** [1,1024])": { "before_serial_ms": 20.70, "after_threaded_ms": 4.26, "ratio": 4.86 }
+  },
+  "decision": "SHIP. 4.86x on broadcast Pow. broadcast_binary_tensors's float_op gained + Sync. Closes the expensive-elementwise-transcendental vein (same-shape + scalar + broadcast all threaded; cheap memory-bound ops and libm intrinsics correctly excluded).",
+  "follow_ups": "Elementwise-transcendental parallelization is now exhausted. Next structurally-different target: interpreter/dispatch overhead — per-op Value clones in the jaxpr eval loop (fj-dispatch), or arena/COW for intermediate Values.",
+  "date": "2026-06-05"
+}
