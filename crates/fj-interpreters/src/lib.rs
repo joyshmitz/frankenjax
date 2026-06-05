@@ -1169,7 +1169,7 @@ mod tests {
     }
 
     fn scalar_i64_add_literal_chain(addends: &[i64]) -> Jaxpr {
-        let equations = addends
+        let equations: Vec<Equation> = addends
             .iter()
             .enumerate()
             .map(|(idx, addend)| Equation {

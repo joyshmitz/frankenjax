@@ -2125,6 +2125,157 @@ pub struct Equation {
     pub sub_jaxprs: Vec<Jaxpr>,
 }
 
+pub struct EquationList {
+    elements: Arc<Vec<Equation>>,
+}
+
+impl EquationList {
+    #[must_use]
+    pub fn new(equations: Vec<Equation>) -> Self {
+        Self {
+            elements: Arc::new(equations),
+        }
+    }
+
+    #[must_use]
+    pub fn as_slice(&self) -> &[Equation] {
+        self.elements.as_slice()
+    }
+
+    #[must_use]
+    pub fn into_vec(self) -> Vec<Equation> {
+        Arc::try_unwrap(self.elements).unwrap_or_else(|elements| elements.as_ref().clone())
+    }
+
+    fn make_mut(&mut self) -> &mut Vec<Equation> {
+        Arc::make_mut(&mut self.elements)
+    }
+
+    pub fn push(&mut self, equation: Equation) {
+        self.make_mut().push(equation);
+    }
+
+    pub fn extend<I>(&mut self, equations: I)
+    where
+        I: IntoIterator<Item = Equation>,
+    {
+        self.make_mut().extend(equations);
+    }
+}
+
+impl Default for EquationList {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
+}
+
+impl Clone for EquationList {
+    fn clone(&self) -> Self {
+        Self {
+            elements: Arc::clone(&self.elements),
+        }
+    }
+}
+
+impl PartialEq for EquationList {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for EquationList {}
+
+impl std::fmt::Debug for EquationList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.as_slice()).finish()
+    }
+}
+
+impl From<Vec<Equation>> for EquationList {
+    fn from(equations: Vec<Equation>) -> Self {
+        Self::new(equations)
+    }
+}
+
+impl FromIterator<Equation> for EquationList {
+    fn from_iter<T: IntoIterator<Item = Equation>>(iter: T) -> Self {
+        Self::new(iter.into_iter().collect())
+    }
+}
+
+impl Serialize for EquationList {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for EquationList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<Equation>::deserialize(deserializer).map(Self::new)
+    }
+}
+
+impl Deref for EquationList {
+    type Target = [Equation];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl<I> Index<I> for EquationList
+where
+    I: SliceIndex<[Equation]>,
+{
+    type Output = I::Output;
+
+    fn index(&self, index: I) -> &Self::Output {
+        &self.as_slice()[index]
+    }
+}
+
+impl<I> IndexMut<I> for EquationList
+where
+    I: SliceIndex<[Equation]>,
+{
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        &mut self.make_mut()[index]
+    }
+}
+
+impl IntoIterator for EquationList {
+    type Item = Equation;
+    type IntoIter = std::vec::IntoIter<Equation>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.into_vec().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a EquationList {
+    type Item = &'a Equation;
+    type IntoIter = std::slice::Iter<'a, Equation>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut EquationList {
+    type Item = &'a mut Equation;
+    type IntoIter = std::slice::IterMut<'a, Equation>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.make_mut().iter_mut()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Jaxpr {
     pub invars: Vec<VarId>,
@@ -2132,7 +2283,7 @@ pub struct Jaxpr {
     pub outvars: Vec<VarId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<String>,
-    pub equations: Vec<Equation>,
+    pub equations: EquationList,
     #[serde(skip)]
     fingerprint_cache: std::sync::OnceLock<String>,
 }
@@ -2211,14 +2362,14 @@ impl Jaxpr {
         invars: Vec<VarId>,
         constvars: Vec<VarId>,
         outvars: Vec<VarId>,
-        equations: Vec<Equation>,
+        equations: impl Into<EquationList>,
     ) -> Self {
         Self {
             invars,
             constvars,
             outvars,
             effects: Vec::new(),
-            equations,
+            equations: equations.into(),
             fingerprint_cache: std::sync::OnceLock::new(),
         }
     }
@@ -4183,6 +4334,50 @@ mod tests {
                     jaxpr.canonical_fingerprint(),
                     decoded.canonical_fingerprint()
                 );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn jaxpr_equation_storage_clone_isolation_and_plain_serde() {
+        run_logged_test(
+            "jaxpr_equation_storage_clone_isolation_and_plain_serde",
+            &("equation-storage-cow-serde", 3_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let original = build_program(ProgramSpec::SquarePlusLinear);
+                let original_fingerprint = original.canonical_fingerprint().to_owned();
+
+                let mut modified = original.clone();
+                modified.equations[0]
+                    .params
+                    .insert("cow_mutation".to_owned(), "1".to_owned());
+
+                assert!(!original.equations[0].params.contains_key("cow_mutation"));
+                assert!(modified.equations[0].params.contains_key("cow_mutation"));
+                assert_eq!(original.canonical_fingerprint(), original_fingerprint);
+                assert_ne!(
+                    original.canonical_fingerprint(),
+                    modified.canonical_fingerprint()
+                );
+
+                let encoded = serde_json::to_value(&original)
+                    .map_err(|err| format!("to_value failed: {err}"))?;
+                assert!(encoded["equations"].is_array());
+                assert!(!encoded.to_string().contains("EquationList"));
+
+                let decoded: Jaxpr = serde_json::from_value(encoded)
+                    .map_err(|err| format!("decode failed: {err}"))?;
+                assert_eq!(decoded.equations, original.equations);
+                assert_eq!(
+                    decoded.canonical_fingerprint(),
+                    original.canonical_fingerprint()
+                );
+
+                let debug = format!("{original:?}");
+                assert!(debug.contains("equations: ["));
+                assert!(!debug.contains("EquationList"));
                 Ok(Vec::new())
             },
         );

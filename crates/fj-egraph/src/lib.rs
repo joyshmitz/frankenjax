@@ -2818,7 +2818,7 @@ fn optimize_supported_segment(
         Ok(lowered) => lowered,
         Err(_) => {
             return SegmentOptimization {
-                equations: jaxpr.equations.clone(),
+                equations: jaxpr.equations.to_vec(),
                 outvar_remap: jaxpr
                     .outvars
                     .iter()

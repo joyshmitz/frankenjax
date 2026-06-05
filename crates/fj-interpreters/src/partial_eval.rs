@@ -451,7 +451,7 @@ pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
             }
         }
         retained_eqns.reverse();
-        retained_eqns
+        retained_eqns.into()
     } else {
         let mut retain_eqn = vec![false; jaxpr.equations.len()];
         let mut retained_count = 0;

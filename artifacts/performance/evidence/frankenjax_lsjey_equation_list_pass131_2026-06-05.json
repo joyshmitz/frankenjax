@@ -1,0 +1,79 @@
+{
+  "bead": "frankenjax-lsjey",
+  "pass": 131,
+  "crate_scope": ["fj-core", "fj-interpreters", "fj-egraph", "fj-conformance"],
+  "target": "partial_eval/all_known/1000eq and dce/all_used/1000eq",
+  "timestamp_utc": "2026-06-05T21:16:31Z",
+  "hotspot": {
+    "profile_basis": "RCH Criterion profile from bead frankenjax-lsjey showed PE/DCE clone pressure on 1000-equation Jaxprs after prior DCE loop micro-levers were exhausted.",
+    "root_cause": "Jaxpr::clone deep-cloned every Equation even in all-known PE and all-used DCE paths where the equation list is semantically reused unchanged."
+  },
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-lsjey-baseline cargo bench -p fj-interpreters --bench pe_baseline -- 'partial_eval/all_known/1000eq|dce/all_used/1000eq' --sample-size 20 --measurement-time 5 --warm-up-time 2 --noplot",
+    "selected_worker": "ts1",
+    "partial_eval_all_known_1000eq": {
+      "low_ns": 48027.0,
+      "mean_ns": 48689.0,
+      "high_ns": 49339.0
+    },
+    "dce_all_used_1000eq": {
+      "low_us": 53.96,
+      "mean_us": 54.853,
+      "high_us": 55.826
+    }
+  },
+  "after": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-lsjey-candidate2 cargo bench -p fj-interpreters --bench pe_baseline -- 'partial_eval/all_known/1000eq|dce/all_used/1000eq' --sample-size 20 --measurement-time 5 --warm-up-time 2 --noplot",
+    "selected_worker": "ts1",
+    "partial_eval_all_known_1000eq": {
+      "low_ns": 76.052,
+      "mean_ns": 77.127,
+      "high_ns": 77.97
+    },
+    "dce_all_used_1000eq": {
+      "low_us": 5.7026,
+      "mean_us": 5.759,
+      "high_us": 5.8158
+    }
+  },
+  "speedup": {
+    "partial_eval_midpoint_x": 631.2835,
+    "partial_eval_conservative_x": 615.9677,
+    "dce_midpoint_x": 9.5247,
+    "dce_conservative_x": 9.2782
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 5,
+    "effort": 3,
+    "value": 8.3333,
+    "keep_gate": "kept; Score >= 2.0 and same-worker rebench improved both target rows"
+  },
+  "lever": "Replace Jaxpr equation Vec storage with Arc-backed copy-on-write EquationList so unchanged PE/DCE paths clone equation storage shallowly while mutable callers retain Vec-like value semantics.",
+  "alien_primitive": {
+    "source": "alien-graveyard persistent/immutable structural sharing and arena-style bulk lifetime primitive",
+    "applied_shape": "Arc<Vec<Equation>> with copy-on-write mutation and plain serde representation"
+  },
+  "isomorphism": {
+    "ordering_preserved": "EquationList dereferences and iterates as the original equation slice. PE all-known/all-unknown paths reuse the original equation sequence. DCE selective retention still filters original equations in original forward order.",
+    "tie_breaking": "N/A; no comparator, priority, or tie-breaking logic changed.",
+    "floating_point": "Identical/N/A; this changes IR storage and PE/DCE metadata reuse only, not primitive evaluation, arithmetic order, dtype promotion, or rounding.",
+    "rng": "N/A; no random state or seed path changed.",
+    "serialization": "EquationList serializes/deserializes as the same JSON equation array; the new fj-core test verifies no wrapper name appears in serialized Jaxpr JSON.",
+    "cache_fingerprint": "Canonical fingerprint iteration still walks equations in the same order and ignores storage identity; the new fj-core test verifies clone mutation isolation and fingerprint behavior.",
+    "error_surface": "PE/DCE mask validation, Jaxpr validation, and staging oracle error paths are unchanged."
+  },
+  "golden_outputs": {
+    "dce_all_used_large_chain_sha256": "3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8",
+    "verified_by": "RCH cargo test -p fj-interpreters --lib partial_eval -- --nocapture, test_dce_all_used_large_chain_golden_hash"
+  },
+  "verification": {
+    "format": "cargo fmt --check -p fj-core -p fj-interpreters -p fj-egraph: pass",
+    "clippy": "RCH cargo clippy -p fj-core -p fj-interpreters -p fj-egraph --all-targets -- -D warnings: pass",
+    "fj_core_jaxpr_tests": "RCH cargo test -p fj-core --lib jaxpr -- --nocapture: 17 passed, 0 failed",
+    "fj_interpreters_partial_eval_tests": "RCH cargo test -p fj-interpreters --lib partial_eval -- --nocapture: 70 passed, 0 failed",
+    "pe_staging_oracle": "RCH cargo test -p fj-conformance --test pe_staging_oracle -- --nocapture: 20 passed, 0 failed",
+    "ubs": "ubs on touched Rust files exited 1 on pre-existing inventories; no unsafe blocks, fmt clean, clippy clean, build clean, tests build clean, and the touched DCE collect::<Vec<_>>() warning was removed before final proof."
+  },
+  "next_profile_hint": "Re-profile after landing; likely residual targets are selective DCE retained-equation cloning, egraph segment cloning, or a cross-phase SSA def-use index if clone pressure shifts there."
+}
