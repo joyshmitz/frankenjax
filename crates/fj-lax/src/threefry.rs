@@ -110,13 +110,62 @@ pub fn random_fold_in(key: PRNGKey, data: u32) -> PRNGKey {
 /// Matches JAX's partitionable `_threefry_random_bits_partitionable` with `bit_width=32`:
 /// For each sample index `i`, calls `threefry2x32(key, [0, i])` and XORs
 /// the two output words: `result[0] ^ result[1]`.
+///
+/// ThreeFry is counter-based — sample `i` only depends on `i` — so the 20-round ARX
+/// permutation is run on [`LANES`] consecutive counters at once with portable SIMD
+/// (`std::simd`, 100% safe). Each lane reproduces the scalar [`threefry2x32`]
+/// `[0, i]` exactly (integer add/rotate/xor/key-injection are bit-exact element-wise),
+/// so the output is bit-for-bit identical to the scalar map — JAX RNG parity is
+/// preserved (see `simd_generate_u32_bits_matches_scalar`). A scalar tail handles
+/// the `count % LANES` remainder.
 fn generate_u32_bits(key: PRNGKey, count: usize) -> Vec<u32> {
-    (0..count)
-        .map(|i| {
-            let [a, b] = threefry2x32(key.0, [0, i as u32]);
-            a ^ b
-        })
-        .collect()
+    use std::simd::Simd;
+
+    const LANES: usize = 8;
+    const KS_PARITY: u32 = 0x1BD1_1BDA;
+
+    let [k0, k1] = key.0;
+    let ks2 = k0 ^ k1 ^ KS_PARITY;
+    let ksched = [k0, k1, ks2];
+
+    let mut out: Vec<u32> = Vec::with_capacity(count);
+    let chunks = count / LANES;
+
+    let k0v: Simd<u32, LANES> = Simd::splat(k0);
+    let k1v: Simd<u32, LANES> = Simd::splat(k1);
+    // Lane offsets [0, 1, …, LANES-1]; added to each chunk's base counter.
+    let lane_off: Simd<u32, LANES> = Simd::from_array(std::array::from_fn(|r| r as u32));
+
+    for c in 0..chunks {
+        let base = (c * LANES) as u32;
+        // data = [0, counter]; x0 = 0 + k0, x1 = counter + k1.
+        let mut x0 = k0v;
+        let mut x1 = (Simd::splat(base) + lane_off) + k1v;
+
+        for round in 0..NUM_ROUNDS {
+            x0 += x1;
+            let r = ROTATIONS[round % 8];
+            // rotate_left(r) lane-wise: r ∈ {6,13,15,16,17,24,26,29} so 32-r is in 1..=31.
+            let rotated = (x1 << Simd::splat(r)) | (x1 >> Simd::splat(32 - r));
+            x1 = rotated ^ x0;
+
+            if (round + 1) % 4 == 0 {
+                let inject_idx = (round + 1) / 4;
+                x0 += Simd::splat(ksched[inject_idx % 3]);
+                x1 += Simd::splat(ksched[(inject_idx + 1) % 3].wrapping_add(inject_idx as u32));
+            }
+        }
+
+        out.extend_from_slice((x0 ^ x1).as_array());
+    }
+
+    // Scalar tail for the final partial chunk.
+    for i in (chunks * LANES)..count {
+        let [a, b] = threefry2x32(key.0, [0, i as u32]);
+        out.push(a ^ b);
+    }
+
+    out
 }
 
 /// Generate uniform random f64 values in [minval, maxval).
@@ -664,6 +713,62 @@ mod tests {
         let a = threefry2x32(key, counter);
         let b = threefry2x32(key, counter);
         assert_eq!(a, b, "ThreeFry must be deterministic");
+    }
+
+    #[test]
+    fn simd_generate_u32_bits_matches_scalar() {
+        // The portable-SIMD generate_u32_bits must be BIT-for-bit identical to the
+        // scalar per-counter threefry2x32([0, i]) ^ — across keys and across counts
+        // that span full SIMD chunks AND every tail length (0..LANES). RNG parity
+        // with JAX is absolute, so any lane/tail divergence is a hard failure.
+        for key in [
+            PRNGKey([0, 0]),
+            PRNGKey([1, 0]),
+            PRNGKey([0x9E37_79B9, 0x1234_5678]),
+            PRNGKey([u32::MAX, u32::MAX]),
+        ] {
+            // 0..=20 covers chunk=0 (tail-only) through 2.5 chunks at LANES=8.
+            for count in 0..=20usize {
+                let simd = generate_u32_bits(key, count);
+                let scalar: Vec<u32> = (0..count)
+                    .map(|i| {
+                        let [a, b] = threefry2x32(key.0, [0, i as u32]);
+                        a ^ b
+                    })
+                    .collect();
+                assert_eq!(simd, scalar, "key={key:?} count={count}");
+            }
+            // A larger count to exercise many full chunks.
+            let count = 10_007;
+            let simd = generate_u32_bits(key, count);
+            let scalar: Vec<u32> = (0..count)
+                .map(|i| {
+                    let [a, b] = threefry2x32(key.0, [0, i as u32]);
+                    a ^ b
+                })
+                .collect();
+            assert_eq!(simd, scalar, "key={key:?} large count={count}");
+        }
+    }
+
+    #[test]
+    fn threefry_generated_bits_golden_sha256() {
+        let mut streams = Vec::new();
+        for key in [
+            PRNGKey([0, 0]),
+            PRNGKey([1, 0]),
+            PRNGKey([0x9E37_79B9, 0x1234_5678]),
+            PRNGKey([u32::MAX, u32::MAX]),
+        ] {
+            for count in [0_usize, 1, 7, 8, 9, 64, 257, 4096] {
+                streams.push((key.0, count, generate_u32_bits(key, count)));
+            }
+        }
+        let digest = fj_test_utils::fixture_id_from_json(&streams).expect("rng digest");
+        assert_eq!(
+            digest, "e96748ed0520e1648d412ffe3ccddbf966b23fd0828824e0d924e2fa7108c8f5",
+            "ThreeFry generated-bits golden SHA-256 changed"
+        );
     }
 
     #[test]

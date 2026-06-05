@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![feature(portable_simd)]
 
 mod arithmetic;
 pub mod array_creation;
