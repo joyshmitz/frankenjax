@@ -1,0 +1,112 @@
+{
+  "bead": "frankenjax-2ndxj",
+  "pass": 132,
+  "date": "2026-06-05",
+  "crate": "fj-interpreters",
+  "target": "dce/all_used retained-position path",
+  "profile_backing": {
+    "source": "RCH reprofile after frankenjax-lsjey EquationList sharing",
+    "hot_rows": [
+      "dce/all_used/10eq",
+      "dce/all_used/100eq",
+      "dce/all_used/1000eq"
+    ],
+    "alien_primitive": "immutable structural sharing plus retained-position bitset metadata"
+  },
+  "lever": {
+    "description": "Use the existing retained-position/forward-order DCE path for every non-empty Jaxpr instead of reserving it for large Jaxprs.",
+    "files": [
+      "crates/fj-interpreters/src/partial_eval.rs"
+    ],
+    "one_lever": true
+  },
+  "baseline": {
+    "worker": "vmi1149989",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-2ndxj-clean-baseline-ts2 cargo bench -p fj-interpreters --bench pe_baseline -- 'dce/all_used' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "rows": {
+      "dce/all_used/10eq": {
+        "low_ns": 858.64,
+        "mid_ns": 929.25,
+        "high_ns": 1018.80
+      },
+      "dce/all_used/100eq": {
+        "low_us": 7.0515,
+        "mid_us": 7.7847,
+        "high_us": 8.3615
+      },
+      "dce/all_used/1000eq": {
+        "low_us": 7.4654,
+        "mid_us": 8.1137,
+        "high_us": 8.7759
+      }
+    }
+  },
+  "after": {
+    "worker": "vmi1149989",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-2ndxj-threshold16-vmi1149989 cargo bench -p fj-interpreters --bench pe_baseline -- 'dce/all_used' --sample-size 20 --measurement-time 2 --warm-up-time 1 --noplot",
+    "rows": {
+      "dce/all_used/10eq": {
+        "low_ns": 545.34,
+        "mid_ns": 560.19,
+        "high_ns": 575.93
+      },
+      "dce/all_used/100eq": {
+        "low_ns": 534.50,
+        "mid_ns": 582.61,
+        "high_ns": 631.94
+      },
+      "dce/all_used/1000eq": {
+        "low_us": 4.9756,
+        "mid_us": 5.5036,
+        "high_us": 6.0073
+      }
+    }
+  },
+  "speedups": {
+    "midpoint_10eq": 1.66,
+    "midpoint_100eq": 13.36,
+    "midpoint_1000eq": 1.47,
+    "conservative_100eq": 11.16
+  },
+  "score": {
+    "impact": 4,
+    "confidence": 5,
+    "effort": 1,
+    "value": 20.0,
+    "keep": true
+  },
+  "isomorphism": {
+    "ordering": "Preserved. Both paths compute liveness by walking equations in reverse; retained_by_position emits the original forward equation order.",
+    "tie_breaking": "Not applicable. DCE has no tie-breaking beyond original equation order, which is preserved.",
+    "floating_point": "Unchanged. The lever does not change arithmetic, literals, dtype promotion, or abstract values.",
+    "rng": "Unchanged. DCE uses no RNG state or seed.",
+    "used_inputs": "Preserved by the same needed-input propagation and retained outvar filtering.",
+    "golden_sha256": "3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8"
+  },
+  "verification": [
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 rch exec -- cargo test -p fj-interpreters --lib test_dce_all_used_large_chain_golden_hash -- --nocapture",
+      "result": "pass"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 rch exec -- cargo check -p fj-interpreters --all-targets",
+      "result": "pass; peer fj-lax dead_code warning observed"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 rch exec -- cargo clippy -p fj-interpreters --all-targets --no-deps -- -D warnings",
+      "result": "pass; peer fj-lax dead_code warning observed"
+    },
+    {
+      "command": "cargo fmt -p fj-interpreters -- --check",
+      "result": "pass"
+    },
+    {
+      "command": "git diff --check -- crates/fj-interpreters/src/partial_eval.rs",
+      "result": "pass"
+    },
+    {
+      "command": "ubs crates/fj-interpreters/src/partial_eval.rs",
+      "result": "exit 1 on pre-existing file-wide inventory; no DCE-hunk finding"
+    }
+  ]
+}
