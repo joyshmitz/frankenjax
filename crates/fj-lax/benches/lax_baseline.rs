@@ -2919,6 +2919,16 @@ fn bench_rfft_batch_64x1000(c: &mut Criterion) {
     });
 }
 
+// Same-invocation Bluestein control: 1003 = 17·59 has a prime factor > 13, so it
+// stays on the Bluestein path while 64x1000 (2^3·5^3) takes mixed-radix.
+fn bench_rfft_batch_64x1003_bluestein(c: &mut Criterion) {
+    let input = real_matrix(64, 1003);
+    let p = no_params();
+    c.bench_function("eval/rfft_batch_64x1003_bluestein_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Rfft, std::slice::from_ref(&input), &p))
+    });
+}
+
 // Batched power-of-two real FFT: 2048 rows of length 256. The radix-2 transform
 // is cheap so the per-row work fans out across threads (dense complex output).
 fn bench_rfft_batch_2048x256(c: &mut Criterion) {
@@ -3505,6 +3515,7 @@ criterion_group!(
     bench_complex_build_literal_512k,
     bench_rfft_256,
     bench_rfft_batch_64x1000,
+    bench_rfft_batch_64x1003_bluestein,
     bench_rfft_batch_2048x256,
     bench_rfft_batch_2048x256_dense_input,
     bench_fft_batch_2048x256_real_dense,

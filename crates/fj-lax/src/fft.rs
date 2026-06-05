@@ -1156,10 +1156,11 @@ pub(crate) fn eval_rfft(
     let out_shape = Shape { dims: out_dims };
 
     let copy_len = fft_length.min(input_last);
-    // Non-power-of-two transform length: build the Bluestein plan once and reuse
-    // it across every row (chirp table + kernel FFT are identical per row).
+    // Non-power-of-two transform length: build the per-row plan once and reuse it
+    // across every row. BatchFftPlan picks mixed-radix for smooth lengths (e.g.
+    // 1000 = 2³·5³) and Bluestein for large-prime lengths.
     let plan = (fft_length > 1 && !fft_length.is_power_of_two())
-        .then(|| BluesteinPlan::new(fft_length, false));
+        .then(|| BatchFftPlan::new(fft_length, false));
     let real_plan = (fft_length >= 2 && fft_length.is_power_of_two())
         .then(|| RealRfftPower2Plan::new(fft_length));
 
@@ -1234,7 +1235,7 @@ pub(crate) fn eval_rfft(
 #[allow(clippy::too_many_arguments)]
 fn rfft_rows_into(
     elements: &[(f64, f64)],
-    plan: Option<&BluesteinPlan>,
+    plan: Option<&BatchFftPlan>,
     real_plan: Option<&RealRfftPower2Plan>,
     fft_length: usize,
     input_last: usize,
@@ -1265,13 +1266,16 @@ fn rfft_rows_into(
     let mut padded = vec![(0.0, 0.0); fft_length];
     let mut transformed = Vec::with_capacity(fft_length);
     let mut scratch = BluesteinScratch::default();
+    let mut mixed_scratch = Vec::new();
     for r in 0..rows {
         let start = (row_start + r) * input_last;
         let batch_slice = &elements[start..start + input_last];
         padded[..copy_len].copy_from_slice(&batch_slice[..copy_len]);
         padded[copy_len..].fill((0.0, 0.0));
         match plan {
-            Some(plan) => plan.apply_into(&padded, &mut scratch, &mut transformed),
+            Some(plan) => {
+                plan.apply_into(&padded, &mut scratch, &mut mixed_scratch, false, &mut transformed)
+            }
             None => fft_1d_into(&padded, &mut transformed),
         }
         out_blk[r * out_last..r * out_last + out_last].copy_from_slice(&transformed[..out_last]);
@@ -1295,7 +1299,7 @@ fn rfft_rows_into(
 #[allow(clippy::too_many_arguments)]
 fn irfft_rows_f64_into(
     elements: &[(f64, f64)],
-    plan: Option<&BluesteinPlan>,
+    plan: Option<&BatchFftPlan>,
     fft_length: usize,
     input_last: usize,
     copy_len: usize,
@@ -1306,6 +1310,7 @@ fn irfft_rows_f64_into(
     let mut full = vec![(0.0, 0.0); fft_length];
     let mut transformed = Vec::with_capacity(fft_length);
     let mut scratch = BluesteinScratch::default();
+    let mut mixed_scratch = Vec::new();
     for r in 0..rows {
         let start = (row_start + r) * input_last;
         let half_spectrum = &elements[start..start + input_last];
@@ -1326,7 +1331,9 @@ fn irfft_rows_f64_into(
         }
 
         match plan {
-            Some(plan) => plan.apply_into(&full, &mut scratch, &mut transformed),
+            Some(plan) => {
+                plan.apply_into(&full, &mut scratch, &mut mixed_scratch, true, &mut transformed)
+            }
             None => ifft_1d_into(&full, &mut transformed),
         }
 
@@ -1389,10 +1396,10 @@ pub(crate) fn eval_irfft(
     let output_count = checked_output_element_count(primitive, batch_size, fft_length)?;
 
     let copy_len = fft_length.min(input_last);
-    // Non-power-of-two transform length: build the inverse Bluestein plan once
-    // and reuse it across every row.
+    // Non-power-of-two transform length: build the inverse per-row plan once
+    // (mixed-radix for smooth lengths, Bluestein for large-prime lengths).
     let plan = (fft_length > 1 && !fft_length.is_power_of_two())
-        .then(|| BluesteinPlan::new(fft_length, true));
+        .then(|| BatchFftPlan::new(fft_length, true));
 
     // Dense + threaded fast path for the common F64 output (Complex128 input).
     // Rows are independent (Hermitian reconstruct + inverse transform + real
@@ -1458,6 +1465,7 @@ pub(crate) fn eval_irfft(
     let mut full = vec![(0.0, 0.0); fft_length];
     let mut transformed = Vec::with_capacity(fft_length);
     let mut scratch = BluesteinScratch::default();
+    let mut mixed_scratch = Vec::new();
 
     for batch in 0..batch_size {
         let start = batch * input_last;
@@ -1480,7 +1488,9 @@ pub(crate) fn eval_irfft(
         }
 
         match &plan {
-            Some(plan) => plan.apply_into(&full, &mut scratch, &mut transformed),
+            Some(plan) => {
+                plan.apply_into(&full, &mut scratch, &mut mixed_scratch, true, &mut transformed)
+            }
             None => ifft_1d_into(&full, &mut transformed),
         }
 
