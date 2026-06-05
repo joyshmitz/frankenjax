@@ -444,6 +444,33 @@ fn bench_add_broadcast_col_1024x1024_i64(c: &mut Criterion) {
     });
 }
 
+fn bench_select_1024x1024_f64(c: &mut Criterion) {
+    // jnp.where(mask, a, b): dense-bool cond + dense-f64 branches [1024,1024].
+    // The cond is dense Bool storage (as a comparison now produces), exercising
+    // the as_bool_slice + as_f64_slice select fast path.
+    let n = 1024usize;
+    let mask: Vec<bool> = (0..n * n).map(|i| (i * 7 + 1) % 3 == 0).collect();
+    let a: Vec<f64> = (0..n * n).map(|i| i as f64 * 1e-4).collect();
+    let b: Vec<f64> = (0..n * n).map(|i| -(i as f64) * 2e-4).collect();
+    let dims = vec![n as u32, n as u32];
+    let cond = Value::Tensor(
+        TensorValue::new_bool_values(Shape { dims: dims.clone() }, mask).unwrap(),
+    );
+    let on_true =
+        Value::Tensor(TensorValue::new_f64_values(Shape { dims: dims.clone() }, a).unwrap());
+    let on_false = Value::Tensor(TensorValue::new_f64_values(Shape { dims }, b).unwrap());
+    let p = no_params();
+    c.bench_function("eval/select_1024x1024_f64", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::Select,
+                &[cond.clone(), on_true.clone(), on_false.clone()],
+                &p,
+            )
+        })
+    });
+}
+
 fn bench_lt_same_shape_1024x1024_f64(c: &mut Criterion) {
     // Same-shape [1024,1024] < [1024,1024], f64 → Bool mask (the most common
     // comparison shape). Exercises the dense-Bool output write path.
@@ -3323,6 +3350,7 @@ criterion_group!(
     bench_add_broadcast_col_1024x1024_f64,
     bench_add_broadcast_row_1024x1024_i64,
     bench_add_broadcast_col_1024x1024_i64,
+    bench_select_1024x1024_f64,
     bench_lt_same_shape_1024x1024_f64,
     bench_lt_broadcast_row_1024x1024_f64,
     bench_lt_broadcast_row_1024x1024_i64,

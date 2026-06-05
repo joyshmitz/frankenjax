@@ -2961,6 +2961,43 @@ fn select_f64_same_shape_fast_path(
     on_true: &TensorValue,
     on_false: &TensorValue,
 ) -> Result<Option<Value>, EvalError> {
+    // Dense path: read both branches from their contiguous f64 backings and pick
+    // per the bool cond into a dense f64 output. When the cond is dense Bool too
+    // this is a branchless contiguous select the compiler vectorizes, and avoids
+    // materializing any branch/cond/output as a 24-byte Literal — the binding cost
+    // for jnp.where(mask, a, b) where the mask comes from a (now dense-Bool)
+    // comparison. Bit-identical: for dense f64, the stored value round-trips its
+    // bits exactly (incl. NaN payloads), and the chosen value matches the prior
+    // `Literal::F64Bits(if flag { t } else { f })`.
+    if let (Some(t), Some(f)) = (
+        on_true.elements.as_f64_slice(),
+        on_false.elements.as_f64_slice(),
+    ) {
+        if let Some(conds) = cond.elements.as_bool_slice() {
+            let out: Vec<f64> = conds
+                .iter()
+                .zip(t)
+                .zip(f)
+                .map(|((&c, &tv), &fv)| if c { tv } else { fv })
+                .collect();
+            return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+                cond.shape.clone(),
+                out,
+            )?)));
+        }
+        let mut out = Vec::with_capacity(t.len());
+        for (i, c) in cond.elements.iter().enumerate() {
+            let Literal::Bool(flag) = *c else {
+                return Ok(None);
+            };
+            out.push(if flag { t[i] } else { f[i] });
+        }
+        return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+            cond.shape.clone(),
+            out,
+        )?)));
+    }
+
     let mut elements = Vec::with_capacity(cond.elements.len());
     for ((c, t), f) in cond
         .elements
@@ -3005,6 +3042,20 @@ fn select_i64_same_shape_fast_path(
     ) else {
         return Ok(None);
     };
+    // Dense Bool cond: branchless contiguous select over the two i64 backings,
+    // no per-element Literal materialization of the mask.
+    if let Some(conds) = cond.elements.as_bool_slice() {
+        let out: Vec<i64> = conds
+            .iter()
+            .zip(true_values)
+            .zip(false_values)
+            .map(|((&c, &tv), &fv)| if c { tv } else { fv })
+            .collect();
+        return Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+            cond.shape.clone(),
+            out,
+        )?)));
+    }
     let conds = cond.elements.as_slice();
     let mut out = Vec::with_capacity(conds.len());
     for (i, c) in conds.iter().enumerate() {
