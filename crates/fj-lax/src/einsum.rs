@@ -206,7 +206,11 @@ pub fn einsum2(
 
     // label -> position in the output coord list / summed-index list.
     let out_pos: HashMap<char, usize> = sub_out.chars().enumerate().map(|(i, c)| (c, i)).collect();
-    let sum_pos: HashMap<char, usize> = sum_indices.iter().enumerate().map(|(i, &c)| (c, i)).collect();
+    let sum_pos: HashMap<char, usize> = sum_indices
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (c, i))
+        .collect();
 
     // Per-axis plan entries: (stride, is_summed, pos) where `pos` indexes
     // out_coords for free axes or the summed-axis list for contracted axes.
@@ -393,7 +397,11 @@ pub fn einsum1(
     // odometer axes and dims stay aligned.
     let sum_labels: Vec<char> = unique_sum.iter().copied().collect();
     let sum_extent: Vec<usize> = sum_labels.iter().map(|&c| index_dims[&c]).collect();
-    let sum_pos: HashMap<char, usize> = sum_labels.iter().enumerate().map(|(j, &c)| (c, j)).collect();
+    let sum_pos: HashMap<char, usize> = sum_labels
+        .iter()
+        .enumerate()
+        .map(|(j, &c)| (c, j))
+        .collect();
 
     // Per-axis plan: (stride, is_summed, pos) where pos indexes out_coords (free)
     // or the summed-axis list (summed).
@@ -538,7 +546,8 @@ fn try_einsum2_matmul(
     let rhs_stride = k.checked_mul(n)?;
     let out_stride = m.checked_mul(n)?;
     // Defensive bounds check (the caller validated dims vs subscripts already).
-    if a.len() < batch_size.checked_mul(lhs_stride)? || b.len() < batch_size.checked_mul(rhs_stride)?
+    if a.len() < batch_size.checked_mul(lhs_stride)?
+        || b.len() < batch_size.checked_mul(rhs_stride)?
     {
         return None;
     }
@@ -547,7 +556,9 @@ fn try_einsum2_matmul(
     for bt in 0..batch_size {
         let a_slice = &a[bt * lhs_stride..bt * lhs_stride + lhs_stride];
         let b_slice = &b[bt * rhs_stride..bt * rhs_stride + rhs_stride];
-        out.extend_from_slice(&crate::tensor_contraction::matmul_2d(a_slice, m, k, b_slice, n));
+        out.extend_from_slice(&crate::tensor_contraction::matmul_2d(
+            a_slice, m, k, b_slice, n,
+        ));
     }
 
     let mut out_shape: Vec<usize> = a_shape[..nb].to_vec();
@@ -600,7 +611,9 @@ mod tests {
         // references bit-for-bit. Covers matrix-vector, a@b^T, Frobenius inner
         // product, batched dot, and outer product.
         let (m, k, n) = (6usize, 5usize, 4usize);
-        let am: Vec<f64> = (0..m * k).map(|i| (i as f64 * 0.053).sin() * 2.0 - 0.3).collect();
+        let am: Vec<f64> = (0..m * k)
+            .map(|i| (i as f64 * 0.053).sin() * 2.0 - 0.3)
+            .collect();
 
         // matrix-vector "ij,j->i": want[i] = sum_j a[i,j]*v[j]
         let v: Vec<f64> = (0..k).map(|j| (j as f64 * 0.21).cos() * 1.1).collect();
@@ -614,7 +627,10 @@ mod tests {
         }
         let (got, sh) = einsum2("ij,j->i", &am, &[m, k], &v, &[k]).unwrap();
         assert_eq!(sh, vec![m]);
-        assert!(got.iter().zip(&mv).all(|(g, w)| g.to_bits() == w.to_bits()), "matvec");
+        assert!(
+            got.iter().zip(&mv).all(|(g, w)| g.to_bits() == w.to_bits()),
+            "matvec"
+        );
 
         // a @ b^T "ij,kj->ik": want[i,k2] = sum_j a[i,j]*b[k2,j]
         let bk: Vec<f64> = (0..n * k).map(|i| (i as f64 * 0.037).cos() * 1.3).collect();
@@ -630,7 +646,12 @@ mod tests {
         }
         let (got, sh) = einsum2("ij,kj->ik", &am, &[m, k], &bk, &[n, k]).unwrap();
         assert_eq!(sh, vec![m, n]);
-        assert!(got.iter().zip(&abt).all(|(g, w)| g.to_bits() == w.to_bits()), "a@b^T");
+        assert!(
+            got.iter()
+                .zip(&abt)
+                .all(|(g, w)| g.to_bits() == w.to_bits()),
+            "a@b^T"
+        );
 
         // Frobenius "ij,ij->": want = sum_ij a[i,j]*c[i,j]
         let c2: Vec<f64> = (0..m * k).map(|i| (i as f64 * 0.067).sin() + 0.5).collect();
@@ -646,7 +667,11 @@ mod tests {
         // implementation-defined (the `sum_indices` set order) and unchanged by
         // this rewrite, so assert value equality within tolerance rather than
         // exact bits against a fixed-order reference.
-        assert!((got[0] - fro).abs() < 1e-9, "frobenius: {} vs {fro}", got[0]);
+        assert!(
+            (got[0] - fro).abs() < 1e-9,
+            "frobenius: {} vs {fro}",
+            got[0]
+        );
 
         // batched dot "bn,bn->b": want[b] = sum_n a[b,n]*c[b,n]
         let mut bd = vec![0.0f64; m];
@@ -659,7 +684,10 @@ mod tests {
         }
         let (got, sh) = einsum2("bn,bn->b", &am, &[m, k], &c2, &[m, k]).unwrap();
         assert_eq!(sh, vec![m]);
-        assert!(got.iter().zip(&bd).all(|(g, w)| g.to_bits() == w.to_bits()), "batched dot");
+        assert!(
+            got.iter().zip(&bd).all(|(g, w)| g.to_bits() == w.to_bits()),
+            "batched dot"
+        );
 
         // outer "i,j->ij": want[i,j] = u[i]*w[j]
         let u: Vec<f64> = (0..m).map(|i| (i as f64 + 1.0) * 0.7).collect();
@@ -672,7 +700,12 @@ mod tests {
         }
         let (got, sh) = einsum2("i,j->ij", &u, &[m], &w2, &[n]).unwrap();
         assert_eq!(sh, vec![m, n]);
-        assert!(got.iter().zip(&outp).all(|(g, w)| g.to_bits() == w.to_bits()), "outer");
+        assert!(
+            got.iter()
+                .zip(&outp)
+                .all(|(g, w)| g.to_bits() == w.to_bits()),
+            "outer"
+        );
     }
 
     #[test]
@@ -681,7 +714,9 @@ mod tests {
         // must equal explicit textbook references bit-for-bit; multi-axis sum is
         // checked within tolerance (its visitation order is set-defined).
         let (r, c) = (5usize, 7usize);
-        let m: Vec<f64> = (0..r * c).map(|i| (i as f64 * 0.041).sin() * 2.0 - 0.4).collect();
+        let m: Vec<f64> = (0..r * c)
+            .map(|i| (i as f64 * 0.041).sin() * 2.0 - 0.4)
+            .collect();
 
         // transpose "ij->ji": want[j,i] = m[i,j]
         let mut tr = vec![0.0f64; c * r];
@@ -692,7 +727,10 @@ mod tests {
         }
         let (got, sh) = einsum1("ij->ji", &m, &[r, c]).unwrap();
         assert_eq!(sh, vec![c, r]);
-        assert!(got.iter().zip(&tr).all(|(g, w)| g.to_bits() == w.to_bits()), "transpose");
+        assert!(
+            got.iter().zip(&tr).all(|(g, w)| g.to_bits() == w.to_bits()),
+            "transpose"
+        );
 
         // single-axis reduction "ij->i": want[i] = sum_j m[i,j]
         let mut rs = vec![0.0f64; r];
@@ -705,7 +743,10 @@ mod tests {
         }
         let (got, sh) = einsum1("ij->i", &m, &[r, c]).unwrap();
         assert_eq!(sh, vec![r]);
-        assert!(got.iter().zip(&rs).all(|(g, w)| g.to_bits() == w.to_bits()), "row sum");
+        assert!(
+            got.iter().zip(&rs).all(|(g, w)| g.to_bits() == w.to_bits()),
+            "row sum"
+        );
 
         // square cases: diagonal "ii->i" and trace "ii->"
         let n = 6usize;
@@ -718,14 +759,21 @@ mod tests {
         }
         let (got, sh) = einsum1("ii->i", &sq, &[n, n]).unwrap();
         assert_eq!(sh, vec![n]);
-        assert!(got.iter().zip(&diag).all(|(g, w)| g.to_bits() == w.to_bits()), "diagonal");
+        assert!(
+            got.iter()
+                .zip(&diag)
+                .all(|(g, w)| g.to_bits() == w.to_bits()),
+            "diagonal"
+        );
         let (got, sh) = einsum1("ii->", &sq, &[n, n]).unwrap();
         assert!(sh.is_empty());
         assert_eq!(got[0].to_bits(), trace.to_bits(), "trace");
 
         // multi-axis sum "ijk->i": value within tolerance (sum order set-defined).
         let (d0, d1, d2) = (4usize, 3usize, 5usize);
-        let t3: Vec<f64> = (0..d0 * d1 * d2).map(|i| (i as f64 * 0.013).sin()).collect();
+        let t3: Vec<f64> = (0..d0 * d1 * d2)
+            .map(|i| (i as f64 * 0.013).sin())
+            .collect();
         let mut want3 = vec![0.0f64; d0];
         for i in 0..d0 {
             let mut s = 0.0;
@@ -738,7 +786,10 @@ mod tests {
         }
         let (got, sh) = einsum1("ijk->i", &t3, &[d0, d1, d2]).unwrap();
         assert_eq!(sh, vec![d0]);
-        assert!(got.iter().zip(&want3).all(|(g, w)| (g - w).abs() < 1e-9), "3d sum");
+        assert!(
+            got.iter().zip(&want3).all(|(g, w)| (g - w).abs() < 1e-9),
+            "3d sum"
+        );
     }
 
     #[test]
@@ -747,8 +798,12 @@ mod tests {
         // the textbook per-batch ascending-contracted-index reference bit-for-bit.
         let (b0, b1, m, k, n) = (3usize, 2usize, 5usize, 7usize, 4usize);
         let bsz = b0 * b1;
-        let a: Vec<f64> = (0..bsz * m * k).map(|i| (i as f64 * 0.029).sin() * 2.0).collect();
-        let b: Vec<f64> = (0..bsz * k * n).map(|i| (i as f64 * 0.037).cos() * 1.3).collect();
+        let a: Vec<f64> = (0..bsz * m * k)
+            .map(|i| (i as f64 * 0.029).sin() * 2.0)
+            .collect();
+        let b: Vec<f64> = (0..bsz * k * n)
+            .map(|i| (i as f64 * 0.037).cos() * 1.3)
+            .collect();
 
         let mut want = vec![0.0f64; bsz * m * n];
         for bt in 0..bsz {
@@ -766,7 +821,12 @@ mod tests {
         // 1 batch dim (bsz flattened) and 2 batch dims [b0,b1].
         type BatchedMatmulCase = (&'static str, Vec<usize>, Vec<usize>, Vec<usize>);
         let cases: [BatchedMatmulCase; 2] = [
-            ("bij,bjk->bik", vec![bsz, m, k], vec![bsz, k, n], vec![bsz, m, n]),
+            (
+                "bij,bjk->bik",
+                vec![bsz, m, k],
+                vec![bsz, k, n],
+                vec![bsz, m, n],
+            ),
             (
                 "cdij,cdjk->cdik",
                 vec![b0, b1, m, k],
@@ -778,7 +838,11 @@ mod tests {
             let (got, shape) = einsum2(subs, &a, &ash, &b, &bsh).unwrap();
             assert_eq!(shape, want_shape, "shape for {subs}");
             for idx in 0..bsz * m * n {
-                assert_eq!(got[idx].to_bits(), want[idx].to_bits(), "{subs} mismatch at {idx}");
+                assert_eq!(
+                    got[idx].to_bits(),
+                    want[idx].to_bits(),
+                    "{subs} mismatch at {idx}"
+                );
             }
         }
     }
