@@ -154,6 +154,30 @@ fn bench_add_1k_f64_vector(c: &mut Criterion) {
     });
 }
 
+// 1M-element same-shape Pow (a^b via f64::powf): per-element powf (~tens of ns)
+// dominates memory traffic, so the elementwise op is compute-bound and threads.
+fn bench_pow_1m_f64_vec(c: &mut Criterion) {
+    let a: Vec<f64> = (0..1 << 20).map(|i| 1.0 + (i % 97) as f64 * 0.01).collect();
+    let b: Vec<f64> = (0..1 << 20).map(|i| 0.5 + (i % 13) as f64 * 0.1).collect();
+    let lhs = Value::vector_f64(&a).unwrap();
+    let rhs = Value::vector_f64(&b).unwrap();
+    let p = no_params();
+    c.bench_function("eval/pow_1m_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Pow, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_atan2_1m_f64_vec(c: &mut Criterion) {
+    let a: Vec<f64> = (0..1 << 20).map(|i| (i % 211) as f64 - 105.0).collect();
+    let b: Vec<f64> = (0..1 << 20).map(|i| (i % 307) as f64 - 153.0).collect();
+    let lhs = Value::vector_f64(&a).unwrap();
+    let rhs = Value::vector_f64(&b).unwrap();
+    let p = no_params();
+    c.bench_function("eval/atan2_1m_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Atan2, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 fn bench_div_1k_f64_vector(c: &mut Criterion) {
     let data: Vec<f64> = (0..1000).map(|i| (i as f64 + 1.0) * 0.001).collect();
     let lhs = Value::vector_f64(&data).unwrap();
@@ -2595,6 +2619,8 @@ criterion_group!(
     bench_add_1k_vector,
     bench_mul_1k_vector,
     bench_add_1k_f64_vector,
+    bench_pow_1m_f64_vec,
+    bench_atan2_1m_f64_vec,
     bench_div_1k_f64_vector,
     bench_add_64k_f64_vec,
     bench_add_64k_f64_dense_reference,

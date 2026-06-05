@@ -1,0 +1,15 @@
+{
+  "bead": "frankenjax-jo7l8",
+  "crate": "fj-lax (arithmetic)",
+  "target": "Same-shape expensive binary elementwise: Pow, Atan2, Hypot, LogAddExp, XLogY on dense F64. eval_same_shape_f64_binop only fast-pathed Add/Sub/Mul/Div/Max/Min; these expensive ops returned None and fell to the generic per-Literal loop (materialize Literals from the dense backing + per-element match + transcendental), so they were doubly slow (no dense path AND serial).",
+  "lever": "Add eval_same_shape_f64_expensive_parallel: when both operands are same-shape dense F64 and the op is Pow/Atan2/Hypot/LogAddExp/XLogY and the length >= 1<<16, read the packed f64 slices and apply the exact same float_op across scoped threads (std::thread::scope, disjoint output blocks). These ops are compute-bound (powf/atan2 ~tens of ns/elem >> memory traffic), so threading scales near-linearly. Cheap memory-bound ops (add/sub/mul/div/max/min) are intentionally EXCLUDED — they keep their serial dense fast path (threading regresses them on large-L3 hosts, confirmed separately on gather). int_op/float_op gained a + Sync bound.",
+  "isomorphism": "BIT-EXACT. threaded_expensive_binary_bit_identical_to_reference (n=1<<16 threaded Pow/Atan2/Hypot == element-wise f64::powf/atan2/hypot reference, bit-for-bit). Each element independent, identical float_op as the generic path. 1101 fj-lax tests pass.",
+  "measurements_same_session_back_to_back": {
+    "pow_1m_f64_vec":   { "before_serial_generic_ms": 70.29, "after_threaded_dense_ms": 6.19, "ratio": 11.4 },
+    "atan2_1m_f64_vec": { "before_serial_generic_ms": 85.15, "after_threaded_dense_ms": 6.81, "ratio": 12.5 }
+  },
+  "score": "impact 5 (pow/atan2/hypot/logaddexp ubiquitous in scientific ML; were on the slowest generic path) x confidence 5 (bit-exact, compute-bound so no L3/mem-bound regression risk, 1101 tests) / effort 2 = 12.5",
+  "decision": "SHIP. 11.4x (Pow) / 12.5x (Atan2) on 1M dense f64. The win combines a missing dense path + threading of a genuinely compute-bound op. Clears Score>=2.0 by a wide margin.",
+  "notes": "This turn first rejected two memory-bound-parallelization attempts (single-line f64 cumsum is FP-non-associative so not bit-exactly parallelizable; gather threading REGRESSED 1.67x because the 32MB table fits this host's 128MB L3 -> mem-bound, not latency-bound). Pivoting to a COMPUTE-bound target (expensive transcendental binops) was the correct read of where parallelization still pays.",
+  "date": "2026-06-05"
+}
