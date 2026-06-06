@@ -8475,6 +8475,62 @@ fn jvp_rule(
 
 /// JVP rule for multi-output primitives.
 /// Given primals, tangents, and primal output values, computes output tangents.
+// ── Small complex helpers for the (non-symmetric) Eig JVP ────────────
+#[inline]
+fn cad(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0 + b.0, a.1 + b.1)
+}
+#[inline]
+fn csub(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0 - b.0, a.1 - b.1)
+}
+#[inline]
+fn cmul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+}
+#[inline]
+fn cdiv(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let d = b.0 * b.0 + b.1 * b.1;
+    ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+}
+/// Extract a tensor's elements as complex (real → zero imaginary).
+fn extract_complex_elems(v: &Value) -> Result<Vec<(f64, f64)>, AdError> {
+    let t = v
+        .as_tensor()
+        .ok_or_else(|| AdError::EvalFailed("eig JVP: expected tensor".to_owned()))?;
+    t.elements
+        .iter()
+        .map(|l| {
+            l.as_complex128()
+                .or_else(|| l.as_complex64().map(|(r, i)| (r as f64, i as f64)))
+                .or_else(|| l.as_f64().map(|r| (r, 0.0)))
+                .ok_or_else(|| AdError::EvalFailed("eig JVP: non-numeric element".to_owned()))
+        })
+        .collect()
+}
+/// Row-major n×n complex matrix product.
+fn cmatmul_n(a: &[(f64, f64)], b: &[(f64, f64)], n: usize) -> Vec<(f64, f64)> {
+    let mut out = vec![(0.0_f64, 0.0_f64); n * n];
+    for i in 0..n {
+        for k in 0..n {
+            let aik = a[i * n + k];
+            for j in 0..n {
+                out[i * n + j] = cad(out[i * n + j], cmul(aik, b[k * n + j]));
+            }
+        }
+    }
+    out
+}
+fn build_complex_tensor(dims: Vec<u32>, data: &[(f64, f64)]) -> Result<Value, AdError> {
+    let elements: Vec<Literal> = data
+        .iter()
+        .map(|&(re, im)| Literal::from_complex128(re, im))
+        .collect();
+    let t = TensorValue::new(DType::Complex128, Shape { dims }, elements)
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+    Ok(Value::Tensor(t))
+}
+
 fn jvp_rule_multi(
     primitive: Primitive,
     _primals: &[Value],
@@ -8483,6 +8539,53 @@ fn jvp_rule_multi(
     _params: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, AdError> {
     match primitive {
+        // ── Eig JVP (non-symmetric) ──
+        // A = V diag(λ) V⁻¹. JAX has eig_jvp_rule (but no VJP). Given tangent dA:
+        //   M  = V⁻¹ dA V;  dλ = diag(M);  dV = V (F ∘ M), F[i,j]=1/(λ_j-λ_i), i≠j.
+        // Complex throughout (V⁻¹ via the complex Solve primitive). Repeated
+        // eigenvalues make F blow up to inf/NaN, matching JAX.
+        Primitive::Eig => {
+            let lam = &primal_outputs[0];
+            let vmat = &primal_outputs[1];
+            let da = &tangents[0];
+            let n = vmat
+                .as_tensor()
+                .ok_or_else(|| AdError::EvalFailed("Eig JVP: V must be tensor".to_owned()))?
+                .shape
+                .dims[0] as usize;
+            let lam_c = extract_complex_elems(lam)?;
+            let v_c = extract_complex_elems(vmat)?;
+            let da_c = extract_complex_elems(da)?;
+            // V⁻¹ = solve(V, I) (complex).
+            let mut eye = vec![(0.0_f64, 0.0_f64); n * n];
+            for i in 0..n {
+                eye[i * n + i] = (1.0, 0.0);
+            }
+            let eye_val = build_complex_tensor(vec![n as u32, n as u32], &eye)?;
+            let vinv_val =
+                eval_primitive(Primitive::Solve, &[vmat.clone(), eye_val], &BTreeMap::new())
+                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let vinv_c = extract_complex_elems(&vinv_val)?;
+            // M = V⁻¹ dA V.
+            let m = cmatmul_n(&cmatmul_n(&vinv_c, &da_c, n), &v_c, n);
+            // dλ = diag(M).
+            let dlam: Vec<(f64, f64)> = (0..n).map(|i| m[i * n + i]).collect();
+            // F ∘ M.
+            let mut fm = vec![(0.0_f64, 0.0_f64); n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    if i != j {
+                        fm[i * n + j] = cdiv(m[i * n + j], csub(lam_c[j], lam_c[i]));
+                    }
+                }
+            }
+            // dV = V (F ∘ M).
+            let dv = cmatmul_n(&v_c, &fm, n);
+            Ok(vec![
+                build_complex_tensor(vec![n as u32], &dlam)?,
+                build_complex_tensor(vec![n as u32, n as u32], &dv)?,
+            ])
+        }
         // ── Eigh JVP ──
         // A = V diag(w) V^T.  dA → (dw, dV)
         // M = V^T dA V;  dw = diag(M);  dV = V (F ⊙ M)
