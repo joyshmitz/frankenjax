@@ -2337,6 +2337,64 @@ pub(crate) fn eval_eigh(
 
 // ── General Linear Solve ────────────────────────────────────────────
 
+/// Solve the complex system `A x = B` (A is n×n, B is n×`ncols`, both row-major
+/// complex) by Gaussian elimination with partial pivoting on the augmented matrix
+/// `[A | B]`. Returns the n×`ncols` solution row-major. A singular `A` is not an
+/// error: the zero/near-zero pivot divides through to inf/NaN, matching `eval_solve`'s
+/// real-path contract (JAX returns inf/NaN; NumPy raises). All `ncols` right-hand
+/// sides share one O(n³) factorization.
+fn complex_solve_system(
+    a: &[(f64, f64)],
+    b: &[(f64, f64)],
+    n: usize,
+    ncols: usize,
+) -> Vec<(f64, f64)> {
+    let w = n + ncols;
+    let mut m = vec![(0.0_f64, 0.0_f64); n * w];
+    for i in 0..n {
+        m[i * w..i * w + n].copy_from_slice(&a[i * n..i * n + n]);
+        m[i * w + n..i * w + w].copy_from_slice(&b[i * ncols..i * ncols + ncols]);
+    }
+
+    for col in 0..n {
+        // Partial pivot: largest-magnitude entry at/below the diagonal (best
+        // available conditioning; a zero best means a singular column → inf/NaN).
+        let mut piv = col;
+        let mut best = complex_abs(m[col * w + col]);
+        for r in (col + 1)..n {
+            let mag = complex_abs(m[r * w + col]);
+            if mag > best {
+                best = mag;
+                piv = r;
+            }
+        }
+        if piv != col {
+            for c in 0..w {
+                m.swap(col * w + c, piv * w + c);
+            }
+        }
+        let pivot = m[col * w + col];
+        for r in (col + 1)..n {
+            let factor = complex_div(m[r * w + col], pivot);
+            for c in col..w {
+                m[r * w + c] = complex_sub(m[r * w + c], complex_mul(factor, m[col * w + c]));
+            }
+        }
+    }
+
+    let mut x = vec![(0.0_f64, 0.0_f64); n * ncols];
+    for jcol in 0..ncols {
+        for row in (0..n).rev() {
+            let mut s = m[row * w + n + jcol];
+            for c in (row + 1)..n {
+                s = complex_sub(s, complex_mul(m[row * w + c], x[c * ncols + jcol]));
+            }
+            x[row * ncols + jcol] = complex_div(s, m[row * w + row]);
+        }
+    }
+    x
+}
+
 /// Solve the linear system Ax = b using LU decomposition with partial pivoting.
 ///
 /// Matches `jnp.linalg.solve(a, b)` / `jax.scipy.linalg.solve(a, b)`.
@@ -2369,19 +2427,14 @@ pub(crate) fn eval_solve(
 
     let n = m_a;
 
-    // Complex linear solve is unsupported in V1 — fail closed instead of
-    // silently solving the real part only (the previous code did
-    // `a.iter().map(|(re, _im)| re)`, corrupting any complex input). The
-    // result of a solve is inexact, so integer/bool inputs promote to a
-    // floating dtype.
+    // Complex A or b → complex Gaussian-elimination solve (jnp.linalg.solve
+    // supports complex). The result of a solve is inexact, so integer/bool inputs
+    // promote to a floating dtype.
     let dtype_b = inputs[1].dtype();
     if matches!(dtype_a, DType::Complex64 | DType::Complex128)
         || matches!(dtype_b, DType::Complex64 | DType::Complex128)
     {
-        return Err(EvalError::Unsupported {
-            primitive,
-            detail: "complex linear solve is unsupported in V1".to_owned(),
-        });
+        return eval_solve_complex(primitive, &a, n, &inputs[1], dtype_a, dtype_b);
     }
     let output_dtype = match promote_dtype(dtype_a, dtype_b) {
         dt @ (DType::F16 | DType::BF16 | DType::F32 | DType::F64) => dt,
@@ -2480,6 +2533,92 @@ pub(crate) fn eval_solve(
 
     let tensor =
         TensorValue::new(output_dtype, shape, elements).map_err(EvalError::InvalidTensor)?;
+    Ok(Value::Tensor(tensor))
+}
+
+/// Complex `jnp.linalg.solve(A, b)`: A is the already-extracted complex n×n matrix,
+/// `b_val` is the (rank-1 vector or rank-2 matrix) right-hand side. Mirrors the real
+/// path — errors on singular, shape-checks `b`, returns a complex tensor of shape
+/// `[n]` (vector b) or `[n, ncols]` (matrix b). Result dtype follows numpy/JAX
+/// `result_type`: complex128 if any operand is complex128 or a float64 is mixed with
+/// the complex operand, else complex64.
+fn eval_solve_complex(
+    primitive: Primitive,
+    a: &[(f64, f64)],
+    n: usize,
+    b_val: &Value,
+    dtype_a: DType,
+    dtype_b: DType,
+) -> Result<Value, EvalError> {
+    let to_c = |lit: &Literal| -> Option<(f64, f64)> {
+        lit.as_complex128()
+            .or_else(|| lit.as_complex64().map(|(r, i)| (r as f64, i as f64)))
+            .or_else(|| lit.as_f64().map(|r| (r, 0.0)))
+    };
+    let numeric_err = EvalError::TypeMismatch {
+        primitive,
+        detail: "b must have numeric elements",
+    };
+    let (b_rows, b_cols, is_vector, b_elems): (usize, usize, bool, Vec<(f64, f64)>) = match b_val {
+        Value::Tensor(t) if t.rank() == 1 => {
+            let len = t.shape.dims[0] as usize;
+            let e: Option<Vec<_>> = t.elements.iter().map(&to_c).collect();
+            (len, 1, true, e.ok_or(numeric_err)?)
+        }
+        Value::Tensor(t) if t.rank() == 2 => {
+            let rows = t.shape.dims[0] as usize;
+            let cols = t.shape.dims[1] as usize;
+            let e: Option<Vec<_>> = t.elements.iter().map(&to_c).collect();
+            (rows, cols, false, e.ok_or(numeric_err)?)
+        }
+        Value::Tensor(t) => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("b must be rank-1 or rank-2, got rank-{}", t.rank()),
+            });
+        }
+        Value::Scalar(lit) => (1, 1, true, vec![to_c(lit).ok_or(numeric_err)?]),
+    };
+
+    if b_rows != n {
+        return Err(EvalError::ShapeMismatch {
+            primitive,
+            left: Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            right: Shape {
+                dims: vec![b_rows as u32, b_cols as u32],
+            },
+        });
+    }
+
+    // Singular A divides through to inf/NaN (not an error), matching the real path.
+    let x = complex_solve_system(a, &b_elems, n, b_cols);
+
+    let wide = matches!(dtype_a, DType::Complex128 | DType::F64)
+        || matches!(dtype_b, DType::Complex128 | DType::F64);
+    let out_dtype = if wide {
+        DType::Complex128
+    } else {
+        DType::Complex64
+    };
+    let elements: Vec<Literal> = x
+        .iter()
+        .map(|&(re, im)| match out_dtype {
+            DType::Complex64 => Literal::from_complex64(re as f32, im as f32),
+            _ => Literal::from_complex128(re, im),
+        })
+        .collect();
+    let shape = if is_vector {
+        Shape {
+            dims: vec![n as u32],
+        }
+    } else {
+        Shape {
+            dims: vec![n as u32, b_cols as u32],
+        }
+    };
+    let tensor = TensorValue::new(out_dtype, shape, elements).map_err(EvalError::InvalidTensor)?;
     Ok(Value::Tensor(tensor))
 }
 
@@ -5891,9 +6030,10 @@ mod tests {
     }
 
     #[test]
-    fn eval_solve_rejects_complex_input() {
-        // Complex solve is not implemented; it must fail closed rather than
-        // silently solving the real part only.
+    fn eval_solve_complex_vector_matches_closed_form() {
+        // A = diag(1+i, 1+i), b = (2, 4). Since (1+i)(1−i)=2, the solution is
+        // x = (1−i, 2−2i). Complex solve must now compute it (jnp.linalg.solve
+        // supports complex) instead of failing closed.
         let a = Value::Tensor(
             TensorValue::new(
                 DType::Complex64,
@@ -5918,18 +6058,71 @@ mod tests {
             )
             .unwrap(),
         );
-        let err = eval_solve(&[a, b], &BTreeMap::new())
-            .expect_err("complex solve must be rejected, not silently real-dropped");
-        assert!(
-            matches!(
-                err,
-                EvalError::Unsupported {
-                    primitive: Primitive::Solve,
-                    ..
-                }
-            ),
-            "expected Unsupported for complex solve, got {err:?}"
+        let Value::Tensor(t) = eval_solve(&[a, b], &BTreeMap::new()).expect("complex solve") else {
+            panic!("expected tensor");
+        };
+        // C64 + C64 → C64; shape [2].
+        assert_eq!(t.dtype, DType::Complex64);
+        assert_eq!(t.shape.dims, vec![2]);
+        let got: Vec<(f64, f64)> = t.elements.iter().map(|l| l.as_complex64().unwrap()).collect();
+        for (g, w) in got.iter().zip(&[(1.0, -1.0), (2.0, -2.0)]) {
+            assert!((g.0 - w.0).abs() < 1e-5 && (g.1 - w.1).abs() < 1e-5, "got {got:?}");
+        }
+    }
+
+    #[test]
+    fn eval_solve_complex_matrix_rhs_reconstructs() {
+        // General 3×3 complex A and a 3×2 complex B: solve, then verify A·X = B to
+        // tolerance and the promoted dtype. A is well-conditioned (diagonally
+        // dominant) so the system is non-singular.
+        let n = 3usize;
+        let c = |re: f64, im: f64| Literal::from_complex128(re, im);
+        let a_raw = [
+            (4.0, 1.0), (0.5, -0.3), (0.2, 0.1), //
+            (-0.4, 0.2), (5.0, -1.0), (0.6, 0.4), //
+            (0.1, -0.2), (0.3, 0.5), (6.0, 0.7),
+        ];
+        let b_raw = [
+            (1.0, 2.0), (3.0, -1.0), //
+            (-2.0, 0.5), (0.0, 1.0), //
+            (1.5, -1.5), (2.0, 2.0),
+        ];
+        let a = Value::Tensor(
+            TensorValue::new(
+                DType::Complex128,
+                Shape { dims: vec![n as u32, n as u32] },
+                a_raw.iter().map(|&(r, i)| c(r, i)).collect(),
+            )
+            .unwrap(),
         );
+        let b = Value::Tensor(
+            TensorValue::new(
+                DType::Complex128,
+                Shape { dims: vec![n as u32, 2] },
+                b_raw.iter().map(|&(r, i)| c(r, i)).collect(),
+            )
+            .unwrap(),
+        );
+        let Value::Tensor(t) = eval_solve(&[a, b], &BTreeMap::new()).expect("complex solve") else {
+            panic!("expected tensor");
+        };
+        assert_eq!(t.dtype, DType::Complex128);
+        assert_eq!(t.shape.dims, vec![n as u32, 2]);
+        let x: Vec<(f64, f64)> = t.elements.iter().map(|l| l.as_complex128().unwrap()).collect();
+        // A·X must equal B (residual < 1e-10).
+        for col in 0..2 {
+            for row in 0..n {
+                let mut acc = (0.0_f64, 0.0_f64);
+                for k in 0..n {
+                    acc = complex_add(acc, complex_mul(a_raw[row * n + k], x[k * 2 + col]));
+                }
+                let want = b_raw[row * 2 + col];
+                assert!(
+                    (acc.0 - want.0).abs() < 1e-10 && (acc.1 - want.1).abs() < 1e-10,
+                    "A·X≠B at ({row},{col}): {acc:?} vs {want:?}"
+                );
+            }
+        }
     }
 
     #[test]
