@@ -2684,10 +2684,22 @@ fn batch_sort(
     // Move batch to front
     let value = move_batch_dim_to_front(&input.value, batch_dim)?;
 
-    // Shift sort dimension by 1
-    let dim = parse_param_usize(params, "dimension")?.unwrap_or(0);
+    // eval_sort/eval_argsort read the "axis" param (defaulting to the last axis) — NOT
+    // "dimension". With the batch axis moved to the front: a NON-NEGATIVE sort axis shifts
+    // by +1; a NEGATIVE axis is end-relative and unchanged (the batch is prepended, not
+    // appended); an ABSENT axis defaults to the batched operand's last axis, which is still
+    // the original last axis. (This previously shifted a "dimension" param that eval never
+    // reads, leaving "axis" unshifted — so vmap(sort) along an explicit non-negative axis
+    // sorted the batch axis. See test_batch_sort_shifts_the_axis_param_eval_reads.)
     let mut new_params = params.clone();
-    new_params.insert("dimension".to_owned(), (dim + 1).to_string());
+    if let Some(raw) = params.get("axis") {
+        let axis: i64 = raw.trim().parse().map_err(|_| {
+            BatchError::EvalError(format!("sort: invalid integer in param 'axis': '{raw}'"))
+        })?;
+        if axis >= 0 {
+            new_params.insert("axis".to_owned(), (axis + 1).to_string());
+        }
+    }
     let result = eval_primitive(primitive, &[value], &new_params)
         .map_err(|e| BatchError::EvalError(e.to_string()))?;
     Ok(BatchTracer::batched(result, 0))
@@ -8070,6 +8082,55 @@ mod tests {
         // Result should be [2, 3, 2] — transposing the inner dims
         let tensor = result.value.as_tensor().unwrap();
         assert_eq!(tensor.shape.dims, vec![2, 3, 2]);
+    }
+
+    #[test]
+    fn test_batch_sort_shifts_the_axis_param_eval_reads() {
+        // vmap a sort along axis 0 of 2x3 matrices. The batched operand is [2,2,3] with the
+        // batch at the front, so the sort must move from axis 0 to axis 1. batch_sort must
+        // shift the SAME param key eval_sort reads ("axis") — not "dimension". Otherwise the
+        // unshifted axis 0 sorts the BATCH axis: a silently-wrong vmap result.
+        let data: Vec<f64> = vec![
+            6.0, 5.0, 4.0, 3.0, 1.0, 2.0, // batch 0: [[6,5,4],[3,1,2]]
+            9.0, 8.0, 7.0, 1.0, 2.0, 3.0, // batch 1: [[9,8,7],[1,2,3]]
+        ];
+        let input = BatchTracer::batched(
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape {
+                        dims: vec![2, 2, 3],
+                    },
+                    data.iter().map(|&x| Literal::F64Bits(x.to_bits())).collect(),
+                )
+                .unwrap(),
+            ),
+            0,
+        );
+        let params = BTreeMap::from([("axis".to_owned(), "0".to_owned())]);
+        let result = apply_batch_rule(Primitive::Sort, &[input], &params).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let t = result.value.as_tensor().unwrap();
+        assert_eq!(t.shape.dims, vec![2, 2, 3]);
+        let got: Vec<f64> = t
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F64Bits(b) => f64::from_bits(*b),
+                _ => unreachable!(),
+            })
+            .collect();
+        // Each batch's columns (axis 0 of the 2x3 slice) sorted ascending:
+        // batch0 cols [6,3],[5,1],[4,2] -> [[3,1,2],[6,5,4]]
+        // batch1 cols [9,1],[8,2],[7,3] -> [[1,2,3],[9,8,7]]
+        let expected = vec![
+            3.0, 1.0, 2.0, 6.0, 5.0, 4.0, //
+            1.0, 2.0, 3.0, 9.0, 8.0, 7.0,
+        ];
+        assert_eq!(
+            got, expected,
+            "vmap(sort axis=0) must sort each batch's columns, not the batch axis"
+        );
     }
 
     #[test]
