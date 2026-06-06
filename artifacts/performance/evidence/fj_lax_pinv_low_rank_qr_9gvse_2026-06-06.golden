@@ -1,0 +1,12 @@
+case=fj_lax_pinv_192x192_f64_low_rank_qr_9gvse
+matrix=real_f64_data(192,192)
+rcond=1e-15
+output_format=f64_to_bits_le_bytes
+output_len=36864
+output_sha256=646497ffdc9a13f758b8db6bb07b729fc3e583275c45d3a418b417f028448fb6
+apa_max_abs=4.21884749357559485e-15
+pap_max_abs=4.60785923306339384e-19
+ap_sym_max_abs=8.22258927613006563e-16
+pa_sym_max_abs=4.85722573273505986e-17
+first_bits=3f1d02478748af34
+last_bits=3eed0d95e05bdb6b

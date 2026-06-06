@@ -1,0 +1,65 @@
+{
+  "bead": "frankenjax-9gvse",
+  "crate": "fj-lax",
+  "lever": "rank-revealing pivoted QR low-rank pseudoinverse fast path for m >= n",
+  "profile_target": {
+    "benchmark": "linalg/pinv_192x192_f64",
+    "input": "real_f64_data(192,192)",
+    "rcond": 1e-15,
+    "profile_observation": "The benchmark matrix is numerically rank 4, so the prior full-rank inverse lever correctly rejected; the hot cost was full 192x192 Gram Jacobi work for a low-rank matrix."
+  },
+  "baseline_rch": {
+    "worker": "ts1",
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target-9gvse-clean-baseline rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_192x192_f64 --sample-size 10",
+    "time_ms_low": 100.15,
+    "time_ms_mid": 102.58,
+    "time_ms_high": 105.49
+  },
+  "candidate_rch": {
+    "worker": "ts1",
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target-9gvse-lowrank-bench2 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_192x192_f64 --sample-size 10",
+    "time_ms_low": 7.8345,
+    "time_ms_mid": 7.971,
+    "time_ms_high": 8.0863
+  },
+  "speedup": {
+    "midpoint_ratio": 12.869150671183038,
+    "conservative_ratio": 12.384527537934532,
+    "score": {
+      "impact": 12.38,
+      "confidence": 0.95,
+      "effort": 2.0,
+      "impact_x_confidence_over_effort": 5.88
+    }
+  },
+  "rejected_attempts": [
+    {
+      "lever": "certified square full-rank inverse fast path",
+      "candidate_rch_ts1_ms": [97.845, 99.365, 101.95],
+      "reason": "Score below 2.0 and wrong primitive for target: singular-value probe showed sigma_min ~= 1.28e-17, cond2 ~= 7.71e18, rcond*cond2 ~= 7711, rank above cutoff = 4. The full-rank certificate correctly rejected the benchmark matrix."
+    }
+  ],
+  "isomorphism_proof": {
+    "semantics": "For finite m>=n inputs, the fast path forms a pivoted modified-Gram-Schmidt QR of A P = Q R and only returns when residual Frobenius trace is <= 0.5 * rcond^2 * sigma_max(R)^2. Because the residual operator norm is bounded by Frobenius trace, all omitted singular directions are below the same SVD cutoff used by pinv. The result is P R+ Q^T, with R+ computed from the small R R^T eigensystem using the same cutoff. Otherwise the existing Gram path runs.",
+    "ordering_and_ties": "Pivot selection scans left-to-right and swaps only on strictly greater residual norm, so equal-norm tie order is deterministic and stable.",
+    "floating_point": "The fast path has deterministic accumulation order. It is gated by a residual certificate and preserves NaN/non-finite/rcond-zero/full-rank fallback behavior by returning None to the existing Gram implementation.",
+    "rng": "No RNG is introduced.",
+    "golden_output_sha256": "646497ffdc9a13f758b8db6bb07b729fc3e583275c45d3a418b417f028448fb6",
+    "golden_metrics": {
+      "output_len": 36864,
+      "apa_max_abs": 4.218847493575595e-15,
+      "pap_max_abs": 4.607859233063394e-19,
+      "ap_sym_max_abs": 8.222589276130066e-16,
+      "pa_sym_max_abs": 4.85722573273506e-17
+    }
+  },
+  "verification": [
+    "rch exec -- cargo test -p fj-lax pinv_low_rank_qr -- --nocapture",
+    "rustc stdin harness against final ts1 release rlib generated raw f64 output sha256 and Moore-Penrose residual metrics",
+    "cargo fmt --check --package fj-lax",
+    "rch exec -- cargo check -p fj-lax --all-targets",
+    "rch exec -- cargo clippy -p fj-lax --all-targets -- -D warnings",
+    "rch exec -- cargo test -p fj-lax",
+    "ubs crates/fj-lax/src/linalg.rs exited 1 on pre-existing file-wide findings; embedded fmt/clippy/check/test sections were clean"
+  ]
+}

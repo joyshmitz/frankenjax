@@ -3041,6 +3041,220 @@ pub fn pinv(a: &[f64], m: usize, n: usize, rcond: f64) -> Vec<f64> {
         return vec![0.0; n * m];
     }
 
+    if m >= n
+        && n >= PINV_LOW_RANK_MIN_DIM
+        && let Some(result) = pinv_m_ge_n_low_rank_qr(a, m, n, rcond)
+    {
+        return result;
+    }
+
+    pinv_gram(a, m, n, rcond)
+}
+
+const PINV_LOW_RANK_MIN_DIM: usize = 16;
+const PINV_LOW_RANK_MAX_RANK: usize = 32;
+const PINV_LOW_RANK_RESIDUAL_MARGIN: f64 = 0.5;
+
+fn pinv_m_ge_n_low_rank_qr(a: &[f64], m: usize, n: usize, rcond: f64) -> Option<Vec<f64>> {
+    if !rcond.is_finite() || rcond == 0.0 || !a.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let mut residual_cols = Vec::with_capacity(n);
+    let mut residual_norms = Vec::with_capacity(n);
+    for col in 0..n {
+        let mut column = Vec::with_capacity(m);
+        let mut norm_sq = 0.0;
+        for row in 0..m {
+            let value = a[row * n + col];
+            column.push(value);
+            norm_sq += value * value;
+        }
+        residual_cols.push(column);
+        residual_norms.push(norm_sq);
+    }
+
+    let initial_trace: f64 = residual_norms.iter().sum();
+    if initial_trace == 0.0 {
+        return Some(vec![0.0; n * m]);
+    }
+
+    let rank_limit = PINV_LOW_RANK_MAX_RANK.min((n / 4).max(1));
+    let mut permutation: Vec<usize> = (0..n).collect();
+    let mut q_cols: Vec<Vec<f64>> = Vec::with_capacity(rank_limit);
+    let mut r_rows: Vec<Vec<f64>> = Vec::with_capacity(rank_limit);
+    let rcond_sq = rcond.abs() * rcond.abs();
+
+    for rank in 0..rank_limit {
+        let mut pivot = rank;
+        let mut pivot_norm = residual_norms[rank];
+        for (candidate, &norm_sq) in residual_norms
+            .iter()
+            .enumerate()
+            .skip(rank + 1)
+            .take(n - rank - 1)
+        {
+            if norm_sq > pivot_norm {
+                pivot = candidate;
+                pivot_norm = norm_sq;
+            }
+        }
+
+        if pivot_norm <= 0.0 {
+            return None;
+        }
+
+        if pivot != rank {
+            residual_cols.swap(rank, pivot);
+            residual_norms.swap(rank, pivot);
+            permutation.swap(rank, pivot);
+            for r_row in &mut r_rows {
+                r_row.swap(rank, pivot);
+            }
+        }
+
+        let norm = pivot_norm.sqrt();
+        if norm <= f64::EPSILON {
+            return None;
+        }
+
+        let mut q = vec![0.0; m];
+        for row in 0..m {
+            q[row] = residual_cols[rank][row] / norm;
+        }
+        for previous_q in &q_cols {
+            let mut projection = 0.0;
+            for row in 0..m {
+                projection += previous_q[row] * q[row];
+            }
+            for row in 0..m {
+                q[row] -= projection * previous_q[row];
+            }
+        }
+        let q_norm_sq = q.iter().map(|value| value * value).sum::<f64>();
+        if q_norm_sq <= f64::EPSILON {
+            return None;
+        }
+        let q_norm = q_norm_sq.sqrt();
+        for value in &mut q {
+            *value /= q_norm;
+        }
+
+        for col in rank..n {
+            let mut projection = 0.0;
+            for row in 0..m {
+                projection += q[row] * residual_cols[col][row];
+            }
+            for row in 0..m {
+                residual_cols[col][row] -= projection * q[row];
+            }
+            residual_norms[col] = residual_cols[col]
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .max(0.0);
+        }
+
+        let mut r_row = vec![0.0; n];
+        for col in 0..n {
+            let original_col = permutation[col];
+            let mut projection = 0.0;
+            for row in 0..m {
+                projection += q[row] * a[row * n + original_col];
+            }
+            r_row[col] = projection;
+        }
+        q_cols.push(q);
+        r_rows.push(r_row);
+
+        let active_rank = rank + 1;
+        let mut rrt = low_rank_rrt(&r_rows, active_rank, n);
+        let (lambdas, eigenvectors) = jacobi_eigendecomposition_cyclic(&mut rrt, active_rank);
+        let sigma_max_sq = lambdas.iter().copied().fold(0.0_f64, f64::max);
+        let cutoff = rcond_sq * sigma_max_sq;
+        let remaining_trace: f64 = residual_norms.iter().skip(active_rank).sum();
+
+        if sigma_max_sq > 0.0 && remaining_trace <= cutoff * PINV_LOW_RANK_RESIDUAL_MARGIN {
+            return Some(low_rank_qr_pinv_result(
+                &q_cols,
+                &r_rows,
+                &permutation,
+                &lambdas,
+                &eigenvectors,
+                cutoff,
+                m,
+                n,
+                active_rank,
+            ));
+        }
+    }
+
+    None
+}
+
+fn low_rank_rrt(r_rows: &[Vec<f64>], rank: usize, n: usize) -> Vec<f64> {
+    let mut rrt = vec![0.0; rank * rank];
+    for i in 0..rank {
+        for j in i..rank {
+            let mut dot = 0.0;
+            for (&left, &right) in r_rows[i].iter().zip(&r_rows[j]).take(n) {
+                dot += left * right;
+            }
+            rrt[i * rank + j] = dot;
+            rrt[j * rank + i] = dot;
+        }
+    }
+    rrt
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "small linear-algebra kernel keeps dimensions explicit"
+)]
+fn low_rank_qr_pinv_result(
+    q_cols: &[Vec<f64>],
+    r_rows: &[Vec<f64>],
+    permutation: &[usize],
+    lambdas: &[f64],
+    eigenvectors: &[f64],
+    cutoff: f64,
+    m: usize,
+    n: usize,
+    rank: usize,
+) -> Vec<f64> {
+    let mut r_plus = vec![0.0; n * rank];
+    for eig in 0..rank {
+        let lambda = lambdas[eig];
+        if lambda <= cutoff || lambda <= 0.0 {
+            continue;
+        }
+        let inv_lambda = 1.0 / lambda;
+        for col in 0..n {
+            let mut rt_u = 0.0;
+            for row in 0..rank {
+                rt_u += r_rows[row][col] * eigenvectors[row * rank + eig];
+            }
+            for q_idx in 0..rank {
+                r_plus[col * rank + q_idx] += rt_u * eigenvectors[q_idx * rank + eig] * inv_lambda;
+            }
+        }
+    }
+
+    let mut result = vec![0.0; n * m];
+    for permuted_col in 0..n {
+        let original_col = permutation[permuted_col];
+        for row in 0..m {
+            let mut value = 0.0;
+            for q_idx in 0..rank {
+                value += r_plus[permuted_col * rank + q_idx] * q_cols[q_idx][row];
+            }
+            result[original_col * m + row] = value;
+        }
+    }
+    result
+}
+
+fn pinv_gram(a: &[f64], m: usize, n: usize, rcond: f64) -> Vec<f64> {
     if m >= n {
         // Gram matrix G = AᵀA (n×n, symmetric PSD).
         let mut g = vec![0.0; n * n];
@@ -4840,6 +5054,107 @@ mod tests {
         let a = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
         let p = pinv(&a, 3, 2, 1e-15);
         assert_eq!(p.len(), 2 * 3); // n x m
+    }
+
+    fn low_rank_square_matrix(n: usize) -> Vec<f64> {
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let u0 = 1.0 + (i as f64) * 0.125;
+                let u1 = ((i * 7 + 3) % 13) as f64 - 6.0;
+                let v0 = 0.5 + (j as f64) * 0.0625;
+                let v1 = ((j * 5 + 1) % 17) as f64 - 8.0;
+                a[i * n + j] = u0 * v0 + u1 * v1 * 0.01;
+            }
+        }
+        a
+    }
+
+    fn test_matmul(a: &[f64], rows: usize, inner: usize, b: &[f64], cols: usize) -> Vec<f64> {
+        let mut out = vec![0.0; rows * cols];
+        for i in 0..rows {
+            for j in 0..cols {
+                let mut sum = 0.0;
+                for k in 0..inner {
+                    sum += a[i * inner + k] * b[k * cols + j];
+                }
+                out[i * cols + j] = sum;
+            }
+        }
+        out
+    }
+
+    fn assert_matrix_close(actual: &[f64], expected: &[f64], tolerance: f64) {
+        assert_eq!(actual.len(), expected.len());
+        for (idx, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "matrix[{idx}] = {actual}, expected {expected}"
+            );
+        }
+    }
+
+    fn assert_symmetric(matrix: &[f64], n: usize, tolerance: f64) {
+        for i in 0..n {
+            for j in 0..n {
+                assert!(
+                    (matrix[i * n + j] - matrix[j * n + i]).abs() <= tolerance,
+                    "matrix must be symmetric at ({i}, {j})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pinv_low_rank_qr_satisfies_moore_penrose_identities() {
+        let n = PINV_LOW_RANK_MIN_DIM;
+        let a = low_rank_square_matrix(n);
+        let fast = pinv_m_ge_n_low_rank_qr(&a, n, n, 1e-12).expect("low-rank certificate passes");
+        let public = pinv(&a, n, n, 1e-12);
+
+        assert_eq!(public, fast, "public pinv must return the certified path");
+
+        let a_p = test_matmul(&a, n, n, &fast, n);
+        let p_a = test_matmul(&fast, n, n, &a, n);
+        let a_p_a = test_matmul(&a_p, n, n, &a, n);
+        let p_a_p = test_matmul(&p_a, n, n, &fast, n);
+
+        assert_matrix_close(&a_p_a, &a, 1e-8);
+        assert_matrix_close(&p_a_p, &fast, 1e-8);
+        assert_symmetric(&a_p, n, 1e-8);
+        assert_symmetric(&p_a, n, 1e-8);
+    }
+
+    #[test]
+    fn pinv_low_rank_qr_rejects_full_rank_matrix() {
+        let n = PINV_LOW_RANK_MIN_DIM;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = if i == j {
+                    (n as f64) + 3.0 + (i as f64) * 0.125
+                } else {
+                    (((i * 17 + j * 31) % 11) as f64 - 5.0) * 0.01
+                };
+            }
+        }
+
+        assert!(
+            pinv_m_ge_n_low_rank_qr(&a, n, n, 1e-12).is_none(),
+            "full-rank input must fall back to the Gram path"
+        );
+    }
+
+    #[test]
+    fn pinv_low_rank_qr_rejects_nan_rcond() {
+        let a = [1.0, 0.0, 0.0, 1.0];
+        assert!(pinv_m_ge_n_low_rank_qr(&a, 2, 2, f64::NAN).is_none());
+
+        let p = pinv(&a, 2, 2, f64::NAN);
+        assert!(
+            p.iter().all(|value| *value == 0.0),
+            "current Gram semantics with NaN rcond retain no singular values"
+        );
     }
 
     #[test]
