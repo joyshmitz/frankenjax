@@ -431,6 +431,85 @@ fn qr_jvp_numerical() {
 }
 
 #[test]
+fn slogdet_jvp_numerical() {
+    // slogdet(A) = (sign, logabsdet); d logabsdet = tr(A⁻¹ dA), d sign = 0 (the sign is
+    // locally constant for an invertible A). The slogdet JVP is implemented in
+    // jvp_rule_multi but was previously UNTESTED — the same "looks done but untested"
+    // pattern that hid the solve-vector-RHS bug. Verify both output tangents against
+    // central differences.
+    let a = make_f64_matrix(3, 3, &[2.0, 0.5, -1.0, 0.3, 1.7, 0.2, -0.4, 0.1, 1.9]);
+    let da = make_f64_matrix(3, 3, &[0.1, 0.05, 0.03, 0.02, 0.12, -0.04, 0.06, -0.01, 0.09]);
+    let jaxpr = Jaxpr::new(
+        vec![VarId(1)],
+        vec![],
+        vec![VarId(2), VarId(3)],
+        vec![Equation {
+            primitive: Primitive::Slogdet,
+            inputs: smallvec![Atom::Var(VarId(1))],
+            outputs: smallvec![VarId(2), VarId(3)],
+            params: BTreeMap::new(),
+            effects: vec![],
+            sub_jaxprs: vec![],
+        }],
+    );
+    let jvp = fj_ad::jvp(&jaxpr, std::slice::from_ref(&a), std::slice::from_ref(&da)).unwrap();
+    let eps = 1e-6;
+    let a_plus = perturb(&a, &da, eps);
+    let a_minus = perturb(&a, &da, -eps);
+    let out_plus = eval_primitive_multi(Primitive::Slogdet, &[a_plus], &BTreeMap::new()).unwrap();
+    let out_minus = eval_primitive_multi(Primitive::Slogdet, &[a_minus], &BTreeMap::new()).unwrap();
+    for i in 0..2 {
+        let an = extract_f64_scalar(&jvp.tangents[i]);
+        let fd = (extract_f64_scalar(&out_plus[i]) - extract_f64_scalar(&out_minus[i]))
+            / (2.0 * eps);
+        assert!(
+            (an - fd).abs() < 1e-4,
+            "Slogdet JVP output[{i}]: analytical {an}, numerical {fd}"
+        );
+    }
+}
+
+#[test]
+fn lu_jvp_numerical() {
+    // LU returns (lu, pivots, permutation); only `lu` (output[0]) is differentiable
+    // (pivots/perm are integer). The LU JVP is implemented in jvp_rule_multi but was
+    // previously UNTESTED. A strongly diagonally-dominant A keeps partial pivoting on the
+    // diagonal, so the permutation is stable under the perturbation and the central
+    // difference of `lu` is well defined.
+    let a = make_f64_matrix(3, 3, &[5.0, 0.3, -0.4, 0.2, 6.0, 0.1, -0.3, 0.2, 7.0]);
+    let da = make_f64_matrix(3, 3, &[0.1, 0.05, 0.03, 0.02, 0.12, -0.04, 0.06, -0.01, 0.09]);
+    let jaxpr = Jaxpr::new(
+        vec![VarId(1)],
+        vec![],
+        vec![VarId(2), VarId(3), VarId(4)],
+        vec![Equation {
+            primitive: Primitive::Lu,
+            inputs: smallvec![Atom::Var(VarId(1))],
+            outputs: smallvec![VarId(2), VarId(3), VarId(4)],
+            params: BTreeMap::new(),
+            effects: vec![],
+            sub_jaxprs: vec![],
+        }],
+    );
+    let jvp = fj_ad::jvp(&jaxpr, std::slice::from_ref(&a), std::slice::from_ref(&da)).unwrap();
+    let dlu_analytical = extract_f64_vec(&jvp.tangents[0]);
+
+    let eps = 1e-6;
+    let a_plus = perturb(&a, &da, eps);
+    let a_minus = perturb(&a, &da, -eps);
+    let out_plus = eval_primitive_multi(Primitive::Lu, &[a_plus], &BTreeMap::new()).unwrap();
+    let out_minus = eval_primitive_multi(Primitive::Lu, &[a_minus], &BTreeMap::new()).unwrap();
+    let lu_plus = extract_f64_vec(&out_plus[0]);
+    let lu_minus = extract_f64_vec(&out_minus[0]);
+    let dlu_numerical: Vec<f64> = lu_plus
+        .iter()
+        .zip(lu_minus.iter())
+        .map(|(p, m)| (p - m) / (2.0 * eps))
+        .collect();
+    assert_close(&dlu_analytical, &dlu_numerical, 1e-4, "LU JVP (lu tangent)");
+}
+
+#[test]
 fn svd_jvp_ill_conditioned_matrix() {
     let a = make_f64_matrix(2, 2, &[1.0, 0.0, 0.0, 1e-4]);
     let da = make_f64_matrix(2, 2, &[0.08, 0.0, 0.0, 0.02]);
