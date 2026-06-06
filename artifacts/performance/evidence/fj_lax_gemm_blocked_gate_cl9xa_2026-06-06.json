@@ -1,0 +1,65 @@
+{
+  "id": "fj_lax_gemm_blocked_gate_cl9xa_2026-06-06",
+  "bead": "frankenjax-cl9xa",
+  "crate": "fj-lax",
+  "target": "linalg/matmul_2d",
+  "lever": "Gate the KC-blocked packed-B macro-kernel to deep B panels only, keeping smaller L3-resident GEMM on the flat packed path.",
+  "base_commit_for_b_pack_flat_baseline": "9608080c",
+  "candidate_base_commit": "35664343",
+  "worker": "ts1",
+  "measurements": {
+    "matmul_1024x1024x1024_f64": {
+      "flat_pack_baseline_ms": [19.956, 25.604, 30.009],
+      "pre_gate_blocked_candidate_ms": [37.575, 43.351, 50.349],
+      "gated_candidate_ms": [20.197, 21.039, 22.279],
+      "midpoint_restore_vs_pre_gate": 2.0605,
+      "conservative_restore_vs_pre_gate": 1.6866,
+      "interpretation": "1024^3 is below BLOCKED_B_MIN_KN and returns to the flat packed path."
+    },
+    "matmul_2048x2048x2048_f64": {
+      "flat_pack_baseline_ms": [236.97, 260.28, 288.16],
+      "pre_gate_blocked_candidate_ms": [136.36, 144.90, 153.37],
+      "gated_candidate_ms": [133.74, 146.62, 159.79],
+      "midpoint_speedup_vs_flat_pack": 1.7752,
+      "conservative_speedup_vs_flat_pack": 1.4829,
+      "interpretation": "2048^3 remains above BLOCKED_B_MIN_KN and keeps the blocked macro-kernel route."
+    }
+  },
+  "thresholds": {
+    "PACK_B_MIN_KN": 131072,
+    "BLOCKED_B_MIN_KN": 4194304
+  },
+  "isomorphism_proof": {
+    "ordering": "Every output element is still computed independently in row-major output storage.",
+    "floating_point": "Both selected kernels preserve ascending k accumulation for each C[i,j]; no reassociation, no fused multiply-add substitution, and no cross-column reduction is introduced.",
+    "tie_breaking": "No sorting or pivot tie surface exists.",
+    "rng": "No RNG surface exists.",
+    "golden_output": "artifacts/performance/evidence/fj_lax_gemm_blocked_gate_cl9xa_2026-06-06.golden"
+  },
+  "validation": [
+    {
+      "command": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-cl9xa-proof3 cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+      "result": "passed: 7 passed, 1 ignored"
+    },
+    {
+      "command": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-cl9xa-clippy3 cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check --package fj-lax",
+      "result": "passed after shared-tree formatting churn settled"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/tensor_contraction.rs",
+      "result": "exit 0; no critical findings; existing file-wide warning inventory remains"
+    }
+  ],
+  "score": {
+    "impact": 4,
+    "confidence": 4,
+    "effort": 2,
+    "impact_x_confidence_over_effort": 8.0
+  },
+  "decision": "keep",
+  "next_target": "Widen the register tile or introduce a safe portable-SIMD f64x4 microkernel for the MR=NR=4 L1 arithmetic-intensity bottleneck."
+}

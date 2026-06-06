@@ -1,0 +1,22 @@
+fj_lax_gemm_blocked_gate_cl9xa_2026-06-06
+
+target: fj-lax tensor_contraction::matmul_2d
+lever: route KC-blocked packed-B macro-kernel only when k*n >= 4194304
+
+same-worker ts1 criterion:
+1024^3 flat-pack baseline midpoint: 25.604 ms
+1024^3 pre-gate blocked midpoint: 43.351 ms
+1024^3 gated midpoint: 21.039 ms
+1024^3 restore vs pre-gate: 2.0605x midpoint
+
+2048^3 flat-pack baseline midpoint: 260.28 ms
+2048^3 pre-gate blocked midpoint: 144.90 ms
+2048^3 gated midpoint: 146.62 ms
+2048^3 speedup vs flat-pack: 1.7752x midpoint
+
+proof:
+ordering preserved row-major
+per-output floating-point accumulation remains ascending k
+no tie-breaking surface
+no rng surface
+forced blocked proof test covers k blocks and row/column borders

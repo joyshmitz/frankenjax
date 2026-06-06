@@ -165,7 +165,7 @@ fn index_to_contracted_coords(idx: usize, axes: &[usize], shape: &[usize]) -> Ve
 /// Register-tile dimensions for the GEMM microkernel: `MR` output rows × `NR`
 /// output columns are accumulated together, streamed over `k`.
 const MR: usize = 4;
-const NR: usize = 4;
+const NR: usize = 8;
 
 /// k-dimension block for the cache-blocked macro-kernel. At KC=256 an [MR×KC] A
 /// tile and a [KC×NR] B panel are ~8 KB each — both stay L1-resident across a
@@ -207,6 +207,25 @@ fn pack_b_panels(b: &[f64], k: usize, n: usize) -> Vec<f64> {
 /// (plus its scratch allocation) does not pay — keeps the small/medium GEMM path
 /// byte-for-byte and perf-for-perf unchanged.
 const PACK_B_MIN_KN: usize = 1 << 17;
+/// `k·n` threshold for the KC-blocked macro-kernel. Below this, same-worker
+/// evidence showed the extra C read/write passes cost more than the B-panel
+/// reuse saves; keep those sizes on the flat packed path.
+const BLOCKED_B_MIN_KN: usize = 1 << 22;
+
+#[derive(Clone, Copy)]
+struct MatmulPlan {
+    threads: usize,
+    pack_b: bool,
+    block_k: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MatmulRhs<'a> {
+    b: &'a [f64],
+    bpack: Option<&'a [f64]>,
+    n: usize,
+    block_k: bool,
+}
 
 /// Matrix multiplication as a special case of tensordot.
 ///
@@ -227,8 +246,13 @@ pub fn matmul_2d(a: &[f64], m: usize, k: usize, b: &[f64], n: usize) -> Vec<f64>
     // right-sizing fanout so each worker owns enough row work.)
     let ops = m.saturating_mul(k).saturating_mul(n);
     let threads = matmul_thread_count(ops, m);
-    let do_pack = k.saturating_mul(n) >= PACK_B_MIN_KN;
-    matmul_2d_with_threads(a, m, k, b, n, threads, do_pack)
+    let b_elems = k.saturating_mul(n);
+    let plan = MatmulPlan {
+        threads,
+        pack_b: b_elems >= PACK_B_MIN_KN,
+        block_k: b_elems >= BLOCKED_B_MIN_KN,
+    };
+    matmul_2d_with_threads(a, m, k, b, n, plan)
 }
 
 /// Benchmark-only entry point: identical to [`matmul_2d`] but with the B-panel
@@ -247,7 +271,12 @@ pub fn matmul_2d_with_pack(
 ) -> Vec<f64> {
     let ops = m.saturating_mul(k).saturating_mul(n);
     let threads = matmul_thread_count(ops, m);
-    matmul_2d_with_threads(a, m, k, b, n, threads, do_pack)
+    let plan = MatmulPlan {
+        threads,
+        pack_b: do_pack,
+        block_k: k.saturating_mul(n) >= BLOCKED_B_MIN_KN,
+    };
+    matmul_2d_with_threads(a, m, k, b, n, plan)
 }
 
 #[inline]
@@ -275,8 +304,7 @@ fn matmul_2d_with_threads(
     k: usize,
     b: &[f64],
     n: usize,
-    threads: usize,
-    do_pack: bool,
+    plan: MatmulPlan,
 ) -> Vec<f64> {
     let mut result = vec![0.0; m * n];
     if m == 0 || n == 0 || k == 0 {
@@ -284,18 +312,23 @@ fn matmul_2d_with_threads(
     }
     // Pack B's column panels once (shared, read-only across all output rows) when
     // B spills L2. Bit-identical to the strided read; just sequential instead.
-    let bpack: Option<Vec<f64>> = if do_pack && n >= NR {
+    let bpack: Option<Vec<f64>> = if plan.pack_b && n >= NR {
         Some(pack_b_panels(b, k, n))
     } else {
         None
     };
-    let bpack_ref = bpack.as_deref();
-    if threads <= 1 {
-        matmul_2d_dispatch(a, k, b, bpack_ref, n, 0, &mut result);
+    let rhs = MatmulRhs {
+        b,
+        bpack: bpack.as_deref(),
+        n,
+        block_k: plan.block_k,
+    };
+    if plan.threads <= 1 {
+        matmul_2d_dispatch(a, k, rhs, 0, &mut result);
         return result;
     }
 
-    let rows_per = m.div_ceil(threads);
+    let rows_per = m.div_ceil(plan.threads);
     std::thread::scope(|scope| {
         let mut rest: &mut [f64] = result.as_mut_slice();
         let mut row_start = 0usize;
@@ -304,7 +337,7 @@ fn matmul_2d_with_threads(
             let (block, tail) = rest.split_at_mut(chunk_rows * n);
             rest = tail;
             let rs = row_start;
-            scope.spawn(move || matmul_2d_dispatch(a, k, b, bpack_ref, n, rs, block));
+            scope.spawn(move || matmul_2d_dispatch(a, k, rhs, rs, block));
             row_start += chunk_rows;
         }
     });
@@ -320,15 +353,15 @@ fn matmul_2d_with_threads(
 fn matmul_2d_dispatch(
     a: &[f64],
     k: usize,
-    b: &[f64],
-    bpack: Option<&[f64]>,
-    n: usize,
+    rhs: MatmulRhs<'_>,
     row_start: usize,
     block: &mut [f64],
 ) {
-    match bpack {
-        Some(bp) if k > KC => matmul_2d_blocked_row_block(a, k, b, bp, n, row_start, block),
-        _ => matmul_2d_row_block(a, k, b, bpack, n, row_start, block),
+    match rhs.bpack {
+        Some(bp) if rhs.block_k && k > KC => {
+            matmul_2d_blocked_row_block(a, k, rhs.b, bp, rhs.n, row_start, block);
+        }
+        _ => matmul_2d_row_block(a, k, rhs.b, rhs.bpack, rhs.n, row_start, block),
     }
 }
 
@@ -802,12 +835,34 @@ mod tests {
         let b: Vec<f64> = (0..k * n)
             .map(|i| (i as f64 * 0.023).cos() * 1.9 + 0.2)
             .collect();
-        let serial = super::matmul_2d_with_threads(&a, m, k, &b, n, 1, false);
+        let serial = super::matmul_2d_with_threads(
+            &a,
+            m,
+            k,
+            &b,
+            n,
+            super::MatmulPlan {
+                threads: 1,
+                pack_b: false,
+                block_k: false,
+            },
+        );
         // Equal across every thread count AND both pack strategies (packing and
         // row-block threading are each bit-identity-preserving, so all combos agree).
         for threads in [2usize, 3, 4, 8, 16, 32] {
             for do_pack in [false, true] {
-                let parallel = super::matmul_2d_with_threads(&a, m, k, &b, n, threads, do_pack);
+                let parallel = super::matmul_2d_with_threads(
+                    &a,
+                    m,
+                    k,
+                    &b,
+                    n,
+                    super::MatmulPlan {
+                        threads,
+                        pack_b: do_pack,
+                        block_k: false,
+                    },
+                );
                 assert_eq!(serial.len(), parallel.len());
                 for idx in 0..serial.len() {
                     assert_eq!(
@@ -956,13 +1011,13 @@ mod tests {
 
     #[test]
     fn matmul_2d_blocked_bit_identical_to_ijk() {
-        // k=700 > KC (256) routes matmul_2d through the cache-blocked macro-kernel
-        // and spans THREE pc-blocks (256+256+188), so the C read-accumulate-store
-        // carry is exercised across multiple blocks. m=300 makes ops large enough
-        // to thread, and m,n are non-multiples of MR/NR (4) so the border sweep is
-        // hit too. k*n=182000 >= PACK_B_MIN_KN trips packing. Must equal the
-        // textbook i-j-k accumulation bit-for-bit.
-        let (m, k, n) = (300usize, 700usize, 260usize);
+        // k=700 > KC (256) spans THREE pc-blocks (256+256+188), so the C
+        // read-accumulate-store carry is exercised across multiple blocks. Force
+        // four row-slice threads and B packing so this proof covers the blocked
+        // kernel directly even when production gating routes smaller matrices to
+        // the flat packed path. m,n are non-multiples of MR/NR (4), so the border
+        // sweep is hit too. Must equal textbook i-j-k bit-for-bit.
+        let (m, k, n) = (301usize, 700usize, 262usize);
         assert!(k > super::KC && k * n >= super::PACK_B_MIN_KN);
         let a: Vec<f64> = (0..m * k)
             .map(|i| (i as f64 * 0.007_93).sin() * 2.5 - 0.4)
@@ -971,7 +1026,18 @@ mod tests {
             .map(|i| (i as f64 * 0.005_11).cos() * 1.7 + 0.3)
             .collect();
 
-        let got = matmul_2d(&a, m, k, &b, n);
+        let got = super::matmul_2d_with_threads(
+            &a,
+            m,
+            k,
+            &b,
+            n,
+            super::MatmulPlan {
+                threads: 4,
+                pack_b: true,
+                block_k: true,
+            },
+        );
 
         let mut want = vec![0.0f64; m * n];
         for i in 0..m {
