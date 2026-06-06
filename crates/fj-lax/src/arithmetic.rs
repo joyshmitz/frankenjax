@@ -12,6 +12,21 @@ use crate::type_promotion::{binary_literal_op, promote_dtype};
 /// count than cheap ops.
 const EXPENSIVE_BINARY_PARALLEL_MIN: usize = 1 << 16; // 65_536
 
+/// Right-size a parallel fan-out to the WORK, not the core count. `std::thread::
+/// scope` spawns each OS thread sequentially (~tens of µs apiece), so a flat
+/// all-core fan-out is spawn-overhead-dominated at moderate element counts (an
+/// elementwise 512k exp was ~3x slower at 64 threads than at 8). Give every
+/// thread at least `ELEMS_PER_THREAD` elements; full core-count parallelism is
+/// still reached once `elems ≥ cores·ELEMS_PER_THREAD`. Thread count never
+/// affects results, so every caller stays bit-identical.
+fn work_scaled_threads(elems: usize) -> usize {
+    const ELEMS_PER_THREAD: usize = 1 << 16; // 65_536
+    let cores = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    (elems / ELEMS_PER_THREAD).clamp(1, cores)
+}
+
 #[inline]
 fn is_expensive_binary(primitive: Primitive) -> bool {
     matches!(
@@ -71,10 +86,7 @@ fn eval_f64_scalar_expensive_parallel(
         return None;
     }
     let scalar = f64::from_bits(scalar_bits);
-    let threads = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(1)
-        .min(n);
+    let threads = work_scaled_threads(n);
     if threads <= 1 {
         return None;
     }
@@ -128,10 +140,7 @@ fn eval_same_shape_f64_expensive_parallel(
     if n < EXPENSIVE_BINARY_PARALLEL_MIN {
         return None;
     }
-    let threads = std::thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(1)
-        .min(n);
+    let threads = work_scaled_threads(n);
     if threads <= 1 {
         return None;
     }
@@ -2699,18 +2708,9 @@ pub(crate) fn eval_unary_elementwise_parallel(
         && let Some(src) = tensor.elements.as_f64_slice()
     {
         const PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144 — enough work to amortize the thread fan-out even for the cheaper kept ops
-        // Right-size the fan-out to the WORK, not the core count. `std::thread::scope`
-        // spawns each OS thread sequentially (~tens of µs apiece), so a flat all-core
-        // fan-out at moderate n was spawn-overhead-dominated (1M exp was only 1.24x).
-        // Give every thread at least this many elements; full 64-way parallelism is
-        // still reached once n is large enough (≥ cores·ELEMS_PER_THREAD).
-        const ELEMS_PER_THREAD: usize = 1 << 16; // 65_536
         let n = src.len();
         let threads = if n >= PARALLEL_MIN_ELEMS {
-            let cores = std::thread::available_parallelism()
-                .map(|p| p.get())
-                .unwrap_or(1);
-            (n / ELEMS_PER_THREAD).clamp(1, cores)
+            work_scaled_threads(n)
         } else {
             1
         };
