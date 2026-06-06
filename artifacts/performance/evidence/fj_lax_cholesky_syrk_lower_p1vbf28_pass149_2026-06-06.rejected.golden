@@ -1,0 +1,44 @@
+bead: frankenjax-p1vbf.28
+pass: 149
+target: linalg/cholesky_1024x1024_f64
+lever: replace full A22 -= L21*L21^T GEMM update with lower-triangle-only SYRK update
+decision: rejected
+score: 0.0
+
+profile-backed baseline:
+worker: ts1
+command: RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf-reprofile cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(eig_48x48_f64|eigh_48x48_f64|cholesky_1024x1024_f64|qr_1024x1024_f64|pinv_192x192_f64|lu_1024x1024_f64|svd_48x48_f64|svd_48x48_full_f64|matmul_2d_1024x1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+cholesky_1024x1024_f64: [57.376 ms 60.661 ms 64.341 ms]
+
+proof before rejection:
+worker: ts1
+command: RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf28-proof cargo test -p fj-lax --lib cholesky -- --nocapture
+result: 12 passed, 0 failed
+covered: cholesky_2x2_spd, cholesky_3x3_spd, cholesky_2x2_identity, cholesky_f64_dense_output_matches_literal_materialization, cholesky_non_square_rejected, cholesky_not_positive_definite_returns_nan, cholesky_real_fast_path_bit_identical_to_complex_path, cholesky_real_fast_path_preserves_f32_dtype_and_shape, cholesky_roundtrip_llt, triangular_solve_cholesky_roundtrip, test_cholesky_rejects_scalar_input, cholesky_blocked_matches_scalar_and_reconstructs
+
+candidate benchmark:
+worker: ts1
+command: RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf28-after-ts1 cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(cholesky_1024x1024_f64|cholesky_512x512_f64|cholesky_128x128_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+cholesky_128x128_f64: [335.74 us 337.97 us 339.92 us]
+cholesky_512x512_f64: [10.595 ms 10.977 ms 11.402 ms]
+cholesky_1024x1024_f64: [65.235 ms 65.966 ms 66.351 ms]
+same-worker target delta: 60.661 ms -> 65.966 ms median, 0.920x
+
+cross-worker provisional check:
+worker: vmi1149989
+cholesky_128x128_f64: [339.61 us 410.00 us 446.65 us]
+cholesky_512x512_f64: [11.814 ms 12.654 ms 13.800 ms]
+cholesky_1024x1024_f64: [62.909 ms 67.542 ms 70.716 ms]
+
+isomorphism proof:
+ordering: small n < 256 scalar Cholesky path was unchanged. Candidate large blocked path computed each consumed lower-triangle Schur entry with t ascending over the same panel columns and skipped upper entries that future panels do not read and final output zeroes. Source was restored after the perf gate failed.
+tie_breaking: Cholesky has no pivot selection or tie-breaking path in this implementation.
+floating_point: candidate did not introduce fused multiply-add or mixed precision; large blocked Cholesky is already tolerance-validated rather than bit-identical. Proof was reconstruction plus scalar parity. Source is restored to the baseline GEMM update.
+rng: not applicable.
+golden_sha256: computed over this file.
+
+source_state:
+git diff -- crates/fj-lax/src/linalg.rs: empty after rejection restore.
+
+next primitive:
+Do not retune lower-only scalar SYRK. Attack a different Cholesky primitive next: recursive/cache-oblivious Cholesky with packed panel solve plus a true register-tiled full Schur update, or a fused TRSM+GEMM update with explicit large-matrix tolerance proof. Target >=1.2x on linalg/cholesky_1024x1024_f64 or route to the next reprofiled linalg hotspot.

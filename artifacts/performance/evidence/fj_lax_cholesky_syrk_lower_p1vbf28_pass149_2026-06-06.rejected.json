@@ -1,0 +1,98 @@
+{
+  "artifact_schema": "frankenjax.performance.rejected.v1",
+  "bead": "frankenjax-p1vbf.28",
+  "pass": 149,
+  "date": "2026-06-06",
+  "crate": "fj-lax",
+  "target": "linalg/cholesky_1024x1024_f64",
+  "lever": "replace full A22 -= L21*L21^T GEMM update with lower-triangle-only SYRK update",
+  "decision": "rejected",
+  "score": {
+    "impact": 0.0,
+    "confidence": 1.0,
+    "effort": 1.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "gate": "keep only Score >= 2.0"
+  },
+  "baseline": {
+    "worker": "ts1",
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf-reprofile cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(eig_48x48_f64|eigh_48x48_f64|cholesky_1024x1024_f64|qr_1024x1024_f64|pinv_192x192_f64|lu_1024x1024_f64|svd_48x48_f64|svd_48x48_full_f64|matmul_2d_1024x1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "cholesky_1024x1024_f64_ms": {
+      "low": 57.376,
+      "median": 60.661,
+      "high": 64.341
+    }
+  },
+  "proof": {
+    "worker": "ts1",
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf28-proof cargo test -p fj-lax --lib cholesky -- --nocapture",
+    "result": "12 passed, 0 failed",
+    "coverage": [
+      "cholesky_2x2_spd",
+      "cholesky_3x3_spd",
+      "cholesky_2x2_identity",
+      "cholesky_f64_dense_output_matches_literal_materialization",
+      "cholesky_non_square_rejected",
+      "cholesky_not_positive_definite_returns_nan",
+      "cholesky_real_fast_path_bit_identical_to_complex_path",
+      "cholesky_real_fast_path_preserves_f32_dtype_and_shape",
+      "cholesky_roundtrip_llt",
+      "triangular_solve_cholesky_roundtrip",
+      "test_cholesky_rejects_scalar_input",
+      "cholesky_blocked_matches_scalar_and_reconstructs"
+    ]
+  },
+  "after_same_worker": {
+    "worker": "ts1",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf28-after-ts1 cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(cholesky_1024x1024_f64|cholesky_512x512_f64|cholesky_128x128_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "cholesky_128x128_f64_us": {
+      "low": 335.74,
+      "median": 337.97,
+      "high": 339.92
+    },
+    "cholesky_512x512_f64_ms": {
+      "low": 10.595,
+      "median": 10.977,
+      "high": 11.402
+    },
+    "cholesky_1024x1024_f64_ms": {
+      "low": 65.235,
+      "median": 65.966,
+      "high": 66.351
+    },
+    "target_speedup": 0.9195786416323509
+  },
+  "after_cross_worker_provisional": {
+    "worker": "vmi1149989",
+    "cholesky_128x128_f64_us": {
+      "low": 339.61,
+      "median": 410.0,
+      "high": 446.65
+    },
+    "cholesky_512x512_f64_ms": {
+      "low": 11.814,
+      "median": 12.654,
+      "high": 13.8
+    },
+    "cholesky_1024x1024_f64_ms": {
+      "low": 62.909,
+      "median": 67.542,
+      "high": 70.716
+    }
+  },
+  "isomorphism": {
+    "ordering": "Small n < 256 scalar Cholesky path was unchanged. Candidate large blocked path computed each consumed lower-triangle Schur entry with t ascending over the same panel columns and skipped upper entries that future panels do not read and final output zeroes. Source was restored after the perf gate failed.",
+    "tie_breaking": "No pivot selection or tie-breaking path exists in this Cholesky implementation.",
+    "floating_point": "Candidate did not introduce fused multiply-add or mixed precision; large blocked Cholesky is already tolerance-validated rather than bit-identical. Proof was reconstruction plus scalar parity. Source is restored to the baseline GEMM update.",
+    "rng": "Not applicable."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_cholesky_syrk_lower_p1vbf28_pass149_2026-06-06.rejected.golden",
+    "sha256": "9f4d0b7ae4979036be313312754567b636aa399b84418049cfb9c5a702438ab5"
+  },
+  "source_state": {
+    "restored": true,
+    "diff": "git diff -- crates/fj-lax/src/linalg.rs is empty"
+  },
+  "next_primitive": "Do not retune lower-only scalar SYRK. Attack a different Cholesky primitive next: recursive/cache-oblivious Cholesky with packed panel solve plus a true register-tiled full Schur update, or a fused TRSM+GEMM update with explicit large-matrix tolerance proof. Target >=1.2x on linalg/cholesky_1024x1024_f64 or route to the next reprofiled linalg hotspot."
+}
