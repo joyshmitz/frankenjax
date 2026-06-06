@@ -1087,11 +1087,11 @@ where
     F: Fn(T, T) -> T + Sync,
 {
     let outer = src.len() / axis_dim.max(1);
+    // Work-scale to total work (src.len()), capped at the independent-line count.
+    // A flat all-core split was spawn-overhead-dominated at moderate sizes (see
+    // work_scaled_threads). Independent lines → bit-identical regardless of split.
     let threads = if src.len() >= CUMULATIVE_PARALLEL_MIN_ELEMS && outer > 1 {
-        std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(1)
-            .min(outer)
+        crate::arithmetic::work_scaled_threads(src.len()).min(outer)
     } else {
         1
     };
