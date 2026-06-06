@@ -2699,12 +2699,18 @@ pub(crate) fn eval_unary_elementwise_parallel(
         && let Some(src) = tensor.elements.as_f64_slice()
     {
         const PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144 — enough work to amortize the thread fan-out even for the cheaper kept ops
+        // Right-size the fan-out to the WORK, not the core count. `std::thread::scope`
+        // spawns each OS thread sequentially (~tens of µs apiece), so a flat all-core
+        // fan-out at moderate n was spawn-overhead-dominated (1M exp was only 1.24x).
+        // Give every thread at least this many elements; full 64-way parallelism is
+        // still reached once n is large enough (≥ cores·ELEMS_PER_THREAD).
+        const ELEMS_PER_THREAD: usize = 1 << 16; // 65_536
         let n = src.len();
         let threads = if n >= PARALLEL_MIN_ELEMS {
-            std::thread::available_parallelism()
+            let cores = std::thread::available_parallelism()
                 .map(|p| p.get())
-                .unwrap_or(1)
-                .min(n)
+                .unwrap_or(1);
+            (n / ELEMS_PER_THREAD).clamp(1, cores)
         } else {
             1
         };

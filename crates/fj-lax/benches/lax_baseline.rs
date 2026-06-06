@@ -2632,6 +2632,18 @@ fn bench_exp_1m(c: &mut Criterion) {
     });
 }
 
+// 512k elements: just above PARALLEL_MIN_ELEMS — the moderate regime where a flat
+// all-core fan-out (64 sequential OS-thread spawns) is spawn-overhead-dominated,
+// and work-scaled thread counts win.
+fn bench_exp_512k(c: &mut Criterion) {
+    let data: Vec<f64> = (0..524_288usize).map(|i| (i as f64) * 1e-5 - 4.0).collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let p = no_params();
+    c.bench_function("eval/exp_512k_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Exp, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_square_1k(c: &mut Criterion) {
     let data: Vec<f64> = (0..1000).map(|i| i as f64 * 0.001).collect();
     let input = Value::vector_f64(&data).unwrap();
@@ -3577,6 +3589,7 @@ criterion_group!(
     bench_exp_1k,
     bench_exp_64k,
     bench_exp_1m,
+    bench_exp_512k,
     bench_square_1k,
     bench_integer_pow_1k,
     bench_clamp_1k,
