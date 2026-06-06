@@ -1,0 +1,89 @@
+{
+  "artifact": "fj_lax_gemm_flat_simd_vgd3x_pass141_2026-06-06",
+  "bead": "frankenjax-vgd3x",
+  "skill_pass": "repeatedly-apply-skill pass141 -> extreme-software-optimization",
+  "status": "kept",
+  "score": {
+    "impact": 4,
+    "confidence": 5,
+    "effort": 2,
+    "value": 10.0,
+    "formula": "Impact x Confidence / Effort"
+  },
+  "profile_basis": {
+    "source": "frankenjax-vgd3x after pass139 NR8 rejection and pass140 broad SIMD rejection",
+    "target": "linalg/matmul_2d_1024x1024x1024_f64",
+    "diagnosis": "The live flat packed GEMM MRxNR kernel was still arithmetic-throughput bound after scalar tile widening failed. This pass applies only safe portable SIMD lanes to the full flat panel, leaving the KC-blocked 2048 path scalar until it has a separate baseline and proof."
+  },
+  "change": {
+    "file": "crates/fj-lax/src/tensor_contraction.rs",
+    "lever": "Replace the flat full MRxNR tile's four scalar [f64; 4] column accumulators with std::simd::Simd<f64, 4> lanes.",
+    "scope": "matmul_2d_row_block full-panel path only",
+    "unchanged": [
+      "MR and NR remain 4",
+      "B packing threshold remains unchanged",
+      "threading remains unchanged",
+      "matmul_2d_blocked_row_block remains scalar",
+      "row and column remainder paths remain scalar"
+    ]
+  },
+  "benchmarks": {
+    "baseline": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/matmul_2d_1024x1024x1024_f64 --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+      "worker": "ts1",
+      "median_ms": 38.293,
+      "ci_ms": [35.004, 43.547],
+      "note": "Same-worker scalar control captured with an empty source diff immediately before the narrowed flat-SIMD candidate."
+    },
+    "candidate": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/matmul_2d_1024x1024x1024_f64 --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+      "worker": "ts1",
+      "median_ms": 19.600,
+      "ci_ms": [18.924, 20.803],
+      "note": "Final narrowed candidate: flat full-panel SIMD lanes only."
+    },
+    "speedup": {
+      "midpoint": 1.954,
+      "conservative": 1.683
+    }
+  },
+  "isomorphism": {
+    "ordering": "The row-block, panel, row-tile, and k-loop order are unchanged. Each output cell still receives products in ascending k order.",
+    "floating_point": "No horizontal reductions, reassociation, mul_add calls, FMA forcing, mixed precision, BLAS, LAPACK, MKL, XLA, or unsafe code are introduced. SIMD lanes are independent output columns.",
+    "tie_breaking": "GEMM has no ordering ties or comparator behavior.",
+    "rng": "No RNG surface exists.",
+    "golden_output_sha256": "c9b848a87aeb2e3032e58874217e58d588a05cae19bc8a201cd65247ab378f3e"
+  },
+  "validation": {
+    "proof_tests": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-vgd3x-flat-simd-test-20260606b cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+      "result": "passed: 7 tests, 1 ignored timing test"
+    },
+    "check": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-vgd3x-flat-simd-check-20260606b cargo check -p fj-lax --all-targets",
+      "result": "passed"
+    },
+    "clippy": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-vgd3x-flat-simd-clippy-20260606b cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "passed"
+    },
+    "format": {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/tensor_contraction.rs",
+      "result": "passed",
+      "package_fmt_note": "cargo fmt --check --package fj-lax currently reports pre-existing formatting drift in crates/fj-lax/src/linalg.rs from the prior eig lane; tensor_contraction.rs is clean and this pass leaves linalg.rs untouched."
+    },
+    "diff_check": {
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    "ubs": {
+      "command": "ubs crates/fj-lax/src/tensor_contraction.rs",
+      "result": "exit 0; existing warning inventory only"
+    },
+    "golden_check": {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_gemm_flat_simd_vgd3x_pass141_2026-06-06.golden.sha256",
+      "result": "passed"
+    }
+  },
+  "next_target": "Reprofile after landing. If GEMM remains hot, attack a separate KC-blocked/2048 SIMD proof or a Dot-only recursive/Strassen path behind an explicit tolerance contract."
+}

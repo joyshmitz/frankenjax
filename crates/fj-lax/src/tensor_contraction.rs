@@ -166,6 +166,7 @@ fn index_to_contracted_coords(idx: usize, axes: &[usize], shape: &[usize]) -> Ve
 /// output columns are accumulated together, streamed over `k`.
 const MR: usize = 4;
 const NR: usize = 4;
+type F64x4 = std::simd::Simd<f64, NR>;
 
 /// k-dimension block for the cache-blocked macro-kernel. At KC=256 an [MR×KC] A
 /// tile and a [KC×NR] B panel are ~8 KB each — both stay L1-resident across a
@@ -415,28 +416,26 @@ fn matmul_2d_row_block(
             let ar1 = ar0 + k;
             let ar2 = ar1 + k;
             let ar3 = ar2 + k;
-            let mut c0 = [0.0_f64; NR];
-            let mut c1 = [0.0_f64; NR];
-            let mut c2 = [0.0_f64; NR];
-            let mut c3 = [0.0_f64; NR];
+            let mut c0 = F64x4::splat(0.0);
+            let mut c1 = F64x4::splat(0.0);
+            let mut c2 = F64x4::splat(0.0);
+            let mut c3 = F64x4::splat(0.0);
             for l in 0..k {
                 let brow = &bsrc[l * rstride..l * rstride + NR];
+                let bv = F64x4::from_array([brow[0], brow[1], brow[2], brow[3]]);
                 let a0 = a[ar0 + l];
                 let a1 = a[ar1 + l];
                 let a2 = a[ar2 + l];
                 let a3 = a[ar3 + l];
-                for jj in 0..NR {
-                    let bv = brow[jj];
-                    c0[jj] += a0 * bv;
-                    c1[jj] += a1 * bv;
-                    c2[jj] += a2 * bv;
-                    c3[jj] += a3 * bv;
-                }
+                c0 += F64x4::splat(a0) * bv;
+                c1 += F64x4::splat(a1) * bv;
+                c2 += F64x4::splat(a2) * bv;
+                c3 += F64x4::splat(a3) * bv;
             }
-            block[i * n + j..i * n + j + NR].copy_from_slice(&c0);
-            block[(i + 1) * n + j..(i + 1) * n + j + NR].copy_from_slice(&c1);
-            block[(i + 2) * n + j..(i + 2) * n + j + NR].copy_from_slice(&c2);
-            block[(i + 3) * n + j..(i + 3) * n + j + NR].copy_from_slice(&c3);
+            block[i * n + j..i * n + j + NR].copy_from_slice(c0.as_array());
+            block[(i + 1) * n + j..(i + 1) * n + j + NR].copy_from_slice(c1.as_array());
+            block[(i + 2) * n + j..(i + 2) * n + j + NR].copy_from_slice(c2.as_array());
+            block[(i + 3) * n + j..(i + 3) * n + j + NR].copy_from_slice(c3.as_array());
             i += MR;
         }
         j += NR;

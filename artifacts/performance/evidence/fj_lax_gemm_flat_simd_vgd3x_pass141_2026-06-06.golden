@@ -1,0 +1,14 @@
+artifact=fj_lax_gemm_flat_simd_vgd3x_pass141_2026-06-06
+bead=frankenjax-vgd3x
+target=linalg/matmul_2d_1024x1024x1024_f64
+baseline_worker=ts1
+control_mid_ms=38.293
+control_ci_ms=[35.004,43.547]
+candidate_mid_ms=19.600
+candidate_ci_ms=[18.924,20.803]
+speedup_mid=1.954x
+speedup_conservative=1.683x
+score=10.0
+lever=flat MRxNR full-panel std::simd f64x4 lane accumulators only; KC-blocked path scalar unchanged
+isomorphism=per-output-cell k loop order unchanged; no horizontal reductions, mul_add, FMA forcing, or reassociation; each lane is an independent output column; row-major store unchanged; no tie-breaking or RNG
+proof=RCH ts1 cargo test -p fj-lax --lib matmul_2d passed 7 tests and 1 ignored; RCH ts1 check/clippy clean; tensor_contraction rustfmt clean; git diff --check clean; UBS exit 0 with existing inventory only
