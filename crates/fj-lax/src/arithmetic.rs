@@ -19,7 +19,7 @@ const EXPENSIVE_BINARY_PARALLEL_MIN: usize = 1 << 16; // 65_536
 /// thread at least `ELEMS_PER_THREAD` elements; full core-count parallelism is
 /// still reached once `elems ≥ cores·ELEMS_PER_THREAD`. Thread count never
 /// affects results, so every caller stays bit-identical.
-fn work_scaled_threads(elems: usize) -> usize {
+pub(crate) fn work_scaled_threads(elems: usize) -> usize {
     const ELEMS_PER_THREAD: usize = 1 << 16; // 65_536
     let cores = std::thread::available_parallelism()
         .map(|p| p.get())

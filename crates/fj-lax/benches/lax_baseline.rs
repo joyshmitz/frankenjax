@@ -1733,6 +1733,28 @@ fn bench_reduce_sum_64k_i64(c: &mut Criterion) {
     });
 }
 
+// Trailing-axis f64 reduction [4096,128] over axis 1: 524288 elems, 4096 output
+// rows. Triggers the threaded dense-f64 trailing-axis path — moderate regime
+// where flat all-core fan-out was spawn-overhead-dominated.
+fn bench_reduce_sum_4096x128_axis1_f64(c: &mut Criterion) {
+    let (rows, cols) = (4096usize, 128usize);
+    let data: Vec<f64> = (0..rows * cols).map(|i| (i as f64) * 1e-4).collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axes".to_string(), "1".to_string());
+    c.bench_function("eval/reduce_sum_4096x128_axis1_f64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_sum_64k_i64_literal_reference(c: &mut Criterion) {
     let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN as i64)
         .map(Literal::I64)
@@ -3552,6 +3574,7 @@ criterion_group!(
     bench_reduce_sum_256_axis0_i64,
     bench_reduce_sum_256_axis0_i64_literal_reference,
     bench_reduce_sum_64k_i64,
+    bench_reduce_sum_4096x128_axis1_f64,
     bench_reduce_sum_64k_i64_literal_reference,
     bench_reduce_and_64k_bool_vec,
     bench_reduce_and_64k_bool_literal_reference,

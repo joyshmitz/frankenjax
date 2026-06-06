@@ -332,10 +332,11 @@ fn dense_f64_axis_reduce(
     {
         let block = values.len() / out_count;
         let mut result = vec![float_init; out_count];
-        let threads = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(1)
-            .min(out_count);
+        // Work-scale the fan-out to the TOTAL reduce work (values.len()), not the
+        // row count: at moderate sizes a flat all-core split gave each thread tiny
+        // work and was spawn-overhead-dominated (see work_scaled_threads). Capped
+        // at out_count since rows are the unit of parallelism.
+        let threads = crate::arithmetic::work_scaled_threads(values.len()).min(out_count);
         if threads > 1 {
             let rows_per = out_count.div_ceil(threads);
             let op_ref = float_op;
