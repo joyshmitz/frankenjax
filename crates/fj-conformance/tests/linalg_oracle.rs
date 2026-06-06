@@ -1691,6 +1691,56 @@ fn oracle_svd_complex64_with_imaginary() {
 }
 
 #[test]
+fn oracle_svd_complex128_rank_deficient_reconstructs() {
+    // Rank-2 complex 3×3 (row 2 = row 0 + row 1 exactly) ⇒ smallest singular value
+    // is exactly 0. One-sided complex Jacobi recovers it to ~ε·‖A‖ (<1e-10); the
+    // old AᴴA / normal-equations path squared the condition number and would land
+    // near √ε·‖A‖ (~1e-7), which the 1e-10 bound rejects (frankenjax-4kx6m).
+    let a_data: [(f64, f64); 9] = [
+        (1.0, 1.0), (2.0, 0.0), (3.0, -1.0), //
+        (0.0, 2.0), (1.0, 1.0), (2.0, 0.0), //
+        (1.0, 3.0), (3.0, 1.0), (5.0, -1.0),
+    ];
+    let a = make_complex128_matrix(3, 3, &a_data);
+    let result = eval_primitive_multi(Primitive::Svd, std::slice::from_ref(&a), &no_params())
+        .expect("svd complex128 rank-deficient should succeed");
+    let u = extract_complex128_matrix(&result[0]); // 3×3
+    let s: Vec<f64> = result[1]
+        .as_tensor()
+        .unwrap()
+        .elements
+        .iter()
+        .map(|l| l.as_f64().unwrap())
+        .collect();
+    let vh = extract_complex128_matrix(&result[2]); // 3×3
+    assert_eq!(s.len(), 3);
+    assert!(s[0] >= s[1] && s[1] >= s[2], "singular values descending");
+    assert!(
+        s[2] < 1e-10,
+        "rank-2 complex matrix zero singular value should be ~ε·‖A‖, got {} (s0={})",
+        s[2],
+        s[0]
+    );
+    // Reconstruct A = U·diag(S)·Vᴴ (complex) and check ‖recon − A‖∞.
+    let cmul = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+    for i in 0..3 {
+        for j in 0..3 {
+            let mut acc = (0.0_f64, 0.0_f64);
+            for l in 0..3 {
+                let usl = (u[i * 3 + l].0 * s[l], u[i * 3 + l].1 * s[l]);
+                let term = cmul(usl, vh[l * 3 + j]);
+                acc = (acc.0 + term.0, acc.1 + term.1);
+            }
+            let expected = a_data[i * 3 + j];
+            assert!(
+                (acc.0 - expected.0).abs() < 1e-9 && (acc.1 - expected.1).abs() < 1e-9,
+                "recon[{i},{j}] = {acc:?}, expected {expected:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn property_svd_preserves_complex_dtypes() {
     for dtype in [DType::Complex64, DType::Complex128] {
         let a = match dtype {

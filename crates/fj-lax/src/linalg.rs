@@ -1158,52 +1158,106 @@ pub(crate) fn eval_svd(
     let k = m.min(n);
     let zero = (0.0, 0.0);
 
-    // Step 1: Compute A^H A (n×n Hermitian matrix)
-    let mut aha = vec![zero; n * n];
+    // One-sided complex Jacobi SVD (Hari–Veselić): orthogonalize the COLUMNS of A
+    // in place by right-side unitary Jacobi rotations, accumulating V. Never forms
+    // AᴴA, so the condition number is not squared and small singular values keep
+    // their relative accuracy (ε·‖A‖, not √ε·‖A‖) — the complex analogue of the
+    // real one-sided path. At convergence W = A·V has orthogonal columns:
+    // σ_i = ‖W[:,i]‖, U[:,i] = W[:,i]/σ_i. See bead frankenjax-4kx6m.
+    let mut w = a.clone(); // m×n working matrix; its columns become orthogonal.
+    let mut v = vec![zero; n * n];
     for i in 0..n {
-        for j in i..n {
-            let mut dot = zero;
-            for row in 0..m {
-                dot = complex_add(
-                    dot,
-                    complex_mul(complex_conj(a[row * n + i]), a[row * n + j]),
-                );
+        v[i * n + i] = (1.0, 0.0);
+    }
+
+    let eps = f64::EPSILON;
+    let max_sweeps = 60;
+    for _ in 0..max_sweeps {
+        let mut converged = true;
+        for p in 0..n.saturating_sub(1) {
+            for q in (p + 1)..n {
+                // 2×2 Hermitian Gram of columns p,q: [[α, γ], [γ̄, β]] with α,β real,
+                // γ = col_pᴴ·col_q = Σ conj(W[i,p])·W[i,q].
+                let mut alpha = 0.0_f64;
+                let mut beta = 0.0_f64;
+                let mut gamma = zero;
+                for i in 0..m {
+                    let wip = w[i * n + p];
+                    let wiq = w[i * n + q];
+                    alpha += wip.0 * wip.0 + wip.1 * wip.1;
+                    beta += wiq.0 * wiq.0 + wiq.1 * wiq.1;
+                    gamma = complex_add(gamma, complex_mul(complex_conj(wip), wiq));
+                }
+                let gmag = (gamma.0 * gamma.0 + gamma.1 * gamma.1).sqrt();
+                // Columns already orthogonal to working precision: skip.
+                if gmag <= eps * (alpha * beta).sqrt() {
+                    continue;
+                }
+                converged = false;
+                // Real symmetric Schur on [[α, |γ|], [|γ|, β]] gives c,s; the column
+                // update carries the complex phase ζ = γ/|γ|. The resulting rotation
+                // J = [[c, ζs], [−ζ̄s, c]] is unitary and drives the (p,q) Gram entry
+                // (which equals ζ·[cs(α−β) + |γ|(c²−s²)]) to zero.
+                let tau = (beta - alpha) / (2.0 * gmag);
+                let t = if tau >= 0.0 {
+                    1.0 / (tau + (1.0 + tau * tau).sqrt())
+                } else {
+                    -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+                };
+                let c = (1.0_f64 / (1.0 + t * t).sqrt(), 0.0);
+                let s = t / (1.0 + t * t).sqrt();
+                let zeta = (gamma.0 / gmag, gamma.1 / gmag); // unit phase ζ
+                let neg_czs = complex_mul((-s, 0.0), complex_conj(zeta)); // −ζ̄·s
+                let zeta_s = complex_mul((s, 0.0), zeta); //                 ζ·s
+                // new_p = c·p − ζ̄s·q ; new_q = ζs·p + c·q.
+                for i in 0..m {
+                    let wip = w[i * n + p];
+                    let wiq = w[i * n + q];
+                    w[i * n + p] = complex_add(complex_mul(c, wip), complex_mul(neg_czs, wiq));
+                    w[i * n + q] = complex_add(complex_mul(zeta_s, wip), complex_mul(c, wiq));
+                }
+                for i in 0..n {
+                    let vip = v[i * n + p];
+                    let viq = v[i * n + q];
+                    v[i * n + p] = complex_add(complex_mul(c, vip), complex_mul(neg_czs, viq));
+                    v[i * n + q] = complex_add(complex_mul(zeta_s, vip), complex_mul(c, viq));
+                }
             }
-            aha[i * n + j] = dot;
-            aha[j * n + i] = complex_conj(dot);
+        }
+        if converged {
+            break;
         }
     }
 
-    // Step 2: Eigendecompose A^H A via Jacobi rotations → V, eigenvalues σ²
-    // (row-cyclic sweeps, O(n³·sweeps) vs the max-pivot kernel's O(n⁴); same spectrum
-    // to machine precision, and Step 3 re-sorts so iteration order is unobservable)
-    let (eigenvalues, v) = complex_jacobi_eigendecomposition_cyclic(&mut aha, n);
-
-    // Step 3: Sort eigenvalues (and corresponding V columns) in descending order
+    // Column norms of W are the singular values; sort descending.
+    let mut col_norm = vec![0.0_f64; n];
+    for j in 0..n {
+        let mut s2 = 0.0_f64;
+        for i in 0..m {
+            let wij = w[i * n + j];
+            s2 += wij.0 * wij.0 + wij.1 * wij.1;
+        }
+        col_norm[j] = s2.sqrt();
+    }
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.sort_by(|&a, &b| eigenvalues[b].total_cmp(&eigenvalues[a]));
+    indices.sort_by(|&a, &b| col_norm[b].total_cmp(&col_norm[a]));
 
     let mut sigma = vec![0.0_f64; k];
     let mut v_sorted = vec![zero; n * n];
+    let mut u = vec![zero; m * k];
     for (new_col, &old_col) in indices.iter().enumerate() {
-        if new_col < k {
-            sigma[new_col] = eigenvalues[old_col].max(0.0).sqrt();
-        }
         for row in 0..n {
             v_sorted[row * n + new_col] = v[row * n + old_col];
         }
-    }
-
-    // Step 4: Compute U = A V Σ^{-1} (thin: m×k)
-    let mut u = vec![zero; m * k];
-    for i in 0..m {
-        for j in 0..k {
-            if sigma[j] > f64::EPSILON * 1e4 {
-                let mut val = zero;
-                for col in 0..n {
-                    val = complex_add(val, complex_mul(a[i * n + col], v_sorted[col * n + j]));
+        if new_col < k {
+            let sg = col_norm[old_col];
+            sigma[new_col] = sg;
+            // U[:,i] = W[:,i]/σ_i; a numerically-zero σ leaves the column zero
+            // (full_matrices later fills a unitary basis), matching the prior guard.
+            if sg > f64::EPSILON * 1e4 {
+                for row in 0..m {
+                    u[row * k + new_col] = complex_div(w[row * n + old_col], (sg, 0.0));
                 }
-                u[i * k + j] = complex_div(val, (sigma[j], 0.0));
             }
         }
     }
