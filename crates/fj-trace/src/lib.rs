@@ -2208,6 +2208,23 @@ impl SimpleTraceContext {
 
                 let padding = parse_reduce_window_padding_param(primitive, params)?;
 
+                // Reject reduce_window dilation params fj-lax does not implement
+                // (base_dilation / window_dilation) rather than infer a wrong (undilated)
+                // output shape — eval rejects them too; staging must agree.
+                for key in ["base_dilation", "window_dilation"] {
+                    if params
+                        .get(key)
+                        .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+                    {
+                        return Err(TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!(
+                                "reduce_window {key} is not supported (window/stride/padding only)"
+                            ),
+                        });
+                    }
+                }
+
                 let mut out_dims = Vec::with_capacity(rank);
                 for d in 0..rank {
                     let input_dim = input.shape.dims[d] as usize;

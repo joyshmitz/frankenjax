@@ -3157,6 +3157,26 @@ fn eval_reduce_window(
     let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
 
     let padding = parse_reduce_window_padding(primitive, params)?;
+
+    // fj-lax reduce_window implements window_dimensions + window_strides + padding only.
+    // Reject the dilation params it does NOT implement (base_dilation dilates the input,
+    // window_dilation dilates the window — both used by dilated/atrous pooling) rather
+    // than silently ignore them and return a wrong (undilated) result for the same shape,
+    // a silent parity violation vs jax.lax.reduce_window. Fail loudly.
+    for key in ["base_dilation", "window_dilation"] {
+        if params
+            .get(key)
+            .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+        {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "reduce_window {key} is not supported (window/stride/padding only)"
+                ),
+            });
+        }
+    }
+
     let output_dtype = reduce_window_output_dtype(tensor.dtype);
 
     // Calculate output dimensions
@@ -9716,6 +9736,41 @@ mod tests {
         let mut p = rw_params(reduce_op, window, strides);
         p.insert("padding".to_owned(), padding.to_owned());
         p
+    }
+
+    #[test]
+    fn reduce_window_rejects_unimplemented_dilation() {
+        // fj-lax reduce_window does window + stride + padding only. Unsupported dilation
+        // params (base_dilation dilates the input, window_dilation dilates the window)
+        // must fail loudly — silently ignoring them would return a wrong (undilated)
+        // result for the same shape.
+        let input = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims: vec![4, 4] },
+                (0..16).map(|i| i as f64).collect(),
+            )
+            .unwrap(),
+        );
+        for (key, val) in [
+            ("base_dilation", "2,2"),
+            ("window_dilation", "2,2"),
+            ("window_dilation", "1,2"),
+        ] {
+            let mut p = rw_params("max", "2,2", "1,1");
+            p.insert(key.to_owned(), val.to_owned());
+            let err = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p)
+                .expect_err(&format!("reduce_window must reject {key}={val}"));
+            assert!(
+                err.to_string().contains(key) && err.to_string().contains("not supported"),
+                "{key}={val}: expected an unsupported error, got {err}"
+            );
+        }
+        // Default (all-1) dilation still succeeds.
+        let mut p = rw_params("max", "2,2", "1,1");
+        p.insert("base_dilation".to_owned(), "1,1".to_owned());
+        p.insert("window_dilation".to_owned(), "1,1".to_owned());
+        eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p)
+            .expect("reduce_window with default (all-1) dilation must still succeed");
     }
 
     #[test]
