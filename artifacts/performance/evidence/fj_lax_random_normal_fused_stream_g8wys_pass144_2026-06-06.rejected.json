@@ -1,0 +1,107 @@
+{
+  "schema": "frankenjax.performance.evidence.v1",
+  "date": "2026-06-06",
+  "pass": 144,
+  "bead": "frankenjax-g8wys",
+  "status": "rejected",
+  "crate": "fj-lax",
+  "target": "random/normal_1m_f64",
+  "skill_loop": [
+    "repeatedly-apply-skill",
+    "extreme-software-optimization",
+    "alien-graveyard",
+    "alien-artifact-coding"
+  ],
+  "profile_backing": {
+    "ready_perf_beads": "none at pass start; g8wys filed from pass143 profile-backed residual",
+    "source": "pass143 profile showed random_uniform_1m_f64 around 9.4 ms and random_normal_1m_f64 still hot after threaded inverse-erf transform",
+    "alien_graveyard_route": "loop fusion / streaming dataflow / allocation elimination over a counter-based RNG stream",
+    "alien_artifact_contract": "compile the stream-fusion idea into a deterministic artifact with key-counter, ordering, FP-expression, and golden-digest proof obligations"
+  },
+  "lever_tested": {
+    "single_lever": true,
+    "description": "Generate ThreeFry uniform mantissas over contiguous counter ranges and immediately write sqrt(2) * erf_inv_approx(u) normal samples into the output, avoiding the intermediate uniform Vec.",
+    "files_touched_temporarily": [
+      "crates/fj-lax/src/threefry.rs"
+    ],
+    "kept": false
+  },
+  "baseline": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-g8wys-baseline cargo bench -p fj-lax --bench lax_baseline -- 'random/normal_1m_f64|random/uniform_1m_f64' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "worker": "vmi1227854",
+    "random_uniform_1m_f64_ms": {
+      "low": 9.8564,
+      "mid": 9.9112,
+      "high": 9.9684
+    },
+    "random_normal_1m_f64_ms": {
+      "low": 44.425,
+      "mid": 45.552,
+      "high": 47.102
+    },
+    "recent_ts1_current_code_baseline_from_pass143": {
+      "random_uniform_1m_f64_ms": {
+        "low": 9.3510,
+        "mid": 9.4332,
+        "high": 9.5397
+      },
+      "random_normal_1m_f64_ms": {
+        "low": 24.638,
+        "mid": 26.629,
+        "high": 29.615
+      }
+    }
+  },
+  "candidate": {
+    "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-g8wys-after-bench cargo bench -p fj-lax --bench lax_baseline -- 'random/normal_1m_f64|random/uniform_1m_f64' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "worker": "ts1",
+    "random_uniform_1m_f64_ms": {
+      "low": 10.279,
+      "mid": 10.630,
+      "high": 10.789
+    },
+    "random_normal_1m_f64_ms": {
+      "low": 52.453,
+      "mid": 56.986,
+      "high": 63.573
+    }
+  },
+  "score": {
+    "impact": 0,
+    "confidence": 5,
+    "effort": 2,
+    "value": 0.0,
+    "decision": "reject",
+    "reason": "Candidate normal midpoint regressed versus both the fresh cross-worker baseline and the recent ts1 current-code baseline; no source hunk retained."
+  },
+  "isomorphism_proof_before_rejection": {
+    "ordering": "Candidate wrote disjoint contiguous chunks; each output index used counter [0, i].",
+    "tie_breaking": "No comparisons or ties.",
+    "floating_point": "Per element used the same min + unit * scale uniform expression and sqrt(2) * erf_inv_approx(u); no reductions, reassociation, mul_add, or mixed precision.",
+    "rng": "ThreeFry key schedule, counter mapping, rounds, mantissa extraction, and tail handling unchanged.",
+    "golden_output_sha256": {
+      "artifact": "2a7d1ffc6db27879d70c5d7e73fb60d6f606c7b2e9860bf2c85e7a9d05d4e5b2",
+      "random_normal_threaded_golden_sha256": "982d444c8f93dd7331fff1e2141e40ee967f6698a7a12cbeef104d38b6c6c29b",
+      "threefry_generated_bits_golden_sha256": "e96748ed0520e1648d412ffe3ccddbf966b23fd0828824e0d924e2fa7108c8f5"
+    }
+  },
+  "validation": [
+    {
+      "command": "RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-g8wys-proof-threefry cargo test -p fj-lax --lib threefry -- --nocapture",
+      "worker": "vmi1149989",
+      "result": "75 passed; included fused_random_normal_stream_matches_materialized_uniform_path, random_normal_threaded_golden_sha256, and threefry_generated_bits_golden_sha256"
+    },
+    {
+      "command": "rustfmt --edition 2024 crates/fj-lax/src/threefry.rs && git diff -- crates/fj-lax/src/threefry.rs",
+      "result": "source restored; diff empty"
+    },
+    {
+      "command": "sha256sum artifacts/performance/evidence/fj_lax_random_normal_fused_stream_g8wys_pass144_2026-06-06.rejected.golden",
+      "result": "2a7d1ffc6db27879d70c5d7e73fb60d6f606c7b2e9860bf2c85e7a9d05d4e5b2"
+    }
+  ],
+  "next_primitive": {
+    "description": "Do not retune fused/parallel normal stream shape. Attack a different distribution-core algorithm: a Box-Muller or Ziggurat normal generator behind an explicit JAX-parity contract only if the public RNG stream contract permits changing normal sample sequence; otherwise route to random_randint/generate_u32_bits parallelization or categorical/Gumbel fusion with a fresh profile-backed bead.",
+    "target_ratio": ">=2.0 score gate, with behavior contract decided before implementation"
+  }
+}
