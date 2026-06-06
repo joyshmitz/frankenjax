@@ -3884,6 +3884,49 @@ pub(crate) fn erf_approx(x: f64) -> f64 {
     }
 }
 
+/// Complementary error function `erfc(x) = 1 − erf(x)`, accurate even in the far tail.
+/// For `|x| < 3.5` the subtraction `1 − erf(x)` is harmless (erf is well below 1). For
+/// `|x| ≥ 3.5` erfc is computed DIRECTLY from the asymptotic expansion
+///   `erfc(t) ~ e^{−t²}/(t√π) · Σ_k (−1)ᵏ (2k−1)!!/(2t²)ᵏ`  (truncated at the smallest term),
+/// so the tiny tail survives. The previous dispatch `1 − erf_approx(x)` returned exactly
+/// `0` for `|x| ≥ 6` (erf_approx saturates to ±1 there) — e.g. erfc(8) was 0 vs the true
+/// ~1.1e-29, a parity gap vs XLA's directly-evaluated erfc (the tail feeds log-survival /
+/// normal-CDF tails). `erfc(−|x|) = 2 − erfc(|x|)`.
+pub(crate) fn erfc_approx(x: f64) -> f64 {
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    let ax = x.abs();
+    if ax < 3.5 {
+        return 1.0 - erf_approx(x);
+    }
+    let x2 = ax * ax;
+    let mut term = 1.0_f64;
+    let mut sum = 1.0_f64;
+    let mut prev_abs = f64::INFINITY;
+    let mut n = 1.0_f64;
+    loop {
+        // tₙ = tₙ₋₁ · −(2n−1)/(2x²)
+        term *= -(2.0 * n - 1.0) / (2.0 * x2);
+        let mag = term.abs();
+        if mag > prev_abs {
+            break; // asymptotic series began to diverge
+        }
+        sum += term;
+        prev_abs = mag;
+        if mag <= f64::EPSILON || n > 100.0 {
+            break;
+        }
+        n += 1.0;
+    }
+    let erfc_pos = (-x2).exp() / (ax * std::f64::consts::PI.sqrt()) * sum;
+    if x >= 0.0 {
+        erfc_pos
+    } else {
+        2.0 - erfc_pos
+    }
+}
+
 const LANCZOS_COEFFS: [f64; 9] = [
     0.999_999_999_999_809_9,
     676.520_368_121_885_1,
@@ -8902,6 +8945,39 @@ mod tests {
         assert_eq!(t.shape.dims, vec![2, 3]);
         let vals = extract_f64_vec(&Value::Tensor(t));
         assert_eq!(vals, vec![3.0, 4.0, 5.0, 6.0, 8.0, 10.0]);
+    }
+
+    #[test]
+    fn erfc_approx_far_tail_accurate() {
+        // THE FIX: the old dispatch erfc = 1 − erf_approx(x) returned exactly 0 for
+        // |x| ≥ 6 (erf_approx saturates to ±1 there); the direct asymptotic recovers the
+        // true tail, matching scipy/XLA. (The [3.5, 6) range is unchanged — erf_approx
+        // already used the same asymptotic there, ~√ε-floored, a pre-existing limit.)
+        let far_tail = [
+            (6.0_f64, 2.151_973_671_249_891_4e-17),
+            (8.0_f64, 1.122_429_717_205_234_2e-29),
+            (10.0_f64, 2.088_487_583_762_544_7e-45),
+        ];
+        for (x, expected) in far_tail {
+            let got = erfc_approx(x);
+            assert!(got > 0.0, "erfc({x}) must be nonzero (was 0 in the old code)");
+            let rel = (got - expected).abs() / expected.abs();
+            assert!(
+                rel < 1e-8,
+                "erfc({x}) = {got:e}, expected {expected:e}, rel err {rel:e}"
+            );
+        }
+        // erfc(1), erfc(2) use the exact 1 − erf path (no cancellation; erf well below 1).
+        assert!((erfc_approx(1.0) - 0.157_299_207_050_285_13).abs() < 1e-13);
+        assert!((erfc_approx(2.0) - 4.677_734_981_047_266e-3).abs() < 1e-14);
+        // Negative tail: erfc(−x) = 2 − erfc(x) → ≈ 2 for large x.
+        assert!((erfc_approx(-8.0) - (2.0 - 1.122_429_717_205_234_2e-29)).abs() < 1e-12);
+        assert!((erfc_approx(0.0) - 1.0).abs() < 1e-15);
+        // Small-|x| path unchanged: still exactly 1 − erf_approx (preserves the
+        // metamorphic erfc==1-erf invariant tested over x ∈ [−3, 3]).
+        for x in [-2.0, -0.5, 0.3, 1.5, 3.0] {
+            assert_eq!(erfc_approx(x), 1.0 - erf_approx(x), "erfc==1-erf for |x|<3.5");
+        }
     }
 
     #[test]

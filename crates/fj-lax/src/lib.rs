@@ -27,7 +27,8 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use arithmetic::{
-    erf_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh, eval_bessel_i0e, eval_bessel_i1e,
+    erf_approx, erfc_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh, eval_bessel_i0e,
+    eval_bessel_i1e,
     eval_betainc, eval_binary_elementwise, eval_clamp, eval_complex, eval_conj, eval_cos,
     eval_cosh, eval_digamma, eval_dot, eval_dot_general, eval_erf_inv, eval_exp, eval_fma,
     eval_igamma, eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf,
@@ -297,9 +298,7 @@ pub fn eval_primitive(
             eval_unary_elementwise(primitive, inputs, |x| 1.0 / (1.0 + (-x).exp()))
         }
         Primitive::Erf => eval_unary_elementwise_parallel(primitive, inputs, erf_approx),
-        Primitive::Erfc => {
-            eval_unary_elementwise_parallel(primitive, inputs, |x| 1.0 - erf_approx(x))
-        }
+        Primitive::Erfc => eval_unary_elementwise_parallel(primitive, inputs, erfc_approx),
         Primitive::Lgamma => eval_lgamma(primitive, inputs),
         Primitive::Digamma => eval_digamma(primitive, inputs),
         Primitive::Polygamma => eval_polygamma(primitive, inputs),
