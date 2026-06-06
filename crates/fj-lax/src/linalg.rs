@@ -2768,6 +2768,125 @@ pub(crate) fn eval_slogdet(
 ///
 /// Uses QR iteration for small matrices. Returns complex eigenvalues/eigenvectors
 /// since non-symmetric matrices can have complex eigenvalues.
+/// Complex QR factorization by modified Gram-Schmidt: `A = Q R` with `Q` unitary
+/// (columns orthonormal under the Hermitian inner product) and `R` upper-triangular,
+/// both row-major n×n. Small-n only (the QR-iteration eigensolver re-orthogonalizes
+/// every step, so MGS's conditioning is adequate here).
+fn complex_qr_mgs(a: &[(f64, f64)], n: usize) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    let mut q = a.to_vec();
+    let mut r = vec![(0.0_f64, 0.0_f64); n * n];
+    for j in 0..n {
+        for i in 0..j {
+            // R[i][j] = <q_i, q_j> = Σ_k conj(q[k][i])·q[k][j]
+            let mut dot = (0.0_f64, 0.0_f64);
+            for k in 0..n {
+                dot = complex_add(dot, complex_mul(complex_conj(q[k * n + i]), q[k * n + j]));
+            }
+            r[i * n + j] = dot;
+            for k in 0..n {
+                q[k * n + j] = complex_sub(q[k * n + j], complex_mul(dot, q[k * n + i]));
+            }
+        }
+        let norm = (0..n)
+            .map(|k| complex_abs(q[k * n + j]).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        r[j * n + j] = (norm, 0.0);
+        if norm > 0.0 {
+            for k in 0..n {
+                q[k * n + j] = (q[k * n + j].0 / norm, q[k * n + j].1 / norm);
+            }
+        }
+    }
+    (q, r)
+}
+
+/// Row-major complex n×n matrix product.
+fn complex_matmul_n(x: &[(f64, f64)], y: &[(f64, f64)], n: usize) -> Vec<(f64, f64)> {
+    let mut out = vec![(0.0_f64, 0.0_f64); n * n];
+    for i in 0..n {
+        for j in 0..n {
+            let mut s = (0.0_f64, 0.0_f64);
+            for k in 0..n {
+                s = complex_add(s, complex_mul(x[i * n + k], y[k * n + j]));
+            }
+            out[i * n + j] = s;
+        }
+    }
+    out
+}
+
+/// Eigenvector for complex eigenvalue `lambda` of complex `a` by two steps of inverse
+/// iteration on `(A − λI)`, reusing the nudging [`complex_linear_solve`] (which keeps
+/// the intentionally near-singular solve finite). Returns a unit-norm complex vector.
+fn complex_eig_eigenvector(a: &[(f64, f64)], n: usize, lambda: (f64, f64)) -> Vec<(f64, f64)> {
+    let mut x = vec![(1.0_f64, 0.0_f64); n];
+    for _ in 0..2 {
+        let mut m: Vec<(f64, f64)> = (0..n * n)
+            .map(|idx| {
+                let e = a[idx];
+                if idx / n == idx % n {
+                    complex_sub(e, lambda)
+                } else {
+                    e
+                }
+            })
+            .collect();
+        let mut b = x.clone();
+        let sol = complex_linear_solve(&mut m, &mut b, n);
+        let norm = sol
+            .iter()
+            .map(|z| complex_abs(*z).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        if !norm.is_finite() || norm == 0.0 {
+            break;
+        }
+        x = sol.iter().map(|z| (z.0 / norm, z.1 / norm)).collect();
+    }
+    x
+}
+
+/// Complex non-Hermitian eigendecomposition: unshifted QR iteration drives `A` to its
+/// (fully upper-triangular) complex Schur form — every eigenvalue lands on the
+/// diagonal (unlike the real case there are no 2×2 blocks) — then each eigenvector is
+/// recovered by inverse iteration on the original `A`. Eigenvectors are column-major
+/// (column k pairs with eigenvalue k). Like the real `eig_qr_iteration`, the unshifted
+/// sweep converges for well-separated eigenvalue moduli (adequate for small matrices).
+fn complex_eig_qr(a: &[(f64, f64)], n: usize) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    if n == 0 {
+        return (vec![], vec![]);
+    }
+    if n == 1 {
+        return (vec![a[0]], vec![(1.0, 0.0)]);
+    }
+    let mut t = a.to_vec();
+    let scale = a.iter().map(|z| complex_abs(*z)).fold(0.0_f64, f64::max).max(1.0);
+    let tol = f64::EPSILON * 1e2 * scale;
+    for _ in 0..(200 * n) {
+        let (q, r) = complex_qr_mgs(&t, n);
+        t = complex_matmul_n(&r, &q, n); // T ← R·Q
+        let mut off = 0.0_f64;
+        for i in 1..n {
+            for j in 0..i {
+                off = off.max(complex_abs(t[i * n + j]));
+            }
+        }
+        if off < tol {
+            break;
+        }
+    }
+    let eigenvalues: Vec<(f64, f64)> = (0..n).map(|i| t[i * n + i]).collect();
+    let mut eigenvectors = vec![(0.0_f64, 0.0_f64); n * n];
+    for (col, &lambda) in eigenvalues.iter().enumerate() {
+        let v = complex_eig_eigenvector(a, n, lambda);
+        for row in 0..n {
+            eigenvectors[row * n + col] = v[row];
+        }
+    }
+    (eigenvalues, eigenvectors)
+}
+
 pub(crate) fn eval_eig(
     inputs: &[Value],
     _params: &std::collections::BTreeMap<String, String>,
@@ -2782,7 +2901,7 @@ pub(crate) fn eval_eig(
         });
     }
 
-    let (m, n, a, _dtype) = extract_complex_matrix(primitive, &inputs[0])?;
+    let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
     if m != n {
         return Err(EvalError::TypeMismatch {
             primitive,
@@ -2790,10 +2909,15 @@ pub(crate) fn eval_eig(
         });
     }
 
-    let a_real: Vec<f64> = a.iter().map(|(re, _im)| *re).collect();
-
-    // Compute eigenvalues and eigenvectors via QR iteration
-    let (eigenvalues, eigenvectors) = eig_qr_iteration(&a_real, n);
+    // Compute eigenvalues and eigenvectors. A complex input uses the complex QR
+    // iteration (the previous code took the real part only — silently wrong); a real
+    // input keeps the real-Schur kernel.
+    let (eigenvalues, eigenvectors) = if matches!(dtype, DType::Complex64 | DType::Complex128) {
+        complex_eig_qr(&a, n)
+    } else {
+        let a_real: Vec<f64> = a.iter().map(|(re, _im)| *re).collect();
+        eig_qr_iteration(&a_real, n)
+    };
 
     // Eigenvalues as Complex128 (can be complex for non-symmetric)
     let w_elements: Vec<Literal> = eigenvalues
@@ -4191,6 +4315,53 @@ mod tests {
     /// Ground truth for frankenjax-eig-nonsymmetric-broken-n3-66pmy: build A = H·T·H
     /// with H a symmetric-orthogonal Householder and T block-diagonal — a 1×1 {2}
     /// plus a 2×2 rotation block {±3i}. A is a dense non-symmetric matrix similar to
+    #[test]
+    fn complex_eig_qr_recovers_known_spectrum_n3() {
+        // Frankenjax-eig-drops-complex-input-gx9mm: complex eig must use the full
+        // complex matrix, not its real part. Build A = H·T·H with H a complex
+        // Householder (unitary & Hermitian) and T = diag(2+i, −1+3i, −2i); A is a
+        // dense complex non-Hermitian matrix similar to T, so eig must recover that
+        // spectrum and satisfy A·v = λ·v.
+        let n = 3usize;
+        let eigs = [(2.0, 1.0), (-1.0, 3.0), (0.0, -2.0)];
+        let mut t = vec![(0.0_f64, 0.0_f64); n * n];
+        for i in 0..n {
+            t[i * n + i] = eigs[i];
+        }
+        // v = [1, i, 1−i], vᴴv = 4, H = I − 0.5·v·vᴴ.
+        let v = [(1.0, 0.0), (0.0, 1.0), (1.0, -1.0)];
+        let mut h = vec![(0.0_f64, 0.0_f64); n * n];
+        for r in 0..n {
+            for c in 0..n {
+                let id = if r == c { (1.0, 0.0) } else { (0.0, 0.0) };
+                let vvh = complex_mul(v[r], complex_conj(v[c]));
+                h[r * n + c] = complex_sub(id, (0.5 * vvh.0, 0.5 * vvh.1));
+            }
+        }
+        let a = complex_matmul_n(&complex_matmul_n(&h, &t, n), &h, n);
+
+        let (w, vecs) = complex_eig_qr(&a, n);
+        for &(er, ei) in &eigs {
+            assert!(
+                w.iter().any(|&(wr, wi)| (wr - er).abs() < 1e-7 && (wi - ei).abs() < 1e-7),
+                "missing eigenvalue ({er},{ei}) in {w:?}"
+            );
+        }
+        for col in 0..n {
+            for row in 0..n {
+                let mut acc = (0.0_f64, 0.0_f64);
+                for k in 0..n {
+                    acc = complex_add(acc, complex_mul(a[row * n + k], vecs[k * n + col]));
+                }
+                let want = complex_mul(w[col], vecs[row * n + col]);
+                assert!(
+                    (acc.0 - want.0).abs() < 1e-7 && (acc.1 - want.1).abs() < 1e-7,
+                    "A·v≠λ·v at ({row},{col}): {acc:?} vs {want:?}"
+                );
+            }
+        }
+    }
+
     /// T, so eig must recover the spectrum {2, 3i, -3i}. The pre-fix kernel read only
     /// the diagonal and returned ≈{2,0,0}, dropping the complex pair.
     #[test]
