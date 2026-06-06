@@ -6190,25 +6190,26 @@ mod tests {
 
         let (values, vectors) = eig_qr_iteration(&a, n);
         let expected_values: [(f64, f64); 3] = [(7.0, 0.0), (3.0, 0.0), (-2.0, 0.0)];
-        let expected_vectors: [(f64, f64); 9] = [
-            (1.0, 0.0),
-            (0.0, 0.0),
-            (0.0, 0.0),
-            (0.0, 0.0),
-            (1.0, 0.0),
-            (0.0, 0.0),
-            (0.0, 0.0),
-            (0.0, 0.0),
-            (1.0, 0.0),
-        ];
 
+        // Eigenvalues of a diagonal matrix deflate exactly.
         for idx in 0..n {
             assert_eq!(values[idx].0.to_bits(), expected_values[idx].0.to_bits());
             assert_eq!(values[idx].1.to_bits(), expected_values[idx].1.to_bits());
         }
-        for idx in 0..n * n {
-            assert_eq!(vectors[idx].0.to_bits(), expected_vectors[idx].0.to_bits());
-            assert_eq!(vectors[idx].1.to_bits(), expected_vectors[idx].1.to_bits());
+        // Eigenvectors now come from inverse iteration — valid up to scale/phase
+        // (not bit-exact identity as the old Schur-vector path happened to emit for
+        // diagonal input). Assert the real contract: A·v = λ·v, and each column is
+        // axis-aligned (|v[row][col]| ≈ δ(row,col)) to tolerance.
+        assert_eig_residual_complex(&a, n, &values, &vectors, 1e-12);
+        for col in 0..n {
+            for row in 0..n {
+                let want = if row == col { 1.0 } else { 0.0 };
+                assert!(
+                    (complex_abs(vectors[row * n + col]) - want).abs() < 1e-9,
+                    "diagonal eig vector[{row}][{col}] |·|={} not ≈{want}",
+                    complex_abs(vectors[row * n + col])
+                );
+            }
         }
     }
 
