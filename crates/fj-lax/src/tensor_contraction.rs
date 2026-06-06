@@ -919,7 +919,11 @@ mod tests {
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             v[v.len() / 2]
         }
-        for &(m, k, n) in &[(2048usize, 2048usize, 2048usize), (4096, 4096, 4096)] {
+        for &(m, k, n) in &[
+            (1024usize, 1024usize, 1024usize),
+            (2048, 2048, 2048),
+            (4096, 4096, 4096),
+        ] {
             let a: Vec<f64> = (0..m * k).map(|i| ((i % 97) as f64) * 0.01 - 0.3).collect();
             let b: Vec<f64> = (0..k * n).map(|i| ((i % 89) as f64) * 0.02 + 0.1).collect();
             let reps = 5;
