@@ -5084,12 +5084,57 @@ pub(crate) fn eval_conv(
     }
 
     let padding = parse_conv_padding(primitive, params)?;
+    reject_unsupported_conv_params(primitive, params)?;
 
     if lhs_rank == 3 {
         eval_conv_1d(primitive, lhs, rhs, params, padding)
     } else {
         eval_conv_2d(primitive, lhs, rhs, params, padding)
     }
+}
+
+/// fj-lax conv implements stride + padding (VALID/SAME/SAME_LOWER) on the default
+/// `[N,(H,)W,Cin]` / `[(KH,)KW,Cin,Cout]` layout. The `conv_general_dilated` parameters
+/// it does NOT implement — input/kernel dilation and feature/batch grouping — must be
+/// REJECTED rather than silently ignored: ignoring `rhs_dilation` (atrous conv) or
+/// `feature_group_count` (depthwise/grouped conv) would return a wrong result for the
+/// same shape, a silent parity violation vs `jax.lax.conv_general_dilated`. Fail loudly.
+fn reject_unsupported_conv_params(
+    primitive: Primitive,
+    params: &BTreeMap<String, String>,
+) -> Result<(), EvalError> {
+    // Dilation params are comma-separated per-spatial-dim factors; the no-op value is
+    // all 1s (or absent).
+    let has_nondefault_dilation = |key: &str| -> bool {
+        params
+            .get(key)
+            .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+    };
+    for key in ["rhs_dilation", "lhs_dilation"] {
+        if has_nondefault_dilation(key) {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "conv {key} is not supported (fj-lax conv implements stride + padding only)"
+                ),
+            });
+        }
+    }
+    // Grouping counts: the no-op value is 1 (or absent).
+    let has_nondefault_count = |key: &str| -> bool {
+        params
+            .get(key)
+            .is_some_and(|v| !matches!(v.trim(), "" | "1"))
+    };
+    for key in ["feature_group_count", "batch_group_count"] {
+        if has_nondefault_count(key) {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("conv {key} > 1 (grouped/depthwise conv) is not supported"),
+            });
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6616,6 +6661,48 @@ mod tests {
             bits(&valid),
             "conv1d 'same' must zero-pad OOB taps bit-for-bit like valid-on-padded"
         );
+    }
+
+    #[test]
+    fn conv_rejects_unimplemented_dilation_and_grouping() {
+        // fj-lax conv does stride + padding only. Unsupported conv_general_dilated
+        // params (dilation, grouping) must fail loudly — silently ignoring e.g.
+        // rhs_dilation would return a wrong (undilated) result for the same shape.
+        let mk = |dims: Vec<u32>, data: &[f64]| {
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims }, data.to_vec()).unwrap())
+        };
+        let lhs = mk(vec![1, 5, 2], &[0.0; 10]); // [N=1, W=5, Cin=2]
+        let rhs = mk(vec![3, 2, 2], &[0.0; 12]); // [K=3, Cin=2, Cout=2]
+        for (key, val) in [
+            ("rhs_dilation", "2"),
+            ("lhs_dilation", "2"),
+            ("rhs_dilation", "1,2"),
+            ("feature_group_count", "2"),
+            ("batch_group_count", "2"),
+        ] {
+            let err = eval_conv(
+                Primitive::Conv,
+                &[lhs.clone(), rhs.clone()],
+                &params(&[("padding", "valid"), (key, val)]),
+            )
+            .expect_err(&format!("conv must reject {key}={val}"));
+            assert!(
+                matches!(err, EvalError::Unsupported { .. }),
+                "conv {key}={val} should be Unsupported, got {err:?}"
+            );
+        }
+        // Sanity: the default (all no-op) params still succeed.
+        eval_conv(
+            Primitive::Conv,
+            &[lhs, rhs],
+            &params(&[
+                ("padding", "valid"),
+                ("strides", "1"),
+                ("rhs_dilation", "1"),
+                ("feature_group_count", "1"),
+            ]),
+        )
+        .expect("conv with default dilation/grouping must still succeed");
     }
 
     #[test]

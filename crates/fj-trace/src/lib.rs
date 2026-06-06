@@ -1756,6 +1756,32 @@ impl SimpleTraceContext {
 
                 let padding = parse_conv_padding_param(primitive, params)?;
 
+                // Reject conv_general_dilated params fj-lax conv does not implement
+                // (dilation, feature/batch grouping) rather than infer a wrong
+                // (undilated/ungrouped) output shape — see eval_conv's
+                // reject_unsupported_conv_params. Staging must agree with eval.
+                for key in ["rhs_dilation", "lhs_dilation"] {
+                    if params
+                        .get(key)
+                        .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+                    {
+                        return Err(TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!(
+                                "conv {key} is not supported (stride + padding only)"
+                            ),
+                        });
+                    }
+                }
+                for key in ["feature_group_count", "batch_group_count"] {
+                    if params.get(key).is_some_and(|v| !matches!(v.trim(), "" | "1")) {
+                        return Err(TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!("conv {key} > 1 is not supported"),
+                        });
+                    }
+                }
+
                 let out_dims = if lhs_rank == 3 {
                     if rhs.shape.rank() != 3 {
                         return Err(TraceError::ShapeInferenceFailed {
