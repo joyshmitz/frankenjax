@@ -6116,8 +6116,12 @@ pub(crate) fn eval_integer_pow(
                     _ => Literal::I64(base.wrapping_pow(e)),
                 })
             }
-            Literal::U32(base) if exponent >= 0 => Ok(Literal::U32(base.wrapping_pow(exponent as u32))),
-            Literal::U64(base) if exponent >= 0 => Ok(Literal::U64(base.wrapping_pow(exponent as u32))),
+            Literal::U32(base) if exponent >= 0 => {
+                Ok(Literal::U32(base.wrapping_pow(exponent as u32)))
+            }
+            Literal::U64(base) if exponent >= 0 => {
+                Ok(Literal::U64(base.wrapping_pow(exponent as u32)))
+            }
             _ => {
                 let value = literal.as_f64().ok_or("expected numeric")?;
                 let in_dtype = literal_dtype(literal);
@@ -6137,12 +6141,14 @@ pub(crate) fn eval_integer_pow(
             let out_dtype = tensor.dtype;
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in &tensor.elements {
-                elements.push(integer_pow_literal(*literal, exponent, out_dtype).map_err(|e| {
-                    EvalError::TypeMismatch {
-                        primitive,
-                        detail: e,
-                    }
-                })?);
+                elements.push(
+                    integer_pow_literal(*literal, exponent, out_dtype).map_err(|e| {
+                        EvalError::TypeMismatch {
+                            primitive,
+                            detail: e,
+                        }
+                    })?,
+                );
             }
 
             Ok(Value::Tensor(TensorValue::new(
@@ -7468,7 +7474,12 @@ mod tests {
                     .unwrap(),
                 )
             };
-            for prim in [Primitive::Add, Primitive::Sub, Primitive::Mul, Primitive::Div] {
+            for prim in [
+                Primitive::Add,
+                Primitive::Sub,
+                Primitive::Mul,
+                Primitive::Div,
+            ] {
                 let d =
                     crate::eval_primitive(prim, &[dense(&lf, &ls), dense(&rf, &rs)], &p).unwrap();
                 let l = crate::eval_primitive(prim, &[lit(&lf, &ls), lit(&rf, &rs)], &p).unwrap();

@@ -255,9 +255,7 @@ fn bench_polygamma_n2_256k_f64(c: &mut Criterion) {
 // 256k same-shape Igamma(a, x): regularized lower incomplete gamma — a series /
 // continued-fraction evaluation per element. Compute-bound, threads.
 fn bench_igamma_256k_f64(c: &mut Criterion) {
-    let a: Vec<f64> = (0..1 << 18)
-        .map(|i| 1.0 + (i % 97) as f64 * 0.05)
-        .collect();
+    let a: Vec<f64> = (0..1 << 18).map(|i| 1.0 + (i % 97) as f64 * 0.05).collect();
     let x: Vec<f64> = (0..1 << 18)
         .map(|i| 0.5 + (i % 211) as f64 * 0.02)
         .collect();
@@ -371,7 +369,13 @@ fn bench_add_broadcast_row_1024x1024_f64(c: &mut Criterion) {
         .unwrap(),
     );
     let rhs = Value::Tensor(
-        TensorValue::new_f64_values(Shape { dims: vec![n as u32] }, row).unwrap(),
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            row,
+        )
+        .unwrap(),
     );
     let p = no_params();
     c.bench_function("eval/add_broadcast_row_1024x1024_f64", |bencher| {
@@ -424,7 +428,13 @@ fn bench_add_broadcast_row_1024x1024_i64(c: &mut Criterion) {
         .unwrap(),
     );
     let rhs = Value::Tensor(
-        TensorValue::new_i64_values(Shape { dims: vec![n as u32] }, row).unwrap(),
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            row,
+        )
+        .unwrap(),
     );
     let p = no_params();
     c.bench_function("eval/add_broadcast_row_1024x1024_i64", |bencher| {
@@ -467,8 +477,7 @@ fn bench_bitand_same_shape_1024x1024_i64(c: &mut Criterion) {
     let a: Vec<i64> = (0..(n * n) as i64).map(|i| i * 2654435761).collect();
     let b: Vec<i64> = (0..(n * n) as i64).map(|i| i ^ 0x5555_5555).collect();
     let dims = vec![n as u32, n as u32];
-    let lhs =
-        Value::Tensor(TensorValue::new_i64_values(Shape { dims: dims.clone() }, a).unwrap());
+    let lhs = Value::Tensor(TensorValue::new_i64_values(Shape { dims: dims.clone() }, a).unwrap());
     let rhs = Value::Tensor(TensorValue::new_i64_values(Shape { dims }, b).unwrap());
     let p = no_params();
     c.bench_function("eval/bitand_same_shape_1024x1024_i64", |bencher| {
@@ -485,9 +494,8 @@ fn bench_select_1024x1024_f64(c: &mut Criterion) {
     let a: Vec<f64> = (0..n * n).map(|i| i as f64 * 1e-4).collect();
     let b: Vec<f64> = (0..n * n).map(|i| -(i as f64) * 2e-4).collect();
     let dims = vec![n as u32, n as u32];
-    let cond = Value::Tensor(
-        TensorValue::new_bool_values(Shape { dims: dims.clone() }, mask).unwrap(),
-    );
+    let cond =
+        Value::Tensor(TensorValue::new_bool_values(Shape { dims: dims.clone() }, mask).unwrap());
     let on_true =
         Value::Tensor(TensorValue::new_f64_values(Shape { dims: dims.clone() }, a).unwrap());
     let on_false = Value::Tensor(TensorValue::new_f64_values(Shape { dims }, b).unwrap());
@@ -548,7 +556,13 @@ fn bench_lt_broadcast_row_1024x1024_f64(c: &mut Criterion) {
         .unwrap(),
     );
     let rhs = Value::Tensor(
-        TensorValue::new_f64_values(Shape { dims: vec![n as u32] }, row).unwrap(),
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            row,
+        )
+        .unwrap(),
     );
     let p = no_params();
     c.bench_function("eval/lt_broadcast_row_1024x1024_f64", |bencher| {
@@ -571,7 +585,13 @@ fn bench_lt_broadcast_row_1024x1024_i64(c: &mut Criterion) {
         .unwrap(),
     );
     let rhs = Value::Tensor(
-        TensorValue::new_i64_values(Shape { dims: vec![n as u32] }, row).unwrap(),
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            row,
+        )
+        .unwrap(),
     );
     let p = no_params();
     c.bench_function("eval/lt_broadcast_row_1024x1024_i64", |bencher| {
@@ -585,7 +605,9 @@ fn bench_mul_broadcast_row_512x512_c128(c: &mut Criterion) {
     let mat: Vec<(f64, f64)> = (0..n * n)
         .map(|i| (i as f64 * 1e-4, i as f64 * 2e-4))
         .collect();
-    let row: Vec<(f64, f64)> = (0..n).map(|i| (i as f64 * 3e-4, -(i as f64) * 1e-4)).collect();
+    let row: Vec<(f64, f64)> = (0..n)
+        .map(|i| (i as f64 * 3e-4, -(i as f64) * 1e-4))
+        .collect();
     let lhs = Value::Tensor(
         TensorValue::new_complex_values(
             DType::Complex128,
@@ -597,8 +619,14 @@ fn bench_mul_broadcast_row_512x512_c128(c: &mut Criterion) {
         .unwrap(),
     );
     let rhs = Value::Tensor(
-        TensorValue::new_complex_values(DType::Complex128, Shape { dims: vec![n as u32] }, row)
-            .unwrap(),
+        TensorValue::new_complex_values(
+            DType::Complex128,
+            Shape {
+                dims: vec![n as u32],
+            },
+            row,
+        )
+        .unwrap(),
     );
     let p = no_params();
     c.bench_function("eval/mul_broadcast_row_512x512_c128", |bencher| {
@@ -612,7 +640,9 @@ fn bench_mul_broadcast_col_512x512_c128(c: &mut Criterion) {
     let mat: Vec<(f64, f64)> = (0..n * n)
         .map(|i| (i as f64 * 1e-4, i as f64 * 2e-4))
         .collect();
-    let col: Vec<(f64, f64)> = (0..n).map(|i| (i as f64 * 3e-4, -(i as f64) * 1e-4)).collect();
+    let col: Vec<(f64, f64)> = (0..n)
+        .map(|i| (i as f64 * 3e-4, -(i as f64) * 1e-4))
+        .collect();
     let lhs = Value::Tensor(
         TensorValue::new_complex_values(
             DType::Complex128,
@@ -2657,7 +2687,9 @@ fn bench_exp_64k(c: &mut Criterion) {
 // 1M elements: above PARALLEL_MIN_ELEMS (262144), so the compute-bound exp fans
 // out across cores. Measures the serial→threaded migration for exp/ln/sin/cos/tan.
 fn bench_exp_1m(c: &mut Criterion) {
-    let data: Vec<f64> = (0..4 * LARGE_RANDOM_LEN).map(|i| (i as f64) * 1e-6 - 8.0).collect();
+    let data: Vec<f64> = (0..4 * LARGE_RANDOM_LEN)
+        .map(|i| (i as f64) * 1e-6 - 8.0)
+        .collect();
     let input = Value::vector_f64(&data).unwrap();
     let p = no_params();
     c.bench_function("eval/exp_4m_f64", |bencher| {

@@ -1505,7 +1505,8 @@ fn eval_bitwise_bool_scalar_tensor(
         out.push(apply_bitwise_binary_bool(primitive, scalar, *v).unwrap_or(false));
     }
     Ok(Value::Tensor(
-        TensorValue::new_bool_values(tensor.shape.clone(), out).map_err(EvalError::InvalidTensor)?,
+        TensorValue::new_bool_values(tensor.shape.clone(), out)
+            .map_err(EvalError::InvalidTensor)?,
     ))
 }
 
@@ -1997,9 +1998,7 @@ fn eval_bitwise_tensor_same_shape(
             // and 24-byte enum stride on both inputs and the output. Bit-for-bit
             // identical to the loop below (same op, same order). `as_i64_slice` is
             // `Some` only for dense I64 storage.
-            if let (Some(av), Some(bv)) =
-                (a.elements.as_i64_slice(), b.elements.as_i64_slice())
-            {
+            if let (Some(av), Some(bv)) = (a.elements.as_i64_slice(), b.elements.as_i64_slice()) {
                 let out: Vec<i64> = av
                     .iter()
                     .zip(bv)
@@ -2085,9 +2084,7 @@ fn eval_bitwise_tensor_same_shape(
             ) {
                 return Err(bool_shift_unsupported(primitive));
             }
-            if let (Some(av), Some(bv)) =
-                (a.elements.as_bool_slice(), b.elements.as_bool_slice())
-            {
+            if let (Some(av), Some(bv)) = (a.elements.as_bool_slice(), b.elements.as_bool_slice()) {
                 let out: Vec<bool> = av
                     .iter()
                     .zip(bv)
@@ -2620,7 +2617,11 @@ fn reduce_window_rank2_f64_sum_3x3_border(
     for dr in 0..3usize {
         let in_row = out_row as isize + dr as isize - 1;
         let row_oob = in_row < 0 || (in_row as usize) >= input_rows;
-        let row_offset = if row_oob { 0 } else { (in_row as usize) * input_cols };
+        let row_offset = if row_oob {
+            0
+        } else {
+            (in_row as usize) * input_cols
+        };
         for dc in 0..3usize {
             let in_col = out_col as isize + dc as isize - 1;
             let v = if row_oob || in_col < 0 || (in_col as usize) >= input_cols {
@@ -2663,7 +2664,11 @@ fn reduce_window_rank2_f64_sum_3x3_border_values(
     for dr in 0..3usize {
         let in_row = out_row as isize + dr as isize - 1;
         let row_oob = in_row < 0 || (in_row as usize) >= input_rows;
-        let row_offset = if row_oob { 0 } else { (in_row as usize) * input_cols };
+        let row_offset = if row_oob {
+            0
+        } else {
+            (in_row as usize) * input_cols
+        };
         for dc in 0..3usize {
             let in_col = out_col as isize + dc as isize - 1;
             let v = if row_oob || in_col < 0 || (in_col as usize) >= input_cols {
@@ -2908,9 +2913,14 @@ fn eval_reduce_window_rank2_f64_sum(
                     let row_offset = if row_oob {
                         0
                     } else {
-                        (padded_row - pad_rows).checked_mul(input_cols).ok_or_else(|| {
-                            reduce_window_unsupported(primitive, "reduce_window flat index overflow")
-                        })?
+                        (padded_row - pad_rows)
+                            .checked_mul(input_cols)
+                            .ok_or_else(|| {
+                                reduce_window_unsupported(
+                                    primitive,
+                                    "reduce_window flat index overflow",
+                                )
+                            })?
                     };
                     for window_col in 0..window_cols {
                         let padded_col = col_base.checked_add(window_col).ok_or_else(|| {
@@ -2966,9 +2976,14 @@ fn eval_reduce_window_rank2_f64_sum(
                 let row_offset = if row_oob {
                     0
                 } else {
-                    (padded_row - pad_rows).checked_mul(input_cols).ok_or_else(|| {
-                        reduce_window_unsupported(primitive, "reduce_window flat index overflow")
-                    })?
+                    (padded_row - pad_rows)
+                        .checked_mul(input_cols)
+                        .ok_or_else(|| {
+                            reduce_window_unsupported(
+                                primitive,
+                                "reduce_window flat index overflow",
+                            )
+                        })?
                 };
 
                 for window_col in 0..window_cols {
@@ -4039,18 +4054,35 @@ mod tests {
             TensorValue::new(
                 DType::F64,
                 Shape::vector(3),
-                fdata.iter().copied().map(fj_core::Literal::from_f64).collect(),
+                fdata
+                    .iter()
+                    .copied()
+                    .map(fj_core::Literal::from_f64)
+                    .collect(),
             )
             .unwrap(),
         );
-        assert!(f_dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        assert!(
+            f_dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_some()
+        );
         assert!(f_lit.as_tensor().unwrap().elements.as_f64_slice().is_none());
-        let dense_out =
-            eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&f_dense), &params)
-                .unwrap();
-        let lit_out =
-            eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&f_lit), &params)
-                .unwrap();
+        let dense_out = eval_primitive(
+            Primitive::BroadcastInDim,
+            std::slice::from_ref(&f_dense),
+            &params,
+        )
+        .unwrap();
+        let lit_out = eval_primitive(
+            Primitive::BroadcastInDim,
+            std::slice::from_ref(&f_lit),
+            &params,
+        )
+        .unwrap();
         let bits = |v: &Value| -> Vec<u64> {
             v.as_tensor()
                 .unwrap()
@@ -4060,7 +4092,11 @@ mod tests {
                 .collect()
         };
         assert_eq!(dense_out.as_tensor().unwrap().shape.dims, vec![4, 3, 5]);
-        assert_eq!(bits(&dense_out), bits(&lit_out), "f64 broadcast dense vs generic");
+        assert_eq!(
+            bits(&dense_out),
+            bits(&lit_out),
+            "f64 broadcast dense vs generic"
+        );
 
         // i64: dense vs Literal-backed.
         let idata = [7_i64, -8, 9];
@@ -4073,12 +4109,18 @@ mod tests {
             )
             .unwrap(),
         );
-        let i_dense_out =
-            eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&i_dense), &params)
-                .unwrap();
-        let i_lit_out =
-            eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&i_lit), &params)
-                .unwrap();
+        let i_dense_out = eval_primitive(
+            Primitive::BroadcastInDim,
+            std::slice::from_ref(&i_dense),
+            &params,
+        )
+        .unwrap();
+        let i_lit_out = eval_primitive(
+            Primitive::BroadcastInDim,
+            std::slice::from_ref(&i_lit),
+            &params,
+        )
+        .unwrap();
         let ivals = |v: &Value| -> Vec<i64> {
             v.as_tensor()
                 .unwrap()
@@ -4087,7 +4129,11 @@ mod tests {
                 .map(|l| l.as_i64().unwrap())
                 .collect()
         };
-        assert_eq!(ivals(&i_dense_out), ivals(&i_lit_out), "i64 broadcast dense vs generic");
+        assert_eq!(
+            ivals(&i_dense_out),
+            ivals(&i_lit_out),
+            "i64 broadcast dense vs generic"
+        );
     }
 
     #[test]
@@ -4114,16 +4160,30 @@ mod tests {
         let i_out = eval_primitive(Primitive::BroadcastedIota, &[], &params).unwrap();
         let i_tensor = i_out.as_tensor().unwrap();
         assert_eq!(i_tensor.shape.dims, vec![3, 4, 5]);
-        assert!(i_tensor.elements.as_i64_slice().is_some(), "i64 iota should be dense");
-        assert_eq!(i_tensor.elements.as_i64_slice().unwrap(), expected.as_slice());
+        assert!(
+            i_tensor.elements.as_i64_slice().is_some(),
+            "i64 iota should be dense"
+        );
+        assert_eq!(
+            i_tensor.elements.as_i64_slice().unwrap(),
+            expected.as_slice()
+        );
 
         // F64: dense storage + bit-equal to `index as f64`.
         params.insert("dtype".into(), "f64".to_string());
         let f_out = eval_primitive(Primitive::BroadcastedIota, &[], &params).unwrap();
         let f_tensor = f_out.as_tensor().unwrap();
-        assert!(f_tensor.elements.as_f64_slice().is_some(), "f64 iota should be dense");
-        let f_bits: Vec<u64> =
-            f_tensor.elements.as_f64_slice().unwrap().iter().map(|v| v.to_bits()).collect();
+        assert!(
+            f_tensor.elements.as_f64_slice().is_some(),
+            "f64 iota should be dense"
+        );
+        let f_bits: Vec<u64> = f_tensor
+            .elements
+            .as_f64_slice()
+            .unwrap()
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
         let exp_bits: Vec<u64> = expected.iter().map(|&v| (v as f64).to_bits()).collect();
         assert_eq!(f_bits, exp_bits, "f64 iota dense vs reference");
     }
@@ -4385,7 +4445,8 @@ mod tests {
 
         // f64: dense (new_f64_values) vs Literal-backed.
         let fdata: Vec<f64> = (0..12).map(|i| (i as f64) * 1.5 - 2.0).collect();
-        let f_dense = Value::Tensor(TensorValue::new_f64_values(shape.clone(), fdata.clone()).unwrap());
+        let f_dense =
+            Value::Tensor(TensorValue::new_f64_values(shape.clone(), fdata.clone()).unwrap());
         let f_lit = Value::Tensor(
             TensorValue::new(
                 DType::F64,
@@ -4394,20 +4455,36 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(f_dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        assert!(
+            f_dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_some()
+        );
         assert!(f_lit.as_tensor().unwrap().elements.as_f64_slice().is_none());
         let pv = Value::scalar_f64(9.0);
         let d = eval_primitive(Primitive::Pad, &[f_dense, pv.clone()], &params).unwrap();
         let l = eval_primitive(Primitive::Pad, &[f_lit, pv], &params).unwrap();
         let fbits = |v: &Value| -> Vec<u64> {
-            v.as_tensor().unwrap().elements.iter().map(|x| x.as_f64().unwrap().to_bits()).collect()
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|x| x.as_f64().unwrap().to_bits())
+                .collect()
         };
-        assert_eq!(d.as_tensor().unwrap().shape.dims, l.as_tensor().unwrap().shape.dims);
+        assert_eq!(
+            d.as_tensor().unwrap().shape.dims,
+            l.as_tensor().unwrap().shape.dims
+        );
         assert_eq!(fbits(&d), fbits(&l), "f64 pad dense vs generic");
 
         // i64: dense vs Literal-backed.
         let idata: Vec<i64> = (0..12).map(|i| i as i64 * 7 - 5).collect();
-        let i_dense = Value::Tensor(TensorValue::new_i64_values(shape.clone(), idata.clone()).unwrap());
+        let i_dense =
+            Value::Tensor(TensorValue::new_i64_values(shape.clone(), idata.clone()).unwrap());
         let i_lit = Value::Tensor(
             TensorValue::new(
                 DType::I64,
@@ -4419,7 +4496,12 @@ mod tests {
         let di = eval_primitive(Primitive::Pad, &[i_dense, Value::scalar_i64(0)], &params).unwrap();
         let li = eval_primitive(Primitive::Pad, &[i_lit, Value::scalar_i64(0)], &params).unwrap();
         let ivals = |v: &Value| -> Vec<i64> {
-            v.as_tensor().unwrap().elements.iter().map(|x| x.as_i64().unwrap()).collect()
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|x| x.as_i64().unwrap())
+                .collect()
         };
         assert_eq!(ivals(&di), ivals(&li), "i64 pad dense vs generic");
 
@@ -9149,7 +9231,11 @@ mod tests {
         ] {
             let out =
                 eval_primitive(prim, &[mk(&a, vec![4]), mk(&b, vec![4])], &no_params()).unwrap();
-            assert_eq!(out.as_tensor().unwrap().dtype, DType::Bool, "{prim:?} dtype");
+            assert_eq!(
+                out.as_tensor().unwrap().dtype,
+                DType::Bool,
+                "{prim:?} dtype"
+            );
             assert_eq!(bits(&out), expected, "{prim:?} same-shape");
         }
 
@@ -9165,19 +9251,24 @@ mod tests {
         // Broadcast [2,2] | [2].
         let out = eval_primitive(
             Primitive::BitwiseOr,
-            &[mk(&[true, false, false, false], vec![2, 2]), mk(&[false, true], vec![2])],
+            &[
+                mk(&[true, false, false, false], vec![2, 2]),
+                mk(&[false, true], vec![2]),
+            ],
             &no_params(),
         )
         .unwrap();
         assert_eq!(bits(&out), vec![true, true, false, true], "broadcast or");
 
         // Shifts remain undefined on bool.
-        assert!(eval_primitive(
-            Primitive::ShiftLeft,
-            &[mk(&a, vec![4]), mk(&b, vec![4])],
-            &no_params()
-        )
-        .is_err());
+        assert!(
+            eval_primitive(
+                Primitive::ShiftLeft,
+                &[mk(&a, vec![4]), mk(&b, vec![4])],
+                &no_params()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -9207,12 +9298,20 @@ mod tests {
         let out = eval_primitive(Primitive::BitwiseNot, &[m], &no_params()).unwrap();
         let t = out.as_tensor().unwrap();
         assert_eq!(t.dtype, DType::Bool);
-        let vals: Vec<bool> = t.elements.iter().map(|l| matches!(l, Literal::Bool(true))).collect();
+        let vals: Vec<bool> = t
+            .elements
+            .iter()
+            .map(|l| matches!(l, Literal::Bool(true)))
+            .collect();
         assert_eq!(vals, vec![false, true, false, true]);
 
         // Scalar bool too.
-        let s = eval_primitive(Primitive::BitwiseNot, &[Value::scalar_bool(true)], &no_params())
-            .unwrap();
+        let s = eval_primitive(
+            Primitive::BitwiseNot,
+            &[Value::scalar_bool(true)],
+            &no_params(),
+        )
+        .unwrap();
         assert!(matches!(s, Value::Scalar(Literal::Bool(false))));
     }
 
@@ -9677,8 +9776,22 @@ mod tests {
 
         // 4x4, 3x3 window → the 3x3-same fast path (border + interior).
         let d4: Vec<f64> = vec![
-            -0.0, 1.0, -2.0, 0.5, 3.0, -0.0, f64::INFINITY, -1.0, -0.0, -0.0, 2.0, -3.0, 4.0, -1.5,
-            -0.0, 0.0,
+            -0.0,
+            1.0,
+            -2.0,
+            0.5,
+            3.0,
+            -0.0,
+            f64::INFINITY,
+            -1.0,
+            -0.0,
+            -0.0,
+            2.0,
+            -3.0,
+            4.0,
+            -1.5,
+            -0.0,
+            0.0,
         ];
         check_2d(4, 4, d4, 3, 1);
 

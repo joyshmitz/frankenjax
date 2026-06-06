@@ -5329,7 +5329,11 @@ fn eval_conv_1d(
                             for k in 0..kernel_w {
                                 let in_pos = (w * stride + k) as isize - pad_left as isize;
                                 let oob = in_pos < 0 || (in_pos as usize) >= width;
-                                let lhs_base = if oob { 0 } else { n_offset + (in_pos as usize) * c_in };
+                                let lhs_base = if oob {
+                                    0
+                                } else {
+                                    n_offset + (in_pos as usize) * c_in
+                                };
                                 let rhs_base = k * c_in_c_out + co;
                                 // Zero-padded (OOB) taps add 0·w, matching XLA zero-
                                 // padding and conv2d; a no-op for finite data, fixes
@@ -5620,7 +5624,11 @@ fn eval_conv_2d(
                         for kh in 0..kernel_h {
                             let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
                             let h_oob = in_h < 0 || (in_h as usize) >= height;
-                            let h_offset = if h_oob { 0 } else { (in_h as usize) * width_c_in };
+                            let h_offset = if h_oob {
+                                0
+                            } else {
+                                (in_h as usize) * width_c_in
+                            };
                             for kw in 0..kernel_w {
                                 let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
                                 let w_oob = in_w < 0 || (in_w as usize) >= width;
@@ -5670,7 +5678,11 @@ fn eval_conv_2d(
                         for kh in 0..kernel_h {
                             let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
                             let h_oob = in_h < 0 || (in_h as usize) >= height;
-                            let h_offset = if h_oob { 0 } else { (in_h as usize) * width_c_in };
+                            let h_offset = if h_oob {
+                                0
+                            } else {
+                                (in_h as usize) * width_c_in
+                            };
                             for kw in 0..kernel_w {
                                 let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
                                 let w_oob = in_w < 0 || (in_w as usize) >= width;
@@ -5702,7 +5714,11 @@ fn eval_conv_2d(
                         for kh in 0..kernel_h {
                             let in_h = (oh * stride_h + kh) as isize - pad_top as isize;
                             let h_oob = in_h < 0 || (in_h as usize) >= height;
-                            let h_offset = if h_oob { 0 } else { (in_h as usize) * width_c_in };
+                            let h_offset = if h_oob {
+                                0
+                            } else {
+                                (in_h as usize) * width_c_in
+                            };
                             for kw in 0..kernel_w {
                                 let in_w = (ow * stride_w + kw) as isize - pad_left as isize;
                                 let w_oob = in_w < 0 || (in_w as usize) >= width;
@@ -6635,12 +6651,7 @@ mod tests {
         };
 
         let lhs_dims = vec![batch as u32, height as u32, width as u32, c_in as u32];
-        let rhs_dims = vec![
-            kernel_h as u32,
-            kernel_w as u32,
-            c_in as u32,
-            c_out as u32,
-        ];
+        let rhs_dims = vec![kernel_h as u32, kernel_w as u32, c_in as u32, c_out as u32];
         for (padding, stride) in [("same", "1"), ("valid", "1"), ("valid", "2")] {
             let p = params(&[("padding", padding), ("strides", stride)]);
             let dense = eval_conv(
@@ -6686,12 +6697,7 @@ mod tests {
         let (h, w, c_in, c_out) = (2usize, 2usize, 1usize, 1usize);
         let (kh, kw) = (3usize, 3usize); // odd ⇒ symmetric pad of 1 each side @ stride 1
 
-        let x: Vec<(f64, f64)> = vec![
-            (-0.0, 0.0),
-            (1.5, -2.0),
-            (f64::INFINITY, -0.0),
-            (-3.0, 0.5),
-        ];
+        let x: Vec<(f64, f64)> = vec![(-0.0, 0.0), (1.5, -2.0), (f64::INFINITY, -0.0), (-3.0, 0.5)];
         // Negative real/imag kernel parts so 0·w yields signed-zero sub-terms.
         let kdata: Vec<(f64, f64)> = (0..kh * kw * c_in * c_out)
             .map(|i| {
@@ -6739,7 +6745,10 @@ mod tests {
         }
         let valid = eval_conv(
             Primitive::Conv,
-            &[mk_c(vec![1, ph as u32, pw as u32, c_in as u32], &xp), kernel],
+            &[
+                mk_c(vec![1, ph as u32, pw as u32, c_in as u32], &xp),
+                kernel,
+            ],
             &params(&[("padding", "valid"), ("strides", "1")]),
         )
         .unwrap();
@@ -7669,12 +7678,16 @@ mod tests {
                     Shape {
                         dims: vec![vals.len() as u32],
                     },
-                    vals.iter().map(|&v| Literal::F32Bits(v.to_bits())).collect(),
+                    vals.iter()
+                        .map(|&v| Literal::F32Bits(v.to_bits()))
+                        .collect(),
                 )
                 .unwrap(),
             )
         };
-        let args = |t: &Value, p| extract_i64_vec(&eval_argsort(Primitive::Argsort, std::slice::from_ref(t), p).unwrap());
+        let args = |t: &Value, p| {
+            extract_i64_vec(&eval_argsort(Primitive::Argsort, std::slice::from_ref(t), p).unwrap())
+        };
 
         // arr indices:   0        1    2        3    4
         let arr = [1.0_f32, pos_nan, 2.0, neg_nan, 0.0];
@@ -7715,13 +7728,20 @@ mod tests {
         let mut big: Vec<f64> = (0..512).map(|i| (i as f64).sin()).collect();
         big[100] = f64::from_bits(0xFFF8_0000_0000_0000); // -NaN
         big[400] = f64::NAN; // +NaN
-        let bt = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![512] }, big).unwrap(),
-        );
+        let bt =
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![512] }, big).unwrap());
         let asc_idx = args(&bt, &asc);
-        assert_eq!(&asc_idx[510..], &[100, 400], "asc f64 radix: NaN last, input order");
+        assert_eq!(
+            &asc_idx[510..],
+            &[100, 400],
+            "asc f64 radix: NaN last, input order"
+        );
         let desc_idx = args(&bt, &desc);
-        assert_eq!(&desc_idx[..2], &[100, 400], "desc f64 radix: NaN first, input order");
+        assert_eq!(
+            &desc_idx[..2],
+            &[100, 400],
+            "desc f64 radix: NaN first, input order"
+        );
     }
 
     #[test]
@@ -8058,7 +8078,14 @@ mod tests {
                 )
                 .unwrap(),
             );
-            assert!(literal.as_tensor().unwrap().elements.as_f64_slice().is_none());
+            assert!(
+                literal
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_f64_slice()
+                    .is_none()
+            );
             for v in [&dense, &literal] {
                 let got_max = eval_argmax(Primitive::Argmax, std::slice::from_ref(v), &p)
                     .unwrap()

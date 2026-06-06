@@ -258,9 +258,7 @@ fn eval_same_shape_f64_compare(
     // mask from 24 bytes/elem (Literal) to 1, the dominant cost at scale. Bit-for-
     // bit identical: same `float_cmp` in the same order, and a Bool's value carries
     // no representation ambiguity, so dense-bool output equals the Literal output.
-    if let (Some(left), Some(right)) =
-        (lhs.elements.as_f64_slice(), rhs.elements.as_f64_slice())
-    {
+    if let (Some(left), Some(right)) = (lhs.elements.as_f64_slice(), rhs.elements.as_f64_slice()) {
         let out: Vec<bool> = left
             .iter()
             .zip(right)
@@ -277,7 +275,10 @@ fn eval_same_shape_f64_compare(
         let (Literal::F64Bits(left_bits), Literal::F64Bits(right_bits)) = (*left, *right) else {
             return Ok(None);
         };
-        out.push(float_cmp(f64::from_bits(left_bits), f64::from_bits(right_bits)));
+        out.push(float_cmp(
+            f64::from_bits(left_bits),
+            f64::from_bits(right_bits),
+        ));
     }
 
     Ok(Some(Value::Tensor(TensorValue::new_bool_values(

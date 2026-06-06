@@ -1351,9 +1351,13 @@ fn rfft_rows_into(
         padded[..copy_len].copy_from_slice(&batch_slice[..copy_len]);
         padded[copy_len..].fill((0.0, 0.0));
         match plan {
-            Some(plan) => {
-                plan.apply_into(&padded, &mut scratch, &mut mixed_scratch, false, &mut transformed)
-            }
+            Some(plan) => plan.apply_into(
+                &padded,
+                &mut scratch,
+                &mut mixed_scratch,
+                false,
+                &mut transformed,
+            ),
             None => fft_1d_into(&padded, &mut transformed),
         }
         out_blk[r * out_last..r * out_last + out_last].copy_from_slice(&transformed[..out_last]);
@@ -1409,9 +1413,13 @@ fn irfft_rows_f64_into(
         }
 
         match plan {
-            Some(plan) => {
-                plan.apply_into(&full, &mut scratch, &mut mixed_scratch, true, &mut transformed)
-            }
+            Some(plan) => plan.apply_into(
+                &full,
+                &mut scratch,
+                &mut mixed_scratch,
+                true,
+                &mut transformed,
+            ),
             None => ifft_1d_into(&full, &mut transformed),
         }
 
@@ -1566,9 +1574,13 @@ pub(crate) fn eval_irfft(
         }
 
         match &plan {
-            Some(plan) => {
-                plan.apply_into(&full, &mut scratch, &mut mixed_scratch, true, &mut transformed)
-            }
+            Some(plan) => plan.apply_into(
+                &full,
+                &mut scratch,
+                &mut mixed_scratch,
+                true,
+                &mut transformed,
+            ),
             None => ifft_1d_into(&full, &mut transformed),
         }
 
@@ -2053,18 +2065,38 @@ mod tests {
         // The mixed-radix path must equal the O(n²) DFT reference (and round-trip
         // through the inverse) for smooth composite lengths.
         for &n in &[6usize, 12, 15, 63, 100, 720, 945, 1000] {
-            assert!(is_mixed_radix_smooth(n), "n={n} should take the mixed-radix path");
+            assert!(
+                is_mixed_radix_smooth(n),
+                "n={n} should take the mixed-radix path"
+            );
             let input: Vec<(f64, f64)> = (0..n)
-                .map(|i| (((i as f64) * 0.3).sin() * 2.0, ((i as f64) * 0.17).cos() - 0.2))
+                .map(|i| {
+                    (
+                        ((i as f64) * 0.3).sin() * 2.0,
+                        ((i as f64) * 0.17).cos() - 0.2,
+                    )
+                })
                 .collect();
 
             let mut scratch = Vec::new();
             let mut got = Vec::new();
-            mixed_radix_into(&input, &precompute_twiddles(n, false), false, &mut got, &mut scratch);
+            mixed_radix_into(
+                &input,
+                &precompute_twiddles(n, false),
+                false,
+                &mut got,
+                &mut scratch,
+            );
             assert_complex_close(&got, &dft_1d(&input), 1e-9);
 
             let mut back = Vec::new();
-            mixed_radix_into(&got, &precompute_twiddles(n, true), true, &mut back, &mut scratch);
+            mixed_radix_into(
+                &got,
+                &precompute_twiddles(n, true),
+                true,
+                &mut back,
+                &mut scratch,
+            );
             assert_complex_close(&back, &input, 1e-9);
         }
         // Prime / large-prime-factor / power-of-two lengths stay off the path.
