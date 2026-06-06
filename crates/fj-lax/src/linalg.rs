@@ -2847,12 +2847,25 @@ fn complex_eig_eigenvector(a: &[(f64, f64)], n: usize, lambda: (f64, f64)) -> Ve
     x
 }
 
-/// Complex non-Hermitian eigendecomposition: unshifted QR iteration drives `A` to its
-/// (fully upper-triangular) complex Schur form — every eigenvalue lands on the
-/// diagonal (unlike the real case there are no 2×2 blocks) — then each eigenvector is
-/// recovered by inverse iteration on the original `A`. Eigenvectors are column-major
-/// (column k pairs with eigenvalue k). Like the real `eig_qr_iteration`, the unshifted
-/// sweep converges for well-separated eigenvalue moduli (adequate for small matrices).
+/// Principal complex square root: `re ≥ 0`, with the imaginary part taking the
+/// sign of `z`'s imaginary part. `(complex_sqrt(z))² == z`.
+fn complex_sqrt(z: (f64, f64)) -> (f64, f64) {
+    let r = complex_abs(z);
+    if r == 0.0 {
+        return (0.0, 0.0);
+    }
+    let re = ((r + z.0) * 0.5).max(0.0).sqrt();
+    let im = ((r - z.0) * 0.5).max(0.0).sqrt();
+    (re, if z.1 < 0.0 { -im } else { im })
+}
+
+/// Complex non-Hermitian eigendecomposition: Wilkinson-shifted QR with deflation
+/// drives `A` to its (fully upper-triangular) complex Schur form — every eigenvalue
+/// lands on the diagonal (unlike the real case there are no 2×2 blocks) — then each
+/// eigenvector is recovered by inverse iteration on the original `A`. Eigenvectors
+/// are column-major (column k pairs with eigenvalue k). The shift is essential: an
+/// unshifted sweep fails for equal-modulus spectra (e.g. eigenvalues on the unit
+/// circle), where it never converges and returns garbage.
 fn complex_eig_qr(a: &[(f64, f64)], n: usize) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
     if n == 0 {
         return (vec![], vec![]);
@@ -2861,19 +2874,66 @@ fn complex_eig_qr(a: &[(f64, f64)], n: usize) -> (Vec<(f64, f64)>, Vec<(f64, f64
         return (vec![a[0]], vec![(1.0, 0.0)]);
     }
     let mut t = a.to_vec();
-    let scale = a.iter().map(|z| complex_abs(*z)).fold(0.0_f64, f64::max).max(1.0);
-    let tol = f64::EPSILON * 1e2 * scale;
-    for _ in 0..(200 * n) {
-        let (q, r) = complex_qr_mgs(&t, n);
-        t = complex_matmul_n(&r, &q, n); // T ← R·Q
-        let mut off = 0.0_f64;
-        for i in 1..n {
-            for j in 0..i {
-                off = off.max(complex_abs(t[i * n + j]));
+
+    // Wilkinson-shifted QR with deflation. The unshifted iteration fails to
+    // converge when eigenvalues share a modulus — subdiagonals shrink at rate
+    // |λ_{i+1}/λ_i| ≈ 1 (e.g. a spectrum on the unit circle) — and returns garbage;
+    // the shift breaks the degeneracy so each trailing eigenvalue converges and
+    // deflates. The active block is the leading p×p of `t`.
+    let mut p = n;
+    let mut iters = 0usize;
+    let max_iters = 100 * n + 100;
+    while p > 1 {
+        // Deflate when the active block's bottom subdiagonal is negligible.
+        let sub = complex_abs(t[(p - 1) * n + (p - 2)]);
+        let dscale =
+            complex_abs(t[(p - 2) * n + (p - 2)]) + complex_abs(t[(p - 1) * n + (p - 1)]);
+        if sub <= f64::EPSILON * dscale.max(f64::MIN_POSITIVE) {
+            t[(p - 1) * n + (p - 2)] = (0.0, 0.0);
+            p -= 1;
+            continue;
+        }
+        if iters >= max_iters {
+            break; // safety: leave whatever is on the diagonal
+        }
+        iters += 1;
+
+        // Wilkinson shift: the trailing-2×2 eigenvalue closer to t[p-1][p-1].
+        let aa = t[(p - 2) * n + (p - 2)];
+        let bb = t[(p - 2) * n + (p - 1)];
+        let cc = t[(p - 1) * n + (p - 2)];
+        let dd = t[(p - 1) * n + (p - 1)];
+        let mid = (0.5 * (aa.0 + dd.0), 0.5 * (aa.1 + dd.1));
+        let half_diff = (0.5 * (aa.0 - dd.0), 0.5 * (aa.1 - dd.1));
+        let disc = complex_add(complex_mul(half_diff, half_diff), complex_mul(bb, cc));
+        let sq = complex_sqrt(disc);
+        let mu1 = complex_add(mid, sq);
+        let mu2 = complex_sub(mid, sq);
+        let mu = if complex_abs(complex_sub(mu1, dd)) <= complex_abs(complex_sub(mu2, dd)) {
+            mu1
+        } else {
+            mu2
+        };
+
+        // Shifted QR step on the active p×p block: (B − μI) = QR, B ← RQ + μI.
+        let mut bsub = vec![(0.0_f64, 0.0_f64); p * p];
+        for i in 0..p {
+            for j in 0..p {
+                bsub[i * p + j] = t[i * n + j];
             }
         }
-        if off < tol {
-            break;
+        for i in 0..p {
+            bsub[i * p + i] = complex_sub(bsub[i * p + i], mu);
+        }
+        let (q, r) = complex_qr_mgs(&bsub, p);
+        let mut rq = complex_matmul_n(&r, &q, p);
+        for i in 0..p {
+            rq[i * p + i] = complex_add(rq[i * p + i], mu);
+        }
+        for i in 0..p {
+            for j in 0..p {
+                t[i * n + j] = rq[i * p + j];
+            }
         }
     }
     let eigenvalues: Vec<(f64, f64)> = (0..n).map(|i| t[i * n + i]).collect();
@@ -4315,6 +4375,38 @@ mod tests {
     /// Ground truth for frankenjax-eig-nonsymmetric-broken-n3-66pmy: build A = H·T·H
     /// with H a symmetric-orthogonal Householder and T block-diagonal — a 1×1 {2}
     /// plus a 2×2 rotation block {±3i}. A is a dense non-symmetric matrix similar to
+    #[test]
+    fn complex_eig_qr_handles_unit_circle_spectrum() {
+        // Eigenvalues {1, i, -1, -i} all have modulus 1: the previous UNSHIFTED QR
+        // never converged (subdiagonals shrink at rate ~1) and returned garbage
+        // (≈{0.22−0.11i,…}). The Wilkinson shift breaks the degeneracy. A = H·T·H
+        // with a complex Householder H, T = diag of the four eigenvalues.
+        let n = 4usize;
+        let eigs = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)];
+        let mut t = vec![(0.0_f64, 0.0_f64); n * n];
+        for i in 0..n {
+            t[i * n + i] = eigs[i];
+        }
+        let v = [(1.0, 0.0), (0.0, 1.0), (1.0, -1.0), (1.0, 1.0)];
+        let vhv: f64 = v.iter().map(|z| complex_abs(*z).powi(2)).sum();
+        let mut h = vec![(0.0_f64, 0.0_f64); n * n];
+        for r in 0..n {
+            for c in 0..n {
+                let id = if r == c { (1.0, 0.0) } else { (0.0, 0.0) };
+                let vvh = complex_mul(v[r], complex_conj(v[c]));
+                h[r * n + c] = complex_sub(id, (2.0 / vhv * vvh.0, 2.0 / vhv * vvh.1));
+            }
+        }
+        let a = complex_matmul_n(&complex_matmul_n(&h, &t, n), &h, n);
+        let (w, _) = complex_eig_qr(&a, n);
+        for &(er, ei) in &eigs {
+            let found = w
+                .iter()
+                .any(|&(wr, wi)| (wr - er).abs() < 1e-6 && (wi - ei).abs() < 1e-6);
+            assert!(found, "missing eigenvalue ({er},{ei}) — QR did not converge");
+        }
+    }
+
     #[test]
     fn complex_eig_qr_recovers_known_spectrum_n3() {
         // Frankenjax-eig-drops-complex-input-gx9mm: complex eig must use the full
