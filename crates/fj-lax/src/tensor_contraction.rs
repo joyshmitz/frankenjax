@@ -218,7 +218,27 @@ pub fn matmul_2d(a: &[f64], m: usize, k: usize, b: &[f64], n: usize) -> Vec<f64>
     // right-sizing fanout so each worker owns enough row work.)
     let ops = m.saturating_mul(k).saturating_mul(n);
     let threads = matmul_thread_count(ops, m);
-    matmul_2d_with_threads(a, m, k, b, n, threads)
+    let do_pack = k.saturating_mul(n) >= PACK_B_MIN_KN;
+    matmul_2d_with_threads(a, m, k, b, n, threads, do_pack)
+}
+
+/// Benchmark-only entry point: identical to [`matmul_2d`] but with the B-panel
+/// packing forced on/off, so an A/B harness can compare both strategies in one
+/// binary on one worker (the only trustworthy way to measure the pack win — cross
+/// `rch` invocations vary 20-60%). Not for production callers; `matmul_2d` picks
+/// `do_pack` by the `PACK_B_MIN_KN` gate.
+#[doc(hidden)]
+pub fn matmul_2d_with_pack(
+    a: &[f64],
+    m: usize,
+    k: usize,
+    b: &[f64],
+    n: usize,
+    do_pack: bool,
+) -> Vec<f64> {
+    let ops = m.saturating_mul(k).saturating_mul(n);
+    let threads = matmul_thread_count(ops, m);
+    matmul_2d_with_threads(a, m, k, b, n, threads, do_pack)
 }
 
 #[inline]
@@ -247,6 +267,7 @@ fn matmul_2d_with_threads(
     b: &[f64],
     n: usize,
     threads: usize,
+    do_pack: bool,
 ) -> Vec<f64> {
     let mut result = vec![0.0; m * n];
     if m == 0 || n == 0 || k == 0 {
@@ -254,7 +275,7 @@ fn matmul_2d_with_threads(
     }
     // Pack B's column panels once (shared, read-only across all output rows) when
     // B spills L2. Bit-identical to the strided read; just sequential instead.
-    let bpack: Option<Vec<f64>> = if k.saturating_mul(n) >= PACK_B_MIN_KN && n >= NR {
+    let bpack: Option<Vec<f64>> = if do_pack && n >= NR {
         Some(pack_b_panels(b, k, n))
     } else {
         None
@@ -634,16 +655,20 @@ mod tests {
         let b: Vec<f64> = (0..k * n)
             .map(|i| (i as f64 * 0.023).cos() * 1.9 + 0.2)
             .collect();
-        let serial = super::matmul_2d_with_threads(&a, m, k, &b, n, 1);
+        let serial = super::matmul_2d_with_threads(&a, m, k, &b, n, 1, false);
+        // Equal across every thread count AND both pack strategies (packing and
+        // row-block threading are each bit-identity-preserving, so all combos agree).
         for threads in [2usize, 3, 4, 8, 16, 32] {
-            let parallel = super::matmul_2d_with_threads(&a, m, k, &b, n, threads);
-            assert_eq!(serial.len(), parallel.len());
-            for idx in 0..serial.len() {
-                assert_eq!(
-                    serial[idx].to_bits(),
-                    parallel[idx].to_bits(),
-                    "threads={threads} mismatch at {idx}"
-                );
+            for do_pack in [false, true] {
+                let parallel = super::matmul_2d_with_threads(&a, m, k, &b, n, threads, do_pack);
+                assert_eq!(serial.len(), parallel.len());
+                for idx in 0..serial.len() {
+                    assert_eq!(
+                        serial[idx].to_bits(),
+                        parallel[idx].to_bits(),
+                        "threads={threads} do_pack={do_pack} mismatch at {idx}"
+                    );
+                }
             }
         }
     }
@@ -731,6 +756,50 @@ mod tests {
         }
         for idx in 0..m * n {
             assert_eq!(got[idx].to_bits(), want[idx].to_bits(), "mismatch at {idx}");
+        }
+    }
+
+    /// Same-binary, same-worker A/B for the B-pack lever. Run with:
+    ///   cargo test -p fj-lax --release matmul_2d_pack_ab_timing -- --ignored --nocapture
+    /// Reports median-of-5 wall time for strided vs packed at GEMM sizes that
+    /// spill L2/L3, and the speedup. Ignored by default (timing, not correctness;
+    /// correctness is matmul_2d_packed_bit_identical_to_ijk).
+    #[test]
+    #[ignore]
+    fn matmul_2d_pack_ab_timing() {
+        use std::time::Instant;
+        fn median_ms(mut v: Vec<f64>) -> f64 {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        }
+        for &(m, k, n) in &[(2048usize, 2048usize, 2048usize), (4096, 4096, 4096)] {
+            let a: Vec<f64> = (0..m * k).map(|i| ((i % 97) as f64) * 0.01 - 0.3).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| ((i % 89) as f64) * 0.02 + 0.1).collect();
+            let reps = 5;
+            let mut strided = Vec::new();
+            let mut packed = Vec::new();
+            // Warm + interleave to share any worker drift across both arms.
+            let _ = matmul_2d_with_pack(&a, m, k, &b, n, false);
+            let _ = matmul_2d_with_pack(&a, m, k, &b, n, true);
+            for _ in 0..reps {
+                let t = Instant::now();
+                let r0 = matmul_2d_with_pack(&a, m, k, &b, n, false);
+                strided.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r1 = matmul_2d_with_pack(&a, m, k, &b, n, true);
+                packed.push(t.elapsed().as_secs_f64() * 1e3);
+                // Guard: both arms must agree bit-for-bit (no perf via wrong math).
+                assert_eq!(r0, r1, "packed != strided at {m}x{k}x{n}");
+            }
+            let s = median_ms(strided);
+            let p = median_ms(packed);
+            let gflops = 2.0 * (m as f64) * (k as f64) * (n as f64) / 1e9;
+            println!(
+                "matmul {m}x{k}x{n}: strided {s:.2}ms ({:.0} GF/s) | packed {p:.2}ms ({:.0} GF/s) | speedup {:.2}x",
+                gflops / (s / 1e3),
+                gflops / (p / 1e3),
+                s / p
+            );
         }
     }
 
