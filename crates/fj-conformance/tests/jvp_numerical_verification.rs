@@ -510,6 +510,60 @@ fn lu_jvp_numerical() {
 }
 
 #[test]
+fn betainc_jvp_raises_on_a_b_differentiation() {
+    // JAX's defjvp registers betainc_grad_not_implemented for a and b (RAISES) and
+    // betainc_gradx for x. Forward mode sees which inputs carry a tangent, so fj-lax
+    // matches JAX exactly: the x-tangent is supported; differentiating w.r.t. a or b raises.
+    let jaxpr = Jaxpr::new(
+        vec![VarId(1), VarId(2), VarId(3)],
+        vec![],
+        vec![VarId(4)],
+        vec![Equation {
+            primitive: Primitive::Betainc,
+            inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2)), Atom::Var(VarId(3))],
+            outputs: smallvec![VarId(4)],
+            params: BTreeMap::new(),
+            effects: vec![],
+            sub_jaxprs: vec![],
+        }],
+    );
+    let primals = [
+        Value::scalar_f64(2.0),
+        Value::scalar_f64(3.0),
+        Value::scalar_f64(0.4),
+    ];
+    // x-tangent only (a, b constant) is JAX-supported: tangent = d/dx I_x(2,3) at 0.4 =
+    // 0.4·0.6²/B(2,3) = 1.728.
+    let t_x = [
+        Value::scalar_f64(0.0),
+        Value::scalar_f64(0.0),
+        Value::scalar_f64(1.0),
+    ];
+    let jvp_x = fj_ad::jvp(&jaxpr, &primals, &t_x).unwrap();
+    let dx = extract_f64_scalar(&jvp_x.tangents[0]);
+    assert!((dx - 1.728).abs() < 1e-6, "betainc d/dx JVP = {dx}, expected 1.728");
+    // Differentiating w.r.t. a or b must RAISE (JAX: not supported).
+    let t_a = [
+        Value::scalar_f64(1.0),
+        Value::scalar_f64(0.0),
+        Value::scalar_f64(0.0),
+    ];
+    assert!(
+        fj_ad::jvp(&jaxpr, &primals, &t_a).is_err(),
+        "betainc JVP w.r.t. a must raise (JAX: not supported)"
+    );
+    let t_b = [
+        Value::scalar_f64(0.0),
+        Value::scalar_f64(1.0),
+        Value::scalar_f64(0.0),
+    ];
+    assert!(
+        fj_ad::jvp(&jaxpr, &primals, &t_b).is_err(),
+        "betainc JVP w.r.t. b must raise (JAX: not supported)"
+    );
+}
+
+#[test]
 fn svd_jvp_ill_conditioned_matrix() {
     let a = make_f64_matrix(2, 2, &[1.0, 0.0, 0.0, 1e-4]);
     let da = make_f64_matrix(2, 2, &[0.08, 0.0, 0.0, 0.02]);

@@ -7899,7 +7899,15 @@ fn jvp_rule(
             ep(Primitive::Neg, &[sum])
         }
         Primitive::Betainc => {
-            // d/dx I_x(a,b) = x^{a-1} * (1-x)^{b-1} / B(a,b)
+            // JAX's defjvp registers betainc_grad_not_implemented for the a and b tangents
+            // (it RAISES "Betainc gradient with respect to a and b not supported") and
+            // betainc_gradx for x. Forward mode CAN see which inputs carry a tangent, so —
+            // unlike the reverse-mode VJP, which must NaN-poison da/db because it can't tell
+            // — match JAX EXACTLY: raise iff a or b is actually being differentiated;
+            // otherwise the x-only tangent. d/dx I_x(a,b) = x^{a-1}·(1-x)^{b-1}/B(a,b).
+            if !is_zero_value(&tangents[0]) || !is_zero_value(&tangents[1]) {
+                return Err(AdError::UnsupportedPrimitive(primitive));
+            }
             let a = &primals[0];
             let b = &primals[1];
             let x = &primals[2];
