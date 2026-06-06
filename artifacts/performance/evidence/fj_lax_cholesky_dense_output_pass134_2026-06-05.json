@@ -1,0 +1,105 @@
+{
+  "bead": "frankenjax-axevw",
+  "pass": 134,
+  "date": "2026-06-05",
+  "crate": "fj-lax",
+  "target": "linalg/cholesky_128x128_f64",
+  "profile_basis": "In-flight Cholesky storage bead was still represented by an uncommitted linalg.rs hunk. Saved RCH Criterion target dirs show the pre-lever baseline and candidate rebench for linalg/cholesky_128x128_f64.",
+  "lever_summary": "Emit real F64 Cholesky results through TensorValue::new_f64_values instead of converting every output element through matrix_to_value's Literal path. Non-F64 dtypes keep matrix_to_value.",
+  "alien_graveyard": {
+    "primitive": "data-layout specialization / zero-copy typed output materialization",
+    "source": "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md communication-avoiding and BLAS-3 locality guidance",
+    "mapping": "The numerical kernel already computes contiguous f64 output. The lever preserves that layout across the API boundary rather than rematerializing a Vec<Literal>."
+  },
+  "results": {
+    "baseline_ns": {
+      "mean": 668296.5083272506,
+      "ci_lower": 664106.3973722628,
+      "ci_upper": 673975.5552250608
+    },
+    "candidate_ns": {
+      "mean": 265232.8432832791,
+      "ci_lower": 256069.00988437186,
+      "ci_upper": 274663.8519087122
+    },
+    "speedup_midpoint_x": 2.52,
+    "speedup_conservative_x": 2.42
+  },
+  "score": {
+    "impact": 4.0,
+    "confidence": 4.0,
+    "effort": 2.0,
+    "impact_times_confidence_over_effort": 8.0,
+    "kept": true
+  },
+  "change": {
+    "files": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "lever": "eval_cholesky_real_matrix now passes the computed Vec<f64> to cholesky_real_matrix_to_value; DType::F64 constructs a dense F64 tensor directly, all other dtypes delegate to matrix_to_value."
+  },
+  "isomorphism": {
+    "ordering": "unchanged: cholesky_real_scalar / cholesky_real_blocked produce the same row-major Vec<f64>, and TensorValue::new_f64_values stores that Vec without reordering",
+    "floating_point": "unchanged: extraction, Cholesky arithmetic order, blocked/scalar threshold, multiply-then-divide off-diagonal formula, NaN behavior, and dtype conversion for non-F64 are untouched",
+    "tie_breaking": "not applicable",
+    "rng": "not applicable",
+    "errors": "unchanged for input validation and non-F64 output conversion; F64 output now uses TensorValue::new_f64_values with the same shape dimensions",
+    "golden_output_sha256": "eae487a2731a82fcd12899895c4623739bd237d3feebf848c23a90f524598dd6"
+  },
+  "validation": [
+    {
+      "name": "criterion_baseline",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target-axevw-baseline rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'linalg/cholesky_128x128_f64'",
+      "result": "baseline estimates from saved Criterion artifact: mean 668.297us [664.106, 673.976]"
+    },
+    {
+      "name": "criterion_candidate",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target-axevw-candidate rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'linalg/cholesky_128x128_f64'",
+      "result": "candidate on vmi1149989: mean 265.233us [256.069, 274.664]"
+    },
+    {
+      "name": "focused_cholesky_tests",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target-axevw-test rch exec -- cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "result": "passed before final formatting: 11 tests"
+    },
+    {
+      "name": "focused_cholesky_tests_final",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target-axevw-test-final rch exec -- cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "result": "passed after final source edits: 12 tests, including cholesky_f64_dense_output_matches_literal_materialization"
+    },
+    {
+      "name": "check_all_targets",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target-axevw-check rch exec -- cargo check -p fj-lax --all-targets",
+      "result": "passed before cfg(test) cleanup, with one legacy dead-code warning for jacobi_eigendecomposition"
+    },
+    {
+      "name": "clippy_deny_warnings",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target-axevw-clippy rch exec -- cargo clippy -p fj-lax --all-targets --no-deps -- -D warnings",
+      "result": "passed after marking the legacy test reference jacobi_eigendecomposition as cfg(test)"
+    },
+    {
+      "name": "touched_file_rustfmt",
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs",
+      "result": "passed"
+    },
+    {
+      "name": "package_fmt_check",
+      "command": "cargo fmt -p fj-lax --check",
+      "result": "blocked by pre-existing formatting drift across fj-lax benches and source files outside this pass; no broad formatter run"
+    },
+    {
+      "name": "ubs_touched_rust_file",
+      "command": "ubs crates/fj-lax/src/linalg.rs",
+      "result": "nonzero from existing linalg-wide inventories (panic/assert/index/unwrap); embedded UBS fmt, clippy, cargo check, cargo test --no-run, cargo audit, and cargo deny checks were clean"
+    },
+    {
+      "name": "golden_sha256",
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_cholesky_dense_output_pass134_2026-06-05.golden.sha256",
+      "result": "passed"
+    }
+  ],
+  "notes": [
+    "The legacy max-pivot jacobi_eigendecomposition helper is used only by tests; this pass marks it cfg(test) so crate-scoped clippy -D warnings can run cleanly.",
+    "Package-level cargo fmt -p fj-lax --check is known to be blocked by unrelated pre-existing formatting drift across fj-lax; touched-file formatting is verified separately."
+  ]
+}

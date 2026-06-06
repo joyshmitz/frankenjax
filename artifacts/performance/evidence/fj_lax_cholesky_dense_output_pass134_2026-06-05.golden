@@ -1,0 +1,10 @@
+frankenjax-axevw pass134 golden
+target=linalg/cholesky_128x128_f64
+lever=dense F64 output storage for real Cholesky; skip Literal rematerialization when dtype is DType::F64
+method=RCH Criterion A/B with saved target dirs .rch-target-axevw-baseline and .rch-target-axevw-candidate
+baseline=668.297us mean [664.106, 673.976]
+candidate=265.233us mean [256.069, 274.664]
+speedup=2.52x midpoint, 2.42x conservative
+score=8.0
+isomorphism=real extraction and cholesky_real_scalar/blocked arithmetic unchanged; output F64 values are moved into TensorValue::new_f64_values in the same row-major order; F32 and non-F64 dtypes fall back to matrix_to_value; ordering, FP arithmetic, tie-breaking, RNG, error handling, and shape/dtype contracts preserved
+validation=RCH cargo test -p fj-lax --lib cholesky -- --nocapture passed 11 tests incl cholesky_f64_dense_output_matches_literal_materialization; RCH cargo check -p fj-lax --all-targets passed with only legacy Jacobi warning before cfg(test) cleanup; clippy/fmt/UBS recorded in JSON artifact

@@ -280,7 +280,24 @@ fn eval_cholesky_real_matrix(
         cholesky_real_scalar(m, &a)
     };
 
-    matrix_to_value(m, m, &l, dtype)
+    cholesky_real_matrix_to_value(m, m, l, dtype)
+}
+
+fn cholesky_real_matrix_to_value(
+    m: usize,
+    n: usize,
+    data: Vec<f64>,
+    dtype: DType,
+) -> Result<Value, EvalError> {
+    if dtype == DType::F64 {
+        let shape = Shape {
+            dims: vec![m as u32, n as u32],
+        };
+        let tensor = TensorValue::new_f64_values(shape, data).map_err(EvalError::InvalidTensor)?;
+        return Ok(Value::Tensor(tensor));
+    }
+
+    matrix_to_value(m, n, &data, dtype)
 }
 
 /// Scalar lower-triangular Cholesky (Cholesky–Banachiewicz), row by row.
@@ -1328,8 +1345,14 @@ fn eval_svd_real(
         .iter()
         .map(|&v| linalg_literal_from_f64(dtype, v))
         .collect();
-    let s_tensor = TensorValue::new(dtype, Shape { dims: vec![k as u32] }, s_elements)
-        .map_err(EvalError::InvalidTensor)?;
+    let s_tensor = TensorValue::new(
+        dtype,
+        Shape {
+            dims: vec![k as u32],
+        },
+        s_elements,
+    )
+    .map_err(EvalError::InvalidTensor)?;
     let s_val = Value::Tensor(s_tensor);
 
     let vh_val = matrix_to_value(vt_rows, n, &vh, dtype)?;
@@ -1558,6 +1581,7 @@ fn complex_jacobi_eigendecomposition(
 
 /// Jacobi eigendecomposition of a symmetric n×n matrix.
 /// Returns (eigenvalues, eigenvectors) where eigenvectors are column-major in an n×n array.
+#[cfg(test)]
 fn jacobi_eigendecomposition(a: &mut [f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     // Initialize V = I
     let mut v = vec![0.0_f64; n * n];
@@ -3496,7 +3520,10 @@ mod tests {
                     assert_eq!(ru.shape.dims, cu.shape.dims, "{m}x{n} full={full}: U shape");
                 }
                 if let (Value::Tensor(rv), Value::Tensor(cv)) = (&real_out[2], &cplx_out[2]) {
-                    assert_eq!(rv.shape.dims, cv.shape.dims, "{m}x{n} full={full}: Vh shape");
+                    assert_eq!(
+                        rv.shape.dims, cv.shape.dims,
+                        "{m}x{n} full={full}: Vh shape"
+                    );
                 }
 
                 assert_eq!(s.len(), k, "{m}x{n} full={full}: S length");
@@ -3684,6 +3711,61 @@ mod tests {
                 im_cplx,
                 0.0_f64.to_bits(),
                 "complex factor imag nonzero at {idx}"
+            );
+        }
+    }
+
+    #[test]
+    fn cholesky_f64_dense_output_matches_literal_materialization() {
+        let n = 6usize;
+        let mut base = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                base[i * n + j] = ((i * 11 + j * 5) % 7) as f64 - 3.0;
+            }
+        }
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += base[k * n + i] * base[k * n + j];
+                }
+                a[i * n + j] = s + if i == j { n as f64 } else { 0.0 };
+            }
+        }
+
+        let Value::Tensor(actual) = eval_cholesky(&[make_matrix(n, n, &a)], &BTreeMap::new())
+            .expect("cholesky should succeed")
+        else {
+            panic!("expected tensor output");
+        };
+        let expected_values = cholesky_real_scalar(n, &a);
+        let Value::Tensor(expected) = matrix_to_value(n, n, &expected_values, DType::F64)
+            .expect("literal materialization should succeed")
+        else {
+            panic!("expected tensor output");
+        };
+
+        assert_eq!(actual.dtype, DType::F64);
+        assert_eq!(actual.shape.dims, vec![n as u32, n as u32]);
+        assert!(
+            actual.elements.as_f64_slice().is_some(),
+            "F64 Cholesky should return dense F64 storage"
+        );
+        assert_eq!(actual.elements.as_slice(), expected.elements.as_slice());
+        for (idx, (&dense, &expected)) in actual
+            .elements
+            .as_f64_slice()
+            .expect("dense F64 output")
+            .iter()
+            .zip(expected_values.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                dense.to_bits(),
+                expected.to_bits(),
+                "dense output bits differ at {idx}"
             );
         }
     }
@@ -4277,7 +4359,10 @@ mod tests {
                 residual = residual.max((pa - s).abs());
             }
         }
-        assert!(residual < 1e-7, "blocked P·A = L·U residual too large: {residual}");
+        assert!(
+            residual < 1e-7,
+            "blocked P·A = L·U residual too large: {residual}"
+        );
     }
 
     #[test]
