@@ -6555,12 +6555,20 @@ mod tests {
                 )
             }
         };
+        // Canonicalize NaN: the im2col+GEMM path and the direct-loop path both
+        // produce NaN for Inf−Inf / 0·Inf taps but with different IEEE payloads
+        // (e.g. x86 GEMM → 0xfff8…, the scalar loop → 0x7ff8…1). NaN payloads are
+        // unspecified by IEEE and not part of JAX/XLA parity, so compare them as a
+        // single canonical NaN; every finite value still compares bit-for-bit.
         let bits = |v: &Value| -> Vec<u64> {
             v.as_tensor()
                 .unwrap()
                 .elements
                 .iter()
-                .map(|l| l.as_f64().unwrap().to_bits())
+                .map(|l| {
+                    let x = l.as_f64().unwrap();
+                    if x.is_nan() { 0x7ff8_0000_0000_0000 } else { x.to_bits() }
+                })
                 .collect()
         };
 
@@ -6641,12 +6649,19 @@ mod tests {
                 )
             }
         };
+        // Canonicalize NaN — see conv_1d_parallel_dense_matches_literal_bits: the
+        // im2col+GEMM and direct-loop paths produce NaN with different IEEE payloads
+        // for Inf−Inf / 0·Inf taps; payloads are not part of JAX/XLA parity. Finite
+        // values still compare bit-for-bit.
         let bits = |v: &Value| -> Vec<u64> {
             v.as_tensor()
                 .unwrap()
                 .elements
                 .iter()
-                .map(|l| l.as_f64().unwrap().to_bits())
+                .map(|l| {
+                    let x = l.as_f64().unwrap();
+                    if x.is_nan() { 0x7ff8_0000_0000_0000 } else { x.to_bits() }
+                })
                 .collect()
         };
 

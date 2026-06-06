@@ -794,6 +794,48 @@ mod tests {
     }
 
     #[test]
+    fn matmul_2d_special_values_bit_identical_to_ijk() {
+        // Diagnostic for the conv dense-vs-literal regression: matmul_2d must equal
+        // the textbook ascending-l accumulation bit-for-bit even with -0.0/±Inf/NaN
+        // present (the conv tests inject these). m=8,k=12,n=8 exercises the full
+        // MR×NR SIMD panel (n%4==0, no remainder, k<KC unblocked).
+        let (m, k, n) = (8usize, 12usize, 8usize);
+        let special = |i: usize| -> f64 {
+            match i % 11 {
+                0 => -0.0,
+                1 => 0.0,
+                2 => f64::INFINITY,
+                3 => f64::NEG_INFINITY,
+                4 => 1.0e308,
+                _ => (i as f64 * 0.013).sin() * 2.0,
+            }
+        };
+        let a: Vec<f64> = (0..m * k).map(special).collect();
+        let b: Vec<f64> = (0..k * n).map(|i| special(i + 5)).collect();
+
+        let got = matmul_2d(&a, m, k, &b, n);
+        let mut want = vec![0.0f64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for l in 0..k {
+                    sum += a[i * k + l] * b[l * n + j];
+                }
+                want[i * n + j] = sum;
+            }
+        }
+        for idx in 0..m * n {
+            assert_eq!(
+                got[idx].to_bits(),
+                want[idx].to_bits(),
+                "mismatch at {idx}: got {} want {}",
+                got[idx],
+                want[idx]
+            );
+        }
+    }
+
+    #[test]
     fn batched_matmul_2d_bit_identical() {
         // Batched matmul kernel must equal the textbook per-batch ascending-l
         // reference bit-for-bit.
