@@ -1,0 +1,51 @@
+{
+  "bead": "frankenjax-nnf7f",
+  "status": "rejected_no_source_kept",
+  "target": {
+    "crate": "fj-ad",
+    "criterion_benchmark": "ad_baseline",
+    "case": "ad/grad_sum_x2_plus_x_1k",
+    "profile_basis": "RCH ts2 fj-ad profile identified grad_sum_x2_plus_x_1k as the AD outlier; all other AD rows were <=2.041 us in the originating profile."
+  },
+  "baseline": {
+    "worker": "ts2",
+    "worktree": "/data/projects/.scratch/frankenjax-next-profile-20260605-2337",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-nnf7f-baseline-rch-target rch exec -- cargo bench -p fj-ad --bench ad_baseline -- ad/grad_sum_x2_plus_x_1k --sample-size 10 --measurement-time 2 --warm-up-time 1 --noplot",
+    "criterion_us": {
+      "lower": 12.525,
+      "mid": 12.587,
+      "upper": 12.662
+    }
+  },
+  "candidate": {
+    "name": "dense_f64_same_shape_value_add_and_in_place_accumulation",
+    "lever": "Added a mutable dense-F64 slice accessor to fj-core and used it from fj-ad cotangent add_or_insert/value_add for same-shape F64 tensors.",
+    "worker": "ts2",
+    "worktree": "/data/projects/frankenjax",
+    "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts2 RCH_WORKERS=ts2 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=/data/tmp/frankenjax-nnf7f-candidate-rch-target rch exec -- cargo bench -p fj-ad --bench ad_baseline -- ad/grad_sum_x2_plus_x_1k --sample-size 10 --measurement-time 2 --warm-up-time 1 --noplot",
+    "criterion_us": {
+      "lower": 13.073,
+      "mid": 13.12,
+      "upper": 13.157
+    },
+    "midpoint_speedup": 0.9594,
+    "conservative_speedup": 0.9519,
+    "score_decision": "reject",
+    "rejection_reason": "Same-worker RCH rebench regressed the targeted row; Score < 2.0.",
+    "source_kept": false
+  },
+  "behavior_isomorphism": {
+    "source_kept": false,
+    "reason_no_expanded_golden": "The candidate failed the performance keep gate and was removed before commit.",
+    "preserved_surfaces": [
+      "cotangent accumulation order remains baseline because no source was kept",
+      "same-shape f64 addition semantics remain baseline because no source was kept",
+      "NaN and signed-zero bits remain baseline because no source was kept",
+      "RNG behavior unaffected"
+    ]
+  },
+  "next_deeper_primitive": {
+    "direction": "Stop micro-tuning AD value_add; re-profile AD/dispatch and attack a structural primitive such as tape representation, cotangent slot layout, or compiled reverse-mode trace for vector reductions.",
+    "target_ratio": ">=1.25x same-worker midpoint with conservative interval not worse than baseline"
+  }
+}
