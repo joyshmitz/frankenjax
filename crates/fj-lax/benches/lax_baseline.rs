@@ -1518,6 +1518,17 @@ fn bench_matmul_2d_1024(c: &mut Criterion) {
     });
 }
 
+fn bench_matmul_2d_2048(c: &mut Criterion) {
+    // B = 32MB — past per-CCD L3, so matmul_2d's full-B-per-row-block streaming
+    // goes RAM/fabric-bound. Premise check for communication-avoiding cache-blocking.
+    let (m, k, n) = (2048usize, 2048usize, 2048usize);
+    let a: Vec<f64> = (0..m * k).map(|i| (i as f64) * 1e-5).collect();
+    let b: Vec<f64> = (0..k * n).map(|i| (i as f64) * 2e-5).collect();
+    c.bench_function("linalg/matmul_2d_2048x2048x2048_f64", |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::matmul_2d(&a, m, k, &b, n))
+    });
+}
+
 // 2D conv (1x32x32x8 input, 3x3x8x16 kernel, SAME): dense f64 conv path (pass87)
 // vs the generic per-multiply Literal path. Same process for a same-worker ratio.
 fn conv2d_inputs(dense: bool) -> (Value, Value) {
@@ -3549,6 +3560,7 @@ criterion_group!(
     bench_matmul_2d_256,
     bench_matmul_2d_512,
     bench_matmul_2d_1024,
+    bench_matmul_2d_2048,
     bench_conv2d_32x32x8_3x3x16_f64_vec,
     bench_conv2d_64x64x32_3x3x64_f64,
     bench_conv2d_32x32x8_3x3x16_f64_literal_reference,
