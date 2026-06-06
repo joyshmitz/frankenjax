@@ -1512,66 +1512,61 @@ fn complex_jacobi_eigendecomposition(
         };
         let (s, c) = theta.sin_cos();
 
-        // Unitary rotation U:
-        // U = [[c, -s*e^{-iφ}], [s*e^{iφ}, c]]
-        // U^H = [[c, s*e^{-iφ}], [-s*e^{iφ}, c]]
-        let phase_conj = complex_conj(phase);
-        let neg_s_phase_conj = complex_mul((-s, 0.0), phase_conj); // -s*e^{-iφ}
-        let s_phase = complex_mul((s, 0.0), phase); // s*e^{iφ}
-        let s_phase_conj = complex_mul((s, 0.0), phase_conj); // s*e^{-iφ}
-        let neg_s_phase = complex_mul((-s, 0.0), phase); // -s*e^{iφ}
+        // Combined unitary U = D·G, where D = diag(1, e^{-iφ}) realifies the pivot
+        // (Dᴴ A D has real off-diagonal |apq|) and G = [[c,-s],[s,c]] is the real
+        // Givens that zeros it, so Uᴴ A U = Gᵀ (Dᴴ A D) G is diagonal:
+        //   U = [[c,          -s        ],
+        //        [s·e^{-iφ},   c·e^{-iφ} ]]
+        // The previous U = [[c,-s·e^{-iφ}],[s·e^{iφ},c]] was NOT D·G — it preserved
+        // the trace but not the determinant/spectrum (|off-diagonal| was unchanged),
+        // i.e. it was not a diagonalizing similarity
+        // (frankenjax-complex-jacobi-wrong-eigenvalues-15mx4).
+        let phase_conj = complex_conj(phase); // e^{-iφ}
+        let s_phase = complex_mul((s, 0.0), phase); // s·e^{iφ}
+        let c_phase = complex_mul((c, 0.0), phase); // c·e^{iφ}
+        let s_phase_conj = complex_mul((s, 0.0), phase_conj); // s·e^{-iφ}
+        let c_phase_conj = complex_mul((c, 0.0), phase_conj); // c·e^{-iφ}
 
-        // Apply U^H from left
+        // Apply Uᴴ from the left (Uᴴ = [[c, s·e^{iφ}], [−s, c·e^{iφ}]]):
         let row_p: Vec<_> = (0..n).map(|j| a[p * n + j]).collect();
         let row_q: Vec<_> = (0..n).map(|j| a[q * n + j]).collect();
-
         for j in 0..n {
-            // (U^H * A)[p][j] = c * A[p][j] + s*e^{-iφ} * A[q][j]
-            a[p * n + j] = complex_add(
-                complex_mul((c, 0.0), row_p[j]),
-                complex_mul(s_phase_conj, row_q[j]),
-            );
-            // (U^H * A)[q][j] = (-s*e^{iφ}) * A[p][j] + c * A[q][j]
-            a[q * n + j] = complex_add(
-                complex_mul(neg_s_phase, row_p[j]),
-                complex_mul((c, 0.0), row_q[j]),
-            );
+            // (Uᴴ A)[p][j] = c·A[p][j] + s·e^{iφ}·A[q][j]
+            a[p * n + j] =
+                complex_add(complex_mul((c, 0.0), row_p[j]), complex_mul(s_phase, row_q[j]));
+            // (Uᴴ A)[q][j] = −s·A[p][j] + c·e^{iφ}·A[q][j]
+            a[q * n + j] =
+                complex_add(complex_mul((-s, 0.0), row_p[j]), complex_mul(c_phase, row_q[j]));
         }
 
-        // Apply U from right
+        // Apply U from the right (U = [[c, −s], [s·e^{-iφ}, c·e^{-iφ}]]):
         let col_p: Vec<_> = (0..n).map(|i| a[i * n + p]).collect();
         let col_q: Vec<_> = (0..n).map(|i| a[i * n + q]).collect();
-
         for i in 0..n {
-            // (A * U)[i][p] = A[i][p] * c + A[i][q] * s*e^{iφ}
-            a[i * n + p] = complex_add(
-                complex_mul((c, 0.0), col_p[i]),
-                complex_mul(s_phase, col_q[i]),
-            );
-            // (A * U)[i][q] = A[i][p] * (-s*e^{-iφ}) + A[i][q] * c
-            a[i * n + q] = complex_add(
-                complex_mul(neg_s_phase_conj, col_p[i]),
-                complex_mul((c, 0.0), col_q[i]),
-            );
+            // (A U)[i][p] = c·A[i][p] + s·e^{-iφ}·A[i][q]
+            a[i * n + p] =
+                complex_add(complex_mul((c, 0.0), col_p[i]), complex_mul(s_phase_conj, col_q[i]));
+            // (A U)[i][q] = −s·A[i][p] + c·e^{-iφ}·A[i][q]
+            a[i * n + q] =
+                complex_add(complex_mul((-s, 0.0), col_p[i]), complex_mul(c_phase_conj, col_q[i]));
         }
 
-        // Diagonal elements should be real; off-diagonal (p,q) should be zero
+        // Diagonal elements should be real; off-diagonal (p,q) annihilated.
         a[p * n + p] = (a[p * n + p].0, 0.0);
         a[q * n + q] = (a[q * n + q].0, 0.0);
         a[p * n + q] = zero;
         a[q * n + p] = zero;
 
-        // Update eigenvector matrix: V' = V * U
+        // V ← V U (same right-multiply by U as applied to A's columns).
         let vp: Vec<_> = (0..n).map(|i| v[i * n + p]).collect();
         let vq: Vec<_> = (0..n).map(|i| v[i * n + q]).collect();
         for i in 0..n {
-            // V'[i][p] = V[i][p]*c + V[i][q]*s*e^{iφ}
-            v[i * n + p] = complex_add(complex_mul((c, 0.0), vp[i]), complex_mul(s_phase, vq[i]));
-            // V'[i][q] = V[i][p]*(-s*e^{-iφ}) + V[i][q]*c
-            v[i * n + q] = complex_add(
-                complex_mul(neg_s_phase_conj, vp[i]),
-                complex_mul((c, 0.0), vq[i]),
-            );
+            // V'[i][p] = c·V[i][p] + s·e^{-iφ}·V[i][q]
+            v[i * n + p] =
+                complex_add(complex_mul((c, 0.0), vp[i]), complex_mul(s_phase_conj, vq[i]));
+            // V'[i][q] = −s·V[i][p] + c·e^{-iφ}·V[i][q]
+            v[i * n + q] =
+                complex_add(complex_mul((-s, 0.0), vp[i]), complex_mul(c_phase_conj, vq[i]));
         }
     }
 
@@ -3555,6 +3550,81 @@ pub fn lstsq(a: &[f64], m: usize, n: usize, b: &[f64]) -> Option<Vec<f64>> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// Deterministic Hermitian n×n test matrix (H = (M + Mᴴ)/2, real diagonal).
+    fn hermitian_test_matrix(n: usize) -> Vec<(f64, f64)> {
+        let rnd = |i: usize, j: usize, salt: u64| -> f64 {
+            let mut x = (i as u64)
+                .wrapping_mul(0x9e37_79b9)
+                .wrapping_add((j as u64).wrapping_mul(0x85eb_ca6b))
+                .wrapping_add(salt)
+                .wrapping_add(n as u64 * 0x1000_0001);
+            x ^= x >> 16;
+            x = x.wrapping_mul(0x7feb_352d);
+            x ^= x >> 15;
+            ((x % 2000) as f64) / 1000.0 - 1.0
+        };
+        let m: Vec<(f64, f64)> = (0..n * n)
+            .map(|idx| (rnd(idx / n, idx % n, 1), rnd(idx / n, idx % n, 2)))
+            .collect();
+        let mut h = vec![(0.0, 0.0); n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let a = m[i * n + j];
+                let b = complex_conj(m[j * n + i]);
+                h[i * n + j] = ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+            }
+        }
+        for i in 0..n {
+            h[i * n + i] = (h[i * n + i].0, 0.0);
+        }
+        h
+    }
+
+    #[test]
+    fn complex_jacobi_diagonalizes_hermitian() {
+        // Regression for frankenjax-complex-jacobi-wrong-eigenvalues-15mx4: the
+        // complex Hermitian Jacobi must be a genuine unitary diagonalization, i.e.
+        // Vᴴ H V = diag(w). Pre-fix this failed — e.g. n=2 returned [0.667,-0.0088]
+        // for a matrix whose true eigenvalues are [0.767,-0.109] (trace preserved,
+        // det/spectrum not). Phase-convention-independent on the eigenvectors.
+        for &n in &[2usize, 3, 4, 8, 20, 33] {
+            let h = hermitian_test_matrix(n);
+            let mut a = h.clone();
+            let (w, v) = complex_jacobi_eigendecomposition(&mut a, n);
+
+            let mut hv = vec![(0.0_f64, 0.0_f64); n * n];
+            for r in 0..n {
+                for c in 0..n {
+                    let mut acc = (0.0, 0.0);
+                    for j in 0..n {
+                        acc = complex_add(acc, complex_mul(h[r * n + j], v[j * n + c]));
+                    }
+                    hv[r * n + c] = acc;
+                }
+            }
+            let mut off = 0.0_f64;
+            let mut diag = 0.0_f64;
+            for a2 in 0..n {
+                for b in 0..n {
+                    let mut acc = (0.0, 0.0);
+                    for i in 0..n {
+                        acc =
+                            complex_add(acc, complex_mul(complex_conj(v[i * n + a2]), hv[i * n + b]));
+                    }
+                    if a2 == b {
+                        diag = diag.max((acc.0 - w[a2]).abs()).max(acc.1.abs());
+                    } else {
+                        off = off.max(complex_abs(acc));
+                    }
+                }
+            }
+            assert!(
+                off < 1e-9 && diag < 1e-9,
+                "n={n} not diagonalized: off={off:e} diag={diag:e}"
+            );
+        }
+    }
 
     fn make_matrix(m: usize, n: usize, data: &[f64]) -> Value {
         let elements: Vec<Literal> = data.iter().map(|&v| Literal::from_f64(v)).collect();
