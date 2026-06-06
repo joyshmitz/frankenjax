@@ -1,0 +1,91 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "bead_id": "frankenjax-p1vbf.32",
+  "original_scratch_bead_id": "frankenjax-p1vbf.29",
+  "created_utc": "2026-06-06T23:21:00Z",
+  "agent": "IcyGlacier",
+  "crate": "fj-lax",
+  "target": "eval/rfft_batch_64x1499_bluestein_f64",
+  "profile_backing": {
+    "source": "fallback target after br ready --json returned no ready perf beads",
+    "profile_signal": "Previous RFFT Bluestein prefix rejection routed to real-input half-spectrum Bluestein. This benchmark exposed output-count fanout gating at 64 * 750 = 48000 even though Bluestein padded work is 64 * 4096 = 262144."
+  },
+  "lever": {
+    "description": "Gate RFFT row fanout on transform work length rather than emitted half-spectrum length, and keep non-power-of-two row blocks even so packed adjacent-row Bluestein pairing is unchanged.",
+    "files_changed": [
+      "crates/fj-lax/src/fft.rs"
+    ],
+    "new_public_api": false,
+    "unsafe_added": false
+  },
+  "benchmark": {
+    "worker": "ts1",
+    "baseline_commit": "713aea88fbaec9c32ad623d3df1965a1481b86d0",
+    "command_baseline": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf29-baseline-713aea88 cargo bench -p fj-lax --bench lax_baseline -- rfft_batch_64x1499_bluestein_f64 --sample-size 100",
+    "command_after": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf29-after-work-threshold-evenrows cargo bench -p fj-lax --bench lax_baseline -- rfft_batch_64x1499_bluestein_f64 --sample-size 100",
+    "baseline_ms": {
+      "low": 4.9041,
+      "median": 5.07,
+      "high": 5.2398
+    },
+    "after_ms": {
+      "low": 3.5072,
+      "median": 3.638,
+      "high": 3.7754
+    },
+    "median_speedup": 1.3936228697086313,
+    "conservative_speedup": 1.2989616994225777,
+    "confidence_interval_overlap": false
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 5,
+    "effort": 1,
+    "score": 15,
+    "keep": true,
+    "reason": "Same-worker RCH Criterion improvement is 1.39x median and 1.30x conservative with non-overlapping intervals; behavior proof pins output and scheduling equivalence."
+  },
+  "isomorphism_proof": {
+    "ordering": "Output row order is unchanged. Parallel workers still receive contiguous row blocks and write disjoint contiguous output slices. For non-power-of-two RFFT, row block size is rounded up to an even count so adjacent-row packed Bluestein pairings remain identical to the serial full-row block, except for the same final odd tail case.",
+    "floating_point": "Per-row transform arithmetic and packed-row unpack formulas are unchanged. The only changed decision is whether independent row blocks run concurrently after the work threshold. Even row-block splitting preserves packed pair membership, so floating-point association for every row is unchanged relative to the serial packed row block.",
+    "tie_breaking": "No comparisons, tie-breaking, sorting, or priority decisions are introduced or changed.",
+    "rng": "No random inputs, seeds, or RNG state are used by this FFT/RFFT path.",
+    "golden_output_sha256": {
+      "threaded_bluestein_rfft_256x257_bits": "11378141236573f4d7b1e8a2e85465e2798b1c608ed0dbc17c308e948628292e",
+      "canonical_fft_64x128_bits": "e08a6c8279950e499a2619baa424616e9a205eafd8727223aacdb633026a356a"
+    },
+    "bit_parity_tests": [
+      "threaded_bluestein_batch_rfft_matches_serial_row_block",
+      "threaded_batch_rfft_matches_per_row_serial",
+      "threaded_batch_fft_matches_per_row_serial",
+      "threaded_batch_irfft_matches_per_row_serial"
+    ]
+  },
+  "validation": {
+    "rch_tests": [
+      {
+        "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 rch exec -- cargo test -p fj-lax --lib fft -- --nocapture",
+        "result": "pass",
+        "summary": "41 passed, 0 failed, 0 ignored, 1124 filtered; includes threaded Bluestein RFFT SHA-256 golden, canonical FFT golden digest, half-length RFFT golden digest, and threaded batch parity tests."
+      }
+    ],
+    "rch_check": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 rch exec -- cargo check -p fj-lax --all-targets",
+      "result": "pass"
+    },
+    "rch_clippy": {
+      "command": "RCH_FORCE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 rch exec -- cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "pass",
+      "details": "Passed after rebasing over origin/main linalg clippy cleanup."
+    },
+    "format": {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/fft.rs && git diff --check",
+      "result": "pass"
+    },
+    "ubs": {
+      "command": "ubs crates/fj-lax/src/fft.rs",
+      "result": "pre_existing_findings",
+      "details": "Changed-file scan exits 1 on longstanding fft.rs panic/indexing/test-assert inventories linked to the baseline blob; no unsafe code was introduced."
+    }
+  }
+}

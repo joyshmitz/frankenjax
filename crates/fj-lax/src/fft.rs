@@ -986,6 +986,13 @@ impl BatchFftPlan {
         }
     }
 
+    fn work_len(&self, n: usize) -> usize {
+        match self {
+            BatchFftPlan::Pow2 | BatchFftPlan::Mixed(_) => n,
+            BatchFftPlan::Bluestein(plan) => plan.m,
+        }
+    }
+
     fn apply_into(
         &self,
         input: &[(f64, f64)],
@@ -1247,7 +1254,11 @@ pub(crate) fn eval_rfft(
     // bit-identical to the serial path.
     let mut out_values: Vec<(f64, f64)> = vec![(0.0, 0.0); output_count];
     const PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144
-    let threads = if output_count >= PARALLEL_MIN_ELEMS && batch_size > 1 {
+    let transform_work = batch_size.saturating_mul(
+        plan.as_ref()
+            .map_or(fft_length, |plan| plan.work_len(fft_length)),
+    );
+    let threads = if transform_work >= PARALLEL_MIN_ELEMS && batch_size > 1 {
         std::thread::available_parallelism()
             .map(|p| p.get())
             .unwrap_or(1)
@@ -1270,7 +1281,10 @@ pub(crate) fn eval_rfft(
             &mut out_values,
         );
     } else {
-        let rows_per = batch_size.div_ceil(threads);
+        let mut rows_per = batch_size.div_ceil(threads);
+        if real_plan.is_none() && rows_per % 2 != 0 {
+            rows_per += 1;
+        }
         let plan_ref = plan.as_ref();
         let real_plan_ref = real_plan.as_ref();
         let elements_ref = &elements;
@@ -1368,14 +1382,17 @@ fn rfft_rows_into(
         }
         padded[copy_len..].fill((0.0, 0.0));
         match plan {
-            Some(plan) => {
-                plan.apply_into(&padded, &mut scratch, &mut mixed_scratch, false, &mut transformed)
-            }
+            Some(plan) => plan.apply_into(
+                &padded,
+                &mut scratch,
+                &mut mixed_scratch,
+                false,
+                &mut transformed,
+            ),
             None => fft_1d_into(&padded, &mut transformed),
         }
 
-        let (blk_a, blk_b) =
-            out_blk[r * out_last..(r + 2) * out_last].split_at_mut(out_last);
+        let (blk_a, blk_b) = out_blk[r * out_last..(r + 2) * out_last].split_at_mut(out_last);
         for k in 0..out_last {
             let nk = if k == 0 { 0 } else { n - k };
             let (zr, zi) = transformed[k];
@@ -1394,9 +1411,13 @@ fn rfft_rows_into(
         padded[..copy_len].copy_from_slice(&elements[start..start + copy_len]);
         padded[copy_len..].fill((0.0, 0.0));
         match plan {
-            Some(plan) => {
-                plan.apply_into(&padded, &mut scratch, &mut mixed_scratch, false, &mut transformed)
-            }
+            Some(plan) => plan.apply_into(
+                &padded,
+                &mut scratch,
+                &mut mixed_scratch,
+                false,
+                &mut transformed,
+            ),
             None => fft_1d_into(&padded, &mut transformed),
         }
         out_blk[r * out_last..r * out_last + out_last].copy_from_slice(&transformed[..out_last]);
@@ -1846,6 +1867,65 @@ mod tests {
         assert_eq!(
             batched_bits, expected,
             "threaded batch RFFT must match per-row serial bit-for-bit"
+        );
+    }
+
+    #[test]
+    fn threaded_bluestein_batch_rfft_matches_serial_row_block() {
+        let p = BTreeMap::new();
+        let rows = 256_usize;
+        let cols = 257_usize;
+        let out_last = cols / 2 + 1;
+        let plan = BatchFftPlan::new(cols, false);
+        assert!(rows * out_last < (1usize << 18));
+        assert!(rows * plan.work_len(cols) >= (1usize << 18));
+
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| {
+                let x = i as f64;
+                (x * 0.001953125).sin() - 0.25 * (x * 0.00390625).cos()
+            })
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let batched = eval_rfft(std::slice::from_ref(&input), &p).unwrap();
+        let batched_bits = complex_bits(&batched);
+        let batched_digest =
+            fj_test_utils::fixture_id_from_json(&batched_bits).expect("RFFT digest should build");
+
+        let elements: Vec<(f64, f64)> = data.into_iter().map(|value| (value, 0.0)).collect();
+        let mut expected = vec![(0.0, 0.0); rows * out_last];
+        rfft_rows_into(
+            &elements,
+            Some(&plan),
+            None,
+            cols,
+            cols,
+            cols,
+            out_last,
+            0,
+            rows,
+            &mut expected,
+        );
+        let expected_bits: Vec<(u64, u64)> = expected
+            .iter()
+            .map(|(re, im)| (re.to_bits(), im.to_bits()))
+            .collect();
+
+        assert_eq!(
+            batched_bits, expected_bits,
+            "threaded Bluestein RFFT must match the serial packed row block bit-for-bit"
+        );
+        assert_eq!(
+            batched_digest, "11378141236573f4d7b1e8a2e85465e2798b1c608ed0dbc17c308e948628292e",
+            "threaded Bluestein RFFT golden output digest changed"
         );
     }
 
