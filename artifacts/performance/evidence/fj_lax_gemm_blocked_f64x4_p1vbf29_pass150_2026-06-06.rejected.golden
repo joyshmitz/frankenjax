@@ -1,0 +1,44 @@
+bead: frankenjax-p1vbf.29
+pass: 150
+target: linalg/matmul_2d_1024x1024x1024_f64
+lever: use F64x4 vector accumulators inside the blocked KC GEMM macro-kernel
+decision: rejected
+score: 0.0
+
+profile-backed baseline:
+worker: ts1
+command: RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf29-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(matmul_2d_1024x1024x1024_f64|matmul_2d_512x512x512_f64|matmul_2d_256x256x256_f64|lu_1024x1024_f64|cholesky_1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+cholesky_1024x1024_f64: [54.106 ms 54.523 ms 55.187 ms]
+lu_1024x1024_f64: [57.902 ms 58.464 ms 59.117 ms]
+matmul_2d_256x256x256_f64: [934.64 us 947.48 us 964.42 us]
+matmul_2d_512x512x512_f64: [4.6340 ms 8.3617 ms 13.402 ms]
+matmul_2d_1024x1024x1024_f64: [16.476 ms 18.704 ms 24.512 ms]
+
+proof before rejection:
+worker: ts1
+command: RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf29-proof cargo test -p fj-lax --lib matmul_2d -- --nocapture
+result: 8 passed, 0 failed, 1 ignored
+covered: matmul_2d_basic, matmul_2d_ikj_bit_identical_to_ijk, matmul_2d_special_values_bit_identical_to_ijk, batched_matmul_2d_bit_identical, matmul_2d_threaded_bit_identical, matmul_2d_large_bit_identical_to_ijk, matmul_2d_packed_bit_identical_to_ijk, matmul_2d_blocked_bit_identical_to_ijk
+
+candidate benchmark:
+worker: ts1
+command: RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf29-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(matmul_2d_1024x1024x1024_f64|matmul_2d_512x512x512_f64|matmul_2d_256x256x256_f64|lu_1024x1024_f64|cholesky_1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+cholesky_1024x1024_f64: [55.404 ms 57.560 ms 59.751 ms]
+lu_1024x1024_f64: [57.101 ms 58.467 ms 59.481 ms]
+matmul_2d_256x256x256_f64: [947.81 us 953.10 us 957.14 us]
+matmul_2d_512x512x512_f64: [4.9829 ms 5.1246 ms 5.3066 ms]
+matmul_2d_1024x1024x1024_f64: [19.078 ms 19.439 ms 20.028 ms]
+same-worker target delta: 18.704 ms -> 19.439 ms median, 0.962x
+
+isomorphism proof:
+ordering: candidate kept the same pc, j, i, and ascending-l loop order. Each output lane received products in the same l order as the scalar array implementation; only four independent column accumulators were held in a SIMD vector.
+tie_breaking: GEMM has no comparisons or tie-breaking.
+floating_point: candidate did not use fused multiply-add, mixed precision, or reassociation. Existing special-value, packed, threaded, large, and blocked bit-identity tests passed before rejection. Source was restored after the perf gate failed.
+rng: not applicable.
+golden_sha256: computed over this file.
+
+source_state:
+git diff -- crates/fj-lax/src/tensor_contraction.rs: empty after rejection restore.
+
+next primitive:
+Do not retune blocked-KC scalar-vs-F64x4 accumulator shape. Attack a different GEMM primitive next: packed A panels plus a register-tiled macro-kernel that reduces C reload/store passes, or an autotuned MR/NR/KC family with an explicit bit-identity proof. Target >=1.2x on linalg/matmul_2d_1024x1024x1024_f64 and no downstream LU/Cholesky regression.
