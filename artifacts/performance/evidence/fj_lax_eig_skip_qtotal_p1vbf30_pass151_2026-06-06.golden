@@ -1,0 +1,49 @@
+frankenjax-p1vbf.30 pass151 fj-lax eig skip unused q_total
+
+Target:
+- linalg/eig_48x48_f64
+- File/function: crates/fj-lax/src/linalg.rs eig_qr_iteration / hessenberg_qr_step
+
+Baseline:
+- Worker: ts1
+- Command: RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-post-p150-reprofile cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(eig_48x48_f64|eigh_48x48_f64|cholesky_1024x1024_f64|qr_1024x1024_f64|pinv_192x192_f64|lu_1024x1024_f64|svd_48x48_f64|svd_48x48_full_f64|matmul_2d_1024x1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+- eig_48x48_f64: 44.821 ms .. 45.351 ms .. 45.733 ms
+- guard cholesky_1024x1024_f64: 54.931 ms .. 55.635 ms .. 57.388 ms
+- guard qr_1024x1024_f64: 35.225 ms .. 37.336 ms .. 39.031 ms
+- guard lu_1024x1024_f64: 53.253 ms .. 54.838 ms .. 56.771 ms
+
+Final candidate:
+- Worker: ts1
+- Proof command: RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf30-proof3 cargo test -p fj-lax --lib eig -- --nocapture
+- Proof result: 17 passed, 0 failed, 0 ignored
+- Target command: RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf30-final-bench cargo bench -p fj-lax --bench lax_baseline -- 'linalg/eig_48x48_f64' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+- eig_48x48_f64: 29.044 ms .. 31.389 ms .. 33.021 ms
+- Guard command: RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf30-final-guards cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(qr_1024x1024_f64|lu_1024x1024_f64|cholesky_1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+- guard cholesky_1024x1024_f64: 52.360 ms .. 52.985 ms .. 53.850 ms
+- guard qr_1024x1024_f64: 35.743 ms .. 37.327 ms .. 40.427 ms
+- guard lu_1024x1024_f64: 52.081 ms .. 52.709 ms .. 53.575 ms
+
+Gate:
+- Median speedup: 45.351 / 31.389 = 1.445x
+- Conservative speedup: 44.821 / 33.021 = 1.357x
+- Score: Impact 4 x Confidence 5 / Effort 2 = 10.0
+- Decision: keep
+
+Isomorphism proof:
+- Ordering preserved: the real Hessenberg matrix t receives the same left Givens applications, and the same right Givens applications are still applied to t in the same rotation order. Only the discarded Schur-vector accumulator q_total no longer receives those rotations.
+- Tie-breaking unchanged: deflation checks, 1x1/2x2 block walking, eigenvalue extraction, and output column pairing are unchanged.
+- Floating-point unchanged for observed outputs: arithmetic that mutates t, computes eigenvalues, performs inverse iteration on the original input matrix a, and writes eigenvectors is unchanged. Removed floating-point work mutates only q_total, which is not used for the returned values.
+- RNG unchanged: no RNG surface.
+- Golden output sha256: recorded in the companion .golden.sha256 file.
+
+Validation:
+- RCH ts1 cargo test -p fj-lax --lib eig -- --nocapture: pass
+- RCH ts1 cargo bench target and guards: pass, target win retained
+- RCH ts1 cargo clippy -p fj-lax --all-targets -- -D warnings: pass after preparatory clippy cleanup commit 42264534
+- RCH ts1 cargo check -p fj-lax --all-targets: pass
+- git diff --check: pass
+- rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs: blocked by pre-existing formatting drift outside this lever; no broad reformat applied
+- ubs crates/fj-lax/src/linalg.rs: blocked by pre-existing inventory in tests and direct-indexing assertions; clippy/fmt/check sections inside UBS are clean
+
+Next profile-backed primitive:
+- Reprofile after landing. Sidecar alien-graveyard/artifact pass recommends attacking lu_factor_real_blocked fused in-place Schur update next, target >=1.15x on linalg/lu_1024x1024_f64.

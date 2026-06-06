@@ -1,0 +1,61 @@
+{
+  "bead": "frankenjax-p1vbf.30",
+  "pass": 151,
+  "date": "2026-06-06",
+  "crate": "fj-lax",
+  "target": "linalg/eig_48x48_f64",
+  "worker": "ts1",
+  "lever": "Skip accumulating the unused q_total Schur-vector matrix during the real Hessenberg QR eig sweep; keep all updates to the observed Hessenberg matrix t unchanged.",
+  "score": {
+    "impact": 4,
+    "confidence": 5,
+    "effort": 2,
+    "value": 10.0
+  },
+  "baseline": {
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-post-p150-reprofile cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(eig_48x48_f64|eigh_48x48_f64|cholesky_1024x1024_f64|qr_1024x1024_f64|pinv_192x192_f64|lu_1024x1024_f64|svd_48x48_f64|svd_48x48_full_f64|matmul_2d_1024x1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "eig_48x48_f64_ms": [44.821, 45.351, 45.733],
+    "guards_ms": {
+      "cholesky_1024x1024_f64": [54.931, 55.635, 57.388],
+      "qr_1024x1024_f64": [35.225, 37.336, 39.031],
+      "lu_1024x1024_f64": [53.253, 54.838, 56.771]
+    }
+  },
+  "candidate": {
+    "proof_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf30-proof3 cargo test -p fj-lax --lib eig -- --nocapture",
+    "proof_result": "17 passed, 0 failed, 0 ignored",
+    "bench_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf30-final-bench cargo bench -p fj-lax --bench lax_baseline -- 'linalg/eig_48x48_f64' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "eig_48x48_f64_ms": [29.044, 31.389, 33.021],
+    "guard_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-p1vbf30-final-guards cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(qr_1024x1024_f64|lu_1024x1024_f64|cholesky_1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "guards_ms": {
+      "cholesky_1024x1024_f64": [52.360, 52.985, 53.850],
+      "qr_1024x1024_f64": [35.743, 37.327, 40.427],
+      "lu_1024x1024_f64": [52.081, 52.709, 53.575]
+    }
+  },
+  "result": {
+    "decision": "keep",
+    "median_speedup": 1.445,
+    "conservative_speedup": 1.357
+  },
+  "isomorphism": {
+    "ordering": "The Hessenberg matrix t receives the same left and right Givens transformations in the same order; only the discarded q_total accumulator skips rotations.",
+    "tie_breaking": "Deflation checks, block walking, eigenvalue extraction, and output column pairing are unchanged.",
+    "floating_point": "All floating-point arithmetic that contributes to returned eigenvalues/eigenvectors is unchanged. Removed arithmetic mutates only q_total, which is not observed.",
+    "rng": "No RNG surface."
+  },
+  "golden": {
+    "path": "artifacts/performance/evidence/fj_lax_eig_skip_qtotal_p1vbf30_pass151_2026-06-06.golden",
+    "sha256": "9d249038ae2f430ceb8585e22bdc2fde169c22bf272c32a61166f7ab6df41d52"
+  },
+  "validation": [
+    "RCH ts1 cargo test -p fj-lax --lib eig -- --nocapture passed",
+    "RCH ts1 target and guard Criterion benches passed",
+    "RCH ts1 cargo clippy -p fj-lax --all-targets -- -D warnings passed",
+    "RCH ts1 cargo check -p fj-lax --all-targets passed",
+    "git diff --check passed",
+    "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs blocked by pre-existing formatting drift outside this lever",
+    "ubs crates/fj-lax/src/linalg.rs blocked by pre-existing inventory; UBS clippy/fmt/check sections were clean"
+  ],
+  "next_candidate": "Reprofile; sidecar recommends lu_factor_real_blocked fused in-place Schur update, target >=1.15x on linalg/lu_1024x1024_f64."
+}

@@ -3287,7 +3287,7 @@ fn eig_qr_iteration(a: &[f64], n: usize) -> EigQrResult {
     // full Q/R factorization and performed two dense matrix multiplies on every
     // step. Hessenberg + Givens QR performs the same orthogonal-similarity
     // iteration class, but each step touches only O(n^2) data.
-    let (mut t, mut q_total) = hessenberg_reduction(a, n);
+    let (mut t, _q_total) = hessenberg_reduction(a, n);
 
     // Unshifted Hessenberg QR drives `t` to real Schur (quasi-triangular) form:
     // negligible subdiagonals separate 1×1 real blocks from isolated 2×2 blocks
@@ -3306,7 +3306,7 @@ fn eig_qr_iteration(a: &[f64], n: usize) -> EigQrResult {
     };
     let mut reached_quasi_triangular = false;
     for _iter in 0..(200 * n) {
-        hessenberg_qr_step(&mut t, &mut q_total, n);
+        hessenberg_qr_step(&mut t, None, n);
         let mut converged = true;
         for j in 2..n {
             if !subdiag_negligible(&t, j) && !subdiag_negligible(&t, j - 1) {
@@ -3361,9 +3361,7 @@ fn eig_qr_iteration(a: &[f64], n: usize) -> EigQrResult {
 
     // Eigenvectors of the ORIGINAL `a` (the QR iteration's Schur vectors are not
     // eigenvectors unless T is diagonal). One eigenvalue → one column, paired by
-    // index, via inverse iteration on A − λI. The accumulated `q_total` is no longer
-    // needed for vectors (the QR sweep still uses it as scratch).
-    let _ = &q_total;
+    // index, via inverse iteration on A − λI.
     let mut eigenvectors = vec![(0.0_f64, 0.0_f64); n * n];
     for (col, &lambda) in eigenvalues.iter().enumerate() {
         let vk = eig_eigenvector(a, n, lambda);
@@ -3471,7 +3469,7 @@ fn apply_householder_right(
     }
 }
 
-fn hessenberg_qr_step(h: &mut [f64], q_total: &mut [f64], n: usize) {
+fn hessenberg_qr_step(h: &mut [f64], mut q_total: Option<&mut [f64]>, n: usize) {
     let mut rotations = Vec::with_capacity(n.saturating_sub(1));
 
     for i in 0..n - 1 {
@@ -3498,7 +3496,9 @@ fn hessenberg_qr_step(h: &mut [f64], q_total: &mut [f64], n: usize) {
 
     for (i, (c, s)) in rotations.into_iter().enumerate() {
         apply_givens_right(h, n, i, c, s);
-        apply_givens_right(q_total, n, i, c, s);
+        if let Some(q_total) = q_total.as_deref_mut() {
+            apply_givens_right(q_total, n, i, c, s);
+        }
     }
 }
 
