@@ -6721,17 +6721,28 @@ mod tests {
         let x = Value::Tensor(x_tensor.clone());
 
         type EvalFn = fn(Primitive, &[Value]) -> Result<Value, EvalError>;
-        let cases: [(&str, Primitive, EvalFn, fn(f64) -> bool); 4] = [
-            ("is_finite", Primitive::IsFinite, eval_is_finite, f64::is_finite),
+        type PredicateCase = (&'static str, Primitive, EvalFn, fn(f64) -> bool);
+        let cases: [PredicateCase; 4] = [
+            (
+                "is_finite",
+                Primitive::IsFinite,
+                eval_is_finite,
+                f64::is_finite,
+            ),
             ("is_nan", Primitive::IsNan, eval_is_nan, f64::is_nan),
             ("is_inf", Primitive::IsInf, eval_is_inf, f64::is_infinite),
-            ("signbit", Primitive::Signbit, eval_signbit, f64::is_sign_negative),
+            (
+                "signbit",
+                Primitive::Signbit,
+                eval_signbit,
+                f64::is_sign_negative,
+            ),
         ];
 
         let reps = 40u32;
         for (label, prim, eval_fn, pred) in cases {
             // NEW dense path.
-            let dense = eval_fn(prim, &[x.clone()]).unwrap();
+            let dense = eval_fn(prim, std::slice::from_ref(&x)).unwrap();
             let dense_t = dense.as_tensor().unwrap();
 
             // Reference: the predicate applied directly (what the per-Literal path
@@ -6750,7 +6761,7 @@ mod tests {
             // Same-binary A/B timing: dense eval vs the per-Literal loop.
             let t0 = Instant::now();
             for _ in 0..reps {
-                let out = eval_fn(prim, &[x.clone()]).unwrap();
+                let out = eval_fn(prim, std::slice::from_ref(&x)).unwrap();
                 std::hint::black_box(&out);
             }
             let dense_ns = t0.elapsed().as_nanos().max(1);
