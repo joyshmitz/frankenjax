@@ -2674,10 +2674,18 @@ fn batch_cumulative(
     // Move batch to front
     let value = move_batch_dim_to_front(&input.value, batch_dim)?;
 
-    // Shift axis by 1
-    let axis = parse_param_usize(params, "axis")?.unwrap_or(0);
+    // Shift the cumulative axis for the prepended batch axis. Parse as i64 so a
+    // negative (end-relative) axis survives — eval_cumulative normalizes it
+    // against the batched rank — and is left UNCHANGED (the batch is prepended at
+    // the front, so an end-relative axis still points to the same position); only
+    // a non-negative axis shifts +1. A usize parse previously rejected "-1".
+    let raw_axis: i64 = params
+        .get("axis")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    let shifted = if raw_axis >= 0 { raw_axis + 1 } else { raw_axis };
     let mut new_params = params.clone();
-    new_params.insert("axis".to_owned(), (axis + 1).to_string());
+    new_params.insert("axis".to_owned(), shifted.to_string());
     let result = eval_primitive(primitive, &[value], &new_params)
         .map_err(|e| BatchError::EvalError(e.to_string()))?;
     Ok(BatchTracer::batched(result, 0))
@@ -7748,6 +7756,21 @@ mod tests {
         let vals = extract_f64_vec(&result.value);
         // Each row summed: [3, 7, 11]
         assert_eq!(vals, vec![3.0, 7.0, 11.0]);
+    }
+
+    #[test]
+    fn test_batch_cumsum_handles_negative_axis() {
+        // eval_cumulative normalizes negative axes; batch_cumulative must too.
+        // vmap(cumsum, axis=-1) over a batch of length-3 vectors cumsums each row.
+        // (Was: parse_param_usize parsed "axis" as usize, rejecting "-1"; and a
+        // blind +1 shift is wrong for an end-relative axis.)
+        let input =
+            BatchTracer::batched(make_f64_matrix(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 0);
+        let params = BTreeMap::from([("axis".to_owned(), "-1".to_owned())]);
+        let result = apply_batch_rule(Primitive::Cumsum, &[input], &params).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let vals = extract_f64_vec(&result.value);
+        assert_eq!(vals, vec![1.0, 3.0, 6.0, 4.0, 9.0, 15.0]);
     }
 
     #[test]
