@@ -5992,6 +5992,32 @@ impl Iterator for MultiIndexIterator {
 }
 
 /// IsFinite: returns Bool indicating whether each element is finite (not NaN or Inf).
+/// Dense f64 fast path for the elementwise float predicates (`is_finite`,
+/// `is_nan`, `is_inf`, `signbit`). When the operand is a dense F64 tensor, read
+/// its packed f64 slice and apply `pred` straight into dense Bool storage,
+/// skipping the per-`Literal` unpack and the boxed `Vec<Literal::Bool>` (24
+/// bytes/elem vs 1). Returns `None` (caller falls back to the generic loop) for
+/// non-dense or non-F64 operands. Bit-identical: for an F64 element the generic
+/// path computes `literal.as_f64()` (= `f64::from_bits`) then the same predicate,
+/// which is exactly what `as_f64_slice` + `pred` does; `new_bool_values` stores
+/// the same bools.
+fn f64_predicate_dense(
+    tensor: &TensorValue,
+    pred: impl Fn(f64) -> bool,
+) -> Result<Option<Value>, EvalError> {
+    if tensor.dtype != DType::F64 {
+        return Ok(None);
+    }
+    let Some(xs) = tensor.elements.as_f64_slice() else {
+        return Ok(None);
+    };
+    let out: Vec<bool> = xs.iter().map(|&v| pred(v)).collect();
+    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+        tensor.shape.clone(),
+        out,
+    )?)))
+}
+
 pub(crate) fn eval_is_finite(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() != 1 {
         return Err(EvalError::ArityMismatch {
@@ -6021,6 +6047,9 @@ pub(crate) fn eval_is_finite(primitive: Primitive, inputs: &[Value]) -> Result<V
             Ok(Value::Scalar(Literal::Bool(is_finite)))
         }
         Value::Tensor(tensor) => {
+            if let Some(value) = f64_predicate_dense(tensor, f64::is_finite)? {
+                return Ok(value);
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in &tensor.elements {
                 let is_finite = match *literal {
@@ -6080,6 +6109,9 @@ pub(crate) fn eval_is_nan(primitive: Primitive, inputs: &[Value]) -> Result<Valu
             Ok(Value::Scalar(Literal::Bool(is_nan)))
         }
         Value::Tensor(tensor) => {
+            if let Some(value) = f64_predicate_dense(tensor, f64::is_nan)? {
+                return Ok(value);
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in &tensor.elements {
                 let is_nan = match *literal {
@@ -6138,6 +6170,9 @@ pub(crate) fn eval_is_inf(primitive: Primitive, inputs: &[Value]) -> Result<Valu
             Ok(Value::Scalar(Literal::Bool(is_inf)))
         }
         Value::Tensor(tensor) => {
+            if let Some(value) = f64_predicate_dense(tensor, f64::is_infinite)? {
+                return Ok(value);
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in &tensor.elements {
                 let is_inf = match *literal {
@@ -6194,6 +6229,9 @@ pub(crate) fn eval_signbit(primitive: Primitive, inputs: &[Value]) -> Result<Val
             Ok(Value::Scalar(Literal::Bool(signbit)))
         }
         Value::Tensor(tensor) => {
+            if let Some(value) = f64_predicate_dense(tensor, f64::is_sign_negative)? {
+                return Ok(value);
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in &tensor.elements {
                 let signbit = match *literal {
@@ -6526,6 +6564,87 @@ mod tests {
     use super::*;
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
+
+    /// Isomorphism + golden proof for the dense f64 float-predicate fast paths
+    /// (is_finite / is_nan / is_inf / signbit). Output must be BIT-FOR-BIT
+    /// identical to the per-`Literal` path; same-binary A/B timing is printed.
+    #[test]
+    fn f64_float_predicates_dense_path_bit_identical_to_literal() {
+        use std::time::Instant;
+
+        let n: u32 = 1 << 20;
+        // Cycle through normal, +/-0, +/-inf, NaN, subnormal, negative.
+        let specials = [
+            1.0f64,
+            -2.5,
+            0.0,
+            -0.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            f64::MIN_POSITIVE / 2.0,
+            -1e300,
+            123.456,
+        ];
+        let xs: Vec<f64> = (0..n as usize).map(|i| specials[i % specials.len()]).collect();
+        let shape = Shape { dims: vec![n] };
+        let x_tensor = TensorValue::new_f64_values(shape.clone(), xs.clone()).unwrap();
+        let x = Value::Tensor(x_tensor.clone());
+
+        type EvalFn = fn(Primitive, &[Value]) -> Result<Value, EvalError>;
+        let cases: [(&str, Primitive, EvalFn, fn(f64) -> bool); 4] = [
+            ("is_finite", Primitive::IsFinite, eval_is_finite, f64::is_finite),
+            ("is_nan", Primitive::IsNan, eval_is_nan, f64::is_nan),
+            ("is_inf", Primitive::IsInf, eval_is_inf, f64::is_infinite),
+            ("signbit", Primitive::Signbit, eval_signbit, f64::is_sign_negative),
+        ];
+
+        let reps = 40u32;
+        for (label, prim, eval_fn, pred) in cases {
+            // NEW dense path.
+            let dense = eval_fn(prim, &[x.clone()]).unwrap();
+            let dense_t = dense.as_tensor().unwrap();
+
+            // Reference: the predicate applied directly (what the per-Literal path
+            // computes via literal.as_f64()).
+            let mut golden: u64 = 0xcbf29ce484222325;
+            for (k, &v) in xs.iter().enumerate() {
+                assert_eq!(
+                    dense_t.elements[k],
+                    Literal::Bool(pred(v)),
+                    "{label} mismatch at {k} (v={v})"
+                );
+                golden ^= u64::from(pred(v));
+                golden = golden.wrapping_mul(0x100000001b3);
+            }
+
+            // Same-binary A/B timing: dense eval vs the per-Literal loop.
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                let out = eval_fn(prim, &[x.clone()]).unwrap();
+                std::hint::black_box(&out);
+            }
+            let dense_ns = t0.elapsed().as_nanos().max(1);
+
+            let t1 = Instant::now();
+            for _ in 0..reps {
+                let mut elements = Vec::with_capacity(n as usize);
+                for &v in &xs {
+                    elements.push(Literal::Bool(pred(v)));
+                }
+                let out = TensorValue::new(DType::Bool, shape.clone(), elements).unwrap();
+                std::hint::black_box(&out);
+            }
+            let lit_ns = t1.elapsed().as_nanos().max(1);
+
+            let ratio = lit_ns as f64 / dense_ns as f64;
+            println!(
+                "[{label}] dense={:.3}ms literal={:.3}ms ratio={ratio:.2}x golden={golden:016x}",
+                dense_ns as f64 / reps as f64 / 1e6,
+                lit_ns as f64 / reps as f64 / 1e6,
+            );
+        }
+    }
 
     /// Isomorphism + golden proof for the dense `clamp(scalar_lo, tensor_x,
     /// scalar_hi)` fast path (`jnp.clip`). Every output element must be
