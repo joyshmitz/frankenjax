@@ -743,6 +743,82 @@ fn infer_equation_output_aval(
                 shape: Shape::vector(length),
             }
         }
+        // ExpandDims: insert a size-1 axis (normalize a negative axis against
+        // rank+1, matching numpy/jnp expand_dims and fj-trace). Without this the
+        // catch-all returned the INPUT shape — a residual typed one rank too low.
+        ExpandDims => {
+            let rank = first_input.shape.rank() as i64;
+            let raw_axis: i64 = eqn
+                .params
+                .get("axis")
+                .and_then(|s| s.split(',').next())
+                .and_then(|s| s.trim().parse::<i64>().ok())
+                .unwrap_or(0);
+            let norm = if raw_axis < 0 { raw_axis + rank + 1 } else { raw_axis };
+            let mut dims = first_input.shape.dims.clone();
+            let axis = norm.clamp(0, rank) as usize;
+            dims.insert(axis, 1);
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape: Shape { dims },
+            }
+        }
+        // Squeeze: drop the listed dims (negative-normalized against rank), or all
+        // size-1 dims if unspecified. Catch-all previously kept the input shape.
+        Squeeze => {
+            let rank = first_input.shape.rank() as i64;
+            let drop: Vec<usize> = match eqn.params.get("dimensions") {
+                Some(s) if !s.trim().is_empty() => s
+                    .split(',')
+                    .filter_map(|d| d.trim().parse::<i64>().ok())
+                    .map(|d| (if d < 0 { d + rank } else { d }).clamp(0, rank.max(0)) as usize)
+                    .collect(),
+                _ => first_input
+                    .shape
+                    .dims
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &d)| d == 1)
+                    .map(|(i, _)| i)
+                    .collect(),
+            };
+            let dims: Vec<u32> = first_input
+                .shape
+                .dims
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !drop.contains(i))
+                .map(|(_, &d)| d)
+                .collect();
+            AbstractValue {
+                dtype: first_input.dtype,
+                shape: Shape { dims },
+            }
+        }
+        // Argmax/Argmin: drop the reduced axis; output is ALWAYS I64 indices. The
+        // catch-all kept the input shape AND dtype — wrong on both counts.
+        Argmax | Argmin => {
+            let rank = first_input.shape.rank() as i64;
+            let shape = if rank == 0 {
+                Shape::scalar()
+            } else {
+                let raw_axis: i64 = eqn
+                    .params
+                    .get("axis")
+                    .and_then(|s| s.trim().parse::<i64>().ok())
+                    .unwrap_or(rank - 1);
+                let norm = if raw_axis < 0 { raw_axis + rank } else { raw_axis };
+                let mut dims = first_input.shape.dims.clone();
+                if norm >= 0 && (norm as usize) < dims.len() {
+                    dims.remove(norm as usize);
+                }
+                Shape { dims }
+            };
+            AbstractValue {
+                dtype: DType::I64,
+                shape,
+            }
+        }
         // Most element-wise ops preserve dtype and shape
         _ => first_input.clone(),
     };
@@ -3637,5 +3713,71 @@ mod tests {
                 Ok(vec![])
             },
         );
+    }
+
+    #[test]
+    fn infer_shape_changing_ops_residual_avals() {
+        // Guards the partial_eval residual-typing path (the two-layers class):
+        // shape/dtype-changing ops must not fall through to the catch-all, which
+        // returned the INPUT aval and silently mistyped staged residuals.
+        fn av(dims: &[u32], dtype: DType) -> AbstractValue {
+            AbstractValue {
+                dtype,
+                shape: Shape { dims: dims.to_vec() },
+            }
+        }
+        fn eqn(prim: Primitive, params: &[(&str, &str)]) -> Equation {
+            let mut p = BTreeMap::new();
+            for (k, v) in params {
+                p.insert((*k).to_string(), (*v).to_string());
+            }
+            Equation {
+                primitive: prim,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params: p,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            }
+        }
+
+        // ExpandDims axis=-1 on [2,3] -> [2,3,1] (catch-all wrongly kept [2,3]).
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::ExpandDims, &[("axis", "-1")]),
+            &av(&[2, 3], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![2, 3, 1]);
+        assert_eq!(out.dtype, DType::F64);
+
+        // Squeeze dimensions=1 on [2,1,3] -> [2,3]; default (all size-1) -> drops.
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Squeeze, &[("dimensions", "1")]),
+            &av(&[2, 1, 3], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![2, 3]);
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Squeeze, &[]),
+            &av(&[1, 4, 1], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![4]);
+
+        // Argmax/Argmin: drop the axis AND retype to I64 (catch-all kept [4,3]/F64).
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Argmax, &[("axis", "0")]),
+            &av(&[4, 3], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![3]);
+        assert_eq!(out.dtype, DType::I64);
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Argmin, &[]),
+            &av(&[4, 3], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![4]);
+        assert_eq!(out.dtype, DType::I64);
     }
 }
