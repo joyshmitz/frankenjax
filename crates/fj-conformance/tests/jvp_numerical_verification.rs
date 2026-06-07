@@ -283,6 +283,61 @@ fn triangular_solve_jvp_numerical() {
     assert_close(&analytical_tangent, &numerical, 1e-4, "TriangularSolve JVP");
 }
 
+// ======================== Conv JVP ========================
+
+#[test]
+fn conv_jvp_numerical() {
+    // conv(L, R) is bilinear: d conv = conv(dL, R) + conv(L, dR). Verify the JVP
+    // against central differences with BOTH tangents nonzero, so a rule that only
+    // got one bilinear term (or computed conv(dL, dR)) is caught. The conv JVP was
+    // previously absent from this suite, which is how the conv(dL,dR) bug (qipg0)
+    // stayed hidden. lhs=[1,3,1] (batch,width,c_in), rhs=[2,1,1] (K,c_in,c_out),
+    // valid padding / stride 1 => output [1,2,1].
+    let t3 = |dims: Vec<u32>, data: &[f64]| {
+        Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims },
+                data.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .unwrap(),
+        )
+    };
+    let lhs = t3(vec![1, 3, 1], &[1.0, 2.0, 3.0]);
+    let rhs = t3(vec![2, 1, 1], &[0.5, -0.25]);
+    let dlhs = t3(vec![1, 3, 1], &[0.1, 0.2, 0.3]);
+    let drhs = t3(vec![2, 1, 1], &[0.05, 0.15]);
+
+    let params = BTreeMap::new();
+    let jaxpr = make_two_input_jaxpr(Primitive::Conv, params.clone());
+    let jvp_result = fj_ad::jvp(
+        &jaxpr,
+        &[lhs.clone(), rhs.clone()],
+        &[dlhs.clone(), drhs.clone()],
+    )
+    .unwrap();
+    let analytical_tangent = extract_f64_vec(&jvp_result.tangents[0]);
+
+    let eps = 1e-6;
+    let l_plus = perturb(&lhs, &dlhs, eps);
+    let r_plus = perturb(&rhs, &drhs, eps);
+    let l_minus = perturb(&lhs, &dlhs, -eps);
+    let r_minus = perturb(&rhs, &drhs, -eps);
+
+    let out_plus = eval_primitive_multi(Primitive::Conv, &[l_plus, r_plus], &params).unwrap();
+    let out_minus = eval_primitive_multi(Primitive::Conv, &[l_minus, r_minus], &params).unwrap();
+    let vals_plus = extract_f64_vec(&out_plus[0]);
+    let vals_minus = extract_f64_vec(&out_minus[0]);
+
+    let numerical: Vec<f64> = vals_plus
+        .iter()
+        .zip(vals_minus.iter())
+        .map(|(p, m)| (p - m) / (2.0 * eps))
+        .collect();
+
+    assert_close(&analytical_tangent, &numerical, 1e-5, "Conv JVP");
+}
+
 // ======================== Eigh JVP ========================
 
 #[test]
