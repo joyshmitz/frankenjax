@@ -619,6 +619,117 @@ fn conv2d_vjp_same_padding_numerical() {
     assert_gradients_close(&grad_rhs, &num_rhs, 1e-5, "Conv2D VJP grad_rhs (SAME)");
 }
 
+#[test]
+fn pad_vjp_interior_dilation_numerical() {
+    // Pad VJP with INTERIOR (dilation) + edge padding — the gradient must
+    // strided-slice the operand positions out of the cotangent and sum the rest
+    // into the pad-VALUE gradient. operand=[3], pad_value scalar, low=1, high=1,
+    // interior=1 → out=[7] laid out [pv, o0, pv, o1, pv, o2, pv]; operand feeds
+    // positions 1,3,5. Pad grad was absent from the numerical suites.
+    let operand_data = [1.0, 2.0, 3.0];
+    let operand = make_f64_vector(&operand_data);
+    let pad_value = Value::Scalar(Literal::from_f64(0.5));
+
+    let mut params = BTreeMap::new();
+    params.insert("padding_low".to_string(), "1".to_string());
+    params.insert("padding_high".to_string(), "1".to_string());
+    params.insert("padding_interior".to_string(), "1".to_string());
+
+    let out =
+        eval_primitive(Primitive::Pad, &[operand.clone(), pad_value.clone()], &params).unwrap();
+    assert_eq!(extract_f64_vec(&out).len(), 7, "pad output shape");
+    let g_data = [1.0, -0.5, 0.7, 0.3, -1.1, 0.9, 0.2];
+    let g = make_f64_vector(&g_data);
+
+    let vjp = fj_ad::vjp(
+        Primitive::Pad,
+        &[operand.clone(), pad_value.clone()],
+        std::slice::from_ref(&g),
+        std::slice::from_ref(&out),
+        &params,
+    )
+    .unwrap();
+    let grad_operand = extract_f64_vec(&vjp[0]);
+    // grad_pad_value is a scalar (pad_value is a scalar input).
+    let grad_pad_value = match &vjp[1] {
+        Value::Scalar(l) => l.as_f64().unwrap(),
+        Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).sum(),
+    };
+
+    let eps = 1e-6;
+    let loss = |ov: &Value, pv: &Value| -> f64 {
+        let o = eval_primitive(Primitive::Pad, &[ov.clone(), pv.clone()], &params).unwrap();
+        extract_f64_vec(&o).iter().zip(g_data.iter()).map(|(o, g)| o * g).sum()
+    };
+    let mut num_operand = vec![0.0; operand_data.len()];
+    for idx in 0..operand_data.len() {
+        let (mut p, mut m) = (operand_data.to_vec(), operand_data.to_vec());
+        p[idx] += eps;
+        m[idx] -= eps;
+        num_operand[idx] =
+            (loss(&make_f64_vector(&p), &pad_value) - loss(&make_f64_vector(&m), &pad_value))
+                / (2.0 * eps);
+    }
+    let num_pad_value = (loss(&operand, &Value::Scalar(Literal::from_f64(0.5 + eps)))
+        - loss(&operand, &Value::Scalar(Literal::from_f64(0.5 - eps))))
+        / (2.0 * eps);
+
+    assert_gradients_close(&grad_operand, &num_operand, 1e-5, "Pad VJP grad_operand (interior)");
+    assert_gradients_close(
+        &[grad_pad_value],
+        &[num_pad_value],
+        1e-5,
+        "Pad VJP grad_pad_value (interior)",
+    );
+}
+
+#[test]
+fn pad_vjp_negative_crop_numerical() {
+    // Pad VJP with NEGATIVE low (crop) — the operand positions that fall outside
+    // the cropped output must receive ZERO gradient (the pos<0 / pos>=dim drop).
+    // operand=[4], low=-1, high=0, interior=0 → out=[3] = operand[1..4]; operand[0]
+    // is cropped away so its grad must be 0.
+    let operand_data = [1.0, 2.0, 3.0, 4.0];
+    let operand = make_f64_vector(&operand_data);
+    let pad_value = Value::Scalar(Literal::from_f64(0.0));
+
+    let mut params = BTreeMap::new();
+    params.insert("padding_low".to_string(), "-1".to_string());
+    params.insert("padding_high".to_string(), "0".to_string());
+    params.insert("padding_interior".to_string(), "0".to_string());
+
+    let out =
+        eval_primitive(Primitive::Pad, &[operand.clone(), pad_value.clone()], &params).unwrap();
+    assert_eq!(extract_f64_vec(&out).len(), 3, "cropped output shape");
+    let g_data = [1.3, -0.7, 2.1];
+    let g = make_f64_vector(&g_data);
+
+    let vjp = fj_ad::vjp(
+        Primitive::Pad,
+        &[operand.clone(), pad_value.clone()],
+        std::slice::from_ref(&g),
+        std::slice::from_ref(&out),
+        &params,
+    )
+    .unwrap();
+    let grad_operand = extract_f64_vec(&vjp[0]);
+
+    let eps = 1e-6;
+    let loss = |ov: &Value| -> f64 {
+        let o = eval_primitive(Primitive::Pad, &[ov.clone(), pad_value.clone()], &params).unwrap();
+        extract_f64_vec(&o).iter().zip(g_data.iter()).map(|(o, g)| o * g).sum()
+    };
+    let mut num_operand = vec![0.0; operand_data.len()];
+    for idx in 0..operand_data.len() {
+        let (mut p, mut m) = (operand_data.to_vec(), operand_data.to_vec());
+        p[idx] += eps;
+        m[idx] -= eps;
+        num_operand[idx] = (loss(&make_f64_vector(&p)) - loss(&make_f64_vector(&m))) / (2.0 * eps);
+    }
+    assert_eq!(grad_operand[0], 0.0, "cropped operand[0] must have zero grad");
+    assert_gradients_close(&grad_operand, &num_operand, 1e-5, "Pad VJP grad_operand (negative crop)");
+}
+
 // ======================== TriangularSolve VJP ========================
 
 #[test]
