@@ -3053,7 +3053,11 @@ pub fn vjp(
                 zero_scattered_positions(g, indices)?
             };
 
-            Ok(vec![grad_operand, grad_updates])
+            // scatter inputs are [operand, indices, updates]; return one
+            // cotangent per input. The middle (indices) is non-differentiable —
+            // omitting it shifted grad_updates onto the indices slot and left
+            // the updates input with no gradient at all.
+            Ok(vec![grad_operand, zeros_like(indices), grad_updates])
         }
         Primitive::Clamp => {
             // JAX order is clamp(min, operand, max). Its subgradients are
@@ -12493,8 +12497,15 @@ mod tests {
         assert!((vals[4] - 1.0).abs() < 1e-10, "row 2 should pass through");
         assert!((vals[5] - 1.0).abs() < 1e-10, "row 2 should pass through");
 
+        // scatter has 3 inputs [operand, indices, updates]; the VJP must return
+        // one cotangent per input, with a zero for the non-differentiable indices.
+        assert_eq!(grads.len(), 3, "scatter VJP must return one grad per input");
+        assert!(
+            tensor_f64_values(&grads[1]).iter().all(|&x| x == 0.0),
+            "indices gradient must be zero"
+        );
         // grad_updates should be [[1,1]] — gathered from g at index 1
-        let vals = tensor_f64_values(&grads[1]);
+        let vals = tensor_f64_values(&grads[2]);
         assert_eq!(vals.len(), 2);
         assert!((vals[0] - 1.0).abs() < 1e-10);
         assert!((vals[1] - 1.0).abs() < 1e-10);
