@@ -1,0 +1,15 @@
+fj_lax_gemm_packeda_zntc3_pass159_2026-06-07
+project=frankenjax
+crate=fj-lax
+bead=frankenjax-zntc3
+target=linalg/matmul_2d_2048x2048x2048_f64
+lever=thread-local packed-A slabs per KC block in [MR-row-tile][k][row] order
+golden_digest_test=matmul_2d_packed_nr8_golden_output_digest
+golden_digest=e3762befad86e2a81da53a8413643b658a0be2d6136d69e195770b2beba48b3a
+focused_test=RCH ts1 cargo test -p fj-lax --lib matmul_2d -- --nocapture => 9 passed, 1 ignored
+baseline_vmi1156319_s=2.1227..2.2458..2.3819
+after_vmi1156319_s=1.4692..1.6003..1.7549
+median_speedup=1.4033
+conservative_speedup=1.2096
+score=8.0
+isomorphism=pc order, j-panel order, i-tile order, ascending inner-k accumulation, row ownership, row-major output, dtype/shape/error behavior, and RNG absence preserved; packing changes only the load address for A scalars.

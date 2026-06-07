@@ -1,0 +1,66 @@
+{
+  "artifact_version": 1,
+  "project": "frankenjax",
+  "crate": "fj-lax",
+  "bead": "frankenjax-zntc3",
+  "pass": 159,
+  "date": "2026-06-07",
+  "status": "kept",
+  "target": "linalg/matmul_2d_2048x2048x2048_f64",
+  "profile_backed_target": {
+    "source": "fresh fixed-worker RCH target-only baseline after frankenjax-o84i1 paired-panel rejection",
+    "worker": "vmi1156319",
+    "baseline_s": [2.1227, 2.2458, 2.3819],
+    "criterion_args": "--sample-size 20 --warm-up-time 2 --measurement-time 10"
+  },
+  "lever": {
+    "summary": "Pack each thread row-block's full MR-row A slabs once per KC block in [row_tile][k][row] layout before sweeping packed-B NR panels",
+    "files_touched": ["crates/fj-lax/src/tensor_contraction.rs"],
+    "source_restored": false,
+    "one_lever": true
+  },
+  "isomorphism_proof": {
+    "ordering": "The pc-block loop, j-panel loop, i-tile loop, and inner l=0..kc product sweep remain in the same order for every output element; packing changes only the address from which each A scalar is read after a one-time copy.",
+    "tie_breaking": "No comparisons or tie-breaking behavior in matmul_2d.",
+    "floating_point": "No FMA, mixed precision, horizontal reduction, reassociation, or change to accumulator seed/writeback behavior; each output cell keeps ascending-k accumulation and the same running-C continuation across pc blocks.",
+    "rng": "No RNG surface in matmul_2d.",
+    "shape_dtype_error_surface": "Shape checks, dtype dispatch, thread row ownership, row-major output layout, packed-B layout, and border handling are unchanged.",
+    "golden_sha256_file": "artifacts/performance/evidence/fj_lax_gemm_packeda_zntc3_pass159_2026-06-07.golden.sha256"
+  },
+  "validation": {
+    "focused_test_command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-zntc3-test cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+    "focused_test_worker": "ts1",
+    "focused_test_result": "passed: 9 passed, 0 failed, 1 ignored, 1163 filtered out",
+    "check_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-zntc3-check cargo check -p fj-lax --all-targets",
+    "check_worker": "ts1",
+    "check_result": "passed",
+    "clippy_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-zntc3-clippy cargo clippy -p fj-lax --all-targets -- -D warnings",
+    "clippy_worker": "vmi1149989",
+    "clippy_result": "passed",
+    "format_command": "rustfmt --edition 2024 --check crates/fj-lax/src/tensor_contraction.rs",
+    "format_result": "passed",
+    "diff_check_command": "git diff --check",
+    "diff_check_result": "passed",
+    "ubs_command": "ubs crates/fj-lax/src/tensor_contraction.rs",
+    "ubs_result": "exit 0; no critical findings; fmt/clippy/check/test-build sections clean; remaining warnings are pre-existing file-wide inventory surfaces"
+  },
+  "benchmark": {
+    "baseline_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1156319 RCH_WORKERS=vmi1156319 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-zntc3-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048' --sample-size 20 --warm-up-time 2 --measurement-time 10",
+    "after_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1156319 RCH_WORKERS=vmi1156319 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-zntc3-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048' --sample-size 20 --warm-up-time 2 --measurement-time 10",
+    "worker": "vmi1156319",
+    "baseline_s": [2.1227, 2.2458, 2.3819],
+    "after_s": [1.4692, 1.6003, 1.7549],
+    "median_speedup": 1.4033,
+    "conservative_speedup": 1.2096,
+    "score_formula": "Impact x Confidence / Effort",
+    "impact": 4,
+    "confidence": 4,
+    "effort": 2,
+    "score": 8.0
+  },
+  "decision": {
+    "keep": true,
+    "reason": "Same-worker median speedup 1.403x and conservative speedup 1.210x clear the Score>=2.0 campaign gate with unchanged behavior proof.",
+    "next_primitive": "Reprofile after landing; continue GEMM/linalg work with a deeper JC-blocked/packed-B-and-packed-A macro-kernel, cache-oblivious GEMM, or the next top RCH linalg row."
+  }
+}

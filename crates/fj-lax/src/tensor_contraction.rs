@@ -517,22 +517,42 @@ fn matmul_2d_blocked_row_block(
     let rows = block.len() / n;
     let full_rows = rows - rows % MR; // rows covered by whole MR-tiles
     let full_cols = n - n % NR; // cols covered by whole NR-panels
+    let row_tiles = full_rows / MR;
+    let mut apack = vec![0.0_f64; row_tiles * KC * MR];
 
     // Full MR×NR tile region, k-blocked with C carried across pc-blocks.
     let mut pc = 0;
     while pc < k {
         let kc = KC.min(k - pc);
         let first = pc == 0;
+
+        // Pack this thread's full-row A slab for the pc-block once, in
+        // [MR-row-tile][k][row] order. The multiply below still consumes l in
+        // ascending order for each output; packing only changes where A is read
+        // from after the one-time copy.
+        for tile in 0..row_tiles {
+            let i = tile * MR;
+            let ar0 = (row_start + i) * k + pc;
+            let ar1 = ar0 + k;
+            let ar2 = ar1 + k;
+            let ar3 = ar2 + k;
+            let dst = tile * KC * MR;
+            for l in 0..kc {
+                let base = dst + l * MR;
+                apack[base] = a[ar0 + l];
+                apack[base + 1] = a[ar1 + l];
+                apack[base + 2] = a[ar2 + l];
+                apack[base + 3] = a[ar3 + l];
+            }
+        }
+
         let mut j = 0;
         while j < full_cols {
             // This panel's pc-block: kc rows of NR, contiguous from the pack.
             let panel = &bpack[(j / NR) * k * NR + pc * NR..];
             let mut i = 0;
             while i < full_rows {
-                let ar0 = (row_start + i) * k + pc;
-                let ar1 = ar0 + k;
-                let ar2 = ar1 + k;
-                let ar3 = ar2 + k;
+                let abase = (i / MR) * KC * MR;
                 // Seed accumulators from the running C (0 on the first pc-block),
                 // so the kc products continue the ascending sweep in place.
                 let mut c0 = [0.0_f64; NR];
@@ -547,10 +567,11 @@ fn matmul_2d_blocked_row_block(
                 }
                 for l in 0..kc {
                     let brow = &panel[l * NR..l * NR + NR];
-                    let a0 = a[ar0 + l];
-                    let a1 = a[ar1 + l];
-                    let a2 = a[ar2 + l];
-                    let a3 = a[ar3 + l];
+                    let ap = abase + l * MR;
+                    let a0 = apack[ap];
+                    let a1 = apack[ap + 1];
+                    let a2 = apack[ap + 2];
+                    let a3 = apack[ap + 3];
                     for jj in 0..NR {
                         let bv = brow[jj];
                         c0[jj] += a0 * bv;
