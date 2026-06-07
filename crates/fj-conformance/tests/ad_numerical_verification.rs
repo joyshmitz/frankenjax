@@ -789,6 +789,126 @@ fn reduce_max_vjp_splits_ties_evenly() {
     assert!(vals[2].abs() < 1e-12, "non-max must get 0, got {}", vals[2]);
 }
 
+#[test]
+fn scatter_vjp_both_modes_numerical() {
+    // Scatter VJP is MODE-dependent: overwrite → grad_operand is g with the
+    // scattered rows zeroed (operand doesn't reach those outputs); add →
+    // grad_operand is the full g. grad_updates gathers g at the scattered rows in
+    // both modes. Verify BOTH operand and updates grads against finite differences
+    // for each mode — the mode split is a classic subtle-bug site and had no
+    // finite-diff coverage. operand=[4,2], indices=[0,2], updates=[2,2].
+    let operand_data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let updates_data = [10.0, 20.0, 30.0, 40.0];
+    let operand = make_f64_matrix(4, 2, &operand_data);
+    let updates = make_f64_matrix(2, 2, &updates_data);
+    let indices = Value::Tensor(
+        TensorValue::new(DType::I64, Shape { dims: vec![2] }, vec![Literal::I64(0), Literal::I64(2)])
+            .unwrap(),
+    );
+
+    for mode in ["overwrite", "add"] {
+        let mut params = BTreeMap::new();
+        params.insert("mode".to_string(), mode.to_string());
+
+        let out = eval_primitive(
+            Primitive::Scatter,
+            &[operand.clone(), indices.clone(), updates.clone()],
+            &params,
+        )
+        .unwrap();
+        let g_data = [1.3, -0.7, 2.1, 0.5, -1.1, 0.9, 0.2, -0.4]; // out shape [4,2]
+        let g = make_f64_matrix(4, 2, &g_data);
+
+        let vjp = fj_ad::vjp(
+            Primitive::Scatter,
+            &[operand.clone(), indices.clone(), updates.clone()],
+            std::slice::from_ref(&g),
+            std::slice::from_ref(&out),
+            &params,
+        )
+        .unwrap();
+        let grad_operand = extract_f64_vec(&vjp[0]);
+        let grad_updates = extract_f64_vec(&vjp[2]); // vjp[1] is the (zero) indices grad
+
+        let eps = 1e-6;
+        let loss = |ov: &Value, uv: &Value| -> f64 {
+            let o = eval_primitive(Primitive::Scatter, &[ov.clone(), indices.clone(), uv.clone()], &params)
+                .unwrap();
+            extract_f64_vec(&o).iter().zip(g_data.iter()).map(|(o, g)| o * g).sum()
+        };
+        let mut num_operand = vec![0.0; operand_data.len()];
+        for idx in 0..operand_data.len() {
+            let (mut p, mut m) = (operand_data.to_vec(), operand_data.to_vec());
+            p[idx] += eps;
+            m[idx] -= eps;
+            num_operand[idx] = (loss(&make_f64_matrix(4, 2, &p), &updates)
+                - loss(&make_f64_matrix(4, 2, &m), &updates))
+                / (2.0 * eps);
+        }
+        let mut num_updates = vec![0.0; updates_data.len()];
+        for idx in 0..updates_data.len() {
+            let (mut p, mut m) = (updates_data.to_vec(), updates_data.to_vec());
+            p[idx] += eps;
+            m[idx] -= eps;
+            num_updates[idx] = (loss(&operand, &make_f64_matrix(2, 2, &p))
+                - loss(&operand, &make_f64_matrix(2, 2, &m)))
+                / (2.0 * eps);
+        }
+        assert_gradients_close(&grad_operand, &num_operand, 1e-5, &format!("Scatter VJP grad_operand ({mode})"));
+        assert_gradients_close(&grad_updates, &num_updates, 1e-5, &format!("Scatter VJP grad_updates ({mode})"));
+    }
+}
+
+#[test]
+fn gather_vjp_numerical() {
+    // Gather VJP scatter-adds the cotangent back into a zero operand at the
+    // gathered rows. Verify against finite differences with a multi-column slice
+    // (slice_sizes=[1,2]) so the per-row routing is exercised. operand=[4,2],
+    // indices=[2,0,3] → out=[3,2]. (Duplicate-index accumulation + OOB clipping
+    // already have value tests; this adds the general finite-diff.)
+    let operand_data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let operand = make_f64_matrix(4, 2, &operand_data);
+    let indices = Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape { dims: vec![3] },
+            vec![Literal::I64(2), Literal::I64(0), Literal::I64(3)],
+        )
+        .unwrap(),
+    );
+    let mut params = BTreeMap::new();
+    params.insert("slice_sizes".to_string(), "1,2".to_string());
+
+    let out = eval_primitive(Primitive::Gather, &[operand.clone(), indices.clone()], &params).unwrap();
+    let g_data = [1.3, -0.7, 2.1, 0.5, -1.1, 0.9]; // out shape [3,2]
+    let g = make_f64_matrix(3, 2, &g_data);
+
+    let vjp = fj_ad::vjp(
+        Primitive::Gather,
+        &[operand.clone(), indices.clone()],
+        std::slice::from_ref(&g),
+        std::slice::from_ref(&out),
+        &params,
+    )
+    .unwrap();
+    let grad_operand = extract_f64_vec(&vjp[0]);
+
+    let eps = 1e-6;
+    let loss = |ov: &Value| -> f64 {
+        let o = eval_primitive(Primitive::Gather, &[ov.clone(), indices.clone()], &params).unwrap();
+        extract_f64_vec(&o).iter().zip(g_data.iter()).map(|(o, g)| o * g).sum()
+    };
+    let mut num_operand = vec![0.0; operand_data.len()];
+    for idx in 0..operand_data.len() {
+        let (mut p, mut m) = (operand_data.to_vec(), operand_data.to_vec());
+        p[idx] += eps;
+        m[idx] -= eps;
+        num_operand[idx] =
+            (loss(&make_f64_matrix(4, 2, &p)) - loss(&make_f64_matrix(4, 2, &m))) / (2.0 * eps);
+    }
+    assert_gradients_close(&grad_operand, &num_operand, 1e-5, "Gather VJP grad_operand");
+}
+
 // ======================== TriangularSolve VJP ========================
 
 #[test]
