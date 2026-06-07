@@ -6132,27 +6132,29 @@ pub(crate) fn eval_split(
             detail: "cannot split a scalar".into(),
         }),
         Value::Tensor(tensor) => {
-            let axis = params
+            // Parse axis as i64 so a negative (end-relative) axis is normalized
+            // against the rank, matching lax.split's canonicalize_axis(axis, ndim).
+            let raw_axis: i64 = params
                 .get("axis")
                 .map(|raw| {
-                    raw.trim()
-                        .parse::<usize>()
-                        .map_err(|_| EvalError::Unsupported {
-                            primitive,
-                            detail: format!("invalid integer in param 'axis': '{raw}'"),
-                        })
+                    raw.trim().parse::<i64>().map_err(|_| EvalError::Unsupported {
+                        primitive,
+                        detail: format!("invalid integer in param 'axis': '{raw}'"),
+                    })
                 })
                 .transpose()?
                 .unwrap_or(0);
             let dims = &tensor.shape.dims;
             let rank = dims.len();
 
-            if axis >= rank {
+            let norm = if raw_axis < 0 { raw_axis + rank as i64 } else { raw_axis };
+            if norm < 0 || norm >= rank as i64 {
                 return Err(EvalError::Unsupported {
                     primitive,
-                    detail: format!("axis {axis} out of range for rank {rank}"),
+                    detail: format!("axis {raw_axis} out of range for rank {rank}"),
                 });
             }
+            let axis = norm as usize;
 
             let axis_size = dims[axis] as usize;
 
@@ -6277,10 +6279,12 @@ pub(crate) fn eval_split_multi(
         }
     };
 
-    let axis = params
+    // Parse axis as i64 so a negative (end-relative) axis is normalized against
+    // the rank, matching lax.split's canonicalize_axis(axis, ndim).
+    let raw_axis: i64 = params
         .get("axis")
         .map(|raw| {
-            raw.trim().parse::<usize>().map_err(|_| EvalError::Unsupported {
+            raw.trim().parse::<i64>().map_err(|_| EvalError::Unsupported {
                 primitive,
                 detail: format!("invalid integer in param 'axis': '{raw}'"),
             })
@@ -6289,12 +6293,14 @@ pub(crate) fn eval_split_multi(
         .unwrap_or(0);
     let dims = &tensor.shape.dims;
     let rank = dims.len();
-    if axis >= rank {
+    let norm = if raw_axis < 0 { raw_axis + rank as i64 } else { raw_axis };
+    if norm < 0 || norm >= rank as i64 {
         return Err(EvalError::Unsupported {
             primitive,
-            detail: format!("axis {axis} out of range for rank {rank}"),
+            detail: format!("axis {raw_axis} out of range for rank {rank}"),
         });
     }
+    let axis = norm as usize;
     let axis_size = dims[axis] as usize;
 
     let sizes: Vec<usize> = if params.contains_key("sizes") {

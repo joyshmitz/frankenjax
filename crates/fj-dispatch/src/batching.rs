@@ -2654,7 +2654,17 @@ fn batch_split(
         Some(bd) => bd,
     };
 
-    let logical_axis = parse_param_usize(params, "axis")?.unwrap_or(0);
+    // Parse axis as i64 so a negative (end-relative) axis is handled, matching
+    // lax.split's canonicalize_axis. The batch axis is prepended at the FRONT.
+    let raw_axis: i64 = params
+        .get("axis")
+        .map(|s| {
+            s.trim()
+                .parse::<i64>()
+                .map_err(|_| BatchError::EvalError(format!("invalid split axis '{s}'")))
+        })
+        .transpose()?
+        .unwrap_or(0);
     get_batch_size(&input.value, batch_dim)?;
     let value = move_batch_dim_to_front(&input.value, batch_dim)?;
     let tensor = value
@@ -2665,15 +2675,17 @@ fn batch_split(
     if per_elem_rank == 0 {
         return Err(BatchError::EvalError("cannot split a scalar".to_owned()));
     }
-    if logical_axis >= per_elem_rank {
+    // Map the logical (per-element) axis to its physical axis in the batched
+    // tensor: a non-negative axis shifts +1 past the prepended batch axis, while a
+    // negative (end-relative) axis resolves to tensor_rank + raw_axis.
+    let tensor_rank = tensor.shape.rank() as i64;
+    let physical_axis = if raw_axis >= 0 { raw_axis + 1 } else { tensor_rank + raw_axis };
+    if physical_axis < 1 || physical_axis >= tensor_rank {
         return Err(BatchError::EvalError(format!(
-            "split axis {logical_axis} out of range for per-element rank {per_elem_rank}"
+            "split axis {raw_axis} out of range for per-element rank {per_elem_rank}"
         )));
     }
-
-    let physical_axis = logical_axis
-        .checked_add(1)
-        .ok_or_else(|| BatchError::EvalError("split axis overflow".to_owned()))?;
+    let physical_axis = physical_axis as usize;
     let mut new_params = params.clone();
     new_params.insert("axis".to_owned(), physical_axis.to_string());
     let result = eval_primitive(Primitive::Split, &[value], &new_params)
@@ -10916,6 +10928,25 @@ mod tests {
         let input = BatchTracer::batched(make_f64_tensor(&[2, 2, 4], &data), 0);
         let params = BTreeMap::from([
             ("axis".to_owned(), "1".to_owned()),
+            ("num_sections".to_owned(), "2".to_owned()),
+        ]);
+
+        let result = apply_batch_rule(Primitive::Split, &[input], &params).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let tensor = result.value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2, 2, 2, 2]);
+        assert_eq!(extract_f64_vec(&result.value), data);
+    }
+
+    #[test]
+    fn test_batch_trace_split_negative_axis() {
+        // vmap(lambda x: split(x, 2, axis=-1)) over a batch of [2, 4] matrices.
+        // Per-element axis=-1 == per-element axis 1 == physical axis 2 of the
+        // batched [2, 2, 4] tensor → same result as the explicit axis=1 case.
+        let data: Vec<f64> = (1..=16).map(f64::from).collect();
+        let input = BatchTracer::batched(make_f64_tensor(&[2, 2, 4], &data), 0);
+        let params = BTreeMap::from([
+            ("axis".to_owned(), "-1".to_owned()),
             ("num_sections".to_owned(), "2".to_owned()),
         ]);
 

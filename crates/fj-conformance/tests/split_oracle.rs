@@ -78,6 +78,13 @@ fn split_params_sizes(axis: usize, sizes: &[usize]) -> BTreeMap<String, String> 
     p
 }
 
+fn split_params_i64(axis: i64, num_sections: usize) -> BTreeMap<String, String> {
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_string(), axis.to_string());
+    p.insert("num_sections".to_string(), num_sections.to_string());
+    p
+}
+
 fn no_params() -> BTreeMap<String, String> {
     BTreeMap::new()
 }
@@ -191,6 +198,44 @@ fn oracle_split_3d_axis2() {
     let input = make_i64_tensor(&[2, 2, 6], (1..=24).collect());
     let result = eval_primitive(Primitive::Split, &[input], &split_params(2, 2)).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 2, 2, 3]);
+}
+
+// ======================== Negative-axis Tests ========================
+
+#[test]
+fn oracle_split_2d_negative_axis_last() {
+    // lax.split canonicalizes axis=-1 against ndim: [2, 4] axis=-1 == axis=1.
+    let input = make_i64_tensor(&[2, 4], vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    let neg = eval_primitive(Primitive::Split, &[input.clone()], &split_params_i64(-1, 2)).unwrap();
+    let pos = eval_primitive(Primitive::Split, &[input], &split_params(1, 2)).unwrap();
+    assert_eq!(extract_shape(&neg), vec![2, 2, 2]);
+    assert_eq!(extract_shape(&neg), extract_shape(&pos));
+    assert_eq!(extract_i64_vec(&neg), extract_i64_vec(&pos));
+}
+
+#[test]
+fn oracle_split_3d_negative_axis_middle() {
+    // [2, 4, 3] axis=-2 == axis=1.
+    let input = make_i64_tensor(&[2, 4, 3], (1..=24).collect());
+    let neg = eval_primitive(Primitive::Split, &[input], &split_params_i64(-2, 2)).unwrap();
+    assert_eq!(extract_shape(&neg), vec![2, 2, 2, 3]);
+}
+
+#[test]
+fn oracle_split_1d_negative_axis() {
+    // [6] axis=-1 == axis=0.
+    let input = make_i64_tensor(&[6], vec![1, 2, 3, 4, 5, 6]);
+    let neg = eval_primitive(Primitive::Split, &[input], &split_params_i64(-1, 3)).unwrap();
+    assert_eq!(extract_shape(&neg), vec![3, 2]);
+    assert_eq!(extract_i64_vec(&neg), vec![1, 2, 3, 4, 5, 6]);
+}
+
+#[test]
+fn oracle_split_negative_axis_out_of_range_rejected() {
+    // axis=-3 on a rank-2 tensor canonicalizes to -1 (out of range) -> error.
+    let input = make_i64_tensor(&[2, 4], vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    let result = eval_primitive(Primitive::Split, &[input], &split_params_i64(-3, 2));
+    assert!(result.is_err(), "out-of-range negative axis must error");
 }
 
 // ======================== Unequal Splits (sizes param) ========================

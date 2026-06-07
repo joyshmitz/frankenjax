@@ -1084,7 +1084,10 @@ impl SimpleTraceContext {
                         detail: format!("expected 1 input, got {}", inputs.len()),
                     });
                 }
-                let axis: usize = if let Some(raw) = params.get("axis") {
+                // Parse axis as i64 so a negative (end-relative) axis is
+                // normalized against the rank, matching lax.split's
+                // canonicalize_axis(axis, ndim).
+                let raw_axis: i64 = if let Some(raw) = params.get("axis") {
                     let trimmed = raw.trim();
                     if trimmed.is_empty() {
                         return Err(TraceError::InvalidPrimitiveParam {
@@ -1094,7 +1097,7 @@ impl SimpleTraceContext {
                         });
                     }
                     trimmed
-                        .parse::<usize>()
+                        .parse::<i64>()
                         .map_err(|_| TraceError::InvalidPrimitiveParam {
                             primitive,
                             key: "axis",
@@ -1105,12 +1108,14 @@ impl SimpleTraceContext {
                 };
                 let dims = &inputs[0].shape.dims;
                 let rank = dims.len();
-                if axis >= rank {
+                let norm = if raw_axis < 0 { raw_axis + rank as i64 } else { raw_axis };
+                if norm < 0 || norm >= rank as i64 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
-                        detail: format!("axis {axis} out of range for rank {rank}"),
+                        detail: format!("axis {raw_axis} out of range for rank {rank}"),
                     });
                 }
+                let axis = norm as usize;
 
                 let axis_size = dims[axis] as usize;
                 let sizes: Vec<usize> = if let Some(raw) = params.get("sizes") {
