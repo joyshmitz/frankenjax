@@ -996,6 +996,69 @@ fn infer_equation_output_aval(
                 shape: Shape { dims: out_dims },
             }
         }
+        // Split: mirror fj-trace's single-output rule — an EVEN split packs a
+        // [num_sections, section_size] pair at the split axis; an UNEVEN split is
+        // best-effort to the first section's shape. Catch-all kept the full input
+        // shape. Falls back to the input aval on inconsistent params (no panic).
+        Split => {
+            let rank = first_input.shape.rank();
+            let dims = &first_input.shape.dims;
+            let raw_axis: i64 = eqn
+                .params
+                .get("axis")
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            let axis_i = if raw_axis < 0 { raw_axis + rank as i64 } else { raw_axis };
+            if rank == 0 || axis_i < 0 || axis_i >= rank as i64 {
+                first_input.clone()
+            } else {
+                let axis = axis_i as usize;
+                let axis_size = dims[axis];
+                let sizes: Vec<u32> = if let Some(s) =
+                    eqn.params.get("sizes").filter(|s| !s.trim().is_empty())
+                {
+                    s.split(',').filter_map(|x| x.trim().parse::<u32>().ok()).collect()
+                } else if let Some(ns) = eqn
+                    .params
+                    .get("num_sections")
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .filter(|&n| n > 0)
+                {
+                    if axis_size % ns == 0 {
+                        vec![axis_size / ns; ns as usize]
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    vec![axis_size]
+                };
+
+                if sizes.is_empty() || sizes.iter().sum::<u32>() != axis_size {
+                    first_input.clone()
+                } else if sizes.len() == 1 || sizes.windows(2).all(|w| w[0] == w[1]) {
+                    let mut new_dims = Vec::with_capacity(dims.len() + 1);
+                    for (i, &d) in dims.iter().enumerate() {
+                        if i == axis {
+                            new_dims.push(sizes.len() as u32);
+                            new_dims.push(sizes[0]);
+                        } else {
+                            new_dims.push(d);
+                        }
+                    }
+                    AbstractValue {
+                        dtype: first_input.dtype,
+                        shape: Shape { dims: new_dims },
+                    }
+                } else {
+                    let mut new_dims = dims.clone();
+                    new_dims[axis] = sizes[0];
+                    AbstractValue {
+                        dtype: first_input.dtype,
+                        shape: Shape { dims: new_dims },
+                    }
+                }
+            }
+        }
         // Most element-wise ops preserve dtype and shape
         _ => first_input.clone(),
     };
@@ -4066,5 +4129,35 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outs[0].dtype, DType::Complex128);
+
+        // Split: even num_sections=3 on [6,2] axis 0 -> packed [3,2,2]
+        // (mirrors fj-trace's even-split packed output).
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Split, &[("axis", "0"), ("num_sections", "3")]),
+            &av(&[6, 2], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![3, 2, 2]);
+        // even sizes=2,2 on [4] axis 0 -> packed [2,2].
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Split, &[("axis", "0"), ("sizes", "2,2")]),
+            &av(&[4], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![2, 2]);
+        // uneven sizes=2,3 on [5,4] axis 0 -> first section [2,4].
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Split, &[("axis", "0"), ("sizes", "2,3")]),
+            &av(&[5, 4], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![2, 4]);
+        // negative axis=-1 even num_sections=2 on [2,4] -> packed [2,2,2].
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Split, &[("axis", "-1"), ("num_sections", "2")]),
+            &av(&[2, 4], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![2, 2, 2]);
     }
 }
