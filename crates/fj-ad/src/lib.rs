@@ -2259,13 +2259,15 @@ pub fn vjp(
             Ok(vec![da, db])
         }
         Primitive::Rem => {
-            // d/da (a%b) = 1, d/db (a%b) = -floor(a/b)
+            // lax.rem is C-style truncated: rem(a,b) = a - trunc(a/b)*b.
+            // d/da = 1, d/db = -trunc(a/b). (JAX uses sign(a/b)*floor(|a/b|) =
+            // trunc; the old `floor(a/b)` was wrong whenever a/b < 0.)
             let a = &inputs[0];
             let b = &inputs[1];
             let ratio = value_div(a, b)?;
-            let floor_ratio = eval_primitive(Primitive::Floor, &[ratio], &BTreeMap::new())
+            let trunc_ratio = eval_primitive(Primitive::Trunc, &[ratio], &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let db = value_neg(&value_mul(g, &floor_ratio)?)?;
+            let db = value_neg(&value_mul(g, &trunc_ratio)?)?;
             Ok(vec![g.clone(), db])
         }
         // Gcd/Lcm: integer operations, non-differentiable
@@ -8016,10 +8018,10 @@ fn jvp_rule(
         }
 
         Primitive::Rem => {
-            // da - floor(a/b) * db
+            // da - trunc(a/b) * db  (lax.rem is truncated; floor was wrong for a/b < 0)
             let a_over_b = ep(Primitive::Div, &[primals[0].clone(), primals[1].clone()])?;
-            let floored = ep(Primitive::Floor, &[a_over_b])?;
-            let f_db = ep(Primitive::Mul, &[floored, tangents[1].clone()])?;
+            let truncated = ep(Primitive::Trunc, &[a_over_b])?;
+            let f_db = ep(Primitive::Mul, &[truncated, tangents[1].clone()])?;
             ep(Primitive::Sub, &[tangents[0].clone(), f_db])
         }
 
@@ -10660,6 +10662,38 @@ mod tests {
         let v05 = g05[0].as_f64_scalar().expect("scalar");
         let want = -4.0 / std::f64::consts::PI;
         assert!((v05 - want).abs() < 1e-6, "sinc'(0.5): got {v05}, want {want}");
+    }
+
+    #[test]
+    fn test_rem_grad_db_uses_truncated_quotient() {
+        // lax.rem (and fj-lax rem, Rust `%`) is C-style truncated:
+        //   rem(x,y) = x - trunc(x/y)*y,  so d/dy rem = -trunc(x/y).
+        // For x=-7, y=3: trunc(-7/3) = trunc(-2.333) = -2  =>  db = -(-2) = +2.
+        // The old code used floor(-2.333) = -3  =>  db = +3 (wrong for x/y < 0).
+        let params = BTreeMap::new();
+
+        let grads = vjp_single(
+            Primitive::Rem,
+            &[Value::scalar_f64(-7.0), Value::scalar_f64(3.0)],
+            &Value::scalar_f64(1.0),
+            &params,
+        )
+        .expect("vjp");
+        let da = grads[0].as_f64_scalar().expect("scalar da");
+        let db = grads[1].as_f64_scalar().expect("scalar db");
+        assert!((da - 1.0).abs() < 1e-12, "da: got {da}");
+        assert!((db - 2.0).abs() < 1e-12, "db: got {db}");
+
+        // JVP self-consistency: tangents (da=0, db=1) => d(rem) = -trunc(x/y) = +2.
+        let jvp = jvp_rule(
+            Primitive::Rem,
+            &[Value::scalar_f64(-7.0), Value::scalar_f64(3.0)],
+            &[Value::scalar_f64(0.0), Value::scalar_f64(1.0)],
+            &params,
+        )
+        .expect("jvp");
+        let jt = jvp.as_f64_scalar().expect("scalar");
+        assert!((jt - 2.0).abs() < 1e-12, "jvp: got {jt}");
     }
 
     #[test]
