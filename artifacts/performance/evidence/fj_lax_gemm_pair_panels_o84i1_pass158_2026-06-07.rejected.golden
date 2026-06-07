@@ -1,0 +1,10 @@
+bead=frankenjax-o84i1
+pass=158
+target=linalg/matmul_2d_2048x2048x2048_f64
+worker=vmi1293453
+lever=paired packed-B panels in blocked GEMM macro-kernel
+baseline_median_ms=377.68
+after_median_ms=357.62
+median_speedup=1.0561
+conservative_speedup=0.9545
+decision=rejected_score_below_2_source_restored

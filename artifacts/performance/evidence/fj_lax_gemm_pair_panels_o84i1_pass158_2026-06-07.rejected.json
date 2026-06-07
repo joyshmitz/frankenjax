@@ -1,0 +1,49 @@
+{
+  "artifact_version": 1,
+  "project": "frankenjax",
+  "crate": "fj-lax",
+  "bead": "frankenjax-o84i1",
+  "pass": 158,
+  "date": "2026-06-07",
+  "status": "rejected",
+  "target": "linalg/matmul_2d_2048x2048x2048_f64",
+  "profile_backed_target": {
+    "source": "fresh fixed-worker RCH target-only baseline",
+    "worker": "vmi1293453",
+    "baseline_ms": [368.53, 377.68, 388.09],
+    "criterion_args": "--sample-size 20 --warm-up-time 2 --measurement-time 10"
+  },
+  "lever": {
+    "summary": "Process two adjacent packed-B NR panels per MR row tile in the blocked GEMM macro-kernel",
+    "files_touched_during_candidate": ["crates/fj-lax/src/tensor_contraction.rs"],
+    "source_restored": true,
+    "diff_after_restore": "empty for crates/fj-lax/src/tensor_contraction.rs"
+  },
+  "isomorphism_proof": {
+    "ordering": "Each output element still accumulates pc blocks in ascending pc order and l=0..kc in ascending order inside each pc block; grouping adjacent column panels only reorders independent output columns.",
+    "tie_breaking": "No comparisons or tie-breaking behavior in matmul_2d.",
+    "floating_point": "No FMA, mixed precision, horizontal reduction, or reassociation per output element.",
+    "rng": "No RNG surface in matmul_2d.",
+    "golden_sha256_file": "artifacts/performance/evidence/fj_lax_gemm_pair_panels_o84i1_pass158_2026-06-07.rejected.golden.sha256"
+  },
+  "validation": {
+    "test_command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-o84i1-test cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+    "test_worker": "vmi1149989",
+    "test_result": "passed: 9 passed, 0 failed, 1 ignored, 1163 filtered out"
+  },
+  "benchmark": {
+    "baseline_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1293453 RCH_WORKERS=vmi1293453 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-o84i1-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048' --sample-size 20 --warm-up-time 2 --measurement-time 10",
+    "after_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1293453 RCH_WORKERS=vmi1293453 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-o84i1-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048' --sample-size 20 --warm-up-time 2 --measurement-time 10",
+    "worker": "vmi1293453",
+    "baseline_ms": [368.53, 377.68, 388.09],
+    "after_ms": [335.84, 357.62, 386.10],
+    "median_speedup": 1.0561,
+    "conservative_speedup": 0.9545,
+    "score": 1.0
+  },
+  "decision": {
+    "keep": false,
+    "reason": "Median improved by about 5.6 percent, but conservative same-worker interval failed and Score 1.0 is below the required 2.0 keep gate. Source was restored.",
+    "next_primitive": "True packed-A slab plus JC-blocked macro-kernel or another cache-oblivious GEMM primitive that reduces memory traffic more substantially while preserving per-output ascending-k accumulation."
+  }
+}
