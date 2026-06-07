@@ -768,9 +768,10 @@ fn batch_reduce(
         Some(bd) => bd,
     };
 
-    // Parse the reduction axes from params
+    // Parse the reduction axes from params. Parse as i64 (allowing NEGATIVE, end-relative
+    // axes, which eval_reduce_axes normalizes) — a usize parse rejects "-1" and so breaks
+    // vmap over a negative reduction axis (e.g. reduce_sum(axes=-1)).
     let axes_raw = params.get("axes");
-    let axes = parse_axes(params)?;
 
     // Move batch dim to front for consistent handling
     let value = move_batch_dim_to_front(&input.value, batch_dim)?;
@@ -779,13 +780,31 @@ fn batch_reduce(
         Value::Tensor(tensor) => tensor.rank().saturating_sub(1),
     };
 
-    let axes = if axes_raw.is_none() {
-        if per_elem_rank == 0 {
-            return Ok(BatchTracer::batched(value, 0));
+    // Resolve the per-element reduction axes, normalizing any negative axis against the
+    // per-element rank exactly as eval_reduce_axes does. A naive +1 shift of a negative axis
+    // would be wrong — it is end-relative — so normalize to a non-negative axis FIRST.
+    let axes: Vec<usize> = match axes_raw {
+        None => {
+            if per_elem_rank == 0 {
+                return Ok(BatchTracer::batched(value, 0));
+            }
+            (0..per_elem_rank).collect()
         }
-        (0..per_elem_rank).collect()
-    } else {
-        axes
+        Some(raw) if is_empty_list(raw) => Vec::new(),
+        Some(raw) => {
+            let raw_axes = parse_i64_list(raw, "axes")?;
+            let mut out = Vec::with_capacity(raw_axes.len());
+            for ax in raw_axes {
+                let norm = if ax < 0 { per_elem_rank as i64 + ax } else { ax };
+                if norm < 0 || norm >= per_elem_rank as i64 {
+                    return Err(BatchError::EvalError(format!(
+                        "reduce axis {ax} out of range for per-element rank {per_elem_rank}"
+                    )));
+                }
+                out.push(norm as usize);
+            }
+            out
+        }
     };
 
     // Shift reduction axes: since we moved batch to position 0,
@@ -7023,14 +7042,6 @@ fn is_empty_list(raw: &str) -> bool {
             .is_empty()
 }
 
-fn parse_axes(params: &BTreeMap<String, String>) -> Result<Vec<usize>, BatchError> {
-    match params.get("axes") {
-        None => Ok(Vec::new()),
-        Some(raw) if is_empty_list(raw) => Ok(Vec::new()),
-        Some(raw) => parse_usize_list(raw, "axes"),
-    }
-}
-
 fn parse_shape(params: &BTreeMap<String, String>) -> Result<Vec<i64>, BatchError> {
     let raw = params
         .get("new_shape")
@@ -7737,6 +7748,20 @@ mod tests {
         let vals = extract_f64_vec(&result.value);
         // Each row summed: [3, 7, 11]
         assert_eq!(vals, vec![3.0, 7.0, 11.0]);
+    }
+
+    #[test]
+    fn test_batch_reduce_sum_handles_negative_axis() {
+        // eval_reduce_axes normalizes negative axes; batch_reduce must too. vmap(sum, axis=-1)
+        // on a batch of length-2 vectors sums each vector. (Was: parse_axes parsed "axes" as
+        // usize, rejecting "-1", so vmap erred — and a naive +1 shift is wrong for a negative
+        // axis, which is end-relative and unchanged when the batch is prepended at the front.)
+        let input = BatchTracer::batched(make_f64_matrix(3, 2, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 0);
+        let params = BTreeMap::from([("axes".to_owned(), "-1".to_owned())]);
+        let result = apply_batch_rule(Primitive::ReduceSum, &[input], &params).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let vals = extract_f64_vec(&result.value);
+        assert_eq!(vals, vec![3.0, 7.0, 11.0]); // each length-2 vector summed
     }
 
     #[test]
