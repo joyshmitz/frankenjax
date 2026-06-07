@@ -1,0 +1,93 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_cholesky_packed_lower_p1vbf43_pass173_confirm_2026-06-07",
+  "status": "rejected",
+  "date": "2026-06-07",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-p1vbf.43",
+  "crate": "fj-lax",
+  "target": "linalg/cholesky_1024x1024_f64",
+  "skill_pass": "repeatedly-apply-skill pass173 confirmation -> extreme-software-optimization",
+  "canonical_rejection_evidence": "artifacts/performance/evidence/fj_lax_cholesky_packed_lower_a7sf0_pass173_2026-06-07.rejected.json",
+  "relationship": "duplicate confirmation of frankenjax-a7sf0 lower-packed Cholesky workspace rejection",
+  "focused_baseline": {
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1227854 RCH_WORKERS=vmi1227854 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,RCH_WORKER,RCH_WORKERS rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf43-baseline cargo bench -p fj-lax --bench lax_baseline -- linalg/cholesky_1024x1024_f64 --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+    "requested_worker": "vmi1227854",
+    "actual_worker": "vmi1167313",
+    "time_ms": [
+      152.14,
+      167.61,
+      184.42
+    ]
+  },
+  "candidate": {
+    "lever": "private lower-packed workspace for blocked real Cholesky",
+    "description": "Same lever family as canonical pass173/a7sf0: store the private Cholesky work matrix in packed lower-triangular rows, perform diagonal factorization, panel solve, and lower-triangle Schur update through packed indexing, then materialize public row-major L.",
+    "source_diff_retained": false,
+    "files_touched_temporarily": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "proof_test": {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf43-proof cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "worker": "vmi1293453",
+      "result": "pass",
+      "details": "13 focused Cholesky tests passed in candidate state, including packed-lower Schur update comparison against the previous row-major lower update and full-GEMM lower-triangle reference."
+    },
+    "rebench": {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1167313 RCH_WORKERS=vmi1167313 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,RCH_WORKER,RCH_WORKERS rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf43-candidate cargo bench -p fj-lax --bench lax_baseline -- linalg/cholesky_1024x1024_f64 --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+      "requested_worker": "vmi1167313",
+      "actual_worker": "vmi1167313",
+      "time_ms": [
+        152.08,
+        172.46,
+        196.71
+      ],
+      "speedup_vs_focused_baseline_mid": 0.971878,
+      "speedup_vs_focused_baseline_conservative": 0.773423
+    }
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 5.0,
+    "effort": 2.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "keep_threshold": 2.0,
+    "decision": "reject_and_restore_source"
+  },
+  "isomorphism_proof": {
+    "ordering": "Candidate preserved diagonal block order, panel row order, lower-triangle p/q traversal, c=0..jb contribution order for each consumed lower-triangle Schur entry, and public row-major lower-triangular L materialization with strict upper zeros.",
+    "tie_breaking": "N/A: Cholesky has no comparison tie-breaking behavior.",
+    "floating_point": "Candidate changed private addressing/storage only. It introduced no mixed precision, FMA, reduction-tree change, tolerance contract, or public NaN/signed-zero policy change for consumed lower-triangle entries.",
+    "rng": "N/A: Cholesky consumes no random state.",
+    "errors": "No public dtype/shape/error surface changed in candidate state.",
+    "golden_sha256": "686ac8396f790bc6afa93991ec9801ca8dc24f7e039880e2ccd14d24271c2265"
+  },
+  "validation": [
+    {
+      "command": "git diff -- crates/fj-lax/src/linalg.rs",
+      "result": "empty after source restore"
+    },
+    {
+      "command": "git diff --check",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum artifacts/performance/evidence/fj_lax_cholesky_packed_lower_p1vbf43_pass173_confirm_2026-06-07.rejected.golden",
+      "result": "686ac8396f790bc6afa93991ec9801ca8dc24f7e039880e2ccd14d24271c2265"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/linalg.rs",
+      "result": "exit 1 with known file-wide linalg.rs inventory; embedded fmt, clippy, cargo check, and test-build sections were clean; no unsafe blocks detected"
+    }
+  ],
+  "decision_notes": [
+    "The p1vbf.43 candidate independently confirms the canonical a7sf0 rejection on the requested baseline worker.",
+    "Source was restored and no linalg.rs source diff is retained.",
+    "Do not repeat the private lower-packed Cholesky workspace family."
+  ],
+  "next_primitive": {
+    "target": "reprofile restored source and attack a different structural primitive",
+    "reason": "The same lower-packed workspace lever failed on two same-worker gates. Next work should move to communication-avoiding/recursive Cholesky panel scheduling with an explicit bit-order proof, blocked LU/QR if reprofile ranks them higher, or a behavior-contract bead where a deeper FP-reordered algorithm is required.",
+    "target_ratio": ">=2.0x on the next profile-backed hotspot"
+  }
+}

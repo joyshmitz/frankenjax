@@ -1,0 +1,16 @@
+frankenjax-p1vbf.43 lower-packed Cholesky confirmation
+status=rejected
+canonical_evidence=artifacts/performance/evidence/fj_lax_cholesky_packed_lower_a7sf0_pass173_2026-06-07.rejected.json
+target=linalg/cholesky_1024x1024_f64
+baseline_worker=vmi1167313
+baseline_ms=[152.14,167.61,184.42]
+candidate_worker=vmi1167313
+candidate_ms=[152.08,172.46,196.71]
+median_speedup=0.971878
+conservative_speedup=0.773423
+score=0.0
+source_diff_retained=false
+linalg_rs_diff_empty=true
+proof=RCH cholesky focused tests passed 13/13 in candidate state; canonical a7sf0 proof and golden remain the full pass173 bundle.
+isomorphism=diagonal panel order, panel solve order, lower-SYRK p/q/c traversal, public row-major lower output, strict upper zeros, dtype/shape/error behavior, signed-zero/NaN behavior, and RNG absence were preserved in candidate state.
+next=do not repeat private lower-packed Cholesky workspace; reprofile restored source and route to a different structural primitive or a behavior-contract bead for FP-reordered algorithms.
