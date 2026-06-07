@@ -1,0 +1,10 @@
+bead=frankenjax-i7atq
+pass=164
+target=linalg/matmul_2d_2048x2048x2048_f64
+worker=vmi1156319
+lever=bounded packed-A row-slab tiling in blocked GEMM macro-kernel
+baseline_median_ms=631.25
+after_median_ms=827.30
+median_speedup=0.7629
+conservative_speedup=0.6571
+decision=rejected_regression_source_restored
