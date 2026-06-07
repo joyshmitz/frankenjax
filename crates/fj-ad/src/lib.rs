@@ -3267,38 +3267,32 @@ pub fn vjp(
                                     rem /= dims[d];
                                 }
 
-                                // Forward cumprod via complex multiplication.
-                                let mut cumprod = vec![(0.0_f64, 0.0_f64); axis_len];
-                                let mut run = (1.0_f64, 0.0_f64);
+                                // Division-free complex VJP (see the real path):
+                                // grad[i] = prefix[i] * suffix[i] with complex
+                                // prefix products and the suffix recurrence
+                                // suffix[i] = g[i] + x[i+1]*suffix[i+1]. No complex
+                                // division (the old path skipped it at |x|≈0,
+                                // silently zeroing the gradient there).
+                                let cmul = |a: (f64, f64), b: (f64, f64)| {
+                                    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+                                };
+                                let mut prefixes = vec![(0.0_f64, 0.0_f64); axis_len];
+                                let mut prefix = (1.0_f64, 0.0_f64);
                                 for i in 0..axis_len {
-                                    let (xr, xi) = x_pairs[base + i * axis_stride];
-                                    run = (run.0 * xr - run.1 * xi, run.0 * xi + run.1 * xr);
-                                    cumprod[i] = run;
+                                    prefixes[i] = prefix;
+                                    prefix = cmul(prefix, x_pairs[base + i * axis_stride]);
                                 }
-
-                                // Reverse suffix sum of g * cumprod (complex),
-                                // then divide by x (complex division).
                                 let mut suffix = (0.0_f64, 0.0_f64);
                                 for i in (0..axis_len).rev() {
                                     let idx = base + i * axis_stride;
-                                    let (gr, gi) = g_pairs[idx];
-                                    let (cr, ci) = cumprod[i];
-                                    // g * cumprod
-                                    let prod = (gr * cr - gi * ci, gr * ci + gi * cr);
-                                    suffix.0 += prod.0;
-                                    suffix.1 += prod.1;
-                                    // suffix / x[i]
-                                    let (xr, xi) = x_pairs[idx];
-                                    let denom = xr * xr + xi * xi;
-                                    if denom > f64::EPSILON {
-                                        // (suffix * conj(x)) / |x|^2
-                                        let num = (
-                                            suffix.0 * xr + suffix.1 * xi,
-                                            suffix.1 * xr - suffix.0 * xi,
-                                        );
-                                        result[idx] = (num.0 / denom, num.1 / denom);
-                                    }
-                                    // If |x[i]| ≈ 0, gradient stays 0 (skip division).
+                                    let x_next = if i + 1 < axis_len {
+                                        x_pairs[base + (i + 1) * axis_stride]
+                                    } else {
+                                        (0.0, 0.0)
+                                    };
+                                    let xs = cmul(x_next, suffix);
+                                    suffix = (g_pairs[idx].0 + xs.0, g_pairs[idx].1 + xs.1);
+                                    result[idx] = cmul(prefixes[i], suffix);
                                 }
                             }
                             result
@@ -3335,21 +3329,32 @@ pub fn vjp(
                                     rem /= dims[d];
                                 }
 
-                                let mut cumprod = vec![0.0_f64; axis_len];
-                                let mut running = 1.0;
+                                // Division-free VJP (transpose of the product-rule
+                                // JVP): grad[i] = prefix[i] * suffix[i], where
+                                //   prefix[i] = prod_{m<i} x_m   (exclusive prefix)
+                                //   suffix[i] = g[i] + x[i+1] * suffix[i+1]
+                                // Exact and zero-safe. The old `suffix_sum / x[i]`
+                                // divided by the input, so it silently produced a
+                                // WRONG 0 gradient wherever x[i] == 0 (and was
+                                // unstable for tiny x[i]). Matches JAX, which
+                                // differentiates cumprod through
+                                // associative_scan(mul) — no division.
+                                let mut prefixes = vec![0.0_f64; axis_len];
+                                let mut prefix = 1.0_f64;
                                 for i in 0..axis_len {
-                                    running *= x_vals[base + i * axis_stride];
-                                    cumprod[i] = running;
+                                    prefixes[i] = prefix;
+                                    prefix *= x_vals[base + i * axis_stride];
                                 }
-
-                                let mut suffix_sum = 0.0;
+                                let mut suffix = 0.0_f64;
                                 for i in (0..axis_len).rev() {
                                     let idx = base + i * axis_stride;
-                                    suffix_sum += g_vals[idx] * cumprod[i];
-                                    let xi = x_vals[idx];
-                                    if xi.abs() > f64::EPSILON {
-                                        result[idx] = suffix_sum / xi;
-                                    }
+                                    let x_next = if i + 1 < axis_len {
+                                        x_vals[base + (i + 1) * axis_stride]
+                                    } else {
+                                        0.0
+                                    };
+                                    suffix = g_vals[idx] + x_next * suffix;
+                                    result[idx] = prefixes[i] * suffix;
                                 }
                             }
                             // Re-encode at the input's real dtype so we
@@ -13448,6 +13453,50 @@ mod tests {
         assert!((result[0] - 16.0).abs() < 1e-10, "got {}", result[0]);
         assert!((result[1] - 10.0).abs() < 1e-10, "got {}", result[1]);
         assert!((result[2] - 6.0).abs() < 1e-10, "got {}", result[2]);
+    }
+
+    #[test]
+    fn test_cumprod_vjp_with_zero_in_input_is_correct() {
+        // cumprod([2,0,3]) with cotangent g=[1,1,1]. True grad (= JAX, which
+        // differentiates cumprod through associative_scan(mul), no division):
+        //   y = [2, 0, 0]
+        //   dx0 = g0 + g1*x1 + g2*x1*x2 = 1 + 0 + 0 = 1
+        //   dx1 = g1*x0 + g2*x0*x2     = 2 + 6     = 8
+        //   dx2 = g2*x0*x1             = 0
+        // The old `suffix_sum / x[i]` VJP divided by x[1]==0 and (guarded) left a
+        // silently-WRONG 0 there.
+        let x = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(0.0),
+                    Literal::from_f64(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![3] },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axis".to_string(), "0".to_string());
+
+        let grads = vjp_single(Primitive::Cumprod, &[x], &g, &params).unwrap();
+        let r = tensor_f64_values(&grads[0]);
+        assert!((r[0] - 1.0).abs() < 1e-10, "dx0: got {}", r[0]);
+        assert!((r[1] - 8.0).abs() < 1e-10, "dx1: got {}", r[1]);
+        assert!((r[2] - 0.0).abs() < 1e-10, "dx2: got {}", r[2]);
     }
 
     // ── Cummax / Cummin gradient tests ────────────────────────────
