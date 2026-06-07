@@ -896,6 +896,16 @@ fn bessel_i1e_deriv(x: &Value) -> Result<Value, AdError> {
     ev(Primitive::Select, &[not_tiny, formula, half_full])
 }
 
+/// Integer and boolean dtypes are non-differentiable (JAX maps their tangent
+/// type to `float0`). A gradient flowing into such a dtype is zero, not the
+/// float gradient truncated into the integer representation.
+fn is_non_differentiable_dtype(dt: DType) -> bool {
+    matches!(
+        dt,
+        DType::I32 | DType::I64 | DType::U32 | DType::U64 | DType::Bool
+    )
+}
+
 fn value_div(a: &Value, b: &Value) -> Result<Value, AdError> {
     eval_primitive(Primitive::Div, &[a.clone(), b.clone()], &BTreeMap::new())
         .map_err(|e| AdError::EvalFailed(e.to_string()))
@@ -3157,6 +3167,12 @@ pub fn vjp(
             // VJP: convert gradient back to input dtype
             require_input_arity(inputs, 1)?;
             let input_dtype = inputs[0].dtype();
+            // An integer/bool input is non-differentiable: JAX's transpose returns
+            // Zero (float0). Converting the float cotangent into the integer dtype
+            // would truncate it to a bogus nonzero gradient.
+            if is_non_differentiable_dtype(input_dtype) {
+                return Ok(vec![zeros_like(&inputs[0])]);
+            }
             let mut back_params = BTreeMap::new();
             back_params.insert("new_dtype".to_owned(), format!("{input_dtype:?}"));
             eval_primitive(
@@ -8365,8 +8381,16 @@ fn jvp_rule(
         Primitive::Copy => Ok(tangents[0].clone()),
         Primitive::StopGradient => Ok(zeros_like(&primals[0])),
         Primitive::ConvertElementType => {
-            // JVP: convert tangent to target dtype (same as primal conversion)
-            ep_p(Primitive::ConvertElementType, tangents, params)
+            // JVP: convert the tangent to the target dtype. But if the OUTPUT
+            // dtype is integer/bool (non-differentiable, float0 in JAX), the
+            // tangent is zero — converting the float tangent into the integer
+            // dtype would truncate it to a bogus value that then propagates.
+            let primal_out = ep_p(Primitive::ConvertElementType, primals, params)?;
+            if is_non_differentiable_dtype(primal_out.dtype()) {
+                Ok(zeros_like(&primal_out))
+            } else {
+                ep_p(Primitive::ConvertElementType, tangents, params)
+            }
         }
         Primitive::BitcastConvertType => {
             let primal_out = ep_p(Primitive::BitcastConvertType, primals, params)?;
@@ -10738,6 +10762,45 @@ mod tests {
         )
         .unwrap();
         assert!((j2.as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlog1py JVP");
+    }
+
+    #[test]
+    fn test_convert_element_type_grad_zero_for_integer_dtype() {
+        // JAX: convert_element_type to/from an integer dtype is non-differentiable
+        // (tangent type float0), so the grad/tangent is ZERO — not the float grad
+        // TRUNCATED into the integer dtype.
+        let mut to_i64 = BTreeMap::new();
+        to_i64.insert("new_dtype".to_owned(), "I64".to_owned());
+        // JVP of f64 -> i64: tangent must be 0, not trunc(2.7)=2.
+        let jvp = jvp_rule(
+            Primitive::ConvertElementType,
+            &[Value::scalar_f64(1.5)],
+            &[Value::scalar_f64(2.7)],
+            &to_i64,
+        )
+        .unwrap();
+        assert!(
+            jvp.as_f64_scalar().unwrap().abs() < 1e-12,
+            "JVP of float->int convert must be 0, got {}",
+            jvp.as_f64_scalar().unwrap()
+        );
+
+        let mut to_f64 = BTreeMap::new();
+        to_f64.insert("new_dtype".to_owned(), "F64".to_owned());
+        // VJP wrt an i64 input: gradient must be 0 (i64 is non-differentiable),
+        // not convert(2.7, i64) = 2.
+        let grads = vjp_single(
+            Primitive::ConvertElementType,
+            &[Value::scalar_i64(3)],
+            &Value::scalar_f64(2.7),
+            &to_f64,
+        )
+        .unwrap();
+        assert!(
+            grads[0].as_f64_scalar().unwrap().abs() < 1e-12,
+            "VJP wrt i64 input must be 0, got {}",
+            grads[0].as_f64_scalar().unwrap()
+        );
     }
 
     #[test]
