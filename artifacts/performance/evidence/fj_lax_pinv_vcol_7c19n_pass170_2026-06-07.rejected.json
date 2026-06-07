@@ -1,0 +1,69 @@
+{
+  "schema": "frankenjax.performance.rejection.v1",
+  "bead_id": "frankenjax-7c19n",
+  "pass": 170,
+  "created_utc": "2026-06-07T19:58:00Z",
+  "crate": "fj-lax",
+  "target": "linalg/pinv_256x128_f64",
+  "profile_basis": {
+    "source": "post frankenjax-jwkcc restored-source routing",
+    "original_pre_edit_baseline_worker": "vmi1149989",
+    "original_pre_edit_baseline_ms": [59.128, 69.656, 86.506],
+    "matched_worker": "vmi1149989",
+    "matched_clean_source_baseline_ms": [59.128, 69.656, 86.506]
+  },
+  "lever": {
+    "name": "pinv V-column scaled coefficient scratch",
+    "changed_paths": ["crates/fj-lax/src/linalg.rs"],
+    "description": "precompute each accepted V[:,l] coefficient scaled by 1/sigma[l] plus a nonzero flag before the existing pinv_svd l -> i -> j reconstruction update",
+    "primitive_family": "private reconstruction data-layout scratch"
+  },
+  "isomorphism": {
+    "singular_vector_order": "unchanged",
+    "singular_value_sorting": "unchanged total_cmp/tie behavior",
+    "cutoff_logic": "unchanged sg > cutoff && sg > 0.0 gate",
+    "result_update_order": "unchanged l -> i -> j loop order",
+    "floating_point_operations": "same vil * inv once per nonzero i and same result[i,j] += vil_inv * u_cols[l,j]",
+    "floating_point_reassociation": "none",
+    "output_order": "row-major n x m output unchanged",
+    "errors": "dtype, shape, and error behavior unchanged",
+    "rng": "no RNG surface",
+    "source_state": "restored after rejection"
+  },
+  "proof": {
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pinv-vcols-proof cargo test -p fj-lax --lib pinv -- --nocapture",
+    "worker": "vmi1264463",
+    "result": "8 passed, 0 failed",
+    "coverage": [
+      "pinv_svd_column_major_reconstruction_matches_row_major_bits",
+      "pinv low-rank QR accept/reject paths",
+      "rank-deficient Moore-Penrose checks",
+      "ill-conditioned 2x2 SVD accuracy",
+      "square and tall matrix public pinv paths"
+    ]
+  },
+  "benchmarks": {
+    "provisional_cross_worker": [
+      {
+        "worker": "vmi1264463",
+        "candidate_ms": [123.41, 179.44, 268.68],
+        "decision": "not used for keep gate; diagnostic only because baseline worker differed"
+      }
+    ],
+    "same_worker_gate": {
+      "worker": "vmi1149989",
+      "clean_source_baseline_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pinv-vcols-baseline cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_256x128_f64 --warm-up-time 1 --measurement-time 3 --sample-size 10",
+      "candidate_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pinv-vcols-candidate-vmi1149989 cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_256x128_f64 --warm-up-time 1 --measurement-time 3 --sample-size 10",
+      "baseline_ms": [59.128, 69.656, 86.506],
+      "candidate_ms": [69.972, 76.645, 83.278],
+      "median_speedup": 0.9088,
+      "conservative_speedup": 0.71,
+      "score": 0.0
+    }
+  },
+  "decision": {
+    "kept": false,
+    "reason": "matched same-worker median and conservative speedups fail Score >= 2.0; source restored"
+  },
+  "next_route": "Do not retune pinv_svd V coefficient scratch. Reprofile restored source and route to the next profile-backed primitive; if GEMM remains top, pursue a different exact-order structural primitive or explicit tolerance-contract work for recursive kernels."
+}
