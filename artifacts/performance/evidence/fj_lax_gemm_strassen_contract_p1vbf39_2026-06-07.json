@@ -1,0 +1,83 @@
+{
+  "schema": "frankenjax.performance.contract.v1",
+  "bead_id": "frankenjax-p1vbf.39",
+  "created_utc": "2026-06-07T18:55:00Z",
+  "target": "linalg/matmul_2d_2048x2048x2048_f64",
+  "profile_basis": {
+    "source": ".skill-loop-progress.md pass165",
+    "worker": "ts1",
+    "gemm2048_ms": [100.59, 103.92, 109.57],
+    "next_rows_ms": {
+      "pinv_256x128_f64": [61.991, 63.476, 65.462],
+      "lu_1024x1024_f64": [53.085, 55.837, 58.225],
+      "cholesky_1024x1024_f64": [52.317, 54.311, 56.718],
+      "qr_1024x1024_f64": [34.193, 35.039, 36.73],
+      "eig_48x48_f64": [30.307, 31.507, 32.685]
+    }
+  },
+  "candidate_primitive": {
+    "name": "recursive/cache-oblivious or Strassen-style GEMM",
+    "source": "alien-graveyard communication-avoiding dense linear algebra",
+    "target_ratio": ">=1.5x on GEMM2048",
+    "contract_risk": "changes the floating-point addition tree for each output cell"
+  },
+  "contract_findings": [
+    {
+      "path": "crates/fj-lax/src/tensor_contraction.rs",
+      "lines": "837-863",
+      "finding": "matmul_2d must match textbook i-j-k ascending contracted-index accumulation bit-for-bit"
+    },
+    {
+      "path": "crates/fj-lax/src/tensor_contraction.rs",
+      "lines": "867-905",
+      "finding": "the bit contract explicitly covers -0.0, +0.0, infinities, and NaN payload surface via to_bits comparisons"
+    },
+    {
+      "path": "crates/fj-lax/src/tensor_contraction.rs",
+      "lines": "1011-1072",
+      "finding": "large and packed-B matmul paths are also pinned to textbook ascending-k to_bits equality"
+    },
+    {
+      "path": "crates/fj-lax/src/arithmetic.rs",
+      "lines": "5228-5311",
+      "finding": "Dot/DotGeneral real accumulation is sequential sum += left * right over the supplied contracted order"
+    },
+    {
+      "path": "crates/fj-lax/src/arithmetic.rs",
+      "lines": "5349-5434",
+      "finding": "rank-2 and batched F64 dot fast paths delegate to matmul_2d and document bit-exact ascending-k behavior"
+    },
+    {
+      "path": "crates/fj-lax/src/arithmetic.rs",
+      "lines": "9551-9567",
+      "finding": "dot_general rank-2 matrix multiply asserts output bits equal a row-major i-j-k reference"
+    },
+    {
+      "path": "crates/fj-lax/src/einsum.rs",
+      "lines": "160-168",
+      "finding": "einsum matmul fast path is admitted only because it preserves ascending contracted-index order bit-for-bit"
+    }
+  ],
+  "contract_decision": {
+    "direct_matmul_rtol": null,
+    "direct_matmul_atol": null,
+    "direct_matmul_comparator": "to_bits equality against ascending-k reference",
+    "nan_signed_zero_behavior": "preserve current to_bits contract",
+    "rng_tie_ordering_surface": "no RNG or tie-breaking surface in direct matmul",
+    "fp_reordered_gemm_admitted": false,
+    "reason": "no explicit large-Dot/matmul tolerance fixture currently overrides the direct bit-exact contract"
+  },
+  "next_route": {
+    "bead_id": "frankenjax-p1vbf.40",
+    "primitive": "KC-major packed-B layout for the blocked GEMM path",
+    "why": "communication-avoiding packed-panel layout can reduce memory traffic while preserving per-output ascending-k accumulation",
+    "avoid_rejected_families": [
+      "KC retune",
+      "NR16 widening",
+      "paired-panel grouping",
+      "row-slab A-pack tiling",
+      "full-k threshold routing"
+    ]
+  },
+  "behavior_change": "none; evidence-only contract gate"
+}
