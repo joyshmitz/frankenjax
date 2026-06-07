@@ -906,6 +906,88 @@ fn is_non_differentiable_dtype(dt: DType) -> bool {
     )
 }
 
+/// JVP of sort: reorder `tangent` by the SAME permutation that sorts `primal`
+/// along the sort axis (JAX gathers the tangent by argsort(primal)), rather than
+/// sorting the tangent independently. Mirrors the per-axis-slice stable argsort
+/// the sort VJP uses, so it is consistent with the forward sort's ordering.
+fn sort_jvp_value(
+    primal: &Value,
+    tangent: &Value,
+    params: &BTreeMap<String, String>,
+) -> Result<Value, AdError> {
+    let (xt, dt) = match (primal, tangent) {
+        (Value::Scalar(_), _) | (_, Value::Scalar(_)) => return Ok(tangent.clone()),
+        (Value::Tensor(xt), Value::Tensor(dt)) => (xt, dt),
+    };
+    let rank = xt.shape.rank();
+    if rank == 0 || xt.shape != dt.shape {
+        return Ok(tangent.clone());
+    }
+    let axis: usize = params
+        .get("axis")
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(rank - 1);
+    if axis >= rank {
+        return Err(AdError::EvalFailed(format!(
+            "sort JVP axis {axis} out of bounds for rank {rank}"
+        )));
+    }
+    let descending = params
+        .get("descending")
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+
+    let x_vals: Vec<f64> = xt.elements.iter().map(|l| l.as_f64().unwrap_or(0.0)).collect();
+    let d_vals: Vec<f64> = dt.elements.iter().map(|l| l.as_f64().unwrap_or(0.0)).collect();
+    let dims: Vec<usize> = xt.shape.dims.iter().map(|&d| d as usize).collect();
+    let mut strides = vec![1usize; rank];
+    for i in (0..rank - 1).rev() {
+        strides[i] = strides[i + 1] * dims[i + 1];
+    }
+    let axis_dim = dims[axis];
+    if axis_dim == 0 {
+        return Ok(tangent.clone());
+    }
+    let axis_stride = strides[axis];
+    let total = x_vals.len();
+    let outer_count = total / axis_dim;
+    let mut result = vec![0.0_f64; total];
+
+    for outer in 0..outer_count {
+        let mut base = 0usize;
+        let mut rem = outer;
+        for ax in (0..rank).rev() {
+            if ax == axis {
+                continue;
+            }
+            base += (rem % dims[ax]) * strides[ax];
+            rem /= dims[ax];
+        }
+        // Stable argsort of the primal slice (same ordering as the sort VJP).
+        let mut indexed: Vec<(usize, f64)> = (0..axis_dim)
+            .map(|i| (i, x_vals[base + i * axis_stride]))
+            .collect();
+        if descending {
+            indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        // Gather: the k-th sorted position takes the tangent at its original index.
+        for (k, &(orig_idx, _)) in indexed.iter().enumerate() {
+            result[base + k * axis_stride] = d_vals[base + orig_idx * axis_stride];
+        }
+    }
+
+    Ok(Value::Tensor(
+        TensorValue::new(
+            dt.dtype,
+            xt.shape.clone(),
+            result.into_iter().map(Literal::from_f64).collect(),
+        )
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+    ))
+}
+
 fn value_div(a: &Value, b: &Value) -> Result<Value, AdError> {
     eval_primitive(Primitive::Div, &[a.clone(), b.clone()], &BTreeMap::new())
         .map_err(|e| AdError::EvalFailed(e.to_string()))
@@ -8407,7 +8489,9 @@ fn jvp_rule(
         Primitive::Cummax | Primitive::Cummin => {
             cum_extreme_jvp_value(primitive, &primals[0], &tangents[0], params)
         }
-        Primitive::Sort => ep_p(Primitive::Sort, &[tangents[0].clone()], params),
+        // sort JVP: reorder the tangent by the primal's sort permutation (JAX
+        // gathers the tangent by argsort(primal)) — NOT an independent sort.
+        Primitive::Sort => sort_jvp_value(&primals[0], &tangents[0], params),
         Primitive::Argsort => Ok(zeros_like(&primals[0])),
         Primitive::TopK => {
             // TopK JVP: gather tangents at the same positions as top-k values.
@@ -10762,6 +10846,30 @@ mod tests {
         )
         .unwrap();
         assert!((j2.as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlog1py JVP");
+    }
+
+    #[test]
+    fn test_sort_jvp_permutes_tangent_by_primal_order_not_sorts_it() {
+        // sort's JVP must reorder the tangent by the SAME permutation that sorts
+        // the primal (JAX gathers the tangent by argsort(primal)), NOT sort the
+        // tangent independently. x=[3,1,2] sorts to [1,2,3] via perm [1,2,0], so
+        // the tangent [0.1,0.2,0.3] must become [0.2,0.3,0.1] — not sort([..])
+        // = [0.1,0.2,0.3].
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![3] }, vec![3.0, 1.0, 2.0]).unwrap(),
+        );
+        let dx = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![3] }, vec![0.1, 0.2, 0.3]).unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axis".to_owned(), "0".to_owned());
+        let jvp = jvp_rule(Primitive::Sort, &[x], &[dx], &params).unwrap();
+        let got = tensor_f64_values(&jvp);
+        assert_eq!(
+            got,
+            vec![0.2, 0.3, 0.1],
+            "sort JVP must permute the tangent by the primal's sort order"
+        );
     }
 
     #[test]
