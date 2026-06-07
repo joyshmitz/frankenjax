@@ -1,0 +1,13 @@
+bead=frankenjax-7wpc7
+pass=163
+target=linalg/matmul_2d_2048x2048x2048_f64
+worker=vmi1156319
+lever=NR16 register tile in blocked GEMM microkernel
+baseline_median_ms=763.22
+initial_after_median_ms=651.66
+confirmation_after_median_ms=771.45
+initial_median_speedup=1.1712
+initial_conservative_speedup=0.9974
+confirmation_median_speedup=0.9893
+confirmation_conservative_speedup=0.7930
+decision=rejected_confirmation_failed_source_restored
