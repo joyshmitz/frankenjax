@@ -730,6 +730,65 @@ fn pad_vjp_negative_crop_numerical() {
     assert_gradients_close(&grad_operand, &num_operand, 1e-5, "Pad VJP grad_operand (negative crop)");
 }
 
+#[test]
+fn reduce_max_min_vjp_axis_numerical() {
+    // ReduceMax/Min VJP routes the cotangent to the arg-extremum of each
+    // reduction window (a select-by-comparison, the same class that bit sort /
+    // reduce_window). With DISTINCT values the max/min is smooth a.e., so a
+    // finite difference verifies the indicator routing across multiple windows.
+    // The existing test is a single full-reduce with no axis/ties/finite-diff.
+    let data = [3.0, 1.0, 2.0, 4.0, 6.0, 5.0]; // [2,3]: rows [3,1,2],[4,6,5]
+    let input = make_f64_matrix(2, 3, &data);
+    let mut params = BTreeMap::new();
+    params.insert("axes".to_string(), "1".to_string());
+
+    for prim in [Primitive::ReduceMax, Primitive::ReduceMin] {
+        let out = eval_primitive(prim, std::slice::from_ref(&input), &params).unwrap();
+        let g_data = [1.3, -0.7]; // out shape [2]
+        let g = make_f64_vector(&g_data);
+        let vjp = fj_ad::vjp(prim, &[input.clone()], std::slice::from_ref(&g), std::slice::from_ref(&out), &params).unwrap();
+        let grad = extract_f64_vec(&vjp[0]);
+
+        let eps = 1e-6;
+        let loss = |xv: &Value| -> f64 {
+            let o = eval_primitive(prim, std::slice::from_ref(xv), &params).unwrap();
+            extract_f64_vec(&o).iter().zip(g_data.iter()).map(|(o, g)| o * g).sum()
+        };
+        let mut num = vec![0.0; data.len()];
+        for idx in 0..data.len() {
+            let (mut p, mut m) = (data.to_vec(), data.to_vec());
+            p[idx] += eps;
+            m[idx] -= eps;
+            num[idx] = (loss(&make_f64_matrix(2, 3, &p)) - loss(&make_f64_matrix(2, 3, &m))) / (2.0 * eps);
+        }
+        assert_gradients_close(&grad, &num, 1e-5, &format!("{prim:?} VJP (axis, distinct)"));
+    }
+}
+
+#[test]
+fn reduce_max_vjp_splits_ties_evenly() {
+    // At a TIE the chooser cotangent is split EVENLY among the tied maxima
+    // (JAX _reduce_chooser). reduce_max([5,5,1]) = 5 with two ties → g=1 routes
+    // 0.5 to each tied position, 0 to the non-max. Finite differences are
+    // ill-defined at a tie, so this is an exact value check of the tie-split.
+    let input = make_f64_vector(&[5.0, 5.0, 1.0]);
+    let g = Value::scalar_f64(1.0);
+    let grads = fj_ad::vjp(
+        Primitive::ReduceMax,
+        std::slice::from_ref(&input),
+        std::slice::from_ref(&g),
+        std::slice::from_ref(
+            &eval_primitive(Primitive::ReduceMax, std::slice::from_ref(&input), &BTreeMap::new()).unwrap(),
+        ),
+        &BTreeMap::new(),
+    )
+    .unwrap();
+    let vals = extract_f64_vec(&grads[0]);
+    assert!((vals[0] - 0.5).abs() < 1e-12, "tied max[0] must get 0.5, got {}", vals[0]);
+    assert!((vals[1] - 0.5).abs() < 1e-12, "tied max[1] must get 0.5, got {}", vals[1]);
+    assert!(vals[2].abs() < 1e-12, "non-max must get 0, got {}", vals[2]);
+}
+
 // ======================== TriangularSolve VJP ========================
 
 #[test]
