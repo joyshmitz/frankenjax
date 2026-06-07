@@ -915,10 +915,6 @@ fn value_select(cond: &Value, on_true: &Value, on_false: &Value) -> Result<Value
     .map_err(|e| AdError::EvalFailed(e.to_string()))
 }
 
-fn value_bool_and(lhs: &Value, rhs: &Value) -> Result<Value, AdError> {
-    value_select(lhs, rhs, &Value::scalar_bool(false))
-}
-
 /// `log(_replace_zero(x))` matching JAX's `pow` exponent-gradient helper, where
 /// `_replace_zero(x) = select(x == 0, 1, x)` (jax/_src/lax/lax.py `_pow_jvp_rhs`).
 ///
@@ -940,8 +936,42 @@ fn log_replace_zero(x: &Value) -> Result<Value, AdError> {
     .map_err(|e| AdError::EvalFailed(e.to_string()))
 }
 
-fn value_masked(mask: &Value, value: &Value, zero_like_value: &Value) -> Result<Value, AdError> {
-    value_select(mask, value, &zeros_like(zero_like_value))
+/// Per-branch 0/1 activity indicators (in `dtype_ref`'s dtype) for
+/// `clamp(min, operand, max)` — which input is the selected output at each
+/// position: min where `operand < min < max`, operand where `min < operand <
+/// max`, max where `operand > max`.
+///
+/// Built from broadcasting multiplies of `select(mask, 1, 0)` indicators rather
+/// than `select`/logical-AND of the bool masks directly: `Select` requires
+/// matching shapes (it has no Tensor/Tensor/Scalar arm), so combining a
+/// tensor-operand mask with a scalar-bound mask via select errors. Multiply
+/// broadcasts, so scalar `min`/`max` against a tensor `operand` (the common
+/// `clip(x, 0, 1)` case) works; the reverse pass later sums the bound
+/// cotangents back to the scalar shapes.
+fn clamp_active_indicators(
+    min: &Value,
+    operand: &Value,
+    max: &Value,
+    dtype_ref: &Value,
+) -> Result<(Value, Value, Value), AdError> {
+    let one = scalar_constant_matching_dtype(1.0, dtype_ref);
+    let zero = scalar_constant_matching_dtype(0.0, dtype_ref);
+    let cmp = |p: Primitive, a: &Value, b: &Value| {
+        eval_primitive(p, &[a.clone(), b.clone()], &BTreeMap::new())
+            .map_err(|e| AdError::EvalFailed(e.to_string()))
+    };
+    let ind = |mask: Value| value_select(&mask, &one, &zero);
+
+    let min_active = value_mul(
+        &ind(cmp(Primitive::Gt, min, operand)?)?,
+        &ind(cmp(Primitive::Lt, min, max)?)?,
+    )?;
+    let operand_active = value_mul(
+        &ind(cmp(Primitive::Gt, operand, min)?)?,
+        &ind(cmp(Primitive::Lt, operand, max)?)?,
+    )?;
+    let max_active = ind(cmp(Primitive::Lt, max, operand)?)?;
+    Ok((min_active, operand_active, max_active))
 }
 
 fn checked_axis_len(target_len: usize, context: &'static str) -> Result<u32, AdError> {
@@ -2923,47 +2953,16 @@ pub fn vjp(
         }
         Primitive::Clamp => {
             // JAX order is clamp(min, operand, max). Its subgradients are
-            // branch-specific; min and max are differentiable when they are
-            // the selected output, not permanent constants.
-            let min = &inputs[0];
-            let operand = &inputs[1];
-            let max = &inputs[2];
-
-            let min_gt_operand = eval_primitive(
-                Primitive::Gt,
-                &[min.clone(), operand.clone()],
-                &BTreeMap::new(),
-            )
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let min_lt_max =
-                eval_primitive(Primitive::Lt, &[min.clone(), max.clone()], &BTreeMap::new())
-                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let operand_gt_min = eval_primitive(
-                Primitive::Gt,
-                &[operand.clone(), min.clone()],
-                &BTreeMap::new(),
-            )
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let operand_lt_max = eval_primitive(
-                Primitive::Lt,
-                &[operand.clone(), max.clone()],
-                &BTreeMap::new(),
-            )
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let max_lt_operand = eval_primitive(
-                Primitive::Lt,
-                &[max.clone(), operand.clone()],
-                &BTreeMap::new(),
-            )
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-
-            let min_mask = value_bool_and(&min_gt_operand, &min_lt_max)?;
-            let operand_mask = value_bool_and(&operand_gt_min, &operand_lt_max)?;
-
+            // branch-specific; min and max are differentiable when they are the
+            // selected output, not permanent constants. grad = g * indicator at
+            // the OUTPUT shape; the reverse pass then sums the bound cotangents
+            // back to the (often scalar) min/max shapes.
+            let (min_active, operand_active, max_active) =
+                clamp_active_indicators(&inputs[0], &inputs[1], &inputs[2], g)?;
             Ok(vec![
-                value_masked(&min_mask, g, min)?,
-                value_masked(&operand_mask, g, operand)?,
-                value_masked(&max_lt_operand, g, max)?,
+                value_mul(g, &min_active)?,
+                value_mul(g, &operand_active)?,
+                value_mul(g, &max_active)?,
             ])
         }
         Primitive::DynamicSlice => dynamic_slice_vjp(inputs, g),
@@ -8350,22 +8349,15 @@ fn jvp_rule(
 
         // ── Clamp: JAX order is clamp(min, operand, max) ──
         Primitive::Clamp => {
-            let min = &primals[0];
-            let operand = &primals[1];
-            let max = &primals[2];
-
-            let min_gt_operand = ep(Primitive::Gt, &[min.clone(), operand.clone()])?;
-            let min_lt_max = ep(Primitive::Lt, &[min.clone(), max.clone()])?;
-            let operand_gt_min = ep(Primitive::Gt, &[operand.clone(), min.clone()])?;
-            let operand_lt_max = ep(Primitive::Lt, &[operand.clone(), max.clone()])?;
-            let max_lt_operand = ep(Primitive::Lt, &[max.clone(), operand.clone()])?;
-
-            let min_mask = value_bool_and(&min_gt_operand, &min_lt_max)?;
-            let operand_mask = value_bool_and(&operand_gt_min, &operand_lt_max)?;
-
-            let min_tangent = value_masked(&min_mask, &tangents[0], &tangents[0])?;
-            let operand_tangent = value_masked(&operand_mask, &tangents[1], &tangents[1])?;
-            let max_tangent = value_masked(&max_lt_operand, &tangents[2], &tangents[2])?;
+            // d(clamp) = indicator_min * dmin + indicator_operand * doperand +
+            // indicator_max * dmax (exactly one branch active per position).
+            // Indicators are built with broadcasting multiplies so scalar bounds
+            // against a tensor operand work — see clamp_active_indicators.
+            let (min_active, operand_active, max_active) =
+                clamp_active_indicators(&primals[0], &primals[1], &primals[2], &primals[1])?;
+            let min_tangent = value_mul(&min_active, &tangents[0])?;
+            let operand_tangent = value_mul(&operand_active, &tangents[1])?;
+            let max_tangent = value_mul(&max_active, &tangents[2])?;
             let lower_tangent = value_add(&min_tangent, &operand_tangent)?;
             value_add(&lower_tangent, &max_tangent)
         }
@@ -10729,6 +10721,72 @@ mod tests {
         let v05 = g05[0].as_f64_scalar().expect("scalar");
         let want = -4.0 / std::f64::consts::PI;
         assert!((v05 - want).abs() < 1e-6, "sinc'(0.5): got {v05}, want {want}");
+    }
+
+    #[test]
+    fn test_grad_clamp_scalar_bounds_does_not_error() {
+        // grad(clamp(0.0, x, 1.0)) — scalar min/max, tensor operand (jnp.clip).
+        // The VJP masks the per-branch cotangent; the min/max branches built
+        // select(Tensor_mask, Tensor_g, Scalar_zero), which eval_select rejects
+        // (no Tensor/Tensor/Scalar arm) -> the whole grad errored. With the fix
+        // the bound grads are output-shaped then summed to scalar.
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![3] }, vec![-1.0, 0.5, 2.0]).unwrap(),
+        );
+        let lo = Value::scalar_f64(0.0);
+        let hi = Value::scalar_f64(1.0);
+        let g = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![3] }, vec![1.0, 1.0, 1.0]).unwrap(),
+        );
+        // Full grad path (backward) so the scalar bound cotangents are summed.
+        use fj_core::{Equation, VarId};
+        use smallvec::smallvec;
+        let jaxpr = Jaxpr::new(
+            vec![VarId(1), VarId(2), VarId(3)],
+            vec![],
+            vec![VarId(4)],
+            vec![Equation {
+                primitive: Primitive::Clamp,
+                inputs: smallvec![
+                    Atom::Var(VarId(1)),
+                    Atom::Var(VarId(2)),
+                    Atom::Var(VarId(3))
+                ],
+                outputs: smallvec![VarId(4)],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            }],
+        );
+        let grads = grad_jaxpr_with_cotangent(&jaxpr, &[lo, x, hi], &g)
+            .expect("clamp grad with scalar bounds must not error");
+
+        // grad wrt operand: gradient passes only where 0 < x < 1 => [0, 1, 0].
+        assert_eq!(tensor_f64_values(&grads[1]), vec![0.0, 1.0, 0.0], "operand grad");
+        // grad wrt scalar min: sum of g where x < min (x=-1) => 1.0.
+        let gmin = grads[0].as_f64_scalar().expect("scalar min grad");
+        assert!((gmin - 1.0).abs() < 1e-12, "min grad: got {gmin}");
+        // grad wrt scalar max: sum of g where x > max (x=2) => 1.0.
+        let gmax = grads[2].as_f64_scalar().expect("scalar max grad");
+        assert!((gmax - 1.0).abs() < 1e-12, "max grad: got {gmax}");
+
+        // JVP with the same scalar bounds must also not error (tensor operand,
+        // scalar bound masks). Tangents (dmin=0, dx=ones, dmax=0): the output
+        // tangent passes dx only where 0 < x < 1 => [0, 1, 0].
+        let x2 = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![3] }, vec![-1.0, 0.5, 2.0]).unwrap(),
+        );
+        let dx = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![3] }, vec![1.0, 1.0, 1.0]).unwrap(),
+        );
+        let jvp = jvp_rule(
+            Primitive::Clamp,
+            &[Value::scalar_f64(0.0), x2, Value::scalar_f64(1.0)],
+            &[Value::scalar_f64(0.0), dx, Value::scalar_f64(0.0)],
+            &BTreeMap::new(),
+        )
+        .expect("clamp JVP with scalar bounds must not error");
+        assert_eq!(tensor_f64_values(&jvp), vec![0.0, 1.0, 0.0], "clamp JVP output tangent");
     }
 
     #[test]
