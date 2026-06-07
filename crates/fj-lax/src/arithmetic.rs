@@ -3150,6 +3150,44 @@ fn select_i64_same_shape_fast_path(
     )?)))
 }
 
+/// Dense fast path for `select(tensor_cond, scalar_true, scalar_false)` — the
+/// `jnp.where(mask, a, b)` masking idiom with scalar branches. Reads the dense
+/// Bool cond slice and writes the chosen scalar straight into a dense f64/i64
+/// output, skipping the per-element `Literal` match + `select_literal_as_dtype`
+/// rebuild. Returns `None` (caller falls back to the generic loop) when the cond
+/// is not dense-Bool or the two scalars are not a matching F64/F64 or I64/I64
+/// pair. Bit-identical: `promote_dtype` of equal dtypes is that dtype, and for an
+/// F64/I64 value `select_literal_as_dtype` is the identity, so the dense buffer
+/// stores exactly the bits the generic path would (incl. F64 NaN payloads).
+fn select_scalar_branches_fast_path(
+    cond: &TensorValue,
+    on_true: Literal,
+    on_false: Literal,
+) -> Result<Option<Value>, EvalError> {
+    let Some(conds) = cond.elements.as_bool_slice() else {
+        return Ok(None);
+    };
+    match (on_true, on_false) {
+        (Literal::F64Bits(tb), Literal::F64Bits(fb)) => {
+            let t = f64::from_bits(tb);
+            let f = f64::from_bits(fb);
+            let out: Vec<f64> = conds.iter().map(|&c| if c { t } else { f }).collect();
+            Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+                cond.shape.clone(),
+                out,
+            )?)))
+        }
+        (Literal::I64(tv), Literal::I64(fv)) => {
+            let out: Vec<i64> = conds.iter().map(|&c| if c { tv } else { fv }).collect();
+            Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+                cond.shape.clone(),
+                out,
+            )?)))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() != 3 {
         return Err(EvalError::ArityMismatch {
@@ -3225,6 +3263,9 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
         }
         // Tensor cond + scalar on_true + scalar on_false: broadcast scalars
         (Value::Tensor(cond), Value::Scalar(on_true), Value::Scalar(on_false)) => {
+            if let Some(value) = select_scalar_branches_fast_path(cond, *on_true, *on_false)? {
+                return Ok(value);
+            }
             let dtype = promote_dtype(literal_dtype(*on_true), literal_dtype(*on_false));
             let mut elements = Vec::with_capacity(cond.elements.len());
             for c in cond.elements.iter().copied() {
@@ -6472,6 +6513,117 @@ mod tests {
     use super::*;
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
+
+    /// Isomorphism + golden proof for the dense `select(tensor_cond, scalar,
+    /// scalar)` masking fast path (`jnp.where(mask, a, b)`). Every output element
+    /// must be BIT-FOR-BIT identical to the old per-`Literal` loop
+    /// (`select_bool_condition` + `select_literal_as_dtype`); same-binary A/B
+    /// timing is printed (run with `--nocapture`).
+    #[test]
+    fn select_scalar_branches_dense_path_bit_identical_to_literal() {
+        use std::time::Instant;
+
+        let n: u32 = 1 << 20; // 1,048,576 elements
+        let conds: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
+        let shape = Shape { dims: vec![n] };
+        let cond_tensor =
+            TensorValue::new_bool_values(shape.clone(), conds.clone()).unwrap();
+        let cond = Value::Tensor(cond_tensor.clone());
+
+        let reps = 40u32;
+        // (label, on_true, on_false, expected output dtype)
+        let cases: [(&str, Literal, Literal); 2] = [
+            (
+                "f64",
+                Literal::F64Bits(2.5f64.to_bits()),
+                Literal::F64Bits((-7.25f64).to_bits()),
+            ),
+            ("i64", Literal::I64(7), Literal::I64(-3)),
+        ];
+
+        for (label, on_true, on_false) in cases {
+            let vt = Value::Scalar(on_true);
+            let vf = Value::Scalar(on_false);
+
+            // NEW dense path.
+            let dense = eval_select(Primitive::Select, &[cond.clone(), vt.clone(), vf.clone()])
+                .unwrap();
+            let dense_t = dense.as_tensor().unwrap();
+
+            // OLD per-`Literal` path (the loop the fast path replaced).
+            let dtype = promote_dtype(literal_dtype(on_true), literal_dtype(on_false));
+            let mut ref_elems = Vec::with_capacity(n as usize);
+            for c in cond_tensor.elements.iter().copied() {
+                let flag = select_bool_condition(Primitive::Select, c).unwrap();
+                let val = if flag { on_true } else { on_false };
+                ref_elems.push(
+                    select_literal_as_dtype(
+                        Primitive::Select,
+                        val,
+                        dtype,
+                        "numeric",
+                        "integer",
+                        "unsigned",
+                    )
+                    .unwrap(),
+                );
+            }
+
+            // Isomorphism: bit-for-bit identical, every element.
+            let mut golden: u64 = 0xcbf29ce484222325;
+            for (k, re) in ref_elems.iter().enumerate() {
+                assert_eq!(dense_t.elements[k], *re, "{label} bit mismatch at {k}");
+                let bits = match dense_t.elements[k] {
+                    Literal::F64Bits(b) => b,
+                    Literal::I64(v) => v as u64,
+                    other => panic!("unexpected output literal {other:?}"),
+                };
+                for byte in bits.to_le_bytes() {
+                    golden ^= byte as u64;
+                    golden = golden.wrapping_mul(0x100000001b3);
+                }
+            }
+
+            // Same-binary A/B timing.
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                let out = eval_select(Primitive::Select, &[cond.clone(), vt.clone(), vf.clone()])
+                    .unwrap();
+                std::hint::black_box(&out);
+            }
+            let dense_ns = t0.elapsed().as_nanos().max(1);
+
+            let t1 = Instant::now();
+            for _ in 0..reps {
+                let mut elements = Vec::with_capacity(n as usize);
+                for c in cond_tensor.elements.iter().copied() {
+                    let flag = select_bool_condition(Primitive::Select, c).unwrap();
+                    let val = if flag { on_true } else { on_false };
+                    elements.push(
+                        select_literal_as_dtype(
+                            Primitive::Select,
+                            val,
+                            dtype,
+                            "numeric",
+                            "integer",
+                            "unsigned",
+                        )
+                        .unwrap(),
+                    );
+                }
+                let out = TensorValue::new(dtype, shape.clone(), elements).unwrap();
+                std::hint::black_box(&out);
+            }
+            let lit_ns = t1.elapsed().as_nanos().max(1);
+
+            let ratio = lit_ns as f64 / dense_ns as f64;
+            println!(
+                "[select {label}] dense={:.3}ms literal={:.3}ms ratio={ratio:.2}x golden={golden:016x}",
+                dense_ns as f64 / reps as f64 / 1e6,
+                lit_ns as f64 / reps as f64 / 1e6,
+            );
+        }
+    }
 
     /// Isomorphism + golden proof for the same-shape dense complex Add/Sub/Div
     /// fast path: every output element must be BIT-FOR-BIT identical to the old
