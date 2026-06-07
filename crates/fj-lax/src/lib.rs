@@ -295,7 +295,9 @@ pub fn eval_primitive(
         ),
         Primitive::Reciprocal => eval_unary_elementwise(primitive, inputs, |x| 1.0 / x),
         Primitive::Logistic => {
-            eval_unary_elementwise(primitive, inputs, |x| 1.0 / (1.0 + (-x).exp()))
+            // Sigmoid is compute-bound (an exp per element), so thread it like the
+            // other transcendentals (exp/erf/tanh/…) instead of the serial path.
+            eval_unary_elementwise_parallel(primitive, inputs, |x| 1.0 / (1.0 + (-x).exp()))
         }
         Primitive::Erf => eval_unary_elementwise_parallel(primitive, inputs, erf_approx),
         Primitive::Erfc => eval_unary_elementwise_parallel(primitive, inputs, erfc_approx),

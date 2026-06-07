@@ -6565,6 +6565,70 @@ mod tests {
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
 
+    /// Isomorphism + golden proof for threading sigmoid (Logistic): the parallel
+    /// path must be BIT-FOR-BIT identical to the serial map (each element is
+    /// independent), and the same-binary A/B speedup is printed.
+    #[test]
+    fn logistic_parallel_bit_identical_and_faster() {
+        use std::time::Instant;
+
+        let sigmoid = |x: f64| 1.0 / (1.0 + (-x).exp());
+        let n: u32 = 1 << 20;
+        let xs: Vec<f64> = (0..n).map(|i| (i as f64) * 1e-4 - 50.0).collect();
+        let shape = Shape { dims: vec![n] };
+        let x = Value::Tensor(TensorValue::new_f64_values(shape.clone(), xs.clone()).unwrap());
+
+        let par = eval_unary_elementwise_parallel(
+            Primitive::Logistic,
+            std::slice::from_ref(&x),
+            sigmoid,
+        )
+        .unwrap();
+        let ser =
+            eval_unary_elementwise(Primitive::Logistic, std::slice::from_ref(&x), sigmoid).unwrap();
+        let par_t = par.as_tensor().unwrap();
+        let ser_t = ser.as_tensor().unwrap();
+
+        let mut golden: u64 = 0xcbf29ce484222325;
+        for k in 0..n as usize {
+            assert_eq!(par_t.elements[k], ser_t.elements[k], "logistic mismatch at {k}");
+            if let Literal::F64Bits(b) = par_t.elements[k] {
+                for byte in b.to_le_bytes() {
+                    golden ^= byte as u64;
+                    golden = golden.wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+
+        let reps = 30u32;
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            let o = eval_unary_elementwise_parallel(
+                Primitive::Logistic,
+                std::slice::from_ref(&x),
+                sigmoid,
+            )
+            .unwrap();
+            std::hint::black_box(&o);
+        }
+        let par_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        for _ in 0..reps {
+            let o = eval_unary_elementwise(Primitive::Logistic, std::slice::from_ref(&x), sigmoid)
+                .unwrap();
+            std::hint::black_box(&o);
+        }
+        let ser_ns = t1.elapsed().as_nanos().max(1);
+
+        let ratio = ser_ns as f64 / par_ns as f64;
+        println!(
+            "[logistic] parallel={:.3}ms serial={:.3}ms ratio={ratio:.2}x golden={golden:016x}",
+            par_ns as f64 / reps as f64 / 1e6,
+            ser_ns as f64 / reps as f64 / 1e6,
+        );
+    }
+
     /// Isomorphism + golden proof for the dense f64 float-predicate fast paths
     /// (is_finite / is_nan / is_inf / signbit). Output must be BIT-FOR-BIT
     /// identical to the per-`Literal` path; same-binary A/B timing is printed.
