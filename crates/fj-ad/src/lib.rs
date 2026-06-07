@@ -8438,7 +8438,14 @@ fn jvp_rule(
             value_add(&lower_tangent, &max_tangent)
         }
 
-        Primitive::DynamicSlice => ep_p(Primitive::DynamicSlice, tangents, params),
+        Primitive::DynamicSlice => {
+            // d dynamic_slice(operand, starts) = dynamic_slice(d_operand, starts):
+            // the start indices are integer (zero tangent). Passing the index
+            // tangents sliced at offset 0; use the PRIMAL starts.
+            let mut inputs = vec![tangents[0].clone()];
+            inputs.extend_from_slice(&primals[1..]);
+            ep_p(Primitive::DynamicSlice, &inputs, params)
+        }
         Primitive::Pad => match &tangents[0] {
             Value::Scalar(_) => Ok(tangents[0].clone()),
             _ => ep_p(Primitive::Pad, tangents, params),
@@ -8470,7 +8477,15 @@ fn jvp_rule(
         Primitive::ReducePrecision => {
             ep_p(Primitive::ReducePrecision, &[tangents[0].clone()], params)
         }
-        Primitive::DynamicUpdateSlice => ep_p(Primitive::DynamicUpdateSlice, tangents, params),
+        Primitive::DynamicUpdateSlice => {
+            // d dynamic_update_slice(operand, update, starts) =
+            //   dynamic_update_slice(d_operand, d_update, starts). operand+update
+            // carry tangents; the integer starts are fixed. Previously the zero
+            // start tangents updated at offset 0.
+            let mut inputs = vec![tangents[0].clone(), tangents[1].clone()];
+            inputs.extend_from_slice(&primals[2..]);
+            ep_p(Primitive::DynamicUpdateSlice, &inputs, params)
+        }
         Primitive::Cumsum => ep_p(Primitive::Cumsum, &[tangents[0].clone()], params),
         Primitive::Cumprod => cumprod_jvp_value(&primals[0], &tangents[0], params),
         Primitive::Cummax | Primitive::Cummin => {
@@ -13860,6 +13875,22 @@ mod tests {
 
         assert_eq!(tensor_f64_values(&grads[0]), vec![0.0, 7.0, 11.0, 0.0, 0.0]);
         assert_eq!(grads[1].as_f64_scalar().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_dynamic_slice_update_jvp_use_primal_start_not_index_tangent() {
+        use fj_core::{Primitive, Shape, TensorValue, Value};
+        let f = |v: &[f64]| Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![v.len() as u32] }, v.to_vec()).unwrap());
+        // dynamic_slice(operand[5], start=2, slice_sizes=2): d = ds(d_op, start=2)
+        // = [d_op[2], d_op[3]] = [3, 4]; the bug sliced at start=0 -> [1, 2].
+        let mut dsp = BTreeMap::new();
+        dsp.insert("slice_sizes".to_owned(), "2".to_owned());
+        let jvp = jvp_rule(Primitive::DynamicSlice, &[f(&[10.0, 20.0, 30.0, 40.0, 50.0]), Value::scalar_i64(2)], &[f(&[1.0, 2.0, 3.0, 4.0, 5.0]), Value::scalar_i64(0)], &dsp).unwrap();
+        assert_eq!(tensor_f64_values(&jvp), vec![3.0, 4.0], "dynamic_slice JVP must use primal start");
+        // dynamic_update_slice(operand[5], update[2], start=1): d = dus(d_op, d_upd, start=1)
+        // = [d_op0, d_upd0, d_upd1, d_op3, d_op4] = [0.1, 5, 6, 0.4, 0.5]; bug -> start 0.
+        let dus = jvp_rule(Primitive::DynamicUpdateSlice, &[f(&[0.0; 5]), f(&[7.0, 8.0]), Value::scalar_i64(1)], &[f(&[0.1, 0.2, 0.3, 0.4, 0.5]), f(&[5.0, 6.0]), Value::scalar_i64(0)], &BTreeMap::new()).unwrap();
+        assert_eq!(tensor_f64_values(&dus), vec![0.1, 5.0, 6.0, 0.4, 0.5], "dynamic_update_slice JVP must update at primal start");
     }
 
     #[test]
