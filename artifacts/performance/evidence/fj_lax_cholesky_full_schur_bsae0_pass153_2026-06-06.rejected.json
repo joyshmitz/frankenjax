@@ -1,0 +1,144 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_cholesky_full_schur_bsae0_pass153_2026-06-06",
+  "status": "rejected",
+  "date": "2026-06-06",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-bsae0",
+  "crate": "fj-lax",
+  "target": "linalg/cholesky_1024x1024_f64",
+  "skill_pass": "repeatedly-apply-skill pass153 -> extreme-software-optimization",
+  "profile_backing": {
+    "worker": "vmi1149989",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-post-p152-reprofile cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(eig_48x48_f64|eigh_48x48_f64|cholesky_1024x1024_f64|qr_1024x1024_f64|pinv_192x192_f64|lu_1024x1024_f64|svd_48x48_f64|svd_48x48_full_f64|matmul_2d_1024x1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+    "top_rows_ms": {
+      "cholesky_1024x1024_f64": [
+        39.678,
+        41.152,
+        42.218
+      ],
+      "lu_1024x1024_f64": [
+        39.368,
+        40.301,
+        41.299
+      ],
+      "qr_1024x1024_f64": [
+        32.745,
+        33.729,
+        35.300
+      ],
+      "matmul_2d_1024x1024x1024_f64": [
+        29.485,
+        31.458,
+        33.584
+      ],
+      "eig_48x48_f64": [
+        22.042,
+        22.676,
+        23.225
+      ],
+      "pinv_192x192_f64": [
+        5.2566,
+        5.4191,
+        5.5771
+      ]
+    }
+  },
+  "candidate": {
+    "lever": "direct-subtract full Cholesky Schur update",
+    "description": "Kept the existing L21 and L21^T panel materialization so the RHS stream remained contiguous, but replaced prod = matmul_2d(L21, L21^T) plus a separate A22 subtract pass with a Cholesky-local 4x4 register-tiled row microkernel that subtracted each product directly into A22.",
+    "source_diff_retained": false,
+    "files_touched_temporarily": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "proof_test": {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-bsae0-proof cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "worker": "vmi1149989",
+      "result": "pass",
+      "details": "12 tests passed in candidate state, including cholesky_blocked_matches_scalar_and_reconstructs, cholesky_real_fast_path_bit_identical_to_complex_path, NaN/non-square behavior, and triangular_solve_cholesky_roundtrip."
+    },
+    "rebench": {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-bsae0-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(cholesky_1024x1024_f64|lu_1024x1024_f64|qr_1024x1024_f64|matmul_2d_1024x1024x1024_f64)' --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot",
+      "worker": "vmi1149989",
+      "time_ms": {
+        "cholesky_1024x1024_f64": [
+          110.53,
+          116.43,
+          122.59
+        ],
+        "lu_1024x1024_f64": [
+          67.405,
+          85.902,
+          113.06
+        ],
+        "qr_1024x1024_f64": [
+          36.884,
+          42.558,
+          53.072
+        ],
+        "matmul_2d_1024x1024x1024_f64": [
+          43.029,
+          57.615,
+          74.692
+        ]
+      },
+      "speedup_vs_focused_baseline_mid": 0.3535,
+      "conservative_speedup_low_over_high": 0.3237
+    }
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 5.0,
+    "effort": 2.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "keep_threshold": 2.0,
+    "decision": "reject_and_restore_source"
+  },
+  "isomorphism_proof": {
+    "ordering": "Candidate left small-n scalar Cholesky, diagonal panel factorization, panel solve, strict upper zeroing, and output layout unchanged. The temporary full-Schur microkernel accumulated each product cell over panel columns in ascending t order before subtracting into the same A22 cell.",
+    "tie_breaking": "N/A: Cholesky has no pivot or comparison tie-breaking surface.",
+    "floating_point": "Candidate used separate multiplication and addition in the same per-cell t order, independent SIMD lanes only, no horizontal reduction, no mul_add call, and no mixed precision. Large blocked Cholesky is already tolerance-validated by scalar parity and reconstruction, not bit-identical to the scalar kernel.",
+    "rng": "N/A: Cholesky consumes no random state.",
+    "errors": "No public error path changed in candidate state; final production source was restored.",
+    "golden_sha256": "085638c4ea9849193e1f0ab1b9be7118130f6109602cf8fe0a633040f7769772"
+  },
+  "validation": [
+    {
+      "command": "RCH fixed-worker cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "result": "pass in candidate state"
+    },
+    {
+      "command": "RCH fixed-worker Criterion target and guard benches",
+      "result": "candidate regressed Cholesky1024 and was rejected"
+    },
+    {
+      "command": "git diff -- crates/fj-lax/src/linalg.rs",
+      "result": "empty after manual restore"
+    },
+    {
+      "command": "git diff --check",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_cholesky_full_schur_bsae0_pass153_2026-06-06.rejected.golden.sha256",
+      "result": "pass"
+    }
+  ],
+  "alien_source": {
+    "primitive_family": "communication-reducing dense linear algebra update",
+    "applied_slice": "Tried eliminating the full rem x rem product scratch while preserving contiguous L21^T panel reads and full Schur update coverage.",
+    "outcome": "Direct subtracting the product lost to the existing matmul_2d result-buffer path. Do not repeat direct-subtract full Schur variants without a fundamentally different panel/TRSM or factorization structure."
+  },
+  "next_primitive": {
+    "target": "Reprofile restored source and pivot to a different primitive family: eig values-only Hessenberg reduction if eig remains material, or a Cholesky panel/TRSM primitive that keeps the existing matmul_2d kernel intact.",
+    "target_ratio": ">=1.15x on the next fixed-worker top linalg row",
+    "reason": "Both pass149 lower-only SYRK and pass153 direct-subtract full Schur lost badly; the next pass must stop Schur-subtract loop variants and attack a different algorithmic structure.",
+    "proof_obligations": [
+      "fixed-worker baseline first",
+      "one lever only",
+      "ordering, tie-breaking, floating-point, and RNG isomorphism notes",
+      "golden sha256 verification",
+      "restore and record rejection if same-worker Criterion does not clear Score>=2.0"
+    ]
+  }
+}
