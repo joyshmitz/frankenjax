@@ -3960,48 +3960,31 @@ pub fn vjp(
             Ok(vec![gx, gn])
         }
         Primitive::XLogY => {
-            // xlogy(x, y) = x * log(y), with 0 * log(anything) = 0
-            // gx = where(x == 0, 0, g * log(y))
-            // gy = g * x / y (naturally 0 when x=0)
+            // xlogy(x, y) = x * log(y). gx = g * log(y), gy = g * x / y. Matches
+            // JAX's custom xlogy jvp/transpose, which does NOT mask x==0: the
+            // x-derivative is log(y) everywhere (the analytic slope of x*log(y)).
+            // The previous where(x==0, 0, g*log(y)) wrongly zeroed gx at x=0,
+            // returning 0 instead of log(y).
             let x = &inputs[0];
             let y = &inputs[1];
-            let zero = zeros_like(x);
-            let x_is_zero =
-                eval_primitive(Primitive::Eq, &[x.clone(), zero.clone()], &BTreeMap::new())
-                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             let log_y = eval_primitive(Primitive::Log, std::slice::from_ref(y), &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let g_log_y = value_mul(g, &log_y)?;
-            let gx = eval_primitive(
-                Primitive::Select,
-                &[x_is_zero, zero.clone(), g_log_y],
-                &BTreeMap::new(),
-            )
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let gx = value_mul(g, &log_y)?;
             let gy = value_mul(g, &value_div(x, y)?)?;
             Ok(vec![gx, gy])
         }
         Primitive::XLog1PY => {
-            // xlog1py(x, y) = x * log1p(y), with 0 * log1p(anything) = 0
-            // gx = where(x == 0, 0, g * log1p(y))
-            // gy = g * x / (1 + y)
+            // xlog1py(x, y) = x * log1p(y). gx = g * log1p(y), gy = g * x / (1+y).
+            // Matches JAX's custom xlog1py jvp/transpose — no x==0 mask; the
+            // x-derivative is log1p(y) everywhere. The previous where(x==0, 0, ...)
+            // wrongly zeroed gx at x=0.
             let x = &inputs[0];
             let y = &inputs[1];
-            let zero = zeros_like(x);
             let one = ones_like(y);
-            let x_is_zero =
-                eval_primitive(Primitive::Eq, &[x.clone(), zero.clone()], &BTreeMap::new())
-                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             let log1p_y =
                 eval_primitive(Primitive::Log1p, std::slice::from_ref(y), &BTreeMap::new())
                     .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let g_log1p_y = value_mul(g, &log1p_y)?;
-            let gx = eval_primitive(
-                Primitive::Select,
-                &[x_is_zero, zero.clone(), g_log1p_y],
-                &BTreeMap::new(),
-            )
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let gx = value_mul(g, &log1p_y)?;
             let one_plus_y = value_add(&one, y)?;
             let gy = value_mul(g, &value_div(x, &one_plus_y)?)?;
             Ok(vec![gx, gy])
@@ -8173,33 +8156,21 @@ fn jvp_rule(
         }
 
         Primitive::XLogY => {
-            // xlogy(x, y) = x * log(y), with 0 * log(anything) = 0
-            // d(xlogy) = dx * log(y) + x/y * dy, with special handling for x=0
-            let zeros = zeros_like(&primals[0]);
-            let x_is_zero = ep(Primitive::Eq, &[primals[0].clone(), zeros.clone()])?;
+            // d(xlogy) = dx * log(y) + (x/y) * dy. Matches JAX's custom xlogy jvp,
+            // which does NOT mask x==0 — the x-derivative is log(y) everywhere.
             let log_y = ep(Primitive::Log, &[primals[1].clone()])?;
-            let dx_log_y = ep(Primitive::Mul, &[tangents[0].clone(), log_y])?;
-            let dx_term = ep(
-                Primitive::Select,
-                &[x_is_zero.clone(), zeros.clone(), dx_log_y],
-            )?;
+            let dx_term = ep(Primitive::Mul, &[tangents[0].clone(), log_y])?;
             let x_over_y = ep(Primitive::Div, &[primals[0].clone(), primals[1].clone()])?;
             let dy_term = ep(Primitive::Mul, &[x_over_y, tangents[1].clone()])?;
             ep(Primitive::Add, &[dx_term, dy_term])
         }
 
         Primitive::XLog1PY => {
-            // xlog1py(x, y) = x * log1p(y), with 0 * log1p(anything) = 0
-            // d(xlog1py) = dx * log1p(y) + x/(1+y) * dy, with special handling for x=0
-            let zeros = zeros_like(&primals[0]);
+            // d(xlog1py) = dx * log1p(y) + x/(1+y) * dy. Matches JAX's custom
+            // xlog1py jvp — no x==0 mask; the x-derivative is log1p(y) everywhere.
             let one = scalar_constant_matching_dtype(1.0, &tangents[0]);
-            let x_is_zero = ep(Primitive::Eq, &[primals[0].clone(), zeros.clone()])?;
             let log1p_y = ep(Primitive::Log1p, &[primals[1].clone()])?;
-            let dx_log1p_y = ep(Primitive::Mul, &[tangents[0].clone(), log1p_y])?;
-            let dx_term = ep(
-                Primitive::Select,
-                &[x_is_zero.clone(), zeros.clone(), dx_log1p_y],
-            )?;
+            let dx_term = ep(Primitive::Mul, &[tangents[0].clone(), log1p_y])?;
             let one_plus_y = ep(Primitive::Add, &[one, primals[1].clone()])?;
             let x_over_1py = ep(Primitive::Div, &[primals[0].clone(), one_plus_y])?;
             let dy_term = ep(Primitive::Mul, &[x_over_1py, tangents[1].clone()])?;
@@ -10709,6 +10680,52 @@ mod tests {
             jvp_t.is_finite() && jvp_t.abs() < 1e-12,
             "JVP tangent of x^0 at 0 must be 0, got {jvp_t}"
         );
+    }
+
+    #[test]
+    fn test_xlogy_xlog1py_x_grad_at_zero_is_log_y_not_masked() {
+        // JAX's xlogy/xlog1py custom_jvp give d/dx = log(y) / log1p(y) with NO
+        // x==0 mask — the x-derivative is the analytic slope of x*log(y) (= log(y))
+        // everywhere. fj-ad wrongly select(x==0, 0, g*log(y)) zeroed the x-grad at
+        // x=0. At x=0, y=2: gx = log(2); at x=0, y=1: xlog1py d/dx = log1p(1) = ln2.
+        let params = BTreeMap::new();
+        let ln2 = 2.0_f64.ln();
+
+        let g = vjp_single(
+            Primitive::XLogY,
+            &[Value::scalar_f64(0.0), Value::scalar_f64(2.0)],
+            &Value::scalar_f64(1.0),
+            &params,
+        )
+        .unwrap();
+        assert!((g[0].as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlogy VJP gx");
+
+        let j = jvp_rule(
+            Primitive::XLogY,
+            &[Value::scalar_f64(0.0), Value::scalar_f64(2.0)],
+            &[Value::scalar_f64(1.0), Value::scalar_f64(0.0)],
+            &params,
+        )
+        .unwrap();
+        assert!((j.as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlogy JVP");
+
+        let g2 = vjp_single(
+            Primitive::XLog1PY,
+            &[Value::scalar_f64(0.0), Value::scalar_f64(1.0)],
+            &Value::scalar_f64(1.0),
+            &params,
+        )
+        .unwrap();
+        assert!((g2[0].as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlog1py VJP gx");
+
+        let j2 = jvp_rule(
+            Primitive::XLog1PY,
+            &[Value::scalar_f64(0.0), Value::scalar_f64(1.0)],
+            &[Value::scalar_f64(1.0), Value::scalar_f64(0.0)],
+            &params,
+        )
+        .unwrap();
+        assert!((j2.as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlog1py JVP");
     }
 
     #[test]
