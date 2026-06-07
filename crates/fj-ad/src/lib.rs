@@ -2901,6 +2901,16 @@ pub fn vjp(
             );
             let mut scatter_params = BTreeMap::new();
             scatter_params.insert("mode".to_owned(), "add".to_owned());
+            // Propagate the gather's out-of-bounds policy so the cotangent lands
+            // exactly where the forward read landed. Gather defaults to clip
+            // (reads dim-1 for an OOB index) while scatter defaults to
+            // fill_or_drop — without this an OOB-clipped gather would DROP its
+            // gradient instead of accumulating it at the clip target.
+            let index_mode = params
+                .get("index_mode")
+                .cloned()
+                .unwrap_or_else(|| "clip".to_owned());
+            scatter_params.insert("index_mode".to_owned(), index_mode);
             // Scatter gradient into the zero tensor at the gathered indices
             let scattered = eval_primitive(
                 Primitive::Scatter,
@@ -18717,6 +18727,71 @@ mod tests {
                     if f32::from_bits(*re) == 0.0 && f32::from_bits(*im) == 0.0
             ));
         }
+    }
+
+    #[test]
+    fn gather_vjp_accumulates_duplicate_indices() {
+        use fj_core::{DType, Literal, Primitive, Shape, TensorValue};
+        // operand[4] gathered at indices [0,0,2] -> [op0, op0, op2]. The VJP must
+        // scatter-ADD the cotangent back, so the duplicate index 0 accumulates:
+        // grad_operand = [g0+g1, 0, g2, 0]. (A scatter-overwrite would drop g0.)
+        let operand = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![4] }, vec![10.0, 20.0, 30.0, 40.0])
+                .unwrap(),
+        );
+        let indices = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![3] },
+                vec![Literal::I64(0), Literal::I64(0), Literal::I64(2)],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![3] }, vec![1.0, 2.0, 5.0]).unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".to_owned(), "1".to_owned());
+        let grads =
+            vjp_single(Primitive::Gather, &[operand, indices], &g, &params).expect("gather vjp");
+        assert_eq!(
+            tensor_f64_values(&grads[0]),
+            vec![3.0, 0.0, 5.0, 0.0],
+            "duplicate gather indices must accumulate (scatter-add)"
+        );
+    }
+
+    #[test]
+    fn gather_vjp_clipped_oob_index_accumulates_at_clip_target() {
+        use fj_core::{DType, Literal, Primitive, Shape, TensorValue};
+        // Gather defaults to clip on OOB: index 5 into operand[4] reads position 3.
+        // The VJP scatters the cotangent back; without propagating the clip mode
+        // the scatter (default fill_or_drop) DROPS index 5 and loses g[1]. Correct
+        // grad accumulates g[1] at the clip target (position 3): [1, 0, 0, 2].
+        let operand = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![4] }, vec![10.0, 20.0, 30.0, 40.0])
+                .unwrap(),
+        );
+        let indices = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2] },
+                vec![Literal::I64(0), Literal::I64(5)],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![2] }, vec![1.0, 2.0]).unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("slice_sizes".to_owned(), "1".to_owned());
+        let grads =
+            vjp_single(Primitive::Gather, &[operand, indices], &g, &params).expect("gather vjp");
+        assert_eq!(
+            tensor_f64_values(&grads[0]),
+            vec![1.0, 0.0, 0.0, 2.0],
+            "OOB-clipped gather grad must accumulate at the clip target, not drop"
+        );
     }
 
     #[test]
