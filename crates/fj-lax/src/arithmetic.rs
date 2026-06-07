@@ -3722,6 +3722,19 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         };
         let lof = f64::from_bits(lo_bits);
         let hif = f64::from_bits(hi_bits);
+        // Dense path: read the packed f64 backing and clamp straight into dense
+        // f64 storage, skipping the per-`Literal` unpack + the 24-byte
+        // `Vec<Literal>` output. Bit-identical to the per-element path below:
+        // `as_f64_slice` round-trips each `F64Bits` exactly, `clamp_f64`
+        // normalizes any-NaN to canonical NaN (so `Literal::from_f64` and the
+        // dense store agree bit-for-bit), and `new_f64_values` keeps the f64 bits.
+        if let Some(xs) = x.elements.as_f64_slice() {
+            let out: Vec<f64> = xs.iter().map(|&xv| clamp_f64(lof, xv, hif)).collect();
+            return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+                x.shape.clone(),
+                out,
+            )?)));
+        }
         let mut elements = Vec::with_capacity(x.elements.len());
         for &elem in &x.elements {
             let Literal::F64Bits(xb) = elem else {
@@ -6513,6 +6526,94 @@ mod tests {
     use super::*;
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
+
+    /// Isomorphism + golden proof for the dense `clamp(scalar_lo, tensor_x,
+    /// scalar_hi)` fast path (`jnp.clip`). Every output element must be
+    /// BIT-FOR-BIT identical to the old per-`Literal` loop; same-binary A/B
+    /// timing is printed (run with `--nocapture`).
+    #[test]
+    fn clamp_f64_scalar_bounds_dense_path_bit_identical_to_literal() {
+        use std::time::Instant;
+
+        // Mirror eval_clamp's nested clamp_f64 exactly (any-NaN -> canonical NaN).
+        fn clamp_ref(lo: f64, x: f64, hi: f64) -> f64 {
+            if lo.is_nan() || x.is_nan() || hi.is_nan() {
+                return f64::NAN;
+            }
+            let lower_bounded = if x < lo { lo } else { x };
+            if lower_bounded > hi { hi } else { lower_bounded }
+        }
+
+        let n: u32 = 1 << 20; // 1,048,576 elements
+        let lo = -1.0f64;
+        let hi = 1.0f64;
+        // Values spanning below-lo, in-range, above-hi, plus periodic NaN.
+        let xs: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 997 == 0 {
+                    f64::NAN
+                } else {
+                    (i as f64) * 1e-4 - 50.0
+                }
+            })
+            .collect();
+        let shape = Shape { dims: vec![n] };
+        let x_tensor = TensorValue::new_f64_values(shape.clone(), xs.clone()).unwrap();
+        let x = Value::Tensor(x_tensor.clone());
+        let vlo = Value::Scalar(Literal::F64Bits(lo.to_bits()));
+        let vhi = Value::Scalar(Literal::F64Bits(hi.to_bits()));
+
+        // NEW dense path.
+        let dense = eval_clamp(Primitive::Clamp, &[vlo.clone(), x.clone(), vhi.clone()]).unwrap();
+        let dense_t = dense.as_tensor().unwrap();
+
+        // OLD per-`Literal` path (the loop the dense path replaced).
+        let mut ref_elems = Vec::with_capacity(n as usize);
+        for elem in x_tensor.elements.iter().copied() {
+            let Literal::F64Bits(xb) = elem else { unreachable!() };
+            ref_elems.push(Literal::from_f64(clamp_ref(lo, f64::from_bits(xb), hi)));
+        }
+
+        // Isomorphism: bit-for-bit identical, every element.
+        let mut golden: u64 = 0xcbf29ce484222325;
+        for (k, re) in ref_elems.iter().enumerate() {
+            assert_eq!(dense_t.elements[k], *re, "clamp bit mismatch at {k}");
+            if let Literal::F64Bits(b) = dense_t.elements[k] {
+                for byte in b.to_le_bytes() {
+                    golden ^= byte as u64;
+                    golden = golden.wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+
+        let reps = 40u32;
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            let out =
+                eval_clamp(Primitive::Clamp, &[vlo.clone(), x.clone(), vhi.clone()]).unwrap();
+            std::hint::black_box(&out);
+        }
+        let dense_ns = t0.elapsed().as_nanos().max(1);
+
+        let t1 = Instant::now();
+        for _ in 0..reps {
+            let mut elements = Vec::with_capacity(n as usize);
+            for elem in x_tensor.elements.iter().copied() {
+                let Literal::F64Bits(xb) = elem else { unreachable!() };
+                elements.push(Literal::from_f64(clamp_ref(lo, f64::from_bits(xb), hi)));
+            }
+            let out = TensorValue::new(DType::F64, shape.clone(), elements).unwrap();
+            std::hint::black_box(&out);
+        }
+        let lit_ns = t1.elapsed().as_nanos().max(1);
+
+        let ratio = lit_ns as f64 / dense_ns as f64;
+        println!(
+            "[clamp f64] dense={:.3}ms literal={:.3}ms ratio={ratio:.2}x golden={golden:016x}",
+            dense_ns as f64 / reps as f64 / 1e6,
+            lit_ns as f64 / reps as f64 / 1e6,
+        );
+    }
 
     /// Isomorphism + golden proof for the dense `select(tensor_cond, scalar,
     /// scalar)` masking fast path (`jnp.where(mask, a, b)`). Every output element
