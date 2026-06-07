@@ -1,0 +1,18 @@
+frankenjax-p1vbf.36 pass156 rejected evidence
+
+target: linalg/cholesky_1024x1024_f64
+worker: ts1
+baseline_ms: [79.404, 88.914, 98.656]
+after_ms: [98.415, 102.16, 109.79]
+speedup_midpoint: 0.8704
+speedup_conservative_low_over_high: 0.8042
+score: 0.0
+decision: reject_and_restore_source
+
+proof: focused RCH cargo test -p fj-lax --lib cholesky passed 12/12 in candidate state.
+covered_tests: cholesky_2x2_identity, cholesky_2x2_spd, cholesky_3x3_spd, cholesky_f64_dense_output_matches_literal_materialization, cholesky_real_fast_path_bit_identical_to_complex_path, cholesky_roundtrip_llt, cholesky_non_square_rejected, cholesky_not_positive_definite_returns_nan, cholesky_real_fast_path_preserves_f32_dtype_and_shape, test_cholesky_rejects_scalar_input, triangular_solve_cholesky_roundtrip, cholesky_blocked_matches_scalar_and_reconstructs
+
+isomorphism_candidate: allocation-lifetime reuse only; panel order, diagonal factorization order, panel solve order, L21 row-major layout, L21T transposed layout, matmul_2d call, A22 subtract order, strict-upper zeroing, dtype/shape/errors, tie-breaking, and RNG surface were unchanged.
+
+source_restored: git diff -- crates/fj-lax/src/linalg.rs empty after rejection.
+next_primitive: stop Cholesky scratch-allocation reuse; attack a deeper algorithmic primitive such as recursive/cache-oblivious Cholesky with packed panel solve plus tolerance proof, or CA-QR/TSQR if restored-source reprofile moves QR above Cholesky.

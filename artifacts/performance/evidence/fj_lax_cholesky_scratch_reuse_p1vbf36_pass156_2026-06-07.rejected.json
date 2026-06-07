@@ -1,0 +1,84 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_cholesky_scratch_reuse_p1vbf36_pass156_2026-06-07",
+  "status": "rejected",
+  "date": "2026-06-07",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-p1vbf.36",
+  "crate": "fj-lax",
+  "target": "linalg/cholesky_1024x1024_f64",
+  "skill_pass": "repeatedly-apply-skill pass156 -> extreme-software-optimization",
+  "profile_backing": {
+    "worker": "ts1",
+    "command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pass156 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(cholesky_1024|qr_1024|lu_1024|eig_48|matmul_2d_1024|pinv_192)' --sample-size 10 --warm-up-time 1 --measurement-time 3",
+    "top_rows_ms": {
+      "cholesky_1024x1024_f64": [79.404, 88.914, 98.656],
+      "lu_1024x1024_f64": [51.378, 53.343, 55.646],
+      "qr_1024x1024_f64": [35.479, 36.111, 36.723],
+      "eig_48x48_f64": [28.769, 29.865, 31.524],
+      "matmul_2d_1024x1024x1024_f64": [17.194, 18.936, 21.024],
+      "pinv_192x192_f64": [8.9569, 9.0574, 9.1856]
+    }
+  },
+  "candidate": {
+    "lever": "reuse Cholesky L21 and L21T scratch buffers across blocked panels",
+    "description": "Moved only the allocation lifetime of the blocked Cholesky panel buffers out of the panel loop. The candidate kept the existing L21 row-major values, L21T transposed layout, matmul_2d(L21, L21T) Schur product, and A22 subtraction loop.",
+    "source_diff_retained": false,
+    "files_touched_temporarily": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "proof_test": {
+      "command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pass156-test rch exec -- cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "worker": "vmi1167313",
+      "result": "pass",
+      "details": "12 tests passed in candidate state, including cholesky_blocked_matches_scalar_and_reconstructs, cholesky_real_fast_path_bit_identical_to_complex_path, NaN/non-square behavior, and triangular_solve_cholesky_roundtrip."
+    },
+    "rebench": {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=ts1 RCH_WORKERS=ts1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pass156-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(cholesky_1024|lu_1024|qr_1024|matmul_2d_1024)' --sample-size 10 --warm-up-time 1 --measurement-time 3",
+      "worker": "ts1",
+      "time_ms": {
+        "cholesky_1024x1024_f64": [98.415, 102.16, 109.79],
+        "lu_1024x1024_f64": [101.71, 108.21, 115.91],
+        "qr_1024x1024_f64": [44.369, 45.239, 46.761],
+        "matmul_2d_1024x1024x1024_f64": [57.796, 61.887, 67.182]
+      },
+      "speedup_vs_baseline_mid": 0.8704,
+      "conservative_speedup_low_over_high": 0.8042
+    }
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 5.0,
+    "effort": 1.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "keep_threshold": 2.0,
+    "decision": "reject_and_restore_source"
+  },
+  "isomorphism_proof": {
+    "ordering": "Candidate changed allocation lifetime only. Panel loop order, diagonal block factorization, panel solve order, L21 row-major layout, L21T transposed layout, matmul_2d dimensions/call, A22 subtraction order, and final strict-upper zeroing were unchanged.",
+    "tie_breaking": "N/A: Cholesky has no pivot or comparison tie-breaking surface.",
+    "floating_point": "Candidate used the same product kernel and subtraction loop; no reassociation, no FMA forcing, no mixed precision, and no algorithmic order change.",
+    "rng": "N/A: Cholesky consumes no random state.",
+    "errors": "No public error path changed in candidate state; final production source was restored.",
+    "golden_sha256": "c79c2faee113ec843e8378d7681f85e6d2a5259650fb026d7e03cb900cf3cd40"
+  },
+  "validation": [
+    {
+      "command": "RCH focused cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "result": "pass in candidate state"
+    },
+    {
+      "command": "RCH fixed-worker Criterion target and guard benches",
+      "result": "candidate regressed Cholesky1024 and guard rows"
+    },
+    {
+      "command": "git diff -- crates/fj-lax/src/linalg.rs",
+      "result": "empty after manual restore"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_cholesky_scratch_reuse_p1vbf36_pass156_2026-06-07.rejected.golden.sha256",
+      "result": "pass"
+    }
+  ],
+  "next_primitive": "Do not retune Cholesky scratch allocation. Attack a deeper algorithmic primitive next: recursive/cache-oblivious Cholesky with packed panel solve plus tolerance proof, or CA-QR/TSQR if restored-source reprofile moves QR above Cholesky."
+}
