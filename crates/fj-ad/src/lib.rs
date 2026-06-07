@@ -8455,7 +8455,23 @@ fn jvp_rule(
             }
         }
         Primitive::Argmin | Primitive::Argmax => Ok(zeros_like(&primals[0])),
-        Primitive::Conv => ep_p(Primitive::Conv, tangents, params),
+        Primitive::Conv => {
+            // conv(L, R) is BILINEAR, so d conv = conv(dL, R) + conv(L, dR).
+            // The previous rule ran conv(dL, dR) — neither term — which zeroed
+            // the tangent whenever one input had a zero tangent (e.g. a constant
+            // kernel: jvp through conv wrt the input gave 0 instead of conv(dL,R)).
+            let dl_r = ep_p(
+                Primitive::Conv,
+                &[tangents[0].clone(), primals[1].clone()],
+                params,
+            )?;
+            let l_dr = ep_p(
+                Primitive::Conv,
+                &[primals[0].clone(), tangents[1].clone()],
+                params,
+            )?;
+            ep(Primitive::Add, &[dl_r, l_dr])
+        }
 
         // ── Control flow ──
         Primitive::Cond => {
@@ -13383,6 +13399,53 @@ mod tests {
     }
 
     // ── Conv 1D VJP tests ──────────────────────────────────────────
+
+    #[test]
+    fn conv_jvp_is_bilinear_sum_not_product_of_tangents() {
+        // conv(L,R) is BILINEAR, so d conv = conv(dL, R) + conv(L, dR). The old
+        // JVP evaluated conv(dL, dR) — neither term. With a constant kernel
+        // (dR=0) the correct tangent is conv(dL, R); conv(dL, dR) gives 0.
+        let lhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![1, 3, 1] },
+                vec![Literal::from_f64(1.0), Literal::from_f64(2.0), Literal::from_f64(3.0)],
+            )
+            .unwrap(),
+        );
+        let rhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 1, 1] },
+                vec![Literal::from_f64(0.5), Literal::from_f64(0.5)],
+            )
+            .unwrap(),
+        );
+        let dlhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![1, 3, 1] },
+                vec![Literal::from_f64(1.0), Literal::from_f64(1.0), Literal::from_f64(1.0)],
+            )
+            .unwrap(),
+        );
+        let drhs = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 1, 1] },
+                vec![Literal::from_f64(0.0), Literal::from_f64(0.0)],
+            )
+            .unwrap(),
+        );
+        let jvp = jvp_rule(Primitive::Conv, &[lhs, rhs], &[dlhs, drhs], &BTreeMap::new())
+            .expect("conv jvp");
+        // conv([1,1,1], [0.5,0.5]) = [0.5+0.5, 0.5+0.5] = [1.0, 1.0].
+        assert_eq!(
+            tensor_f64_values(&jvp),
+            vec![1.0, 1.0],
+            "conv JVP must be conv(dL,R)+conv(L,dR), not conv(dL,dR)"
+        );
+    }
 
     #[test]
     fn conv_vjp_basic_1d() {
