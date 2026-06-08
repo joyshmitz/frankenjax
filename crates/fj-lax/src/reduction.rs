@@ -1240,6 +1240,42 @@ fn eval_cumulative_dense(
         )?)));
     }
 
+    if tensor.dtype == DType::F32 {
+        let Some(src) = tensor.elements.as_f32_slice() else {
+            return Ok(None);
+        };
+        // Dense f32 cumulative: scan each line reading f32, accumulating in f64
+        // (widen INLINE per element — no buffer), storing each step's running value
+        // rounded back to f32. BIT-IDENTICAL to the generic per-`Literal` float
+        // scan (lib path: `acc = float_op(acc, as_f64()); store reduce_real_literal
+        // (F32, acc)`) — same f64 accumulator (never rounded mid-scan), same per-step
+        // `as f32` round (`new_f32_values(acc as f32)` == `from_f32(acc as f32)`),
+        // same per-line order. The scan is a sequential dependency (acc feeds the
+        // next step), so it CANNOT reassociate/vectorize — exact incl. NaN.
+        let mut out = vec![0.0f32; total];
+        for outer in 0..outer_count {
+            let base = line_base(outer);
+            let mut acc = float_init;
+            if reverse {
+                for i in (0..axis_dim).rev() {
+                    let fi = base + i * axis_stride;
+                    acc = float_op(acc, f64::from(src[fi]));
+                    out[fi] = acc as f32;
+                }
+            } else {
+                for i in 0..axis_dim {
+                    let fi = base + i * axis_stride;
+                    acc = float_op(acc, f64::from(src[fi]));
+                    out[fi] = acc as f32;
+                }
+            }
+        }
+        return Ok(Some(Value::Tensor(TensorValue::new_f32_values(
+            tensor.shape.clone(),
+            out,
+        )?)));
+    }
+
     if tensor.dtype == DType::I64 {
         let Some(src) = tensor.elements.as_i64_slice() else {
             return Ok(None);
@@ -2547,6 +2583,99 @@ mod tests {
                 assert_eq!(ints(&di), ints(&li), "i64 {prim:?} axis={axis} rev={rev}");
             }
         }
+    }
+
+    /// Dense f32 cumulative (cumsum/cumprod/cummax/cummin) must be BIT-FOR-BIT
+    /// identical to the generic per-`Literal` float scan (forced via a boxed f32
+    /// input whose `as_f32_slice` is None), across axes/forward+reverse, incl
+    /// NaN/±inf/-0.0. The scan is a sequential dependency so it can't reassociate;
+    /// the f64 accumulator + per-step `as f32` round match the generic exactly.
+    #[test]
+    fn dense_f32_cumulative_bit_identical_to_literal_path() {
+        let (rows, cols) = (3usize, 16usize);
+        let dims = vec![rows as u32, cols as u32];
+        let f: Vec<f32> = (0..rows * cols)
+            .map(|i| match i % 11 {
+                0 => 0.0,
+                1 => -1.5,
+                2 => f32::INFINITY,
+                3 => -0.0,
+                4 => f32::NEG_INFINITY,
+                5 => f32::from_bits(0x7fc0_0001),
+                _ => ((i as f32) * 0.13).sin() * 2.0 - 0.4,
+            })
+            .collect();
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, f.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                f.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(dense.as_tensor().unwrap().elements.as_f32_slice().is_some());
+        assert!(boxed.as_tensor().unwrap().elements.as_f32_slice().is_none());
+        // Sequential scan => exact bit match (no NaN canonicalization needed).
+        let f32_bits = |v: &Value| -> Vec<u32> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F32Bits(b) => *b,
+                    o => panic!("expected f32, got {o:?}"),
+                })
+                .collect()
+        };
+        for prim in [
+            Primitive::Cumsum,
+            Primitive::Cumprod,
+            Primitive::Cummax,
+            Primitive::Cummin,
+        ] {
+            for (axis, rev) in [("0", "false"), ("1", "false"), ("1", "true"), ("0", "true")] {
+                let mut p = BTreeMap::new();
+                p.insert("axis".to_owned(), axis.to_owned());
+                p.insert("reverse".to_owned(), rev.to_owned());
+                let d = crate::eval_primitive(prim, std::slice::from_ref(&dense), &p).unwrap();
+                let l = crate::eval_primitive(prim, std::slice::from_ref(&boxed), &p).unwrap();
+                assert_eq!(d.as_tensor().unwrap().dtype, DType::F32, "{prim:?} dtype");
+                assert_eq!(f32_bits(&d), f32_bits(&l), "f32 {prim:?} axis={axis} rev={rev}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_cumsum_dense_vs_generic() {
+        use std::time::Instant;
+        let (rows, cols) = (2048usize, 2048usize); // cumsum over last axis
+        let data: Vec<f32> = (0..rows * cols).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
+        let dims = vec![rows as u32, cols as u32];
+        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        let boxed = Value::Tensor(
+            TensorValue::new(DType::F32, Shape { dims: dims.clone() }, data.iter().copied().map(Literal::from_f32).collect()).unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+        let time = |input: &Value| {
+            let _ = crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(input), &p).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(input), &p).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let generic = time(&boxed);
+        let dense_t = time(&dense);
+        println!(
+            "BENCH f32 cumsum axis1 [{rows},{cols}]: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3, dense_t * 1e3, generic / dense_t
+        );
     }
 
     /// Isomorphism proof for the parallel cumulative scan: a last-axis scan large
