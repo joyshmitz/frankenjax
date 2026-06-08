@@ -184,6 +184,13 @@ fn f64xnr_from_slice(values: &[f64]) -> F64xN {
 /// replaces.
 const KC: usize = 256;
 
+/// Superpanel dimensions for the row-contiguous blocked GEMM traversal. The
+/// kernel still computes one output tile with the same ascending `l` loop, but
+/// walks adjacent NR panels for one MR row tile before moving to the next row
+/// tile, keeping C accesses row-contiguous while bounding B-panel rereads.
+const ROW_SUPERPANEL_TILES: usize = 8;
+const COL_SUPERPANEL_PANELS: usize = 8;
+
 /// Pack B's full `NR`-wide column panels into panel-major order: panel `jp`
 /// (columns `jp*NR .. jp*NR+NR`) is stored as a contiguous `[k][NR]` block at
 /// `bpack[jp*k*NR ..]`, so `bpack[jp*k*NR + l*NR + jj] == b[l*n + jp*NR + jj]`.
@@ -609,55 +616,68 @@ fn matmul_2d_blocked_row_block(
             }
         }
 
-        let mut j = 0;
-        while j < full_cols {
-            // This panel's pc-block: kc rows of NR, contiguous from the pack.
-            let panel = &bpack[(j / NR) * k * NR + pc * NR..];
-            let mut i = 0;
-            while i < full_rows {
-                let abase = (i / MR) * KC * MR;
-                // Seed accumulators from the running C (0 on the first pc-block),
-                // so the kc products continue the ascending sweep in place.
-                let mut c0 = if first {
-                    F64xN::splat(0.0)
-                } else {
-                    f64xnr_from_slice(&block[i * n + j..i * n + j + NR])
-                };
-                let mut c1 = if first {
-                    F64xN::splat(0.0)
-                } else {
-                    f64xnr_from_slice(&block[(i + 1) * n + j..(i + 1) * n + j + NR])
-                };
-                let mut c2 = if first {
-                    F64xN::splat(0.0)
-                } else {
-                    f64xnr_from_slice(&block[(i + 2) * n + j..(i + 2) * n + j + NR])
-                };
-                let mut c3 = if first {
-                    F64xN::splat(0.0)
-                } else {
-                    f64xnr_from_slice(&block[(i + 3) * n + j..(i + 3) * n + j + NR])
-                };
-                for l in 0..kc {
-                    let brow = &panel[l * NR..l * NR + NR];
-                    let bv = f64xnr_from_slice(brow);
-                    let ap = abase + l * MR;
-                    let a0 = apack[ap];
-                    let a1 = apack[ap + 1];
-                    let a2 = apack[ap + 2];
-                    let a3 = apack[ap + 3];
-                    c0 += F64xN::splat(a0) * bv;
-                    c1 += F64xN::splat(a1) * bv;
-                    c2 += F64xN::splat(a2) * bv;
-                    c3 += F64xN::splat(a3) * bv;
+        let col_panels = full_cols / NR;
+        let mut row_super = 0;
+        while row_super < row_tiles {
+            let row_super_end = (row_super + ROW_SUPERPANEL_TILES).min(row_tiles);
+            let mut col_super = 0;
+            while col_super < col_panels {
+                let col_super_end = (col_super + COL_SUPERPANEL_PANELS).min(col_panels);
+                let mut tile = row_super;
+                while tile < row_super_end {
+                    let i = tile * MR;
+                    let abase = tile * KC * MR;
+                    let mut jp = col_super;
+                    while jp < col_super_end {
+                        let j = jp * NR;
+                        // This panel's pc-block: kc rows of NR, contiguous from the pack.
+                        let panel = &bpack[jp * k * NR + pc * NR..];
+                        // Seed accumulators from the running C (0 on the first pc-block),
+                        // so the kc products continue the ascending sweep in place.
+                        let mut c0 = if first {
+                            F64xN::splat(0.0)
+                        } else {
+                            f64xnr_from_slice(&block[i * n + j..i * n + j + NR])
+                        };
+                        let mut c1 = if first {
+                            F64xN::splat(0.0)
+                        } else {
+                            f64xnr_from_slice(&block[(i + 1) * n + j..(i + 1) * n + j + NR])
+                        };
+                        let mut c2 = if first {
+                            F64xN::splat(0.0)
+                        } else {
+                            f64xnr_from_slice(&block[(i + 2) * n + j..(i + 2) * n + j + NR])
+                        };
+                        let mut c3 = if first {
+                            F64xN::splat(0.0)
+                        } else {
+                            f64xnr_from_slice(&block[(i + 3) * n + j..(i + 3) * n + j + NR])
+                        };
+                        for l in 0..kc {
+                            let brow = &panel[l * NR..l * NR + NR];
+                            let bv = f64xnr_from_slice(brow);
+                            let ap = abase + l * MR;
+                            let a0 = apack[ap];
+                            let a1 = apack[ap + 1];
+                            let a2 = apack[ap + 2];
+                            let a3 = apack[ap + 3];
+                            c0 += F64xN::splat(a0) * bv;
+                            c1 += F64xN::splat(a1) * bv;
+                            c2 += F64xN::splat(a2) * bv;
+                            c3 += F64xN::splat(a3) * bv;
+                        }
+                        block[i * n + j..i * n + j + NR].copy_from_slice(c0.as_array());
+                        block[(i + 1) * n + j..(i + 1) * n + j + NR].copy_from_slice(c1.as_array());
+                        block[(i + 2) * n + j..(i + 2) * n + j + NR].copy_from_slice(c2.as_array());
+                        block[(i + 3) * n + j..(i + 3) * n + j + NR].copy_from_slice(c3.as_array());
+                        jp += 1;
+                    }
+                    tile += 1;
                 }
-                block[i * n + j..i * n + j + NR].copy_from_slice(c0.as_array());
-                block[(i + 1) * n + j..(i + 1) * n + j + NR].copy_from_slice(c1.as_array());
-                block[(i + 2) * n + j..(i + 2) * n + j + NR].copy_from_slice(c2.as_array());
-                block[(i + 3) * n + j..(i + 3) * n + j + NR].copy_from_slice(c3.as_array());
-                i += MR;
+                col_super = col_super_end;
             }
-            j += NR;
+            row_super = row_super_end;
         }
         pc += KC;
     }

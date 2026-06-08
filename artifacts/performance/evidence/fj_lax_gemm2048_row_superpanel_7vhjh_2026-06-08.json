@@ -1,0 +1,80 @@
+{
+  "bead": "frankenjax-7vhjh",
+  "pass": 179,
+  "status": "kept",
+  "target": "linalg/matmul_2d_2048x2048x2048_f64",
+  "profile_source": {
+    "post_keep_profile": {
+      "worker": "fmd",
+      "benchmark": "linalg/matmul_2d_2048x2048x2048_f64",
+      "ms": [202.57, 206.51, 210.80],
+      "note": "Top post-p1vbf.46 fj-lax linalg profile target."
+    },
+    "matched_baseline": {
+      "worker": "vmi1293453",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1293453 RCH_WORKERS=vmi1293453 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-7vhjh-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048x2048x2048_f64' --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+      "ms": [293.20, 317.42, 349.24],
+      "outlier_note": "Criterion reported one high severe outlier; keep/reject gate uses same-worker non-overlap against the after run."
+    }
+  },
+  "lever": {
+    "name": "contiguous-row B-superpanel GEMM traversal",
+    "file": "crates/fj-lax/src/tensor_contraction.rs",
+    "one_lever": true,
+    "description": "Within each packed-k block, traverse bounded row superpanels and B column superpanels so adjacent NR outputs for one MR row tile are accumulated and stored contiguously before moving to the next row tile."
+  },
+  "after": {
+    "worker": "vmi1293453",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1293453 RCH_WORKERS=vmi1293453 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-7vhjh-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048x2048x2048_f64' --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+    "ms": [227.75, 241.84, 255.26]
+  },
+  "result": {
+    "median_speedup": 1.312521,
+    "conservative_low_over_high_speedup": 1.148633,
+    "intervals_overlap": false,
+    "score": {
+      "impact": 4.0,
+      "confidence": 4.0,
+      "effort": 1.0,
+      "impact_x_confidence_div_effort": 16.0
+    },
+    "decision": "keep"
+  },
+  "proof": {
+    "golden_output_sha256": "e3762befad86e2a81da53a8413643b658a0be2d6136d69e195770b2beba48b3a",
+    "golden_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1293453 RCH_WORKERS=vmi1293453 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-7vhjh-proof cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+    "golden_result": "10 passed, 0 failed, 1 ignored",
+    "isomorphism": [
+      "Row-major output layout is unchanged.",
+      "Thread row-block ownership and output partitioning are unchanged.",
+      "A and B packing formats are unchanged.",
+      "For each output element, accumulation still runs in ascending pc blocks and ascending l within each block; only independent output-tile visitation order changes.",
+      "Floating-point product/add order per output element is unchanged.",
+      "No ordering/tie-breaking, RNG, dtype promotion, error, or assertion surface changes."
+    ],
+    "validation": [
+      {
+        "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKERS=vmi1293453,vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-7vhjh-check cargo check -p fj-lax --all-targets",
+        "worker": "vmi1293453",
+        "result": "passed"
+      },
+      {
+        "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKERS=vmi1293453,vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-7vhjh-clippy cargo clippy -p fj-lax --all-targets -- -D warnings",
+        "worker": "vmi1149989",
+        "result": "passed"
+      },
+      {
+        "command": "rustfmt --edition 2024 --check crates/fj-lax/src/tensor_contraction.rs",
+        "result": "passed"
+      },
+      {
+        "command": "git diff --check",
+        "result": "passed"
+      },
+      {
+        "command": "ubs crates/fj-lax/src/tensor_contraction.rs",
+        "result": "exit 0; existing warning inventory reported by UBS, with fmt/clippy/check/test-build sections passing"
+      }
+    ]
+  }
+}
