@@ -396,7 +396,11 @@ fn decode_from_sidecar_records(
             symbol_data,
             kind,
         );
-        let auth = AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero());
+        // asupersync 0.3.4 made `new_verified` pub(crate); `from_parts` is the
+        // public replacement and is semantically identical here — `new_verified`
+        // set `verified = !tag.is_zero()`, so a zero tag already yielded an
+        // unverified symbol, which is exactly what `from_parts` produces.
+        let auth = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
 
         decoder
             .feed(auth)
