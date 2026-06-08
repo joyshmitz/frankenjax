@@ -1,0 +1,80 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "pass": 183,
+  "bead": "frankenjax-p1vbf.50",
+  "parent_bead": "frankenjax-p1vbf",
+  "crate": "fj-lax",
+  "status": "kept",
+  "target": "linalg/qr_1024x1024_f64",
+  "profile_backing": {
+    "source": "Created and claimed after frankenjax-p1vbf.49 rejected the GEMM two-panel microkernel. The fresh fmd linalg profile still showed QR1024 as a top non-GEMM fj-lax row and GEMM had an active micro-lever rejection streak.",
+    "pre_candidate_profile_fmd_ms": [29.954, 29.970, 30.033],
+    "confirmatory_profile_fmd_ms": [29.940, 30.995, 31.259],
+    "nearby_hot_rows_ms": {
+      "linalg/matmul_2d_2048x2048x2048_f64": [190.40, 190.42, 190.42],
+      "linalg/pinv_256x128_f64": [38.713, 39.091, 40.604],
+      "linalg/lu_1024x1024_f64": [37.140, 37.313, 38.005],
+      "linalg/qr_1024x1024_f64": [29.954, 29.970, 30.033],
+      "linalg/cholesky_1024x1024_f64": [26.551, 26.643, 27.011]
+    }
+  },
+  "lever": {
+    "kind": "packed Householder reflector arena",
+    "description": "Replace real-QR per-reflector Vec<Vec<f64>> storage and per-step reflector allocation with one packed reflector arena plus one reusable scratch vector.",
+    "alien_primitive": "arena/slab reuse for dense numerical kernel temporary storage",
+    "one_lever_scope": ["crates/fj-lax/src/linalg.rs eval_qr_real_matrix"],
+    "not_in_scope": "No blocked-WY QR, no tile-width change, no Householder arithmetic change, no dtype/fallback behavior change, no sign/phase policy change."
+  },
+  "baseline": {
+    "worker": "fmd",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf50-baseline cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_1024x1024_f64 --quick --noplot",
+    "time_ms": [29.965, 30.158, 30.930],
+    "median_ms": 30.158
+  },
+  "candidate": {
+    "worker": "fmd",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf50-after cargo bench -p fj-lax --bench lax_baseline -- linalg/qr_1024x1024_f64 --quick --noplot",
+    "time_ms": [27.273, 27.528, 27.592],
+    "median_ms": 27.528
+  },
+  "result": {
+    "speedup_median": 1.09555,
+    "speedup_conservative": 1.08600,
+    "absolute_median_saved_ms": 2.630,
+    "score": {
+      "formula": "Impact x Confidence / Effort",
+      "impact": 3.0,
+      "confidence": 0.9,
+      "effort": 1.0,
+      "value": 2.7,
+      "keep_threshold": 2.0,
+      "decision": "keep"
+    }
+  },
+  "isomorphism": {
+    "ordering": "Reflector generation order, R update order, tau storage order, Q identity initialization, Q reverse-pass order, R extraction order, and diagonal sign normalization are unchanged.",
+    "tie_breaking": "QR has no comparison or tie-breaking surface in this real path.",
+    "floating_point": "Each reflector copies the same column slice, computes norm_v, v0_abs, sign, v[0], v_norm_sq, tau, dot products, and element updates in the same order as before. The packed arena changes only reflector storage layout and allocation frequency; it does not reassociate arithmetic or request fused operations.",
+    "rng": "No RNG is present in Primitive::Qr.",
+    "golden_output_sha256": "6119fc5cf4759d8cdcd9c34d89a79de89d205203730814fc06aa52bf57ff262b",
+    "golden_artifact": "artifacts/performance/evidence/fj_lax_qr_reflector_arena_p1vbf50_pass183_2026-06-08.golden",
+    "golden_file_sha256": "23ea1476b0ba9810dc2eec0337ca4788e807d824b01023b73e168af0b9a7e57e"
+  },
+  "validation": [
+    "RCH fmd cargo test -p fj-lax --lib qr -- --nocapture: 26 passed; 0 failed; 0 ignored",
+    "RCH fmd cargo check -p fj-lax --all-targets: passed",
+    "RCH fmd cargo clippy -p fj-lax --all-targets -- -D warnings: passed",
+    "git diff --check -- crates/fj-lax/src/linalg.rs: passed",
+    "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs: nonzero due pre-existing unrelated file-wide formatting drift outside this hunk",
+    "ubs staged files: nonzero due pre-existing file-wide linalg.rs panic/unwrap/direct-index inventories; UBS embedded fmt/clippy/check/test subchecks clean"
+  ],
+  "next_route": {
+    "action": "Reprofile fj-lax after landing this keep because the QR allocation bottleneck shifted.",
+    "candidate_primitives": [
+      "blocked/recursive QR under an explicit floating-point parity contract",
+      "LU layout-copy removal or Schur update restructuring",
+      "GEMM caller output-write avoidance with full-profile confirmation"
+    ],
+    "target_ratio": ">= 1.10x for the next kept algorithmic lever"
+  }
+}

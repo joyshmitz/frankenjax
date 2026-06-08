@@ -838,11 +838,16 @@ fn eval_qr_real_matrix(
     let k = m.min(n);
 
     let mut r = a;
-    let mut v_store: Vec<Vec<f64>> = Vec::with_capacity(k);
-    let mut tau_store: Vec<f64> = Vec::with_capacity(k);
+    let mut v_scratch = vec![0.0_f64; m];
+    let mut v_store = vec![0.0_f64; qr_reflector_packed_len(m, k)];
+    let mut tau_store = vec![0.0_f64; k];
 
     for j in 0..k {
-        let mut v: Vec<f64> = (j..m).map(|i| r[i * n + j]).collect();
+        let v_len = m - j;
+        for row_offset in 0..v_len {
+            v_scratch[row_offset] = r[(j + row_offset) * n + j];
+        }
+        let v = &mut v_scratch[..v_len];
         let norm_v = v.iter().map(|x| x * x).sum::<f64>().sqrt();
 
         let v0_abs = (v[0] * v[0]).sqrt();
@@ -858,13 +863,13 @@ fn eval_qr_real_matrix(
         if v_norm_sq > f64::EPSILON * 1e4 {
             let tau = 2.0 / v_norm_sq;
 
-            apply_real_householder_columns(&mut r, n, j, j, n, &v, tau);
+            apply_real_householder_columns(&mut r, n, j, j, n, v, tau);
 
-            v_store.push(v);
-            tau_store.push(tau);
+            let v_base = qr_reflector_offset(m, j);
+            v_store[v_base..v_base + v_len].copy_from_slice(v);
+            tau_store[j] = tau;
         } else {
-            v_store.push(vec![0.0; m - j]);
-            tau_store.push(0.0);
+            tau_store[j] = 0.0;
         }
     }
 
@@ -876,12 +881,14 @@ fn eval_qr_real_matrix(
     }
 
     for j in (0..k).rev() {
-        let v = &v_store[j];
         let tau = tau_store[j];
         if (tau * tau).sqrt() < f64::EPSILON {
             continue;
         }
 
+        let v_len = m - j;
+        let v_base = qr_reflector_offset(m, j);
+        let v = &v_store[v_base..v_base + v_len];
         apply_real_householder_columns(&mut q, q_cols, j, j, q_cols, v, tau);
     }
 
@@ -916,6 +923,16 @@ fn eval_qr_real_matrix(
     let r_val = matrix_to_value(r_rows, n, &r_out, dtype)?;
 
     Ok(vec![q_val, r_val])
+}
+
+#[inline]
+fn qr_reflector_packed_len(rows: usize, reflectors: usize) -> usize {
+    reflectors * rows - (reflectors * reflectors.saturating_sub(1)) / 2
+}
+
+#[inline]
+fn qr_reflector_offset(rows: usize, reflector: usize) -> usize {
+    reflector * rows - (reflector * reflector.saturating_sub(1)) / 2
 }
 
 const QR_REFLECTOR_COL_TILE: usize = 8;
