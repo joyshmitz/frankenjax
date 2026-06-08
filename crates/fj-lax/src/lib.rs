@@ -3347,24 +3347,28 @@ fn eval_reduce_window(
 
     let padding = parse_reduce_window_padding(primitive, params)?;
 
-    // fj-lax reduce_window implements window_dimensions + window_strides + padding only.
-    // Reject the dilation params it does NOT implement (base_dilation dilates the input,
-    // window_dilation dilates the window — both used by dilated/atrous pooling) rather
-    // than silently ignore them and return a wrong (undilated) result for the same shape,
-    // a silent parity violation vs jax.lax.reduce_window. Fail loudly.
-    for key in ["base_dilation", "window_dilation"] {
-        if params
-            .get(key)
-            .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
-        {
-            return Err(EvalError::Unsupported {
-                primitive,
-                detail: format!(
-                    "reduce_window {key} is not supported (window/stride/padding only)"
-                ),
-            });
-        }
+    // window_dilation (atrous/dilated pooling) IS supported: a dilation `d` spaces the
+    // window taps `d` apart, so the window's effective extent is `(win-1)*d+1` (used for
+    // the output size and SAME padding) and tap `t` reads input `out*stride + t*d - pad`.
+    // base_dilation (input dilation) is NOT implemented — reject it loudly rather than
+    // silently return a wrong result.
+    if params
+        .get("base_dilation")
+        .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+    {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: "reduce_window base_dilation is not supported".to_owned(),
+        });
     }
+    let window_dilation = parse_reduce_window_param(primitive, params, "window_dilation", rank, 1)?;
+    let no_window_dilation = window_dilation.iter().all(|&d| d == 1);
+    // Effective (dilated) window extent per dim, for output-size + SAME-pad geometry.
+    let eff_window_dims: Vec<usize> = window_dims
+        .iter()
+        .zip(&window_dilation)
+        .map(|(&w, &d)| (w.max(1) - 1) * d + 1)
+        .collect();
 
     let output_dtype = reduce_window_output_dtype(tensor.dtype);
 
@@ -3373,7 +3377,7 @@ fn eval_reduce_window(
     let mut pad_lows: Vec<usize> = Vec::with_capacity(rank);
     for d in 0..rank {
         let input_dim = tensor.shape.dims[d] as usize;
-        let win = window_dims[d];
+        let win = eff_window_dims[d];
         let stride = strides[d];
         let (out_dim, pad_low) = match padding {
             ReduceWindowPadding::Same => {
@@ -3419,7 +3423,8 @@ fn eval_reduce_window(
         ));
     }
 
-    if tensor.dtype == fj_core::DType::F64
+    if no_window_dilation
+        && tensor.dtype == fj_core::DType::F64
         && rank == 2
         && matches!(reduce_op, "max" | "min")
         && let Some(src) = reduce_window_f64_values(tensor)
@@ -3437,7 +3442,11 @@ fn eval_reduce_window(
         );
     }
 
-    if tensor.dtype == fj_core::DType::F64 && rank == 2 && reduce_window_sum_like(reduce_op) {
+    if no_window_dilation
+        && tensor.dtype == fj_core::DType::F64
+        && rank == 2
+        && reduce_window_sum_like(reduce_op)
+    {
         return eval_reduce_window_rank2_f64_sum(
             primitive,
             tensor,
@@ -3456,7 +3465,8 @@ fn eval_reduce_window(
     // pooling — neither of which the rank-2-only F64 paths above ever reach. Falls
     // through (returns None view) for boxed/non-float input. Bit-identical to the
     // generic loop below (see eval_reduce_window_dense_float).
-    if matches!(output_dtype, fj_core::DType::F64 | fj_core::DType::F32)
+    if no_window_dilation
+        && matches!(output_dtype, fj_core::DType::F64 | fj_core::DType::F32)
         && (matches!(reduce_op, "max" | "min") || reduce_window_sum_like(reduce_op))
         && let Some(src) = reduce_window_dense_f64_view(tensor)
     {
@@ -3535,9 +3545,10 @@ fn eval_reduce_window(
             let mut flat_input_idx = 0usize;
 
             for d in (0..rank).rev() {
-                let padded_pos = out_idx[d]
-                    .checked_mul(strides[d])
-                    .and_then(|base| base.checked_add(win_idx[d]))
+                // Dilated window tap: position = out*stride + win_idx*window_dilation.
+                let padded_pos = win_idx[d]
+                    .checked_mul(window_dilation[d])
+                    .and_then(|tap| out_idx[d].checked_mul(strides[d]).map(|base| base + tap))
                     .ok_or_else(|| EvalError::Unsupported {
                         primitive,
                         detail: "reduce_window window index overflow".to_owned(),
@@ -9962,11 +9973,10 @@ mod tests {
     }
 
     #[test]
-    fn reduce_window_rejects_unimplemented_dilation() {
-        // fj-lax reduce_window does window + stride + padding only. Unsupported dilation
-        // params (base_dilation dilates the input, window_dilation dilates the window)
-        // must fail loudly — silently ignoring them would return a wrong (undilated)
-        // result for the same shape.
+    fn reduce_window_rejects_base_dilation() {
+        // window_dilation (atrous pooling) is now supported (see
+        // reduce_window_window_dilation_matches_reference). base_dilation (input
+        // dilation) is still unimplemented and must fail loudly.
         let input = Value::Tensor(
             TensorValue::new_f64_values(
                 Shape { dims: vec![4, 4] },
@@ -9974,26 +9984,71 @@ mod tests {
             )
             .unwrap(),
         );
-        for (key, val) in [
-            ("base_dilation", "2,2"),
-            ("window_dilation", "2,2"),
-            ("window_dilation", "1,2"),
-        ] {
-            let mut p = rw_params("max", "2,2", "1,1");
-            p.insert(key.to_owned(), val.to_owned());
-            let err = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p)
-                .expect_err(&format!("reduce_window must reject {key}={val}"));
-            assert!(
-                err.to_string().contains(key) && err.to_string().contains("not supported"),
-                "{key}={val}: expected an unsupported error, got {err}"
-            );
-        }
+        let mut p = rw_params("max", "2,2", "1,1");
+        p.insert("base_dilation".to_owned(), "2,2".to_owned());
+        let err = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p)
+            .expect_err("reduce_window must reject base_dilation");
+        assert!(
+            err.to_string().contains("base_dilation"),
+            "expected base_dilation error, got {err}"
+        );
         // Default (all-1) dilation still succeeds.
         let mut p = rw_params("max", "2,2", "1,1");
         p.insert("base_dilation".to_owned(), "1,1".to_owned());
         p.insert("window_dilation".to_owned(), "1,1".to_owned());
         eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p)
             .expect("reduce_window with default (all-1) dilation must still succeed");
+    }
+
+    #[test]
+    fn reduce_window_window_dilation_matches_reference() {
+        // Atrous pooling (window_dilation): window tap t reads input out*stride + t*d.
+        // VALID, bit-identical to a direct dilated f64 reference, for max and sum over a
+        // 2D input. Effective window extent (w-1)*d+1 -> out = (in - eff)/stride + 1.
+        let (h, w) = (7usize, 8usize);
+        let (wh, ww, dh, dw) = (2usize, 3usize, 3usize, 2usize);
+        let data: Vec<f64> = (0..h * w).map(|i| ((i * 7) % 13) as f64 - 5.0).collect();
+        let input = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![h as u32, w as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let (eff_h, eff_w) = ((wh - 1) * dh + 1, (ww - 1) * dw + 1);
+        let (out_h, out_w) = (h - eff_h + 1, w - eff_w + 1);
+        for op in ["max", "sum"] {
+            let mut p = rw_params_with_padding(op, &format!("{wh},{ww}"), "1,1", "VALID");
+            p.insert("window_dilation".to_owned(), format!("{dh},{dw}"));
+            let got =
+                eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p).unwrap();
+            let t = got.as_tensor().unwrap();
+            assert_eq!(
+                t.shape.dims,
+                vec![out_h as u32, out_w as u32],
+                "{op} dilated shape"
+            );
+            let got_v: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+            let mut want = Vec::new();
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let mut acc = if op == "max" { f64::NEG_INFINITY } else { 0.0 };
+                    for a in 0..wh {
+                        for b in 0..ww {
+                            let v = data[(oh + a * dh) * w + (ow + b * dw)];
+                            acc = if op == "max" { acc.max(v) } else { acc + v };
+                        }
+                    }
+                    want.push(acc);
+                }
+            }
+            assert_eq!(
+                got_v, want,
+                "{op} dilated pooling must match direct reference"
+            );
+        }
     }
 
     #[test]

@@ -2291,27 +2291,53 @@ impl SimpleTraceContext {
 
                 let padding = parse_reduce_window_padding_param(primitive, params)?;
 
-                // Reject reduce_window dilation params fj-lax does not implement
-                // (base_dilation / window_dilation) rather than infer a wrong (undilated)
-                // output shape — eval rejects them too; staging must agree.
-                for key in ["base_dilation", "window_dilation"] {
-                    if params
-                        .get(key)
-                        .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
-                    {
-                        return Err(TraceError::ShapeInferenceFailed {
-                            primitive,
-                            detail: format!(
-                                "reduce_window {key} is not supported (window/stride/padding only)"
-                            ),
-                        });
-                    }
+                // window_dilation (atrous pooling) IS supported by eval_reduce_window —
+                // infer the dilated output shape (effective window extent (w-1)*d+1).
+                // base_dilation (input dilation) is not implemented; reject it.
+                if params
+                    .get("base_dilation")
+                    .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+                {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "reduce_window base_dilation is not supported".to_owned(),
+                    });
                 }
+                let window_dilation: Vec<usize> = if let Some(s) = params.get("window_dilation") {
+                    let parsed: Result<Vec<usize>, _> = s
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|x| !x.is_empty())
+                        .map(|x| {
+                            x.parse::<usize>()
+                                .ok()
+                                .filter(|&v| v >= 1)
+                                .ok_or_else(|| format!("invalid window_dilation token: '{x}'"))
+                        })
+                        .collect();
+                    let wd = parsed.map_err(|e| TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: e,
+                    })?;
+                    match wd.len() {
+                        0 => vec![1; rank],
+                        1 => vec![wd[0]; rank],
+                        n if n == rank => wd,
+                        n => {
+                            return Err(TraceError::ShapeInferenceFailed {
+                                primitive,
+                                detail: format!("window_dilation length {n} != input rank {rank}"),
+                            });
+                        }
+                    }
+                } else {
+                    vec![1; rank]
+                };
 
                 let mut out_dims = Vec::with_capacity(rank);
                 for d in 0..rank {
                     let input_dim = input.shape.dims[d] as usize;
-                    let win = window_dims[d];
+                    let win = (window_dims[d].max(1) - 1) * window_dilation[d] + 1;
                     let stride = strides[d];
                     let out_dim = match padding {
                         ReduceWindowPadding::Same | ReduceWindowPadding::SameLower => {
