@@ -1,0 +1,11 @@
+frankenjax-z9iya pass180 fj-lax LU1024 row-tail SIMD AXPY
+target=linalg/lu_1024x1024_f64
+profile_fmd_ms=[69.262,74.074,77.519]
+baseline_fmd_ms=[35.409,35.919,36.847]
+candidate_fmd_ms=[80.317,86.318,92.638]
+median_speedup=0.416124
+conservative_speedup=0.382230
+score=0.0
+behavior=RCH LU proof passed 63 tests including blocked golden digest and real-vs-complex bit-identity; source restored because performance regressed
+isomorphism=pivot scan, swaps, diag/factor formulas, col/row/t order, per-element update sequence, trailing GEMM path, dtype/shape/error surface, and RNG absence preserved in candidate; no horizontal reductions or reassociation introduced
+decision=rejected_and_restored

@@ -1,0 +1,118 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_lu_row_axpy_simd_z9iya_pass180_2026-06-08",
+  "status": "rejected",
+  "date": "2026-06-08",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-z9iya",
+  "crate": "fj-lax",
+  "target": "linalg/lu_1024x1024_f64",
+  "skill_pass": "repeatedly-apply-skill pass180 -> extreme-software-optimization",
+  "profile_backing": {
+    "worker": "fmd",
+    "source": "current-main RCH criterion linalg profile after frankenjax-sn7f2 closeout",
+    "top_rows": [
+      {
+        "name": "linalg/matmul_2d_2048x2048x2048_f64",
+        "time_ms": [402.6, 427.31, 450.34],
+        "note": "Top row, but direct GEMM remains blocked by the exact-order floating-point contract."
+      },
+      {
+        "name": "linalg/lu_1024x1024_f64",
+        "time_ms": [69.262, 74.074, 77.519],
+        "route": "top shippable non-GEMM row"
+      },
+      {
+        "name": "linalg/pinv_256x128_f64",
+        "time_ms": [64.235, 65.006, 65.767]
+      },
+      {
+        "name": "linalg/cholesky_1024x1024_f64",
+        "time_ms": [61.231, 64.679, 69.867]
+      }
+    ]
+  },
+  "focused_baseline": {
+    "worker": "fmd",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-z9iya-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/lu_1024x1024_f64' --sample-size 20 --warm-up-time 2 --measurement-time 8 --noplot",
+    "time_ms": {
+      "lu_1024x1024_f64": [35.409, 35.919, 36.847]
+    }
+  },
+  "candidate": {
+    "lever": "std::simd lane-wise row-tail AXPY for real LU panel and triangular-solve updates",
+    "description": "Added an 8-lane helper for row[j] -= factor * pivot[j] and used it in lu_factor_real_scalar, blocked-panel rank-1 updates, and the blocked U12 forward solve.",
+    "source_diff_retained": false,
+    "files_touched_temporarily": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "rebench": {
+      "worker": "fmd",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-z9iya-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/lu_1024x1024_f64' --sample-size 20 --warm-up-time 2 --measurement-time 8 --noplot",
+      "time_ms": {
+        "lu_1024x1024_f64": [80.317, 86.318, 92.638]
+      },
+      "median_speedup": 0.416124,
+      "conservative_speedup_low_over_high": 0.38223
+    },
+    "proof_result": {
+      "status": "passed_before_performance_rejection",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-z9iya-proof cargo test -p fj-lax --lib lu -- --nocapture",
+      "details": "63 passed, 1123 filtered; includes lu_blocked_path_golden_output_digest, lu_blocked_path_reconstructs_and_matches_scalar, and lu_real_fast_path_bit_identical_to_complex_zero_imag_path."
+    }
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 5.0,
+    "effort": 1.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "keep_threshold": 2.0,
+    "decision": "reject_and_restore_source"
+  },
+  "isomorphism_proof": {
+    "ordering": "Candidate preserved pivot scan, row swaps, column/row/t loop order, and the per-element update sequence for each LU output.",
+    "tie_breaking": "Pivot tie behavior was unchanged because the pivot metric and comparison stayed scalar and unchanged.",
+    "floating_point": "Candidate only processed independent columns in SIMD lanes for the same scalar row[j] -= factor * pivot[j] operation; no horizontal reduction, mixed precision, or reassociation was introduced.",
+    "rng": "N/A: LU consumes no random state.",
+    "errors": "No public dtype, shape, or error surface changed in candidate state; final production source was restored.",
+    "golden_sha256": "4b13f48be4eaf96f7d848e827aacf36027f464b0e6c8876933798141beacc47b"
+  },
+  "validation": [
+    {
+      "command": "git diff -- crates/fj-lax/src/linalg.rs",
+      "result": "empty after source restore"
+    },
+    {
+      "command": "git diff --check -- crates/fj-lax/src/linalg.rs artifacts/performance/evidence/fj_lax_lu_row_axpy_simd_z9iya_pass180_2026-06-08.rejected.golden",
+      "result": "pass"
+    },
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs",
+      "result": "pre_existing_unrelated_formatting_drift",
+      "details": "rustfmt would reflow existing Cholesky/eig/complex-test regions outside the LU diff; file was not broad-formatted to avoid unrelated churn."
+    },
+    {
+      "command": "sha256sum artifacts/performance/evidence/fj_lax_lu_row_axpy_simd_z9iya_pass180_2026-06-08.rejected.golden",
+      "result": "4b13f48be4eaf96f7d848e827aacf36027f464b0e6c8876933798141beacc47b"
+    }
+  ],
+  "alien_source": {
+    "primary_sources": [
+      "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md",
+      "/data/projects/alien_cs_graveyard/high_level_summary_of_frankensuite_planned_and_implemented_features_and_concepts.md"
+    ],
+    "primitive_family": "safe portable-SIMD dense row update",
+    "applied_slice": "Tried lane-wise AXPY for LU panel and triangular-solve row tails."
+  },
+  "next_primitive": {
+    "target": "reprofile current main and avoid LU row-tail SIMD AXPY; choose a materially different LU/GEMM primitive such as layout-copy removal or direct subtract-into Schur update",
+    "reason": "The lane-wise helper increased overhead enough to regress LU1024 despite proof passing.",
+    "target_ratio": ">=2.0 score gate with same-worker RCH A/B and unchanged golden sha256",
+    "proof_obligations": [
+      "observable output order unchanged",
+      "floating-point operation order unchanged unless a separate behavior-contract bead admits tolerance",
+      "no RNG, tie-breaking, dtype/shape/error change",
+      "golden sha256 passes before close"
+    ]
+  }
+}
