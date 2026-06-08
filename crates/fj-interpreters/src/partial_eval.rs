@@ -621,6 +621,17 @@ fn infer_equation_output_avals(
 ) -> Result<Vec<AbstractValue>, PartialEvalError> {
     use fj_core::Primitive::*;
 
+    // AUTHORITATIVE PATH: delegate to fj-trace's `infer_output_avals` — the SAME
+    // inference tracing uses — for EVERY op, so staging and tracing agree by
+    // construction (no more two-layers drift). fj-trace is exhaustive over
+    // Primitive and returns the correct output count for multi-output ops too.
+    // The local arms below are now only a best-effort FALLBACK for residuals
+    // fj-trace validates and REJECTS (it is stricter than the lenient staging
+    // path, which must never fail). Covers BroadcastedIota (0 inputs) as well.
+    if let Some(avals) = delegate_infer_to_trace(eqn, input_avals) {
+        return Ok(avals);
+    }
+
     // BroadcastedIota takes NO inputs, so it must be typed before the
     // first-input guard below (which would otherwise return an empty aval list).
     if eqn.primitive == BroadcastedIota {
@@ -646,22 +657,6 @@ fn infer_equation_output_avals(
         // contracting/batch dimension_numbers params), so it likewise needs the
         // multi-input path. The catch-all typed a residual matmul as the LHS.
         DotGeneral => Ok(vec![infer_dot_general_aval(eqn, input_avals); eqn.outputs.len()]),
-        // Gather/Conv/ReduceWindow have output geometry that depends on the
-        // dimension_numbers / window params (and, for Gather/Conv, on a second
-        // operand) — too involved to re-derive here without drifting from the
-        // eval. Delegate to fj-trace's `infer_output_avals`, the SAME authoritative
-        // inference tracing uses, so staging and tracing agree by construction.
-        // On Err (params fj-trace validates and rejects) fall back to the local
-        // best-effort path, which never fails (staging must not panic/error).
-        Gather | Conv | ReduceWindow => {
-            match delegate_infer_to_trace(eqn, input_avals) {
-                Some(avals) => Ok(avals),
-                None => {
-                    let out_aval = infer_equation_output_aval(eqn, first_input)?;
-                    Ok(vec![out_aval; eqn.outputs.len()])
-                }
-            }
-        }
         _ => {
             let out_aval = infer_equation_output_aval(eqn, first_input)?;
             Ok(vec![out_aval; eqn.outputs.len()])
