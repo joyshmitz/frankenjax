@@ -3124,6 +3124,192 @@ fn eval_reduce_window_rank2_f64_max_min(
     ))
 }
 
+/// Borrow a dense `f64` view of a reduce_window input for the dense float fast
+/// path: F64 storage is borrowed directly; dense-F32 storage is widened once to an
+/// owned `Vec<f64>` (exact, lossless — the same `as_f64()` the generic loop applies
+/// per tap, but hoisted out of the O(output·window) tap loop). Returns `None` for
+/// boxed/non-float storage so the caller falls back to the generic per-`Literal`
+/// loop.
+fn reduce_window_dense_f64_view(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
+    match tensor.dtype {
+        fj_core::DType::F64 => tensor.elements.as_f64_slice().map(Cow::Borrowed),
+        fj_core::DType::F32 => tensor
+            .elements
+            .as_f32_slice()
+            .map(|s| Cow::Owned(s.iter().map(|&v| f64::from(v)).collect())),
+        _ => None,
+    }
+}
+
+/// Dense float reduce_window (any rank, sum/max/min, F64 or dense-F32 input).
+///
+/// The F64-accumulator float case of the generic loop, specialized for a dense
+/// source: the per-tap `Literal` gather + string-dispatched accumulate is replaced
+/// by a direct `f64` read and a single op selected ONCE. For each output position
+/// the window is classified interior (all taps in bounds) vs border; the interior
+/// runs a tight loop over a precomputed flat tap-offset stencil (no per-tap bounds
+/// check — vectorizes for sum), the border keeps the per-tap bounds check with
+/// OOB taps contributing the init value, exactly as the generic loop does.
+///
+/// BIT-FOR-BIT identical to the generic per-`Literal` loop: same row-major tap
+/// order, same `f64` init (max=-inf/min=+inf/sum=0), same `jax_max_f64`/`jax_min_f64`/
+/// `+=` ops, same OOB→init contribution, and the same final round
+/// (`new_f64_values` == `from_f64`, `new_f32_values(v as f32)` == `from_f32(v as f32)`
+/// == `reduce_window_literal_from_f64`).
+#[allow(clippy::too_many_arguments)]
+fn eval_reduce_window_dense_float(
+    output_dtype: fj_core::DType,
+    reduce_op: &str,
+    src: &[f64],
+    window_dims: &[usize],
+    strides: &[usize],
+    out_dims: &[u32],
+    pad_lows: &[usize],
+    input_dims: &[usize],
+    input_strides: &[usize],
+    total_output: usize,
+) -> Result<Value, EvalError> {
+    let rank = window_dims.len();
+    let win_total: usize = window_dims.iter().product();
+
+    // Precompute, in row-major window order (last dim fastest — matching the
+    // generic odometer), each tap's per-dim coord and its flat offset from the
+    // window's input top-left corner.
+    let mut tap_coord = vec![0usize; rank];
+    let mut tap_offsets: Vec<usize> = Vec::with_capacity(win_total);
+    let mut tap_coords: Vec<Vec<usize>> = Vec::with_capacity(win_total);
+    for _ in 0..win_total {
+        let mut off = 0usize;
+        for d in 0..rank {
+            off += tap_coord[d] * input_strides[d];
+        }
+        tap_offsets.push(off);
+        tap_coords.push(tap_coord.clone());
+        let mut carry = true;
+        for d in (0..rank).rev() {
+            if carry {
+                tap_coord[d] += 1;
+                if tap_coord[d] >= window_dims[d] {
+                    tap_coord[d] = 0;
+                } else {
+                    carry = false;
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Op {
+        Sum,
+        Max,
+        Min,
+    }
+    let op = match reduce_op {
+        "max" => Op::Max,
+        "min" => Op::Min,
+        _ => Op::Sum,
+    };
+    let init = match op {
+        Op::Max => f64::NEG_INFINITY,
+        Op::Min => f64::INFINITY,
+        Op::Sum => 0.0,
+    };
+
+    let out_dims_usize: Vec<usize> = out_dims.iter().map(|&d| d as usize).collect();
+    let mut out_idx = vec![0usize; rank];
+    let mut values: Vec<f64> = Vec::with_capacity(total_output);
+
+    for _ in 0..total_output {
+        // Window's input top-left corner per dim (may be negative under padding).
+        // Interior iff every tap lands in bounds: corner >= 0 and
+        // corner + (win-1) < input_dim for all dims.
+        let mut interior = true;
+        let mut base: isize = 0;
+        for d in 0..rank {
+            let corner = out_idx[d] as isize * strides[d] as isize - pad_lows[d] as isize;
+            if corner < 0 || corner + (window_dims[d] as isize - 1) >= input_dims[d] as isize {
+                interior = false;
+                break;
+            }
+            base += corner * input_strides[d] as isize;
+        }
+
+        let mut acc = init;
+        if interior {
+            let base = base as usize;
+            match op {
+                Op::Sum => {
+                    for &off in &tap_offsets {
+                        acc += src[base + off];
+                    }
+                }
+                Op::Max => {
+                    for &off in &tap_offsets {
+                        acc = jax_max_f64(acc, src[base + off]);
+                    }
+                }
+                Op::Min => {
+                    for &off in &tap_offsets {
+                        acc = jax_min_f64(acc, src[base + off]);
+                    }
+                }
+            }
+        } else {
+            for coords in &tap_coords {
+                let mut in_bounds = true;
+                let mut flat = 0usize;
+                for d in (0..rank).rev() {
+                    let padded = out_idx[d] * strides[d] + coords[d];
+                    if padded < pad_lows[d] {
+                        in_bounds = false;
+                        break;
+                    }
+                    let ip = padded - pad_lows[d];
+                    if ip >= input_dims[d] {
+                        in_bounds = false;
+                        break;
+                    }
+                    flat += ip * input_strides[d];
+                }
+                let tap = if in_bounds { src[flat] } else { init };
+                match op {
+                    Op::Sum => acc += tap,
+                    Op::Max => acc = jax_max_f64(acc, tap),
+                    Op::Min => acc = jax_min_f64(acc, tap),
+                }
+            }
+        }
+        values.push(acc);
+
+        let mut carry = true;
+        for d in (0..rank).rev() {
+            if carry {
+                out_idx[d] += 1;
+                if out_idx[d] >= out_dims_usize[d] {
+                    out_idx[d] = 0;
+                } else {
+                    carry = false;
+                }
+            }
+        }
+    }
+
+    let shape = Shape {
+        dims: out_dims.to_vec(),
+    };
+    match output_dtype {
+        fj_core::DType::F32 => {
+            let f32_values: Vec<f32> = values.iter().map(|&v| v as f32).collect();
+            Ok(Value::Tensor(
+                TensorValue::new_f32_values(shape, f32_values).map_err(EvalError::from)?,
+            ))
+        }
+        _ => Ok(Value::Tensor(
+            TensorValue::new_f64_values(shape, values).map_err(EvalError::from)?,
+        )),
+    }
+}
+
 /// Evaluate ReduceWindow: apply a reduction over sliding windows of a tensor.
 ///
 /// inputs: [tensor]
@@ -3260,6 +3446,40 @@ fn eval_reduce_window(
             &strides,
             &out_dims,
             &pad_lows,
+            total_output,
+        );
+    }
+
+    // Dense float fast path (ANY rank, sum/max/min): the F64-accumulator float case
+    // for F64 or dense-F32 input. Replaces the generic per-`Literal` gather +
+    // string-dispatched accumulate with a dense `f64` read and a hoisted op, plus an
+    // interior tap-offset stencil. Covers real 2D pooling (rank-4 NHWC) and ALL f32
+    // pooling — neither of which the rank-2-only F64 paths above ever reach. Falls
+    // through (returns None view) for boxed/non-float input. Bit-identical to the
+    // generic loop below (see eval_reduce_window_dense_float).
+    if matches!(output_dtype, fj_core::DType::F64 | fj_core::DType::F32)
+        && (matches!(reduce_op, "max" | "min") || reduce_window_sum_like(reduce_op))
+        && let Some(src) = reduce_window_dense_f64_view(tensor)
+    {
+        let input_dims: Vec<usize> = tensor.shape.dims.iter().map(|d| *d as usize).collect();
+        let mut input_strides = vec![1usize; rank];
+        let mut stride_mult = 1usize;
+        for d in (0..rank).rev() {
+            input_strides[d] = stride_mult;
+            stride_mult = stride_mult.checked_mul(input_dims[d]).ok_or_else(|| {
+                reduce_window_unsupported(primitive, "reduce_window stride multiplier overflow")
+            })?;
+        }
+        return eval_reduce_window_dense_float(
+            output_dtype,
+            reduce_op,
+            src.as_ref(),
+            &window_dims,
+            &strides,
+            &out_dims,
+            &pad_lows,
+            &input_dims,
+            &input_strides,
             total_output,
         );
     }
@@ -10127,6 +10347,133 @@ mod tests {
                 assert_eq!(bits(&l), reference, "{op} {win:?} {stride:?} {pad} literal");
             }
         }
+    }
+
+    /// Real 2D pooling on rank-4 NHWC (and all f32 pooling) routes through the new
+    /// dense float path — neither is reached by the rank-2-only F64 paths. It must
+    /// be BIT-FOR-BIT identical to the generic per-`Literal` loop (forced via a
+    /// boxed input whose `as_*_slice` is None), across max/min/sum, f64 AND f32,
+    /// SAME (border-heavy) + VALID padding, incl NaN/±inf/-0.0.
+    #[test]
+    fn dense_reduce_window_rank4_pooling_matches_generic() {
+        let (n, h, w, c) = (2usize, 7usize, 9usize, 3usize);
+        let total = n * h * w * c;
+        let data64: Vec<f64> = (0..total)
+            .map(|i| match i % 13 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                _ => ((i as f64) * 0.19).sin() * 8.0 - (i as f64) * 0.1,
+            })
+            .collect();
+        let dims = vec![n as u32, h as u32, w as u32, c as u32];
+        let dense64 = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, data64.clone()).unwrap(),
+        );
+        let boxed64 = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: dims.clone() },
+                data64.iter().copied().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(dense64.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        assert!(boxed64.as_tensor().unwrap().elements.as_f64_slice().is_none());
+        let data32: Vec<f32> = data64.iter().map(|&v| v as f32).collect();
+        let dense32 = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data32.clone()).unwrap(),
+        );
+        let boxed32 = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data32.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(dense32.as_tensor().unwrap().elements.as_f32_slice().is_some());
+        assert!(boxed32.as_tensor().unwrap().elements.as_f32_slice().is_none());
+        // Canonicalize NaN: `inf + (-inf)` (and friends) produces a NaN whose SIGN
+        // BIT is IEEE-754-unspecified and differs between two valid summation orders
+        // (the dense tight loop vs the generic per-Literal fold) — not a parity
+        // concern (JAX/XLA don't specify it either, and reduce_window has no golden
+        // digests). Map every NaN to one pattern before comparing, matching the
+        // project's conv/const-fold NaN-bit-test precedent.
+        let bits64 = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| {
+                    let f = l.as_f64().unwrap();
+                    if f.is_nan() { 0x7ff8_0000_0000_0000 } else { f.to_bits() }
+                })
+                .collect()
+        };
+        let bits32 = |v: &Value| -> Vec<u32> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F32Bits(b) => {
+                        if f32::from_bits(*b).is_nan() { 0x7fc0_0000 } else { *b }
+                    }
+                    o => panic!("expected f32, got {o:?}"),
+                })
+                .collect()
+        };
+        for op in ["max", "min", "sum"] {
+            for (win, stride, pad) in [
+                ("1,3,3,1", "1,1,1,1", "SAME"),  // border-heavy (exercises border path)
+                ("1,2,2,1", "1,2,2,1", "VALID"), // standard 2x2 stride-2 pool
+                ("1,2,3,1", "1,1,1,1", "VALID"), // asymmetric window
+            ] {
+                let p = rw_params_with_padding(op, win, stride, pad);
+                let d64 = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense64), &p).unwrap();
+                let l64 = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&boxed64), &p).unwrap();
+                assert_eq!(d64.as_tensor().unwrap().shape.dims, l64.as_tensor().unwrap().shape.dims, "f64 {op} {win} {pad} shape");
+                assert_eq!(bits64(&d64), bits64(&l64), "f64 {op} {win} {stride} {pad}");
+                assert!(d64.as_tensor().unwrap().elements.as_f64_slice().is_some(), "f64 output must be dense");
+                let d32 = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense32), &p).unwrap();
+                let l32 = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&boxed32), &p).unwrap();
+                assert_eq!(bits32(&d32), bits32(&l32), "f32 {op} {win} {stride} {pad}");
+                assert!(d32.as_tensor().unwrap().elements.as_f32_slice().is_some(), "f32 output must be dense");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_maxpool_dense_vs_generic() {
+        use std::time::Instant;
+        let (n, h, w, c) = (16usize, 64usize, 64usize, 32usize); // [16,64,64,32] -> 2x2 s2 pool
+        let total = n * h * w * c;
+        let data: Vec<f32> = (0..total).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
+        let dims = vec![n as u32, h as u32, w as u32, c as u32];
+        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        let boxed = Value::Tensor(
+            TensorValue::new(DType::F32, Shape { dims: dims.clone() }, data.iter().copied().map(Literal::from_f32).collect()).unwrap(),
+        );
+        let p = rw_params_with_padding("max", "1,2,2,1", "1,2,2,1", "VALID");
+        let time = |input: &Value| {
+            let _ = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(input), &p).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(input), &p).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let generic = time(&boxed);
+        let dense_t = time(&dense);
+        println!(
+            "BENCH f32 maxpool [{n},{h},{w},{c}] 2x2 s2: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3, dense_t * 1e3, generic / dense_t
+        );
     }
 
     #[test]
