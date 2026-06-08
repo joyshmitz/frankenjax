@@ -1,0 +1,77 @@
+{
+  "bead": "frankenjax-g5u6u",
+  "pass": 177,
+  "date": "2026-06-08",
+  "crate": "fj-lax",
+  "target": "eval/one_hot_2048x512_f64",
+  "lever_summary": "F64 OneHot now returns the mostly-off tensor as LiteralBuffer::from_repeated_with_patches(vec![off], total, patches), using the same patch index calculation as the dense fill+scatter path. This avoids filling and storing the 1,048,576-element F64 output on construction while preserving materialized public literal order and bits.",
+  "alien_graveyard": {
+    "primitive": "sparse/lazy materialized tensor representation for a structurally sparse dense logical output",
+    "mapping": "OneHot is a repeated off-value tensor with one sparse on-value patch per valid input index. The lever changes representation only, not the logical dense tensor."
+  },
+  "baseline": {
+    "worker": "vmi1153651",
+    "command": "RUSTFLAGS='-D warnings' rch exec -- cargo bench -p fj-lax --bench lax_baseline one_hot_2048x512_f64 -- --warm-up-time 1 --measurement-time 3 --sample-size 10",
+    "ci_us": [579.48, 597.99, 614.23]
+  },
+  "candidate": {
+    "worker": "vmi1153651",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1153651 RUSTFLAGS='-D warnings' rch exec -- cargo bench -p fj-lax --bench lax_baseline one_hot_2048x512_f64 -- --warm-up-time 1 --measurement-time 3 --sample-size 10",
+    "ci_us": [25.052, 26.095, 26.956]
+  },
+  "results": {
+    "speedup_midpoint_x": 22.9159,
+    "speedup_conservative_x": 21.4973
+  },
+  "score": {
+    "impact": 5.0,
+    "confidence": 5.0,
+    "effort": 1.0,
+    "impact_times_confidence_over_effort": 25.0,
+    "kept": true
+  },
+  "change": {
+    "files": ["crates/fj-lax/src/tensor_ops.rs"],
+    "lever": "Route DType::F64 eval_one_hot through one_hot_repeated_patch_buffer and TensorValue::new_with_literal_buffer. Other dtypes keep their existing dense or literal fill+scatter paths."
+  },
+  "isomorphism": {
+    "ordering": "unchanged: patch generation enumerates input flat indices in the same order as one_hot_scatter and uses the same input-stride to output-stride mapping; LiteralBuffer materialization is row-major over the same total length.",
+    "tie_breaking": "not applicable for one_hot; if duplicate patches were ever produced, LiteralBuffer materializes patches in vector order with last write winning, matching dense assignment order.",
+    "floating_point": "no arithmetic added; on/off are exactly literal_for(on_value/off_value), preserving F64 bits including -0.0 and infinity in the golden.",
+    "rng": "not applicable",
+    "errors": "num_classes parse, dtype parse, axis validation, element-count overflow, input integer validation, and TensorValue element-count checks are unchanged.",
+    "storage_contract": "F64 OneHot output is no longer as_f64_slice-dense; public materialized literals, dtype, shape, serde, iteration, and indexing remain equivalent."
+  },
+  "validation": [
+    {
+      "name": "focused_one_hot_repeated_patches",
+      "command": "RUSTFLAGS='-D warnings' rch exec -- cargo test -p fj-lax --lib one_hot_f64_repeated_patches_materialize_like_dense_scatter -- --nocapture",
+      "result": "passed on vmi1293453: 1 passed; final rerun after clippy-gate hygiene also passed on vmi1293453"
+    },
+    {
+      "name": "golden_sha256",
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_one_hot_repeated_patches_g5u6u_pass177_2026-06-08.golden.sha256",
+      "result": "passed locally; golden sha256 170fda3787441a07736677f824d2d825854df0b9aed532244a90606e299c72b4"
+    },
+    {
+      "name": "crate_check",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- cargo check -p fj-lax --all-targets",
+      "result": "passed on vmi1149989"
+    },
+    {
+      "name": "crate_clippy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "passed on vmi1152480"
+    },
+    {
+      "name": "fmt_and_whitespace",
+      "command": "cargo fmt --check --package fj-lax && git diff --check -- crates/fj-lax/src/tensor_ops.rs crates/fj-lax/src/arithmetic.rs crates/fj-lax/src/reduction.rs",
+      "result": "passed locally"
+    },
+    {
+      "name": "ubs_changed_files",
+      "command": "ubs crates/fj-lax/src/tensor_ops.rs crates/fj-lax/src/arithmetic.rs crates/fj-lax/src/reduction.rs artifacts/performance/evidence/fj_lax_one_hot_repeated_patches_g5u6u_pass177_2026-06-08.golden artifacts/performance/evidence/fj_lax_one_hot_repeated_patches_g5u6u_pass177_2026-06-08.golden.sha256 artifacts/performance/evidence/fj_lax_one_hot_repeated_patches_g5u6u_pass177_2026-06-08.json",
+      "result": "completed with nonzero exit from broad pre-existing inventory; UBS reported no unsafe blocks and its fmt/clippy/check/test-build sections were clean"
+    }
+  ]
+}

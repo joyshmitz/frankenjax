@@ -4280,11 +4280,12 @@ pub(crate) fn eval_one_hot(
         .collect();
 
     let tensor = match dtype {
-        DType::F64 => TensorValue::new_f64_values(
-            Shape { dims: out_dims },
-            one_hot_scatter(
-                on_value,
-                off_value,
+        DType::F64 => {
+            let on = literal_for(on_value);
+            let off = literal_for(off_value);
+            if let Some(elements) = one_hot_repeated_patch_buffer(
+                on,
+                off,
                 total,
                 &indices,
                 nc,
@@ -4292,8 +4293,25 @@ pub(crate) fn eval_one_hot(
                 &input_strides,
                 &in_to_out_stride,
                 class_stride,
-            ),
-        ),
+            ) {
+                TensorValue::new_with_literal_buffer(DType::F64, Shape { dims: out_dims }, elements)
+            } else {
+                TensorValue::new_f64_values(
+                    Shape { dims: out_dims },
+                    one_hot_scatter(
+                        on_value,
+                        off_value,
+                        total,
+                        &indices,
+                        nc,
+                        input_rank,
+                        &input_strides,
+                        &in_to_out_stride,
+                        class_stride,
+                    ),
+                )
+            }
+        }
         DType::I64 => TensorValue::new_i64_values(
             Shape { dims: out_dims },
             one_hot_scatter(
@@ -4419,6 +4437,36 @@ fn one_hot_scatter<T: Copy>(
         out[out_base + idx as usize * class_stride] = on;
     }
     out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn one_hot_repeated_patch_buffer(
+    on: Literal,
+    off: Literal,
+    total: usize,
+    indices: &[i64],
+    nc: usize,
+    input_rank: usize,
+    input_strides: &[usize],
+    in_to_out_stride: &[usize],
+    class_stride: usize,
+) -> Option<LiteralBuffer> {
+    let mut patches = Vec::with_capacity(indices.len());
+    for (i, &idx) in indices.iter().enumerate() {
+        if idx < 0 || idx as usize >= nc {
+            continue;
+        }
+        let mut rem = i;
+        let mut out_base = 0_usize;
+        for j in 0..input_rank {
+            let c = rem / input_strides[j];
+            rem %= input_strides[j];
+            out_base += c * in_to_out_stride[j];
+        }
+        patches.push((out_base + idx as usize * class_stride, on));
+    }
+
+    LiteralBuffer::from_repeated_with_patches(vec![off], total, patches)
 }
 
 /// Sort: sort elements along a specified axis (default: last axis).
@@ -8513,7 +8561,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let start = vec![
+        let start = [
             Value::Scalar(Literal::I64(2000)),
             Value::Scalar(Literal::I64(0)),
         ];
@@ -10154,6 +10202,53 @@ mod tests {
             .collect();
         let expected32: Vec<i64> = expected.iter().map(|&v| v as i64).collect();
         assert_eq!(vals32, expected32, "one_hot i32 fill+scatter vs reference");
+    }
+
+    #[test]
+    fn one_hot_f64_repeated_patches_materialize_like_dense_scatter() {
+        let in_rows = 2usize;
+        let in_cols = 3usize;
+        let idata = [0_i64, 2, -1, 1, 5, 3];
+        let indices = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![in_rows as u32, in_cols as u32],
+                },
+                idata.to_vec(),
+            )
+            .unwrap(),
+        );
+        let p = params(&[
+            ("num_classes", "4"),
+            ("axis", "1"),
+            ("dtype", "f64"),
+            ("on_value", "1.5"),
+            ("off_value", "-0.0"),
+        ]);
+        let out = eval_one_hot(std::slice::from_ref(&indices), &p).unwrap();
+        let tensor = out.as_tensor().unwrap();
+        assert_eq!(
+            tensor.shape.dims,
+            vec![in_rows as u32, 4_u32, in_cols as u32]
+        );
+        assert_eq!(tensor.dtype, DType::F64);
+        assert!(
+            tensor.elements.as_f64_slice().is_none(),
+            "F64 one_hot should stay compressed until materialized"
+        );
+
+        let got: Vec<u64> = tensor
+            .elements
+            .iter()
+            .map(|literal| literal.as_f64().unwrap().to_bits())
+            .collect();
+        let on = 1.5_f64.to_bits();
+        let off = (-0.0_f64).to_bits();
+        let expected = vec![
+            on, off, off, off, off, off, off, on, off, off, off, off, off, off, off, on, off, off,
+            off, off, off, off, off, on,
+        ];
+        assert_eq!(got, expected);
     }
 
     // ── Scatter ──
