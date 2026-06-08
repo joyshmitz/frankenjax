@@ -1806,6 +1806,24 @@ fn broadcast_binary_tensors(
         return Ok(value);
     }
 
+    // F32⊗F32 dense broadcast fast path: mirrors the F64 one (gather f32, compute
+    // in f64, round to f32) — bit-identical to the generic per-Literal f32 path.
+    if lhs.dtype == DType::F32
+        && rhs.dtype == DType::F32
+        && let Some(value) = broadcast_binary_f32(
+            lhs,
+            rhs,
+            &out_shape,
+            out_count,
+            &out_strides,
+            &lhs_strides,
+            &rhs_strides,
+            float_op,
+        )?
+    {
+        return Ok(value);
+    }
+
     // I64⊗I64 dense broadcast fast path: for I64 operands binary_literal_op
     // returns Literal::I64(int_op(a, b)) and promote_dtype(I64, I64) == I64, so
     // a dense int_op fold over the broadcast-gathered i64 values is identical.
@@ -2121,6 +2139,112 @@ fn broadcast_binary_f64(
         DType::F64,
         out_shape.clone(),
         elements,
+    )?)))
+}
+
+/// Dense-f32 broadcast binary fast path — the f32 sibling of
+/// [`broadcast_binary_f64`]. Different-shape f32 ops (`[B,n] + [n]` bias-add,
+/// `[B,n] * [1,n]` scale — the canonical residual/LayerNorm shapes) are on the
+/// hottest ML path; keeping them dense avoids re-boxing the pipeline into
+/// per-`Literal` storage between ops.
+///
+/// Identical gather structure to `broadcast_binary_f64` (same row-major odometer
+/// / contiguous-inner carry, same `(lhs_idx, rhs_idx)` per element), but gathers
+/// from the `as_f32_slice` backings and computes `float_op(l as f64, r as f64) as
+/// f32`. BIT-FOR-BIT identical to the generic broadcast loop, whose f32 element is
+/// `binary_literal_op` = `from_f32(float_op(l as f64, r as f64) as f32)` —
+/// f32->f64 is lossless and the single f32 round matches (the generic path also
+/// rounds f64->f32). Returns `Ok(None)` unless both operands are F32 dense
+/// storage, so the caller falls through to the generic path.
+#[inline]
+fn broadcast_binary_f32(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    out_shape: &Shape,
+    out_count: usize,
+    out_strides: &[usize],
+    lhs_strides: &[usize],
+    rhs_strides: &[usize],
+    float_op: &impl Fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    let (Some(lhs_values), Some(rhs_values)) =
+        (lhs.elements.as_f32_slice(), rhs.elements.as_f32_slice())
+    else {
+        return Ok(None);
+    };
+    let _ = out_strides;
+    let op = |l: f32, r: f32| float_op(f64::from(l), f64::from(r)) as f32;
+    let rank = out_shape.dims.len();
+    let mut values = Vec::with_capacity(out_count);
+    if rank >= 1 && out_count > 0 {
+        let inner = out_shape.dims[rank - 1] as usize;
+        let inner_ls = lhs_strides[rank - 1];
+        let inner_rs = rhs_strides[rank - 1];
+        let outer = out_count / inner;
+        let mut coord = vec![0usize; rank.saturating_sub(1)];
+        let mut lb = 0usize;
+        let mut rb = 0usize;
+        for _ in 0..outer {
+            match (inner_ls, inner_rs) {
+                (1, 1) => {
+                    let l = &lhs_values[lb..lb + inner];
+                    let r = &rhs_values[rb..rb + inner];
+                    for k in 0..inner {
+                        values.push(op(l[k], r[k]));
+                    }
+                }
+                (1, 0) => {
+                    let l = &lhs_values[lb..lb + inner];
+                    let rv = rhs_values[rb];
+                    for &lv in l {
+                        values.push(op(lv, rv));
+                    }
+                }
+                (0, 1) => {
+                    let lv = lhs_values[lb];
+                    let r = &rhs_values[rb..rb + inner];
+                    for &rv in r {
+                        values.push(op(lv, rv));
+                    }
+                }
+                _ => {
+                    for k in 0..inner {
+                        values.push(op(
+                            lhs_values[lb + k * inner_ls],
+                            rhs_values[rb + k * inner_rs],
+                        ));
+                    }
+                }
+            }
+            if rank >= 2 {
+                let mut ax = rank - 2;
+                loop {
+                    coord[ax] += 1;
+                    lb += lhs_strides[ax];
+                    rb += rhs_strides[ax];
+                    if coord[ax] < out_shape.dims[ax] as usize {
+                        break;
+                    }
+                    coord[ax] = 0;
+                    lb -= lhs_strides[ax] * out_shape.dims[ax] as usize;
+                    rb -= rhs_strides[ax] * out_shape.dims[ax] as usize;
+                    if ax == 0 {
+                        break;
+                    }
+                    ax -= 1;
+                }
+            }
+        }
+    } else {
+        let mut odometer = BroadcastOdometer::new(&out_shape.dims, lhs_strides, rhs_strides);
+        for _ in 0..out_count {
+            let (lhs_idx, rhs_idx) = odometer.next();
+            values.push(op(lhs_values[lhs_idx], rhs_values[rhs_idx]));
+        }
+    }
+    Ok(Some(Value::Tensor(TensorValue::new_f32_values(
+        out_shape.clone(),
+        values,
     )?)))
 }
 
@@ -11031,6 +11155,117 @@ mod tests {
             serial * 1e3,
             dense_t * 1e3,
             serial / dense_t
+        );
+    }
+
+    /// Dense-f32 broadcast binops must be BIT-FOR-BIT identical to the generic
+    /// per-`Literal` broadcast loop, across the canonical broadcast shapes
+    /// (bias-add `[B,n]+[n]`, row `[B,n]+[1,n]`, col `[B,n]+[B,1]`, rank-lift
+    /// `[n]+[B,n]`) for Add/Sub/Mul/Div, including ±0/±inf/NaN.
+    #[test]
+    fn f32_broadcast_binop_dense_bit_identical_to_serial() {
+        let specials = [0.0f32, -0.0, 1.5, -3.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 2.0];
+        let make = |len: usize, off: usize| -> Vec<f32> {
+            (0..len).map(|i| specials[(i + off) % specials.len()]).collect()
+        };
+        let dense = |dims: Vec<u32>, d: &[f32]| {
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims }, d.to_vec()).unwrap())
+        };
+        let boxed = |dims: Vec<u32>, d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims },
+                    d.iter().map(|&v| Literal::from_f32(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let bits = |v: &Value| -> Vec<u32> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F32Bits(b) => *b,
+                    o => panic!("expected f32, got {o:?}"),
+                })
+                .collect()
+        };
+        // (lhs_dims, lhs_len, rhs_dims, rhs_len)
+        let cases: &[(Vec<u32>, usize, Vec<u32>, usize)] = &[
+            (vec![4, 3], 12, vec![3], 3),       // bias-add [B,n]+[n]
+            (vec![4, 3], 12, vec![1, 3], 3),    // row [B,n]+[1,n]
+            (vec![4, 3], 12, vec![4, 1], 4),    // col [B,n]+[B,1]
+            (vec![3], 3, vec![4, 3], 12),       // rank-lift [n]+[B,n]
+            (vec![2, 3, 4], 24, vec![4], 4),    // rank-3 inner broadcast
+        ];
+        for (ld, ll, rd, rl) in cases {
+            let la = make(*ll, 0);
+            let rb = make(*rl, 3);
+            for prim in [Primitive::Add, Primitive::Sub, Primitive::Mul, Primitive::Div] {
+                let fast = crate::eval_primitive(
+                    prim,
+                    &[dense(ld.clone(), &la), dense(rd.clone(), &rb)],
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                let slow = crate::eval_primitive(
+                    prim,
+                    &[boxed(ld.clone(), &la), boxed(rd.clone(), &rb)],
+                    &BTreeMap::new(),
+                )
+                .unwrap();
+                assert_eq!(fast.as_tensor().unwrap().dtype, DType::F32);
+                assert_eq!(fast.as_tensor().unwrap().shape, slow.as_tensor().unwrap().shape);
+                assert_eq!(bits(&fast), bits(&slow), "f32 {prim:?} broadcast {ld:?}⊗{rd:?} dense != serial");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_broadcast_biasadd_dense_vs_serial() {
+        use std::time::Instant;
+        let (b, n) = (4096usize, 512usize); // [4096,512] + [512] bias-add, 2.1M out
+        let mat: Vec<f32> = (0..b * n).map(|i| (i % 1000) as f32 * 0.001 - 0.5).collect();
+        let bias: Vec<f32> = (0..n).map(|i| (i % 97) as f32 * 0.01).collect();
+        let mk_dense = |dims: Vec<u32>, d: &[f32]| {
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims }, d.to_vec()).unwrap())
+        };
+        let mk_boxed = |dims: Vec<u32>, d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims },
+                    d.iter().map(|&v| Literal::from_f32(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let timeit = |lhs: &Value, rhs: &Value| {
+            let _ = crate::eval_primitive(Primitive::Add, &[lhs.clone(), rhs.clone()], &BTreeMap::new()).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..30 {
+                let t = Instant::now();
+                let _ = crate::eval_primitive(Primitive::Add, &[lhs.clone(), rhs.clone()], &BTreeMap::new()).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let serial = timeit(
+            &mk_boxed(vec![b as u32, n as u32], &mat),
+            &mk_boxed(vec![n as u32], &bias),
+        );
+        let dense = timeit(
+            &mk_dense(vec![b as u32, n as u32], &mat),
+            &mk_dense(vec![n as u32], &bias),
+        );
+        println!(
+            "BENCH f32 bias-add [{b},{n}]+[{n}]: serial(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            serial * 1e3,
+            dense * 1e3,
+            serial / dense
         );
     }
 
