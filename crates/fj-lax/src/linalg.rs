@@ -1518,12 +1518,18 @@ pub(crate) fn eval_svd(
 fn one_sided_jacobi_svd_real(m: usize, n: usize, a: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let k = m.min(n);
     // Store W column-major because Jacobi sweeps stream columns p/q repeatedly.
-    // Each dot and rotation still visits rows in ascending order, preserving the
-    // arithmetic order of the former row-major implementation.
+    // The copy also records initial column norms, then applies a deterministic
+    // descending-norm ordering before the first sweep. This is a bounded
+    // Drmac-Veselic-style preconditioner: it changes only the internal Jacobi
+    // path, while the public SVD contract remains spectrum + reconstruction
+    // parity with deterministic tie-breaking.
     let mut w = vec![0.0_f64; m * n]; // n columns, each length m.
+    let mut initial_norm_sq = vec![0.0_f64; n];
     for row in 0..m {
         for col in 0..n {
-            w[col * m + row] = a[row * n + col];
+            let value = a[row * n + col];
+            w[col * m + row] = value;
+            initial_norm_sq[col] += value * value;
         }
     }
     // Store V column-major for the same reason as W: every Jacobi rotation
@@ -1532,6 +1538,28 @@ fn one_sided_jacobi_svd_real(m: usize, n: usize, a: &[f64]) -> (Vec<f64>, Vec<f6
     let mut v = vec![0.0_f64; n * n];
     for i in 0..n {
         v[i * n + i] = 1.0;
+    }
+    let mut initial_order: Vec<usize> = (0..n).collect();
+    initial_order.sort_by(|&left, &right| {
+        initial_norm_sq[right]
+            .total_cmp(&initial_norm_sq[left])
+            .then_with(|| left.cmp(&right))
+    });
+    if initial_order
+        .iter()
+        .enumerate()
+        .any(|(idx, &col)| idx != col)
+    {
+        let mut ordered_w = vec![0.0_f64; m * n];
+        let mut ordered_v = vec![0.0_f64; n * n];
+        for (new_col, &old_col) in initial_order.iter().enumerate() {
+            let src = old_col * m;
+            let dst = new_col * m;
+            ordered_w[dst..dst + m].copy_from_slice(&w[src..src + m]);
+            ordered_v[new_col * n + old_col] = 1.0;
+        }
+        w = ordered_w;
+        v = ordered_v;
     }
 
     let eps = f64::EPSILON;
@@ -5458,7 +5486,7 @@ mod tests {
     }
 
     #[test]
-    fn one_sided_jacobi_svd_real_column_major_v_matches_row_major_bits() {
+    fn one_sided_jacobi_svd_real_initial_norm_order_preserves_contract() {
         let (m, n) = (11usize, 7usize);
         let data: Vec<f64> = (0..m * n)
             .map(|idx| {
@@ -5469,29 +5497,77 @@ mod tests {
             })
             .collect();
 
-        let (old_sigma, old_u, old_v) = one_sided_jacobi_svd_real_rowmajor_v_reference(m, n, &data);
+        let (old_sigma, _, _) = one_sided_jacobi_svd_real_rowmajor_v_reference(m, n, &data);
         let (new_sigma, new_u, new_v) = one_sided_jacobi_svd_real(m, n, &data);
+        let (repeat_sigma, repeat_u, repeat_v) = one_sided_jacobi_svd_real(m, n, &data);
 
-        for (idx, (&old, &new)) in old_sigma.iter().zip(&new_sigma).enumerate() {
+        for (idx, ((&old, &new), &repeat)) in old_sigma
+            .iter()
+            .zip(&new_sigma)
+            .zip(&repeat_sigma)
+            .enumerate()
+        {
+            let tolerance = 1e-12 * (1.0 + old.abs());
+            assert!(
+                (old - new).abs() <= tolerance,
+                "sigma contract drift at {idx}: old={old:?} new={new:?}"
+            );
             assert_eq!(
-                old.to_bits(),
                 new.to_bits(),
-                "sigma bit drift at {idx}: old={old:?} new={new:?}"
+                repeat.to_bits(),
+                "sigma determinism drift at {idx}: first={new:?} repeat={repeat:?}"
             );
         }
-        for (idx, (&old, &new)) in old_u.iter().zip(&new_u).enumerate() {
+        for (idx, (&first, &repeat)) in new_u.iter().zip(&repeat_u).enumerate() {
             assert_eq!(
-                old.to_bits(),
-                new.to_bits(),
-                "U bit drift at {idx}: old={old:?} new={new:?}"
+                first.to_bits(),
+                repeat.to_bits(),
+                "U determinism drift at {idx}: first={first:?} repeat={repeat:?}"
             );
         }
-        for (idx, (&old, &new)) in old_v.iter().zip(&new_v).enumerate() {
+        for (idx, (&first, &repeat)) in new_v.iter().zip(&repeat_v).enumerate() {
             assert_eq!(
-                old.to_bits(),
-                new.to_bits(),
-                "V bit drift at {idx}: old={old:?} new={new:?}"
+                first.to_bits(),
+                repeat.to_bits(),
+                "V determinism drift at {idx}: first={first:?} repeat={repeat:?}"
             );
+        }
+
+        for row in 0..m {
+            for col in 0..n {
+                let mut reconstructed = 0.0;
+                for axis in 0..n {
+                    reconstructed +=
+                        new_u[row * n + axis] * new_sigma[axis] * new_v[col * n + axis];
+                }
+                assert!(
+                    (reconstructed - data[row * n + col]).abs() <= 1e-11,
+                    "reconstruction[{row},{col}] = {reconstructed}, expected {}",
+                    data[row * n + col]
+                );
+            }
+        }
+
+        for left in 0..n {
+            for right in 0..n {
+                let expected = if left == right { 1.0 } else { 0.0 };
+                let mut u_dot = 0.0;
+                let mut v_dot = 0.0;
+                for row in 0..m {
+                    u_dot += new_u[row * n + left] * new_u[row * n + right];
+                }
+                for row in 0..n {
+                    v_dot += new_v[row * n + left] * new_v[row * n + right];
+                }
+                assert!(
+                    (u_dot - expected).abs() <= 1e-11,
+                    "U dot[{left},{right}] = {u_dot}, expected {expected}"
+                );
+                assert!(
+                    (v_dot - expected).abs() <= 1e-11,
+                    "V dot[{left},{right}] = {v_dot}, expected {expected}"
+                );
+            }
         }
     }
 

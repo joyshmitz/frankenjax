@@ -1,0 +1,42 @@
+frankenjax-poyvi pass187 kept
+
+Lever:
+deterministic initial column-norm ordering for one_sided_jacobi_svd_real.
+
+Same-worker RCH criterion gate:
+worker: ovh-a
+baseline linalg/svd_48x48_f64: 1.1586..1.1592..1.1593 ms
+candidate linalg/svd_48x48_f64: 1.0735..1.0738..1.0753 ms
+median speedup: 1.079530639x
+conservative speedup: 1.077466753x
+
+Secondary rows from same ovh-a run:
+baseline linalg/svd_48x48_full_f64: 1.1567..1.1570..1.1580 ms
+candidate linalg/svd_48x48_full_f64: 1.0727..1.0852..1.0883 ms
+median speedup: 1.066162919x
+conservative speedup: 1.062850317x
+baseline linalg/pinv_256x128_f64: 39.113..39.437..40.732 ms
+candidate linalg/pinv_256x128_f64: 38.771..38.831..39.073 ms
+median speedup: 1.015606088x
+conservative speedup: 1.001023725x
+
+Score:
+Impact 3.0 * Confidence 4.0 / Effort 3.0 = 4.0
+
+Behavior proof:
+Observable SVD ordering remains descending singular values. Initial norm ties are broken by original column index via total_cmp plus index comparison. Final singular-value sorting remains the existing descending total_cmp sort. No RNG is introduced. No unsafe code is introduced.
+
+Floating-point proof:
+The internal Jacobi sweep order changes by design, so internal bit identity is not the contract. Public behavior is preserved by the SVD tolerance contract: singular values match the row-major scalar reference within 1e-12*(1+abs(sigma)); U/V are deterministic across repeated runs bit-for-bit; U/V orthonormality and reconstruction are checked within 1e-11. Downstream pinv Moore-Penrose and reconstruction tests still pass.
+
+Proof commands:
+RCH ovh-a cargo test -p fj-lax --lib svd -- --nocapture: passed 10 tests
+RCH ovh-a cargo test -p fj-lax --lib pinv -- --nocapture: passed 8 tests
+RCH ovh-a cargo check -p fj-lax --all-targets: passed
+RCH ovh-a cargo clippy -p fj-lax --all-targets -- -D warnings: passed
+rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs: passed
+git diff --check: passed
+ubs crates/fj-lax/src/linalg.rs: nonzero on pre-existing broad inventory; UBS fmt/clippy/check/test-build sections clean and no unsafe blocks detected
+
+Known unrelated gate note:
+cargo fmt --check --package fj-lax fails on pre-existing crates/fj-lax/benches/lax_baseline.rs formatting. The touched linalg.rs file is rustfmt-clean and this commit does not include bench-format churn.

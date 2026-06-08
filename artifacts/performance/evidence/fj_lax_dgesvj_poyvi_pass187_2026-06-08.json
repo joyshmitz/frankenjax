@@ -1,0 +1,98 @@
+{
+  "bead": "frankenjax-poyvi",
+  "pass": 187,
+  "date": "2026-06-08",
+  "decision": "kept",
+  "crate": "fj-lax",
+  "lever": "deterministic initial column-norm ordering for the real one-sided Jacobi SVD core",
+  "files_changed": [
+    "crates/fj-lax/src/linalg.rs"
+  ],
+  "benchmark_gate": {
+    "tool": "rch criterion",
+    "worker": "ovh-a",
+    "command_baseline": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-poyvi-baseline-profile cargo bench -p fj-lax --bench lax_baseline -- linalg/ --quick --noplot",
+    "command_candidate": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-poyvi-candidate-profile-3 cargo bench -p fj-lax --bench lax_baseline -- linalg/ --quick --noplot",
+    "baseline": {
+      "linalg/svd_48x48_f64_ms": [1.1586, 1.1592, 1.1593],
+      "linalg/svd_48x48_full_f64_ms": [1.1567, 1.1570, 1.1580],
+      "linalg/pinv_256x128_f64_ms": [39.113, 39.437, 40.732]
+    },
+    "candidate": {
+      "linalg/svd_48x48_f64_ms": [1.0735, 1.0738, 1.0753],
+      "linalg/svd_48x48_full_f64_ms": [1.0727, 1.0852, 1.0883],
+      "linalg/pinv_256x128_f64_ms": [38.771, 38.831, 39.073]
+    },
+    "speedup": {
+      "linalg/svd_48x48_f64_median": 1.079530639,
+      "linalg/svd_48x48_f64_conservative": 1.077466753,
+      "linalg/svd_48x48_full_f64_median": 1.066162919,
+      "linalg/svd_48x48_full_f64_conservative": 1.062850317,
+      "linalg/pinv_256x128_f64_median": 1.015606088,
+      "linalg/pinv_256x128_f64_conservative": 1.001023725
+    },
+    "secondary_sanity": {
+      "worker": "ovh-b",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-poyvi-candidate-svd-confirm cargo bench -p fj-lax --bench lax_baseline -- linalg/svd_48x48_f64 --quick --noplot",
+      "candidate_linalg_svd_48x48_f64_ms": [2.2636, 2.2768, 2.2801],
+      "note": "Cross-worker timing is not used for the keep score."
+    },
+    "score": {
+      "impact": 3.0,
+      "confidence": 4.0,
+      "effort": 3.0,
+      "impact_x_confidence_div_effort": 4.0
+    }
+  },
+  "behavior_proof": {
+    "observable_contract": "SVD observable behavior is singular values in descending order, deterministic tie handling, U/V orthonormality, reconstruction parity, dtype/shape/error surface, and RNG absence. Internal Jacobi column order is not public behavior.",
+    "ordering_and_ties": "Initial preconditioner orders columns by descending initial norm using f64::total_cmp; equal norms break by original column index. Final singular values are still sorted descending by the existing col_norm total_cmp sort.",
+    "floating_point": "This lever intentionally changes the internal Jacobi sweep path. Public floating-point parity is therefore proven by the existing real-SVD tolerance contract: singular spectrum matches the row-major scalar reference within 1e-12*(1+abs(sigma)); reconstruction and orthonormality are checked within 1e-11.",
+    "rng": "No random source is introduced.",
+    "unsafe": "No unsafe block is introduced; crate-level forbid(unsafe_code) remains active.",
+    "golden": "artifacts/performance/evidence/fj_lax_dgesvj_poyvi_pass187_2026-06-08.golden"
+  },
+  "proof_commands": [
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-poyvi-test-svd2 cargo test -p fj-lax --lib svd -- --nocapture",
+      "worker": "ovh-a",
+      "result": "passed: 10 tests"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-poyvi-test-pinv cargo test -p fj-lax --lib pinv -- --nocapture",
+      "worker": "ovh-a",
+      "result": "passed: 8 tests"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-poyvi-check cargo check -p fj-lax --all-targets",
+      "worker": "ovh-a",
+      "result": "passed"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-poyvi-clippy cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "worker": "ovh-a",
+      "result": "passed"
+    },
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs",
+      "worker": "local",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check --package fj-lax",
+      "worker": "local",
+      "result": "failed on pre-existing crates/fj-lax/benches/lax_baseline.rs formatting; no diff in that file is included in this lever"
+    },
+    {
+      "command": "git diff --check",
+      "worker": "local",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/linalg.rs",
+      "worker": "local",
+      "result": "nonzero on pre-existing broad inventory; UBS fmt/clippy/check/test-build sections clean and no unsafe blocks detected"
+    }
+  ],
+  "follow_up": "frankenjax-poyvi.1 is open for the larger QR-preconditioned DGESVJ primitive because this bounded norm-ordering lever is a kept 1.08x SVD win, not the full 2.5-3x algorithmic target."
+}
