@@ -209,6 +209,12 @@ pub(crate) fn eval_binary_elementwise(
                 {
                     return Ok(value);
                 }
+                if lhs.dtype == DType::F32
+                    && rhs.dtype == DType::F32
+                    && let Some(value) = eval_same_shape_f32_binop(primitive, lhs, rhs)?
+                {
+                    return Ok(value);
+                }
                 if lhs.dtype == DType::I64
                     && rhs.dtype == DType::I64
                     && let Some(value) = eval_same_shape_i64_binop(lhs, rhs, &int_op)?
@@ -327,6 +333,57 @@ fn eval_same_shape_f64_binop(
         Primitive::Min => eval_same_shape_f64_map(lhs, rhs, crate::jax_min_f64),
         _ => Ok(None),
     }
+}
+
+/// Same-shape F32⊗F32 elementwise fast path — the dense-f32 sibling of
+/// [`eval_same_shape_f64_binop`]. f32 is JAX's DEFAULT float dtype, so once
+/// producers emit dense f32 (see `new_f32_values`), keeping binary ops dense
+/// avoids re-boxing the pipeline into per-`Literal` storage between ops.
+///
+/// BIT-FOR-BIT identical to the generic `binary_literal_op` f32 path, which for
+/// f32 operands computes `literal_from_numeric_f64(F32, float_op(a as f64, b as
+/// f64))` = `from_f32(float_op(a as f64, b as f64) as f32)`. We do exactly the
+/// same: promote each f32->f64 (exact), apply the SAME `op`, round `as f32`.
+/// f32->f64 promotion is lossless, and for `+`/`-`/`*` the f64 result is exact
+/// (≤53 mantissa bits), so the single round to f32 matches native f32; for `/`
+/// the generic path ALSO computes in f64 then rounds, so we match it regardless.
+#[inline]
+fn eval_same_shape_f32_binop(
+    primitive: Primitive,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    match primitive {
+        Primitive::Add => eval_same_shape_f32_map(lhs, rhs, |a, b| a + b),
+        Primitive::Sub => eval_same_shape_f32_map(lhs, rhs, |a, b| a - b),
+        Primitive::Mul => eval_same_shape_f32_map(lhs, rhs, |a, b| a * b),
+        Primitive::Div => eval_same_shape_f32_map(lhs, rhs, |a, b| a / b),
+        Primitive::Max => eval_same_shape_f32_map(lhs, rhs, crate::jax_max_f64),
+        Primitive::Min => eval_same_shape_f32_map(lhs, rhs, crate::jax_min_f64),
+        _ => Ok(None),
+    }
+}
+
+#[inline]
+fn eval_same_shape_f32_map(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    op: impl Fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    let (Some(lhs_values), Some(rhs_values)) =
+        (lhs.elements.as_f32_slice(), rhs.elements.as_f32_slice())
+    else {
+        return Ok(None);
+    };
+    let values = lhs_values
+        .iter()
+        .zip(rhs_values)
+        .map(|(&left, &right)| op(f64::from(left), f64::from(right)) as f32)
+        .collect::<Vec<_>>();
+    Ok(Some(Value::Tensor(TensorValue::new_f32_values(
+        lhs.shape.clone(),
+        values,
+    )?)))
 }
 
 #[inline]
@@ -10721,6 +10778,115 @@ mod tests {
             serial * 1e3,
             threaded * 1e3,
             serial / threaded
+        );
+    }
+
+    /// Dense-f32 same-shape binary ops (`as_f32_slice`-backed, dense output) must
+    /// be BIT-FOR-BIT identical to the generic per-`Literal` path for every op,
+    /// across normal values AND specials (±0, ±inf, NaN — incl. Max/Min's
+    /// NaN-propagation via `jax_max_f64`/`jax_min_f64`).
+    #[test]
+    fn f32_same_shape_binop_dense_bit_identical_to_serial() {
+        let specials = [
+            0.0f32, -0.0, 1.0, -1.0, 0.5, 3.5, f32::INFINITY, f32::NEG_INFINITY, f32::NAN,
+            1e30, -2.5e-20, 7.0,
+        ];
+        let n = specials.len();
+        // every (i,j) pair so both operands span the special grid.
+        let la: Vec<f32> = (0..n * n).map(|k| specials[k / n]).collect();
+        let lb: Vec<f32> = (0..n * n).map(|k| specials[k % n]).collect();
+        let dims = vec![(n * n) as u32];
+        let dense = |d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new_f32_values(Shape { dims: dims.clone() }, d.to_vec()).unwrap(),
+            )
+        };
+        let boxed = |d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims: dims.clone() },
+                    d.iter().map(|&v| Literal::from_f32(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let bits = |v: &Value| -> Vec<u32> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F32Bits(b) => *b,
+                    o => panic!("expected f32, got {o:?}"),
+                })
+                .collect()
+        };
+        for prim in [
+            Primitive::Add,
+            Primitive::Sub,
+            Primitive::Mul,
+            Primitive::Div,
+            Primitive::Max,
+            Primitive::Min,
+        ] {
+            let fast = crate::eval_primitive(
+                prim,
+                &[dense(&la), dense(&lb)],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            let slow = crate::eval_primitive(
+                prim,
+                &[boxed(&la), boxed(&lb)],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            assert_eq!(fast.as_tensor().unwrap().dtype, DType::F32);
+            assert_eq!(bits(&fast), bits(&slow), "f32 {prim:?} dense != serial");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_same_shape_mul_dense_vs_serial() {
+        use std::time::Instant;
+        let n = 1usize << 21; // 2.1M elements
+        let a: Vec<f32> = (0..n).map(|i| (i % 1000) as f32 * 0.001 - 0.5).collect();
+        let b: Vec<f32> = (0..n).map(|i| (i % 777) as f32 * 0.01 + 0.25).collect();
+        let dims = vec![n as u32];
+        let mk_dense = |d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new_f32_values(Shape { dims: dims.clone() }, d.to_vec()).unwrap(),
+            )
+        };
+        let mk_boxed = |d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims: dims.clone() },
+                    d.iter().map(|&v| Literal::from_f32(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let timeit = |inputs: &[Value]| {
+            let _ = crate::eval_primitive(Primitive::Mul, inputs, &BTreeMap::new()).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..30 {
+                let t = Instant::now();
+                let _ = crate::eval_primitive(Primitive::Mul, inputs, &BTreeMap::new()).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let serial = timeit(&[mk_boxed(&a), mk_boxed(&b)]);
+        let dense = timeit(&[mk_dense(&a), mk_dense(&b)]);
+        println!(
+            "BENCH f32 mul n={n}: serial(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            serial * 1e3,
+            dense * 1e3,
+            serial / dense
         );
     }
 
