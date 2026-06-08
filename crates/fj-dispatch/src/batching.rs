@@ -9849,6 +9849,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_batch_eval_jaxpr_scan_sub_jaxprs_nonscalar_carry_batches_correctly() {
+        // vmap(scan) where the carry is a VECTOR per lane (not a scalar): each
+        // lane accumulates a running vector sum over 3 steps of [2]-vectors. The
+        // existing scan tests only cover scalar carries; this exercises the
+        // non-scalar carry path (the gap that broke the while masked-loop). scan
+        // recursively batches its body via batch_eval_jaxpr_with_consts, so unlike
+        // while it stays correct for any carry shape — confirm that here.
+        let jaxpr = make_scan_sub_jaxpr_control_flow_jaxpr(false);
+        let carry = make_i64_matrix(2, 2, &[0, 0, 0, 0]); // [batch=2, carry=2]
+        let xs = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 3, 2] }, // [batch=2, scan_len=3, elem=2]
+                [1, 2, 3, 4, 5, 6, 10, 20, 30, 40, 50, 60]
+                    .iter()
+                    .map(|&x| Literal::I64(x))
+                    .collect(),
+            )
+            .unwrap(),
+        );
+        let outputs = batch_eval_jaxpr(
+            &jaxpr,
+            &[BatchTracer::batched(carry, 0), BatchTracer::batched(xs, 0)],
+        )
+        .expect("vmap(scan) over a vector carry must batch the body correctly");
+        assert_eq!(outputs.len(), 2);
+        // Final carry [batch=2, 2]: lane0 [0,0]+[1,2]+[3,4]+[5,6]=[9,12];
+        // lane1 [0,0]+[10,20]+[30,40]+[50,60]=[90,120].
+        assert_eq!(outputs[0].batch_dim, Some(0));
+        assert_eq!(outputs[0].value.as_tensor().unwrap().shape.dims, vec![2, 2]);
+        assert_eq!(extract_i64_vec(&outputs[0].value), vec![9, 12, 90, 120]);
+        // ys [batch=2, scan_len=3, 2]: per-step running sums.
+        assert_eq!(outputs[1].batch_dim, Some(0));
+        assert_eq!(outputs[1].value.as_tensor().unwrap().shape.dims, vec![2, 3, 2]);
+        assert_eq!(
+            extract_i64_vec(&outputs[1].value),
+            vec![1, 2, 4, 6, 9, 12, 10, 20, 40, 60, 90, 120]
+        );
+    }
+
     // ── Control Flow Batching Tests ───────────────────────────
 
     #[test]
