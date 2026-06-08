@@ -6387,6 +6387,21 @@ fn batch_while_sub_jaxpr_general(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    // This masked-loop vectorization only handles SCALAR-per-lane carries: it
+    // evaluates the UNBATCHED cond/body jaxprs directly on the batched carry and
+    // masks finished lanes with a [batch] Select. For a NON-scalar carry
+    // (batched shape [batch, ...inner]) that breaks: a scalar-returning while
+    // cond (which must reduce the carry) would reduce the batch axis, and the
+    // [batch] active mask can't Select against [batch, ...inner] operands. Bail
+    // to the per-element by_slices loop, which runs each lane's full while
+    // independently and is correct for any carry shape.
+    if carry
+        .iter()
+        .any(|v| matches!(v, Value::Tensor(t) if t.shape.rank() > 1))
+    {
+        return Ok(None);
+    }
+
     let mut active_mask = Value::Tensor(
         TensorValue::new(
             DType::Bool,
@@ -9496,6 +9511,68 @@ mod tests {
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].batch_dim, Some(0));
         assert_eq!(extract_i64_vec(&outputs[0].value), vec![-1, 0, -1]);
+    }
+
+    #[test]
+    fn test_batch_eval_jaxpr_while_sub_jaxprs_nonscalar_carry_falls_back_to_slices() {
+        // vmap(while) where the carry is a VECTOR per lane: cond is
+        // `reduce_sum(carry) > 0`, body is `carry - 1` (elementwise). The masked
+        // active-mask loop only supports scalar-per-lane carries (it would reduce
+        // the batch axis and can't Select a [batch] mask against [batch,3]
+        // operands); the non-scalar carry must fall back to the per-element
+        // by_slices loop, which runs each lane's full while independently.
+        let cond_jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::from([("axes".to_owned(), "0".to_owned())]),
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Gt,
+                    inputs: smallvec![Atom::Var(VarId(2)), Atom::Lit(Literal::I64(0))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    effects: vec![],
+                    sub_jaxprs: vec![],
+                },
+            ],
+        );
+        let body_jaxpr = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Sub,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Lit(Literal::I64(1))],
+                outputs: smallvec![VarId(2)],
+                params: BTreeMap::new(),
+                effects: vec![],
+                sub_jaxprs: vec![],
+            }],
+        );
+        let jaxpr = make_while_control_flow_jaxpr_with_sub_jaxprs(cond_jaxpr, body_jaxpr, 16);
+        // Lane 0 [3,3,3]: sum9→[2,2,2]→[1,1,1]→[0,0,0] (sum0, stop). Lane 1
+        // [1,1,1]: sum3→[0,0,0] (stop). Both end at [0,0,0].
+        let outputs = batch_eval_jaxpr(
+            &jaxpr,
+            &[BatchTracer::batched(
+                make_i64_matrix(2, 3, &[3, 3, 3, 1, 1, 1]),
+                0,
+            )],
+        )
+        .expect("vmap(while) over a vector carry must succeed via the by_slices fallback");
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0].batch_dim, Some(0));
+        let tensor = outputs[0].value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2, 3]);
+        assert_eq!(extract_i64_vec(&outputs[0].value), vec![0, 0, 0, 0, 0, 0]);
     }
 
     #[test]
