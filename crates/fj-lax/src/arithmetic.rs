@@ -1114,9 +1114,11 @@ fn apply_complex_pow(lhs: (f64, f64), rhs: (f64, f64)) -> Result<(f64, f64), Eva
         if exp_re >= 0.0 {
             return Ok(complex_integer_pow(lhs, exp_re as u64));
         }
+        // 1 / base^|n| via Smith's reciprocal — the naive p.0²+p.1² denominator
+        // overflowed when base^|n| is large (e.g. (1e100)^-2 → denom=inf → (0,_)
+        // instead of 1e-200).
         let positive = complex_integer_pow(lhs, (-exp_re) as u64);
-        let denom = positive.0 * positive.0 + positive.1 * positive.1;
-        return Ok((positive.0 / denom, -positive.1 / denom));
+        return Ok(complex_reciprocal(positive));
     }
 
     let radius = base_re.hypot(base_im);
@@ -6597,6 +6599,27 @@ mod tests {
     use super::*;
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
+
+    #[test]
+    fn complex_pow_negative_integer_exponent_no_overflow() {
+        let close = |a: (f64, f64), b: (f64, f64), tol: f64| {
+            assert!(
+                a.0.is_finite()
+                    && a.1.is_finite()
+                    && (a.0 - b.0).abs() <= tol * (1.0 + b.0.abs())
+                    && (a.1 - b.1).abs() <= tol * (1.0 + b.1.abs()),
+                "got {a:?}, expected {b:?}"
+            );
+        };
+        // OVERFLOW: (1e100)^-2 — naive 1/p with p=1e200 gave denom=inf → (0,_);
+        // Smith's reciprocal gives 1e-200.
+        close(apply_complex_pow((1e100, 0.0), (-2.0, 0.0)).unwrap(), (1e-200, 0.0), 1e-12);
+        // Normal cases unchanged: (1+i)^-2 = 1/(2i) = -0.5i; 2^-2 = 0.25.
+        close(apply_complex_pow((1.0, 1.0), (-2.0, 0.0)).unwrap(), (0.0, -0.5), 1e-15);
+        close(apply_complex_pow((2.0, 0.0), (-2.0, 0.0)).unwrap(), (0.25, 0.0), 1e-15);
+        // Positive integer + general complex exponent paths still hold.
+        close(apply_complex_pow((1.0, 1.0), (2.0, 0.0)).unwrap(), (0.0, 2.0), 1e-15);
+    }
 
     #[test]
     fn complex_tanh_tan_saturate_for_large_argument() {
