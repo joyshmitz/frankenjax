@@ -1,0 +1,79 @@
+{
+  "bead": "frankenjax-p1vbf.49",
+  "date_utc": "2026-06-08",
+  "skill_pass": 182,
+  "status": "rejected",
+  "target": {
+    "crate": "fj-lax",
+    "criterion_benchmark": "linalg/matmul_2d_2048x2048x2048_f64",
+    "profile_backing": {
+      "worker": "fmd",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pass182-profile cargo bench -p fj-lax --bench lax_baseline -- linalg --quick --noplot",
+      "hot_rows_ms": {
+        "linalg/matmul_2d_2048x2048x2048_f64": [190.40, 190.42, 190.42],
+        "linalg/pinv_256x128_f64": [38.713, 39.091, 40.604],
+        "linalg/lu_1024x1024_f64": [37.140, 37.313, 38.005],
+        "linalg/qr_1024x1024_f64": [29.954, 29.970, 30.033],
+        "linalg/cholesky_1024x1024_f64": [26.551, 26.643, 27.011]
+      }
+    }
+  },
+  "lever": {
+    "description": "Two-panel packed/KC-blocked GEMM microkernel: compute two adjacent NR=8 column panels for one MR=4 row tile inside the same ascending-l loop, reusing each A scalar across 16 columns.",
+    "files_touched_during_candidate": ["crates/fj-lax/src/tensor_contraction.rs"],
+    "source_restored_after_rejection": true
+  },
+  "baseline": {
+    "focused": {
+      "worker": "fmd",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf49-baseline cargo bench -p fj-lax --bench lax_baseline -- linalg/matmul_2d_2048x2048x2048_f64 --quick --noplot",
+      "time_ms": [523.17, 540.34, 609.04],
+      "median_ms": 540.34
+    },
+    "full_profile": {
+      "worker": "fmd",
+      "time_ms": [190.40, 190.42, 190.42],
+      "median_ms": 190.42
+    }
+  },
+  "candidate": {
+    "focused": {
+      "worker": "fmd",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf49-after cargo bench -p fj-lax --bench lax_baseline -- linalg/matmul_2d_2048x2048x2048_f64 --quick --noplot",
+      "time_ms": [251.90, 252.23, 253.55],
+      "median_ms": 252.23,
+      "apparent_median_speedup_vs_focused_baseline": 2.14225
+    },
+    "confirmatory_full_profile": {
+      "worker": "fmd",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf49-profile-after cargo bench -p fj-lax --bench lax_baseline -- linalg --quick --noplot",
+      "time_ms": [221.41, 224.20, 224.90],
+      "median_ms": 224.20
+    }
+  },
+  "delta": {
+    "full_profile_median_speedup": 0.84933,
+    "full_profile_conservative_speedup": 0.84660,
+    "score": 0.0,
+    "score_formula": "Impact x Confidence / Effort",
+    "keep_gate": "Score >= 2.0",
+    "decision": "Reject: focused benchmark looked faster only because its baseline was inconsistent with the immediately preceding full-profile baseline; confirmatory full-profile run regressed GEMM2048."
+  },
+  "behavior_proof": {
+    "worker": "fmd",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf49-test cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+    "result": "10 passed; 0 failed; 1 ignored",
+    "golden_output_digest": "e3762befad86e2a81da53a8413643b658a0be2d6136d69e195770b2beba48b3a",
+    "golden_artifact": "artifacts/performance/evidence/fj_lax_gemm_two_panel_p1vbf49_pass182_2026-06-08.golden",
+    "isomorphism": [
+      "Candidate preserved each output element's ascending k accumulation order.",
+      "Candidate preserved B panel layout, row/thread partitioning, column/remainder coverage, dtype/shape/error surface, and RNG absence.",
+      "No source change is shipped after rejection; final tree behavior is bit-for-bit the pre-candidate behavior."
+    ]
+  },
+  "next_route": {
+    "primitive": "materially different GEMM or linalg caller primitive",
+    "target_ratio": ">= 1.10x against the full-profile row, not only a noisy focused baseline",
+    "notes": "Do not repeat adjacent column-panel unrolling without a same-run A/B harness or a stable full-profile win. Consider output-write avoidance in GEMM callers, blocked QR/LU structure, or a parity-contract bead for exact-order alternatives."
+  }
+}
