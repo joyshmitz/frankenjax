@@ -111,6 +111,12 @@ pub(crate) fn eval_comparison(
                 {
                     return Ok(value);
                 }
+                if lhs.dtype == DType::F32
+                    && rhs.dtype == DType::F32
+                    && let Some(value) = eval_same_shape_f32_compare(lhs, rhs, &float_cmp)?
+                {
+                    return Ok(value);
+                }
 
                 let mut elements = Vec::with_capacity(lhs.elements.len());
                 for (lhs, rhs) in lhs
@@ -176,6 +182,20 @@ pub(crate) fn eval_comparison(
                 );
                 return Ok(Value::Tensor(TensorValue::new_bool_values(out_shape, out)?));
             }
+            if let (Some(left), Some(right)) =
+                (lhs.elements.as_f32_slice(), rhs.elements.as_f32_slice())
+            {
+                let mut out = Vec::with_capacity(out_count);
+                crate::arithmetic::broadcast_visit_row_major(
+                    &out_shape.dims,
+                    &lhs_strides,
+                    &rhs_strides,
+                    |li, ri| {
+                        out.push(float_cmp(f64::from(left[li]), f64::from(right[ri])));
+                    },
+                );
+                return Ok(Value::Tensor(TensorValue::new_bool_values(out_shape, out)?));
+            }
 
             let mut elements = Vec::with_capacity(out_count);
             for flat_idx in 0..out_count {
@@ -200,6 +220,9 @@ pub(crate) fn eval_comparison(
             if let Some(value) = eval_f64_scalar_compare(*lhs, rhs, true, &float_cmp)? {
                 return Ok(value);
             }
+            if let Some(value) = eval_f32_scalar_compare(*lhs, rhs, true, &float_cmp)? {
+                return Ok(value);
+            }
             if let Some(value) = eval_i64_scalar_compare(*lhs, rhs, true, &int_cmp)? {
                 return Ok(value);
             }
@@ -218,6 +241,9 @@ pub(crate) fn eval_comparison(
         }
         (Value::Tensor(lhs), Value::Scalar(rhs)) => {
             if let Some(value) = eval_f64_scalar_compare(*rhs, lhs, false, &float_cmp)? {
+                return Ok(value);
+            }
+            if let Some(value) = eval_f32_scalar_compare(*rhs, lhs, false, &float_cmp)? {
                 return Ok(value);
             }
             if let Some(value) = eval_i64_scalar_compare(*rhs, lhs, false, &int_cmp)? {
@@ -281,6 +307,33 @@ fn eval_same_shape_f64_compare(
         ));
     }
 
+    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+        lhs.shape.clone(),
+        out,
+    )?)))
+}
+
+/// Same-shape F32⊗F32 comparison fast path producing a `DType::Bool` tensor.
+/// JAX's default float dtype — `x > thresh`/mask idioms run on f32. Bit-for-bit
+/// identical to the generic `compare_literals` path, which for F32 operands widens
+/// each to f64 (`as_f64()` = `f64::from(f32)` — exact, NaN preserved) and applies
+/// `float_cmp`; this does the same off the packed `as_f32_slice` backing into a
+/// dense `Vec<bool>` (1 byte/elem vs 24). Returns `None` if not dense F32.
+#[inline]
+fn eval_same_shape_f32_compare(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    float_cmp: &impl Fn(f64, f64) -> bool,
+) -> Result<Option<Value>, EvalError> {
+    let (Some(left), Some(right)) = (lhs.elements.as_f32_slice(), rhs.elements.as_f32_slice())
+    else {
+        return Ok(None);
+    };
+    let out: Vec<bool> = left
+        .iter()
+        .zip(right)
+        .map(|(&a, &b)| float_cmp(f64::from(a), f64::from(b)))
+        .collect();
     Ok(Some(Value::Tensor(TensorValue::new_bool_values(
         lhs.shape.clone(),
         out,
@@ -429,6 +482,44 @@ fn eval_f64_scalar_compare(
     )?)))
 }
 
+/// F32-scalar ⊗ dense-F32-tensor comparison fast path (`x > 0.0` relu/threshold
+/// masks). Mirrors `eval_f64_scalar_compare`: the generic `compare_literals` path
+/// widens both F32 operands to f64 then `float_cmp`, so widening the scalar and
+/// each tap with `f64::from` is bit-for-bit identical. Returns `None` unless the
+/// scalar is `F32Bits` and the tensor is dense F32.
+fn eval_f32_scalar_compare(
+    scalar: Literal,
+    tensor: &TensorValue,
+    scalar_on_left: bool,
+    float_cmp: &impl Fn(f64, f64) -> bool,
+) -> Result<Option<Value>, EvalError> {
+    let Literal::F32Bits(scalar_bits) = scalar else {
+        return Ok(None);
+    };
+    if tensor.dtype != DType::F32 {
+        return Ok(None);
+    }
+    let Some(values) = tensor.elements.as_f32_slice() else {
+        return Ok(None);
+    };
+    let scalar = f64::from(f32::from_bits(scalar_bits));
+    let out: Vec<bool> = values
+        .iter()
+        .map(|&value| {
+            let v = f64::from(value);
+            if scalar_on_left {
+                float_cmp(scalar, v)
+            } else {
+                float_cmp(v, scalar)
+            }
+        })
+        .collect();
+    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+        tensor.shape.clone(),
+        out,
+    )?)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,6 +593,153 @@ mod tests {
             let want: Vec<bool> = lhs.iter().map(|&a| fcmp(a, scalar)).collect();
             assert_eq!(got, want, "{p:?} scalar-right mismatch");
         }
+    }
+
+    #[test]
+    fn f32_compare_dense_bit_identical_to_generic() {
+        // Dense F32 (as_f32_slice) takes the new fast paths; boxed F32 Literals take
+        // the generic compare_literals loop. Bool outputs must match exactly across
+        // same-shape / scalar-both-orders / broadcast, all six comparisons, incl
+        // NaN/+-inf/+-0 (f32->f64 widening is exact + NaN-preserving).
+        let la = [
+            1.5f32,
+            -0.0,
+            f32::INFINITY,
+            f32::NAN,
+            7.0,
+            -3.25,
+            0.0,
+            f32::NEG_INFINITY,
+        ];
+        let ra = [
+            2.0f32,
+            0.0,
+            -4.0,
+            5.0,
+            7.0,
+            -3.25,
+            f32::NAN,
+            f32::NEG_INFINITY,
+        ];
+        let dims = vec![la.len() as u32];
+        let dense = |d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new_f32_values(Shape { dims: dims.clone() }, d.to_vec()).unwrap(),
+            )
+        };
+        let boxed = |d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims: dims.clone() },
+                    d.iter().copied().map(Literal::from_f32).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let s = Value::Scalar(Literal::from_f32(0.0));
+        // broadcast: [n] vs [1]
+        let dense_b = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![1] }, vec![0.0f32]).unwrap(),
+        );
+        let boxed_b = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: vec![1] },
+                vec![Literal::from_f32(0.0)],
+            )
+            .unwrap(),
+        );
+        assert!(
+            dense(&la)
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .is_some()
+        );
+        assert!(
+            boxed(&la)
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .is_none()
+        );
+        let p = BTreeMap::new();
+        for prim in [
+            Primitive::Eq,
+            Primitive::Ne,
+            Primitive::Lt,
+            Primitive::Le,
+            Primitive::Gt,
+            Primitive::Ge,
+        ] {
+            let run = |a: Value, b: Value| {
+                extract_bools(&crate::eval_primitive(prim, &[a, b], &p).unwrap())
+            };
+            assert_eq!(
+                run(dense(&la), dense(&ra)),
+                run(boxed(&la), boxed(&ra)),
+                "{prim:?} same-shape"
+            );
+            assert_eq!(
+                run(s.clone(), dense(&ra)),
+                run(s.clone(), boxed(&ra)),
+                "{prim:?} scalar-left"
+            );
+            assert_eq!(
+                run(dense(&la), s.clone()),
+                run(boxed(&la), s.clone()),
+                "{prim:?} scalar-right"
+            );
+            assert_eq!(
+                run(dense(&la), dense_b.clone()),
+                run(boxed(&la), boxed_b.clone()),
+                "{prim:?} broadcast"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_compare_scalar_dense_vs_boxed() {
+        use std::time::Instant;
+        // `x > 0.0` relu/threshold mask over a large f32 tensor.
+        let n = 1usize << 22; // 4M
+        let data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01 - 2000.0).collect();
+        let dims = vec![n as u32];
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        let s = Value::Scalar(Literal::from_f32(0.0));
+        let p = BTreeMap::new();
+        let time = |x: &Value| {
+            let _ = crate::eval_primitive(Primitive::Gt, &[x.clone(), s.clone()], &p).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = crate::eval_primitive(Primitive::Gt, &[x.clone(), s.clone()], &p).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let generic = time(&boxed);
+        let dense_t = time(&dense);
+        println!(
+            "BENCH f32 compare (x>0) n={n}: boxed(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
     }
 
     #[test]
