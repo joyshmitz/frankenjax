@@ -5875,6 +5875,13 @@ fn rank2_f64_any_orientation_matmul(
 /// Permute a contiguous row-major f64 tensor of shape `orig_dims` so output axis
 /// `i` is original axis `perm[i]`, returning the permuted contiguous buffer.
 /// O(n·rank). Used to reshape an arbitrary contraction into a 2-D GEMM.
+/// True when `perm` is the identity `[0, 1, 2, …]`, i.e. [`permute_f64`] would
+/// return an exact copy of its input — letting callers reuse the input directly.
+#[inline]
+fn is_identity_perm(perm: &[usize]) -> bool {
+    perm.iter().enumerate().all(|(i, &p)| i == p)
+}
+
 fn permute_f64(data: &[f64], orig_dims: &[usize], perm: &[usize]) -> Vec<f64> {
     let rank = orig_dims.len();
     let mut orig_strides = vec![1usize; rank];
@@ -5976,9 +5983,25 @@ fn general_real_tensordot(
     let mut rhs_perm: Vec<usize> = rhs_batch.to_vec();
     rhs_perm.extend_from_slice(rhs_contracting);
     rhs_perm.extend_from_slice(rhs_free_dims);
-    let a = permute_f64(&lhs_v, &lhs_dims, &lhs_perm);
-    let b = permute_f64(&rhs_v, &rhs_dims, &rhs_perm);
-    let values = batched_matmul_2d(&a, batch, m, k, &b, n);
+    // Skip the permute gather when it's the identity (the common case: a standard
+    // [m,k]@[k,n] matmul already has lhs=[free,contract], rhs=[contract,free], so
+    // both perms are [0,1,..]). `permute_f64` would otherwise do a per-element
+    // rank-deep index-decode over the WHOLE operand just to produce an identical
+    // copy — pure overhead the F64 fast path (rank2_f64_matmul -> matmul_2d on the
+    // borrowed slice) never pays. f32/bf16/f16 fall here, so this closes that gap.
+    // Reusing the already-promoted `lhs_v`/`rhs_v` is trivially bit-identical (same
+    // values, same order). Non-identity perms still gather as before.
+    let a = if is_identity_perm(&lhs_perm) {
+        lhs_v
+    } else {
+        Cow::Owned(permute_f64(&lhs_v, &lhs_dims, &lhs_perm))
+    };
+    let b = if is_identity_perm(&rhs_perm) {
+        rhs_v
+    } else {
+        Cow::Owned(permute_f64(&rhs_v, &rhs_dims, &rhs_perm))
+    };
+    let values = batched_matmul_2d(a.as_ref(), batch, m, k, b.as_ref(), n);
     if output_dims.is_empty() {
         // Full contraction (e.g. vector·vector) -> scalar, matching the other paths.
         return Ok(Some(Value::Scalar(real_literal_from_f64(out_dtype, values[0]))));
@@ -8394,6 +8417,48 @@ mod tests {
         println!(
             "BENCH f32 (A@B)+bias [{m},{k}]@[{k},{n}]: matmul={:.3}ms | boxed-ba={:.3}ms dense-ba={:.3}ms | pipeline before={:.3}ms after={:.3}ms speedup={:.2}x",
             t_dot * 1e3, t_ba_boxed * 1e3, t_ba_dense * 1e3, before * 1e3, after * 1e3, before / after
+        );
+    }
+
+    /// The identity-permute skip saves two full-operand `permute_f64` gathers per
+    /// f32 standard matmul. A/B in the same binary: `after` = `eval_dot_general`
+    /// (now skips them); the saved cost is exactly the two `permute_f64` calls the
+    /// old code always ran, so `before = after + 2×permute`.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_dot_identity_permute_skip() {
+        use std::time::Instant;
+        let (m, k, n) = (4096usize, 512usize, 512usize);
+        let af: Vec<f32> = (0..m * k).map(|i| (i % 100) as f32 * 0.01 - 0.5).collect();
+        let bf: Vec<f32> = (0..k * n).map(|i| (i % 77) as f32 * 0.01).collect();
+        let mk32 = |dims: Vec<u32>, data: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(DType::F32, Shape { dims }, data.iter().map(|&v| Literal::from_f32(v)).collect()).unwrap(),
+            )
+        };
+        let inputs = [mk32(vec![m as u32, k as u32], &af), mk32(vec![k as u32, n as u32], &bf)];
+        let params = BTreeMap::from([
+            ("lhs_contracting_dims".to_owned(), "1".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "0".to_owned()),
+        ]);
+        let time = |f: &dyn Fn()| {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..15 { let t = Instant::now(); f(); best = best.min(t.elapsed().as_secs_f64()); }
+            best
+        };
+        let after = time(&|| { let _ = eval_dot_general(&inputs, &params).unwrap(); });
+        // The two identity permutes the old path always ran (lhs [m,k], rhs [k,n]).
+        let lhs_f64: Vec<f64> = af.iter().map(|&v| v as f64).collect();
+        let rhs_f64: Vec<f64> = bf.iter().map(|&v| v as f64).collect();
+        let t_perm = time(&|| {
+            let _ = super::permute_f64(&lhs_f64, &[m, k], &[0, 1]);
+            let _ = super::permute_f64(&rhs_f64, &[k, n], &[0, 1]);
+        });
+        let before = after + t_perm;
+        println!(
+            "BENCH f32 dot [{m},{k}]@[{k},{n}] identity-permute-skip: after={:.3}ms permute-saved={:.3}ms before={:.3}ms speedup={:.2}x",
+            after * 1e3, t_perm * 1e3, before * 1e3, before / after
         );
     }
 
