@@ -5478,9 +5478,13 @@ fn batched_standard_f64_matmul(
         }
         batch = batch.saturating_mul(lhs.shape.dims[i] as usize);
     }
-    // Only worth the contiguous-kernel route for enough work; small batched
-    // matmuls stay on the LLVM-optimized generic loop (no regression).
-    const BATCHED_FASTPATH_MIN_OPS: usize = 1 << 20; // ~1M FMAs
+    // Route canonical batched f64 matmul through the contiguous batched kernel.
+    // The old `>= 1<<20 FMAs` floor sent small-per-matrix / large-batch shapes
+    // (e.g. [1024,8,8], 524k FMAs) to the generic strided loop, which is ~50x
+    // SLOWER than the contiguous kernel here — the "no regression" assumption was
+    // wrong for the large-batch/small-matrix regime. A tiny floor keeps trivially
+    // small contractions (where neither kernel matters) off the per-thread setup.
+    const BATCHED_FASTPATH_MIN_OPS: usize = 1 << 10; // 1024 FMAs
     if batch.saturating_mul(m).saturating_mul(k).saturating_mul(n) < BATCHED_FASTPATH_MIN_OPS {
         return Ok(None);
     }
@@ -7568,6 +7572,88 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn batched_dot_general_small_fastpath_bit_identical_to_reference() {
+        // After lowering BATCHED_FASTPATH_MIN_OPS, a small batched matmul
+        // (batch=64,m=k=n=4 → 4096 FMAs: above the new 1<<10 floor, below the old
+        // 1<<20 floor) routes through batched_matmul_2d instead of the generic
+        // strided loop. Its output must be BIT-for-bit identical to the textbook
+        // per-batch ascending-l reference (what the generic loop computed).
+        let (batch, m, k, n) = (64usize, 4usize, 4usize, 4usize);
+        let a: Vec<f64> = (0..batch * m * k)
+            .map(|i| (i as f64 * 0.017).sin() * 2.0 - 0.3)
+            .collect();
+        let b: Vec<f64> = (0..batch * k * n)
+            .map(|i| (i as f64 * 0.023).cos() * 1.5 + 0.2)
+            .collect();
+        let lhs = tensor_f64(vec![batch as u32, m as u32, k as u32], &a);
+        let rhs = tensor_f64(vec![batch as u32, k as u32, n as u32], &b);
+        let params = BTreeMap::from([
+            ("lhs_batch_dims".to_owned(), "0".to_owned()),
+            ("rhs_batch_dims".to_owned(), "0".to_owned()),
+            ("lhs_contracting_dims".to_owned(), "2".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "1".to_owned()),
+        ]);
+        let Value::Tensor(out) = eval_dot_general(&[lhs, rhs], &params).unwrap() else {
+            panic!("expected tensor");
+        };
+        assert_eq!(out.shape.dims, vec![batch as u32, m as u32, n as u32]);
+        let got: Vec<u64> = out
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F64Bits(bits) => *bits,
+                other => panic!("unexpected literal {other:?}"),
+            })
+            .collect();
+
+        let mut want = vec![0.0f64; batch * m * n];
+        for bt in 0..batch {
+            for i in 0..m {
+                for j in 0..n {
+                    let mut s = 0.0;
+                    for l in 0..k {
+                        s += a[(bt * m + i) * k + l] * b[(bt * k + l) * n + j];
+                    }
+                    want[(bt * m + i) * n + j] = s;
+                }
+            }
+        }
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert_eq!(*g, w.to_bits(), "fast-path batched matmul must be bit-identical");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batched_dot_general_small_matrices() {
+        use std::time::Instant;
+        let run = |batch: usize, m: usize, k: usize, n: usize| {
+            let a: Vec<f64> = (0..batch * m * k).map(|i| (i % 7) as f64 * 0.5).collect();
+            let b: Vec<f64> = (0..batch * k * n).map(|i| (i % 5) as f64 * 0.25).collect();
+            let lhs = tensor_f64(vec![batch as u32, m as u32, k as u32], &a);
+            let rhs = tensor_f64(vec![batch as u32, k as u32, n as u32], &b);
+            let params = BTreeMap::from([
+                ("lhs_batch_dims".to_owned(), "0".to_owned()),
+                ("rhs_batch_dims".to_owned(), "0".to_owned()),
+                ("lhs_contracting_dims".to_owned(), "2".to_owned()),
+                ("rhs_contracting_dims".to_owned(), "1".to_owned()),
+            ]);
+            let inputs = [lhs, rhs];
+            let _ = eval_dot_general(&inputs, &params).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..30 {
+                let t = Instant::now();
+                let _ = eval_dot_general(&inputs, &params).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            println!("BENCH eval_dot_general batched=[{batch},{m},{k}]x[{batch},{k},{n}]: {:.4}ms", best * 1e3);
+        };
+        run(1024, 8, 8, 8);
+        run(256, 16, 16, 16);
+        run(64, 4, 4, 4);
     }
     fn tensor_i64(dims: Vec<u32>, data: &[i64]) -> Value {
         Value::Tensor(
