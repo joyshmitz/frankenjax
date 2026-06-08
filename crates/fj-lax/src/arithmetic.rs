@@ -5622,16 +5622,22 @@ fn permute_f64(data: &[f64], orig_dims: &[usize], perm: &[usize]) -> Vec<f64> {
     out
 }
 
-/// General NO-BATCH f64 dot_general (any rank, any number of contracting dims) as
-/// a single GEMM: permute lhs to `[free..., contract...]` and rhs to
-/// `[contract..., free...]` (collapsing each group to one axis), matmul_2d, and
-/// the `[lhs_free_size, rhs_free_size]` output is already the dot_general order
-/// `[lhs_free dims ++ rhs_free dims]`. Replaces the generic strided loop for
-/// rank>2 tensordots and multi-contracting-dim contractions. Bit-identical: same
-/// products summed over the contracting index in ascending order. f64 only.
-fn general_nobatch_f64_tensordot(
+/// General f64 dot_general — ANY rank, ANY number of batch / contracting dims —
+/// as a single (batched) GEMM. Permute lhs to `[batch..., free..., contract...]`
+/// and rhs to `[batch..., contract..., free...]` (collapsing each group to one
+/// axis), then `batched_matmul_2d` over the flattened batch. The resulting
+/// `[batch, m, n]` is already the dot_general output order
+/// `[lhs_batch ++ lhs_free ++ rhs_free]`, so it reshapes for free. Replaces the
+/// generic strided loop for every f64 contraction the canonical fast paths above
+/// don't catch (non-canonical batched, rank>2 tensordot, multi-contract). The
+/// batch/contract dims are flattened in their paired param order; the free dims
+/// in ascending order. Bit-identical: same products summed over the contracting
+/// index in ascending order; the permute only reorders memory. f64 only.
+fn general_f64_tensordot(
     lhs: &TensorValue,
     rhs: &TensorValue,
+    lhs_batch: &[usize],
+    rhs_batch: &[usize],
     lhs_contracting: &[usize],
     rhs_contracting: &[usize],
     lhs_free_dims: &[usize],
@@ -5643,26 +5649,31 @@ fn general_nobatch_f64_tensordot(
     }
     let lhs_dims: Vec<usize> = lhs.shape.dims.iter().map(|&d| d as usize).collect();
     let rhs_dims: Vec<usize> = rhs.shape.dims.iter().map(|&d| d as usize).collect();
+    let batch: usize = lhs_batch.iter().map(|&d| lhs_dims[d]).product();
     let m: usize = lhs_free_dims.iter().map(|&d| lhs_dims[d]).product();
     let k: usize = lhs_contracting.iter().map(|&d| lhs_dims[d]).product();
     let n: usize = rhs_free_dims.iter().map(|&d| rhs_dims[d]).product();
-    // Contracting sizes must match group-for-group (also validated upstream).
+    // Batch and contracting sizes must match group-for-group (also validated
+    // upstream); guard against any mismatch before trusting the flat layout.
+    let rbatch: usize = rhs_batch.iter().map(|&d| rhs_dims[d]).product();
     let rk: usize = rhs_contracting.iter().map(|&d| rhs_dims[d]).product();
-    if rk != k {
+    if rk != k || rbatch != batch {
         return Ok(None);
     }
     let (Some(lhs_v), Some(rhs_v)) = (dot_f64_elements(lhs), dot_f64_elements(rhs)) else {
         return Ok(None);
     };
-    // lhs -> [free (ascending) ++ contract (paired order)] = [m, k] row-major.
-    let mut lhs_perm: Vec<usize> = lhs_free_dims.to_vec();
+    // lhs -> [batch (paired) ++ free (ascending) ++ contract (paired)] = [batch,m,k].
+    let mut lhs_perm: Vec<usize> = lhs_batch.to_vec();
+    lhs_perm.extend_from_slice(lhs_free_dims);
     lhs_perm.extend_from_slice(lhs_contracting);
-    // rhs -> [contract (paired order) ++ free (ascending)] = [k, n] row-major.
-    let mut rhs_perm: Vec<usize> = rhs_contracting.to_vec();
+    // rhs -> [batch (paired) ++ contract (paired) ++ free (ascending)] = [batch,k,n].
+    let mut rhs_perm: Vec<usize> = rhs_batch.to_vec();
+    rhs_perm.extend_from_slice(rhs_contracting);
     rhs_perm.extend_from_slice(rhs_free_dims);
     let a = permute_f64(&lhs_v, &lhs_dims, &lhs_perm);
     let b = permute_f64(&rhs_v, &rhs_dims, &rhs_perm);
-    let values = matmul_2d(&a, m, k, &b, n);
+    let values = batched_matmul_2d(&a, batch, m, k, &b, n);
     if output_dims.is_empty() {
         // Full contraction (e.g. vector·vector) -> scalar, matching the other paths.
         return Ok(Some(Value::Scalar(Literal::from_f64(values[0]))));
@@ -6048,23 +6059,23 @@ pub(crate) fn eval_dot_general(
         return Ok(value);
     }
 
-    // General NO-BATCH f64 tensordot (any rank, any #contracting dims) as a single
-    // reshape-to-GEMM: permute to [free,contract]/[contract,free] and matmul_2d,
-    // instead of the generic strided loop. Covers rank>2 tensordots (e.g.
-    // einsum 'abk,kcd->abcd') and multi-contracting-dim rank-2 contractions.
-    // Bit-identical (same products, ascending contracting index).
-    if lhs_batch.is_empty()
-        && rhs_batch.is_empty()
-        && let Some(value) = general_nobatch_f64_tensordot(
-            lhs,
-            rhs,
-            &lhs_contracting,
-            &rhs_contracting,
-            &lhs_free_dims,
-            &rhs_free_dims,
-            &output_dims,
-        )?
-    {
+    // General f64 dot_general (any rank, any batch/contracting dims) as a single
+    // reshape-to-(batched-)GEMM: permute to [batch,free,contract]/[batch,contract,
+    // free] and batched_matmul_2d, instead of the generic strided loop. Catches
+    // every remaining f64 case the canonical fast paths above miss — non-canonical
+    // batched contractions (e.g. batched attention with transposed operands),
+    // rank>2 tensordots, multi-contract. Bit-identical (same products, ascending k).
+    if let Some(value) = general_f64_tensordot(
+        lhs,
+        rhs,
+        &lhs_batch,
+        &rhs_batch,
+        &lhs_contracting,
+        &rhs_contracting,
+        &lhs_free_dims,
+        &rhs_free_dims,
+        &output_dims,
+    )? {
         return Ok(value);
     }
 
@@ -7907,6 +7918,60 @@ mod tests {
     }
 
     #[test]
+    fn general_batched_noncanonical_tensordot_bit_identical_to_reference() {
+        // Batched A·Bᵀ (Q@Kᵀ-style): A[b,m,k], B[b,n,k] contract k, batch dim 0.
+        // Non-canonical (rhs contracting is the LAST dim, not the middle), so it
+        // routes through the general reshape-to-batched-GEMM path. Must be
+        // bit-for-bit identical to the textbook per-batch ascending-k reference.
+        let (bt, m, k, n) = (3usize, 2usize, 4usize, 5usize);
+        let mk = |len: usize, salt: f64| -> Vec<f64> {
+            (0..len).map(|i| (i as f64 * salt).sin() * 1.3 - 0.2).collect()
+        };
+        let a = mk(bt * m * k, 0.013);
+        let b = mk(bt * n * k, 0.019);
+        let p = BTreeMap::from([
+            ("lhs_batch_dims".to_owned(), "0".to_owned()),
+            ("rhs_batch_dims".to_owned(), "0".to_owned()),
+            ("lhs_contracting_dims".to_owned(), "2".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "2".to_owned()),
+        ]);
+        let Value::Tensor(out) = eval_dot_general(
+            &[
+                tensor_f64(vec![bt as u32, m as u32, k as u32], &a),
+                tensor_f64(vec![bt as u32, n as u32, k as u32], &b),
+            ],
+            &p,
+        )
+        .unwrap() else {
+            panic!("expected tensor");
+        };
+        assert_eq!(out.shape.dims, vec![bt as u32, m as u32, n as u32]);
+        let got: Vec<u64> = out
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F64Bits(x) => *x,
+                o => panic!("unexpected {o:?}"),
+            })
+            .collect();
+        let mut want = vec![0.0f64; bt * m * n];
+        for t in 0..bt {
+            for i in 0..m {
+                for j in 0..n {
+                    let mut s = 0.0;
+                    for kk in 0..k {
+                        s += a[(t * m + i) * k + kk] * b[(t * n + j) * k + kk];
+                    }
+                    want[(t * m + i) * n + j] = s;
+                }
+            }
+        }
+        for (g, w) in got.iter().zip(want.iter()) {
+            assert_eq!(*g, w.to_bits(), "batched non-canonical must be bit-identical");
+        }
+    }
+
+    #[test]
     fn batched_dot_general_small_fastpath_bit_identical_to_reference() {
         // After lowering BATCHED_FASTPATH_MIN_OPS, a small batched matmul
         // (batch=64,m=k=n=4 → 4096 FMAs: above the new 1<<10 floor, below the old
@@ -7956,6 +8021,37 @@ mod tests {
         for (g, w) in got.iter().zip(want.iter()) {
             assert_eq!(*g, w.to_bits(), "fast-path batched matmul must be bit-identical");
         }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batched_noncanonical_dot_general() {
+        use std::time::Instant;
+        // Batched A·Bᵀ (Q@Kᵀ-style): A[b,m,k], B[b,n,k] contract k, batch dim 0.
+        let run = |batch: usize, m: usize, k: usize, n: usize| {
+            let a: Vec<f64> = (0..batch * m * k).map(|i| (i % 7) as f64 * 0.5).collect();
+            let b: Vec<f64> = (0..batch * n * k).map(|i| (i % 5) as f64 * 0.25).collect();
+            let params = BTreeMap::from([
+                ("lhs_batch_dims".to_owned(), "0".to_owned()),
+                ("rhs_batch_dims".to_owned(), "0".to_owned()),
+                ("lhs_contracting_dims".to_owned(), "2".to_owned()),
+                ("rhs_contracting_dims".to_owned(), "2".to_owned()),
+            ]);
+            let inputs = [
+                tensor_f64(vec![batch as u32, m as u32, k as u32], &a),
+                tensor_f64(vec![batch as u32, n as u32, k as u32], &b),
+            ];
+            let _ = eval_dot_general(&inputs, &params).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = eval_dot_general(&inputs, &params).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            println!("BENCH batched A[{batch},{m},{k}]·B[{batch},{n},{k}]ᵀ -> [{batch},{m},{n}]: {:.4}ms", best * 1e3);
+        };
+        run(32, 128, 64, 128);
+        run(64, 32, 32, 32);
     }
 
     #[test]
