@@ -3932,6 +3932,76 @@ pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Va
                 });
             }
 
+            // Dense fast paths (cond/switch per-element select): when every operand
+            // shares a dense typed backing, pick operand[idx[i]][i] straight from the
+            // contiguous slices into dense output, skipping the per-`Literal`
+            // materialization of each picked element AND the boxed output. The index
+            // is still decoded per element via select_n_index_to_usize (preserving
+            // its Bool/int handling, bounds errors, and >2-operand-Bool rejection),
+            // so behavior is identical; only the (bulk) operand read/output is dense.
+            // Bit-for-bit identical: operand slice[i] == operand.elements[i].
+            macro_rules! dense_select_n {
+                ($accessor:ident, $ctor:expr) => {{
+                    let mut op_slices = Vec::with_capacity(n_operands);
+                    let mut all_dense = true;
+                    for op in operands {
+                        match op {
+                            Value::Tensor(t) => match t.elements.$accessor() {
+                                Some(s) => op_slices.push(s),
+                                None => {
+                                    all_dense = false;
+                                    break;
+                                }
+                            },
+                            Value::Scalar(_) => {
+                                all_dense = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_dense {
+                        let mut out = Vec::with_capacity(idx_tensor.elements.len());
+                        if let Some(idxs) = idx_tensor.elements.as_i64_slice() {
+                            // Dense i64 index (switch lowering): decode inline,
+                            // matching select_n_index_to_usize for an I64 literal
+                            // exactly (`v as usize`, OOB -> same error message).
+                            for (i, &iv) in idxs.iter().enumerate() {
+                                let u = iv as usize;
+                                if u >= n_operands {
+                                    return Err(EvalError::Unsupported {
+                                        primitive,
+                                        detail: format!(
+                                            "select_n index {u} out of bounds for {n_operands} operands"
+                                        ),
+                                    });
+                                }
+                                out.push(op_slices[u][i]);
+                            }
+                        } else {
+                            // Bool / other index dtypes: keep per-`Literal` decode
+                            // (preserves Bool->{0,1} with >2-operand rejection).
+                            for (i, idx_lit) in idx_tensor.elements.iter().enumerate() {
+                                let idx = select_n_index_to_usize(*idx_lit, n_operands, primitive)?;
+                                out.push(op_slices[idx][i]);
+                            }
+                        }
+                        return Ok(Value::Tensor($ctor(idx_tensor.shape.clone(), out)?));
+                    }
+                }};
+            }
+            match first_operand.dtype {
+                DType::F64 => dense_select_n!(as_f64_slice, TensorValue::new_f64_values),
+                DType::F32 => dense_select_n!(as_f32_slice, TensorValue::new_f32_values),
+                DType::I64 => dense_select_n!(as_i64_slice, TensorValue::new_i64_values),
+                DType::BF16 | DType::F16 => {
+                    let dt = first_operand.dtype;
+                    dense_select_n!(as_half_float_slice, |sh, out| {
+                        TensorValue::new_half_float_values(dt, sh, out)
+                    });
+                }
+                _ => {}
+            }
+
             let dtype = first_operand.dtype;
             let mut elements = Vec::with_capacity(idx_tensor.elements.len());
 
@@ -11579,6 +11649,189 @@ mod tests {
         let result = eval_select_n(Primitive::SelectN, &[idx, a, b, c]).unwrap();
         let vals = extract_f64_vec(&result);
         assert_eq!(vals, vec![1.0, 20.0, 300.0, 40.0]);
+    }
+
+    #[test]
+    fn dense_select_n_matches_literal_path_and_stays_dense() {
+        // Dense f64/f32/i64/bf16 select_n (3 operands, i64 index) must be BIT-FOR-BIT
+        // identical to the boxed per-`Literal` path AND keep dense output.
+        let n = 257usize;
+        let dims = vec![n as u32];
+        let idxv: Vec<i64> = (0..n as i64).map(|i| i % 3).collect();
+        let idx = Value::Tensor(
+            TensorValue::new_i64_values(Shape { dims: dims.clone() }, idxv.clone()).unwrap(),
+        );
+        let lits = |v: &Value| v.as_tensor().unwrap().elements.to_vec();
+
+        // f64
+        let mk_f64 = |off: f64| {
+            let d: Vec<f64> = (0..n).map(|i| i as f64 * 0.5 + off).collect();
+            (
+                Value::Tensor(
+                    TensorValue::new_f64_values(Shape { dims: dims.clone() }, d.clone()).unwrap(),
+                ),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims: dims.clone() },
+                        d.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        let (da, ba) = mk_f64(0.0);
+        let (db, bb) = mk_f64(1000.0);
+        let (dc, bc) = mk_f64(2000.0);
+        let d = eval_select_n(Primitive::SelectN, &[idx.clone(), da, db, dc]).unwrap();
+        let l = eval_select_n(Primitive::SelectN, &[idx.clone(), ba, bb, bc]).unwrap();
+        assert_eq!(lits(&d), lits(&l), "f64 select_n");
+        assert!(
+            d.as_tensor().unwrap().elements.as_f64_slice().is_some(),
+            "f64 dense out"
+        );
+
+        // f32
+        let mk_f32 = |off: f32| {
+            let d: Vec<f32> = (0..n).map(|i| i as f32 * 0.25 + off).collect();
+            (
+                Value::Tensor(
+                    TensorValue::new_f32_values(Shape { dims: dims.clone() }, d.clone()).unwrap(),
+                ),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F32,
+                        Shape { dims: dims.clone() },
+                        d.iter().copied().map(Literal::from_f32).collect(),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        let (da, ba) = mk_f32(0.0);
+        let (db, bb) = mk_f32(500.0);
+        let (dc, bc) = mk_f32(900.0);
+        let d = eval_select_n(Primitive::SelectN, &[idx.clone(), da, db, dc]).unwrap();
+        let l = eval_select_n(Primitive::SelectN, &[idx.clone(), ba, bb, bc]).unwrap();
+        assert_eq!(lits(&d), lits(&l), "f32 select_n");
+        assert!(
+            d.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+            "f32 dense out"
+        );
+
+        // i64
+        let mk_i64 = |off: i64| {
+            let d: Vec<i64> = (0..n as i64).map(|i| i + off).collect();
+            (
+                Value::Tensor(
+                    TensorValue::new_i64_values(Shape { dims: dims.clone() }, d.clone()).unwrap(),
+                ),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::I64,
+                        Shape { dims: dims.clone() },
+                        d.iter().copied().map(Literal::I64).collect(),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        let (da, ba) = mk_i64(0);
+        let (db, bb) = mk_i64(1_000_000);
+        let (dc, bc) = mk_i64(2_000_000);
+        let d = eval_select_n(Primitive::SelectN, &[idx.clone(), da, db, dc]).unwrap();
+        let l = eval_select_n(Primitive::SelectN, &[idx.clone(), ba, bb, bc]).unwrap();
+        assert_eq!(lits(&d), lits(&l), "i64 select_n");
+        assert!(
+            d.as_tensor().unwrap().elements.as_i64_slice().is_some(),
+            "i64 dense out"
+        );
+
+        // bf16
+        let mk_bf16 = |seed: u16| {
+            let d: Vec<u16> = (0..n)
+                .map(|i| (i as u16).wrapping_mul(31).wrapping_add(seed))
+                .collect();
+            (
+                Value::Tensor(
+                    TensorValue::new_half_float_values(
+                        DType::BF16,
+                        Shape { dims: dims.clone() },
+                        d.clone(),
+                    )
+                    .unwrap(),
+                ),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::BF16,
+                        Shape { dims: dims.clone() },
+                        d.iter().copied().map(Literal::BF16Bits).collect(),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        let (da, ba) = mk_bf16(0x3f00);
+        let (db, bb) = mk_bf16(0x4000);
+        let (dc, bc) = mk_bf16(0x4100);
+        let d = eval_select_n(Primitive::SelectN, &[idx.clone(), da, db, dc]).unwrap();
+        let l = eval_select_n(Primitive::SelectN, &[idx.clone(), ba, bb, bc]).unwrap();
+        assert_eq!(lits(&d), lits(&l), "bf16 select_n");
+        assert!(
+            d.as_tensor()
+                .unwrap()
+                .elements
+                .as_half_float_slice()
+                .is_some(),
+            "bf16 dense out"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_select_n_f32_dense_vs_boxed() {
+        use std::time::Instant;
+        let n = 1usize << 22; // 4M, 3-way select_n (cond/switch per element)
+        let dims = vec![n as u32];
+        let idxv: Vec<i64> = (0..n as i64).map(|i| i % 3).collect();
+        let idx =
+            Value::Tensor(TensorValue::new_i64_values(Shape { dims: dims.clone() }, idxv).unwrap());
+        let mk = |off: f32, dense: bool| {
+            let d: Vec<f32> = (0..n).map(|i| (i % 997) as f32 * 0.01 + off).collect();
+            if dense {
+                Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, d).unwrap())
+            } else {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F32,
+                        Shape { dims: dims.clone() },
+                        d.iter().copied().map(Literal::from_f32).collect(),
+                    )
+                    .unwrap(),
+                )
+            }
+        };
+        let dense_ops = [mk(0.0, true), mk(100.0, true), mk(200.0, true)];
+        let boxed_ops = [mk(0.0, false), mk(100.0, false), mk(200.0, false)];
+        let time = |ops: &[Value; 3]| {
+            let inp = [idx.clone(), ops[0].clone(), ops[1].clone(), ops[2].clone()];
+            let _ = eval_select_n(Primitive::SelectN, &inp).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = eval_select_n(Primitive::SelectN, &inp).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let generic = time(&boxed_ops);
+        let dense_t = time(&dense_ops);
+        println!(
+            "BENCH select_n f32 n={n} (3-way): boxed(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
     }
 
     #[test]
