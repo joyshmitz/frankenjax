@@ -22,6 +22,15 @@ fn complex_mul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
 }
 
+// NOTE: this naive `b.0² + b.1²` denominator overflows for |b| ≳ 1.3e154 (the
+// quotient collapses to (0,0)), unlike the Div PRIMITIVE's `complex_div` in
+// arithmetic.rs which uses Smith's algorithm. Do NOT "fix" this one the same way:
+// its exact bits are pinned by `lu_real_fast_path_bit_identical_to_complex_zero_imag_path`
+// and `cholesky_real_fast_path_bit_identical_to_complex_path`, which require the
+// complex path to be bit-for-bit equal to the real fast path. Smith's changes the
+// op order (1 ULP) and breaks that invariant. The overflow only bites at
+// pathological (≥1e154) matrix entries; making this overflow-safe would require
+// updating the real fast paths in lockstep.
 fn complex_div(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     let denom = b.0 * b.0 + b.1 * b.1;
     (
