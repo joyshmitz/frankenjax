@@ -411,6 +411,101 @@ fn dot_general_jvp_numerical() {
     assert_close(&analytical_tangent, &numerical, 1e-5, "DotGeneral JVP");
 }
 
+// ======================== Pad JVP (pad_value tangent) ========================
+
+#[test]
+fn pad_jvp_pad_value_tangent_numerical() {
+    // d pad(operand, pad_value) = pad(d_operand, d_pad_value): the padding region
+    // must be filled with the pad_value's TANGENT (a rule that drops it — padding
+    // with 0 or the primal pad_value — is a common forward-mode bug). Use a
+    // NONZERO d_pad_value so that path is exercised. operand=[3], low=1,high=1,
+    // interior=1 → out=[7] laid out [pv,o0,pv,o1,pv,o2,pv].
+    let operand = make_f64_vector(&[1.0, 2.0, 3.0]);
+    let pad_value = Value::Scalar(Literal::from_f64(0.5));
+    let d_operand = make_f64_vector(&[0.1, 0.2, 0.3]);
+    let d_pad_value = Value::Scalar(Literal::from_f64(0.7));
+
+    let mut params = BTreeMap::new();
+    params.insert("padding_low".to_string(), "1".to_string());
+    params.insert("padding_high".to_string(), "1".to_string());
+    params.insert("padding_interior".to_string(), "1".to_string());
+
+    let jaxpr = make_two_input_jaxpr(Primitive::Pad, params.clone());
+    let jvp = fj_ad::jvp(
+        &jaxpr,
+        &[operand.clone(), pad_value.clone()],
+        &[d_operand.clone(), d_pad_value.clone()],
+    )
+    .unwrap();
+    let analytical = extract_f64_vec(&jvp.tangents[0]);
+
+    let eps = 1e-6;
+    let perturb_scalar = |base: f64, dv: f64, s: f64| Value::Scalar(Literal::from_f64(base + s * dv));
+    let op_plus = perturb(&operand, &d_operand, eps);
+    let op_minus = perturb(&operand, &d_operand, -eps);
+    let pv_plus = perturb_scalar(0.5, 0.7, eps);
+    let pv_minus = perturb_scalar(0.5, 0.7, -eps);
+    let out_plus = eval_primitive_multi(Primitive::Pad, &[op_plus, pv_plus], &params).unwrap();
+    let out_minus = eval_primitive_multi(Primitive::Pad, &[op_minus, pv_minus], &params).unwrap();
+    let numerical: Vec<f64> = extract_f64_vec(&out_plus[0])
+        .iter()
+        .zip(extract_f64_vec(&out_minus[0]).iter())
+        .map(|(p, m)| (p - m) / (2.0 * eps))
+        .collect();
+
+    assert_close(&analytical, &numerical, 1e-5, "Pad JVP (pad_value tangent)");
+}
+
+// ======================== ReduceMax/Min JVP ========================
+
+fn make_single_input_jaxpr(prim: Primitive, params: BTreeMap<String, String>) -> Jaxpr {
+    Jaxpr::new(
+        vec![VarId(1)],
+        vec![],
+        vec![VarId(2)],
+        vec![Equation {
+            primitive: prim,
+            inputs: smallvec![Atom::Var(VarId(1))],
+            outputs: smallvec![VarId(2)],
+            params,
+            effects: vec![],
+            sub_jaxprs: vec![],
+        }],
+    )
+}
+
+#[test]
+fn reduce_max_min_jvp_axis_numerical() {
+    // ReduceMax/Min JVP gathers the tangent at each window's arg-extremum (a
+    // selection — same class as sort/reduce_window). With DISTINCT values the
+    // chooser is the true derivative, so a finite difference verifies the
+    // forward-mode routing. The forward direction had NO numerical coverage.
+    let data = [3.0, 1.0, 2.0, 4.0, 6.0, 5.0]; // [2,3]: rows [3,1,2],[4,6,5]
+    let input = make_f64_matrix(2, 3, &data);
+    let d_data = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+    let d_input = make_f64_matrix(2, 3, &d_data);
+    let mut params = BTreeMap::new();
+    params.insert("axes".to_string(), "1".to_string());
+
+    for prim in [Primitive::ReduceMax, Primitive::ReduceMin] {
+        let jaxpr = make_single_input_jaxpr(prim, params.clone());
+        let jvp = fj_ad::jvp(&jaxpr, &[input.clone()], &[d_input.clone()]).unwrap();
+        let analytical = extract_f64_vec(&jvp.tangents[0]);
+
+        let eps = 1e-6;
+        let plus = perturb(&input, &d_input, eps);
+        let minus = perturb(&input, &d_input, -eps);
+        let out_plus = eval_primitive_multi(prim, std::slice::from_ref(&plus), &params).unwrap();
+        let out_minus = eval_primitive_multi(prim, std::slice::from_ref(&minus), &params).unwrap();
+        let numerical: Vec<f64> = extract_f64_vec(&out_plus[0])
+            .iter()
+            .zip(extract_f64_vec(&out_minus[0]).iter())
+            .map(|(p, m)| (p - m) / (2.0 * eps))
+            .collect();
+        assert_close(&analytical, &numerical, 1e-5, &format!("{prim:?} JVP (axis)"));
+    }
+}
+
 // ======================== Eigh JVP ========================
 
 #[test]
