@@ -1,0 +1,109 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_cholesky_schur_simd_9dgqw_pass178_2026-06-08",
+  "status": "rejected",
+  "date": "2026-06-08",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-9dgqw",
+  "crate": "fj-lax",
+  "target": "linalg/cholesky_1024x1024_f64",
+  "skill_pass": "repeatedly-apply-skill pass178 -> extreme-software-optimization",
+  "profile_backing": {
+    "worker": "vmi1149989",
+    "source": "bead description and Agent Mail start note",
+    "top_rows": [
+      {
+        "name": "linalg/matmul_2d_2048x2048x2048_f64",
+        "time_ms": [971.19],
+        "note": "Broad-profile top, but direct GEMM remains blocked by the closed bit-exact ascending-k contract."
+      },
+      {
+        "name": "linalg/cholesky_1024x1024_f64",
+        "time_ms": [58.921, 59.061, 59.620],
+        "route": "next shippable non-GEMM row if the lever preserves behavior"
+      },
+      {
+        "name": "linalg/lu_1024x1024_f64",
+        "time_ms": [51.975, 53.936, 54.427]
+      }
+    ]
+  },
+  "focused_baseline": {
+    "worker": "vmi1149989",
+    "time_ms": {
+      "cholesky_1024x1024_f64": [58.921, 59.061, 59.620]
+    }
+  },
+  "candidate": {
+    "lever": "safe std::simd lower Schur dot for blocked Cholesky",
+    "description": "Replaced the scalar c=0..jb dot accumulation in cholesky_schur_update_lower_rows with eight-lane SIMD products followed by horizontal lane summation.",
+    "source_diff_retained": false,
+    "files_touched_temporarily": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "rebench": {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-9dgqw-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/cholesky_1024x1024_f64' --sample-size 20 --warm-up-time 2 --measurement-time 8 --noplot",
+      "worker": "vmi1149989",
+      "time_ms": {
+        "cholesky_1024x1024_f64": [35.613, 37.959, 40.722]
+      },
+      "speedup_vs_focused_baseline_mid": 1.5559,
+      "conservative_speedup_low_over_high": 1.4470
+    },
+    "proof_failure": {
+      "reason": "Candidate changed golden output bits by reassociating floating-point dot accumulation.",
+      "old_blocked_cholesky_digest": "9fbcc45dd316e9c3b2e5f730d895c39bad0b562e990432196fd7eb4a0627fdc6",
+      "candidate_blocked_cholesky_digest": "cae3c6a0fcc965880d1379765d0b7886deb1ca3d1c9dc1036ca705e60306ff0a",
+      "failed_obligation": "golden-output sha256 and floating-point operation order must remain unchanged unless a separate behavior-contract bead admits tolerance."
+    }
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 5.0,
+    "effort": 1.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "keep_threshold": 2.0,
+    "decision": "reject_and_restore_source"
+  },
+  "isomorphism_proof": {
+    "ordering": "Candidate preserved p/q traversal and output addressing but did not preserve per-entry c contribution order.",
+    "tie_breaking": "N/A: Cholesky has no pivot or comparison tie-breaking surface.",
+    "floating_point": "Failed: eight-lane SIMD produced lane-local partial sums and a horizontal reduction, changing the scalar c=0..jb addition order.",
+    "rng": "N/A: Cholesky consumes no random state.",
+    "errors": "No public dtype, shape, or error surface changed in candidate state; final production source was restored.",
+    "golden_sha256": "e7c7d0dd865fa243c73ec800335f821db1215d0069e4a1df76afde7cda769047"
+  },
+  "validation": [
+    {
+      "command": "git diff -- crates/fj-lax/src/linalg.rs",
+      "result": "empty after source restore"
+    },
+    {
+      "command": "git diff --check -- crates/fj-lax/src/linalg.rs",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_cholesky_schur_simd_9dgqw_pass178_2026-06-08.rejected.golden.sha256",
+      "result": "pass"
+    }
+  ],
+  "alien_source": {
+    "primary_sources": [
+      "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md",
+      "/data/projects/alien_cs_graveyard/high_level_summary_of_frankensuite_planned_and_implemented_features_and_concepts.md"
+    ],
+    "primitive_family": "portable SIMD dense factorization dot product",
+    "applied_slice": "Measured a safe SIMD Schur dot after Cholesky remained the top shippable non-GEMM row."
+  },
+  "next_primitive": {
+    "target": "reprofile restored source and attack a different FP-order-preserving linalg primitive or first land a behavior-contract bead",
+    "reason": "The SIMD dot was performance-positive but violates the active bit-preservation contract. Do not repeat lower-Schur reassociation without an explicit tolerance contract.",
+    "target_ratio": ">=2.0 score gate with same-worker RCH A/B and unchanged golden sha256",
+    "proof_obligations": [
+      "observable output order unchanged",
+      "floating-point operation order unchanged unless a separate behavior-contract bead admits tolerance",
+      "no RNG, tie-breaking, dtype/shape/error change",
+      "golden sha256 passes before close"
+    ]
+  }
+}

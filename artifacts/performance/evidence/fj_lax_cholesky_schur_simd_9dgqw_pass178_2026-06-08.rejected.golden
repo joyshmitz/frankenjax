@@ -1,0 +1,17 @@
+frankenjax-9dgqw pass178 rejected evidence
+
+target: linalg/cholesky_1024x1024_f64
+worker: vmi1149989
+baseline_ms: [58.921, 59.061, 59.620]
+after_ms: [35.613, 37.959, 40.722]
+speedup_midpoint: 1.5559
+speedup_conservative_low_over_high: 1.4470
+score: 0.0
+decision: reject_and_restore_source
+
+rejection_gate: behavior proof failed. The candidate changed cholesky_blocked_path_golden_output_digest from 9fbcc45dd316e9c3b2e5f730d895c39bad0b562e990432196fd7eb4a0627fdc6 to cae3c6a0fcc965880d1379765d0b7886deb1ca3d1c9dc1036ca705e60306ff0a.
+
+isomorphism_failure: safe SIMD dot accumulated eight independent lane sums and then horizontally reduced them, which reassociated the original c=0..jb floating-point addition order for every lower Schur update entry.
+
+source_restored: git diff -- crates/fj-lax/src/linalg.rs empty after rejection.
+next_primitive: do not repeat lower-Schur SIMD reassociation under the current bit-preservation contract. Attack a profile-backed LU/QR/SVD primitive that preserves FP order, or first land an explicit behavior-contract bead if a deeper Cholesky/GEMM primitive requires FP tolerance.
