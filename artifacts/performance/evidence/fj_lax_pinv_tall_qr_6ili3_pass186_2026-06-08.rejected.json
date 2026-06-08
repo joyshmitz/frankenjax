@@ -1,0 +1,60 @@
+{
+  "artifact": "fj_lax_pinv_tall_qr_6ili3_pass186_2026-06-08",
+  "bead": "frankenjax-6ili3",
+  "pass": 186,
+  "date": "2026-06-08",
+  "crate": "fj-lax",
+  "target": "linalg/pinv_256x128_f64_fullrank",
+  "decision": "rejected",
+  "commit_parent": "9ab4f5eaf101e23d0fe0d31121d56aa9a6c315f1",
+  "candidate_wip_commit": "154939ee4b5769398b576620da5e976eedd2bee2",
+  "lever": {
+    "name": "QR-preprocess tall full-rank pinv",
+    "description": "Route tall full-rank m>=2n real pseudoinverse through thin QR, compute pinv(R) by SVD, then form R_plus * Q_transpose.",
+    "one_lever": true,
+    "source_kept": false
+  },
+  "rch_baseline_first": {
+    "worker": "ovh-b",
+    "command": "cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_256x128_f64 --quick --noplot",
+    "source": "detached HEAD 9ab4f5ea",
+    "note": "This is the existing public pinv bench and was run before edits/proof work. The later full-rank A/B is the primary gate because the existing data is low rank and routes through the already-landed low-rank path.",
+    "interval_ms": [72.741, 73.110, 73.202]
+  },
+  "primary_same_binary_ab": {
+    "worker": "ovh-a",
+    "command": "cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_256x128_f64_fullrank --quick --noplot",
+    "direct_svd_baseline_ms": [24.878, 24.893, 24.897],
+    "qr_preprocess_candidate_ms": [26.077, 26.119, 26.129],
+    "median_speedup": 0.953060990,
+    "conservative_speedup": 0.952122163,
+    "median_regression_percent": 4.925079
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 5.0,
+    "effort": 1.0,
+    "impact_times_confidence_over_effort": 0.0,
+    "threshold": 2.0
+  },
+  "behavior_proof": {
+    "candidate_behavior": "The candidate was not bit-isomorphic to direct SVD because QR preprocessing changes floating-point operation order. The intended proof obligation was Moore-Penrose uniqueness plus singular-value cutoff equivalence with deterministic tolerance goldens.",
+    "accepted_state": "Rejected state restores production and benchmark source exactly to parent 9ab4f5ea; therefore public behavior, ordering, tie-breaking, floating-point recurrence, RNG absence, dtype/shape/error surface, and low-rank dispatch remain unchanged.",
+    "golden_sha256_file": "artifacts/performance/evidence/fj_lax_pinv_tall_qr_6ili3_pass186_2026-06-08.rejected.golden.sha256"
+  },
+  "proof_gates": {
+    "source_restored": "git diff HEAD~1 -- crates/fj-lax/src/linalg.rs crates/fj-lax/benches/lax_baseline.rs produced no output before closeout commit",
+    "rch_tests": "ovh-a: cargo test -p fj-lax --lib pinv -- --nocapture; 8 passed, 0 failed",
+    "rch_check": "ovh-a: cargo check -p fj-lax --all-targets; passed",
+    "rch_clippy": "ovh-a: cargo clippy -p fj-lax --all-targets -- -D warnings; passed",
+    "local_fmt": "cargo fmt --check --package fj-lax; passed",
+    "local_diff_check": "git diff --check; passed",
+    "local_json": "jq empty evidence JSON; passed",
+    "local_sha256": "sha256sum -c golden.sha256; passed",
+    "ubs": "ubs crates/fj-lax/src/linalg.rs crates/fj-lax/benches/lax_baseline.rs exited 1 on pre-existing broad inventory; no unsafe blocks, and UBS fmt/clippy/check/test-build sections were clean"
+  },
+  "next_route": {
+    "do_not_repeat": "Do not retry QR-preprocess-at-2n for pinv256 full-rank; QR plus R_plus*Q_transpose is slower than direct one-sided Jacobi SVD on the same worker.",
+    "deeper_primitive": "Attack the SVD core itself: blocked/one-sided Jacobi sweeps with cache-resident column tiles, fewer full-column passes, or a Golub-Kahan bidiagonalization artifact with an explicit tolerance contract."
+  }
+}

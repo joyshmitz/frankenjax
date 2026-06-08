@@ -1,0 +1,41 @@
+bead=frankenjax-6ili3
+pass=186
+decision=rejected
+target=linalg/pinv_256x128_f64_fullrank
+parent=9ab4f5eaf101e23d0fe0d31121d56aa9a6c315f1
+wip_candidate=154939ee4b5769398b576620da5e976eedd2bee2
+
+baseline_first_rch_existing_public_bench:
+  worker=ovh-b
+  bench=linalg/pinv_256x128_f64
+  source=detached-parent-9ab4f5ea
+  interval_ms=72.741..73.110..73.202
+
+primary_same_binary_ab:
+  worker=ovh-a
+  direct_svd_baseline_ms=24.878..24.893..24.897
+  qr_preprocess_candidate_ms=26.077..26.119..26.129
+  median_speedup=0.953060990
+  conservative_speedup=0.952122163
+  median_regression_percent=4.925079
+  score=0.0
+
+accepted_state:
+  source_kept=false
+  restored_to_parent=true
+  behavior_unchanged=restored-source
+
+proof_gates:
+  source_restored_diff_vs_parent=empty
+  rch_test_pinv=ovh-a_8_passed_0_failed
+  rch_check_fj_lax_all_targets=passed
+  rch_clippy_fj_lax_all_targets_d_warnings=passed
+  cargo_fmt_check_package_fj_lax=passed
+  git_diff_check=passed
+  jq_empty_evidence_json=passed
+  sha256sum_check=passed
+  ubs=exit_1_pre_existing_inventory_no_unsafe_fmt_clippy_check_test_build_clean
+
+next_route:
+  avoid_qr_preprocess_at_2n=true
+  attack=svd_core_blocked_one_sided_jacobi_or_golub_kahan_artifact
