@@ -334,6 +334,74 @@ const CHOLESKY_SCHUR_PARALLEL_MIN_OPS: usize = 1 << 20;
 /// Keep enough rows per worker that thread spawn overhead stays amortized.
 const CHOLESKY_SCHUR_MIN_ROWS_PER_THREAD: usize = 32;
 
+/// Minimum scalar products before the Cholesky panel solve pays for scoped
+/// thread fan-out. Each row below the diagonal panel is independent once L11 has
+/// been factored, but rows are still solved left-to-right to preserve per-row FP
+/// order.
+const CHOLESKY_PANEL_PARALLEL_MIN_OPS: usize = 1 << 20;
+/// Keep enough panel rows per worker to amortize scoped-thread setup.
+const CHOLESKY_PANEL_MIN_ROWS_PER_THREAD: usize = 32;
+
+fn cholesky_panel_solve(
+    l11_source: &[f64],
+    panel_rows: &mut [f64],
+    n: usize,
+    j: usize,
+    jb: usize,
+    rem: usize,
+) {
+    let products = rem.saturating_mul(jb.saturating_mul(jb.saturating_sub(1)) / 2);
+    let max_threads = rem.div_ceil(CHOLESKY_PANEL_MIN_ROWS_PER_THREAD);
+    let available = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1);
+    let threads = if products >= CHOLESKY_PANEL_PARALLEL_MIN_OPS {
+        available.min(max_threads).max(1)
+    } else {
+        1
+    };
+
+    if threads <= 1 {
+        cholesky_panel_solve_rows(l11_source, &mut panel_rows[..rem * n], n, j, jb, rem);
+        return;
+    }
+
+    let rows_per = rem.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest = &mut panel_rows[..rem * n];
+        let mut row_start = 0usize;
+        while row_start < rem {
+            let chunk_rows = rows_per.min(rem - row_start);
+            let (chunk, tail) = rest.split_at_mut(chunk_rows * n);
+            rest = tail;
+            scope.spawn(move || {
+                cholesky_panel_solve_rows(l11_source, chunk, n, j, jb, chunk_rows);
+            });
+            row_start += chunk_rows;
+        }
+    });
+}
+
+fn cholesky_panel_solve_rows(
+    l11_source: &[f64],
+    rows: &mut [f64],
+    n: usize,
+    j: usize,
+    jb: usize,
+    row_count: usize,
+) {
+    for local_r in 0..row_count {
+        let row = &mut rows[local_r * n..local_r * n + n];
+        for c in 0..jb {
+            let mut s = row[j + c];
+            for t in 0..c {
+                s -= row[j + t] * l11_source[(j + c) * n + (j + t)];
+            }
+            row[j + c] = s / l11_source[(j + c) * n + (j + c)];
+        }
+    }
+}
+
 /// Apply the Cholesky trailing update `A22 -= L21 * L21^T` only to the lower
 /// triangle. Later panels read only those lower-triangle entries, and the strict
 /// upper triangle is zeroed before returning.
@@ -444,15 +512,9 @@ fn cholesky_real_blocked(n: usize, a_in: &[f64]) -> Vec<f64> {
         let rem = n - (j + jb);
         if rem > 0 {
             // (b) Panel solve: L21 = A21 · L11^{-T} (rows j+jb..n, cols j..j+jb).
-            for r in (j + jb)..n {
-                for c in 0..jb {
-                    let mut s = a[r * n + (j + c)];
-                    for t in 0..c {
-                        s -= a[r * n + (j + t)] * a[(j + c) * n + (j + t)];
-                    }
-                    a[r * n + (j + c)] = s / a[(j + c) * n + (j + c)];
-                }
-            }
+            let panel_start = (j + jb) * n;
+            let (l11_source, panel_rows) = a.split_at_mut(panel_start);
+            cholesky_panel_solve(l11_source, panel_rows, n, j, jb, rem);
 
             // (c) Trailing symmetric update A22 -= L21 · L21ᵀ via blocked GEMM.
             let mut l21 = vec![0.0_f64; rem * jb];
@@ -5073,6 +5135,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cholesky_blocked_path_golden_output_digest() -> Result<(), Box<dyn std::error::Error>> {
+        let n = CHOLESKY_BLOCK_THRESHOLD;
+        let base: Vec<f64> = (0..n * n)
+            .map(|idx| (((idx * 17 + 3) % 31) as f64 - 15.0) * 0.03125)
+            .collect();
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += base[k * n + i] * base[k * n + j];
+                }
+                a[i * n + j] = s + if i == j { n as f64 + 17.0 } else { 0.0 };
+            }
+        }
+
+        let result = eval_cholesky(&[make_matrix(n, n, &a)], &BTreeMap::new())?;
+        let output_bits: Vec<u64> = extract_f64_elements(&result)
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        let digest = fj_test_utils::fixture_id_from_json(&output_bits)?;
+        assert_eq!(
+            digest, "9fbcc45dd316e9c3b2e5f730d895c39bad0b562e990432196fd7eb4a0627fdc6",
+            "blocked Cholesky golden output digest changed"
+        );
+        Ok(())
     }
 
     #[test]

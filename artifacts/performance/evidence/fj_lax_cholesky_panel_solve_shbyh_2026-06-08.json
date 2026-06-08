@@ -1,0 +1,129 @@
+{
+  "bead": "frankenjax-shbyh",
+  "status": "kept",
+  "crate": "fj-lax",
+  "target": "linalg/cholesky_1024x1024_f64",
+  "lever": "parallel blocked Cholesky panel solve rows",
+  "date_utc": "2026-06-08",
+  "profile_route": {
+    "post_previous_keep_profile_worker": "vmi1293453",
+    "post_previous_keep_profile": [
+      {
+        "target": "linalg/matmul_2d_2048x2048x2048_f64",
+        "ms": [277.13, 285.78, 294.46],
+        "note": "Still broad-profile top, but direct GEMM remains under the closed exact-order bitwise contract and repeated exact-order GEMM families have already been kept or rejected."
+      },
+      {
+        "target": "linalg/cholesky_1024x1024_f64",
+        "ms": [53.702, 62.625, 77.261]
+      },
+      {
+        "target": "linalg/lu_1024x1024_f64",
+        "ms": [46.438, 47.764, 50.1]
+      },
+      {
+        "target": "linalg/pinv_256x128_f64",
+        "ms": [42.461, 43.354, 44.091]
+      },
+      {
+        "target": "linalg/qr_1024x1024_f64",
+        "ms": [36.0, 36.526, 36.988]
+      },
+      {
+        "target": "linalg/eig_48x48_f64",
+        "ms": [27.064, 27.747, 28.396]
+      }
+    ],
+    "focused_non_gemm_route_worker": "vmi1293453",
+    "focused_non_gemm_route": [
+      {
+        "target": "linalg/cholesky_1024x1024_f64",
+        "ms": [54.314, 56.557, 59.154],
+        "rank": 1
+      },
+      {
+        "target": "linalg/lu_1024x1024_f64",
+        "ms": [48.947, 50.822, 53.844],
+        "rank": 2
+      },
+      {
+        "target": "linalg/pinv_256x128_f64",
+        "ms": [43.303, 44.484, 45.556],
+        "rank": 3
+      },
+      {
+        "target": "linalg/qr_1024x1024_f64",
+        "ms": [34.504, 35.083, 35.557],
+        "rank": 4
+      }
+    ]
+  },
+  "benchmark": {
+    "tool": "criterion via rch exec",
+    "command": "cargo bench -p fj-lax --bench lax_baseline -- 'linalg/cholesky_1024x1024_f64' --sample-size 20 --warm-up-time 2 --measurement-time 6 --noplot",
+    "baseline": {
+      "worker": "vmi1293453",
+      "target_dir": "/data/tmp/frankenjax-rch-fjlax-nongemm-route-20260608",
+      "confidence_interval_ms": [54.314, 56.557, 59.154]
+    },
+    "candidate": {
+      "worker": "vmi1293453",
+      "target_dir": "/data/tmp/frankenjax-rch-fjlax-shbyh-after",
+      "confidence_interval_ms": [37.679, 38.553, 39.804]
+    },
+    "median_speedup": 1.4670,
+    "conservative_speedup_low_over_high": 1.3645,
+    "intervals_non_overlapping": true,
+    "score": {
+      "impact": 4,
+      "confidence": 4,
+      "effort": 2,
+      "value": 8.0,
+      "threshold": 2.0
+    }
+  },
+  "behavior_proof": {
+    "isomorphism": [
+      "Diagonal block factorization L11 is unchanged.",
+      "For each subdiagonal panel row, the column loop c=0..jb and inner t=0..c subtraction order are unchanged.",
+      "Rows below the panel are independent once L11 has been factored; the lever only changes row scheduling across disjoint mutable row chunks.",
+      "The lower-only Schur update order and its GEMM accumulation order are unchanged.",
+      "Output remains the same row-major lower-triangular L with unchanged dtype, shape, non-square rejection, non-positive-definite NaN surface, and no tie-breaking or RNG surface."
+    ],
+    "golden_output_digest": "9fbcc45dd316e9c3b2e5f730d895c39bad0b562e990432196fd7eb4a0627fdc6",
+    "golden_artifact": "artifacts/performance/evidence/fj_lax_cholesky_panel_solve_shbyh_2026-06-08.golden",
+    "golden_artifact_sha256": "79b462831a674ca2a0501144b6808324be9c7a5a988e9d3504a0597bc778847b"
+  },
+  "validation": [
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1293453 RCH_WORKERS=vmi1293453 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-shbyh-proof-final cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "worker": "vmi1156319",
+      "result": "passed",
+      "details": "14 passed, 0 failed, 0 ignored, 1169 filtered out"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-shbyh-check cargo check -p fj-lax --all-targets",
+      "worker": "vmi1149989",
+      "result": "passed"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-shbyh-clippy cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "worker": "vmi1149989",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- crates/fj-lax/src/linalg.rs",
+      "result": "passed"
+    },
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs",
+      "result": "failed",
+      "details": "Pre-existing unrelated formatting drift in complex eig and tests outside the Cholesky diff hunk; file was not broad-formatted to avoid unrelated churn."
+    },
+    {
+      "command": "ubs crates/fj-lax/src/linalg.rs",
+      "result": "existing_inventory_nonzero",
+      "details": "Exit 1 with existing inventory: 17 critical, 1143 warnings, 201 info. UBS reported no unsafe blocks, clean fmt, clean clippy, clean cargo check, and clean test build."
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+bead=frankenjax-shbyh
+target=linalg/cholesky_1024x1024_f64
+lever=parallel blocked Cholesky panel solve rows
+golden_output_digest=9fbcc45dd316e9c3b2e5f730d895c39bad0b562e990432196fd7eb4a0627fdc6
+baseline_worker=vmi1293453
+baseline_ms=54.314,56.557,59.154
+candidate_worker=vmi1293453
+candidate_ms=37.679,38.553,39.804
+median_speedup=1.4670
+conservative_speedup_low_over_high=1.3645
+score=8.0
