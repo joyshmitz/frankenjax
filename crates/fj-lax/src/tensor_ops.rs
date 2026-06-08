@@ -2861,6 +2861,10 @@ pub(crate) fn eval_dynamic_slice(
         )?));
     }
 
+    // A trailing-contiguous slice (full extents + zero starts on every axis but
+    // the first) is a single contiguous run [start_offset, end_offset); otherwise
+    // we gather with an odometer. Computed once and shared by the dense and Literal
+    // paths below.
     let has_contiguous_trailing_slice = rank > 0
         && slice_sizes
             .iter()
@@ -2868,7 +2872,7 @@ pub(crate) fn eval_dynamic_slice(
             .zip(tensor.shape.dims.iter().skip(1))
             .all(|(&slice_size, &dim)| slice_size == dim as usize)
         && starts.iter().skip(1).all(|&start| start == 0);
-    if has_contiguous_trailing_slice {
+    let contig_range = if has_contiguous_trailing_slice {
         let row_len =
             checked_shape_element_count(primitive, "dynamic_slice row", &tensor.shape.dims[1..])?;
         let start_offset =
@@ -2884,6 +2888,49 @@ pub(crate) fn eval_dynamic_slice(
                 primitive,
                 detail: "dynamic_slice end offset overflows usize".to_owned(),
             })?;
+        Some((start_offset, end_offset))
+    } else {
+        None
+    };
+
+    let in_strides = checked_row_major_strides(primitive, "dynamic_slice", &tensor.shape.dims)?;
+
+    // Dense fast paths: gather the slice straight from the typed backing into dense
+    // output, avoiding the per-`Literal` materialization (`tensor.elements[..]`
+    // reconstructs a 24-byte Literal each access) AND the boxed output. Same index
+    // math/order -> bit-for-bit identical. Critical alongside dense
+    // dynamic_update_slice for scan/decode loops (read the slice, compute, write it
+    // back) — keeps the whole loop on dense storage. Falls through for other dtypes.
+    macro_rules! dense_ds {
+        ($src:expr, $ctor:expr) => {{
+            let out = dynamic_slice_dense(
+                $src,
+                rank,
+                total,
+                &slice_sizes,
+                &starts,
+                &in_strides,
+                contig_range,
+            );
+            return Ok(Value::Tensor($ctor(Shape { dims: out_dims }, out)?));
+        }};
+    }
+    if let Some(s) = tensor.elements.as_f64_slice() {
+        dense_ds!(s, TensorValue::new_f64_values);
+    }
+    if let Some(s) = tensor.elements.as_f32_slice() {
+        dense_ds!(s, TensorValue::new_f32_values);
+    }
+    if let Some(s) = tensor.elements.as_half_float_slice() {
+        let dt = tensor.dtype;
+        dense_ds!(s, |sh, o| TensorValue::new_half_float_values(dt, sh, o));
+    }
+    if let Some(s) = tensor.elements.as_i64_slice() {
+        dense_ds!(s, TensorValue::new_i64_values);
+    }
+
+    // Literal fallback (boxed/other dtypes): the same gather over Literals.
+    if let Some((start_offset, end_offset)) = contig_range {
         return Ok(Value::Tensor(TensorValue::new(
             tensor.dtype,
             Shape { dims: out_dims },
@@ -2891,38 +2938,14 @@ pub(crate) fn eval_dynamic_slice(
         )?));
     }
 
-    let in_strides = checked_row_major_strides(primitive, "dynamic_slice", &tensor.shape.dims)?;
-
     let mut elements = Vec::with_capacity(total);
     let mut out_coords = vec![0_usize; rank];
-
     for _ in 0..total {
         let mut in_flat = 0_usize;
         for ax in 0..rank {
-            let coord =
-                out_coords[ax]
-                    .checked_add(starts[ax])
-                    .ok_or_else(|| EvalError::Unsupported {
-                        primitive,
-                        detail: format!("dynamic_slice coordinate overflows usize on axis {ax}"),
-                    })?;
-            let offset =
-                coord
-                    .checked_mul(in_strides[ax])
-                    .ok_or_else(|| EvalError::Unsupported {
-                        primitive,
-                        detail: format!("dynamic_slice offset overflows usize on axis {ax}"),
-                    })?;
-            in_flat = in_flat
-                .checked_add(offset)
-                .ok_or_else(|| EvalError::Unsupported {
-                    primitive,
-                    detail: "dynamic_slice flat offset overflows usize".to_owned(),
-                })?;
+            in_flat += (out_coords[ax] + starts[ax]) * in_strides[ax];
         }
         elements.push(tensor.elements[in_flat]);
-
-        // Increment output coordinates
         for ax in (0..rank).rev() {
             out_coords[ax] += 1;
             if out_coords[ax] < slice_sizes[ax] {
@@ -2937,6 +2960,41 @@ pub(crate) fn eval_dynamic_slice(
         Shape { dims: out_dims },
         elements,
     )?))
+}
+
+/// Dense, type-generic core of [`eval_dynamic_slice`]: gather the slice from a
+/// contiguous typed backing into dense output. `contig_range` Some is a single
+/// contiguous run (memcpy); None walks the output with an odometer. Identical
+/// index math/order to the `Literal` path -> bit-for-bit identical.
+fn dynamic_slice_dense<T: Copy>(
+    src: &[T],
+    rank: usize,
+    total: usize,
+    slice_sizes: &[usize],
+    starts: &[usize],
+    in_strides: &[usize],
+    contig_range: Option<(usize, usize)>,
+) -> Vec<T> {
+    if let Some((start, end)) = contig_range {
+        return src[start..end].to_vec();
+    }
+    let mut out = Vec::with_capacity(total);
+    let mut out_coords = vec![0_usize; rank];
+    for _ in 0..total {
+        let mut in_flat = 0_usize;
+        for ax in 0..rank {
+            in_flat += (out_coords[ax] + starts[ax]) * in_strides[ax];
+        }
+        out.push(src[in_flat]);
+        for ax in (0..rank).rev() {
+            out_coords[ax] += 1;
+            if out_coords[ax] < slice_sizes[ax] {
+                break;
+            }
+            out_coords[ax] = 0;
+        }
+    }
+    out
 }
 
 /// DynamicUpdateSlice: write `update` into `operand` at position given by start indices.
@@ -8464,6 +8522,220 @@ mod tests {
         let dense_t = time(&dense_op, &dense_up);
         println!(
             "BENCH dynamic_update_slice f32 [{seq},{dim}] write 1 row: boxed(materialize+box)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
+    }
+
+    #[test]
+    fn dense_dynamic_slice_matches_literal_and_stays_dense() {
+        // Dense dynamic_slice over f64/f32/bf16/f16/i64 must be BIT-FOR-BIT
+        // identical to the boxed per-`Literal` path AND keep dense output, for both
+        // the contiguous-trailing fast path and the general odometer path.
+        let (rows, cols) = (6usize, 4usize);
+        let lits = |v: &Value| v.as_tensor().unwrap().elements.to_vec();
+        // (slice_sizes, start indices) — contiguous-trailing then general.
+        let cases: [(&[&str], &[i64]); 2] = [(&["2", "4"], &[3, 0]), (&["2", "3"], &[1, 1])];
+        for (ssizes, starts) in cases {
+            let start_lits: Vec<Value> = starts
+                .iter()
+                .map(|&s| Value::Scalar(Literal::I64(s)))
+                .collect();
+            let p = params(&[("slice_sizes", &ssizes.join(","))]);
+            let mk_inputs = |op: Value| -> Vec<Value> {
+                let mut v = vec![op];
+                v.extend(start_lits.iter().cloned());
+                v
+            };
+            let odims = vec![rows as u32, cols as u32];
+
+            let opd: Vec<f64> = (0..rows * cols).map(|i| i as f64 * 0.5 - 3.0).collect();
+            let dense = Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opd.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opd.iter().copied().map(Literal::from_f64).collect(),
+                )
+                .unwrap(),
+            );
+            let d = eval_dynamic_slice(&mk_inputs(dense), &p).unwrap();
+            let l = eval_dynamic_slice(&mk_inputs(boxed), &p).unwrap();
+            assert_eq!(extract_shape(&d), extract_shape(&l), "f64 DS shape");
+            assert_eq!(lits(&d), lits(&l), "f64 DS {starts:?}");
+            assert!(
+                d.as_tensor().unwrap().elements.as_f64_slice().is_some(),
+                "f64 DS dense"
+            );
+
+            let opf: Vec<f32> = (0..rows * cols).map(|i| i as f32 * 0.25 - 1.0).collect();
+            let dense = Value::Tensor(
+                TensorValue::new_f32_values(
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opf.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opf.iter().copied().map(Literal::from_f32).collect(),
+                )
+                .unwrap(),
+            );
+            let d = eval_dynamic_slice(&mk_inputs(dense), &p).unwrap();
+            let l = eval_dynamic_slice(&mk_inputs(boxed), &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "f32 DS {starts:?}");
+            assert!(
+                d.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+                "f32 DS dense"
+            );
+
+            for dtype in [DType::BF16, DType::F16] {
+                let opr: Vec<u16> = (0..rows * cols)
+                    .map(|i| (i as u16).wrapping_mul(67).wrapping_add(5))
+                    .collect();
+                let mk = move |b: u16| {
+                    if dtype == DType::BF16 {
+                        Literal::BF16Bits(b)
+                    } else {
+                        Literal::F16Bits(b)
+                    }
+                };
+                let dense = Value::Tensor(
+                    TensorValue::new_half_float_values(
+                        dtype,
+                        Shape {
+                            dims: odims.clone(),
+                        },
+                        opr.clone(),
+                    )
+                    .unwrap(),
+                );
+                let boxed = Value::Tensor(
+                    TensorValue::new(
+                        dtype,
+                        Shape {
+                            dims: odims.clone(),
+                        },
+                        opr.iter().copied().map(mk).collect(),
+                    )
+                    .unwrap(),
+                );
+                let d = eval_dynamic_slice(&mk_inputs(dense), &p).unwrap();
+                let l = eval_dynamic_slice(&mk_inputs(boxed), &p).unwrap();
+                assert_eq!(lits(&d), lits(&l), "{dtype:?} DS {starts:?}");
+                assert!(
+                    d.as_tensor()
+                        .unwrap()
+                        .elements
+                        .as_half_float_slice()
+                        .is_some(),
+                    "{dtype:?} DS dense"
+                );
+            }
+
+            let opi: Vec<i64> = (0..(rows * cols) as i64).map(|i| i - 6).collect();
+            let dense = Value::Tensor(
+                TensorValue::new_i64_values(
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opi.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    DType::I64,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opi.iter().copied().map(Literal::I64).collect(),
+                )
+                .unwrap(),
+            );
+            let d = eval_dynamic_slice(&mk_inputs(dense), &p).unwrap();
+            let l = eval_dynamic_slice(&mk_inputs(boxed), &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "i64 DS {starts:?}");
+            assert!(
+                d.as_tensor().unwrap().elements.as_i64_slice().is_some(),
+                "i64 DS dense"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_dynamic_slice_f32_dense_vs_boxed() {
+        use std::time::Instant;
+        // Read a large contiguous block of rows out of a [rows, cols] tensor — the
+        // contiguous-trailing fast path (KV-cache / scan "read a window of rows").
+        // Boxed `to_vec()` clones N 24-byte Literals; dense clones N 4-byte f32 and
+        // keeps dense storage. Memory-bandwidth bound -> the per-Literal width wins.
+        let (rows, cols) = (8192usize, 2048usize);
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
+        let odims = vec![rows as u32, cols as u32];
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: odims.clone(),
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape {
+                    dims: odims.clone(),
+                },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        let take = rows / 2;
+        let p = params(&[("slice_sizes", &format!("{take},{cols}"))]);
+        let mk = |op: &Value| {
+            vec![
+                op.clone(),
+                Value::Scalar(Literal::I64(1024)),
+                Value::Scalar(Literal::I64(0)),
+            ]
+        };
+        let time = |op: &Value| {
+            let _ = eval_dynamic_slice(&mk(op), &p).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..50 {
+                let t = Instant::now();
+                let _ = eval_dynamic_slice(&mk(op), &p).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let generic = time(&boxed);
+        let dense_t = time(&dense);
+        println!(
+            "BENCH dynamic_slice f32 [{rows},{cols}] read {take} rows (contiguous): boxed(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
             generic * 1e3,
             dense_t * 1e3,
             generic / dense_t
