@@ -2587,8 +2587,16 @@ pub(crate) fn eval_cos(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
 pub(crate) fn eval_tan(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
-            let denom = (2.0 * a).cos() + (2.0 * b).cosh();
-            ((2.0 * a).sin() / denom, (2.0 * b).sinh() / denom)
+            // Mirror of tanh: for large |Im|, cosh(2b)/sinh(2b) overflow so the
+            // naive sinh(2b)/denom is inf/inf = NaN — but tan SATURATES to
+            // sign(Im)·i. numpy's c_tan large-|y| branch (real part is the
+            // vanishing 4·sin·cos·e^(-2|b|) correction).
+            if b.abs() > 20.0 {
+                (4.0 * a.sin() * a.cos() * (-2.0 * b.abs()).exp(), b.signum())
+            } else {
+                let denom = (2.0 * a).cos() + (2.0 * b).cosh();
+                ((2.0 * a).sin() / denom, (2.0 * b).sinh() / denom)
+            }
         })
     } else {
         eval_unary_elementwise_parallel(primitive, inputs, f64::tan)
@@ -2618,8 +2626,17 @@ pub(crate) fn eval_cosh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
 pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
-            let denom = (2.0 * a).cosh() + (2.0 * b).cos();
-            ((2.0 * a).sinh() / denom, (2.0 * b).sin() / denom)
+            // For large |Re|, cosh(2a) and sinh(2a) both overflow to +inf, so the
+            // naive sinh(2a)/denom is inf/inf = NaN — but tanh SATURATES to
+            // sign(Re). Use numpy's c_tanh large-|x| branch (the imaginary part is
+            // a vanishing 4·sin·cos·e^(-2|a|) correction); continuous with the
+            // regular formula to ~1 ULP at the threshold.
+            if a.abs() > 20.0 {
+                (a.signum(), 4.0 * b.sin() * b.cos() * (-2.0 * a.abs()).exp())
+            } else {
+                let denom = (2.0 * a).cosh() + (2.0 * b).cos();
+                ((2.0 * a).sinh() / denom, (2.0 * b).sin() / denom)
+            }
         })
     } else {
         eval_unary_elementwise_parallel(primitive, inputs, f64::tanh)
@@ -6580,6 +6597,38 @@ mod tests {
     use super::*;
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
+
+    #[test]
+    fn complex_tanh_tan_saturate_for_large_argument() {
+        // Complex tanh saturates to sign(Re) for large |Re|; the naive
+        // sinh(2a)/(cosh(2a)+cos(2b)) was inf/inf = NaN there. tan mirrors it on
+        // the imaginary part (-> sign(Im)·i).
+        let cz = |re: f64, im: f64| Value::Scalar(Literal::from_complex128(re, im));
+        let near = |a: (f64, f64), b: (f64, f64)| {
+            assert!(
+                a.0.is_finite() && a.1.is_finite() && (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                "got {a:?}, expected {b:?}"
+            );
+        };
+
+        // tanh: large +/- real part -> (+/-1, ~0); not NaN.
+        let t = eval_tanh(Primitive::Tanh, &[cz(400.0, 0.0)]).unwrap();
+        near(t.as_complex128_scalar().unwrap(), (1.0, 0.0));
+        let t = eval_tanh(Primitive::Tanh, &[cz(-400.0, 1.0)]).unwrap();
+        near(t.as_complex128_scalar().unwrap(), (-1.0, 0.0));
+
+        // tan: large +/- imaginary part -> (~0, +/-1); not NaN.
+        let t = eval_tan(Primitive::Tan, &[cz(0.0, 400.0)]).unwrap();
+        near(t.as_complex128_scalar().unwrap(), (0.0, 1.0));
+        let t = eval_tan(Primitive::Tan, &[cz(1.0, -400.0)]).unwrap();
+        near(t.as_complex128_scalar().unwrap(), (0.0, -1.0));
+
+        // Continuity: small arguments still use the regular formula and match
+        // the analytic value (tanh(0.5+0.3i) etc. unchanged).
+        let t = eval_tanh(Primitive::Tanh, &[cz(0.5, 0.3)]).unwrap();
+        // tanh(0.5+0.3i) = 0.496197066 + 0.238405083i (reference)
+        near(t.as_complex128_scalar().unwrap(), (0.496_197_066, 0.238_405_083));
+    }
 
     #[test]
     fn complex_div_smith_avoids_overflow_underflow() {
