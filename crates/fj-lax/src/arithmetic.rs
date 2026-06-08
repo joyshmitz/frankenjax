@@ -3136,10 +3136,79 @@ pub(crate) fn eval_unary_elementwise_parallel(
             )?));
         }
     }
+    // DENSE BF16/F16 path: with fj-core's dense `as_half_float_slice()` (u16 = 2B/elem
+    // vs a 24B boxed `Literal`), half-float unary is COMPUTE-bound rather than
+    // materialization-bound, so it threads like the f32 path. Each tap widens u16->f64
+    // via the SAME `Literal::{BF16,F16}Bits(b).as_f64()` the generic loop uses, runs `op`
+    // in f64, and rounds back with the SAME `Literal::from_{bf16,f16}_f64` — so the
+    // output is BIT-IDENTICAL to the serial per-`Literal` path in `eval_unary_elementwise`
+    // (which computes `from_{bf16,f16}_f64(op(literal.as_f64()))`). bf16/f16 are the
+    // dominant inference/training activation dtypes.
+    if let [Value::Tensor(tensor)] = inputs
+        && matches!(tensor.dtype, DType::BF16 | DType::F16)
+        && let Some(src) = tensor.elements.as_half_float_slice()
+    {
+        const PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144 — match the f64/f32 threshold
+        let n = src.len();
+        let dt = tensor.dtype;
+        let threads = if n >= PARALLEL_MIN_ELEMS {
+            work_scaled_threads(n)
+        } else {
+            1
+        };
+        if threads > 1 {
+            let mut out = vec![0u16; n];
+            let chunk = n.div_ceil(threads);
+            let op_ref = &op;
+            std::thread::scope(|scope| {
+                let mut rest: &mut [u16] = out.as_mut_slice();
+                let mut start = 0usize;
+                while start < n {
+                    let len = chunk.min(n - start);
+                    let (blk, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let s = start;
+                    scope.spawn(move || {
+                        for (i, o) in blk.iter_mut().enumerate() {
+                            *o = half_unary_apply(dt, src[s + i], op_ref);
+                        }
+                    });
+                    start += len;
+                }
+            });
+            return Ok(Value::Tensor(TensorValue::new_half_float_values(
+                dt,
+                tensor.shape.clone(),
+                out,
+            )?));
+        }
+    }
     // Below the threading threshold, or non-dense storage: serial per-`Literal`
-    // map (still correct, just not threaded). BF16/F16 stay here (no dense backing
-    // yet) — they remain memory-bandwidth-bound, so threading wouldn't help.
+    // map (still correct, just not threaded).
     eval_unary_elementwise(primitive, inputs, op)
+}
+
+/// Apply a unary f64 op to one BF16/F16 bit pattern, BIT-IDENTICALLY to the generic
+/// per-`Literal` path: widen via `Literal::{BF16,F16}Bits(b).as_f64()`, run `op` in f64,
+/// round via `Literal::from_{bf16,f16}_f64`, and return the resulting u16 bits.
+#[inline]
+fn half_unary_apply(dt: DType, bits: u16, op: &impl Fn(f64) -> f64) -> u16 {
+    let widened = if dt == DType::BF16 {
+        Literal::BF16Bits(bits)
+    } else {
+        Literal::F16Bits(bits)
+    }
+    .as_f64()
+    .unwrap_or(0.0);
+    let rounded = if dt == DType::BF16 {
+        Literal::from_bf16_f64(op(widened))
+    } else {
+        Literal::from_f16_f64(op(widened))
+    };
+    match rounded {
+        Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+        _ => 0,
+    }
 }
 
 fn eval_unary_f64_tensor_fast_path(
@@ -9816,6 +9885,83 @@ mod tests {
                 bits(&from_dense),
                 "{prim:?} dense threaded != literal serial"
             );
+        }
+    }
+
+    /// Isomorphism proof for the dense BF16/F16 unary fast path: a large dense
+    /// half-float Exp2/Log2/Atan (>= 1<<18, threaded) must equal the boxed-`Literal`
+    /// serial map bit-for-bit. Both paths widen via `Literal::{BF16,F16}Bits.as_f64()`
+    /// and round via `from_{bf16,f16}_f64`, so they are bit-identical.
+    #[test]
+    fn threaded_dense_half_float_unary_bit_identical_to_literal() {
+        use fj_core::{DType, Shape, TensorValue};
+        let n = 1usize << 18; // >= threshold -> threaded dense path
+        let half_bits = |dt: DType, x: f64| -> u16 {
+            match if dt == DType::BF16 {
+                Literal::from_bf16_f64(x)
+            } else {
+                Literal::from_f16_f64(x)
+            } {
+                Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+                other => panic!("expected half-float literal, got {other:?}"),
+            }
+        };
+        let out_bits = |v: &Value| -> Vec<u16> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
+                    other => panic!("expected half-float, got {other:?}"),
+                })
+                .collect()
+        };
+        for dt in [DType::BF16, DType::F16] {
+            // Positive inputs keep Log2 finite; bits round through the same conversion
+            // the dense path uses so the stored values are exact half-floats.
+            let bits: Vec<u16> = (0..n)
+                .map(|i| half_bits(dt, (i as f64 * 0.0007).sin().abs() * 3.0 + 0.5))
+                .collect();
+            let shape = Shape {
+                dims: vec![n as u32],
+            };
+            let dense = Value::Tensor(
+                TensorValue::new_half_float_values(dt, shape.clone(), bits.clone()).unwrap(),
+            );
+            assert!(
+                dense
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some(),
+                "input must be dense half-float to exercise the fast path"
+            );
+            let lits: Vec<Literal> = bits
+                .iter()
+                .map(|&b| {
+                    if dt == DType::BF16 {
+                        Literal::BF16Bits(b)
+                    } else {
+                        Literal::F16Bits(b)
+                    }
+                })
+                .collect();
+            let boxed = Value::Tensor(TensorValue::new(dt, shape, lits).unwrap());
+            for prim in [Primitive::Exp2, Primitive::Log2, Primitive::Atan] {
+                let from_dense =
+                    crate::eval_primitive(prim, std::slice::from_ref(&dense), &BTreeMap::new())
+                        .unwrap();
+                let from_boxed =
+                    crate::eval_primitive(prim, std::slice::from_ref(&boxed), &BTreeMap::new())
+                        .unwrap();
+                assert_eq!(
+                    out_bits(&from_dense),
+                    out_bits(&from_boxed),
+                    "{prim:?} {dt:?} dense threaded != boxed serial"
+                );
+            }
         }
     }
 

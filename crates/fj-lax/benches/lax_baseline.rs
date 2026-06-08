@@ -2871,6 +2871,60 @@ fn bench_complex_neg_1k(c: &mut Criterion) {
     });
 }
 
+// 256k dense-BF16 Exp2 (threaded): exercises the dense half-float unary fast path
+// (u16 = 2B/elem, no per-`Literal` materialization, compute-bound transcendental so it
+// threads). Paired with the boxed-`Literal` reference below for a same-invocation A/B
+// (cross-invocation rch timings drift 20–60%).
+fn bench_bf16_exp2_256k_dense(c: &mut Criterion) {
+    let n = 1usize << 18;
+    let bits: Vec<u16> = (0..n)
+        .map(
+            |i| match Literal::from_bf16_f64((i as f64 * 0.0007).sin().abs() * 3.0 + 0.5) {
+                Literal::BF16Bits(b) => b,
+                _ => 0,
+            },
+        )
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_half_float_values(
+            DType::BF16,
+            Shape {
+                dims: vec![n as u32],
+            },
+            bits,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/exp2_256k_bf16_dense", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Exp2, std::slice::from_ref(black_box(&input)), &p))
+    });
+}
+
+// Same workload via the boxed per-`Literal` path: `TensorValue::new` makes
+// `as_half_float_slice()` return None, bypassing the dense fast path (the pre-change
+// behavior — serial per-`Literal` map).
+fn bench_bf16_exp2_256k_boxed(c: &mut Criterion) {
+    let n = 1usize << 18;
+    let lits: Vec<Literal> = (0..n)
+        .map(|i| Literal::from_bf16_f64((i as f64 * 0.0007).sin().abs() * 3.0 + 0.5))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::BF16,
+            Shape {
+                dims: vec![n as u32],
+            },
+            lits,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/exp2_256k_bf16_boxed", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Exp2, std::slice::from_ref(black_box(&input)), &p))
+    });
+}
+
 fn bench_complex_expm1_1k(c: &mut Criterion) {
     let input = complex_vector(1000);
     let p = no_params();
@@ -3669,6 +3723,8 @@ criterion_group!(
     bench_complex_ctor_1k,
     bench_complex_conj_1k,
     bench_complex_neg_1k,
+    bench_bf16_exp2_256k_dense,
+    bench_bf16_exp2_256k_boxed,
     bench_complex_expm1_1k,
     bench_complex_exp_256k_dense,
     bench_complex_pow_256k_dense,
