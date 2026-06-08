@@ -661,8 +661,20 @@ fn complex_mul(lhs: (f64, f64), rhs: (f64, f64)) -> (f64, f64) {
 fn complex_div(lhs: (f64, f64), rhs: (f64, f64)) -> (f64, f64) {
     let (ar, ai) = lhs;
     let (br, bi) = rhs;
-    let denom = br * br + bi * bi;
-    ((ar * br + ai * bi) / denom, (ai * br - ar * bi) / denom)
+    // Smith's algorithm (Smith 1962; C99 Annex G / numpy / XLA): scale by the
+    // larger-magnitude denominator component so we never form `br*br + bi*bi`
+    // directly. The naive formula overflows when |br| or |bi| is large
+    // (e.g. (1+i)/(1e200+1e200i) → denom=inf → (0,0) instead of ~1e-200) and
+    // underflows for tiny denominators. Smith's keeps the intermediate finite.
+    if br.abs() >= bi.abs() {
+        let r = bi / br;
+        let den = br + bi * r;
+        ((ar + ai * r) / den, (ai - ar * r) / den)
+    } else {
+        let r = br / bi;
+        let den = br * r + bi;
+        ((ar * r + ai) / den, (ai * r - ar) / den)
+    }
 }
 
 fn complex_exp((re, im): (f64, f64)) -> (f64, f64) {
@@ -682,9 +694,10 @@ fn complex_log((re, im): (f64, f64)) -> (f64, f64) {
     (re.hypot(im).ln(), im.atan2(re))
 }
 
-fn complex_reciprocal((re, im): (f64, f64)) -> (f64, f64) {
-    let denom = re * re + im * im;
-    (re / denom, -im / denom)
+fn complex_reciprocal(z: (f64, f64)) -> (f64, f64) {
+    // 1/z via Smith's algorithm (see complex_div) — the naive `re*re + im*im`
+    // denominator overflows for large |z| and underflows for tiny |z|.
+    complex_div((1.0, 0.0), z)
 }
 
 fn complex_sqrt((re, im): (f64, f64)) -> (f64, f64) {
@@ -6567,6 +6580,37 @@ mod tests {
     use super::*;
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
+
+    #[test]
+    fn complex_div_smith_avoids_overflow_underflow() {
+        let close = |a: (f64, f64), b: (f64, f64), tol: f64| {
+            assert!(
+                (a.0 - b.0).abs() <= tol * (1.0 + b.0.abs())
+                    && (a.1 - b.1).abs() <= tol * (1.0 + b.1.abs()),
+                "got {a:?}, expected {b:?}"
+            );
+        };
+        // Normal case: (1+2i)/(3+4i) = (11+2i)/25 = (0.44, 0.08).
+        close(complex_div((1.0, 2.0), (3.0, 4.0)), (0.44, 0.08), 1e-15);
+        // Real denominator: (6+8i)/2 = (3, 4).
+        close(complex_div((6.0, 8.0), (2.0, 0.0)), (3.0, 4.0), 1e-15);
+        // Pure-imaginary denominator: 1/(2i) = -0.5i.
+        close(complex_div((1.0, 0.0), (0.0, 2.0)), (0.0, -0.5), 1e-15);
+
+        // OVERFLOW: the naive br*br+bi*bi formula gave (0,0) here (denom=inf);
+        // Smith's keeps it finite: (1+i)/(1e200+1e200i) = 1e-200.
+        close(complex_div((1.0, 1.0), (1e200, 1e200)), (1e-200, 0.0), 1e-13);
+        // UNDERFLOW: tiny denominator. 1/1e-200 = 1e200.
+        close(complex_div((1.0, 0.0), (1e-200, 0.0)), (1e200, 0.0), 1e-13);
+        // Reciprocal routes through the same path.
+        close(complex_reciprocal((1e200, 0.0)), (1e-200, 0.0), 1e-13);
+
+        // All finite (no inf/nan from intermediate overflow).
+        for &(re, im) in &[(1e180, 2e180), (3e-180, -4e-180), (1e308, 1e308)] {
+            let q = complex_div((1.0, -1.0), (re, im));
+            assert!(q.0.is_finite() && q.1.is_finite(), "non-finite quotient for ({re},{im}): {q:?}");
+        }
+    }
 
     /// Isomorphism + golden proof for threading Sinc: the parallel path must be
     /// BIT-FOR-BIT identical to the serial map (each element independent), and the
