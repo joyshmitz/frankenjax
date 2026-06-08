@@ -599,7 +599,8 @@ fn batch_binary_elementwise(
     // Fast path: both inputs have batch_dim == 0, skip harmonization entirely
     // This is the common case for vmap with default in_axes=0.
     if a.batch_dim == Some(0) && b.batch_dim == Some(0) {
-        let result = eval_primitive(primitive, &[a.value.clone(), b.value.clone()], params)
+        let (a_val, b_val) = align_batched_logical_ranks(&a.value, &b.value)?;
+        let result = eval_primitive(primitive, &[a_val, b_val], params)
             .map_err(|e| BatchError::EvalError(e.to_string()))?;
         return Ok(BatchTracer {
             value: result,
@@ -661,12 +662,68 @@ fn batch_binary_elementwise(
     }
 
     let (a_val, b_val, out_batch_dim) = harmonize_batch_dims(a, b)?;
+    // Both operands are now at batch axis 0; align their logical ranks so a
+    // vector+scalar (etc.) body broadcasts per-lane instead of mis-aligning the
+    // batch axis against a logical axis.
+    let (a_val, b_val) = if out_batch_dim == Some(0) {
+        align_batched_logical_ranks(&a_val, &b_val)?
+    } else {
+        (a_val, b_val)
+    };
     let result = eval_primitive(primitive, &[a_val, b_val], params)
         .map_err(|e| BatchError::EvalError(e.to_string()))?;
     Ok(BatchTracer {
         value: result,
         batch_dim: out_batch_dim,
     })
+}
+
+/// When two operands are both batched at axis 0 but have DIFFERENT ranks (e.g.
+/// vmap turned an unbatched `vector + scalar` into `[batch, n] + [batch]`), insert
+/// size-1 axes right after the batch axis of the lower-rank operand so its LOGICAL
+/// (non-batch) dims broadcast against the other operand's from the RIGHT — exactly
+/// the broadcast the unbatched op performed. Without this, eval aligns the batch
+/// axis against the wrong logical axis ("shape mismatch [batch,n] vs [batch]", or —
+/// when n happens to equal batch — a SILENTLY wrong per-column instead of per-lane
+/// add). Equal-rank operands (the hot same-shape case) return unchanged.
+fn align_batched_logical_ranks(a: &Value, b: &Value) -> Result<(Value, Value), BatchError> {
+    let (Value::Tensor(at), Value::Tensor(bt)) = (a, b) else {
+        return Ok((a.clone(), b.clone()));
+    };
+    let (ra, rb) = (at.shape.rank(), bt.shape.rank());
+    if ra == rb {
+        return Ok((a.clone(), b.clone()));
+    }
+    if ra > rb {
+        Ok((a.clone(), insert_unit_axes_after_batch(b, bt, ra - rb)?))
+    } else {
+        Ok((insert_unit_axes_after_batch(a, at, rb - ra)?, b.clone()))
+    }
+}
+
+/// Reshape a batched value to insert `count` size-1 axes immediately after its
+/// batch axis (axis 0). Pure metadata reshape — element order is unchanged.
+fn insert_unit_axes_after_batch(
+    value: &Value,
+    tensor: &TensorValue,
+    count: usize,
+) -> Result<Value, BatchError> {
+    if tensor.shape.dims.is_empty() {
+        return Ok(value.clone());
+    }
+    let mut dims: Vec<u32> = Vec::with_capacity(tensor.shape.dims.len() + count);
+    dims.push(tensor.shape.dims[0]);
+    dims.extend(std::iter::repeat(1u32).take(count));
+    dims.extend_from_slice(&tensor.shape.dims[1..]);
+    let new_shape = dims
+        .iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut params = BTreeMap::new();
+    params.insert("new_shape".to_owned(), new_shape);
+    eval_primitive(Primitive::Reshape, std::slice::from_ref(value), &params)
+        .map_err(|e| BatchError::EvalError(e.to_string()))
 }
 
 #[inline]
@@ -7759,6 +7816,36 @@ mod tests {
         assert_eq!(result.batch_dim, Some(0));
         let vals = extract_f64_vec(&result.value);
         assert_eq!(vals, vec![11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn test_batch_add_vector_and_per_lane_scalar() {
+        // vmap(|v, s| v + s) over v=[batch,n] and s=[batch] (a per-lane scalar):
+        // each lane adds its scalar to every element of its vector. Both operands
+        // are batched at axis 0 but have DIFFERENT ranks ([2,3] vs [2]), so the
+        // both-batched fast path must align the logical (non-batch) dims from the
+        // right — i.e. broadcast the [batch] scalar against [batch, n] — not let
+        // eval mis-align the batch axis against the vector axis.
+        let v = BatchTracer::batched(make_i64_matrix(2, 3, &[1, 2, 3, 10, 20, 30]), 0);
+        let s = BatchTracer::batched(make_i64_vector(&[100, 200]), 0);
+        let result = apply_batch_rule(Primitive::Add, &[v, s], &BTreeMap::new()).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        let tensor = result.value.as_tensor().unwrap();
+        assert_eq!(tensor.shape.dims, vec![2, 3]);
+        assert_eq!(
+            extract_i64_vec(&result.value),
+            vec![101, 102, 103, 210, 220, 230]
+        );
+
+        // Reversed operand order (scalar lower-rank on the LEFT) must align too.
+        let s2 = BatchTracer::batched(make_i64_vector(&[100, 200]), 0);
+        let v2 = BatchTracer::batched(make_i64_matrix(2, 3, &[1, 2, 3, 10, 20, 30]), 0);
+        let result2 = apply_batch_rule(Primitive::Add, &[s2, v2], &BTreeMap::new()).unwrap();
+        assert_eq!(result2.value.as_tensor().unwrap().shape.dims, vec![2, 3]);
+        assert_eq!(
+            extract_i64_vec(&result2.value),
+            vec![101, 102, 103, 210, 220, 230]
+        );
     }
 
     #[test]
