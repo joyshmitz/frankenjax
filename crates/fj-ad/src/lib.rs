@@ -4996,7 +4996,7 @@ fn vjp_reduce_window(
 
     let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
 
-    let _padding = params.get("padding").map(|s| s.as_str()).unwrap_or("valid");
+    let padding = params.get("padding").map(|s| s.as_str()).unwrap_or("valid");
 
     let input_dims: Vec<usize> = input_tensor
         .shape
@@ -5005,6 +5005,10 @@ fn vjp_reduce_window(
         .map(|d| *d as usize)
         .collect();
     let out_dims: Vec<usize> = g_tensor.shape.dims.iter().map(|d| *d as usize).collect();
+    // SAME-padding low offsets: the forward maps output tap (out,win) to input
+    // out*stride + win - pad_low, so the gradient must scatter to the same positions.
+    let pad_lows =
+        reduce_window_grad_pad_lows(padding, &out_dims, &input_dims, &window_dims, &strides);
 
     let total_input = ad_checked_usize_product("reduce_window input", &input_dims)?;
 
@@ -5041,7 +5045,14 @@ fn vjp_reduce_window(
                 };
                 let mut win_idx = vec![0usize; rank];
                 for _ in 0..win_total {
-                    let flat = compute_flat_index(&out_idx, &win_idx, &strides, &input_dims, rank)?;
+                    let flat = compute_flat_index(
+                        &out_idx,
+                        &win_idx,
+                        &strides,
+                        &input_dims,
+                        &pad_lows,
+                        rank,
+                    )?;
                     if let Some(flat_idx) = flat {
                         let val = input_vals[flat_idx];
                         let is_better = if reduce_op == "max" {
@@ -5064,7 +5075,14 @@ fn vjp_reduce_window(
                 // Sum reduction: gradient scatters to every window position.
                 let mut win_idx = vec![0usize; rank];
                 for _ in 0..win_total {
-                    let flat = compute_flat_index(&out_idx, &win_idx, &strides, &input_dims, rank)?;
+                    let flat = compute_flat_index(
+                        &out_idx,
+                        &win_idx,
+                        &strides,
+                        &input_dims,
+                        &pad_lows,
+                        rank,
+                    )?;
                     if let Some(flat_idx) = flat {
                         scatter.push((flat_idx, out_flat));
                     }
@@ -5195,6 +5213,9 @@ fn jvp_reduce_window_select(
     };
     let out_dims: Vec<usize> = out_tensor.shape.dims.iter().map(|d| *d as usize).collect();
     let total_output = ad_checked_usize_product("reduce_window output", &out_dims)?;
+    let padding = params.get("padding").map(|s| s.as_str()).unwrap_or("valid");
+    let pad_lows =
+        reduce_window_grad_pad_lows(padding, &out_dims, &input_dims, &window_dims, &strides);
 
     let input_vals: Vec<f64> = input_tensor
         .elements
@@ -5220,7 +5241,7 @@ fn jvp_reduce_window_select(
         let mut win_idx = vec![0usize; rank];
         for _ in 0..win_total {
             if let Some(flat_idx) =
-                compute_flat_index(&out_idx, &win_idx, &strides, &input_dims, rank)?
+                compute_flat_index(&out_idx, &win_idx, &strides, &input_dims, &pad_lows, rank)?
             {
                 let val = input_vals[flat_idx];
                 let is_better = if want_max {
@@ -5246,19 +5267,50 @@ fn jvp_reduce_window_select(
     Ok(Value::Tensor(out))
 }
 
+/// SAME/SAME_LOWER low-padding per dim for a reduce_window gradient, matching the
+/// fj-lax forward geometry (reduce_window_same_geometry): pad_total =
+/// (out-1)*stride + window - input; pad_low = pad_total/2 (SAME) or ceil/2
+/// (SAME_LOWER). VALID (and any other) padding gives all-zero offsets.
+fn reduce_window_grad_pad_lows(
+    padding: &str,
+    out_dims: &[usize],
+    input_dims: &[usize],
+    window_dims: &[usize],
+    strides: &[usize],
+) -> Vec<usize> {
+    let p = padding.trim();
+    let lower = p.eq_ignore_ascii_case("same_lower");
+    let same = lower || p.eq_ignore_ascii_case("same");
+    if !same {
+        return vec![0; input_dims.len()];
+    }
+    (0..input_dims.len())
+        .map(|d| {
+            let covered = (out_dims[d].saturating_sub(1)) * strides[d] + window_dims[d];
+            let total = covered.saturating_sub(input_dims[d]);
+            if lower { total.div_ceil(2) } else { total / 2 }
+        })
+        .collect()
+}
+
 /// Compute the flat input index for a given output position and window offset.
-/// Returns None if the position is out of bounds.
+/// Returns None if the position is out of bounds (incl. the SAME padding region).
 fn compute_flat_index(
     out_idx: &[usize],
     win_idx: &[usize],
     strides: &[usize],
     input_dims: &[usize],
+    pad_lows: &[usize],
     rank: usize,
 ) -> Result<Option<usize>, AdError> {
     let mut flat = 0usize;
     let mut stride_mult = 1usize;
     for d in (0..rank).rev() {
-        let input_pos = out_idx[d]
+        // Padded position = out*stride + win; the real input position subtracts the
+        // SAME-padding low offset. Taps landing in the padding region (padded <
+        // pad_low) or past the input map to no real element (contributed the
+        // reduction init in the forward pass, so they carry no gradient).
+        let padded = out_idx[d]
             .checked_mul(strides[d])
             .and_then(|base| base.checked_add(win_idx[d]))
             .ok_or_else(|| {
@@ -5266,6 +5318,10 @@ fn compute_flat_index(
                     "reduce_window flat index computation overflows usize".to_owned(),
                 )
             })?;
+        if padded < pad_lows[d] {
+            return Ok(None);
+        }
+        let input_pos = padded - pad_lows[d];
         if input_pos >= input_dims[d] {
             return Ok(None);
         }
@@ -16939,6 +16995,60 @@ mod tests {
         let grads = vjp_single(Primitive::ReduceWindow, &[input], &g, &params).unwrap();
         let vals = tensor_f64_values(&grads[0]);
         assert_eq!(vals, vec![0.0, 30.0, 30.0, 0.0]);
+    }
+
+    #[test]
+    fn reduce_window_vjp_same_padding_matches_numerical() {
+        // SAME-padded pooling gradient: the VJP previously ignored padding (mapped to
+        // out*stride+win with no -pad_low), silently scattering to the wrong input
+        // positions. Verify sum- and max-pool SAME-pad grads match central finite
+        // differences of L = sum(pool . g). window 3 stride 1 SAME -> pad_low 1.
+        let w = 6usize;
+        let x0: Vec<f64> = vec![0.7, -1.3, 2.1, 0.4, -0.9, 1.8];
+        let gv: Vec<f64> = (0..w).map(|i| (i as f64 * 0.37).sin() + 0.5).collect();
+        let mk = |d: &[f64]| {
+            Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![d.len() as u32],
+                    },
+                    d.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
+        let g = mk(&gv);
+        for op in ["sum", "max"] {
+            let params = BTreeMap::from([
+                ("window_dimensions".to_owned(), "3".to_owned()),
+                ("window_strides".to_owned(), "1".to_owned()),
+                ("reduce_op".to_owned(), op.to_owned()),
+                ("padding".to_owned(), "SAME".to_owned()),
+            ]);
+            let loss = |xv: &[f64]| -> f64 {
+                let out = eval_primitive(Primitive::ReduceWindow, &[mk(xv)], &params).unwrap();
+                tensor_f64_values(&out)
+                    .iter()
+                    .zip(&gv)
+                    .map(|(o, gg)| o * gg)
+                    .sum()
+            };
+            let grads = vjp_single(Primitive::ReduceWindow, &[mk(&x0)], &g, &params).unwrap();
+            let gx = tensor_f64_values(&grads[0]);
+            assert_eq!(gx.len(), w, "{op} SAME grad shape");
+            let eps = 1e-6;
+            for j in 0..w {
+                let (mut up, mut dn) = (x0.clone(), x0.clone());
+                up[j] += eps;
+                dn[j] -= eps;
+                let fd = (loss(&up) - loss(&dn)) / (2.0 * eps);
+                assert!(
+                    (fd - gx[j]).abs() < 1e-5,
+                    "{op} SAME grad[{j}] analytic={} fd={fd}",
+                    gx[j]
+                );
+            }
+        }
     }
 
     #[test]
