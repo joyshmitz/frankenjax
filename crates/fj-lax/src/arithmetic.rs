@@ -2842,6 +2842,13 @@ pub(crate) fn eval_unary_elementwise_parallel(
             )?));
         }
     }
+    // Only F64 is threaded: it has a dense `as_f64_slice()` backing, so the op is
+    // compute-bound. F32/BF16/F16 are stored per-`Literal` (a 16-byte boxed enum),
+    // which makes even a heavy special function MEMORY-bandwidth-bound — measured
+    // threading speedup was ~1x–2x and bandwidth-fragile (can regress, per the
+    // "memory-bound ops regress when threaded" rule). The real lever for fast F32
+    // elementwise is DENSE F32 storage in fj-core (like the dense-f64 path), not
+    // threading the boxed-Literal map. Do not re-add a per-Literal threaded path.
     eval_unary_elementwise(primitive, inputs, op)
 }
 
