@@ -1,0 +1,65 @@
+{
+  "bead": "frankenjax-p1vbf.48",
+  "date_utc": "2026-06-08",
+  "skill_pass": 181,
+  "status": "rejected",
+  "target": {
+    "crate": "fj-lax",
+    "criterion_benchmark": "linalg/eig_48x48_f64",
+    "profile_backing": {
+      "worker": "fmd",
+      "profile_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pass181-profile cargo bench -p fj-lax --bench lax_baseline -- linalg --quick --noplot",
+      "hot_rows_ms": {
+        "linalg/matmul_2d_2048x2048x2048_f64": [491.53, 523.48, 651.29],
+        "linalg/eig_48x48_f64": [43.607, 43.827, 44.710],
+        "linalg/pinv_256x256_f64": [39.407, 39.429, 39.517],
+        "linalg/lu_1024x1024_f64": [38.330, 39.275, 39.511],
+        "linalg/qr_1024x1024_f64": [29.711, 29.776, 29.792],
+        "linalg/cholesky_1024x1024_f64": [24.716, 24.940, 25.837]
+      }
+    }
+  },
+  "lever": {
+    "description": "Reuse inverse-iteration scratch in the real eig eigenvector path, avoiding per-iteration complex shifted-matrix and RHS allocations.",
+    "files_touched_during_candidate": ["crates/fj-lax/src/linalg.rs"],
+    "source_restored_after_rejection": true
+  },
+  "baseline": {
+    "worker": "fmd",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf48-baseline cargo bench -p fj-lax --bench lax_baseline -- linalg/eig_48x48_f64 --quick --noplot",
+    "time_ms": [22.868, 22.893, 22.994],
+    "median_ms": 22.893
+  },
+  "candidate": {
+    "worker": "fmd",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf48-after cargo bench -p fj-lax --bench lax_baseline -- linalg/eig_48x48_f64 --quick --noplot",
+    "time_ms": [22.424, 22.760, 22.844],
+    "median_ms": 22.760
+  },
+  "delta": {
+    "median_speedup": 1.00584,
+    "conservative_speedup": 1.00105,
+    "median_delta_ms": 0.133,
+    "score": 0.8,
+    "score_formula": "Impact x Confidence / Effort",
+    "keep_gate": "Score >= 2.0",
+    "decision": "Reject: improvement is too small to keep as a shipped source change."
+  },
+  "behavior_proof": {
+    "worker": "fmd",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf48-test cargo test -p fj-lax --lib eig -- --nocapture",
+    "result": "18 passed; 0 failed",
+    "golden_output_digest": "80382d8085c9f98a425a5a468a69eb04ad61f8224f7a8ace851d101d1eb4f80a",
+    "golden_artifact": "artifacts/performance/evidence/fj_lax_eig_inverse_scratch_p1vbf48_pass181_2026-06-08.golden",
+    "isomorphism": [
+      "Candidate preserved Hessenberg QR iteration, deflation thresholds, eigenvalue ordering, inverse-iteration count, pivot selection, tie handling, and complex arithmetic order inside each solve.",
+      "Candidate introduced no RNG and changed no dtype, shape, or error surface.",
+      "No source change is shipped after rejection; final tree behavior is bit-for-bit the pre-candidate behavior."
+    ]
+  },
+  "next_route": {
+    "primitive": "algorithmically different eig path",
+    "target_ratio": ">= 1.10x on same-worker eig48 before considering source shipment",
+    "notes": "Allocation scratch reuse is not the right depth. Route next to blocked/recursive Hessenberg-Schur or batched inverse-iteration structure, with profile/golden proof first."
+  }
+}
