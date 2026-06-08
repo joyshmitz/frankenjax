@@ -1,0 +1,122 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "artifact": "fj_lax_cholesky_l21_panel_gxkuk_pass177_2026-06-08",
+  "status": "rejected",
+  "date": "2026-06-08",
+  "agent": "IcyGlacier",
+  "bead": "frankenjax-gxkuk",
+  "crate": "fj-lax",
+  "target": "linalg/cholesky_1024x1024_f64",
+  "skill_pass": "repeatedly-apply-skill pass177 -> extreme-software-optimization",
+  "profile_backing": {
+    "worker": "fmd",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch-frankenjax-pass177-profile cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(matmul_2d_2048x2048x2048_f64|cholesky_1024x1024_f64|lu_1024x1024_f64|pinv_256x128_f64|qr_1024x1024_f64|eig_48x48_f64|svd_48x48_f64)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+    "top_rows": [
+      {
+        "name": "linalg/matmul_2d_2048x2048x2048_f64",
+        "time_ms": [202.76, 207.29, 211.34],
+        "note": "Still broad-profile top, but exact-order GEMM layout families are in a rejection streak and recursive/Strassen-style GEMM remains contract-blocked by bit-exact ascending-k semantics."
+      },
+      {
+        "name": "linalg/cholesky_1024x1024_f64",
+        "time_ms": [39.353, 47.886, 52.345],
+        "route": "top shippable non-GEMM structural row after GEMM contract gate"
+      },
+      {
+        "name": "linalg/pinv_256x128_f64",
+        "time_ms": [39.779, 41.194, 44.576]
+      },
+      {
+        "name": "linalg/lu_1024x1024_f64",
+        "time_ms": [39.320, 39.884, 40.420]
+      },
+      {
+        "name": "linalg/eig_48x48_f64",
+        "time_ms": [32.064, 36.964, 38.970]
+      },
+      {
+        "name": "linalg/qr_1024x1024_f64",
+        "time_ms": [31.095, 32.761, 35.816]
+      }
+    ]
+  },
+  "focused_baseline": {
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-gxkuk-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/cholesky_1024x1024_f64' --sample-size 20 --warm-up-time 2 --measurement-time 8 --noplot",
+    "worker": "fmd",
+    "time_ms": {
+      "cholesky_1024x1024_f64": [24.399, 24.497, 24.612]
+    }
+  },
+  "candidate": {
+    "lever": "fill compact L21 during blocked Cholesky panel solve",
+    "description": "Threaded the compact Schur-update L21 buffer through cholesky_panel_solve so each solved panel entry was copied once at production time instead of by a separate post-solve materialization loop.",
+    "source_diff_retained": false,
+    "files_touched_temporarily": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "proof_test": {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-gxkuk-proof cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "worker": "fmd",
+      "result": "pass",
+      "details": "15 focused Cholesky tests passed in candidate state, including cholesky_blocked_path_golden_output_digest, cholesky_blocked_matches_scalar_and_reconstructs, cholesky_real_fast_path_bit_identical_to_complex_path, and candidate-only cholesky_panel_solve_fills_l21_compact_bits."
+    },
+    "rebench": {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-gxkuk-after cargo bench -p fj-lax --bench lax_baseline -- 'linalg/cholesky_1024x1024_f64' --sample-size 20 --warm-up-time 2 --measurement-time 8 --noplot",
+      "worker": "fmd",
+      "time_ms": {
+        "cholesky_1024x1024_f64": [25.646, 25.824, 25.991]
+      },
+      "speedup_vs_focused_baseline_mid": 0.9486,
+      "conservative_speedup_low_over_high": 0.9387
+    }
+  },
+  "score": {
+    "impact": 0.0,
+    "confidence": 5.0,
+    "effort": 1.0,
+    "impact_x_confidence_over_effort": 0.0,
+    "keep_threshold": 2.0,
+    "decision": "reject_and_restore_source"
+  },
+  "isomorphism_proof": {
+    "ordering": "Candidate preserved diagonal block factorization order, independent panel row scheduling, each row's c=0..jb solve loop, the inner t=0..c subtraction order, lower Schur p/q traversal, c contribution order, and final row-major lower-triangular public output.",
+    "tie_breaking": "N/A: Cholesky has no pivot or comparison tie-breaking surface.",
+    "floating_point": "Candidate only changed when solved panel entries were copied into the compact L21 buffer. It introduced no reassociation, FMA forcing, mixed precision, reduction-tree change, or public NaN/signed-zero policy change.",
+    "rng": "N/A: Cholesky consumes no random state.",
+    "errors": "No public dtype, shape, or error surface changed in candidate state; final production source was restored.",
+    "golden_sha256": "81c0b837bcd9065f108e8ce42ea2bfec4c8832cfc3e59d71f926572c4f8ef6ec"
+  },
+  "validation": [
+    {
+      "command": "git diff -- crates/fj-lax/src/linalg.rs",
+      "result": "empty after source restore"
+    },
+    {
+      "command": "git diff --check -- crates/fj-lax/src/linalg.rs",
+      "result": "pass"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_cholesky_l21_panel_gxkuk_pass177_2026-06-08.rejected.golden.sha256",
+      "result": "pass"
+    }
+  ],
+  "alien_source": {
+    "primary_sources": [
+      "/data/projects/alien_cs_graveyard/alien_cs_graveyard.md",
+      "/data/projects/alien_cs_graveyard/high_level_summary_of_frankensuite_planned_and_implemented_features_and_concepts.md"
+    ],
+    "primitive_family": "blocked dense factorization dataflow fusion",
+    "applied_slice": "Tested eliminating a separate panel-to-compact-L21 materialization pass after the prior kept row-parallel panel solve made the copy visible but still small."
+  },
+  "next_primitive": {
+    "target": "finish or reject frankenjax-9dgqw safe-SIMD lower Schur dot, then reprofile",
+    "reason": "Panel-copy elimination was too small and slightly regressed after the earlier panel parallelization keep. Do not repeat this copy-elimination family.",
+    "target_ratio": ">=2.0 score gate with same-worker RCH A/B",
+    "proof_obligations": [
+      "observable output order unchanged",
+      "floating-point operation order unchanged unless a separate behavior-contract bead admits tolerance",
+      "no RNG, tie-breaking, dtype/shape/error change",
+      "golden sha256 passes before close"
+    ]
+  }
+}

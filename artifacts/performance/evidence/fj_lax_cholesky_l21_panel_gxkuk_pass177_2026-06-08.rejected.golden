@@ -1,0 +1,18 @@
+frankenjax-gxkuk pass177 rejected evidence
+
+target: linalg/cholesky_1024x1024_f64
+worker: fmd
+baseline_ms: [24.399, 24.497, 24.612]
+after_ms: [25.646, 25.824, 25.991]
+speedup_midpoint: 0.9486
+speedup_conservative_low_over_high: 0.9387
+score: 0.0
+decision: reject_and_restore_source
+
+proof: focused RCH cargo test -p fj-lax --lib cholesky passed 15/15 in candidate state.
+candidate_test_added: cholesky_panel_solve_fills_l21_compact_bits
+
+isomorphism_candidate: diagonal block factorization, panel row scheduling, per-row c loop, inner t subtraction order, lower Schur p/q traversal, c contribution order, public row-major L output, dtype/shape/error surface, signed-zero/NaN behavior, tie-breaking absence, and RNG absence were unchanged. The candidate only filled the compact L21 Schur-update buffer while computing the solved in-place panel entries.
+
+source_restored: git diff -- crates/fj-lax/src/linalg.rs empty after rejection.
+next_primitive: stop Cholesky panel-copy elimination. Continue with the already-filed safe-SIMD lower Schur dot bead only if it can prove a same-worker Score >= 2.0; otherwise pivot to a different profile-backed LU/QR/SVD or explicit FP-tolerance contract primitive.
