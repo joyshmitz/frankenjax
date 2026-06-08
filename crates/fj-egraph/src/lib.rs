@@ -7571,6 +7571,45 @@ mod tests {
     }
 
     #[test]
+    fn safe_rewrite_allowlist_covers_every_safe_rule_root() {
+        // GUARD against silent fast-path drift (bead jeck3): the safe-no-rewrite
+        // fast path (fast_path_safe_no_rewrite_single_output_segment) returns a
+        // segment VERBATIM, skipping egg saturation, unless some equation's
+        // primitive satisfies safe_rewrite_may_match. So EVERY root primitive of a
+        // safe_algebraic_rules rule MUST be in that allowlist, or its rewrite is
+        // silently never applied (which previously left cos(neg(x)), floor(floor(x)),
+        // reduce_sum(reduce_sum(x)), abs(neg(x)), max(x,x), ... unsimplified).
+        //
+        // This derives the roots from the ACTUAL rule patterns (not a hand list), so
+        // adding a safe rule whose root op is not allowlisted FAILS here instead of
+        // silently disabling the rule. Primitive::as_str() matches the FjLang
+        // operator token by construction (e.g. "cos", "reduce_sum").
+        use egg::ENodeOrVar;
+        let allow_ops: std::collections::BTreeSet<&'static str> = Primitive::ALL
+            .iter()
+            .filter(|p| safe_rewrite_may_match(**p))
+            .map(|p| p.as_str())
+            .collect();
+        for rule in safe_algebraic_rules() {
+            let ast = rule
+                .searcher
+                .get_pattern_ast()
+                .unwrap_or_else(|| panic!("safe rule '{}' has no pattern AST", rule.name));
+            let root = ast.as_ref().last().expect("non-empty pattern AST");
+            if let ENodeOrVar::ENode(node) = root {
+                let op = node.to_string();
+                assert!(
+                    allow_ops.contains(op.as_str()),
+                    "safe rule '{}' has root op '{}' not covered by safe_rewrite_may_match — \
+                     the safe-no-rewrite fast path will silently skip it",
+                    rule.name,
+                    op
+                );
+            }
+        }
+    }
+
+    #[test]
     fn numerical_safety_mode_preserves_safe_rules() {
         // neg-neg is now in numerically_unsafe_rules (moved for NaN boundary preservation)
         // In safe mode, neg-neg should NOT be simplified (preserves NaN propagation)
