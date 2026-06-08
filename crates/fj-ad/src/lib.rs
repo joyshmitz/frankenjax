@@ -4969,6 +4969,20 @@ fn vjp_reduce_window(
 
     let rank = input_tensor.shape.rank();
 
+    // Forward reduce_window now supports window_dilation (atrous pooling), but this
+    // VJP's scatter uses undilated tap indices — reject dilation loudly rather than
+    // return a silently-wrong gradient (base_dilation is unsupported in forward too).
+    for key in ["window_dilation", "base_dilation"] {
+        if params
+            .get(key)
+            .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+        {
+            return Err(AdError::EvalFailed(format!(
+                "reduce_window gradient (VJP) does not yet support {key}; its reverse-mode derivative is not implemented"
+            )));
+        }
+    }
+
     // Parse window parameters (same parsing as forward pass in fj-lax)
     let window_dims: Vec<usize> = params
         .get("window_dimensions")
@@ -5135,6 +5149,21 @@ fn jvp_reduce_window_select(
         Value::Scalar(_) => return Ok(tangents[0].clone()),
     };
     let rank = input_tensor.shape.rank();
+
+    // Max/min reduce_window JVP follows the primal arg-extremum via undilated tap
+    // indices; reject window_dilation/base_dilation rather than select the wrong
+    // (undilated) extremum. (The sum-pool JVP composes the forward op, so it handles
+    // window_dilation correctly and does not reach here.)
+    for key in ["window_dilation", "base_dilation"] {
+        if params
+            .get(key)
+            .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+        {
+            return Err(AdError::EvalFailed(format!(
+                "reduce_window max/min JVP does not yet support {key}"
+            )));
+        }
+    }
 
     // Window geometry: parsed identically to vjp_reduce_window / the fj-lax
     // forward pass.
@@ -16910,6 +16939,68 @@ mod tests {
         let grads = vjp_single(Primitive::ReduceWindow, &[input], &g, &params).unwrap();
         let vals = tensor_f64_values(&grads[0]);
         assert_eq!(vals, vec![0.0, 30.0, 30.0, 0.0]);
+    }
+
+    #[test]
+    fn reduce_window_vjp_fail_closed_on_window_dilation() {
+        // Forward reduce_window supports window_dilation (atrous pooling), but its VJP
+        // (and the max/min JVP) use undilated tap indices — they must fail-closed
+        // rather than return a silently-wrong gradient. Plain pooling grad still works.
+        let mk = |n: usize, dims: Vec<u32>| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims },
+                    (0..n).map(|i| Literal::from_f64(i as f64 + 1.0)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let input = mk(8, vec![8]);
+        // window 2 dilation 2 -> eff 3, VALID stride1 -> out 6.
+        let g = mk(6, vec![6]);
+        for op in ["sum", "max"] {
+            let mut params = BTreeMap::from([
+                ("window_dimensions".to_owned(), "2".to_owned()),
+                ("window_strides".to_owned(), "1".to_owned()),
+                ("reduce_op".to_owned(), op.to_owned()),
+                ("window_dilation".to_owned(), "2".to_owned()),
+            ]);
+            let res = vjp_single(Primitive::ReduceWindow, &[input.clone()], &g, &params);
+            assert!(
+                res.is_err(),
+                "{op}-pool VJP must fail-closed on window_dilation"
+            );
+            assert!(
+                format!("{:?}", res.unwrap_err()).contains("window_dilation"),
+                "{op} VJP error should name window_dilation"
+            );
+            // max/min JVP also fail-closed (sum JVP composes the forward op, so it is
+            // correct and not asserted here).
+            if op == "max" {
+                let jres = jvp_rule(
+                    Primitive::ReduceWindow,
+                    &[input.clone()],
+                    &[input.clone()],
+                    &params,
+                );
+                assert!(
+                    jres.is_err(),
+                    "max-pool JVP must fail-closed on window_dilation"
+                );
+            }
+        }
+        // Regression: plain pooling VJP still works (no dilation).
+        let plain = BTreeMap::from([
+            ("window_dimensions".to_owned(), "2".to_owned()),
+            ("window_strides".to_owned(), "1".to_owned()),
+            ("reduce_op".to_owned(), "sum".to_owned()),
+        ]);
+        let g2 = mk(7, vec![7]); // out = 8-2+1 = 7
+        assert!(
+            vjp_single(Primitive::ReduceWindow, &[input], &g2, &plain).is_ok(),
+            "plain reduce_window VJP must still succeed"
+        );
     }
 
     #[test]
