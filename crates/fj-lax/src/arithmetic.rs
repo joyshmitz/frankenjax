@@ -5622,18 +5622,41 @@ fn permute_f64(data: &[f64], orig_dims: &[usize], perm: &[usize]) -> Vec<f64> {
     out
 }
 
-/// General f64 dot_general — ANY rank, ANY number of batch / contracting dims —
-/// as a single (batched) GEMM. Permute lhs to `[batch..., free..., contract...]`
-/// and rhs to `[batch..., contract..., free...]` (collapsing each group to one
-/// axis), then `batched_matmul_2d` over the flattened batch. The resulting
-/// `[batch, m, n]` is already the dot_general output order
+/// Extract a real-float tensor's elements as f64 (F64 borrowed; F32/BF16/F16
+/// promoted losslessly), or None for non-real-float literals. The generic
+/// dot_general `Real` path accumulates in f64 over these exact promotions, so a
+/// GEMM on these values + rounding back to the output dtype is bit-identical.
+fn dot_real_elements_as_f64(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
+    if let Some(values) = tensor.elements.as_f64_slice() {
+        return Some(Cow::Borrowed(values));
+    }
+    let mut out = Vec::with_capacity(tensor.elements.len());
+    for literal in &tensor.elements {
+        match literal {
+            Literal::F64Bits(_) | Literal::F32Bits(_) | Literal::BF16Bits(_) | Literal::F16Bits(_) => {
+                out.push(literal.as_f64()?);
+            }
+            _ => return None,
+        }
+    }
+    Some(Cow::Owned(out))
+}
+
+/// General REAL-float dot_general — ANY rank, ANY number of batch / contracting
+/// dims, ANY real dtype (F64/F32/BF16/F16) — as a single (batched) GEMM. Permute
+/// lhs to `[batch..., free..., contract...]` and rhs to
+/// `[batch..., contract..., free...]` (collapsing each group to one axis), then
+/// `batched_matmul_2d` over the flattened batch (f64 accumulation, exactly what
+/// the generic `Real` path does), and round each result to the promoted output
+/// dtype. The resulting `[batch, m, n]` is already the dot_general output order
 /// `[lhs_batch ++ lhs_free ++ rhs_free]`, so it reshapes for free. Replaces the
-/// generic strided loop for every f64 contraction the canonical fast paths above
-/// don't catch (non-canonical batched, rank>2 tensordot, multi-contract). The
-/// batch/contract dims are flattened in their paired param order; the free dims
-/// in ascending order. Bit-identical: same products summed over the contracting
-/// index in ascending order; the permute only reorders memory. f64 only.
-fn general_f64_tensordot(
+/// generic strided loop for every real-float contraction the canonical fast paths
+/// above don't catch (non-canonical batched, rank>2 tensordot, multi-contract,
+/// and ALL non-F64 real dtypes — f32 is the default ML dtype). Bit-identical:
+/// same products summed over the contracting index in ascending order in f64,
+/// then `real_literal_from_f64(out_dtype, _)` — the permute only reorders memory.
+/// Integer / complex dot_general fall through to the generic loop.
+fn general_real_tensordot(
     lhs: &TensorValue,
     rhs: &TensorValue,
     lhs_batch: &[usize],
@@ -5644,9 +5667,10 @@ fn general_f64_tensordot(
     rhs_free_dims: &[usize],
     output_dims: &[u32],
 ) -> Result<Option<Value>, EvalError> {
-    if lhs.dtype != DType::F64 || rhs.dtype != DType::F64 {
-        return Ok(None);
-    }
+    let out_dtype = match dot_output_kind(lhs, rhs) {
+        DotOutputKind::Real(dtype) => dtype,
+        _ => return Ok(None),
+    };
     let lhs_dims: Vec<usize> = lhs.shape.dims.iter().map(|&d| d as usize).collect();
     let rhs_dims: Vec<usize> = rhs.shape.dims.iter().map(|&d| d as usize).collect();
     let batch: usize = lhs_batch.iter().map(|&d| lhs_dims[d]).product();
@@ -5660,7 +5684,9 @@ fn general_f64_tensordot(
     if rk != k || rbatch != batch {
         return Ok(None);
     }
-    let (Some(lhs_v), Some(rhs_v)) = (dot_f64_elements(lhs), dot_f64_elements(rhs)) else {
+    let (Some(lhs_v), Some(rhs_v)) =
+        (dot_real_elements_as_f64(lhs), dot_real_elements_as_f64(rhs))
+    else {
         return Ok(None);
     };
     // lhs -> [batch (paired) ++ free (ascending) ++ contract (paired)] = [batch,m,k].
@@ -5676,14 +5702,20 @@ fn general_f64_tensordot(
     let values = batched_matmul_2d(&a, batch, m, k, &b, n);
     if output_dims.is_empty() {
         // Full contraction (e.g. vector·vector) -> scalar, matching the other paths.
-        return Ok(Some(Value::Scalar(Literal::from_f64(values[0]))));
+        return Ok(Some(Value::Scalar(real_literal_from_f64(out_dtype, values[0]))));
     }
-    Ok(Some(Value::Tensor(TensorValue::new_f64_values(
-        Shape {
-            dims: output_dims.to_vec(),
-        },
-        values,
-    )?)))
+    let shape = Shape {
+        dims: output_dims.to_vec(),
+    };
+    if out_dtype == DType::F64 {
+        // from_f64(v) == F64Bits(v.to_bits()), so this matches new_f64_values exactly.
+        return Ok(Some(Value::Tensor(TensorValue::new_f64_values(shape, values)?)));
+    }
+    let elements: Vec<Literal> = values
+        .iter()
+        .map(|&v| real_literal_from_f64(out_dtype, v))
+        .collect();
+    Ok(Some(Value::Tensor(TensorValue::new(out_dtype, shape, elements)?)))
 }
 
 fn dot_f64_elements(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
@@ -6059,13 +6091,15 @@ pub(crate) fn eval_dot_general(
         return Ok(value);
     }
 
-    // General f64 dot_general (any rank, any batch/contracting dims) as a single
-    // reshape-to-(batched-)GEMM: permute to [batch,free,contract]/[batch,contract,
-    // free] and batched_matmul_2d, instead of the generic strided loop. Catches
-    // every remaining f64 case the canonical fast paths above miss — non-canonical
-    // batched contractions (e.g. batched attention with transposed operands),
-    // rank>2 tensordots, multi-contract. Bit-identical (same products, ascending k).
-    if let Some(value) = general_f64_tensordot(
+    // General real-float dot_general (any rank, any batch/contracting dims, any of
+    // F64/F32/BF16/F16) as a single reshape-to-(batched-)GEMM: permute to
+    // [batch,free,contract]/[batch,contract,free] and batched_matmul_2d (f64
+    // accumulation = the generic Real path), instead of the generic strided loop.
+    // Catches every remaining real-float case the canonical fast paths above miss —
+    // non-canonical batched contractions (batched attention), rank>2 tensordots,
+    // multi-contract, AND all non-F64 real dtypes (f32 is the default ML dtype).
+    // Bit-identical (same products, ascending k, same round-to-out-dtype).
+    if let Some(value) = general_real_tensordot(
         lhs,
         rhs,
         &lhs_batch,
@@ -7915,6 +7949,93 @@ mod tests {
             }
         }
         assert_eq!(bits(&got), want.iter().map(|w| w.to_bits()).collect::<Vec<_>>(), "rank3-T");
+    }
+
+    #[test]
+    fn f32_dot_general_gemm_bit_identical_to_reference() {
+        // f32 dot_general (the default ML dtype) now routes through the GEMM path
+        // (promote f32->f64, matmul in f64, round to f32). Must be bit-for-bit
+        // identical to the generic Real loop: f64 accumulation of exact f32
+        // products, then real_literal_from_f64(F32, sum) = (sum as f32).
+        let mk32 = |dims: Vec<u32>, data: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims },
+                    data.iter().map(|&v| Literal::from_f32(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let (m, k, n) = (5usize, 7usize, 4usize);
+        let af: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.013).sin() * 1.7 - 0.3).collect();
+        let bf: Vec<f32> = (0..k * n).map(|i| (i as f32 * 0.019).cos() * 1.3 + 0.2).collect();
+        let params = BTreeMap::from([
+            ("lhs_contracting_dims".to_owned(), "1".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "0".to_owned()),
+        ]);
+        let Value::Tensor(out) = eval_dot_general(
+            &[mk32(vec![m as u32, k as u32], &af), mk32(vec![k as u32, n as u32], &bf)],
+            &params,
+        )
+        .unwrap() else {
+            panic!("expected tensor");
+        };
+        assert_eq!(out.dtype, DType::F32, "f32×f32 -> f32 (no widening)");
+        let got: Vec<u32> = out
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F32Bits(b) => *b,
+                o => panic!("unexpected {o:?}"),
+            })
+            .collect();
+        let mut want = Vec::new();
+        for i in 0..m {
+            for j in 0..n {
+                let mut s = 0.0f64;
+                for l in 0..k {
+                    s += af[i * k + l] as f64 * bf[l * n + j] as f64;
+                }
+                want.push((s as f32).to_bits());
+            }
+        }
+        assert_eq!(got, want, "f32 matmul must be bit-identical to the f64-accum reference");
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_f32_matmul_dot_general() {
+        use std::time::Instant;
+        let run = |m: usize, k: usize, n: usize| {
+            let a: Vec<f32> = (0..m * k).map(|i| (i % 7) as f32 * 0.5).collect();
+            let b: Vec<f32> = (0..k * n).map(|i| (i % 5) as f32 * 0.25).collect();
+            let mk = |dims: Vec<u32>, data: &[f32]| {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F32,
+                        Shape { dims },
+                        data.iter().map(|&v| Literal::from_f32(v)).collect(),
+                    )
+                    .unwrap(),
+                )
+            };
+            let params = BTreeMap::from([
+                ("lhs_contracting_dims".to_owned(), "1".to_owned()),
+                ("rhs_contracting_dims".to_owned(), "0".to_owned()),
+            ]);
+            let inputs = [mk(vec![m as u32, k as u32], &a), mk(vec![k as u32, n as u32], &b)];
+            let _ = eval_dot_general(&inputs, &params).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = eval_dot_general(&inputs, &params).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            println!("BENCH f32 matmul [{m},{k}]·[{k},{n}]: {:.4}ms", best * 1e3);
+        };
+        run(256, 256, 256);
+        run(512, 128, 512);
     }
 
     #[test]
