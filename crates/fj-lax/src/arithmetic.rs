@@ -5530,6 +5530,69 @@ fn rank2_f64_matmul(
     )?)))
 }
 
+/// Transpose a contiguous row-major `[rows, cols]` f64 matrix to `[cols, rows]`.
+fn transpose_rows_cols_f64(data: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut out = vec![0.0_f64; rows * cols];
+    for r in 0..rows {
+        let base = r * cols;
+        for c in 0..cols {
+            out[c * rows + r] = data[base + c];
+        }
+    }
+    out
+}
+
+/// Rank-2, single-contracting-dim, NO-batch f64 dot_general in ANY orientation.
+/// Transposes each operand to the canonical `[m,k]` / `[k,n]` layout and runs the
+/// fast `matmul_2d` kernel instead of the generic strided loop (which is what the
+/// non-`([1],[0])` orientations — e.g. A·Bᵀ-style dots, and the single-operand
+/// vmap(DotGeneral) shapes — fell to). Bit-identical to the generic loop: the
+/// per-element products are the same and both sum over the contracting index in
+/// ascending order; the transpose only reorders memory. Returns None for non-f64.
+fn rank2_f64_any_orientation_matmul(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    lc: usize,
+    rc: usize,
+    output_dims: &[u32],
+) -> Result<Option<Value>, EvalError> {
+    if lhs.dtype != DType::F64 || rhs.dtype != DType::F64 {
+        return Ok(None);
+    }
+    let lf = 1 - lc;
+    let rf = 1 - rc;
+    let m = lhs.shape.dims[lf] as usize;
+    let k = lhs.shape.dims[lc] as usize;
+    let n = rhs.shape.dims[rf] as usize;
+    if rhs.shape.dims[rc] as usize != k {
+        return Ok(None);
+    }
+    let (Some(lhs_v), Some(rhs_v)) = (dot_f64_elements(lhs), dot_f64_elements(rhs)) else {
+        return Ok(None);
+    };
+    // Arrange lhs as [m,k]: lc==1 is already [free=m, contract=k]; lc==0 means lhs
+    // is [k, m], transpose to [m, k].
+    let a: Cow<[f64]> = if lc == 1 {
+        lhs_v
+    } else {
+        Cow::Owned(transpose_rows_cols_f64(&lhs_v, k, m))
+    };
+    // Arrange rhs as [k,n]: rc==0 is already [contract=k, free=n]; rc==1 means rhs
+    // is [n, k], transpose to [k, n].
+    let b: Cow<[f64]> = if rc == 0 {
+        rhs_v
+    } else {
+        Cow::Owned(transpose_rows_cols_f64(&rhs_v, n, k))
+    };
+    let values = matmul_2d(&a, m, k, &b, n);
+    Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+        Shape {
+            dims: output_dims.to_vec(),
+        },
+        values,
+    )?)))
+}
+
 fn dot_f64_elements(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
     if let Some(values) = tensor.elements.as_f64_slice() {
         return Some(Cow::Borrowed(values));
@@ -5861,6 +5924,28 @@ pub(crate) fn eval_dot_general(
         && lhs_free_dims.as_slice() == [0usize]
         && rhs_free_dims.as_slice() == [1usize];
     if standard_rank2_matmul && let Some(value) = rank2_f64_matmul(lhs, rhs, &output_dims)? {
+        return Ok(value);
+    }
+
+    // General rank-2 single-contracting-dim f64 contraction in any orientation
+    // (no batch dims): transpose to canonical and use matmul_2d instead of the
+    // generic strided loop. Covers A·Bᵀ-style dots (lhs_c=[1],rhs_c=[1]),
+    // Aᵀ·B (lhs_c=[0],rhs_c=[0]), etc. — including the single-operand
+    // vmap(DotGeneral) shapes. Bit-identical to the generic loop.
+    if lhs_rank == 2
+        && rhs_rank == 2
+        && lhs_batch.is_empty()
+        && rhs_batch.is_empty()
+        && lhs_contracting.len() == 1
+        && rhs_contracting.len() == 1
+        && let Some(value) = rank2_f64_any_orientation_matmul(
+            lhs,
+            rhs,
+            lhs_contracting[0],
+            rhs_contracting[0],
+            &output_dims,
+        )?
+    {
         return Ok(value);
     }
 
@@ -7575,6 +7660,61 @@ mod tests {
     }
 
     #[test]
+    fn rank2_dot_general_any_orientation_bit_identical_to_reference() {
+        // The general rank-2 fast path routes every single-contracting-dim
+        // orientation (not just the canonical [1],[0]) through matmul_2d. Each must
+        // be BIT-for-bit identical to the textbook ascending-l reference (= what the
+        // generic strided loop computed).
+        let (m, k, n) = (5usize, 7usize, 4usize);
+        let mk = |len: usize, salt: f64| -> Vec<f64> {
+            (0..len).map(|i| (i as f64 * salt).sin() * 1.7 - 0.3).collect()
+        };
+        for &(lc, rc) in &[(1usize, 1usize), (0usize, 0usize), (0usize, 1usize)] {
+            let (lr, lcd) = if lc == 1 { (m, k) } else { (k, m) };
+            let (rr, rcd) = if rc == 0 { (k, n) } else { (n, k) };
+            let a = mk(lr * lcd, 0.013);
+            let b = mk(rr * rcd, 0.019);
+            let lhs = tensor_f64(vec![lr as u32, lcd as u32], &a);
+            let rhs = tensor_f64(vec![rr as u32, rcd as u32], &b);
+            let params = BTreeMap::from([
+                ("lhs_contracting_dims".to_owned(), lc.to_string()),
+                ("rhs_contracting_dims".to_owned(), rc.to_string()),
+            ]);
+            let Value::Tensor(out) = eval_dot_general(&[lhs, rhs], &params).unwrap() else {
+                panic!("expected tensor for (lc={lc},rc={rc})");
+            };
+            assert_eq!(
+                out.shape.dims,
+                vec![m as u32, n as u32],
+                "(lc={lc},rc={rc}) output shape"
+            );
+            let got: Vec<u64> = out
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F64Bits(bits) => *bits,
+                    other => panic!("unexpected literal {other:?}"),
+                })
+                .collect();
+            let lhs_at = |i: usize, l: usize| if lc == 1 { a[i * k + l] } else { a[l * m + i] };
+            let rhs_at = |l: usize, j: usize| if rc == 0 { b[l * n + j] } else { b[j * k + l] };
+            let mut want = vec![0.0f64; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut s = 0.0;
+                    for l in 0..k {
+                        s += lhs_at(i, l) * rhs_at(l, j);
+                    }
+                    want[i * n + j] = s;
+                }
+            }
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert_eq!(*g, w.to_bits(), "(lc={lc},rc={rc}) must be bit-identical");
+            }
+        }
+    }
+
+    #[test]
     fn batched_dot_general_small_fastpath_bit_identical_to_reference() {
         // After lowering BATCHED_FASTPATH_MIN_OPS, a small batched matmul
         // (batch=64,m=k=n=4 → 4096 FMAs: above the new 1<<10 floor, below the old
@@ -7624,6 +7764,36 @@ mod tests {
         for (g, w) in got.iter().zip(want.iter()) {
             assert_eq!(*g, w.to_bits(), "fast-path batched matmul must be bit-identical");
         }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_rank2_noncanonical_dot_general() {
+        use std::time::Instant;
+        // Non-canonical rank-2 contraction: dot_general(A[m,k], B[n,k], contract
+        // dim 1 of each) -> [m,n] (the vmap(W@x)-style shape). lhs_c=[1],rhs_c=[1].
+        let run = |m: usize, k: usize, n: usize| {
+            let a: Vec<f64> = (0..m * k).map(|i| (i % 7) as f64 * 0.5).collect();
+            let b: Vec<f64> = (0..n * k).map(|i| (i % 5) as f64 * 0.25).collect();
+            let lhs = tensor_f64(vec![m as u32, k as u32], &a);
+            let rhs = tensor_f64(vec![n as u32, k as u32], &b);
+            let params = BTreeMap::from([
+                ("lhs_contracting_dims".to_owned(), "1".to_owned()),
+                ("rhs_contracting_dims".to_owned(), "1".to_owned()),
+            ]);
+            let inputs = [lhs, rhs];
+            let _ = eval_dot_general(&inputs, &params).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..30 {
+                let t = Instant::now();
+                let _ = eval_dot_general(&inputs, &params).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            println!("BENCH dot_general A[{m},{k}]·B[{n},{k}]ᵀ -> [{m},{n}]: {:.4}ms", best * 1e3);
+        };
+        run(32, 32, 1024);
+        run(64, 64, 256);
+        run(256, 16, 256);
     }
 
     #[test]
