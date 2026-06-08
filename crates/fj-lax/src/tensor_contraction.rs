@@ -239,6 +239,73 @@ fn pack_b_panels(b: &[f64], k: usize, n: usize, threads: usize) -> Vec<f64> {
     bpack
 }
 
+fn pack_b_pc_panel_block(b: &[f64], k: usize, n: usize, pc: usize, out: &mut [f64]) {
+    let npanels = n / NR;
+    let kc = KC.min(k - pc);
+    let panel_elems = kc * NR;
+    debug_assert_eq!(out.len(), npanels * panel_elems);
+    for jp in 0..npanels {
+        let panel = &mut out[jp * panel_elems..(jp + 1) * panel_elems];
+        let jbase = jp * NR;
+        for l in 0..kc {
+            let src = (pc + l) * n + jbase;
+            panel[l * NR..l * NR + NR].copy_from_slice(&b[src..src + NR]);
+        }
+    }
+}
+
+/// Pack B by KC-sized pc blocks, then NR column panels inside each block:
+/// `bpack[pc*npanels*NR + jp*kc*NR + l*NR + jj] == b[(pc+l)*n + jp*NR + jj]`.
+///
+/// This is only for the cache-blocked macro-kernel. It keeps each pc slab's
+/// column panels adjacent, cutting the stride between panels from `k*NR` to
+/// `kc*NR` while preserving every output element's ascending-k recurrence.
+fn pack_b_pc_panels(b: &[f64], k: usize, n: usize, threads: usize) -> Vec<f64> {
+    let npanels = n / NR;
+    let mut bpack = vec![0.0f64; npanels * k * NR];
+    if threads <= 1 || k <= KC {
+        let mut pc = 0;
+        while pc < k {
+            let kc = KC.min(k - pc);
+            let elems = npanels * kc * NR;
+            let start = pc * npanels * NR;
+            pack_b_pc_panel_block(b, k, n, pc, &mut bpack[start..start + elems]);
+            pc += KC;
+        }
+        return bpack;
+    }
+
+    let blocks = k.div_ceil(KC);
+    let workers = threads.min(blocks);
+    let blocks_per_worker = blocks.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut rest = bpack.as_mut_slice();
+        let mut block_start = 0usize;
+        while block_start < blocks {
+            let block_end = (block_start + blocks_per_worker).min(blocks);
+            let pc_start = block_start * KC;
+            let pc_end = (block_end * KC).min(k);
+            let elems = (pc_end - pc_start) * npanels * NR;
+            let (chunk, tail) = rest.split_at_mut(elems);
+            rest = tail;
+            scope.spawn(move || {
+                let mut local = chunk;
+                let mut pc = pc_start;
+                while pc < pc_end {
+                    let kc = KC.min(k - pc);
+                    let elems = npanels * kc * NR;
+                    let (block, tail) = local.split_at_mut(elems);
+                    local = tail;
+                    pack_b_pc_panel_block(b, k, n, pc, block);
+                    pc += KC;
+                }
+            });
+            block_start = block_end;
+        }
+    });
+    bpack
+}
+
 /// `k·n` (B element count) above which B is packed into panel-major order before
 /// the multiply: once B spills L2 (~1 MB f64 = 131072 elems) the strided read in
 /// the microkernel misses on every k-step. Below it B is L2-resident and the pack
@@ -385,7 +452,11 @@ fn matmul_2d_with_threads_into(
     // Pack B's column panels once (shared, read-only across all output rows) when
     // B spills L2. Bit-identical to the strided read; just panel-contiguous.
     let bpack: Option<Vec<f64>> = if plan.pack_b && n >= NR {
-        Some(pack_b_panels(b, k, n, plan.threads))
+        Some(if plan.block_k && k > KC {
+            pack_b_pc_panels(b, k, n, plan.threads)
+        } else {
+            pack_b_panels(b, k, n, plan.threads)
+        })
     } else {
         None
     };
@@ -561,12 +632,13 @@ fn matmul_2d_row_block(
 }
 
 /// Cache-blocked GEMM macro-kernel for one thread's contiguous row-block, with B
-/// already packed into panel-major order (`bpack`, see [`pack_b_panels`]).
+/// already packed into pc-major panel order (`bpack`, see [`pack_b_pc_panels`]).
 ///
 /// Loop order: pc (k in KC chunks) → jp (NR-col panel) → it (MR-row tile). The
-/// packed B panel for `jp`'s pc-block lives at `bpack[jp*k*NR + pc*NR ..]` and is
-/// reused across every row-tile while L1-resident; the [MR×KC] A tile is reused
-/// across panels. C is read-modified-written once per pc-block: each pc-block
+/// packed B panel for `jp`'s pc-block lives at
+/// `bpack[pc*npanels*NR + jp*kc*NR ..]` and is reused across every row-tile while
+/// L1-resident; the [MR×KC] A tile is reused across panels. C is
+/// read-modified-written once per pc-block: each pc-block
 /// LOADS the running C value (or starts at 0 on the first block) and accumulates
 /// its KC products in ascending `l`, so every output element is summed in the
 /// exact ascending-`l` order `(((0 + p0) + p1) + …)` of the textbook kernel — the
@@ -624,6 +696,7 @@ fn matmul_2d_blocked_row_block(
             let mut col_super = 0;
             while col_super < col_panels {
                 let col_super_end = (col_super + COL_SUPERPANEL_PANELS).min(col_panels);
+                let pc_base = pc * col_panels * NR;
                 let mut tile = row_super;
                 while tile < row_super_end {
                     let i = tile * MR;
@@ -632,7 +705,7 @@ fn matmul_2d_blocked_row_block(
                     while jp < col_super_end {
                         let j = jp * NR;
                         // This panel's pc-block: kc rows of NR, contiguous from the pack.
-                        let panel = &bpack[jp * k * NR + pc * NR..];
+                        let panel = &bpack[pc_base + jp * kc * NR..];
                         // Seed accumulators from the running C (0 on the first pc-block),
                         // so the kc products continue the ascending sweep in place.
                         let mut c0 = if first {
@@ -1420,6 +1493,53 @@ mod tests {
                     got.to_bits(),
                     want.to_bits(),
                     "threads={threads} packed-B bit mismatch at {idx}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pack_b_pc_panels_layout_matches_source() {
+        let (k, n) = (KC + 5usize, 24usize); // two pc-blocks, three full panels
+        let npanels = n / NR;
+        let b: Vec<f64> = (0..k * n).map(|i| i as f64).collect();
+        let bpack = pack_b_pc_panels(&b, k, n, 3);
+
+        let mut pc = 0;
+        while pc < k {
+            let kc = KC.min(k - pc);
+            let pc_base = pc * npanels * NR;
+            for jp in 0..npanels {
+                for l in 0..kc {
+                    for jj in 0..NR {
+                        assert_eq!(
+                            bpack[pc_base + jp * kc * NR + l * NR + jj],
+                            b[(pc + l) * n + jp * NR + jj],
+                            "pc={pc} jp={jp} l={l} jj={jj}"
+                        );
+                    }
+                }
+            }
+            pc += KC;
+        }
+    }
+
+    #[test]
+    fn pack_b_pc_panels_parallel_matches_serial_bits() {
+        let (k, n) = (KC * 2 + 13usize, 72usize); // three pc-blocks, nine panels
+        let b: Vec<f64> = (0..k * n)
+            .map(|i| (i as f64 * 0.011_3).cos() * 2.25 + 0.5)
+            .collect();
+        let serial = pack_b_pc_panels(&b, k, n, 1);
+
+        for threads in [2usize, 3, 4, 8, 16] {
+            let parallel = pack_b_pc_panels(&b, k, n, threads);
+            assert_eq!(parallel.len(), serial.len(), "threads={threads}");
+            for (idx, (got, want)) in parallel.iter().zip(serial.iter()).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "threads={threads} pc-major packed-B bit mismatch at {idx}"
                 );
             }
         }

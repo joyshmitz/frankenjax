@@ -1,0 +1,119 @@
+{
+  "artifact": "fj_lax_gemm_pcmajor_bpack_mcqr58_pass183_2026-06-08",
+  "bead": "frankenjax-mcqr.58",
+  "pass": 183,
+  "status": "kept",
+  "target": "linalg/matmul_2d_2048x2048x2048_f64",
+  "profile_route": {
+    "source": "Post-pass181 pinned RCH fmd linalg profile recorded in frankenjax-6ykcu and Agent Mail",
+    "top_rows": [
+      {
+        "benchmark": "linalg/matmul_2d_2048x2048x2048_f64",
+        "worker": "fmd",
+        "ms": [170.08, 170.79, 173.66],
+        "decision": "dominant profile row after pass181; recursive/communication-avoiding route rejected in frankenjax-6ykcu because current GEMM/Dot contract is bit-exact ascending-k"
+      },
+      {
+        "benchmark": "linalg/pinv_256x128_f64",
+        "worker": "fmd",
+        "ms": [37.359, 37.56, 38.365]
+      },
+      {
+        "benchmark": "linalg/lu_1024x1024_f64",
+        "worker": "fmd",
+        "ms": [35.507, 35.784, 36.892]
+      },
+      {
+        "benchmark": "linalg/qr_1024x1024_f64",
+        "worker": "fmd",
+        "ms": [27.011, 27.028, 27.096]
+      }
+    ],
+    "alien_primitive": "cache-blocked panel locality: pc-major blocked B-pack layout for the exact-order safe-Rust GEMM macro-kernel"
+  },
+  "lever": {
+    "description": "For the k-blocked GEMM path only, pack B as [pc-block][column-panel][kc][NR] instead of the flat path's [column-panel][k][NR]. The flat packed path still uses the original panel-major pack.",
+    "files": [
+      "crates/fj-lax/src/tensor_contraction.rs"
+    ],
+    "one_lever_only": true,
+    "behavior_change": "none intended"
+  },
+  "benchmarks": {
+    "same_worker_gate": {
+      "worker": "fmd",
+      "baseline_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd rch exec -- cargo bench -p fj-lax --bench lax_baseline 'linalg/matmul_2d_2048x2048x2048_f64' -- --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot",
+      "candidate_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd rch exec -- cargo bench -p fj-lax --bench lax_baseline 'linalg/matmul_2d_2048x2048x2048_f64' -- --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot",
+      "baseline_ms": [177.27, 178.28, 179.43],
+      "candidate_ms": [172.03, 174.25, 176.59],
+      "median_speedup": 1.023128,
+      "conservative_speedup_low_over_high": 1.003851,
+      "intervals": "non-overlapping: candidate high 176.59 ms < baseline low 177.27 ms"
+    },
+    "score": {
+      "impact": 2.0,
+      "confidence": 3.0,
+      "effort": 2.0,
+      "value": 3.0,
+      "rationale": "Small percentage win, but on the dominant profile row with same-worker non-overlapping Criterion intervals and a structural cache-layout lever."
+    }
+  },
+  "behavior_proof": {
+    "isomorphism": [
+      "The blocked GEMM loop order remains pc -> row-superpanel -> column-superpanel -> tile -> jp -> l, and each output element still accumulates products in strictly ascending k/l order.",
+      "The new pack changes only the address used to read B values: bpack[pc*npanels*NR + jp*kc*NR + l*NR + jj] equals b[(pc+l)*n + jp*NR + jj].",
+      "The flat packed path remains on the original panel-major pack_b_panels layout, so smaller nonblocked GEMM behavior and performance surface are unchanged.",
+      "C first-block zero seeding and subsequent running-C loads are unchanged; no reassociation, FMA request, mixed precision, tolerance relaxation, or parallel reduction is introduced.",
+      "Thread row ownership, row-major output order, dtype, shape, error behavior, NaN and signed-zero surface, and RNG absence are unchanged."
+    ],
+    "golden": "artifacts/performance/evidence/fj_lax_gemm_pcmajor_bpack_mcqr58_pass183_2026-06-08.golden",
+    "golden_sha256": "a27213aecb8d6280f8cca7d5240405e38f338007b3d3c678734f832c18c5a672",
+    "golden_output_digest": "e3762befad86e2a81da53a8413643b658a0be2d6136d69e195770b2beba48b3a",
+    "proof_commands": [
+      {
+        "worker": "fmd",
+        "command": "cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+        "result": "passed: 11 passed, 0 failed, 1 ignored; includes blocked/packed/threaded bit-identity, special-value bit-identity, matmul_2d_into parity, and packed NR8 golden digest"
+      },
+      {
+        "worker": "fmd",
+        "command": "cargo test -p fj-lax --lib pack_b_pc_panels -- --nocapture",
+        "result": "passed: 2 passed; covers pc-major source mapping and serial-vs-parallel packed-B bit equality"
+      }
+    ]
+  },
+  "validation": [
+    {
+      "worker": "fmd",
+      "command": "cargo check -p fj-lax --all-targets",
+      "result": "passed"
+    },
+    {
+      "worker": "fmd",
+      "command": "cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check --package fj-lax",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_lax_gemm_pcmajor_bpack_mcqr58_pass183_2026-06-08.golden.sha256",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/tensor_contraction.rs",
+      "result": "exit 0; no criticals and no unsafe blocks; UBS fmt/clippy/check/test-build sections clean; pre-existing broad warning inventory remains"
+    }
+  ],
+  "decision": {
+    "gate": "keep only Score >= 2.0",
+    "result": "keep",
+    "reason": "Same-worker fmd GEMM2048 median improved from 178.28 ms to 174.25 ms with non-overlapping Criterion intervals; Score 3.0.",
+    "next_primitive": "Reprofile after landing. If GEMM remains top, attack the next structurally different exact-order panel/cache primitive or file a deeper contract bead for any FP-reordered algorithm before implementation."
+  }
+}
