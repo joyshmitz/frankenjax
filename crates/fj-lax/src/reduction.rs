@@ -679,6 +679,34 @@ pub(crate) fn eval_reduce_axes(
                             &float_op,
                         )
                     }),
+                    // Half floats decode each raw u16 to f64 exactly via the same
+                    // `Literal::as_f64()` the generic path uses (so the fold sees
+                    // identical values in identical order); reading the packed u16
+                    // backing avoids the per-element odometer over boxed Literals.
+                    DType::BF16 => tensor.elements.as_half_float_slice().and_then(|v| {
+                        dense_f64_axis_reduce(
+                            tensor,
+                            v,
+                            |b| Literal::BF16Bits(b).as_f64().unwrap_or(0.0),
+                            &kept_axes,
+                            &out_dims,
+                            out_count,
+                            float_init,
+                            &float_op,
+                        )
+                    }),
+                    DType::F16 => tensor.elements.as_half_float_slice().and_then(|v| {
+                        dense_f64_axis_reduce(
+                            tensor,
+                            v,
+                            |b| Literal::F16Bits(b).as_f64().unwrap_or(0.0),
+                            &kept_axes,
+                            &out_dims,
+                            out_count,
+                            float_init,
+                            &float_op,
+                        )
+                    }),
                     _ => None,
                 };
                 let result = if let Some(values) = dense {
@@ -1845,6 +1873,182 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dense_half_float_reduce_bit_identical_to_literal_path() {
+        // Dense BF16/F16 (as_half_float_slice) takes the new dense axis-reduce path;
+        // boxed half Literals take the generic odometer. Both decode each tap via
+        // Literal::as_f64() and fold in the same order, so results are bit-identical
+        // (NaN sign canonicalized, as in the f32 test — inf+(-inf) sign is
+        // unspecified). Axis reductions exercise the new branch.
+        for dtype in [DType::BF16, DType::F16] {
+            let raw: Vec<u16> = (0..12)
+                .map(|i| match i {
+                    4 => {
+                        if dtype == DType::F16 {
+                            0x7c00
+                        } else {
+                            0x7f80
+                        }
+                    } // +inf
+                    5 => {
+                        if dtype == DType::F16 {
+                            0xfc00
+                        } else {
+                            0xff80
+                        }
+                    } // -inf
+                    6 => {
+                        if dtype == DType::F16 {
+                            0x7e00
+                        } else {
+                            0x7fc0
+                        }
+                    } // NaN
+                    7 => 0x8000, // -0
+                    _ => (i as u16).wrapping_mul(53).wrapping_add(1),
+                })
+                .collect();
+            let dims = vec![3u32, 4u32];
+            let mk = move |b: u16| {
+                if dtype == DType::BF16 {
+                    Literal::BF16Bits(b)
+                } else {
+                    Literal::F16Bits(b)
+                }
+            };
+            let dense = Value::Tensor(
+                TensorValue::new_half_float_values(
+                    dtype,
+                    Shape { dims: dims.clone() },
+                    raw.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    dtype,
+                    Shape { dims: dims.clone() },
+                    raw.iter().copied().map(mk).collect(),
+                )
+                .unwrap(),
+            );
+            assert!(
+                dense
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some()
+            );
+            assert!(
+                boxed
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_none()
+            );
+            let is_nan_half = |b: u16| -> bool {
+                if dtype == DType::BF16 {
+                    Literal::BF16Bits(b).as_f64().is_some_and(|v| v.is_nan())
+                } else {
+                    Literal::F16Bits(b).as_f64().is_some_and(|v| v.is_nan())
+                }
+            };
+            let nan_canon = if dtype == DType::F16 { 0x7e00 } else { 0x7fc0 };
+            let half_bits = |v: &Value| -> Vec<u16> {
+                let lit_bits = |l: &Literal| match l {
+                    Literal::BF16Bits(b) | Literal::F16Bits(b) => {
+                        if is_nan_half(*b) {
+                            nan_canon
+                        } else {
+                            *b
+                        }
+                    }
+                    o => panic!("expected half, got {o:?}"),
+                };
+                match v {
+                    Value::Scalar(l) => vec![lit_bits(l)],
+                    Value::Tensor(t) => {
+                        assert_eq!(t.dtype, dtype, "half output dtype preserved");
+                        t.elements.iter().map(lit_bits).collect()
+                    }
+                }
+            };
+            for primitive in [
+                Primitive::ReduceSum,
+                Primitive::ReduceProd,
+                Primitive::ReduceMax,
+                Primitive::ReduceMin,
+            ] {
+                for axes in [None, Some("0"), Some("1")] {
+                    let mut p = BTreeMap::new();
+                    if let Some(a) = axes {
+                        p.insert("axes".to_owned(), a.to_owned());
+                    }
+                    let d =
+                        crate::eval_primitive(primitive, std::slice::from_ref(&dense), &p).unwrap();
+                    let l =
+                        crate::eval_primitive(primitive, std::slice::from_ref(&boxed), &p).unwrap();
+                    assert_eq!(
+                        half_bits(&d),
+                        half_bits(&l),
+                        "{dtype:?} {primitive:?} axes={axes:?} dense != generic"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_bf16_reduce_sum_axis_dense_vs_generic() {
+        use std::time::Instant;
+        let (rows, cols) = (4096usize, 1024usize); // reduce axis 1 -> [4096]
+        let raw: Vec<u16> = (0..rows * cols)
+            .map(|i| (i as u16).wrapping_mul(37).wrapping_add(0x3f00))
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let dense = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape { dims: dims.clone() },
+                raw.clone(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::BF16,
+                Shape { dims: dims.clone() },
+                raw.iter().copied().map(Literal::BF16Bits).collect(),
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        let time = |input: &Value| {
+            let _ = crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(input), &p)
+                .unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ =
+                    crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(input), &p)
+                        .unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let generic = time(&boxed);
+        let dense_t = time(&dense);
+        println!(
+            "BENCH bf16 reduce_sum axis1 [{rows},{cols}]: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
     }
 
     #[test]
