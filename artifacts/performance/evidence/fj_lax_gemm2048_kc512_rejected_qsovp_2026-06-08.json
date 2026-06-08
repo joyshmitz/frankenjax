@@ -1,0 +1,47 @@
+{
+  "bead": "frankenjax-qsovp",
+  "pass": 177,
+  "status": "rejected",
+  "target": {
+    "crate": "fj-lax",
+    "benchmark": "linalg/matmul_2d_2048x2048x2048_f64",
+    "profile_source": "post-frankenjax-p1vbf.46 RCH fmd linalg profile",
+    "profile_interval_ms": [202.57, 206.51, 210.8]
+  },
+  "lever": {
+    "name": "KC512 blocked GEMM communication block",
+    "one_lever": true,
+    "source_change": "temporarily changed tensor_contraction::KC from 256 to 512",
+    "kept_in_source": false,
+    "reason_rejected": "Matched-worker Criterion intervals overlapped; median speedup was small and confidence was insufficient for Score >= 2.0."
+  },
+  "matched_benchmark": {
+    "tool": "rch exec -- cargo bench -p fj-lax --bench lax_baseline",
+    "worker": "vmi1293453",
+    "baseline_kc256_ms": [283.58, 294.45, 305.35],
+    "candidate_kc512_ms": [277.86, 284.62, 290.91],
+    "median_speedup": 1.0345,
+    "conservative_speedup_low_over_high": 0.9748,
+    "score": 0.0
+  },
+  "behavior_proof": {
+    "tool": "rch exec",
+    "worker": "vmi1156319",
+    "command": "cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+    "result": "10 passed, 0 failed, 1 ignored",
+    "golden_output_digest": "e3762befad86e2a81da53a8413643b658a0be2d6136d69e195770b2beba48b3a"
+  },
+  "isomorphism": {
+    "output_order": "row-major output ownership unchanged",
+    "floating_point": "per-output accumulation order remains ascending k; KC changes only pc-block boundary placement",
+    "tie_breaking": "no comparisons or ties in GEMM path",
+    "rng": "no RNG surface",
+    "errors": "input assertions and panic surface unchanged"
+  },
+  "next_primitive": {
+    "name": "exact-order recursive panel scheduler",
+    "source": "alien-graveyard cache locality and tiled SIMD primitive",
+    "target_ratio": ">= 1.15x on same-worker GEMM2048",
+    "constraint": "preserve each output element's ascending-k accumulation order; restructure i/j tile scheduling and B/A panel reuse only"
+  }
+}

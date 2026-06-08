@@ -1,0 +1,6 @@
+golden_output_digest=e3762befad86e2a81da53a8413643b658a0be2d6136d69e195770b2beba48b3a
+baseline_kc256_ms=283.58,294.45,305.35
+candidate_kc512_ms=277.86,284.62,290.91
+median_speedup=1.0345
+conservative_speedup_low_over_high=0.9748
+score=0.0
