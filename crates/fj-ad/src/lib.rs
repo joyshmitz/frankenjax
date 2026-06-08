@@ -7947,9 +7947,22 @@ fn jvp_rule(
         Primitive::Neg => ep(Primitive::Neg, &[tangents[0].clone()]),
 
         Primitive::Abs => {
-            // sign(x) * dx
-            let sign = ep(Primitive::Sign, &[primals[0].clone()])?;
-            ep(Primitive::Mul, &[sign, tangents[0].clone()])
+            if matches!(primals[0].dtype(), DType::Complex64 | DType::Complex128) {
+                // JAX `_abs_jvp_rule` for complex x: Re(conj(x)/|x| · dx) =
+                // Re(conj(sign(x)) · dx). |z| is real-valued, so its tangent is
+                // real — the previous `sign(x) * dx` was complex AND used sign(x)
+                // (= x/|x|) instead of its conjugate, flipping the imaginary
+                // contribution. At x=0, sign(0)=(0,0) ⇒ tangent 0, matching JAX's
+                // `_replace_zero(|x|)` guard (Re(conj(0)·dx)=0).
+                let sign = ep(Primitive::Sign, &[primals[0].clone()])?;
+                let csign = ep(Primitive::Conj, &[sign])?;
+                let prod = ep(Primitive::Mul, &[csign, tangents[0].clone()])?;
+                ep(Primitive::Real, &[prod])
+            } else {
+                // sign(x) * dx
+                let sign = ep(Primitive::Sign, &[primals[0].clone()])?;
+                ep(Primitive::Mul, &[sign, tangents[0].clone()])
+            }
         }
 
         Primitive::Exp => {
@@ -11048,6 +11061,42 @@ mod tests {
             vec![0.2, 0.3, 0.1],
             "sort JVP must permute the tangent by the primal's sort order"
         );
+    }
+
+    #[test]
+    fn test_abs_jvp_complex_is_real_and_uses_conjugate() {
+        // JAX `_abs_jvp_rule` for complex x: dabs = Re(conj(x)/|x| · dx). For
+        // x = 3+4i (|x|=5) and dx = 1+1i:
+        //   conj(x)/|x| = (3-4i)/5, so dabs = Re((3-4i)(1+i)/5) = Re((7-i)/5) = 1.4.
+        // The old `sign(x)·dx` returned the COMPLEX value (3+4i)(1+i)/5 = -0.2+1.4i —
+        // wrong real part (-0.2 vs 1.4) and a complex tangent for a real-valued |x|.
+        let x = Value::scalar_complex128(3.0, 4.0);
+        let dx = Value::scalar_complex128(1.0, 1.0);
+        let out = jvp_rule(Primitive::Abs, &[x], &[dx], &BTreeMap::new()).unwrap();
+        let lit = out.as_scalar_literal().expect("scalar");
+        assert!(
+            lit.as_complex128().is_none(),
+            "abs of a complex number is real-valued; its tangent must be real, not complex"
+        );
+        let val = lit.as_f64().expect("real tangent");
+        assert!(
+            (val - 1.4).abs() < 1e-10,
+            "expected Re(conj(x)/|x|·dx) = 1.4, got {val}"
+        );
+    }
+
+    #[test]
+    fn test_abs_jvp_real_unchanged() {
+        // Real path must keep sign(x)·dx exactly (regression guard for the branch).
+        let out = jvp_rule(
+            Primitive::Abs,
+            &[Value::scalar_f64(-2.0)],
+            &[Value::scalar_f64(3.0)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let val = out.as_scalar_literal().and_then(Literal::as_f64).expect("f64");
+        assert!((val + 3.0).abs() < 1e-10, "sign(-2)·3 = -3, got {val}");
     }
 
     #[test]
