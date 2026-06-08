@@ -7911,6 +7911,25 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_add_scalar_lane_and_matrix_constant_rank_diff_two() {
+        // vmap(|s| s + M) where s is a per-lane SCALAR ([batch]) and M is an
+        // unbatched [m,n] constant. Per lane: scalar + matrix → [m,n], so the
+        // result is [batch, m, n]. The scalar operand ([batch], rank 1) must gain
+        // TWO size-1 axes ([batch,1,1]) to broadcast against [batch,m,n] — exercises
+        // the multi-axis (rank-diff > 1) path of the mixed-rank vmap alignment.
+        let s = BatchTracer::batched(make_i64_vector(&[100, 200]), 0);
+        let m = BatchTracer::unbatched(make_i64_matrix(2, 2, &[1, 2, 3, 4]));
+        let result = apply_batch_rule(Primitive::Add, &[s, m], &BTreeMap::new()).unwrap();
+        assert_eq!(result.batch_dim, Some(0));
+        assert_eq!(result.value.as_tensor().unwrap().shape.dims, vec![2, 2, 2]);
+        // lane0: 100 + [[1,2],[3,4]]; lane1: 200 + [[1,2],[3,4]].
+        assert_eq!(
+            extract_i64_vec(&result.value),
+            vec![101, 102, 103, 104, 201, 202, 203, 204]
+        );
+    }
+
+    #[test]
     fn test_batch_trace_elementwise_trunc() {
         // Unary elementwise: vmap(trunc) preserves the batch dim.
         let input = BatchTracer::batched(make_f64_vector(&[1.7, -2.3, 3.9]), 0);
