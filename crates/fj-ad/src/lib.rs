@@ -4969,18 +4969,16 @@ fn vjp_reduce_window(
 
     let rank = input_tensor.shape.rank();
 
-    // Forward reduce_window now supports window_dilation (atrous pooling), but this
-    // VJP's scatter uses undilated tap indices — reject dilation loudly rather than
-    // return a silently-wrong gradient (base_dilation is unsupported in forward too).
-    for key in ["window_dilation", "base_dilation"] {
-        if params
-            .get(key)
-            .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
-        {
-            return Err(AdError::EvalFailed(format!(
-                "reduce_window gradient (VJP) does not yet support {key}; its reverse-mode derivative is not implemented"
-            )));
-        }
+    // window_dilation (atrous pooling) gradient is supported below (dilated tap
+    // mapping in compute_flat_index). base_dilation (input dilation) is unsupported in
+    // the forward too — reject it defensively rather than risk a wrong gradient.
+    if params
+        .get("base_dilation")
+        .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+    {
+        return Err(AdError::EvalFailed(
+            "reduce_window gradient (VJP) does not support base_dilation".to_owned(),
+        ));
     }
 
     // Parse window parameters (same parsing as forward pass in fj-lax)
@@ -4994,6 +4992,8 @@ fn vjp_reduce_window(
         .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
         .unwrap_or_else(|| vec![1; rank]);
 
+    let window_dilation = parse_reduce_window_grad_dilation(params, rank);
+
     let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
 
     let padding = params.get("padding").map(|s| s.as_str()).unwrap_or("valid");
@@ -5005,10 +5005,17 @@ fn vjp_reduce_window(
         .map(|d| *d as usize)
         .collect();
     let out_dims: Vec<usize> = g_tensor.shape.dims.iter().map(|d| *d as usize).collect();
-    // SAME-padding low offsets: the forward maps output tap (out,win) to input
-    // out*stride + win - pad_low, so the gradient must scatter to the same positions.
-    let pad_lows =
-        reduce_window_grad_pad_lows(padding, &out_dims, &input_dims, &window_dims, &strides);
+    // SAME-padding low offsets (using the effective dilated window); the forward maps
+    // output tap (out,win) to input out*stride + win*dilation - pad_low, so the
+    // gradient must scatter to the same positions.
+    let pad_lows = reduce_window_grad_pad_lows(
+        padding,
+        &out_dims,
+        &input_dims,
+        &window_dims,
+        &window_dilation,
+        &strides,
+    );
 
     let total_input = ad_checked_usize_product("reduce_window input", &input_dims)?;
 
@@ -5051,6 +5058,7 @@ fn vjp_reduce_window(
                         &strides,
                         &input_dims,
                         &pad_lows,
+                        &window_dilation,
                         rank,
                     )?;
                     if let Some(flat_idx) = flat {
@@ -5081,6 +5089,7 @@ fn vjp_reduce_window(
                         &strides,
                         &input_dims,
                         &pad_lows,
+                        &window_dilation,
                         rank,
                     )?;
                     if let Some(flat_idx) = flat {
@@ -5168,19 +5177,15 @@ fn jvp_reduce_window_select(
     };
     let rank = input_tensor.shape.rank();
 
-    // Max/min reduce_window JVP follows the primal arg-extremum via undilated tap
-    // indices; reject window_dilation/base_dilation rather than select the wrong
-    // (undilated) extremum. (The sum-pool JVP composes the forward op, so it handles
-    // window_dilation correctly and does not reach here.)
-    for key in ["window_dilation", "base_dilation"] {
-        if params
-            .get(key)
-            .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
-        {
-            return Err(AdError::EvalFailed(format!(
-                "reduce_window max/min JVP does not yet support {key}"
-            )));
-        }
+    // window_dilation (atrous max/min pooling) is supported via the dilated tap
+    // mapping below; base_dilation is unsupported in the forward — reject defensively.
+    if params
+        .get("base_dilation")
+        .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+    {
+        return Err(AdError::EvalFailed(
+            "reduce_window max/min JVP does not support base_dilation".to_owned(),
+        ));
     }
 
     // Window geometry: parsed identically to vjp_reduce_window / the fj-lax
@@ -5193,6 +5198,7 @@ fn jvp_reduce_window_select(
         .get("window_strides")
         .map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect())
         .unwrap_or_else(|| vec![1; rank]);
+    let window_dilation = parse_reduce_window_grad_dilation(params, rank);
     let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
     let want_max = reduce_op == "max";
 
@@ -5214,8 +5220,14 @@ fn jvp_reduce_window_select(
     let out_dims: Vec<usize> = out_tensor.shape.dims.iter().map(|d| *d as usize).collect();
     let total_output = ad_checked_usize_product("reduce_window output", &out_dims)?;
     let padding = params.get("padding").map(|s| s.as_str()).unwrap_or("valid");
-    let pad_lows =
-        reduce_window_grad_pad_lows(padding, &out_dims, &input_dims, &window_dims, &strides);
+    let pad_lows = reduce_window_grad_pad_lows(
+        padding,
+        &out_dims,
+        &input_dims,
+        &window_dims,
+        &window_dilation,
+        &strides,
+    );
 
     let input_vals: Vec<f64> = input_tensor
         .elements
@@ -5240,9 +5252,15 @@ fn jvp_reduce_window_select(
         };
         let mut win_idx = vec![0usize; rank];
         for _ in 0..win_total {
-            if let Some(flat_idx) =
-                compute_flat_index(&out_idx, &win_idx, &strides, &input_dims, &pad_lows, rank)?
-            {
+            if let Some(flat_idx) = compute_flat_index(
+                &out_idx,
+                &win_idx,
+                &strides,
+                &input_dims,
+                &pad_lows,
+                &window_dilation,
+                rank,
+            )? {
                 let val = input_vals[flat_idx];
                 let is_better = if want_max {
                     val > best_val
@@ -5271,11 +5289,31 @@ fn jvp_reduce_window_select(
 /// fj-lax forward geometry (reduce_window_same_geometry): pad_total =
 /// (out-1)*stride + window - input; pad_low = pad_total/2 (SAME) or ceil/2
 /// (SAME_LOWER). VALID (and any other) padding gives all-zero offsets.
+/// Parse `window_dilation` for a reduce_window gradient as `rank` per-dim factors
+/// (absent => all 1s; a single value broadcasts). Matches the fj-lax forward parse.
+fn parse_reduce_window_grad_dilation(params: &BTreeMap<String, String>, rank: usize) -> Vec<usize> {
+    let parsed: Vec<usize> = params
+        .get("window_dilation")
+        .map(|s| {
+            s.split(',')
+                .filter_map(|x| x.trim().parse::<usize>().ok())
+                .filter(|&v| v >= 1)
+                .collect()
+        })
+        .unwrap_or_default();
+    match parsed.len() {
+        0 => vec![1; rank],
+        1 => vec![parsed[0]; rank],
+        _ => parsed,
+    }
+}
+
 fn reduce_window_grad_pad_lows(
     padding: &str,
     out_dims: &[usize],
     input_dims: &[usize],
     window_dims: &[usize],
+    window_dilation: &[usize],
     strides: &[usize],
 ) -> Vec<usize> {
     let p = padding.trim();
@@ -5286,7 +5324,9 @@ fn reduce_window_grad_pad_lows(
     }
     (0..input_dims.len())
         .map(|d| {
-            let covered = (out_dims[d].saturating_sub(1)) * strides[d] + window_dims[d];
+            // SAME geometry uses the effective (dilated) window extent (w-1)*d+1.
+            let eff_window = (window_dims[d].max(1) - 1) * window_dilation[d] + 1;
+            let covered = (out_dims[d].saturating_sub(1)) * strides[d] + eff_window;
             let total = covered.saturating_sub(input_dims[d]);
             if lower { total.div_ceil(2) } else { total / 2 }
         })
@@ -5301,18 +5341,19 @@ fn compute_flat_index(
     strides: &[usize],
     input_dims: &[usize],
     pad_lows: &[usize],
+    window_dilation: &[usize],
     rank: usize,
 ) -> Result<Option<usize>, AdError> {
     let mut flat = 0usize;
     let mut stride_mult = 1usize;
     for d in (0..rank).rev() {
-        // Padded position = out*stride + win; the real input position subtracts the
-        // SAME-padding low offset. Taps landing in the padding region (padded <
-        // pad_low) or past the input map to no real element (contributed the
-        // reduction init in the forward pass, so they carry no gradient).
-        let padded = out_idx[d]
-            .checked_mul(strides[d])
-            .and_then(|base| base.checked_add(win_idx[d]))
+        // Padded position = out*stride + win*window_dilation (atrous tap spacing); the
+        // real input position subtracts the SAME-padding low offset. Taps landing in
+        // the padding region (padded < pad_low) or past the input map to no real
+        // element (contributed the reduction init forward, so they carry no gradient).
+        let padded = win_idx[d]
+            .checked_mul(window_dilation[d])
+            .and_then(|tap| out_idx[d].checked_mul(strides[d]).map(|base| base + tap))
             .ok_or_else(|| {
                 AdError::EvalFailed(
                     "reduce_window flat index computation overflows usize".to_owned(),
@@ -17052,64 +17093,74 @@ mod tests {
     }
 
     #[test]
-    fn reduce_window_vjp_fail_closed_on_window_dilation() {
-        // Forward reduce_window supports window_dilation (atrous pooling), but its VJP
-        // (and the max/min JVP) use undilated tap indices — they must fail-closed
-        // rather than return a silently-wrong gradient. Plain pooling grad still works.
-        let mk = |n: usize, dims: Vec<u32>| {
+    fn reduce_window_vjp_window_dilation_matches_numerical() {
+        // Atrous pooling gradient: window tap t reads input out*stride + t*dilation
+        // (minus SAME pad_low). Verify sum- and max-pool window_dilation grads match
+        // central finite differences of L = sum(pool . g), VALID and SAME. base_dilation
+        // grad stays fail-closed.
+        let mk = |d: &[f64]| {
             Value::Tensor(
-                TensorValue::new(
-                    DType::F64,
-                    Shape { dims },
-                    (0..n).map(|i| Literal::from_f64(i as f64 + 1.0)).collect(),
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![d.len() as u32],
+                    },
+                    d.to_vec(),
                 )
                 .unwrap(),
             )
         };
-        let input = mk(8, vec![8]);
-        // window 2 dilation 2 -> eff 3, VALID stride1 -> out 6.
-        let g = mk(6, vec![6]);
-        for op in ["sum", "max"] {
-            let mut params = BTreeMap::from([
-                ("window_dimensions".to_owned(), "2".to_owned()),
-                ("window_strides".to_owned(), "1".to_owned()),
-                ("reduce_op".to_owned(), op.to_owned()),
-                ("window_dilation".to_owned(), "2".to_owned()),
-            ]);
-            let res = vjp_single(Primitive::ReduceWindow, &[input.clone()], &g, &params);
-            assert!(
-                res.is_err(),
-                "{op}-pool VJP must fail-closed on window_dilation"
-            );
-            assert!(
-                format!("{:?}", res.unwrap_err()).contains("window_dilation"),
-                "{op} VJP error should name window_dilation"
-            );
-            // max/min JVP also fail-closed (sum JVP composes the forward op, so it is
-            // correct and not asserted here).
-            if op == "max" {
-                let jres = jvp_rule(
-                    Primitive::ReduceWindow,
-                    &[input.clone()],
-                    &[input.clone()],
-                    &params,
-                );
-                assert!(
-                    jres.is_err(),
-                    "max-pool JVP must fail-closed on window_dilation"
-                );
+        let x0: Vec<f64> = vec![0.7, -1.3, 2.1, 0.4, -0.9, 1.8, 0.2, -2.4, 1.1, 0.6];
+        for pad in ["VALID", "SAME"] {
+            for op in ["sum", "max"] {
+                let params = BTreeMap::from([
+                    ("window_dimensions".to_owned(), "2".to_owned()),
+                    ("window_strides".to_owned(), "1".to_owned()),
+                    ("reduce_op".to_owned(), op.to_owned()),
+                    ("window_dilation".to_owned(), "2".to_owned()),
+                    ("padding".to_owned(), pad.to_owned()),
+                ]);
+                // Determine output length from the forward pass.
+                let fwd = eval_primitive(Primitive::ReduceWindow, &[mk(&x0)], &params).unwrap();
+                let out_len = fwd.as_tensor().unwrap().shape.dims[0] as usize;
+                let gv: Vec<f64> = (0..out_len)
+                    .map(|i| (i as f64 * 0.41).cos() + 0.6)
+                    .collect();
+                let g = mk(&gv);
+                let loss = |xv: &[f64]| -> f64 {
+                    let out = eval_primitive(Primitive::ReduceWindow, &[mk(xv)], &params).unwrap();
+                    tensor_f64_values(&out)
+                        .iter()
+                        .zip(&gv)
+                        .map(|(o, gg)| o * gg)
+                        .sum()
+                };
+                let grads = vjp_single(Primitive::ReduceWindow, &[mk(&x0)], &g, &params).unwrap();
+                let gx = tensor_f64_values(&grads[0]);
+                let eps = 1e-6;
+                for j in 0..x0.len() {
+                    let (mut up, mut dn) = (x0.clone(), x0.clone());
+                    up[j] += eps;
+                    dn[j] -= eps;
+                    let fd = (loss(&up) - loss(&dn)) / (2.0 * eps);
+                    assert!(
+                        (fd - gx[j]).abs() < 1e-5,
+                        "{op} {pad} dilated grad[{j}] analytic={} fd={fd}",
+                        gx[j]
+                    );
+                }
             }
         }
-        // Regression: plain pooling VJP still works (no dilation).
-        let plain = BTreeMap::from([
+        // base_dilation grad stays fail-closed (forward rejects it too).
+        let bparams = BTreeMap::from([
             ("window_dimensions".to_owned(), "2".to_owned()),
             ("window_strides".to_owned(), "1".to_owned()),
             ("reduce_op".to_owned(), "sum".to_owned()),
+            ("base_dilation".to_owned(), "2".to_owned()),
         ]);
-        let g2 = mk(7, vec![7]); // out = 8-2+1 = 7
+        let gb = mk(&vec![1.0; 9]);
         assert!(
-            vjp_single(Primitive::ReduceWindow, &[input], &g2, &plain).is_ok(),
-            "plain reduce_window VJP must still succeed"
+            vjp_single(Primitive::ReduceWindow, &[mk(&x0)], &gb, &bparams).is_err(),
+            "base_dilation grad must fail-closed"
         );
     }
 
