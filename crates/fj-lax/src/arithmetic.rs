@@ -3011,6 +3011,9 @@ pub(crate) fn eval_unary_elementwise(
             if let Some(result) = eval_unary_f64_tensor_fast_path(tensor, &op) {
                 return result;
             }
+            if let Some(result) = eval_unary_f32_tensor_fast_path(tensor, &op) {
+                return result;
+            }
 
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in tensor.elements.iter().copied() {
@@ -3156,6 +3159,31 @@ fn eval_unary_f64_tensor_fast_path(
 
     Some(
         TensorValue::new(DType::F64, tensor.shape.clone(), elements)
+            .map(Value::Tensor)
+            .map_err(EvalError::from),
+    )
+}
+
+/// Serial dense-F32 unary fast path — the f32 sibling of
+/// [`eval_unary_f64_tensor_fast_path`], for the unary ops dispatched through the
+/// serial `eval_unary_elementwise` (Sqrt/Rsqrt/Floor/Ceil and any op below the
+/// parallel threshold). f32 is JAX's default float, so these run on dense f32
+/// storage that otherwise pays per-`Literal` materialization (24B/elem) + a boxed
+/// output. Reads the packed `as_f32_slice` backing, promotes each tap f32->f64
+/// (lossless), runs `op` in f64 and rounds back with `as f32` into dense f32 —
+/// BIT-IDENTICAL to the generic loop, which computes the same
+/// `from_f32(op(literal.as_f64()) as f32)`. Returns `None` for non-dense-F32.
+fn eval_unary_f32_tensor_fast_path(
+    tensor: &TensorValue,
+    op: &impl Fn(f64) -> f64,
+) -> Option<Result<Value, EvalError>> {
+    if tensor.dtype != DType::F32 {
+        return None;
+    }
+    let src = tensor.elements.as_f32_slice()?;
+    let out: Vec<f32> = src.iter().map(|&v| op(f64::from(v)) as f32).collect();
+    Some(
+        TensorValue::new_f32_values(tensor.shape.clone(), out)
             .map(Value::Tensor)
             .map_err(EvalError::from),
     )
@@ -11836,6 +11864,129 @@ mod tests {
             serial * 1e3,
             threaded * 1e3,
             serial / threaded
+        );
+    }
+
+    /// The serial dense-F32 unary fast path (Sqrt/Rsqrt/Floor/Ceil and other ops
+    /// routed through `eval_unary_elementwise`) must be BIT-FOR-BIT identical to the
+    /// boxed per-`Literal` path, incl specials (±0/±inf/NaN/subnormal), and keep
+    /// dense f32 output.
+    #[test]
+    fn dense_f32_serial_unary_bit_identical_to_literal_path() {
+        let data: Vec<f32> = vec![
+            0.0,
+            -0.0,
+            1.0,
+            4.0,
+            0.25,
+            2.5,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            f32::from_bits(0x0000_0001), // smallest subnormal
+            9.0,
+            -3.0,
+            1e30,
+            123.456,
+        ];
+        let dims = vec![data.len() as u32];
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(dense.as_tensor().unwrap().elements.as_f32_slice().is_some());
+        assert!(boxed.as_tensor().unwrap().elements.as_f32_slice().is_none());
+        let canon = |v: &Value| -> Vec<u32> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F32Bits(b) => {
+                        if f32::from_bits(*b).is_nan() {
+                            0x7fc0_0000
+                        } else {
+                            *b
+                        }
+                    }
+                    o => panic!("expected f32, got {o:?}"),
+                })
+                .collect()
+        };
+        // (primitive, op) pairs that all route through serial eval_unary_elementwise.
+        let cases: [(Primitive, fn(f64) -> f64); 4] = [
+            (Primitive::Sqrt, f64::sqrt),
+            (Primitive::Rsqrt, |x| 1.0 / x.sqrt()),
+            (Primitive::Floor, f64::floor),
+            (Primitive::Ceil, f64::ceil),
+        ];
+        for (prim, op) in cases {
+            let d = eval_unary_elementwise(prim, std::slice::from_ref(&dense), op).unwrap();
+            let l = eval_unary_elementwise(prim, std::slice::from_ref(&boxed), op).unwrap();
+            assert_eq!(d.as_tensor().unwrap().dtype, DType::F32, "{prim:?} dtype");
+            assert!(
+                d.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+                "{prim:?} dense output"
+            );
+            assert_eq!(canon(&d), canon(&l), "{prim:?} dense != generic");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_rsqrt_serial_dense_vs_boxed() {
+        use std::time::Instant;
+        // rsqrt is the RMSNorm/layernorm hot path; dispatched through serial
+        // eval_unary_elementwise (no _parallel), so dense vs boxed isolates the
+        // per-Literal materialization cost on f32.
+        let n = 1usize << 22; // 4M
+        let data: Vec<f32> = (0..n).map(|i| (i % 9973) as f32 + 1.0).collect();
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        let rsqrt = |x: f64| 1.0 / x.sqrt();
+        let time = |x: &Value| {
+            let _ =
+                eval_unary_elementwise(Primitive::Rsqrt, std::slice::from_ref(x), rsqrt).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = eval_unary_elementwise(Primitive::Rsqrt, std::slice::from_ref(x), rsqrt)
+                    .unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let generic = time(&boxed);
+        let dense_t = time(&dense);
+        println!(
+            "BENCH f32 rsqrt serial n={n}: boxed(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
