@@ -937,8 +937,16 @@ fn sort_jvp_value(
         .map(|s| s.trim() == "true")
         .unwrap_or(false);
 
-    let x_vals: Vec<f64> = xt.elements.iter().map(|l| l.as_f64().unwrap_or(0.0)).collect();
-    let d_vals: Vec<f64> = dt.elements.iter().map(|l| l.as_f64().unwrap_or(0.0)).collect();
+    let x_vals: Vec<f64> = xt
+        .elements
+        .iter()
+        .map(|l| l.as_f64().unwrap_or(0.0))
+        .collect();
+    let d_vals: Vec<f64> = dt
+        .elements
+        .iter()
+        .map(|l| l.as_f64().unwrap_or(0.0))
+        .collect();
     let dims: Vec<usize> = xt.shape.dims.iter().map(|&d| d as usize).collect();
     let mut strides = vec![1usize; rank];
     for i in (0..rank - 1).rev() {
@@ -1499,7 +1507,10 @@ fn transpose_grad_to_operand_order(
     let mut t_params = BTreeMap::new();
     t_params.insert(
         "permutation".to_string(),
-        perm.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","),
+        perm.iter()
+            .map(|x| x.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
     );
     eval_primitive(Primitive::Transpose, &[value], &t_params)
         .map_err(|e| AdError::EvalFailed(e.to_string()))
@@ -1588,8 +1599,12 @@ fn dot_general_vjp(
     // d_lhs comes out laid out [lhs_batch, lhs_free, lhs_contract]; restore lhs's
     // actual dim order. The contract block follows ascending rhs-contracting
     // position (paired back to the matching lhs-contracting dim).
-    let mut rhs_contract_pairs: Vec<(usize, usize)> =
-        rhs_contracting.iter().copied().enumerate().map(|(j, d)| (d, j)).collect();
+    let mut rhs_contract_pairs: Vec<(usize, usize)> = rhs_contracting
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(j, d)| (d, j))
+        .collect();
     rhs_contract_pairs.sort_by_key(|&(d, _)| d);
     let lhs_dim_order: Vec<usize> = lhs_batch
         .iter()
@@ -1644,8 +1659,12 @@ fn dot_general_vjp(
     // d_rhs comes out laid out [rhs_batch, rhs_contract, rhs_free]; restore rhs's
     // actual dim order. The contract block follows ascending lhs-contracting
     // position (paired back to the matching rhs-contracting dim).
-    let mut lhs_contract_pairs: Vec<(usize, usize)> =
-        lhs_contracting.iter().copied().enumerate().map(|(j, d)| (d, j)).collect();
+    let mut lhs_contract_pairs: Vec<(usize, usize)> = lhs_contracting
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(j, d)| (d, j))
+        .collect();
     lhs_contract_pairs.sort_by_key(|&(d, _)| d);
     let rhs_dim_order: Vec<usize> = rhs_batch
         .iter()
@@ -1842,8 +1861,12 @@ fn unbroadcast_cotangent_to(value: Value, target: &Shape) -> Result<Value, AdErr
     for &axis in reduce_axes.iter().rev() {
         let mut params = BTreeMap::new();
         params.insert("axes".to_owned(), axis.to_string());
-        current = eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&current), &params)
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+        current = eval_primitive(
+            Primitive::ReduceSum,
+            std::slice::from_ref(&current),
+            &params,
+        )
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?;
     }
 
     // ReduceSum drops the reduced axes; reshape to exactly `target` to recover
@@ -2547,8 +2570,12 @@ pub fn vjp(
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             let imag = eval_primitive(Primitive::Imag, std::slice::from_ref(g), &BTreeMap::new())
                 .map_err(|e| AdError::EvalFailed(e.to_string()))?;
-            let g_imag = eval_primitive(Primitive::Neg, std::slice::from_ref(&imag), &BTreeMap::new())
-                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let g_imag = eval_primitive(
+                Primitive::Neg,
+                std::slice::from_ref(&imag),
+                &BTreeMap::new(),
+            )
+            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             Ok(vec![g_real, g_imag])
         }
         Primitive::Conj => Ok(vec![
@@ -3350,8 +3377,9 @@ pub fn vjp(
             // reduce_precision to the cotangent (deflinear(.., lambda t:
             // reduce_precision(t))), so the gradient is rounded to the reduced
             // precision — not the identity.
-            let rounded = eval_primitive(Primitive::ReducePrecision, std::slice::from_ref(g), params)
-                .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+            let rounded =
+                eval_primitive(Primitive::ReducePrecision, std::slice::from_ref(g), params)
+                    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
             Ok(vec![rounded])
         }
         Primitive::DynamicUpdateSlice => {
@@ -5121,7 +5149,12 @@ fn jvp_reduce_window_select(
     let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
     let want_max = reduce_op == "max";
 
-    let input_dims: Vec<usize> = input_tensor.shape.dims.iter().map(|d| *d as usize).collect();
+    let input_dims: Vec<usize> = input_tensor
+        .shape
+        .dims
+        .iter()
+        .map(|d| *d as usize)
+        .collect();
 
     // Output geometry from the primal forward pass — matches fj-lax exactly
     // (including any padding the manual loop would otherwise re-derive).
@@ -5134,7 +5167,11 @@ fn jvp_reduce_window_select(
     let out_dims: Vec<usize> = out_tensor.shape.dims.iter().map(|d| *d as usize).collect();
     let total_output = ad_checked_usize_product("reduce_window output", &out_dims)?;
 
-    let input_vals: Vec<f64> = input_tensor.elements.iter().map(|e| e.as_f64().unwrap_or(0.0)).collect();
+    let input_vals: Vec<f64> = input_tensor
+        .elements
+        .iter()
+        .map(|e| e.as_f64().unwrap_or(0.0))
+        .collect();
     let tan_elems: Vec<Literal> = tan_tensor.elements.iter().cloned().collect();
     let zero = literal_from_f64_for_dtype(tan_tensor.dtype, 0.0);
     let mut out_elems: Vec<Literal> = vec![zero; total_output];
@@ -5146,14 +5183,22 @@ fn jvp_reduce_window_select(
         // comparison → ties keep the FIRST window position, matching the VJP so
         // the JVP/VJP stay exact transposes).
         let mut best_flat: Option<usize> = None;
-        let mut best_val = if want_max { f64::NEG_INFINITY } else { f64::INFINITY };
+        let mut best_val = if want_max {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
         let mut win_idx = vec![0usize; rank];
         for _ in 0..win_total {
             if let Some(flat_idx) =
                 compute_flat_index(&out_idx, &win_idx, &strides, &input_dims, rank)?
             {
                 let val = input_vals[flat_idx];
-                let is_better = if want_max { val > best_val } else { val < best_val };
+                let is_better = if want_max {
+                    val > best_val
+                } else {
+                    val < best_val
+                };
                 if is_better {
                     best_val = val;
                     best_flat = Some(flat_idx);
@@ -6260,6 +6305,37 @@ fn conv_vjp(
     g: &Value,
     params: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, AdError> {
+    // conv_vjp's transposed-conv index math implements stride + padding only. The
+    // forward eval_conv now also supports rhs_dilation (atrous), lhs_dilation
+    // (transposed) and feature_group_count (grouped) — but the gradient for those is
+    // NOT yet derived here, so reject loudly rather than return a silently-wrong
+    // (undilated/ungrouped) gradient. (The JVP path is correct for all params: it
+    // composes forward convs.) Default ("1"/absent) values fall through.
+    let nondefault_list = |key: &str| {
+        params
+            .get(key)
+            .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
+    };
+    let nondefault_scalar = |key: &str| {
+        params
+            .get(key)
+            .is_some_and(|v| !matches!(v.trim(), "" | "1"))
+    };
+    for key in ["rhs_dilation", "lhs_dilation"] {
+        if nondefault_list(key) {
+            return Err(AdError::EvalFailed(format!(
+                "conv gradient (VJP) does not yet support {key}; forward conv supports it but its reverse-mode derivative is not implemented"
+            )));
+        }
+    }
+    for key in ["feature_group_count", "batch_group_count"] {
+        if nondefault_scalar(key) {
+            return Err(AdError::EvalFailed(format!(
+                "conv gradient (VJP) does not yet support {key}; forward conv supports it but its reverse-mode derivative is not implemented"
+            )));
+        }
+    }
+
     let lhs = match &inputs[0] {
         Value::Tensor(t) => t,
         Value::Scalar(_) => return Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])]),
@@ -11009,7 +11085,10 @@ mod tests {
             &params,
         )
         .unwrap();
-        assert!((g[0].as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlogy VJP gx");
+        assert!(
+            (g[0].as_f64_scalar().unwrap() - ln2).abs() < 1e-12,
+            "xlogy VJP gx"
+        );
 
         let j = jvp_rule(
             Primitive::XLogY,
@@ -11018,7 +11097,10 @@ mod tests {
             &params,
         )
         .unwrap();
-        assert!((j.as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlogy JVP");
+        assert!(
+            (j.as_f64_scalar().unwrap() - ln2).abs() < 1e-12,
+            "xlogy JVP"
+        );
 
         let g2 = vjp_single(
             Primitive::XLog1PY,
@@ -11027,7 +11109,10 @@ mod tests {
             &params,
         )
         .unwrap();
-        assert!((g2[0].as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlog1py VJP gx");
+        assert!(
+            (g2[0].as_f64_scalar().unwrap() - ln2).abs() < 1e-12,
+            "xlog1py VJP gx"
+        );
 
         let j2 = jvp_rule(
             Primitive::XLog1PY,
@@ -11036,7 +11121,10 @@ mod tests {
             &params,
         )
         .unwrap();
-        assert!((j2.as_f64_scalar().unwrap() - ln2).abs() < 1e-12, "xlog1py JVP");
+        assert!(
+            (j2.as_f64_scalar().unwrap() - ln2).abs() < 1e-12,
+            "xlog1py JVP"
+        );
     }
 
     #[test]
@@ -11095,7 +11183,10 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap();
-        let val = out.as_scalar_literal().and_then(Literal::as_f64).expect("f64");
+        let val = out
+            .as_scalar_literal()
+            .and_then(Literal::as_f64)
+            .expect("f64");
         assert!((val + 3.0).abs() < 1e-10, "sign(-2)·3 = -3, got {val}");
     }
 
@@ -11153,18 +11244,31 @@ mod tests {
 
         // Expected: reduce_precision(g). Compute it so the test tracks fj-lax's
         // exact rounding, and confirm it actually changes 1.3 (meaningful test).
-        let rounded =
-            eval_primitive(Primitive::ReducePrecision, std::slice::from_ref(&g), &params).unwrap();
+        let rounded = eval_primitive(
+            Primitive::ReducePrecision,
+            std::slice::from_ref(&g),
+            &params,
+        )
+        .unwrap();
         let want = rounded.as_f64_scalar().unwrap();
-        assert!((want - 1.3).abs() > 1e-6, "reduce_precision should round 1.3, got {want}");
+        assert!(
+            (want - 1.3).abs() > 1e-6,
+            "reduce_precision should round 1.3, got {want}"
+        );
 
         let grads = vjp_single(Primitive::ReducePrecision, &[x.clone()], &g, &params).unwrap();
         let got = grads[0].as_f64_scalar().unwrap();
-        assert!((got - want).abs() < 1e-12, "VJP must round the cotangent: got {got}, want {want}");
+        assert!(
+            (got - want).abs() < 1e-12,
+            "VJP must round the cotangent: got {got}, want {want}"
+        );
 
         let jvp = jvp_rule(Primitive::ReducePrecision, &[x], &[g.clone()], &params).unwrap();
         let jgot = jvp.as_f64_scalar().unwrap();
-        assert!((jgot - want).abs() < 1e-12, "JVP must round the tangent: got {jgot}, want {want}");
+        assert!(
+            (jgot - want).abs() < 1e-12,
+            "JVP must round the tangent: got {jgot}, want {want}"
+        );
     }
 
     #[test]
@@ -11181,7 +11285,10 @@ mod tests {
         )
         .expect("vjp");
         let vg = grads[0].as_f64_scalar().expect("scalar");
-        assert!(vg.is_finite() && vg.abs() < 1e-12, "VJP sinc'(0) must be 0, got {vg}");
+        assert!(
+            vg.is_finite() && vg.abs() < 1e-12,
+            "VJP sinc'(0) must be 0, got {vg}"
+        );
 
         let jvp = jvp_rule(
             Primitive::Sinc,
@@ -11191,7 +11298,10 @@ mod tests {
         )
         .expect("jvp");
         let jg = jvp.as_f64_scalar().expect("scalar");
-        assert!(jg.is_finite() && jg.abs() < 1e-12, "JVP sinc'(0) must be 0, got {jg}");
+        assert!(
+            jg.is_finite() && jg.abs() < 1e-12,
+            "JVP sinc'(0) must be 0, got {jg}"
+        );
 
         // Sanity: a nonzero point is unchanged. sinc'(x) = (cos(pi x) - sinc(x))/x;
         // at x=0.5: sinc(0.5)=2/pi, cos(pi/2)=0 => sinc'(0.5) = -(2/pi)/0.5 = -4/pi.
@@ -11204,7 +11314,10 @@ mod tests {
         .expect("vjp");
         let v05 = g05[0].as_f64_scalar().expect("scalar");
         let want = -4.0 / std::f64::consts::PI;
-        assert!((v05 - want).abs() < 1e-6, "sinc'(0.5): got {v05}, want {want}");
+        assert!(
+            (v05 - want).abs() < 1e-6,
+            "sinc'(0.5): got {v05}, want {want}"
+        );
     }
 
     #[test]
@@ -11246,7 +11359,11 @@ mod tests {
             .expect("clamp grad with scalar bounds must not error");
 
         // grad wrt operand: gradient passes only where 0 < x < 1 => [0, 1, 0].
-        assert_eq!(tensor_f64_values(&grads[1]), vec![0.0, 1.0, 0.0], "operand grad");
+        assert_eq!(
+            tensor_f64_values(&grads[1]),
+            vec![0.0, 1.0, 0.0],
+            "operand grad"
+        );
         // grad wrt scalar min: sum of g where x < min (x=-1) => 1.0.
         let gmin = grads[0].as_f64_scalar().expect("scalar min grad");
         assert!((gmin - 1.0).abs() < 1e-12, "min grad: got {gmin}");
@@ -11270,7 +11387,11 @@ mod tests {
             &BTreeMap::new(),
         )
         .expect("clamp JVP with scalar bounds must not error");
-        assert_eq!(tensor_f64_values(&jvp), vec![0.0, 1.0, 0.0], "clamp JVP output tangent");
+        assert_eq!(
+            tensor_f64_values(&jvp),
+            vec![0.0, 1.0, 0.0],
+            "clamp JVP output tangent"
+        );
     }
 
     #[test]
@@ -11282,47 +11403,85 @@ mod tests {
         let a_vals = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let b_vals = vec![10.0, 20.0, 30.0];
         let mk = |dims: Vec<u32>, vals: &[f64]| {
-            Value::Tensor(
-                TensorValue::new_f64_values(Shape { dims }, vals.to_vec()).unwrap(),
-            )
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims }, vals.to_vec()).unwrap())
         };
         let a = mk(vec![2, 3], &a_vals);
         let b = mk(vec![3], &b_vals);
         let ones = mk(vec![2, 3], &vec![1.0; 6]);
 
         // Mul: grad_a = b (broadcast), grad_b = sum_rows(a) = [1+4, 2+5, 3+6].
-        let gm = grad_jaxpr_with_cotangent(&make_binary_jaxpr(Primitive::Mul), &[a.clone(), b.clone()], &ones).unwrap();
-        assert_eq!(tensor_f64_values(&gm[0]), vec![10.0, 20.0, 30.0, 10.0, 20.0, 30.0]);
+        let gm = grad_jaxpr_with_cotangent(
+            &make_binary_jaxpr(Primitive::Mul),
+            &[a.clone(), b.clone()],
+            &ones,
+        )
+        .unwrap();
+        assert_eq!(
+            tensor_f64_values(&gm[0]),
+            vec![10.0, 20.0, 30.0, 10.0, 20.0, 30.0]
+        );
         assert_eq!(gm[1].as_tensor().unwrap().shape.dims, vec![3]);
-        assert_eq!(tensor_f64_values(&gm[1]), vec![5.0, 7.0, 9.0], "grad_b = sum over rows of a");
+        assert_eq!(
+            tensor_f64_values(&gm[1]),
+            vec![5.0, 7.0, 9.0],
+            "grad_b = sum over rows of a"
+        );
 
         // Sub: grad_a = g (ones), grad_b = -sum(g) over rows = [-2,-2,-2].
-        let gs = grad_jaxpr_with_cotangent(&make_binary_jaxpr(Primitive::Sub), &[a.clone(), b.clone()], &ones).unwrap();
+        let gs = grad_jaxpr_with_cotangent(
+            &make_binary_jaxpr(Primitive::Sub),
+            &[a.clone(), b.clone()],
+            &ones,
+        )
+        .unwrap();
         assert_eq!(tensor_f64_values(&gs[0]), vec![1.0; 6]);
         assert_eq!(tensor_f64_values(&gs[1]), vec![-2.0, -2.0, -2.0]);
 
         // Div: grad_a = 1/b (broadcast); grad_b = -sum_rows(a)/b^2.
-        let gd = grad_jaxpr_with_cotangent(&make_binary_jaxpr(Primitive::Div), &[a, b], &ones).unwrap();
+        let gd =
+            grad_jaxpr_with_cotangent(&make_binary_jaxpr(Primitive::Div), &[a, b], &ones).unwrap();
         let ga = tensor_f64_values(&gd[0]);
         let want_ga = vec![0.1, 0.05, 1.0 / 30.0, 0.1, 0.05, 1.0 / 30.0];
         for (got, want) in ga.iter().zip(&want_ga) {
-            assert!((got - want).abs() < 1e-12, "div grad_a: got {got}, want {want}");
+            assert!(
+                (got - want).abs() < 1e-12,
+                "div grad_a: got {got}, want {want}"
+            );
         }
         let gb = tensor_f64_values(&gd[1]);
         let want_gb = vec![-5.0 / 100.0, -7.0 / 400.0, -9.0 / 900.0];
         assert_eq!(gd[1].as_tensor().unwrap().shape.dims, vec![3]);
         for (got, want) in gb.iter().zip(&want_gb) {
-            assert!((got - want).abs() < 1e-12, "div grad_b: got {got}, want {want}");
+            assert!(
+                (got - want).abs() < 1e-12,
+                "div grad_b: got {got}, want {want}"
+            );
         }
 
         // Size-1 axis (keepdims) unbroadcast: a[1,3] + b[2,3]. grad_a sums the
         // broadcast axis 0 but RESHAPES back to [1,3] (not [3]) — exercises the
         // reshape-to-target path of unbroadcast_cotangent_to.
         let a1 = mk(vec![1, 3], &vec![1.0, 2.0, 3.0]);
-        let b2 = mk(vec![2, 3], &b_vals.iter().chain([40.0, 50.0, 60.0].iter()).copied().collect::<Vec<_>>());
-        let ga = grad_jaxpr_with_cotangent(&make_binary_jaxpr(Primitive::Add), &[a1, b2], &ones).unwrap();
-        assert_eq!(ga[0].as_tensor().unwrap().shape.dims, vec![1, 3], "grad_a keepdims shape");
-        assert_eq!(tensor_f64_values(&ga[0]), vec![2.0, 2.0, 2.0], "grad_a summed over axis 0");
+        let b2 = mk(
+            vec![2, 3],
+            &b_vals
+                .iter()
+                .chain([40.0, 50.0, 60.0].iter())
+                .copied()
+                .collect::<Vec<_>>(),
+        );
+        let ga = grad_jaxpr_with_cotangent(&make_binary_jaxpr(Primitive::Add), &[a1, b2], &ones)
+            .unwrap();
+        assert_eq!(
+            ga[0].as_tensor().unwrap().shape.dims,
+            vec![1, 3],
+            "grad_a keepdims shape"
+        );
+        assert_eq!(
+            tensor_f64_values(&ga[0]),
+            vec![2.0, 2.0, 2.0],
+            "grad_a summed over axis 0"
+        );
         assert_eq!(ga[1].as_tensor().unwrap().shape.dims, vec![2, 3]);
     }
 
@@ -11444,7 +11603,11 @@ mod tests {
         );
         let grads = vjp_single(Primitive::Pow, &[a, b], &g, &BTreeMap::new())
             .expect("pow VJP with a tensor base must not error");
-        assert_eq!(tensor_f64_values(&grads[0]), vec![4.0, 6.0], "da = b*a^(b-1)");
+        assert_eq!(
+            tensor_f64_values(&grads[0]),
+            vec![4.0, 6.0],
+            "da = b*a^(b-1)"
+        );
 
         // JVP too: tangents (da=ones, db=0) => d(a^b) = b*a^(b-1)*da = [4,6].
         let a2 = Value::Tensor(
@@ -11460,7 +11623,11 @@ mod tests {
             &BTreeMap::new(),
         )
         .expect("pow JVP with a tensor base must not error");
-        assert_eq!(tensor_f64_values(&jvp), vec![4.0, 6.0], "d(a^b) = b*a^(b-1)*da");
+        assert_eq!(
+            tensor_f64_values(&jvp),
+            vec![4.0, 6.0],
+            "d(a^b) = b*a^(b-1)*da"
+        );
     }
 
     #[test]
@@ -12664,25 +12831,126 @@ mod tests {
         // middle indices slot and the updates input got no gradient. Guard the
         // at-risk multi-input ops here.
         use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
-        let f = |v: &[f64]| Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![v.len() as u32] }, v.to_vec()).unwrap());
-        let ii = |v: &[i64]| Value::Tensor(TensorValue::new(DType::I64, Shape { dims: vec![v.len() as u32] }, v.iter().map(|&x| Literal::I64(x)).collect()).unwrap());
-        let bb = |v: &[bool]| Value::Tensor(TensorValue::new_bool_values(Shape { dims: vec![v.len() as u32] }, v.to_vec()).unwrap());
+        let f = |v: &[f64]| {
+            Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![v.len() as u32],
+                    },
+                    v.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
+        let ii = |v: &[i64]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::I64,
+                    Shape {
+                        dims: vec![v.len() as u32],
+                    },
+                    v.iter().map(|&x| Literal::I64(x)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let bb = |v: &[bool]| {
+            Value::Tensor(
+                TensorValue::new_bool_values(
+                    Shape {
+                        dims: vec![v.len() as u32],
+                    },
+                    v.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
         let g2 = f(&[1.0, 1.0]);
         let no = BTreeMap::new();
         // scatter: [operand, indices(MIDDLE, non-diff), updates] -> 3
-        assert_eq!(vjp_single(Primitive::Scatter, &[f(&[0.0, 0.0, 0.0]), ii(&[1]), f(&[5.0])], &f(&[1.0, 1.0, 1.0]), &no).unwrap().len(), 3, "scatter");
+        assert_eq!(
+            vjp_single(
+                Primitive::Scatter,
+                &[f(&[0.0, 0.0, 0.0]), ii(&[1]), f(&[5.0])],
+                &f(&[1.0, 1.0, 1.0]),
+                &no
+            )
+            .unwrap()
+            .len(),
+            3,
+            "scatter"
+        );
         // select: [cond(FIRST, non-diff), x, y] -> 3
-        assert_eq!(vjp_single(Primitive::Select, &[bb(&[true, false]), f(&[1.0, 2.0]), f(&[3.0, 4.0])], &g2, &no).unwrap().len(), 3, "select");
+        assert_eq!(
+            vjp_single(
+                Primitive::Select,
+                &[bb(&[true, false]), f(&[1.0, 2.0]), f(&[3.0, 4.0])],
+                &g2,
+                &no
+            )
+            .unwrap()
+            .len(),
+            3,
+            "select"
+        );
         // select_n: [index(FIRST, non-diff), case0, case1] -> 3
-        assert_eq!(vjp_single(Primitive::SelectN, &[ii(&[0, 1]), f(&[1.0, 2.0]), f(&[3.0, 4.0])], &g2, &no).unwrap().len(), 3, "select_n");
+        assert_eq!(
+            vjp_single(
+                Primitive::SelectN,
+                &[ii(&[0, 1]), f(&[1.0, 2.0]), f(&[3.0, 4.0])],
+                &g2,
+                &no
+            )
+            .unwrap()
+            .len(),
+            3,
+            "select_n"
+        );
         // cond: [pred(FIRST, non-diff), true, false] -> 3
-        assert_eq!(vjp_single(Primitive::Cond, &[Value::scalar_bool(true), Value::scalar_f64(5.0), Value::scalar_f64(10.0)], &Value::scalar_f64(1.0), &no).unwrap().len(), 3, "cond");
+        assert_eq!(
+            vjp_single(
+                Primitive::Cond,
+                &[
+                    Value::scalar_bool(true),
+                    Value::scalar_f64(5.0),
+                    Value::scalar_f64(10.0)
+                ],
+                &Value::scalar_f64(1.0),
+                &no
+            )
+            .unwrap()
+            .len(),
+            3,
+            "cond"
+        );
         // fma: [a, b, c] all differentiable -> 3
-        assert_eq!(vjp_single(Primitive::Fma, &[f(&[1.0, 2.0]), f(&[3.0, 4.0]), f(&[5.0, 6.0])], &g2, &no).unwrap().len(), 3, "fma");
+        assert_eq!(
+            vjp_single(
+                Primitive::Fma,
+                &[f(&[1.0, 2.0]), f(&[3.0, 4.0]), f(&[5.0, 6.0])],
+                &g2,
+                &no
+            )
+            .unwrap()
+            .len(),
+            3,
+            "fma"
+        );
         // concatenate: variadic, 3 inputs -> 3
         let mut cp = BTreeMap::new();
         cp.insert("dimension".to_owned(), "0".to_owned());
-        assert_eq!(vjp_single(Primitive::Concatenate, &[f(&[1.0]), f(&[2.0]), f(&[3.0])], &f(&[1.0, 1.0, 1.0]), &cp).unwrap().len(), 3, "concatenate");
+        assert_eq!(
+            vjp_single(
+                Primitive::Concatenate,
+                &[f(&[1.0]), f(&[2.0]), f(&[3.0])],
+                &f(&[1.0, 1.0, 1.0]),
+                &cp
+            )
+            .unwrap()
+            .len(),
+            3,
+            "concatenate"
+        );
     }
 
     #[test]
@@ -13903,15 +14171,23 @@ mod tests {
         let lhs = Value::Tensor(
             TensorValue::new(
                 DType::F64,
-                Shape { dims: vec![1, 3, 1] },
-                vec![Literal::from_f64(1.0), Literal::from_f64(2.0), Literal::from_f64(3.0)],
+                Shape {
+                    dims: vec![1, 3, 1],
+                },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(2.0),
+                    Literal::from_f64(3.0),
+                ],
             )
             .unwrap(),
         );
         let rhs = Value::Tensor(
             TensorValue::new(
                 DType::F64,
-                Shape { dims: vec![2, 1, 1] },
+                Shape {
+                    dims: vec![2, 1, 1],
+                },
                 vec![Literal::from_f64(0.5), Literal::from_f64(0.5)],
             )
             .unwrap(),
@@ -13919,21 +14195,34 @@ mod tests {
         let dlhs = Value::Tensor(
             TensorValue::new(
                 DType::F64,
-                Shape { dims: vec![1, 3, 1] },
-                vec![Literal::from_f64(1.0), Literal::from_f64(1.0), Literal::from_f64(1.0)],
+                Shape {
+                    dims: vec![1, 3, 1],
+                },
+                vec![
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                    Literal::from_f64(1.0),
+                ],
             )
             .unwrap(),
         );
         let drhs = Value::Tensor(
             TensorValue::new(
                 DType::F64,
-                Shape { dims: vec![2, 1, 1] },
+                Shape {
+                    dims: vec![2, 1, 1],
+                },
                 vec![Literal::from_f64(0.0), Literal::from_f64(0.0)],
             )
             .unwrap(),
         );
-        let jvp = jvp_rule(Primitive::Conv, &[lhs, rhs], &[dlhs, drhs], &BTreeMap::new())
-            .expect("conv jvp");
+        let jvp = jvp_rule(
+            Primitive::Conv,
+            &[lhs, rhs],
+            &[dlhs, drhs],
+            &BTreeMap::new(),
+        )
+        .expect("conv jvp");
         // conv([1,1,1], [0.5,0.5]) = [0.5+0.5, 0.5+0.5] = [1.0, 1.0].
         assert_eq!(
             tensor_f64_values(&jvp),
@@ -13945,18 +14234,108 @@ mod tests {
     #[test]
     fn test_gather_scatter_jvp_use_primal_indices_not_index_tangent() {
         use fj_core::{DType, Literal, Primitive, Shape, TensorValue};
-        let f = |v: &[f64]| Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![v.len() as u32] }, v.to_vec()).unwrap());
-        let idx = |v: &[i64]| Value::Tensor(TensorValue::new(DType::I64, Shape { dims: vec![v.len() as u32] }, v.iter().map(|&x| Literal::I64(x)).collect()).unwrap());
+        let f = |v: &[f64]| {
+            Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![v.len() as u32],
+                    },
+                    v.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
+        let idx = |v: &[i64]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::I64,
+                    Shape {
+                        dims: vec![v.len() as u32],
+                    },
+                    v.iter().map(|&x| Literal::I64(x)).collect(),
+                )
+                .unwrap(),
+            )
+        };
         // gather: operand[4], indices=[2,0], d_op=[1,2,3,4] => gather(d_op,[2,0])=[3,1].
         let mut gp = BTreeMap::new();
         gp.insert("slice_sizes".to_owned(), "1".to_owned());
-        let jvp = jvp_rule(Primitive::Gather, &[f(&[10.0, 20.0, 30.0, 40.0]), idx(&[2, 0])], &[f(&[1.0, 2.0, 3.0, 4.0]), idx(&[0, 0])], &gp).unwrap();
-        assert_eq!(tensor_f64_values(&jvp), vec![3.0, 1.0], "gather JVP must use primal indices");
+        let jvp = jvp_rule(
+            Primitive::Gather,
+            &[f(&[10.0, 20.0, 30.0, 40.0]), idx(&[2, 0])],
+            &[f(&[1.0, 2.0, 3.0, 4.0]), idx(&[0, 0])],
+            &gp,
+        )
+        .unwrap();
+        assert_eq!(
+            tensor_f64_values(&jvp),
+            vec![3.0, 1.0],
+            "gather JVP must use primal indices"
+        );
         // scatter: operand[3]=0, idx=[2], updates[1]=7, d_op=[0.1,0.2,0.3], d_upd=5 => [0.1,0.2,5.0].
         let updates = f(&[7.0]);
         let d_upd = f(&[5.0]);
-        let sjvp = jvp_rule(Primitive::Scatter, &[f(&[0.0, 0.0, 0.0]), idx(&[2]), updates], &[f(&[0.1, 0.2, 0.3]), idx(&[0]), d_upd], &BTreeMap::new()).unwrap();
-        assert_eq!(tensor_f64_values(&sjvp), vec![0.1, 0.2, 5.0], "scatter JVP must scatter at primal indices");
+        let sjvp = jvp_rule(
+            Primitive::Scatter,
+            &[f(&[0.0, 0.0, 0.0]), idx(&[2]), updates],
+            &[f(&[0.1, 0.2, 0.3]), idx(&[0]), d_upd],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            tensor_f64_values(&sjvp),
+            vec![0.1, 0.2, 5.0],
+            "scatter JVP must scatter at primal indices"
+        );
+    }
+
+    #[test]
+    fn conv_vjp_rejects_dilation_and_grouping_fail_closed() {
+        // Forward eval_conv supports rhs_dilation / lhs_dilation / feature_group_count,
+        // but conv_vjp's transposed-conv math does not — it must reject loudly rather
+        // than return a silently-wrong (undilated/ungrouped) gradient. Plain conv VJP
+        // still succeeds.
+        let mk = |dims: Vec<u32>, n: usize| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims },
+                    (0..n)
+                        .map(|i| Literal::from_f64(i as f64 * 0.1 + 0.1))
+                        .collect(),
+                )
+                .unwrap(),
+            )
+        };
+        // 1D: lhs[1,6,2], rhs[2,2,2] (or grouped rhs[2,1,2]), g sized for VALID stride1.
+        let lhs = mk(vec![1, 6, 2], 12);
+        let rhs = mk(vec![2, 2, 2], 8);
+        let g = mk(vec![1, 5, 2], 10); // out_w = 6-2+1 = 5
+        for (key, val, rhs_in) in [
+            ("rhs_dilation", "2", rhs.clone()),
+            ("lhs_dilation", "2", rhs.clone()),
+            ("feature_group_count", "2", mk(vec![2, 1, 2], 4)), // Cin/G=1
+        ] {
+            let params = BTreeMap::from([
+                ("padding".to_owned(), "valid".to_owned()),
+                (key.to_owned(), val.to_owned()),
+            ]);
+            let res = vjp_single(Primitive::Conv, &[lhs.clone(), rhs_in], &g, &params);
+            assert!(
+                res.is_err(),
+                "conv VJP must fail-closed on {key}={val} (no silent-wrong gradient)"
+            );
+            assert!(
+                format!("{:?}", res.unwrap_err()).contains(key),
+                "conv VJP error should name {key}"
+            );
+        }
+        // Regression: plain conv VJP still works.
+        let plain = BTreeMap::from([("padding".to_owned(), "valid".to_owned())]);
+        assert!(
+            vjp_single(Primitive::Conv, &[lhs, rhs], &g, &plain).is_ok(),
+            "plain conv VJP must still succeed"
+        );
     }
 
     #[test]
@@ -14144,17 +14523,51 @@ mod tests {
     #[test]
     fn test_dynamic_slice_update_jvp_use_primal_start_not_index_tangent() {
         use fj_core::{Primitive, Shape, TensorValue, Value};
-        let f = |v: &[f64]| Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![v.len() as u32] }, v.to_vec()).unwrap());
+        let f = |v: &[f64]| {
+            Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![v.len() as u32],
+                    },
+                    v.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
         // dynamic_slice(operand[5], start=2, slice_sizes=2): d = ds(d_op, start=2)
         // = [d_op[2], d_op[3]] = [3, 4]; the bug sliced at start=0 -> [1, 2].
         let mut dsp = BTreeMap::new();
         dsp.insert("slice_sizes".to_owned(), "2".to_owned());
-        let jvp = jvp_rule(Primitive::DynamicSlice, &[f(&[10.0, 20.0, 30.0, 40.0, 50.0]), Value::scalar_i64(2)], &[f(&[1.0, 2.0, 3.0, 4.0, 5.0]), Value::scalar_i64(0)], &dsp).unwrap();
-        assert_eq!(tensor_f64_values(&jvp), vec![3.0, 4.0], "dynamic_slice JVP must use primal start");
+        let jvp = jvp_rule(
+            Primitive::DynamicSlice,
+            &[f(&[10.0, 20.0, 30.0, 40.0, 50.0]), Value::scalar_i64(2)],
+            &[f(&[1.0, 2.0, 3.0, 4.0, 5.0]), Value::scalar_i64(0)],
+            &dsp,
+        )
+        .unwrap();
+        assert_eq!(
+            tensor_f64_values(&jvp),
+            vec![3.0, 4.0],
+            "dynamic_slice JVP must use primal start"
+        );
         // dynamic_update_slice(operand[5], update[2], start=1): d = dus(d_op, d_upd, start=1)
         // = [d_op0, d_upd0, d_upd1, d_op3, d_op4] = [0.1, 5, 6, 0.4, 0.5]; bug -> start 0.
-        let dus = jvp_rule(Primitive::DynamicUpdateSlice, &[f(&[0.0; 5]), f(&[7.0, 8.0]), Value::scalar_i64(1)], &[f(&[0.1, 0.2, 0.3, 0.4, 0.5]), f(&[5.0, 6.0]), Value::scalar_i64(0)], &BTreeMap::new()).unwrap();
-        assert_eq!(tensor_f64_values(&dus), vec![0.1, 5.0, 6.0, 0.4, 0.5], "dynamic_update_slice JVP must update at primal start");
+        let dus = jvp_rule(
+            Primitive::DynamicUpdateSlice,
+            &[f(&[0.0; 5]), f(&[7.0, 8.0]), Value::scalar_i64(1)],
+            &[
+                f(&[0.1, 0.2, 0.3, 0.4, 0.5]),
+                f(&[5.0, 6.0]),
+                Value::scalar_i64(0),
+            ],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            tensor_f64_values(&dus),
+            vec![0.1, 5.0, 6.0, 0.4, 0.5],
+            "dynamic_update_slice JVP must update at primal start"
+        );
     }
 
     #[test]
@@ -14850,14 +15263,12 @@ mod tests {
         let u = vec![0.3, -0.7, 1.1, 0.5]; // probe tangent
         let v = vec![1.3, 0.2, -0.9, 0.4]; // probe cotangent
         let params = BTreeMap::new();
-        let du = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![4] }, u.clone()).unwrap(),
-        );
+        let du =
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![4] }, u.clone()).unwrap());
         let jvp = jvp_rule(Primitive::Sort, &[x.clone()], &[du], &params).unwrap();
         let ju = tensor_f64_values(&jvp);
-        let gv = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![4] }, v.clone()).unwrap(),
-        );
+        let gv =
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![4] }, v.clone()).unwrap());
         let vjp = vjp_single(Primitive::Sort, &[x], &gv, &params).unwrap();
         let jtv = tensor_f64_values(&vjp[0]);
         let lhs: f64 = ju.iter().zip(&v).map(|(a, b)| a * b).sum();
@@ -15183,7 +15594,11 @@ mod tests {
         let g = Value::vector_f64(&[1.0, 1.0]).unwrap();
         let grads = vjp_single(Primitive::Scan, &[init, xs], &g, &scan_params("mul")).unwrap();
         assert_eq!(tensor_f64_values(&grads[0]), vec![2.0, 2.0], "grad_init");
-        assert_eq!(tensor_f64_values(&grads[1]), vec![4.0, 6.0, 2.0, 3.0], "grad_xs");
+        assert_eq!(
+            tensor_f64_values(&grads[1]),
+            vec![4.0, 6.0, 2.0, 3.0],
+            "grad_xs"
+        );
     }
 
     #[test]
@@ -16375,7 +16790,9 @@ mod tests {
         Value::Tensor(
             TensorValue::new(
                 DType::F64,
-                Shape { dims: vec![vals.len() as u32] },
+                Shape {
+                    dims: vec![vals.len() as u32],
+                },
                 vals.iter().map(|&v| Literal::from_f64(v)).collect(),
             )
             .unwrap(),
@@ -16403,7 +16820,10 @@ mod tests {
         let want = [0.2, 0.2, 0.3, 0.5];
         assert_eq!(vals.len(), want.len(), "got {vals:?}");
         for (a, b) in vals.iter().zip(want) {
-            assert!((a - b).abs() < 1e-12, "max-pool JVP must gather: got {vals:?}");
+            assert!(
+                (a - b).abs() < 1e-12,
+                "max-pool JVP must gather: got {vals:?}"
+            );
         }
     }
 
@@ -16422,7 +16842,10 @@ mod tests {
         let jvp = jvp_rule(Primitive::ReduceWindow, &[x], &[dx], &params).unwrap();
         let vals = tensor_f64_values(&jvp);
         for (a, b) in vals.iter().zip([0.2, 0.2, 0.3, 0.5]) {
-            assert!((a - b).abs() < 1e-12, "min-pool JVP must gather: got {vals:?}");
+            assert!(
+                (a - b).abs() < 1e-12,
+                "min-pool JVP must gather: got {vals:?}"
+            );
         }
     }
 
@@ -16441,7 +16864,13 @@ mod tests {
         params.insert("reduce_op".into(), "max".into());
 
         let ju = tensor_f64_values(
-            &jvp_rule(Primitive::ReduceWindow, &[x.clone()], &[f64_tensor_1d(&u)], &params).unwrap(),
+            &jvp_rule(
+                Primitive::ReduceWindow,
+                &[x.clone()],
+                &[f64_tensor_1d(&u)],
+                &params,
+            )
+            .unwrap(),
         );
         let lhs: f64 = ju.iter().zip(v).map(|(a, b)| a * b).sum();
 
@@ -16466,10 +16895,14 @@ mod tests {
         params.insert("reduce_op".into(), "sum".into());
 
         let x = f64_tensor_1d(&[9.0, 8.0, 7.0, 6.0, 5.0]); // primal irrelevant for sum
-        let jvp = tensor_f64_values(&jvp_rule(Primitive::ReduceWindow, &[x], &[dx], &params).unwrap());
+        let jvp =
+            tensor_f64_values(&jvp_rule(Primitive::ReduceWindow, &[x], &[dx], &params).unwrap());
         // windowed sums of dx: [.3,.5,.7,.9]
         for (a, b) in jvp.iter().zip([0.3, 0.5, 0.7, 0.9]) {
-            assert!((a - b).abs() < 1e-12, "sum JVP must stay linear: got {jvp:?}");
+            assert!(
+                (a - b).abs() < 1e-12,
+                "sum JVP must stay linear: got {jvp:?}"
+            );
         }
     }
 
