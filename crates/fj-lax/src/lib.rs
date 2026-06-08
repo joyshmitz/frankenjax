@@ -28,10 +28,9 @@ use std::collections::BTreeMap;
 
 use arithmetic::{
     erf_approx, erfc_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh, eval_bessel_i0e,
-    eval_bessel_i1e,
-    eval_betainc, eval_binary_elementwise, eval_clamp, eval_complex, eval_conj, eval_cos,
-    eval_cosh, eval_digamma, eval_dot, eval_dot_general, eval_erf_inv, eval_exp, eval_fma,
-    eval_igamma, eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf,
+    eval_bessel_i1e, eval_betainc, eval_binary_elementwise, eval_clamp, eval_complex, eval_conj,
+    eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general, eval_erf_inv, eval_exp,
+    eval_fma, eval_igamma, eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf,
     eval_is_nan, eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_polygamma, eval_real,
     eval_round, eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
     eval_unary_elementwise, eval_unary_elementwise_parallel, eval_unary_int_or_float, eval_zeta,
@@ -10379,8 +10378,22 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(dense64.as_tensor().unwrap().elements.as_f64_slice().is_some());
-        assert!(boxed64.as_tensor().unwrap().elements.as_f64_slice().is_none());
+        assert!(
+            dense64
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_some()
+        );
+        assert!(
+            boxed64
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_none()
+        );
         let data32: Vec<f32> = data64.iter().map(|&v| v as f32).collect();
         let dense32 = Value::Tensor(
             TensorValue::new_f32_values(Shape { dims: dims.clone() }, data32.clone()).unwrap(),
@@ -10393,8 +10406,22 @@ mod tests {
             )
             .unwrap(),
         );
-        assert!(dense32.as_tensor().unwrap().elements.as_f32_slice().is_some());
-        assert!(boxed32.as_tensor().unwrap().elements.as_f32_slice().is_none());
+        assert!(
+            dense32
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .is_some()
+        );
+        assert!(
+            boxed32
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .is_none()
+        );
         // Canonicalize NaN: `inf + (-inf)` (and friends) produces a NaN whose SIGN
         // BIT is IEEE-754-unspecified and differs between two valid summation orders
         // (the dense tight loop vs the generic per-Literal fold) — not a parity
@@ -10408,7 +10435,11 @@ mod tests {
                 .iter()
                 .map(|l| {
                     let f = l.as_f64().unwrap();
-                    if f.is_nan() { 0x7ff8_0000_0000_0000 } else { f.to_bits() }
+                    if f.is_nan() {
+                        0x7ff8_0000_0000_0000
+                    } else {
+                        f.to_bits()
+                    }
                 })
                 .collect()
         };
@@ -10419,7 +10450,11 @@ mod tests {
                 .iter()
                 .map(|l| match l {
                     Literal::F32Bits(b) => {
-                        if f32::from_bits(*b).is_nan() { 0x7fc0_0000 } else { *b }
+                        if f32::from_bits(*b).is_nan() {
+                            0x7fc0_0000
+                        } else {
+                            *b
+                        }
                     }
                     o => panic!("expected f32, got {o:?}"),
                 })
@@ -10427,20 +10462,38 @@ mod tests {
         };
         for op in ["max", "min", "sum"] {
             for (win, stride, pad) in [
-                ("1,3,3,1", "1,1,1,1", "SAME"),  // border-heavy (exercises border path)
+                ("1,3,3,1", "1,1,1,1", "SAME"), // border-heavy (exercises border path)
                 ("1,2,2,1", "1,2,2,1", "VALID"), // standard 2x2 stride-2 pool
                 ("1,2,3,1", "1,1,1,1", "VALID"), // asymmetric window
             ] {
                 let p = rw_params_with_padding(op, win, stride, pad);
-                let d64 = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense64), &p).unwrap();
-                let l64 = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&boxed64), &p).unwrap();
-                assert_eq!(d64.as_tensor().unwrap().shape.dims, l64.as_tensor().unwrap().shape.dims, "f64 {op} {win} {pad} shape");
+                let d64 =
+                    eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense64), &p)
+                        .unwrap();
+                let l64 =
+                    eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&boxed64), &p)
+                        .unwrap();
+                assert_eq!(
+                    d64.as_tensor().unwrap().shape.dims,
+                    l64.as_tensor().unwrap().shape.dims,
+                    "f64 {op} {win} {pad} shape"
+                );
                 assert_eq!(bits64(&d64), bits64(&l64), "f64 {op} {win} {stride} {pad}");
-                assert!(d64.as_tensor().unwrap().elements.as_f64_slice().is_some(), "f64 output must be dense");
-                let d32 = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense32), &p).unwrap();
-                let l32 = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&boxed32), &p).unwrap();
+                assert!(
+                    d64.as_tensor().unwrap().elements.as_f64_slice().is_some(),
+                    "f64 output must be dense"
+                );
+                let d32 =
+                    eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense32), &p)
+                        .unwrap();
+                let l32 =
+                    eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&boxed32), &p)
+                        .unwrap();
                 assert_eq!(bits32(&d32), bits32(&l32), "f32 {op} {win} {stride} {pad}");
-                assert!(d32.as_tensor().unwrap().elements.as_f32_slice().is_some(), "f32 output must be dense");
+                assert!(
+                    d32.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+                    "f32 output must be dense"
+                );
             }
         }
     }
@@ -10451,19 +10504,30 @@ mod tests {
         use std::time::Instant;
         let (n, h, w, c) = (16usize, 64usize, 64usize, 32usize); // [16,64,64,32] -> 2x2 s2 pool
         let total = n * h * w * c;
-        let data: Vec<f32> = (0..total).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
+        let data: Vec<f32> = (0..total)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
         let dims = vec![n as u32, h as u32, w as u32, c as u32];
-        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
         let boxed = Value::Tensor(
-            TensorValue::new(DType::F32, Shape { dims: dims.clone() }, data.iter().copied().map(Literal::from_f32).collect()).unwrap(),
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
         );
         let p = rw_params_with_padding("max", "1,2,2,1", "1,2,2,1", "VALID");
         let time = |input: &Value| {
-            let _ = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(input), &p).unwrap();
+            let _ =
+                eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(input), &p).unwrap();
             let mut best = f64::MAX;
             for _ in 0..20 {
                 let t = Instant::now();
-                let _ = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(input), &p).unwrap();
+                let _ = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(input), &p)
+                    .unwrap();
                 best = best.min(t.elapsed().as_secs_f64());
             }
             best
@@ -10472,7 +10536,9 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH f32 maxpool [{n},{h},{w},{c}] 2x2 s2: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 

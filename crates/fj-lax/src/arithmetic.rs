@@ -648,7 +648,11 @@ fn eval_f32_scalar_broadcast_binop(
         .iter()
         .map(|&x| {
             let x = f64::from(x);
-            let (l, r) = if scalar_on_left { (scalar, x) } else { (x, scalar) };
+            let (l, r) = if scalar_on_left {
+                (scalar, x)
+            } else {
+                (x, scalar)
+            };
             op(l, r) as f32
         })
         .collect();
@@ -929,7 +933,10 @@ fn complex_erf(z: (f64, f64)) -> (f64, f64) {
     }
     let sqrt_pi = std::f64::consts::PI.sqrt();
     let erfc = complex_mul(
-        complex_mul(exp_neg_z2, complex_reciprocal((z.0 * sqrt_pi, z.1 * sqrt_pi))),
+        complex_mul(
+            exp_neg_z2,
+            complex_reciprocal((z.0 * sqrt_pi, z.1 * sqrt_pi)),
+        ),
         sum,
     );
     (1.0 - erfc.0, -erfc.1)
@@ -4331,11 +4338,7 @@ pub(crate) fn erfc_approx(x: f64) -> f64 {
         }
     }
     let erfc_pos = (-ax * ax).exp() / std::f64::consts::PI.sqrt() * f;
-    if x >= 0.0 {
-        erfc_pos
-    } else {
-        2.0 - erfc_pos
-    }
+    if x >= 0.0 { erfc_pos } else { 2.0 - erfc_pos }
 }
 
 const LANCZOS_COEFFS: [f64; 9] = [
@@ -5217,7 +5220,11 @@ fn eval_ternary_elementwise(
                 }
             });
             let elements: Vec<Literal> = out.into_iter().map(Literal::from_f64).collect();
-            return Ok(Value::Tensor(TensorValue::new(DType::F64, out_shape, elements)?));
+            return Ok(Value::Tensor(TensorValue::new(
+                DType::F64,
+                out_shape,
+                elements,
+            )?));
         }
     }
 
@@ -5919,7 +5926,10 @@ fn dot_real_elements_as_f64(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
     let mut out = Vec::with_capacity(tensor.elements.len());
     for literal in &tensor.elements {
         match literal {
-            Literal::F64Bits(_) | Literal::F32Bits(_) | Literal::BF16Bits(_) | Literal::F16Bits(_) => {
+            Literal::F64Bits(_)
+            | Literal::F32Bits(_)
+            | Literal::BF16Bits(_)
+            | Literal::F16Bits(_) => {
                 out.push(literal.as_f64()?);
             }
             _ => return None,
@@ -5990,8 +6000,7 @@ fn general_real_tensordot(
     if out_dtype == DType::F32
         && is_identity_perm(&lhs_perm)
         && is_identity_perm(&rhs_perm)
-        && let (Some(a32), Some(b32)) =
-            (lhs.elements.as_f32_slice(), rhs.elements.as_f32_slice())
+        && let (Some(a32), Some(b32)) = (lhs.elements.as_f32_slice(), rhs.elements.as_f32_slice())
     {
         let values = batched_matmul_2d_f32_in(a32, batch, m, k, b32, n);
         if output_dims.is_empty() {
@@ -6005,8 +6014,7 @@ fn general_real_tensordot(
         )?)));
     }
 
-    let (Some(lhs_v), Some(rhs_v)) =
-        (dot_real_elements_as_f64(lhs), dot_real_elements_as_f64(rhs))
+    let (Some(lhs_v), Some(rhs_v)) = (dot_real_elements_as_f64(lhs), dot_real_elements_as_f64(rhs))
     else {
         return Ok(None);
     };
@@ -6031,14 +6039,18 @@ fn general_real_tensordot(
     let values = batched_matmul_2d(a.as_ref(), batch, m, k, b.as_ref(), n);
     if output_dims.is_empty() {
         // Full contraction (e.g. vector·vector) -> scalar, matching the other paths.
-        return Ok(Some(Value::Scalar(real_literal_from_f64(out_dtype, values[0]))));
+        return Ok(Some(Value::Scalar(real_literal_from_f64(
+            out_dtype, values[0],
+        ))));
     }
     let shape = Shape {
         dims: output_dims.to_vec(),
     };
     if out_dtype == DType::F64 {
         // from_f64(v) == F64Bits(v.to_bits()), so this matches new_f64_values exactly.
-        return Ok(Some(Value::Tensor(TensorValue::new_f64_values(shape, values)?)));
+        return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+            shape, values,
+        )?)));
     }
     // Dense f32 output: emit dense `f32` storage so the GEMM result feeds
     // downstream f32 elementwise (bias-add/activation) densely without re-boxing
@@ -6046,13 +6058,17 @@ fn general_real_tensordot(
     // `Literal::from_f32(v as f32)`, exactly what `new_f32_values` stores.
     if out_dtype == DType::F32 {
         let values: Vec<f32> = values.iter().map(|&v| v as f32).collect();
-        return Ok(Some(Value::Tensor(TensorValue::new_f32_values(shape, values)?)));
+        return Ok(Some(Value::Tensor(TensorValue::new_f32_values(
+            shape, values,
+        )?)));
     }
     let elements: Vec<Literal> = values
         .iter()
         .map(|&v| real_literal_from_f64(out_dtype, v))
         .collect();
-    Ok(Some(Value::Tensor(TensorValue::new(out_dtype, shape, elements)?)))
+    Ok(Some(Value::Tensor(TensorValue::new(
+        out_dtype, shape, elements,
+    )?)))
 }
 
 fn dot_f64_elements(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
@@ -7268,12 +7284,28 @@ mod tests {
         };
         // OVERFLOW: (1e100)^-2 — naive 1/p with p=1e200 gave denom=inf → (0,_);
         // Smith's reciprocal gives 1e-200.
-        close(apply_complex_pow((1e100, 0.0), (-2.0, 0.0)).unwrap(), (1e-200, 0.0), 1e-12);
+        close(
+            apply_complex_pow((1e100, 0.0), (-2.0, 0.0)).unwrap(),
+            (1e-200, 0.0),
+            1e-12,
+        );
         // Normal cases unchanged: (1+i)^-2 = 1/(2i) = -0.5i; 2^-2 = 0.25.
-        close(apply_complex_pow((1.0, 1.0), (-2.0, 0.0)).unwrap(), (0.0, -0.5), 1e-15);
-        close(apply_complex_pow((2.0, 0.0), (-2.0, 0.0)).unwrap(), (0.25, 0.0), 1e-15);
+        close(
+            apply_complex_pow((1.0, 1.0), (-2.0, 0.0)).unwrap(),
+            (0.0, -0.5),
+            1e-15,
+        );
+        close(
+            apply_complex_pow((2.0, 0.0), (-2.0, 0.0)).unwrap(),
+            (0.25, 0.0),
+            1e-15,
+        );
         // Positive integer + general complex exponent paths still hold.
-        close(apply_complex_pow((1.0, 1.0), (2.0, 0.0)).unwrap(), (0.0, 2.0), 1e-15);
+        close(
+            apply_complex_pow((1.0, 1.0), (2.0, 0.0)).unwrap(),
+            (0.0, 2.0),
+            1e-15,
+        );
     }
 
     #[test]
@@ -7284,7 +7316,10 @@ mod tests {
         let cz = |re: f64, im: f64| Value::Scalar(Literal::from_complex128(re, im));
         let near = |a: (f64, f64), b: (f64, f64)| {
             assert!(
-                a.0.is_finite() && a.1.is_finite() && (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                a.0.is_finite()
+                    && a.1.is_finite()
+                    && (a.0 - b.0).abs() < 1e-9
+                    && (a.1 - b.1).abs() < 1e-9,
                 "got {a:?}, expected {b:?}"
             );
         };
@@ -7305,7 +7340,10 @@ mod tests {
         // the analytic value (tanh(0.5+0.3i) etc. unchanged).
         let t = eval_tanh(Primitive::Tanh, &[cz(0.5, 0.3)]).unwrap();
         // tanh(0.5+0.3i) = 0.496197066 + 0.238405083i (reference)
-        near(t.as_complex128_scalar().unwrap(), (0.496_197_066, 0.238_405_083));
+        near(
+            t.as_complex128_scalar().unwrap(),
+            (0.496_197_066, 0.238_405_083),
+        );
     }
 
     #[test]
@@ -7326,7 +7364,11 @@ mod tests {
 
         // OVERFLOW: the naive br*br+bi*bi formula gave (0,0) here (denom=inf);
         // Smith's keeps it finite: (1+i)/(1e200+1e200i) = 1e-200.
-        close(complex_div((1.0, 1.0), (1e200, 1e200)), (1e-200, 0.0), 1e-13);
+        close(
+            complex_div((1.0, 1.0), (1e200, 1e200)),
+            (1e-200, 0.0),
+            1e-13,
+        );
         // UNDERFLOW: tiny denominator. 1/1e-200 = 1e200.
         close(complex_div((1.0, 0.0), (1e-200, 0.0)), (1e200, 0.0), 1e-13);
         // Reciprocal routes through the same path.
@@ -7335,7 +7377,10 @@ mod tests {
         // All finite (no inf/nan from intermediate overflow).
         for &(re, im) in &[(1e180, 2e180), (3e-180, -4e-180), (1e308, 1e308)] {
             let q = complex_div((1.0, -1.0), (re, im));
-            assert!(q.0.is_finite() && q.1.is_finite(), "non-finite quotient for ({re},{im}): {q:?}");
+            assert!(
+                q.0.is_finite() && q.1.is_finite(),
+                "non-finite quotient for ({re},{im}): {q:?}"
+            );
         }
     }
 
@@ -7357,13 +7402,19 @@ mod tests {
         let n: u32 = 1 << 20;
         // Include an exact zero (the x==0 branch) plus a wide range.
         let xs: Vec<f64> = (0..n)
-            .map(|i| if i == 7 { 0.0 } else { (i as f64) * 1e-3 - 500.0 })
+            .map(|i| {
+                if i == 7 {
+                    0.0
+                } else {
+                    (i as f64) * 1e-3 - 500.0
+                }
+            })
             .collect();
         let shape = Shape { dims: vec![n] };
         let x = Value::Tensor(TensorValue::new_f64_values(shape.clone(), xs.clone()).unwrap());
 
-        let par =
-            eval_unary_elementwise_parallel(Primitive::Sinc, std::slice::from_ref(&x), sinc).unwrap();
+        let par = eval_unary_elementwise_parallel(Primitive::Sinc, std::slice::from_ref(&x), sinc)
+            .unwrap();
         let ser = eval_unary_elementwise(Primitive::Sinc, std::slice::from_ref(&x), sinc).unwrap();
         let par_t = par.as_tensor().unwrap();
         let ser_t = ser.as_tensor().unwrap();
@@ -7391,7 +7442,8 @@ mod tests {
 
         let t1 = Instant::now();
         for _ in 0..reps {
-            let o = eval_unary_elementwise(Primitive::Sinc, std::slice::from_ref(&x), sinc).unwrap();
+            let o =
+                eval_unary_elementwise(Primitive::Sinc, std::slice::from_ref(&x), sinc).unwrap();
             std::hint::black_box(&o);
         }
         let ser_ns = t1.elapsed().as_nanos().max(1);
@@ -7417,12 +7469,9 @@ mod tests {
         let shape = Shape { dims: vec![n] };
         let x = Value::Tensor(TensorValue::new_f64_values(shape.clone(), xs.clone()).unwrap());
 
-        let par = eval_unary_elementwise_parallel(
-            Primitive::Logistic,
-            std::slice::from_ref(&x),
-            sigmoid,
-        )
-        .unwrap();
+        let par =
+            eval_unary_elementwise_parallel(Primitive::Logistic, std::slice::from_ref(&x), sigmoid)
+                .unwrap();
         let ser =
             eval_unary_elementwise(Primitive::Logistic, std::slice::from_ref(&x), sigmoid).unwrap();
         let par_t = par.as_tensor().unwrap();
@@ -7430,7 +7479,10 @@ mod tests {
 
         let mut golden: u64 = 0xcbf29ce484222325;
         for k in 0..n as usize {
-            assert_eq!(par_t.elements[k], ser_t.elements[k], "logistic mismatch at {k}");
+            assert_eq!(
+                par_t.elements[k], ser_t.elements[k],
+                "logistic mismatch at {k}"
+            );
             if let Literal::F64Bits(b) = par_t.elements[k] {
                 for byte in b.to_le_bytes() {
                     golden ^= byte as u64;
@@ -7489,7 +7541,9 @@ mod tests {
             -1e300,
             123.456,
         ];
-        let xs: Vec<f64> = (0..n as usize).map(|i| specials[i % specials.len()]).collect();
+        let xs: Vec<f64> = (0..n as usize)
+            .map(|i| specials[i % specials.len()])
+            .collect();
         let shape = Shape { dims: vec![n] };
         let x_tensor = TensorValue::new_f64_values(shape.clone(), xs.clone()).unwrap();
         let x = Value::Tensor(x_tensor.clone());
@@ -7574,7 +7628,11 @@ mod tests {
                 return f64::NAN;
             }
             let lower_bounded = if x < lo { lo } else { x };
-            if lower_bounded > hi { hi } else { lower_bounded }
+            if lower_bounded > hi {
+                hi
+            } else {
+                lower_bounded
+            }
         }
 
         let n: u32 = 1 << 20; // 1,048,576 elements
@@ -7603,7 +7661,9 @@ mod tests {
         // OLD per-`Literal` path (the loop the dense path replaced).
         let mut ref_elems = Vec::with_capacity(n as usize);
         for elem in x_tensor.elements.iter().copied() {
-            let Literal::F64Bits(xb) = elem else { unreachable!() };
+            let Literal::F64Bits(xb) = elem else {
+                unreachable!()
+            };
             ref_elems.push(Literal::from_f64(clamp_ref(lo, f64::from_bits(xb), hi)));
         }
 
@@ -7622,8 +7682,7 @@ mod tests {
         let reps = 40u32;
         let t0 = Instant::now();
         for _ in 0..reps {
-            let out =
-                eval_clamp(Primitive::Clamp, &[vlo.clone(), x.clone(), vhi.clone()]).unwrap();
+            let out = eval_clamp(Primitive::Clamp, &[vlo.clone(), x.clone(), vhi.clone()]).unwrap();
             std::hint::black_box(&out);
         }
         let dense_ns = t0.elapsed().as_nanos().max(1);
@@ -7632,7 +7691,9 @@ mod tests {
         for _ in 0..reps {
             let mut elements = Vec::with_capacity(n as usize);
             for elem in x_tensor.elements.iter().copied() {
-                let Literal::F64Bits(xb) = elem else { unreachable!() };
+                let Literal::F64Bits(xb) = elem else {
+                    unreachable!()
+                };
                 elements.push(Literal::from_f64(clamp_ref(lo, f64::from_bits(xb), hi)));
             }
             let out = TensorValue::new(DType::F64, shape.clone(), elements).unwrap();
@@ -7660,8 +7721,7 @@ mod tests {
         let n: u32 = 1 << 20; // 1,048,576 elements
         let conds: Vec<bool> = (0..n).map(|i| i % 3 == 0).collect();
         let shape = Shape { dims: vec![n] };
-        let cond_tensor =
-            TensorValue::new_bool_values(shape.clone(), conds.clone()).unwrap();
+        let cond_tensor = TensorValue::new_bool_values(shape.clone(), conds.clone()).unwrap();
         let cond = Value::Tensor(cond_tensor.clone());
 
         let reps = 40u32;
@@ -7680,8 +7740,8 @@ mod tests {
             let vf = Value::Scalar(on_false);
 
             // NEW dense path.
-            let dense = eval_select(Primitive::Select, &[cond.clone(), vt.clone(), vf.clone()])
-                .unwrap();
+            let dense =
+                eval_select(Primitive::Select, &[cond.clone(), vt.clone(), vf.clone()]).unwrap();
             let dense_t = dense.as_tensor().unwrap();
 
             // OLD per-`Literal` path (the loop the fast path replaced).
@@ -8151,7 +8211,9 @@ mod tests {
         // generic strided loop computed).
         let (m, k, n) = (5usize, 7usize, 4usize);
         let mk = |len: usize, salt: f64| -> Vec<f64> {
-            (0..len).map(|i| (i as f64 * salt).sin() * 1.7 - 0.3).collect()
+            (0..len)
+                .map(|i| (i as f64 * salt).sin() * 1.7 - 0.3)
+                .collect()
         };
         for &(lc, rc) in &[(1usize, 1usize), (0usize, 0usize), (0usize, 1usize)] {
             let (lr, lcd) = if lc == 1 { (m, k) } else { (k, m) };
@@ -8204,7 +8266,9 @@ mod tests {
         // general_nobatch_f64_tensordot (permute + matmul_2d). Each must be
         // bit-for-bit identical to the textbook ascending-(flattened-k) reference.
         let bits = |v: &Value| -> Vec<u64> {
-            let Value::Tensor(t) = v else { panic!("expected tensor") };
+            let Value::Tensor(t) = v else {
+                panic!("expected tensor")
+            };
             t.elements
                 .iter()
                 .map(|l| match l {
@@ -8214,7 +8278,9 @@ mod tests {
                 .collect()
         };
         let mk = |len: usize, salt: f64| -> Vec<f64> {
-            (0..len).map(|i| (i as f64 * salt).sin() * 1.7 - 0.3).collect()
+            (0..len)
+                .map(|i| (i as f64 * salt).sin() * 1.7 - 0.3)
+                .collect()
         };
 
         // (1) rank-3 single contract: A[2,3,4]·B[4,5] contract A:2,B:0 -> [2,3,5].
@@ -8224,8 +8290,11 @@ mod tests {
             ("lhs_contracting_dims".to_owned(), "2".to_owned()),
             ("rhs_contracting_dims".to_owned(), "0".to_owned()),
         ]);
-        let got = eval_dot_general(&[tensor_f64(vec![2, 3, 4], &a), tensor_f64(vec![4, 5], &b)], &p)
-            .unwrap();
+        let got = eval_dot_general(
+            &[tensor_f64(vec![2, 3, 4], &a), tensor_f64(vec![4, 5], &b)],
+            &p,
+        )
+        .unwrap();
         let mut want = vec![0.0f64; 2 * 3 * 5];
         for i in 0..2 {
             for j in 0..3 {
@@ -8238,7 +8307,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(bits(&got), want.iter().map(|w| w.to_bits()).collect::<Vec<_>>(), "rank3");
+        assert_eq!(
+            bits(&got),
+            want.iter().map(|w| w.to_bits()).collect::<Vec<_>>(),
+            "rank3"
+        );
 
         // (2) multi-contract: A[2,3,4]·B[3,4,5] contract (A:1,2)/(B:0,1) -> [2,5].
         let a = mk(2 * 3 * 4, 0.011);
@@ -8247,9 +8320,11 @@ mod tests {
             ("lhs_contracting_dims".to_owned(), "1,2".to_owned()),
             ("rhs_contracting_dims".to_owned(), "0,1".to_owned()),
         ]);
-        let got =
-            eval_dot_general(&[tensor_f64(vec![2, 3, 4], &a), tensor_f64(vec![3, 4, 5], &b)], &p)
-                .unwrap();
+        let got = eval_dot_general(
+            &[tensor_f64(vec![2, 3, 4], &a), tensor_f64(vec![3, 4, 5], &b)],
+            &p,
+        )
+        .unwrap();
         let mut want = vec![0.0f64; 2 * 5];
         for i in 0..2 {
             for l in 0..5 {
@@ -8262,7 +8337,11 @@ mod tests {
                 want[i * 5 + l] = s;
             }
         }
-        assert_eq!(bits(&got), want.iter().map(|w| w.to_bits()).collect::<Vec<_>>(), "multi");
+        assert_eq!(
+            bits(&got),
+            want.iter().map(|w| w.to_bits()).collect::<Vec<_>>(),
+            "multi"
+        );
 
         // (3) rank-3 transposed: A[2,4,3]·B[5,4] contract A:1,B:1 -> [2,3,5].
         let a = mk(2 * 4 * 3, 0.023);
@@ -8271,8 +8350,11 @@ mod tests {
             ("lhs_contracting_dims".to_owned(), "1".to_owned()),
             ("rhs_contracting_dims".to_owned(), "1".to_owned()),
         ]);
-        let got = eval_dot_general(&[tensor_f64(vec![2, 4, 3], &a), tensor_f64(vec![5, 4], &b)], &p)
-            .unwrap();
+        let got = eval_dot_general(
+            &[tensor_f64(vec![2, 4, 3], &a), tensor_f64(vec![5, 4], &b)],
+            &p,
+        )
+        .unwrap();
         let mut want = vec![0.0f64; 2 * 3 * 5];
         for i in 0..2 {
             for j in 0..3 {
@@ -8285,7 +8367,11 @@ mod tests {
                 }
             }
         }
-        assert_eq!(bits(&got), want.iter().map(|w| w.to_bits()).collect::<Vec<_>>(), "rank3-T");
+        assert_eq!(
+            bits(&got),
+            want.iter().map(|w| w.to_bits()).collect::<Vec<_>>(),
+            "rank3-T"
+        );
     }
 
     #[test]
@@ -8305,14 +8391,21 @@ mod tests {
             )
         };
         let (m, k, n) = (5usize, 7usize, 4usize);
-        let af: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.013).sin() * 1.7 - 0.3).collect();
-        let bf: Vec<f32> = (0..k * n).map(|i| (i as f32 * 0.019).cos() * 1.3 + 0.2).collect();
+        let af: Vec<f32> = (0..m * k)
+            .map(|i| (i as f32 * 0.013).sin() * 1.7 - 0.3)
+            .collect();
+        let bf: Vec<f32> = (0..k * n)
+            .map(|i| (i as f32 * 0.019).cos() * 1.3 + 0.2)
+            .collect();
         let params = BTreeMap::from([
             ("lhs_contracting_dims".to_owned(), "1".to_owned()),
             ("rhs_contracting_dims".to_owned(), "0".to_owned()),
         ]);
         let Value::Tensor(out) = eval_dot_general(
-            &[mk32(vec![m as u32, k as u32], &af), mk32(vec![k as u32, n as u32], &bf)],
+            &[
+                mk32(vec![m as u32, k as u32], &af),
+                mk32(vec![k as u32, n as u32], &bf),
+            ],
             &params,
         )
         .unwrap() else {
@@ -8337,7 +8430,10 @@ mod tests {
                 want.push((s as f32).to_bits());
             }
         }
-        assert_eq!(got, want, "f32 matmul must be bit-identical to the f64-accum reference");
+        assert_eq!(
+            got, want,
+            "f32 matmul must be bit-identical to the f64-accum reference"
+        );
     }
 
     /// f32 dot_general now emits DENSE f32 storage (not boxed `Literal`s) so the
@@ -8363,7 +8459,10 @@ mod tests {
             ("rhs_contracting_dims".to_owned(), "0".to_owned()),
         ]);
         let Value::Tensor(out) = eval_dot_general(
-            &[mk32(vec![m as u32, k as u32], &af), mk32(vec![k as u32, n as u32], &bf)],
+            &[
+                mk32(vec![m as u32, k as u32], &af),
+                mk32(vec![k as u32, n as u32], &bf),
+            ],
             &params,
         )
         .unwrap() else {
@@ -8382,7 +8481,11 @@ mod tests {
                 for l in 0..k {
                     s += af[i * k + l] as f64 * bf[l * n + j] as f64;
                 }
-                assert_eq!(got[i * n + j].to_bits(), (s as f32).to_bits(), "mismatch at {i},{j}");
+                assert_eq!(
+                    got[i * n + j].to_bits(),
+                    (s as f32).to_bits(),
+                    "mismatch at {i},{j}"
+                );
             }
         }
     }
@@ -8407,10 +8510,28 @@ mod tests {
                 .unwrap(),
             )
         };
-        let a = mk32(vec![m as u32, k as u32], &(0..m * k).map(|i| (i % 100) as f32 * 0.01 - 0.5).collect::<Vec<_>>());
-        let b = mk32(vec![k as u32, n as u32], &(0..k * n).map(|i| (i % 77) as f32 * 0.01).collect::<Vec<_>>());
+        let a = mk32(
+            vec![m as u32, k as u32],
+            &(0..m * k)
+                .map(|i| (i % 100) as f32 * 0.01 - 0.5)
+                .collect::<Vec<_>>(),
+        );
+        let b = mk32(
+            vec![k as u32, n as u32],
+            &(0..k * n)
+                .map(|i| (i % 77) as f32 * 0.01)
+                .collect::<Vec<_>>(),
+        );
         let bias_data: Vec<f32> = (0..n).map(|i| (i % 31) as f32 * 0.1).collect();
-        let bias_dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, bias_data.clone()).unwrap());
+        let bias_dense = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                bias_data.clone(),
+            )
+            .unwrap(),
+        );
         let bias_boxed = mk32(vec![n as u32], &bias_data);
         let params = BTreeMap::from([
             ("lhs_contracting_dims".to_owned(), "1".to_owned()),
@@ -8419,11 +8540,24 @@ mod tests {
         // matmul time (common to both worlds) + dense result for downstream.
         let dot = || eval_dot_general(&[a.clone(), b.clone()], &params).unwrap();
         let dense_res = dot();
-        assert!(dense_res.as_tensor().unwrap().elements.as_f32_slice().is_some());
+        assert!(
+            dense_res
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .is_some()
+        );
         // boxed copy of the matmul result (simulates the pre-change boxed output).
         let boxed_res = {
             let t = dense_res.as_tensor().unwrap();
-            let lits: Vec<Literal> = t.elements.as_f32_slice().unwrap().iter().map(|&v| Literal::from_f32(v)).collect();
+            let lits: Vec<Literal> = t
+                .elements
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .map(|&v| Literal::from_f32(v))
+                .collect();
             Value::Tensor(TensorValue::new(DType::F32, t.shape.clone(), lits).unwrap())
         };
         let time = |f: &dyn Fn()| {
@@ -8436,14 +8570,35 @@ mod tests {
             }
             best
         };
-        let t_dot = time(&|| { let _ = dot(); });
-        let t_ba_boxed = time(&|| { let _ = crate::eval_primitive(Primitive::Add, &[boxed_res.clone(), bias_boxed.clone()], &BTreeMap::new()).unwrap(); });
-        let t_ba_dense = time(&|| { let _ = crate::eval_primitive(Primitive::Add, &[dense_res.clone(), bias_dense.clone()], &BTreeMap::new()).unwrap(); });
+        let t_dot = time(&|| {
+            let _ = dot();
+        });
+        let t_ba_boxed = time(&|| {
+            let _ = crate::eval_primitive(
+                Primitive::Add,
+                &[boxed_res.clone(), bias_boxed.clone()],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        });
+        let t_ba_dense = time(&|| {
+            let _ = crate::eval_primitive(
+                Primitive::Add,
+                &[dense_res.clone(), bias_dense.clone()],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        });
         let before = t_dot + t_ba_boxed;
         let after = t_dot + t_ba_dense;
         println!(
             "BENCH f32 (A@B)+bias [{m},{k}]@[{k},{n}]: matmul={:.3}ms | boxed-ba={:.3}ms dense-ba={:.3}ms | pipeline before={:.3}ms after={:.3}ms speedup={:.2}x",
-            t_dot * 1e3, t_ba_boxed * 1e3, t_ba_dense * 1e3, before * 1e3, after * 1e3, before / after
+            t_dot * 1e3,
+            t_ba_boxed * 1e3,
+            t_ba_dense * 1e3,
+            before * 1e3,
+            after * 1e3,
+            before / after
         );
     }
 
@@ -8460,10 +8615,18 @@ mod tests {
         let bf: Vec<f32> = (0..k * n).map(|i| (i % 77) as f32 * 0.01).collect();
         let mk32 = |dims: Vec<u32>, data: &[f32]| {
             Value::Tensor(
-                TensorValue::new(DType::F32, Shape { dims }, data.iter().map(|&v| Literal::from_f32(v)).collect()).unwrap(),
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims },
+                    data.iter().map(|&v| Literal::from_f32(v)).collect(),
+                )
+                .unwrap(),
             )
         };
-        let inputs = [mk32(vec![m as u32, k as u32], &af), mk32(vec![k as u32, n as u32], &bf)];
+        let inputs = [
+            mk32(vec![m as u32, k as u32], &af),
+            mk32(vec![k as u32, n as u32], &bf),
+        ];
         let params = BTreeMap::from([
             ("lhs_contracting_dims".to_owned(), "1".to_owned()),
             ("rhs_contracting_dims".to_owned(), "0".to_owned()),
@@ -8471,10 +8634,16 @@ mod tests {
         let time = |f: &dyn Fn()| {
             f();
             let mut best = f64::MAX;
-            for _ in 0..15 { let t = Instant::now(); f(); best = best.min(t.elapsed().as_secs_f64()); }
+            for _ in 0..15 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
             best
         };
-        let after = time(&|| { let _ = eval_dot_general(&inputs, &params).unwrap(); });
+        let after = time(&|| {
+            let _ = eval_dot_general(&inputs, &params).unwrap();
+        });
         // The two identity permutes the old path always ran (lhs [m,k], rhs [k,n]).
         let lhs_f64: Vec<f64> = af.iter().map(|&v| v as f64).collect();
         let rhs_f64: Vec<f64> = bf.iter().map(|&v| v as f64).collect();
@@ -8485,7 +8654,10 @@ mod tests {
         let before = after + t_perm;
         println!(
             "BENCH f32 dot [{m},{k}]@[{k},{n}] identity-permute-skip: after={:.3}ms permute-saved={:.3}ms before={:.3}ms speedup={:.2}x",
-            after * 1e3, t_perm * 1e3, before * 1e3, before / after
+            after * 1e3,
+            t_perm * 1e3,
+            before * 1e3,
+            before / after
         );
     }
 
@@ -8510,7 +8682,10 @@ mod tests {
                 ("lhs_contracting_dims".to_owned(), "1".to_owned()),
                 ("rhs_contracting_dims".to_owned(), "0".to_owned()),
             ]);
-            let inputs = [mk(vec![m as u32, k as u32], &a), mk(vec![k as u32, n as u32], &b)];
+            let inputs = [
+                mk(vec![m as u32, k as u32], &a),
+                mk(vec![k as u32, n as u32], &b),
+            ];
             let _ = eval_dot_general(&inputs, &params).unwrap();
             let mut best = f64::MAX;
             for _ in 0..20 {
@@ -8532,7 +8707,9 @@ mod tests {
         // bit-for-bit identical to the textbook per-batch ascending-k reference.
         let (bt, m, k, n) = (3usize, 2usize, 4usize, 5usize);
         let mk = |len: usize, salt: f64| -> Vec<f64> {
-            (0..len).map(|i| (i as f64 * salt).sin() * 1.3 - 0.2).collect()
+            (0..len)
+                .map(|i| (i as f64 * salt).sin() * 1.3 - 0.2)
+                .collect()
         };
         let a = mk(bt * m * k, 0.013);
         let b = mk(bt * n * k, 0.019);
@@ -8574,7 +8751,11 @@ mod tests {
             }
         }
         for (g, w) in got.iter().zip(want.iter()) {
-            assert_eq!(*g, w.to_bits(), "batched non-canonical must be bit-identical");
+            assert_eq!(
+                *g,
+                w.to_bits(),
+                "batched non-canonical must be bit-identical"
+            );
         }
     }
 
@@ -8626,7 +8807,11 @@ mod tests {
             }
         }
         for (g, w) in got.iter().zip(want.iter()) {
-            assert_eq!(*g, w.to_bits(), "fast-path batched matmul must be bit-identical");
+            assert_eq!(
+                *g,
+                w.to_bits(),
+                "fast-path batched matmul must be bit-identical"
+            );
         }
     }
 
@@ -8655,7 +8840,10 @@ mod tests {
                 let _ = eval_dot_general(&inputs, &params).unwrap();
                 best = best.min(t.elapsed().as_secs_f64());
             }
-            println!("BENCH batched A[{batch},{m},{k}]·B[{batch},{n},{k}]ᵀ -> [{batch},{m},{n}]: {:.4}ms", best * 1e3);
+            println!(
+                "BENCH batched A[{batch},{m},{k}]·B[{batch},{n},{k}]ᵀ -> [{batch},{m},{n}]: {:.4}ms",
+                best * 1e3
+            );
         };
         run(32, 128, 64, 128);
         run(64, 32, 32, 32);
@@ -8685,7 +8873,13 @@ mod tests {
             }
             println!("BENCH {label}: {:.4}ms", best * 1e3);
         };
-        run("rank3 A[64,64,64]·B[64,64]", vec![64, 64, 64], vec![64, 64], "2", "0");
+        run(
+            "rank3 A[64,64,64]·B[64,64]",
+            vec![64, 64, 64],
+            vec![64, 64],
+            "2",
+            "0",
+        );
         run(
             "multi A[64,8,8]·B[8,8,64]",
             vec![64, 8, 8],
@@ -8718,7 +8912,10 @@ mod tests {
                 let _ = eval_dot_general(&inputs, &params).unwrap();
                 best = best.min(t.elapsed().as_secs_f64());
             }
-            println!("BENCH dot_general A[{m},{k}]·B[{n},{k}]ᵀ -> [{m},{n}]: {:.4}ms", best * 1e3);
+            println!(
+                "BENCH dot_general A[{m},{k}]·B[{n},{k}]ᵀ -> [{m},{n}]: {:.4}ms",
+                best * 1e3
+            );
         };
         run(32, 32, 1024);
         run(64, 64, 256);
@@ -8748,7 +8945,10 @@ mod tests {
                 let _ = eval_dot_general(&inputs, &params).unwrap();
                 best = best.min(t.elapsed().as_secs_f64());
             }
-            println!("BENCH eval_dot_general batched=[{batch},{m},{k}]x[{batch},{k},{n}]: {:.4}ms", best * 1e3);
+            println!(
+                "BENCH eval_dot_general batched=[{batch},{m},{k}]x[{batch},{k},{n}]: {:.4}ms",
+                best * 1e3
+            );
         };
         run(1024, 8, 8, 8);
         run(256, 16, 16, 16);
@@ -11006,7 +11206,10 @@ mod tests {
         // the 11th digit, and the win here is "nonzero", proven last tick).
         for (x, expected) in [(8.0_f64, 1.1224e-29), (10.0_f64, 2.0885e-45)] {
             let got = erfc_approx(x);
-            assert!(got > 0.0, "erfc({x}) must be nonzero (was 0 in the old code)");
+            assert!(
+                got > 0.0,
+                "erfc({x}) must be nonzero (was 0 in the old code)"
+            );
             assert!(
                 (got - expected).abs() / expected.abs() < 1e-4,
                 "erfc({x}) = {got:e}, expected ~{expected:e}"
@@ -11021,7 +11224,11 @@ mod tests {
         // Small-|x| path unchanged: still exactly 1 − erf_approx (preserves the
         // metamorphic erfc==1-erf invariant tested over x ∈ [−3, 3]).
         for x in [-2.0, -0.5, 0.3, 1.5, 3.0] {
-            assert_eq!(erfc_approx(x), 1.0 - erf_approx(x), "erfc==1-erf for |x|<3.5");
+            assert_eq!(
+                erfc_approx(x),
+                1.0 - erf_approx(x),
+                "erfc==1-erf for |x|<3.5"
+            );
         }
     }
 
@@ -11095,13 +11302,21 @@ mod tests {
             .collect();
         // Dense f32 storage -> engages the threaded `as_f32_slice` path.
         let dense = Value::Tensor(
-            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
         );
         // Literals-backed -> `as_f32_slice` returns None -> serial per-Literal map.
         let boxed = Value::Tensor(
             TensorValue::new(
                 DType::F32,
-                Shape { dims: vec![n as u32] },
+                Shape {
+                    dims: vec![n as u32],
+                },
                 data.iter().map(|&v| Literal::from_f32(v)).collect(),
             )
             .unwrap(),
@@ -11136,14 +11351,24 @@ mod tests {
     fn bench_f32_exp_dense_vs_serial() {
         use std::time::Instant;
         let n = 1usize << 20; // 1.05M elements
-        let data: Vec<f32> = (0..n).map(|i| ((i % 4001) as f32 - 2000.0) * 0.001).collect();
+        let data: Vec<f32> = (0..n)
+            .map(|i| ((i % 4001) as f32 - 2000.0) * 0.001)
+            .collect();
         let dense = Value::Tensor(
-            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
         );
         let boxed = Value::Tensor(
             TensorValue::new(
                 DType::F32,
-                Shape { dims: vec![n as u32] },
+                Shape {
+                    dims: vec![n as u32],
+                },
                 data.iter().map(|&v| Literal::from_f32(v)).collect(),
             )
             .unwrap(),
@@ -11175,8 +11400,18 @@ mod tests {
     #[test]
     fn f32_same_shape_binop_dense_bit_identical_to_serial() {
         let specials = [
-            0.0f32, -0.0, 1.0, -1.0, 0.5, 3.5, f32::INFINITY, f32::NEG_INFINITY, f32::NAN,
-            1e30, -2.5e-20, 7.0,
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            3.5,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            1e30,
+            -2.5e-20,
+            7.0,
         ];
         let n = specials.len();
         // every (i,j) pair so both operands span the special grid.
@@ -11217,18 +11452,10 @@ mod tests {
             Primitive::Max,
             Primitive::Min,
         ] {
-            let fast = crate::eval_primitive(
-                prim,
-                &[dense(&la), dense(&lb)],
-                &BTreeMap::new(),
-            )
-            .unwrap();
-            let slow = crate::eval_primitive(
-                prim,
-                &[boxed(&la), boxed(&lb)],
-                &BTreeMap::new(),
-            )
-            .unwrap();
+            let fast =
+                crate::eval_primitive(prim, &[dense(&la), dense(&lb)], &BTreeMap::new()).unwrap();
+            let slow =
+                crate::eval_primitive(prim, &[boxed(&la), boxed(&lb)], &BTreeMap::new()).unwrap();
             assert_eq!(fast.as_tensor().unwrap().dtype, DType::F32);
             assert_eq!(bits(&fast), bits(&slow), "f32 {prim:?} dense != serial");
         }
@@ -11283,8 +11510,18 @@ mod tests {
     #[test]
     fn f32_scalar_broadcast_dense_bit_identical_to_serial() {
         let specials = [
-            0.0f32, -0.0, 1.0, -1.0, 0.5, 3.5, f32::INFINITY, f32::NEG_INFINITY, f32::NAN,
-            1e30, -2.5e-20, 7.0,
+            0.0f32,
+            -0.0,
+            1.0,
+            -1.0,
+            0.5,
+            3.5,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            1e30,
+            -2.5e-20,
+            7.0,
         ];
         let data: Vec<f32> = specials.to_vec();
         let dims = vec![data.len() as u32];
@@ -11312,16 +11549,41 @@ mod tests {
         };
         for &s in &[0.5f32, -2.0, 0.0, f32::INFINITY, f32::NAN] {
             let sc = Value::scalar_f32(s);
-            for prim in [Primitive::Add, Primitive::Sub, Primitive::Mul, Primitive::Div] {
+            for prim in [
+                Primitive::Add,
+                Primitive::Sub,
+                Primitive::Mul,
+                Primitive::Div,
+            ] {
                 // tensor ⊗ scalar
-                let fast = crate::eval_primitive(prim, &[dense.clone(), sc.clone()], &BTreeMap::new()).unwrap();
-                let slow = crate::eval_primitive(prim, &[boxed.clone(), sc.clone()], &BTreeMap::new()).unwrap();
-                assert_eq!(fast.as_tensor().unwrap().dtype, DType::F32, "{prim:?} t⊗s dtype");
-                assert_eq!(bits(&fast), bits(&slow), "f32 {prim:?} tensor⊗scalar(s={s}) dense != serial");
+                let fast =
+                    crate::eval_primitive(prim, &[dense.clone(), sc.clone()], &BTreeMap::new())
+                        .unwrap();
+                let slow =
+                    crate::eval_primitive(prim, &[boxed.clone(), sc.clone()], &BTreeMap::new())
+                        .unwrap();
+                assert_eq!(
+                    fast.as_tensor().unwrap().dtype,
+                    DType::F32,
+                    "{prim:?} t⊗s dtype"
+                );
+                assert_eq!(
+                    bits(&fast),
+                    bits(&slow),
+                    "f32 {prim:?} tensor⊗scalar(s={s}) dense != serial"
+                );
                 // scalar ⊗ tensor
-                let fast2 = crate::eval_primitive(prim, &[sc.clone(), dense.clone()], &BTreeMap::new()).unwrap();
-                let slow2 = crate::eval_primitive(prim, &[sc.clone(), boxed.clone()], &BTreeMap::new()).unwrap();
-                assert_eq!(bits(&fast2), bits(&slow2), "f32 {prim:?} scalar⊗tensor(s={s}) dense != serial");
+                let fast2 =
+                    crate::eval_primitive(prim, &[sc.clone(), dense.clone()], &BTreeMap::new())
+                        .unwrap();
+                let slow2 =
+                    crate::eval_primitive(prim, &[sc.clone(), boxed.clone()], &BTreeMap::new())
+                        .unwrap();
+                assert_eq!(
+                    bits(&fast2),
+                    bits(&slow2),
+                    "f32 {prim:?} scalar⊗tensor(s={s}) dense != serial"
+                );
             }
         }
     }
@@ -11346,11 +11608,18 @@ mod tests {
         );
         let sc = Value::scalar_f32(0.5);
         let timeit = |t: &Value| {
-            let _ = crate::eval_primitive(Primitive::Mul, &[t.clone(), sc.clone()], &BTreeMap::new()).unwrap();
+            let _ =
+                crate::eval_primitive(Primitive::Mul, &[t.clone(), sc.clone()], &BTreeMap::new())
+                    .unwrap();
             let mut best = f64::MAX;
             for _ in 0..30 {
                 let st = Instant::now();
-                let _ = crate::eval_primitive(Primitive::Mul, &[t.clone(), sc.clone()], &BTreeMap::new()).unwrap();
+                let _ = crate::eval_primitive(
+                    Primitive::Mul,
+                    &[t.clone(), sc.clone()],
+                    &BTreeMap::new(),
+                )
+                .unwrap();
                 best = best.min(st.elapsed().as_secs_f64());
             }
             best
@@ -11371,9 +11640,20 @@ mod tests {
     /// `[n]+[B,n]`) for Add/Sub/Mul/Div, including ±0/±inf/NaN.
     #[test]
     fn f32_broadcast_binop_dense_bit_identical_to_serial() {
-        let specials = [0.0f32, -0.0, 1.5, -3.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, 2.0];
+        let specials = [
+            0.0f32,
+            -0.0,
+            1.5,
+            -3.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            2.0,
+        ];
         let make = |len: usize, off: usize| -> Vec<f32> {
-            (0..len).map(|i| specials[(i + off) % specials.len()]).collect()
+            (0..len)
+                .map(|i| specials[(i + off) % specials.len()])
+                .collect()
         };
         let dense = |dims: Vec<u32>, d: &[f32]| {
             Value::Tensor(TensorValue::new_f32_values(Shape { dims }, d.to_vec()).unwrap())
@@ -11401,16 +11681,21 @@ mod tests {
         };
         // (lhs_dims, lhs_len, rhs_dims, rhs_len)
         let cases: &[(Vec<u32>, usize, Vec<u32>, usize)] = &[
-            (vec![4, 3], 12, vec![3], 3),       // bias-add [B,n]+[n]
-            (vec![4, 3], 12, vec![1, 3], 3),    // row [B,n]+[1,n]
-            (vec![4, 3], 12, vec![4, 1], 4),    // col [B,n]+[B,1]
-            (vec![3], 3, vec![4, 3], 12),       // rank-lift [n]+[B,n]
-            (vec![2, 3, 4], 24, vec![4], 4),    // rank-3 inner broadcast
+            (vec![4, 3], 12, vec![3], 3),    // bias-add [B,n]+[n]
+            (vec![4, 3], 12, vec![1, 3], 3), // row [B,n]+[1,n]
+            (vec![4, 3], 12, vec![4, 1], 4), // col [B,n]+[B,1]
+            (vec![3], 3, vec![4, 3], 12),    // rank-lift [n]+[B,n]
+            (vec![2, 3, 4], 24, vec![4], 4), // rank-3 inner broadcast
         ];
         for (ld, ll, rd, rl) in cases {
             let la = make(*ll, 0);
             let rb = make(*rl, 3);
-            for prim in [Primitive::Add, Primitive::Sub, Primitive::Mul, Primitive::Div] {
+            for prim in [
+                Primitive::Add,
+                Primitive::Sub,
+                Primitive::Mul,
+                Primitive::Div,
+            ] {
                 let fast = crate::eval_primitive(
                     prim,
                     &[dense(ld.clone(), &la), dense(rd.clone(), &rb)],
@@ -11424,8 +11709,15 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(fast.as_tensor().unwrap().dtype, DType::F32);
-                assert_eq!(fast.as_tensor().unwrap().shape, slow.as_tensor().unwrap().shape);
-                assert_eq!(bits(&fast), bits(&slow), "f32 {prim:?} broadcast {ld:?}⊗{rd:?} dense != serial");
+                assert_eq!(
+                    fast.as_tensor().unwrap().shape,
+                    slow.as_tensor().unwrap().shape
+                );
+                assert_eq!(
+                    bits(&fast),
+                    bits(&slow),
+                    "f32 {prim:?} broadcast {ld:?}⊗{rd:?} dense != serial"
+                );
             }
         }
     }
@@ -11435,7 +11727,9 @@ mod tests {
     fn bench_f32_broadcast_biasadd_dense_vs_serial() {
         use std::time::Instant;
         let (b, n) = (4096usize, 512usize); // [4096,512] + [512] bias-add, 2.1M out
-        let mat: Vec<f32> = (0..b * n).map(|i| (i % 1000) as f32 * 0.001 - 0.5).collect();
+        let mat: Vec<f32> = (0..b * n)
+            .map(|i| (i % 1000) as f32 * 0.001 - 0.5)
+            .collect();
         let bias: Vec<f32> = (0..n).map(|i| (i % 97) as f32 * 0.01).collect();
         let mk_dense = |dims: Vec<u32>, d: &[f32]| {
             Value::Tensor(TensorValue::new_f32_values(Shape { dims }, d.to_vec()).unwrap())
@@ -11451,11 +11745,21 @@ mod tests {
             )
         };
         let timeit = |lhs: &Value, rhs: &Value| {
-            let _ = crate::eval_primitive(Primitive::Add, &[lhs.clone(), rhs.clone()], &BTreeMap::new()).unwrap();
+            let _ = crate::eval_primitive(
+                Primitive::Add,
+                &[lhs.clone(), rhs.clone()],
+                &BTreeMap::new(),
+            )
+            .unwrap();
             let mut best = f64::MAX;
             for _ in 0..30 {
                 let t = Instant::now();
-                let _ = crate::eval_primitive(Primitive::Add, &[lhs.clone(), rhs.clone()], &BTreeMap::new()).unwrap();
+                let _ = crate::eval_primitive(
+                    Primitive::Add,
+                    &[lhs.clone(), rhs.clone()],
+                    &BTreeMap::new(),
+                )
+                .unwrap();
                 best = best.min(t.elapsed().as_secs_f64());
             }
             best

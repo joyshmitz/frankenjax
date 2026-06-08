@@ -704,7 +704,11 @@ fn next_after_f64(x: f64, toward: f64) -> f64 {
     let bits = x.to_bits();
     // Moving away from zero (increasing magnitude) increments the bit pattern;
     // moving toward zero decrements it.
-    let next = if (toward > x) == (x > 0.0) { bits + 1 } else { bits - 1 };
+    let next = if (toward > x) == (x > 0.0) {
+        bits + 1
+    } else {
+        bits - 1
+    };
     f64::from_bits(next)
 }
 

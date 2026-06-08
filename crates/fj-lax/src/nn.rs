@@ -399,7 +399,11 @@ mod tests {
         const ALPHA: f64 = 1.6732632423543772;
         const SCALE: f64 = 1.0507009873554805;
         for &x in &[-1e-12, -1e-8, -1e-4, -0.5, -3.0] {
-            assert_eq!(elu(&[x], 1.0)[0].to_bits(), x.exp_m1().to_bits(), "elu({x})");
+            assert_eq!(
+                elu(&[x], 1.0)[0].to_bits(),
+                x.exp_m1().to_bits(),
+                "elu({x})"
+            );
             assert_eq!(
                 elu(&[x], 2.0)[0].to_bits(),
                 (2.0 * x.exp_m1()).to_bits(),
@@ -410,7 +414,11 @@ mod tests {
                 (SCALE * (ALPHA * x.exp_m1())).to_bits(),
                 "selu({x})"
             );
-            assert_eq!(celu(&[x], 1.0)[0].to_bits(), x.exp_m1().to_bits(), "celu({x})");
+            assert_eq!(
+                celu(&[x], 1.0)[0].to_bits(),
+                x.exp_m1().to_bits(),
+                "celu({x})"
+            );
         }
         // And the expm1 form is strictly more accurate than exp(x)-1 near 0:
         // elu(-1e-10) should be ~-1e-10; the naive form is off by ~1e-16.

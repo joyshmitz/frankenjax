@@ -1087,8 +1087,12 @@ mod tests {
     #[test]
     fn batched_matmul_2d_f32_in_matches_promote_bits() {
         let (bt, m, k, n) = (2usize, 40usize, 33usize, 17usize);
-        let af: Vec<f32> = (0..bt * m * k).map(|i| (i as f32 * 0.013).sin() * 2.0 - 0.5).collect();
-        let bf: Vec<f32> = (0..bt * k * n).map(|i| (i as f32 * 0.019).cos() * 1.6 + 0.3).collect();
+        let af: Vec<f32> = (0..bt * m * k)
+            .map(|i| (i as f32 * 0.013).sin() * 2.0 - 0.5)
+            .collect();
+        let bf: Vec<f32> = (0..bt * k * n)
+            .map(|i| (i as f32 * 0.019).cos() * 1.6 + 0.3)
+            .collect();
         let got = batched_matmul_2d_f32_in(&af, bt, m, k, &bf, n);
         // reference: promote -> f64 GEMM -> round as f32.
         let a64: Vec<f64> = af.iter().map(|&v| v as f64).collect();
@@ -1096,7 +1100,11 @@ mod tests {
         let want64 = batched_matmul_2d(&a64, bt, m, k, &b64, n);
         assert_eq!(got.len(), want64.len());
         for idx in 0..got.len() {
-            assert_eq!(got[idx].to_bits(), (want64[idx] as f32).to_bits(), "mismatch at {idx}");
+            assert_eq!(
+                got[idx].to_bits(),
+                (want64[idx] as f32).to_bits(),
+                "mismatch at {idx}"
+            );
         }
     }
 
@@ -1136,7 +1144,11 @@ mod tests {
             let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
             println!(
                 "BENCH f32 GEMM [{m},{k}]@[{k},{n}]: promote+f64+round={:.3}ms ({:.1} GFLOP/s) native-f32-in={:.3}ms ({:.1} GFLOP/s) speedup={:.2}x",
-                promote * 1e3, gflop / promote, native * 1e3, gflop / native, promote / native
+                promote * 1e3,
+                gflop / promote,
+                native * 1e3,
+                gflop / native,
+                promote / native
             );
         }
     }

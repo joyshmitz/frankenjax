@@ -498,14 +498,8 @@ fn cholesky_schur_dot(lhs: &[f64], rhs: &[f64]) -> f64 {
     }
 
     let lanes = acc.as_array();
-    let mut dot = lanes[0]
-        + lanes[1]
-        + lanes[2]
-        + lanes[3]
-        + lanes[4]
-        + lanes[5]
-        + lanes[6]
-        + lanes[7];
+    let mut dot =
+        lanes[0] + lanes[1] + lanes[2] + lanes[3] + lanes[4] + lanes[5] + lanes[6] + lanes[7];
     while c < lhs.len() {
         dot += lhs[c] * rhs[c];
         c += 1;
@@ -1861,11 +1855,15 @@ fn complex_jacobi_eigendecomposition(
         let row_q: Vec<_> = (0..n).map(|j| a[q * n + j]).collect();
         for j in 0..n {
             // (Uᴴ A)[p][j] = c·A[p][j] + s·e^{iφ}·A[q][j]
-            a[p * n + j] =
-                complex_add(complex_mul((c, 0.0), row_p[j]), complex_mul(s_phase, row_q[j]));
+            a[p * n + j] = complex_add(
+                complex_mul((c, 0.0), row_p[j]),
+                complex_mul(s_phase, row_q[j]),
+            );
             // (Uᴴ A)[q][j] = −s·A[p][j] + c·e^{iφ}·A[q][j]
-            a[q * n + j] =
-                complex_add(complex_mul((-s, 0.0), row_p[j]), complex_mul(c_phase, row_q[j]));
+            a[q * n + j] = complex_add(
+                complex_mul((-s, 0.0), row_p[j]),
+                complex_mul(c_phase, row_q[j]),
+            );
         }
 
         // Apply U from the right (U = [[c, −s], [s·e^{-iφ}, c·e^{-iφ}]]):
@@ -1873,11 +1871,15 @@ fn complex_jacobi_eigendecomposition(
         let col_q: Vec<_> = (0..n).map(|i| a[i * n + q]).collect();
         for i in 0..n {
             // (A U)[i][p] = c·A[i][p] + s·e^{-iφ}·A[i][q]
-            a[i * n + p] =
-                complex_add(complex_mul((c, 0.0), col_p[i]), complex_mul(s_phase_conj, col_q[i]));
+            a[i * n + p] = complex_add(
+                complex_mul((c, 0.0), col_p[i]),
+                complex_mul(s_phase_conj, col_q[i]),
+            );
             // (A U)[i][q] = −s·A[i][p] + c·e^{-iφ}·A[i][q]
-            a[i * n + q] =
-                complex_add(complex_mul((-s, 0.0), col_p[i]), complex_mul(c_phase_conj, col_q[i]));
+            a[i * n + q] = complex_add(
+                complex_mul((-s, 0.0), col_p[i]),
+                complex_mul(c_phase_conj, col_q[i]),
+            );
         }
 
         // Diagonal elements should be real; off-diagonal (p,q) annihilated.
@@ -1891,11 +1893,15 @@ fn complex_jacobi_eigendecomposition(
         let vq: Vec<_> = (0..n).map(|i| v[i * n + q]).collect();
         for i in 0..n {
             // V'[i][p] = c·V[i][p] + s·e^{-iφ}·V[i][q]
-            v[i * n + p] =
-                complex_add(complex_mul((c, 0.0), vp[i]), complex_mul(s_phase_conj, vq[i]));
+            v[i * n + p] = complex_add(
+                complex_mul((c, 0.0), vp[i]),
+                complex_mul(s_phase_conj, vq[i]),
+            );
             // V'[i][q] = −s·V[i][p] + c·e^{-iφ}·V[i][q]
-            v[i * n + q] =
-                complex_add(complex_mul((-s, 0.0), vp[i]), complex_mul(c_phase_conj, vq[i]));
+            v[i * n + q] = complex_add(
+                complex_mul((-s, 0.0), vp[i]),
+                complex_mul(c_phase_conj, vq[i]),
+            );
         }
     }
 
@@ -1976,8 +1982,10 @@ fn complex_jacobi_eigendecomposition_cyclic(
                 let row_p: Vec<_> = (0..n).map(|j| a[p * n + j]).collect();
                 let row_q: Vec<_> = (0..n).map(|j| a[q * n + j]).collect();
                 for j in 0..n {
-                    a[p * n + j] =
-                        complex_add(complex_mul((c, 0.0), row_p[j]), complex_mul(s_phase, row_q[j]));
+                    a[p * n + j] = complex_add(
+                        complex_mul((c, 0.0), row_p[j]),
+                        complex_mul(s_phase, row_q[j]),
+                    );
                     a[q * n + j] = complex_add(
                         complex_mul((-s, 0.0), row_p[j]),
                         complex_mul(c_phase, row_q[j]),
@@ -3209,8 +3217,7 @@ fn complex_eig_qr(a: &[ComplexScalar], n: usize) -> EigQrResult {
     while p > 1 {
         // Deflate when the active block's bottom subdiagonal is negligible.
         let sub = complex_abs(t[(p - 1) * n + (p - 2)]);
-        let dscale =
-            complex_abs(t[(p - 2) * n + (p - 2)]) + complex_abs(t[(p - 1) * n + (p - 1)]);
+        let dscale = complex_abs(t[(p - 2) * n + (p - 2)]) + complex_abs(t[(p - 1) * n + (p - 1)]);
         if sub <= f64::EPSILON * dscale.max(f64::MIN_POSITIVE) {
             t[(p - 1) * n + (p - 2)] = (0.0, 0.0);
             p -= 1;
@@ -4585,8 +4592,10 @@ mod tests {
                 for b in 0..n {
                     let mut acc = (0.0, 0.0);
                     for i in 0..n {
-                        acc =
-                            complex_add(acc, complex_mul(complex_conj(v[i * n + a2]), hv[i * n + b]));
+                        acc = complex_add(
+                            acc,
+                            complex_mul(complex_conj(v[i * n + a2]), hv[i * n + b]),
+                        );
                     }
                     if a2 == b {
                         diag = diag.max((acc.0 - w[a2]).abs()).max(acc.1.abs());
@@ -4674,23 +4683,32 @@ mod tests {
                 t_new.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (o, c) = (median_ms(t_old), median_ms(t_new));
-            println!("complex_jacobi n={n}: maxpivot {o:.3}ms | cyclic {c:.3}ms | speedup {:.2}x", o / c);
+            println!(
+                "complex_jacobi n={n}: maxpivot {o:.3}ms | cyclic {c:.3}ms | speedup {:.2}x",
+                o / c
+            );
         }
     }
 
     /// Ground truth for frankenjax-eig-nonsymmetric-broken-n3-66pmy: build A = H·T·H
     /// with H a symmetric-orthogonal Householder and T block-diagonal — a 1×1 {2}
     /// plus a 2×2 rotation block {±3i}. A is a dense non-symmetric matrix similar to
-#[test]
+    #[test]
     fn real_eig_cube_roots_of_unity_diag() {
         // Companion of z^3-1: eigenvalues are the cube roots of unity {1, e^{±2πi/3}},
         // all modulus 1. Real unshifted QR + 2x2-block extraction may fail to separate.
         let n = 3usize;
-        let a = [0.0,0.0,1.0, 1.0,0.0,0.0, 0.0,1.0,0.0];
+        let a = [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         let (w, _) = eig_qr_iteration(&a, n);
-        let want = [(1.0, 0.0), (-0.5, 0.8660254037844387), (-0.5, -0.8660254037844387)];
-        for &(er,ei) in &want {
-            let f = w.iter().any(|&(wr,wi)| (wr-er).abs()<1e-5 && (wi-ei).abs()<1e-5);
+        let want = [
+            (1.0, 0.0),
+            (-0.5, 0.8660254037844387),
+            (-0.5, -0.8660254037844387),
+        ];
+        for &(er, ei) in &want {
+            let f = w
+                .iter()
+                .any(|&(wr, wi)| (wr - er).abs() < 1e-5 && (wi - ei).abs() < 1e-5);
             assert!(f, "REAL EIG MISSING ({er},{ei}) in {w:?}");
         }
     }
@@ -4723,7 +4741,10 @@ mod tests {
             let found = w
                 .iter()
                 .any(|&(wr, wi)| (wr - er).abs() < 1e-6 && (wi - ei).abs() < 1e-6);
-            assert!(found, "missing eigenvalue ({er},{ei}) — QR did not converge");
+            assert!(
+                found,
+                "missing eigenvalue ({er},{ei}) — QR did not converge"
+            );
         }
     }
 
@@ -4755,7 +4776,8 @@ mod tests {
         let (w, vecs) = complex_eig_qr(&a, n);
         for &(er, ei) in &eigs {
             assert!(
-                w.iter().any(|&(wr, wi)| (wr - er).abs() < 1e-7 && (wi - ei).abs() < 1e-7),
+                w.iter()
+                    .any(|&(wr, wi)| (wr - er).abs() < 1e-7 && (wi - ei).abs() < 1e-7),
                 "missing eigenvalue ({er},{ei}) in {w:?}"
             );
         }
@@ -4837,7 +4859,11 @@ mod tests {
                 }
                 let lv = complex_mul(w[col], v[row * n + col]);
                 let res = complex_abs(complex_sub(av, lv));
-                assert!(res <= tol, "residual {res} at ({row},{col}) > {tol}; w={:?}", w[col]);
+                assert!(
+                    res <= tol,
+                    "residual {res} at ({row},{col}) > {tol}; w={:?}",
+                    w[col]
+                );
             }
         }
     }
@@ -4880,7 +4906,8 @@ mod tests {
         let (w, v) = eig_qr_iteration(&a, n);
         for &(er, ei) in &[(5.0, 0.0), (-1.0, 0.0), (1.0, 2.0), (1.0, -2.0)] {
             assert!(
-                w.iter().any(|&(wr, wi)| (wr - er).abs() < 1e-6 && (wi - ei).abs() < 1e-6),
+                w.iter()
+                    .any(|&(wr, wi)| (wr - er).abs() < 1e-6 && (wi - ei).abs() < 1e-6),
                 "missing eigenvalue ({er},{ei}) in {w:?}"
             );
         }
@@ -7167,7 +7194,10 @@ mod tests {
             })
             .collect();
         for (g, w) in got.iter().zip(&[(1.0, -1.0), (2.0, -2.0)]) {
-            assert!((g.0 - w.0).abs() < 1e-5 && (g.1 - w.1).abs() < 1e-5, "got {got:?}");
+            assert!(
+                (g.0 - w.0).abs() < 1e-5 && (g.1 - w.1).abs() < 1e-5,
+                "got {got:?}"
+            );
         }
     }
 
@@ -7179,19 +7209,30 @@ mod tests {
         let n = 3usize;
         let c = |re: f64, im: f64| Literal::from_complex128(re, im);
         let a_raw = [
-            (4.0, 1.0), (0.5, -0.3), (0.2, 0.1), //
-            (-0.4, 0.2), (5.0, -1.0), (0.6, 0.4), //
-            (0.1, -0.2), (0.3, 0.5), (6.0, 0.7),
+            (4.0, 1.0),
+            (0.5, -0.3),
+            (0.2, 0.1), //
+            (-0.4, 0.2),
+            (5.0, -1.0),
+            (0.6, 0.4), //
+            (0.1, -0.2),
+            (0.3, 0.5),
+            (6.0, 0.7),
         ];
         let b_raw = [
-            (1.0, 2.0), (3.0, -1.0), //
-            (-2.0, 0.5), (0.0, 1.0), //
-            (1.5, -1.5), (2.0, 2.0),
+            (1.0, 2.0),
+            (3.0, -1.0), //
+            (-2.0, 0.5),
+            (0.0, 1.0), //
+            (1.5, -1.5),
+            (2.0, 2.0),
         ];
         let a = Value::Tensor(
             TensorValue::new(
                 DType::Complex128,
-                Shape { dims: vec![n as u32, n as u32] },
+                Shape {
+                    dims: vec![n as u32, n as u32],
+                },
                 a_raw.iter().map(|&(r, i)| c(r, i)).collect(),
             )
             .unwrap(),
@@ -7199,7 +7240,9 @@ mod tests {
         let b = Value::Tensor(
             TensorValue::new(
                 DType::Complex128,
-                Shape { dims: vec![n as u32, 2] },
+                Shape {
+                    dims: vec![n as u32, 2],
+                },
                 b_raw.iter().map(|&(r, i)| c(r, i)).collect(),
             )
             .unwrap(),
@@ -7209,7 +7252,11 @@ mod tests {
         };
         assert_eq!(t.dtype, DType::Complex128);
         assert_eq!(t.shape.dims, vec![n as u32, 2]);
-        let x: Vec<(f64, f64)> = t.elements.iter().map(|l| l.as_complex128().unwrap()).collect();
+        let x: Vec<(f64, f64)> = t
+            .elements
+            .iter()
+            .map(|l| l.as_complex128().unwrap())
+            .collect();
         // A·X must equal B (residual < 1e-10).
         for col in 0..2 {
             for row in 0..n {
@@ -7235,7 +7282,9 @@ mod tests {
                 TensorValue::new(
                     DType::Complex128,
                     Shape { dims: vec![2, 2] },
-                    data.iter().map(|&(r, i)| Literal::from_complex128(r, i)).collect(),
+                    data.iter()
+                        .map(|&(r, i)| Literal::from_complex128(r, i))
+                        .collect(),
                 )
                 .unwrap(),
             )
@@ -7265,7 +7314,10 @@ mod tests {
             panic!("logabsdet scalar");
         };
         let lad = ll.as_f64().unwrap();
-        assert!((sre - 0.0).abs() < 1e-12 && (sim - 1.0).abs() < 1e-12, "sign ({sre},{sim})");
+        assert!(
+            (sre - 0.0).abs() < 1e-12 && (sim - 1.0).abs() < 1e-12,
+            "sign ({sre},{sim})"
+        );
         assert!((lad - 2.0_f64.ln()).abs() < 1e-12, "logabsdet {lad}");
     }
 

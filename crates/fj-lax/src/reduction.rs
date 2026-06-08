@@ -657,13 +657,25 @@ pub(crate) fn eval_reduce_axes(
                 let dense = match tensor.dtype {
                     DType::F64 => tensor.elements.as_f64_slice().and_then(|v| {
                         dense_f64_axis_reduce(
-                            tensor, v, |x| x, &kept_axes, &out_dims, out_count, float_init,
+                            tensor,
+                            v,
+                            |x| x,
+                            &kept_axes,
+                            &out_dims,
+                            out_count,
+                            float_init,
                             &float_op,
                         )
                     }),
                     DType::F32 => tensor.elements.as_f32_slice().and_then(|v| {
                         dense_f64_axis_reduce(
-                            tensor, v, f64::from, &kept_axes, &out_dims, out_count, float_init,
+                            tensor,
+                            v,
+                            f64::from,
+                            &kept_axes,
+                            &out_dims,
+                            out_count,
+                            float_init,
                             &float_op,
                         )
                     }),
@@ -1760,8 +1772,18 @@ mod tests {
     #[test]
     fn dense_f32_reduce_bit_identical_to_literal_path() {
         let data: Vec<f32> = std::hint::black_box(vec![
-            1.5, -0.0, 2.0, -3.25, f32::INFINITY, 0.0, f32::NEG_INFINITY, 2.5,
-            -1.0, 4.0, f32::from_bits(0x7fc0_0001), 0.5,
+            1.5,
+            -0.0,
+            2.0,
+            -3.25,
+            f32::INFINITY,
+            0.0,
+            f32::NEG_INFINITY,
+            2.5,
+            -1.0,
+            4.0,
+            f32::from_bits(0x7fc0_0001),
+            0.5,
         ]);
         let dims = vec![3u32, 4u32];
         let dense = Value::Tensor(
@@ -1787,7 +1809,11 @@ mod tests {
         let f32_bits = |v: &Value| -> Vec<u32> {
             let lit_bits = |l: &Literal| match l {
                 Literal::F32Bits(b) => {
-                    if f32::from_bits(*b).is_nan() { 0x7fc0_0000 } else { *b }
+                    if f32::from_bits(*b).is_nan() {
+                        0x7fc0_0000
+                    } else {
+                        *b
+                    }
                 }
                 o => panic!("expected f32, got {o:?}"),
             };
@@ -1812,7 +1838,11 @@ mod tests {
                 }
                 let d = crate::eval_primitive(primitive, std::slice::from_ref(&dense), &p).unwrap();
                 let l = crate::eval_primitive(primitive, std::slice::from_ref(&boxed), &p).unwrap();
-                assert_eq!(f32_bits(&d), f32_bits(&l), "f32 {primitive:?} axes={axes:?} dense != generic");
+                assert_eq!(
+                    f32_bits(&d),
+                    f32_bits(&l),
+                    "f32 {primitive:?} axes={axes:?} dense != generic"
+                );
             }
         }
     }
@@ -1822,19 +1852,31 @@ mod tests {
     fn bench_f32_reduce_sum_axis_dense_vs_generic() {
         use std::time::Instant;
         let (rows, cols) = (4096usize, 1024usize); // reduce over axis 1 -> [4096]
-        let data: Vec<f32> = (0..rows * cols).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
         let dims = vec![rows as u32, cols as u32];
-        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
         let boxed = Value::Tensor(
-            TensorValue::new(DType::F32, Shape { dims: dims.clone() }, data.iter().map(|&v| Literal::from_f32(v)).collect()).unwrap(),
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data.iter().map(|&v| Literal::from_f32(v)).collect(),
+            )
+            .unwrap(),
         );
         let p = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
         let time = |input: &Value| {
-            let _ = crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(input), &p).unwrap();
+            let _ = crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(input), &p)
+                .unwrap();
             let mut best = f64::MAX;
             for _ in 0..20 {
                 let t = Instant::now();
-                let _ = crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(input), &p).unwrap();
+                let _ =
+                    crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(input), &p)
+                        .unwrap();
                 best = best.min(t.elapsed().as_secs_f64());
             }
             best
@@ -1843,7 +1885,9 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH f32 reduce_sum axis1 [{rows},{cols}]: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
@@ -2643,7 +2687,11 @@ mod tests {
                 let d = crate::eval_primitive(prim, std::slice::from_ref(&dense), &p).unwrap();
                 let l = crate::eval_primitive(prim, std::slice::from_ref(&boxed), &p).unwrap();
                 assert_eq!(d.as_tensor().unwrap().dtype, DType::F32, "{prim:?} dtype");
-                assert_eq!(f32_bits(&d), f32_bits(&l), "f32 {prim:?} axis={axis} rev={rev}");
+                assert_eq!(
+                    f32_bits(&d),
+                    f32_bits(&l),
+                    "f32 {prim:?} axis={axis} rev={rev}"
+                );
             }
         }
     }
@@ -2653,19 +2701,30 @@ mod tests {
     fn bench_f32_cumsum_dense_vs_generic() {
         use std::time::Instant;
         let (rows, cols) = (2048usize, 2048usize); // cumsum over last axis
-        let data: Vec<f32> = (0..rows * cols).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
         let dims = vec![rows as u32, cols as u32];
-        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
         let boxed = Value::Tensor(
-            TensorValue::new(DType::F32, Shape { dims: dims.clone() }, data.iter().copied().map(Literal::from_f32).collect()).unwrap(),
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
         );
         let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
         let time = |input: &Value| {
-            let _ = crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(input), &p).unwrap();
+            let _ =
+                crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(input), &p).unwrap();
             let mut best = f64::MAX;
             for _ in 0..20 {
                 let t = Instant::now();
-                let _ = crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(input), &p).unwrap();
+                let _ = crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(input), &p)
+                    .unwrap();
                 best = best.min(t.elapsed().as_secs_f64());
             }
             best
@@ -2674,7 +2733,9 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH f32 cumsum axis1 [{rows},{cols}]: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
