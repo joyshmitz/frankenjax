@@ -1012,6 +1012,17 @@ enum LiteralBufferStorage {
         dtype: DType,
         literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
     },
+    /// Dense half-float storage: raw 16-bit values, tagged with the logical dtype
+    /// (`BF16` or `F16`). Lets half-precision ML paths (bf16 is the dominant
+    /// training dtype) borrow a packed `&[u16]` slice and emit dense outputs
+    /// without per-element `Literal` materialization. The stored `u16` IS the
+    /// logical value's bit pattern, so materializing back via `BF16Bits(bits)` /
+    /// `F16Bits(bits)` is bit-identical.
+    HalfFloat {
+        values: Arc<Vec<u16>>,
+        dtype: DType,
+        literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
+    },
     RepeatedPatches {
         base: Arc<Vec<Literal>>,
         repeats: usize,
@@ -1106,6 +1117,24 @@ impl LiteralBuffer {
         }
     }
 
+    /// Build a dense half-float buffer from raw 16-bit values tagged with a
+    /// half-float dtype. `dtype` must be `BF16` or `F16`. The `u16` bits ARE the
+    /// logical values, so materialization is bit-exact.
+    #[must_use]
+    pub fn from_half_float_values(values: Vec<u16>, dtype: DType) -> Self {
+        debug_assert!(
+            matches!(dtype, DType::BF16 | DType::F16),
+            "from_half_float_values requires a half-float dtype"
+        );
+        Self {
+            storage: LiteralBufferStorage::HalfFloat {
+                values: Arc::new(values),
+                dtype,
+                literals: Arc::new(OnceLock::new()),
+            },
+        }
+    }
+
     #[must_use]
     pub fn from_repeated_with_patches(
         base: Vec<Literal>,
@@ -1185,6 +1214,15 @@ impl LiteralBuffer {
                     )
                 })
                 .as_slice(),
+            LiteralBufferStorage::HalfFloat {
+                values,
+                dtype,
+                literals,
+            } => literals
+                .get_or_init(|| {
+                    Arc::new(values.iter().map(|&bits| half_bits_to_literal(bits, *dtype)).collect())
+                })
+                .as_slice(),
             LiteralBufferStorage::RepeatedPatches {
                 base,
                 repeats,
@@ -1215,11 +1253,33 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(_) => None,
             LiteralBufferStorage::F64 { values, .. } => Some(values.as_slice()),
             LiteralBufferStorage::F32 { .. } => None,
+            LiteralBufferStorage::HalfFloat { .. } => None,
             LiteralBufferStorage::I64 { .. } => None,
             LiteralBufferStorage::Bool { .. } => None,
             LiteralBufferStorage::Complex { .. } => None,
             LiteralBufferStorage::RepeatedPatches { .. } => None,
             LiteralBufferStorage::Concat { .. } => None,
+        }
+    }
+
+    /// Borrow the dense half-float storage as a packed `&[u16]` bit slice, if this
+    /// buffer is half-float-backed. Returns `None` otherwise. The logical dtype
+    /// (`BF16`/`F16`) is available via [`Self::half_float_dtype`].
+    #[must_use]
+    pub fn as_half_float_slice(&self) -> Option<&[u16]> {
+        match &self.storage {
+            LiteralBufferStorage::HalfFloat { values, .. } => Some(values.as_slice()),
+            _ => None,
+        }
+    }
+
+    /// The logical half-float dtype of a half-float-backed buffer (`BF16`/`F16`),
+    /// or `None` if this buffer is not dense-half-float-backed.
+    #[must_use]
+    pub fn half_float_dtype(&self) -> Option<DType> {
+        match &self.storage {
+            LiteralBufferStorage::HalfFloat { dtype, .. } => Some(*dtype),
+            _ => None,
         }
     }
 
@@ -1263,6 +1323,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(_)
             | LiteralBufferStorage::F64 { .. }
             | LiteralBufferStorage::F32 { .. }
+            | LiteralBufferStorage::HalfFloat { .. }
             | LiteralBufferStorage::Bool { .. }
             | LiteralBufferStorage::Complex { .. }
             | LiteralBufferStorage::RepeatedPatches { .. }
@@ -1277,6 +1338,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(_)
             | LiteralBufferStorage::F64 { .. }
             | LiteralBufferStorage::F32 { .. }
+            | LiteralBufferStorage::HalfFloat { .. }
             | LiteralBufferStorage::I64 { .. }
             | LiteralBufferStorage::Complex { .. }
             | LiteralBufferStorage::RepeatedPatches { .. }
@@ -1290,6 +1352,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(elements) => elements.len(),
             LiteralBufferStorage::F64 { values, .. } => values.len(),
             LiteralBufferStorage::F32 { values, .. } => values.len(),
+            LiteralBufferStorage::HalfFloat { values, .. } => values.len(),
             LiteralBufferStorage::I64 { values, .. } => values.len(),
             LiteralBufferStorage::Bool { values, .. } => values.len(),
             LiteralBufferStorage::Complex { values, .. } => values.len(),
@@ -1313,6 +1376,7 @@ impl LiteralBuffer {
             self.storage,
             LiteralBufferStorage::F64 { .. }
                 | LiteralBufferStorage::F32 { .. }
+                | LiteralBufferStorage::HalfFloat { .. }
                 | LiteralBufferStorage::I64 { .. }
                 | LiteralBufferStorage::Bool { .. }
                 | LiteralBufferStorage::Complex { .. }
@@ -1327,6 +1391,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::Literals(elements) => Arc::make_mut(elements),
             LiteralBufferStorage::F64 { .. }
             | LiteralBufferStorage::F32 { .. }
+            | LiteralBufferStorage::HalfFloat { .. }
             | LiteralBufferStorage::I64 { .. }
             | LiteralBufferStorage::Bool { .. }
             | LiteralBufferStorage::Complex { .. }
@@ -1397,6 +1462,17 @@ impl Clone for LiteralBuffer {
                 literals,
             } => Self {
                 storage: LiteralBufferStorage::Complex {
+                    values: Arc::clone(values),
+                    dtype: *dtype,
+                    literals: Arc::clone(literals),
+                },
+            },
+            LiteralBufferStorage::HalfFloat {
+                values,
+                dtype,
+                literals,
+            } => Self {
+                storage: LiteralBufferStorage::HalfFloat {
                     values: Arc::clone(values),
                     dtype: *dtype,
                     literals: Arc::clone(literals),
@@ -1579,6 +1655,23 @@ impl IntoIterator for LiteralBuffer {
                     .collect::<Vec<_>>()
                     .into_iter()
             }
+            LiteralBufferStorage::HalfFloat {
+                values,
+                dtype,
+                literals,
+            } => {
+                if let Some(materialized) = literals.get() {
+                    return Arc::try_unwrap(Arc::clone(materialized))
+                        .unwrap_or_else(|elements| (*elements).clone())
+                        .into_iter();
+                }
+
+                values
+                    .iter()
+                    .map(|&bits| half_bits_to_literal(bits, dtype))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
             LiteralBufferStorage::RepeatedPatches {
                 base,
                 repeats,
@@ -1650,6 +1743,15 @@ fn complex_pair_to_literal(re: f64, im: f64, dtype: DType) -> Literal {
     match dtype {
         DType::Complex64 => Literal::from_complex64(re as f32, im as f32),
         _ => Literal::from_complex128(re, im),
+    }
+}
+
+/// Materialize a dense half-float bit pattern into the matching `Literal`. The
+/// stored `u16` IS the value's bits, so this is bit-exact.
+fn half_bits_to_literal(bits: u16, dtype: DType) -> Literal {
+    match dtype {
+        DType::F16 => Literal::F16Bits(bits),
+        _ => Literal::BF16Bits(bits),
     }
 }
 
@@ -1772,6 +1874,33 @@ impl TensorValue {
             dtype: DType::F32,
             shape,
             elements: LiteralBuffer::from_f32_values(values),
+        })
+    }
+
+    /// Build a half-float (`BF16`/`F16`) tensor from dense 16-bit values, backed
+    /// by the packed [`LiteralBuffer::from_half_float_values`] storage. `dtype`
+    /// must be `BF16` or `F16`; the `u16`s are the values' bit patterns.
+    pub fn new_half_float_values(
+        dtype: DType,
+        shape: Shape,
+        values: Vec<u16>,
+    ) -> Result<Self, ValueError> {
+        let expected_count = shape.element_count().ok_or(ValueError::ShapeOverflow {
+            shape: shape.clone(),
+        })?;
+
+        if expected_count != values.len() as u64 {
+            return Err(ValueError::ElementCountMismatch {
+                shape,
+                expected_count,
+                actual_count: values.len(),
+            });
+        }
+
+        Ok(Self {
+            dtype,
+            shape,
+            elements: LiteralBuffer::from_half_float_values(values, dtype),
         })
     }
 
@@ -6178,6 +6307,49 @@ mod tests {
         }
         // element-count mismatch is rejected like the other dense constructors.
         assert!(TensorValue::new_f32_values(Shape::vector(2), vec![1.0]).is_err());
+    }
+
+    #[test]
+    fn dense_half_float_storage_roundtrips_and_preserves_api() {
+        // Dense BF16/F16 storage must present the same `Literal` API as the boxed
+        // form, materializing bit-exact (the stored u16 IS the value's bits), with
+        // the right dtype tag, and fall back to literal storage on mutation (COW).
+        for (dtype, mk_lit) in [
+            (DType::BF16, Literal::BF16Bits as fn(u16) -> Literal),
+            (DType::F16, Literal::F16Bits as fn(u16) -> Literal),
+        ] {
+            let raw: Vec<u16> = vec![0x0000, 0x8000, 0x3f80, 0x7fc1, 0xffff]; // +0,-0,~1,NaN,etc
+            let expected: Vec<Literal> = raw.iter().copied().map(mk_lit).collect();
+            let mut buffer = LiteralBuffer::from_half_float_values(raw.clone(), dtype);
+            assert_eq!(buffer.len(), raw.len());
+            assert_eq!(buffer.as_half_float_slice().expect("dense half"), raw.as_slice());
+            assert_eq!(buffer.half_float_dtype(), Some(dtype));
+            assert!(buffer.as_f64_slice().is_none());
+            assert_eq!(buffer.as_slice(), expected.as_slice());
+            assert_eq!(buffer.to_vec(), expected);
+            assert_eq!(format!("{buffer:?}"), format!("{:?}", expected));
+            assert_eq!(
+                serde_json::to_string(&buffer).expect("serialize"),
+                serde_json::to_string(&expected).expect("serialize literals")
+            );
+            assert_eq!(buffer.clone().into_iter().collect::<Vec<_>>(), expected);
+            assert_eq!(buffer, expected);
+            // COW on mutation -> materializes to literal storage.
+            let original = buffer.clone();
+            buffer[0] = mk_lit(0x1234);
+            assert_eq!(original.as_slice(), expected.as_slice());
+            assert_eq!(buffer[0], mk_lit(0x1234));
+            assert!(buffer.as_half_float_slice().is_none());
+
+            // TensorValue constructor round-trips with the right dtype.
+            let t = TensorValue::new_half_float_values(dtype, Shape::vector(raw.len() as u32), raw.clone()).unwrap();
+            assert_eq!(t.dtype, dtype);
+            assert_eq!(t.elements.as_half_float_slice().expect("dense"), raw.as_slice());
+            for (i, &b) in raw.iter().enumerate() {
+                assert_eq!(t.elements[i], mk_lit(b));
+            }
+            assert!(TensorValue::new_half_float_values(dtype, Shape::vector(2), vec![1]).is_err());
+        }
     }
 
     #[test]
