@@ -1,0 +1,74 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "project": "frankenjax",
+  "bead": "frankenjax-x6y94",
+  "pass": 184,
+  "skill_loop": "repeatedly-apply-skill/extreme-software-optimization",
+  "status": "rejected",
+  "date": "2026-06-08",
+  "target": {
+    "crate": "fj-lax",
+    "benchmark": "linalg/pinv_256x128_f64",
+    "profile_backed": true,
+    "profile_note": "post-pass181 pinned fmd linalg profile ranked pinv256 as the top non-GEMM row after the recursive/communication-avoiding GEMM route was rejected by the current bit-exact Dot/DotGeneral contract"
+  },
+  "source": {
+    "baseline_commit": "1657d3da",
+    "candidate_lever": "private Jacobi SVD U-output layout selector so pinv_svd can receive U columns directly and skip the row-major-to-column-major transpose",
+    "production_source_kept": false,
+    "source_restored_proof": "git diff -- crates/fj-lax/src/linalg.rs is empty after manual apply_patch restoration"
+  },
+  "benchmarks": {
+    "tool": "criterion via rch",
+    "worker": "fmd",
+    "baseline_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-x6y94-baseline-current cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_256x128_f64 --quick --noplot",
+    "candidate_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-x6y94-candidate cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_256x128_f64 --quick --noplot",
+    "baseline_ms": {
+      "low": 38.927,
+      "median": 39.008,
+      "high": 39.028
+    },
+    "candidate_ms": {
+      "low": 39.453,
+      "median": 39.543,
+      "high": 39.566
+    },
+    "median_speedup": 0.986497,
+    "conservative_speedup": 0.984519,
+    "score": 0.0
+  },
+  "behavior_proof": {
+    "candidate_isomorphism": [
+      "Jacobi sweep p/q order unchanged",
+      "alpha/beta/gamma row accumulation order unchanged",
+      "rotation formula and W/V update order unchanged",
+      "singular-value norm computation and total_cmp sorting unchanged",
+      "public SVD row-major layout unchanged in the tested candidate",
+      "pinv rcond cutoff unchanged",
+      "pinv result loops l->i->j and floating-point recurrence unchanged",
+      "dtype/shape/error behavior unchanged",
+      "signed-zero/NaN behavior unchanged",
+      "RNG absent"
+    ],
+    "post_revert_tests": [
+      {
+        "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-x6y94-proof cargo test -p fj-lax --lib pinv -- --nocapture",
+        "worker": "fmd",
+        "result": "passed 8/8"
+      },
+      {
+        "command": "git diff --check",
+        "result": "passed"
+      }
+    ],
+    "golden": {
+      "path": "artifacts/performance/evidence/fj_lax_pinv_direct_u_columns_x6y94_pass184_2026-06-08.rejected.golden",
+      "sha256": "4d3a6362481603ecc5f9c2d3053a42547fc405d2985122aa6221067e34bedcde"
+    }
+  },
+  "decision": {
+    "keep_threshold": "Score >= 2.0",
+    "result": "Reject. Candidate regressed the same-worker benchmark, so no source lever is kept.",
+    "next_route": "Do not repeat SVD U-transpose/materialization micro-levers. Reprofile restored source and attack a different structural BLAS/LAPACK primitive, such as blocked/communication-avoiding SVD or LU/QR panel work with a proven behavior contract."
+  }
+}

@@ -1,0 +1,14 @@
+frankenjax-x6y94 rejected golden
+pass: 184
+target: linalg/pinv_256x128_f64
+head_baseline: 1657d3da
+worker: fmd
+baseline_ms: 38.927..39.008..39.028
+candidate_ms: 39.453..39.543..39.566
+median_speedup: 0.986497
+conservative_speedup: 0.984519
+score: 0.0
+decision: reject, no production source kept
+source_after_revert: git diff -- crates/fj-lax/src/linalg.rs is empty
+proof: RCH cargo test -p fj-lax --lib pinv -- --nocapture passed 8/8 on fmd after source restoration
+isomorphism: candidate only changed final private U materialization layout for pinv_svd; Jacobi sweep order, dot row order, rotation order, sigma total_cmp sorting, V materialization, rcond cutoff, result loop order, dtype/shape/error behavior, signed-zero/NaN behavior, and RNG absence were unchanged, but the same-worker performance gate failed.
