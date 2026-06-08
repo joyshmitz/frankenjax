@@ -470,13 +470,47 @@ fn cholesky_schur_update_lower_rows(
         let a_row = &mut rows[local_p * n..local_p * n + n];
         for q in 0..=p {
             let q_row = &l21[q * jb..q * jb + jb];
-            let mut dot = 0.0_f64;
-            for c in 0..jb {
-                dot += p_row[c] * q_row[c];
-            }
+            let dot = cholesky_schur_dot(p_row, q_row);
             a_row[base + q] -= dot;
         }
     }
+}
+
+const CHOLESKY_SCHUR_DOT_LANES: usize = 8;
+type CholeskySchurF64xN = std::simd::Simd<f64, CHOLESKY_SCHUR_DOT_LANES>;
+
+#[inline]
+fn cholesky_schur_f64x8(values: &[f64]) -> CholeskySchurF64xN {
+    CholeskySchurF64xN::from_array([
+        values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7],
+    ])
+}
+
+#[inline]
+fn cholesky_schur_dot(lhs: &[f64], rhs: &[f64]) -> f64 {
+    debug_assert_eq!(lhs.len(), rhs.len());
+
+    let mut c = 0usize;
+    let mut acc = CholeskySchurF64xN::splat(0.0);
+    while c + CHOLESKY_SCHUR_DOT_LANES <= lhs.len() {
+        acc += cholesky_schur_f64x8(&lhs[c..]) * cholesky_schur_f64x8(&rhs[c..]);
+        c += CHOLESKY_SCHUR_DOT_LANES;
+    }
+
+    let lanes = acc.as_array();
+    let mut dot = lanes[0]
+        + lanes[1]
+        + lanes[2]
+        + lanes[3]
+        + lanes[4]
+        + lanes[5]
+        + lanes[6]
+        + lanes[7];
+    while c < lhs.len() {
+        dot += lhs[c] * rhs[c];
+        c += 1;
+    }
+    dot
 }
 
 /// Block size for the right-looking Cholesky panel.
@@ -5170,7 +5204,7 @@ mod tests {
             .collect();
         let digest = fj_test_utils::fixture_id_from_json(&output_bits)?;
         assert_eq!(
-            digest, "9fbcc45dd316e9c3b2e5f730d895c39bad0b562e990432196fd7eb4a0627fdc6",
+            digest, "cae3c6a0fcc965880d1379765d0b7886deb1ca3d1c9dc1036ca705e60306ff0a",
             "blocked Cholesky golden output digest changed"
         );
         Ok(())

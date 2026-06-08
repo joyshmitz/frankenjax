@@ -1,0 +1,120 @@
+{
+  "artifact": "fj_lax_cholesky_schur_simd_9dgqw_pass177_2026-06-08",
+  "bead": "frankenjax-9dgqw",
+  "pass": 177,
+  "status": "kept",
+  "target": "linalg/cholesky_1024x1024_f64",
+  "profile_route": {
+    "source": "fresh RCH criterion linalg profile after frankenjax-4doiz closeout and current no-gaps routing",
+    "worker": "vmi1149989",
+    "top_rows": [
+      {
+        "benchmark": "linalg/matmul_2d_2048x2048x2048_f64",
+        "ms": [964.74, 971.19, 997.01],
+        "decision": "Top row, but direct GEMM remains blocked by the closed exact-order bitwise contract; recursive or communication-avoiding GEMM needs explicit FP-tolerance contract artifacts first."
+      },
+      {
+        "benchmark": "linalg/matmul_2d_1024x1024x1024_f64",
+        "ms": [131.26, 131.29, 131.42],
+        "decision": "Same exact-order GEMM contract family as the 2048 row."
+      },
+      {
+        "benchmark": "linalg/cholesky_1024x1024_f64",
+        "ms": [58.921, 59.061, 59.62],
+        "decision": "Top shippable non-GEMM factorization row under the existing large-blocked tolerance contract."
+      },
+      {
+        "benchmark": "linalg/lu_1024x1024_f64",
+        "ms": [51.975, 53.936, 54.427]
+      },
+      {
+        "benchmark": "linalg/qr_1024x1024_f64",
+        "ms": [39.204, 39.343, 39.898]
+      },
+      {
+        "benchmark": "linalg/pinv_256x128_f64",
+        "ms": [39.699, 40.084, 40.181]
+      }
+    ],
+    "alien_primitive": "Safe-Rust portable-SIMD lane accumulation for the inner c dimension of the blocked Cholesky lower Schur dot. Unlike the rejected q-lane SYRK microkernel, this lever uses the already tolerance-gated large-blocked path to admit a deterministic FP grouping change."
+  },
+  "lever": {
+    "description": "Replace the scalar c loop inside cholesky_schur_update_lower_rows with an 8-lane std::simd dot helper plus scalar tail.",
+    "files": ["crates/fj-lax/src/linalg.rs"],
+    "one_lever_only": true,
+    "unsafe_code": false
+  },
+  "benchmarks": {
+    "initial_profile_anchor": {
+      "worker": "vmi1149989",
+      "command": "cargo bench -p fj-lax --bench lax_baseline -- linalg --quick --noplot",
+      "target_ms": [58.921, 59.061, 59.62]
+    },
+    "same_worker_gate": {
+      "worker": "fmd",
+      "baseline_command": "cargo bench -p fj-lax --bench lax_baseline -- linalg/cholesky_1024x1024_f64 --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+      "baseline_source": "restored scalar Schur dot with original blocked Cholesky digest",
+      "baseline_ms": [25.577, 25.941, 26.416],
+      "candidate_command": "cargo bench -p fj-lax --bench lax_baseline -- linalg/cholesky_1024x1024_f64 --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+      "candidate_source": "final SIMD Schur dot with updated blocked Cholesky digest",
+      "candidate_ms": [22.357, 22.902, 23.543],
+      "median_speedup": 1.132696,
+      "conservative_speedup": 1.086353,
+      "intervals_non_overlapping": true
+    },
+    "score": {
+      "impact": 3.0,
+      "confidence": 4.0,
+      "effort": 2.0,
+      "value": 6.0,
+      "threshold": 2.0
+    }
+  },
+  "behavior_proof": {
+    "isomorphism": [
+      "Small matrices still use cholesky_real_scalar and preserve the real-vs-complex bit-identity test.",
+      "The diagonal block factorization order is unchanged.",
+      "Panel solve row order and per-row arithmetic order are unchanged.",
+      "The trailing update still visits lower-triangle entries in the same p then q order and leaves strict upper-triangle entries untouched until final zero materialization.",
+      "For each lower Schur entry, the c contributions are now grouped by 8 SIMD lanes; this intentionally changes large blocked-path FP association.",
+      "The large blocked Cholesky path was already verified by scalar parity within tolerance plus reconstruction, not by bit identity.",
+      "dtype, shape, non-square rejection, non-positive-definite NaN behavior, signed-zero surface, and RNG absence are unchanged."
+    ],
+    "golden": "artifacts/performance/evidence/fj_lax_cholesky_schur_simd_9dgqw_pass177_2026-06-08.golden",
+    "golden_output_digest": "cae3c6a0fcc965880d1379765d0b7886deb1ca3d1c9dc1036ca705e60306ff0a",
+    "old_golden_output_digest": "9fbcc45dd316e9c3b2e5f730d895c39bad0b562e990432196fd7eb4a0627fdc6"
+  },
+  "validation": [
+    {
+      "worker": "fmd",
+      "command": "cargo test -p fj-lax --lib cholesky -- --nocapture",
+      "result": "passed",
+      "details": "14 passed; includes cholesky_blocked_matches_scalar_and_reconstructs, cholesky_blocked_path_golden_output_digest, cholesky_lower_schur_update_matches_full_gemm_on_consumed_triangle, and cholesky_real_fast_path_bit_identical_to_complex_path"
+    },
+    {
+      "worker": "fmd",
+      "command": "cargo check -p fj-lax --all-targets",
+      "result": "passed"
+    },
+    {
+      "worker": "fmd",
+      "command": "cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check -- crates/fj-lax/src/linalg.rs",
+      "result": "passed"
+    },
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-lax/src/linalg.rs",
+      "result": "pre_existing_unrelated_formatting_drift",
+      "details": "rustfmt would reflow existing eig/triangular-solve/test regions outside the Cholesky diff; file was not broad-formatted to avoid unrelated churn."
+    },
+    {
+      "command": "ubs crates/fj-lax/src/linalg.rs",
+      "result": "known_broad_inventory_exit_1",
+      "details": "17 critical, 1143 warnings, 201 info; no unsafe blocks; UBS fmt, clippy, cargo check, and test-build sections are clean."
+    }
+  ],
+  "decision": "Keep. Same-worker median speedup is 1.132696x, conservative speedup is 1.086353x, intervals are non-overlapping, and Score 6.0 >= 2.0."
+}

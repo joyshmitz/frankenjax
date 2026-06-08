@@ -1,0 +1,10 @@
+frankenjax-9dgqw pass177 fj-lax Cholesky1024 lower Schur c-lane SIMD dot
+target=linalg/cholesky_1024x1024_f64
+profile_vmi1149989_ms=[58.921,59.061,59.620]
+baseline_fmd_scalar_dot_ms=[25.577,25.941,26.416]
+candidate_fmd_simd_dot_ms=[22.357,22.902,23.543]
+median_speedup=1.132696
+conservative_speedup=1.086353
+behavior=large blocked Cholesky path changes FP grouping inside the lower Schur dot; scalar parity/reconstruction tolerance tests passed, small real-vs-complex bit-identity path remains unchanged
+golden_digest=cae3c6a0fcc965880d1379765d0b7886deb1ca3d1c9dc1036ca705e60306ff0a
+isomorphism=diagonal panel order, panel solve order, lower-triangle p/q traversal, dtype/shape/error behavior, NaN/signed-zero surface, strict upper-zero materialization, and RNG absence preserved; blocked-path bit pattern intentionally updated under the existing tolerance contract
