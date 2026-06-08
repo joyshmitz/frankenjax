@@ -1108,7 +1108,11 @@ impl SimpleTraceContext {
                 };
                 let dims = &inputs[0].shape.dims;
                 let rank = dims.len();
-                let norm = if raw_axis < 0 { raw_axis + rank as i64 } else { raw_axis };
+                let norm = if raw_axis < 0 {
+                    raw_axis + rank as i64
+                } else {
+                    raw_axis
+                };
                 if norm < 0 || norm >= rank as i64 {
                     return Err(TraceError::ShapeInferenceFailed {
                         primitive,
@@ -1785,31 +1789,63 @@ impl SimpleTraceContext {
 
                 let padding = parse_conv_padding_param(primitive, params)?;
 
-                // Reject conv_general_dilated params fj-lax conv does not implement
-                // (dilation, feature/batch grouping) rather than infer a wrong
-                // (undilated/ungrouped) output shape — see eval_conv's
-                // reject_unsupported_conv_params. Staging must agree with eval.
-                for key in ["rhs_dilation", "lhs_dilation"] {
-                    if params
-                        .get(key)
-                        .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
-                    {
-                        return Err(TraceError::ShapeInferenceFailed {
-                            primitive,
-                            detail: format!(
-                                "conv {key} is not supported (stride + padding only)"
-                            ),
-                        });
-                    }
+                // conv_general_dilated params rhs_dilation (atrous), lhs_dilation
+                // (transposed conv) and feature_group_count (grouped/depthwise) are
+                // all implemented by eval_conv, so staging infers the matching
+                // dilated/grouped output shape. batch_group_count stays unsupported.
+                if params
+                    .get("batch_group_count")
+                    .is_some_and(|v| !matches!(v.trim(), "" | "1"))
+                {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "conv batch_group_count > 1 is not supported".to_owned(),
+                    });
                 }
-                for key in ["feature_group_count", "batch_group_count"] {
-                    if params.get(key).is_some_and(|v| !matches!(v.trim(), "" | "1")) {
-                        return Err(TraceError::ShapeInferenceFailed {
-                            primitive,
-                            detail: format!("conv {key} > 1 is not supported"),
-                        });
+                // Parse per-spatial-dim factor lists (empty => all 1s). A dilation `d`
+                // gives effective extent `(n-1)*d+1`; output uses dilated input AND
+                // dilated kernel extents (matching eval_conv).
+                let num_spatial = lhs_rank - 2;
+                let conv_factors = |key: &str| -> Result<Vec<usize>, TraceError> {
+                    let Some(raw) = params.get(key) else {
+                        return Ok(Vec::new());
+                    };
+                    raw.split(',')
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(|v| {
+                            v.parse::<usize>().ok().filter(|&x| x >= 1).ok_or_else(|| {
+                                TraceError::ShapeInferenceFailed {
+                                    primitive,
+                                    detail: format!("invalid conv {key} factor {v:?}"),
+                                }
+                            })
+                        })
+                        .collect()
+                };
+                let rhs_dil = conv_factors("rhs_dilation")?;
+                let lhs_dil = conv_factors("lhs_dilation")?;
+                let factor_at = |list: &[usize], axis: usize| -> usize {
+                    if list.is_empty() {
+                        1
+                    } else if list.len() == 1 {
+                        list[0]
+                    } else {
+                        list.get(axis).copied().unwrap_or(1)
                     }
-                }
+                };
+                let group_count = params
+                    .get("feature_group_count")
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                    .map_or(Ok(1usize), |v| {
+                        v.parse::<usize>().ok().filter(|&g| g >= 1).ok_or_else(|| {
+                            TraceError::ShapeInferenceFailed {
+                                primitive,
+                                detail: format!("invalid conv feature_group_count {v:?}"),
+                            }
+                        })
+                    })?;
 
                 let out_dims = if lhs_rank == 3 {
                     if rhs.shape.rank() != 3 {
@@ -1825,11 +1861,11 @@ impl SimpleTraceContext {
                     let c_in = lhs.shape.dims[2] as usize;
                     let kernel_w = rhs.shape.dims[0] as usize;
                     let rhs_c_in = rhs.shape.dims[1] as usize;
-                    if c_in != rhs_c_in {
+                    if c_in != group_count * rhs_c_in {
                         return Err(TraceError::ShapeInferenceFailed {
                             primitive,
                             detail: format!(
-                                "channel mismatch: lhs c_in={c_in}, rhs c_in={rhs_c_in}"
+                                "channel mismatch: lhs c_in={c_in} != feature_group_count={group_count} * rhs c_in={rhs_c_in}"
                             ),
                         });
                     }
@@ -1865,9 +1901,15 @@ impl SimpleTraceContext {
                             detail: "conv strides must be positive".to_owned(),
                         });
                     }
+                    let eff_in = if width == 0 {
+                        0
+                    } else {
+                        (width - 1) * factor_at(&lhs_dil, 0) + 1
+                    };
+                    let eff_kw = (kernel_w.max(1) - 1) * factor_at(&rhs_dil, 0) + 1;
                     let out_w = match padding {
-                        ConvPadding::Same | ConvPadding::SameLower => width.div_ceil(stride),
-                        ConvPadding::Valid => conv_valid_output_dim(width, kernel_w, stride),
+                        ConvPadding::Same | ConvPadding::SameLower => eff_in.div_ceil(stride),
+                        ConvPadding::Valid => conv_valid_output_dim(eff_in, eff_kw, stride),
                     };
                     vec![lhs.shape.dims[0], out_w as u32, c_out]
                 } else {
@@ -1886,11 +1928,11 @@ impl SimpleTraceContext {
                     let kernel_h = rhs.shape.dims[0] as usize;
                     let kernel_w = rhs.shape.dims[1] as usize;
                     let rhs_c_in = rhs.shape.dims[2] as usize;
-                    if c_in != rhs_c_in {
+                    if c_in != group_count * rhs_c_in {
                         return Err(TraceError::ShapeInferenceFailed {
                             primitive,
                             detail: format!(
-                                "channel mismatch: lhs c_in={c_in}, rhs c_in={rhs_c_in}"
+                                "channel mismatch: lhs c_in={c_in} != feature_group_count={group_count} * rhs c_in={rhs_c_in}"
                             ),
                         });
                     }
@@ -1929,13 +1971,25 @@ impl SimpleTraceContext {
                             detail: "conv strides must be positive".to_owned(),
                         });
                     }
+                    let eff_h_in = if height == 0 {
+                        0
+                    } else {
+                        (height - 1) * factor_at(&lhs_dil, 0) + 1
+                    };
+                    let eff_w_in = if width == 0 {
+                        0
+                    } else {
+                        (width - 1) * factor_at(&lhs_dil, 1) + 1
+                    };
+                    let eff_kh = (kernel_h.max(1) - 1) * factor_at(&rhs_dil, 0) + 1;
+                    let eff_kw = (kernel_w.max(1) - 1) * factor_at(&rhs_dil, 1) + 1;
                     let out_h = match padding {
-                        ConvPadding::Same | ConvPadding::SameLower => height.div_ceil(stride_h),
-                        ConvPadding::Valid => conv_valid_output_dim(height, kernel_h, stride_h),
+                        ConvPadding::Same | ConvPadding::SameLower => eff_h_in.div_ceil(stride_h),
+                        ConvPadding::Valid => conv_valid_output_dim(eff_h_in, eff_kh, stride_h),
                     };
                     let out_w = match padding {
-                        ConvPadding::Same | ConvPadding::SameLower => width.div_ceil(stride_w),
-                        ConvPadding::Valid => conv_valid_output_dim(width, kernel_w, stride_w),
+                        ConvPadding::Same | ConvPadding::SameLower => eff_w_in.div_ceil(stride_w),
+                        ConvPadding::Valid => conv_valid_output_dim(eff_w_in, eff_kw, stride_w),
                     };
                     vec![lhs.shape.dims[0], out_h as u32, out_w as u32, c_out]
                 };
@@ -9398,6 +9452,111 @@ mod tests {
             .expect("SAME_LOWER padding should succeed");
         let aval = ctx.tracer_aval(out[0]).expect("aval present");
         assert_eq!(aval.shape.dims, vec![1, 4, 1]);
+    }
+
+    #[test]
+    fn test_infer_conv_dilation_and_grouping_shapes() {
+        // Staging must infer the same output shapes eval_conv now produces for
+        // rhs_dilation (atrous), feature_group_count (grouped), and lhs_dilation
+        // (transposed conv) — otherwise jit(dilated/grouped conv) would fail to stage.
+        let infer = |lhs: Vec<u32>, rhs: Vec<u32>, kvs: &[(&str, &str)]| -> Vec<u32> {
+            let mut ctx = SimpleTraceContext::with_inputs(vec![
+                ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape { dims: lhs },
+                },
+                ShapedArray {
+                    dtype: DType::F64,
+                    shape: Shape { dims: rhs },
+                },
+            ]);
+            let mut params = BTreeMap::new();
+            for (k, v) in kvs {
+                params.insert((*k).to_owned(), (*v).to_owned());
+            }
+            let out = ctx
+                .process_primitive(Primitive::Conv, &[TracerId(1), TracerId(2)], params)
+                .expect("conv shape inference should succeed");
+            ctx.tracer_aval(out[0])
+                .expect("aval present")
+                .shape
+                .dims
+                .clone()
+        };
+
+        // 2D rhs_dilation: kh=3,kw=2 dilated by (2,3) -> eff (5,4); [1,8,7]→(4,4), Cout=5.
+        assert_eq!(
+            infer(
+                vec![1, 8, 7, 3],
+                vec![3, 2, 3, 5],
+                &[("padding", "valid"), ("rhs_dilation", "2,3")]
+            ),
+            vec![1, 4, 4, 5],
+            "2D rhs_dilation shape"
+        );
+        // 2D feature_group_count G=3: Cin=6, kernel Cin/G=2, Cout=9; [1,6,6]→(4,4).
+        assert_eq!(
+            infer(
+                vec![1, 6, 6, 6],
+                vec![3, 3, 2, 9],
+                &[("padding", "valid"), ("feature_group_count", "3")]
+            ),
+            vec![1, 4, 4, 9],
+            "2D grouped shape"
+        );
+        // 2D lhs_dilation (transposed) (2,3): [1,5,4]→eff(9,10), k(2,2)→out(8,9), Cout=3.
+        assert_eq!(
+            infer(
+                vec![1, 5, 4, 2],
+                vec![2, 2, 2, 3],
+                &[("padding", "valid"), ("lhs_dilation", "2,3")]
+            ),
+            vec![1, 8, 9, 3],
+            "2D lhs_dilation (transposed) shape"
+        );
+        // 1D rhs_dilation 2: kw=2→eff 3; [1,11]→9, Cout=5.
+        assert_eq!(
+            infer(
+                vec![1, 11, 3],
+                vec![2, 3, 5],
+                &[("padding", "valid"), ("rhs_dilation", "2")]
+            ),
+            vec![1, 9, 5],
+            "1D rhs_dilation shape"
+        );
+        // 1D feature_group_count G=3: Cin=6, kernel Cin/G=2, Cout=6; [1,8]→6.
+        assert_eq!(
+            infer(
+                vec![1, 8, 6],
+                vec![3, 2, 6],
+                &[("padding", "valid"), ("feature_group_count", "3")]
+            ),
+            vec![1, 6, 6],
+            "1D grouped shape"
+        );
+        // batch_group_count still rejected.
+        let mut ctx = SimpleTraceContext::with_inputs(vec![
+            ShapedArray {
+                dtype: DType::F64,
+                shape: Shape {
+                    dims: vec![1, 5, 2],
+                },
+            },
+            ShapedArray {
+                dtype: DType::F64,
+                shape: Shape {
+                    dims: vec![3, 2, 2],
+                },
+            },
+        ]);
+        let mut params = BTreeMap::new();
+        params.insert("padding".to_owned(), "valid".to_owned());
+        params.insert("batch_group_count".to_owned(), "2".to_owned());
+        assert!(
+            ctx.process_primitive(Primitive::Conv, &[TracerId(1), TracerId(2)], params)
+                .is_err(),
+            "batch_group_count must still be rejected"
+        );
     }
 
     #[test]
