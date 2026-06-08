@@ -1,0 +1,5 @@
+artifact=fj_lax_gemm_skip_output_prefill_lqjov_pass181_2026-06-08
+bead=frankenjax-lqjov
+golden_source=tensor_contraction::tests::matmul_2d_packed_nr8_golden_output_digest
+digest=e3762befad86e2a81da53a8413643b658a0be2d6136d69e195770b2beba48b3a
+proof=RCH fmd cargo test -p fj-lax --lib matmul_2d -- --nocapture (11 passed; 1 ignored)

@@ -1,0 +1,115 @@
+{
+  "artifact": "fj_lax_gemm_skip_output_prefill_lqjov_pass181_2026-06-08",
+  "bead": "frankenjax-lqjov",
+  "pass": 181,
+  "status": "kept",
+  "target": "linalg/matmul_2d_2048x2048x2048_f64",
+  "profile_route": {
+    "source": "Pinned RCH fmd fj-lax linalg profile after pass179 closeout",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-profile-pass181 cargo bench -p fj-lax --bench lax_baseline -- linalg --quick --noplot",
+    "top_rows": [
+      {
+        "benchmark": "linalg/matmul_2d_2048x2048x2048_f64",
+        "worker": "fmd",
+        "ms": [163.79, 165.25, 171.07],
+        "decision": "dominant profile row; previous exact-order row-tile and Schur-output families were measured rejects, so this pass used output-write avoidance instead of row-width retuning"
+      },
+      {
+        "benchmark": "linalg/pinv_256x128_f64",
+        "worker": "fmd",
+        "ms": [37.818, 38.237, 39.913]
+      },
+      {
+        "benchmark": "linalg/lu_1024x1024_f64",
+        "worker": "fmd",
+        "ms": [32.715, 32.804, 32.827]
+      },
+      {
+        "benchmark": "linalg/qr_1024x1024_f64",
+        "worker": "fmd",
+        "ms": [26.376, 26.705, 26.787]
+      },
+      {
+        "benchmark": "linalg/matmul_2d_1024x1024x1024_f64",
+        "worker": "fmd",
+        "ms": [22.600, 22.760, 22.800]
+      }
+    ],
+    "alien_primitive": "memory-traffic output-write avoidance: remove a full m*n result prefill where the GEMM kernel overwrites every output from explicit zero accumulators"
+  },
+  "lever": {
+    "description": "Skip the unconditional result.fill(0.0) in matmul_2d_with_threads_into for nonzero-k products, and zero only the row-remainder block that still uses += accumulation.",
+    "files": [
+      "crates/fj-lax/src/tensor_contraction.rs"
+    ],
+    "one_lever_only": true,
+    "behavior_change": "none intended"
+  },
+  "benchmarks": {
+    "same_worker_gate": {
+      "worker": "fmd",
+      "baseline_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-lqjov-baseline cargo bench -p fj-lax --bench lax_baseline -- linalg/matmul_2d_2048x2048x2048_f64 --quick --noplot",
+      "candidate_command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=fmd RCH_WORKERS=fmd RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-lqjov-candidate cargo bench -p fj-lax --bench lax_baseline -- linalg/matmul_2d_2048x2048x2048_f64 --quick --noplot",
+      "baseline_ms": [169.62, 176.69, 178.46],
+      "candidate_ms": [157.99, 158.03, 158.17],
+      "median_speedup": 1.11808,
+      "conservative_speedup_low_over_high": 1.07239
+    },
+    "score": {
+      "impact": 4.0,
+      "confidence": 2.0,
+      "effort": 1.0,
+      "value": 8.0
+    }
+  },
+  "behavior_proof": {
+    "isomorphism": [
+      "For k > 0, full MRxNR tiles are written from zero local accumulators and never need the caller buffer pre-cleared.",
+      "The KC-blocked path still seeds the first pc block from zero and subsequent pc blocks from the running C value, preserving the same ascending-k recurrence for every output element.",
+      "The nonblocked column-remainder path still assigns scalar sums directly after ascending-k accumulation.",
+      "The row-remainder path is locally zeroed before its unchanged l-major += loop, preserving the previous starting value and per-output accumulation order.",
+      "For k == 0, the function still fills the result with zeros before returning.",
+      "Thread row ownership, B panel packing layout, tile traversal, dtype, shape, error behavior, NaN and signed-zero surfaces, and RNG absence are unchanged."
+    ],
+    "golden": "artifacts/performance/evidence/fj_lax_gemm_skip_output_prefill_lqjov_pass181_2026-06-08.golden",
+    "golden_sha256": "7a9c7f647c9ad35f8eb38c10481922c5b71e80c763b5fb6af1dc0163d85b775c",
+    "golden_output_digest": "e3762befad86e2a81da53a8413643b658a0be2d6136d69e195770b2beba48b3a",
+    "proof_commands": [
+      {
+        "worker": "fmd",
+        "command": "cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+        "result": "11 passed; 0 failed; 1 ignored; includes matmul_2d_into_matches_allocating_path, blocked/packed/threaded bit-identity, special-value bit-identity, and packed NR8 golden digest"
+      }
+    ]
+  },
+  "validation": [
+    {
+      "worker": "fmd",
+      "command": "cargo check -p fj-lax --all-targets",
+      "result": "passed"
+    },
+    {
+      "worker": "fmd",
+      "command": "cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "passed"
+    },
+    {
+      "command": "cargo fmt --check --package fj-lax",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/tensor_contraction.rs",
+      "result": "exit 0; no criticals, no unsafe blocks, fmt/clippy/check/test-build clean; broad pre-existing warning inventory remains"
+    }
+  ],
+  "decision": {
+    "gate": "keep only Score >= 2.0",
+    "result": "keep",
+    "reason": "Same-worker fmd GEMM2048 median improved from 176.69 ms to 158.03 ms; conservative interval speedup is 1.07239x; Score 8.0.",
+    "next_primitive": "Reprofile after landing. If GEMM remains top, route to a deeper communication-avoiding or tolerance-contract primitive rather than repeating row-tile/MR-width microlevers."
+  }
+}

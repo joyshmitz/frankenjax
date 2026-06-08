@@ -378,8 +378,8 @@ fn matmul_2d_with_threads_into(
     result: &mut [f64],
 ) {
     assert_eq!(result.len(), m * n);
-    result.fill(0.0);
     if m == 0 || n == 0 || k == 0 {
+        result.fill(0.0);
         return;
     }
     // Pack B's column panels once (shared, read-only across all output rows) when
@@ -548,6 +548,7 @@ fn matmul_2d_row_block(
     while i < rows {
         let a_row = (row_start + i) * k;
         let c_row = &mut block[i * n..i * n + n];
+        c_row.fill(0.0);
         for l in 0..k {
             let a_il = a[a_row + l];
             let src = &b[l * n..l * n + n];
