@@ -455,7 +455,12 @@ fn eval_same_shape_half_float_map(
 /// `binary_literal_op` half-float path: widen each via `Literal::{BF16,F16}Bits.as_f64()`,
 /// run `op` in f64, round via `Literal::from_{bf16,f16}_f64`, return the u16 bits.
 #[inline]
-fn half_binary_apply(dt: DType, lhs_bits: u16, rhs_bits: u16, op: &impl Fn(f64, f64) -> f64) -> u16 {
+fn half_binary_apply(
+    dt: DType,
+    lhs_bits: u16,
+    rhs_bits: u16,
+    op: &impl Fn(f64, f64) -> f64,
+) -> u16 {
     let widen = |bits: u16| -> f64 {
         if dt == DType::BF16 {
             Literal::BF16Bits(bits)
@@ -10111,7 +10116,11 @@ mod tests {
             };
             let (ld, rd) = (dense(&lb), dense(&rb));
             assert!(
-                ld.as_tensor().unwrap().elements.as_half_float_slice().is_some(),
+                ld.as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some(),
                 "input must be dense half-float to exercise the fast path"
             );
             let (lbox, rbox) = (boxed(&lb), boxed(&rb));

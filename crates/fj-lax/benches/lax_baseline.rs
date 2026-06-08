@@ -2897,7 +2897,8 @@ fn bench_bf16_exp2_256k_dense(c: &mut Criterion) {
     );
     let p = no_params();
     c.bench_function("eval/exp2_256k_bf16_dense", |bencher| {
-        bencher.iter(|| eval_primitive(Primitive::Exp2, std::slice::from_ref(black_box(&input)), &p))
+        bencher
+            .iter(|| eval_primitive(Primitive::Exp2, std::slice::from_ref(black_box(&input)), &p))
     });
 }
 
@@ -2921,7 +2922,8 @@ fn bench_bf16_exp2_256k_boxed(c: &mut Criterion) {
     );
     let p = no_params();
     c.bench_function("eval/exp2_256k_bf16_boxed", |bencher| {
-        bencher.iter(|| eval_primitive(Primitive::Exp2, std::slice::from_ref(black_box(&input)), &p))
+        bencher
+            .iter(|| eval_primitive(Primitive::Exp2, std::slice::from_ref(black_box(&input)), &p))
     });
 }
 
