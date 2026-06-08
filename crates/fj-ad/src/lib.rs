@@ -6328,13 +6328,21 @@ fn conv_vjp(
             )));
         }
     }
-    for key in ["feature_group_count", "batch_group_count"] {
-        if nondefault_scalar(key) {
-            return Err(AdError::EvalFailed(format!(
-                "conv gradient (VJP) does not yet support {key}; forward conv supports it but its reverse-mode derivative is not implemented"
-            )));
-        }
+    if nondefault_scalar("batch_group_count") {
+        return Err(AdError::EvalFailed(
+            "conv gradient (VJP) does not support batch_group_count".to_owned(),
+        ));
     }
+    let group_count = params
+        .get("feature_group_count")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map_or(Ok(1usize), |v| {
+            v.parse::<usize>()
+                .ok()
+                .filter(|&gc| gc >= 1)
+                .ok_or_else(|| AdError::EvalFailed(format!("invalid feature_group_count {v:?}")))
+        })?;
 
     let lhs = match &inputs[0] {
         Value::Tensor(t) => t,
@@ -6349,6 +6357,15 @@ fn conv_vjp(
         Value::Scalar(_) => return Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])]),
     };
 
+    // Grouped/depthwise conv VJP (no dilation — guarded above): a grouped conv is G
+    // independent convs, so its gradient is G independent ungrouped-conv VJPs. Split
+    // input channels (lhs), output channels (rhs Cout, g) per group, reuse the trusted
+    // stride+padding conv_vjp on each, then concatenate grad_lhs over input channels
+    // and grad_rhs over output channels. Correct by construction.
+    if group_count > 1 {
+        return conv_vjp_grouped(lhs, rhs, g_tensor, group_count, params);
+    }
+
     let rank = lhs.shape.rank();
     if rank == 3 {
         conv_vjp_1d(lhs, rhs, g_tensor, params)
@@ -6357,6 +6374,90 @@ fn conv_vjp(
     } else {
         Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])])
     }
+}
+
+/// Grouped-conv VJP via per-group decomposition (see conv_vjp). Reuses the trusted
+/// ungrouped stride+padding conv_vjp on each group's channel slice; assumes no
+/// dilation (the caller guards rhs/lhs_dilation).
+fn conv_vjp_grouped(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    g_tensor: &TensorValue,
+    group_count: usize,
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, AdError> {
+    let lhs_rank = lhs.shape.rank();
+    let c_in = lhs.shape.dims[lhs_rank - 1] as usize; // channel = last axis
+    let c_out = rhs.shape.dims[rhs.shape.rank() - 1] as usize; // Cout = last axis of kernel
+    if c_in % group_count != 0 || c_out % group_count != 0 {
+        return Err(AdError::EvalFailed(format!(
+            "grouped conv VJP: c_in={c_in}/c_out={c_out} not divisible by feature_group_count={group_count}"
+        )));
+    }
+    let cin_g = c_in / group_count;
+    let cout_g = c_out / group_count;
+
+    // Slice [start, end) along the LAST axis of `v` via the Slice primitive.
+    let slice_last = |v: &Value, start: usize, end: usize| -> Result<Value, AdError> {
+        let t = v.as_tensor().ok_or_else(|| {
+            AdError::EvalFailed("grouped conv VJP expects tensor operands".to_owned())
+        })?;
+        let dims = &t.shape.dims;
+        let last = dims.len() - 1;
+        let starts: Vec<String> = dims
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                if i == last {
+                    start.to_string()
+                } else {
+                    "0".to_owned()
+                }
+            })
+            .collect();
+        let limits: Vec<String> = dims
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| {
+                if i == last {
+                    end.to_string()
+                } else {
+                    d.to_string()
+                }
+            })
+            .collect();
+        let p = BTreeMap::from([
+            ("start_indices".to_owned(), starts.join(",")),
+            ("limit_indices".to_owned(), limits.join(",")),
+        ]);
+        eval_primitive(Primitive::Slice, std::slice::from_ref(v), &p)
+            .map_err(|e| AdError::EvalFailed(e.to_string()))
+    };
+    let concat_last = |parts: &[Value], rank: usize| -> Result<Value, AdError> {
+        let p = BTreeMap::from([("dimension".to_owned(), (rank - 1).to_string())]);
+        eval_primitive(Primitive::Concatenate, parts, &p)
+            .map_err(|e| AdError::EvalFailed(e.to_string()))
+    };
+
+    let mut inner = params.clone();
+    inner.remove("feature_group_count");
+    let lhs_v = Value::Tensor(lhs.clone());
+    let rhs_v = Value::Tensor(rhs.clone());
+    let g_v = Value::Tensor(g_tensor.clone());
+
+    let mut grad_lhs_parts = Vec::with_capacity(group_count);
+    let mut grad_rhs_parts = Vec::with_capacity(group_count);
+    for grp in 0..group_count {
+        let sub_lhs = slice_last(&lhs_v, grp * cin_g, (grp + 1) * cin_g)?;
+        let sub_rhs = slice_last(&rhs_v, grp * cout_g, (grp + 1) * cout_g)?;
+        let sub_g = slice_last(&g_v, grp * cout_g, (grp + 1) * cout_g)?;
+        let grads = conv_vjp(&[sub_lhs, sub_rhs], &sub_g, &inner)?;
+        grad_lhs_parts.push(grads[0].clone());
+        grad_rhs_parts.push(grads[1].clone());
+    }
+    let grad_lhs = concat_last(&grad_lhs_parts, lhs_rank)?;
+    let grad_rhs = concat_last(&grad_rhs_parts, rhs.shape.rank())?;
+    Ok(vec![grad_lhs, grad_rhs])
 }
 
 /// 1D Conv VJP: lhs=[N, W, C_in], rhs=[K, C_in, C_out], g=[N, W_out, C_out]
@@ -14311,10 +14412,11 @@ mod tests {
         let lhs = mk(vec![1, 6, 2], 12);
         let rhs = mk(vec![2, 2, 2], 8);
         let g = mk(vec![1, 5, 2], 10); // out_w = 6-2+1 = 5
+        // rhs_dilation/lhs_dilation VJP is still fail-closed (feature_group_count is
+        // now supported — see conv_vjp_grouped_matches_numerical).
         for (key, val, rhs_in) in [
             ("rhs_dilation", "2", rhs.clone()),
             ("lhs_dilation", "2", rhs.clone()),
-            ("feature_group_count", "2", mk(vec![2, 1, 2], 4)), // Cin/G=1
         ] {
             let params = BTreeMap::from([
                 ("padding".to_owned(), "valid".to_owned()),
@@ -14336,6 +14438,98 @@ mod tests {
             vjp_single(Primitive::Conv, &[lhs, rhs], &g, &plain).is_ok(),
             "plain conv VJP must still succeed"
         );
+    }
+
+    #[test]
+    fn conv_vjp_grouped_matches_numerical() {
+        // Grouped 1D conv VJP (feature_group_count=2) vs central finite differences of
+        // L(lhs,rhs) = sum(conv(lhs,rhs) . g). lhs[1,5,4] (Cin=4), rhs[2,2,4]
+        // (K=2, Cin/G=2, Cout=4), VALID stride 1 -> out[1,4,4].
+        let (cin, kcin, cout, w, kw) = (4usize, 2usize, 4usize, 5usize, 2usize);
+        let ow = w - kw + 1;
+        let lhs0: Vec<f64> = (0..w * cin)
+            .map(|i| (i as f64 * 0.017).sin() * 1.3 + 0.2)
+            .collect();
+        let rhs0: Vec<f64> = (0..kw * kcin * cout)
+            .map(|i| (i as f64 * 0.013).cos() * 0.9 - 0.1)
+            .collect();
+        let gv: Vec<f64> = (0..ow * cout)
+            .map(|i| (i as f64 * 0.011).sin() + 0.3)
+            .collect();
+        let params = BTreeMap::from([
+            ("padding".to_owned(), "valid".to_owned()),
+            ("strides".to_owned(), "1".to_owned()),
+            ("feature_group_count".to_owned(), "2".to_owned()),
+        ]);
+        let mk = |dims: Vec<u32>, d: &[f64]| {
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims }, d.to_vec()).unwrap())
+        };
+        let g = mk(vec![1, ow as u32, cout as u32], &gv);
+
+        // L = sum(conv(lhs,rhs) . g) over given flat lhs/rhs values.
+        let loss = |lv: &[f64], rv: &[f64]| -> f64 {
+            let out = eval_primitive(
+                Primitive::Conv,
+                &[
+                    mk(vec![1, w as u32, cin as u32], lv),
+                    mk(vec![kw as u32, kcin as u32, cout as u32], rv),
+                ],
+                &params,
+            )
+            .unwrap();
+            tensor_f64_values(&out)
+                .iter()
+                .zip(&gv)
+                .map(|(o, gg)| o * gg)
+                .sum()
+        };
+
+        let grads = vjp_single(
+            Primitive::Conv,
+            &[
+                mk(vec![1, w as u32, cin as u32], &lhs0),
+                mk(vec![kw as u32, kcin as u32, cout as u32], &rhs0),
+            ],
+            &g,
+            &params,
+        )
+        .unwrap();
+        let glhs = tensor_f64_values(&grads[0]);
+        let grhs = tensor_f64_values(&grads[1]);
+        assert_eq!(
+            grads[0].as_tensor().unwrap().shape.dims,
+            vec![1, w as u32, cin as u32]
+        );
+        assert_eq!(
+            grads[1].as_tensor().unwrap().shape.dims,
+            vec![kw as u32, kcin as u32, cout as u32]
+        );
+
+        let eps = 1e-6;
+        for j in 0..lhs0.len() {
+            let mut up = lhs0.clone();
+            up[j] += eps;
+            let mut dn = lhs0.clone();
+            dn[j] -= eps;
+            let fd = (loss(&up, &rhs0) - loss(&dn, &rhs0)) / (2.0 * eps);
+            assert!(
+                (fd - glhs[j]).abs() < 1e-5,
+                "grad_lhs[{j}] analytic={} fd={fd}",
+                glhs[j]
+            );
+        }
+        for j in 0..rhs0.len() {
+            let mut up = rhs0.clone();
+            up[j] += eps;
+            let mut dn = rhs0.clone();
+            dn[j] -= eps;
+            let fd = (loss(&lhs0, &up) - loss(&lhs0, &dn)) / (2.0 * eps);
+            assert!(
+                (fd - grhs[j]).abs() < 1e-5,
+                "grad_rhs[{j}] analytic={} fd={fd}",
+                grhs[j]
+            );
+        }
     }
 
     #[test]
