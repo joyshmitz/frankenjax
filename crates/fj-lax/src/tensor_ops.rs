@@ -811,10 +811,26 @@ pub(crate) fn eval_broadcast_in_dim(
                     vec![*v; total],
                 )?)),
                 // U32/U64/Complex have no dense storage variant: boxed fill.
-                Literal::U32(_) => Ok(Value::Tensor(TensorValue::new(DType::U32, shape, vec![*lit; total])?)),
-                Literal::U64(_) => Ok(Value::Tensor(TensorValue::new(DType::U64, shape, vec![*lit; total])?)),
-                Literal::Complex64Bits(..) => Ok(Value::Tensor(TensorValue::new(DType::Complex64, shape, vec![*lit; total])?)),
-                Literal::Complex128Bits(..) => Ok(Value::Tensor(TensorValue::new(DType::Complex128, shape, vec![*lit; total])?)),
+                Literal::U32(_) => Ok(Value::Tensor(TensorValue::new(
+                    DType::U32,
+                    shape,
+                    vec![*lit; total],
+                )?)),
+                Literal::U64(_) => Ok(Value::Tensor(TensorValue::new(
+                    DType::U64,
+                    shape,
+                    vec![*lit; total],
+                )?)),
+                Literal::Complex64Bits(..) => Ok(Value::Tensor(TensorValue::new(
+                    DType::Complex64,
+                    shape,
+                    vec![*lit; total],
+                )?)),
+                Literal::Complex128Bits(..) => Ok(Value::Tensor(TensorValue::new(
+                    DType::Complex128,
+                    shape,
+                    vec![*lit; total],
+                )?)),
             }
         }
         Value::Tensor(tensor) => {
@@ -949,7 +965,13 @@ pub(crate) fn eval_broadcast_in_dim(
             // output of the generic path below. Pure replication, bit-identical.
             if let Some(src) = tensor.elements.as_f32_slice() {
                 let out = broadcast_replicate(
-                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                    total,
+                    out_rank,
+                    &target_dims,
+                    &out_to_in,
+                    in_dims,
+                    &in_strides,
+                    src,
                 );
                 return Ok(Value::Tensor(TensorValue::new_f32_values(
                     Shape { dims: target_dims },
@@ -958,7 +980,13 @@ pub(crate) fn eval_broadcast_in_dim(
             }
             if let Some(src) = tensor.elements.as_half_float_slice() {
                 let out = broadcast_replicate(
-                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                    total,
+                    out_rank,
+                    &target_dims,
+                    &out_to_in,
+                    in_dims,
+                    &in_strides,
+                    src,
                 );
                 return Ok(Value::Tensor(TensorValue::new_half_float_values(
                     tensor.dtype,
@@ -1428,15 +1456,21 @@ pub(crate) fn eval_pad(
     // a fast typed fill of the pad value + dense placement, avoiding the input
     // Literal materialization + boxed output. Bit-identical (the typed pad value
     // is the pad_literal's exact bit pattern: f32::from_bits / the raw u16).
-    if let (Some(src), Literal::F32Bits(pb)) =
-        (operand.elements.as_f32_slice(), pad_literal)
-    {
+    if let (Some(src), Literal::F32Bits(pb)) = (operand.elements.as_f32_slice(), pad_literal) {
         let pad = f32::from_bits(pb);
         let out = if row_copyable {
             pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
         } else {
             pad_fill_place(
-                src, pad, out_total, rank, in_dims, &lows, &interiors, &out_dims, &out_strides,
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &interiors,
+                &out_dims,
+                &out_strides,
             )
         };
         return Ok(Value::Tensor(TensorValue::new_f32_values(
@@ -1451,7 +1485,15 @@ pub(crate) fn eval_pad(
             pad_copy_rows(src, pb, out_total, rank, in_dims, &lows, &out_strides)
         } else {
             pad_fill_place(
-                src, pb, out_total, rank, in_dims, &lows, &interiors, &out_dims, &out_strides,
+                src,
+                pb,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &interiors,
+                &out_dims,
+                &out_strides,
             )
         };
         return Ok(Value::Tensor(TensorValue::new_half_float_values(
@@ -1581,6 +1623,42 @@ fn pad_fill_place<T: Copy>(
                 break;
             }
             in_coords[ax] = 0;
+        }
+    }
+    out
+}
+
+/// Strided (general) slice gather over a typed slice: walk output positions in
+/// row-major order with a reused coordinate odometer, mapping each to its input
+/// flat index `sum_ax (start[ax] + out_coord[ax]*stride[ax]) * in_stride[ax]`, and
+/// copy `src[in_flat]`. Generic over the element type so the dense (f64/f32/half/
+/// i64) and `Literal` paths share identical index math — bit-for-bit identical.
+/// No per-element overflow checks: for a valid input tensor every `in_flat` is
+/// `< src.len() <= usize::MAX`, so the arithmetic cannot overflow.
+fn slice_strided_gather<T: Copy>(
+    src: &[T],
+    rank: usize,
+    total: usize,
+    starts: &[usize],
+    slice_strides: &[usize],
+    in_strides: &[usize],
+    out_dims: &[u32],
+) -> Vec<T> {
+    let mut out = Vec::with_capacity(total);
+    let mut out_coords = vec![0_usize; rank];
+    for _ in 0..total {
+        let mut in_flat = 0_usize;
+        for ax in 0..rank {
+            let coord = starts[ax] + out_coords[ax] * slice_strides[ax];
+            in_flat += coord * in_strides[ax];
+        }
+        out.push(src[in_flat]);
+        for ax in (0..rank).rev() {
+            out_coords[ax] += 1;
+            if out_coords[ax] < out_dims[ax] as usize {
+                break;
+            }
+            out_coords[ax] = 0;
         }
     }
     out
@@ -1737,53 +1815,49 @@ pub(crate) fn eval_slice(
 
             let in_strides = checked_row_major_strides(primitive, "slice", in_dims)?;
 
-            let mut elements = Vec::with_capacity(total);
-            let mut out_coords = vec![0_usize; rank];
-
-            for _ in 0..total {
-                // Map output coords to input coords by adding start offsets.
-                let mut in_flat = 0_usize;
-                for ax in 0..rank {
-                    let stepped =
-                        out_coords[ax]
-                            .checked_mul(slice_strides[ax])
-                            .ok_or_else(|| EvalError::Unsupported {
-                                primitive,
-                                detail: format!("slice coordinate overflows usize on axis {ax}"),
-                            })?;
-                    let coord =
-                        starts[ax]
-                            .checked_add(stepped)
-                            .ok_or_else(|| EvalError::Unsupported {
-                                primitive,
-                                detail: format!("slice coordinate overflows usize on axis {ax}"),
-                            })?;
-                    let offset = coord.checked_mul(in_strides[ax]).ok_or_else(|| {
-                        EvalError::Unsupported {
-                            primitive,
-                            detail: format!("slice offset overflows usize on axis {ax}"),
-                        }
-                    })?;
-                    in_flat =
-                        in_flat
-                            .checked_add(offset)
-                            .ok_or_else(|| EvalError::Unsupported {
-                                primitive,
-                                detail: "slice flat offset overflows usize".to_owned(),
-                            })?;
-                }
-                elements.push(tensor.elements[in_flat]);
-
-                // Increment output coordinates.
-                for ax in (0..rank).rev() {
-                    out_coords[ax] += 1;
-                    if out_coords[ax] < out_dims[ax] as usize {
-                        break;
-                    }
-                    out_coords[ax] = 0;
-                }
+            // Dense fast paths: gather the strided sub-tensor straight from the
+            // typed backing into dense output, avoiding the full-input `Vec<Literal>`
+            // materialization that `tensor.elements[in_flat]` triggers AND the boxed
+            // output. Same odometer index math -> bit-for-bit identical. Falls
+            // through to the Literal path for other dtypes.
+            macro_rules! dense_strided_slice {
+                ($slice:expr, $ctor:expr) => {{
+                    let out = slice_strided_gather(
+                        $slice,
+                        rank,
+                        total,
+                        &starts,
+                        &slice_strides,
+                        &in_strides,
+                        &out_dims,
+                    );
+                    return Ok(Value::Tensor($ctor(Shape { dims: out_dims }, out)?));
+                }};
+            }
+            if let Some(s) = tensor.elements.as_f64_slice() {
+                dense_strided_slice!(s, TensorValue::new_f64_values);
+            }
+            if let Some(s) = tensor.elements.as_f32_slice() {
+                dense_strided_slice!(s, TensorValue::new_f32_values);
+            }
+            if let Some(s) = tensor.elements.as_half_float_slice() {
+                let dt = tensor.dtype;
+                dense_strided_slice!(s, |sh, out| TensorValue::new_half_float_values(dt, sh, out));
+            }
+            if let Some(s) = tensor.elements.as_i64_slice() {
+                dense_strided_slice!(s, TensorValue::new_i64_values);
             }
 
+            // Literal fallback (boxed/other dtypes): the same gather over Literals.
+            let elements = slice_strided_gather(
+                tensor.elements.as_slice(),
+                rank,
+                total,
+                &starts,
+                &slice_strides,
+                &in_strides,
+                &out_dims,
+            );
             Ok(Value::Tensor(TensorValue::new(
                 tensor.dtype,
                 Shape { dims: out_dims },
@@ -2083,12 +2157,13 @@ pub(crate) fn eval_gather(
                             primitive,
                             detail: "gather base offset overflows usize".to_owned(),
                         })?;
-                let end = base_offset.checked_add(slice_elems).ok_or_else(|| {
-                    EvalError::Unsupported {
-                        primitive,
-                        detail: "gather contiguous slice end overflows usize".to_owned(),
-                    }
-                })?;
+                let end =
+                    base_offset
+                        .checked_add(slice_elems)
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: "gather contiguous slice end overflows usize".to_owned(),
+                        })?;
                 if end > src.len() {
                     return Err(EvalError::Unsupported {
                         primitive,
@@ -7786,7 +7861,7 @@ mod tests {
     #[test]
     fn dense_transpose_matches_literal_path_and_stays_dense() {
         for (dims, perm) in [
-            (vec![70u32, 130u32], "1,0"),     // rank-2 tiled, partial tiles
+            (vec![70u32, 130u32], "1,0"),      // rank-2 tiled, partial tiles
             (vec![5u32, 7u32, 4u32], "2,0,1"), // general rank-3
         ] {
             let n: usize = dims.iter().map(|&d| d as usize).product();
@@ -7799,9 +7874,16 @@ mod tests {
                     let boxed = $mk_boxed;
                     let d = eval_transpose(std::slice::from_ref(&dense), &p).unwrap();
                     let l = eval_transpose(std::slice::from_ref(&boxed), &p).unwrap();
-                    assert_eq!(extract_shape(&d), extract_shape(&l), "{dims:?} {perm} shape");
+                    assert_eq!(
+                        extract_shape(&d),
+                        extract_shape(&l),
+                        "{dims:?} {perm} shape"
+                    );
                     assert_eq!(lits(&d), lits(&l), "{dims:?} {perm} values");
-                    assert!($is_dense(d.as_tensor().unwrap()), "{dims:?} {perm} output dense");
+                    assert!(
+                        $is_dense(d.as_tensor().unwrap()),
+                        "{dims:?} {perm} output dense"
+                    );
                 }};
             }
             let sh = || Shape { dims: dims.clone() };
@@ -7809,28 +7891,62 @@ mod tests {
             let f64d: Vec<f64> = (0..n).map(|i| i as f64 * 0.5 - 3.0).collect();
             check!(
                 Value::Tensor(TensorValue::new_f64_values(sh(), f64d.clone()).unwrap()),
-                Value::Tensor(TensorValue::new(DType::F64, sh(), f64d.iter().copied().map(Literal::from_f64).collect()).unwrap()),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        sh(),
+                        f64d.iter().copied().map(Literal::from_f64).collect()
+                    )
+                    .unwrap()
+                ),
                 |t: &TensorValue| t.elements.as_f64_slice().is_some()
             );
             let f32d: Vec<f32> = (0..n).map(|i| i as f32 * 0.25 - 1.0).collect();
             check!(
                 Value::Tensor(TensorValue::new_f32_values(sh(), f32d.clone()).unwrap()),
-                Value::Tensor(TensorValue::new(DType::F32, sh(), f32d.iter().copied().map(Literal::from_f32).collect()).unwrap()),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F32,
+                        sh(),
+                        f32d.iter().copied().map(Literal::from_f32).collect()
+                    )
+                    .unwrap()
+                ),
                 |t: &TensorValue| t.elements.as_f32_slice().is_some()
             );
             for dtype in [DType::BF16, DType::F16] {
-                let raw: Vec<u16> = (0..n).map(|i| (i as u16).wrapping_mul(83).wrapping_add(9)).collect();
-                let mk_lit = move |b: u16| if dtype == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
+                let raw: Vec<u16> = (0..n)
+                    .map(|i| (i as u16).wrapping_mul(83).wrapping_add(9))
+                    .collect();
+                let mk_lit = move |b: u16| {
+                    if dtype == DType::BF16 {
+                        Literal::BF16Bits(b)
+                    } else {
+                        Literal::F16Bits(b)
+                    }
+                };
                 check!(
-                    Value::Tensor(TensorValue::new_half_float_values(dtype, sh(), raw.clone()).unwrap()),
-                    Value::Tensor(TensorValue::new(dtype, sh(), raw.iter().copied().map(mk_lit).collect()).unwrap()),
+                    Value::Tensor(
+                        TensorValue::new_half_float_values(dtype, sh(), raw.clone()).unwrap()
+                    ),
+                    Value::Tensor(
+                        TensorValue::new(dtype, sh(), raw.iter().copied().map(mk_lit).collect())
+                            .unwrap()
+                    ),
                     |t: &TensorValue| t.elements.as_half_float_slice().is_some()
                 );
             }
             let i64d: Vec<i64> = (0..n as i64).map(|i| i - 7).collect();
             check!(
                 Value::Tensor(TensorValue::new_i64_values(sh(), i64d.clone()).unwrap()),
-                Value::Tensor(TensorValue::new(DType::I64, sh(), i64d.iter().copied().map(Literal::I64).collect()).unwrap()),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::I64,
+                        sh(),
+                        i64d.iter().copied().map(Literal::I64).collect()
+                    )
+                    .unwrap()
+                ),
                 |t: &TensorValue| t.elements.as_i64_slice().is_some()
             );
         }
@@ -7841,10 +7957,21 @@ mod tests {
     fn bench_f32_transpose_dense_vs_boxed() {
         use std::time::Instant;
         let (rows, cols) = (3000usize, 3000usize);
-        let data: Vec<f32> = (0..rows * cols).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
-        let sh = Shape { dims: vec![rows as u32, cols as u32] };
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
+        let sh = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
         let dense = Value::Tensor(TensorValue::new_f32_values(sh.clone(), data.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::F32, sh.clone(), data.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                sh.clone(),
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
         let p = params(&[("permutation", "1,0")]);
         let time = |x: &Value| {
             let _ = eval_transpose(std::slice::from_ref(x), &p).unwrap();
@@ -7860,7 +7987,9 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH f32 transpose [{rows},{cols}]: boxed(materialize+box)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
@@ -7895,31 +8024,77 @@ mod tests {
 
         // f32
         let f32d: Vec<f32> = vec![1.5, -0.0, 3.25];
-        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![3] }, f32d.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: vec![3] }, f32d.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![3] }, f32d.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: vec![3] },
+                f32d.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
         let d = eval_broadcast_in_dim(std::slice::from_ref(&dense), &p_tensor).unwrap();
         let l = eval_broadcast_in_dim(std::slice::from_ref(&boxed), &p_tensor).unwrap();
         assert_eq!(lits(&d), lits(&l), "f32 tensor broadcast");
-        assert!(d.as_tensor().unwrap().elements.as_f32_slice().is_some(), "f32 broadcast output dense");
+        assert!(
+            d.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+            "f32 broadcast output dense"
+        );
         // f32 scalar fill
-        let ds = eval_broadcast_in_dim(&[Value::Scalar(Literal::from_f32(-2.5))], &p_scalar).unwrap();
+        let ds =
+            eval_broadcast_in_dim(&[Value::Scalar(Literal::from_f32(-2.5))], &p_scalar).unwrap();
         assert_eq!(ds.as_tensor().unwrap().dtype, DType::F32);
-        assert!(ds.as_tensor().unwrap().elements.as_f32_slice().is_some(), "f32 scalar broadcast dense");
+        assert!(
+            ds.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+            "f32 scalar broadcast dense"
+        );
         assert_eq!(lits(&ds), vec![Literal::from_f32(-2.5); 30]);
 
         // bf16 + f16
         for dtype in [DType::BF16, DType::F16] {
             let raw: Vec<u16> = vec![0x3f80, 0x8000, 0x7fc1];
-            let mk_lit = move |b: u16| if dtype == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
-            let dense = Value::Tensor(TensorValue::new_half_float_values(dtype, Shape { dims: vec![3] }, raw.clone()).unwrap());
-            let boxed = Value::Tensor(TensorValue::new(dtype, Shape { dims: vec![3] }, raw.iter().copied().map(mk_lit).collect()).unwrap());
+            let mk_lit = move |b: u16| {
+                if dtype == DType::BF16 {
+                    Literal::BF16Bits(b)
+                } else {
+                    Literal::F16Bits(b)
+                }
+            };
+            let dense = Value::Tensor(
+                TensorValue::new_half_float_values(dtype, Shape { dims: vec![3] }, raw.clone())
+                    .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    dtype,
+                    Shape { dims: vec![3] },
+                    raw.iter().copied().map(mk_lit).collect(),
+                )
+                .unwrap(),
+            );
             let d = eval_broadcast_in_dim(std::slice::from_ref(&dense), &p_tensor).unwrap();
             let l = eval_broadcast_in_dim(std::slice::from_ref(&boxed), &p_tensor).unwrap();
             assert_eq!(lits(&d), lits(&l), "{dtype:?} tensor broadcast");
-            assert!(d.as_tensor().unwrap().elements.as_half_float_slice().is_some(), "{dtype:?} broadcast output dense");
+            assert!(
+                d.as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some(),
+                "{dtype:?} broadcast output dense"
+            );
             let ds = eval_broadcast_in_dim(&[Value::Scalar(mk_lit(0x4000))], &p_scalar).unwrap();
             assert_eq!(ds.as_tensor().unwrap().dtype, dtype);
-            assert!(ds.as_tensor().unwrap().elements.as_half_float_slice().is_some(), "{dtype:?} scalar broadcast dense");
+            assert!(
+                ds.as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some(),
+                "{dtype:?} scalar broadcast dense"
+            );
         }
     }
 
@@ -7929,9 +8104,29 @@ mod tests {
         use std::time::Instant;
         let (rows, cols) = (8192usize, 2048usize); // [cols] -> [rows, cols]
         let data: Vec<f32> = (0..cols).map(|i| (i as f32) * 0.01 - 1.0).collect();
-        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![cols as u32] }, data.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: vec![cols as u32] }, data.iter().copied().map(Literal::from_f32).collect()).unwrap());
-        let p = params(&[("shape", &format!("{rows},{cols}")), ("broadcast_dimensions", "1")]);
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![cols as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape {
+                    dims: vec![cols as u32],
+                },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        let p = params(&[
+            ("shape", &format!("{rows},{cols}")),
+            ("broadcast_dimensions", "1"),
+        ]);
         let time = |x: &Value| {
             let _ = eval_broadcast_in_dim(std::slice::from_ref(x), &p).unwrap();
             let mut best = f64::MAX;
@@ -7946,7 +8141,9 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH f32 broadcast [{cols}]->[{rows},{cols}]: boxed(materialize+box)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
@@ -7959,32 +8156,85 @@ mod tests {
         let dims = vec![rows as u32, cols as u32];
         let lits = |v: &Value| v.as_tensor().unwrap().elements.to_vec();
         for p in [
-            params(&[("padding_low", "1,2"), ("padding_high", "2,1"), ("padding_interior", "0,0")]), // row-copyable
-            params(&[("padding_low", "1,0"), ("padding_high", "0,1"), ("padding_interior", "1,2")]), // interior dilation
-            params(&[("padding_low", "-1,0"), ("padding_high", "0,-1"), ("padding_interior", "0,0")]), // crop
+            params(&[
+                ("padding_low", "1,2"),
+                ("padding_high", "2,1"),
+                ("padding_interior", "0,0"),
+            ]), // row-copyable
+            params(&[
+                ("padding_low", "1,0"),
+                ("padding_high", "0,1"),
+                ("padding_interior", "1,2"),
+            ]), // interior dilation
+            params(&[
+                ("padding_low", "-1,0"),
+                ("padding_high", "0,-1"),
+                ("padding_interior", "0,0"),
+            ]), // crop
         ] {
             // f32
             let f32d: Vec<f32> = (0..rows * cols).map(|i| i as f32 * 0.5 - 2.0).collect();
-            let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, f32d.clone()).unwrap());
-            let boxed = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: dims.clone() }, f32d.iter().copied().map(Literal::from_f32).collect()).unwrap());
+            let dense = Value::Tensor(
+                TensorValue::new_f32_values(Shape { dims: dims.clone() }, f32d.clone()).unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims: dims.clone() },
+                    f32d.iter().copied().map(Literal::from_f32).collect(),
+                )
+                .unwrap(),
+            );
             let pv = Value::Scalar(Literal::from_f32(-9.5));
             let d = eval_pad(&[dense, pv.clone()], &p).unwrap();
             let l = eval_pad(&[boxed, pv], &p).unwrap();
             assert_eq!(extract_shape(&d), extract_shape(&l), "f32 pad shape");
             assert_eq!(lits(&d), lits(&l), "f32 pad values");
-            assert!(d.as_tensor().unwrap().elements.as_f32_slice().is_some(), "f32 pad output dense");
+            assert!(
+                d.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+                "f32 pad output dense"
+            );
 
             // bf16 + f16
             for dtype in [DType::BF16, DType::F16] {
-                let raw: Vec<u16> = (0..rows * cols).map(|i| (i as u16).wrapping_mul(91).wrapping_add(3)).collect();
-                let mk_lit = move |b: u16| if dtype == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
-                let dense = Value::Tensor(TensorValue::new_half_float_values(dtype, Shape { dims: dims.clone() }, raw.clone()).unwrap());
-                let boxed = Value::Tensor(TensorValue::new(dtype, Shape { dims: dims.clone() }, raw.iter().copied().map(mk_lit).collect()).unwrap());
+                let raw: Vec<u16> = (0..rows * cols)
+                    .map(|i| (i as u16).wrapping_mul(91).wrapping_add(3))
+                    .collect();
+                let mk_lit = move |b: u16| {
+                    if dtype == DType::BF16 {
+                        Literal::BF16Bits(b)
+                    } else {
+                        Literal::F16Bits(b)
+                    }
+                };
+                let dense = Value::Tensor(
+                    TensorValue::new_half_float_values(
+                        dtype,
+                        Shape { dims: dims.clone() },
+                        raw.clone(),
+                    )
+                    .unwrap(),
+                );
+                let boxed = Value::Tensor(
+                    TensorValue::new(
+                        dtype,
+                        Shape { dims: dims.clone() },
+                        raw.iter().copied().map(mk_lit).collect(),
+                    )
+                    .unwrap(),
+                );
                 let pv = Value::Scalar(mk_lit(0x7fc0));
                 let d = eval_pad(&[dense, pv.clone()], &p).unwrap();
                 let l = eval_pad(&[boxed, pv], &p).unwrap();
                 assert_eq!(lits(&d), lits(&l), "{dtype:?} pad values");
-                assert!(d.as_tensor().unwrap().elements.as_half_float_slice().is_some(), "{dtype:?} pad output dense");
+                assert!(
+                    d.as_tensor()
+                        .unwrap()
+                        .elements
+                        .as_half_float_slice()
+                        .is_some(),
+                    "{dtype:?} pad output dense"
+                );
             }
         }
     }
@@ -7994,11 +8244,26 @@ mod tests {
     fn bench_f32_pad_dense_vs_boxed() {
         use std::time::Instant;
         let (rows, cols) = (4000usize, 1000usize);
-        let data: Vec<f32> = (0..rows * cols).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
         let dims = vec![rows as u32, cols as u32];
-        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: dims.clone() }, data.iter().copied().map(Literal::from_f32).collect()).unwrap());
-        let p = params(&[("padding_low", "1,1"), ("padding_high", "1,1"), ("padding_interior", "0,0")]);
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        let p = params(&[
+            ("padding_low", "1,1"),
+            ("padding_high", "1,1"),
+            ("padding_interior", "0,0"),
+        ]);
         let pv = Value::Scalar(Literal::from_f32(0.0));
         let time = |x: &Value| {
             let _ = eval_pad(&[x.clone(), pv.clone()], &p).unwrap();
@@ -8014,7 +8279,173 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH f32 pad [{rows},{cols}]+1 border: boxed(materialize+box)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
+    }
+
+    /// Dense STRIDED slice (non-leading-axis slice + stride>1) must be BIT-FOR-BIT
+    /// identical to the boxed per-`Literal` path AND keep dense output, for
+    /// f64/f32/bf16/f16/i64.
+    #[test]
+    fn dense_strided_slice_matches_literal_path_and_stays_dense() {
+        let (rows, cols) = (10usize, 12usize);
+        let dims = vec![rows as u32, cols as u32];
+        let lits = |v: &Value| v.as_tensor().unwrap().elements.to_vec();
+        for p in [
+            params(&[("start_indices", "0,2"), ("limit_indices", "10,8")]), // non-leading axis crop
+            params(&[
+                ("start_indices", "1,1"),
+                ("limit_indices", "9,11"),
+                ("strides", "2,3"),
+            ]), // stride>1
+        ] {
+            let f64d: Vec<f64> = (0..rows * cols).map(|i| i as f64 * 0.5 - 5.0).collect();
+            let dense = Value::Tensor(
+                TensorValue::new_f64_values(Shape { dims: dims.clone() }, f64d.clone()).unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: dims.clone() },
+                    f64d.iter().copied().map(Literal::from_f64).collect(),
+                )
+                .unwrap(),
+            );
+            let d = eval_slice(std::slice::from_ref(&dense), &p).unwrap();
+            let l = eval_slice(std::slice::from_ref(&boxed), &p).unwrap();
+            assert_eq!(
+                extract_shape(&d),
+                extract_shape(&l),
+                "f64 strided slice shape"
+            );
+            assert_eq!(lits(&d), lits(&l), "f64 strided slice");
+            assert!(
+                d.as_tensor().unwrap().elements.as_f64_slice().is_some(),
+                "f64 strided slice dense"
+            );
+
+            let f32d: Vec<f32> = (0..rows * cols).map(|i| i as f32 * 0.25 - 1.0).collect();
+            let dense = Value::Tensor(
+                TensorValue::new_f32_values(Shape { dims: dims.clone() }, f32d.clone()).unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims: dims.clone() },
+                    f32d.iter().copied().map(Literal::from_f32).collect(),
+                )
+                .unwrap(),
+            );
+            let d = eval_slice(std::slice::from_ref(&dense), &p).unwrap();
+            let l = eval_slice(std::slice::from_ref(&boxed), &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "f32 strided slice");
+            assert!(
+                d.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+                "f32 strided slice dense"
+            );
+
+            for dtype in [DType::BF16, DType::F16] {
+                let raw: Vec<u16> = (0..rows * cols)
+                    .map(|i| (i as u16).wrapping_mul(67).wrapping_add(5))
+                    .collect();
+                let mk_lit = move |b: u16| {
+                    if dtype == DType::BF16 {
+                        Literal::BF16Bits(b)
+                    } else {
+                        Literal::F16Bits(b)
+                    }
+                };
+                let dense = Value::Tensor(
+                    TensorValue::new_half_float_values(
+                        dtype,
+                        Shape { dims: dims.clone() },
+                        raw.clone(),
+                    )
+                    .unwrap(),
+                );
+                let boxed = Value::Tensor(
+                    TensorValue::new(
+                        dtype,
+                        Shape { dims: dims.clone() },
+                        raw.iter().copied().map(mk_lit).collect(),
+                    )
+                    .unwrap(),
+                );
+                let d = eval_slice(std::slice::from_ref(&dense), &p).unwrap();
+                let l = eval_slice(std::slice::from_ref(&boxed), &p).unwrap();
+                assert_eq!(lits(&d), lits(&l), "{dtype:?} strided slice");
+                assert!(
+                    d.as_tensor()
+                        .unwrap()
+                        .elements
+                        .as_half_float_slice()
+                        .is_some(),
+                    "{dtype:?} strided slice dense"
+                );
+            }
+
+            let i64d: Vec<i64> = (0..(rows * cols) as i64).map(|i| i - 30).collect();
+            let dense = Value::Tensor(
+                TensorValue::new_i64_values(Shape { dims: dims.clone() }, i64d.clone()).unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    DType::I64,
+                    Shape { dims: dims.clone() },
+                    i64d.iter().copied().map(Literal::I64).collect(),
+                )
+                .unwrap(),
+            );
+            let d = eval_slice(std::slice::from_ref(&dense), &p).unwrap();
+            let l = eval_slice(std::slice::from_ref(&boxed), &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "i64 strided slice");
+            assert!(
+                d.as_tensor().unwrap().elements.as_i64_slice().is_some(),
+                "i64 strided slice dense"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_strided_slice_dense_vs_boxed() {
+        use std::time::Instant;
+        let (rows, cols) = (4096usize, 2048usize); // crop feature axis: [:, 256:1792]
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
+        let p = params(&[("start_indices", "0,256"), ("limit_indices", "4096,1792")]);
+        let time = |x: &Value| {
+            let _ = eval_slice(std::slice::from_ref(x), &p).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let _ = eval_slice(std::slice::from_ref(x), &p).unwrap();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let generic = time(&boxed);
+        let dense_t = time(&dense);
+        println!(
+            "BENCH f32 strided slice [{rows},{cols}]->[:,256:1792]: boxed(materialize+box)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
@@ -8030,42 +8461,107 @@ mod tests {
 
         // f64
         let f64d: Vec<f64> = (0..rows * cols).map(|i| i as f64 * 1.5 - 3.0).collect();
-        let dense = Value::Tensor(TensorValue::new_f64_values(Shape { dims: dims.clone() }, f64d.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::F64, Shape { dims: dims.clone() }, f64d.iter().copied().map(Literal::from_f64).collect()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: dims.clone() }, f64d.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: dims.clone() },
+                f64d.iter().copied().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
         let d = eval_slice(&[dense], &p).unwrap();
         let l = eval_slice(&[boxed], &p).unwrap();
         assert_eq!(lits(&d), lits(&l), "f64 slice");
-        assert!(d.as_tensor().unwrap().elements.as_f64_slice().is_some(), "f64 slice output dense");
+        assert!(
+            d.as_tensor().unwrap().elements.as_f64_slice().is_some(),
+            "f64 slice output dense"
+        );
 
         // f32
         let f32d: Vec<f32> = (0..rows * cols).map(|i| i as f32 * 0.25 - 1.0).collect();
-        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, f32d.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: dims.clone() }, f32d.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, f32d.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                f32d.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
         let d = eval_slice(&[dense], &p).unwrap();
         let l = eval_slice(&[boxed], &p).unwrap();
         assert_eq!(lits(&d), lits(&l), "f32 slice");
-        assert!(d.as_tensor().unwrap().elements.as_f32_slice().is_some(), "f32 slice output dense");
+        assert!(
+            d.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+            "f32 slice output dense"
+        );
 
         // bf16 + f16
         for dtype in [DType::BF16, DType::F16] {
-            let raw: Vec<u16> = (0..rows * cols).map(|i| (i as u16).wrapping_mul(61).wrapping_add(7)).collect();
-            let mk_lit = |b: u16| if dtype == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
-            let dense = Value::Tensor(TensorValue::new_half_float_values(dtype, Shape { dims: dims.clone() }, raw.clone()).unwrap());
-            let boxed = Value::Tensor(TensorValue::new(dtype, Shape { dims: dims.clone() }, raw.iter().copied().map(mk_lit).collect()).unwrap());
+            let raw: Vec<u16> = (0..rows * cols)
+                .map(|i| (i as u16).wrapping_mul(61).wrapping_add(7))
+                .collect();
+            let mk_lit = |b: u16| {
+                if dtype == DType::BF16 {
+                    Literal::BF16Bits(b)
+                } else {
+                    Literal::F16Bits(b)
+                }
+            };
+            let dense = Value::Tensor(
+                TensorValue::new_half_float_values(
+                    dtype,
+                    Shape { dims: dims.clone() },
+                    raw.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new(
+                    dtype,
+                    Shape { dims: dims.clone() },
+                    raw.iter().copied().map(mk_lit).collect(),
+                )
+                .unwrap(),
+            );
             let d = eval_slice(&[dense], &p).unwrap();
             let l = eval_slice(&[boxed], &p).unwrap();
             assert_eq!(lits(&d), lits(&l), "{dtype:?} slice");
-            assert!(d.as_tensor().unwrap().elements.as_half_float_slice().is_some(), "{dtype:?} slice output dense");
+            assert!(
+                d.as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some(),
+                "{dtype:?} slice output dense"
+            );
         }
 
         // i64
         let i64d: Vec<i64> = (0..(rows * cols) as i64).map(|i| i - 12).collect();
-        let dense = Value::Tensor(TensorValue::new_i64_values(Shape { dims: dims.clone() }, i64d.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::I64, Shape { dims: dims.clone() }, i64d.iter().copied().map(Literal::I64).collect()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_i64_values(Shape { dims: dims.clone() }, i64d.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: dims.clone() },
+                i64d.iter().copied().map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        );
         let d = eval_slice(&[dense], &p).unwrap();
         let l = eval_slice(&[boxed], &p).unwrap();
         assert_eq!(lits(&d), lits(&l), "i64 slice");
-        assert!(d.as_tensor().unwrap().elements.as_i64_slice().is_some(), "i64 slice output dense");
+        assert!(
+            d.as_tensor().unwrap().elements.as_i64_slice().is_some(),
+            "i64 slice output dense"
+        );
     }
 
     #[test]
@@ -8073,10 +8569,21 @@ mod tests {
     fn bench_f32_slice_dense_vs_boxed() {
         use std::time::Instant;
         let (rows, cols) = (4096usize, 1024usize); // slice [0:2048] -> half
-        let data: Vec<f32> = (0..rows * cols).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
         let dims = vec![rows as u32, cols as u32];
-        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: dims.clone() }, data.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: dims.clone() },
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
         let p = params(&[("start_indices", "0,0"), ("limit_indices", "2048,1024")]);
         let time = |x: &Value| {
             let _ = eval_slice(std::slice::from_ref(x), &p).unwrap();
@@ -8092,7 +8599,9 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH f32 slice [{rows},{cols}]->[2048,{cols}]: boxed(materialize+box)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
@@ -8297,27 +8806,86 @@ mod tests {
 
         // f32 dense path vs generic (the default ML dtype), bit-identical + dense out.
         let f32d: Vec<f32> = (0..n).map(|i| (i as f32) * 0.25 - 2.0).collect();
-        let f32_dense = Value::Tensor(TensorValue::new_f32_values(shape.clone(), f32d.clone()).unwrap());
-        let f32_lit = Value::Tensor(TensorValue::new(DType::F32, shape.clone(), f32d.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let f32_dense =
+            Value::Tensor(TensorValue::new_f32_values(shape.clone(), f32d.clone()).unwrap());
+        let f32_lit = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                shape.clone(),
+                f32d.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
         let f32bits = |v: &Value| -> Vec<u32> {
-            v.as_tensor().unwrap().elements.iter().map(|l| match l { Literal::F32Bits(b) => *b, o => panic!("{o:?}") }).collect()
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F32Bits(b) => *b,
+                    o => panic!("{o:?}"),
+                })
+                .collect()
         };
         let d = eval_rev(std::slice::from_ref(&f32_dense), &p).unwrap();
-        assert_eq!(f32bits(&d), f32bits(&eval_rev(std::slice::from_ref(&f32_lit), &p).unwrap()), "f32 rev");
-        assert!(d.as_tensor().unwrap().elements.as_f32_slice().is_some(), "f32 rev output dense");
+        assert_eq!(
+            f32bits(&d),
+            f32bits(&eval_rev(std::slice::from_ref(&f32_lit), &p).unwrap()),
+            "f32 rev"
+        );
+        assert!(
+            d.as_tensor().unwrap().elements.as_f32_slice().is_some(),
+            "f32 rev output dense"
+        );
 
         // bf16 + f16 dense path vs generic.
         for dtype in [DType::BF16, DType::F16] {
-            let raw: Vec<u16> = (0..n).map(|i| (i as u16).wrapping_mul(71).wrapping_add(5)).collect();
-            let mk_lit = |b: u16| if dtype == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
-            let hf_dense = Value::Tensor(TensorValue::new_half_float_values(dtype, shape.clone(), raw.clone()).unwrap());
-            let hf_lit = Value::Tensor(TensorValue::new(dtype, shape.clone(), raw.iter().copied().map(mk_lit).collect()).unwrap());
+            let raw: Vec<u16> = (0..n)
+                .map(|i| (i as u16).wrapping_mul(71).wrapping_add(5))
+                .collect();
+            let mk_lit = |b: u16| {
+                if dtype == DType::BF16 {
+                    Literal::BF16Bits(b)
+                } else {
+                    Literal::F16Bits(b)
+                }
+            };
+            let hf_dense = Value::Tensor(
+                TensorValue::new_half_float_values(dtype, shape.clone(), raw.clone()).unwrap(),
+            );
+            let hf_lit = Value::Tensor(
+                TensorValue::new(
+                    dtype,
+                    shape.clone(),
+                    raw.iter().copied().map(mk_lit).collect(),
+                )
+                .unwrap(),
+            );
             let hfbits = |v: &Value| -> Vec<u16> {
-                v.as_tensor().unwrap().elements.iter().map(|l| match l { Literal::BF16Bits(b) | Literal::F16Bits(b) => *b, o => panic!("{o:?}") }).collect()
+                v.as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| match l {
+                        Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
+                        o => panic!("{o:?}"),
+                    })
+                    .collect()
             };
             let d = eval_rev(std::slice::from_ref(&hf_dense), &p).unwrap();
-            assert_eq!(hfbits(&d), hfbits(&eval_rev(std::slice::from_ref(&hf_lit), &p).unwrap()), "{dtype:?} rev");
-            assert!(d.as_tensor().unwrap().elements.as_half_float_slice().is_some(), "{dtype:?} rev output dense");
+            assert_eq!(
+                hfbits(&d),
+                hfbits(&eval_rev(std::slice::from_ref(&hf_lit), &p).unwrap()),
+                "{dtype:?} rev"
+            );
+            assert!(
+                d.as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some(),
+                "{dtype:?} rev output dense"
+            );
         }
     }
 
@@ -8326,10 +8894,22 @@ mod tests {
     fn bench_f32_rev_dense_vs_boxed() {
         use std::time::Instant;
         let (rows, cols) = (2048usize, 2048usize);
-        let data: Vec<f32> = (0..rows * cols).map(|i| ((i % 251) as f32) * 0.013 - 1.6).collect();
-        let shape = Shape { dims: vec![rows as u32, cols as u32] };
-        let dense = Value::Tensor(TensorValue::new_f32_values(shape.clone(), data.clone()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new(DType::F32, shape.clone(), data.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i % 251) as f32) * 0.013 - 1.6)
+            .collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let dense =
+            Value::Tensor(TensorValue::new_f32_values(shape.clone(), data.clone()).unwrap());
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                shape.clone(),
+                data.iter().copied().map(Literal::from_f32).collect(),
+            )
+            .unwrap(),
+        );
         let p = params(&[("axes", "1")]);
         let time = |x: &Value| {
             let _ = eval_rev(std::slice::from_ref(x), &p).unwrap();
@@ -8345,7 +8925,9 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH f32 rev axis1 [{rows},{cols}]: boxed(materialize+box)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
@@ -8388,13 +8970,23 @@ mod tests {
     #[test]
     fn dense_one_hot_f32_half_matches_f64_and_stays_dense() {
         let indices = Value::Tensor(
-            TensorValue::new_i64_values(Shape { dims: vec![2, 3] }, vec![0, 1, 5, 2, 3, 1]).unwrap(),
+            TensorValue::new_i64_values(Shape { dims: vec![2, 3] }, vec![0, 1, 5, 2, 3, 1])
+                .unwrap(),
         );
         let f64bits = |v: &Value| -> Vec<u64> {
-            v.as_tensor().unwrap().elements.iter().map(|l| l.as_f64().unwrap().to_bits()).collect()
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect()
         };
         let reference = f64bits(
-            &eval_one_hot(std::slice::from_ref(&indices), &params(&[("num_classes", "4"), ("dtype", "f64")])).unwrap(),
+            &eval_one_hot(
+                std::slice::from_ref(&indices),
+                &params(&[("num_classes", "4"), ("dtype", "f64")]),
+            )
+            .unwrap(),
         );
         for dt in ["f32", "bf16", "f16"] {
             let r = eval_one_hot(
@@ -8407,7 +8999,10 @@ mod tests {
             if dt == "f32" {
                 assert!(t.elements.as_f32_slice().is_some(), "f32 one_hot dense");
             } else {
-                assert!(t.elements.as_half_float_slice().is_some(), "{dt} one_hot dense");
+                assert!(
+                    t.elements.as_half_float_slice().is_some(),
+                    "{dt} one_hot dense"
+                );
             }
         }
     }
@@ -8418,10 +9013,20 @@ mod tests {
         use std::time::Instant;
         let (batch, nc) = (8192usize, 1024usize); // [batch] -> [batch, nc]
         let idxs: Vec<i64> = (0..batch as i64).map(|i| (i * 7919) % nc as i64).collect();
-        let indices = Value::Tensor(TensorValue::new_i64_values(Shape { dims: vec![batch as u32] }, idxs.clone()).unwrap());
+        let indices = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![batch as u32],
+                },
+                idxs.clone(),
+            )
+            .unwrap(),
+        );
         let p = params(&[("num_classes", &nc.to_string()), ("dtype", "f32")]);
         let total = batch * nc;
-        let shape = Shape { dims: vec![batch as u32, nc as u32] };
+        let shape = Shape {
+            dims: vec![batch as u32, nc as u32],
+        };
         let timeit = |f: &dyn Fn()| {
             f();
             let mut best = f64::MAX;
@@ -8447,7 +9052,9 @@ mod tests {
         });
         println!(
             "BENCH f32 one_hot [{batch}]->[{batch},{nc}]: boxed(Literal fill+box)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            boxed * 1e3, dense * 1e3, boxed / dense
+            boxed * 1e3,
+            dense * 1e3,
+            boxed / dense
         );
     }
 
@@ -10126,7 +10733,13 @@ mod tests {
         let idx = Value::vector_i64(&idxs).unwrap();
         let upd_dims = vec![n_upd as u32, cols as u32];
         for dtype in [DType::BF16, DType::F16] {
-            let mk_lit = |b: u16| if dtype == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
+            let mk_lit = |b: u16| {
+                if dtype == DType::BF16 {
+                    Literal::BF16Bits(b)
+                } else {
+                    Literal::F16Bits(b)
+                }
+            };
             let opr: Vec<u16> = (0..rows * cols)
                 .map(|i| match i % 11 {
                     0 => 0x7f80, // +inf-ish (bf16 +inf=0x7f80)
@@ -10136,27 +10749,72 @@ mod tests {
                     _ => (i as u16).wrapping_mul(53).wrapping_add(17),
                 })
                 .collect();
-            let updr: Vec<u16> = (0..n_upd * cols).map(|i| (i as u16).wrapping_mul(97).wrapping_add(3)).collect();
+            let updr: Vec<u16> = (0..n_upd * cols)
+                .map(|i| (i as u16).wrapping_mul(97).wrapping_add(3))
+                .collect();
             let mk = |d: &[u16], dm: &[u32], dense: bool| {
                 if dense {
-                    Value::Tensor(TensorValue::new_half_float_values(dtype, Shape { dims: dm.to_vec() }, d.to_vec()).unwrap())
+                    Value::Tensor(
+                        TensorValue::new_half_float_values(
+                            dtype,
+                            Shape { dims: dm.to_vec() },
+                            d.to_vec(),
+                        )
+                        .unwrap(),
+                    )
                 } else {
-                    Value::Tensor(TensorValue::new(dtype, Shape { dims: dm.to_vec() }, d.iter().copied().map(mk_lit).collect()).unwrap())
+                    Value::Tensor(
+                        TensorValue::new(
+                            dtype,
+                            Shape { dims: dm.to_vec() },
+                            d.iter().copied().map(mk_lit).collect(),
+                        )
+                        .unwrap(),
+                    )
                 }
             };
             let bits = |v: &Value| -> Vec<u16> {
-                v.as_tensor().unwrap().elements.iter().map(|l| match l {
-                    Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
-                    o => panic!("expected half-float, got {o:?}"),
-                }).collect()
+                v.as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| match l {
+                        Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
+                        o => panic!("expected half-float, got {o:?}"),
+                    })
+                    .collect()
             };
             for mode in ["overwrite", "add"] {
                 for imode in ["fill_or_drop", "clip"] {
                     let p = params(&[("mode", mode), ("index_mode", imode)]);
-                    let d = super::eval_scatter(&[mk(&opr, &dims, true), idx.clone(), mk(&updr, &upd_dims, true)], &p).unwrap();
-                    let l = super::eval_scatter(&[mk(&opr, &dims, false), idx.clone(), mk(&updr, &upd_dims, false)], &p).unwrap();
-                    assert_eq!(d.as_tensor().unwrap().dtype, dtype, "{dtype:?} scatter dtype {mode} {imode}");
-                    assert_eq!(bits(&d), bits(&l), "{dtype:?} scatter mode={mode} imode={imode}");
+                    let d = super::eval_scatter(
+                        &[
+                            mk(&opr, &dims, true),
+                            idx.clone(),
+                            mk(&updr, &upd_dims, true),
+                        ],
+                        &p,
+                    )
+                    .unwrap();
+                    let l = super::eval_scatter(
+                        &[
+                            mk(&opr, &dims, false),
+                            idx.clone(),
+                            mk(&updr, &upd_dims, false),
+                        ],
+                        &p,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        d.as_tensor().unwrap().dtype,
+                        dtype,
+                        "{dtype:?} scatter dtype {mode} {imode}"
+                    );
+                    assert_eq!(
+                        bits(&d),
+                        bits(&l),
+                        "{dtype:?} scatter mode={mode} imode={imode}"
+                    );
                 }
             }
         }
@@ -10169,14 +10827,54 @@ mod tests {
         let (vocab, dim) = (50000usize, 256usize);
         let batch = 8192usize;
         let zeros: Vec<u16> = vec![0u16; vocab * dim];
-        let updates: Vec<u16> = (0..batch * dim).map(|i| (i as u16).wrapping_mul(40503).wrapping_add(7)).collect();
+        let updates: Vec<u16> = (0..batch * dim)
+            .map(|i| (i as u16).wrapping_mul(40503).wrapping_add(7))
+            .collect();
         let op_dims = vec![vocab as u32, dim as u32];
         let upd_dims = vec![batch as u32, dim as u32];
-        let dense_op = Value::Tensor(TensorValue::new_half_float_values(DType::BF16, Shape { dims: op_dims.clone() }, zeros.clone()).unwrap());
-        let boxed_op = Value::Tensor(TensorValue::new(DType::BF16, Shape { dims: op_dims.clone() }, zeros.iter().copied().map(Literal::BF16Bits).collect()).unwrap());
-        let dense_upd = Value::Tensor(TensorValue::new_half_float_values(DType::BF16, Shape { dims: upd_dims.clone() }, updates.clone()).unwrap());
-        let boxed_upd = Value::Tensor(TensorValue::new(DType::BF16, Shape { dims: upd_dims.clone() }, updates.iter().copied().map(Literal::BF16Bits).collect()).unwrap());
-        let idx: Vec<i64> = (0..batch as i64).map(|i| (i * 7919) % vocab as i64).collect();
+        let dense_op = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape {
+                    dims: op_dims.clone(),
+                },
+                zeros.clone(),
+            )
+            .unwrap(),
+        );
+        let boxed_op = Value::Tensor(
+            TensorValue::new(
+                DType::BF16,
+                Shape {
+                    dims: op_dims.clone(),
+                },
+                zeros.iter().copied().map(Literal::BF16Bits).collect(),
+            )
+            .unwrap(),
+        );
+        let dense_upd = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape {
+                    dims: upd_dims.clone(),
+                },
+                updates.clone(),
+            )
+            .unwrap(),
+        );
+        let boxed_upd = Value::Tensor(
+            TensorValue::new(
+                DType::BF16,
+                Shape {
+                    dims: upd_dims.clone(),
+                },
+                updates.iter().copied().map(Literal::BF16Bits).collect(),
+            )
+            .unwrap(),
+        );
+        let idx: Vec<i64> = (0..batch as i64)
+            .map(|i| (i * 7919) % vocab as i64)
+            .collect();
         let idx_v = Value::vector_i64(&idx).unwrap();
         let p = params(&[("mode", "overwrite"), ("index_mode", "clip")]);
         let time = |op: &Value, upd: &Value| {
@@ -10193,7 +10891,9 @@ mod tests {
         let dense_t = time(&dense_op, &dense_upd);
         println!(
             "BENCH bf16 embedding scatter-overwrite [{vocab},{dim}] x {batch}: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
@@ -10380,26 +11080,65 @@ mod tests {
             })
             .collect();
         for dtype in [DType::BF16, DType::F16] {
-            let mk_lit = |b: u16| if dtype == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
+            let mk_lit = |b: u16| {
+                if dtype == DType::BF16 {
+                    Literal::BF16Bits(b)
+                } else {
+                    Literal::F16Bits(b)
+                }
+            };
             for mode in ["clip", "fill_or_drop"] {
                 let params = params(&[("slice_sizes", "1,40"), ("index_mode", mode)]);
                 let dense = Value::Tensor(
-                    TensorValue::new_half_float_values(dtype, Shape { dims: dims.clone() }, raw.clone()).unwrap(),
+                    TensorValue::new_half_float_values(
+                        dtype,
+                        Shape { dims: dims.clone() },
+                        raw.clone(),
+                    )
+                    .unwrap(),
                 );
                 let boxed = Value::Tensor(
-                    TensorValue::new(dtype, Shape { dims: dims.clone() }, raw.iter().copied().map(mk_lit).collect()).unwrap(),
+                    TensorValue::new(
+                        dtype,
+                        Shape { dims: dims.clone() },
+                        raw.iter().copied().map(mk_lit).collect(),
+                    )
+                    .unwrap(),
                 );
-                assert!(dense.as_tensor().unwrap().elements.as_half_float_slice().is_some());
-                assert!(boxed.as_tensor().unwrap().elements.as_half_float_slice().is_none());
+                assert!(
+                    dense
+                        .as_tensor()
+                        .unwrap()
+                        .elements
+                        .as_half_float_slice()
+                        .is_some()
+                );
+                assert!(
+                    boxed
+                        .as_tensor()
+                        .unwrap()
+                        .elements
+                        .as_half_float_slice()
+                        .is_none()
+                );
                 let bits = |v: &Value| -> Vec<u16> {
-                    v.as_tensor().unwrap().elements.iter().map(|l| match l {
-                        Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
-                        o => panic!("expected half-float, got {o:?}"),
-                    }).collect()
+                    v.as_tensor()
+                        .unwrap()
+                        .elements
+                        .iter()
+                        .map(|l| match l {
+                            Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
+                            o => panic!("expected half-float, got {o:?}"),
+                        })
+                        .collect()
                 };
                 let d = super::eval_gather(&[dense, idx.clone()], &params).unwrap();
                 let l = super::eval_gather(&[boxed, idx.clone()], &params).unwrap();
-                assert_eq!(d.as_tensor().unwrap().dtype, dtype, "{dtype:?} gather dtype mode={mode}");
+                assert_eq!(
+                    d.as_tensor().unwrap().dtype,
+                    dtype,
+                    "{dtype:?} gather dtype mode={mode}"
+                );
                 assert_eq!(bits(&d), bits(&l), "{dtype:?} gather mode={mode}");
             }
         }
@@ -10411,13 +11150,29 @@ mod tests {
         use std::time::Instant;
         let (vocab, dim) = (50000usize, 256usize);
         let batch = 8192usize;
-        let raw: Vec<u16> = (0..vocab * dim).map(|i| (i as u16).wrapping_mul(40503).wrapping_add(7)).collect();
+        let raw: Vec<u16> = (0..vocab * dim)
+            .map(|i| (i as u16).wrapping_mul(40503).wrapping_add(7))
+            .collect();
         let dims = vec![vocab as u32, dim as u32];
-        let dense = Value::Tensor(TensorValue::new_half_float_values(DType::BF16, Shape { dims: dims.clone() }, raw.clone()).unwrap());
-        let boxed = Value::Tensor(
-            TensorValue::new(DType::BF16, Shape { dims: dims.clone() }, raw.iter().copied().map(Literal::BF16Bits).collect()).unwrap(),
+        let dense = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape { dims: dims.clone() },
+                raw.clone(),
+            )
+            .unwrap(),
         );
-        let idx: Vec<i64> = (0..batch as i64).map(|i| (i * 7919) % vocab as i64).collect();
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::BF16,
+                Shape { dims: dims.clone() },
+                raw.iter().copied().map(Literal::BF16Bits).collect(),
+            )
+            .unwrap(),
+        );
+        let idx: Vec<i64> = (0..batch as i64)
+            .map(|i| (i * 7919) % vocab as i64)
+            .collect();
         let idx_v = Value::vector_i64(&idx).unwrap();
         let p = params(&[("slice_sizes", "1,256"), ("index_mode", "clip")]);
         let time = |operand: &Value| {
@@ -10434,7 +11189,9 @@ mod tests {
         let dense_t = time(&dense);
         println!(
             "BENCH bf16 embedding gather [{vocab},{dim}] x {batch} rows: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
-            generic * 1e3, dense_t * 1e3, generic / dense_t
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
         );
     }
 
