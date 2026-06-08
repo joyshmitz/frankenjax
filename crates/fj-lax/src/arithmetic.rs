@@ -215,6 +215,12 @@ pub(crate) fn eval_binary_elementwise(
                 {
                     return Ok(value);
                 }
+                if matches!(lhs.dtype, DType::BF16 | DType::F16)
+                    && lhs.dtype == rhs.dtype
+                    && let Some(value) = eval_same_shape_half_float_binop(primitive, lhs, rhs)?
+                {
+                    return Ok(value);
+                }
                 if lhs.dtype == DType::I64
                     && rhs.dtype == DType::I64
                     && let Some(value) = eval_same_shape_i64_binop(lhs, rhs, &int_op)?
@@ -390,6 +396,85 @@ fn eval_same_shape_f32_map(
         lhs.shape.clone(),
         values,
     )?)))
+}
+
+/// Same-shape BF16⊗BF16 / F16⊗F16 elementwise fast path — the dense half-float sibling
+/// of [`eval_same_shape_f32_binop`]. `promote_dtype` keeps BF16+BF16→BF16 and F16+F16→F16
+/// (mixed BF16+F16→F32 is excluded), and the generic `binary_literal_op` rounds the f64
+/// result via `literal_from_numeric_f64(half, float_op(a,b))` = `from_{bf16,f16}_f64(...)`.
+/// We do exactly that on the dense `u16` backing (2B/elem vs a 24B boxed `Literal`), so the
+/// output is BIT-FOR-BIT identical while skipping per-`Literal` materialization + dispatch.
+#[inline]
+fn eval_same_shape_half_float_binop(
+    primitive: Primitive,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    match primitive {
+        Primitive::Add => eval_same_shape_half_float_map(lhs, rhs, |a, b| a + b),
+        Primitive::Sub => eval_same_shape_half_float_map(lhs, rhs, |a, b| a - b),
+        Primitive::Mul => eval_same_shape_half_float_map(lhs, rhs, |a, b| a * b),
+        Primitive::Div => eval_same_shape_half_float_map(lhs, rhs, |a, b| a / b),
+        Primitive::Max => eval_same_shape_half_float_map(lhs, rhs, crate::jax_max_f64),
+        Primitive::Min => eval_same_shape_half_float_map(lhs, rhs, crate::jax_min_f64),
+        _ => Ok(None),
+    }
+}
+
+#[inline]
+fn eval_same_shape_half_float_map(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    op: impl Fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    // Mixed BF16+F16 promotes to F32 (handled by the generic path), so only same-half
+    // operands take this dense path.
+    if lhs.dtype != rhs.dtype {
+        return Ok(None);
+    }
+    let dt = lhs.dtype;
+    let (Some(lhs_values), Some(rhs_values)) = (
+        lhs.elements.as_half_float_slice(),
+        rhs.elements.as_half_float_slice(),
+    ) else {
+        return Ok(None);
+    };
+    let values: Vec<u16> = lhs_values
+        .iter()
+        .zip(rhs_values)
+        .map(|(&l, &r)| half_binary_apply(dt, l, r, &op))
+        .collect();
+    Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+        dt,
+        lhs.shape.clone(),
+        values,
+    )?)))
+}
+
+/// Apply a binary f64 op to two BF16/F16 bit patterns, BIT-IDENTICALLY to the generic
+/// `binary_literal_op` half-float path: widen each via `Literal::{BF16,F16}Bits.as_f64()`,
+/// run `op` in f64, round via `Literal::from_{bf16,f16}_f64`, return the u16 bits.
+#[inline]
+fn half_binary_apply(dt: DType, lhs_bits: u16, rhs_bits: u16, op: &impl Fn(f64, f64) -> f64) -> u16 {
+    let widen = |bits: u16| -> f64 {
+        if dt == DType::BF16 {
+            Literal::BF16Bits(bits)
+        } else {
+            Literal::F16Bits(bits)
+        }
+        .as_f64()
+        .unwrap_or(0.0)
+    };
+    let result = op(widen(lhs_bits), widen(rhs_bits));
+    let rounded = if dt == DType::BF16 {
+        Literal::from_bf16_f64(result)
+    } else {
+        Literal::from_f16_f64(result)
+    };
+    match rounded {
+        Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+        _ => 0,
+    }
 }
 
 #[inline]
@@ -9960,6 +10045,94 @@ mod tests {
                     out_bits(&from_dense),
                     out_bits(&from_boxed),
                     "{prim:?} {dt:?} dense threaded != boxed serial"
+                );
+            }
+        }
+    }
+
+    /// Isomorphism proof for the dense BF16/F16 same-shape binary fast path: dense
+    /// half-float Add/Sub/Mul/Div/Max/Min must equal the boxed-`Literal` generic map
+    /// bit-for-bit. Both widen via `Literal::{BF16,F16}Bits.as_f64()` and round via
+    /// `from_{bf16,f16}_f64`, so they are bit-identical.
+    #[test]
+    fn dense_half_float_binary_bit_identical_to_literal() {
+        use fj_core::{DType, Shape, TensorValue};
+        let n = 4096usize;
+        let half_bits = |dt: DType, x: f64| -> u16 {
+            match if dt == DType::BF16 {
+                Literal::from_bf16_f64(x)
+            } else {
+                Literal::from_f16_f64(x)
+            } {
+                Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+                other => panic!("expected half-float literal, got {other:?}"),
+            }
+        };
+        let out_bits = |v: &Value| -> Vec<u16> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
+                    other => panic!("expected half-float, got {other:?}"),
+                })
+                .collect()
+        };
+        for dt in [DType::BF16, DType::F16] {
+            let lb: Vec<u16> = (0..n)
+                .map(|i| half_bits(dt, (i as f64 * 0.013).sin() * 2.0))
+                .collect();
+            // Keep rhs strictly positive so Div is clean (bit-identity holds for any
+            // value, but this avoids ±inf/NaN noise in the comparison).
+            let rb: Vec<u16> = (0..n)
+                .map(|i| half_bits(dt, (i as f64 * 0.0071).cos() * 1.5 + 2.0))
+                .collect();
+            let shape = Shape {
+                dims: vec![n as u32],
+            };
+            let dense = |bits: &[u16]| {
+                Value::Tensor(
+                    TensorValue::new_half_float_values(dt, shape.clone(), bits.to_vec()).unwrap(),
+                )
+            };
+            let boxed = |bits: &[u16]| {
+                let lits: Vec<Literal> = bits
+                    .iter()
+                    .map(|&b| {
+                        if dt == DType::BF16 {
+                            Literal::BF16Bits(b)
+                        } else {
+                            Literal::F16Bits(b)
+                        }
+                    })
+                    .collect();
+                Value::Tensor(TensorValue::new(dt, shape.clone(), lits).unwrap())
+            };
+            let (ld, rd) = (dense(&lb), dense(&rb));
+            assert!(
+                ld.as_tensor().unwrap().elements.as_half_float_slice().is_some(),
+                "input must be dense half-float to exercise the fast path"
+            );
+            let (lbox, rbox) = (boxed(&lb), boxed(&rb));
+            for prim in [
+                Primitive::Add,
+                Primitive::Sub,
+                Primitive::Mul,
+                Primitive::Div,
+                Primitive::Max,
+                Primitive::Min,
+            ] {
+                let from_dense =
+                    crate::eval_primitive(prim, &[ld.clone(), rd.clone()], &BTreeMap::new())
+                        .unwrap();
+                let from_boxed =
+                    crate::eval_primitive(prim, &[lbox.clone(), rbox.clone()], &BTreeMap::new())
+                        .unwrap();
+                assert_eq!(
+                    out_bits(&from_dense),
+                    out_bits(&from_boxed),
+                    "{prim:?} {dt:?} dense != boxed"
                 );
             }
         }

@@ -2925,6 +2925,63 @@ fn bench_bf16_exp2_256k_boxed(c: &mut Criterion) {
     });
 }
 
+// 2M dense-BF16 same-shape Mul: exercises the dense half-float binary fast path (u16 =
+// 2B/elem, no per-`Literal` materialization/dispatch). Cheap binop = memory-bound, not
+// threaded — the win is pure per-`Literal`-dispatch elimination. Paired with the boxed
+// reference for a same-invocation A/B.
+fn bf16_bits_vec(n: usize, f: impl Fn(usize) -> f64) -> Vec<u16> {
+    (0..n)
+        .map(|i| match Literal::from_bf16_f64(f(i)) {
+            Literal::BF16Bits(b) => b,
+            _ => 0,
+        })
+        .collect()
+}
+
+fn bench_bf16_mul_2m_dense(c: &mut Criterion) {
+    let n = 1usize << 21;
+    let shape = Shape {
+        dims: vec![n as u32],
+    };
+    let lhs = Value::Tensor(
+        TensorValue::new_half_float_values(
+            DType::BF16,
+            shape.clone(),
+            bf16_bits_vec(n, |i| (i as f64 * 0.013).sin() * 2.0),
+        )
+        .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_half_float_values(
+            DType::BF16,
+            shape,
+            bf16_bits_vec(n, |i| (i as f64 * 0.0071).cos() + 1.5),
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/mul_2m_bf16_dense", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Mul, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_bf16_mul_2m_boxed(c: &mut Criterion) {
+    let n = 1usize << 21;
+    let shape = Shape {
+        dims: vec![n as u32],
+    };
+    let boxed = |f: &dyn Fn(usize) -> f64| {
+        let lits: Vec<Literal> = (0..n).map(|i| Literal::from_bf16_f64(f(i))).collect();
+        Value::Tensor(TensorValue::new(DType::BF16, shape.clone(), lits).unwrap())
+    };
+    let lhs = boxed(&|i| (i as f64 * 0.013).sin() * 2.0);
+    let rhs = boxed(&|i| (i as f64 * 0.0071).cos() + 1.5);
+    let p = no_params();
+    c.bench_function("eval/mul_2m_bf16_boxed", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Mul, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 fn bench_complex_expm1_1k(c: &mut Criterion) {
     let input = complex_vector(1000);
     let p = no_params();
@@ -3725,6 +3782,8 @@ criterion_group!(
     bench_complex_neg_1k,
     bench_bf16_exp2_256k_dense,
     bench_bf16_exp2_256k_boxed,
+    bench_bf16_mul_2m_dense,
+    bench_bf16_mul_2m_boxed,
     bench_complex_expm1_1k,
     bench_complex_exp_256k_dense,
     bench_complex_pow_256k_dense,
