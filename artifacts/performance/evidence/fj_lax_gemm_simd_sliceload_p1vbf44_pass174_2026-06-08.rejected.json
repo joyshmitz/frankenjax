@@ -1,0 +1,144 @@
+{
+  "artifact": "fj_lax_gemm_simd_sliceload_p1vbf44_pass174",
+  "bead": "frankenjax-p1vbf.44",
+  "status": "rejected",
+  "date_utc": "2026-06-08",
+  "target": "fj-lax linalg/matmul_2d_2048x2048x2048_f64",
+  "profile_route": {
+    "worker": "vmi1293453",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-pass174-profile cargo bench -p fj-lax --bench lax_baseline -- 'linalg/(matmul_2d_2048x2048x2048_f64|lu_1024x1024_f64|cholesky_1024x1024_f64|qr_1024x1024_f64|pinv_256x128_f64|svd_48x48_f64|eig_48x48_f64)' --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+    "ranking": [
+      {
+        "benchmark": "linalg/matmul_2d_2048x2048x2048_f64",
+        "time_ms": [
+          468.50,
+          550.90,
+          632.32
+        ]
+      },
+      {
+        "benchmark": "linalg/cholesky_1024x1024_f64",
+        "time_ms": [
+          85.734,
+          105.63,
+          131.53
+        ]
+      },
+      {
+        "benchmark": "linalg/lu_1024x1024_f64",
+        "time_ms": [
+          59.685,
+          62.918,
+          65.495
+        ]
+      },
+      {
+        "benchmark": "linalg/pinv_256x128_f64",
+        "time_ms": [
+          48.001,
+          49.386,
+          50.638
+        ]
+      },
+      {
+        "benchmark": "linalg/qr_1024x1024_f64",
+        "time_ms": [
+          39.287,
+          40.409,
+          41.749
+        ]
+      },
+      {
+        "benchmark": "linalg/eig_48x48_f64",
+        "time_ms": [
+          28.833,
+          32.775,
+          35.874
+        ]
+      },
+      {
+        "benchmark": "linalg/svd_48x48_f64",
+        "time_ms": [
+          1.4804,
+          1.5316,
+          1.5691
+        ]
+      }
+    ]
+  },
+  "lever": {
+    "description": "Replace manual 8-lane f64 Simd construction from a contiguous B-panel slice with the standard safe slice-load helper in the existing exact-order MR4/NR8 GEMM microkernel.",
+    "edited_file": "crates/fj-lax/src/tensor_contraction.rs",
+    "one_lever_only": true,
+    "source_restored": true
+  },
+  "benchmarks": {
+    "initial_pre_edit_baseline": {
+      "worker": "vmi1149989",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf44-baseline cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048x2048x2048_f64' --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+      "time_ms": [
+        646.60,
+        778.38,
+        918.88
+      ],
+      "used_for_gate": false,
+      "note": "Not paired with the candidate worker; retained as pre-edit baseline evidence only."
+    },
+    "same_worker_old_source_baseline": {
+      "worker": "vmi1293453",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf44-oldpair cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048x2048x2048_f64' --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+      "time_ms": [
+        304.09,
+        314.91,
+        327.85
+      ],
+      "used_for_gate": true
+    },
+    "candidate_slice_load": {
+      "worker": "vmi1293453",
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf44-candidate cargo bench -p fj-lax --bench lax_baseline -- 'linalg/matmul_2d_2048x2048x2048_f64' --sample-size 10 --warm-up-time 1 --measurement-time 3 --noplot",
+      "time_ms": [
+        346.34,
+        365.91,
+        387.50
+      ],
+      "used_for_gate": true
+    },
+    "median_speedup_old_over_candidate": 0.8606214642944987,
+    "conservative_speedup_old_low_over_candidate_high": 0.7847483870967741,
+    "score_impact_x_confidence_over_effort": 0.0
+  },
+  "proof": {
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=180 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-fjlax-p1vbf44-proof cargo test -p fj-lax --lib matmul_2d -- --nocapture",
+    "worker": "vmi1293453",
+    "result": "passed",
+    "tests_passed": 9,
+    "tests_ignored": 1,
+    "coverage": [
+      "matmul_2d_basic",
+      "batched_matmul_2d_bit_identical",
+      "matmul_2d_ikj_bit_identical_to_ijk",
+      "matmul_2d_special_values_bit_identical_to_ijk",
+      "matmul_2d_packed_nr8_golden_output_digest",
+      "matmul_2d_threaded_bit_identical",
+      "matmul_2d_packed_bit_identical_to_ijk",
+      "matmul_2d_large_bit_identical_to_ijk",
+      "matmul_2d_blocked_bit_identical_to_ijk"
+    ],
+    "isomorphism": {
+      "row_ownership": "unchanged",
+      "output_layout": "unchanged row-major",
+      "accumulation_order": "per-output l=0..k ascending order preserved",
+      "ordering_and_tie_breaking": "not applicable beyond deterministic row/panel traversal, which is unchanged",
+      "floating_point_surface": "candidate only changed lane load construction; all arithmetic, NaN propagation, Inf behavior, and signed-zero behavior remained covered by bit-identical matmul tests",
+      "rng": "none"
+    },
+    "golden_artifact": "artifacts/performance/evidence/fj_lax_gemm_simd_sliceload_p1vbf44_pass174_2026-06-08.rejected.golden"
+  },
+  "decision": {
+    "gate": "keep only Score >= 2.0",
+    "result": "reject",
+    "reason": "Same-worker candidate regressed GEMM2048 from 314.91 ms median to 365.91 ms median.",
+    "next_primitive": "Stop GEMM SIMD lane-load microtuning. Reprofile restored source and route to a different structural primitive or the explicit FP-tolerance contract work needed to unlock recursive/communication-avoiding GEMM."
+  }
+}

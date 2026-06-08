@@ -1,0 +1,12 @@
+frankenjax-p1vbf.44 pass174 rejected
+target: fj-lax linalg/matmul_2d_2048x2048x2048_f64
+profile route: vmi1293453 GEMM2048 [468.50, 550.90, 632.32] ms ranked first
+proof: RCH cargo test -p fj-lax --lib matmul_2d -- --nocapture passed 9 tests, 1 ignored, on vmi1293453
+candidate lever: safe std::simd slice load for NR8 B-panel vector construction
+same-worker old source: vmi1293453 [304.09, 314.91, 327.85] ms
+same-worker candidate: vmi1293453 [346.34, 365.91, 387.50] ms
+median speedup old/candidate: 0.8606214642944987x
+conservative speedup old-low/candidate-high: 0.7847483870967741x
+score: 0.0
+decision: reject and restore source
+isomorphism: row ownership, row-major output, panel traversal, per-output ascending-k floating-point accumulation, NaN/signed-zero surface, and RNG absence preserved during candidate proof
