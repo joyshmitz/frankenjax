@@ -648,35 +648,64 @@ pub fn random_poisson(key: PRNGKey, count: usize, lam: f64) -> Vec<u64> {
     result
 }
 
-/// Generate truncated normal samples in [lower, upper].
+/// Generate truncated normal samples in (lower, upper).
 ///
-/// Matches `jax.random.truncated_normal(key, lower, upper, shape)`.
-/// Uses rejection sampling.
+/// Matches `jax.random.truncated_normal(key, lower, upper, shape)`: the
+/// inverse-CDF transform `√2·erf_inv(uniform(erf(lower/√2), erf(upper/√2)))`,
+/// then clamped into the OPEN interval (random.py `_truncated_normal`). This
+/// consumes exactly ONE uniform per sample over the same threefry stream as
+/// `random_normal`, so it tracks JAX's RNG sequence.
+///
+/// The previous implementation used REJECTION sampling on `random_normal`,
+/// which (a) consumed a different number of draws than JAX (count*20, with a
+/// data-dependent count), so it never matched JAX's sequence, and (b)
+/// degenerated to a constant midpoint fill for any narrow or off-center range
+/// (e.g. [2.0, 2.5], where almost every standard-normal draw is rejected) —
+/// producing a near-degenerate distribution instead of a truncated normal.
 #[must_use]
 pub fn random_truncated_normal(key: PRNGKey, count: usize, lower: f64, upper: f64) -> Vec<f64> {
     if lower >= upper {
         return vec![f64::NAN; count];
     }
 
-    let normals = random_normal(key, count * 20);
-    let mut result = Vec::with_capacity(count);
-    let mut idx = 0;
+    let sqrt2 = std::f64::consts::SQRT_2;
+    let a = crate::arithmetic::erf_approx(lower / sqrt2);
+    let b = crate::arithmetic::erf_approx(upper / sqrt2);
 
-    while result.len() < count && idx < normals.len() {
-        let sample = normals[idx];
-        if sample >= lower && sample <= upper {
-            result.push(sample);
-        }
-        idx += 1;
+    // JAX clamps into the OPEN interval so rounding (or drawing u == a) can't
+    // land exactly on a bound: clip(out, nextafter(lower, +inf), nextafter(upper, -inf)).
+    let lo_clamp = next_after_f64(lower, f64::INFINITY);
+    let hi_clamp = next_after_f64(upper, f64::NEG_INFINITY);
+
+    random_uniform(key, count, a, b)
+        .into_iter()
+        .map(|u| {
+            let out = sqrt2 * crate::arithmetic::erf_inv_approx(u);
+            // numpy/jnp clip semantics (max then min — never panics).
+            out.max(lo_clamp).min(hi_clamp)
+        })
+        .collect()
+}
+
+/// `nextafter(x, toward)` for f64 — the adjacent representable value stepping
+/// from `x` toward `toward`. Mirrors `lax.nextafter`; used to clamp
+/// truncated_normal into its open interval exactly as JAX does.
+fn next_after_f64(x: f64, toward: f64) -> f64 {
+    if x.is_nan() || toward.is_nan() {
+        return f64::NAN;
     }
-
-    // Fill remaining with midpoint if not enough valid samples
-    let midpoint = (lower + upper) / 2.0;
-    while result.len() < count {
-        result.push(midpoint);
+    if x == toward {
+        return toward;
     }
-
-    result
+    if x == 0.0 {
+        let tiny = f64::from_bits(1);
+        return if toward > 0.0 { tiny } else { -tiny };
+    }
+    let bits = x.to_bits();
+    // Moving away from zero (increasing magnitude) increments the bit pattern;
+    // moving toward zero decrements it.
+    let next = if (toward > x) == (x > 0.0) { bits + 1 } else { bits - 1 };
+    f64::from_bits(next)
 }
 
 /// Generate samples from a Cauchy distribution.
@@ -1794,6 +1823,39 @@ mod tests {
         let key = random_key(42);
         let vals = random_truncated_normal(key, 100, -1.0, 1.0);
         assert!(vals.iter().all(|&v| (-1.0..=1.0).contains(&v)));
+    }
+
+    #[test]
+    fn test_truncated_normal_narrow_offcenter_is_proper_distribution() {
+        // Regression for the old rejection sampler: for a narrow, off-center
+        // range like [2.0, 2.5] it rejected ~98% of standard-normal draws and
+        // padded the rest with the EXACT midpoint 2.25 — a near-degenerate
+        // distribution. The inverse-CDF method (matching JAX) yields a proper
+        // truncated normal: strictly inside the open interval, full spread, and
+        // the analytic truncated-normal mean (~2.2045), NOT the midpoint 2.25.
+        let key = random_key(7);
+        let n = 20_000;
+        let (lower, upper) = (2.0_f64, 2.5_f64);
+        let vals = random_truncated_normal(key, n, lower, upper);
+
+        assert!(
+            vals.iter().all(|&v| v > lower && v < upper),
+            "all samples must be strictly inside ({lower}, {upper})"
+        );
+        let distinct = vals
+            .iter()
+            .map(|v| v.to_bits())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert!(
+            distinct > n / 2,
+            "distribution must be non-degenerate (old midpoint-fill bug), got {distinct} distinct of {n}"
+        );
+        let mean = vals.iter().sum::<f64>() / n as f64;
+        assert!(
+            (mean - 2.2045).abs() < 0.02,
+            "truncated-normal mean over [2,2.5] should be ~2.2045 (analytic), got {mean}"
+        );
     }
 
     #[test]
