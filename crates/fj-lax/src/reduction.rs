@@ -703,9 +703,24 @@ pub(crate) fn eval_reduce_axes(
                         result[out_idx] = int_op(result[out_idx], val);
                     }
                 }
-                let elements: Vec<Literal> = result.into_iter().map(Literal::I64).collect();
+                // Preserve the input integer dtype: a JAX/XLA int32 reduction
+                // stays int32 (it does NOT widen to int64). Accumulation runs in
+                // i64 (matching XLA's widened accumulator), then an int32 result
+                // wraps back to two's-complement int32 — same semantics as the
+                // elementwise int32 ops and the `narrow_i32_tensor_result`
+                // chokepoint, applied here so the reduce is self-correct
+                // regardless of caller. int64 reductions are unchanged.
+                let out_dtype = tensor.dtype;
+                let elements: Vec<Literal> = if out_dtype == DType::I32 {
+                    result
+                        .into_iter()
+                        .map(|v| Literal::I64(i64::from(v as i32)))
+                        .collect()
+                } else {
+                    result.into_iter().map(Literal::I64).collect()
+                };
                 Ok(Value::Tensor(TensorValue::new(
-                    DType::I64,
+                    out_dtype,
                     Shape { dims: out_dims },
                     elements,
                 )?))
@@ -2767,6 +2782,90 @@ mod tests {
         assert_eq!(vals.len(), 2);
         assert!((vals[0] - 3.0).abs() < 1e-12);
         assert!((vals[1] - 7.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn reduce_axes_i32_preserves_dtype_and_wraps() {
+        // b6w3l gap (1): an int32 partial-axis reduction must STAY int32 (JAX/XLA
+        // does not widen to int64) and overflow must wrap two's-complement.
+        // [[2^30, 1], [2^30, 2]] reduced along axis 0 → [2^31, 3]; 2^31 overflows
+        // int32 and wraps to i32::MIN = -2147483648. The kept column [1,2] sums to
+        // 3 (in range, unchanged).
+        let big = 1_i64 << 30; // 1073741824, a valid int32
+        let m = Value::Tensor(
+            TensorValue::new(
+                DType::I32,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(big),
+                    Literal::I64(1),
+                    Literal::I64(big),
+                    Literal::I64(2),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axes".to_owned(), "0".to_owned());
+        let result = eval_reduce_axes(
+            Primitive::ReduceSum,
+            &[m],
+            &params,
+            0,
+            0.0,
+            i64::wrapping_add,
+            |a, b| a + b,
+        )
+        .unwrap();
+
+        let Value::Tensor(t) = &result else {
+            panic!("expected tensor result, got {result:?}");
+        };
+        assert_eq!(t.dtype, DType::I32, "int32 reduction must stay int32");
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(
+            vals,
+            vec![i64::from(i32::MIN), 3],
+            "2^31 must wrap to i32::MIN; in-range column unchanged"
+        );
+    }
+
+    #[test]
+    fn reduce_axes_i64_still_widens_unchanged() {
+        // Regression guard: int64 reductions keep int64 dtype and full-width sums.
+        let big = 1_i64 << 40; // 1099511627776, far past int32 range
+        let m = Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::I64(big),
+                    Literal::I64(1),
+                    Literal::I64(big),
+                    Literal::I64(2),
+                ],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axes".to_owned(), "0".to_owned());
+        let result = eval_reduce_axes(
+            Primitive::ReduceSum,
+            &[m],
+            &params,
+            0,
+            0.0,
+            i64::wrapping_add,
+            |a, b| a + b,
+        )
+        .unwrap();
+
+        let Value::Tensor(t) = &result else {
+            panic!("expected tensor result, got {result:?}");
+        };
+        assert_eq!(t.dtype, DType::I64, "int64 reduction stays int64");
+        let vals: Vec<i64> = t.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        assert_eq!(vals, vec![2 * big, 3], "int64 does not wrap at int32 width");
     }
 
     #[test]
