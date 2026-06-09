@@ -7331,25 +7331,32 @@ pub(crate) fn eval_dot_general(
         return Ok(value);
     }
 
-    // Canonical I64 [m,k]@[k,n]: contiguous i-k-j wrapping kernel instead of the generic
+    // Canonical I32/I64 [m,k]@[k,n]: contiguous i-k-j wrapping kernel instead of the generic
     // strided per-element loop (which decodes a full multi-index + stride sum per `l`).
     // Integer +/* are associative and exact, so ascending-`l` wrapping is BIT-IDENTICAL to
-    // the generic integer reduction (see rank2_i64_matmul_matches_generic). I64 matmul
-    // otherwise has no fast path. Scoped to I64 output (Literal::I64 == new_i64_values).
+    // the generic integer reduction (see rank2_i64_matmul_matches_generic). Covers BOTH I32
+    // (JAX's common integer dtype) and I64: i32 tensors are dense-i64-backed (as_i64_slice is
+    // Some) and the generic signed integral path accumulates them in the SAME wrapping i64
+    // fold (dot_accumulate emits Literal::I64 for both), so the kernel's i64 vector is exactly
+    // what the generic loop produces. An I32 output is tagged I32 over the dense i64 storage;
+    // the narrow_i32_tensor_result chokepoint in eval_primitive then wraps any value outside
+    // i32 range (mod 2^32 commutes with the i64 wrapping fold — same proof as the i32 reduce).
     if standard_rank2_matmul
-        && matches!(output_kind, DotOutputKind::Integral(DType::I64))
+        && let DotOutputKind::Integral(int_dtype @ (DType::I32 | DType::I64)) = output_kind
         && let (Some(a), Some(b)) = (lhs.elements.as_i64_slice(), rhs.elements.as_i64_slice())
     {
         let m = lhs.shape.dims[0] as usize;
         let k = lhs.shape.dims[1] as usize;
         let n = rhs.shape.dims[1] as usize;
         let values = rank2_i64_matmul(a, m, k, b, n);
-        return Ok(Value::Tensor(TensorValue::new_i64_values(
+        let mut out = TensorValue::new_i64_values(
             Shape {
                 dims: output_dims.to_vec(),
             },
             values,
-        )?));
+        )?;
+        out.dtype = int_dtype;
+        return Ok(Value::Tensor(out));
     }
 
     // Canonical complex [m,k]@[k,n]: contiguous i-k-j accumulation of each output's
@@ -9327,6 +9334,69 @@ mod tests {
                 assert_eq!(*g, w.to_bits(), "(lc={lc},rc={rc}) must be bit-identical");
             }
         }
+    }
+
+    #[test]
+    fn i32_dot_general_canonical_fast_path_wraps_like_jax() {
+        // i32 [m,k]@[k,n] must stay int32 and wrap two's-complement (XLA int32 matmul),
+        // routed through the new canonical i32 fast path. Reference: the exact i64
+        // wrapping fold narrowed to i32 — identical to JAX int32 semantics AND to fj's
+        // generic integer loop + narrow_i32_tensor_result chokepoint. Values are chosen
+        // near sqrt(i32::MAX) so individual products and their sums overflow i32.
+        let (m, k, n) = (3usize, 5usize, 4usize);
+        let mk = |len: usize, seed: i64| -> Vec<i64> {
+            (0..len as i64)
+                .map(|i| 46_300 + ((i * 37 + seed * 11) % 120))
+                .collect()
+        };
+        let a = mk(m * k, 1);
+        let b = mk(k * n, 2);
+        let tensor_i32 = |dims: Vec<u32>, data: &[i64]| -> Value {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::I32,
+                    Shape { dims },
+                    data.iter().map(|&v| Literal::I64(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let lhs = tensor_i32(vec![m as u32, k as u32], &a);
+        let rhs = tensor_i32(vec![k as u32, n as u32], &b);
+        let params = BTreeMap::from([
+            ("lhs_contracting_dims".to_owned(), "1".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "0".to_owned()),
+        ]);
+        // eval_primitive (not eval_dot_general) so the i32 narrowing chokepoint runs.
+        let Value::Tensor(out) =
+            crate::eval_primitive(Primitive::DotGeneral, &[lhs, rhs], &params).unwrap()
+        else {
+            panic!("expected tensor");
+        };
+        assert_eq!(out.dtype, DType::I32, "int32 matmul must stay int32");
+        assert_eq!(out.shape.dims, vec![m as u32, n as u32]);
+        let got: Vec<i64> = out.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+
+        let mut want = vec![0i64; m * n];
+        let mut any_wrapped = false;
+        for i in 0..m {
+            for j in 0..n {
+                let mut s = 0i64;
+                for l in 0..k {
+                    s = s.wrapping_add(a[i * k + l].wrapping_mul(b[l * n + j]));
+                }
+                let wrapped = i64::from(s as i32);
+                if wrapped != s {
+                    any_wrapped = true;
+                }
+                want[i * n + j] = wrapped;
+            }
+        }
+        assert_eq!(got, want, "int32 matmul must wrap mod 2^32 like JAX/XLA");
+        assert!(
+            any_wrapped,
+            "test inputs must actually exercise i32 overflow wrapping"
+        );
     }
 
     #[test]
