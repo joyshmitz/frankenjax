@@ -808,6 +808,27 @@ pub fn random_chi2(key: PRNGKey, count: usize, df: f64) -> Vec<f64> {
     gamma_samples.into_iter().map(|g| 2.0 * g).collect()
 }
 
+/// Sample from the Maxwell-Boltzmann speed distribution.
+///
+/// Matches JAX's `_maxwell` verbatim: draw `normal(key, shape + (3,))` and take
+/// the Euclidean norm over the trailing length-3 axis — i.e. each output is the
+/// magnitude of a 3-D standard-normal vector, `sqrt(n0² + n1² + n2²)`. Because
+/// `random_normal` reproduces JAX's flat normal stream, drawing `3·count` normals
+/// and grouping them in row-major triples matches JAX's `(count, 3)` layout
+/// exactly. `jnp.linalg.norm(..., axis=-1)` is the plain `sqrt(Σ x²)` for a real
+/// vector (no hypot rescaling), so the per-sample arithmetic matches too.
+pub fn random_maxwell(key: PRNGKey, count: usize) -> Vec<f64> {
+    let normals = random_normal(key, count.saturating_mul(3));
+    (0..count)
+        .map(|i| {
+            let a = normals[3 * i];
+            let b = normals[3 * i + 1];
+            let c = normals[3 * i + 2];
+            (a * a + b * b + c * c).sqrt()
+        })
+        .collect()
+}
+
 /// Generate Student's t-distributed random samples.
 ///
 /// Matches `jax.random.t(key, df, shape)`.
@@ -1769,6 +1790,49 @@ mod tests {
             );
             assert!(s[i].is_finite(), "logistic sample must be finite at {i}");
         }
+    }
+
+    #[test]
+    fn test_maxwell_deterministic() {
+        let key = random_key(42);
+        let a = random_maxwell(key, 100);
+        let b = random_maxwell(key, 100);
+        assert_eq!(a, b, "maxwell: same key must produce same samples");
+    }
+
+    #[test]
+    fn test_maxwell_matches_jax_norm_of_three_normals() {
+        // JAX `_maxwell`: norm(normal(key, shape+(3,)), axis=-1). Pin the exact
+        // transform bit-for-bit over the SAME normal stream: sample i is the L2
+        // norm of the i-th row-major triple (matching JAX's (count,3) layout).
+        let key = random_key(7);
+        let n = 128;
+        let normals = random_normal(key, n * 3);
+        let m = random_maxwell(key, n);
+        assert_eq!(m.len(), n);
+        for i in 0..n {
+            let (a, b, c) = (normals[3 * i], normals[3 * i + 1], normals[3 * i + 2]);
+            let expected = (a * a + b * b + c * c).sqrt();
+            assert_eq!(
+                m[i].to_bits(),
+                expected.to_bits(),
+                "maxwell[{i}] must equal sqrt(n0^2+n1^2+n2^2) of the i-th normal triple"
+            );
+            assert!(m[i] >= 0.0, "maxwell magnitude must be non-negative at {i}");
+        }
+    }
+
+    #[test]
+    fn test_maxwell_mean_matches_distribution() {
+        // Maxwell-Boltzmann (sigma=1) has mean 2*sqrt(2/pi) ~ 1.5958.
+        let key = random_key(123);
+        let vals = random_maxwell(key, 50_000);
+        let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+        let expected = 2.0 * (2.0 / std::f64::consts::PI).sqrt();
+        assert!(
+            (mean - expected).abs() < 0.05,
+            "maxwell mean={mean:.4} expected={expected:.4}"
+        );
     }
 
     #[test]
