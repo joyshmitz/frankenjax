@@ -1,0 +1,94 @@
+{
+  "project": "frankenjax",
+  "bead": "frankenjax-yax7q",
+  "pass": 189,
+  "crate": "fj-lax",
+  "date_utc": "2026-06-09",
+  "target": "reduce_window max/min large-window dense f64/f32 pooling",
+  "lever": "Replace the existing separable per-axis window scan with a monotonic-deque line pass for max/min. The dispatch gate is unchanged: no window dilation, dense float input/output, reduce_op in {max,min}, and win_total > 2*win_sum.",
+  "alien_primitive": "Monotonic deque sliding-window extrema; algorithmic replacement from repeated per-window rescans to amortized O(input+output) per axis.",
+  "baseline": {
+    "worker": "ovh-a",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-yax7q-baseline cargo bench -p fj-lax --bench lax_baseline -- eval/maxpool_256x256_15x15 --quick --noplot",
+    "direct_reference_ms": {
+      "low": 6.1957,
+      "mid": 6.2209,
+      "high": 6.2272
+    },
+    "current_separable_scan_ms": {
+      "low": 2.7291,
+      "mid": 2.7303,
+      "high": 2.7350
+    }
+  },
+  "after": {
+    "worker": "ovh-a",
+    "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-yax7q-after cargo bench -p fj-lax --bench lax_baseline -- eval/maxpool_256x256_15x15 --quick --noplot",
+    "direct_reference_ms": {
+      "low": 6.1728,
+      "mid": 6.1745,
+      "high": 6.1749
+    },
+    "monotonic_deque_ms": {
+      "low": 0.76366,
+      "mid": 0.78413,
+      "high": 0.78924
+    }
+  },
+  "deltas": {
+    "same_worker_mid_speedup_vs_prior_separable_scan": 3.482,
+    "same_worker_conservative_speedup_vs_prior_separable_scan": 3.458,
+    "after_mid_speedup_vs_direct_reference": 7.875
+  },
+  "score": {
+    "impact": 5,
+    "confidence": 5,
+    "effort": 2,
+    "impact_x_confidence_div_effort": 12.5,
+    "decision": "keep"
+  },
+  "isomorphism": {
+    "ordering": "Output shape and row-major output order are unchanged. Each axis pass still emits one value for each original output coordinate before the next axis pass.",
+    "floating_point": "Max/min are the only routed reductions. NaNs are tracked per 1D window and emit canonical f64::NAN exactly like jax_max_f64/jax_min_f64. Signed zero preference matches f64::max (+0) and f64::min (-0). There is no sum reassociation, FMA, mixed precision, or tolerance-based comparison.",
+    "rng": "No RNG state or random primitive is touched.",
+    "tie_breaking": "The reducer returns scalar extrema, not indices. Equal nonzero values have identical bits; signed-zero preference is explicitly preserved.",
+    "fallback_surface": "Sum, small windows, dilated windows, non-float outputs, and non-dense inputs keep the previous paths."
+  },
+  "validation": [
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-yax7q-test cargo test -p fj-lax --lib reduce_window_separable_maxmin_matches_generic -- --nocapture",
+      "result": "passed: 1 test; bit-identical dense deque path vs boxed generic path including special values"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-yax7q-reduce-window-tests cargo test -p fj-lax --lib reduce_window -- --nocapture",
+      "result": "passed: 35 reduce_window tests"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-yax7q-check cargo check -p fj-lax --all-targets",
+      "result": "passed"
+    },
+    {
+      "command": "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-yax7q-clippy2 cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "result": "passed after adding a narrow allow for a pre-existing benchmark helper with 9 arguments"
+    },
+    {
+      "command": "cargo fmt --package fj-lax -- --check",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-lax/src/lib.rs crates/fj-lax/benches/lax_baseline.rs",
+      "result": "nonzero due to broad pre-existing inventory in the two large files; regular fmt/clippy/check/test gates passed and no deque-specific UBS finding was isolated"
+    }
+  ],
+  "changed_files": [
+    "crates/fj-lax/src/lib.rs",
+    "crates/fj-lax/benches/lax_baseline.rs",
+    "artifacts/performance/evidence/fj_lax_reduce_window_monotonic_deque_yax7q_pass189_2026-06-09.json",
+    "artifacts/performance/evidence/fj_lax_reduce_window_monotonic_deque_yax7q_pass189_2026-06-09.golden",
+    "artifacts/performance/evidence/fj_lax_reduce_window_monotonic_deque_yax7q_pass189_2026-06-09.golden.sha256"
+  ]
+}

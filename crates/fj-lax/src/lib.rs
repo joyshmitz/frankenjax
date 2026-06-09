@@ -3309,15 +3309,48 @@ fn eval_reduce_window_dense_float(
     }
 }
 
-/// Separable sliding-window max/min: reduce each window axis with an independent 1D pass,
-/// turning the O(output·∏window) full-window scan into O(output·∑window). Max and min are
-/// associative, commutative AND idempotent, and an out-of-bounds tap contributes the
-/// reduction init (∓∞) which is a no-op for the combine — so the per-axis composition
-/// `max_d2(max_d1(...))` equals the full-window max over exactly the same set of in-bounds
-/// elements, BIT-FOR-BIT (max/min of a finite/∞ set is order-independent; a NaN propagates
-/// regardless of fold order). Only the NaN *payload* of a multi-NaN window is fold-order
-/// dependent, and that is IEEE-unspecified (not JAX parity). Used only when ∏window is
-/// meaningfully larger than ∑window so the pass overhead pays (see the caller's gate).
+#[inline]
+fn reduce_window_new_extreme_dominates(old: f64, new: f64, is_max: bool) -> bool {
+    debug_assert!(!old.is_nan());
+    debug_assert!(!new.is_nan());
+
+    if is_max {
+        if new > old {
+            return true;
+        }
+        if new < old {
+            return false;
+        }
+        // `f64::max` selects +0 over -0. For other equal values, either bit
+        // pattern is identical, so replacing the older index is safe.
+        if new == 0.0 && old == 0.0 {
+            return (old.is_sign_negative() && new.is_sign_positive())
+                || old.to_bits() == new.to_bits();
+        }
+    } else {
+        if new < old {
+            return true;
+        }
+        if new > old {
+            return false;
+        }
+        // `f64::min` selects -0 over +0.
+        if new == 0.0 && old == 0.0 {
+            return (old.is_sign_positive() && new.is_sign_negative())
+                || old.to_bits() == new.to_bits();
+        }
+    }
+
+    old.to_bits() == new.to_bits()
+}
+
+/// Separable sliding-window max/min: reduce each window axis with an independent
+/// monotonic-deque 1D pass. This turns the O(output·∏window) full-window scan and
+/// the older O(output·∑window) per-axis scan into O(input+output) work per axis.
+/// Out-of-bounds taps contribute the reduction init (∓∞), a no-op for max/min.
+/// NaNs are tracked separately so every window containing at least one NaN yields
+/// the same canonical NaN as `jax_max_f64`/`jax_min_f64`; signed zero preference
+/// matches `f64::max`/`f64::min`.
 fn reduce_window_separable_maxmin(
     src: &[f64],
     input_dims: &[usize],
@@ -3350,24 +3383,58 @@ fn reduce_window_separable_maxmin(
         for o in 0..outer {
             let cur_o = o * l * inner;
             let next_o = o * out_l * inner;
-            for ol in 0..out_l {
-                let start = ol as isize * sd as isize - pd as isize;
-                let dst = &mut next[next_o + ol * inner..next_o + ol * inner + inner];
-                for w in 0..wd {
-                    let pos = start + w as isize;
-                    if pos < 0 || pos as usize >= l {
-                        continue; // OOB tap: combine with init (∓∞) is a no-op
+            for lane in 0..inner {
+                let line_base = cur_o + lane;
+                let out_base = next_o + lane;
+                let mut deque: Vec<usize> = Vec::with_capacity(l);
+                let mut nan_positions: Vec<usize> = Vec::new();
+                let mut head = 0usize;
+                let mut nan_head = 0usize;
+                let mut pushed_until = 0usize;
+                for ol in 0..out_l {
+                    let raw_start = ol as isize * sd as isize - pd as isize;
+                    let raw_end = raw_start + wd as isize;
+                    let start = raw_start.clamp(0, l as isize) as usize;
+                    let end = raw_end.clamp(0, l as isize) as usize;
+
+                    while pushed_until < end {
+                        let v = cur[line_base + pushed_until * inner];
+                        if v.is_nan() {
+                            nan_positions.push(pushed_until);
+                        } else {
+                            while deque.len() > head {
+                                let Some(&back) = deque.last() else {
+                                    break;
+                                };
+                                let back_value = cur[line_base + back * inner];
+                                if reduce_window_new_extreme_dominates(back_value, v, is_max) {
+                                    deque.pop();
+                                } else {
+                                    break;
+                                }
+                            }
+                            if deque.len() == head {
+                                deque.clear();
+                                head = 0;
+                            }
+                            deque.push(pushed_until);
+                        }
+                        pushed_until += 1;
                     }
-                    let row = &cur
-                        [cur_o + (pos as usize) * inner..cur_o + (pos as usize) * inner + inner];
-                    if is_max {
-                        for (a, &r) in dst.iter_mut().zip(row) {
-                            *a = jax_max_f64(*a, r);
-                        }
+
+                    while deque.get(head).is_some_and(|&idx| idx < start) {
+                        head += 1;
+                    }
+                    while nan_positions.get(nan_head).is_some_and(|&idx| idx < start) {
+                        nan_head += 1;
+                    }
+
+                    next[out_base + ol * inner] = if nan_head < nan_positions.len() {
+                        f64::NAN
+                    } else if let Some(&idx) = deque.get(head) {
+                        cur[line_base + idx * inner]
                     } else {
-                        for (a, &r) in dst.iter_mut().zip(row) {
-                            *a = jax_min_f64(*a, r);
-                        }
+                        init
                     }
                 }
             }
@@ -11225,7 +11292,6 @@ mod tests {
         // The separable max/min fast path (dense input, ∏window > 2·∑window) must equal the
         // generic per-`Literal` loop (boxed input bypasses every dense path) bit-for-bit.
         // Covers rank-4 NHWC 7×7 + rank-2 5×5, max & min, VALID + SAME padding + stride 2.
-        // Finite inputs only (a multi-NaN window's payload is fold-order/IEEE-unspecified).
         let data = |n: usize| -> Vec<f64> {
             (0..n)
                 .map(|i| (i as f64 * 0.137).sin() * 3.0 - (i as f64 * 0.0411).cos())
@@ -11276,6 +11342,34 @@ mod tests {
                     "{op} window={window} pad={pad} dims={dims:?}"
                 );
             }
+        }
+
+        let mut special = data(8 * 8);
+        special[0] = -0.0;
+        special[1] = 0.0;
+        special[9] = f64::NAN;
+        special[18] = f64::INFINITY;
+        special[27] = f64::NEG_INFINITY;
+        special[36] = -0.0;
+        special[45] = 0.0;
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![8, 8] }, special.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![8, 8] },
+                special.iter().map(|&v| Literal::from_f64(v)).collect(),
+            )
+            .unwrap(),
+        );
+        for op in ["max", "min"] {
+            let p = rw_params_with_padding(op, "5,5", "1,1", "SAME");
+            let got =
+                eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense), &p).unwrap();
+            let refr =
+                eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&boxed), &p).unwrap();
+            assert_eq!(out_bits(&got), out_bits(&refr), "{op} special-value bits");
         }
     }
 

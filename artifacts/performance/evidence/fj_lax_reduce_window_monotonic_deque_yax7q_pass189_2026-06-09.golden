@@ -1,0 +1,13 @@
+frankenjax-yax7q pass189 fj-lax reduce_window monotonic deque
+baseline_worker=ovh-a
+baseline_current_separable_scan_ms=[2.7291,2.7303,2.7350]
+after_monotonic_deque_ms=[0.76366,0.78413,0.78924]
+same_worker_mid_speedup_vs_prior_separable_scan=3.482
+same_worker_conservative_speedup_vs_prior_separable_scan=3.458
+after_direct_reference_ms=[6.1728,6.1745,6.1749]
+after_mid_speedup_vs_direct_reference=7.875
+semantic_proof=bit-identical dense deque max/min vs boxed generic reduce_window for rank4 7x7, rank2 5x5, VALID/SAME, stride1/2, max/min, canonical NaN, infinities, and signed zeros
+fallbacks=sum small-window dilated-window non-float-output non-dense-input unchanged
+validation=focus-test-pass reduce-window-35-pass check-pass clippy-pass fmt-pass diff-check-pass
+ubs=nonzero due to broad pre-existing inventory in touched large files; regular gates clean
+score=impact5_confidence5_effort2_total12.5_keep

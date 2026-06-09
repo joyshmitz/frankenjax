@@ -3323,6 +3323,7 @@ fn grouped_conv_inputs() -> (
     (x, k, h, w, cin, cout, kh, kw, g)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn grouped_conv2d_general_ref(
     x: &[f64],
     k: &[f64],
