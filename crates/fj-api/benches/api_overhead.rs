@@ -330,7 +330,14 @@ fn bench_prepared_dispatch_metadata(c: &mut Criterion) {
     let features: Vec<String> = Vec::new();
 
     let meta = prepare_dispatch_meta(
-        mode, &jaxpr, &transforms, &evidence, backend, &compile_options, None, &features,
+        mode,
+        &jaxpr,
+        &transforms,
+        &evidence,
+        backend,
+        &compile_options,
+        None,
+        &features,
     )
     .expect("prepare dispatch meta");
 

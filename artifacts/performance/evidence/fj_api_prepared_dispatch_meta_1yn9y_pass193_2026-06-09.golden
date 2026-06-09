@@ -1,0 +1,5 @@
+case=prepared_metadata_yields_identical_response result=ok
+case=prepared_metadata_rejects_mismatched_static_inputs result=ok
+case=prepared_metadata_does_not_bypass_strict_unknown_features result=ok
+end_to_end_midpoint_us baseline=71.237 candidate=43.520 speedup=1.636
+same_binary_midpoint_us recompute=64.695 prepared=52.459 speedup=1.233

@@ -1,0 +1,80 @@
+{
+  "artifact": "fj_api_prepared_dispatch_meta_1yn9y_pass193_2026-06-09",
+  "bead": "frankenjax-1yn9y",
+  "pass": 193,
+  "target": "value_and_grad_runtime/shared/deep_100_nodes",
+  "profile_target": {
+    "source": "frankenjax-1yn9y description",
+    "samples": 5303,
+    "top_buckets": [
+      "_int_malloc 15.45%",
+      "fj_core::verify_transform_composition_parts 14.90%",
+      "fj_ad::forward_with_tape 11.52%",
+      "fj_ad::backward 10.09%",
+      "sha2::sha256::x86::digest_blocks 7.22%",
+      "AdValueStore::for_jaxpr 2.85%"
+    ]
+  },
+  "lever": "Memoize args-independent dispatch metadata for repeated ValueAndGradWrapped calls, and validate prepared metadata against the live request static inputs before reuse.",
+  "benchmark": {
+    "runner": "rch exec",
+    "worker": "local fallback (no admissible workers: critical_pressure=2,insufficient_slots=1 or active_project_exclusion=1)",
+    "baseline_command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-1yn9y-base-target rch exec -- cargo bench -p fj-api --bench api_overhead -- value_and_grad_runtime/shared/deep_100_nodes",
+    "candidate_command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-1yn9y-candidate-guard-target rch exec -- cargo bench -p fj-api --bench api_overhead -- value_and_grad_runtime/shared/deep_100_nodes",
+    "same_binary_ab_command": "CARGO_TARGET_DIR=/data/tmp/frankenjax-1yn9y-prepared-ab-target rch exec -- cargo bench -p fj-api --bench api_overhead -- prepared_dispatch_metadata",
+    "baseline_us": {
+      "low": 69.095,
+      "mid": 71.237,
+      "high": 73.334
+    },
+    "candidate_us": {
+      "low": 42.941,
+      "mid": 43.520,
+      "high": 44.226
+    },
+    "same_binary_recompute_us": {
+      "low": 63.285,
+      "mid": 64.695,
+      "high": 66.350
+    },
+    "same_binary_prepared_us": {
+      "low": 51.714,
+      "mid": 52.459,
+      "high": 53.381
+    },
+    "midpoint_speedup": 1.636,
+    "same_binary_midpoint_speedup": 1.233
+  },
+  "score": {
+    "impact": 4,
+    "confidence": 4,
+    "effort": 2,
+    "impact_x_confidence_over_effort": 8.0
+  },
+  "isomorphism": {
+    "ordering_preserved": "yes - execution still uses the request root_jaxpr, transform stack, args, backend, and compile options; only proof/key recomputation is memoized for identical static inputs",
+    "tie_breaking_unchanged": "yes - no data ordering or selection logic changed",
+    "floating_point": "identical - transform execution and arithmetic paths are untouched",
+    "rng": "unchanged - no RNG state or seed handling touched",
+    "cache_key_semantics": "preserved - prepared metadata carries mode, jaxpr fingerprint, transform stack/evidence, backend, compile options, custom hook, and unknown features; mismatches reject before reuse",
+    "strict_mode": "fail closed - prepared metadata cannot bypass unknown incompatible feature rejection"
+  },
+  "proof": {
+    "focused_tests": [
+      "CARGO_TARGET_DIR=/data/tmp/frankenjax-1yn9y-dispatch-test-target rch exec -- cargo test -p fj-dispatch prepared_metadata -- --nocapture"
+    ],
+    "checks": [
+      "CARGO_TARGET_DIR=/data/tmp/frankenjax-1yn9y-dispatch-check-target rch exec -- cargo check -p fj-dispatch --all-targets",
+      "CARGO_TARGET_DIR=/data/tmp/frankenjax-1yn9y-api-check-target rch exec -- cargo check -p fj-api --all-targets",
+      "RUSTFLAGS=\"--cap-lints allow\" CARGO_TARGET_DIR=/data/tmp/frankenjax-1yn9y-dispatch-clippy-target3 rch exec -- cargo clippy -p fj-dispatch --all-targets -- -D warnings",
+      "RUSTFLAGS=\"--cap-lints allow\" CARGO_TARGET_DIR=/data/tmp/frankenjax-1yn9y-api-clippy-target3 rch exec -- cargo clippy -p fj-api --all-targets -- -D warnings",
+      "git diff --check",
+      "rustfmt --edition 2024 --check crates/fj-api/benches/api_overhead.rs"
+    ],
+    "known_preexisting_blockers": [
+      "cargo clippy -p fj-dispatch --all-targets -- -D warnings without dependency lint caps fails in existing dependency crates: fj-trace unused num_spatial, fj-lax too_many_arguments/doc_lazy_continuation/excessive_precision, fj-interpreters manual_is_multiple_of, fj-ad needless_range_loop/manual_is_multiple_of"
+    ],
+    "golden_file": "artifacts/performance/evidence/fj_api_prepared_dispatch_meta_1yn9y_pass193_2026-06-09.golden",
+    "golden_sha256_file": "artifacts/performance/evidence/fj_api_prepared_dispatch_meta_1yn9y_pass193_2026-06-09.golden.sha256"
+  }
+}

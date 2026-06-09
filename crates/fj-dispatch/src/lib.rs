@@ -183,6 +183,55 @@ pub struct DispatchRequestRef<'a> {
 pub struct PreparedDispatchMeta {
     pub composition_proof: TransformCompositionProof,
     pub cache_key: CacheKey,
+    static_inputs: PreparedDispatchStaticInputs,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedDispatchStaticInputs {
+    mode: CompatibilityMode,
+    root_jaxpr_fingerprint: String,
+    transform_stack: Vec<Transform>,
+    transform_evidence: Vec<String>,
+    backend: String,
+    compile_options: BTreeMap<String, String>,
+    custom_hook: Option<String>,
+    unknown_incompatible_features: Vec<String>,
+}
+
+impl PreparedDispatchStaticInputs {
+    #[allow(clippy::too_many_arguments)]
+    fn from_parts(
+        mode: CompatibilityMode,
+        root_jaxpr: &Jaxpr,
+        transform_stack: &[Transform],
+        transform_evidence: &[String],
+        backend: &str,
+        compile_options: &BTreeMap<String, String>,
+        custom_hook: Option<&str>,
+        unknown_incompatible_features: &[String],
+    ) -> Self {
+        Self {
+            mode,
+            root_jaxpr_fingerprint: root_jaxpr.canonical_fingerprint().to_owned(),
+            transform_stack: transform_stack.to_vec(),
+            transform_evidence: transform_evidence.to_vec(),
+            backend: backend.to_owned(),
+            compile_options: compile_options.clone(),
+            custom_hook: custom_hook.map(str::to_owned),
+            unknown_incompatible_features: unknown_incompatible_features.to_vec(),
+        }
+    }
+
+    fn matches_request(&self, request: &DispatchRequestRef<'_>) -> bool {
+        self.mode == request.mode
+            && self.root_jaxpr_fingerprint == request.root_jaxpr.canonical_fingerprint()
+            && self.transform_stack == request.transform_stack
+            && self.transform_evidence == request.transform_evidence
+            && self.backend == request.backend
+            && self.compile_options == request.compile_options
+            && self.custom_hook.as_deref() == request.custom_hook
+            && self.unknown_incompatible_features == request.unknown_incompatible_features
+    }
 }
 
 /// Compute the args-independent dispatch metadata for a wrapped function.
@@ -192,6 +241,7 @@ pub struct PreparedDispatchMeta {
 /// the result back in produces byte-identical proofs, cache keys, and evidence
 /// ledgers. Returns an error if composition verification or cache-key
 /// construction would fail (e.g. strict-mode unknown incompatible features).
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_dispatch_meta(
     mode: CompatibilityMode,
     root_jaxpr: &Jaxpr,
@@ -216,6 +266,16 @@ pub fn prepare_dispatch_meta(
     Ok(PreparedDispatchMeta {
         composition_proof,
         cache_key,
+        static_inputs: PreparedDispatchStaticInputs::from_parts(
+            mode,
+            root_jaxpr,
+            transform_stack,
+            transform_evidence,
+            backend,
+            compile_options,
+            custom_hook,
+            unknown_incompatible_features,
+        ),
     })
 }
 
@@ -508,10 +568,28 @@ pub fn dispatch_ref(request: DispatchRequestRef<'_>) -> Result<DispatchResponse,
     // FNV/SHA-256 hashing; otherwise derive it identically here.
     use std::borrow::Cow;
     let (composition_proof, cache_key): (Cow<'_, _>, Cow<'_, _>) = match request.prepared {
-        Some(meta) => (
-            Cow::Borrowed(&meta.composition_proof),
-            Cow::Borrowed(&meta.cache_key),
-        ),
+        Some(meta) => {
+            if request.mode == CompatibilityMode::Strict
+                && !request.unknown_incompatible_features.is_empty()
+            {
+                return Err(CacheKeyError::UnknownIncompatibleFeatures {
+                    features: request.unknown_incompatible_features.to_vec(),
+                }
+                .into());
+            }
+            if !meta.static_inputs.matches_request(&request) {
+                return Err(DispatchError::TransformExecution(
+                    TransformExecutionError::TensorBuild(
+                        "prepared dispatch metadata does not match request static inputs"
+                            .to_owned(),
+                    ),
+                ));
+            }
+            (
+                Cow::Borrowed(&meta.composition_proof),
+                Cow::Borrowed(&meta.cache_key),
+            )
+        }
         None => {
             let composition_proof = verify_transform_composition_parts(
                 request.root_jaxpr,
@@ -2285,6 +2363,86 @@ mod tests {
             recompute, prepared,
             "prepared metadata must produce an identical DispatchResponse"
         );
+    }
+
+    #[test]
+    fn prepared_metadata_rejects_mismatched_static_inputs() {
+        let led = ledger(ProgramSpec::Square, &[Transform::Grad]);
+        let mut compile_options = BTreeMap::new();
+        compile_options.insert("value_and_grad".to_owned(), "true".to_owned());
+        let features: Vec<String> = vec![];
+
+        let meta = prepare_dispatch_meta(
+            CompatibilityMode::Strict,
+            &led.root_jaxpr,
+            &led.transform_stack,
+            &led.transform_evidence,
+            "cpu",
+            &compile_options,
+            None,
+            &features,
+        )
+        .expect("prepare meta");
+
+        let err = dispatch_ref(DispatchRequestRef {
+            mode: CompatibilityMode::Strict,
+            root_jaxpr: &led.root_jaxpr,
+            transform_stack: &led.transform_stack,
+            transform_evidence: &led.transform_evidence,
+            args: vec![Value::scalar_f64(3.0)],
+            backend: "gpu",
+            compile_options,
+            custom_hook: None,
+            unknown_incompatible_features: &features,
+            prepared: Some(&meta),
+        })
+        .expect_err("stale prepared metadata must be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("prepared dispatch metadata does not match request static inputs"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn prepared_metadata_does_not_bypass_strict_unknown_features() {
+        let led = ledger(ProgramSpec::Square, &[Transform::Grad]);
+        let mut compile_options = BTreeMap::new();
+        compile_options.insert("value_and_grad".to_owned(), "true".to_owned());
+        let features: Vec<String> = vec![];
+        let unknown_features = vec!["experimental-transform".to_owned()];
+
+        let meta = prepare_dispatch_meta(
+            CompatibilityMode::Strict,
+            &led.root_jaxpr,
+            &led.transform_stack,
+            &led.transform_evidence,
+            "cpu",
+            &compile_options,
+            None,
+            &features,
+        )
+        .expect("prepare meta");
+
+        let err = dispatch_ref(DispatchRequestRef {
+            mode: CompatibilityMode::Strict,
+            root_jaxpr: &led.root_jaxpr,
+            transform_stack: &led.transform_stack,
+            transform_evidence: &led.transform_evidence,
+            args: vec![Value::scalar_f64(3.0)],
+            backend: "cpu",
+            compile_options,
+            custom_hook: None,
+            unknown_incompatible_features: &unknown_features,
+            prepared: Some(&meta),
+        })
+        .expect_err("strict mode must reject unknown incompatible features");
+
+        assert!(matches!(
+            err,
+            DispatchError::Cache(fj_cache::CacheKeyError::UnknownIncompatibleFeatures { .. })
+        ));
     }
 
     #[test]
