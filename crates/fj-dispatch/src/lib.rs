@@ -2,10 +2,10 @@
 
 pub mod batching;
 
-use fj_cache::{CacheKeyError, CacheKeyInputRef, build_cache_key_ref};
+use fj_cache::{CacheKey, CacheKeyError, CacheKeyInputRef, build_cache_key_ref};
 use fj_core::{
     Atom, CompatibilityMode, DType, Jaxpr, Literal, Primitive, Shape, TensorValue,
-    TraceTransformLedger, Transform, TransformCompositionError, Value,
+    TraceTransformLedger, Transform, TransformCompositionError, TransformCompositionProof, Value,
     verify_transform_composition_parts,
 };
 use fj_interpreters::InterpreterError;
@@ -162,6 +162,61 @@ pub struct DispatchRequestRef<'a> {
     pub compile_options: BTreeMap<String, String>,
     pub custom_hook: Option<&'a str>,
     pub unknown_incompatible_features: &'a [String],
+    /// Optional precomputed dispatch metadata (composition proof + cache key).
+    ///
+    /// Both values are a pure function of the *static* dispatch inputs (jaxpr,
+    /// transform stack/evidence, mode, backend, compile options, custom hook,
+    /// incompatible features) — they never depend on the runtime `args`. When a
+    /// caller invokes the same wrapped function repeatedly it can compute this
+    /// once via [`prepare_dispatch_meta`] and pass it here, skipping the
+    /// per-call fingerprint signature allocation + FNV/SHA-256 hashing.
+    pub prepared: Option<&'a PreparedDispatchMeta>,
+}
+
+/// Precomputed, args-independent dispatch metadata.
+///
+/// Produced by [`prepare_dispatch_meta`] and threaded through
+/// [`DispatchRequestRef::prepared`] so repeated calls of the same wrapped
+/// function avoid recomputing the transform-composition proof and cache key
+/// (both dominated by hashing the canonical Jaxpr fingerprint).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedDispatchMeta {
+    pub composition_proof: TransformCompositionProof,
+    pub cache_key: CacheKey,
+}
+
+/// Compute the args-independent dispatch metadata for a wrapped function.
+///
+/// This performs exactly the same composition verification and cache-key
+/// derivation that [`dispatch_ref`] does when `prepared` is `None`, so passing
+/// the result back in produces byte-identical proofs, cache keys, and evidence
+/// ledgers. Returns an error if composition verification or cache-key
+/// construction would fail (e.g. strict-mode unknown incompatible features).
+pub fn prepare_dispatch_meta(
+    mode: CompatibilityMode,
+    root_jaxpr: &Jaxpr,
+    transform_stack: &[Transform],
+    transform_evidence: &[String],
+    backend: &str,
+    compile_options: &BTreeMap<String, String>,
+    custom_hook: Option<&str>,
+    unknown_incompatible_features: &[String],
+) -> Result<PreparedDispatchMeta, DispatchError> {
+    let composition_proof =
+        verify_transform_composition_parts(root_jaxpr, transform_stack, transform_evidence)?;
+    let cache_key = build_cache_key_ref(&CacheKeyInputRef {
+        mode,
+        backend,
+        jaxpr: root_jaxpr,
+        transform_stack,
+        compile_options,
+        custom_hook,
+        unknown_incompatible_features,
+    })?;
+    Ok(PreparedDispatchMeta {
+        composition_proof,
+        cache_key,
+    })
 }
 
 /// Parse in_axes from compile_options.
@@ -442,29 +497,43 @@ pub fn dispatch(request: DispatchRequest) -> Result<DispatchResponse, DispatchEr
         compile_options,
         custom_hook: custom_hook.as_deref(),
         unknown_incompatible_features: &unknown_incompatible_features,
+        prepared: None,
     })
 }
 
 pub fn dispatch_ref(request: DispatchRequestRef<'_>) -> Result<DispatchResponse, DispatchError> {
-    let composition_proof = verify_transform_composition_parts(
-        request.root_jaxpr,
-        request.transform_stack,
-        request.transform_evidence,
-    )?;
+    // The composition proof and cache key are pure functions of the static
+    // dispatch inputs (no `args` dependence). Reuse caller-precomputed metadata
+    // when available to skip the per-call fingerprint signature allocation and
+    // FNV/SHA-256 hashing; otherwise derive it identically here.
+    use std::borrow::Cow;
+    let (composition_proof, cache_key): (Cow<'_, _>, Cow<'_, _>) = match request.prepared {
+        Some(meta) => (
+            Cow::Borrowed(&meta.composition_proof),
+            Cow::Borrowed(&meta.cache_key),
+        ),
+        None => {
+            let composition_proof = verify_transform_composition_parts(
+                request.root_jaxpr,
+                request.transform_stack,
+                request.transform_evidence,
+            )?;
+            let cache_key = build_cache_key_ref(&CacheKeyInputRef {
+                mode: request.mode,
+                backend: request.backend,
+                jaxpr: request.root_jaxpr,
+                transform_stack: request.transform_stack,
+                compile_options: &request.compile_options,
+                custom_hook: request.custom_hook,
+                unknown_incompatible_features: request.unknown_incompatible_features,
+            })?;
+            (Cow::Owned(composition_proof), Cow::Owned(cache_key))
+        }
+    };
     let nested_trace_summary =
         simulate_nested_trace_contexts(request.transform_stack, &request.args).map_err(|err| {
             TransformExecutionError::TensorBuild(format!("nested trace simulation failed: {err}"))
         })?;
-
-    let cache_key = build_cache_key_ref(&CacheKeyInputRef {
-        mode: request.mode,
-        backend: request.backend,
-        jaxpr: request.root_jaxpr,
-        transform_stack: request.transform_stack,
-        compile_options: &request.compile_options,
-        custom_hook: request.custom_hook,
-        unknown_incompatible_features: request.unknown_incompatible_features,
-    })?;
 
     // Thread effect context through Jaxpr/equation effect ordering.
     let mut effect_ctx = EffectContext::new();
@@ -539,7 +608,7 @@ pub fn dispatch_ref(request: DispatchRequestRef<'_>) -> Result<DispatchResponse,
             EvidenceSignal {
                 signal_name: "transform_stack_hash".to_owned(),
                 log_likelihood_delta: (composition_proof.transform_count as f64 + 1.0).ln(),
-                detail: composition_proof.stack_hash_hex,
+                detail: composition_proof.stack_hash_hex.clone(),
             },
             EvidenceSignal {
                 signal_name: "nested_trace_depth".to_owned(),

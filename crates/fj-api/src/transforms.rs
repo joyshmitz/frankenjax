@@ -3,11 +3,12 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
 use fj_core::TraceTransformLedger;
 use fj_core::{CompatibilityMode, Jaxpr, Transform, Value};
-use fj_dispatch::{DispatchRequestRef, dispatch_ref};
+use fj_dispatch::{DispatchRequestRef, PreparedDispatchMeta, dispatch_ref, prepare_dispatch_meta};
 pub use fj_trace::ShapedArray;
 
 use crate::errors::ApiError;
@@ -47,6 +48,31 @@ pub struct ValueAndGradWrapped {
     backend: BackendName,
     mode: CompatibilityMode,
     custom_vjp_rule_key: Option<String>,
+    /// Lazily-computed, args-independent dispatch metadata (composition proof +
+    /// cache key) shared across repeated `call`s. Excluded from equality/Debug
+    /// so the wrapper's observable identity is unchanged.
+    meta_cache: DispatchMetaCache,
+}
+
+/// Process-lifetime cache for the args-independent dispatch metadata of a
+/// wrapped function. Cloning shares the cell (a clone has byte-identical static
+/// inputs, so the cached proof/key stay valid); any builder that changes a
+/// cache-key input must reset it via [`DispatchMetaCache::default`].
+#[derive(Clone, Default)]
+struct DispatchMetaCache(Arc<OnceLock<Option<PreparedDispatchMeta>>>);
+
+impl PartialEq for DispatchMetaCache {
+    fn eq(&self, _other: &Self) -> bool {
+        // The cache is a pure memo of the other fields; it never contributes to
+        // the wrapper's logical identity.
+        true
+    }
+}
+
+impl std::fmt::Debug for DispatchMetaCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DispatchMetaCache(..)")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,6 +201,7 @@ pub fn value_and_grad(jaxpr: Jaxpr) -> ValueAndGradWrapped {
         backend: Cow::Borrowed(DEFAULT_BACKEND),
         mode: CompatibilityMode::Strict,
         custom_vjp_rule_key: None,
+        meta_cache: DispatchMetaCache::default(),
     }
 }
 
@@ -610,17 +637,41 @@ fn dispatch_with_options(
     compile_options: BTreeMap<String, String>,
 ) -> Result<Vec<Value>, ApiError> {
     let transform_evidence = transform_evidence(transforms);
+    dispatch_with_options_prepared(
+        jaxpr,
+        transforms,
+        &transform_evidence,
+        args,
+        backend,
+        mode,
+        compile_options,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_with_options_prepared(
+    jaxpr: &Jaxpr,
+    transforms: &[Transform],
+    transform_evidence: &[String],
+    args: Vec<Value>,
+    backend: &str,
+    mode: CompatibilityMode,
+    compile_options: BTreeMap<String, String>,
+    prepared: Option<&PreparedDispatchMeta>,
+) -> Result<Vec<Value>, ApiError> {
     let unknown_incompatible_features: &[String] = &[];
     let response = dispatch_ref(DispatchRequestRef {
         mode,
         root_jaxpr: jaxpr,
         transform_stack: transforms,
-        transform_evidence: &transform_evidence,
+        transform_evidence,
         args,
         backend,
         compile_options,
         custom_hook: None,
         unknown_incompatible_features,
+        prepared,
     })?;
     Ok(response.outputs)
 }
@@ -866,28 +917,62 @@ impl ValueAndGradWrapped {
     #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = Cow::Owned(backend.to_owned());
+        // Backend feeds the cache key — invalidate any memoized metadata.
+        self.meta_cache = DispatchMetaCache::default();
         self
     }
 
     #[must_use]
     pub fn with_mode(mut self, mode: CompatibilityMode) -> Self {
         self.mode = mode;
+        // Mode feeds the cache key — invalidate any memoized metadata.
+        self.meta_cache = DispatchMetaCache::default();
         self
     }
 
-    pub fn call(&self, args: Vec<Value>) -> Result<(Vec<Value>, Vec<Value>), ApiError> {
+    /// Build the per-wrapper compile options. These are constant across calls,
+    /// so the derived dispatch metadata can be memoized.
+    fn compile_options(&self) -> BTreeMap<String, String> {
         let mut compile_options = BTreeMap::new();
         compile_options.insert("value_and_grad".to_owned(), "true".to_owned());
         if let Some(rule_key) = &self.custom_vjp_rule_key {
             compile_options.insert(CUSTOM_VJP_RULE_KEY_OPTION.to_owned(), rule_key.clone());
         }
-        let outputs = dispatch_with_options(
+        compile_options
+    }
+
+    pub fn call(&self, args: Vec<Value>) -> Result<(Vec<Value>, Vec<Value>), ApiError> {
+        let compile_options = self.compile_options();
+        let transforms = [Transform::Grad];
+        let evidence = transform_evidence(&transforms);
+        // Memoize the args-independent composition proof + cache key so repeated
+        // calls skip re-hashing the canonical Jaxpr fingerprint.
+        let prepared = self
+            .meta_cache
+            .0
+            .get_or_init(|| {
+                prepare_dispatch_meta(
+                    self.mode,
+                    &self.jaxpr,
+                    &transforms,
+                    &evidence,
+                    self.backend.as_ref(),
+                    &compile_options,
+                    None,
+                    &[],
+                )
+                .ok()
+            })
+            .as_ref();
+        let outputs = dispatch_with_options_prepared(
             &self.jaxpr,
-            &[Transform::Grad],
+            &transforms,
+            &evidence,
             args,
             self.backend.as_ref(),
             self.mode,
             compile_options,
+            prepared,
         )?;
         let value_len = self.jaxpr.outvars.len();
         if outputs.len() < value_len + 1 {
@@ -940,6 +1025,7 @@ impl CustomVjpWrapped {
             backend: self.backend.clone(),
             mode: self.mode,
             custom_vjp_rule_key: Some(self.rule_key.clone()),
+            meta_cache: DispatchMetaCache::default(),
         }
     }
 
@@ -1047,6 +1133,7 @@ impl CheckpointWrapped {
             backend: self.backend.clone(),
             mode: self.mode,
             custom_vjp_rule_key: Some(self.custom_vjp_rule_key.clone()),
+            meta_cache: DispatchMetaCache::default(),
         }
     }
 
