@@ -1,0 +1,62 @@
+{
+  "bead": "frankenjax-cf6go",
+  "status": "rejected_no_ship",
+  "pass": 210,
+  "target": "fj-dispatch vmap_eigh/batched_matrix_3x3",
+  "profile_basis": {
+    "reason": "No unowned ready [perf] bead was available; fj-lax dense/linalg roots were owned by IcyGlacier. Prior RCH profiles left vmap_eigh/batched_matrix_3x3 as the next unowned fj-dispatch hotspot after SVD.",
+    "prior_vmi1227854_us": {
+      "low": 97.518,
+      "median": 99.086,
+      "high": 100.06
+    },
+    "prior_ovh_a_us": {
+      "low": 106.57,
+      "median": 108.70,
+      "high": 111.66
+    }
+  },
+  "baseline": {
+    "tool": "rch exec -- cargo bench -j 1 -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --sample-size 30 --measurement-time 3 --warm-up-time 1 --noplot",
+    "worker": "vmi1227854",
+    "range_us": {
+      "low": 98.763,
+      "median": 99.651,
+      "high": 100.51
+    }
+  },
+  "candidate": {
+    "lever": "For DType::F64 only, batch_eigh_multi accumulated W/V into Vec<f64> and emitted TensorValue::new_f64_values, preserving the existing analytic/Jacobi arithmetic and fallback surfaces.",
+    "tool": "rch exec -- cargo bench -j 1 -p fj-dispatch --bench dispatch_baseline -- vmap_eigh/batched_matrix_3x3 --sample-size 30 --measurement-time 3 --warm-up-time 1 --noplot",
+    "worker": "vmi1227854",
+    "range_us": {
+      "low": 96.836,
+      "median": 97.288,
+      "high": 97.878
+    }
+  },
+  "delta": {
+    "median_speedup": 1.0242882570270065,
+    "conservative_speedup": 1.0090429391477484,
+    "score": 0.0,
+    "score_formula": "Impact x Confidence / Effort",
+    "decision": "Rejected because the same-worker gain is below the Score >= 2.0 keep gate."
+  },
+  "isomorphism_proof_for_candidate": {
+    "ordering": "Each matrix slice was read in the same row-major order and dispatched through the same analytic_eigh_3x3 or eigh_decompose_matrix_into path.",
+    "tie_breaking": "Eigenvalue ordering continued to use the existing total_cmp/index ordering; eigenvector sign behavior was not changed.",
+    "floating_point": "No arithmetic expression, reassociation, FMA request, dtype conversion, or tolerance was changed; only the output container changed.",
+    "rng": "No RNG surface exists in the Eigh batching rule.",
+    "fallbacks": "Non-F64, non-rank3, non-square, non-leading batch movement, and error surfaces were unchanged."
+  },
+  "golden_sha256": {
+    "leading_batch": "de40295687095bc622bd73074d24337004f440bdd2cc65d8a8759dfb5cf0b106",
+    "rank3": "9c8554df967d304b2570460fc5db4fca86602577232fcf8b01177fcd41cd365f"
+  },
+  "validation": {
+    "focused_tests": "RCH remote vmi1227854 cargo test -j 1 -p fj-dispatch --lib eigh -- --nocapture: 6 passed, 0 failed.",
+    "diff_check": "git diff --check passed after source revert.",
+    "source_state": "Candidate source and test hunks were removed before commit; production code remains unchanged by this rejected pass."
+  },
+  "next_route": "Do not repeat Eigh output-storage micro-tuning. Reprofile and attack a different unowned dispatch primitive, or use alien-graveyard to choose a deeper algorithmic primitive if dispatch micro-levers keep failing."
+}
