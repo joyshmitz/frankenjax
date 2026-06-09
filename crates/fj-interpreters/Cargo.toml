@@ -24,3 +24,7 @@ harness = false
 [[bench]]
 name = "eval_chain_memory"
 harness = false
+
+[[bench]]
+name = "eval_fusion_speed"
+harness = false

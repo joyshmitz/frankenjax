@@ -962,6 +962,260 @@ fn try_eval_scalar_i64_add_chain(
 /// `max_defined_var_id + 1`. Each variable lookup is an `O(1)` bounds-checked
 /// array index; the equation-input scratch buffer is reused across equations so
 /// a chain of single-output primitives performs no per-equation allocation.
+// ── Elementwise operation fusion (bead frankenjax-a8nbp) ───────────────────
+//
+// A maximal RUN of consecutive cheap-elementwise equations (each single-output,
+// same-shape dense f64, with single-use intermediates) is evaluated in ONE
+// chunked pass that materializes only the final output — skipping the N-1
+// intermediate tensors the per-equation loop would allocate. Each chain step is a
+// MONOMORPHIC tight loop over a cache-resident chunk (the `match` is hoisted out
+// of the element loop so it autovectorizes), so it stays compute-cheap while
+// cutting memory traffic to one read of each input + one write of the output.
+//
+// BIT-IDENTICAL to running the ops separately: the fused ops are exactly `a OP b`
+// / `-a` over f64 — the same closures `eval_same_shape_f64_binop` uses — applied
+// in the same order per element, so every value (incl. inf/NaN) matches.
+
+#[derive(Clone, Copy, PartialEq)]
+enum CheapOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Neg,
+}
+
+fn cheap_op(p: Primitive) -> Option<CheapOp> {
+    match p {
+        Primitive::Add => Some(CheapOp::Add),
+        Primitive::Sub => Some(CheapOp::Sub),
+        Primitive::Mul => Some(CheapOp::Mul),
+        Primitive::Div => Some(CheapOp::Div),
+        Primitive::Neg => Some(CheapOp::Neg),
+        _ => None,
+    }
+}
+
+/// An operand of a fused step: the running chain value, an external dense-f64
+/// tensor (index into the gathered `ext` slices), or an f64 scalar constant.
+#[derive(Clone, Copy)]
+enum FOperand {
+    Chain,
+    Ext(usize),
+    Scalar(f64),
+}
+
+struct FStep {
+    op: CheapOp,
+    a: FOperand,
+    b: FOperand, // unused for Neg
+}
+
+struct FusedRun {
+    out_var: VarId,
+    values: Vec<f64>,
+    shape: Shape,
+    ext_vars: Vec<VarId>,
+    run_end: usize,
+}
+
+const FUSION_MIN_RUN: usize = 3;
+const FUSION_MIN_ELEMS: usize = 1024;
+const FUSION_CHUNK: usize = 8192;
+
+/// Classify one operand atom. Pushes external dense-f64 tensors into `ext`/`ext_vars`
+/// and sets/checks the run shape `S`. Returns `None` (bail) for anything not
+/// fuse-eligible (non-f64 literal, non-dense or wrong-shape tensor, scalar non-f64).
+fn classify_fusion_operand<'e>(
+    atom: &Atom,
+    chain: Option<VarId>,
+    env: &'e [Option<Value>],
+    ext: &mut Vec<&'e [f64]>,
+    ext_vars: &mut Vec<VarId>,
+    shape: &mut Option<Shape>,
+) -> Option<FOperand> {
+    match atom {
+        Atom::Lit(Literal::F64Bits(b)) => Some(FOperand::Scalar(f64::from_bits(*b))),
+        Atom::Lit(_) => None,
+        Atom::Var(v) => {
+            if chain == Some(*v) {
+                return Some(FOperand::Chain);
+            }
+            let value = env.get(v.0 as usize).and_then(|s| s.as_ref())?;
+            match value {
+                Value::Scalar(Literal::F64Bits(b)) => Some(FOperand::Scalar(f64::from_bits(*b))),
+                Value::Scalar(_) => None,
+                Value::Tensor(t) => {
+                    let slice = t.elements.as_f64_slice()?;
+                    match shape {
+                        None => *shape = Some(t.shape.clone()),
+                        Some(s) if *s == t.shape => {}
+                        Some(_) => return None,
+                    }
+                    let idx = ext.len();
+                    ext.push(slice);
+                    ext_vars.push(*v);
+                    Some(FOperand::Ext(idx))
+                }
+            }
+        }
+    }
+}
+
+/// Apply one chain step's NON-chain operand to the chunk buffer (the chain value
+/// lives in `out`). Each arm is a monomorphic, autovectorizable loop.
+#[inline]
+fn apply_fusion_other(out: &mut [f64], op: CheapOp, chain_left: bool, other: FOperand, ext: &[&[f64]], base: usize) {
+    match other {
+        FOperand::Scalar(s) => match (op, chain_left) {
+            (CheapOp::Add, _) => out.iter_mut().for_each(|o| *o += s),
+            (CheapOp::Mul, _) => out.iter_mut().for_each(|o| *o *= s),
+            (CheapOp::Sub, true) => out.iter_mut().for_each(|o| *o -= s),
+            (CheapOp::Sub, false) => out.iter_mut().for_each(|o| *o = s - *o),
+            (CheapOp::Div, true) => out.iter_mut().for_each(|o| *o /= s),
+            (CheapOp::Div, false) => out.iter_mut().for_each(|o| *o = s / *o),
+            (CheapOp::Neg, _) => {}
+        },
+        FOperand::Ext(i) => {
+            let sl = &ext[i][base..base + out.len()];
+            match (op, chain_left) {
+                (CheapOp::Add, _) => out.iter_mut().zip(sl).for_each(|(o, e)| *o += *e),
+                (CheapOp::Mul, _) => out.iter_mut().zip(sl).for_each(|(o, e)| *o *= *e),
+                (CheapOp::Sub, true) => out.iter_mut().zip(sl).for_each(|(o, e)| *o -= *e),
+                (CheapOp::Sub, false) => out.iter_mut().zip(sl).for_each(|(o, e)| *o = *e - *o),
+                (CheapOp::Div, true) => out.iter_mut().zip(sl).for_each(|(o, e)| *o /= *e),
+                (CheapOp::Div, false) => out.iter_mut().zip(sl).for_each(|(o, e)| *o = *e / *o),
+                (CheapOp::Neg, _) => {}
+            }
+        }
+        FOperand::Chain => {}
+    }
+}
+
+/// Evaluate the fused run over one chunk `out` (already sized to the chunk length).
+fn apply_fusion_chunk(out: &mut [f64], tape: &[FStep], ext: &[&[f64]], base: usize) {
+    // Step 0 has no chain operand: seed `out` from operand `a`, then apply `b`.
+    let s0 = &tape[0];
+    match s0.a {
+        FOperand::Ext(i) => out.copy_from_slice(&ext[i][base..base + out.len()]),
+        FOperand::Scalar(v) => out.fill(v),
+        FOperand::Chain => {}
+    }
+    if s0.op == CheapOp::Neg {
+        out.iter_mut().for_each(|o| *o = -*o);
+    } else {
+        apply_fusion_other(out, s0.op, true, s0.b, ext, base);
+    }
+    for step in &tape[1..] {
+        if step.op == CheapOp::Neg {
+            out.iter_mut().for_each(|o| *o = -*o);
+            continue;
+        }
+        match (step.a, step.b) {
+            (FOperand::Chain, FOperand::Chain) => match step.op {
+                CheapOp::Add => out.iter_mut().for_each(|o| *o = *o + *o),
+                CheapOp::Sub => out.iter_mut().for_each(|o| *o = *o - *o),
+                CheapOp::Mul => out.iter_mut().for_each(|o| *o = *o * *o),
+                CheapOp::Div => out.iter_mut().for_each(|o| *o = *o / *o),
+                CheapOp::Neg => {}
+            },
+            (FOperand::Chain, other) => apply_fusion_other(out, step.op, true, other, ext, base),
+            (other, FOperand::Chain) => apply_fusion_other(out, step.op, false, other, ext, base),
+            _ => {} // unreachable for a chain step
+        }
+    }
+}
+
+/// Try to fuse a maximal cheap-elementwise run starting at `start`. Returns the
+/// owned fused result (no borrow of `env`) or `None` to fall through to the normal
+/// per-equation path. Opt-in: any non-matching condition bails with zero effect.
+fn try_fuse_elementwise_chain(
+    jaxpr: &Jaxpr,
+    start: usize,
+    env: &[Option<Value>],
+    last_use: &[usize],
+) -> Option<FusedRun> {
+    let eqns = &jaxpr.equations;
+    let mut ext: Vec<&[f64]> = Vec::new();
+    let mut ext_vars: Vec<VarId> = Vec::new();
+    let mut tape: Vec<FStep> = Vec::new();
+    let mut shape: Option<Shape> = None;
+    let mut chain_var: Option<VarId> = None;
+    let mut run_out: Option<VarId> = None;
+    let mut run_end = start;
+
+    let mut k = start;
+    loop {
+        let Some(eqn) = eqns.get(k) else { break };
+        if !eqn.params.is_empty() || !eqn.sub_jaxprs.is_empty() || eqn.outputs.len() != 1 {
+            break;
+        }
+        let Some(op) = cheap_op(eqn.primitive) else { break };
+        let needed = if op == CheapOp::Neg { 1 } else { 2 };
+        if eqn.inputs.len() != needed {
+            break;
+        }
+        let ext_mark = ext.len();
+        let vars_mark = ext_vars.len();
+        let a = classify_fusion_operand(&eqn.inputs[0], chain_var, env, &mut ext, &mut ext_vars, &mut shape);
+        let b = if op == CheapOp::Neg {
+            Some(FOperand::Scalar(0.0))
+        } else {
+            classify_fusion_operand(&eqn.inputs[1], chain_var, env, &mut ext, &mut ext_vars, &mut shape)
+        };
+        let (Some(a), Some(b)) = (a, b) else {
+            ext.truncate(ext_mark);
+            ext_vars.truncate(vars_mark);
+            break;
+        };
+        // Steps after the first MUST thread the chain (one operand == Chain). The
+        // last_use==k guarantee ensures eqn k uses chain_var, but stay defensive.
+        if chain_var.is_some()
+            && !matches!(a, FOperand::Chain)
+            && !matches!(b, FOperand::Chain)
+        {
+            ext.truncate(ext_mark);
+            ext_vars.truncate(vars_mark);
+            break;
+        }
+        tape.push(FStep { op, a, b });
+        run_out = Some(eqn.outputs[0]);
+        run_end = k;
+        let out_idx = eqn.outputs[0].0 as usize;
+        if k + 1 < eqns.len() && last_use.get(out_idx).copied() == Some(k + 1) {
+            chain_var = Some(eqn.outputs[0]);
+            k += 1;
+        } else {
+            break;
+        }
+    }
+
+    if tape.len() < FUSION_MIN_RUN {
+        return None;
+    }
+    let shape = shape?;
+    let n = shape.element_count()? as usize;
+    if n < FUSION_MIN_ELEMS {
+        return None;
+    }
+    let out_var = run_out?;
+
+    let mut values = vec![0.0_f64; n];
+    let mut s = 0;
+    while s < n {
+        let e = (s + FUSION_CHUNK).min(n);
+        apply_fusion_chunk(&mut values[s..e], &tape, &ext, s);
+        s = e;
+    }
+    Some(FusedRun {
+        out_var,
+        values,
+        shape,
+        ext_vars,
+        run_end,
+    })
+}
+
 fn eval_jaxpr_dense_env(
     jaxpr: &Jaxpr,
     const_values: &[Value],
@@ -1003,7 +1257,29 @@ fn eval_jaxpr_dense_env(
     }
 
     let mut scratch: Vec<Value> = Vec::new();
-    for (i, eqn) in jaxpr.equations.iter().enumerate() {
+    let mut i = 0;
+    while i < jaxpr.equations.len() {
+        // Fast path: fuse a maximal cheap-elementwise run starting here into one
+        // chunked pass (materializes only the final output). Bails to the normal
+        // path below for anything not fuse-eligible.
+        if let Some(run) = try_fuse_elementwise_chain(jaxpr, i, &env, &last_use) {
+            let tensor = TensorValue::new_f64_values(run.shape, run.values)
+                .map_err(EvalError::InvalidTensor)
+                .map_err(InterpreterError::Primitive)?;
+            env[run.out_var.0 as usize] = Some(Value::Tensor(tensor));
+            // Free the run's external inputs whose last read was within the run
+            // (outvars are pinned to usize::MAX, so they survive).
+            for v in &run.ext_vars {
+                let s = v.0 as usize;
+                if last_use[s] <= run.run_end {
+                    env[s] = None;
+                }
+            }
+            i = run.run_end + 1;
+            continue;
+        }
+
+        let eqn = &jaxpr.equations[i];
         scratch.clear();
         scratch.reserve(eqn.inputs.len());
         for atom in &eqn.inputs {
@@ -1043,6 +1319,8 @@ fn eval_jaxpr_dense_env(
                 }
             }
         }
+
+        i += 1;
     }
 
     jaxpr
@@ -1108,6 +1386,115 @@ mod tests {
         let jaxpr = build_program(ProgramSpec::Add2);
         let outputs = eval_jaxpr(&jaxpr, &[Value::scalar_i64(4), Value::scalar_i64(5)]);
         assert_eq!(outputs, Ok(vec![Value::scalar_i64(9)]));
+    }
+
+    // ── Elementwise fusion (a8nbp) bit-identity ──
+    fn f64_tensor(n: usize, f: impl Fn(usize) -> f64) -> Value {
+        Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![n as u32] }, (0..n).map(f).collect())
+                .unwrap(),
+        )
+    }
+    fn f64_vec(v: &Value) -> Vec<f64> {
+        match v {
+            // Robust to both dense-f64 storage (fused output) and boxed Literal
+            // storage (the per-equation path's output).
+            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+            _ => panic!("expected tensor"),
+        }
+    }
+    fn lit(x: f64) -> Atom {
+        Atom::Lit(Literal::from_f64(x))
+    }
+
+    #[test]
+    fn fusion_chain_matches_reference_bit_for_bit() {
+        // Build: v1 = mul(x, x); v2 = add(v1, 2.5); v3 = sub(7.0, v2); v4 = div(v3, y);
+        //        v5 = neg(v4); out = mul(v5, x)
+        // Mixes square (mul(x,x)), scalar (Add/Sub commute & non-commute), external
+        // tensor (Div by y, Mul by x), and Neg. Single-use chain, 6 ops -> fuses.
+        // out must equal an independent per-element fold, bit-for-bit (incl any inf/NaN).
+        let n = 4096usize; // > FUSION_MIN_ELEMS, > one chunk
+        let xv: Vec<f64> = (0..n).map(|i| i as f64 * 0.013 - 9.0).collect();
+        let yv: Vec<f64> = (0..n).map(|i| (i as f64 * 0.007).sin() + 1.5).collect();
+        let x = VarId(0);
+        let y = VarId(1);
+        let (v1, v2, v3, v4, v5, out) =
+            (VarId(2), VarId(3), VarId(4), VarId(5), VarId(6), VarId(7));
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(Primitive::Mul, smallvec![Atom::Var(x), Atom::Var(x)], v1),
+            mk(Primitive::Add, smallvec![Atom::Var(v1), lit(2.5)], v2),
+            mk(Primitive::Sub, smallvec![lit(7.0), Atom::Var(v2)], v3),
+            mk(Primitive::Div, smallvec![Atom::Var(v3), Atom::Var(y)], v4),
+            mk(Primitive::Neg, smallvec![Atom::Var(v4)], v5),
+            mk(Primitive::Mul, smallvec![Atom::Var(v5), Atom::Var(x)], out),
+        ];
+        let jaxpr = Jaxpr::new(vec![x, y], vec![], vec![out], eqns);
+        let got = f64_vec(
+            &eval_jaxpr(&jaxpr, &[f64_tensor(n, |i| xv[i]), f64_tensor(n, |i| yv[i])]).unwrap()[0],
+        );
+
+        let want: Vec<f64> = (0..n)
+            .map(|i| {
+                let v1 = xv[i] * xv[i];
+                let v2 = v1 + 2.5;
+                let v3 = 7.0 - v2;
+                let v4 = v3 / yv[i];
+                let v5 = -v4;
+                v5 * xv[i]
+            })
+            .collect();
+        assert_eq!(got.len(), n);
+        for i in 0..n {
+            assert_eq!(
+                got[i].to_bits(),
+                want[i].to_bits(),
+                "fused chain mismatch at {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn fusion_respects_multi_use_intermediate_boundary() {
+        // v1 = add(x, 1.0); v2 = mul(v1, 2.0); out1 = sub(v2, 3.0); out2 = neg(v1)
+        // v1 is used by BOTH v2 and out2 (multi-use) -> the run cannot extend past v1,
+        // so v1 MUST be materialized. Both outputs must be correct.
+        let n = 2048usize;
+        let xv: Vec<f64> = (0..n).map(|i| i as f64 * 0.5 - 100.0).collect();
+        let (x, v1, v2, out1, out2) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(Primitive::Add, smallvec![Atom::Var(x), lit(1.0)], v1),
+            mk(Primitive::Mul, smallvec![Atom::Var(v1), lit(2.0)], v2),
+            mk(Primitive::Sub, smallvec![Atom::Var(v2), lit(3.0)], out1),
+            mk(Primitive::Neg, smallvec![Atom::Var(v1)], out2),
+        ];
+        let jaxpr = Jaxpr::new(vec![x], vec![], vec![out1, out2], eqns);
+        let res = eval_jaxpr(&jaxpr, &[f64_tensor(n, |i| xv[i])]).unwrap();
+        let got1 = f64_vec(&res[0]);
+        let got2 = f64_vec(&res[1]);
+        for i in 0..n {
+            let v1 = xv[i] + 1.0;
+            assert_eq!(got1[i].to_bits(), ((v1 * 2.0) - 3.0).to_bits());
+            assert_eq!(got2[i].to_bits(), (-v1).to_bits());
+        }
     }
 
     #[test]
