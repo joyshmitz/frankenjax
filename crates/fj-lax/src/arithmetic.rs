@@ -7412,20 +7412,22 @@ pub(crate) fn eval_dot_general(
         return Ok(value);
     }
 
-    // Transposed rank-2 single-contracting-dim I64 contraction (A·Bᵀ / Aᵀ·B): the
-    // canonical-only I64 fast path above misses these orientations, so they fell to
+    // Transposed rank-2 single-contracting-dim I32/I64 contraction (A·Bᵀ / Aᵀ·B): the
+    // canonical-only fast path above misses these orientations, so they fell to
     // the generic strided per-element loop. Transpose to canonical and use the
     // contiguous `rank2_i64_matmul` kernel. Bit-identical (associative/exact integer
-    // wrapping fold, ascending-`l`; transpose only reorders memory). Scoped to I64
-    // output with both operands I64-backed, mirroring the canonical I64 block.
+    // wrapping fold, ascending-`l`; transpose only reorders memory). i32 is dense-i64-
+    // backed (as_i64_slice Some) and folds in wrapping i64 identically to the generic
+    // signed path; an I32 output is re-tagged over the dense i64 storage and the
+    // narrow_i32_tensor_result chokepoint wraps mod 2^32 (same as the canonical block).
     if lhs_rank == 2
         && rhs_rank == 2
         && lhs_batch.is_empty()
         && rhs_batch.is_empty()
         && lhs_contracting.len() == 1
         && rhs_contracting.len() == 1
-        && matches!(output_kind, DotOutputKind::Integral(DType::I64))
-        && let Some(value) = rank2_i64_any_orientation_matmul(
+        && let DotOutputKind::Integral(int_dtype @ (DType::I32 | DType::I64)) = output_kind
+        && let Some(mut value) = rank2_i64_any_orientation_matmul(
             lhs,
             rhs,
             lhs_contracting[0],
@@ -7433,6 +7435,11 @@ pub(crate) fn eval_dot_general(
             &output_dims,
         )?
     {
+        if int_dtype == DType::I32
+            && let Value::Tensor(t) = &mut value
+        {
+            t.dtype = DType::I32;
+        }
         return Ok(value);
     }
 
@@ -7480,11 +7487,13 @@ pub(crate) fn eval_dot_general(
         return Ok(value);
     }
 
-    // Canonical batched I64 matmul -> contiguous multi-threaded batched_rank2_i64_matmul
+    // Canonical batched I32/I64 matmul -> contiguous multi-threaded batched_rank2_i64_matmul
     // (the f64 path above is f64-only, so batched integer matmul fell to the generic
-    // per-element loop). Bit-identical wrapping fold. Scoped to I64 output.
-    if matches!(output_kind, DotOutputKind::Integral(DType::I64))
-        && let Some(value) = batched_standard_i64_matmul(
+    // per-element loop). Bit-identical wrapping fold. i32 is dense-i64-backed and folds
+    // identically; an I32 output is re-tagged over the dense i64 storage and the
+    // narrow_i32_tensor_result chokepoint wraps mod 2^32 (same as the canonical block).
+    if let DotOutputKind::Integral(int_dtype @ (DType::I32 | DType::I64)) = output_kind
+        && let Some(mut value) = batched_standard_i64_matmul(
             lhs,
             rhs,
             &lhs_batch,
@@ -7496,6 +7505,11 @@ pub(crate) fn eval_dot_general(
             &output_dims,
         )?
     {
+        if int_dtype == DType::I32
+            && let Value::Tensor(t) = &mut value
+        {
+            t.dtype = DType::I32;
+        }
         return Ok(value);
     }
 
@@ -9397,6 +9411,106 @@ mod tests {
             any_wrapped,
             "test inputs must actually exercise i32 overflow wrapping"
         );
+    }
+
+    #[test]
+    fn i32_dot_general_transposed_and_batched_wrap_like_jax() {
+        // i32 transposed (A·Bᵀ / Aᵀ·B) and batched orientations must also stay int32
+        // and wrap two's-complement, matching JAX/XLA. Reference: the exact i64 wrapping
+        // fold narrowed to i32 (== fj generic loop + chokepoint). Values near
+        // sqrt(i32::MAX) so products/sums overflow i32.
+        let mk = |len: usize, seed: i64| -> Vec<i64> {
+            (0..len as i64)
+                .map(|i| i64::from((46_300 + ((i * 37 + seed * 11) % 130)) as i32))
+                .collect()
+        };
+        let tensor_i32 = |dims: Vec<u32>, data: &[i64]| -> Value {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::I32,
+                    Shape { dims },
+                    data.iter().map(|&v| Literal::I64(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        // Transposed A·Bᵀ: [m,k]·[n,k] contracting (1,1) -> [m,n].
+        let (m, k, n) = (3usize, 5usize, 4usize);
+        let a = mk(m * k, 1);
+        let bt = mk(n * k, 2);
+        let params = BTreeMap::from([
+            ("lhs_contracting_dims".to_owned(), "1".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "1".to_owned()),
+        ]);
+        let Value::Tensor(out) = crate::eval_primitive(
+            Primitive::DotGeneral,
+            &[
+                tensor_i32(vec![m as u32, k as u32], &a),
+                tensor_i32(vec![n as u32, k as u32], &bt),
+            ],
+            &params,
+        )
+        .unwrap() else {
+            panic!("expected tensor");
+        };
+        assert_eq!(out.dtype, DType::I32, "transposed int32 matmul stays int32");
+        let got: Vec<i64> = out.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        let mut want = vec![0i64; m * n];
+        let mut wrapped_any = false;
+        for i in 0..m {
+            for j in 0..n {
+                let mut s = 0i64;
+                for l in 0..k {
+                    s = s.wrapping_add(a[i * k + l].wrapping_mul(bt[j * k + l]));
+                }
+                let w = i64::from(s as i32);
+                wrapped_any |= w != s;
+                want[i * n + j] = w;
+            }
+        }
+        assert_eq!(got, want, "transposed int32 matmul must wrap mod 2^32");
+
+        // Batched [bt,m,k]@[bt,k,n] contracting (2,1), batch (0,0).
+        let (bdim, bm, bk, bn) = (2usize, 2usize, 5usize, 3usize);
+        let ba = mk(bdim * bm * bk, 3);
+        let bb = mk(bdim * bk * bn, 4);
+        let bparams = BTreeMap::from([
+            ("lhs_batch_dims".to_owned(), "0".to_owned()),
+            ("rhs_batch_dims".to_owned(), "0".to_owned()),
+            ("lhs_contracting_dims".to_owned(), "2".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "1".to_owned()),
+        ]);
+        let Value::Tensor(bout) = crate::eval_primitive(
+            Primitive::DotGeneral,
+            &[
+                tensor_i32(vec![bdim as u32, bm as u32, bk as u32], &ba),
+                tensor_i32(vec![bdim as u32, bk as u32, bn as u32], &bb),
+            ],
+            &bparams,
+        )
+        .unwrap() else {
+            panic!("expected tensor");
+        };
+        assert_eq!(bout.dtype, DType::I32, "batched int32 matmul stays int32");
+        let bgot: Vec<i64> = bout.elements.iter().map(|l| l.as_i64().unwrap()).collect();
+        let mut bwant = vec![0i64; bdim * bm * bn];
+        for bi in 0..bdim {
+            for i in 0..bm {
+                for j in 0..bn {
+                    let mut s = 0i64;
+                    for l in 0..bk {
+                        let av = ba[(bi * bm + i) * bk + l];
+                        let bv = bb[(bi * bk + l) * bn + j];
+                        s = s.wrapping_add(av.wrapping_mul(bv));
+                    }
+                    let w = i64::from(s as i32);
+                    wrapped_any |= w != s;
+                    bwant[(bi * bm + i) * bn + j] = w;
+                }
+            }
+        }
+        assert_eq!(bgot, bwant, "batched int32 matmul must wrap mod 2^32");
+        assert!(wrapped_any, "test inputs must exercise i32 overflow wrapping");
     }
 
     #[test]
