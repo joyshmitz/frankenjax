@@ -306,6 +306,74 @@ fn bench_api_mode_config(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// 6. Prepared dispatch metadata: same-binary A/B
+//
+// Isolates the lever for frankenjax-1yn9y. Both arms run the identical deep
+// value_and_grad dispatch through `dispatch_ref`; the only difference is whether
+// the args-independent composition proof + cache key are precomputed once
+// (`prepared = Some`) or rederived on every call (`prepared = None`). A single
+// binary measures both so the ratio is trustworthy (no cross-invocation drift).
+// ---------------------------------------------------------------------------
+
+fn bench_prepared_dispatch_metadata(c: &mut Criterion) {
+    use fj_dispatch::{DispatchRequestRef, dispatch_ref, prepare_dispatch_meta};
+
+    let mut group = c.benchmark_group("prepared_dispatch_metadata");
+    let input = Value::scalar_f64(1.5);
+    let jaxpr = build_deep_value_and_grad_jaxpr(100);
+    let transforms = [Transform::Grad];
+    let evidence: Vec<String> = vec!["fj-api-grad-0".to_owned()];
+    let mut compile_options = std::collections::BTreeMap::new();
+    compile_options.insert("value_and_grad".to_owned(), "true".to_owned());
+    let backend = "cpu";
+    let mode = fj_core::CompatibilityMode::Strict;
+    let features: Vec<String> = Vec::new();
+
+    let meta = prepare_dispatch_meta(
+        mode, &jaxpr, &transforms, &evidence, backend, &compile_options, None, &features,
+    )
+    .expect("prepare dispatch meta");
+
+    group.bench_function("recompute/deep_100_nodes", |b| {
+        b.iter(|| {
+            dispatch_ref(DispatchRequestRef {
+                mode,
+                root_jaxpr: &jaxpr,
+                transform_stack: &transforms,
+                transform_evidence: &evidence,
+                args: vec![input.clone()],
+                backend,
+                compile_options: compile_options.clone(),
+                custom_hook: None,
+                unknown_incompatible_features: &features,
+                prepared: None,
+            })
+            .expect("recompute dispatch");
+        });
+    });
+
+    group.bench_function("prepared/deep_100_nodes", |b| {
+        b.iter(|| {
+            dispatch_ref(DispatchRequestRef {
+                mode,
+                root_jaxpr: &jaxpr,
+                transform_stack: &transforms,
+                transform_evidence: &evidence,
+                args: vec![input.clone()],
+                backend,
+                compile_options: compile_options.clone(),
+                custom_hook: None,
+                unknown_incompatible_features: &features,
+                prepared: Some(&meta),
+            })
+            .expect("prepared dispatch");
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -316,5 +384,6 @@ criterion_group!(
     bench_value_and_grad_shared_vs_separate,
     bench_api_composition,
     bench_api_mode_config,
+    bench_prepared_dispatch_metadata,
 );
 criterion_main!(api_benches);

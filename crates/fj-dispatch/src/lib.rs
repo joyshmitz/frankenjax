@@ -1539,7 +1539,10 @@ pub fn calibrated_posterior_abandoned(
 
 #[cfg(test)]
 mod tests {
-    use super::{DispatchError, DispatchRequest, TransformExecutionError, dispatch};
+    use super::{
+        DispatchError, DispatchRequest, DispatchRequestRef, TransformExecutionError, dispatch,
+        dispatch_ref, prepare_dispatch_meta,
+    };
     use fj_core::{
         Atom, CompatibilityMode, DType, Equation, Jaxpr, Primitive, ProgramSpec, Shape,
         TensorValue, TraceTransformLedger, Transform, Value, VarId, build_program,
@@ -2225,6 +2228,62 @@ mod tests {
         assert_ne!(
             r1.cache_key, r3.cache_key,
             "different program = different key"
+        );
+    }
+
+    #[test]
+    fn prepared_metadata_yields_identical_response() {
+        // The precomputed-metadata fast path must be byte-for-byte isomorphic to
+        // the recompute path: same cache key, outputs, and evidence ledger.
+        let led = ledger(ProgramSpec::Square, &[Transform::Grad]);
+        let mut compile_options = BTreeMap::new();
+        compile_options.insert("value_and_grad".to_owned(), "true".to_owned());
+        let args = vec![Value::scalar_f64(3.0)];
+        let features: Vec<String> = vec![];
+
+        let recompute = dispatch_ref(DispatchRequestRef {
+            mode: CompatibilityMode::Strict,
+            root_jaxpr: &led.root_jaxpr,
+            transform_stack: &led.transform_stack,
+            transform_evidence: &led.transform_evidence,
+            args: args.clone(),
+            backend: "cpu",
+            compile_options: compile_options.clone(),
+            custom_hook: None,
+            unknown_incompatible_features: &features,
+            prepared: None,
+        })
+        .expect("recompute dispatch");
+
+        let meta = prepare_dispatch_meta(
+            CompatibilityMode::Strict,
+            &led.root_jaxpr,
+            &led.transform_stack,
+            &led.transform_evidence,
+            "cpu",
+            &compile_options,
+            None,
+            &features,
+        )
+        .expect("prepare meta");
+
+        let prepared = dispatch_ref(DispatchRequestRef {
+            mode: CompatibilityMode::Strict,
+            root_jaxpr: &led.root_jaxpr,
+            transform_stack: &led.transform_stack,
+            transform_evidence: &led.transform_evidence,
+            args,
+            backend: "cpu",
+            compile_options,
+            custom_hook: None,
+            unknown_incompatible_features: &features,
+            prepared: Some(&meta),
+        })
+        .expect("prepared dispatch");
+
+        assert_eq!(
+            recompute, prepared,
+            "prepared metadata must produce an identical DispatchResponse"
         );
     }
 
