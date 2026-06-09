@@ -20,3 +20,7 @@ smallvec = { workspace = true }
 [[bench]]
 name = "pe_baseline"
 harness = false
+
+[[bench]]
+name = "eval_chain_memory"
+harness = false

@@ -976,8 +976,34 @@ fn eval_jaxpr_dense_env(
         env[var.0 as usize] = Some(args[idx].clone());
     }
 
+    // Liveness: `last_use[slot]` = index of the LAST equation that reads this var as
+    // an input (`usize::MAX` = never read; outvars are pinned `usize::MAX` so they
+    // survive to the return). After an equation runs we drop every input slot whose
+    // last use was this equation, so an N-equation elementwise CHAIN holds only its
+    // live working set (~2 tensors) instead of all N intermediates at once — a large
+    // peak-memory reduction for deep jaxprs. Bit-identical: a slot is freed strictly
+    // after its final read, outvars are never freed, so outputs are unchanged.
+    let mut last_use: Vec<usize> = vec![usize::MAX; slots];
+    for (i, eqn) in jaxpr.equations.iter().enumerate() {
+        for atom in &eqn.inputs {
+            if let Atom::Var(var) = atom {
+                // Bounds-guard: a malformed jaxpr can reference an id beyond the
+                // defined-var range; resolution below reports MissingVariable for it,
+                // so just skip it here (mirrors the original `env.get(..)`-safe lookup).
+                if let Some(slot) = last_use.get_mut(var.0 as usize) {
+                    *slot = i;
+                }
+            }
+        }
+    }
+    for var in &jaxpr.outvars {
+        if let Some(slot) = last_use.get_mut(var.0 as usize) {
+            *slot = usize::MAX; // pin: returned, never free
+        }
+    }
+
     let mut scratch: Vec<Value> = Vec::new();
-    for eqn in &jaxpr.equations {
+    for (i, eqn) in jaxpr.equations.iter().enumerate() {
         scratch.clear();
         scratch.reserve(eqn.inputs.len());
         for atom in &eqn.inputs {
@@ -1004,6 +1030,17 @@ fn eval_jaxpr_dense_env(
             let outputs = eval_equation_outputs_from_resolved(eqn, &scratch)?;
             for (out_var, output) in eqn.outputs.iter().zip(outputs) {
                 env[out_var.0 as usize] = Some(output);
+            }
+        }
+
+        // Free intermediates whose last read was this equation (outvars are pinned
+        // to usize::MAX above, so they are never dropped here).
+        for atom in &eqn.inputs {
+            if let Atom::Var(var) = atom {
+                let s = var.0 as usize;
+                if last_use[s] == i {
+                    env[s] = None;
+                }
             }
         }
     }
