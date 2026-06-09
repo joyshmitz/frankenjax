@@ -1421,6 +1421,73 @@ mod tests {
     }
 
     #[test]
+    fn batched_matmul_2d_batch1_matches_matmul_2d() {
+        // dot_general routes batch==1 f64 contractions to the packed matmul_2d; it must be
+        // bit-for-bit identical to the naive batched_matmul_2d(batch=1) it replaces (both
+        // are i-j-k-order references). Includes MR/NR remainder dims.
+        for &(m, k, n) in &[(13usize, 17usize, 11usize), (64, 48, 40), (33, 31, 9)] {
+            let a: Vec<f64> = (0..m * k)
+                .map(|i| (i as f64 * 0.019).sin() * 3.0 - 0.7)
+                .collect();
+            let b: Vec<f64> = (0..k * n)
+                .map(|i| (i as f64 * 0.023).cos() * 1.9 + 0.2)
+                .collect();
+            let packed = matmul_2d(&a, m, k, &b, n);
+            let naive = batched_matmul_2d(&a, 1, m, k, &b, n);
+            assert_eq!(packed.len(), naive.len());
+            for idx in 0..packed.len() {
+                assert_eq!(
+                    packed[idx].to_bits(),
+                    naive[idx].to_bits(),
+                    "mismatch at {idx} for [{m},{k}]@[{k},{n}]"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f64_batch1_packed_vs_naive() {
+        use std::time::Instant;
+        let time = |f: &dyn Fn()| {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..6 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        // batch==1 f64 contraction (e.g. transposed/non-canonical matmul reaching
+        // general_real_tensordot): packed matmul_2d vs the naive row-block it replaces. The
+        // packed win grows once B (k·n) spills cache.
+        for &(m, k, n) in &[
+            (4096usize, 512usize, 512usize), // B=2MB f64 (L3-resident)
+            (2048, 2048, 2048),              // B=32MB f64 (at L3 edge)
+            (3072, 3072, 3072),              // B=72MB f64 (clearly RAM-bound)
+        ] {
+            let a: Vec<f64> = (0..m * k).map(|i| (i % 100) as f64 * 0.01 - 0.5).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| (i % 77) as f64 * 0.01).collect();
+            let naive = time(&|| {
+                let _ = batched_matmul_2d(&a, 1, m, k, &b, n);
+            });
+            let packed = time(&|| {
+                let _ = matmul_2d(&a, m, k, &b, n);
+            });
+            let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
+            println!(
+                "BENCH f64 batch1 GEMM [{m},{k}]@[{k},{n}]: naive-row-block={:.3}ms ({:.1} GFLOP/s) packed={:.3}ms ({:.1} GFLOP/s) speedup={:.2}x",
+                naive * 1e3,
+                gflop / naive,
+                packed * 1e3,
+                gflop / packed,
+                naive / packed
+            );
+        }
+    }
+
+    #[test]
     fn matmul_2d_threaded_bit_identical() {
         // The multi-threaded row-block driver must equal the serial kernel
         // bit-for-bit, including a thread count that exceeds the row count (so

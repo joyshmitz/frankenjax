@@ -6679,7 +6679,20 @@ fn general_real_tensordot(
     } else {
         Cow::Owned(permute_f64(&rhs_v, &rhs_dims, &rhs_perm))
     };
-    let values = batched_matmul_2d(a.as_ref(), batch, m, k, b.as_ref(), n);
+    // batch==1 (the common single-contraction case: transposed matmul A·Bᵀ / Aᵀ·B,
+    // rank>2 tensordot, multi-contract einsum — all collapse to one [m,k]@[k,n] after the
+    // permute above) uses the packed register-blocked `matmul_2d` instead of the naive
+    // row-block `batched_matmul_2d`. Both are bit-identical to the i-j-k reference (proven
+    // by matmul_2d's order tests + batched_matmul_2d_batch1_matches_matmul_2d), so this is
+    // BIT-FOR-BIT identical; `matmul_2d` is never slower (≈1.0x L3-resident, up to ~2x once
+    // B spills cache per [[project_gemm_bpack_regime]]). The canonical [m,k]@[k,n] case
+    // already used `matmul_2d` via `rank2_f64_matmul`; this extends it to the non-canonical
+    // f64 contractions that fall through to here.
+    let values = if batch == 1 {
+        matmul_2d(a.as_ref(), m, k, b.as_ref(), n)
+    } else {
+        batched_matmul_2d(a.as_ref(), batch, m, k, b.as_ref(), n)
+    };
     if output_dims.is_empty() {
         // Full contraction (e.g. vector·vector) -> scalar, matching the other paths.
         return Ok(Some(Value::Scalar(real_literal_from_f64(
