@@ -22,3 +22,7 @@ harness = false
 [[bench]]
 name = "u64_matmul_speed"
 harness = false
+
+[[bench]]
+name = "rng_uniform_threading"
+harness = false
