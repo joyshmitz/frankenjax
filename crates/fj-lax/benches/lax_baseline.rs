@@ -3098,6 +3098,84 @@ fn bench_bf16_biasadd_boxed(c: &mut Criterion) {
     });
 }
 
+// Depthwise conv2d [1,56,56,128] 3x3 VALID (MobileNet-style). A/B: the dense channel-
+// vectorized fast path (eval_primitive) vs the pre-change per-output-channel scalar loop
+// that read the window channel-strided once per output channel (replicated locally).
+fn depthwise_conv2d_general_ref(
+    x: &[f64],
+    k: &[f64],
+    h: usize,
+    w: usize,
+    c: usize,
+    kh: usize,
+    kw: usize,
+) -> Vec<f64> {
+    let (oh, ow) = (h - kh + 1, w - kw + 1);
+    let wc = w * c;
+    let mut out = vec![0.0f64; oh * ow * c];
+    let mut oi = 0usize;
+    for o_h in 0..oh {
+        for o_w in 0..ow {
+            for co in 0..c {
+                let mut acc = 0.0f64;
+                for a in 0..kh {
+                    for b in 0..kw {
+                        acc += x[(o_h + a) * wc + (o_w + b) * c + co] * k[(a * kw + b) * c + co];
+                    }
+                }
+                out[oi] = acc;
+                oi += 1;
+            }
+        }
+    }
+    out
+}
+
+fn depthwise_conv_inputs() -> (Vec<f64>, Vec<f64>, usize, usize, usize, usize, usize) {
+    let (h, w, c, kh, kw) = (56usize, 56usize, 128usize, 3usize, 3usize);
+    let x: Vec<f64> = (0..h * w * c).map(|i| (i as f64 * 0.0011).sin()).collect();
+    let k: Vec<f64> = (0..kh * kw * c)
+        .map(|i| (i as f64 * 0.0023).cos())
+        .collect();
+    (x, k, h, w, c, kh, kw)
+}
+
+fn bench_depthwise_conv_general(c: &mut Criterion) {
+    let (x, k, h, w, ch, kh, kw) = depthwise_conv_inputs();
+    c.bench_function("conv/depthwise_56x56x128_3x3_general", |b| {
+        b.iter(|| depthwise_conv2d_general_ref(black_box(&x), black_box(&k), h, w, ch, kh, kw))
+    });
+}
+
+fn bench_depthwise_conv_fast(c: &mut Criterion) {
+    let (x, k, h, w, ch, kh, kw) = depthwise_conv_inputs();
+    let x_val = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![1, h as u32, w as u32, ch as u32],
+            },
+            x,
+        )
+        .unwrap(),
+    );
+    let k_val = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![kh as u32, kw as u32, 1, ch as u32],
+            },
+            k,
+        )
+        .unwrap(),
+    );
+    let mut p = no_params();
+    p.insert("padding".to_owned(), "valid".to_owned());
+    p.insert("strides".to_owned(), "1".to_owned());
+    p.insert("feature_group_count".to_owned(), ch.to_string());
+    c.bench_function("conv/depthwise_56x56x128_3x3_fast", |b| {
+        b.iter(|| eval_primitive(Primitive::Conv, &[x_val.clone(), k_val.clone()], &p))
+    });
+}
+
 fn bench_complex_expm1_1k(c: &mut Criterion) {
     let input = complex_vector(1000);
     let p = no_params();
@@ -3902,6 +3980,8 @@ criterion_group!(
     bench_bf16_mul_2m_boxed,
     bench_bf16_biasadd_dense,
     bench_bf16_biasadd_boxed,
+    bench_depthwise_conv_general,
+    bench_depthwise_conv_fast,
     bench_bf16_scalarmul_2m_dense,
     bench_bf16_scalarmul_2m_boxed,
     bench_complex_expm1_1k,

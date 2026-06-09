@@ -6691,6 +6691,65 @@ fn eval_conv_2d_grouped(
     };
     let lhs_src: &[f64] = &lhs_cow;
     let rhs_src: &[f64] = &rhs_cow;
+
+    // Depthwise fast path (feature_group_count == c_in, multiplier 1: rhs_c_in == 1 and
+    // cout_per_group == 1, so c_out == c_in). Output channel `co` reads input channel `co`
+    // and kernel `[kh,kw,0,co]`, BOTH contiguous over `co`. So accumulate the whole
+    // channel vector per spatial position with a contiguous inner loop (the compiler
+    // autovectorizes it, and each input position is read ONCE) instead of the general
+    // path's per-`co` channel-strided re-read of the window. Per-channel accumulation
+    // order (kh outer, kw inner) and the `0.0 * rhs` contribution for OOB taps (which
+    // yields NaN for an inf kernel value, exactly as the general loop does) are
+    // preserved, so the output is BIT-FOR-BIT identical. Verified by
+    // conv2d_depthwise_fast_path_matches_general.
+    if rhs_c_in == 1 && cout_per_group == 1 {
+        let mut out = vec![0.0_f64; total];
+        let mut oi = 0usize;
+        for n in 0..batch {
+            let n_off = n * height_width_c_in;
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let acc = &mut out[oi..oi + c_out];
+                    for kh in 0..kernel_h {
+                        let in_h = (oh * stride_h + kh * dil_h) as isize - pad_top as isize;
+                        let h_oob = in_h < 0 || (in_h as usize) >= height;
+                        let h_off = if h_oob {
+                            0
+                        } else {
+                            (in_h as usize) * width_c_in
+                        };
+                        let rhs_kh = kh * kw_rhs_c_in_c_out;
+                        for kw in 0..kernel_w {
+                            let in_w = (ow * stride_w + kw * dil_w) as isize - pad_left as isize;
+                            let w_oob = in_w < 0 || (in_w as usize) >= width;
+                            let rbase = rhs_kh + kw * rhs_c_in_c_out;
+                            let rhs_row = &rhs_src[rbase..rbase + c_out];
+                            if h_oob || w_oob {
+                                // OOB tap: `0.0 * rhs` per channel — identical to the
+                                // general loop (yields NaN for an inf kernel value).
+                                #[allow(
+                                    clippy::erasing_op,
+                                    reason = "must replicate the general loop's 0.0*rhs for bit-identity (inf kernel -> NaN)"
+                                )]
+                                for (a, &r) in acc.iter_mut().zip(rhs_row) {
+                                    *a += 0.0 * r;
+                                }
+                            } else {
+                                let base = n_off + h_off + (in_w as usize) * c_in;
+                                let lhs_row = &lhs_src[base..base + c_out];
+                                for ((a, &l), &r) in acc.iter_mut().zip(lhs_row).zip(rhs_row) {
+                                    *a += l * r;
+                                }
+                            }
+                        }
+                    }
+                    oi += c_out;
+                }
+            }
+        }
+        return conv_real_output_from_f64(out_dtype, out_dims, out);
+    }
+
     let mut out = Vec::with_capacity(total);
     for n in 0..batch {
         let n_off = n * height_width_c_in;
@@ -8349,6 +8408,86 @@ mod tests {
             got1, want1,
             "1D dilated conv must match direct dilated reference"
         );
+    }
+
+    #[test]
+    fn conv2d_depthwise_fast_path_matches_general() {
+        // Depthwise conv (feature_group_count == c_in, multiplier 1) takes the channel-
+        // vectorized fast path. Validate it BIT-FOR-BIT against an INDEPENDENT oracle:
+        // a depthwise conv is C single-channel non-grouped convs (im2col path), which
+        // accumulate the same kh-outer/kw-inner products in f64. Covers SAME padding
+        // (border OOB) and stride 2.
+        let mk = |dims: Vec<u32>, d: &[f64]| {
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims }, d.to_vec()).unwrap())
+        };
+        let bits = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F64Bits(b) => *b,
+                    o => panic!("unexpected {o:?}"),
+                })
+                .collect()
+        };
+        for &(h, w, c, kh, kw, pad, stride) in &[
+            (8usize, 7usize, 6usize, 3usize, 3usize, "valid", 1usize),
+            (8, 7, 6, 3, 3, "same", 1),
+            (9, 9, 5, 3, 3, "same", 2),
+            (6, 6, 4, 2, 2, "valid", 1),
+        ] {
+            let xf: Vec<f64> = (0..h * w * c)
+                .map(|i| (i as f64 * 0.021).sin() * 1.4 - 0.25)
+                .collect();
+            let kf: Vec<f64> = (0..kh * kw * c)
+                .map(|i| (i as f64 * 0.017).cos() * 0.7 + 0.15)
+                .collect();
+            let strides = stride.to_string();
+            let got = eval_conv(
+                Primitive::Conv,
+                &[
+                    mk(vec![1, h as u32, w as u32, c as u32], &xf),
+                    mk(vec![kh as u32, kw as u32, 1, c as u32], &kf),
+                ],
+                &params(&[
+                    ("padding", pad),
+                    ("strides", &strides),
+                    ("feature_group_count", &c.to_string()),
+                ]),
+            )
+            .unwrap();
+            let gt = got.as_tensor().unwrap();
+            let out_h = gt.shape.dims[1] as usize;
+            let out_w = gt.shape.dims[2] as usize;
+            let got_bits = bits(&got);
+            // Per-channel oracle: single-channel non-grouped conv (im2col path).
+            for ch in 0..c {
+                let x_ch: Vec<f64> = (0..h * w).map(|p| xf[p * c + ch]).collect();
+                let k_ch: Vec<f64> = (0..kh * kw).map(|p| kf[p * c + ch]).collect();
+                let ref_out = eval_conv(
+                    Primitive::Conv,
+                    &[
+                        mk(vec![1, h as u32, w as u32, 1], &x_ch),
+                        mk(vec![kh as u32, kw as u32, 1, 1], &k_ch),
+                    ],
+                    &params(&[("padding", pad), ("strides", &strides)]),
+                )
+                .unwrap();
+                let ref_bits = bits(&ref_out);
+                for oh in 0..out_h {
+                    for ow in 0..out_w {
+                        let g = got_bits[(oh * out_w + ow) * c + ch];
+                        let r = ref_bits[oh * out_w + ow];
+                        assert_eq!(
+                            g, r,
+                            "depthwise fast path != per-channel ref at \
+                             ({oh},{ow},ch={ch}) cfg=({h},{w},{c},{kh},{kw},{pad},s{stride})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
