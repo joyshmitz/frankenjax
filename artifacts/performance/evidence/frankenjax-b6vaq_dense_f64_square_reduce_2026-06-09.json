@@ -83,9 +83,9 @@
       "details": "reported unchanged fj-trace dependency warning: unused variable num_spatial"
     },
     {
-      "command": "cargo clippy -p fj-ad --all-targets -- -D warnings",
-      "status": "blocked_preexisting",
-      "details": "blocked by unchanged fj-trace unused variable and fj-lax clippy debt; --no-deps additionally exposes unchanged fj-ad lints in reduce_window, conv_vjp_grouped, scatter JVP, and tests"
+      "command": "cargo clippy -p fj-ad --all-targets --no-deps -- -D warnings",
+      "status": "passed",
+      "details": "fj-ad passed with -D warnings; cargo still emitted unchanged fj-trace unused-variable and fj-lax dead-code dependency warnings before checking fj-ad"
     },
     {
       "command": "ubs crates/fj-ad/src/lib.rs",

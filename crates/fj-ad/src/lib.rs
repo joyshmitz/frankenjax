@@ -5606,7 +5606,7 @@ fn jvp_reduce_window_select(
 
     let win_total = ad_checked_usize_product("reduce_window window", &window_dims)?;
     let mut out_idx = vec![0usize; rank];
-    for out_flat in 0..total_output {
+    for out_elem in out_elems.iter_mut().take(total_output) {
         // Find the same arg-extremum the VJP routes the cotangent to (strict
         // comparison → ties keep the FIRST window position, matching the VJP so
         // the JVP/VJP stay exact transposes).
@@ -5641,7 +5641,7 @@ fn jvp_reduce_window_select(
             increment_nd_index(&mut win_idx, &window_dims);
         }
         if let Some(idx) = best_flat {
-            out_elems[out_flat] = tan_elems[idx];
+            *out_elem = tan_elems[idx];
         }
         increment_nd_index(&mut out_idx, &out_dims);
     }
@@ -7013,7 +7013,7 @@ fn conv_vjp_grouped(
     let lhs_rank = lhs.shape.rank();
     let c_in = lhs.shape.dims[lhs_rank - 1] as usize; // channel = last axis
     let c_out = rhs.shape.dims[rhs.shape.rank() - 1] as usize; // Cout = last axis of kernel
-    if c_in % group_count != 0 || c_out % group_count != 0 {
+    if !c_in.is_multiple_of(group_count) || !c_out.is_multiple_of(group_count) {
         return Err(AdError::EvalFailed(format!(
             "grouped conv VJP: c_in={c_in}/c_out={c_out} not divisible by feature_group_count={group_count}"
         )));
@@ -9393,11 +9393,11 @@ fn jvp_rule(
             // updates carry tangents. Previously the zero index tangent scattered
             // at index 0. Use the primal indices, tangents for operand and updates.
             let mut inputs = vec![tangents[0].clone()];
-            for k in 1..primals.len() {
+            for (k, tangent) in tangents.iter().enumerate().take(primals.len()).skip(1) {
                 if k == 1 {
                     inputs.push(primals[1].clone());
                 } else {
-                    inputs.push(tangents[k].clone());
+                    inputs.push(tangent.clone());
                 }
             }
             ep_p(Primitive::Scatter, &inputs, params)
@@ -12141,7 +12141,7 @@ mod tests {
         };
         let a = mk(vec![2, 3], &a_vals);
         let b = mk(vec![3], &b_vals);
-        let ones = mk(vec![2, 3], &vec![1.0; 6]);
+        let ones = mk(vec![2, 3], &[1.0; 6]);
 
         // Mul: grad_a = b (broadcast), grad_b = sum_rows(a) = [1+4, 2+5, 3+6].
         let gm = grad_jaxpr_with_cotangent(
@@ -12195,7 +12195,7 @@ mod tests {
         // Size-1 axis (keepdims) unbroadcast: a[1,3] + b[2,3]. grad_a sums the
         // broadcast axis 0 but RESHAPES back to [1,3] (not [3]) — exercises the
         // reshape-to-target path of unbroadcast_cotangent_to.
-        let a1 = mk(vec![1, 3], &vec![1.0, 2.0, 3.0]);
+        let a1 = mk(vec![1, 3], &[1.0, 2.0, 3.0]);
         let b2 = mk(
             vec![2, 3],
             &b_vals
@@ -17532,7 +17532,7 @@ mod tests {
             ("reduce_op".to_owned(), "sum".to_owned()),
             ("base_dilation".to_owned(), "2".to_owned()),
         ]);
-        let gb = mk(&vec![1.0; 9]);
+        let gb = mk(&[1.0; 9]);
         assert!(
             vjp_single(Primitive::ReduceWindow, &[mk(&x0)], &gb, &bparams).is_err(),
             "base_dilation grad must fail-closed"
