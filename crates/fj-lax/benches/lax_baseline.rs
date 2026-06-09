@@ -3524,6 +3524,51 @@ fn bench_i64_matmul_512_literal_reference(c: &mut Criterion) {
     });
 }
 
+// Transposed i64 [512,512]·[512,512]ᵀ matmul (rhs_contracting=1, i.e. A·Bᵀ):
+// dense (contiguous rank2_i64_any_orientation_matmul: transpose B then
+// rank2_i64_matmul) vs Vec<Literal> boxed (the generic strided per-element
+// reduction that this orientation fell to before). Same-invocation A/B.
+fn i64_matmul_transposed_params() -> BTreeMap<String, String> {
+    let mut p = no_params();
+    p.insert("lhs_contracting_dims".to_owned(), "1".to_owned());
+    p.insert("rhs_contracting_dims".to_owned(), "1".to_owned());
+    p
+}
+
+fn bench_i64_matmul_512_transposed_dense(c: &mut Criterion) {
+    let n = 512usize;
+    let a: Vec<i64> = (0..(n * n) as i64)
+        .map(|i| i.wrapping_mul(2_654_435_761))
+        .collect();
+    let b: Vec<i64> = (0..(n * n) as i64)
+        .map(|i| i.wrapping_mul(40_503) ^ 0x5555)
+        .collect();
+    let dims = vec![n as u32, n as u32];
+    let lhs = Value::Tensor(TensorValue::new_i64_values(Shape { dims: dims.clone() }, a).unwrap());
+    let rhs = Value::Tensor(TensorValue::new_i64_values(Shape { dims }, b).unwrap());
+    let p = i64_matmul_transposed_params();
+    c.bench_function("eval/matmul_512x512_i64_transposed_dense", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::DotGeneral, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_i64_matmul_512_transposed_literal_reference(c: &mut Criterion) {
+    let n = 512usize;
+    let a: Vec<Literal> = (0..(n * n) as i64)
+        .map(|i| Literal::I64(i.wrapping_mul(2_654_435_761)))
+        .collect();
+    let b: Vec<Literal> = (0..(n * n) as i64)
+        .map(|i| Literal::I64(i.wrapping_mul(40_503) ^ 0x5555))
+        .collect();
+    let dims = vec![n as u32, n as u32];
+    let lhs = Value::Tensor(TensorValue::new(DType::I64, Shape { dims: dims.clone() }, a).unwrap());
+    let rhs = Value::Tensor(TensorValue::new(DType::I64, Shape { dims }, b).unwrap());
+    let p = i64_matmul_transposed_params();
+    c.bench_function("eval/matmul_512x512_i64_transposed_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::DotGeneral, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 // Complex128 canonical [256,256]@[256,256] matmul: dense (contiguous
 // rank2_complex_matmul fast path) vs Vec<Literal> boxed (the generic strided
 // per-element complex reduction). Same-invocation A/B.
@@ -4389,6 +4434,8 @@ criterion_group!(
     bench_bf16_scalarmul_2m_boxed,
     bench_i64_matmul_512_dense,
     bench_i64_matmul_512_literal_reference,
+    bench_i64_matmul_512_transposed_dense,
+    bench_i64_matmul_512_transposed_literal_reference,
     bench_complex_matmul_256_dense,
     bench_complex_matmul_256_literal_reference,
     bench_complex_expm1_1k,

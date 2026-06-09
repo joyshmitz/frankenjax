@@ -6450,6 +6450,66 @@ fn transpose_rows_cols_f64(data: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     out
 }
 
+/// Transpose a contiguous row-major `[rows, cols]` i64 matrix to `[cols, rows]`.
+fn transpose_rows_cols_i64(data: &[i64], rows: usize, cols: usize) -> Vec<i64> {
+    let mut out = vec![0i64; rows * cols];
+    for r in 0..rows {
+        let base = r * cols;
+        for c in 0..cols {
+            out[c * rows + r] = data[base + c];
+        }
+    }
+    out
+}
+
+/// Rank-2, single-contracting-dim, NO-batch I64 dot_general in ANY orientation.
+/// Mirrors [`rank2_f64_any_orientation_matmul`] for integer output: transposes each
+/// operand to the canonical `[m,k]` / `[k,n]` layout and runs the contiguous
+/// `rank2_i64_matmul` kernel instead of the generic strided per-element loop that the
+/// non-`([1],[0])` orientations (A·Bᵀ with `rhs_c=[1]`, Aᵀ·B with `lhs_c=[0]`) fall to.
+/// Integer `+`/`*` are associative and exact, so the ascending-`l` wrapping fold is
+/// BIT-IDENTICAL to the generic integer reduction; the transpose only reorders memory
+/// (see `rank2_i64_any_orientation_matmul_matches_generic`). Returns None unless both
+/// operands are I64-backed.
+fn rank2_i64_any_orientation_matmul(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    lc: usize,
+    rc: usize,
+    output_dims: &[u32],
+) -> Result<Option<Value>, EvalError> {
+    let (Some(la), Some(rb)) = (lhs.elements.as_i64_slice(), rhs.elements.as_i64_slice()) else {
+        return Ok(None);
+    };
+    let lf = 1 - lc;
+    let rf = 1 - rc;
+    let m = lhs.shape.dims[lf] as usize;
+    let k = lhs.shape.dims[lc] as usize;
+    let n = rhs.shape.dims[rf] as usize;
+    if rhs.shape.dims[rc] as usize != k {
+        return Ok(None);
+    }
+    // Arrange lhs as [m,k]: lc==1 is already [free=m, contract=k]; lc==0 means lhs is
+    // [k, m], transpose to [m, k]. Same for rhs to [k, n].
+    let a: Cow<[i64]> = if lc == 1 {
+        Cow::Borrowed(la)
+    } else {
+        Cow::Owned(transpose_rows_cols_i64(la, k, m))
+    };
+    let b: Cow<[i64]> = if rc == 0 {
+        Cow::Borrowed(rb)
+    } else {
+        Cow::Owned(transpose_rows_cols_i64(rb, n, k))
+    };
+    let values = rank2_i64_matmul(&a, m, k, &b, n);
+    Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+        Shape {
+            dims: output_dims.to_vec(),
+        },
+        values,
+    )?)))
+}
+
 /// Rank-2, single-contracting-dim, NO-batch f64 dot_general in ANY orientation.
 /// Transposes each operand to the canonical `[m,k]` / `[k,n]` layout and runs the
 /// fast `matmul_2d` kernel instead of the generic strided loop (which is what the
@@ -7131,6 +7191,30 @@ pub(crate) fn eval_dot_general(
         && lhs_contracting.len() == 1
         && rhs_contracting.len() == 1
         && let Some(value) = rank2_f64_any_orientation_matmul(
+            lhs,
+            rhs,
+            lhs_contracting[0],
+            rhs_contracting[0],
+            &output_dims,
+        )?
+    {
+        return Ok(value);
+    }
+
+    // Transposed rank-2 single-contracting-dim I64 contraction (A·Bᵀ / Aᵀ·B): the
+    // canonical-only I64 fast path above misses these orientations, so they fell to
+    // the generic strided per-element loop. Transpose to canonical and use the
+    // contiguous `rank2_i64_matmul` kernel. Bit-identical (associative/exact integer
+    // wrapping fold, ascending-`l`; transpose only reorders memory). Scoped to I64
+    // output with both operands I64-backed, mirroring the canonical I64 block.
+    if lhs_rank == 2
+        && rhs_rank == 2
+        && lhs_batch.is_empty()
+        && rhs_batch.is_empty()
+        && lhs_contracting.len() == 1
+        && rhs_contracting.len() == 1
+        && matches!(output_kind, DotOutputKind::Integral(DType::I64))
+        && let Some(value) = rank2_i64_any_orientation_matmul(
             lhs,
             rhs,
             lhs_contracting[0],
@@ -8971,6 +9055,62 @@ mod tests {
             for (g, w) in got.iter().zip(want.iter()) {
                 assert_eq!(*g, w.to_bits(), "(lc={lc},rc={rc}) must be bit-identical");
             }
+        }
+    }
+
+    #[test]
+    fn rank2_i64_any_orientation_matmul_matches_generic() {
+        // The transposed-I64 fast path (rank2_i64_any_orientation_matmul) routes every
+        // single-contracting-dim orientation — not just canonical [1],[0] — through the
+        // contiguous rank2_i64_matmul kernel. Each must equal a direct ascending-`l`
+        // wrapping reference (exactly the fold the generic integer reduction does),
+        // including overflow wrapping. Covers A·Bᵀ (rc=1) and Aᵀ·B (lc=0).
+        let (m, k, n) = (6usize, 9usize, 5usize);
+        let mk = |len: usize, mul: i64, add: i64| -> Vec<i64> {
+            (0..len)
+                .map(|i| (i as i64).wrapping_mul(mul).wrapping_add(add))
+                .collect()
+        };
+        for &(lc, rc) in &[(1usize, 1usize), (0usize, 0usize), (0usize, 1usize), (1usize, 0usize)] {
+            let (lr, lcd) = if lc == 1 { (m, k) } else { (k, m) };
+            let (rr, rcd) = if rc == 0 { (k, n) } else { (n, k) };
+            let a = mk(lr * lcd, 2_654_435_761, -7);
+            let b = mk(rr * rcd, 40_503, 3);
+            let lhs = tensor_i64(vec![lr as u32, lcd as u32], &a);
+            let rhs = tensor_i64(vec![rr as u32, rcd as u32], &b);
+            let params = BTreeMap::from([
+                ("lhs_contracting_dims".to_owned(), lc.to_string()),
+                ("rhs_contracting_dims".to_owned(), rc.to_string()),
+            ]);
+            let Value::Tensor(out) = eval_dot_general(&[lhs, rhs], &params).unwrap() else {
+                panic!("expected tensor for (lc={lc},rc={rc})");
+            };
+            assert_eq!(
+                out.shape.dims,
+                vec![m as u32, n as u32],
+                "(lc={lc},rc={rc}) output shape"
+            );
+            let got: Vec<i64> = out
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::I64(v) => *v,
+                    other => panic!("unexpected literal {other:?}"),
+                })
+                .collect();
+            let lhs_at = |i: usize, l: usize| if lc == 1 { a[i * k + l] } else { a[l * m + i] };
+            let rhs_at = |l: usize, j: usize| if rc == 0 { b[l * n + j] } else { b[j * k + l] };
+            let mut want = vec![0i64; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut s = 0i64;
+                    for l in 0..k {
+                        s = s.wrapping_add(lhs_at(i, l).wrapping_mul(rhs_at(l, j)));
+                    }
+                    want[i * n + j] = s;
+                }
+            }
+            assert_eq!(got, want, "(lc={lc},rc={rc}) must be bit-identical");
         }
     }
 
