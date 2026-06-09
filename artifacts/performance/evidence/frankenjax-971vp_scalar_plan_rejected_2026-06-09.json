@@ -1,0 +1,42 @@
+{
+  "bead": "frankenjax-971vp",
+  "status": "rejected",
+  "date": "2026-06-09",
+  "target": "fj-api prepared value_and_grad dispatch for scalar F64 Add/Mul Jaxprs",
+  "candidate": "cache args-independent scalar F64 Add/Mul value_and_grad plan metadata in PreparedDispatchMeta",
+  "profile_basis": "bead description reports post-7e1d392d profile: fj_ad::value_and_grad_jaxpr_inner_with_custom_vjp_key 4.08% self and scalar_f64_set_slot 0.67% after pass197",
+  "benchmark_command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-971vp-{baseline,candidate} rch exec -- cargo bench -p fj-api --bench api_overhead -- prepared_dispatch_metadata --sample-size 20 --warm-up-time 1 --measurement-time 3",
+  "placement": {
+    "baseline": "rch failed open to local: no admissible workers: critical_pressure=2,insufficient_slots=1",
+    "candidate": "rch failed open to local: no admissible workers: critical_pressure=2,active_project_exclusion=1",
+    "comparability": "same host local fallback through rch; remote same-worker placement was unavailable"
+  },
+  "baseline": {
+    "commit": "528ee0a6e6887d1147bc3289307cdeac77b906ad",
+    "worktree": "/data/projects/.scratch/frankenjax-971vp-baseline-20260609T121056",
+    "recompute_deep_100_nodes_mean_us": 16.694,
+    "prepared_deep_100_nodes_mean_us": 3.8466
+  },
+  "candidate": {
+    "source_files_tested": [
+      "crates/fj-ad/src/lib.rs",
+      "crates/fj-dispatch/src/lib.rs"
+    ],
+    "recompute_deep_100_nodes_mean_us": 17.551,
+    "prepared_deep_100_nodes_mean_us": 4.2910
+  },
+  "result": {
+    "prepared_speedup": 0.8964,
+    "recompute_speedup": 0.9512,
+    "score": 0.0,
+    "decision": "reject and restore source; the added prepared plan regressed the directly affected benchmark row"
+  },
+  "isomorphism": {
+    "ordering_preserved": "yes, candidate only replayed the same Jaxpr equation order",
+    "tie_breaking_unchanged": "yes, no ordering or comparison semantics changed",
+    "floating_point": "bit-identical by construction in the tested candidate; Add/Mul expression order was unchanged",
+    "rng": "not applicable",
+    "golden_outputs": "candidate had an fj-ad equality test against the existing dynamic fast path, but the source was not kept because perf regressed"
+  },
+  "next_route": "do not repeat static metadata caching for this row; re-profile and attack a different profile-backed primitive"
+}
