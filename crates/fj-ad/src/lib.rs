@@ -410,6 +410,7 @@ fn scalar_f64_forward_output(
 
 fn scalar_f64_atom_value(values: &[Option<f64>], atom: &Atom) -> Result<Option<f64>, AdError> {
     match atom {
+        Atom::Var(var) if var.0 as usize >= DENSE_AD_VALUE_STORE_MAX_SLOTS => Ok(None),
         Atom::Var(var) => Ok(Some(
             *values
                 .get(var.0 as usize)
@@ -419,6 +420,17 @@ fn scalar_f64_atom_value(values: &[Option<f64>], atom: &Atom) -> Result<Option<f
         Atom::Lit(Literal::F64Bits(bits)) => Ok(Some(f64::from_bits(*bits))),
         Atom::Lit(_) => Ok(None),
     }
+}
+
+fn scalar_f64_ensure_slot(values: &mut Vec<Option<f64>>, var: VarId) -> Option<&mut Option<f64>> {
+    let slot_count = (var.0 as usize).checked_add(1)?;
+    if slot_count > DENSE_AD_VALUE_STORE_MAX_SLOTS {
+        return None;
+    }
+    if slot_count > values.len() {
+        values.resize_with(slot_count, || None);
+    }
+    values.get_mut(var.0 as usize)
 }
 
 fn scalar_f64_add_or_insert(
@@ -461,24 +473,20 @@ fn try_scalar_f64_add_mul_value_and_grad(
         });
     }
 
-    let Some(max_var) = max_var_index(jaxpr) else {
-        return Ok(None);
-    };
-    let Some(slots) = max_var.checked_add(1) else {
-        return Ok(None);
-    };
-    if slots > DENSE_AD_VALUE_STORE_MAX_SLOTS {
-        return Ok(None);
-    }
-
-    let mut values = vec![None; slots];
+    let mut values = Vec::with_capacity(
+        jaxpr
+            .invars
+            .len()
+            .saturating_add(jaxpr.equations.len())
+            .saturating_add(jaxpr.outvars.len()),
+    );
     for (var, arg) in jaxpr.invars.iter().zip(args) {
         let Value::Scalar(Literal::F64Bits(bits)) = arg else {
             return Ok(None);
         };
-        let slot = values
-            .get_mut(var.0 as usize)
-            .ok_or(AdError::MissingVariable(*var))?;
+        let Some(slot) = scalar_f64_ensure_slot(&mut values, *var) else {
+            return Ok(None);
+        };
         *slot = Some(f64::from_bits(*bits));
     }
 
@@ -508,9 +516,9 @@ fn try_scalar_f64_add_mul_value_and_grad(
             _ => unreachable!("primitive checked above"),
         };
         let out_var = eqn.outputs[0];
-        let slot = values
-            .get_mut(out_var.0 as usize)
-            .ok_or(AdError::MissingVariable(out_var))?;
+        let Some(slot) = scalar_f64_ensure_slot(&mut values, out_var) else {
+            return Ok(None);
+        };
         *slot = Some(output);
     }
 
@@ -520,7 +528,7 @@ fn try_scalar_f64_add_mul_value_and_grad(
         .and_then(Option::as_ref)
         .ok_or(AdError::MissingVariable(output_var))?;
 
-    let mut adjoints = vec![None; slots];
+    let mut adjoints = vec![None; values.len()];
     adjoints[output_var.0 as usize] = Some(1.0);
     for eqn in jaxpr.equations.iter().rev() {
         let out_var = eqn.outputs[0];

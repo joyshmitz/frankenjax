@@ -1,0 +1,116 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "project": "frankenjax",
+  "bead": "frankenjax-5u1l7",
+  "pass": 196,
+  "date": "2026-06-09",
+  "base_commit": "8ef49b7ebac0323c3406850afe21fcfc1e279d0a",
+  "target": {
+    "crate": "fj-api",
+    "benchmark": "value_and_grad_runtime/shared/deep_100_nodes",
+    "implementation_crate": "fj-ad",
+    "profile_source": "/data/projects/.scratch/frankenjax-f2s2l-post-pass195-bench.perf.data",
+    "profile_summary_self_percent": [
+      {
+        "symbol": "fj_ad::value_and_grad_jaxpr_inner_with_custom_vjp_key",
+        "self_percent": 36.66
+      },
+      {
+        "symbol": "fj_ad::max_var_index",
+        "self_percent": 22.04
+      },
+      {
+        "symbol": "Option<f64> dense initialization",
+        "self_percent": 2.73
+      },
+      {
+        "symbol": "fj_dispatch::dispatch_ref",
+        "self_percent": 2.13
+      },
+      {
+        "symbol": "malloc",
+        "self_percent": 1.92
+      }
+    ]
+  },
+  "lever": {
+    "name": "on-demand scalar fast-path dense slots",
+    "summary": "Remove the separate max_var_index scan from the guarded scalar-F64 Add/Mul value_and_grad fast path. Dense scalar slots now grow on demand while preserving the same DENSE_AD_VALUE_STORE_MAX_SLOTS fallback threshold.",
+    "files_changed": [
+      "crates/fj-ad/src/lib.rs"
+    ]
+  },
+  "benchmark": {
+    "tool": "criterion via rch exec",
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-5u1l7-<baseline|candidate>-8ef49b7e-20260609 rch exec -- cargo bench -p fj-api --bench api_overhead -- value_and_grad_runtime/shared/deep_100_nodes --sample-size 20 --warm-up-time 1 --measurement-time 3 --noplot",
+    "rch_note": "Both final baseline and candidate selected vmi1153651 and fell open locally after the same remote topology preflight failure.",
+    "baseline": {
+      "worktree": "/data/projects/.scratch/frankenjax-5u1l7-baseline-8ef49b7e-20260609",
+      "commit": "8ef49b7ebac0323c3406850afe21fcfc1e279d0a",
+      "time_us_low": 4.8194,
+      "time_us_mid": 4.9041,
+      "time_us_high": 4.9786
+    },
+    "candidate": {
+      "worktree": "/data/projects/.scratch/frankenjax-5u1l7-candidate-9f1b398a-20260609",
+      "commit": "8ef49b7ebac0323c3406850afe21fcfc1e279d0a plus crates/fj-ad/src/lib.rs patch only",
+      "time_us_low": 3.9823,
+      "time_us_mid": 4.0400,
+      "time_us_high": 4.1096
+    },
+    "speedup_mid": 1.21389,
+    "speedup_conservative": 1.17272,
+    "latency_reduction_percent_mid": 17.62,
+    "score": {
+      "impact": 3,
+      "confidence": 4,
+      "effort": 2,
+      "impact_x_confidence_over_effort": 6.0,
+      "decision": "keep"
+    }
+  },
+  "isomorphism_proof": {
+    "ordering": "Equation traversal, reverse traversal, Add cotangent accumulation order, repeated-Mul cotangent order, and output/gradient order are unchanged.",
+    "floating_point": "The same scalar f64 + and * operations run in the same order. No reassociation, FMA, SIMD, mixed precision, or tolerance relaxation was introduced.",
+    "fallback": "VarIds requiring more than DENSE_AD_VALUE_STORE_MAX_SLOTS slots still return Ok(None) and fall back to the generic tape path. Unsupported dtype, literal, primitive, arity, params, effects, custom VJPs, and sub-Jaxprs keep the existing fallback/error behavior.",
+    "rng": "No RNG primitive or state is routed.",
+    "tie_breaking": "No tie-sensitive primitive is routed."
+  },
+  "golden": {
+    "fixture_json_payload": [
+      "7ff0000000000000",
+      "7ff0000000000000"
+    ],
+    "fixture_json_sha256": "2b1b03372322b4e6042ed0af95c4bfe87c0e15c25e9621c28a2da846689a9e25",
+    "golden_file": "artifacts/performance/evidence/fj_ad_scalar_layout_scan_5u1l7_pass196_2026-06-09.golden",
+    "golden_file_sha256": "518acf1317d616ba5ae83e4cf76d437e008350648b737e4da9b24eaa1f1ad08b",
+    "check_command": "sha256sum -c artifacts/performance/evidence/fj_ad_scalar_layout_scan_5u1l7_pass196_2026-06-09.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-ad/src/lib.rs",
+      "result": "passed"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-5u1l7-check-8ef49b7e-20260609 rch exec -- cargo check -p fj-ad --all-targets",
+      "result": "passed on remote vmi1227854; pre-existing fj-trace unused-variable warning only"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-5u1l7-test-8ef49b7e-20260609 rch exec -- cargo test -p fj-ad --lib",
+      "result": "passed via RCH local fail-open; 364 passed, 0 failed"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-5u1l7-clippy-8ef49b7e-20260609 rch exec -- cargo clippy -p fj-ad --all-targets -- -D warnings -A unused-variables -A clippy::too_many_arguments -A clippy::doc_lazy_continuation -A clippy::excessive_precision -A clippy::manual_is_multiple_of -A clippy::needless_range_loop -A clippy::useless_vec",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-ad/src/lib.rs",
+      "result": "nonzero on broad pre-existing file inventory; UBS fmt, clippy, cargo check, test build, cargo audit, and cargo deny sections were clean"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_ad_scalar_layout_scan_5u1l7_pass196_2026-06-09.golden.sha256",
+      "result": "passed"
+    }
+  ],
+  "next": "Reprofile value_and_grad after landing; if fj-ad remains top, the next deeper primitive is cached scalar fast-path metadata or an arena/compiled scalar tape, not another scan-only tweak."
+}
