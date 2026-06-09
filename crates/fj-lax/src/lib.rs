@@ -10,6 +10,7 @@ mod fft;
 pub mod linalg;
 pub mod nn;
 mod reduction;
+pub mod simd_exp;
 pub mod tensor_contraction;
 mod tensor_ops;
 pub mod threefry;
