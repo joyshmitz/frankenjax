@@ -832,8 +832,50 @@ fn rank2_i64_row_block(
     row_start: usize,
     block: &mut [i64],
 ) {
-    for (ri, c_row) in block.chunks_mut(n).enumerate() {
-        let a_off = (row_start + ri) * k;
+    let rows = block.len() / n;
+    let full = rows - rows % 4; // rows covered by whole 4-row register tiles
+    let (blocked, tail) = block.split_at_mut(full * n);
+
+    // 4-row register-blocked region: four output rows share ONE `b_row` load per
+    // `l`, so B is streamed `rows/4` times instead of `rows` times (4x less
+    // C-vs-B cache traffic) and the four independent wrapping MACs per b load give
+    // the integer pipeline 4-way ILP. Each output still accumulates its products
+    // over `l` in strictly ascending order with `wrapping_mul`/`wrapping_add`;
+    // since `Z/2^64` is a commutative ring this is BIT-FOR-BIT identical to the
+    // single-row loop below / the generic integer reduction — the register
+    // blocking only interleaves four independent output rows, never regrouping any
+    // one output's partial sum. (Mirrors the f64 `matmul_2d_blocked_row_block`
+    // MR-row reuse, minus the float-reassociation concern integers don't have.)
+    for (g, four) in blocked.chunks_mut(4 * n).enumerate() {
+        let (c0, rest) = four.split_at_mut(n);
+        let (c1, rest) = rest.split_at_mut(n);
+        let (c2, c3) = rest.split_at_mut(n);
+        let base = (row_start + g * 4) * k;
+        let (a0o, a1o, a2o, a3o) = (base, base + k, base + 2 * k, base + 3 * k);
+        for l in 0..k {
+            let a0 = a[a0o + l];
+            let a1 = a[a1o + l];
+            let a2 = a[a2o + l];
+            let a3 = a[a3o + l];
+            let b_row = &b[l * n..l * n + n];
+            for ((((e0, e1), e2), e3), &bv) in c0
+                .iter_mut()
+                .zip(c1.iter_mut())
+                .zip(c2.iter_mut())
+                .zip(c3.iter_mut())
+                .zip(b_row)
+            {
+                *e0 = e0.wrapping_add(a0.wrapping_mul(bv));
+                *e1 = e1.wrapping_add(a1.wrapping_mul(bv));
+                *e2 = e2.wrapping_add(a2.wrapping_mul(bv));
+                *e3 = e3.wrapping_add(a3.wrapping_mul(bv));
+            }
+        }
+    }
+
+    // Remainder rows (`rows % 4`): the original single-row i-k-j loop, unchanged.
+    for (ri_rem, c_row) in tail.chunks_mut(n).enumerate() {
+        let a_off = (row_start + full + ri_rem) * k;
         for l in 0..k {
             let a_il = a[a_off + l];
             let b_row = &b[l * n..l * n + n];
@@ -1685,11 +1727,16 @@ mod tests {
         // The contiguous i64 kernel must equal a direct ascending-`l` wrapping reference
         // (the same fold dot_general's generic integer reduction does), including overflow
         // wrapping and MR/NR remainder dims.
+        // Shapes deliberately hit every `rows % 4` remainder against the 4-row
+        // register-blocked kernel: 13→rem1, 64→rem0, 1→all-remainder, 40→rem0,
+        // 6→rem2, 7→rem3.
         for &(m, k, n) in &[
             (13usize, 17usize, 11usize),
             (64, 48, 40),
             (1, 33, 1),
             (40, 1, 7),
+            (6, 5, 9),
+            (7, 9, 5),
         ] {
             let a: Vec<i64> = (0..m * k)
                 .map(|i| (i as i64).wrapping_mul(2_654_435_761).wrapping_sub(7))
