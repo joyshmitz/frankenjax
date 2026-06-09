@@ -1912,7 +1912,8 @@ enum IndexMode {
 }
 
 /// Parse the JAX-style `index_mode` (out-of-bounds policy) param. Distinct from the
-/// scatter combiner `mode` ("overwrite"/"add"). Defaults to `default` when absent.
+/// scatter combiner `mode` ("overwrite"/"add"/"mul"/"min"/"max"). Defaults to `default`
+/// when absent.
 fn parse_index_mode(
     primitive: Primitive,
     params: &BTreeMap<String, String>,
@@ -2298,6 +2299,65 @@ pub(crate) fn eval_gather(
 /// add via `a + b` (F64) / `a.wrapping_add(b)` (I64), matching binary_literal_op
 /// Add. Returns `None` unless both operand and updates are the same F64/I64 dense
 /// storage.
+/// How a scatter combines an incoming `update` with the `current` operand value
+/// at a target index. Mirrors `jax.lax.scatter` / `scatter_add` / `scatter_mul` /
+/// `scatter_min` / `scatter_max` (the `update_jaxpr` combiner): `Overwrite` is
+/// plain `scatter` (replace), the rest fold via the matching primitive. All four
+/// folds are associative, so repeated indices accumulate order-independently.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScatterCombine {
+    Overwrite,
+    Add,
+    Mul,
+    Min,
+    Max,
+}
+
+/// Combine one `(current, update)` literal pair under `combine`. Routes through
+/// the same `binary_literal_op` the elementwise ops use, so dtype dispatch,
+/// integer wrapping, and float NaN semantics (via `jax_min_f64`/`jax_max_f64`,
+/// matching `lax.min`/`lax.max`) are identical to `Add`/`Mul`/`Min`/`Max`
+/// elementwise. (Complex min/max/mul fall through to `binary_literal_op`'s numeric
+/// path and error there, exactly as complex scatter-add already does.)
+#[inline]
+fn scatter_combine_literal(
+    combine: ScatterCombine,
+    current: Literal,
+    update: Literal,
+) -> Result<Literal, EvalError> {
+    match combine {
+        ScatterCombine::Overwrite => Ok(update),
+        ScatterCombine::Add => binary_literal_op(
+            current,
+            update,
+            Primitive::Add,
+            &|a, b| a.wrapping_add(b),
+            &|a, b| a + b,
+        ),
+        ScatterCombine::Mul => binary_literal_op(
+            current,
+            update,
+            Primitive::Mul,
+            &|a, b| a.wrapping_mul(b),
+            &|a, b| a * b,
+        ),
+        ScatterCombine::Min => binary_literal_op(
+            current,
+            update,
+            Primitive::Min,
+            &|a, b| a.min(b),
+            &crate::jax_min_f64,
+        ),
+        ScatterCombine::Max => binary_literal_op(
+            current,
+            update,
+            Primitive::Max,
+            &|a, b| a.max(b),
+            &crate::jax_max_f64,
+        ),
+    }
+}
+
 fn eval_scatter_dense(
     operand: &TensorValue,
     updates: &TensorValue,
@@ -2305,9 +2365,17 @@ fn eval_scatter_dense(
     slice_elems: usize,
     dim0: usize,
     index_mode: IndexMode,
-    add_mode: bool,
+    combine: ScatterCombine,
 ) -> Result<Option<Value>, EvalError> {
     let primitive = Primitive::Scatter;
+    // The dense typed fast paths only accelerate Overwrite + Add (the hot embedding
+    // lookup/gradient cases). Mul/Min/Max scatter is rarer and falls through to the
+    // generic `binary_literal_op` path below (return None = "not handled here").
+    let add_mode = match combine {
+        ScatterCombine::Overwrite => false,
+        ScatterCombine::Add => true,
+        ScatterCombine::Mul | ScatterCombine::Min | ScatterCombine::Max => return Ok(None),
+    };
     macro_rules! scatter_typed {
         ($op:expr, $upd:expr, $ctor:expr, $add_fn:expr) => {{
             let mut out = $op.to_vec();
@@ -2541,13 +2609,23 @@ pub(crate) fn eval_scatter(
         .map(|s| s.as_str())
         .unwrap_or("overwrite");
 
-    if mode != "overwrite" && mode != "add" {
-        return Err(EvalError::Unsupported {
-            primitive,
-            detail: format!("unknown scatter mode \"{mode}\", expected \"overwrite\" or \"add\""),
-        });
-    }
-    let add_mode = mode == "add";
+    // Scatter combiner (`update_jaxpr`): `overwrite` = jax.lax.scatter (replace),
+    // plus scatter_add/mul/min/max. Distinct from the OOB `index_mode` param below.
+    let combine = match mode {
+        "overwrite" => ScatterCombine::Overwrite,
+        "add" => ScatterCombine::Add,
+        "mul" => ScatterCombine::Mul,
+        "min" => ScatterCombine::Min,
+        "max" => ScatterCombine::Max,
+        other => {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!(
+                    "unknown scatter mode \"{other}\", expected \"overwrite\", \"add\", \"mul\", \"min\", or \"max\""
+                ),
+            });
+        }
+    };
 
     if updates.shape != expected_update_shape {
         return Err(EvalError::ShapeMismatch {
@@ -2592,7 +2670,7 @@ pub(crate) fn eval_scatter(
         slice_elems,
         dim0,
         index_mode,
-        add_mode,
+        combine,
     )? {
         return Ok(value);
     }
@@ -2617,7 +2695,7 @@ pub(crate) fn eval_scatter(
                 detail: "scatter update offset overflows usize".to_owned(),
             })?;
 
-        if !add_mode {
+        if combine == ScatterCombine::Overwrite {
             let result_end =
                 base_offset
                     .checked_add(slice_elems)
@@ -2679,13 +2757,7 @@ pub(crate) fn eval_scatter(
                         primitive,
                         detail: "scatter update index exceeds update element count".to_owned(),
                     })?;
-            result_elements[result_index] = binary_literal_op(
-                current,
-                update,
-                Primitive::Add,
-                &|a, b| a.wrapping_add(b),
-                &|a, b| a + b,
-            )?;
+            result_elements[result_index] = scatter_combine_literal(combine, current, update)?;
         }
     }
 
@@ -11902,6 +11974,81 @@ mod tests {
             .expect_err("scalar update should not fill non-scalar scatter slices");
         assert!(
             err.to_string().contains("updates must be a tensor"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── scatter combiner modes: scatter_max / scatter_min / scatter_mul (jax.lax) ──
+
+    #[test]
+    fn scatter_max_f64_duplicate_indices() {
+        // operand [1,2,3,4]; scatter-max indices [0,0,2] updates [5,3,1]:
+        //   out[0]=max(1,5,3)=5, out[2]=max(3,1)=3 -> [5,2,3,4]. Duplicate indices
+        //   accumulate order-independently (max is associative).
+        let operand = v_f64(&[1.0, 2.0, 3.0, 4.0]);
+        let idx = Value::vector_i64(&[0, 0, 2]).unwrap();
+        let upd = v_f64(&[5.0, 3.0, 1.0]);
+        let p = params(&[("mode", "max")]);
+        let out = eval_scatter(&[operand, idx, upd], &p).unwrap();
+        assert_eq!(extract_f64_vec(&out), vec![5.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn scatter_min_f64_duplicate_indices() {
+        // operand [5,5,5]; scatter-min indices [0,1,0] updates [2,7,8]:
+        //   out[0]=min(5,2,8)=2, out[1]=min(5,7)=5 -> [2,5,5].
+        let operand = v_f64(&[5.0, 5.0, 5.0]);
+        let idx = Value::vector_i64(&[0, 1, 0]).unwrap();
+        let upd = v_f64(&[2.0, 7.0, 8.0]);
+        let p = params(&[("mode", "min")]);
+        let out = eval_scatter(&[operand, idx, upd], &p).unwrap();
+        assert_eq!(extract_f64_vec(&out), vec![2.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn scatter_max_propagates_nan_like_lax_max() {
+        // jax.lax.max(x, NaN) == NaN; scatter_max uses the SAME jax_max_f64 the
+        // elementwise Max uses, so a NaN update poisons the target.
+        let operand = v_f64(&[1.0]);
+        let idx = Value::vector_i64(&[0]).unwrap();
+        let upd = v_f64(&[f64::NAN]);
+        let p = params(&[("mode", "max")]);
+        let out = eval_scatter(&[operand, idx, upd], &p).unwrap();
+        assert!(
+            extract_f64_vec(&out)[0].is_nan(),
+            "scatter_max must propagate NaN like lax.max"
+        );
+    }
+
+    #[test]
+    fn scatter_mul_i64_accumulates_via_generic_path() {
+        // i64 (boxed): operand [2,3,4]; scatter-mul indices [0,0] updates [3,5]:
+        //   out[0]=2*3*5=30 -> [30,3,4]. Exercises the GENERIC combine path (the
+        //   dense fast path returns None for mul) and integer wrapping_mul, and the
+        //   output stays I64.
+        let operand = Value::vector_i64(&[2, 3, 4]).unwrap();
+        let idx = Value::vector_i64(&[0, 0]).unwrap();
+        let upd = Value::vector_i64(&[3, 5]).unwrap();
+        let p = params(&[("mode", "mul")]);
+        let out = eval_scatter(&[operand, idx, upd], &p).unwrap();
+        let Value::Tensor(t) = &out else {
+            panic!("expected tensor")
+        };
+        assert_eq!(t.dtype, DType::I64);
+        let got: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+        assert_eq!(got, vec![30.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn scatter_rejects_unknown_combine_mode() {
+        let operand = v_f64(&[1.0, 2.0]);
+        let idx = Value::vector_i64(&[0]).unwrap();
+        let upd = v_f64(&[9.0]);
+        let p = params(&[("mode", "bogus")]);
+        let err =
+            eval_scatter(&[operand, idx, upd], &p).expect_err("unknown scatter mode must error");
+        assert!(
+            err.to_string().contains("unknown scatter mode"),
             "unexpected error: {err}"
         );
     }
