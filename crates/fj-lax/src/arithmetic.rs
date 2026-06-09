@@ -130,6 +130,70 @@ fn eval_f64_scalar_expensive_parallel(
         .map(Value::Tensor)
 }
 
+/// f32 sibling of [`eval_f64_scalar_expensive_parallel`]: threads an expensive binary op
+/// between a dense f32 tensor and an f32 scalar (the common `x ** 2.0` / `x / s` /
+/// `atan2(x, s)` activation/normalization patterns). f32 is JAX's DEFAULT float dtype, and
+/// these ops are compute-bound. Gated on an `F32Bits` scalar so the result stays F32
+/// (`promote_dtype(F32, F32) == F32`). Each element promotes f32->f64, applies `float_op`,
+/// rounds back `as f32` — EXACTLY the generic-f32 contract
+/// (`from_f32(float_op(scalar as f64, x as f64) as f32)`), so it is BIT-FOR-BIT identical.
+/// Without this, expensive f32 scalar ops (Pow/Atan2/Hypot/…) fell to the per-`Literal`
+/// generic path (`eval_f32_scalar_broadcast_binop` handles only Add/Sub/Mul/Div).
+fn eval_f32_scalar_expensive_parallel(
+    primitive: Primitive,
+    scalar: Literal,
+    tensor: &TensorValue,
+    scalar_on_left: bool,
+    float_op: &(impl Fn(f64, f64) -> f64 + Sync),
+) -> Option<Value> {
+    if !is_expensive_binary(primitive) {
+        return None;
+    }
+    let Literal::F32Bits(scalar_bits) = scalar else {
+        return None;
+    };
+    if tensor.dtype != DType::F32 {
+        return None;
+    }
+    let src = tensor.elements.as_f32_slice()?;
+    let n = src.len();
+    if n < EXPENSIVE_BINARY_PARALLEL_MIN {
+        return None;
+    }
+    let scalar = f64::from(f32::from_bits(scalar_bits));
+    let threads = work_scaled_threads(n);
+    if threads <= 1 {
+        return None;
+    }
+    let mut out = vec![0.0f32; n];
+    let chunk = n.div_ceil(threads);
+    let op_ref = float_op;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f32] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < n {
+            let len = chunk.min(n - start);
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let s = start;
+            scope.spawn(move || {
+                for (i, o) in blk.iter_mut().enumerate() {
+                    let v = f64::from(src[s + i]);
+                    *o = if scalar_on_left {
+                        op_ref(scalar, v) as f32
+                    } else {
+                        op_ref(v, scalar) as f32
+                    };
+                }
+            });
+            start += len;
+        }
+    });
+    TensorValue::new_f32_values(tensor.shape.clone(), out)
+        .ok()
+        .map(Value::Tensor)
+}
+
 /// Expensive elementwise binary ops are dominated by per-element transcendental
 /// cost, not memory traffic, so threading over elements scales (unlike cheap
 /// memory-bound add/sub/mul). These currently fall through to the generic
@@ -329,6 +393,11 @@ pub(crate) fn eval_binary_elementwise(
             if let Some(value) = eval_f64_scalar_broadcast_binop(primitive, *lhs, rhs, true)? {
                 return Ok(value);
             }
+            if let Some(value) =
+                eval_f32_scalar_expensive_parallel(primitive, *lhs, rhs, true, &float_op)
+            {
+                return Ok(value);
+            }
             if let Some(value) = eval_f32_scalar_broadcast_binop(primitive, *lhs, rhs, true)? {
                 return Ok(value);
             }
@@ -362,6 +431,11 @@ pub(crate) fn eval_binary_elementwise(
                 return Ok(value);
             }
             if let Some(value) = eval_f64_scalar_broadcast_binop(primitive, *rhs, lhs, false)? {
+                return Ok(value);
+            }
+            if let Some(value) =
+                eval_f32_scalar_expensive_parallel(primitive, *rhs, lhs, false, &float_op)
+            {
                 return Ok(value);
             }
             if let Some(value) = eval_f32_scalar_broadcast_binop(primitive, *rhs, lhs, false)? {
@@ -9715,6 +9789,85 @@ mod tests {
                 ser / par,
             );
         }
+    }
+
+    /// f32 scalar⊗tensor expensive ops now thread via eval_f32_scalar_expensive_parallel.
+    /// Each output must equal the generic-f32 contract `op(x as f64, s as f64) as f32`
+    /// bit-for-bit, for BOTH operand orders (the common `x**2`/`x/s`/`atan2(x,s)` patterns),
+    /// plus a light A/B for the threaded transcendental.
+    #[test]
+    fn f32_scalar_expensive_threaded_bit_identical_and_faster() {
+        use std::time::Instant;
+
+        let n: usize = 1 << 20;
+        let x: Vec<f32> = (0..n).map(|i| (i as f32) * 0.0011 + 0.5).collect();
+        let shape = Shape { dims: vec![n as u32] };
+        let tensor = Value::Tensor(TensorValue::new_f32_values(shape.clone(), x.clone()).unwrap());
+        let scalar_f32 = 2.5f32;
+        let scalar = Value::Scalar(Literal::from_f32(scalar_f32));
+        let sc = f64::from(scalar_f32);
+        let p = BTreeMap::new();
+
+        let cases: [(Primitive, fn(f64, f64) -> f64, &str); 3] = [
+            (Primitive::Div, |a, b| a / b, "div"),
+            (Primitive::Atan2, f64::atan2, "atan2"),
+            (Primitive::Hypot, f64::hypot, "hypot"),
+        ];
+        for (prim, op, name) in cases {
+            // tensor OP scalar (scalar on right)
+            let out = crate::eval_primitive(prim, &[tensor.clone(), scalar.clone()], &p).unwrap();
+            let ov = out
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .expect("dense f32 output (tensor,scalar)");
+            for i in 0..n {
+                assert_eq!(
+                    ov[i].to_bits(),
+                    (op(f64::from(x[i]), sc) as f32).to_bits(),
+                    "{name} (t,s) mismatch at {i}"
+                );
+            }
+            // scalar OP tensor (scalar on left)
+            let out2 = crate::eval_primitive(prim, &[scalar.clone(), tensor.clone()], &p).unwrap();
+            let ov2 = out2
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .expect("dense f32 output (scalar,tensor)");
+            for i in 0..n {
+                assert_eq!(
+                    ov2[i].to_bits(),
+                    (op(sc, f64::from(x[i])) as f32).to_bits(),
+                    "{name} (s,t) mismatch at {i}"
+                );
+            }
+        }
+
+        // Light A/B for the threaded transcendental (atan2(x, s)) vs a serial map.
+        let reps = 8u32;
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Atan2, &[tensor.clone(), scalar.clone()], &p)
+                    .unwrap(),
+            );
+        }
+        let par = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = Instant::now();
+        for _ in 0..reps {
+            let r: Vec<f32> = x.iter().map(|&v| f64::from(v).atan2(sc) as f32).collect();
+            std::hint::black_box(TensorValue::new_f32_values(shape.clone(), r).unwrap());
+        }
+        let ser = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "[f32 atan2(x,s) n={n}] threaded={:.3}ms serial-map={:.3}ms ratio={:.2}x",
+            par / 1e6,
+            ser / 1e6,
+            ser / par,
+        );
     }
 
     /// Bit-exact parity for the dense-i64 same-shape Add fast path: a dense
