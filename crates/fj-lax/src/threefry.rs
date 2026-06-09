@@ -43,6 +43,38 @@ impl std::fmt::Display for CategoricalError {
 
 impl std::error::Error for CategoricalError {}
 
+/// Errors returned by [`random_choice`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChoiceError {
+    /// Samples were requested from an empty population.
+    EmptyPopulation,
+    /// `replace = false` but more samples were requested than the population size.
+    SampleLargerThanPopulation { n_draws: usize, n_inputs: usize },
+    /// Probability vector length did not match the population size.
+    WeightsLengthMismatch { weights_len: usize, n_inputs: usize },
+}
+
+impl std::fmt::Display for ChoiceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyPopulation => write!(f, "choice requires a non-empty population"),
+            Self::SampleLargerThanPopulation { n_draws, n_inputs } => write!(
+                f,
+                "cannot take a sample of size {n_draws} from population {n_inputs} without replacement"
+            ),
+            Self::WeightsLengthMismatch {
+                weights_len,
+                n_inputs,
+            } => write!(
+                f,
+                "p must be a 1-D vector matching the population size: p.len()={weights_len}, population={n_inputs}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ChoiceError {}
+
 /// ThreeFry2x32: encrypt a 2-word plaintext with a 2-word key using `NUM_ROUNDS` rounds.
 ///
 /// This exactly matches JAX's `threefry2x32` implementation.
@@ -558,6 +590,95 @@ pub fn random_permutation(key: PRNGKey, n: usize) -> Vec<usize> {
         x = order.into_iter().map(|i| x[i]).collect();
     }
     x
+}
+
+/// Sample `n_draws` indices from `0..n_inputs`, matching `jax.random.choice` in
+/// its integer-population form (`choice(key, n_inputs, shape, replace, p)`
+/// returning indices into `arange(n_inputs)`).
+///
+/// All four JAX branches are reproduced verbatim, each drawing once from the raw
+/// `key` (JAX does no key splitting inside `choice`):
+/// - `p=None, replace=true`  → `randint(key, n_draws, 0, n_inputs)`
+/// - `p=None, replace=false` → `permutation(key, n_inputs)[:n_draws]`
+/// - `p=Some, replace=true`  → inverse-CDF: `cuml=cumsum(p); r=cuml[-1]*(1-uniform);
+///   ind=searchsorted_left(cuml, r)`
+/// - `p=Some, replace=false` → Gumbel-top-k: `g=gumbel(key, n_inputs)+ln(p);
+///   ind=top_k(g, n_draws)` (indices of the largest `n_draws`, descending)
+///
+/// Errors mirror JAX: empty population, sampling more than the population without
+/// replacement, and a probability vector whose length ≠ `n_inputs`.
+pub fn random_choice(
+    key: PRNGKey,
+    n_inputs: usize,
+    n_draws: usize,
+    replace: bool,
+    p: Option<&[f64]>,
+) -> Result<Vec<usize>, ChoiceError> {
+    if n_draws == 0 {
+        return Ok(Vec::new());
+    }
+    if n_inputs == 0 {
+        return Err(ChoiceError::EmptyPopulation);
+    }
+    if !replace && n_draws > n_inputs {
+        return Err(ChoiceError::SampleLargerThanPopulation { n_draws, n_inputs });
+    }
+    if let Some(weights) = p
+        && weights.len() != n_inputs
+    {
+        return Err(ChoiceError::WeightsLengthMismatch {
+            weights_len: weights.len(),
+            n_inputs,
+        });
+    }
+
+    match (p, replace) {
+        (None, true) => Ok(random_randint(key, n_draws, 0, n_inputs as i64)
+            .into_iter()
+            .map(|i| i as usize)
+            .collect()),
+        (None, false) => {
+            let mut perm = random_permutation(key, n_inputs);
+            perm.truncate(n_draws);
+            Ok(perm)
+        }
+        (Some(weights), true) => {
+            // Inverse-CDF sampling against the cumulative weights. JAX:
+            // r = p_cuml[-1] * (1 - uniform); ind = searchsorted(p_cuml, r, 'left').
+            let mut cuml = Vec::with_capacity(n_inputs);
+            let mut acc = 0.0_f64;
+            for &w in weights {
+                acc += w;
+                cuml.push(acc);
+            }
+            let total = *cuml.last().expect("n_inputs > 0");
+            let uniforms = random_uniform(key, n_draws, 0.0, 1.0);
+            Ok(uniforms
+                .into_iter()
+                .map(|u| {
+                    let r = total * (1.0 - u);
+                    // searchsorted side='left' == count of elements strictly < r.
+                    // r <= total == cuml[last], so this is always <= n_inputs-1.
+                    cuml.partition_point(|&x| x < r).min(n_inputs - 1)
+                })
+                .collect())
+        }
+        (Some(weights), false) => {
+            // Gumbel top-k trick: argsort of (gumbel + log p), take the top n_draws.
+            let gumbel = random_gumbel(key, n_inputs, 0.0, 1.0);
+            let mut scored: Vec<(f64, usize)> = (0..n_inputs)
+                .map(|i| (gumbel[i] + weights[i].ln(), i))
+                .collect();
+            // top_k returns the largest values descending; break ties by lower
+            // index (gumbel values are continuous, so ties are measure-zero).
+            scored.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            Ok(scored.into_iter().take(n_draws).map(|(_, i)| i).collect())
+        }
+    }
 }
 
 /// Generate gamma-distributed samples using Marsaglia & Tsang's method.
@@ -1984,6 +2105,117 @@ mod tests {
             random_permutation(key, n),
             expected,
             "permutation must equal stable argsort of JAX random_bits"
+        );
+    }
+
+    #[test]
+    fn test_choice_uniform_replace_matches_randint() {
+        // JAX p=None, replace=True: ind = randint(key, shape, 0, n).
+        let key = random_key(42);
+        let (n, d) = (10usize, 25usize);
+        let got = random_choice(key, n, d, true, None).unwrap();
+        let expected: Vec<usize> = random_randint(key, d, 0, n as i64)
+            .into_iter()
+            .map(|i| i as usize)
+            .collect();
+        assert_eq!(got, expected);
+        assert!(got.iter().all(|&i| i < n));
+    }
+
+    #[test]
+    fn test_choice_uniform_noreplace_matches_permutation_prefix() {
+        // JAX p=None, replace=False: permutation(key, n)[:n_draws].
+        let key = random_key(42);
+        let (n, d) = (50usize, 12usize);
+        let got = random_choice(key, n, d, false, None).unwrap();
+        let mut expected = random_permutation(key, n);
+        expected.truncate(d);
+        assert_eq!(got, expected);
+        // Without replacement → all indices distinct.
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), d, "no-replacement draws must be distinct");
+    }
+
+    #[test]
+    fn test_choice_weighted_replace_matches_inverse_cdf() {
+        // JAX p given, replace=True: r = total*(1-u); ind = searchsorted_left(cuml, r).
+        let key = random_key(7);
+        let weights = [0.1f64, 0.2, 0.3, 0.4];
+        let d = 20usize;
+        let got = random_choice(key, weights.len(), d, true, Some(&weights)).unwrap();
+
+        let mut cuml = Vec::new();
+        let mut acc = 0.0;
+        for &w in &weights {
+            acc += w;
+            cuml.push(acc);
+        }
+        let total = *cuml.last().unwrap();
+        let uniforms = random_uniform(key, d, 0.0, 1.0);
+        let expected: Vec<usize> = uniforms
+            .into_iter()
+            .map(|u| {
+                let r = total * (1.0 - u);
+                cuml.partition_point(|&x| x < r).min(weights.len() - 1)
+            })
+            .collect();
+        assert_eq!(got, expected);
+        assert!(got.iter().all(|&i| i < weights.len()));
+    }
+
+    #[test]
+    fn test_choice_weighted_noreplace_matches_gumbel_topk() {
+        // JAX p given, replace=False: ind = top_k(gumbel(key,n)+log(p), n_draws).
+        let key = random_key(7);
+        let weights = [0.4f64, 0.1, 0.2, 0.15, 0.15];
+        let d = 3usize;
+        let got = random_choice(key, weights.len(), d, false, Some(&weights)).unwrap();
+
+        let gumbel = random_gumbel(key, weights.len(), 0.0, 1.0);
+        let mut scored: Vec<(f64, usize)> = (0..weights.len())
+            .map(|i| (gumbel[i] + weights[i].ln(), i))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        let expected: Vec<usize> = scored.into_iter().take(d).map(|(_, i)| i).collect();
+        assert_eq!(got, expected);
+        let mut sorted = got.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), d, "no-replacement draws must be distinct");
+    }
+
+    #[test]
+    fn test_choice_deterministic_and_errors() {
+        let key = random_key(1);
+        assert_eq!(
+            random_choice(key, 8, 4, true, None),
+            random_choice(key, 8, 4, true, None)
+        );
+        assert_eq!(random_choice(key, 5, 0, false, None).unwrap(), Vec::<usize>::new());
+        assert_eq!(
+            random_choice(key, 0, 3, true, None),
+            Err(ChoiceError::EmptyPopulation)
+        );
+        assert_eq!(
+            random_choice(key, 3, 5, false, None),
+            Err(ChoiceError::SampleLargerThanPopulation {
+                n_draws: 5,
+                n_inputs: 3
+            })
+        );
+        let w = [0.5f64, 0.5];
+        assert_eq!(
+            random_choice(key, 3, 2, true, Some(&w)),
+            Err(ChoiceError::WeightsLengthMismatch {
+                weights_len: 2,
+                n_inputs: 3
+            })
         );
     }
 
