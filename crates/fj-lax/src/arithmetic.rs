@@ -6391,7 +6391,15 @@ fn batched_standard_f64_matmul(
     else {
         return Ok(None);
     };
-    let values = batched_matmul_2d(&lhs_values, batch, m, k, &rhs_values, n);
+    // batch==1 (a kept size-1 leading dim, e.g. [1,m,k]@[1,k,n] from vmap/explicit shapes)
+    // uses the packed register-blocked matmul_2d instead of the naive row-block — bit-for-bit
+    // identical (both == ijk; batched_matmul_2d_batch1_matches_matmul_2d) and never slower
+    // (≈1.0x L3, ~2.9x at RAM-bound, same kernel swap as the general_real_tensordot path).
+    let values = if batch == 1 {
+        matmul_2d(&lhs_values, m, k, &rhs_values, n)
+    } else {
+        batched_matmul_2d(&lhs_values, batch, m, k, &rhs_values, n)
+    };
     Ok(Some(Value::Tensor(TensorValue::new_f64_values(
         Shape {
             dims: output_dims.to_vec(),
