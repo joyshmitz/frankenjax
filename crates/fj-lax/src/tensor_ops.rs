@@ -6792,6 +6792,65 @@ fn eval_conv_2d_grouped(
         return conv_real_output_from_f64(out_dtype, out_dims, out);
     }
 
+    // General grouped fast path (cout_per_group > 1, e.g. ResNeXt; the depthwise
+    // multiplier-1 case returned above). For a fixed input tap (kh,kw,ci) and group g,
+    // every output channel in that group shares the SAME input value lhs[…, g·rhs_c_in+ci]
+    // and reads CONTIGUOUS kernel weights rhs[kh,kw,ci, g·cpg .. g·cpg+cpg], so the inner
+    // work is an AXPY (scalar·vector + vector) over the group's output channels — the
+    // compiler autovectorizes it, and each lhs value is read ONCE per group instead of
+    // the general loop's per-output-channel channel-strided re-read. Per-channel
+    // (kh-outer/kw/ci) accumulation order and the 0.0·rhs OOB contribution are preserved,
+    // so it is BIT-FOR-BIT identical. Verified by conv2d_grouped_axpy_matches_general.
+    if cout_per_group > 1 {
+        let mut out = vec![0.0_f64; total];
+        let mut spatial_base = 0usize;
+        for n in 0..batch {
+            let n_off = n * height_width_c_in;
+            for oh in 0..out_h {
+                for ow in 0..out_w {
+                    let acc = &mut out[spatial_base..spatial_base + c_out];
+                    for kh in 0..kernel_h {
+                        let in_h = (oh * stride_h + kh * dil_h) as isize - pad_top as isize;
+                        let h_oob = in_h < 0 || (in_h as usize) >= height;
+                        let h_off = if h_oob {
+                            0
+                        } else {
+                            (in_h as usize) * width_c_in
+                        };
+                        let rhs_kh = kh * kw_rhs_c_in_c_out;
+                        for kw in 0..kernel_w {
+                            let in_w = (ow * stride_w + kw * dil_w) as isize - pad_left as isize;
+                            let w_oob = in_w < 0 || (in_w as usize) >= width;
+                            let oob = h_oob || w_oob;
+                            let in_w_off = if w_oob { 0 } else { (in_w as usize) * c_in };
+                            let lhs_base = n_off + h_off + in_w_off;
+                            let rhs_kw = rhs_kh + kw * rhs_c_in_c_out;
+                            for ci in 0..rhs_c_in {
+                                let rhs_ci = rhs_kw + ci * c_out;
+                                for g in 0..group_count {
+                                    let lhs_val = if oob {
+                                        0.0
+                                    } else {
+                                        lhs_src[lhs_base + g * rhs_c_in + ci]
+                                    };
+                                    let co_base = g * cout_per_group;
+                                    let rhs_row = &rhs_src
+                                        [rhs_ci + co_base..rhs_ci + co_base + cout_per_group];
+                                    let acc_g = &mut acc[co_base..co_base + cout_per_group];
+                                    for (a, &r) in acc_g.iter_mut().zip(rhs_row) {
+                                        *a += lhs_val * r;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    spatial_base += c_out;
+                }
+            }
+        }
+        return conv_real_output_from_f64(out_dtype, out_dims, out);
+    }
+
     let mut out = Vec::with_capacity(total);
     for n in 0..batch {
         let n_off = n * height_width_c_in;
@@ -8526,6 +8585,103 @@ mod tests {
                             "depthwise fast path != per-channel ref at \
                              ({oh},{ow},ch={ch}) cfg=({h},{w},{c},{kh},{kw},{pad},s{stride})"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conv2d_grouped_axpy_matches_general() {
+        // General grouped conv2d (cout_per_group > 1) takes the AXPY fast path. Validate
+        // BIT-FOR-BIT against an independent oracle: group g is a non-grouped conv of input
+        // channels [g·rhs_c_in..) with kernel slice [:,:,:, g·cpg..), placed into output
+        // channels [g·cpg..). Covers SAME padding (border OOB) + stride 2.
+        let mk = |dims: Vec<u32>, d: &[f64]| {
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims }, d.to_vec()).unwrap())
+        };
+        let bits = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::F64Bits(b) => *b,
+                    o => panic!("unexpected {o:?}"),
+                })
+                .collect()
+        };
+        // (h, w, c_in, c_out, kh, kw, G, padding, stride)
+        for &(h, w, cin, cout, kh, kw, g, pad, stride) in &[
+            (
+                8usize, 7usize, 6usize, 9usize, 3usize, 2usize, 3usize, "same", 1usize,
+            ),
+            (9, 9, 8, 8, 3, 3, 2, "same", 2),
+            (7, 8, 6, 12, 3, 3, 3, "valid", 1),
+        ] {
+            let rhs_cin = cin / g;
+            let cpg = cout / g;
+            let xf: Vec<f64> = (0..h * w * cin)
+                .map(|i| (i as f64 * 0.021).sin() * 1.4 - 0.25)
+                .collect();
+            // kernel [kh, kw, rhs_cin, cout]
+            let kf: Vec<f64> = (0..kh * kw * rhs_cin * cout)
+                .map(|i| (i as f64 * 0.017).cos() * 0.7 + 0.15)
+                .collect();
+            let strides = stride.to_string();
+            let got = eval_conv(
+                Primitive::Conv,
+                &[
+                    mk(vec![1, h as u32, w as u32, cin as u32], &xf),
+                    mk(vec![kh as u32, kw as u32, rhs_cin as u32, cout as u32], &kf),
+                ],
+                &params(&[
+                    ("padding", pad),
+                    ("strides", &strides),
+                    ("feature_group_count", &g.to_string()),
+                ]),
+            )
+            .unwrap();
+            let gt = got.as_tensor().unwrap();
+            let out_h = gt.shape.dims[1] as usize;
+            let out_w = gt.shape.dims[2] as usize;
+            let got_bits = bits(&got);
+            for grp in 0..g {
+                // input channels of this group
+                let mut x_g = Vec::with_capacity(h * w * rhs_cin);
+                for p in 0..h * w {
+                    for ci in 0..rhs_cin {
+                        x_g.push(xf[p * cin + grp * rhs_cin + ci]);
+                    }
+                }
+                // kernel slice [kh,kw,rhs_cin, cpg] = kf[..., grp*cpg .. grp*cpg+cpg]
+                let mut k_g = Vec::with_capacity(kh * kw * rhs_cin * cpg);
+                for t in 0..kh * kw * rhs_cin {
+                    for j in 0..cpg {
+                        k_g.push(kf[t * cout + grp * cpg + j]);
+                    }
+                }
+                let ref_out = eval_conv(
+                    Primitive::Conv,
+                    &[
+                        mk(vec![1, h as u32, w as u32, rhs_cin as u32], &x_g),
+                        mk(vec![kh as u32, kw as u32, rhs_cin as u32, cpg as u32], &k_g),
+                    ],
+                    &params(&[("padding", pad), ("strides", &strides)]),
+                )
+                .unwrap();
+                let ref_bits = bits(&ref_out);
+                for oh in 0..out_h {
+                    for ow in 0..out_w {
+                        for j in 0..cpg {
+                            let go = got_bits[(oh * out_w + ow) * cout + grp * cpg + j];
+                            let re = ref_bits[(oh * out_w + ow) * cpg + j];
+                            assert_eq!(
+                                go, re,
+                                "grouped AXPY != per-group ref at (oh={oh},ow={ow},g={grp},j={j}) \
+                                 cfg=({h},{w},{cin},{cout},G={g},{pad},s{stride})"
+                            );
+                        }
                     }
                 }
             }
