@@ -1848,6 +1848,50 @@ fn bench_reduce_sum_64k_f32_literal_reference(c: &mut Criterion) {
     });
 }
 
+// BF16 (the dominant TRAINING dtype) full reduce-sum over 64k elems: dense packed-u16
+// storage (the new eval_dense_float_full_reduce half-float arm: decode u16->f64 fold)
+// vs Vec<Literal> boxed BF16Bits (generic per-element as_f64() + 24-byte stride). Both
+// fold a single f64 accumulator ascending, so bit-identical. Same-invocation A/B. This
+// is the bf16 loss / grad-norm hot path.
+fn bench_reduce_sum_64k_bf16_dense(c: &mut Criterion) {
+    let bits: Vec<u16> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| match Literal::from_bf16_f64((i as f64) * 1e-3) {
+            Literal::BF16Bits(b) => b,
+            _ => unreachable!(),
+        })
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_half_float_values(
+            DType::BF16,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            bits,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/reduce_sum_64k_bf16_dense", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_sum_64k_bf16_literal_reference(c: &mut Criterion) {
+    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::from_bf16_f64((i as f64) * 1e-3))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::BF16,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            elements,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/reduce_sum_64k_bf16_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 // 64k bool ReduceAnd full reduction: dense bool storage fold (pass80) vs the
 // Vec<Literal> per-element match, run in the same process for a same-worker ratio.
 fn bench_reduce_and_64k_bool_vec(c: &mut Criterion) {
@@ -4582,6 +4626,8 @@ criterion_group!(
     bench_reduce_sum_64k_i64_literal_reference,
     bench_reduce_sum_64k_f32_dense,
     bench_reduce_sum_64k_f32_literal_reference,
+    bench_reduce_sum_64k_bf16_dense,
+    bench_reduce_sum_64k_bf16_literal_reference,
     bench_reduce_and_64k_bool_vec,
     bench_reduce_and_64k_bool_literal_reference,
     bench_reduce_and_256_axis1_bool_vec,

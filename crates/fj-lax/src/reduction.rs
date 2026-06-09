@@ -115,6 +115,49 @@ fn eval_dense_float_full_reduce(
             }
             Some(Value::Scalar(reduce_real_literal(DType::F32, acc)))
         }
+        // BF16 is the dominant TRAINING dtype; loss / grad-norm full reductions over it
+        // were boxed. bf16->f32 is EXACTLY `f32::from_bits((bits as u32) << 16)` (bf16 is
+        // the truncated top 16 bits of f32, exact for all values incl ±inf/NaN/subnormal —
+        // identical to the half crate's `f32::from(bf16)` that `Literal::BF16Bits.as_f64()`
+        // uses). That widen is the bottleneck (unlike f32's free `as f64`), so we VECTORIZE
+        // it 8 lanes at a time: u16 -> u32 (zero-extend) -> <<16 -> reinterpret f32 -> widen
+        // f64. The fold itself stays a SINGLE scalar f64 accumulator over the lanes in
+        // ascending order — no reassociation — so it is BIT-IDENTICAL to the generic
+        // per-Literal fold (verified incl ±inf/NaN/signed-zero). Tail handled scalar.
+        DType::BF16 => {
+            use std::simd::{
+                Simd,
+                num::{SimdFloat, SimdUint},
+            };
+            const LANES: usize = 8;
+            let values = tensor.elements.as_half_float_slice()?;
+            let mut acc = float_init;
+            let chunks = values.chunks_exact(LANES);
+            let tail = chunks.remainder();
+            for chunk in chunks {
+                let u16v = Simd::<u16, LANES>::from_slice(chunk);
+                let u32v = u16v.cast::<u32>() << Simd::splat(16u32);
+                let f64v = Simd::<f32, LANES>::from_bits(u32v).cast::<f64>();
+                for &v in f64v.to_array().iter() {
+                    acc = float_op(acc, v);
+                }
+            }
+            for &bits in tail {
+                acc = float_op(acc, f64::from(f32::from_bits((bits as u32) << 16)));
+            }
+            Some(Value::Scalar(reduce_real_literal(DType::BF16, acc)))
+        }
+        // F16 is not a simple shift (different exponent bias), so its widen doesn't
+        // vectorize cheaply; keep the scalar dense fold (still bit-identical, reading the
+        // packed u16 backing instead of 24-byte boxed Literals — a modest free win).
+        DType::F16 => {
+            let values = tensor.elements.as_half_float_slice()?;
+            let mut acc = float_init;
+            for &bits in values {
+                acc = float_op(acc, Literal::F16Bits(bits).as_f64().unwrap_or(0.0));
+            }
+            Some(Value::Scalar(reduce_real_literal(DType::F16, acc)))
+        }
         _ => None,
     }
 }
@@ -1796,6 +1839,64 @@ mod tests {
                 extract_f32_bits(&boxed_result),
                 "{prim:?} dense vs boxed f32 full-reduce must be bit-identical"
             );
+        }
+    }
+
+    #[test]
+    fn dense_half_float_full_reduce_bit_identical_to_literal_path() {
+        // BF16/F16 full-reduce: dense packed-u16 storage (fast path) must be BIT-FOR-BIT
+        // identical to the generic boxed-Literal path for sum/prod/max/min — both decode
+        // each u16 to f64 via Literal::{BF16,F16}Bits.as_f64(), fold a single f64
+        // accumulator ascending, then round back to the half dtype at output. Cover
+        // ±inf, NaN, signed zero, and large magnitudes.
+        let src: Vec<f64> = std::hint::black_box(vec![
+            1.5, -0.0, f64::NAN, -3.25, f64::INFINITY, 0.0, 240.0, -240.0, f64::NEG_INFINITY, 2.5,
+        ]);
+        let cases: [(Primitive, f64, fn(f64, f64) -> f64); 4] = [
+            (Primitive::ReduceSum, 0.0, |a, b| a + b),
+            (Primitive::ReduceProd, 1.0, |a, b| a * b),
+            (Primitive::ReduceMax, f64::NEG_INFINITY, crate::jax_max_f64),
+            (Primitive::ReduceMin, f64::INFINITY, crate::jax_min_f64),
+        ];
+        for (dtype, to_lit) in [
+            (DType::BF16, Literal::from_bf16_f64 as fn(f64) -> Literal),
+            (DType::F16, Literal::from_f16_f64 as fn(f64) -> Literal),
+        ] {
+            // Build matching dense + boxed tensors from the SAME half-rounded literals.
+            let lits: Vec<Literal> = src.iter().map(|&v| to_lit(v)).collect();
+            let bits: Vec<u16> = lits
+                .iter()
+                .map(|l| match l {
+                    Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
+                    other => panic!("expected half-float literal, got {other:?}"),
+                })
+                .collect();
+            let dims = vec![src.len() as u32];
+            let dense = Value::Tensor(
+                TensorValue::new_half_float_values(dtype, Shape { dims: dims.clone() }, bits).unwrap(),
+            );
+            assert!(dense.as_tensor().unwrap().elements.as_half_float_slice().is_some());
+            let boxed =
+                Value::Tensor(TensorValue::new(dtype, Shape { dims }, lits).unwrap());
+            assert!(boxed.as_tensor().unwrap().elements.as_half_float_slice().is_none());
+
+            let extract_half_bits = |val: &Value| -> u16 {
+                match val {
+                    Value::Scalar(Literal::BF16Bits(b) | Literal::F16Bits(b)) => *b,
+                    other => panic!("expected half-float scalar, got {other:?}"),
+                }
+            };
+            for (prim, finit, fop) in cases {
+                let d =
+                    eval_reduce(prim, std::slice::from_ref(&dense), 0, finit, |a, _| a, fop).unwrap();
+                let b =
+                    eval_reduce(prim, std::slice::from_ref(&boxed), 0, finit, |a, _| a, fop).unwrap();
+                assert_eq!(
+                    extract_half_bits(&d),
+                    extract_half_bits(&b),
+                    "{dtype:?} {prim:?} dense vs boxed half-float full-reduce must be bit-identical"
+                );
+            }
         }
     }
 
