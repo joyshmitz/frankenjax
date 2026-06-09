@@ -3703,6 +3703,45 @@ fn bench_complex_matmul_256_literal_reference(c: &mut Criterion) {
     });
 }
 
+// Complex64 (JAX's DEFAULT complex dtype) canonical [256,256]@[256,256] matmul: dense
+// (now routed through the contiguous rank2_complex_matmul kernel + round-to-f32 output)
+// vs Vec<Literal> boxed Complex64Bits (the generic strided per-element complex reduction
+// it fell to before). Same-invocation A/B.
+fn bench_complex64_matmul_256_dense(c: &mut Criterion) {
+    let n = 256usize;
+    let vals: Vec<(f64, f64)> = (0..(n * n) as i64)
+        .map(|i| (i as f64 * 0.5 - 3.0, i as f64 * -0.25 + 1.0))
+        .collect();
+    let dims = vec![n as u32, n as u32];
+    let lhs = Value::Tensor(
+        TensorValue::new_complex_values(DType::Complex64, Shape { dims: dims.clone() }, vals.clone())
+            .unwrap(),
+    );
+    let rhs = Value::Tensor(
+        TensorValue::new_complex_values(DType::Complex64, Shape { dims }, vals).unwrap(),
+    );
+    let p = i64_matmul_params();
+    c.bench_function("eval/matmul_256x256_complex64_dense", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::DotGeneral, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
+fn bench_complex64_matmul_256_literal_reference(c: &mut Criterion) {
+    let n = 256usize;
+    let elems: Vec<Literal> = (0..(n * n) as i64)
+        .map(|i| Literal::from_complex64((i as f64 * 0.5 - 3.0) as f32, (i as f64 * -0.25 + 1.0) as f32))
+        .collect();
+    let dims = vec![n as u32, n as u32];
+    let lhs = Value::Tensor(
+        TensorValue::new(DType::Complex64, Shape { dims: dims.clone() }, elems.clone()).unwrap(),
+    );
+    let rhs = Value::Tensor(TensorValue::new(DType::Complex64, Shape { dims }, elems).unwrap());
+    let p = i64_matmul_params();
+    c.bench_function("eval/matmul_256x256_complex64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::DotGeneral, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 // Transposed Complex128 [256,256]·[256,256]ᵀ matmul (rhs_contracting=1, A·Bᵀ):
 // dense (rank2_complex_any_orientation_matmul: transpose B then
 // rank2_complex_matmul) vs Vec<Literal> boxed (the generic strided per-element
@@ -4584,6 +4623,8 @@ criterion_group!(
     bench_batched_complex_matmul_literal_reference,
     bench_complex_matmul_256_dense,
     bench_complex_matmul_256_literal_reference,
+    bench_complex64_matmul_256_dense,
+    bench_complex64_matmul_256_literal_reference,
     bench_complex_matmul_256_transposed_dense,
     bench_complex_matmul_256_transposed_literal_reference,
     bench_complex_expm1_1k,

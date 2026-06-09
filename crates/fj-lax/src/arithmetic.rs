@@ -6497,11 +6497,12 @@ fn batched_standard_i64_matmul(
     )?)))
 }
 
-/// Canonical batched Complex128 matmul -> contiguous multi-threaded
+/// Canonical batched complex matmul -> contiguous multi-threaded
 /// `batched_rank2_complex_matmul` instead of the generic strided per-element complex
-/// loop. Bit-identical (same ascending-`l` complex_mul + real/imag adds). Scoped to
-/// Complex128 output with both operands dense-complex-backed; mirrors the canonical
-/// rank-2 Complex128 block.
+/// loop. Bit-identical (same ascending-`l` complex_mul + real/imag adds, f64
+/// accumulation). Covers both Complex128 and Complex64 output (`out_dtype` rounds the
+/// result via new_complex_values); both operands dense-complex-backed. Mirrors the
+/// canonical rank-2 complex block.
 fn batched_standard_complex_matmul(
     lhs: &TensorValue,
     rhs: &TensorValue,
@@ -6511,6 +6512,7 @@ fn batched_standard_complex_matmul(
     rhs_contracting: &[usize],
     lhs_free_dims: &[usize],
     rhs_free_dims: &[usize],
+    out_dtype: DType,
     output_dims: &[u32],
 ) -> Result<Option<Value>, EvalError> {
     let Some((batch, m, k, n)) = canonical_batched_matmul_dims(
@@ -6533,7 +6535,7 @@ fn batched_standard_complex_matmul(
     };
     let values = batched_rank2_complex_matmul(a, batch, m, k, b, n);
     Ok(Some(Value::Tensor(TensorValue::new_complex_values(
-        DType::Complex128,
+        out_dtype,
         Shape {
             dims: output_dims.to_vec(),
         },
@@ -6656,21 +6658,23 @@ fn rank2_i64_any_orientation_matmul(
     )?)))
 }
 
-/// Rank-2, single-contracting-dim, NO-batch Complex128 dot_general in ANY orientation.
+/// Rank-2, single-contracting-dim, NO-batch complex dot_general in ANY orientation.
 /// Mirrors [`rank2_i64_any_orientation_matmul`] for complex output: transposes each
 /// operand to the canonical `[m,k]` / `[k,n]` layout (plain, non-conjugating — exactly
 /// what the `rhs_c=[1]` / `lhs_c=[0]` orientations mean) and runs the contiguous
 /// `rank2_complex_matmul` kernel instead of the generic strided per-element loop that
 /// the non-`([1],[0])` orientations (A·Bᵀ, Aᵀ·B) fall to. The kernel uses the SAME
-/// ascending-`l` `complex_mul` + separate real/imag adds as the generic complex
-/// reduction, so it is BIT-IDENTICAL; the transpose only reorders memory (see
-/// `rank2_complex_any_orientation_matmul_matches_generic`). Returns None unless both
-/// operands are dense-complex-backed.
+/// ascending-`l` `complex_mul` + separate real/imag adds with f64 accumulation as the
+/// generic complex reduction, so it is BIT-IDENTICAL; the transpose only reorders memory
+/// (see `rank2_complex_any_orientation_matmul_matches_generic`). Covers both Complex128
+/// and Complex64 output (`out_dtype` rounds the result via new_complex_values). Returns
+/// None unless both operands are dense-complex-backed.
 fn rank2_complex_any_orientation_matmul(
     lhs: &TensorValue,
     rhs: &TensorValue,
     lc: usize,
     rc: usize,
+    out_dtype: DType,
     output_dims: &[u32],
 ) -> Result<Option<Value>, EvalError> {
     let (Some(la), Some(rb)) = (
@@ -6699,7 +6703,7 @@ fn rank2_complex_any_orientation_matmul(
     };
     let values = rank2_complex_matmul(&a, m, k, &b, n);
     Ok(Some(Value::Tensor(TensorValue::new_complex_values(
-        DType::Complex128,
+        out_dtype,
         Shape {
             dims: output_dims.to_vec(),
         },
@@ -7348,16 +7352,19 @@ pub(crate) fn eval_dot_general(
         )?));
     }
 
-    // Canonical Complex128 [m,k]@[k,n]: contiguous i-k-j accumulation of each output's
+    // Canonical complex [m,k]@[k,n]: contiguous i-k-j accumulation of each output's
     // (re, im) pair over the dense (f64,f64) operand buffers, instead of the generic strided
     // loop (which decodes a multi-index + stride sum per `l` AND boxes every element). The
-    // kernel uses the SAME ascending-`l` complex_mul + separate real/imag adds, so it is
-    // BIT-IDENTICAL to the generic complex reduction (see rank2_complex_matmul_matches_generic).
-    // Complex otherwise has no fast path (general_real_tensordot returns None for complex).
-    // Scoped to Complex128 output (full f64; Complex64 would round at output) with both
-    // operands dense-complex-backed.
+    // kernel uses the SAME ascending-`l` complex_mul + separate real/imag adds with f64
+    // accumulation, so it is BIT-IDENTICAL to the generic complex reduction (which also
+    // promotes f32 components to f64, accumulates in f64, and rounds at output via
+    // new_complex_values — see rank2_complex_matmul_matches_generic + the Complex64 round
+    // in from_complex_values). Covers BOTH Complex128 and Complex64 output (Complex64 is
+    // JAX's DEFAULT complex dtype): as_complex_slice yields f32-exact f64 pairs for dense
+    // Complex64, and new_complex_values(out_dtype) rounds the result back to f32. Complex
+    // otherwise has no fast path (general_real_tensordot returns None for complex).
     if standard_rank2_matmul
-        && matches!(output_kind, DotOutputKind::Complex(DType::Complex128))
+        && let DotOutputKind::Complex(out_dtype) = output_kind
         && let (Some(a), Some(b)) = (
             lhs.elements.as_complex_slice(),
             rhs.elements.as_complex_slice(),
@@ -7368,7 +7375,7 @@ pub(crate) fn eval_dot_general(
         let n = rhs.shape.dims[1] as usize;
         let values = rank2_complex_matmul(a, m, k, b, n);
         return Ok(Value::Tensor(TensorValue::new_complex_values(
-            DType::Complex128,
+            out_dtype,
             Shape {
                 dims: output_dims.to_vec(),
             },
@@ -7426,21 +7433,23 @@ pub(crate) fn eval_dot_general(
     // the canonical-only complex fast path above misses these orientations, so they
     // fell to the generic strided per-element complex loop. Transpose (plain, no
     // conjugation) to canonical and use the contiguous `rank2_complex_matmul` kernel.
-    // Bit-identical (same ascending-`l` complex_mul + real/imag adds; transpose only
-    // reorders memory). Scoped to Complex128 output with both operands dense-complex-
-    // backed, mirroring the canonical Complex128 block.
+    // Bit-identical (same ascending-`l` complex_mul + real/imag adds, f64 accumulation;
+    // transpose only reorders memory). Covers Complex128 AND Complex64 output (the
+    // out_dtype rounds the result), both operands dense-complex-backed, mirroring the
+    // canonical complex block.
     if lhs_rank == 2
         && rhs_rank == 2
         && lhs_batch.is_empty()
         && rhs_batch.is_empty()
         && lhs_contracting.len() == 1
         && rhs_contracting.len() == 1
-        && matches!(output_kind, DotOutputKind::Complex(DType::Complex128))
+        && let DotOutputKind::Complex(out_dtype) = output_kind
         && let Some(value) = rank2_complex_any_orientation_matmul(
             lhs,
             rhs,
             lhs_contracting[0],
             rhs_contracting[0],
+            out_dtype,
             &output_dims,
         )?
     {
@@ -7483,10 +7492,11 @@ pub(crate) fn eval_dot_general(
         return Ok(value);
     }
 
-    // Canonical batched Complex128 matmul -> contiguous multi-threaded
+    // Canonical batched complex matmul -> contiguous multi-threaded
     // batched_rank2_complex_matmul (batched complex matmul otherwise has no fast path).
-    // Bit-identical complex reduction. Scoped to Complex128 output.
-    if matches!(output_kind, DotOutputKind::Complex(DType::Complex128))
+    // Bit-identical complex reduction. Covers Complex128 AND Complex64 output (out_dtype
+    // rounds the result).
+    if let DotOutputKind::Complex(out_dtype) = output_kind
         && let Some(value) = batched_standard_complex_matmul(
             lhs,
             rhs,
@@ -7496,6 +7506,7 @@ pub(crate) fn eval_dot_general(
             &rhs_contracting,
             &lhs_free_dims,
             &rhs_free_dims,
+            out_dtype,
             &output_dims,
         )?
     {
@@ -9439,6 +9450,116 @@ mod tests {
                         (gr.to_bits(), gi.to_bits()),
                         (re.to_bits(), im.to_bits()),
                         "(lc={lc},rc={rc}) [{i},{j}] must be bit-identical"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn complex64_dot_general_matches_generic_all_orientations() {
+        // Complex64 (JAX's DEFAULT complex dtype) matmul now routes through the same
+        // contiguous complex kernels as Complex128 (the f64-accumulating kernel + a
+        // round-to-f32 at output via new_complex_values). Must be BIT-IDENTICAL to the
+        // generic complex reduction, which ALSO promotes f32 components to f64,
+        // accumulates the complex_mul products in f64, and rounds once at output. Cover
+        // canonical, transposed (A·Bᵀ), and batched orientations. Reference accumulates in
+        // f64 then rounds each output component via `as f32 as f64`.
+        let round = |x: f64| x as f32 as f64;
+        let mkc = |len: usize, sa: f64, sb: f64| -> Vec<(f64, f64)> {
+            (0..len)
+                // f32-exact inputs (new_complex_values would round them anyway).
+                .map(|i| {
+                    (
+                        (i as f64 * sa - 3.0) as f32 as f64,
+                        (i as f64 * sb + 1.0) as f32 as f64,
+                    )
+                })
+                .collect()
+        };
+        let c64 = |dims: Vec<u32>, pairs: &[(f64, f64)]| -> Value {
+            Value::Tensor(
+                TensorValue::new_complex_values(DType::Complex64, Shape { dims }, pairs.to_vec())
+                    .unwrap(),
+            )
+        };
+
+        // (1) canonical [m,k]@[k,n]  (2) transposed A·Bᵀ [m,k]@[n,k]
+        let (m, k, n) = (6usize, 9usize, 5usize);
+        for &(rc, rhs_dims) in &[(0usize, [k as u32, n as u32]), (1usize, [n as u32, k as u32])] {
+            let a = mkc(m * k, 0.5, -0.25);
+            let b = mkc(rhs_dims[0] as usize * rhs_dims[1] as usize, -0.125, 0.375);
+            let params = BTreeMap::from([
+                ("lhs_contracting_dims".to_owned(), "1".to_owned()),
+                ("rhs_contracting_dims".to_owned(), rc.to_string()),
+            ]);
+            let Value::Tensor(out) = eval_dot_general(
+                &[c64(vec![m as u32, k as u32], &a), c64(rhs_dims.to_vec(), &b)],
+                &params,
+            )
+            .unwrap() else {
+                panic!("expected tensor (rc={rc})");
+            };
+            assert_eq!(out.dtype, DType::Complex64, "rc={rc} dtype");
+            let got = out.elements.as_complex_slice().expect("complex output");
+            let rhs_at = |l: usize, j: usize| if rc == 0 { b[l * n + j] } else { b[j * k + l] };
+            for i in 0..m {
+                for j in 0..n {
+                    let (mut re, mut im) = (0.0f64, 0.0f64);
+                    for l in 0..k {
+                        let (ar, ai) = a[i * k + l];
+                        let (br, bi) = rhs_at(l, j);
+                        re += ar * br - ai * bi;
+                        im += ar * bi + ai * br;
+                    }
+                    let (gr, gi) = got[i * n + j];
+                    assert_eq!(
+                        (gr.to_bits(), gi.to_bits()),
+                        (round(re).to_bits(), round(im).to_bits()),
+                        "rc={rc} [{i},{j}]"
+                    );
+                }
+            }
+        }
+
+        // (3) batched [bt,m,k]@[bt,k,n] — dims above BATCHED_FASTPATH_MIN_OPS so the
+        // contiguous batched kernel fires (dense complex output).
+        let (bt, m, k, n) = (8usize, 8usize, 8usize, 8usize);
+        let a = mkc(bt * m * k, 0.5, -0.25);
+        let b = mkc(bt * k * n, -0.125, 0.375);
+        let params = BTreeMap::from([
+            ("lhs_batch_dims".to_owned(), "0".to_owned()),
+            ("rhs_batch_dims".to_owned(), "0".to_owned()),
+            ("lhs_contracting_dims".to_owned(), "2".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "1".to_owned()),
+        ]);
+        let Value::Tensor(out) = eval_dot_general(
+            &[
+                c64(vec![bt as u32, m as u32, k as u32], &a),
+                c64(vec![bt as u32, k as u32, n as u32], &b),
+            ],
+            &params,
+        )
+        .unwrap() else {
+            panic!("expected tensor (batched)");
+        };
+        assert_eq!(out.dtype, DType::Complex64, "batched dtype");
+        let got = out.elements.as_complex_slice().expect("complex output");
+        for t in 0..bt {
+            for i in 0..m {
+                for j in 0..n {
+                    let (mut re, mut im) = (0.0f64, 0.0f64);
+                    for l in 0..k {
+                        let (ar, ai) = a[(t * m + i) * k + l];
+                        let (br, bi) = b[(t * k + l) * n + j];
+                        re += ar * br - ai * bi;
+                        im += ar * bi + ai * br;
+                    }
+                    let (gr, gi) = got[(t * m + i) * n + j];
+                    assert_eq!(
+                        (gr.to_bits(), gi.to_bits()),
+                        (round(re).to_bits(), round(im).to_bits()),
+                        "batched [{t},{i},{j}]"
                     );
                 }
             }
