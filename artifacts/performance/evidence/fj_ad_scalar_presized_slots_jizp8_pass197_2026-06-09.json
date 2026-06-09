@@ -1,0 +1,141 @@
+{
+  "schema": "frankenjax.performance_evidence.v1",
+  "project": "frankenjax",
+  "bead": "frankenjax-jizp8",
+  "pass": 197,
+  "date": "2026-06-09",
+  "live_base_commit": "5df1cfcb3492ceefd63b4c1c1cf278c796abe013",
+  "fj_ad_base_commit": "57d6f66e78ea255827d9ddbbcc7fe638d8ecd561",
+  "target": {
+    "crate": "fj-api",
+    "benchmark": "value_and_grad_runtime/shared/deep_100_nodes",
+    "implementation_crate": "fj-ad",
+    "profile_source": "/data/projects/.scratch/frankenjax-post196-57d6f66-value_and_grad-cargo.perf.data",
+    "profile_samples": 22500,
+    "profile_summary_self_percent": [
+      {
+        "symbol": "fj_ad::value_and_grad_jaxpr_inner_with_custom_vjp_key",
+        "self_percent": 21.94
+      },
+      {
+        "symbol": "fj_ad::scalar_f64_ensure_slot",
+        "self_percent": 5.98
+      },
+      {
+        "symbol": "fj_dispatch::thread_jaxpr_effect_tokens",
+        "self_percent": 2.15
+      },
+      {
+        "symbol": "fj_dispatch::dispatch_ref",
+        "self_percent": 1.48
+      },
+      {
+        "symbol": "Option<f64> dense initialization",
+        "self_percent": 1.04
+      }
+    ],
+    "routing_note": "Two unrelated fj-lax random/bead commits landed after the profile and before this pass completed. They do not touch fj-ad or the value_and_grad benchmark implementation."
+  },
+  "lever": {
+    "name": "pre-sized scalar fast-path slots",
+    "summary": "Pre-size the guarded scalar-F64 Add/Mul value_and_grad values vector from static Jaxpr counts, then use the grow/fallback helper only when VarIds are sparse or exceed the pre-sized dense range.",
+    "files_changed": [
+      "crates/fj-ad/src/lib.rs"
+    ]
+  },
+  "benchmark": {
+    "tool": "criterion",
+    "score_basis": "comparable local run pair from the same scratch worktree and target directory",
+    "baseline": {
+      "worktree": "/data/projects/.scratch/frankenjax-jizp8-baseline-e191c615",
+      "commit": "e191c61528e0de056438e5cb49510274dac01228",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-jizp8-baseline-e191c615 rch exec -- cargo bench -p fj-api --bench api_overhead -- value_and_grad_runtime/shared/deep_100_nodes",
+      "rch_mode": "RCH selected vmi1153651, remote topology preflight failed, local fail-open",
+      "time_us_low": 3.9158,
+      "time_us_mid": 3.9586,
+      "time_us_high": 4.0060
+    },
+    "candidate": {
+      "worktree": "/data/projects/.scratch/frankenjax-jizp8-baseline-e191c615",
+      "commit": "e191c61528e0de056438e5cb49510274dac01228 plus crates/fj-ad/src/lib.rs patch only",
+      "command": "CARGO_TARGET_DIR=target/rch-jizp8-baseline-e191c615 cargo bench -p fj-api --bench api_overhead -- value_and_grad_runtime/shared/deep_100_nodes",
+      "rch_mode": "local direct confirmation after RCH selected vmi1227854 for the final rerun; remote-only candidate rows were not scored",
+      "time_us_low": 3.7301,
+      "time_us_mid": 3.7697,
+      "time_us_high": 3.8145
+    },
+    "diagnostic_remote_candidates_not_scored": [
+      {
+        "worker": "vmi1227854",
+        "path": "/data/projects/frankenjax",
+        "time_us_low": 4.1445,
+        "time_us_mid": 4.2375,
+        "time_us_high": 4.3231,
+        "reason_not_scored": "No same-worker baseline row; local baseline was faster and incomparable."
+      },
+      {
+        "worker": "vmi1227854",
+        "path": "/data/projects/.scratch/frankenjax-jizp8-baseline-e191c615",
+        "time_us_low": 4.1415,
+        "time_us_mid": 4.2271,
+        "time_us_high": 4.3162,
+        "reason_not_scored": "No same-worker baseline row; used only to confirm the candidate builds and runs remotely."
+      }
+    ],
+    "speedup_mid": 1.05011,
+    "speedup_conservative": 1.02656,
+    "latency_reduction_percent_mid": 4.77,
+    "score": {
+      "impact": 2,
+      "confidence": 3,
+      "effort": 1,
+      "impact_x_confidence_over_effort": 6.0,
+      "decision": "keep"
+    }
+  },
+  "isomorphism_proof": {
+    "ordering": "Equation traversal, reverse traversal, Add cotangent accumulation order, repeated-Mul cotangent order, and output/gradient order are unchanged.",
+    "floating_point": "The same scalar f64 + and * operations run in the same order. No reassociation, FMA, SIMD, mixed precision, or tolerance relaxation was introduced.",
+    "fallback": "Static count pre-sizing is only an allocation/layout choice. Sparse VarIds still grow through scalar_f64_ensure_slot, and VarIds requiring more than DENSE_AD_VALUE_STORE_MAX_SLOTS slots still return Ok(None) and fall back to the generic tape path.",
+    "rng": "No RNG primitive or state is routed.",
+    "tie_breaking": "No tie-sensitive primitive is routed.",
+    "edge_test": "scalar_f64_add_mul_fast_path_falls_back_for_high_var_ids asserts that a VarId at DENSE_AD_VALUE_STORE_MAX_SLOTS returns Ok(None), not MissingVariable."
+  },
+  "golden": {
+    "fixture_json_payload": [
+      "7ff0000000000000",
+      "7ff0000000000000"
+    ],
+    "fixture_json_sha256": "2b1b03372322b4e6042ed0af95c4bfe87c0e15c25e9621c28a2da846689a9e25",
+    "golden_file": "artifacts/performance/evidence/fj_ad_scalar_presized_slots_jizp8_pass197_2026-06-09.golden",
+    "golden_file_sha256": "5cedc4b6bb23543b6551ad248a358c7a0dd8114875483289abd2a51d4df9ef9e",
+    "check_command": "sha256sum -c artifacts/performance/evidence/fj_ad_scalar_presized_slots_jizp8_pass197_2026-06-09.golden.sha256"
+  },
+  "validation": [
+    {
+      "command": "rustfmt --edition 2024 --check crates/fj-ad/src/lib.rs",
+      "result": "passed"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-jizp8-test-e191c615 rch exec -- cargo test -p fj-ad --lib",
+      "result": "passed via RCH local fail-open; 365 passed, 0 failed"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-jizp8-check-e191c615 rch exec -- cargo check -p fj-ad --all-targets",
+      "result": "passed via RCH local fail-open; pre-existing fj-trace unused-variable warning only"
+    },
+    {
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-jizp8-clippy-e191c615 rch exec -- cargo clippy -p fj-ad --all-targets -- -D warnings -A unused-variables -A clippy::too_many_arguments -A clippy::doc_lazy_continuation -A clippy::excessive_precision -A clippy::manual_is_multiple_of -A clippy::needless_range_loop -A clippy::useless_vec",
+      "result": "passed"
+    },
+    {
+      "command": "ubs crates/fj-ad/src/lib.rs",
+      "result": "nonzero on broad pre-existing fj-ad inventory; rerun after replacing the new direct index with get_mut removed that new finding, and UBS fmt, clippy, cargo check, test build, cargo audit, and cargo deny sections were clean"
+    },
+    {
+      "command": "sha256sum -c artifacts/performance/evidence/fj_ad_scalar_presized_slots_jizp8_pass197_2026-06-09.golden.sha256",
+      "result": "passed"
+    }
+  ],
+  "next": "Reprofile value_and_grad after landing; if fj-ad remains top, stop shrinking slot helpers and attack a larger primitive such as cached scalar fast-path metadata or a compiled scalar Add/Mul tape."
+}

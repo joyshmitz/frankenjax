@@ -433,6 +433,27 @@ fn scalar_f64_ensure_slot(values: &mut Vec<Option<f64>>, var: VarId) -> Option<&
     values.get_mut(var.0 as usize)
 }
 
+fn scalar_f64_presized_slot_count(jaxpr: &Jaxpr) -> usize {
+    jaxpr
+        .invars
+        .len()
+        .checked_add(jaxpr.equations.len())
+        .and_then(|count| count.checked_add(jaxpr.outvars.len()))
+        .filter(|count| *count <= DENSE_AD_VALUE_STORE_MAX_SLOTS)
+        .unwrap_or(0)
+}
+
+#[inline]
+fn scalar_f64_set_slot(values: &mut Vec<Option<f64>>, var: VarId, value: f64) -> Option<()> {
+    let index = var.0 as usize;
+    if let Some(slot) = values.get_mut(index) {
+        *slot = Some(value);
+        return Some(());
+    }
+    *scalar_f64_ensure_slot(values, var)? = Some(value);
+    Some(())
+}
+
 fn scalar_f64_add_or_insert(
     adjoints: &mut [Option<f64>],
     var: VarId,
@@ -473,21 +494,14 @@ fn try_scalar_f64_add_mul_value_and_grad(
         });
     }
 
-    let mut values = Vec::with_capacity(
-        jaxpr
-            .invars
-            .len()
-            .saturating_add(jaxpr.equations.len())
-            .saturating_add(jaxpr.outvars.len()),
-    );
+    let mut values = vec![None; scalar_f64_presized_slot_count(jaxpr)];
     for (var, arg) in jaxpr.invars.iter().zip(args) {
         let Value::Scalar(Literal::F64Bits(bits)) = arg else {
             return Ok(None);
         };
-        let Some(slot) = scalar_f64_ensure_slot(&mut values, *var) else {
+        if scalar_f64_set_slot(&mut values, *var, f64::from_bits(*bits)).is_none() {
             return Ok(None);
-        };
-        *slot = Some(f64::from_bits(*bits));
+        }
     }
 
     for eqn in &jaxpr.equations {
@@ -516,10 +530,9 @@ fn try_scalar_f64_add_mul_value_and_grad(
             _ => unreachable!("primitive checked above"),
         };
         let out_var = eqn.outputs[0];
-        let Some(slot) = scalar_f64_ensure_slot(&mut values, out_var) else {
+        if scalar_f64_set_slot(&mut values, out_var, output).is_none() {
             return Ok(None);
-        };
-        *slot = Some(output);
+        }
     }
 
     let output_var = jaxpr.outvars[0];
@@ -18746,6 +18759,32 @@ mod tests {
         assert_eq!(fast_outputs, reference_outputs);
         assert_eq!(fast_grads, reference_grads);
         assert_eq!(fast_steps, tape.entries.len());
+        clear_custom_derivative_rules();
+    }
+
+    #[test]
+    fn scalar_f64_add_mul_fast_path_falls_back_for_high_var_ids() {
+        use fj_core::{Equation, Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        clear_custom_derivative_rules();
+        let high_var = VarId(DENSE_AD_VALUE_STORE_MAX_SLOTS as u32);
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![high_var],
+            vec![Equation {
+                primitive: Primitive::Add,
+                inputs: smallvec![Atom::Var(VarId(0)), Atom::Lit(Literal::from_f64(1.0))],
+                outputs: smallvec![high_var],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            }],
+        );
+        let result = try_scalar_f64_add_mul_value_and_grad(&jaxpr, &[Value::scalar_f64(1.5)], None)
+            .expect("high VarId fallback should not error");
+        assert!(result.is_none());
         clear_custom_derivative_rules();
     }
 
