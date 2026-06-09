@@ -9403,12 +9403,12 @@ mod tests {
     fn sqrt_rsqrt_parallel_bit_identical_and_faster() {
         use std::time::Instant;
 
-        let n: usize = 1 << 22; // 4_194_304 f64 (> PARALLEL_MIN_ELEMS = 262_144)
+        let n: usize = 1 << 20; // 1,048,576 f64 — a common size that still crosses the threshold
         let data: Vec<f64> = (0..n).map(|i| (i as f64) * 7.0e-4 + 0.5).collect();
         let shape = Shape { dims: vec![n as u32] };
         let input =
             Value::Tensor(TensorValue::new_f64_values(shape, data).unwrap());
-        let reps = 5u32; // serial (boxed) arm is slow; bit-identity is the gate, A/B informational
+        let reps = 10u32; // dense both sides now; bit-identity is the gate, A/B informational
 
         macro_rules! ab {
             ($name:expr, $prim:expr, $op:expr) => {{
