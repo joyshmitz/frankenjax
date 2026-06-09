@@ -6462,6 +6462,20 @@ fn transpose_rows_cols_i64(data: &[i64], rows: usize, cols: usize) -> Vec<i64> {
     out
 }
 
+/// Transpose a contiguous row-major `[rows, cols]` complex `(re, im)` matrix to
+/// `[cols, rows]`. Plain (non-conjugating) transpose — matches what dot_general's
+/// `rhs_contracting=[1]` / `lhs_contracting=[0]` orientation does (no conjugation).
+fn transpose_rows_cols_complex(data: &[(f64, f64)], rows: usize, cols: usize) -> Vec<(f64, f64)> {
+    let mut out = vec![(0.0f64, 0.0f64); rows * cols];
+    for r in 0..rows {
+        let base = r * cols;
+        for c in 0..cols {
+            out[c * rows + r] = data[base + c];
+        }
+    }
+    out
+}
+
 /// Rank-2, single-contracting-dim, NO-batch I64 dot_general in ANY orientation.
 /// Mirrors [`rank2_f64_any_orientation_matmul`] for integer output: transposes each
 /// operand to the canonical `[m,k]` / `[k,n]` layout and runs the contiguous
@@ -6503,6 +6517,57 @@ fn rank2_i64_any_orientation_matmul(
     };
     let values = rank2_i64_matmul(&a, m, k, &b, n);
     Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+        Shape {
+            dims: output_dims.to_vec(),
+        },
+        values,
+    )?)))
+}
+
+/// Rank-2, single-contracting-dim, NO-batch Complex128 dot_general in ANY orientation.
+/// Mirrors [`rank2_i64_any_orientation_matmul`] for complex output: transposes each
+/// operand to the canonical `[m,k]` / `[k,n]` layout (plain, non-conjugating — exactly
+/// what the `rhs_c=[1]` / `lhs_c=[0]` orientations mean) and runs the contiguous
+/// `rank2_complex_matmul` kernel instead of the generic strided per-element loop that
+/// the non-`([1],[0])` orientations (A·Bᵀ, Aᵀ·B) fall to. The kernel uses the SAME
+/// ascending-`l` `complex_mul` + separate real/imag adds as the generic complex
+/// reduction, so it is BIT-IDENTICAL; the transpose only reorders memory (see
+/// `rank2_complex_any_orientation_matmul_matches_generic`). Returns None unless both
+/// operands are dense-complex-backed.
+fn rank2_complex_any_orientation_matmul(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    lc: usize,
+    rc: usize,
+    output_dims: &[u32],
+) -> Result<Option<Value>, EvalError> {
+    let (Some(la), Some(rb)) = (
+        lhs.elements.as_complex_slice(),
+        rhs.elements.as_complex_slice(),
+    ) else {
+        return Ok(None);
+    };
+    let lf = 1 - lc;
+    let rf = 1 - rc;
+    let m = lhs.shape.dims[lf] as usize;
+    let k = lhs.shape.dims[lc] as usize;
+    let n = rhs.shape.dims[rf] as usize;
+    if rhs.shape.dims[rc] as usize != k {
+        return Ok(None);
+    }
+    let a: Cow<[(f64, f64)]> = if lc == 1 {
+        Cow::Borrowed(la)
+    } else {
+        Cow::Owned(transpose_rows_cols_complex(la, k, m))
+    };
+    let b: Cow<[(f64, f64)]> = if rc == 0 {
+        Cow::Borrowed(rb)
+    } else {
+        Cow::Owned(transpose_rows_cols_complex(rb, n, k))
+    };
+    let values = rank2_complex_matmul(&a, m, k, &b, n);
+    Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+        DType::Complex128,
         Shape {
             dims: output_dims.to_vec(),
         },
@@ -7215,6 +7280,31 @@ pub(crate) fn eval_dot_general(
         && rhs_contracting.len() == 1
         && matches!(output_kind, DotOutputKind::Integral(DType::I64))
         && let Some(value) = rank2_i64_any_orientation_matmul(
+            lhs,
+            rhs,
+            lhs_contracting[0],
+            rhs_contracting[0],
+            &output_dims,
+        )?
+    {
+        return Ok(value);
+    }
+
+    // Transposed rank-2 single-contracting-dim Complex128 contraction (A·Bᵀ / Aᵀ·B):
+    // the canonical-only complex fast path above misses these orientations, so they
+    // fell to the generic strided per-element complex loop. Transpose (plain, no
+    // conjugation) to canonical and use the contiguous `rank2_complex_matmul` kernel.
+    // Bit-identical (same ascending-`l` complex_mul + real/imag adds; transpose only
+    // reorders memory). Scoped to Complex128 output with both operands dense-complex-
+    // backed, mirroring the canonical Complex128 block.
+    if lhs_rank == 2
+        && rhs_rank == 2
+        && lhs_batch.is_empty()
+        && rhs_batch.is_empty()
+        && lhs_contracting.len() == 1
+        && rhs_contracting.len() == 1
+        && matches!(output_kind, DotOutputKind::Complex(DType::Complex128))
+        && let Some(value) = rank2_complex_any_orientation_matmul(
             lhs,
             rhs,
             lhs_contracting[0],
@@ -9111,6 +9201,77 @@ mod tests {
                 }
             }
             assert_eq!(got, want, "(lc={lc},rc={rc}) must be bit-identical");
+        }
+    }
+
+    #[test]
+    fn rank2_complex_any_orientation_matmul_matches_generic() {
+        // The transposed-Complex128 fast path (rank2_complex_any_orientation_matmul)
+        // routes every single-contracting-dim orientation — not just canonical
+        // [1],[0] — through the contiguous rank2_complex_matmul kernel. Each must be
+        // BIT-for-bit identical to the textbook ascending-`l` complex reference
+        // (complex_mul + separate real/imag adds), compared via to_bits so NaN/sign/
+        // rounding can't hide a divergence. Covers A·Bᵀ (rc=1) and Aᵀ·B (lc=0).
+        let (m, k, n) = (6usize, 9usize, 5usize);
+        let mk = |len: usize, sa: f64, sb: f64| -> Vec<(f64, f64)> {
+            (0..len)
+                .map(|i| (i as f64 * sa - 3.0, i as f64 * sb + 1.0))
+                .collect()
+        };
+        for &(lc, rc) in &[(1usize, 1usize), (0usize, 0usize), (0usize, 1usize), (1usize, 0usize)] {
+            let (lr, lcd) = if lc == 1 { (m, k) } else { (k, m) };
+            let (rr, rcd) = if rc == 0 { (k, n) } else { (n, k) };
+            let a = mk(lr * lcd, 0.5, -0.25);
+            let b = mk(rr * rcd, -0.125, 0.375);
+            let lhs = Value::Tensor(
+                TensorValue::new_complex_values(
+                    DType::Complex128,
+                    Shape { dims: vec![lr as u32, lcd as u32] },
+                    a.clone(),
+                )
+                .unwrap(),
+            );
+            let rhs = Value::Tensor(
+                TensorValue::new_complex_values(
+                    DType::Complex128,
+                    Shape { dims: vec![rr as u32, rcd as u32] },
+                    b.clone(),
+                )
+                .unwrap(),
+            );
+            let params = BTreeMap::from([
+                ("lhs_contracting_dims".to_owned(), lc.to_string()),
+                ("rhs_contracting_dims".to_owned(), rc.to_string()),
+            ]);
+            let Value::Tensor(out) = eval_dot_general(&[lhs, rhs], &params).unwrap() else {
+                panic!("expected tensor for (lc={lc},rc={rc})");
+            };
+            assert_eq!(
+                out.shape.dims,
+                vec![m as u32, n as u32],
+                "(lc={lc},rc={rc}) output shape"
+            );
+            let got = out.elements.as_complex_slice().expect("complex output");
+            let lhs_at = |i: usize, l: usize| if lc == 1 { a[i * k + l] } else { a[l * m + i] };
+            let rhs_at = |l: usize, j: usize| if rc == 0 { b[l * n + j] } else { b[j * k + l] };
+            for i in 0..m {
+                for j in 0..n {
+                    let mut re = 0.0f64;
+                    let mut im = 0.0f64;
+                    for l in 0..k {
+                        let (ar, ai) = lhs_at(i, l);
+                        let (br, bi) = rhs_at(l, j);
+                        re += ar * br - ai * bi;
+                        im += ar * bi + ai * br;
+                    }
+                    let (gr, gi) = got[i * n + j];
+                    assert_eq!(
+                        (gr.to_bits(), gi.to_bits()),
+                        (re.to_bits(), im.to_bits()),
+                        "(lc={lc},rc={rc}) [{i},{j}] must be bit-identical"
+                    );
+                }
+            }
         }
     }
 
