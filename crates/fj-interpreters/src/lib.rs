@@ -1250,6 +1250,7 @@ enum F32Operand {
     Chain,
     Ext(usize),
     RowBroadcast(usize),
+    ColBroadcast { idx: usize, cols: usize },
     Scalar(f32),
 }
 
@@ -1288,13 +1289,21 @@ fn classify_f32_fusion_operand<'e>(
                     match shape {
                         None => *shape = Some(t.shape.clone()),
                         Some(s) if *s == t.shape => {}
-                        Some(s) if f32_row_broadcast_len(s, &t.shape).is_some() => {
-                            let idx = ext.len();
-                            ext.push(slice);
-                            ext_vars.push(*v);
-                            return Some(F32Operand::RowBroadcast(idx));
+                        Some(s) => {
+                            if f32_row_broadcast_len(s, &t.shape).is_some() {
+                                let idx = ext.len();
+                                ext.push(slice);
+                                ext_vars.push(*v);
+                                return Some(F32Operand::RowBroadcast(idx));
+                            }
+                            if let Some(cols) = f32_col_broadcast_cols(s, &t.shape) {
+                                let idx = ext.len();
+                                ext.push(slice);
+                                ext_vars.push(*v);
+                                return Some(F32Operand::ColBroadcast { idx, cols });
+                            }
+                            return None;
                         }
-                        Some(_) => return None,
                     }
                     let idx = ext.len();
                     ext.push(slice);
@@ -1309,6 +1318,13 @@ fn classify_f32_fusion_operand<'e>(
 fn f32_row_broadcast_len(full: &Shape, candidate: &Shape) -> Option<usize> {
     match (full.dims.as_slice(), candidate.dims.as_slice()) {
         ([_, cols], [row_cols]) if cols == row_cols => Some(*cols as usize),
+        _ => None,
+    }
+}
+
+fn f32_col_broadcast_cols(full: &Shape, candidate: &Shape) -> Option<usize> {
+    match (full.dims.as_slice(), candidate.dims.as_slice()) {
+        ([rows, cols], [candidate_rows, 1]) if rows == candidate_rows => Some(*cols as usize),
         _ => None,
     }
 }
@@ -1375,6 +1391,17 @@ fn apply_f32_fusion_other(
                 }),
             }
         }
+        F32Operand::ColBroadcast { idx, cols } => {
+            let col = ext[idx];
+            match chain_left {
+                true => out.iter_mut().enumerate().for_each(|(offset, o)| {
+                    *o = f32_fused_binary(op, *o, col[(base + offset) / cols]);
+                }),
+                false => out.iter_mut().enumerate().for_each(|(offset, o)| {
+                    *o = f32_fused_binary(op, col[(base + offset) / cols], *o);
+                }),
+            }
+        }
         F32Operand::Chain => {}
     }
 }
@@ -1390,6 +1417,12 @@ fn apply_f32_fusion_chunk(out: &mut [f32], tape: &[F32Step], ext: &[&[f32]], bas
             out.iter_mut()
                 .enumerate()
                 .for_each(|(offset, o)| *o = row[(base + offset) % row.len()]);
+        }
+        F32Operand::ColBroadcast { idx, cols } => {
+            let col = ext[idx];
+            out.iter_mut()
+                .enumerate()
+                .for_each(|(offset, o)| *o = col[(base + offset) / cols]);
         }
         F32Operand::Scalar(v) => out.fill(v),
         F32Operand::Chain => {}
@@ -1992,6 +2025,106 @@ mod tests {
         assert_eq!(
             digest,
             "1f742aad15797ada82394f8d78c5b2d488ac650c272e8a81330a694621a64494"
+        );
+    }
+
+    #[test]
+    fn fusion_f32_col_broadcast_chain_matches_reference_bit_for_bit() {
+        // Column broadcasts must gather from `[rows, 1]` by row-major row index
+        // while preserving f32's per-step f32->f64->f32 rounding contract.
+        let rows = 64usize;
+        let cols = 64usize;
+        let n = rows * cols;
+        let mut x: Vec<f32> = (0..n).map(|i| i as f32 * 0.002 - 5.0).collect();
+        let mut y: Vec<f32> = (0..n).map(|i| (i as f32 * 0.009).sin() + 1.5).collect();
+        let mut bias: Vec<f32> = (0..rows).map(|i| i as f32 * 0.015 - 0.4).collect();
+        x[0] = -0.0;
+        x[1] = f32::INFINITY;
+        x[2] = f32::from_bits(0x7fc0_3333);
+        y[0] = 0.0;
+        y[1] = f32::NEG_INFINITY;
+        y[2] = -3.0;
+        bias[0] = f32::from_bits(0x7fc0_4444);
+        bias[1] = -0.0;
+        bias[2] = f32::from_bits(1);
+
+        let xv = VarId(0);
+        let bv = VarId(1);
+        let yv = VarId(2);
+        let v: Vec<VarId> = (3..=10).map(VarId).collect();
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(xv), Atom::Var(bv)],
+                v[0],
+            ),
+            mk(
+                Primitive::Mul,
+                smallvec![Atom::Var(v[0]), lit32(1.25)],
+                v[1],
+            ),
+            mk(
+                Primitive::Sub,
+                smallvec![Atom::Var(v[1]), Atom::Var(bv)],
+                v[2],
+            ),
+            mk(
+                Primitive::Mul,
+                smallvec![Atom::Var(v[2]), Atom::Var(yv)],
+                v[3],
+            ),
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(v[3]), Atom::Var(bv)],
+                v[4],
+            ),
+            mk(Primitive::Sub, smallvec![Atom::Var(v[4]), lit32(0.5)], v[5]),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit32(2.0)], v[6]),
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(v[6]), Atom::Var(bv)],
+                v[7],
+            ),
+        ];
+        let jaxpr = Jaxpr::new(vec![xv, bv, yv], vec![], vec![v[7]], eqns);
+        let dims = vec![rows as u32, cols as u32];
+        let args = [
+            f32_tensor_values(dims.clone(), x),
+            f32_tensor_values(vec![rows as u32, 1], bias),
+            f32_tensor_values(dims, y),
+        ];
+
+        let fused_outputs = eval_jaxpr(&jaxpr, &args).unwrap();
+        let unfused_outputs =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("unfused reference evaluates");
+        let Value::Tensor(out_tensor) = &fused_outputs[0] else {
+            panic!("expected tensor output")
+        };
+        assert_eq!(out_tensor.dtype, DType::F32);
+        assert_eq!(out_tensor.shape.dims, vec![rows as u32, cols as u32]);
+        assert!(
+            out_tensor.elements.as_f32_slice().is_some(),
+            "fused col-broadcast output should stay dense f32"
+        );
+        let got_bits = f32_bits(&fused_outputs[0]);
+        let want_bits = f32_bits(&unfused_outputs[0]);
+        assert_eq!(
+            got_bits, want_bits,
+            "fused f32 col-broadcast chain must match forced unfused path bit-for-bit"
+        );
+        let digest = fj_test_utils::fixture_id_from_json(&want_bits)
+            .expect("reference output bits should hash");
+        assert_eq!(
+            digest,
+            "5762f3ec4614f491d21407cbb09c5cd92915840f65d145070f8d8b5e8c7c5e3a"
         );
     }
 
