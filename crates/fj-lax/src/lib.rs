@@ -3537,17 +3537,16 @@ fn eval_reduce_window(
     // window_dilation (atrous/dilated pooling) IS supported: a dilation `d` spaces the
     // window taps `d` apart, so the window's effective extent is `(win-1)*d+1` (used for
     // the output size and SAME padding) and tap `t` reads input `out*stride + t*d - pad`.
-    // base_dilation (input dilation) is NOT implemented — reject it loudly rather than
-    // silently return a wrong result.
-    if params
-        .get("base_dilation")
-        .is_some_and(|v| v.split(',').any(|p| !matches!(p.trim(), "" | "1")))
-    {
-        return Err(EvalError::Unsupported {
-            primitive,
-            detail: "reduce_window base_dilation is not supported".to_owned(),
-        });
-    }
+    // base_dilation (operand/input dilation) IS ALSO supported: a dilation `db` spaces the
+    // BASE (operand) elements `db` apart, so the dilated base extent is `(n-1)*db+1` (used
+    // for the output size + SAME padding). A position `p` in the dilated base maps to real
+    // element `p/db` when `p % db == 0`, otherwise it is a HOLE filled with the reduction
+    // init value — exactly as XLA dilates the base for `reduce_window` (and identical to how
+    // the generic loop below already treats out-of-bounds/padding taps). The dense/rank-2
+    // fast paths assume `db == 1`, so they are each gated on `no_base_dilation` below; a
+    // dilated base falls through to the generic windowing loop.
+    let base_dilation = parse_reduce_window_param(primitive, params, "base_dilation", rank, 1)?;
+    let no_base_dilation = base_dilation.iter().all(|&d| d == 1);
     let window_dilation = parse_reduce_window_param(primitive, params, "window_dilation", rank, 1)?;
     let no_window_dilation = window_dilation.iter().all(|&d| d == 1);
     // Effective (dilated) window extent per dim, for output-size + SAME-pad geometry.
@@ -3556,6 +3555,14 @@ fn eval_reduce_window(
         .zip(&window_dilation)
         .map(|(&w, &d)| (w.max(1) - 1) * d + 1)
         .collect();
+    // Effective (dilated) BASE extent per dim: `(n-1)*db + 1` (= `n` when `db == 1`, so the
+    // geometry is bit-identical to the undilated path in that case).
+    let dilated_input_dims: Vec<usize> = (0..rank)
+        .map(|d| {
+            let n = tensor.shape.dims[d] as usize;
+            if n == 0 { 0 } else { (n - 1) * base_dilation[d] + 1 }
+        })
+        .collect();
 
     let output_dtype = reduce_window_output_dtype(tensor.dtype);
 
@@ -3563,7 +3570,7 @@ fn eval_reduce_window(
     let mut out_dims: Vec<u32> = Vec::with_capacity(rank);
     let mut pad_lows: Vec<usize> = Vec::with_capacity(rank);
     for d in 0..rank {
-        let input_dim = tensor.shape.dims[d] as usize;
+        let input_dim = dilated_input_dims[d];
         let win = eff_window_dims[d];
         let stride = strides[d];
         let (out_dim, pad_low) = match padding {
@@ -3615,7 +3622,8 @@ fn eval_reduce_window(
     // instead of O(output·∏window). Bit-identical for max/min (see
     // reduce_window_separable_maxmin). Gated above 2·∑window so the pass/buffer overhead
     // pays (small windows like 2×2/3×3 stay on the single-pass stencil paths below).
-    if no_window_dilation
+    if no_base_dilation
+        && no_window_dilation
         && matches!(reduce_op, "max" | "min")
         && matches!(output_dtype, fj_core::DType::F64 | fj_core::DType::F32)
     {
@@ -3652,7 +3660,8 @@ fn eval_reduce_window(
         }
     }
 
-    if no_window_dilation
+    if no_base_dilation
+        && no_window_dilation
         && tensor.dtype == fj_core::DType::F64
         && rank == 2
         && matches!(reduce_op, "max" | "min")
@@ -3671,7 +3680,8 @@ fn eval_reduce_window(
         );
     }
 
-    if no_window_dilation
+    if no_base_dilation
+        && no_window_dilation
         && tensor.dtype == fj_core::DType::F64
         && rank == 2
         && reduce_window_sum_like(reduce_op)
@@ -3694,7 +3704,8 @@ fn eval_reduce_window(
     // pooling — neither of which the rank-2-only F64 paths above ever reach. Falls
     // through (returns None view) for boxed/non-float input. Bit-identical to the
     // generic loop below (see eval_reduce_window_dense_float).
-    if no_window_dilation
+    if no_base_dilation
+        && no_window_dilation
         && matches!(output_dtype, fj_core::DType::F64 | fj_core::DType::F32)
         && (matches!(reduce_op, "max" | "min") || reduce_window_sum_like(reduce_op))
         && let Some(src) = reduce_window_dense_f64_view(tensor)
@@ -3786,12 +3797,23 @@ fn eval_reduce_window(
                     in_bounds = false;
                     break;
                 }
+                // `input_pos` is a coordinate in the base-DILATED grid (size
+                // `dilated_input_dims[d] = (n-1)*db+1`).
                 let input_pos = padded_pos - pad_lows[d];
-                if input_pos >= input_dims[d] {
+                if input_pos >= dilated_input_dims[d] {
                     in_bounds = false;
                     break;
                 }
-                let flat_increment = input_pos.checked_mul(input_strides[d]).ok_or_else(|| {
+                // Base-dilation hole: a position not on a `base_dilation` multiple has no
+                // real operand element, so it contributes the reduction init value — handled
+                // identically to an out-of-bounds/padding tap (`pad_literal`). For `db == 1`
+                // this never triggers and `real_pos == input_pos` (bit-identical).
+                if input_pos % base_dilation[d] != 0 {
+                    in_bounds = false;
+                    break;
+                }
+                let real_pos = input_pos / base_dilation[d];
+                let flat_increment = real_pos.checked_mul(input_strides[d]).ok_or_else(|| {
                     EvalError::Unsupported {
                         primitive,
                         detail: "reduce_window flat index overflow".to_owned(),
@@ -10283,10 +10305,85 @@ mod tests {
     }
 
     #[test]
-    fn reduce_window_rejects_base_dilation() {
-        // window_dilation (atrous pooling) is now supported (see
-        // reduce_window_window_dilation_matches_reference). base_dilation (input
-        // dilation) is still unimplemented and must fail loudly.
+    fn reduce_window_base_dilation_1d_sum_matches_hand_computation() {
+        // base_dilation=2 dilates [1,2,3] -> [1,0,2,0,3] (holes = sum init 0), then a
+        // window=3, stride=1, VALID sum slides over the length-5 dilated base:
+        //   [1,0,2]=3, [0,2,0]=2, [2,0,3]=5  => [3,2,5].
+        let input = Value::vector_f64(&[1.0, 2.0, 3.0]).unwrap();
+        let mut p = rw_params("sum", "3", "1");
+        p.insert("base_dilation".to_owned(), "2".to_owned());
+        let out =
+            eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p).unwrap();
+        let Value::Tensor(t) = &out else {
+            panic!("expected tensor")
+        };
+        let vals: Vec<f64> = t.elements.iter().map(|l| l.as_f64().unwrap()).collect();
+        assert_eq!(vals, vec![3.0, 2.0, 5.0]);
+    }
+
+    #[test]
+    fn reduce_window_base_dilation_matches_explicit_dilated_operand() {
+        // GENERAL reference: base_dilation on the operand must equal running the SAME
+        // reduce_window (base_dilation=1) on an operand that has been explicitly dilated
+        // with the reduction init value in the holes. Cover sum (init 0) and max (init
+        // -inf) over a 2-D operand with asymmetric per-axis dilation and a stride.
+        let dims = [3usize, 4usize];
+        let data: Vec<f64> = (0..(dims[0] * dims[1])).map(|i| (i as f64) * 0.5 - 2.0).collect();
+        let operand = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape { dims: vec![dims[0] as u32, dims[1] as u32] },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let base_dil = [2usize, 3usize];
+        for (op, init) in [("sum", 0.0_f64), ("max", f64::NEG_INFINITY)] {
+            // Build the explicitly base-dilated operand: size (n-1)*db+1 per axis, holes=init.
+            let dd = [
+                (dims[0] - 1) * base_dil[0] + 1,
+                (dims[1] - 1) * base_dil[1] + 1,
+            ];
+            let mut dilated = vec![init; dd[0] * dd[1]];
+            for r in 0..dims[0] {
+                for c in 0..dims[1] {
+                    dilated[(r * base_dil[0]) * dd[1] + c * base_dil[1]] = data[r * dims[1] + c];
+                }
+            }
+            let dilated_operand = Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape { dims: vec![dd[0] as u32, dd[1] as u32] },
+                    dilated,
+                )
+                .unwrap(),
+            );
+
+            let mut p_dil = rw_params(op, "2,2", "2,1");
+            p_dil.insert("base_dilation".to_owned(), "2,3".to_owned());
+            let got =
+                eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&operand), &p_dil)
+                    .unwrap();
+
+            let p_ref = rw_params(op, "2,2", "2,1"); // base_dilation defaults to 1
+            let want = eval_primitive(
+                Primitive::ReduceWindow,
+                std::slice::from_ref(&dilated_operand),
+                &p_ref,
+            )
+            .unwrap();
+
+            let (Value::Tensor(gt), Value::Tensor(wt)) = (&got, &want) else {
+                panic!("expected tensors")
+            };
+            assert_eq!(gt.shape.dims, wt.shape.dims, "{op}: shape mismatch");
+            let gv: Vec<u64> = gt.elements.iter().map(|l| l.as_f64().unwrap().to_bits()).collect();
+            let wv: Vec<u64> = wt.elements.iter().map(|l| l.as_f64().unwrap().to_bits()).collect();
+            assert_eq!(gv, wv, "{op}: base_dilation != explicit dilated operand");
+        }
+    }
+
+    #[test]
+    fn reduce_window_default_base_dilation_still_succeeds() {
+        // Default (all-1) base_dilation is the unchanged path and must still succeed.
         let input = Value::Tensor(
             TensorValue::new_f64_values(
                 Shape { dims: vec![4, 4] },
@@ -10294,15 +10391,6 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut p = rw_params("max", "2,2", "1,1");
-        p.insert("base_dilation".to_owned(), "2,2".to_owned());
-        let err = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&input), &p)
-            .expect_err("reduce_window must reject base_dilation");
-        assert!(
-            err.to_string().contains("base_dilation"),
-            "expected base_dilation error, got {err}"
-        );
-        // Default (all-1) dilation still succeeds.
         let mut p = rw_params("max", "2,2", "1,1");
         p.insert("base_dilation".to_owned(), "1,1".to_owned());
         p.insert("window_dilation".to_owned(), "1,1".to_owned());
