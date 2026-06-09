@@ -379,6 +379,30 @@ fn single_output_vjp_ignores_outputs(primitive: Primitive) -> bool {
 
 type ForwardResult = (Vec<Value>, Tape, AdValueStore);
 
+fn scalar_f64_forward_output(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Option<Value> {
+    if !params.is_empty() {
+        return None;
+    }
+    let [
+        Value::Scalar(Literal::F64Bits(lhs)),
+        Value::Scalar(Literal::F64Bits(rhs)),
+    ] = inputs
+    else {
+        return None;
+    };
+    let lhs = f64::from_bits(*lhs);
+    let rhs = f64::from_bits(*rhs);
+    match primitive {
+        Primitive::Add => Some(Value::Scalar(Literal::from_f64(lhs + rhs))),
+        Primitive::Mul => Some(Value::Scalar(Literal::from_f64(lhs * rhs))),
+        _ => None,
+    }
+}
+
 fn forward_with_tape(jaxpr: &Jaxpr, args: &[Value]) -> Result<ForwardResult, AdError> {
     if args.len() != jaxpr.invars.len() {
         return Err(AdError::InputArity {
@@ -418,8 +442,14 @@ fn forward_with_tape(jaxpr: &Jaxpr, args: &[Value]) -> Result<ForwardResult, AdE
             }
         }
 
-        let mut output_values = fj_lax::eval_primitive_multi(eqn.primitive, &resolved, &eqn.params)
-            .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+        let mut output_values = if let Some(output) =
+            scalar_f64_forward_output(eqn.primitive, &resolved, &eqn.params)
+        {
+            vec![output]
+        } else {
+            fj_lax::eval_primitive_multi(eqn.primitive, &resolved, &eqn.params)
+                .map_err(|e| AdError::EvalFailed(e.to_string()))?
+        };
 
         let out_var_ids: Vec<VarId> = eqn.outputs.iter().copied().collect();
         if output_values.len() != out_var_ids.len() {
@@ -18408,6 +18438,47 @@ mod tests {
             matches!(actual, Value::Scalar(Literal::F32Bits(_))),
             "F32 scalar add should keep the existing evaluator dtype"
         );
+    }
+
+    #[test]
+    fn scalar_f64_forward_tape_matches_eval_primitive_bits() {
+        use fj_core::{Equation, Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let cases = [
+            (Primitive::Add, 0.0, -0.0),
+            (Primitive::Add, f64::from_bits(0x7ff8_0000_0000_0001), 4.0),
+            (Primitive::Mul, -0.0, 3.5),
+            (Primitive::Mul, f64::INFINITY, 0.0),
+        ];
+
+        for (primitive, lhs, rhs) in cases {
+            let jaxpr = Jaxpr::new(
+                vec![VarId(0), VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                }],
+            );
+            let args = [Value::scalar_f64(lhs), Value::scalar_f64(rhs)];
+            let expected = eval_primitive(primitive, &args, &BTreeMap::new())
+                .expect("reference eval should succeed");
+            let (outputs, tape, _) =
+                forward_with_tape(&jaxpr, &args).expect("forward tape should succeed");
+            assert_eq!(outputs, vec![expected]);
+            assert_eq!(tape.entries.len(), 1);
+            assert!(
+                tape.entries[0].output_values.is_empty(),
+                "{} forward tape should preserve output-free VJP tape shape",
+                primitive.as_str()
+            );
+        }
     }
 
     #[test]
