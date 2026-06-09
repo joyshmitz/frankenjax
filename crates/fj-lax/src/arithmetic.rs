@@ -3604,16 +3604,28 @@ fn eval_unary_f64_tensor_fast_path(
         return None;
     }
 
-    let mut elements = Vec::with_capacity(tensor.elements.len());
-    for literal in tensor.elements.iter().copied() {
-        let Literal::F64Bits(bits) = literal else {
-            return None;
-        };
-        elements.push(Literal::F64Bits(op(f64::from_bits(bits)).to_bits()));
-    }
+    // Emit DENSE f64 output (mirrors the f32 sibling, which already does this) instead
+    // of a boxed `Vec<Literal>` (24 B/elem). Prefer the packed `as_f64_slice` backing
+    // (no per-`Literal` reconstruction); fall back to the boxed-F64 path for a
+    // `Vec<Literal>`-backed input. Values are identical (`op(x)` per element), so this is
+    // bit-for-bit identical at the value level — only the backing changes to dense. This
+    // de-boxes every serial-path unary op (Floor/Ceil/Reciprocal, and sub-threshold
+    // transcendentals reaching here via `eval_unary_elementwise_parallel`'s fallback).
+    let out: Vec<f64> = if let Some(src) = tensor.elements.as_f64_slice() {
+        src.iter().map(|&x| op(x)).collect()
+    } else {
+        let mut v = Vec::with_capacity(tensor.elements.len());
+        for literal in tensor.elements.iter().copied() {
+            let Literal::F64Bits(bits) = literal else {
+                return None;
+            };
+            v.push(op(f64::from_bits(bits)));
+        }
+        v
+    };
 
     Some(
-        TensorValue::new(DType::F64, tensor.shape.clone(), elements)
+        TensorValue::new_f64_values(tensor.shape.clone(), out)
             .map(Value::Tensor)
             .map_err(EvalError::from),
     )
@@ -9462,6 +9474,66 @@ mod tests {
         }
         ab!("sqrt", Primitive::Sqrt, f64::sqrt);
         ab!("rsqrt", Primitive::Rsqrt, |x: f64| 1.0 / x.sqrt());
+    }
+
+    /// The serial-path f64 unary fast path (Floor/Ceil/Reciprocal, …) now emits DENSE
+    /// f64 output (new_f64_values) instead of a boxed Vec<Literal>. Verify the output is
+    /// dense + value-identical to the per-element op, and that it beats the old boxed
+    /// output build on a large array (these ops are too cheap to thread — the win is the
+    /// 8 B/elem dense output vs 24 B/elem boxed).
+    #[test]
+    fn floor_ceil_recip_serial_unary_emits_dense_output() {
+        use std::time::Instant;
+
+        let n: usize = 1 << 22;
+        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.37 - 1000.0).collect();
+        let shape = Shape { dims: vec![n as u32] };
+        let input =
+            Value::Tensor(TensorValue::new_f64_values(shape.clone(), data.clone()).unwrap());
+        let reps = 5u32;
+
+        macro_rules! ab {
+            ($name:expr, $prim:expr, $op:expr) => {{
+                let op = $op;
+                let dense =
+                    eval_unary_elementwise($prim, std::slice::from_ref(&input), op).unwrap();
+                let dt = dense.as_tensor().unwrap();
+                let dv = dt
+                    .elements
+                    .as_f64_slice()
+                    .expect("serial unary output must be dense f64");
+                for (k, &x) in data.iter().enumerate() {
+                    assert_eq!(dv[k].to_bits(), op(x).to_bits(), "{} mismatch at {}", $name, k);
+                }
+
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    std::hint::black_box(
+                        eval_unary_elementwise($prim, std::slice::from_ref(&input), op).unwrap(),
+                    );
+                }
+                let dense_ns = t0.elapsed().as_nanos().max(1);
+                let t1 = Instant::now();
+                for _ in 0..reps {
+                    let elems: Vec<Literal> =
+                        data.iter().map(|&x| Literal::F64Bits(op(x).to_bits())).collect();
+                    std::hint::black_box(
+                        TensorValue::new(DType::F64, shape.clone(), elems).unwrap(),
+                    );
+                }
+                let boxed_ns = t1.elapsed().as_nanos().max(1);
+                println!(
+                    "[{} dense-output] dense={:.3}ms boxed={:.3}ms ratio={:.2}x",
+                    $name,
+                    dense_ns as f64 / reps as f64 / 1e6,
+                    boxed_ns as f64 / reps as f64 / 1e6,
+                    boxed_ns as f64 / dense_ns as f64,
+                );
+            }};
+        }
+        ab!("floor", Primitive::Floor, f64::floor);
+        ab!("ceil", Primitive::Ceil, f64::ceil);
+        ab!("reciprocal", Primitive::Reciprocal, |x: f64| 1.0 / x);
     }
 
     /// Bit-exact parity for the dense-i64 same-shape Add fast path: a dense
