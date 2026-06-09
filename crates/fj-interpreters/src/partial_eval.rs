@@ -511,8 +511,16 @@ fn broadcast_dims(a: &[u32], b: &[u32]) -> Vec<u32> {
     let n = a.len().max(b.len());
     (0..n)
         .map(|i| {
-            let ad = if i + a.len() < n { 1 } else { a[i + a.len() - n] };
-            let bd = if i + b.len() < n { 1 } else { b[i + b.len() - n] };
+            let ad = if i + a.len() < n {
+                1
+            } else {
+                a[i + a.len() - n]
+            };
+            let bd = if i + b.len() < n {
+                1
+            } else {
+                b[i + b.len() - n]
+            };
             ad.max(bd)
         })
         .collect()
@@ -549,8 +557,14 @@ fn infer_complex_aval(input_avals: &[AbstractValue]) -> AbstractValue {
         (Some(DType::F32), Some(DType::F32)) => DType::Complex64,
         _ => DType::Complex128,
     };
-    let a = input_avals.first().map(|v| v.shape.dims.as_slice()).unwrap_or(&[]);
-    let b = input_avals.get(1).map(|v| v.shape.dims.as_slice()).unwrap_or(&[]);
+    let a = input_avals
+        .first()
+        .map(|v| v.shape.dims.as_slice())
+        .unwrap_or(&[]);
+    let b = input_avals
+        .get(1)
+        .map(|v| v.shape.dims.as_slice())
+        .unwrap_or(&[]);
     AbstractValue {
         dtype,
         shape: Shape {
@@ -568,10 +582,10 @@ fn infer_complex_aval(input_avals: &[AbstractValue]) -> AbstractValue {
 /// arity is wrong (best-effort: staging must not panic on a malformed residual).
 fn infer_dot_general_aval(eqn: &Equation, input_avals: &[AbstractValue]) -> AbstractValue {
     let (Some(lhs), Some(rhs)) = (input_avals.first(), input_avals.get(1)) else {
-        return input_avals
-            .first()
-            .cloned()
-            .unwrap_or(AbstractValue { dtype: DType::F64, shape: Shape::scalar() });
+        return input_avals.first().cloned().unwrap_or(AbstractValue {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        });
     };
 
     let parse_dims = |key: &str| -> Vec<usize> {
@@ -656,7 +670,10 @@ fn infer_equation_output_avals(
         // DotGeneral's output shape/dtype depend on BOTH operands (and the
         // contracting/batch dimension_numbers params), so it likewise needs the
         // multi-input path. The catch-all typed a residual matmul as the LHS.
-        DotGeneral => Ok(vec![infer_dot_general_aval(eqn, input_avals); eqn.outputs.len()]),
+        DotGeneral => Ok(vec![
+            infer_dot_general_aval(eqn, input_avals);
+            eqn.outputs.len()
+        ]),
         _ => {
             let out_aval = infer_equation_output_aval(eqn, first_input)?;
             Ok(vec![out_aval; eqn.outputs.len()])
@@ -675,7 +692,10 @@ fn delegate_infer_to_trace(
 ) -> Option<Vec<AbstractValue>> {
     let trace_inputs: Vec<fj_trace::ShapedArray> = input_avals
         .iter()
-        .map(|av| fj_trace::ShapedArray { dtype: av.dtype, shape: av.shape.clone() })
+        .map(|av| fj_trace::ShapedArray {
+            dtype: av.dtype,
+            shape: av.shape.clone(),
+        })
         .collect();
     let out = fj_trace::infer_output_avals(eqn.primitive, &trace_inputs, &eqn.params).ok()?;
     if out.len() != eqn.outputs.len() {
@@ -683,7 +703,10 @@ fn delegate_infer_to_trace(
     }
     Some(
         out.into_iter()
-            .map(|sa| AbstractValue { dtype: sa.dtype, shape: sa.shape })
+            .map(|sa| AbstractValue {
+                dtype: sa.dtype,
+                shape: sa.shape,
+            })
             .collect(),
     )
 }
@@ -965,7 +988,11 @@ fn infer_equation_output_aval(
                 .and_then(|s| s.split(',').next())
                 .and_then(|s| s.trim().parse::<i64>().ok())
                 .unwrap_or(0);
-            let norm = if raw_axis < 0 { raw_axis + rank + 1 } else { raw_axis };
+            let norm = if raw_axis < 0 {
+                raw_axis + rank + 1
+            } else {
+                raw_axis
+            };
             let mut dims = first_input.shape.dims.clone();
             let axis = norm.clamp(0, rank) as usize;
             dims.insert(axis, 1);
@@ -1018,7 +1045,11 @@ fn infer_equation_output_aval(
                     .get("axis")
                     .and_then(|s| s.trim().parse::<i64>().ok())
                     .unwrap_or(rank - 1);
-                let norm = if raw_axis < 0 { raw_axis + rank } else { raw_axis };
+                let norm = if raw_axis < 0 {
+                    raw_axis + rank
+                } else {
+                    raw_axis
+                };
                 let mut dims = first_input.shape.dims.clone();
                 if norm >= 0 && (norm as usize) < dims.len() {
                     dims.remove(norm as usize);
@@ -1083,7 +1114,11 @@ fn infer_equation_output_aval(
                 .get("axis")
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or((output_rank - 1) as i64);
-            let norm = if raw_axis < 0 { raw_axis + output_rank as i64 } else { raw_axis };
+            let norm = if raw_axis < 0 {
+                raw_axis + output_rank as i64
+            } else {
+                raw_axis
+            };
             let axis = norm.clamp(0, (output_rank - 1) as i64) as usize;
             out_dims.insert(axis, num_classes);
             AbstractValue {
@@ -1103,30 +1138,35 @@ fn infer_equation_output_aval(
                 .get("axis")
                 .and_then(|s| s.trim().parse().ok())
                 .unwrap_or(0);
-            let axis_i = if raw_axis < 0 { raw_axis + rank as i64 } else { raw_axis };
+            let axis_i = if raw_axis < 0 {
+                raw_axis + rank as i64
+            } else {
+                raw_axis
+            };
             if rank == 0 || axis_i < 0 || axis_i >= rank as i64 {
                 first_input.clone()
             } else {
                 let axis = axis_i as usize;
                 let axis_size = dims[axis];
-                let sizes: Vec<u32> = if let Some(s) =
-                    eqn.params.get("sizes").filter(|s| !s.trim().is_empty())
-                {
-                    s.split(',').filter_map(|x| x.trim().parse::<u32>().ok()).collect()
-                } else if let Some(ns) = eqn
-                    .params
-                    .get("num_sections")
-                    .and_then(|s| s.trim().parse::<u32>().ok())
-                    .filter(|&n| n > 0)
-                {
-                    if axis_size % ns == 0 {
-                        vec![axis_size / ns; ns as usize]
+                let sizes: Vec<u32> =
+                    if let Some(s) = eqn.params.get("sizes").filter(|s| !s.trim().is_empty()) {
+                        s.split(',')
+                            .filter_map(|x| x.trim().parse::<u32>().ok())
+                            .collect()
+                    } else if let Some(ns) = eqn
+                        .params
+                        .get("num_sections")
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                        .filter(|&n| n > 0)
+                    {
+                        if axis_size.is_multiple_of(ns) {
+                            vec![axis_size / ns; ns as usize]
+                        } else {
+                            Vec::new()
+                        }
                     } else {
-                        Vec::new()
-                    }
-                } else {
-                    vec![axis_size]
-                };
+                        vec![axis_size]
+                    };
 
                 if sizes.is_empty() || sizes.iter().sum::<u32>() != axis_size {
                     first_input.clone()
@@ -3467,9 +3507,18 @@ mod tests {
                     ],
                 );
                 let in_avals = vec![
-                    AbstractValue { dtype: DType::F64, shape: Shape { dims: vec![2, 3] } },
-                    AbstractValue { dtype: DType::F64, shape: Shape { dims: vec![3, 4] } },
-                    AbstractValue { dtype: DType::F64, shape: Shape { dims: vec![2, 4] } },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![2, 3] },
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![3, 4] },
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![2, 4] },
+                    },
                 ];
                 let result =
                     partial_eval_jaxpr_typed(&jaxpr, &[false, false, true], Some(&in_avals))
@@ -3522,8 +3571,14 @@ mod tests {
                     ],
                 );
                 let in_avals = vec![
-                    AbstractValue { dtype: DType::F64, shape: Shape { dims: vec![5] } },
-                    AbstractValue { dtype: DType::I64, shape: Shape { dims: vec![5] } },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![5] },
+                    },
+                    AbstractValue {
+                        dtype: DType::I64,
+                        shape: Shape { dims: vec![5] },
+                    },
                 ];
                 let result =
                     partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
@@ -3578,8 +3633,14 @@ mod tests {
                     ],
                 );
                 let in_avals = vec![
-                    AbstractValue { dtype: DType::F64, shape: Shape { dims: vec![4, 4] } },
-                    AbstractValue { dtype: DType::F64, shape: Shape { dims: vec![2, 2] } },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![4, 4] },
+                    },
+                    AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape { dims: vec![2, 2] },
+                    },
                 ];
                 let result =
                     partial_eval_jaxpr_typed(&jaxpr, &[false, true], Some(&in_avals)).unwrap();
@@ -3605,7 +3666,10 @@ mod tests {
         // asserts delegation returns Some (i.e. fj-trace handled it) for a
         // representative op of each arity/shape class, with a couple of exact-shape
         // spot checks — so a silent fallback regression fails loudly here.
-        let av = |dtype: DType, dims: Vec<u32>| AbstractValue { dtype, shape: Shape { dims } };
+        let av = |dtype: DType, dims: Vec<u32>| AbstractValue {
+            dtype,
+            shape: Shape { dims },
+        };
         let eqn = |primitive: Primitive, params: &[(&str, &str)]| Equation {
             primitive,
             inputs: smallvec![],
@@ -3622,7 +3686,11 @@ mod tests {
         // (label, eqn, input avals) — every one must delegate (Some).
         let cases: Vec<(&str, Equation, Vec<AbstractValue>)> = vec![
             ("exp", eqn(Primitive::Exp, &[]), vec![f64v(vec![3])]),
-            ("add", eqn(Primitive::Add, &[]), vec![f64v(vec![3]), f64v(vec![3])]),
+            (
+                "add",
+                eqn(Primitive::Add, &[]),
+                vec![f64v(vec![3]), f64v(vec![3])],
+            ),
             (
                 "reduce_sum",
                 eqn(Primitive::ReduceSum, &[("axes", "0")]),
@@ -3643,7 +3711,11 @@ mod tests {
                 eqn(Primitive::ExpandDims, &[("axis", "-1")]),
                 vec![f64v(vec![3])],
             ),
-            ("argsort", eqn(Primitive::Argsort, &[("axis", "0")]), vec![f64v(vec![5])]),
+            (
+                "argsort",
+                eqn(Primitive::Argsort, &[("axis", "0")]),
+                vec![f64v(vec![5])],
+            ),
         ];
         for (label, equation, avals) in &cases {
             assert!(
@@ -3663,7 +3735,11 @@ mod tests {
             &[f64v(vec![2, 3]), f64v(vec![3, 4])],
         )
         .expect("dot_general delegates");
-        assert_eq!(dot[0].shape.dims, vec![2, 4], "dot_general [2,3]·[3,4]→[2,4]");
+        assert_eq!(
+            dot[0].shape.dims,
+            vec![2, 4],
+            "dot_general [2,3]·[3,4]→[2,4]"
+        );
     }
 
     #[test]
@@ -4302,7 +4378,9 @@ mod tests {
         fn av(dims: &[u32], dtype: DType) -> AbstractValue {
             AbstractValue {
                 dtype,
-                shape: Shape { dims: dims.to_vec() },
+                shape: Shape {
+                    dims: dims.to_vec(),
+                },
             }
         }
         fn eqn(prim: Primitive, params: &[(&str, &str)]) -> Equation {
@@ -4336,11 +4414,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.shape.dims, vec![2, 3]);
-        let out = infer_equation_output_aval(
-            &eqn(Primitive::Squeeze, &[]),
-            &av(&[1, 4, 1], DType::F64),
-        )
-        .unwrap();
+        let out =
+            infer_equation_output_aval(&eqn(Primitive::Squeeze, &[]), &av(&[1, 4, 1], DType::F64))
+                .unwrap();
         assert_eq!(out.shape.dims, vec![4]);
 
         // Argmax/Argmin: drop the axis AND retype to I64 (catch-all kept [4,3]/F64).
@@ -4351,11 +4427,9 @@ mod tests {
         .unwrap();
         assert_eq!(out.shape.dims, vec![3]);
         assert_eq!(out.dtype, DType::I64);
-        let out = infer_equation_output_aval(
-            &eqn(Primitive::Argmin, &[]),
-            &av(&[4, 3], DType::F64),
-        )
-        .unwrap();
+        let out =
+            infer_equation_output_aval(&eqn(Primitive::Argmin, &[]), &av(&[4, 3], DType::F64))
+                .unwrap();
         assert_eq!(out.shape.dims, vec![4]);
         assert_eq!(out.dtype, DType::I64);
 
@@ -4370,11 +4444,9 @@ mod tests {
         assert_eq!(out.shape.dims, vec![2, 3]);
 
         // Real of Complex128 -> F64 (shape preserved).
-        let out = infer_equation_output_aval(
-            &eqn(Primitive::Real, &[]),
-            &av(&[4], DType::Complex128),
-        )
-        .unwrap();
+        let out =
+            infer_equation_output_aval(&eqn(Primitive::Real, &[]), &av(&[4], DType::Complex128))
+                .unwrap();
         assert_eq!(out.dtype, DType::F64);
         assert_eq!(out.shape.dims, vec![4]);
 
@@ -4446,7 +4518,11 @@ mod tests {
 
         // BroadcastedIota shape=3,4 dtype=f32 -> [3,4] F32.
         let outs = infer_equation_output_avals(
-            &eqn_n(Primitive::BroadcastedIota, 1, &[("shape", "3,4"), ("dtype", "f32")]),
+            &eqn_n(
+                Primitive::BroadcastedIota,
+                1,
+                &[("shape", "3,4"), ("dtype", "f32")],
+            ),
             &[],
         )
         .unwrap();

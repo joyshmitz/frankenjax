@@ -27,6 +27,13 @@ EVAL_FUSION_SPEED_F32 n=1048576 ops=8 unfused=7.805ms fused=0.949ms speedup=8.22
 EVAL_FUSION_SPEED_F64 n=1048576 ops=8 unfused=25.893ms fused=2.296ms speedup=11.28x
 ```
 
+Post-cleanup RCH rebench on `vmi1227854`:
+
+```text
+EVAL_FUSION_SPEED_F64 n=1048576 ops=8 unfused=30.053ms fused=2.535ms speedup=11.85x
+EVAL_FUSION_SPEED_F32 n=1048576 ops=8 unfused=7.391ms fused=1.024ms speedup=7.22x
+```
+
 Score: `12.5` (`Impact=5`, `Confidence=5`, `Effort=2`).
 
 ## Isomorphism
@@ -50,13 +57,13 @@ fef28624a52e5647abc35f0d388072b443cf081e5941243c6c58a8bd91f40a84
 ## Validation
 
 ```text
-cargo fmt -p fj-interpreters --check
+cargo fmt --check -p fj-interpreters
 rch exec -- cargo check -p fj-interpreters --all-targets
-rch exec -- cargo test -p fj-interpreters
+rch exec -- cargo clippy -p fj-interpreters --all-targets --no-deps -- -D warnings
+rch exec -- cargo test -p fj-interpreters --lib
 rch exec -- cargo test -p fj-interpreters fusion_ -- --nocapture
 ```
 
-Results: format passed, check passed, package tests passed (`147 passed`), and
-focused fusion tests passed (`3 passed`). Standard clippy remains blocked by
-pre-existing out-of-scope lints; package clippy passed with those known lint
-classes allowed.
+Results: format passed, check passed remotely, strict crate clippy passed
+remotely, post-cleanup lib tests passed (`147 passed`; RCH fell open locally
+because no worker slot was admissible), and focused fusion tests passed.

@@ -48,10 +48,8 @@ fn build_add_chain(n: usize, size: usize) -> (Jaxpr, Value) {
     let x = VarId(0);
     let mut equations = Vec::with_capacity(n);
     let mut cur = x;
-    let mut next = 1u32;
-    for _ in 0..n {
+    for next in (1u32..).take(n) {
         let out = VarId(next);
-        next += 1;
         equations.push(Equation {
             primitive: Primitive::Add,
             inputs: smallvec![Atom::Var(cur), Atom::Var(x)],
@@ -65,7 +63,9 @@ fn build_add_chain(n: usize, size: usize) -> (Jaxpr, Value) {
     let jaxpr = Jaxpr::new(vec![x], vec![], vec![cur], equations);
     let arg = Value::Tensor(
         TensorValue::new_f64_values(
-            Shape { dims: vec![size as u32] },
+            Shape {
+                dims: vec![size as u32],
+            },
             (0..size).map(|i| i as f64 * 1e-3).collect(),
         )
         .unwrap(),
