@@ -1,0 +1,96 @@
+{
+  "bead_id": "frankenjax-b6vaq",
+  "title": "perf(fj-ad): dense f64 square-plus-linear reduce-sum reverse-mode fast path",
+  "timestamp_utc": "2026-06-09T16:52:00Z",
+  "base_commit": "af5f01b7",
+  "agent": "BoldFalcon",
+  "target": {
+    "crate": "fj-ad",
+    "criterion_row": "ad/grad_sum_x2_plus_x_1k",
+    "profile_basis": "fresh rch Criterion profile ranked ad/grad_sum_x2_plus_x_1k as the dominant fj-ad row at about 4.9748 us before this pass",
+    "shape": "dense F64 vector length 1024",
+    "jaxpr": "Mul(x,x) -> Add(square,x) -> ReduceSum"
+  },
+  "alien_primitive": {
+    "name": "expression-template reverse-mode fusion",
+    "source": "alien_cs_graveyard AD/composable differentiation and staged-expression entries",
+    "description": "Guard a narrow dense-F64 Jaxpr shape and execute the primal and adjoint program as one scratch-array pass instead of building generic Value/Tape/eval_primitive intermediates."
+  },
+  "benchmark": {
+    "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=target/rch-b6vaq-... rch exec -- cargo bench -p fj-ad --bench ad_baseline -- ad/grad_sum_x2_plus_x_1k --sample-size 20 --warm-up-time 1 --measurement-time 3",
+    "rch_mode": "local fallback for both scored baseline and final candidate because no admissible workers were available",
+    "baseline": {
+      "commit": "af5f01b7",
+      "mean_us": 5.0526,
+      "interval_low_us": 5.0007,
+      "interval_high_us": 5.1148
+    },
+    "rejected_intermediate": {
+      "description": "generic dense Add/Mul/ReduceSum tape with Vec<f64> slots",
+      "mean_us": 5.8193,
+      "decision": "rejected and removed before commit"
+    },
+    "candidate": {
+      "mean_us": 3.2775,
+      "interval_low_us": 3.2571,
+      "interval_high_us": 3.3029
+    },
+    "speedup_mean": 1.5416,
+    "speedup_conservative": 1.5140
+  },
+  "score": {
+    "impact": 3,
+    "confidence": 4,
+    "effort": 2,
+    "formula": "Impact * Confidence / Effort",
+    "value": 6.0,
+    "decision": "keep"
+  },
+  "isomorphism_proof": {
+    "ordering_preserved": "Forward order is exactly x*x, then square+x, then left-to-right ReduceSum over the dense input order. Backward accumulation is 1.0 from Add, then +x, then +x from repeated Mul, matching the generic reverse traversal for this Jaxpr.",
+    "tie_breaking": "N/A: no comparisons, sorting, arg selection, or ties.",
+    "floating_point": "bit-identical for the guarded shape; dense_f64_square_plus_linear_reducesum_matches_generic_bits compares output and gradient raw bits against the forced generic path, including signed zero, infinity, and NaN payload coverage.",
+    "rng": "N/A: no randomness.",
+    "fallbacks": "Custom primitive VJPs, custom Jaxpr VJPs, custom rule keys, constvars, effects, params, sub-Jaxprs, non-F64 tensors, non-dense storage, non-exact Jaxpr shape, or different Add input ordering all fall back to the existing generic path.",
+    "golden_sha256": "5282853e2bd187c1c1bfdfa612bd74776fb403e6b767eb0a8bf0c8bcd2fe2a19",
+    "golden_test": "cargo test -p fj-ad grad_sum_x2_plus_x_1k_golden_sha256 -- --nocapture"
+  },
+  "validation": [
+    {
+      "command": "cargo fmt --check -p fj-ad",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "status": "passed"
+    },
+    {
+      "command": "cargo test -p fj-ad",
+      "status": "passed",
+      "details": "366 unit tests passed plus doc-tests"
+    },
+    {
+      "command": "cargo test -p fj-ad dense_f64_square_plus_linear_reducesum_matches_generic_bits -- --nocapture",
+      "status": "passed"
+    },
+    {
+      "command": "cargo test -p fj-ad grad_sum_x2_plus_x_1k_golden_sha256 -- --nocapture",
+      "status": "passed"
+    },
+    {
+      "command": "cargo check -p fj-ad --all-targets",
+      "status": "passed",
+      "details": "reported unchanged fj-trace dependency warning: unused variable num_spatial"
+    },
+    {
+      "command": "cargo clippy -p fj-ad --all-targets -- -D warnings",
+      "status": "blocked_preexisting",
+      "details": "blocked by unchanged fj-trace unused variable and fj-lax clippy debt; --no-deps additionally exposes unchanged fj-ad lints in reduce_window, conv_vjp_grouped, scatter JVP, and tests"
+    },
+    {
+      "command": "ubs crates/fj-ad/src/lib.rs",
+      "status": "nonzero_preexisting_inventory",
+      "details": "UBS style/build sections were clean, but file-wide pre-existing panic/unwrap/assert/direct-index inventory remains nonzero"
+    }
+  ]
+}

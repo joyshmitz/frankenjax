@@ -599,6 +599,116 @@ fn try_scalar_f64_add_mul_value_and_grad(
     )))
 }
 
+fn dense_f64_add_mul_reducesum_fast_path_uses_builtin_vjp(jaxpr: &Jaxpr) -> bool {
+    lookup_custom_vjp(Primitive::Add).is_none()
+        && lookup_custom_vjp(Primitive::Mul).is_none()
+        && lookup_custom_vjp(Primitive::ReduceSum).is_none()
+        && lookup_custom_jaxpr_vjp(jaxpr).is_none()
+}
+
+fn dense_f64_square_plus_linear_reducesum_input(jaxpr: &Jaxpr) -> Option<VarId> {
+    if !jaxpr.constvars.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 1
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 3
+    {
+        return None;
+    }
+
+    let input_var = jaxpr.invars[0];
+    let [mul_eqn, add_eqn, reduce_eqn] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+    if mul_eqn.primitive != Primitive::Mul
+        || !mul_eqn.params.is_empty()
+        || !mul_eqn.sub_jaxprs.is_empty()
+        || !mul_eqn.effects.is_empty()
+        || mul_eqn.outputs.len() != 1
+        || mul_eqn.inputs.as_slice() != [Atom::Var(input_var), Atom::Var(input_var)]
+    {
+        return None;
+    }
+
+    let square_var = mul_eqn.outputs[0];
+    if add_eqn.primitive != Primitive::Add
+        || !add_eqn.params.is_empty()
+        || !add_eqn.sub_jaxprs.is_empty()
+        || !add_eqn.effects.is_empty()
+        || add_eqn.outputs.len() != 1
+        || add_eqn.inputs.as_slice() != [Atom::Var(square_var), Atom::Var(input_var)]
+    {
+        return None;
+    }
+
+    let shifted_var = add_eqn.outputs[0];
+    if reduce_eqn.primitive != Primitive::ReduceSum
+        || !reduce_eqn.params.is_empty()
+        || !reduce_eqn.sub_jaxprs.is_empty()
+        || !reduce_eqn.effects.is_empty()
+        || reduce_eqn.inputs.as_slice() != [Atom::Var(shifted_var)]
+        || reduce_eqn.outputs.as_slice() != jaxpr.outvars.as_slice()
+    {
+        return None;
+    }
+
+    Some(input_var)
+}
+
+fn try_dense_f64_square_plus_linear_reducesum_value_and_grad(
+    jaxpr: &Jaxpr,
+    args: &[Value],
+    custom_vjp_rule_key: Option<&str>,
+) -> Result<Option<ValueAndGradInnerResult>, AdError> {
+    if custom_vjp_rule_key.is_some() {
+        return Ok(None);
+    }
+    if dense_f64_square_plus_linear_reducesum_input(jaxpr).is_none() {
+        return Ok(None);
+    }
+    if !dense_f64_add_mul_reducesum_fast_path_uses_builtin_vjp(jaxpr) {
+        return Ok(None);
+    }
+    if args.len() != jaxpr.invars.len() {
+        return Err(AdError::InputArity {
+            expected: jaxpr.invars.len(),
+            actual: args.len(),
+        });
+    }
+
+    let Value::Tensor(tensor) = &args[0] else {
+        return Ok(None);
+    };
+    if tensor.dtype != DType::F64 {
+        return Ok(None);
+    }
+    let Some(input) = tensor.elements.as_f64_slice() else {
+        return Ok(None);
+    };
+
+    let mut output = 0.0_f64;
+    let mut grad = Vec::with_capacity(input.len());
+    for &x in input {
+        let squared = x * x;
+        let shifted = squared + x;
+        output += shifted;
+
+        let mut cotangent = 1.0_f64;
+        cotangent += x;
+        cotangent += x;
+        grad.push(cotangent);
+    }
+
+    let grad = TensorValue::new_f64_values(tensor.shape.clone(), grad)
+        .map(Value::Tensor)
+        .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+    Ok(Some((
+        vec![Value::Scalar(Literal::from_f64(output))],
+        vec![grad],
+        jaxpr.equations.len(),
+    )))
+}
+
 fn forward_with_tape(jaxpr: &Jaxpr, args: &[Value]) -> Result<ForwardResult, AdError> {
     if args.len() != jaxpr.invars.len() {
         return Err(AdError::InputArity {
@@ -10302,6 +10412,11 @@ fn value_and_grad_jaxpr_inner_with_custom_vjp_key(
     if let Some(result) = try_scalar_f64_add_mul_value_and_grad(jaxpr, args, custom_vjp_rule_key)? {
         return Ok(result);
     }
+    if let Some(result) =
+        try_dense_f64_square_plus_linear_reducesum_value_and_grad(jaxpr, args, custom_vjp_rule_key)?
+    {
+        return Ok(result);
+    }
 
     let (outputs, tape, env) = forward_with_tape(jaxpr, args)?;
 
@@ -18908,6 +19023,97 @@ mod tests {
             digest,
             "5282853e2bd187c1c1bfdfa612bd74776fb403e6b767eb0a8bf0c8bcd2fe2a19"
         );
+    }
+
+    #[test]
+    fn dense_f64_square_plus_linear_reducesum_matches_generic_bits() {
+        use fj_core::{Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let _guard = custom_rule_test_guard();
+        clear_custom_derivative_rules();
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(1)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+        let data = [
+            0.0,
+            -0.0,
+            1.5,
+            -2.0,
+            f64::INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_0042),
+        ];
+        let args = [Value::vector_f64(&data).expect("vector argument")];
+
+        let (fast_outputs, fast_grads) =
+            value_and_grad_jaxpr(&jaxpr, &args).expect("fast value_and_grad");
+        let (generic_outputs, generic_grads) =
+            value_and_grad_jaxpr_with_custom_vjp_key(&jaxpr, &args, "force-generic")
+                .expect("generic value_and_grad");
+
+        assert_eq!(
+            fast_outputs[0]
+                .as_f64_scalar()
+                .expect("fast scalar")
+                .to_bits(),
+            generic_outputs[0]
+                .as_f64_scalar()
+                .expect("generic scalar")
+                .to_bits()
+        );
+
+        let fast_tensor = fast_grads[0].as_tensor().expect("fast gradient tensor");
+        let generic_tensor = generic_grads[0]
+            .as_tensor()
+            .expect("generic gradient tensor");
+        assert_eq!(fast_tensor.shape, generic_tensor.shape);
+        assert!(
+            fast_tensor.elements.as_f64_slice().is_some(),
+            "fast gradient should stay densely packed"
+        );
+        let fast_bits: Vec<u64> = fast_tensor
+            .to_f64_vec()
+            .expect("fast f64 gradient")
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        let generic_bits: Vec<u64> = generic_tensor
+            .to_f64_vec()
+            .expect("generic f64 gradient")
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        assert_eq!(fast_bits, generic_bits);
+        clear_custom_derivative_rules();
     }
 
     #[test]
