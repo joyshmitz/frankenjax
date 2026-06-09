@@ -407,6 +407,7 @@ pub fn matmul_2d_with_pack(
 fn matmul_thread_count(ops: usize, rows: usize) -> usize {
     const MIN_PARALLEL_OPS: usize = 1 << 23; // ~8M FMAs
     const OPS_PER_THREAD: usize = 1 << 21; // ~2M FMAs/thread
+    const MAX_MATMUL_THREADS: usize = 16;
     if rows <= 1 || ops < MIN_PARALLEL_OPS {
         return 1;
     }
@@ -414,7 +415,11 @@ fn matmul_thread_count(ops: usize, rows: usize) -> usize {
         .map(|p| p.get())
         .unwrap_or(1);
     let by_work = (ops / OPS_PER_THREAD).max(1);
-    available.min(rows).min(by_work).max(1)
+    available
+        .min(MAX_MATMUL_THREADS)
+        .min(rows)
+        .min(by_work)
+        .max(1)
 }
 
 /// `matmul_2d` driver with an explicit thread count (1 = serial). Splitting the
