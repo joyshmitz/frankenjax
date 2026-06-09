@@ -1428,6 +1428,83 @@ fn complex_binary_literal_op(
     Ok(complex_literal_from_f64_parts(out_dtype, re, im))
 }
 
+/// Dense (and, for the expensive transcendental ops, threaded) fast path for a complex
+/// tensor combined with a single complex `scalar` (the common `z*c` / `z^c` / `atan2(z, c)`
+/// broadcast). Mirrors the same-shape complex path: read the packed `(re,im)` backing, apply
+/// `apply_complex_binary` (exactly what `complex_binary_literal_op` delegates to) straight
+/// into dense complex storage with the same `out_dtype` narrowing (`new_complex_values` ==
+/// `complex_literal_from_f64_parts` per element) — BIT-FOR-BIT identical to the per-`Literal`
+/// loop, minus the 4-f64-from-bits unpack/repack. `scalar_on_left` preserves operand order for
+/// the non-commutative ops (Sub/Div/Pow/Atan2). Returns `None` for a non-dense tensor backing.
+fn eval_complex_tensor_scalar(
+    primitive: Primitive,
+    tensor: &TensorValue,
+    scalar: (f64, f64),
+    out_dtype: DType,
+    scalar_on_left: bool,
+) -> Result<Option<Value>, EvalError> {
+    let Some(a) = tensor.elements.as_complex_slice() else {
+        return Ok(None);
+    };
+    let n = a.len();
+
+    // Threaded dense path for the EXPENSIVE complex binary ops (each several complex
+    // transcendentals per element); `apply_complex_binary` is infallible for those (same as
+    // the same-shape threaded path), so the NaN fallback is unreachable.
+    if is_expensive_complex_binary(primitive) && n >= COMPLEX_UNARY_PARALLEL_MIN {
+        let threads = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(n);
+        if threads > 1 {
+            let mut out = vec![(0.0f64, 0.0f64); n];
+            let chunk = n.div_ceil(threads);
+            std::thread::scope(|scope| {
+                let mut rest: &mut [(f64, f64)] = out.as_mut_slice();
+                let mut start = 0usize;
+                while start < n {
+                    let len = chunk.min(n - start);
+                    let (blk, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let s = start;
+                    scope.spawn(move || {
+                        for (i, o) in blk.iter_mut().enumerate() {
+                            let x = a[s + i];
+                            *o = if scalar_on_left {
+                                apply_complex_binary(primitive, scalar, x)
+                            } else {
+                                apply_complex_binary(primitive, x, scalar)
+                            }
+                            .unwrap_or((f64::NAN, f64::NAN));
+                        }
+                    });
+                    start += len;
+                }
+            });
+            return Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+                out_dtype,
+                tensor.shape.clone(),
+                out,
+            )?)));
+        }
+    }
+
+    // Serial dense path (cheap ops are memory-bound, where fan-out regresses).
+    let mut out: Vec<(f64, f64)> = Vec::with_capacity(n);
+    for &x in a {
+        out.push(if scalar_on_left {
+            apply_complex_binary(primitive, scalar, x)?
+        } else {
+            apply_complex_binary(primitive, x, scalar)?
+        });
+    }
+    Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+        out_dtype,
+        tensor.shape.clone(),
+        out,
+    )?)))
+}
+
 fn eval_binary_elementwise_complex(
     primitive: Primitive,
     inputs: &[Value],
@@ -1680,6 +1757,14 @@ fn eval_binary_elementwise_complex(
         }
         (Value::Scalar(lhs), Value::Tensor(rhs)) => {
             let out_dtype = complex_binary_output_dtype(literal_dtype(*lhs), rhs.dtype);
+            // Dense (+ threaded for expensive ops) fast path; bails to the per-Literal
+            // loop for a non-dense tensor backing. scalar_on_left = true (scalar is lhs).
+            let scalar = literal_to_complex_parts(primitive, *lhs)?;
+            if let Some(value) =
+                eval_complex_tensor_scalar(primitive, rhs, scalar, out_dtype, true)?
+            {
+                return Ok(value);
+            }
             let mut elements = Vec::with_capacity(rhs.elements.len());
             for right in rhs.elements.iter().copied() {
                 elements.push(complex_binary_literal_op(
@@ -1695,6 +1780,13 @@ fn eval_binary_elementwise_complex(
         }
         (Value::Tensor(lhs), Value::Scalar(rhs)) => {
             let out_dtype = complex_binary_output_dtype(lhs.dtype, literal_dtype(*rhs));
+            // Dense (+ threaded for expensive ops) fast path; scalar_on_left = false.
+            let scalar = literal_to_complex_parts(primitive, *rhs)?;
+            if let Some(value) =
+                eval_complex_tensor_scalar(primitive, lhs, scalar, out_dtype, false)?
+            {
+                return Ok(value);
+            }
             let mut elements = Vec::with_capacity(lhs.elements.len());
             for left in lhs.elements.iter().copied() {
                 elements.push(complex_binary_literal_op(primitive, left, *rhs, out_dtype)?);
@@ -9185,6 +9277,109 @@ mod tests {
                 dense_ns as f64 / reps as f64 / 1e6,
                 lit_ns as f64 / reps as f64 / 1e6,
             );
+        }
+    }
+
+    /// Isomorphism + same-binary A/B for the complex tensor⊗scalar dense fast path
+    /// (`eval_complex_tensor_scalar`). Every element of the dense path must be
+    /// bit-for-bit identical to the per-`Literal` `complex_binary_literal_op` it
+    /// replaced, for BOTH operand orders and for cheap (de-box) + expensive
+    /// (de-box + threaded) ops. The threaded expensive path runs because
+    /// `n > COMPLEX_UNARY_PARALLEL_MIN`.
+    #[test]
+    fn complex_tensor_scalar_dense_path_bit_identical_to_literal() {
+        use std::time::Instant;
+
+        let n: u32 = 1 << 20; // 1,048,576 complex elements (> COMPLEX_UNARY_PARALLEL_MIN)
+        let a_pairs: Vec<(f64, f64)> = (0..n)
+            .map(|i| (i as f64 * 0.013 - 5.0, (i as f64 * 0.007).sin() + 0.5))
+            .collect();
+        let shape = Shape { dims: vec![n] };
+        let tensor = Value::Tensor(
+            TensorValue::new_complex_values(DType::Complex128, shape.clone(), a_pairs.clone())
+                .unwrap(),
+        );
+        let scalar_lit = Literal::from_complex128(1.5, -0.75);
+        let scalar = Value::Scalar(scalar_lit);
+
+        let lit_a: Vec<Literal> = a_pairs
+            .iter()
+            .map(|&(r, i)| Literal::Complex128Bits(r.to_bits(), i.to_bits()))
+            .collect();
+
+        let reps = 6u32; // A/B is an informational sanity print; bit-identity is the gate
+        let out_dtype = DType::Complex128;
+        for op in [
+            Primitive::Add,
+            Primitive::Sub,
+            Primitive::Mul,
+            Primitive::Div,
+            Primitive::Pow,
+            Primitive::Atan2,
+            Primitive::XLogY,
+            Primitive::LogAddExp,
+        ] {
+            for scalar_on_left in [false, true] {
+                let inputs = if scalar_on_left {
+                    [scalar.clone(), tensor.clone()]
+                } else {
+                    [tensor.clone(), scalar.clone()]
+                };
+                let dense = eval_binary_elementwise_complex(op, &inputs).unwrap();
+                let dense_t = dense.as_tensor().unwrap();
+
+                // Reference: the per-`Literal` path the dense fast path replaced.
+                let reference = |l: Literal| -> Literal {
+                    if scalar_on_left {
+                        complex_binary_literal_op(op, scalar_lit, l, out_dtype).unwrap()
+                    } else {
+                        complex_binary_literal_op(op, l, scalar_lit, out_dtype).unwrap()
+                    }
+                };
+
+                let mut golden: u64 = 0xcbf29ce484222325;
+                for (k, &l) in lit_a.iter().enumerate() {
+                    let want = reference(l);
+                    assert_eq!(
+                        dense_t.elements[k], want,
+                        "op {op:?} left={scalar_on_left} bit mismatch at {k}"
+                    );
+                    if let Literal::Complex128Bits(rb, ib) = dense_t.elements[k] {
+                        for byte in rb.to_le_bytes().iter().chain(ib.to_le_bytes().iter()) {
+                            golden ^= *byte as u64;
+                            golden = golden.wrapping_mul(0x100000001b3);
+                        }
+                    }
+                }
+
+                // Same-binary A/B: dense path vs the per-`Literal` loop.
+                let t0 = Instant::now();
+                for _ in 0..reps {
+                    std::hint::black_box(
+                        eval_binary_elementwise_complex(op, &inputs).unwrap(),
+                    );
+                }
+                let dense_ns = t0.elapsed().as_nanos().max(1);
+
+                let t1 = Instant::now();
+                for _ in 0..reps {
+                    let mut elements = Vec::with_capacity(n as usize);
+                    for &l in lit_a.iter() {
+                        elements.push(reference(l));
+                    }
+                    std::hint::black_box(
+                        TensorValue::new(out_dtype, shape.clone(), elements).unwrap(),
+                    );
+                }
+                let lit_ns = t1.elapsed().as_nanos().max(1);
+
+                let ratio = lit_ns as f64 / dense_ns as f64;
+                println!(
+                    "[complex-scalar {op:?} left={scalar_on_left}] dense={:.3}ms literal={:.3}ms ratio={ratio:.2}x golden={golden:016x}",
+                    dense_ns as f64 / reps as f64 / 1e6,
+                    lit_ns as f64 / reps as f64 / 1e6,
+                );
+            }
         }
     }
 
