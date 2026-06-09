@@ -72,7 +72,7 @@ fn reduce_real_literal(dtype: DType, value: f64) -> Literal {
 /// `slice[i] == as_slice()[i].as_f64()` exactly, so a malformed declared-F64
 /// tensor (`Literal` storage) returns `None` and falls through unchanged.
 #[inline]
-fn eval_dense_f64_full_reduce(
+fn eval_dense_float_full_reduce(
     primitive: Primitive,
     tensor: &TensorValue,
     float_init: f64,
@@ -81,24 +81,42 @@ fn eval_dense_f64_full_reduce(
     if !matches!(
         primitive,
         Primitive::ReduceSum | Primitive::ReduceProd | Primitive::ReduceMax | Primitive::ReduceMin
-    ) || tensor.dtype != DType::F64
-    {
+    ) {
         return None;
     }
-    // F64 only: a single-accumulator fold over a flat slice is a candidate for LLVM
-    // reduction vectorization. For F64 that's bit-identical to the generic
-    // per-`Literal` scalar fold (verified by the dense-F64 reduce tests). The dense
-    // F32 full-reduce was deliberately NOT added here — empirically its flat-slice
-    // fold diverged from the generic scalar fold (inf+(-inf)=NaN sign, a symptom of
-    // a different summation shape), so it is NOT provably order-identical. f32 AXIS
-    // reductions (the hot softmax/layernorm path) ARE accelerated — they use the
-    // scatter-odometer / per-cell-ordered block folds, which can't reassociate.
-    let values = tensor.elements.as_f64_slice()?;
-    let mut acc = float_init;
-    for &value in values {
-        acc = float_op(acc, value);
+    // A single-accumulator f64 fold over the flat backing slice, in strictly ascending
+    // order. This is the EXACT shape of the generic per-`Literal` float full-reduce
+    // (the `else` branch below): `acc: f64 = float_op(acc, literal.as_f64())`, then
+    // round to the input's float dtype via `reduce_real_literal`. The only change is
+    // reading a 4/8-byte contiguous scalar instead of a 24-byte boxed `Literal` with an
+    // enum match. No reassociation (the `float_op` fn-pointer fold is not LLVM
+    // reduction-vectorized at default opt), so it is BIT-IDENTICAL including ±inf/NaN
+    // and signed-zero — verified by the dense full-reduce tests.
+    //
+    // F32 (JAX's DEFAULT float) accumulates in f64 too: `v as f64` for an `f32` equals
+    // `Literal::F32Bits(b).as_f64()` exactly (lossless widening), and the result rounds
+    // back to f32 at output — so the f32 path is just as order-identical as f64. (An
+    // earlier attempt that accumulated NATIVELY in f32 diverged on inf+(-inf) NaN sign;
+    // accumulating in f64 mirrors the generic fold and cannot diverge.)
+    match tensor.dtype {
+        DType::F64 => {
+            let values = tensor.elements.as_f64_slice()?;
+            let mut acc = float_init;
+            for &value in values {
+                acc = float_op(acc, value);
+            }
+            Some(Value::Scalar(reduce_real_literal(DType::F64, acc)))
+        }
+        DType::F32 => {
+            let values = tensor.elements.as_f32_slice()?;
+            let mut acc = float_init;
+            for &value in values {
+                acc = float_op(acc, value as f64);
+            }
+            Some(Value::Scalar(reduce_real_literal(DType::F32, acc)))
+        }
+        _ => None,
     }
-    Some(Value::Scalar(reduce_real_literal(DType::F64, acc)))
 }
 
 fn parse_reduction_axes(
@@ -190,7 +208,7 @@ pub(crate) fn eval_reduce(
             }
 
             if let Some(value) =
-                eval_dense_f64_full_reduce(primitive, tensor, float_init, &float_op)
+                eval_dense_float_full_reduce(primitive, tensor, float_init, &float_op)
             {
                 return Ok(value);
             }
@@ -1718,6 +1736,67 @@ mod tests {
             extract_f64_bits(&dense_result),
             extract_f64_bits(&literal_result)
         );
+    }
+
+    #[test]
+    fn dense_f32_full_reduce_bit_identical_to_literal_path() {
+        // The dense F32 full-reduce (eval_dense_float_full_reduce) must be BIT-FOR-BIT
+        // identical to the generic boxed-Literal path for sum/prod/max/min, including
+        // ±inf, NaN payload/sign, and signed zero — both promote each f32 to f64, fold a
+        // single f64 accumulator in ascending order, then round to f32 at output.
+        let data: Vec<f32> = std::hint::black_box(vec![
+            1.5_f32,
+            -0.0,
+            f32::from_bits(0x7fc0_0001), // NaN payload
+            -3.25,
+            f32::INFINITY,
+            0.0,
+            1e30,
+            -1e30,
+            f32::NEG_INFINITY,
+            2.5,
+        ]);
+        let dims = vec![data.len() as u32];
+
+        // Dense F32 storage (fast path) vs boxed-Literal F32 (generic path).
+        let dense =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        assert!(dense.as_tensor().unwrap().elements.as_f32_slice().is_some());
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims },
+                data.iter().map(|&v| Literal::from_f32(v)).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(boxed.as_tensor().unwrap().elements.as_f32_slice().is_none());
+
+        let extract_f32_bits = |val: &Value| -> u32 {
+            match val {
+                Value::Scalar(Literal::F32Bits(b)) => *b,
+                other => panic!("expected f32 scalar, got {other:?}"),
+            }
+        };
+
+        // (primitive, float_init, float_op) mirroring lib.rs reduce wiring.
+        let cases: [(Primitive, f64, fn(f64, f64) -> f64); 4] = [
+            (Primitive::ReduceSum, 0.0, |a, b| a + b),
+            (Primitive::ReduceProd, 1.0, |a, b| a * b),
+            (Primitive::ReduceMax, f64::NEG_INFINITY, crate::jax_max_f64),
+            (Primitive::ReduceMin, f64::INFINITY, crate::jax_min_f64),
+        ];
+        for (prim, finit, fop) in cases {
+            let dense_result =
+                eval_reduce(prim, std::slice::from_ref(&dense), 0, finit, |a, _| a, fop).unwrap();
+            let boxed_result =
+                eval_reduce(prim, std::slice::from_ref(&boxed), 0, finit, |a, _| a, fop).unwrap();
+            assert_eq!(
+                extract_f32_bits(&dense_result),
+                extract_f32_bits(&boxed_result),
+                "{prim:?} dense vs boxed f32 full-reduce must be bit-identical"
+            );
+        }
     }
 
     #[test]

@@ -1814,6 +1814,40 @@ fn bench_reduce_sum_64k_i64_literal_reference(c: &mut Criterion) {
     });
 }
 
+// F32 (JAX's DEFAULT float) full reduce-sum over 64k elems: dense F32 storage (the
+// new eval_dense_float_full_reduce: read 4-byte contiguous f32 + promote-to-f64 fold)
+// vs Vec<Literal> boxed F32Bits (the generic per-element get().as_f64() + 24-byte
+// stride). Both accumulate in a single f64 accumulator ascending, so bit-identical.
+// Same-invocation A/B. This is the softmax-denominator / loss / norm hot path.
+fn bench_reduce_sum_64k_f32_dense(c: &mut Criterion) {
+    let data: Vec<f32> = (0..LARGE_ELEMENTWISE_LEN).map(|i| (i as f32) * 1e-3).collect();
+    let input = Value::Tensor(
+        TensorValue::new_f32_values(Shape::vector(LARGE_ELEMENTWISE_LEN as u32), data).unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/reduce_sum_64k_f32_dense", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_reduce_sum_64k_f32_literal_reference(c: &mut Criterion) {
+    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| Literal::from_f32((i as f32) * 1e-3))
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            elements,
+        )
+        .unwrap(),
+    );
+    let p = no_params();
+    c.bench_function("eval/reduce_sum_64k_f32_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 // 64k bool ReduceAnd full reduction: dense bool storage fold (pass80) vs the
 // Vec<Literal> per-element match, run in the same process for a same-worker ratio.
 fn bench_reduce_and_64k_bool_vec(c: &mut Criterion) {
@@ -4546,6 +4580,8 @@ criterion_group!(
     bench_reduce_sum_64k_i64,
     bench_reduce_sum_4096x128_axis1_f64,
     bench_reduce_sum_64k_i64_literal_reference,
+    bench_reduce_sum_64k_f32_dense,
+    bench_reduce_sum_64k_f32_literal_reference,
     bench_reduce_and_64k_bool_vec,
     bench_reduce_and_64k_bool_literal_reference,
     bench_reduce_and_256_axis1_bool_vec,
