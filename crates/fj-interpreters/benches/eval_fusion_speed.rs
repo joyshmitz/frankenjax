@@ -17,10 +17,41 @@ use smallvec::smallvec;
 
 fn f64_tensor(vals: Vec<f64>) -> Value {
     let n = vals.len();
-    Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![n as u32] }, vals).unwrap())
+    Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            vals,
+        )
+        .unwrap(),
+    )
 }
 
-fn main() {
+fn f32_tensor(vals: Vec<f32>) -> Value {
+    let n = vals.len();
+    Value::Tensor(
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            vals,
+        )
+        .unwrap(),
+    )
+}
+
+fn f32_bits_at(t: &TensorValue, idx: usize) -> u32 {
+    if let Some(values) = t.elements.as_f32_slice() {
+        return values[idx].to_bits();
+    }
+    match t.elements[idx] {
+        Literal::F32Bits(bits) => bits,
+        other => panic!("expected f32 element, got {other:?}"),
+    }
+}
+
+fn run_f64() {
     let n = 1usize << 20; // 1M f64 = 8 MB per tensor (RAM-bound)
     let x: Vec<f64> = (0..n).map(|i| i as f64 * 1e-6 - 0.5).collect();
     let y: Vec<f64> = (0..n).map(|i| (i as f64 * 3e-7).cos() + 1.2).collect();
@@ -41,14 +72,34 @@ fn main() {
     };
     let lit = |c: f64| Atom::Lit(Literal::from_f64(c));
     let eqns = vec![
-        mk(Primitive::Mul, smallvec![Atom::Var(xv), Atom::Var(xv)], v[0]),
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(xv), Atom::Var(xv)],
+            v[0],
+        ),
         mk(Primitive::Add, smallvec![Atom::Var(v[0]), lit(0.5)], v[1]),
-        mk(Primitive::Sub, smallvec![Atom::Var(v[1]), Atom::Var(xv)], v[2]),
-        mk(Primitive::Mul, smallvec![Atom::Var(v[2]), Atom::Var(yv)], v[3]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[1]), Atom::Var(xv)],
+            v[2],
+        ),
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(v[2]), Atom::Var(yv)],
+            v[3],
+        ),
         mk(Primitive::Add, smallvec![Atom::Var(v[3]), lit(1.0)], v[4]),
-        mk(Primitive::Sub, smallvec![Atom::Var(v[4]), Atom::Var(yv)], v[5]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[4]), Atom::Var(yv)],
+            v[5],
+        ),
         mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2.0)], v[6]),
-        mk(Primitive::Add, smallvec![Atom::Var(v[6]), Atom::Var(xv)], v[7]),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(v[6]), Atom::Var(xv)],
+            v[7],
+        ),
     ];
     let jaxpr = Jaxpr::new(vec![xv, yv], vec![], vec![v[7]], eqns.clone());
     let args = [f64_tensor(x.clone()), f64_tensor(y.clone())];
@@ -99,9 +150,122 @@ fn main() {
     let unf = t1.elapsed().as_nanos() as f64 / iters as f64;
 
     println!(
-        "EVAL_FUSION_SPEED n={n} ops=8 unfused={:.3}ms fused={:.3}ms speedup={:.2}x",
+        "EVAL_FUSION_SPEED_F64 n={n} ops=8 unfused={:.3}ms fused={:.3}ms speedup={:.2}x",
         unf / 1e6,
         fused / 1e6,
         unf / fused,
     );
+}
+
+fn run_f32() {
+    let n = 1usize << 20; // 1M f32 = 4 MB per tensor (JAX default float dtype)
+    let x: Vec<f32> = (0..n).map(|i| i as f32 * 1e-6 - 0.5).collect();
+    let y: Vec<f32> = (0..n).map(|i| (i as f32 * 3e-7).cos() + 1.2).collect();
+
+    // Same chain as f64, but all tensor inputs and scalar literals are f32.
+    let xv = VarId(0);
+    let yv = VarId(1);
+    let v: Vec<VarId> = (2..=9).map(VarId).collect();
+    let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+        primitive: p,
+        inputs: ins,
+        outputs: smallvec![o],
+        params: BTreeMap::new(),
+        sub_jaxprs: vec![],
+        effects: vec![],
+    };
+    let lit = |c: f32| Atom::Lit(Literal::from_f32(c));
+    let eqns = vec![
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(xv), Atom::Var(xv)],
+            v[0],
+        ),
+        mk(Primitive::Add, smallvec![Atom::Var(v[0]), lit(0.5)], v[1]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[1]), Atom::Var(xv)],
+            v[2],
+        ),
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(v[2]), Atom::Var(yv)],
+            v[3],
+        ),
+        mk(Primitive::Add, smallvec![Atom::Var(v[3]), lit(1.0)], v[4]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[4]), Atom::Var(yv)],
+            v[5],
+        ),
+        mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2.0)], v[6]),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(v[6]), Atom::Var(xv)],
+            v[7],
+        ),
+    ];
+    let jaxpr = Jaxpr::new(vec![xv, yv], vec![], vec![v[7]], eqns.clone());
+    let args = [f32_tensor(x.clone()), f32_tensor(y.clone())];
+
+    // Unfused reference: evaluate each equation via eval_primitive, materializing
+    // intermediates (the pre-f32-fusion eval_jaxpr behavior), via a small env vec.
+    let unfused = || {
+        let mut env: Vec<Option<Value>> = vec![None; 10];
+        env[0] = Some(args[0].clone());
+        env[1] = Some(args[1].clone());
+        for eqn in &eqns {
+            let ins: Vec<Value> = eqn
+                .inputs
+                .iter()
+                .map(|a| match a {
+                    Atom::Var(vr) => env[vr.0 as usize].clone().unwrap(),
+                    Atom::Lit(l) => Value::Scalar(*l),
+                })
+                .collect();
+            let out = eval_primitive(eqn.primitive, &ins, &eqn.params).unwrap();
+            env[eqn.outputs[0].0 as usize] = Some(out);
+        }
+        env[v[7].0 as usize].clone().unwrap()
+    };
+
+    // Correctness sanity: fused == unfused for representative elements.
+    let f = eval_jaxpr(&jaxpr, &args).unwrap();
+    let u = unfused();
+    if let (Value::Tensor(ft), Value::Tensor(ut)) = (&f[0], &u) {
+        for idx in [0, n / 2, n - 1] {
+            assert_eq!(
+                f32_bits_at(ft, idx),
+                f32_bits_at(ut, idx),
+                "fused f32 != unfused"
+            );
+        }
+    }
+
+    let iters = 60;
+    let _ = eval_jaxpr(&jaxpr, &args).unwrap();
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap());
+    }
+    let fused = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+    let _ = unfused();
+    let t1 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(unfused());
+    }
+    let unf = t1.elapsed().as_nanos() as f64 / iters as f64;
+
+    println!(
+        "EVAL_FUSION_SPEED_F32 n={n} ops=8 unfused={:.3}ms fused={:.3}ms speedup={:.2}x",
+        unf / 1e6,
+        fused / 1e6,
+        unf / fused,
+    );
+}
+
+fn main() {
+    run_f64();
+    run_f32();
 }
