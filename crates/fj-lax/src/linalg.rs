@@ -4102,7 +4102,9 @@ pub fn pinv(a: &[f64], m: usize, n: usize, rcond: f64) -> Vec<f64> {
 
 const PINV_LOW_RANK_MIN_DIM: usize = 16;
 const PINV_LOW_RANK_MAX_RANK: usize = 32;
-const PINV_LOW_RANK_RESIDUAL_MARGIN: f64 = 0.5;
+/// Accept the rank-revealing QR certificate when unresolved residual energy is
+/// at or below the same squared singular-value cutoff used for Σ⁺.
+const PINV_LOW_RANK_RESIDUAL_MARGIN: f64 = 1.0;
 
 fn pinv_m_ge_n_low_rank_qr(a: &[f64], m: usize, n: usize, rcond: f64) -> Option<Vec<f64>> {
     if !rcond.is_finite() || rcond == 0.0 || !a.iter().all(|value| value.is_finite()) {
@@ -6846,6 +6848,27 @@ mod tests {
                 "pinv reconstruction bit drift at {idx}: old={old:?} new={new:?}"
             );
         }
+    }
+
+    #[test]
+    fn pinv_low_rank_profile_shape_golden_digest() -> Result<(), Box<dyn std::error::Error>> {
+        let (m, n) = (256usize, 128usize);
+        let a: Vec<f64> = (0..m * n)
+            .map(|idx| {
+                let x = idx as f64;
+                (x * 0.125).sin() + (x * 0.03125).cos()
+            })
+            .collect();
+
+        let got = pinv(&a, m, n, 1e-15);
+        assert_eq!(got.len(), n * m);
+        let bits: Vec<u64> = got.iter().map(|value| value.to_bits()).collect();
+        let digest = fj_test_utils::fixture_id_from_json(&bits)?;
+        assert_eq!(
+            digest, "aa6633cd1c02444eca8fa95d72870710cafc7dbc9503e9c4056640f3118d492f",
+            "profile-shaped low-rank pinv output digest changed"
+        );
+        Ok(())
     }
 
     #[test]

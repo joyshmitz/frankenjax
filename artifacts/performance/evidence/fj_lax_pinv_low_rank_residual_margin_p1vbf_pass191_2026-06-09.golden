@@ -1,0 +1,13 @@
+case=fj_lax_pinv_256x128_low_rank_residual_margin_p1vbf_pass191
+matrix=real_f64_data(256,128)
+rcond=1e-15
+output_format=f64_to_bits_fixture_id
+output_len=32768
+output_digest=aa6633cd1c02444eca8fa95d72870710cafc7dbc9503e9c4056640f3118d492f
+old_certificate_active_rank=11
+new_certificate_active_rank=4
+tail_residual_rel=2.59e-32
+baseline_ovh_a_ms=38.155..38.302..38.513
+candidate_ovh_a_ms=5.8039..5.8086..5.8140
+median_speedup=6.594015770
+conservative_speedup=6.562607499

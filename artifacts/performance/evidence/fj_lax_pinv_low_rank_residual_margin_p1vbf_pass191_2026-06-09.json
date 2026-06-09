@@ -1,0 +1,137 @@
+{
+  "artifact": "fj_lax_pinv_low_rank_residual_margin_p1vbf_pass191_2026-06-09",
+  "bead": "frankenjax-p1vbf.52",
+  "parent_bead": "frankenjax-p1vbf",
+  "crate": "fj-lax",
+  "date": "2026-06-09",
+  "status": "kept",
+  "target": "linalg/pinv_256x128_f64",
+  "profile_basis": {
+    "source": "post-v58oy RCH linalg profile on clean origin/main 75ad31a6",
+    "worker": "ovh-a",
+    "rank": "top non-B-pack linalg row after GEMM2048; GEMM exact-order B-pack lifetime route had just failed and was routed away",
+    "full_profile_ms": [
+      {
+        "benchmark": "linalg/matmul_2d_2048x2048x2048_f64",
+        "lower": 223.77,
+        "mid": 239.41,
+        "upper": 256.39
+      },
+      {
+        "benchmark": "linalg/pinv_256x128_f64",
+        "lower": 42.173,
+        "mid": 44.075,
+        "upper": 46.095
+      },
+      {
+        "benchmark": "linalg/lu_1024x1024_f64",
+        "lower": 33.116,
+        "mid": 33.373,
+        "upper": 33.677
+      },
+      {
+        "benchmark": "linalg/matmul_2d_1024x1024x1024_f64",
+        "lower": 30.692,
+        "mid": 31.126,
+        "upper": 31.569
+      },
+      {
+        "benchmark": "linalg/qr_1024x1024_f64",
+        "lower": 27.094,
+        "mid": 27.249,
+        "upper": 27.406
+      }
+    ]
+  },
+  "lever": {
+    "description": "Relax the private low-rank QR residual certificate margin from 0.5 to 1.0 so the certificate accepts exactly when unresolved residual energy is at or below the same squared singular-value cutoff used by the pseudoinverse.",
+    "files": [
+      "crates/fj-lax/src/linalg.rs"
+    ],
+    "one_lever": true,
+    "safe_rust": true,
+    "algorithmic_effect": "For the profile-shaped 256x128 rank-4 matrix, stop the pivoted QR certificate at rank 4 instead of rank 11 before constructing the small pseudoinverse."
+  },
+  "benchmarks": {
+    "same_worker_gate": {
+      "worker": "ovh-a",
+      "baseline_ms": {
+        "lower": 38.155,
+        "mid": 38.302,
+        "upper": 38.513
+      },
+      "candidate_ms": {
+        "lower": 5.8039,
+        "mid": 5.8086,
+        "upper": 5.814
+      },
+      "median_speedup": 6.59401577,
+      "conservative_speedup": 6.562607499,
+      "score": {
+        "impact": 8.0,
+        "confidence": 4.0,
+        "effort": 2.0,
+        "value": 16.0
+      },
+      "baseline_command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_256x128_f64",
+      "candidate_command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR CARGO_TARGET_DIR=.rch-target rch exec -- cargo bench -p fj-lax --bench lax_baseline -- linalg/pinv_256x128_f64"
+    }
+  },
+  "certificate_analysis": {
+    "benchmark_matrix_numeric_rank": 4,
+    "rcond": 1e-15,
+    "cutoff": "rcond * sigma_max",
+    "old_margin_active_rank": 11,
+    "new_margin_active_rank": 4,
+    "tail_residual_rel": 2.59e-32,
+    "reason": "The low-rank QR path already proves omitted residual energy against the same cutoff family used by the SVD pseudoinverse. The old 0.5 margin over-certified below-cutoff singular directions; 1.0 accepts at the cutoff boundary and still falls back when residual energy exceeds it."
+  },
+  "isomorphism_proof": [
+    "Public shape, dtype, output layout, rcond handling, non-finite handling, and fallback behavior are unchanged.",
+    "Pivoted modified-Gram-Schmidt order is unchanged: pivot scan remains left-to-right with strict greater-than swaps, preserving equal-residual tie behavior.",
+    "No RNG, parallel nondeterminism, FMA request, mixed precision, or public sorting/tie-breaking rule is introduced.",
+    "The only accepted fast-path cases are still finite m>=n matrices whose unresolved residual energy certificate proves omitted directions are below the pseudoinverse cutoff.",
+    "The locked profile-shaped output digest is aa6633cd1c02444eca8fa95d72870710cafc7dbc9503e9c4056640f3118d492f."
+  ],
+  "goldens": {
+    "pinv_low_rank_profile_shape_golden_digest": "aa6633cd1c02444eca8fa95d72870710cafc7dbc9503e9c4056640f3118d492f",
+    "golden_file": "artifacts/performance/evidence/fj_lax_pinv_low_rank_residual_margin_p1vbf_pass191_2026-06-09.golden",
+    "golden_sha256_file": "artifacts/performance/evidence/fj_lax_pinv_low_rank_residual_margin_p1vbf_pass191_2026-06-09.golden.sha256"
+  },
+  "validation": {
+    "rch_tests": [
+      {
+        "command": "cargo test -p fj-lax --lib pinv -- --nocapture",
+        "worker": "ovh-a",
+        "result": "passed",
+        "summary": "9 passed; 0 failed; 1279 filtered out"
+      }
+    ],
+    "rch_check": {
+      "command": "cargo check -p fj-lax --all-targets",
+      "worker": "local fallback via rch",
+      "result": "passed"
+    },
+    "rch_clippy": {
+      "command": "cargo clippy -p fj-lax --all-targets -- -D warnings",
+      "worker": "local fallback via rch",
+      "result": "passed"
+    },
+    "local": [
+      {
+        "command": "cargo fmt --check --package fj-lax",
+        "result": "passed"
+      },
+      {
+        "command": "git diff --check",
+        "result": "passed"
+      },
+      {
+        "command": "ubs crates/fj-lax/src/linalg.rs",
+        "result": "nonzero_preexisting_inventory",
+        "note": "UBS embedded fmt, cargo check, clippy, and tests were clean; file-wide historical panic/indexing/unwrap inventory remains outside this lever."
+      }
+    ]
+  },
+  "next_route": "Reprofile after landing; if GEMM exact-order B-pack remains dominant, route to a fundamentally different approved primitive rather than another B-pack lifetime tweak."
+}
