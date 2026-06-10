@@ -983,6 +983,41 @@ enum CheapOp {
     Mul,
     Div,
     Neg,
+    // NaN-propagating elementwise max/min (jnp.maximum/minimum, JAX's relu/clamp
+    // lowering) and abs. All three are exact (no reassociation, deterministic
+    // rounding), so fusing them through a chain is bit-identical to the per-op
+    // path — and lets activation/clamp pipelines fuse instead of breaking the run.
+    Max,
+    Min,
+    Abs,
+}
+
+impl CheapOp {
+    /// Unary ops read a single operand (the chain value); their `b` slot is unused.
+    #[inline]
+    fn is_unary(self) -> bool {
+        matches!(self, CheapOp::Neg | CheapOp::Abs)
+    }
+}
+
+/// NaN-propagating max, bit-identical to fj-lax's `jax_max_f64` (the per-op path):
+/// any NaN operand yields a canonical NaN, else IEEE `f64::max`.
+#[inline]
+fn fused_jax_max(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else {
+        left.max(right)
+    }
+}
+
+#[inline]
+fn fused_jax_min(left: f64, right: f64) -> f64 {
+    if left.is_nan() || right.is_nan() {
+        f64::NAN
+    } else {
+        left.min(right)
+    }
 }
 
 fn cheap_op(p: Primitive) -> Option<CheapOp> {
@@ -992,6 +1027,9 @@ fn cheap_op(p: Primitive) -> Option<CheapOp> {
         Primitive::Mul => Some(CheapOp::Mul),
         Primitive::Div => Some(CheapOp::Div),
         Primitive::Neg => Some(CheapOp::Neg),
+        Primitive::Max => Some(CheapOp::Max),
+        Primitive::Min => Some(CheapOp::Min),
+        Primitive::Abs => Some(CheapOp::Abs),
         _ => None,
     }
 }
@@ -1094,7 +1132,10 @@ fn f64_fused_binary(op: CheapOp, left: f64, right: f64) -> f64 {
         CheapOp::Sub => left - right,
         CheapOp::Mul => left * right,
         CheapOp::Div => left / right,
-        CheapOp::Neg => left,
+        CheapOp::Max => fused_jax_max(left, right),
+        CheapOp::Min => fused_jax_min(left, right),
+        // Unary ops (handled by the chunk driver's unary arms); never a binary step.
+        CheapOp::Neg | CheapOp::Abs => left,
     }
 }
 
@@ -1214,7 +1255,11 @@ fn apply_fusion_other(
             (CheapOp::Sub, false) => out.iter_mut().for_each(|o| *o = s - *o),
             (CheapOp::Div, true) => out.iter_mut().for_each(|o| *o /= s),
             (CheapOp::Div, false) => out.iter_mut().for_each(|o| *o = s / *o),
-            (CheapOp::Neg, _) => {}
+            // Max/Min are commutative (incl. NaN propagation), so `chain_left`
+            // does not affect the value.
+            (CheapOp::Max, _) => out.iter_mut().for_each(|o| *o = fused_jax_max(*o, s)),
+            (CheapOp::Min, _) => out.iter_mut().for_each(|o| *o = fused_jax_min(*o, s)),
+            (CheapOp::Neg | CheapOp::Abs, _) => {}
         },
         FOperand::Ext(i) => {
             let sl = &ext[i][base..base + out.len()];
@@ -1225,7 +1270,15 @@ fn apply_fusion_other(
                 (CheapOp::Sub, false) => out.iter_mut().zip(sl).for_each(|(o, e)| *o = *e - *o),
                 (CheapOp::Div, true) => out.iter_mut().zip(sl).for_each(|(o, e)| *o /= *e),
                 (CheapOp::Div, false) => out.iter_mut().zip(sl).for_each(|(o, e)| *o = *e / *o),
-                (CheapOp::Neg, _) => {}
+                (CheapOp::Max, _) => out
+                    .iter_mut()
+                    .zip(sl)
+                    .for_each(|(o, e)| *o = fused_jax_max(*o, *e)),
+                (CheapOp::Min, _) => out
+                    .iter_mut()
+                    .zip(sl)
+                    .for_each(|(o, e)| *o = fused_jax_min(*o, *e)),
+                (CheapOp::Neg | CheapOp::Abs, _) => {}
             }
         }
         FOperand::RowBroadcast(i) => {
@@ -1250,15 +1303,22 @@ fn apply_fusion_chunk(out: &mut [f64], tape: &[FStep], ext: &[&[f64]], base: usi
         FOperand::Scalar(v) => out.fill(v),
         FOperand::Chain => {}
     }
-    if s0.op == CheapOp::Neg {
-        out.iter_mut().for_each(|o| *o = -*o);
-    } else {
-        apply_fusion_other(out, s0.op, true, s0.b, ext, base);
+    match s0.op {
+        CheapOp::Neg => out.iter_mut().for_each(|o| *o = -*o),
+        CheapOp::Abs => out.iter_mut().for_each(|o| *o = o.abs()),
+        _ => apply_fusion_other(out, s0.op, true, s0.b, ext, base),
     }
     for step in &tape[1..] {
-        if step.op == CheapOp::Neg {
-            out.iter_mut().for_each(|o| *o = -*o);
-            continue;
+        match step.op {
+            CheapOp::Neg => {
+                out.iter_mut().for_each(|o| *o = -*o);
+                continue;
+            }
+            CheapOp::Abs => {
+                out.iter_mut().for_each(|o| *o = o.abs());
+                continue;
+            }
+            _ => {}
         }
         match (step.a, step.b) {
             (FOperand::Chain, FOperand::Chain) => match step.op {
@@ -1266,7 +1326,9 @@ fn apply_fusion_chunk(out: &mut [f64], tape: &[FStep], ext: &[&[f64]], base: usi
                 CheapOp::Sub => out.iter_mut().for_each(|o| *o = *o - *o),
                 CheapOp::Mul => out.iter_mut().for_each(|o| *o = *o * *o),
                 CheapOp::Div => out.iter_mut().for_each(|o| *o = *o / *o),
-                CheapOp::Neg => {}
+                // max(x,x)==x and min(x,x)==x (incl. NaN: x is already NaN).
+                CheapOp::Max | CheapOp::Min => {}
+                CheapOp::Neg | CheapOp::Abs => {}
             },
             (FOperand::Chain, other) => apply_fusion_other(out, step.op, true, other, ext, base),
             (other, FOperand::Chain) => apply_fusion_other(out, step.op, false, other, ext, base),
@@ -1303,7 +1365,7 @@ fn try_fuse_elementwise_chain_f64(
         let Some(op) = cheap_op(eqn.primitive) else {
             break;
         };
-        let needed = if op == CheapOp::Neg { 1 } else { 2 };
+        let needed = if op.is_unary() { 1 } else { 2 };
         if eqn.inputs.len() != needed {
             break;
         }
@@ -1317,7 +1379,7 @@ fn try_fuse_elementwise_chain_f64(
             &mut ext_vars,
             &mut shape,
         );
-        let b = if op == CheapOp::Neg {
+        let b = if op.is_unary() {
             Some(FOperand::Scalar(0.0))
         } else {
             classify_fusion_operand(
@@ -1476,13 +1538,24 @@ fn f32_fused_binary(op: CheapOp, left: f32, right: f32) -> f32 {
         CheapOp::Sub => (left - right) as f32,
         CheapOp::Mul => (left * right) as f32,
         CheapOp::Div => (left / right) as f32,
-        CheapOp::Neg => left as f32,
+        // Mirrors fj-lax dense f32 max/min: widen, NaN-propagating op, round to
+        // f32 (exact — the result equals one input, already f32-representable).
+        CheapOp::Max => fused_jax_max(left, right) as f32,
+        CheapOp::Min => fused_jax_min(left, right) as f32,
+        // Unary ops (handled by the chunk driver); never a binary step.
+        CheapOp::Neg | CheapOp::Abs => left as f32,
     }
 }
 
 #[inline]
 fn f32_fused_neg(value: f32) -> f32 {
     (-f64::from(value)) as f32
+}
+
+#[inline]
+fn f32_fused_abs(value: f32) -> f32 {
+    // Mirrors fj-lax dense f32 abs: widen, f64::abs, round to f32 (exact).
+    f64::from(value).abs() as f32
 }
 
 #[inline]
@@ -1640,15 +1713,22 @@ fn apply_f32_fusion_chunk(out: &mut [f32], tape: &[F32Step], ext: &[&[f32]], bas
         F32Operand::Scalar(v) => out.fill(v),
         F32Operand::Chain => {}
     }
-    if s0.op == CheapOp::Neg {
-        out.iter_mut().for_each(|o| *o = f32_fused_neg(*o));
-    } else {
-        apply_f32_fusion_other(out, s0.op, true, s0.b, ext, base);
+    match s0.op {
+        CheapOp::Neg => out.iter_mut().for_each(|o| *o = f32_fused_neg(*o)),
+        CheapOp::Abs => out.iter_mut().for_each(|o| *o = f32_fused_abs(*o)),
+        _ => apply_f32_fusion_other(out, s0.op, true, s0.b, ext, base),
     }
     for step in &tape[1..] {
-        if step.op == CheapOp::Neg {
-            out.iter_mut().for_each(|o| *o = f32_fused_neg(*o));
-            continue;
+        match step.op {
+            CheapOp::Neg => {
+                out.iter_mut().for_each(|o| *o = f32_fused_neg(*o));
+                continue;
+            }
+            CheapOp::Abs => {
+                out.iter_mut().for_each(|o| *o = f32_fused_abs(*o));
+                continue;
+            }
+            _ => {}
         }
         match (step.a, step.b) {
             (F32Operand::Chain, F32Operand::Chain) => out
@@ -1690,7 +1770,7 @@ fn try_fuse_elementwise_chain_f32(
         let Some(op) = cheap_op(eqn.primitive) else {
             break;
         };
-        let needed = if op == CheapOp::Neg { 1 } else { 2 };
+        let needed = if op.is_unary() { 1 } else { 2 };
         if eqn.inputs.len() != needed {
             break;
         }
@@ -1704,7 +1784,7 @@ fn try_fuse_elementwise_chain_f32(
             &mut ext_vars,
             &mut shape,
         );
-        let b = if op == CheapOp::Neg {
+        let b = if op.is_unary() {
             Some(F32Operand::Scalar(0.0))
         } else {
             classify_f32_fusion_operand(
@@ -1859,7 +1939,10 @@ fn apply_i64_fusion_other(
             (CheapOp::Div, false) => out
                 .iter_mut()
                 .for_each(|o| *o = s.checked_div(*o).unwrap_or(0)),
-            (CheapOp::Neg, _) => {}
+            // Integer max/min are commutative and total (no NaN).
+            (CheapOp::Max, _) => out.iter_mut().for_each(|o| *o = (*o).max(s)),
+            (CheapOp::Min, _) => out.iter_mut().for_each(|o| *o = (*o).min(s)),
+            (CheapOp::Neg | CheapOp::Abs, _) => {}
         },
         I64Operand::Ext(i) => {
             let sl = &ext[i][base..base + out.len()];
@@ -1888,7 +1971,9 @@ fn apply_i64_fusion_other(
                     .iter_mut()
                     .zip(sl)
                     .for_each(|(o, e)| *o = e.checked_div(*o).unwrap_or(0)),
-                (CheapOp::Neg, _) => {}
+                (CheapOp::Max, _) => out.iter_mut().zip(sl).for_each(|(o, e)| *o = (*o).max(*e)),
+                (CheapOp::Min, _) => out.iter_mut().zip(sl).for_each(|(o, e)| *o = (*o).min(*e)),
+                (CheapOp::Neg | CheapOp::Abs, _) => {}
             }
         }
         I64Operand::Chain => {}
@@ -1905,15 +1990,22 @@ fn apply_i64_fusion_chunk(out: &mut [i64], tape: &[I64Step], ext: &[&[i64]], bas
         I64Operand::Scalar(v) => out.fill(v),
         I64Operand::Chain => {}
     }
-    if s0.op == CheapOp::Neg {
-        out.iter_mut().for_each(|o| *o = o.wrapping_neg());
-    } else {
-        apply_i64_fusion_other(out, s0.op, true, s0.b, ext, base);
+    match s0.op {
+        CheapOp::Neg => out.iter_mut().for_each(|o| *o = o.wrapping_neg()),
+        CheapOp::Abs => out.iter_mut().for_each(|o| *o = o.wrapping_abs()),
+        _ => apply_i64_fusion_other(out, s0.op, true, s0.b, ext, base),
     }
     for step in &tape[1..] {
-        if step.op == CheapOp::Neg {
-            out.iter_mut().for_each(|o| *o = o.wrapping_neg());
-            continue;
+        match step.op {
+            CheapOp::Neg => {
+                out.iter_mut().for_each(|o| *o = o.wrapping_neg());
+                continue;
+            }
+            CheapOp::Abs => {
+                out.iter_mut().for_each(|o| *o = o.wrapping_abs());
+                continue;
+            }
+            _ => {}
         }
         match (step.a, step.b) {
             (I64Operand::Chain, I64Operand::Chain) => match step.op {
@@ -1923,7 +2015,9 @@ fn apply_i64_fusion_chunk(out: &mut [i64], tape: &[I64Step], ext: &[&[i64]], bas
                 CheapOp::Div => out
                     .iter_mut()
                     .for_each(|o| *o = o.checked_div(*o).unwrap_or(0)),
-                CheapOp::Neg => {}
+                // max(x,x)==x, min(x,x)==x.
+                CheapOp::Max | CheapOp::Min => {}
+                CheapOp::Neg | CheapOp::Abs => {}
             },
             (I64Operand::Chain, other) => {
                 apply_i64_fusion_other(out, step.op, true, other, ext, base)
@@ -1961,7 +2055,7 @@ fn try_fuse_elementwise_chain_i64(
         let Some(op) = cheap_op(eqn.primitive) else {
             break;
         };
-        let needed = if op == CheapOp::Neg { 1 } else { 2 };
+        let needed = if op.is_unary() { 1 } else { 2 };
         if eqn.inputs.len() != needed {
             break;
         }
@@ -1975,7 +2069,7 @@ fn try_fuse_elementwise_chain_i64(
             &mut ext_vars,
             &mut shape,
         );
-        let b = if op == CheapOp::Neg {
+        let b = if op.is_unary() {
             Some(I64Operand::Scalar(0))
         } else {
             classify_i64_fusion_operand(
@@ -2386,6 +2480,79 @@ mod tests {
                 got[i].to_bits(),
                 want[i].to_bits(),
                 "fused chain mismatch at {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn fusion_max_min_abs_chain_matches_reference_bit_for_bit() {
+        // Build a clamp/relu/abs pipeline (hardtanh-shaped):
+        //   v1 = abs(x); v2 = max(v1, 0.5); v3 = min(v2, 6.0);
+        //   v4 = max(v3, y); v5 = mul(v4, 2.0); out = sub(v5, x)
+        // Exercises Abs (unary), Max/Min with scalar, and Max with an external
+        // tensor — 6 single-use ops -> fuses. Inputs include NaN/inf so the
+        // fused result must match the per-op jax_max/jax_min NaN propagation bit
+        // for bit (any NaN operand => canonical NaN).
+        let n = 4096usize;
+        let xv: Vec<f64> = (0..n)
+            .map(|i| match i % 7 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                _ => i as f64 * 0.017 - 30.0,
+            })
+            .collect();
+        let yv: Vec<f64> = (0..n)
+            .map(|i| if i % 5 == 0 { f64::NAN } else { (i as f64 * 0.011).cos() * 4.0 })
+            .collect();
+        let jmax = |a: f64, b: f64| if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) };
+        let jmin = |a: f64, b: f64| if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) };
+        let x = VarId(0);
+        let y = VarId(1);
+        let (v1, v2, v3, v4, v5, out) =
+            (VarId(2), VarId(3), VarId(4), VarId(5), VarId(6), VarId(7));
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(Primitive::Abs, smallvec![Atom::Var(x)], v1),
+            mk(Primitive::Max, smallvec![Atom::Var(v1), lit(0.5)], v2),
+            mk(Primitive::Min, smallvec![Atom::Var(v2), lit(6.0)], v3),
+            mk(Primitive::Max, smallvec![Atom::Var(v3), Atom::Var(y)], v4),
+            mk(Primitive::Mul, smallvec![Atom::Var(v4), lit(2.0)], v5),
+            mk(Primitive::Sub, smallvec![Atom::Var(v5), Atom::Var(x)], out),
+        ];
+        let jaxpr = Jaxpr::new(vec![x, y], vec![], vec![out], eqns);
+        let got = f64_vec(
+            &eval_jaxpr(
+                &jaxpr,
+                &[f64_tensor(n, |i| xv[i]), f64_tensor(n, |i| yv[i])],
+            )
+            .unwrap()[0],
+        );
+        let want: Vec<f64> = (0..n)
+            .map(|i| {
+                let v1 = xv[i].abs();
+                let v2 = jmax(v1, 0.5);
+                let v3 = jmin(v2, 6.0);
+                let v4 = jmax(v3, yv[i]);
+                let v5 = v4 * 2.0;
+                v5 - xv[i]
+            })
+            .collect();
+        assert_eq!(got.len(), n);
+        for i in 0..n {
+            assert_eq!(
+                got[i].to_bits(),
+                want[i].to_bits(),
+                "fused max/min/abs chain mismatch at {i}: {} vs {}",
                 got[i],
                 want[i]
             );

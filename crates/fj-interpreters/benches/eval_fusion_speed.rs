@@ -949,9 +949,101 @@ fn run_i64() {
     );
 }
 
+/// Clamp/relu/abs activation chain (f32 — JAX's default inference dtype). Before
+/// Max/Min/Abs were fusable, this chain fused NOTHING (the first Max broke the run
+/// and the prefix was below FUSION_MIN_RUN), so eval_jaxpr ran 8 separate
+/// materializing passes — identical to the unfused arm. Now it fuses into one pass.
+fn run_f32_clamp() {
+    let n = 1usize << 20; // 1M f32 = 4 MB per tensor
+    let x: Vec<f32> = (0..n).map(|i| i as f32 * 1e-5 - 5.0).collect();
+    let y: Vec<f32> = (0..n).map(|i| (i as f32 * 3e-7).cos() * 4.0).collect();
+
+    // v1=abs(x); v2=max(v1,0); v3=mul(v2,y); v4=min(v3,6); v5=max(v4,0);
+    // v6=sub(v5,x); v7=max(v6,y); out=mul(v7,0.5)  (8 ops, single-use chain)
+    let xv = VarId(0);
+    let yv = VarId(1);
+    let v: Vec<VarId> = (2..=9).map(VarId).collect();
+    let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+        primitive: p,
+        inputs: ins,
+        outputs: smallvec![o],
+        params: BTreeMap::new(),
+        sub_jaxprs: vec![],
+        effects: vec![],
+    };
+    let lit = |c: f32| Atom::Lit(Literal::from_f32(c));
+    let eqns = vec![
+        mk(Primitive::Abs, smallvec![Atom::Var(xv)], v[0]),
+        mk(Primitive::Max, smallvec![Atom::Var(v[0]), lit(0.0)], v[1]),
+        mk(Primitive::Mul, smallvec![Atom::Var(v[1]), Atom::Var(yv)], v[2]),
+        mk(Primitive::Min, smallvec![Atom::Var(v[2]), lit(6.0)], v[3]),
+        mk(Primitive::Max, smallvec![Atom::Var(v[3]), lit(0.0)], v[4]),
+        mk(Primitive::Sub, smallvec![Atom::Var(v[4]), Atom::Var(xv)], v[5]),
+        mk(Primitive::Max, smallvec![Atom::Var(v[5]), Atom::Var(yv)], v[6]),
+        mk(Primitive::Mul, smallvec![Atom::Var(v[6]), lit(0.5)], v[7]),
+    ];
+    let jaxpr = Jaxpr::new(vec![xv, yv], vec![], vec![v[7]], eqns.clone());
+    let args = [f32_tensor(x.clone()), f32_tensor(y.clone())];
+
+    let unfused = || {
+        let mut env: Vec<Option<Value>> = vec![None; 10];
+        env[0] = Some(args[0].clone());
+        env[1] = Some(args[1].clone());
+        for eqn in &eqns {
+            let ins: Vec<Value> = eqn
+                .inputs
+                .iter()
+                .map(|a| match a {
+                    Atom::Var(vr) => env[vr.0 as usize].clone().unwrap(),
+                    Atom::Lit(l) => Value::Scalar(*l),
+                })
+                .collect();
+            let out = eval_primitive(eqn.primitive, &ins, &eqn.params).unwrap();
+            env[eqn.outputs[0].0 as usize] = Some(out);
+        }
+        env[v[7].0 as usize].clone().unwrap()
+    };
+
+    // Correctness: fused == unfused, bit-for-bit across all elements.
+    let f = eval_jaxpr(&jaxpr, &args).unwrap();
+    let u = unfused();
+    if let (Value::Tensor(ft), Value::Tensor(ut)) = (&f[0], &u) {
+        for i in 0..n {
+            assert_eq!(
+                f32_bits_at(ft, i),
+                f32_bits_at(ut, i),
+                "fused != unfused at {i}"
+            );
+        }
+    }
+
+    let iters = 60;
+    let _ = eval_jaxpr(&jaxpr, &args).unwrap();
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap());
+    }
+    let fused = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+    let _ = unfused();
+    let t1 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(unfused());
+    }
+    let unf = t1.elapsed().as_nanos() as f64 / iters as f64;
+
+    println!(
+        "EVAL_FUSION_SPEED_F32_CLAMP n={n} ops=8 unfused={:.3}ms fused={:.3}ms speedup={:.2}x",
+        unf / 1e6,
+        fused / 1e6,
+        unf / fused,
+    );
+}
+
 fn main() {
     run_f64();
     run_f32();
+    run_f32_clamp();
     run_f32_row_broadcast();
     run_f32_col_broadcast();
     run_f64_row_broadcast();
