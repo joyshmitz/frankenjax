@@ -1001,6 +1001,11 @@ enum LiteralBufferStorage {
         values: Arc<Vec<bool>>,
         literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
     },
+    BoolWords {
+        words: Arc<Vec<u64>>,
+        len: usize,
+        literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
+    },
     /// Dense complex storage: `(re, im)` pairs as `f64`, tagged with the logical
     /// complex dtype (`Complex64` or `Complex128`). Lets complex-heavy ops (FFT,
     /// complex elementwise) borrow a packed `&[(f64, f64)]` slice and emit dense
@@ -1088,6 +1093,23 @@ impl LiteralBuffer {
                 literals: Arc::new(OnceLock::new()),
             },
         }
+    }
+
+    #[must_use]
+    pub fn from_bool_words(words: Vec<u64>, len: usize) -> Option<Self> {
+        let expected_words = len.div_ceil(u64::BITS as usize);
+        if words.len() != expected_words {
+            return None;
+        }
+        let mut words = words;
+        clear_unused_bool_word_bits(&mut words, len);
+        Some(Self {
+            storage: LiteralBufferStorage::BoolWords {
+                words: Arc::new(words),
+                len,
+                literals: Arc::new(OnceLock::new()),
+            },
+        })
     }
 
     /// Build a dense complex buffer from `(re, im)` `f64` pairs tagged with a
@@ -1200,6 +1222,13 @@ impl LiteralBuffer {
             LiteralBufferStorage::Bool { values, literals } => literals
                 .get_or_init(|| Arc::new(values.iter().copied().map(Literal::Bool).collect()))
                 .as_slice(),
+            LiteralBufferStorage::BoolWords {
+                words,
+                len,
+                literals,
+            } => literals
+                .get_or_init(|| Arc::new(materialize_bool_words(words, *len)))
+                .as_slice(),
             LiteralBufferStorage::Complex {
                 values,
                 dtype,
@@ -1261,6 +1290,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::HalfFloat { .. } => None,
             LiteralBufferStorage::I64 { .. } => None,
             LiteralBufferStorage::Bool { .. } => None,
+            LiteralBufferStorage::BoolWords { .. } => None,
             LiteralBufferStorage::Complex { .. } => None,
             LiteralBufferStorage::RepeatedPatches { .. } => None,
             LiteralBufferStorage::Concat { .. } => None,
@@ -1330,6 +1360,7 @@ impl LiteralBuffer {
             | LiteralBufferStorage::F32 { .. }
             | LiteralBufferStorage::HalfFloat { .. }
             | LiteralBufferStorage::Bool { .. }
+            | LiteralBufferStorage::BoolWords { .. }
             | LiteralBufferStorage::Complex { .. }
             | LiteralBufferStorage::RepeatedPatches { .. }
             | LiteralBufferStorage::Concat { .. } => None,
@@ -1345,9 +1376,18 @@ impl LiteralBuffer {
             | LiteralBufferStorage::F32 { .. }
             | LiteralBufferStorage::HalfFloat { .. }
             | LiteralBufferStorage::I64 { .. }
+            | LiteralBufferStorage::BoolWords { .. }
             | LiteralBufferStorage::Complex { .. }
             | LiteralBufferStorage::RepeatedPatches { .. }
             | LiteralBufferStorage::Concat { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_bool_words(&self) -> Option<(&[u64], usize)> {
+        match &self.storage {
+            LiteralBufferStorage::BoolWords { words, len, .. } => Some((words.as_slice(), *len)),
+            _ => None,
         }
     }
 
@@ -1360,6 +1400,7 @@ impl LiteralBuffer {
             LiteralBufferStorage::HalfFloat { values, .. } => values.len(),
             LiteralBufferStorage::I64 { values, .. } => values.len(),
             LiteralBufferStorage::Bool { values, .. } => values.len(),
+            LiteralBufferStorage::BoolWords { len, .. } => *len,
             LiteralBufferStorage::Complex { values, .. } => values.len(),
             LiteralBufferStorage::RepeatedPatches { base, repeats, .. } => base.len() * repeats,
             LiteralBufferStorage::Concat { len, .. } => *len,
@@ -1384,6 +1425,7 @@ impl LiteralBuffer {
                 | LiteralBufferStorage::HalfFloat { .. }
                 | LiteralBufferStorage::I64 { .. }
                 | LiteralBufferStorage::Bool { .. }
+                | LiteralBufferStorage::BoolWords { .. }
                 | LiteralBufferStorage::Complex { .. }
                 | LiteralBufferStorage::RepeatedPatches { .. }
                 | LiteralBufferStorage::Concat { .. }
@@ -1399,6 +1441,7 @@ impl LiteralBuffer {
             | LiteralBufferStorage::HalfFloat { .. }
             | LiteralBufferStorage::I64 { .. }
             | LiteralBufferStorage::Bool { .. }
+            | LiteralBufferStorage::BoolWords { .. }
             | LiteralBufferStorage::Complex { .. }
             | LiteralBufferStorage::RepeatedPatches { .. }
             | LiteralBufferStorage::Concat { .. } => unreachable!("lazy buffer was materialized"),
@@ -1458,6 +1501,17 @@ impl Clone for LiteralBuffer {
             LiteralBufferStorage::Bool { values, literals } => Self {
                 storage: LiteralBufferStorage::Bool {
                     values: Arc::clone(values),
+                    literals: Arc::clone(literals),
+                },
+            },
+            LiteralBufferStorage::BoolWords {
+                words,
+                len,
+                literals,
+            } => Self {
+                storage: LiteralBufferStorage::BoolWords {
+                    words: Arc::clone(words),
+                    len: *len,
                     literals: Arc::clone(literals),
                 },
             },
@@ -1643,6 +1697,19 @@ impl IntoIterator for LiteralBuffer {
                     .collect::<Vec<_>>()
                     .into_iter()
             }
+            LiteralBufferStorage::BoolWords {
+                words,
+                len,
+                literals,
+            } => {
+                if let Some(materialized) = literals.get() {
+                    return Arc::try_unwrap(Arc::clone(materialized))
+                        .unwrap_or_else(|elements| (*elements).clone())
+                        .into_iter();
+                }
+
+                materialize_bool_words(&words, len).into_iter()
+            }
             LiteralBufferStorage::Complex {
                 values,
                 dtype,
@@ -1758,6 +1825,27 @@ fn half_bits_to_literal(bits: u16, dtype: DType) -> Literal {
         DType::F16 => Literal::F16Bits(bits),
         _ => Literal::BF16Bits(bits),
     }
+}
+
+fn clear_unused_bool_word_bits(words: &mut [u64], len: usize) {
+    let used_bits = len % u64::BITS as usize;
+    if used_bits == 0 || words.is_empty() {
+        return;
+    }
+    let mask = (1_u64 << used_bits) - 1;
+    if let Some(last) = words.last_mut() {
+        *last &= mask;
+    }
+}
+
+fn materialize_bool_words(words: &[u64], len: usize) -> Vec<Literal> {
+    let mut out = Vec::with_capacity(len);
+    for index in 0..len {
+        let word = words[index / u64::BITS as usize];
+        let bit = (word >> (index % u64::BITS as usize)) & 1;
+        out.push(Literal::Bool(bit != 0));
+    }
+    out
 }
 
 fn materialize_repeated_patches(
@@ -6530,6 +6618,55 @@ mod tests {
             buffer.as_i64_slice().is_none(),
             "mutating dense storage should materialize to literal storage"
         );
+    }
+
+    #[test]
+    fn bool_word_literal_buffer_preserves_literal_api_and_tail_canonicalization() {
+        for len in [0usize, 1, 63, 64, 65, 127, 128, 129] {
+            let expected_flags: Vec<bool> = (0..len).map(|i| i % 3 == 0 || i % 7 == 1).collect();
+            let expected_literals: Vec<Literal> =
+                expected_flags.iter().copied().map(Literal::Bool).collect();
+            let mut words = vec![0_u64; len.div_ceil(u64::BITS as usize)];
+            for (index, &flag) in expected_flags.iter().enumerate() {
+                if flag {
+                    words[index / u64::BITS as usize] |= 1_u64 << (index % u64::BITS as usize);
+                }
+            }
+            if let Some(last) = words.last_mut() {
+                let tail_bits = len % u64::BITS as usize;
+                if tail_bits != 0 {
+                    *last |= !((1_u64 << tail_bits) - 1);
+                }
+            }
+
+            let mut buffer =
+                LiteralBuffer::from_bool_words(words, len).expect("valid bool word buffer");
+            assert_eq!(buffer.len(), len);
+            assert_eq!(buffer.as_bool_words().expect("word-backed").1, len);
+            assert_eq!(buffer.as_slice(), expected_literals.as_slice(), "len={len}");
+            assert_eq!(buffer.to_vec(), expected_literals, "len={len}");
+            assert_eq!(
+                serde_json::to_string(&buffer).expect("serialize bool words"),
+                serde_json::to_string(&expected_literals).expect("serialize literal bools"),
+                "len={len}"
+            );
+            assert_eq!(
+                buffer.clone().into_iter().collect::<Vec<_>>(),
+                expected_literals,
+                "len={len}"
+            );
+
+            if len != 0 {
+                buffer[0] = Literal::Bool(!expected_flags[0]);
+                assert!(
+                    buffer.as_bool_words().is_none(),
+                    "mutating bool words must materialize to literal storage"
+                );
+                assert_eq!(buffer[0], Literal::Bool(!expected_flags[0]));
+            }
+        }
+
+        assert!(LiteralBuffer::from_bool_words(vec![0], 65).is_none());
     }
 
     #[test]

@@ -58,6 +58,44 @@ fn reduce_real_literal(dtype: DType, value: f64) -> Literal {
     }
 }
 
+fn bool_word_bit(words: &[u64], index: usize) -> bool {
+    let word = words[index / u64::BITS as usize];
+    ((word >> (index % u64::BITS as usize)) & 1) != 0
+}
+
+fn reduce_bool_words_scalar(
+    primitive: Primitive,
+    words: &[u64],
+    len: usize,
+    bool_init: bool,
+) -> Option<bool> {
+    if len == 0 {
+        return Some(bool_init);
+    }
+
+    match primitive {
+        Primitive::ReduceAnd => {
+            let full_words = len / u64::BITS as usize;
+            let tail_bits = len % u64::BITS as usize;
+            let full_ok = words[..full_words].iter().all(|&word| word == u64::MAX);
+            let tail_ok = if tail_bits == 0 {
+                true
+            } else {
+                let tail_mask = (1_u64 << tail_bits) - 1;
+                words[full_words] == tail_mask
+            };
+            Some(full_ok && tail_ok)
+        }
+        Primitive::ReduceOr => Some(words.iter().any(|&word| word != 0)),
+        Primitive::ReduceXor => Some(
+            words
+                .iter()
+                .fold(false, |acc, word| acc ^ (word.count_ones() % 2 == 1)),
+        ),
+        _ => None,
+    }
+}
+
 /// Dense F64 full-reduction fast path for `ReduceSum`/`ReduceProd`/`ReduceMax`/
 /// `ReduceMin`. Folds the contiguous `f64` backing store directly instead of
 /// materializing the 24-byte `Literal` enum and matching `as_f64()` per element
@@ -497,8 +535,7 @@ fn dense_f64_axis_reduce<T: Copy + Sync>(
     // NaN bits and non-associative sum order. Non-contiguous axis sets fall
     // through to the odometer.
     let reduced_axes: Vec<usize> = (0..rank).filter(|i| !kept_axes.contains(i)).collect();
-    if let Some((outer, reduce, inner)) =
-        contiguous_reduce_block(&tensor.shape.dims, &reduced_axes)
+    if let Some((outer, reduce, inner)) = contiguous_reduce_block(&tensor.shape.dims, &reduced_axes)
     {
         let mut result = vec![float_init; out_count];
         if inner == 1 {
@@ -710,7 +747,11 @@ pub(crate) fn eval_reduce_axes(
                 // One accumulation step into output cell `idx` for value `(re, im)`,
                 // shared by the dense contiguous-block fast path and the generic
                 // odometer fallback so they stay bit-identical.
-                let accumulate = |result_re: &mut [f64], result_im: &mut [f64], idx: usize, re: f64, im: f64| {
+                let accumulate = |result_re: &mut [f64],
+                                  result_im: &mut [f64],
+                                  idx: usize,
+                                  re: f64,
+                                  im: f64| {
                     match primitive {
                         Primitive::ReduceProd => {
                             let acc_re = result_re[idx];
@@ -822,7 +863,13 @@ pub(crate) fn eval_reduce_axes(
                                 let out_base = o * inner;
                                 for i in 0..inner {
                                     let (re, im) = values[in_base + i];
-                                    accumulate(&mut result_re, &mut result_im, out_base + i, re, im);
+                                    accumulate(
+                                        &mut result_re,
+                                        &mut result_im,
+                                        out_base + i,
+                                        re,
+                                        im,
+                                    );
                                 }
                             }
                         }
@@ -862,11 +909,9 @@ pub(crate) fn eval_reduce_axes(
                 // each cell accumulates ascending-r, exactly the odometer's order
                 // (int_op is associative for sum/prod; max/min are order-invariant).
                 let dense_i64 = tensor.elements.as_i64_slice();
-                let block =
-                    dense_i64.and_then(|v| {
-                        contiguous_reduce_block(&tensor.shape.dims, &axes_sorted)
-                            .map(|b| (v, b))
-                    });
+                let block = dense_i64.and_then(|v| {
+                    contiguous_reduce_block(&tensor.shape.dims, &axes_sorted).map(|b| (v, b))
+                });
                 if let Some((values, (outer, reduce, inner))) = block {
                     if inner == 1 {
                         for (o, slot) in result.iter_mut().enumerate() {
@@ -1093,6 +1138,12 @@ pub(crate) fn eval_reduce_bitwise_axes(
                             }
                             return Ok(Value::scalar_bool(acc));
                         }
+                        if let Some((words, len)) = tensor.elements.as_bool_words()
+                            && let Some(acc) =
+                                reduce_bool_words_scalar(primitive, words, len, bool_init)
+                        {
+                            return Ok(Value::scalar_bool(acc));
+                        }
                         let mut acc = bool_init;
                         for literal in &tensor.elements {
                             let val = match literal {
@@ -1189,6 +1240,11 @@ pub(crate) fn eval_reduce_bitwise_axes(
                             let out_idx = odometer.next_index();
                             result[out_idx] = bool_op(result[out_idx], val);
                         }
+                    } else if let Some((words, len)) = tensor.elements.as_bool_words() {
+                        for index in 0..len {
+                            let out_idx = odometer.next_index();
+                            result[out_idx] = bool_op(result[out_idx], bool_word_bit(words, index));
+                        }
                     } else {
                         for literal in tensor.elements.iter() {
                             let out_idx = odometer.next_index();
@@ -1205,11 +1261,9 @@ pub(crate) fn eval_reduce_bitwise_axes(
                         }
                     }
 
-                    let elements = result.into_iter().map(Literal::Bool).collect();
-                    Ok(Value::Tensor(TensorValue::new(
-                        DType::Bool,
+                    Ok(Value::Tensor(TensorValue::new_bool_values(
                         Shape { dims: out_dims },
-                        elements,
+                        result,
                     )?))
                 }
                 DType::I64 => {
@@ -1902,6 +1956,7 @@ pub(crate) fn eval_cumulative(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fj_core::LiteralBuffer;
     use std::collections::BTreeMap;
 
     fn s_f64(v: f64) -> Value {
@@ -2065,8 +2120,9 @@ mod tests {
         let dims = vec![data.len() as u32];
 
         // Dense F32 storage (fast path) vs boxed-Literal F32 (generic path).
-        let dense =
-            Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        let dense = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap(),
+        );
         assert!(dense.as_tensor().unwrap().elements.as_f32_slice().is_some());
         let boxed = Value::Tensor(
             TensorValue::new(
@@ -2113,7 +2169,16 @@ mod tests {
         // accumulator ascending, then round back to the half dtype at output. Cover
         // ±inf, NaN, signed zero, and large magnitudes.
         let src: Vec<f64> = std::hint::black_box(vec![
-            1.5, -0.0, f64::NAN, -3.25, f64::INFINITY, 0.0, 240.0, -240.0, f64::NEG_INFINITY, 2.5,
+            1.5,
+            -0.0,
+            f64::NAN,
+            -3.25,
+            f64::INFINITY,
+            0.0,
+            240.0,
+            -240.0,
+            f64::NEG_INFINITY,
+            2.5,
         ]);
         let cases: [(Primitive, f64, fn(f64, f64) -> f64); 4] = [
             (Primitive::ReduceSum, 0.0, |a, b| a + b),
@@ -2136,12 +2201,26 @@ mod tests {
                 .collect();
             let dims = vec![src.len() as u32];
             let dense = Value::Tensor(
-                TensorValue::new_half_float_values(dtype, Shape { dims: dims.clone() }, bits).unwrap(),
+                TensorValue::new_half_float_values(dtype, Shape { dims: dims.clone() }, bits)
+                    .unwrap(),
             );
-            assert!(dense.as_tensor().unwrap().elements.as_half_float_slice().is_some());
-            let boxed =
-                Value::Tensor(TensorValue::new(dtype, Shape { dims }, lits).unwrap());
-            assert!(boxed.as_tensor().unwrap().elements.as_half_float_slice().is_none());
+            assert!(
+                dense
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some()
+            );
+            let boxed = Value::Tensor(TensorValue::new(dtype, Shape { dims }, lits).unwrap());
+            assert!(
+                boxed
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_none()
+            );
 
             let extract_half_bits = |val: &Value| -> u16 {
                 match val {
@@ -2150,10 +2229,10 @@ mod tests {
                 }
             };
             for (prim, finit, fop) in cases {
-                let d =
-                    eval_reduce(prim, std::slice::from_ref(&dense), 0, finit, |a, _| a, fop).unwrap();
-                let b =
-                    eval_reduce(prim, std::slice::from_ref(&boxed), 0, finit, |a, _| a, fop).unwrap();
+                let d = eval_reduce(prim, std::slice::from_ref(&dense), 0, finit, |a, _| a, fop)
+                    .unwrap();
+                let b = eval_reduce(prim, std::slice::from_ref(&boxed), 0, finit, |a, _| a, fop)
+                    .unwrap();
                 assert_eq!(
                     extract_half_bits(&d),
                     extract_half_bits(&b),
@@ -2795,6 +2874,85 @@ mod tests {
     }
 
     #[test]
+    fn bool_word_reduce_bit_identical_to_literal_path() {
+        let word_tensor = |dims: Vec<u32>, data: &[bool]| -> Value {
+            let mut words = vec![0_u64; data.len().div_ceil(u64::BITS as usize)];
+            for (index, &flag) in data.iter().enumerate() {
+                if flag {
+                    words[index / u64::BITS as usize] |= 1_u64 << (index % u64::BITS as usize);
+                }
+            }
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Bool,
+                    Shape { dims },
+                    LiteralBuffer::from_bool_words(words, data.len()).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let literal_tensor = |dims: Vec<u32>, data: &[bool]| -> Value {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::Bool,
+                    Shape { dims },
+                    data.iter().copied().map(Literal::Bool).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let bools = |v: &Value| -> Vec<bool> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|literal| matches!(literal, Literal::Bool(true)))
+                .collect()
+        };
+
+        for len in [0usize, 1, 63, 64, 65, 127, 128, 129] {
+            let data: Vec<bool> = (0..len).map(|i| i % 5 != 2 && i % 11 != 7).collect();
+            let word = word_tensor(vec![len as u32], &data);
+            assert!(word.as_tensor().unwrap().elements.as_bool_words().is_some());
+            let literal = literal_tensor(vec![len as u32], &data);
+            let params = BTreeMap::new();
+            for prim in [
+                Primitive::ReduceAnd,
+                Primitive::ReduceOr,
+                Primitive::ReduceXor,
+            ] {
+                let w = crate::eval_primitive(prim, std::slice::from_ref(&word), &params).unwrap();
+                let l =
+                    crate::eval_primitive(prim, std::slice::from_ref(&literal), &params).unwrap();
+                assert_eq!(
+                    w.as_scalar_literal(),
+                    l.as_scalar_literal(),
+                    "{prim:?} len={len}"
+                );
+            }
+        }
+
+        let dims = vec![3_u32, 43];
+        let data: Vec<bool> = (0..129).map(|i| (i * 7 + 3) % 17 < 9).collect();
+        let word = word_tensor(dims.clone(), &data);
+        let literal = literal_tensor(dims, &data);
+        for prim in [
+            Primitive::ReduceAnd,
+            Primitive::ReduceOr,
+            Primitive::ReduceXor,
+        ] {
+            for axes in ["0", "1"] {
+                let mut params = BTreeMap::new();
+                params.insert("axes".to_owned(), axes.to_owned());
+                let w = crate::eval_primitive(prim, std::slice::from_ref(&word), &params).unwrap();
+                let l =
+                    crate::eval_primitive(prim, std::slice::from_ref(&literal), &params).unwrap();
+                assert_eq!(bools(&w), bools(&l), "{prim:?} axes={axes}");
+            }
+        }
+    }
+
+    #[test]
     fn reduce_arity_error() {
         let result = eval_reduce(
             Primitive::ReduceSum,
@@ -3111,7 +3269,11 @@ mod tests {
         let Value::Scalar(lit) = &result else {
             panic!("expected scalar result, got {result:?}");
         };
-        assert_eq!(lit.as_i64().unwrap(), 0, "2^32 must wrap to 0 at int32 width");
+        assert_eq!(
+            lit.as_i64().unwrap(),
+            0,
+            "2^32 must wrap to 0 at int32 width"
+        );
     }
 
     #[test]

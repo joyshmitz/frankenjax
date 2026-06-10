@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
-use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
+use fj_core::{DType, Literal, LiteralBuffer, Primitive, Shape, TensorValue, Value};
+use std::simd::{
+    Simd,
+    cmp::{SimdPartialEq, SimdPartialOrd},
+};
 
 use crate::EvalError;
 use crate::type_promotion::compare_literals;
@@ -140,6 +144,75 @@ fn eval_f64_rank2_row_broadcast_compare(
     Ok(None)
 }
 
+#[inline]
+fn push_bool_word(words: &mut [u64], index: usize, value: bool) {
+    if value {
+        words[index / u64::BITS as usize] |= 1_u64 << (index % u64::BITS as usize);
+    }
+}
+
+fn bool_words_tensor(
+    primitive: Primitive,
+    shape: Shape,
+    len: usize,
+    words: Vec<u64>,
+) -> Result<Value, EvalError> {
+    let elements = LiteralBuffer::from_bool_words(words, len).ok_or(EvalError::Unsupported {
+        primitive,
+        detail: "invalid bool word mask length".to_owned(),
+    })?;
+    Ok(Value::Tensor(TensorValue::new_with_literal_buffer(
+        DType::Bool,
+        shape,
+        elements,
+    )?))
+}
+
+fn f64_compare_words(
+    primitive: Primitive,
+    left: &[f64],
+    right: &[f64],
+    float_cmp: &impl Fn(f64, f64) -> bool,
+) -> Vec<u64> {
+    const WORD_BITS: usize = u64::BITS as usize;
+    const LANES: usize = 8;
+    debug_assert!(matches!(
+        primitive,
+        Primitive::Eq
+            | Primitive::Ne
+            | Primitive::Lt
+            | Primitive::Le
+            | Primitive::Gt
+            | Primitive::Ge
+    ));
+    let mut words = vec![0_u64; left.len().div_ceil(WORD_BITS)];
+    let full_words = left.len() / WORD_BITS;
+    for (word_index, word_slot) in words.iter_mut().take(full_words).enumerate() {
+        let base = word_index * WORD_BITS;
+        let mut word = 0_u64;
+        for chunk in 0..(WORD_BITS / LANES) {
+            let offset = base + chunk * LANES;
+            let left_values = Simd::<f64, LANES>::from_slice(&left[offset..offset + LANES]);
+            let right_values = Simd::<f64, LANES>::from_slice(&right[offset..offset + LANES]);
+            let mask = match primitive {
+                Primitive::Eq => left_values.simd_eq(right_values).to_bitmask(),
+                Primitive::Ne => left_values.simd_ne(right_values).to_bitmask(),
+                Primitive::Lt => left_values.simd_lt(right_values).to_bitmask(),
+                Primitive::Le => left_values.simd_le(right_values).to_bitmask(),
+                Primitive::Gt => left_values.simd_gt(right_values).to_bitmask(),
+                Primitive::Ge => left_values.simd_ge(right_values).to_bitmask(),
+                _ => 0,
+            };
+            word |= mask << (chunk * LANES);
+        }
+        *word_slot = word;
+    }
+    for index in (full_words * WORD_BITS)..left.len() {
+        push_bool_word(&mut words, index, float_cmp(left[index], right[index]));
+    }
+    words
+}
+
 /// Comparison operators: return Bool scalars/tensors.
 #[inline]
 pub(crate) fn eval_comparison(
@@ -171,7 +244,8 @@ pub(crate) fn eval_comparison(
                 }
                 if lhs.dtype == DType::F64
                     && rhs.dtype == DType::F64
-                    && let Some(value) = eval_same_shape_f64_compare(lhs, rhs, &float_cmp)?
+                    && let Some(value) =
+                        eval_same_shape_f64_compare(primitive, lhs, rhs, &float_cmp)?
                 {
                     return Ok(value);
                 }
@@ -344,6 +418,7 @@ pub(crate) fn eval_comparison(
 /// through to the generic path.
 #[inline]
 fn eval_same_shape_f64_compare(
+    primitive: Primitive,
     lhs: &TensorValue,
     rhs: &TensorValue,
     float_cmp: &impl Fn(f64, f64) -> bool,
@@ -354,15 +429,13 @@ fn eval_same_shape_f64_compare(
     // bit identical: same `float_cmp` in the same order, and a Bool's value carries
     // no representation ambiguity, so dense-bool output equals the Literal output.
     if let (Some(left), Some(right)) = (lhs.elements.as_f64_slice(), rhs.elements.as_f64_slice()) {
-        let out: Vec<bool> = left
-            .iter()
-            .zip(right)
-            .map(|(&a, &b)| float_cmp(a, b))
-            .collect();
-        return Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+        let out = f64_compare_words(primitive, left, right, float_cmp);
+        return Ok(Some(bool_words_tensor(
+            primitive,
             lhs.shape.clone(),
+            left.len(),
             out,
-        )?)));
+        )?));
     }
 
     let mut out = Vec::with_capacity(lhs.elements.len());
@@ -661,6 +734,75 @@ mod tests {
                 extract(crate::eval_primitive(p, &[v_f64(&lhs), s_f64(scalar)], &params).unwrap());
             let want: Vec<bool> = lhs.iter().map(|&a| fcmp(a, scalar)).collect();
             assert_eq!(got, want, "{p:?} scalar-right mismatch");
+        }
+    }
+
+    #[test]
+    fn f64_compare_word_masks_match_literal_path_at_word_boundaries() {
+        let params = BTreeMap::new();
+        for len in [0usize, 1, 63, 64, 65, 127, 128, 129] {
+            let lhs: Vec<f64> = (0..len)
+                .map(|i| match i % 11 {
+                    0 => f64::NAN,
+                    1 => -0.0,
+                    2 => 0.0,
+                    3 => f64::INFINITY,
+                    4 => f64::NEG_INFINITY,
+                    _ => i as f64 * 0.25 - 17.0,
+                })
+                .collect();
+            let rhs: Vec<f64> = (0..len)
+                .map(|i| match i % 13 {
+                    0 => f64::NAN,
+                    1 => 0.0,
+                    2 => -0.0,
+                    3 => f64::NEG_INFINITY,
+                    4 => f64::INFINITY,
+                    _ => ((i * 7 + 3) % 97) as f64 * 0.5 - 23.0,
+                })
+                .collect();
+            let shape = Shape::vector(len as u32);
+            let dense = |data: &[f64]| {
+                Value::Tensor(TensorValue::new_f64_values(shape.clone(), data.to_vec()).unwrap())
+            };
+            let literal = |data: &[f64]| {
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        shape.clone(),
+                        data.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                )
+            };
+
+            for prim in [
+                Primitive::Eq,
+                Primitive::Ne,
+                Primitive::Lt,
+                Primitive::Le,
+                Primitive::Gt,
+                Primitive::Ge,
+            ] {
+                let word_backed =
+                    crate::eval_primitive(prim, &[dense(&lhs), dense(&rhs)], &params).unwrap();
+                assert!(
+                    word_backed
+                        .as_tensor()
+                        .unwrap()
+                        .elements
+                        .as_bool_words()
+                        .is_some(),
+                    "{prim:?} len={len} must stay word-backed"
+                );
+                let boxed =
+                    crate::eval_primitive(prim, &[literal(&lhs), literal(&rhs)], &params).unwrap();
+                assert_eq!(
+                    extract_bools(&word_backed),
+                    extract_bools(&boxed),
+                    "{prim:?} len={len}"
+                );
+            }
         }
     }
 
