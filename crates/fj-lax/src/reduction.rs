@@ -109,6 +109,109 @@ fn reduce_bool_words_scalar(
 /// `as_f64_slice()` is `Some` only for F64 dense storage, where
 /// `slice[i] == as_slice()[i].as_f64()` exactly, so a malformed declared-F64
 /// tensor (`Literal` storage) returns `None` and falls through unchanged.
+/// SIMD full-reduce max/min over a dense `f64` slice, bit-identical to the scalar
+/// `jax_max_f64`/`jax_min_f64` fold but vectorized. The scalar fold can't autovectorize
+/// because the per-step NaN branch breaks LLVM's reduction recognition.
+///
+/// `jax_max`/`jax_min` are associative AND commutative on the VALUE (any NaN ⇒ canonical
+/// NaN; else `f64::max`/`min`), so a lane-parallel reduction equals the sequential fold
+/// on the value. Two specials need care:
+///   • NaN — `simd_max`/`simd_min` IGNORE NaN, so any-NaN is tracked separately and the
+///     result is overridden to canonical `f64::NAN` (matching the scalar fold, which
+///     collapses every NaN payload to `f64::NAN`).
+///   • signed zero — `f64::max(+0,-0)` returns the SECOND operand (x86 `maxsd`/LLVM
+///     `maxnum`), so the scalar fold's ±0 SIGN is order-dependent (last-zero-wins) and a
+///     lane-parallel reduce can't reproduce it. So when the SIMD value is exactly ±0
+///     (the only ambiguous case, and rare — it means every element is ≤0 for max / ≥0
+///     for min) fall back to the exact scalar fold, which is bit-identical by definition.
+fn simd_reduce_minmax_f64(values: &[f64], is_max: bool) -> f64 {
+    use std::simd::{Simd, num::SimdFloat};
+    const LANES: usize = 8;
+    let init = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
+
+    let mut vacc = Simd::<f64, LANES>::splat(init);
+    let mut any_nan = false;
+    let chunks = values.chunks_exact(LANES);
+    let tail = chunks.remainder();
+    for chunk in chunks {
+        let v = Simd::<f64, LANES>::from_slice(chunk);
+        any_nan |= v.is_nan().any();
+        vacc = if is_max { vacc.simd_max(v) } else { vacc.simd_min(v) };
+    }
+    // Horizontal combine with scalar f64::max/min (vacc holds no NaN: simd_max/min
+    // ignore them).
+    let mut m = init;
+    for &lane in vacc.to_array().iter() {
+        m = if is_max { m.max(lane) } else { m.min(lane) };
+    }
+    for &v in tail {
+        if v.is_nan() {
+            any_nan = true;
+        } else {
+            m = if is_max { m.max(v) } else { m.min(v) };
+        }
+    }
+
+    if any_nan {
+        return f64::NAN;
+    }
+    if m == 0.0 {
+        // ±0 sign is order-dependent under f64::max/min; defer to the exact fold (no
+        // NaN here, so the fold is just f64::max/min over the slice).
+        let mut acc = init;
+        for &v in values {
+            acc = if is_max { acc.max(v) } else { acc.min(v) };
+        }
+        return acc;
+    }
+    m
+}
+
+/// f32 sibling of [`simd_reduce_minmax_f64`]. The scalar f32 fold widens each f32 to
+/// f64, applies `jax_max`/`jax_min`, and rounds the result back to f32 — but for
+/// max/min the result is always one of the inputs, so widen→op→round equals the f32
+/// max/min directly. Same NaN / ±0 handling on f32 patterns.
+fn simd_reduce_minmax_f32(values: &[f32], is_max: bool) -> f32 {
+    use std::simd::{Simd, num::SimdFloat};
+    const LANES: usize = 16;
+    let init = if is_max { f32::NEG_INFINITY } else { f32::INFINITY };
+
+    let mut vacc = Simd::<f32, LANES>::splat(init);
+    let mut any_nan = false;
+    let chunks = values.chunks_exact(LANES);
+    let tail = chunks.remainder();
+    for chunk in chunks {
+        let v = Simd::<f32, LANES>::from_slice(chunk);
+        any_nan |= v.is_nan().any();
+        vacc = if is_max { vacc.simd_max(v) } else { vacc.simd_min(v) };
+    }
+    let mut m = init;
+    for &lane in vacc.to_array().iter() {
+        m = if is_max { m.max(lane) } else { m.min(lane) };
+    }
+    for &v in tail {
+        if v.is_nan() {
+            any_nan = true;
+        } else {
+            m = if is_max { m.max(v) } else { m.min(v) };
+        }
+    }
+
+    if any_nan {
+        return f32::NAN;
+    }
+    if m == 0.0 {
+        // Match the scalar f32 fold exactly: accumulate in f64, round to f32.
+        let mut acc = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
+        for &v in values {
+            let vv = f64::from(v);
+            acc = if is_max { acc.max(vv) } else { acc.min(vv) };
+        }
+        return acc as f32;
+    }
+    m
+}
+
 #[inline]
 fn eval_dense_float_full_reduce(
     primitive: Primitive,
@@ -136,6 +239,33 @@ fn eval_dense_float_full_reduce(
     // back to f32 at output — so the f32 path is just as order-identical as f64. (An
     // earlier attempt that accumulated NATIVELY in f32 diverged on inf+(-inf) NaN sign;
     // accumulating in f64 mirrors the generic fold and cannot diverge.)
+    // ReduceMax/ReduceMin SIMD path: the scalar `jax_max`/`jax_min` fold above can't
+    // autovectorize (per-step NaN branch), so vectorize it explicitly. max/min are
+    // associative+commutative, so this is bit-identical (see simd_reduce_minmax_f64).
+    // Sum/Prod stay on the scalar fold (non-associative — bit-exact order matters).
+    let is_minmax = matches!(primitive, Primitive::ReduceMax | Primitive::ReduceMin);
+    if is_minmax {
+        let is_max = primitive == Primitive::ReduceMax;
+        match tensor.dtype {
+            DType::F64 => {
+                if let Some(values) = tensor.elements.as_f64_slice() {
+                    return Some(Value::Scalar(reduce_real_literal(
+                        DType::F64,
+                        simd_reduce_minmax_f64(values, is_max),
+                    )));
+                }
+            }
+            DType::F32 => {
+                if let Some(values) = tensor.elements.as_f32_slice() {
+                    return Some(Value::Scalar(Literal::from_f32(simd_reduce_minmax_f32(
+                        values, is_max,
+                    ))));
+                }
+            }
+            _ => {}
+        }
+    }
+
     match tensor.dtype {
         DType::F64 => {
             let values = tensor.elements.as_f64_slice()?;
@@ -2314,6 +2444,120 @@ mod tests {
                 extract_f64_bits(&literal_result),
                 "dense/literal mismatch for {primitive:?}"
             );
+        }
+    }
+
+    /// SIMD ReduceMax/ReduceMin full-reduce must be bit-identical to the boxed
+    /// per-`Literal` scalar fold across the SIMD hazards: the tail (length not a
+    /// multiple of the lane count), NaN propagation (incl. payload collapse), and —
+    /// critically — ±0 where `simd_max`/`simd_min` corrupt a lane but the ±0 fixup
+    /// must still recover the exact bit (e.g. +0.0 and -0.0 landing in the SAME lane
+    /// across chunks). The boxed input (`as_f64_slice` None) forces the scalar
+    /// reference path; the dense input takes the SIMD path.
+    #[test]
+    fn simd_reduce_minmax_bit_identical_to_scalar_fold() {
+        let nan_payload = f64::from_bits(0x7ff8_0000_0000_0001);
+        let snan = f64::from_bits(0x7ff0_0000_0000_0007);
+        let cases: Vec<Vec<f64>> = vec![
+            // +0 (lane 0, chunk 0) and -0 (lane 0, chunk 1) collide in one lane;
+            // everything else negative so the reduced value is ±0. (17 elems: tail.)
+            {
+                let mut a = vec![-1.0f64; 17];
+                a[0] = 0.0;
+                a[8] = -0.0;
+                a[16] = -5.0;
+                a
+            },
+            // Only -0.0 zeros present (max ⇒ -0.0, min picks the smallest negative).
+            {
+                let mut a = vec![-2.0f64; 20];
+                a[3] = -0.0;
+                a[11] = -0.0;
+                a
+            },
+            // +0 and -0 with everything else positive (min ⇒ -0.0, max ⇒ the max pos).
+            {
+                let mut a = vec![3.0f64; 19];
+                a[1] = 0.0;
+                a[9] = -0.0;
+                a
+            },
+            // NaN payload in the body — result must collapse to canonical NaN.
+            {
+                let mut a: Vec<f64> = (0..23).map(|i| i as f64 * 0.5 - 5.0).collect();
+                a[7] = nan_payload;
+                a
+            },
+            // Signaling-NaN only in the tail.
+            {
+                let mut a: Vec<f64> = (0..13).map(|i| i as f64 - 6.0).collect();
+                a[12] = snan;
+                a
+            },
+            // ±inf mixed, longer, no zeros.
+            {
+                let mut a: Vec<f64> = (0..71).map(|i| (i as f64 * 0.37).sin() * 10.0).collect();
+                a[5] = f64::INFINITY;
+                a[40] = f64::NEG_INFINITY;
+                a
+            },
+            vec![-0.0f64; 8],  // all -0, exactly one chunk
+            vec![0.0f64; 9],   // all +0, chunk + tail
+        ];
+        // Reference = the exact scalar fold the SIMD path REPLACES (jax_max/jax_min
+        // over the dense slice, in ascending order) — NOT the boxed per-`Literal`
+        // path, which has a separate pre-existing ±0 quirk (it can yield -0.0 where
+        // f64::max yields +0.0). The SIMD path must equal the dense scalar fold.
+        let jmax = |a: f64, b: f64| if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) };
+        let jmin = |a: f64, b: f64| if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) };
+        let params = BTreeMap::new();
+        for (ci, data) in cases.iter().enumerate() {
+            for primitive in [Primitive::ReduceMax, Primitive::ReduceMin] {
+                let is_max = primitive == Primitive::ReduceMax;
+                let mut acc = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
+                for &v in data {
+                    acc = if is_max { jmax(acc, v) } else { jmin(acc, v) };
+                }
+                let want64 = acc.to_bits();
+
+                let dense = Value::vector_f64(data).unwrap();
+                assert!(dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+                let d = crate::eval_primitive(primitive, std::slice::from_ref(&dense), &params)
+                    .unwrap();
+                assert_eq!(
+                    extract_f64_bits(&d),
+                    want64,
+                    "case {ci} {primitive:?}: SIMD f64 != dense scalar fold"
+                );
+
+                // f32 sibling (LANES=16): reference folds widened f64 then rounds to f32.
+                let f32_data: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+                let mut acc32 = if is_max { f64::NEG_INFINITY } else { f64::INFINITY };
+                for &v in &f32_data {
+                    let vv = f64::from(v);
+                    acc32 = if is_max { jmax(acc32, vv) } else { jmin(acc32, vv) };
+                }
+                let want32 = (acc32 as f32).to_bits();
+                let dense32 = Value::Tensor(
+                    TensorValue::new_f32_values(
+                        Shape {
+                            dims: vec![f32_data.len() as u32],
+                        },
+                        f32_data.clone(),
+                    )
+                    .unwrap(),
+                );
+                let d32 = crate::eval_primitive(primitive, std::slice::from_ref(&dense32), &params)
+                    .unwrap();
+                let bits32 = match &d32 {
+                    Value::Scalar(Literal::F32Bits(b)) => *b,
+                    other => panic!("expected f32 scalar, got {other:?}"),
+                };
+                assert_eq!(
+                    bits32, want32,
+                    "case {ci} {primitive:?}: SIMD f32 != dense scalar fold"
+                );
+            }
         }
     }
 
