@@ -8601,8 +8601,8 @@ fn jvp_inner(
         return Ok(result);
     }
 
-    let mut primal_env: BTreeMap<VarId, Value> = BTreeMap::new();
-    let mut tangent_env: BTreeMap<VarId, Value> = BTreeMap::new();
+    let mut primal_env = AdValueStore::for_jaxpr(jaxpr);
+    let mut tangent_env = AdValueStore::for_jaxpr(jaxpr);
 
     for (idx, var) in jaxpr.invars.iter().enumerate() {
         primal_env.insert(*var, primals[idx].clone());
@@ -13790,6 +13790,96 @@ mod tests {
     }
 
     // ── Forward-mode JVP tests ──────────────────────────────────
+
+    fn poly_jvp_jaxpr_from_base(base: u32) -> Jaxpr {
+        use fj_core::{Equation, Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let x = VarId(base);
+        let x2 = VarId(base + 1);
+        let x3 = VarId(base + 2);
+        let x3_plus_x2 = VarId(base + 3);
+        let out = VarId(base + 4);
+        Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(x), Atom::Var(x)],
+                    outputs: smallvec![x2],
+                    params: BTreeMap::new(),
+                    effects: Vec::new(),
+                    sub_jaxprs: Vec::new(),
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(x2), Atom::Var(x)],
+                    outputs: smallvec![x3],
+                    params: BTreeMap::new(),
+                    effects: Vec::new(),
+                    sub_jaxprs: Vec::new(),
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(x3), Atom::Var(x2)],
+                    outputs: smallvec![x3_plus_x2],
+                    params: BTreeMap::new(),
+                    effects: Vec::new(),
+                    sub_jaxprs: Vec::new(),
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(x3_plus_x2), Atom::Var(x)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    effects: Vec::new(),
+                    sub_jaxprs: Vec::new(),
+                },
+            ],
+        )
+    }
+
+    fn jvp_scalar_bits(result: &JvpResult) -> Vec<String> {
+        vec![
+            format!(
+                "{:016x}",
+                result.primals[0]
+                    .as_f64_scalar()
+                    .expect("scalar primal")
+                    .to_bits()
+            ),
+            format!(
+                "{:016x}",
+                result.tangents[0]
+                    .as_f64_scalar()
+                    .expect("scalar tangent")
+                    .to_bits()
+            ),
+        ]
+    }
+
+    #[test]
+    fn jvp_dense_store_matches_sparse_store_and_golden_sha256() {
+        clear_custom_derivative_rules();
+        let dense = poly_jvp_jaxpr_from_base(0);
+        let sparse = poly_jvp_jaxpr_from_base(DENSE_AD_VALUE_STORE_MAX_SLOTS as u32);
+        let primals = [Value::scalar_f64(2.0)];
+        let tangents = [Value::scalar_f64(1.0)];
+
+        let dense_result = jvp(&dense, &primals, &tangents).expect("dense-store jvp");
+        let sparse_result = jvp(&sparse, &primals, &tangents).expect("sparse-store jvp");
+        let dense_bits = jvp_scalar_bits(&dense_result);
+        assert_eq!(dense_bits, jvp_scalar_bits(&sparse_result));
+
+        let digest = fj_test_utils::fixture_id_from_json(&dense_bits).expect("sha256 digest");
+        assert_eq!(
+            digest,
+            "0de357fc34872ec8485ed674662a533718400a68b9e690ae8016f84b6fba4b31"
+        );
+        clear_custom_derivative_rules();
+    }
 
     #[test]
     fn jvp_x_squared_at_3() {
