@@ -722,25 +722,61 @@ pub(crate) fn eval_reduce_axes(
                     out_count,
                     int_init,
                 )?;
-                let mut odometer = OutIndexOdometer::new(&tensor.shape.dims, &kept_axes, &out_dims);
-                // Dense i64 fast path: drive the odometer over the contiguous
-                // `i64` backing slice, skipping the per-element `Literal::I64`
-                // match and 24-byte stride. Bit-identical to the generic loop
-                // (same order, out_idx sequence, int_op). `as_i64_slice()` is
-                // `Some` only for I64 dense storage.
-                if let Some(values) = tensor.elements.as_i64_slice() {
-                    for &val in values {
-                        let out_idx = odometer.next_index();
-                        result[out_idx] = int_op(result[out_idx], val);
+                // Dense i64 contiguous-block fast path: when the reduced axes form
+                // one contiguous block, the layout factors as [outer, reduce, inner]
+                // and each output cell is a hoistable, autovectorizing fold over a
+                // contiguous run — no per-element odometer carry. Bit-identical:
+                // each cell accumulates ascending-r, exactly the odometer's order
+                // (int_op is associative for sum/prod; max/min are order-invariant).
+                let dense_i64 = tensor.elements.as_i64_slice();
+                let block =
+                    dense_i64.and_then(|v| {
+                        contiguous_reduce_block(&tensor.shape.dims, &axes_sorted)
+                            .map(|b| (v, b))
+                    });
+                if let Some((values, (outer, reduce, inner))) = block {
+                    if inner == 1 {
+                        for (o, slot) in result.iter_mut().enumerate() {
+                            let base = o * reduce;
+                            let mut acc = int_init;
+                            for &v in &values[base..base + reduce] {
+                                acc = int_op(acc, v);
+                            }
+                            *slot = acc;
+                        }
+                    } else {
+                        for o in 0..outer {
+                            let out_row = &mut result[o * inner..(o + 1) * inner];
+                            for r in 0..reduce {
+                                let in_row = &values[(o * reduce + r) * inner..][..inner];
+                                for (slot, &v) in out_row.iter_mut().zip(in_row) {
+                                    *slot = int_op(*slot, v);
+                                }
+                            }
+                        }
                     }
                 } else {
-                    for literal in tensor.elements.iter() {
-                        let out_idx = odometer.next_index();
-                        let val = literal.as_i64().ok_or(EvalError::TypeMismatch {
-                            primitive,
-                            detail: "expected i64 tensor",
-                        })?;
-                        result[out_idx] = int_op(result[out_idx], val);
+                    let mut odometer =
+                        OutIndexOdometer::new(&tensor.shape.dims, &kept_axes, &out_dims);
+                    // Dense i64 fast path: drive the odometer over the contiguous
+                    // `i64` backing slice, skipping the per-element `Literal::I64`
+                    // match and 24-byte stride. Bit-identical to the generic loop
+                    // (same order, out_idx sequence, int_op). `as_i64_slice()` is
+                    // `Some` only for I64 dense storage.
+                    if let Some(values) = dense_i64 {
+                        for &val in values {
+                            let out_idx = odometer.next_index();
+                            result[out_idx] = int_op(result[out_idx], val);
+                        }
+                    } else {
+                        for literal in tensor.elements.iter() {
+                            let out_idx = odometer.next_index();
+                            let val = literal.as_i64().ok_or(EvalError::TypeMismatch {
+                                primitive,
+                                detail: "expected i64 tensor",
+                            })?;
+                            result[out_idx] = int_op(result[out_idx], val);
+                        }
                     }
                 }
                 // Preserve the input integer dtype: a JAX/XLA int32 reduction
