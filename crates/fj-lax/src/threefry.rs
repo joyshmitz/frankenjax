@@ -150,7 +150,107 @@ pub fn random_fold_in(key: PRNGKey, data: u32) -> PRNGKey {
 /// so the output is bit-for-bit identical to the scalar map — JAX RNG parity is
 /// preserved (see `simd_generate_u32_bits_matches_scalar`). A scalar tail handles
 /// the `count % LANES` remainder.
-fn generate_u32_bits(key: PRNGKey, count: usize) -> Vec<u32> {
+/// Minimum elements per worker before [`generate_u32_bits`] fans the raw
+/// counter-based bit generation across threads. Same regime as the uniform
+/// generator (a compute-bound 20-round ARX permutation that is its own producer,
+/// not stacked on a threaded upstream), so it shares the `1<<18` cap that keeps
+/// each worker's slice large enough to amortize the spawn.
+const RANDOM_BITS_MIN_ELEMS_PER_THREAD: usize = 1 << 18;
+
+/// Generate `count` raw u32 random words, matching JAX's partitionable
+/// `_threefry_random_bits_partitionable` with `bit_width=32`: word `i` is
+/// `threefry2x32(key, [0, i])[0] ^ [1]`.
+///
+/// ThreeFry is counter-based — word `i` depends only on its absolute counter `i`
+/// — so generation partitions into independent contiguous ranges that fan out
+/// across threads with NO cross-element dependency and BIT-IDENTICAL output for
+/// any partition (proven by `threaded_u32_bits_matches_serial`). Small draws stay
+/// on the single-threaded SIMD path; large draws fan out (the permutation is
+/// compute-bound). Underpins randint (two draws), random_bits, and the
+/// sort/argsort key path.
+#[must_use]
+pub fn generate_u32_bits(key: PRNGKey, count: usize) -> Vec<u32> {
+    let hardware = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(1);
+    let threads = hardware.min(count / RANDOM_BITS_MIN_ELEMS_PER_THREAD);
+    if threads <= 1 {
+        return generate_u32_bits_serial(key, count);
+    }
+
+    let mut out = vec![0_u32; count];
+    let chunk = count.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [u32] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < count {
+            let len = chunk.min(count - start);
+            let (block, tail) = rest.split_at_mut(len);
+            rest = tail;
+            scope.spawn(move || fill_u32_bits(block, start, key));
+            start += len;
+        }
+    });
+    out
+}
+
+/// Fill `out[j]` with the raw u32 word for absolute ThreeFry counter
+/// `global_start + j`. Counter-based, so correct for ANY contiguous sub-range —
+/// the shared kernel behind both the serial and threaded `generate_u32_bits`
+/// paths. Bit-identical to the scalar `threefry2x32([0, i])` map per word
+/// (`simd_generate_u32_bits_matches_scalar`).
+fn fill_u32_bits(out: &mut [u32], global_start: usize, key: PRNGKey) {
+    use std::simd::Simd;
+
+    const LANES: usize = 8;
+    const KS_PARITY: u32 = 0x1BD1_1BDA;
+
+    let [k0, k1] = key.0;
+    let ks2 = k0 ^ k1 ^ KS_PARITY;
+    let ksched = [k0, k1, ks2];
+
+    let k0v: Simd<u32, LANES> = Simd::splat(k0);
+    let k1v: Simd<u32, LANES> = Simd::splat(k1);
+    let lane_off: Simd<u32, LANES> = Simd::from_array(std::array::from_fn(|r| r as u32));
+
+    let n = out.len();
+    let chunks = n / LANES;
+    for c in 0..chunks {
+        let base = (global_start + c * LANES) as u32;
+        // data = [0, counter]; x0 = 0 + k0, x1 = counter + k1.
+        let mut x0 = k0v;
+        let mut x1 = (Simd::splat(base) + lane_off) + k1v;
+
+        for round in 0..NUM_ROUNDS {
+            x0 += x1;
+            let r = ROTATIONS[round % 8];
+            // rotate_left(r) lane-wise: r ∈ {6,13,15,16,17,24,26,29} so 32-r is in 1..=31.
+            let rotated = (x1 << Simd::splat(r)) | (x1 >> Simd::splat(32 - r));
+            x1 = rotated ^ x0;
+
+            if (round + 1) % 4 == 0 {
+                let inject_idx = (round + 1) / 4;
+                x0 += Simd::splat(ksched[inject_idx % 3]);
+                x1 += Simd::splat(ksched[(inject_idx + 1) % 3].wrapping_add(inject_idx as u32));
+            }
+        }
+
+        out[c * LANES..c * LANES + LANES].copy_from_slice((x0 ^ x1).as_array());
+    }
+
+    // Scalar tail (range length % LANES): same absolute counters, bit-identical
+    // to the SIMD lanes per word.
+    for j in (chunks * LANES)..n {
+        let i = (global_start + j) as u32;
+        let [a, b] = threefry2x32(key.0, [0, i]);
+        out[j] = a ^ b;
+    }
+}
+
+/// Single-threaded SIMD generation of `count` raw u32 random words. Retained as
+/// the threaded path's bit-identity oracle and A/B baseline.
+#[must_use]
+pub fn generate_u32_bits_serial(key: PRNGKey, count: usize) -> Vec<u32> {
     use std::simd::Simd;
 
     const LANES: usize = 8;
@@ -1327,6 +1427,39 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn threaded_u32_bits_matches_serial() {
+        // The threaded generate_u32_bits must be word-for-word identical to the
+        // single-threaded SIMD baseline for ANY partition — ThreeFry is
+        // counter-based, so word i always uses absolute counter i regardless of
+        // which thread (or SIMD-vs-tail boundary) computes it. Cover counts above
+        // the parallel threshold, including non-multiple-of-LANES totals that force
+        // ragged thread/tail boundaries. JAX RNG parity is absolute.
+        for key in [
+            PRNGKey([0, 0]),
+            PRNGKey([7, 0]),
+            PRNGKey([0x9E37_79B9, 0x1234_5678]),
+            PRNGKey([u32::MAX, u32::MAX]),
+        ] {
+            for count in [
+                2 * RANDOM_BITS_MIN_ELEMS_PER_THREAD,
+                2 * RANDOM_BITS_MIN_ELEMS_PER_THREAD + 1,
+                2 * RANDOM_BITS_MIN_ELEMS_PER_THREAD + 7,
+                1_000_003,
+                4_194_304,
+                5_000_007,
+            ] {
+                let threaded = generate_u32_bits(key, count);
+                let serial = generate_u32_bits_serial(key, count);
+                assert_eq!(threaded.len(), serial.len());
+                assert!(
+                    threaded == serial,
+                    "key={key:?} count={count}: threaded u32 bits diverged from serial"
+                );
             }
         }
     }

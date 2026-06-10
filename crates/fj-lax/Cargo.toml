@@ -30,3 +30,7 @@ harness = false
 [[bench]]
 name = "rng_dist_transform_threading"
 harness = false
+
+[[bench]]
+name = "rng_bits_threading"
+harness = false
