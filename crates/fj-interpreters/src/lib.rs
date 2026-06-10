@@ -997,11 +997,14 @@ fn cheap_op(p: Primitive) -> Option<CheapOp> {
 }
 
 /// An operand of a fused step: the running chain value, an external dense-f64
-/// tensor (index into the gathered `ext` slices), or an f64 scalar constant.
+/// tensor (index into the gathered `ext` slices), a row/col broadcast vector, or
+/// an f64 scalar constant.
 #[derive(Clone, Copy)]
 enum FOperand {
     Chain,
     Ext(usize),
+    RowBroadcast(usize),
+    ColBroadcast { idx: usize, cols: usize },
     Scalar(f64),
 }
 
@@ -1055,7 +1058,21 @@ fn classify_fusion_operand<'e>(
                     match shape {
                         None => *shape = Some(t.shape.clone()),
                         Some(s) if *s == t.shape => {}
-                        Some(_) => return None,
+                        Some(s) => {
+                            if row_broadcast_len(s, &t.shape).is_some() {
+                                let idx = ext.len();
+                                ext.push(slice);
+                                ext_vars.push(*v);
+                                return Some(FOperand::RowBroadcast(idx));
+                            }
+                            if let Some(cols) = col_broadcast_cols(s, &t.shape) {
+                                let idx = ext.len();
+                                ext.push(slice);
+                                ext_vars.push(*v);
+                                return Some(FOperand::ColBroadcast { idx, cols });
+                            }
+                            return None;
+                        }
                     }
                     let idx = ext.len();
                     ext.push(slice);
@@ -1064,6 +1081,116 @@ fn classify_fusion_operand<'e>(
                 }
             }
         }
+    }
+}
+
+/// One f64 fused binary op. `chain_left == true` evaluates `out OP other`, matching
+/// `apply_fusion_other`'s same-shape `Ext` arms; `false` evaluates `other OP out`.
+#[inline]
+fn f64_fused_binary(op: CheapOp, left: f64, right: f64) -> f64 {
+    match op {
+        CheapOp::Add => left + right,
+        CheapOp::Sub => left - right,
+        CheapOp::Mul => left * right,
+        CheapOp::Div => left / right,
+        CheapOp::Neg => left,
+    }
+}
+
+/// Seed `out` from a row-broadcast vector: element `(r, c)` of an `[R, C]` chunk
+/// takes `row[c]`, with `c` cycling `0..C` from the chunk's flattened `base`.
+#[inline]
+fn seed_f64_row_broadcast(out: &mut [f64], row: &[f64], base: usize) {
+    if out.is_empty() {
+        return;
+    }
+    let row_len = row.len();
+    let mut done = 0;
+    let mut col = base % row_len;
+    while done < out.len() {
+        let take = (row_len - col).min(out.len() - done);
+        out[done..done + take].copy_from_slice(&row[col..col + take]);
+        done += take;
+        col = 0;
+    }
+}
+
+#[inline]
+fn apply_f64_row_broadcast_other(
+    out: &mut [f64],
+    op: CheapOp,
+    chain_left: bool,
+    row: &[f64],
+    base: usize,
+) {
+    if out.is_empty() {
+        return;
+    }
+    let row_len = row.len();
+    let mut done = 0;
+    let mut col = base % row_len;
+    while done < out.len() {
+        let take = (row_len - col).min(out.len() - done);
+        let out_part = &mut out[done..done + take];
+        let row_part = &row[col..col + take];
+        match chain_left {
+            true => out_part
+                .iter_mut()
+                .zip(row_part)
+                .for_each(|(o, e)| *o = f64_fused_binary(op, *o, *e)),
+            false => out_part
+                .iter_mut()
+                .zip(row_part)
+                .for_each(|(o, e)| *o = f64_fused_binary(op, *e, *o)),
+        }
+        done += take;
+        col = 0;
+    }
+}
+
+/// Seed `out` from a col-broadcast vector: element `(r, c)` of an `[R, C]` chunk
+/// takes `col_values[r]` (one value per row, repeated across the `cols` columns).
+#[inline]
+fn seed_f64_col_broadcast(out: &mut [f64], col_values: &[f64], cols: usize, base: usize) {
+    let mut done = 0;
+    let mut linear = base;
+    while done < out.len() {
+        let row = linear / cols;
+        let col = linear % cols;
+        let take = (cols - col).min(out.len() - done);
+        out[done..done + take].fill(col_values[row]);
+        done += take;
+        linear += take;
+    }
+}
+
+#[inline]
+fn apply_f64_col_broadcast_other(
+    out: &mut [f64],
+    op: CheapOp,
+    chain_left: bool,
+    col_values: &[f64],
+    cols: usize,
+    base: usize,
+) {
+    let mut done = 0;
+    let mut linear = base;
+    while done < out.len() {
+        let row = linear / cols;
+        let col = linear % cols;
+        let take = (cols - col).min(out.len() - done);
+        let scalar = col_values[row];
+        let out_part = &mut out[done..done + take];
+        match chain_left {
+            true => out_part
+                .iter_mut()
+                .for_each(|o| *o = f64_fused_binary(op, *o, scalar)),
+            false => out_part
+                .iter_mut()
+                .for_each(|o| *o = f64_fused_binary(op, scalar, *o)),
+        }
+        done += take;
+        linear += take;
     }
 }
 
@@ -1100,6 +1227,12 @@ fn apply_fusion_other(
                 (CheapOp::Neg, _) => {}
             }
         }
+        FOperand::RowBroadcast(i) => {
+            apply_f64_row_broadcast_other(out, op, chain_left, ext[i], base);
+        }
+        FOperand::ColBroadcast { idx, cols } => {
+            apply_f64_col_broadcast_other(out, op, chain_left, ext[idx], cols, base);
+        }
         FOperand::Chain => {}
     }
 }
@@ -1111,6 +1244,8 @@ fn apply_fusion_chunk(out: &mut [f64], tape: &[FStep], ext: &[&[f64]], base: usi
     let s0 = &tape[0];
     match s0.a {
         FOperand::Ext(i) => out.copy_from_slice(&ext[i][base..base + out.len()]),
+        FOperand::RowBroadcast(i) => seed_f64_row_broadcast(out, ext[i], base),
+        FOperand::ColBroadcast { idx, cols } => seed_f64_col_broadcast(out, ext[idx], cols, base),
         FOperand::Scalar(v) => out.fill(v),
         FOperand::Chain => {}
     }
@@ -1290,13 +1425,13 @@ fn classify_f32_fusion_operand<'e>(
                         None => *shape = Some(t.shape.clone()),
                         Some(s) if *s == t.shape => {}
                         Some(s) => {
-                            if f32_row_broadcast_len(s, &t.shape).is_some() {
+                            if row_broadcast_len(s, &t.shape).is_some() {
                                 let idx = ext.len();
                                 ext.push(slice);
                                 ext_vars.push(*v);
                                 return Some(F32Operand::RowBroadcast(idx));
                             }
-                            if let Some(cols) = f32_col_broadcast_cols(s, &t.shape) {
+                            if let Some(cols) = col_broadcast_cols(s, &t.shape) {
                                 let idx = ext.len();
                                 ext.push(slice);
                                 ext_vars.push(*v);
@@ -1315,14 +1450,16 @@ fn classify_f32_fusion_operand<'e>(
     }
 }
 
-fn f32_row_broadcast_len(full: &Shape, candidate: &Shape) -> Option<usize> {
+/// Shape-only (dtype-agnostic) broadcast classifiers shared by the f64 and f32
+/// fusion scanners.
+fn row_broadcast_len(full: &Shape, candidate: &Shape) -> Option<usize> {
     match (full.dims.as_slice(), candidate.dims.as_slice()) {
         ([_, cols], [row_cols]) if cols == row_cols => Some(*cols as usize),
         _ => None,
     }
 }
 
-fn f32_col_broadcast_cols(full: &Shape, candidate: &Shape) -> Option<usize> {
+fn col_broadcast_cols(full: &Shape, candidate: &Shape) -> Option<usize> {
     match (full.dims.as_slice(), candidate.dims.as_slice()) {
         ([rows, cols], [candidate_rows, 1]) if rows == candidate_rows => Some(*cols as usize),
         _ => None,
@@ -1876,6 +2013,25 @@ mod tests {
         Atom::Lit(Literal::from_f32(x))
     }
 
+    fn f64_tensor_values(dims: Vec<u32>, values: Vec<f64>) -> Value {
+        Value::Tensor(TensorValue::new_f64_values(Shape { dims }, values).unwrap())
+    }
+
+    fn f64_bits(v: &Value) -> Vec<u64> {
+        match v {
+            Value::Tensor(t) => {
+                if let Some(values) = t.elements.as_f64_slice() {
+                    return values.iter().map(|value| value.to_bits()).collect();
+                }
+                t.elements
+                    .iter()
+                    .map(|literal| literal.as_f64().unwrap().to_bits())
+                    .collect()
+            }
+            _ => panic!("expected tensor"),
+        }
+    }
+
     #[test]
     fn fusion_chain_matches_reference_bit_for_bit() {
         // Build: v1 = mul(x, x); v2 = add(v1, 2.5); v3 = sub(7.0, v2); v4 = div(v3, y);
@@ -2200,6 +2356,145 @@ mod tests {
         assert_eq!(
             digest,
             "5762f3ec4614f491d21407cbb09c5cd92915840f65d145070f8d8b5e8c7c5e3a"
+        );
+    }
+
+    #[test]
+    fn fusion_f64_row_broadcast_chain_matches_reference_bit_for_bit() {
+        // f64 layernorm-style row broadcasts (a [cols] vector against an [R, C]
+        // tensor) must fuse, gather in row-major order, and match the unfused
+        // per-equation reference bit-for-bit — including signed zeros / inf / NaN.
+        let rows = 64usize;
+        let cols = 64usize;
+        let n = rows * cols;
+        let mut x: Vec<f64> = (0..n).map(|i| i as f64 * 0.003 - 7.0).collect();
+        let mut y: Vec<f64> = (0..n).map(|i| (i as f64 * 0.011).cos() + 1.25).collect();
+        let mut bias: Vec<f64> = (0..cols).map(|i| i as f64 * 0.02 - 0.7).collect();
+        x[0] = -0.0;
+        x[1] = f64::INFINITY;
+        x[2] = f64::from_bits(0x7ff8_0000_0000_1111);
+        y[0] = 0.0;
+        y[1] = f64::NEG_INFINITY;
+        y[2] = 3.0;
+        bias[0] = f64::from_bits(0x7ff8_0000_0000_2222);
+        bias[1] = -0.0;
+        bias[2] = f64::from_bits(1);
+
+        let xv = VarId(0);
+        let bv = VarId(1);
+        let yv = VarId(2);
+        let v: Vec<VarId> = (3..=10).map(VarId).collect();
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(Primitive::Add, smallvec![Atom::Var(xv), Atom::Var(bv)], v[0]),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[0]), lit(1.25)], v[1]),
+            mk(Primitive::Sub, smallvec![Atom::Var(v[1]), Atom::Var(bv)], v[2]),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[2]), Atom::Var(yv)], v[3]),
+            mk(Primitive::Add, smallvec![Atom::Var(v[3]), Atom::Var(bv)], v[4]),
+            mk(Primitive::Sub, smallvec![Atom::Var(v[4]), lit(0.5)], v[5]),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2.0)], v[6]),
+            mk(Primitive::Add, smallvec![Atom::Var(v[6]), Atom::Var(bv)], v[7]),
+        ];
+        let jaxpr = Jaxpr::new(vec![xv, bv, yv], vec![], vec![v[7]], eqns);
+        let dims = vec![rows as u32, cols as u32];
+        let args = [
+            f64_tensor_values(dims.clone(), x),
+            f64_tensor_values(vec![cols as u32], bias),
+            f64_tensor_values(dims, y),
+        ];
+
+        let fused_outputs = eval_jaxpr(&jaxpr, &args).unwrap();
+        let unfused_outputs =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("unfused reference evaluates");
+        let Value::Tensor(out_tensor) = &fused_outputs[0] else {
+            panic!("expected tensor output")
+        };
+        assert_eq!(out_tensor.dtype, DType::F64);
+        assert_eq!(out_tensor.shape.dims, vec![rows as u32, cols as u32]);
+        assert!(
+            out_tensor.elements.as_f64_slice().is_some(),
+            "fused row-broadcast output should stay dense f64"
+        );
+        assert_eq!(
+            f64_bits(&fused_outputs[0]),
+            f64_bits(&unfused_outputs[0]),
+            "fused f64 row-broadcast chain must match forced unfused path bit-for-bit"
+        );
+    }
+
+    #[test]
+    fn fusion_f64_col_broadcast_chain_matches_reference_bit_for_bit() {
+        // f64 column broadcasts (a [rows, 1] vector against [R, C]) must fuse,
+        // gather by row-major row index, and match the unfused reference bit-for-bit.
+        let rows = 64usize;
+        let cols = 64usize;
+        let n = rows * cols;
+        let mut x: Vec<f64> = (0..n).map(|i| i as f64 * 0.002 - 5.0).collect();
+        let mut y: Vec<f64> = (0..n).map(|i| (i as f64 * 0.009).sin() + 1.5).collect();
+        let mut bias: Vec<f64> = (0..rows).map(|i| i as f64 * 0.015 - 0.4).collect();
+        x[0] = -0.0;
+        x[1] = f64::INFINITY;
+        x[2] = f64::from_bits(0x7ff8_0000_0000_3333);
+        y[0] = 0.0;
+        y[1] = f64::NEG_INFINITY;
+        y[2] = -3.0;
+        bias[0] = f64::from_bits(0x7ff8_0000_0000_4444);
+        bias[1] = -0.0;
+        bias[2] = f64::from_bits(1);
+
+        let xv = VarId(0);
+        let bv = VarId(1);
+        let yv = VarId(2);
+        let v: Vec<VarId> = (3..=10).map(VarId).collect();
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(Primitive::Add, smallvec![Atom::Var(xv), Atom::Var(bv)], v[0]),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[0]), lit(1.25)], v[1]),
+            mk(Primitive::Sub, smallvec![Atom::Var(v[1]), Atom::Var(bv)], v[2]),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[2]), Atom::Var(yv)], v[3]),
+            mk(Primitive::Add, smallvec![Atom::Var(v[3]), Atom::Var(bv)], v[4]),
+            mk(Primitive::Sub, smallvec![Atom::Var(v[4]), lit(0.5)], v[5]),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2.0)], v[6]),
+            mk(Primitive::Add, smallvec![Atom::Var(v[6]), Atom::Var(bv)], v[7]),
+        ];
+        let jaxpr = Jaxpr::new(vec![xv, bv, yv], vec![], vec![v[7]], eqns);
+        let dims = vec![rows as u32, cols as u32];
+        let args = [
+            f64_tensor_values(dims.clone(), x),
+            f64_tensor_values(vec![rows as u32, 1], bias),
+            f64_tensor_values(dims, y),
+        ];
+
+        let fused_outputs = eval_jaxpr(&jaxpr, &args).unwrap();
+        let unfused_outputs =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("unfused reference evaluates");
+        let Value::Tensor(out_tensor) = &fused_outputs[0] else {
+            panic!("expected tensor output")
+        };
+        assert_eq!(out_tensor.dtype, DType::F64);
+        assert_eq!(out_tensor.shape.dims, vec![rows as u32, cols as u32]);
+        assert!(
+            out_tensor.elements.as_f64_slice().is_some(),
+            "fused col-broadcast output should stay dense f64"
+        );
+        assert_eq!(
+            f64_bits(&fused_outputs[0]),
+            f64_bits(&unfused_outputs[0]),
+            "fused f64 col-broadcast chain must match forced unfused path bit-for-bit"
         );
     }
 
