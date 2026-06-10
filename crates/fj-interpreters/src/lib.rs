@@ -2915,8 +2915,7 @@ mod tests {
         let digest =
             fj_test_utils::fixture_id_from_json(&want).expect("reference output should hash");
         assert_eq!(
-            digest,
-            "TO_FILL",
+            digest, "7f7e34d693a2f0e9f63a0d4575b03db01882e16d74746eb5b3978d8a6d25b297",
             "i64 fusion golden output digest must stay fixed"
         );
     }
