@@ -1,0 +1,45 @@
+{
+  "bead": "frankenjax-prbo6",
+  "status": "rejected",
+  "agent": "BoldFalcon",
+  "worker": "vmi1227854",
+  "date": "2026-06-10",
+  "lever": "bit-packed Bool LiteralBuffer storage with direct same-shape F64 compare emission",
+  "baseline_command": "RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_PRIORITY=normal RCH_TEST_SLOTS=1 RCH_BUILD_SLOTS=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,RUSTFLAGS,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY,RCH_PRIORITY,RCH_TEST_SLOTS,RCH_BUILD_SLOTS rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-prbo6-baseline cargo bench -j 1 -p fj-lax --bench lax_baseline -- 'eval/(lt_same_shape_1024x1024_f64|reduce_and_64k_bool_vec|select_1024x1024_f64)' --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot",
+  "candidate2_command": "RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_PRIORITY=normal RCH_TEST_SLOTS=1 RCH_BUILD_SLOTS=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,RUSTFLAGS,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY,RCH_PRIORITY,RCH_TEST_SLOTS,RCH_BUILD_SLOTS rch exec -- env CARGO_TARGET_DIR=/data/tmp/frankenjax-rch-prbo6-candidate2 cargo bench -j 1 -p fj-lax --bench lax_baseline -- 'eval/(lt_same_shape_1024x1024_f64|reduce_and_64k_bool_vec|select_1024x1024_f64)' --sample-size 10 --measurement-time 1 --warm-up-time 1 --noplot",
+  "benchmarks": {
+    "eval/select_1024x1024_f64": {
+      "baseline_median_us": 579.86,
+      "candidate1_median_us": 679.37,
+      "candidate2_median_us": 737.54,
+      "candidate2_speedup": 0.7862
+    },
+    "eval/lt_same_shape_1024x1024_f64": {
+      "baseline_median_us": 392.19,
+      "candidate1_median_us": 1727.6,
+      "candidate2_median_us": 515.63,
+      "candidate2_speedup": 0.7606
+    },
+    "eval/reduce_and_64k_bool_vec": {
+      "baseline_median_us": 1.0313,
+      "candidate1_median_us": 1.1343,
+      "candidate2_median_us": 1.0603,
+      "candidate2_speedup": 0.9726
+    }
+  },
+  "score": 0.0,
+  "score_reason": "candidate2 regressed the target comparison row and adjacent Bool consumer rows; source changes restored",
+  "behavior_proof": {
+    "ordering_preserved": "yes; tests verified row-major Bool order across word boundaries",
+    "tie_breaking_unchanged": "yes; Bool values have no tie-breaking policy",
+    "floating_point": "comparison operand order and primitive comparison semantics preserved in proof tests, including NaN, signed zero, and infinities",
+    "rng": "not applicable",
+    "golden_sha256": "14bd0f823ccd1be6e58cbebc3cfd7eb7e7f4e4a8ac1451cfb4a83f6a64513a69"
+  },
+  "validation": [
+    "rch cargo test -j 1 -p fj-core bool_tensor_uses_bit_packed_storage_with_ordered_materialization -- --nocapture: passed",
+    "rch cargo test -j 1 -p fj-lax prbo6_bitpacked_f64_compare_matches_literal_bool_consumers -- --nocapture: passed"
+  ],
+  "next_bead": "frankenjax-lu4yw",
+  "next_route": "fuse compare masks into word-mask consumers instead of storage-only packing"
+}
