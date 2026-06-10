@@ -687,12 +687,14 @@ fn try_dense_f64_square_plus_linear_reducesum_value_and_grad(
     };
 
     let mut output = 0.0_f64;
-    let mut grad = Vec::with_capacity(input.len());
     for &x in input {
         let squared = x * x;
         let shifted = squared + x;
         output += shifted;
+    }
 
+    let mut grad = Vec::with_capacity(input.len());
+    for &x in input {
         let mut cotangent = 1.0_f64;
         cotangent += x;
         cotangent += x;
