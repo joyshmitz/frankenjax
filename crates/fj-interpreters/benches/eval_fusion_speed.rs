@@ -975,11 +975,23 @@ fn run_f32_clamp() {
     let eqns = vec![
         mk(Primitive::Abs, smallvec![Atom::Var(xv)], v[0]),
         mk(Primitive::Max, smallvec![Atom::Var(v[0]), lit(0.0)], v[1]),
-        mk(Primitive::Mul, smallvec![Atom::Var(v[1]), Atom::Var(yv)], v[2]),
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(v[1]), Atom::Var(yv)],
+            v[2],
+        ),
         mk(Primitive::Min, smallvec![Atom::Var(v[2]), lit(6.0)], v[3]),
         mk(Primitive::Max, smallvec![Atom::Var(v[3]), lit(0.0)], v[4]),
-        mk(Primitive::Sub, smallvec![Atom::Var(v[4]), Atom::Var(xv)], v[5]),
-        mk(Primitive::Max, smallvec![Atom::Var(v[5]), Atom::Var(yv)], v[6]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[4]), Atom::Var(xv)],
+            v[5],
+        ),
+        mk(
+            Primitive::Max,
+            smallvec![Atom::Var(v[5]), Atom::Var(yv)],
+            v[6],
+        ),
         mk(Primitive::Mul, smallvec![Atom::Var(v[6]), lit(0.5)], v[7]),
     ];
     let jaxpr = Jaxpr::new(vec![xv, yv], vec![], vec![v[7]], eqns.clone());

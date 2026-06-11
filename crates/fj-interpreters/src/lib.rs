@@ -1530,24 +1530,6 @@ fn col_broadcast_cols(full: &Shape, candidate: &Shape) -> Option<usize> {
 }
 
 #[inline]
-fn f32_fused_binary(op: CheapOp, left: f32, right: f32) -> f32 {
-    let left = f64::from(left);
-    let right = f64::from(right);
-    match op {
-        CheapOp::Add => (left + right) as f32,
-        CheapOp::Sub => (left - right) as f32,
-        CheapOp::Mul => (left * right) as f32,
-        CheapOp::Div => (left / right) as f32,
-        // Mirrors fj-lax dense f32 max/min: widen, NaN-propagating op, round to
-        // f32 (exact — the result equals one input, already f32-representable).
-        CheapOp::Max => fused_jax_max(left, right) as f32,
-        CheapOp::Min => fused_jax_min(left, right) as f32,
-        // Unary ops (handled by the chunk driver); never a binary step.
-        CheapOp::Neg | CheapOp::Abs => left as f32,
-    }
-}
-
-#[inline]
 fn f32_fused_neg(value: f32) -> f32 {
     (-f64::from(value)) as f32
 }
@@ -1592,15 +1574,40 @@ fn apply_f32_row_broadcast_other(
         let take = (row_len - col).min(out.len() - done);
         let out_part = &mut out[done..done + take];
         let row_part = &row[col..col + take];
-        match chain_left {
-            true => out_part
+        match (op, chain_left) {
+            (CheapOp::Add, _) => out_part
                 .iter_mut()
                 .zip(row_part)
-                .for_each(|(o, e)| *o = f32_fused_binary(op, *o, *e)),
-            false => out_part
+                .for_each(|(o, e)| *o = (f64::from(*o) + f64::from(*e)) as f32),
+            (CheapOp::Mul, _) => out_part
                 .iter_mut()
                 .zip(row_part)
-                .for_each(|(o, e)| *o = f32_fused_binary(op, *e, *o)),
+                .for_each(|(o, e)| *o = (f64::from(*o) * f64::from(*e)) as f32),
+            (CheapOp::Sub, true) => out_part
+                .iter_mut()
+                .zip(row_part)
+                .for_each(|(o, e)| *o = (f64::from(*o) - f64::from(*e)) as f32),
+            (CheapOp::Sub, false) => out_part
+                .iter_mut()
+                .zip(row_part)
+                .for_each(|(o, e)| *o = (f64::from(*e) - f64::from(*o)) as f32),
+            (CheapOp::Div, true) => out_part
+                .iter_mut()
+                .zip(row_part)
+                .for_each(|(o, e)| *o = (f64::from(*o) / f64::from(*e)) as f32),
+            (CheapOp::Div, false) => out_part
+                .iter_mut()
+                .zip(row_part)
+                .for_each(|(o, e)| *o = (f64::from(*e) / f64::from(*o)) as f32),
+            (CheapOp::Max, _) => out_part
+                .iter_mut()
+                .zip(row_part)
+                .for_each(|(o, e)| *o = fused_jax_max(f64::from(*o), f64::from(*e)) as f32),
+            (CheapOp::Min, _) => out_part
+                .iter_mut()
+                .zip(row_part)
+                .for_each(|(o, e)| *o = fused_jax_min(f64::from(*o), f64::from(*e)) as f32),
+            (CheapOp::Neg | CheapOp::Abs, _) => {}
         }
         done += take;
         col = 0;
@@ -1638,13 +1645,33 @@ fn apply_f32_col_broadcast_other(
         let take = (cols - col).min(out.len() - done);
         let scalar = col_values[row];
         let out_part = &mut out[done..done + take];
-        match chain_left {
-            true => out_part
+        let scalar = f64::from(scalar);
+        match (op, chain_left) {
+            (CheapOp::Add, _) => out_part
                 .iter_mut()
-                .for_each(|o| *o = f32_fused_binary(op, *o, scalar)),
-            false => out_part
+                .for_each(|o| *o = (f64::from(*o) + scalar) as f32),
+            (CheapOp::Mul, _) => out_part
                 .iter_mut()
-                .for_each(|o| *o = f32_fused_binary(op, scalar, *o)),
+                .for_each(|o| *o = (f64::from(*o) * scalar) as f32),
+            (CheapOp::Sub, true) => out_part
+                .iter_mut()
+                .for_each(|o| *o = (f64::from(*o) - scalar) as f32),
+            (CheapOp::Sub, false) => out_part
+                .iter_mut()
+                .for_each(|o| *o = (scalar - f64::from(*o)) as f32),
+            (CheapOp::Div, true) => out_part
+                .iter_mut()
+                .for_each(|o| *o = (f64::from(*o) / scalar) as f32),
+            (CheapOp::Div, false) => out_part
+                .iter_mut()
+                .for_each(|o| *o = (scalar / f64::from(*o)) as f32),
+            (CheapOp::Max, _) => out_part
+                .iter_mut()
+                .for_each(|o| *o = fused_jax_max(f64::from(*o), scalar) as f32),
+            (CheapOp::Min, _) => out_part
+                .iter_mut()
+                .for_each(|o| *o = fused_jax_min(f64::from(*o), scalar) as f32),
+            (CheapOp::Neg | CheapOp::Abs, _) => {}
         }
         done += take;
         linear += take;
@@ -1663,25 +1690,68 @@ fn apply_f32_fusion_other(
     base: usize,
 ) {
     match other {
-        F32Operand::Scalar(s) => match chain_left {
-            true => out
-                .iter_mut()
-                .for_each(|o| *o = f32_fused_binary(op, *o, s)),
-            false => out
-                .iter_mut()
-                .for_each(|o| *o = f32_fused_binary(op, s, *o)),
-        },
+        F32Operand::Scalar(s) => {
+            let s = f64::from(s);
+            match (op, chain_left) {
+                (CheapOp::Add, _) => out.iter_mut().for_each(|o| *o = (f64::from(*o) + s) as f32),
+                (CheapOp::Mul, _) => out.iter_mut().for_each(|o| *o = (f64::from(*o) * s) as f32),
+                (CheapOp::Sub, true) => {
+                    out.iter_mut().for_each(|o| *o = (f64::from(*o) - s) as f32)
+                }
+                (CheapOp::Sub, false) => {
+                    out.iter_mut().for_each(|o| *o = (s - f64::from(*o)) as f32)
+                }
+                (CheapOp::Div, true) => {
+                    out.iter_mut().for_each(|o| *o = (f64::from(*o) / s) as f32)
+                }
+                (CheapOp::Div, false) => {
+                    out.iter_mut().for_each(|o| *o = (s / f64::from(*o)) as f32)
+                }
+                (CheapOp::Max, _) => out
+                    .iter_mut()
+                    .for_each(|o| *o = fused_jax_max(f64::from(*o), s) as f32),
+                (CheapOp::Min, _) => out
+                    .iter_mut()
+                    .for_each(|o| *o = fused_jax_min(f64::from(*o), s) as f32),
+                (CheapOp::Neg | CheapOp::Abs, _) => {}
+            }
+        }
         F32Operand::Ext(i) => {
             let sl = &ext[i][base..base + out.len()];
-            match chain_left {
-                true => out
+            match (op, chain_left) {
+                (CheapOp::Add, _) => out
                     .iter_mut()
                     .zip(sl)
-                    .for_each(|(o, e)| *o = f32_fused_binary(op, *o, *e)),
-                false => out
+                    .for_each(|(o, e)| *o = (f64::from(*o) + f64::from(*e)) as f32),
+                (CheapOp::Mul, _) => out
                     .iter_mut()
                     .zip(sl)
-                    .for_each(|(o, e)| *o = f32_fused_binary(op, *e, *o)),
+                    .for_each(|(o, e)| *o = (f64::from(*o) * f64::from(*e)) as f32),
+                (CheapOp::Sub, true) => out
+                    .iter_mut()
+                    .zip(sl)
+                    .for_each(|(o, e)| *o = (f64::from(*o) - f64::from(*e)) as f32),
+                (CheapOp::Sub, false) => out
+                    .iter_mut()
+                    .zip(sl)
+                    .for_each(|(o, e)| *o = (f64::from(*e) - f64::from(*o)) as f32),
+                (CheapOp::Div, true) => out
+                    .iter_mut()
+                    .zip(sl)
+                    .for_each(|(o, e)| *o = (f64::from(*o) / f64::from(*e)) as f32),
+                (CheapOp::Div, false) => out
+                    .iter_mut()
+                    .zip(sl)
+                    .for_each(|(o, e)| *o = (f64::from(*e) / f64::from(*o)) as f32),
+                (CheapOp::Max, _) => out
+                    .iter_mut()
+                    .zip(sl)
+                    .for_each(|(o, e)| *o = fused_jax_max(f64::from(*o), f64::from(*e)) as f32),
+                (CheapOp::Min, _) => out
+                    .iter_mut()
+                    .zip(sl)
+                    .for_each(|(o, e)| *o = fused_jax_min(f64::from(*o), f64::from(*e)) as f32),
+                (CheapOp::Neg | CheapOp::Abs, _) => {}
             }
         }
         F32Operand::RowBroadcast(i) => {
@@ -1697,6 +1767,7 @@ fn apply_f32_fusion_other(
 }
 
 /// Evaluate the fused f32 run over one chunk `out` (already sized to the chunk length).
+#[allow(clippy::eq_op)] // Chain/Chain must execute x-x and x/x to preserve NaN behavior.
 fn apply_f32_fusion_chunk(out: &mut [f32], tape: &[F32Step], ext: &[&[f32]], base: usize) {
     // Step 0 has no chain operand: seed `out` from operand `a`, then apply `b`.
     let s0 = &tape[0];
@@ -1731,9 +1802,22 @@ fn apply_f32_fusion_chunk(out: &mut [f32], tape: &[F32Step], ext: &[&[f32]], bas
             _ => {}
         }
         match (step.a, step.b) {
-            (F32Operand::Chain, F32Operand::Chain) => out
-                .iter_mut()
-                .for_each(|o| *o = f32_fused_binary(step.op, *o, *o)),
+            (F32Operand::Chain, F32Operand::Chain) => match step.op {
+                CheapOp::Add => out
+                    .iter_mut()
+                    .for_each(|o| *o = (f64::from(*o) + f64::from(*o)) as f32),
+                CheapOp::Sub => out
+                    .iter_mut()
+                    .for_each(|o| *o = (f64::from(*o) - f64::from(*o)) as f32),
+                CheapOp::Mul => out
+                    .iter_mut()
+                    .for_each(|o| *o = (f64::from(*o) * f64::from(*o)) as f32),
+                CheapOp::Div => out
+                    .iter_mut()
+                    .for_each(|o| *o = (f64::from(*o) / f64::from(*o)) as f32),
+                CheapOp::Max | CheapOp::Min => {}
+                CheapOp::Neg | CheapOp::Abs => {}
+            },
             (F32Operand::Chain, other) => {
                 apply_f32_fusion_other(out, step.op, true, other, ext, base);
             }
@@ -2505,10 +2589,28 @@ mod tests {
             })
             .collect();
         let yv: Vec<f64> = (0..n)
-            .map(|i| if i % 5 == 0 { f64::NAN } else { (i as f64 * 0.011).cos() * 4.0 })
+            .map(|i| {
+                if i % 5 == 0 {
+                    f64::NAN
+                } else {
+                    (i as f64 * 0.011).cos() * 4.0
+                }
+            })
             .collect();
-        let jmax = |a: f64, b: f64| if a.is_nan() || b.is_nan() { f64::NAN } else { a.max(b) };
-        let jmin = |a: f64, b: f64| if a.is_nan() || b.is_nan() { f64::NAN } else { a.min(b) };
+        let jmax = |a: f64, b: f64| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.max(b)
+            }
+        };
+        let jmin = |a: f64, b: f64| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else {
+                a.min(b)
+            }
+        };
         let x = VarId(0);
         let y = VarId(1);
         let (v1, v2, v3, v4, v5, out) =
