@@ -5047,21 +5047,30 @@ fn one_hot_params_for_leading_batch(
 fn passthrough_expensive_linalg(primitive: Primitive) -> bool {
     matches!(
         primitive,
-        Primitive::Solve | Primitive::Det | Primitive::Lu | Primitive::Slogdet
+        // Non-symmetric `Eig` is the heaviest of these — iterative Francis QR plus
+        // per-eigenvalue Hessenberg inverse iteration (its work is well above the
+        // batch·n³ estimate, so the work-scaled thread count is conservative).
+        Primitive::Solve | Primitive::Det | Primitive::Lu | Primitive::Slogdet | Primitive::Eig
     )
 }
 
-/// O(n³)-ish work estimate for a batched passthrough whose per-slice input is an
+/// Flop-ish work estimate for a batched passthrough whose per-slice input is an
 /// `n×n` matrix: per-slice element count ≈ `n²`, so `n³ ≈ per_slice · √per_slice`.
-fn passthrough_work_estimate(batched: &Value, batch_size: usize) -> usize {
+/// `Eig` is ITERATIVE (Francis QR sweeps + per-eigenvalue Hessenberg inverse
+/// iteration), measured ~25× the per-slice cost of a single blocked-LU pass at the
+/// same `n`, so it gets a multiplier — otherwise the conservative `n³` estimate
+/// would keep moderate-`n` eig batches serial despite each slice being ~0.5ms.
+fn passthrough_work_estimate(primitive: Primitive, batched: &Value, batch_size: usize) -> usize {
     if batch_size == 0 {
         return 0;
     }
     let total = batched.as_tensor().map(|t| t.elements.len()).unwrap_or(0);
     let per_slice = total / batch_size;
+    let mult = if primitive == Primitive::Eig { 16 } else { 1 };
     batch_size
         .saturating_mul(per_slice)
         .saturating_mul(per_slice.isqrt())
+        .saturating_mul(mult)
 }
 
 fn batch_passthrough_leading(
@@ -5101,7 +5110,7 @@ fn batch_passthrough_leading(
     // eval is serial at moderate n. Cheap / control-flow passthrough stays serial.
     let threads = if passthrough_expensive_linalg(primitive) {
         batch_parallel_threads(
-            passthrough_work_estimate(&batched.value, batch_size),
+            passthrough_work_estimate(primitive, &batched.value, batch_size),
             batch_size,
         )
     } else {
@@ -5233,7 +5242,7 @@ fn batch_passthrough_leading_multi(
     // across a work-scaled thread count; cheap passthrough stays serial.
     let threads = if passthrough_expensive_linalg(primitive) {
         batch_parallel_threads(
-            passthrough_work_estimate(&batched.value, batch_size),
+            passthrough_work_estimate(primitive, &batched.value, batch_size),
             batch_size,
         )
     } else {
@@ -9893,8 +9902,9 @@ mod tests {
         assert!(
             super::batch_parallel_threads(
                 super::passthrough_work_estimate(
+                    Primitive::Lu,
                     &make_f64_tensor(&[batch as u32, n as u32, n as u32], &data),
-                    batch
+                    batch,
                 ),
                 batch
             ) > 1
@@ -10198,6 +10208,128 @@ mod tests {
             outputs[1].value.as_tensor().unwrap().shape.dims,
             vec![2, 2, 2]
         );
+    }
+
+    #[test]
+    fn batch_eig_passthrough_parallel_matches_oracle() {
+        // A batch large enough to trip the work-scaled fan-out in
+        // batch_passthrough_leading_multi (Eig is on the expensive-linalg allowlist)
+        // must equal the per-slice oracle — eval_eig is deterministic, so the batched
+        // and per-slice eigenvalues/eigenvectors are identical (no cross-call sign drift).
+        let (batch, n) = (64usize, 48usize);
+        let mut data = Vec::with_capacity(batch * n * n);
+        let mut matrices = Vec::with_capacity(batch);
+        for b in 0..batch {
+            // Real non-symmetric, well-separated spectrum (distinct diagonal + small
+            // off-diagonals keeps eig well-conditioned and the QR sweep convergent).
+            let mut a = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    a[i * n + j] = (((i * 13 + j * 29 + b * 7 + 3) % 7) as f64 - 3.0) * 0.05;
+                }
+                a[i * n + i] = (i as f64) * 1.3 + 2.0 + (b as f64) * 0.01;
+            }
+            matrices.push(make_f64_matrix(n, n, &a));
+            data.extend_from_slice(&a);
+        }
+        assert!(
+            super::batch_parallel_threads(
+                super::passthrough_work_estimate(
+                    Primitive::Eig,
+                    &make_f64_tensor(&[batch as u32, n as u32, n as u32], &data),
+                    batch,
+                ),
+                batch
+            ) > 1
+        );
+        let input = BatchTracer::batched(
+            make_f64_tensor(&[batch as u32, n as u32, n as u32], &data),
+            0,
+        );
+        let outputs = apply_batch_rule_multi(Primitive::Eig, &[input], &BTreeMap::new()).unwrap();
+        assert_eig_matches_slice_oracle(&outputs, &matrices);
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batch_eig_passthrough_parallel_vs_serial() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let mk = |n: usize, b: usize| -> Value {
+            let mut a = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in 0..n {
+                    a[i * n + j] = (((i * 13 + j * 29 + b * 7 + 3) % 7) as f64 - 3.0) * 0.05;
+                }
+                a[i * n + i] = (i as f64) * 1.3 + 2.0 + (b as f64) * 0.01;
+            }
+            make_f64_matrix(n, n, &a)
+        };
+        let run = |batch: usize, n: usize| {
+            let slices: Vec<Value> = (0..batch).map(|b| mk(n, b)).collect();
+            let slices_ref = &slices;
+            let serial = best_time(|| {
+                let mut out = Vec::with_capacity(batch);
+                for b in 0..batch {
+                    out.push(
+                        eval_primitive_multi(
+                            Primitive::Eig,
+                            std::slice::from_ref(&slices_ref[b]),
+                            &BTreeMap::new(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                std::hint::black_box(out);
+            });
+            let threads = super::batch_parallel_threads(batch * n * n * n * 16, batch);
+            let parallel = best_time(|| {
+                let mut slots: Vec<Option<Vec<Value>>> = (0..batch).map(|_| None).collect();
+                let per = batch.div_ceil(threads.max(1));
+                std::thread::scope(|scope| {
+                    let mut rest = slots.as_mut_slice();
+                    let mut start = 0usize;
+                    while start < batch {
+                        let cnt = per.min(batch - start);
+                        let (chunk, tail) = rest.split_at_mut(cnt);
+                        rest = tail;
+                        let s0 = start;
+                        scope.spawn(move || {
+                            for (j, slot) in chunk.iter_mut().enumerate() {
+                                *slot = Some(
+                                    eval_primitive_multi(
+                                        Primitive::Eig,
+                                        std::slice::from_ref(&slices_ref[s0 + j]),
+                                        &BTreeMap::new(),
+                                    )
+                                    .unwrap(),
+                                );
+                            }
+                        });
+                        start += cnt;
+                    }
+                });
+                std::hint::black_box(slots);
+            });
+            println!(
+                "BENCH batch eig batch={batch} n={n} (threads={threads}): serial {:.3}ms -> parallel {:.3}ms = {:.2}x",
+                serial * 1e3,
+                parallel * 1e3,
+                serial / parallel
+            );
+        };
+        run(64, 32);
+        run(128, 48);
+        run(256, 64);
     }
 
     #[test]
