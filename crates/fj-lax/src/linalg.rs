@@ -829,6 +829,66 @@ fn eval_qr_real_matrix(
     dtype: DType,
     full_matrices: bool,
 ) -> Result<Vec<Value>, EvalError> {
+    // Gate the WY-blocked path on the trailing matrix spilling L3 repeatedly under the
+    // BLAS-2 rank-1 update (bead wpjbg): below QR_BLOCK_MIN the contiguous cache-friendly
+    // scalar reflector loop is memory-bound but L3-resident and beats the blocked GEMMs;
+    // it also preserves the small-n bit-identity goldens.
+    let blocked = m.min(n) >= QR_BLOCK_MIN;
+    eval_qr_real_matrix_impl(m, n, a, dtype, full_matrices, blocked)
+}
+
+/// Factor one Householder reflector for column `j` (rows `j..m`) and apply it to
+/// columns `[j, col_end)` of the row-major `r` (stride `n`). Stores the reflector in
+/// the flat packed `v_store` (slot at `qr_reflector_offset(m, j)`) and its scale in
+/// `tau_store[j]`. `col_end == n` reproduces the original scalar factor loop exactly.
+fn qr_factor_col(
+    r: &mut [f64],
+    n: usize,
+    m: usize,
+    j: usize,
+    col_end: usize,
+    v_scratch: &mut [f64],
+    v_store: &mut [f64],
+    tau_store: &mut [f64],
+) {
+    let v_len = m - j;
+    for row_offset in 0..v_len {
+        v_scratch[row_offset] = r[(j + row_offset) * n + j];
+    }
+    let v = &mut v_scratch[..v_len];
+    let norm_v = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+
+    let v0_abs = (v[0] * v[0]).sqrt();
+    let alpha = if v0_abs > 0.0 {
+        let phase = v[0] / v0_abs;
+        -norm_v * phase
+    } else {
+        -norm_v
+    };
+    v[0] -= alpha;
+    let v_norm_sq: f64 = v.iter().map(|x| x * x).sum();
+
+    if v_norm_sq > f64::EPSILON * 1e4 {
+        let tau = 2.0 / v_norm_sq;
+        apply_real_householder_columns(r, n, j, j, col_end, v, tau);
+        let v_base = qr_reflector_offset(m, j);
+        v_store[v_base..v_base + v_len].copy_from_slice(v);
+        tau_store[j] = tau;
+    } else {
+        // v_store slot stays zeroed (pre-initialized) so the block reflector treats
+        // this reflector as the identity, matching the scalar path's tau==0 skip.
+        tau_store[j] = 0.0;
+    }
+}
+
+fn eval_qr_real_matrix_impl(
+    m: usize,
+    n: usize,
+    a: Vec<f64>,
+    dtype: DType,
+    full_matrices: bool,
+    blocked: bool,
+) -> Result<Vec<Value>, EvalError> {
     let k = m.min(n);
 
     let mut r = a;
@@ -836,34 +896,43 @@ fn eval_qr_real_matrix(
     let mut v_store = vec![0.0_f64; qr_reflector_packed_len(m, k)];
     let mut tau_store = vec![0.0_f64; k];
 
-    for j in 0..k {
-        let v_len = m - j;
-        for row_offset in 0..v_len {
-            v_scratch[row_offset] = r[(j + row_offset) * n + j];
+    if blocked {
+        // R = QᵀA: factor each QR_BLOCK-column panel (reflectors applied only within the
+        // panel's own columns), build the compact-WY T, then apply the panel block
+        // reflector M = H_{p+b-1}…H_p = I − V Tᵀ Vᵀ to the trailing columns via two GEMMs.
+        let mut p = 0;
+        while p < k {
+            let b = QR_BLOCK.min(k - p);
+            for j in p..p + b {
+                qr_factor_col(
+                    &mut r,
+                    n,
+                    m,
+                    j,
+                    p + b,
+                    &mut v_scratch,
+                    &mut v_store,
+                    &mut tau_store,
+                );
+            }
+            if p + b < n {
+                let t = qr_compact_wy_t(&v_store, &tau_store, m, p, b);
+                qr_block_apply(&mut r, m, n, &v_store, &t, p, b, p + b, n, true);
+            }
+            p += b;
         }
-        let v = &mut v_scratch[..v_len];
-        let norm_v = v.iter().map(|x| x * x).sum::<f64>().sqrt();
-
-        let v0_abs = (v[0] * v[0]).sqrt();
-        let alpha = if v0_abs > 0.0 {
-            let phase = v[0] / v0_abs;
-            -norm_v * phase
-        } else {
-            -norm_v
-        };
-        v[0] -= alpha;
-        let v_norm_sq: f64 = v.iter().map(|x| x * x).sum();
-
-        if v_norm_sq > f64::EPSILON * 1e4 {
-            let tau = 2.0 / v_norm_sq;
-
-            apply_real_householder_columns(&mut r, n, j, j, n, v, tau);
-
-            let v_base = qr_reflector_offset(m, j);
-            v_store[v_base..v_base + v_len].copy_from_slice(v);
-            tau_store[j] = tau;
-        } else {
-            tau_store[j] = 0.0;
+    } else {
+        for j in 0..k {
+            qr_factor_col(
+                &mut r,
+                n,
+                m,
+                j,
+                n,
+                &mut v_scratch,
+                &mut v_store,
+                &mut tau_store,
+            );
         }
     }
 
@@ -874,16 +943,32 @@ fn eval_qr_real_matrix(
         q[i * q_cols + i] = 1.0;
     }
 
-    for j in (0..k).rev() {
-        let tau = tau_store[j];
-        if (tau * tau).sqrt() < f64::EPSILON {
-            continue;
+    if blocked {
+        // Q = H_0…H_{k-1} applied to I: apply each panel block reflector I − V T Vᵀ
+        // (note: T, not Tᵀ — the forward product, opposite of the R update) backward,
+        // over columns [p, q_cols) (columns < p stay identity, so they are skipped).
+        let mut starts: Vec<(usize, usize)> = Vec::new();
+        let mut p = 0;
+        while p < k {
+            starts.push((p, QR_BLOCK.min(k - p)));
+            p += QR_BLOCK;
         }
+        for &(p, b) in starts.iter().rev() {
+            let t = qr_compact_wy_t(&v_store, &tau_store, m, p, b);
+            qr_block_apply(&mut q, m, q_cols, &v_store, &t, p, b, p, q_cols, false);
+        }
+    } else {
+        for j in (0..k).rev() {
+            let tau = tau_store[j];
+            if (tau * tau).sqrt() < f64::EPSILON {
+                continue;
+            }
 
-        let v_len = m - j;
-        let v_base = qr_reflector_offset(m, j);
-        let v = &v_store[v_base..v_base + v_len];
-        apply_real_householder_columns(&mut q, q_cols, j, j, q_cols, v, tau);
+            let v_len = m - j;
+            let v_base = qr_reflector_offset(m, j);
+            let v = &v_store[v_base..v_base + v_len];
+            apply_real_householder_columns(&mut q, q_cols, j, j, q_cols, v, tau);
+        }
     }
 
     let r_rows = if full_matrices { m } else { k };
@@ -980,6 +1065,152 @@ fn apply_real_householder_columns(
 
         col += width;
     }
+}
+
+/// Panel width for the WY-blocked QR (b reflectors fused into one block reflector).
+const QR_BLOCK: usize = 32;
+/// Minimum `min(m,n)` to take the WY-blocked path. Below it the scalar reflector loop
+/// (cache-friendly contiguous rank-1 update, L3-resident) wins and the bit-identity
+/// goldens are preserved (they all use small n); at/above it the trailing matrix spills
+/// L3 repeatedly under the BLAS-2 rank-1 update, so the in-place rank-b block apply —
+/// which sweeps the trailing matrix only twice per panel instead of `b` times — wins:
+/// measured (same-binary A/B) 1.05x at n=2048 and 1.25x at n=4096, growing with n. See
+/// bead wpjbg / project_qr_matmul2d_unsuitable.
+const QR_BLOCK_MIN: usize = 2048;
+
+/// Compact-WY upper-triangular `T` (b×b) for the panel of `b` Householder reflectors
+/// starting at global column `p`: the block reflector `H_p…H_{p+b-1} = I − V T Vᵀ`
+/// (V is the m×b trapezoidal reflector matrix; reflector `p+j` lives in the flat
+/// `v_store` slot at `qr_reflector_offset(m, p+j)`, indexed from row `p+j`).
+fn qr_compact_wy_t(v_store: &[f64], tau_store: &[f64], m: usize, p: usize, b: usize) -> Vec<f64> {
+    let mut t = vec![0.0_f64; b * b];
+    for j in 0..b {
+        let tau_j = tau_store[p + j];
+        t[j * b + j] = tau_j;
+        if tau_j == 0.0 || j == 0 {
+            continue;
+        }
+        let vj_base = qr_reflector_offset(m, p + j);
+        let vj_len = m - (p + j);
+        // w[i] = v_{p+i} · v_{p+j} over the overlapping rows ≥ p+j.
+        let mut w = vec![0.0_f64; j];
+        for (i, wi) in w.iter_mut().enumerate() {
+            let vi_base = qr_reflector_offset(m, p + i);
+            let offset = j - i; // v_{p+i}[offset+tt] aligns with v_{p+j}[tt] (row p+j+tt)
+            let mut s = 0.0;
+            for tt in 0..vj_len {
+                s += v_store[vi_base + offset + tt] * v_store[vj_base + tt];
+            }
+            *wi = s;
+        }
+        // T[0:j, j] = −tau_j · T[0:j,0:j] · w  (T upper-triangular).
+        for i in 0..j {
+            let mut s = 0.0;
+            for l in i..j {
+                s += t[i * b + l] * w[l];
+            }
+            t[i * b + j] = -tau_j * s;
+        }
+    }
+    t
+}
+
+/// Apply the panel `(p, b)` block reflector to columns `[col_start, col_end)` of the
+/// row-major `c` (m rows, `c_cols` cols) as two cache-blocked GEMMs `C −= V (W₂)` with
+/// `W₂ = T(ᵀ) (Vᵀ C)`. `transpose_t == true` applies `I − V Tᵀ Vᵀ` (the R update:
+/// M = H_{p+b-1}…H_p = Qᵀ_panel); `false` applies `I − V T Vᵀ` (the Q update:
+/// H_p…H_{p+b-1}). Reassociates vs the per-reflector loop (tolerance-equal, not bit-
+/// identical — gated to the large-n path).
+#[allow(clippy::too_many_arguments)]
+fn qr_block_apply(
+    c: &mut [f64],
+    m: usize,
+    c_cols: usize,
+    v_store: &[f64],
+    t: &[f64],
+    p: usize,
+    b: usize,
+    col_start: usize,
+    col_end: usize,
+    transpose_t: bool,
+) {
+    let cols = col_end - col_start;
+    if cols == 0 {
+        return;
+    }
+    // W1 = Vᵀ C_sub (b×cols), accumulated IN PLACE from the strided row-major trailing
+    // matrix — no contiguous copy of C, no GEMM pack/spawn (those O(n³) extra memory
+    // passes are exactly why the matmul_2d block apply lost, bead wpjbg). Reflector p+lj
+    // has support rows ≥ p+lj; sweeping the trailing rows once, each row is read once and
+    // fanned into the active reflectors' W1 rows (a cache-resident b×cols buffer).
+    let mut w1 = vec![0.0_f64; b * cols];
+    for row in p..m {
+        let crow = &c[row * c_cols + col_start..row * c_cols + col_start + cols];
+        let lj_max = (row - p + 1).min(b);
+        for lj in 0..lj_max {
+            let base = p + lj;
+            let vval = v_store[qr_reflector_offset(m, base) + (row - base)];
+            if vval == 0.0 {
+                continue;
+            }
+            let wrow = &mut w1[lj * cols..lj * cols + cols];
+            for col in 0..cols {
+                wrow[col] += vval * crow[col];
+            }
+        }
+    }
+    let mut w2 = vec![0.0_f64; b * cols];
+    if transpose_t {
+        // W2 = Tᵀ W1 : W2[i] = Σ_{l≤i} T[l][i] W1[l]  (Tᵀ lower-triangular).
+        for i in 0..b {
+            for l in 0..=i {
+                let tli = t[l * b + i];
+                if tli != 0.0 {
+                    for col in 0..cols {
+                        w2[i * cols + col] += tli * w1[l * cols + col];
+                    }
+                }
+            }
+        }
+    } else {
+        // W2 = T W1 : W2[i] = Σ_{l≥i} T[i][l] W1[l]  (T upper-triangular).
+        for i in 0..b {
+            for l in i..b {
+                let til = t[i * b + l];
+                if til != 0.0 {
+                    for col in 0..cols {
+                        w2[i * cols + col] += til * w1[l * cols + col];
+                    }
+                }
+            }
+        }
+    }
+    // C_sub −= V W2, again IN PLACE on the strided trailing matrix: sweep the rows once,
+    // each row gets the rank-b correction Σ_lj V[row,lj]·W2[lj,:] (W2 is b×cols, cache-
+    // resident). Reads/writes each C row exactly once.
+    for row in p..m {
+        let lj_max = (row - p + 1).min(b);
+        let crow = &mut c[row * c_cols + col_start..row * c_cols + col_start + cols];
+        for lj in 0..lj_max {
+            let base = p + lj;
+            let vval = v_store[qr_reflector_offset(m, base) + (row - base)];
+            if vval == 0.0 {
+                continue;
+            }
+            let w2row = &w2[lj * cols..lj * cols + cols];
+            for col in 0..cols {
+                crow[col] -= vval * w2row[col];
+            }
+        }
+    }
+}
+
+/// Bench-only entry: run the real QR with the WY-blocked path forced on or off, so a
+/// same-binary A/B can isolate the blocked GEMM passes from the scalar reflector loop
+/// at a fixed size (the public `Qr` primitive auto-gates on `QR_BLOCK_MIN`).
+#[doc(hidden)]
+pub fn qr_real_bench(a: Vec<f64>, m: usize, n: usize, blocked: bool) -> Vec<Value> {
+    eval_qr_real_matrix_impl(m, n, a, DType::F64, false, blocked).expect("qr bench")
 }
 
 // ── LU Decomposition ───────────────────────────────────────────────
@@ -6071,6 +6302,69 @@ mod tests {
         }
 
         assert_real_qr_matches_complex_zero_imag(n, &a);
+    }
+
+    #[test]
+    fn qr_blocked_reconstructs_and_orthonormal() {
+        // Force the WY-blocked path (qr_real_bench blocked=true) at a small n so the
+        // test is cheap: A = Q·R must hold and Q must be orthonormal (Qᵀ·Q = I), both
+        // to tolerance. The blocked path reassociates vs the scalar reflector loop, so
+        // this is a tolerance check (QR JAX-parity is 1e-12), not bit-identity.
+        let n = 300usize;
+        // Diagonally dominant => full rank with no tiny pivots, so QR with positive-
+        // diagonal R is UNIQUE and the blocked path must match the scalar path (avoids
+        // the genuine column-direction ambiguity of a near-dependent column).
+        let a: Vec<f64> = (0..n * n)
+            .map(|idx| {
+                let (i, j) = (idx / n, idx % n);
+                let off = ((idx as f64) * 0.012_34).sin() * 0.7 + ((idx % 13) as f64) * 0.05 - 0.3;
+                if i == j { off + n as f64 } else { off }
+            })
+            .collect();
+        let blocked = super::qr_real_bench(a.clone(), n, n, true);
+        let scalar = super::qr_real_bench(a.clone(), n, n, false);
+        let qd: Vec<f64> = blocked[0]
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect();
+        let rd: Vec<f64> = blocked[1]
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect();
+        // Blocked must also match the trusted scalar factorization to tolerance.
+        let qs: Vec<f64> = scalar[0]
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect();
+        let mut max_res = 0.0_f64;
+        let mut max_orth = 0.0_f64;
+        let mut max_vs_scalar = 0.0_f64;
+        for i in 0..n {
+            for j in 0..n {
+                let mut qr = 0.0;
+                let mut qtq = 0.0;
+                for kk in 0..n {
+                    qr += qd[i * n + kk] * rd[kk * n + j];
+                    qtq += qd[kk * n + i] * qd[kk * n + j];
+                }
+                max_res = max_res.max((qr - a[i * n + j]).abs());
+                let want = if i == j { 1.0 } else { 0.0 };
+                max_orth = max_orth.max((qtq - want).abs());
+                max_vs_scalar = max_vs_scalar.max((qd[i * n + j] - qs[i * n + j]).abs());
+            }
+        }
+        assert!(max_res < 1e-9, "QR reconstruction residual {max_res}");
+        assert!(max_orth < 1e-9, "Q orthonormality residual {max_orth}");
+        assert!(max_vs_scalar < 1e-9, "blocked Q vs scalar Q {max_vs_scalar}");
     }
 
     #[test]

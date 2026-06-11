@@ -4881,6 +4881,42 @@ fn bench_dispatch_overhead(c: &mut Criterion) {
     });
 }
 
+// WY-blocked QR (bead wpjbg): same-binary A/B of the scalar reflector loop vs the
+// WY-blocked GEMM-trailing-update path at large n, where the trailing matrix spills L3
+// repeatedly under the BLAS-2 rank-1 update. `qr_real_bench` forces the path so this
+// isolates the algorithm from the auto-gate. Small sample count: each n=4096 QR is ~1s.
+fn bench_qr_blocked_ab(c: &mut Criterion) {
+    for &n in &[2048usize, 4096usize] {
+        let a: Vec<f64> = (0..n * n)
+            .map(|i| {
+                let x = i as f64;
+                (x * 0.125).sin() + (x * 0.03125).cos()
+            })
+            .collect();
+        c.bench_function(&format!("linalg/qr_{n}_scalar"), |bencher| {
+            bencher.iter(|| {
+                black_box(fj_lax::linalg::qr_real_bench(
+                    black_box(a.clone()),
+                    n,
+                    n,
+                    false,
+                ))
+            })
+        });
+        c.bench_function(&format!("linalg/qr_{n}_blocked"), |bencher| {
+            bencher.iter(|| {
+                black_box(fj_lax::linalg::qr_real_bench(black_box(a.clone()), n, n, true))
+            })
+        });
+    }
+}
+
+criterion_group!(
+    name = qr_blocked_ab;
+    config = Criterion::default().sample_size(10);
+    targets = bench_qr_blocked_ab
+);
+
 criterion_group!(
     benches,
     bench_dispatch_overhead,
@@ -5129,4 +5165,4 @@ criterion_group!(
     bench_eq_1k,
     bench_bitwise_and_1k,
 );
-criterion_main!(benches);
+criterion_main!(benches, qr_blocked_ab);
