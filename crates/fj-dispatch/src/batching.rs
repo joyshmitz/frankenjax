@@ -3341,50 +3341,91 @@ fn batch_qr_multi(
     let r_rows = if full_matrices { m } else { k };
     let matrix_len = m * n;
 
-    let mut q_elements = Vec::with_capacity(batch_size * m * q_cols);
-    let mut r_elements = Vec::with_capacity(batch_size * r_rows * n);
-    let mut matrix = Vec::with_capacity(matrix_len);
-    let mut qr_scratch = QrScratch::default();
-    for batch in 0..batch_size {
-        let base = batch * matrix_len;
-        if m == 3 && n == 2 && !full_matrices {
-            let a00 = tensor.elements[base].as_f64().ok_or_else(|| {
-                BatchError::EvalError("type mismatch for qr: expected numeric elements".to_owned())
-            })?;
-            let a01 = tensor.elements[base + 1].as_f64().ok_or_else(|| {
-                BatchError::EvalError("type mismatch for qr: expected numeric elements".to_owned())
-            })?;
-            let a10 = tensor.elements[base + 2].as_f64().ok_or_else(|| {
-                BatchError::EvalError("type mismatch for qr: expected numeric elements".to_owned())
-            })?;
-            let a11 = tensor.elements[base + 3].as_f64().ok_or_else(|| {
-                BatchError::EvalError("type mismatch for qr: expected numeric elements".to_owned())
-            })?;
-            let a20 = tensor.elements[base + 4].as_f64().ok_or_else(|| {
-                BatchError::EvalError("type mismatch for qr: expected numeric elements".to_owned())
-            })?;
-            let a21 = tensor.elements[base + 5].as_f64().ok_or_else(|| {
-                BatchError::EvalError("type mismatch for qr: expected numeric elements".to_owned())
-            })?;
+    let q_len = m * q_cols;
+    let r_len = r_rows * n;
+    let mut q_f = vec![0.0_f64; batch_size * q_len];
+    let mut r_f = vec![0.0_f64; batch_size * r_len];
+
+    // Extract every batch matrix to f64 once (serial — also surfaces non-numeric
+    // elements as an error before the parallel section).
+    let mut all = Vec::with_capacity(batch_size * matrix_len);
+    for lit in &tensor.elements[..batch_size * matrix_len] {
+        all.push(lit.as_f64().ok_or_else(|| {
+            BatchError::EvalError("type mismatch for qr: expected numeric elements".to_owned())
+        })?);
+    }
+
+    // Each batch matrix is an INDEPENDENT, compute-bound O(m·n·k) Householder QR.
+    // Fan the batch out across a WORK-SCALED thread count (each thread ≥
+    // BATCH_PARALLEL_WORK_PER_THREAD; serial for small work — see batch_parallel_threads).
+    // Bit-identical: qr_decompose_matrix is deterministic given its input (it clears
+    // `r`/`tau_store`/each `v_store[j]`), so a fresh per-thread scratch matches a
+    // reused one; only the order of execution changes.
+    let thin_3x2 = m == 3 && n == 2 && !full_matrices;
+    let decompose = |b: usize, scratch: &mut QrScratch, q: &mut [f64], r: &mut [f64]| {
+        let base = b * matrix_len;
+        if thin_3x2 {
+            let a = &all[base..base + 6];
             qr_decompose_matrix_3x2_thin(
-                [a00, a01, a10, a11, a20, a21],
-                &mut qr_scratch.q_out,
-                &mut qr_scratch.r_out,
+                [a[0], a[1], a[2], a[3], a[4], a[5]],
+                &mut scratch.q_out,
+                &mut scratch.r_out,
             );
         } else {
-            matrix.clear();
-            for lit in &tensor.elements[base..base + matrix_len] {
-                matrix.push(lit.as_f64().ok_or_else(|| {
-                    BatchError::EvalError(
-                        "type mismatch for qr: expected numeric elements".to_owned(),
-                    )
-                })?);
-            }
-            qr_decompose_matrix(m, n, &matrix, full_matrices, &mut qr_scratch);
+            qr_decompose_matrix(m, n, &all[base..base + matrix_len], full_matrices, scratch);
         }
-        q_elements.extend(qr_scratch.q_out.iter().copied().map(Literal::from_f64));
-        r_elements.extend(qr_scratch.r_out.iter().copied().map(Literal::from_f64));
+        q.copy_from_slice(&scratch.q_out);
+        r.copy_from_slice(&scratch.r_out);
+    };
+
+    let total_work = batch_size
+        .saturating_mul(m)
+        .saturating_mul(n)
+        .saturating_mul(k);
+    let threads = batch_parallel_threads(total_work, batch_size);
+
+    if threads <= 1 {
+        let mut scratch = QrScratch::default();
+        for b in 0..batch_size {
+            decompose(
+                b,
+                &mut scratch,
+                &mut q_f[b * q_len..(b + 1) * q_len],
+                &mut r_f[b * r_len..(b + 1) * r_len],
+            );
+        }
+    } else {
+        let per = batch_size.div_ceil(threads);
+        let decompose_ref = &decompose;
+        std::thread::scope(|scope| {
+            let mut q_rest: &mut [f64] = q_f.as_mut_slice();
+            let mut r_rest: &mut [f64] = r_f.as_mut_slice();
+            let mut start = 0usize;
+            while start < batch_size {
+                let cnt = per.min(batch_size - start);
+                let (q_chunk, q_tail) = q_rest.split_at_mut(cnt * q_len);
+                let (r_chunk, r_tail) = r_rest.split_at_mut(cnt * r_len);
+                q_rest = q_tail;
+                r_rest = r_tail;
+                let s0 = start;
+                scope.spawn(move || {
+                    let mut scratch = QrScratch::default();
+                    for j in 0..cnt {
+                        decompose_ref(
+                            s0 + j,
+                            &mut scratch,
+                            &mut q_chunk[j * q_len..(j + 1) * q_len],
+                            &mut r_chunk[j * r_len..(j + 1) * r_len],
+                        );
+                    }
+                });
+                start += cnt;
+            }
+        });
     }
+
+    let q_elements: Vec<Literal> = q_f.into_iter().map(Literal::from_f64).collect();
+    let r_elements: Vec<Literal> = r_f.into_iter().map(Literal::from_f64).collect();
 
     let q_shape = Shape {
         dims: vec![batch_size as u32, m as u32, q_cols as u32],
@@ -9526,6 +9567,151 @@ mod tests {
 
         let err = apply_batch_rule_multi(Primitive::Qr, &[input], &BTreeMap::new()).unwrap_err();
         assert!(err.to_string().contains("expected rank-2 tensor"));
+    }
+
+    #[test]
+    fn batch_qr_parallel_path_is_bit_identical_to_serial() {
+        // A batch whose work-scaled thread count is > 1 must produce BYTE-FOR-BYTE the
+        // same Q/R as the serial per-slice factorization — qr_decompose_matrix is
+        // deterministic given its input (clears r/tau/v_store), so a fresh per-thread
+        // scratch matches a reused one regardless of execution order.
+        let (batch, m, n) = (256usize, 32usize, 32usize);
+        let k = m.min(n);
+        assert!(super::batch_parallel_threads(batch * m * n * k, batch) > 1);
+        let matrix_len = m * n;
+        let (q_len, r_len) = (m * k, k * n);
+        let mut data = Vec::with_capacity(batch * matrix_len);
+        for b in 0..batch {
+            data.extend_from_slice(&general_batch_matrix(m, n, b));
+        }
+
+        let input = BatchTracer::batched(
+            make_f64_tensor(&[batch as u32, m as u32, n as u32], &data),
+            0,
+        );
+        let outputs = apply_batch_rule_multi(Primitive::Qr, &[input], &BTreeMap::new()).unwrap();
+        let q_act = extract_f64_vec(&outputs[0].value);
+        let r_act = extract_f64_vec(&outputs[1].value);
+
+        let mut scratch = super::QrScratch::default();
+        let mut q_ref = vec![0.0f64; batch * q_len];
+        let mut r_ref = vec![0.0f64; batch * r_len];
+        for b in 0..batch {
+            super::qr_decompose_matrix(
+                m,
+                n,
+                &data[b * matrix_len..(b + 1) * matrix_len],
+                false,
+                &mut scratch,
+            );
+            q_ref[b * q_len..(b + 1) * q_len].copy_from_slice(&scratch.q_out);
+            r_ref[b * r_len..(b + 1) * r_len].copy_from_slice(&scratch.r_out);
+        }
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&q_act), bits(&q_ref), "Q not bit-identical to serial");
+        assert_eq!(bits(&r_act), bits(&r_ref), "R not bit-identical to serial");
+
+        // Sanity: a few slices reconstruct Q·R = A.
+        for b in [0usize, 1, batch / 2, batch - 1] {
+            let a = &data[b * matrix_len..(b + 1) * matrix_len];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut val = 0.0;
+                    for c in 0..k {
+                        val += q_act[b * q_len + i * k + c] * r_act[b * r_len + c * n + j];
+                    }
+                    assert!((val - a[i * n + j]).abs() < 1e-9, "recon b={b} [{i},{j}]");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batch_qr_parallel_vs_serial() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let run = |batch: usize, m: usize, n: usize| {
+            let k = m.min(n);
+            let matrix_len = m * n;
+            let (q_len, r_len) = (m * k, k * n);
+            let mut all = Vec::with_capacity(batch * matrix_len);
+            for b in 0..batch {
+                all.extend_from_slice(&general_batch_matrix(m, n, b));
+            }
+            let all_ref: &[f64] = &all;
+            let serial = best_time(|| {
+                let mut scratch = super::QrScratch::default();
+                let mut q = vec![0.0f64; batch * q_len];
+                let mut r = vec![0.0f64; batch * r_len];
+                for b in 0..batch {
+                    super::qr_decompose_matrix(
+                        m,
+                        n,
+                        &all_ref[b * matrix_len..(b + 1) * matrix_len],
+                        false,
+                        &mut scratch,
+                    );
+                    q[b * q_len..(b + 1) * q_len].copy_from_slice(&scratch.q_out);
+                    r[b * r_len..(b + 1) * r_len].copy_from_slice(&scratch.r_out);
+                }
+                std::hint::black_box((q, r));
+            });
+            let threads = super::batch_parallel_threads(batch * m * n * k, batch);
+            let parallel = best_time(|| {
+                let per = batch.div_ceil(threads.max(1));
+                let mut q = vec![0.0f64; batch * q_len];
+                let mut r = vec![0.0f64; batch * r_len];
+                std::thread::scope(|scope| {
+                    let mut qr_: &mut [f64] = q.as_mut_slice();
+                    let mut rr: &mut [f64] = r.as_mut_slice();
+                    let mut start = 0usize;
+                    while start < batch {
+                        let cnt = per.min(batch - start);
+                        let (qc, qt) = qr_.split_at_mut(cnt * q_len);
+                        let (rc, rt) = rr.split_at_mut(cnt * r_len);
+                        qr_ = qt;
+                        rr = rt;
+                        let s0 = start;
+                        scope.spawn(move || {
+                            let mut scratch = super::QrScratch::default();
+                            for j in 0..cnt {
+                                let b = s0 + j;
+                                super::qr_decompose_matrix(
+                                    m,
+                                    n,
+                                    &all_ref[b * matrix_len..(b + 1) * matrix_len],
+                                    false,
+                                    &mut scratch,
+                                );
+                                qc[j * q_len..(j + 1) * q_len].copy_from_slice(&scratch.q_out);
+                                rc[j * r_len..(j + 1) * r_len].copy_from_slice(&scratch.r_out);
+                            }
+                        });
+                        start += cnt;
+                    }
+                });
+                std::hint::black_box((q, r));
+            });
+            println!(
+                "BENCH batch qr batch={batch} m={m} n={n} (threads={threads}): serial {:.3}ms -> parallel {:.3}ms = {:.2}x",
+                serial * 1e3,
+                parallel * 1e3,
+                serial / parallel
+            );
+        };
+        run(128, 32, 32);
+        run(256, 48, 48);
+        run(512, 64, 64);
     }
 
     /// Verify a multi-output vmap result against the per-slice oracle: each
