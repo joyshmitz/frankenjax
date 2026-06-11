@@ -1742,6 +1742,195 @@ pub(crate) fn eval_svd(
     Ok(vec![u_val, s_val, vh_val])
 }
 
+const SVD_COMPRESSED_MIN_DIM: usize = 32;
+const SVD_COMPRESSED_MAX_RANK: usize = 16;
+const SVD_COMPRESSED_REL_RESIDUAL: f64 = 1.0e-20;
+
+#[allow(clippy::too_many_lines)]
+fn compressed_rrqr_svd_real(
+    m: usize,
+    n: usize,
+    a: &[f64],
+) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+    if m < n || n < SVD_COMPRESSED_MIN_DIM || !a.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let k = m.min(n);
+    let mut residual_cols = Vec::with_capacity(n);
+    let mut residual_norms = Vec::with_capacity(n);
+    for col in 0..n {
+        let mut column = Vec::with_capacity(m);
+        let mut norm_sq = 0.0;
+        for row in 0..m {
+            let value = a[row * n + col];
+            column.push(value);
+            norm_sq += value * value;
+        }
+        residual_cols.push(column);
+        residual_norms.push(norm_sq);
+    }
+
+    let initial_trace: f64 = residual_norms.iter().sum();
+    if initial_trace == 0.0 {
+        let sigma = vec![0.0; k];
+        let u = vec![0.0; m * k];
+        let mut v = vec![0.0; n * n];
+        for i in 0..n {
+            v[i * n + i] = 1.0;
+        }
+        return Some((sigma, u, v));
+    }
+
+    let rank_limit = SVD_COMPRESSED_MAX_RANK.min((n / 2).max(1));
+    let mut permutation: Vec<usize> = (0..n).collect();
+    let mut q_cols: Vec<Vec<f64>> = Vec::with_capacity(rank_limit);
+    let mut r_rows: Vec<Vec<f64>> = Vec::with_capacity(rank_limit);
+
+    for rank in 0..rank_limit {
+        let mut pivot = rank;
+        let mut pivot_norm = residual_norms[rank];
+        for (candidate, &norm_sq) in residual_norms.iter().enumerate().skip(rank + 1) {
+            if norm_sq > pivot_norm {
+                pivot = candidate;
+                pivot_norm = norm_sq;
+            }
+        }
+
+        if pivot_norm <= 0.0 {
+            return None;
+        }
+
+        if pivot != rank {
+            residual_cols.swap(rank, pivot);
+            residual_norms.swap(rank, pivot);
+            permutation.swap(rank, pivot);
+            for r_row in &mut r_rows {
+                r_row.swap(rank, pivot);
+            }
+        }
+
+        let norm = pivot_norm.sqrt();
+        if norm <= f64::EPSILON {
+            return None;
+        }
+
+        let mut q = vec![0.0; m];
+        for row in 0..m {
+            q[row] = residual_cols[rank][row] / norm;
+        }
+        for previous_q in &q_cols {
+            let mut projection = 0.0;
+            for row in 0..m {
+                projection += previous_q[row] * q[row];
+            }
+            for row in 0..m {
+                q[row] -= projection * previous_q[row];
+            }
+        }
+        let q_norm_sq = q.iter().map(|value| value * value).sum::<f64>();
+        if q_norm_sq <= f64::EPSILON {
+            return None;
+        }
+        let q_norm = q_norm_sq.sqrt();
+        for value in &mut q {
+            *value /= q_norm;
+        }
+
+        for col in rank..n {
+            let mut projection = 0.0;
+            for row in 0..m {
+                projection += q[row] * residual_cols[col][row];
+            }
+            for row in 0..m {
+                residual_cols[col][row] -= projection * q[row];
+            }
+            residual_norms[col] = residual_cols[col]
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .max(0.0);
+        }
+
+        let mut r_row = vec![0.0; n];
+        for col in 0..n {
+            let original_col = permutation[col];
+            let mut projection = 0.0;
+            for row in 0..m {
+                projection += q[row] * a[row * n + original_col];
+            }
+            r_row[col] = projection;
+        }
+        q_cols.push(q);
+        r_rows.push(r_row);
+
+        let active_rank = rank + 1;
+        let remaining_trace: f64 = residual_norms.iter().skip(active_rank).sum();
+        if active_rank < n && remaining_trace <= initial_trace * SVD_COMPRESSED_REL_RESIDUAL {
+            return Some(compressed_rrqr_svd_result(
+                &q_cols,
+                &r_rows,
+                &permutation,
+                m,
+                n,
+                active_rank,
+            ));
+        }
+    }
+
+    None
+}
+
+fn compressed_rrqr_svd_result(
+    q_cols: &[Vec<f64>],
+    r_rows: &[Vec<f64>],
+    permutation: &[usize],
+    m: usize,
+    n: usize,
+    rank: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let k = m.min(n);
+    let mut rrt = low_rank_rrt(r_rows, rank, n);
+    let (lambdas, eigenvectors) = jacobi_eigendecomposition_cyclic(&mut rrt, rank);
+    let mut order: Vec<usize> = (0..rank).collect();
+    order.sort_by(|&left, &right| {
+        lambdas[right]
+            .total_cmp(&lambdas[left])
+            .then_with(|| left.cmp(&right))
+    });
+
+    let mut sigma = vec![0.0; k];
+    let active_cols = rank.min(k);
+    let mut u = vec![0.0; m * k];
+    let mut v_active = vec![0.0; n * active_cols];
+
+    for (new_col, &eig_col) in order.iter().take(active_cols).enumerate() {
+        let sg = lambdas[eig_col].max(0.0).sqrt();
+        sigma[new_col] = sg;
+
+        for row in 0..m {
+            let mut value = 0.0;
+            for basis in 0..rank {
+                value += q_cols[basis][row] * eigenvectors[basis * rank + eig_col];
+            }
+            u[row * k + new_col] = value;
+        }
+
+        if sg > f64::EPSILON * 1e4 {
+            for (permuted_col, &original_col) in permutation.iter().enumerate() {
+                let mut value = 0.0;
+                for basis in 0..rank {
+                    value += r_rows[basis][permuted_col] * eigenvectors[basis * rank + eig_col];
+                }
+                v_active[original_col * active_cols + new_col] = value / sg;
+            }
+        }
+    }
+
+    let v = extend_orthogonal_columns(&v_active, n, active_cols, n);
+    (sigma, u, v)
+}
+
 /// Core real thin SVD via one-sided Jacobi (Hestenes / Demmel–Veselić). Orthogonalize
 /// the COLUMNS of A in place by right-side Jacobi rotations, accumulating V; never form
 /// AᵀA, so small singular values keep high *relative* accuracy (≈ε‖A‖, not √ε‖A‖). At
@@ -1750,6 +1939,10 @@ pub(crate) fn eval_svd(
 /// and V the full n×n right singular vectors as columns. Shared by `eval_svd_real` and
 /// the SVD-based pseudoinverse `pinv_svd` (beads frankenjax-96i7w, -4kx6m).
 fn one_sided_jacobi_svd_real(m: usize, n: usize, a: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    if let Some(result) = compressed_rrqr_svd_real(m, n, a) {
+        return result;
+    }
+
     let k = m.min(n);
     // Store W column-major because Jacobi sweeps stream columns p/q repeatedly.
     // The copy also records initial column norms, then applies a deterministic
@@ -7299,6 +7492,30 @@ mod tests {
     fn svd_48x48_f64_golden_output_digest() -> Result<(), Box<dyn std::error::Error>> {
         let data = svd_48_profile_matrix_data();
         let result = eval_svd(&[make_matrix(48, 48, &data)], &BTreeMap::new())?;
+        let u = extract_f64_elements(&result[0]);
+        let s = extract_f64_elements(&result[1]);
+        let vh = extract_f64_elements(&result[2]);
+        for (idx, pair) in s.windows(2).enumerate() {
+            assert!(
+                pair[0] >= pair[1],
+                "singular values not descending at {idx}: {} < {}",
+                pair[0],
+                pair[1]
+            );
+        }
+        for row in 0..48 {
+            for col in 0..48 {
+                let mut reconstructed = 0.0;
+                for axis in 0..48 {
+                    reconstructed += u[row * 48 + axis] * s[axis] * vh[axis * 48 + col];
+                }
+                assert!(
+                    (reconstructed - data[row * 48 + col]).abs() < 1e-9,
+                    "SVD 48x48 reconstruction[{row},{col}] = {reconstructed}, expected {}",
+                    data[row * 48 + col]
+                );
+            }
+        }
         let output_bits: Vec<Vec<u64>> = result
             .iter()
             .map(|value| {
@@ -7311,7 +7528,7 @@ mod tests {
         let digest = fj_test_utils::fixture_id_from_json(&output_bits)?;
         eprintln!("SVD 48x48 f64 golden digest: {digest}");
         assert_eq!(
-            digest, "6f1b0069586dda5b23d377bbb171a18ac0e24b6e0309dabc4ad0e0d2d1864d90",
+            digest, "5d9fc335e204bea56ea3e086abf97a7e271c9d70aaad4352503d8de8457f197f",
             "SVD 48x48 f64 golden output digest changed"
         );
         Ok(())
