@@ -14224,13 +14224,16 @@ mod tests {
             )
             .unwrap(),
         );
+        // Boxed (Vec<Literal>) reference: TensorValue::new now densifies all-I64 inputs
+        // (fj-core i64-densify), so build the boxed buffer explicitly to keep exercising
+        // the generic path against the dense top_k fast path.
         let lit_i = Value::Tensor(
-            TensorValue::new(
+            TensorValue::new_with_literal_buffer(
                 DType::I64,
                 Shape {
                     dims: vec![rows as u32, cols as u32],
                 },
-                di.iter().copied().map(Literal::I64).collect(),
+                fj_core::LiteralBuffer::new(di.iter().copied().map(Literal::I64).collect()),
             )
             .unwrap(),
         );
