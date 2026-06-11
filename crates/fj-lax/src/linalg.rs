@@ -4730,11 +4730,38 @@ fn lu_solve(lu: &[f64], p: &[usize], b: &[f64], n: usize) -> Vec<f64> {
     x
 }
 
+/// LU factorization for the dense real `solve`/`solve_multi_rhs` path, returning
+/// `(combined L\U row-major, swap-built row permutation)` consumed identically by
+/// `lu_solve`. For small `n` (< `LU_BLOCK_THRESHOLD`) this is the bit-identical
+/// scalar `lu_factor` the conformance goldens pin; at scale it switches to the
+/// cache-blocked, GEMM-accelerated `lu_factor_real_blocked` (LAPACK `getrf` shape),
+/// whose O(n³) trailing Schur update `A22 -= L21·U12` runs at `matmul_2d`
+/// microkernel speed instead of strided scalar rank-1 sweeps. The blocked result is
+/// numerically equivalent — `P·A = L·U` to machine precision, exactly JAX's own
+/// blocked `getrf` guarantee — differing only in the last ulp; `solve` parity is
+/// tolerance-based and its goldens cover only small `n` (same gate + rationale as
+/// `eval_lu`). `lu_factor_real_blocked` builds `perm` by the identical
+/// `swap(col, max_row)`-from-identity sequence, so converting it to `usize` feeds
+/// `lu_solve` (`pb[i] = b[perm[i]]`) exactly as the scalar `p` does.
+fn lu_factor_for_solve(a: &[f64], n: usize) -> Option<(Vec<f64>, Vec<usize>)> {
+    if a.len() != n * n {
+        return None;
+    }
+    if n >= LU_BLOCK_THRESHOLD {
+        let mut lu = a.to_vec();
+        let (_pivots, perm) = lu_factor_real_blocked(&mut lu, n, n);
+        let p: Vec<usize> = perm.iter().map(|&row| row as usize).collect();
+        Some((lu, p))
+    } else {
+        lu_factor(a, n)
+    }
+}
+
 pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     if a.len() != n * n || b.len() != n {
         return None;
     }
-    let (lu, p) = lu_factor(a, n)?;
+    let (lu, p) = lu_factor_for_solve(a, n)?;
     Some(lu_solve(&lu, &p, b, n))
 }
 
@@ -4746,7 +4773,7 @@ pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
 /// identical: every column previously received the same factorization of the
 /// same `A`.
 pub fn solve_multi_rhs(a: &[f64], b: &[f64], n: usize, m: usize) -> Option<Vec<f64>> {
-    let (lu, p) = lu_factor(a, n)?;
+    let (lu, p) = lu_factor_for_solve(a, n)?;
     let mut result = vec![0.0; n * m];
     for j in 0..m {
         let rhs: Vec<f64> = (0..n).map(|i| b[i * m + j]).collect();
@@ -7465,6 +7492,108 @@ mod tests {
         assert!((x[0] - 1.0).abs() < 1e-8);
         assert!((x[1] - 2.0).abs() < 1e-8);
         assert!((x[2] - 3.0).abs() < 1e-8);
+    }
+
+    // Deterministic, diagonally-dominant (well-conditioned) n×n system + RHS.
+    fn solve_test_system(n: usize) -> (Vec<f64>, Vec<f64>) {
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = (((i * 131 + j * 17 + 7) % 1000) as f64 / 500.0) - 1.0;
+            }
+            a[i * n + i] += n as f64; // dominant diagonal → well-conditioned
+        }
+        let b: Vec<f64> = (0..n).map(|i| ((i * 13 % 97) as f64) - 48.0).collect();
+        (a, b)
+    }
+
+    #[test]
+    fn blocked_solve_matches_naive_within_tolerance_and_residual() {
+        // n ≥ LU_BLOCK_THRESHOLD routes `solve` through the cache-blocked GEMM LU.
+        // Verify the blocked solution (a) reconstructs b with a tiny residual and
+        // (b) matches the naive scalar-LU reference to tolerance — numerically
+        // equivalent (P·A = L·U to machine precision), differing only at ulp level.
+        let n = 300usize;
+        assert!(n >= LU_BLOCK_THRESHOLD, "must exercise the blocked path");
+        let (a, b) = solve_test_system(n);
+
+        let x = solve(&a, &b, n).expect("blocked solve");
+
+        // (a) residual ‖Ax − b‖_∞
+        let mut max_res = 0.0f64;
+        for i in 0..n {
+            let mut s = 0.0;
+            for j in 0..n {
+                s += a[i * n + j] * x[j];
+            }
+            max_res = max_res.max((s - b[i]).abs());
+        }
+        assert!(max_res < 1e-9, "residual too large: {max_res}");
+
+        // (b) vs naive scalar-LU reference (call the unblocked kernel directly).
+        let (lu, p) = lu_factor(&a, n).expect("naive lu");
+        let xref = lu_solve(&lu, &p, &b, n);
+        let mut max_diff = 0.0f64;
+        for i in 0..n {
+            max_diff = max_diff.max((x[i] - xref[i]).abs());
+        }
+        assert!(max_diff < 1e-9, "blocked vs naive solve diff: {max_diff}");
+    }
+
+    #[test]
+    fn small_solve_stays_bit_identical_to_naive_lu() {
+        // Below the threshold, `solve` must be the SAME unblocked factorization the
+        // conformance goldens pin — bit-for-bit identical to the naive lu_factor path.
+        let n = 64usize;
+        assert!(n < LU_BLOCK_THRESHOLD);
+        let (a, b) = solve_test_system(n);
+        let x = solve(&a, &b, n).expect("solve");
+        let (lu, p) = lu_factor(&a, n).expect("naive lu");
+        let xref = lu_solve(&lu, &p, &b, n);
+        for i in 0..n {
+            assert_eq!(
+                x[i].to_bits(),
+                xref[i].to_bits(),
+                "small-n solve must stay bit-identical at {i}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_solve_blocked_lu_vs_naive() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let run = |n: usize| {
+            let (a, b) = solve_test_system(n);
+            let naive = best_time(|| {
+                let (lu, p) = lu_factor(&a, n).unwrap();
+                std::hint::black_box(lu_solve(&lu, &p, &b, n));
+            });
+            let blocked = best_time(|| {
+                let mut lu = a.clone();
+                let (_piv, perm) = lu_factor_real_blocked(&mut lu, n, n);
+                let p: Vec<usize> = perm.iter().map(|&r| r as usize).collect();
+                std::hint::black_box(lu_solve(&lu, &p, &b, n));
+            });
+            println!(
+                "BENCH solve n={n}: naive-LU {:.3}ms -> blocked-GEMM-LU {:.3}ms = {:.2}x",
+                naive * 1e3,
+                blocked * 1e3,
+                naive / blocked
+            );
+        };
+        run(512);
+        run(1024);
     }
 
     #[test]
