@@ -1733,11 +1733,11 @@ fn bench_matmul_2d_512(c: &mut Criterion) {
 fn f32_gemm_blocked_ab(c: &mut Criterion, m: usize, k: usize, n: usize) {
     let a: Vec<f32> = (0..m * k).map(|i| (i as f32 * 1e-4).sin()).collect();
     let b: Vec<f32> = (0..k * n).map(|i| (i as f32 * 2e-4).cos()).collect();
-    c.bench_function(&format!("linalg/f32_gemm_{m}_blocked"), |bencher| {
-        bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, true))
+    c.bench_function(&format!("linalg/f32_gemm_{m}_packed"), |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, "packed"))
     });
-    c.bench_function(&format!("linalg/f32_gemm_{m}_rowref"), |bencher| {
-        bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, false))
+    c.bench_function(&format!("linalg/f32_gemm_{m}_register"), |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, "register"))
     });
 }
 fn bench_f32_gemm_1024(c: &mut Criterion) {

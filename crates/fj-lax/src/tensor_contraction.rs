@@ -1185,6 +1185,34 @@ pub fn batched_matmul_2d_f32_in(
     let ops = total_rows.saturating_mul(k).saturating_mul(n);
     let threads = matmul_thread_count(ops, total_rows);
 
+    // Single-matrix GEMM with B past L2: pack B panel-major ONCE so every thread's
+    // microkernel streams it sequentially (bit-identical, just B read order). Batched
+    // (batch>1) GEMM keeps the unpacked register kernel (B differs per batch).
+    if batch == 1 && k.saturating_mul(n) >= PACK_B_MIN_KN_F32 {
+        let bpack = pack_b_panels_f32(b, k, n);
+        if threads <= 1 {
+            matmul_2d_packed_row_block_f32(a, k, &bpack, b, n, 0, &mut result);
+        } else {
+            let rows_per = total_rows.div_ceil(threads);
+            std::thread::scope(|scope| {
+                let bpack = bpack.as_slice();
+                let mut rest: &mut [f32] = result.as_mut_slice();
+                let mut g_start = 0usize;
+                while g_start < total_rows {
+                    let chunk_rows = rows_per.min(total_rows - g_start);
+                    let (block, tail) = rest.split_at_mut(chunk_rows * n);
+                    rest = tail;
+                    let gs = g_start;
+                    scope.spawn(move || {
+                        matmul_2d_packed_row_block_f32(a, k, bpack, b, n, gs, block)
+                    });
+                    g_start += chunk_rows;
+                }
+            });
+        }
+        return result;
+    }
+
     if threads <= 1 {
         batched_matmul_row_block_f32_in(a, b, m, k, n, 0, &mut result);
         return result;
@@ -1360,15 +1388,126 @@ fn batched_matmul_row_block_f32_in_rowref(
     }
 }
 
+/// `k·n` (B element count) above which B is packed panel-major before the multiply.
+/// Once B spills L2 the strided read in the per-`l` microkernel misses spatial
+/// locality on every k-step; below it B is L2-resident and the pack does not pay.
+/// f32 sibling of the f64 `PACK_B_MIN_KN` (half the bytes, so 2x the elements).
+const PACK_B_MIN_KN_F32: usize = 1 << 18;
+
+/// Flat panel-major B pack for the native-f32 GEMM: panel `jp` (columns
+/// `jp*F32_NR .. jp*F32_NR+F32_NR`) is stored contiguously as `[k][F32_NR]` at
+/// `bpack[jp*k*F32_NR ..]`, so the register microkernel reads each panel's k-stream
+/// SEQUENTIALLY (stride `F32_NR`) instead of striding B by `n` on every k-step.
+/// Only full `F32_NR`-wide panels are packed; the column remainder reads B directly.
+/// Pure copy — bit-for-bit unchanged values.
+fn pack_b_panels_f32(b: &[f32], k: usize, n: usize) -> Vec<f32> {
+    let npanels = n / F32_NR;
+    let mut bpack = vec![0.0f32; npanels * k * F32_NR];
+    for jp in 0..npanels {
+        let j = jp * F32_NR;
+        let dst = jp * k * F32_NR;
+        for l in 0..k {
+            let s = l * n + j;
+            bpack[dst + l * F32_NR..dst + l * F32_NR + F32_NR].copy_from_slice(&b[s..s + F32_NR]);
+        }
+    }
+    bpack
+}
+
+/// Native-f32 GEMM row-block reading a panel-major-packed B (single matrix, batch 0).
+/// BIT-IDENTICAL to [`batched_matmul_row_block_f32_in`] — same MR=4 × F32_NR register
+/// tile, same per-output ascending-`l` fold; only B's read order changes (sequential
+/// from the pack). Column/row remainders read unpacked B with the same ascending sweep.
+fn matmul_2d_packed_row_block_f32(
+    a: &[f32],
+    k: usize,
+    bpack: &[f32],
+    b: &[f32],
+    n: usize,
+    g_start: usize,
+    block: &mut [f32],
+) {
+    let total_rows = block.len() / n;
+    let full_cols = n / F32_NR * F32_NR;
+    let full_rows = total_rows / F32_MR * F32_MR;
+
+    let mut j = 0;
+    while j < full_cols {
+        let panel = &bpack[(j / F32_NR) * k * F32_NR..];
+        let mut i = 0;
+        while i < full_rows {
+            let ar0 = (g_start + i) * k;
+            let (ar1, ar2, ar3) = (ar0 + k, ar0 + 2 * k, ar0 + 3 * k);
+            let mut c0 = F32xN::splat(0.0);
+            let mut c1 = F32xN::splat(0.0);
+            let mut c2 = F32xN::splat(0.0);
+            let mut c3 = F32xN::splat(0.0);
+            for l in 0..k {
+                let bv = F32xN::from_slice(&panel[l * F32_NR..l * F32_NR + F32_NR]);
+                c0 += F32xN::splat(a[ar0 + l]) * bv;
+                c1 += F32xN::splat(a[ar1 + l]) * bv;
+                c2 += F32xN::splat(a[ar2 + l]) * bv;
+                c3 += F32xN::splat(a[ar3 + l]) * bv;
+            }
+            let ob = i * n + j;
+            block[ob..ob + F32_NR].copy_from_slice(c0.as_array());
+            block[ob + n..ob + n + F32_NR].copy_from_slice(c1.as_array());
+            block[ob + 2 * n..ob + 2 * n + F32_NR].copy_from_slice(c2.as_array());
+            block[ob + 3 * n..ob + 3 * n + F32_NR].copy_from_slice(c3.as_array());
+            i += F32_MR;
+        }
+        j += F32_NR;
+    }
+
+    // Column remainder (full MR-row tiles, columns past the last F32_NR panel).
+    let mut i = 0;
+    while i < full_rows {
+        let ar0 = (g_start + i) * k;
+        let mut jj = full_cols;
+        while jj < n {
+            let mut s = [0.0f32; F32_MR];
+            for l in 0..k {
+                let bv = b[l * n + jj];
+                for (r, sr) in s.iter_mut().enumerate() {
+                    *sr += a[ar0 + r * k + l] * bv;
+                }
+            }
+            for (r, sr) in s.iter().enumerate() {
+                block[(i + r) * n + jj] = *sr;
+            }
+            jj += 1;
+        }
+        i += F32_MR;
+    }
+
+    // Row remainder (rows past the last MR tile): per-row ascending-`l` sweep.
+    while i < total_rows {
+        let a_row = (g_start + i) * k;
+        let c_row = &mut block[i * n..i * n + n];
+        c_row.fill(0.0);
+        for l in 0..k {
+            let a_il = a[a_row + l];
+            let src = &b[l * n..l * n + n];
+            for (cx, bx) in c_row.iter_mut().zip(src) {
+                *cx += a_il * *bx;
+            }
+        }
+        i += 1;
+    }
+}
+
 /// Bench-only single-batch f32 GEMM A/B: `blocked=true` runs the F32_MR cache-blocked
 /// kernel (production), `false` the per-row reference, isolating the register-blocking win.
 #[doc(hidden)]
-pub fn f32_matmul_bench(a: &[f32], m: usize, k: usize, b: &[f32], n: usize, blocked: bool) -> Vec<f32> {
+pub fn f32_matmul_bench(a: &[f32], m: usize, k: usize, b: &[f32], n: usize, mode: &str) -> Vec<f32> {
     let mut out = vec![0.0f32; m * n];
-    if blocked {
-        batched_matmul_row_block_f32_in(a, b, m, k, n, 0, &mut out);
-    } else {
-        batched_matmul_row_block_f32_in_rowref(a, b, m, k, n, 0, &mut out);
+    match mode {
+        "rowref" => batched_matmul_row_block_f32_in_rowref(a, b, m, k, n, 0, &mut out),
+        "packed" => {
+            let bpack = pack_b_panels_f32(b, k, n);
+            matmul_2d_packed_row_block_f32(a, k, &bpack, b, n, 0, &mut out);
+        }
+        _ => batched_matmul_row_block_f32_in(a, b, m, k, n, 0, &mut out),
     }
     out
 }
@@ -2080,6 +2219,38 @@ mod tests {
                         "mismatch at batch={batch}, row={i}, col={j}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The panel-major-packed f32 path (k·n >= PACK_B_MIN_KN_F32, batch 1) must equal the
+    /// ascending-`l` reference, including the MR/NR remainders that read unpacked B.
+    #[test]
+    fn batched_matmul_2d_f32_in_packed_path_matches_reference() {
+        for &(m, k, n) in &[
+            (11usize, 512usize, 519usize), // k·n=265728 >= 1<<18; m%4=3, n%16=7
+            (37, 600, 528),                // larger; m%4=1, n%16=0
+        ] {
+            assert!(k * n >= PACK_B_MIN_KN_F32, "test must trigger the packed path");
+            let af: Vec<f32> = (0..m * k).map(|i| (i as f32 * 0.0007).sin() - 0.3).collect();
+            let bf: Vec<f32> = (0..k * n).map(|i| (i as f32 * 0.0009).cos() + 0.2).collect();
+            let got = batched_matmul_2d_f32_in(&af, 1, m, k, &bf, n);
+            let mut want = vec![0.0f32; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for l in 0..k {
+                        acc += af[i * k + l] * bf[l * n + j];
+                    }
+                    want[i * n + j] = acc;
+                }
+            }
+            for idx in 0..m * n {
+                assert_eq!(
+                    got[idx].to_bits(),
+                    want[idx].to_bits(),
+                    "packed f32 mismatch m={m} k={k} n={n} at {idx}"
+                );
             }
         }
     }
