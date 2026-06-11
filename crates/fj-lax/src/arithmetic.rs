@@ -7502,6 +7502,89 @@ fn general_integral_tensordot(
     Ok(Some(Value::Tensor(out)))
 }
 
+/// General COMPLEX dot_general — ANY rank, ANY number of batch / contracting dims
+/// (Complex64/Complex128) — as a single (batched) complex GEMM. The complex sibling
+/// of [`general_real_tensordot`] / [`general_integral_tensordot`]: permute lhs to
+/// `[batch..., free..., contract...]` and rhs to `[batch..., contract..., free...]`
+/// over the dense `(re, im)` f64 pairs, then `rank2_complex_matmul` (batch==1) /
+/// `batched_rank2_complex_matmul`, and round each `(re, im)` to the output dtype.
+/// Replaces the generic strided odometer for every complex contraction the canonical
+/// fast paths above miss — non-canonical batched, rank>2 tensordot, multi-contract.
+/// Bit-identical: the generic complex path accumulates `(re, im)` in f64 via
+/// `complex_mul` + separate real/imag adds over the contracting index in ascending
+/// row-major order, then `complex_literal_from_f64_parts(out_dtype, _)` — exactly
+/// what the kernel + `new_complex_values` do (Complex64 rounds components to f32);
+/// the permute only reorders memory in that same order.
+#[allow(clippy::too_many_arguments)]
+fn general_complex_tensordot(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    lhs_batch: &[usize],
+    rhs_batch: &[usize],
+    lhs_contracting: &[usize],
+    rhs_contracting: &[usize],
+    lhs_free_dims: &[usize],
+    rhs_free_dims: &[usize],
+    output_dims: &[u32],
+) -> Result<Option<Value>, EvalError> {
+    let out_dtype = match dot_output_kind(lhs, rhs) {
+        DotOutputKind::Complex(dt) => dt,
+        _ => return Ok(None),
+    };
+    let (Some(lhs_c), Some(rhs_c)) = (
+        lhs.elements.as_complex_slice(),
+        rhs.elements.as_complex_slice(),
+    ) else {
+        return Ok(None);
+    };
+    let lhs_dims: Vec<usize> = lhs.shape.dims.iter().map(|&d| d as usize).collect();
+    let rhs_dims: Vec<usize> = rhs.shape.dims.iter().map(|&d| d as usize).collect();
+    let batch: usize = lhs_batch.iter().map(|&d| lhs_dims[d]).product();
+    let m: usize = lhs_free_dims.iter().map(|&d| lhs_dims[d]).product();
+    let k: usize = lhs_contracting.iter().map(|&d| lhs_dims[d]).product();
+    let n: usize = rhs_free_dims.iter().map(|&d| rhs_dims[d]).product();
+    let rbatch: usize = rhs_batch.iter().map(|&d| rhs_dims[d]).product();
+    let rk: usize = rhs_contracting.iter().map(|&d| rhs_dims[d]).product();
+    if rk != k || rbatch != batch {
+        return Ok(None);
+    }
+    let mut lhs_perm: Vec<usize> = lhs_batch.to_vec();
+    lhs_perm.extend_from_slice(lhs_free_dims);
+    lhs_perm.extend_from_slice(lhs_contracting);
+    let mut rhs_perm: Vec<usize> = rhs_batch.to_vec();
+    rhs_perm.extend_from_slice(rhs_contracting);
+    rhs_perm.extend_from_slice(rhs_free_dims);
+
+    let a = if is_identity_perm(&lhs_perm) {
+        Cow::Borrowed(lhs_c)
+    } else {
+        Cow::Owned(permute_strided(lhs_c, &lhs_dims, &lhs_perm))
+    };
+    let b = if is_identity_perm(&rhs_perm) {
+        Cow::Borrowed(rhs_c)
+    } else {
+        Cow::Owned(permute_strided(rhs_c, &rhs_dims, &rhs_perm))
+    };
+    let values = if batch == 1 {
+        rank2_complex_matmul(a.as_ref(), m, k, b.as_ref(), n)
+    } else {
+        batched_rank2_complex_matmul(a.as_ref(), batch, m, k, b.as_ref(), n)
+    };
+    if output_dims.is_empty() {
+        let (re, im) = values[0];
+        return Ok(Some(Value::Scalar(complex_literal_from_f64_parts(
+            out_dtype, re, im,
+        ))));
+    }
+    Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+        out_dtype,
+        Shape {
+            dims: output_dims.to_vec(),
+        },
+        values,
+    )?)))
+}
+
 fn dot_f64_elements(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> {
     if let Some(values) = tensor.elements.as_f64_slice() {
         return Some(Cow::Borrowed(values));
@@ -8268,6 +8351,26 @@ pub(crate) fn eval_dot_general(
     // multi-contract einsum). Bit-identical wrapping-i64 fold (see
     // general_integral_dot_general_matches_generic).
     if let Some(value) = general_integral_tensordot(
+        lhs,
+        rhs,
+        &lhs_batch,
+        &rhs_batch,
+        &lhs_contracting,
+        &rhs_contracting,
+        &lhs_free_dims,
+        &rhs_free_dims,
+        &output_dims,
+    )? {
+        return Ok(value);
+    }
+
+    // General complex dot_general (Complex64/Complex128, any rank/batch/multi-contract)
+    // as a single (batched) complex GEMM via permute -> rank2/batched complex matmul,
+    // instead of the generic strided odometer. Catches every complex contraction the
+    // canonical fast paths above miss (non-canonical batched, rank>2 tensordot,
+    // multi-contract). Bit-identical f64 (re,im) accumulation (see
+    // general_complex_dot_general_matches_generic).
+    if let Some(value) = general_complex_tensordot(
         lhs,
         rhs,
         &lhs_batch,
@@ -11643,6 +11746,108 @@ mod tests {
     }
 
     #[test]
+    fn general_complex_dot_general_matches_generic() {
+        // Rank>2, multi-contracting-dim, and non-canonical batched complex
+        // contractions now route through general_complex_tensordot (permute +
+        // (batched) rank2_complex_matmul) instead of the generic strided odometer.
+        // Each must be bit-for-bit identical to the textbook ascending-(flattened-k)
+        // (re,im) f64 reference (Complex128, no rounding).
+        let cplx = |v: &Value| -> Vec<(u64, u64)> {
+            let Value::Tensor(t) = v else {
+                panic!("expected tensor")
+            };
+            t.elements
+                .as_complex_slice()
+                .expect("complex")
+                .iter()
+                .map(|&(re, im)| (re.to_bits(), im.to_bits()))
+                .collect()
+        };
+        let mk = |len: usize, salt: f64| -> Vec<(f64, f64)> {
+            (0..len)
+                .map(|i| {
+                    (
+                        (i as f64 * salt).sin() * 1.7 - 0.3,
+                        (i as f64 * salt).cos() * 1.1 + 0.2,
+                    )
+                })
+                .collect()
+        };
+        // Dense-complex inputs (new_complex_values) so the as_complex_slice fast
+        // path actually fires; new() with boxed literals would fall to the odometer.
+        let tc = |dims: Vec<u32>, data: &[(f64, f64)]| {
+            Value::Tensor(
+                TensorValue::new_complex_values(DType::Complex128, Shape { dims }, data.to_vec())
+                    .unwrap(),
+            )
+        };
+
+        // (1) multi-contract: A[2,3,4]·B[3,4,5] contract (A:1,2)/(B:0,1) -> [2,5].
+        let a = mk(2 * 3 * 4, 0.011);
+        let b = mk(3 * 4 * 5, 0.017);
+        let p = BTreeMap::from([
+            ("lhs_contracting_dims".to_owned(), "1,2".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "0,1".to_owned()),
+        ]);
+        let got = eval_dot_general(&[tc(vec![2, 3, 4], &a), tc(vec![3, 4, 5], &b)], &p).unwrap();
+        let mut want = vec![(0.0f64, 0.0f64); 2 * 5];
+        for i in 0..2 {
+            for l in 0..5 {
+                let (mut re, mut im) = (0.0f64, 0.0f64);
+                for j in 0..3 {
+                    for kk in 0..4 {
+                        let (ar, ai) = a[(i * 3 + j) * 4 + kk];
+                        let (br, bi) = b[(j * 4 + kk) * 5 + l];
+                        re += ar * br - ai * bi;
+                        im += ar * bi + ai * br;
+                    }
+                }
+                want[i * 5 + l] = (re, im);
+            }
+        }
+        assert_eq!(
+            cplx(&got),
+            want.iter()
+                .map(|&(r, i)| (r.to_bits(), i.to_bits()))
+                .collect::<Vec<_>>(),
+            "multi"
+        );
+
+        // (2) non-canonical batched: A[2,4,3]·B[2,5,4] batch 0, contract A:1,B:2 -> [2,3,5].
+        let a = mk(2 * 4 * 3, 0.023);
+        let b = mk(2 * 5 * 4, 0.029);
+        let p = BTreeMap::from([
+            ("lhs_batch_dims".to_owned(), "0".to_owned()),
+            ("rhs_batch_dims".to_owned(), "0".to_owned()),
+            ("lhs_contracting_dims".to_owned(), "1".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "2".to_owned()),
+        ]);
+        let got = eval_dot_general(&[tc(vec![2, 4, 3], &a), tc(vec![2, 5, 4], &b)], &p).unwrap();
+        let mut want = vec![(0.0f64, 0.0f64); 2 * 3 * 5];
+        for t in 0..2 {
+            for j in 0..3 {
+                for l in 0..5 {
+                    let (mut re, mut im) = (0.0f64, 0.0f64);
+                    for kk in 0..4 {
+                        let (ar, ai) = a[(t * 4 + kk) * 3 + j];
+                        let (br, bi) = b[(t * 5 + l) * 4 + kk];
+                        re += ar * br - ai * bi;
+                        im += ar * bi + ai * br;
+                    }
+                    want[(t * 3 + j) * 5 + l] = (re, im);
+                }
+            }
+        }
+        assert_eq!(
+            cplx(&got),
+            want.iter()
+                .map(|&(r, i)| (r.to_bits(), i.to_bits()))
+                .collect::<Vec<_>>(),
+            "batched-T"
+        );
+    }
+
+    #[test]
     fn f32_dot_general_gemm_bit_identical_to_reference() {
         // f32 dot_general (the default ML dtype) now routes through the GEMM path
         // (f32 inputs, f32 accumulation, f32 output). Must be bit-for-bit
@@ -12077,6 +12282,139 @@ mod tests {
         }));
         println!(
             "BENCH i64 dot_general [{bt},{m},{n}]/k={k}: odometer {:.3}ms -> GEMM {:.3}ms = {:.2}x",
+            old * 1e3,
+            new * 1e3,
+            old / new
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_complex_dot_general_gemm_vs_odometer() {
+        // A/B (same binary): the new general_complex_tensordot GEMM routing vs a
+        // faithful copy of the replaced threaded strided odometer (per-output
+        // multi-index decode, per-step linear_to_multi_index + complex_mul) on a
+        // non-canonical batched Complex128 contraction A[b,m,k]·B[b,n,k] -> [b,m,n].
+        use std::time::Instant;
+        let (bt, m, k, n) = (8usize, 96usize, 96usize, 128usize);
+        let a: Vec<(f64, f64)> = (0..bt * m * k)
+            .map(|i| ((i as f64 * 0.013).sin(), (i as f64 * 0.017).cos()))
+            .collect();
+        let b: Vec<(f64, f64)> = (0..bt * n * k)
+            .map(|i| ((i as f64 * 0.019).cos(), (i as f64 * 0.011).sin()))
+            .collect();
+        let tc = |dims: Vec<u32>, data: &[(f64, f64)]| {
+            Value::Tensor(
+                TensorValue::new_complex_values(DType::Complex128, Shape { dims }, data.to_vec())
+                    .unwrap(),
+            )
+        };
+        let inputs = [
+            tc(vec![bt as u32, m as u32, k as u32], &a),
+            tc(vec![bt as u32, n as u32, k as u32], &b),
+        ];
+        let params = BTreeMap::from([
+            ("lhs_batch_dims".to_owned(), "0".to_owned()),
+            ("rhs_batch_dims".to_owned(), "0".to_owned()),
+            ("lhs_contracting_dims".to_owned(), "2".to_owned()),
+            ("rhs_contracting_dims".to_owned(), "2".to_owned()),
+        ]);
+
+        let odometer = || -> Vec<(f64, f64)> {
+            let (Value::Tensor(l), Value::Tensor(r)) = (&inputs[0], &inputs[1]) else {
+                unreachable!()
+            };
+            let ls = compute_strides(&l.shape.dims);
+            let rs = compute_strides(&r.shape.dims);
+            let le = l.elements.as_complex_slice().unwrap();
+            let re_ = r.elements.as_complex_slice().unwrap();
+            let (lb, rb) = (vec![0usize], vec![0usize]);
+            let (lf, rf) = (vec![1usize], vec![1usize]);
+            let (lc, rc) = (vec![2usize], vec![2usize]);
+            let (br_, lfr, rfr, cr) =
+                (vec![bt as u32], vec![m as u32], vec![n as u32], vec![k as u32]);
+            let out_count = bt * m * n;
+            let mut out = vec![(0.0f64, 0.0f64); out_count];
+            let threads = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1)
+                .min(out_count);
+            let chunk = out_count.div_ceil(threads);
+            std::thread::scope(|scope| {
+                let mut rest = out.as_mut_slice();
+                let mut start = 0usize;
+                while start < out_count {
+                    let len = chunk.min(out_count - start);
+                    let (blk, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let s = start;
+                    let (ls, rs) = (&ls, &rs);
+                    let (br_, lfr, rfr, cr) = (&br_, &lfr, &rfr, &cr);
+                    let (lb, rb, lf, rf, lc, rc) = (&lb, &rb, &lf, &rf, &lc, &rc);
+                    scope.spawn(move || {
+                        for (idx, slot) in blk.iter_mut().enumerate() {
+                            let o = s + idx;
+                            let rhs_free_flat = o % n;
+                            let t2 = o / n;
+                            let lhs_free_flat = t2 % m;
+                            let batch_flat = (t2 / m) % bt;
+                            let batch_idx = linear_to_multi_index(batch_flat, br_);
+                            let lhs_free_idx = linear_to_multi_index(lhs_free_flat, lfr);
+                            let rhs_free_idx = linear_to_multi_index(rhs_free_flat, rfr);
+                            let (mut sr, mut si) = (0.0f64, 0.0f64);
+                            for kk in 0..k {
+                                let contract_idx = linear_to_multi_index(kk, cr);
+                                let mut li = 0usize;
+                                for (i2, &d) in lb.iter().enumerate() {
+                                    li += batch_idx[i2] * ls[d];
+                                }
+                                for (i2, &d) in lf.iter().enumerate() {
+                                    li += lhs_free_idx[i2] * ls[d];
+                                }
+                                for (i2, &d) in lc.iter().enumerate() {
+                                    li += contract_idx[i2] * ls[d];
+                                }
+                                let mut ri = 0usize;
+                                for (i2, &d) in rb.iter().enumerate() {
+                                    ri += batch_idx[i2] * rs[d];
+                                }
+                                for (i2, &d) in rf.iter().enumerate() {
+                                    ri += rhs_free_idx[i2] * rs[d];
+                                }
+                                for (i2, &d) in rc.iter().enumerate() {
+                                    ri += contract_idx[i2] * rs[d];
+                                }
+                                let (pr, pi) = complex_mul(le[li], re_[ri]);
+                                sr += pr;
+                                si += pi;
+                            }
+                            *slot = (sr, si);
+                        }
+                    });
+                    start += len;
+                }
+            });
+            out
+        };
+
+        let best = |mut f: Box<dyn FnMut()>| -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..10 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let old = best(Box::new(|| {
+            std::hint::black_box(odometer());
+        }));
+        let new = best(Box::new(|| {
+            std::hint::black_box(eval_dot_general(&inputs, &params).unwrap());
+        }));
+        println!(
+            "BENCH c128 dot_general [{bt},{m},{n}]/k={k}: odometer {:.3}ms -> GEMM {:.3}ms = {:.2}x",
             old * 1e3,
             new * 1e3,
             old / new
