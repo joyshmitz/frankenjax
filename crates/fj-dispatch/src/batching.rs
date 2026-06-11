@@ -312,8 +312,7 @@ fn harmonize_ternary(
             // instead of mis-aligning the batch axis against a logical axis. Equal-
             // rank operands (the Select contract, and same-shape Clamp) are
             // unchanged. Same mixed-rank fix as the binary elementwise path.
-            let (a_val, b_val, c_val) =
-                align_batched_ternary_logical_ranks(a_val, b_val, c_val)?;
+            let (a_val, b_val, c_val) = align_batched_ternary_logical_ranks(a_val, b_val, c_val)?;
             Ok((a_val, b_val, c_val, Some(0)))
         }
     }
@@ -887,7 +886,11 @@ fn batch_reduce(
             let raw_axes = parse_i64_list(raw, "axes")?;
             let mut out = Vec::with_capacity(raw_axes.len());
             for ax in raw_axes {
-                let norm = if ax < 0 { per_elem_rank as i64 + ax } else { ax };
+                let norm = if ax < 0 {
+                    per_elem_rank as i64 + ax
+                } else {
+                    ax
+                };
                 if norm < 0 || norm >= per_elem_rank as i64 {
                     return Err(BatchError::EvalError(format!(
                         "reduce axis {ax} out of range for per-element rank {per_elem_rank}"
@@ -1083,9 +1086,12 @@ fn batch_dot_general(
         (Some(bd_a), None) => {
             let a_val = move_batch_dim_to_front(&a.value, bd_a)?;
             let new_params = dot_general_params_shift_one(params, true);
-            let result =
-                eval_primitive(Primitive::DotGeneral, &[a_val, b.value.clone()], &new_params)
-                    .map_err(|e| BatchError::EvalError(e.to_string()))?;
+            let result = eval_primitive(
+                Primitive::DotGeneral,
+                &[a_val, b.value.clone()],
+                &new_params,
+            )
+            .map_err(|e| BatchError::EvalError(e.to_string()))?;
             let pos = dot_dim_count(params, "lhs_batch_dims");
             let result = move_batch_dim_to_front(&result, pos)?;
             Ok(BatchTracer::batched(result, 0))
@@ -1096,9 +1102,12 @@ fn batch_dot_general(
         (None, Some(bd_b)) => {
             let b_val = move_batch_dim_to_front(&b.value, bd_b)?;
             let new_params = dot_general_params_shift_one(params, false);
-            let result =
-                eval_primitive(Primitive::DotGeneral, &[a.value.clone(), b_val], &new_params)
-                    .map_err(|e| BatchError::EvalError(e.to_string()))?;
+            let result = eval_primitive(
+                Primitive::DotGeneral,
+                &[a.value.clone(), b_val],
+                &new_params,
+            )
+            .map_err(|e| BatchError::EvalError(e.to_string()))?;
             let lhs_rank = a.value.as_tensor().map_or(0, |t| t.shape.rank());
             let pos = lhs_rank.saturating_sub(dot_dim_count(params, "lhs_contracting_dims"));
             let result = move_batch_dim_to_front(&result, pos)?;
@@ -1136,10 +1145,16 @@ fn dot_general_params_shift_one(
     };
     let mut new_params = params.clone();
     if shift_lhs {
-        new_params.insert("lhs_contracting_dims".to_owned(), shifted("lhs_contracting_dims"));
+        new_params.insert(
+            "lhs_contracting_dims".to_owned(),
+            shifted("lhs_contracting_dims"),
+        );
         new_params.insert("lhs_batch_dims".to_owned(), shifted("lhs_batch_dims"));
     } else {
-        new_params.insert("rhs_contracting_dims".to_owned(), shifted("rhs_contracting_dims"));
+        new_params.insert(
+            "rhs_contracting_dims".to_owned(),
+            shifted("rhs_contracting_dims"),
+        );
         new_params.insert("rhs_batch_dims".to_owned(), shifted("rhs_batch_dims"));
     }
     new_params
@@ -1170,8 +1185,14 @@ fn dot_general_params_with_prepended_batch(
     rhs_batch.insert(0, 0);
 
     let mut new_params = params.clone();
-    new_params.insert("lhs_contracting_dims".to_owned(), format_csv(&lhs_contracting));
-    new_params.insert("rhs_contracting_dims".to_owned(), format_csv(&rhs_contracting));
+    new_params.insert(
+        "lhs_contracting_dims".to_owned(),
+        format_csv(&lhs_contracting),
+    );
+    new_params.insert(
+        "rhs_contracting_dims".to_owned(),
+        format_csv(&rhs_contracting),
+    );
     new_params.insert("lhs_batch_dims".to_owned(), format_csv(&lhs_batch));
     new_params.insert("rhs_batch_dims".to_owned(), format_csv(&rhs_batch));
     new_params
@@ -2797,7 +2818,11 @@ fn batch_expand_dims(
         // rank, then shift +1 for the prepended batch axis. A usize parse rejected
         // axis=-1.
         let out_rank = per_elem_rank + 1;
-        let logical_axis = if raw_axis < 0 { raw_axis + out_rank as i64 } else { raw_axis };
+        let logical_axis = if raw_axis < 0 {
+            raw_axis + out_rank as i64
+        } else {
+            raw_axis
+        };
         if logical_axis < 0 || logical_axis as usize >= out_rank {
             return Err(BatchError::EvalError(format!(
                 "expand_dims axis {raw_axis} out of range for per-element output rank {out_rank}"
@@ -2899,7 +2924,11 @@ fn batch_split(
     // tensor: a non-negative axis shifts +1 past the prepended batch axis, while a
     // negative (end-relative) axis resolves to tensor_rank + raw_axis.
     let tensor_rank = tensor.shape.rank() as i64;
-    let physical_axis = if raw_axis >= 0 { raw_axis + 1 } else { tensor_rank + raw_axis };
+    let physical_axis = if raw_axis >= 0 {
+        raw_axis + 1
+    } else {
+        tensor_rank + raw_axis
+    };
     if physical_axis < 1 || physical_axis >= tensor_rank {
         return Err(BatchError::EvalError(format!(
             "split axis {raw_axis} out of range for per-element rank {per_elem_rank}"
@@ -2942,7 +2971,11 @@ fn batch_cumulative(
         .get("axis")
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0);
-    let shifted = if raw_axis >= 0 { raw_axis + 1 } else { raw_axis };
+    let shifted = if raw_axis >= 0 {
+        raw_axis + 1
+    } else {
+        raw_axis
+    };
     let mut new_params = params.clone();
     new_params.insert("axis".to_owned(), shifted.to_string());
     let result = eval_primitive(primitive, &[value], &new_params)
@@ -3523,6 +3556,11 @@ fn qr_decompose_matrix(
     }
 }
 
+/// Fan the batched eigh out across threads only when the total work (≈ `batch·m³`
+/// decomposition flops) is large enough to amortize thread spawn (~tens of µs each).
+/// Below this, the serial loop wins.
+const EIGH_BATCH_PARALLEL_MIN_WORK: usize = 1 << 18;
+
 fn batch_eigh_multi(
     inputs: &[BatchTracer],
     params: &BTreeMap<String, String>,
@@ -3600,22 +3638,73 @@ fn batch_eigh_multi(
             append_eigh_decomposition(&mut matrix, m, scratch, &mut w_elements, &mut v_elements);
         }
     } else {
-        let mut matrix = Vec::with_capacity(matrix_len);
-        let mut scratch = EighScratch::with_order(m);
-        for batch in 0..batch_size {
-            let base = batch * matrix_len;
-            matrix.clear();
-            for lit in &tensor.elements[base..base + matrix_len] {
-                matrix.push(lit.as_f64().ok_or_else(eigh_type_mismatch)?);
-            }
-            append_eigh_decomposition(
-                &mut matrix,
-                m,
-                &mut scratch,
-                &mut w_elements,
-                &mut v_elements,
-            );
+        // Extract every batch matrix to f64 once (cheap, serial — also surfaces any
+        // non-numeric element as an error before the parallel section).
+        let mut all = Vec::with_capacity(batch_size * matrix_len);
+        for lit in &tensor.elements[..batch_size * matrix_len] {
+            all.push(lit.as_f64().ok_or_else(eigh_type_mismatch)?);
         }
+
+        // Each batch matrix is an INDEPENDENT, compute-bound O(m³) eigendecomposition,
+        // so fan the batch out across threads (each with its own EighScratch) writing
+        // into disjoint output offsets. Bit-identical to the serial loop: every slice
+        // is decomposed by the same `eigh_decompose_matrix_into` and stored at its
+        // fixed batch offset; only the *order of execution* changes.
+        let mut w_out = vec![0.0_f64; batch_size * m];
+        let mut v_out = vec![0.0_f64; batch_size * matrix_len];
+        let total_work = batch_size
+            .saturating_mul(m)
+            .saturating_mul(m)
+            .saturating_mul(m);
+        let threads = if batch_size >= 2 && total_work >= EIGH_BATCH_PARALLEL_MIN_WORK {
+            std::thread::available_parallelism()
+                .map(|t| t.get())
+                .unwrap_or(1)
+                .min(batch_size)
+        } else {
+            1
+        };
+
+        if threads <= 1 {
+            let mut scratch = EighScratch::with_order(m);
+            for b in 0..batch_size {
+                let mut matrix = all[b * matrix_len..(b + 1) * matrix_len].to_vec();
+                eigh_decompose_matrix_into(&mut matrix, m, &mut scratch);
+                w_out[b * m..(b + 1) * m].copy_from_slice(&scratch.w_sorted);
+                v_out[b * matrix_len..(b + 1) * matrix_len].copy_from_slice(&scratch.v_sorted);
+            }
+        } else {
+            let per = batch_size.div_ceil(threads);
+            let all_ref: &[f64] = &all;
+            std::thread::scope(|scope| {
+                let mut w_rest: &mut [f64] = w_out.as_mut_slice();
+                let mut v_rest: &mut [f64] = v_out.as_mut_slice();
+                let mut start = 0usize;
+                while start < batch_size {
+                    let cnt = per.min(batch_size - start);
+                    let (w_chunk, w_tail) = w_rest.split_at_mut(cnt * m);
+                    let (v_chunk, v_tail) = v_rest.split_at_mut(cnt * matrix_len);
+                    w_rest = w_tail;
+                    v_rest = v_tail;
+                    let s = start;
+                    scope.spawn(move || {
+                        let mut scratch = EighScratch::with_order(m);
+                        for j in 0..cnt {
+                            let b = s + j;
+                            let mut matrix = all_ref[b * matrix_len..(b + 1) * matrix_len].to_vec();
+                            eigh_decompose_matrix_into(&mut matrix, m, &mut scratch);
+                            w_chunk[j * m..(j + 1) * m].copy_from_slice(&scratch.w_sorted);
+                            v_chunk[j * matrix_len..(j + 1) * matrix_len]
+                                .copy_from_slice(&scratch.v_sorted);
+                        }
+                    });
+                    start += cnt;
+                }
+            });
+        }
+
+        w_elements.extend(w_out.into_iter().map(Literal::from_f64));
+        v_elements.extend(v_out.into_iter().map(Literal::from_f64));
     }
 
     let w_shape = Shape {
@@ -8292,8 +8381,7 @@ mod tests {
         );
 
         // Isomorphism: bit-for-bit identical to the per-slice passthrough.
-        let per_slice =
-            batch_passthrough_leading(Primitive::DotGeneral, &[a, b], &params).unwrap();
+        let per_slice = batch_passthrough_leading(Primitive::DotGeneral, &[a, b], &params).unwrap();
         assert_eq!(
             extract_f64_vec(&batched.value),
             extract_f64_vec(&per_slice.value)
@@ -8306,23 +8394,25 @@ mod tests {
         // must be bit-for-bit identical to the per-slice passthrough it replaces,
         // across the placement variants: rhs-batched, lhs-batched, and a matrix
         // operand with a leading vmap free dim.
-        let check = |a: BatchTracer, b: BatchTracer, params: &BTreeMap<String, String>, label: &str| {
-            let routed =
-                apply_batch_rule(Primitive::DotGeneral, &[a.clone(), b.clone()], params).unwrap();
-            let per_slice =
-                batch_passthrough_leading(Primitive::DotGeneral, &[a, b], params).unwrap();
-            assert_eq!(routed.batch_dim, per_slice.batch_dim, "{label}: batch_dim");
-            assert_eq!(
-                routed.value.as_tensor().unwrap().shape.dims,
-                per_slice.value.as_tensor().unwrap().shape.dims,
-                "{label}: shape"
-            );
-            assert_eq!(
-                extract_f64_vec(&routed.value),
-                extract_f64_vec(&per_slice.value),
-                "{label}: values"
-            );
-        };
+        let check =
+            |a: BatchTracer, b: BatchTracer, params: &BTreeMap<String, String>, label: &str| {
+                let routed =
+                    apply_batch_rule(Primitive::DotGeneral, &[a.clone(), b.clone()], params)
+                        .unwrap();
+                let per_slice =
+                    batch_passthrough_leading(Primitive::DotGeneral, &[a, b], params).unwrap();
+                assert_eq!(routed.batch_dim, per_slice.batch_dim, "{label}: batch_dim");
+                assert_eq!(
+                    routed.value.as_tensor().unwrap().shape.dims,
+                    per_slice.value.as_tensor().unwrap().shape.dims,
+                    "{label}: shape"
+                );
+                assert_eq!(
+                    extract_f64_vec(&routed.value),
+                    extract_f64_vec(&per_slice.value),
+                    "{label}: values"
+                );
+            };
         let mk = |dims: &[u32]| {
             let n: usize = dims.iter().map(|&d| d as usize).product();
             let data: Vec<f64> = (0..n).map(|i| (i % 11) as f64 * 0.5 - 1.0).collect();
@@ -8534,8 +8624,7 @@ mod tests {
         // vmap(cumsum, axis=-1) over a batch of length-3 vectors cumsums each row.
         // (Was: parse_param_usize parsed "axis" as usize, rejecting "-1"; and a
         // blind +1 shift is wrong for an end-relative axis.)
-        let input =
-            BatchTracer::batched(make_f64_matrix(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 0);
+        let input = BatchTracer::batched(make_f64_matrix(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]), 0);
         let params = BTreeMap::from([("axis".to_owned(), "-1".to_owned())]);
         let result = apply_batch_rule(Primitive::Cumsum, &[input], &params).unwrap();
         assert_eq!(result.batch_dim, Some(0));
@@ -8919,7 +9008,9 @@ mod tests {
                     Shape {
                         dims: vec![2, 2, 3],
                     },
-                    data.iter().map(|&x| Literal::F64Bits(x.to_bits())).collect(),
+                    data.iter()
+                        .map(|&x| Literal::F64Bits(x.to_bits()))
+                        .collect(),
                 )
                 .unwrap(),
             ),
@@ -9720,6 +9811,129 @@ mod tests {
         assert!(err.to_string().contains("expected rank-2 tensor"));
     }
 
+    /// Deterministic symmetric m×m matrix keyed by `seed` (distinct per batch slice).
+    fn symmetric_batch_matrix(m: usize, seed: usize) -> Vec<f64> {
+        let mut a = vec![0.0f64; m * m];
+        for i in 0..m {
+            for j in i..m {
+                let v = if i == j {
+                    (i as f64) * 1.3 + 2.0 + (seed as f64) * 0.07
+                } else {
+                    (((i * 31 + j * 17 + seed * 11 + 5) % 23) as f64 - 11.0) * 0.04
+                };
+                a[i * m + j] = v;
+                a[j * m + i] = v;
+            }
+        }
+        a
+    }
+
+    #[test]
+    fn batch_eigh_parallel_path_matches_per_slice_oracle() {
+        // A batch large enough to trigger the multi-threaded fan-out
+        // (batch·m³ ≥ EIGH_BATCH_PARALLEL_MIN_WORK) must produce exactly the
+        // per-slice eigh oracle (spectrum + eigenvectors up to sign), proving the
+        // parallel offset writes and per-thread scratch are correct.
+        let (batch, m) = (24usize, 24usize);
+        assert!(batch * m * m * m >= super::EIGH_BATCH_PARALLEL_MIN_WORK);
+        let mut data = Vec::with_capacity(batch * m * m);
+        let mut matrices = Vec::with_capacity(batch);
+        for b in 0..batch {
+            let a = symmetric_batch_matrix(m, b);
+            matrices.push(make_f64_matrix(m, m, &a));
+            data.extend_from_slice(&a);
+        }
+        let input = BatchTracer::batched(
+            make_f64_tensor(&[batch as u32, m as u32, m as u32], &data),
+            0,
+        );
+        let outputs = apply_batch_rule_multi(Primitive::Eigh, &[input], &BTreeMap::new()).unwrap();
+        assert_eigh_matches_slice_oracle(&outputs, &matrices);
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batch_eigh_parallel_vs_serial() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let run = |batch: usize, m: usize| {
+            let matrix_len = m * m;
+            let mut all = Vec::with_capacity(batch * matrix_len);
+            for b in 0..batch {
+                all.extend_from_slice(&symmetric_batch_matrix(m, b));
+            }
+            // Serial: one scratch, decompose each slice in order.
+            let serial = best_time(|| {
+                let mut scratch = super::EighScratch::with_order(m);
+                let mut w = vec![0.0f64; batch * m];
+                let mut v = vec![0.0f64; batch * matrix_len];
+                for b in 0..batch {
+                    let mut mat = all[b * matrix_len..(b + 1) * matrix_len].to_vec();
+                    super::eigh_decompose_matrix_into(&mut mat, m, &mut scratch);
+                    w[b * m..(b + 1) * m].copy_from_slice(&scratch.w_sorted);
+                    v[b * matrix_len..(b + 1) * matrix_len].copy_from_slice(&scratch.v_sorted);
+                }
+                std::hint::black_box((w, v));
+            });
+            // Parallel: fan the batch across threads, per-thread scratch.
+            let parallel = best_time(|| {
+                let threads = std::thread::available_parallelism()
+                    .map(|t| t.get())
+                    .unwrap_or(1)
+                    .min(batch);
+                let per = batch.div_ceil(threads);
+                let mut w = vec![0.0f64; batch * m];
+                let mut v = vec![0.0f64; batch * matrix_len];
+                let all_ref: &[f64] = &all;
+                std::thread::scope(|scope| {
+                    let mut wr: &mut [f64] = w.as_mut_slice();
+                    let mut vr: &mut [f64] = v.as_mut_slice();
+                    let mut s = 0usize;
+                    while s < batch {
+                        let cnt = per.min(batch - s);
+                        let (wc, wt) = wr.split_at_mut(cnt * m);
+                        let (vc, vt) = vr.split_at_mut(cnt * matrix_len);
+                        wr = wt;
+                        vr = vt;
+                        let start = s;
+                        scope.spawn(move || {
+                            let mut scratch = super::EighScratch::with_order(m);
+                            for j in 0..cnt {
+                                let b = start + j;
+                                let mut mat =
+                                    all_ref[b * matrix_len..(b + 1) * matrix_len].to_vec();
+                                super::eigh_decompose_matrix_into(&mut mat, m, &mut scratch);
+                                wc[j * m..(j + 1) * m].copy_from_slice(&scratch.w_sorted);
+                                vc[j * matrix_len..(j + 1) * matrix_len]
+                                    .copy_from_slice(&scratch.v_sorted);
+                            }
+                        });
+                        s += cnt;
+                    }
+                });
+                std::hint::black_box((w, v));
+            });
+            println!(
+                "BENCH batch eigh batch={batch} m={m}: serial {:.3}ms -> parallel {:.3}ms = {:.2}x",
+                serial * 1e3,
+                parallel * 1e3,
+                serial / parallel
+            );
+        };
+        run(64, 16);
+        run(64, 32);
+        run(128, 32);
+    }
+
     fn assert_svd_matches_slice_oracle(
         outputs: &[BatchTracer],
         matrices: &[Value],
@@ -10051,8 +10265,12 @@ mod tests {
             make_f64_matrix(2, 3, &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
             0,
         );
-        let result =
-            apply_batch_rule(Primitive::Cond, &[pred, on_true, on_false], &BTreeMap::new()).unwrap();
+        let result = apply_batch_rule(
+            Primitive::Cond,
+            &[pred, on_true, on_false],
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(result.batch_dim, Some(0));
         let tensor = result.value.as_tensor().unwrap();
         assert_eq!(tensor.shape.dims, vec![2, 3]);
@@ -10611,7 +10829,9 @@ mod tests {
         let xs = Value::Tensor(
             TensorValue::new(
                 DType::I64,
-                Shape { dims: vec![2, 3, 2] }, // [batch=2, scan_len=3, elem=2]
+                Shape {
+                    dims: vec![2, 3, 2],
+                }, // [batch=2, scan_len=3, elem=2]
                 [1, 2, 3, 4, 5, 6, 10, 20, 30, 40, 50, 60]
                     .iter()
                     .map(|&x| Literal::I64(x))
@@ -10632,7 +10852,10 @@ mod tests {
         assert_eq!(extract_i64_vec(&outputs[0].value), vec![9, 12, 90, 120]);
         // ys [batch=2, scan_len=3, 2]: per-step running sums.
         assert_eq!(outputs[1].batch_dim, Some(0));
-        assert_eq!(outputs[1].value.as_tensor().unwrap().shape.dims, vec![2, 3, 2]);
+        assert_eq!(
+            outputs[1].value.as_tensor().unwrap().shape.dims,
+            vec![2, 3, 2]
+        );
         assert_eq!(
             extract_i64_vec(&outputs[1].value),
             vec![1, 2, 4, 6, 9, 12, 10, 20, 40, 60, 90, 120]
@@ -10789,7 +11012,8 @@ mod tests {
             .into_iter()
             .map(f32::to_bits)
             .collect::<Vec<_>>();
-        let digest = fj_test_utils::fixture_id_from_json(&(tensor.shape.dims.clone(), bits)).unwrap();
+        let digest =
+            fj_test_utils::fixture_id_from_json(&(tensor.shape.dims.clone(), bits)).unwrap();
 
         assert_eq!(
             digest,
