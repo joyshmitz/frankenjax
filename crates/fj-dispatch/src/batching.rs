@@ -4837,12 +4837,12 @@ fn batch_triangular_solve(
 
     let a_matrix_len = m_a * n_a;
     let b_matrix_len = m_b * n_b;
-    let mut elements = Vec::with_capacity(batch_size * m_a * n_b);
+    let x_matrix_len = m_a * n_b;
 
-    for batch in 0..batch_size {
-        let a_base = batch * a_matrix_len;
-        let b_base = batch * b_matrix_len;
-        let a = a_tensor.elements[a_base..a_base + a_matrix_len]
+    // Extract every batch slice to f64 ONCE, surfacing any type mismatch BEFORE
+    // the (possibly parallel) solve section so errors stay deterministic.
+    let to_f64 = |elems: &[Literal]| -> Result<Vec<f64>, BatchError> {
+        elems
             .iter()
             .map(|lit| {
                 lit.as_f64().ok_or_else(|| {
@@ -4851,63 +4851,68 @@ fn batch_triangular_solve(
                     )
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        let b = b_tensor.elements[b_base..b_base + b_matrix_len]
-            .iter()
-            .map(|lit| {
-                lit.as_f64().ok_or_else(|| {
-                    BatchError::EvalError(
-                        "type mismatch for triangular_solve: expected numeric elements".to_owned(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut x = vec![0.0_f64; m_a * n_b];
+            .collect()
+    };
+    let a_all = to_f64(&a_tensor.elements)?;
+    let b_all = to_f64(&b_tensor.elements)?;
 
-        for col in 0..n_b {
-            let mut b_col: Vec<f64> = (0..m_a).map(|row| b[row * n_b + col]).collect();
+    // Each batch slice is an INDEPENDENT, compute-bound O(m² · n_b) triangular
+    // solve, so fan the batch out across a work-scaled thread count — each thread
+    // writes into a DISJOINT output chunk. Bit-identical to the serial loop: every
+    // slice runs the same `triangular_solve_slice` and lands at its fixed batch
+    // offset; only the order of execution changes. Work-scaled threading stays
+    // serial below ~2 threads' worth of work, so small batches never regress.
+    let mut out = vec![0.0_f64; batch_size * x_matrix_len];
+    let total_work = batch_size
+        .saturating_mul(m_a)
+        .saturating_mul(m_a)
+        .saturating_mul(n_b);
+    let threads = batch_parallel_threads(total_work, batch_size);
 
-            if lower && !transpose_a {
-                for i in 0..m_a {
-                    for k in 0..i {
-                        let a_ik = a[row_major_index(i, k, n_a)];
-                        b_col[i] -= a_ik * x[k * n_b + col];
-                    }
-                    let diag = triangular_solve_diag(&a, i, n_a, unit_diagonal)?;
-                    x[i * n_b + col] = b_col[i] / diag;
-                }
-            } else if !lower && !transpose_a {
-                for i in (0..m_a).rev() {
-                    for k in (i + 1)..m_a {
-                        let a_ik = a[row_major_index(i, k, n_a)];
-                        b_col[i] -= a_ik * x[k * n_b + col];
-                    }
-                    let diag = triangular_solve_diag(&a, i, n_a, unit_diagonal)?;
-                    x[i * n_b + col] = b_col[i] / diag;
-                }
-            } else if lower && transpose_a {
-                for i in (0..m_a).rev() {
-                    for k in (i + 1)..m_a {
-                        let a_ki = a[row_major_index(k, i, n_a)];
-                        b_col[i] -= a_ki * x[k * n_b + col];
-                    }
-                    let diag = triangular_solve_diag(&a, i, n_a, unit_diagonal)?;
-                    x[i * n_b + col] = b_col[i] / diag;
-                }
-            } else {
-                for i in 0..m_a {
-                    for k in 0..i {
-                        let a_ki = a[row_major_index(k, i, n_a)];
-                        b_col[i] -= a_ki * x[k * n_b + col];
-                    }
-                    let diag = triangular_solve_diag(&a, i, n_a, unit_diagonal)?;
-                    x[i * n_b + col] = b_col[i] / diag;
-                }
-            }
+    if threads <= 1 {
+        for batch in 0..batch_size {
+            let a = &a_all[batch * a_matrix_len..(batch + 1) * a_matrix_len];
+            let b = &b_all[batch * b_matrix_len..(batch + 1) * b_matrix_len];
+            let x = &mut out[batch * x_matrix_len..(batch + 1) * x_matrix_len];
+            triangular_solve_slice(a, b, x, m_a, n_a, n_b, lower, transpose_a, unit_diagonal);
         }
-
-        elements.extend(x.into_iter().map(Literal::from_f64));
+    } else {
+        let per = batch_size.div_ceil(threads);
+        let a_ref: &[f64] = &a_all;
+        let b_ref: &[f64] = &b_all;
+        std::thread::scope(|scope| {
+            let mut rest: &mut [f64] = out.as_mut_slice();
+            let mut start = 0usize;
+            while start < batch_size {
+                let cnt = per.min(batch_size - start);
+                let (chunk, tail) = rest.split_at_mut(cnt * x_matrix_len);
+                rest = tail;
+                let s = start;
+                scope.spawn(move || {
+                    for j in 0..cnt {
+                        let batch = s + j;
+                        let a = &a_ref[batch * a_matrix_len..(batch + 1) * a_matrix_len];
+                        let b = &b_ref[batch * b_matrix_len..(batch + 1) * b_matrix_len];
+                        let x = &mut chunk[j * x_matrix_len..(j + 1) * x_matrix_len];
+                        triangular_solve_slice(
+                            a,
+                            b,
+                            x,
+                            m_a,
+                            n_a,
+                            n_b,
+                            lower,
+                            transpose_a,
+                            unit_diagonal,
+                        );
+                    }
+                });
+                start += cnt;
+            }
+        });
     }
+
+    let elements: Vec<Literal> = out.into_iter().map(Literal::from_f64).collect();
 
     let out_dtype = promote_dtype_public(a_tensor.dtype, b_tensor.dtype);
     let shape = Shape {
@@ -4923,22 +4928,68 @@ fn row_major_index(row: usize, col: usize, cols: usize) -> usize {
     row * cols + col
 }
 
-fn triangular_solve_diag(
+/// Solve one triangular system `A · X = B` by forward/back substitution, where
+/// `A` is `m × n_a` (row-major, square m=n_a) and `B`/`X` are `m × n_b`. Pure and
+/// deterministic — factored out of `batch_triangular_solve` so the serial and the
+/// per-thread batch paths share the EXACT same arithmetic (bit-identical: same
+/// column order, same `b_col[i] -= a·x` accumulation order, same final divide).
+///
+/// JAX's triangular_solve does not raise for a zero/near-zero diagonal; the
+/// division yields inf/nan (singular) or a finite large value (near-singular),
+/// matching jnp (NumPy raises).
+#[allow(clippy::too_many_arguments)]
+fn triangular_solve_slice(
     a: &[f64],
-    i: usize,
-    cols: usize,
+    b: &[f64],
+    x: &mut [f64],
+    m: usize,
+    n_a: usize,
+    n_b: usize,
+    lower: bool,
+    transpose_a: bool,
     unit_diagonal: bool,
-) -> Result<f64, BatchError> {
-    let diag = if unit_diagonal {
-        1.0
-    } else {
-        a[row_major_index(i, i, cols)]
+) {
+    let diag = |i: usize| -> f64 {
+        if unit_diagonal {
+            1.0
+        } else {
+            a[row_major_index(i, i, n_a)]
+        }
     };
 
-    // JAX's triangular_solve does not raise for a zero/near-zero diagonal; the
-    // caller's division yields inf/nan (singular) or a finite large value
-    // (near-singular), matching jnp (NumPy raises).
-    Ok(diag)
+    for col in 0..n_b {
+        let mut b_col: Vec<f64> = (0..m).map(|row| b[row * n_b + col]).collect();
+
+        if lower && !transpose_a {
+            for i in 0..m {
+                for k in 0..i {
+                    b_col[i] -= a[row_major_index(i, k, n_a)] * x[k * n_b + col];
+                }
+                x[i * n_b + col] = b_col[i] / diag(i);
+            }
+        } else if !lower && !transpose_a {
+            for i in (0..m).rev() {
+                for k in (i + 1)..m {
+                    b_col[i] -= a[row_major_index(i, k, n_a)] * x[k * n_b + col];
+                }
+                x[i * n_b + col] = b_col[i] / diag(i);
+            }
+        } else if lower && transpose_a {
+            for i in (0..m).rev() {
+                for k in (i + 1)..m {
+                    b_col[i] -= a[row_major_index(k, i, n_a)] * x[k * n_b + col];
+                }
+                x[i * n_b + col] = b_col[i] / diag(i);
+            }
+        } else {
+            for i in 0..m {
+                for k in 0..i {
+                    b_col[i] -= a[row_major_index(k, i, n_a)] * x[k * n_b + col];
+                }
+                x[i * n_b + col] = b_col[i] / diag(i);
+            }
+        }
+    }
 }
 
 // ── FFT-Family Batching ────────────────────────────────────────────
@@ -13628,6 +13679,140 @@ mod tests {
         let err =
             apply_batch_rule(Primitive::TriangularSolve, &[a, b], &BTreeMap::new()).unwrap_err();
         assert!(err.to_string().contains("expected rank-2 tensor"));
+    }
+
+    #[test]
+    fn batch_triangular_solve_parallel_path_matches_per_slice_oracle() {
+        // Drive a batch LARGE enough to cross the work-scaled parallel threshold
+        // (batch·m²·n_b ≥ ~2·BATCH_PARALLEL_WORK_PER_THREAD) and assert the fanned
+        // output is bit-identical to a per-slice serial reference computed by the
+        // same `triangular_solve_slice` helper. Catches chunk-offset / split bugs;
+        // triangular_solve output is unique (no sign/order ambiguity).
+        let batch = 64usize;
+        let m = 48usize;
+        let n_b = 48usize;
+        assert!(
+            batch * m * m * n_b >= 2 * super::BATCH_PARALLEL_WORK_PER_THREAD,
+            "test sizing must exercise the parallel path"
+        );
+        assert!(super::batch_parallel_threads(batch * m * m * n_b, batch) > 1);
+
+        // Lower-triangular, diagonally dominant A (well-conditioned) + dense B.
+        let mut a_data = vec![0.0f64; batch * m * m];
+        let mut b_data = vec![0.0f64; batch * m * n_b];
+        for bb in 0..batch {
+            for i in 0..m {
+                for j in 0..=i {
+                    a_data[bb * m * m + i * m + j] =
+                        (((i * 7 + j * 5 + bb * 3 + 1) % 9) as f64 - 4.0) * 0.1;
+                }
+                a_data[bb * m * m + i * m + i] = (i as f64) * 0.5 + 3.0 + (bb as f64) * 0.01;
+            }
+            for i in 0..m {
+                for c in 0..n_b {
+                    b_data[bb * m * n_b + i * n_b + c] =
+                        (((i * 11 + c * 13 + bb * 2 + 2) % 7) as f64 - 3.0) * 0.2;
+                }
+            }
+        }
+
+        let a = BatchTracer::batched(
+            make_f64_tensor(&[batch as u32, m as u32, m as u32], &a_data),
+            0,
+        );
+        let b = BatchTracer::batched(
+            make_f64_tensor(&[batch as u32, m as u32, n_b as u32], &b_data),
+            0,
+        );
+        let result =
+            apply_batch_rule(Primitive::TriangularSolve, &[a, b], &BTreeMap::new()).unwrap();
+        let got = extract_f64_vec(&result.value);
+
+        // Per-slice serial oracle via the shared helper.
+        let mut expected = vec![0.0f64; batch * m * n_b];
+        for bb in 0..batch {
+            let a_slice = &a_data[bb * m * m..(bb + 1) * m * m];
+            let b_slice = &b_data[bb * m * n_b..(bb + 1) * m * n_b];
+            let x_slice = &mut expected[bb * m * n_b..(bb + 1) * m * n_b];
+            super::triangular_solve_slice(a_slice, b_slice, x_slice, m, m, n_b, true, false, false);
+        }
+
+        assert_eq!(got.len(), expected.len());
+        for (g, e) in got.iter().zip(expected.iter()) {
+            assert_eq!(
+                g.to_bits(),
+                e.to_bits(),
+                "parallel fan-out diverged from oracle"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batch_triangular_solve_parallel_vs_serial() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let run = |batch: usize, m: usize, n_b: usize| {
+            let mut a_data = vec![0.0f64; batch * m * m];
+            let mut b_data = vec![0.0f64; batch * m * n_b];
+            for bb in 0..batch {
+                for i in 0..m {
+                    for j in 0..=i {
+                        a_data[bb * m * m + i * m + j] =
+                            (((i * 7 + j * 5 + bb * 3 + 1) % 9) as f64 - 4.0) * 0.1;
+                    }
+                    a_data[bb * m * m + i * m + i] = (i as f64) * 0.5 + 3.0 + (bb as f64) * 0.01;
+                }
+                for i in 0..m {
+                    for c in 0..n_b {
+                        b_data[bb * m * n_b + i * n_b + c] =
+                            (((i * 11 + c * 13 + bb * 2 + 2) % 7) as f64 - 3.0) * 0.2;
+                    }
+                }
+            }
+            // Serial reference: per-slice via the shared helper (== threads==1 path).
+            let serial = best_time(|| {
+                let mut out = vec![0.0f64; batch * m * n_b];
+                for bb in 0..batch {
+                    let a_slice = &a_data[bb * m * m..(bb + 1) * m * m];
+                    let b_slice = &b_data[bb * m * n_b..(bb + 1) * m * n_b];
+                    let x_slice = &mut out[bb * m * n_b..(bb + 1) * m * n_b];
+                    super::triangular_solve_slice(
+                        a_slice, b_slice, x_slice, m, m, n_b, true, false, false,
+                    );
+                }
+                std::hint::black_box(out);
+            });
+            // Parallel: the production batched rule.
+            let a = make_f64_tensor(&[batch as u32, m as u32, m as u32], &a_data);
+            let b = make_f64_tensor(&[batch as u32, m as u32, n_b as u32], &b_data);
+            let threads = super::batch_parallel_threads(batch * m * m * n_b, batch);
+            let parallel = best_time(|| {
+                let at = BatchTracer::batched(a.clone(), 0);
+                let bt = BatchTracer::batched(b.clone(), 0);
+                let r = apply_batch_rule(Primitive::TriangularSolve, &[at, bt], &BTreeMap::new())
+                    .unwrap();
+                std::hint::black_box(r);
+            });
+            println!(
+                "BENCH batch triangular_solve batch={batch} m={m} n_b={n_b} (threads={threads}): serial {:.3}ms -> parallel {:.3}ms = {:.2}x",
+                serial * 1e3,
+                parallel * 1e3,
+                serial / parallel
+            );
+        };
+        run(64, 48, 48);
+        run(128, 64, 64);
+        run(256, 96, 96);
     }
 
     #[test]
