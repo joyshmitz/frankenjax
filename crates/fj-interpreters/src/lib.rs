@@ -1056,6 +1056,9 @@ enum FusedValues {
     F64(Vec<f64>),
     F32(Vec<f32>),
     I64(Vec<i64>),
+    /// Dense half-float (BF16/F16) bit patterns tagged with the logical dtype, so
+    /// the chain materializes back via `new_half_float_values` bit-identically.
+    Half { dtype: DType, values: Vec<u16> },
 }
 
 struct FusedRun {
@@ -2215,6 +2218,366 @@ fn try_fuse_elementwise_chain_i64(
     })
 }
 
+// ── half-float (BF16/F16) elementwise fusion ───────────────────────────────
+//
+// The half-precision sibling of the f64/f32/i64 fusion paths — bf16 is the
+// dominant ML activation dtype, so chained bf16 elementwise ops are common.
+// A maximal run of SAME-half-dtype (all BF16 or all F16; mixed promotes to F32
+// and takes a different path) same-shape dense cheap-elementwise equations is
+// evaluated in ONE chunked pass over a `u16` working buffer, materializing only
+// the final output and skipping the N-1 intermediate half tensors.
+//
+// BIT-IDENTICAL to running the ops separately: every fused step reproduces the
+// EXACT half semantics fj-lax's per-op path uses — widen each operand to f64
+// (`Literal::{BF16,F16}Bits::as_f64`), apply the f64 closure (`a OP b`,
+// `jax_max/min`, `-x`, `|x|`), then round to half via `Literal::from_{bf16,f16}_f64`
+// (round-to-odd f64→f32→half). Each intermediate is a real half value, so widening
+// the chain operand reproduces the materialized tensor exactly; same operand order,
+// same per-element op, same rounding → identical bits incl. inf/NaN.
+
+/// An operand of a fused half step: the running chain value (half bits in `out`),
+/// an external dense-half tensor (index into the gathered `ext` slices), or a
+/// half scalar constant (raw `u16` bits — widened once at apply time).
+#[derive(Clone, Copy)]
+enum HalfOperand {
+    Chain,
+    Ext(usize),
+    Scalar(u16),
+}
+
+struct HalfStep {
+    op: CheapOp,
+    a: HalfOperand,
+    b: HalfOperand, // unused for Neg/Abs
+}
+
+/// Widen a half (BF16/F16) bit pattern to f64, exactly as `half_binary_apply`
+/// in fj-lax does (`Literal::{BF16,F16}Bits.as_f64()`).
+#[inline]
+fn half_fusion_widen(dt: DType, bits: u16) -> f64 {
+    if dt == DType::BF16 {
+        Literal::BF16Bits(bits)
+    } else {
+        Literal::F16Bits(bits)
+    }
+    .as_f64()
+    .unwrap_or(0.0)
+}
+
+/// Round an f64 result back to half bits, exactly as fj-lax rounds
+/// (`Literal::from_{bf16,f16}_f64` — round-to-odd f64→f32 then →half).
+#[inline]
+fn half_fusion_round(dt: DType, value: f64) -> u16 {
+    let rounded = if dt == DType::BF16 {
+        Literal::from_bf16_f64(value)
+    } else {
+        Literal::from_f16_f64(value)
+    };
+    match rounded {
+        Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+        _ => 0,
+    }
+}
+
+/// One fused half binary op on already-widened f64 operands, rounding to half.
+/// `left`/`right` are pre-widened so the chain operand (read once per element)
+/// and the other operand (widened once for a scalar / per-element for a tensor)
+/// share the same f64 arithmetic as the per-op path.
+#[inline]
+fn half_fused_binary(dt: DType, op: CheapOp, left: f64, right: f64) -> u16 {
+    let result = match op {
+        CheapOp::Add => left + right,
+        CheapOp::Sub => left - right,
+        CheapOp::Mul => left * right,
+        CheapOp::Div => left / right,
+        CheapOp::Max => fused_jax_max(left, right),
+        CheapOp::Min => fused_jax_min(left, right),
+        // Unary ops are handled by the chunk driver; never a binary step.
+        CheapOp::Neg | CheapOp::Abs => left,
+    };
+    half_fusion_round(dt, result)
+}
+
+/// Classify one half operand atom. Pushes external dense-half tensors into
+/// `ext`/`ext_vars` and sets/checks both the run shape AND the run's half dtype
+/// (`half_dt`): the first half operand fixes BF16-vs-F16, and any operand of the
+/// other half dtype bails (mixed BF16+F16 promotes to F32 → different path).
+/// Returns `None` (bail) for anything not fuse-eligible. Same-shape only (no
+/// broadcast — mirrors the i64 path's tight v1 scope).
+fn classify_half_fusion_operand<'e>(
+    atom: &Atom,
+    chain: Option<VarId>,
+    env: &'e [Option<Value>],
+    ext: &mut Vec<&'e [u16]>,
+    ext_vars: &mut Vec<VarId>,
+    shape: &mut Option<Shape>,
+    half_dt: &mut Option<DType>,
+) -> Option<HalfOperand> {
+    // Confirm an operand's half dtype matches the run's (or set it). Returns
+    // `None` on a half/half mismatch.
+    fn match_half_dt(half_dt: &mut Option<DType>, dt: DType) -> Option<()> {
+        match half_dt {
+            None => {
+                *half_dt = Some(dt);
+                Some(())
+            }
+            Some(existing) if *existing == dt => Some(()),
+            Some(_) => None,
+        }
+    }
+    match atom {
+        Atom::Lit(Literal::BF16Bits(b)) => {
+            match_half_dt(half_dt, DType::BF16)?;
+            Some(HalfOperand::Scalar(*b))
+        }
+        Atom::Lit(Literal::F16Bits(b)) => {
+            match_half_dt(half_dt, DType::F16)?;
+            Some(HalfOperand::Scalar(*b))
+        }
+        Atom::Lit(_) => None,
+        Atom::Var(v) => {
+            if chain == Some(*v) {
+                return Some(HalfOperand::Chain);
+            }
+            let value = env.get(v.0 as usize).and_then(|s| s.as_ref())?;
+            match value {
+                Value::Scalar(Literal::BF16Bits(b)) => {
+                    match_half_dt(half_dt, DType::BF16)?;
+                    Some(HalfOperand::Scalar(*b))
+                }
+                Value::Scalar(Literal::F16Bits(b)) => {
+                    match_half_dt(half_dt, DType::F16)?;
+                    Some(HalfOperand::Scalar(*b))
+                }
+                Value::Scalar(_) => None,
+                Value::Tensor(t) => {
+                    if !matches!(t.dtype, DType::BF16 | DType::F16) {
+                        return None;
+                    }
+                    match_half_dt(half_dt, t.dtype)?;
+                    let slice = t.elements.as_half_float_slice()?;
+                    match shape {
+                        None => *shape = Some(t.shape.clone()),
+                        Some(s) if *s == t.shape => {}
+                        Some(_) => return None,
+                    }
+                    let idx = ext.len();
+                    ext.push(slice);
+                    ext_vars.push(*v);
+                    Some(HalfOperand::Ext(idx))
+                }
+            }
+        }
+    }
+}
+
+/// Apply one half chain step's NON-chain operand to the chunk buffer (the chain's
+/// half bits live in `out`). Each arm widens the chain element, applies the op in
+/// f64, and rounds back to half — exactly the per-op path.
+#[inline]
+fn apply_half_fusion_other(
+    dt: DType,
+    out: &mut [u16],
+    op: CheapOp,
+    chain_left: bool,
+    other: HalfOperand,
+    ext: &[&[u16]],
+    base: usize,
+) {
+    match other {
+        HalfOperand::Scalar(bits) => {
+            let s = half_fusion_widen(dt, bits);
+            match chain_left {
+                true => out
+                    .iter_mut()
+                    .for_each(|o| *o = half_fused_binary(dt, op, half_fusion_widen(dt, *o), s)),
+                false => out
+                    .iter_mut()
+                    .for_each(|o| *o = half_fused_binary(dt, op, s, half_fusion_widen(dt, *o))),
+            }
+        }
+        HalfOperand::Ext(i) => {
+            let sl = &ext[i][base..base + out.len()];
+            match chain_left {
+                true => out.iter_mut().zip(sl).for_each(|(o, e)| {
+                    *o = half_fused_binary(dt, op, half_fusion_widen(dt, *o), half_fusion_widen(dt, *e))
+                }),
+                false => out.iter_mut().zip(sl).for_each(|(o, e)| {
+                    *o = half_fused_binary(dt, op, half_fusion_widen(dt, *e), half_fusion_widen(dt, *o))
+                }),
+            }
+        }
+        HalfOperand::Chain => {}
+    }
+}
+
+/// Apply a half unary op (Neg/Abs) in place: widen → f64 op → round to half.
+#[inline]
+fn apply_half_fusion_unary(dt: DType, out: &mut [u16], op: CheapOp) {
+    match op {
+        CheapOp::Neg => out
+            .iter_mut()
+            .for_each(|o| *o = half_fusion_round(dt, -half_fusion_widen(dt, *o))),
+        CheapOp::Abs => out
+            .iter_mut()
+            .for_each(|o| *o = half_fusion_round(dt, half_fusion_widen(dt, *o).abs())),
+        _ => {}
+    }
+}
+
+/// Evaluate the fused half run over one chunk `out` (already sized to the chunk len).
+#[allow(clippy::eq_op)] // Chain/Chain must execute x-x and x/x to preserve NaN behavior.
+fn apply_half_fusion_chunk(
+    dt: DType,
+    out: &mut [u16],
+    tape: &[HalfStep],
+    ext: &[&[u16]],
+    base: usize,
+) {
+    // Step 0 has no chain operand: seed `out` from operand `a` (raw half bits),
+    // then apply `b`.
+    let s0 = &tape[0];
+    match s0.a {
+        HalfOperand::Ext(i) => out.copy_from_slice(&ext[i][base..base + out.len()]),
+        HalfOperand::Scalar(bits) => out.fill(bits),
+        HalfOperand::Chain => {}
+    }
+    match s0.op {
+        CheapOp::Neg | CheapOp::Abs => apply_half_fusion_unary(dt, out, s0.op),
+        _ => apply_half_fusion_other(dt, out, s0.op, true, s0.b, ext, base),
+    }
+    for step in &tape[1..] {
+        if matches!(step.op, CheapOp::Neg | CheapOp::Abs) {
+            apply_half_fusion_unary(dt, out, step.op);
+            continue;
+        }
+        match (step.a, step.b) {
+            (HalfOperand::Chain, HalfOperand::Chain) => out.iter_mut().for_each(|o| {
+                let v = half_fusion_widen(dt, *o);
+                *o = half_fused_binary(dt, step.op, v, v);
+            }),
+            (HalfOperand::Chain, other) => {
+                apply_half_fusion_other(dt, out, step.op, true, other, ext, base)
+            }
+            (other, HalfOperand::Chain) => {
+                apply_half_fusion_other(dt, out, step.op, false, other, ext, base)
+            }
+            _ => {} // unreachable for a chain step
+        }
+    }
+}
+
+#[allow(clippy::while_let_loop)] // Mirrors the f64 fusion scanner's ordered bailouts.
+fn try_fuse_elementwise_chain_half(
+    jaxpr: &Jaxpr,
+    start: usize,
+    env: &[Option<Value>],
+    last_use: &[usize],
+) -> Option<FusedRun> {
+    let eqns = &jaxpr.equations;
+    let mut ext: Vec<&[u16]> = Vec::new();
+    let mut ext_vars: Vec<VarId> = Vec::new();
+    let mut tape: Vec<HalfStep> = Vec::new();
+    let mut shape: Option<Shape> = None;
+    let mut half_dt: Option<DType> = None;
+    let mut chain_var: Option<VarId> = None;
+    let mut run_out: Option<VarId> = None;
+    let mut run_end = start;
+
+    let mut k = start;
+    loop {
+        let Some(eqn) = eqns.get(k) else { break };
+        if !eqn.params.is_empty() || !eqn.sub_jaxprs.is_empty() || eqn.outputs.len() != 1 {
+            break;
+        }
+        let Some(op) = cheap_op(eqn.primitive) else {
+            break;
+        };
+        let needed = if op.is_unary() { 1 } else { 2 };
+        if eqn.inputs.len() != needed {
+            break;
+        }
+        let ext_mark = ext.len();
+        let vars_mark = ext_vars.len();
+        let dt_mark = half_dt;
+        let a = classify_half_fusion_operand(
+            &eqn.inputs[0],
+            chain_var,
+            env,
+            &mut ext,
+            &mut ext_vars,
+            &mut shape,
+            &mut half_dt,
+        );
+        let b = if op.is_unary() {
+            // Unary ops carry no second operand; the chunk driver ignores `b`.
+            Some(HalfOperand::Chain)
+        } else {
+            classify_half_fusion_operand(
+                &eqn.inputs[1],
+                chain_var,
+                env,
+                &mut ext,
+                &mut ext_vars,
+                &mut shape,
+                &mut half_dt,
+            )
+        };
+        let (Some(a), Some(b)) = (a, b) else {
+            ext.truncate(ext_mark);
+            ext_vars.truncate(vars_mark);
+            half_dt = dt_mark;
+            break;
+        };
+        // Steps after the first MUST thread the chain (one operand == Chain).
+        if chain_var.is_some()
+            && !matches!(a, HalfOperand::Chain)
+            && !matches!(b, HalfOperand::Chain)
+        {
+            ext.truncate(ext_mark);
+            ext_vars.truncate(vars_mark);
+            half_dt = dt_mark;
+            break;
+        }
+        tape.push(HalfStep { op, a, b });
+        run_out = Some(eqn.outputs[0]);
+        run_end = k;
+        let out_idx = eqn.outputs[0].0 as usize;
+        if k + 1 < eqns.len() && last_use.get(out_idx).copied() == Some(k + 1) {
+            chain_var = Some(eqn.outputs[0]);
+            k += 1;
+        } else {
+            break;
+        }
+    }
+
+    if tape.len() < FUSION_MIN_RUN {
+        return None;
+    }
+    let shape = shape?;
+    let dt = half_dt?;
+    let n = shape.element_count()? as usize;
+    if n < FUSION_MIN_ELEMS {
+        return None;
+    }
+    let out_var = run_out?;
+
+    let mut values = vec![0_u16; n];
+    let mut s = 0;
+    while s < n {
+        let e = (s + FUSION_CHUNK).min(n);
+        apply_half_fusion_chunk(dt, &mut values[s..e], &tape, &ext, s);
+        s = e;
+    }
+    Some(FusedRun {
+        out_var,
+        values: FusedValues::Half { dtype: dt, values },
+        shape,
+        ext_vars,
+        run_end,
+    })
+}
+
 fn try_fuse_elementwise_chain(
     jaxpr: &Jaxpr,
     start: usize,
@@ -2224,6 +2587,7 @@ fn try_fuse_elementwise_chain(
     try_fuse_elementwise_chain_f64(jaxpr, start, env, last_use)
         .or_else(|| try_fuse_elementwise_chain_f32(jaxpr, start, env, last_use))
         .or_else(|| try_fuse_elementwise_chain_i64(jaxpr, start, env, last_use))
+        .or_else(|| try_fuse_elementwise_chain_half(jaxpr, start, env, last_use))
 }
 
 fn eval_jaxpr_dense_env(
@@ -2277,6 +2641,9 @@ fn eval_jaxpr_dense_env(
                 FusedValues::F64(values) => TensorValue::new_f64_values(run.shape, values),
                 FusedValues::F32(values) => TensorValue::new_f32_values(run.shape, values),
                 FusedValues::I64(values) => TensorValue::new_i64_values(run.shape, values),
+                FusedValues::Half { dtype, values } => {
+                    TensorValue::new_half_float_values(dtype, run.shape, values)
+                }
             }
             .map_err(EvalError::InvalidTensor)
             .map_err(InterpreterError::Primitive)?;
@@ -2462,6 +2829,48 @@ mod tests {
 
     fn lit32(x: f32) -> Atom {
         Atom::Lit(Literal::from_f32(x))
+    }
+
+    fn bf16_bits_of(x: f64) -> u16 {
+        match Literal::from_bf16_f64(x) {
+            Literal::BF16Bits(b) => b,
+            other => panic!("expected bf16 literal, got {other:?}"),
+        }
+    }
+
+    fn bf16_tensor(n: usize, f: impl Fn(usize) -> u16) -> Value {
+        Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                (0..n).map(f).collect(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn half_bits(v: &Value) -> Vec<u16> {
+        match v {
+            Value::Tensor(t) => {
+                if let Some(values) = t.elements.as_half_float_slice() {
+                    return values.to_vec();
+                }
+                t.elements
+                    .iter()
+                    .map(|literal| match literal {
+                        Literal::BF16Bits(bits) | Literal::F16Bits(bits) => *bits,
+                        other => panic!("expected half-float tensor element, got {other:?}"),
+                    })
+                    .collect()
+            }
+            _ => panic!("expected tensor"),
+        }
+    }
+
+    fn lit_bf16(x: f64) -> Atom {
+        Atom::Lit(Literal::from_bf16_f64(x))
     }
 
     fn f64_tensor_values(dims: Vec<u32>, values: Vec<f64>) -> Value {
@@ -2725,6 +3134,142 @@ mod tests {
             digest,
             "fef28624a52e5647abc35f0d388072b443cf081e5941243c6c58a8bd91f40a84"
         );
+    }
+
+    #[test]
+    fn fusion_bf16_chain_matches_reference_bit_for_bit() {
+        // bf16 sibling of the f32 fusion proof: the reference is the hash-map
+        // interpreter, which never takes the dense-env fusion fast path. It
+        // materializes every intermediate through fj-lax, including bf16's
+        // widen→f64→op→round-to-bf16 (round-to-odd) per-step contract. The fused
+        // path must reproduce those bits exactly, incl. ±0 / inf / NaN / subnormal.
+        let n = 4096usize;
+        let mut xb: Vec<u16> = (0..n).map(|i| bf16_bits_of(i as f64 * 0.013 - 9.0)).collect();
+        let mut yb: Vec<u16> = (0..n)
+            .map(|i| bf16_bits_of((i as f64 * 0.007).sin() + 1.5))
+            .collect();
+        xb[0] = bf16_bits_of(0.0);
+        xb[1] = bf16_bits_of(-0.0);
+        xb[2] = bf16_bits_of(f64::INFINITY);
+        xb[3] = bf16_bits_of(f64::NEG_INFINITY);
+        xb[4] = 0x7fc1; // a bf16 NaN with payload
+        xb[5] = 0x0001; // smallest positive bf16 subnormal
+        yb[0] = bf16_bits_of(-0.0);
+        yb[1] = bf16_bits_of(0.0);
+        yb[2] = 0x7fd2; // another bf16 NaN payload
+        yb[3] = bf16_bits_of(2.0);
+        let x = VarId(0);
+        let y = VarId(1);
+        let (v1, v2, v3, v4, v5, out) =
+            (VarId(2), VarId(3), VarId(4), VarId(5), VarId(6), VarId(7));
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(Primitive::Mul, smallvec![Atom::Var(x), Atom::Var(x)], v1),
+            mk(Primitive::Add, smallvec![Atom::Var(v1), lit_bf16(2.5)], v2),
+            mk(Primitive::Sub, smallvec![lit_bf16(7.0), Atom::Var(v2)], v3),
+            mk(Primitive::Div, smallvec![Atom::Var(v3), Atom::Var(y)], v4),
+            mk(Primitive::Neg, smallvec![Atom::Var(v4)], v5),
+            mk(Primitive::Mul, smallvec![Atom::Var(v5), Atom::Var(x)], out),
+        ];
+        let jaxpr = Jaxpr::new(vec![x, y], vec![], vec![out], eqns);
+        let args = [bf16_tensor(n, |i| xb[i]), bf16_tensor(n, |i| yb[i])];
+        let fused_outputs = eval_jaxpr(&jaxpr, &args).unwrap();
+        let unfused_outputs =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("unfused reference evaluates");
+        let Value::Tensor(out_tensor) = &fused_outputs[0] else {
+            panic!("expected tensor output")
+        };
+        assert_eq!(out_tensor.dtype, DType::BF16);
+        assert!(
+            out_tensor.elements.as_half_float_slice().is_some(),
+            "fused output should stay dense half-float"
+        );
+        let got_bits = half_bits(&fused_outputs[0]);
+        let want_bits = half_bits(&unfused_outputs[0]);
+        assert_eq!(
+            got_bits, want_bits,
+            "fused bf16 chain must match forced unfused path bit-for-bit"
+        );
+        let digest = fj_test_utils::fixture_id_from_json(&want_bits)
+            .expect("reference output bits should hash");
+        assert_eq!(
+            digest,
+            "3132f039bc6e3cbc8f2654e641b4297f4163ecb2cb0b729835873079ae9339ff"
+        );
+    }
+
+    #[test]
+    fn fusion_f16_maxmin_abs_chain_matches_reference_bit_for_bit() {
+        // F16 variant exercising Max/Min/Abs (the activation-pipeline ops) plus a
+        // tensor operand, proving the F16 widen/round contract and the half NaN
+        // semantics (jax_max/min) match the per-op path bit-for-bit.
+        fn f16_bits_of(x: f64) -> u16 {
+            match Literal::from_f16_f64(x) {
+                Literal::F16Bits(b) => b,
+                other => panic!("expected f16 literal, got {other:?}"),
+            }
+        }
+        let n = 2048usize;
+        let mut xb: Vec<u16> = (0..n).map(|i| f16_bits_of(i as f64 * 0.001 - 1.0)).collect();
+        let yb: Vec<u16> = (0..n)
+            .map(|i| f16_bits_of((i as f64 * 0.005).cos()))
+            .collect();
+        xb[0] = 0x7e01; // f16 NaN payload
+        xb[1] = f16_bits_of(-0.0);
+        xb[2] = f16_bits_of(f64::INFINITY);
+        let x = VarId(0);
+        let y = VarId(1);
+        let (v1, v2, v3, out) = (VarId(2), VarId(3), VarId(4), VarId(5));
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let lit_f16 = |x: f64| Atom::Lit(Literal::from_f16_f64(x));
+        let eqns = vec![
+            mk(Primitive::Max, smallvec![Atom::Var(x), lit_f16(0.0)], v1), // relu
+            mk(Primitive::Min, smallvec![Atom::Var(v1), Atom::Var(y)], v2),
+            mk(Primitive::Abs, smallvec![Atom::Var(v2)], v3),
+            mk(Primitive::Add, smallvec![Atom::Var(v3), lit_f16(0.25)], out),
+        ];
+        let jaxpr = Jaxpr::new(vec![x, y], vec![], vec![out], eqns);
+        let f16_tensor = |bits: &[u16]| {
+            Value::Tensor(
+                TensorValue::new_half_float_values(
+                    DType::F16,
+                    Shape { dims: vec![n as u32] },
+                    bits.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
+        let args = [f16_tensor(&xb), f16_tensor(&yb)];
+        let fused_outputs = eval_jaxpr(&jaxpr, &args).unwrap();
+        let unfused_outputs =
+            eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("unfused reference evaluates");
+        let Value::Tensor(out_tensor) = &fused_outputs[0] else {
+            panic!("expected tensor output")
+        };
+        assert_eq!(out_tensor.dtype, DType::F16);
+        let got_bits = half_bits(&fused_outputs[0]);
+        let want_bits = half_bits(&unfused_outputs[0]);
+        assert_eq!(
+            got_bits, want_bits,
+            "fused f16 max/min/abs chain must match forced unfused path bit-for-bit"
+        );
+        let digest = fj_test_utils::fixture_id_from_json(&want_bits)
+            .expect("reference output bits should hash");
+        assert_eq!(digest, "50bd04003ca23bfb110a239a785969d8f4f5da9d3c9ab96f6a79a332d41a149c");
     }
 
     #[test]

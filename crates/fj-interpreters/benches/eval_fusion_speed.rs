@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use fj_core::{Atom, Equation, Jaxpr, Literal, Primitive, Shape, TensorValue, Value, VarId};
+use fj_core::{Atom, DType, Equation, Jaxpr, Literal, Primitive, Shape, TensorValue, Value, VarId};
 use fj_interpreters::eval_jaxpr;
 use fj_lax::eval_primitive;
 use smallvec::smallvec;
@@ -52,6 +52,37 @@ fn i64_tensor(vals: Vec<i64>) -> Value {
         )
         .unwrap(),
     )
+}
+
+fn bf16_bits_of(x: f64) -> u16 {
+    match Literal::from_bf16_f64(x) {
+        Literal::BF16Bits(b) => b,
+        _ => 0,
+    }
+}
+
+fn bf16_tensor(vals: Vec<u16>) -> Value {
+    let n = vals.len();
+    Value::Tensor(
+        TensorValue::new_half_float_values(
+            DType::BF16,
+            Shape {
+                dims: vec![n as u32],
+            },
+            vals,
+        )
+        .unwrap(),
+    )
+}
+
+fn half_bits_at(t: &TensorValue, idx: usize) -> u16 {
+    if let Some(values) = t.elements.as_half_float_slice() {
+        return values[idx];
+    }
+    match t.elements[idx] {
+        Literal::BF16Bits(bits) | Literal::F16Bits(bits) => bits,
+        other => panic!("expected half-float element, got {other:?}"),
+    }
 }
 
 fn f32_bits_at(t: &TensorValue, idx: usize) -> u32 {
@@ -949,6 +980,115 @@ fn run_i64() {
     );
 }
 
+/// bf16 elementwise chain (the dominant ML activation dtype). Each fused step
+/// reproduces fj-lax's per-op bf16 contract (widen→f64→op→round-to-bf16), so the
+/// win is the eliminated N-1 intermediate half tensors, same op mix as run_i64.
+fn run_bf16() {
+    let n = 1usize << 20; // 1M bf16 = 2 MB per tensor
+    let x: Vec<u16> = (0..n).map(|i| bf16_bits_of(i as f64 * 1e-6 - 0.5)).collect();
+    let y: Vec<u16> = (0..n)
+        .map(|i| bf16_bits_of((i as f64 * 3e-7).cos() + 1.2))
+        .collect();
+
+    let xv = VarId(0);
+    let yv = VarId(1);
+    let v: Vec<VarId> = (2..=9).map(VarId).collect();
+    let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+        primitive: p,
+        inputs: ins,
+        outputs: smallvec![o],
+        params: BTreeMap::new(),
+        sub_jaxprs: vec![],
+        effects: vec![],
+    };
+    let lit = |c: f64| Atom::Lit(Literal::from_bf16_f64(c));
+    let eqns = vec![
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(xv), Atom::Var(xv)],
+            v[0],
+        ),
+        mk(Primitive::Add, smallvec![Atom::Var(v[0]), lit(0.5)], v[1]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[1]), Atom::Var(xv)],
+            v[2],
+        ),
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(v[2]), Atom::Var(yv)],
+            v[3],
+        ),
+        mk(Primitive::Add, smallvec![Atom::Var(v[3]), lit(1.0)], v[4]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[4]), Atom::Var(yv)],
+            v[5],
+        ),
+        mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2.0)], v[6]),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(v[6]), Atom::Var(xv)],
+            v[7],
+        ),
+    ];
+    let jaxpr = Jaxpr::new(vec![xv, yv], vec![], vec![v[7]], eqns.clone());
+    let args = [bf16_tensor(x.clone()), bf16_tensor(y.clone())];
+
+    let unfused = || {
+        let mut env: Vec<Option<Value>> = vec![None; 10];
+        env[0] = Some(args[0].clone());
+        env[1] = Some(args[1].clone());
+        for eqn in &eqns {
+            let ins: Vec<Value> = eqn
+                .inputs
+                .iter()
+                .map(|a| match a {
+                    Atom::Var(vr) => env[vr.0 as usize].clone().unwrap(),
+                    Atom::Lit(l) => Value::Scalar(*l),
+                })
+                .collect();
+            let out = eval_primitive(eqn.primitive, &ins, &eqn.params).unwrap();
+            env[eqn.outputs[0].0 as usize] = Some(out);
+        }
+        env[v[7].0 as usize].clone().unwrap()
+    };
+
+    let f = eval_jaxpr(&jaxpr, &args).unwrap();
+    let u = unfused();
+    if let (Value::Tensor(ft), Value::Tensor(ut)) = (&f[0], &u) {
+        for idx in [0usize, n / 2, n - 1] {
+            assert_eq!(
+                half_bits_at(ft, idx),
+                half_bits_at(ut, idx),
+                "fused bf16 != unfused"
+            );
+        }
+    }
+
+    let iters = 60;
+    let _ = eval_jaxpr(&jaxpr, &args).unwrap();
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap());
+    }
+    let fused = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+    let _ = unfused();
+    let t1 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(unfused());
+    }
+    let unf = t1.elapsed().as_nanos() as f64 / iters as f64;
+
+    println!(
+        "EVAL_FUSION_SPEED_BF16 n={n} ops=8 unfused={:.3}ms fused={:.3}ms speedup={:.2}x",
+        unf / 1e6,
+        fused / 1e6,
+        unf / fused,
+    );
+}
+
 /// Clamp/relu/abs activation chain (f32 — JAX's default inference dtype). Before
 /// Max/Min/Abs were fusable, this chain fused NOTHING (the first Max broke the run
 /// and the prefix was below FUSION_MIN_RUN), so eval_jaxpr ran 8 separate
@@ -1061,4 +1201,5 @@ fn main() {
     run_f64_row_broadcast();
     run_f64_col_broadcast();
     run_i64();
+    run_bf16();
 }
