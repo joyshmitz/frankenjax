@@ -4123,6 +4123,30 @@ pub fn det(a: &[f64], n: usize) -> f64 {
         return a[0] * a[3] - a[1] * a[2];
     }
 
+    // Large square inputs route through the cache-blocked right-looking LU whose
+    // O(n³) Schur update runs at GEMM speed (same kernel `eval_solve`/`eval_lu`
+    // use). The block-reordered trailing sum is numerically equivalent (P·A=L·U
+    // to machine precision) but not bit-identical to the scalar elimination, so
+    // small n (conformance goldens) stays on the unblocked path below. JAX itself
+    // factors with blocked LAPACK getrf, so the large-n det matches it to
+    // tolerance. The blocked path divides through tiny-but-nonzero pivots exactly
+    // as JAX/getrf does (no early zero short-circuit), so genuinely singular
+    // inputs fall out as a ~0 diagonal product rather than a forced 0.0.
+    if n >= LU_BLOCK_THRESHOLD {
+        let mut lu = a.to_vec();
+        let (pivots, _perm) = lu_factor_real_blocked(&mut lu, n, n);
+        let mut result = 1.0_f64;
+        for (col, &piv) in pivots.iter().enumerate() {
+            if piv as usize != col {
+                result = -result;
+            }
+        }
+        for i in 0..n {
+            result *= lu[i * n + i];
+        }
+        return result;
+    }
+
     // LU decomposition with partial pivoting
     let mut lu = a.to_vec();
     let mut sign = 1.0_f64;
@@ -4190,6 +4214,33 @@ pub fn slogdet(a: &[f64], n: usize) -> (f64, f64) {
     if n == 0 {
         // det of the empty matrix is 1; log|1| = 0.
         return (1.0, 0.0);
+    }
+
+    // Large inputs route through the cache-blocked GEMM LU (see `det`): the
+    // factorization is numerically equivalent to the scalar elimination below
+    // and matches JAX's blocked getrf to tolerance, so it is gated above the
+    // conformance-golden sizes (n < LU_BLOCK_THRESHOLD stays bit-identical).
+    if n >= LU_BLOCK_THRESHOLD {
+        let mut lu = a.to_vec();
+        let (pivots, _perm) = lu_factor_real_blocked(&mut lu, n, n);
+        let mut sign = 1.0_f64;
+        for (col, &piv) in pivots.iter().enumerate() {
+            if piv as usize != col {
+                sign = -sign;
+            }
+        }
+        let mut logabsdet = 0.0_f64;
+        for i in 0..n {
+            let pivot = lu[i * n + i];
+            if pivot.abs() < 1e-15 {
+                return (0.0, f64::NEG_INFINITY); // singular
+            }
+            if pivot < 0.0 {
+                sign = -sign;
+            }
+            logabsdet += pivot.abs().ln();
+        }
+        return (sign, logabsdet);
     }
 
     let mut lu = a.to_vec();
@@ -7070,6 +7121,129 @@ mod tests {
         assert!((logabsdet - expected).abs() < 1e-6);
         // The naive log(det) path would have failed: det() underflows to 0.
         assert_eq!(det(&a, n), 0.0);
+    }
+
+    /// Naive scalar reference for the blocked-LU det path: BLAS-2 right-looking
+    /// elimination, the exact algorithm `det` runs below `LU_BLOCK_THRESHOLD`.
+    fn naive_det_ref(a: &[f64], n: usize) -> f64 {
+        let mut lu = a.to_vec();
+        let mut sign = 1.0_f64;
+        for k in 0..n {
+            let mut max_val = lu[k * n + k].abs();
+            let mut max_row = k;
+            for i in (k + 1)..n {
+                let val = lu[i * n + k].abs();
+                if val > max_val {
+                    max_val = val;
+                    max_row = i;
+                }
+            }
+            if max_val == 0.0 {
+                return 0.0;
+            }
+            if max_row != k {
+                for j in 0..n {
+                    lu.swap(k * n + j, max_row * n + j);
+                }
+                sign = -sign;
+            }
+            for i in (k + 1)..n {
+                let factor = lu[i * n + k] / lu[k * n + k];
+                for j in (k + 1)..n {
+                    lu[i * n + j] -= factor * lu[k * n + j];
+                }
+            }
+        }
+        let mut result = sign;
+        for i in 0..n {
+            result *= lu[i * n + i];
+        }
+        result
+    }
+
+    #[test]
+    fn blocked_det_matches_naive_within_tolerance() {
+        // n ≥ LU_BLOCK_THRESHOLD routes `det`/`slogdet` through the cache-blocked
+        // GEMM LU. The block-reordered Schur update is numerically equivalent to
+        // the scalar elimination (P·A = L·U to machine precision) but not bit-
+        // identical, so verify the determinant and its sign+log agree to tolerance.
+        let n = 300usize;
+        assert!(n >= LU_BLOCK_THRESHOLD, "must exercise the blocked path");
+        // Strongly diagonally-dominant, well-conditioned matrix whose determinant
+        // (≈ product of diagonals in [1.0, 1.3]) stays finite — the dominant-
+        // diagonal solve_test_system would give det ≈ 300^300 = +inf.
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = (((i * 131 + j * 17 + 7) % 13) as f64 - 6.0) * 1e-5;
+            }
+            a[i * n + i] = 1.0 + ((i % 7) as f64) * 0.05;
+        }
+
+        let d_blocked = det(&a, n);
+        let d_ref = naive_det_ref(&a, n);
+        assert!(d_blocked.is_finite() && d_ref != 0.0, "det must be finite/nonzero");
+        // Block-reordered GEMM Schur update is numerically equivalent, agreeing to ~ulp.
+        assert!(
+            (d_blocked / d_ref - 1.0).abs() < 1e-9,
+            "blocked det {d_blocked} vs naive {d_ref}"
+        );
+
+        let (sign_b, log_b) = slogdet(&a, n);
+        let sign_ref = d_ref.signum();
+        assert_eq!(sign_b, sign_ref, "slogdet sign mismatch");
+        let log_ref = d_ref.abs().ln();
+        assert!(
+            (log_b - log_ref).abs() < 1e-9,
+            "blocked logabsdet {log_b} vs naive {log_ref}"
+        );
+    }
+
+    #[test]
+    fn small_det_stays_bit_identical_to_naive() {
+        // Below the threshold, `det` must be the SAME unblocked elimination the
+        // conformance goldens pin — bit-for-bit identical to the scalar reference.
+        let n = 64usize;
+        assert!(n < LU_BLOCK_THRESHOLD);
+        let (a, _b) = solve_test_system(n);
+        assert_eq!(
+            det(&a, n).to_bits(),
+            naive_det_ref(&a, n).to_bits(),
+            "small-n det must stay bit-identical to the scalar kernel"
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_det_blocked_vs_naive() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..7 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let run = |n: usize| {
+            let (a, _b) = solve_test_system(n);
+            let naive = best_time(|| {
+                std::hint::black_box(naive_det_ref(std::hint::black_box(&a), n));
+            });
+            let blocked = best_time(|| {
+                std::hint::black_box(det(std::hint::black_box(&a), n));
+            });
+            println!(
+                "BENCH det n={n}: naive-LU {:.3}ms -> blocked-GEMM-LU {:.3}ms = {:.2}x",
+                naive * 1e3,
+                blocked * 1e3,
+                naive / blocked
+            );
+        };
+        run(512);
+        run(1024);
     }
 
     // ── Inverse tests ───────────────────────────────────────────────
