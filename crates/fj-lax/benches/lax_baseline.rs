@@ -1700,6 +1700,26 @@ fn bench_matmul_2d_512(c: &mut Criterion) {
     });
 }
 
+// f32 GEMM cache-blocking A/B: F32_MR register-blocked (production) vs per-row reference.
+// The win appears once B (k·n·4B) spills cache and the per-row kernel re-streams it from
+// RAM once per output row; the MR-tile loads each B panel once and reuses it across rows.
+fn f32_gemm_blocked_ab(c: &mut Criterion, m: usize, k: usize, n: usize) {
+    let a: Vec<f32> = (0..m * k).map(|i| (i as f32 * 1e-4).sin()).collect();
+    let b: Vec<f32> = (0..k * n).map(|i| (i as f32 * 2e-4).cos()).collect();
+    c.bench_function(&format!("linalg/f32_gemm_{m}_blocked"), |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, true))
+    });
+    c.bench_function(&format!("linalg/f32_gemm_{m}_rowref"), |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, false))
+    });
+}
+fn bench_f32_gemm_1024(c: &mut Criterion) {
+    f32_gemm_blocked_ab(c, 1024, 1024, 1024);
+}
+fn bench_f32_gemm_2048(c: &mut Criterion) {
+    f32_gemm_blocked_ab(c, 2048, 2048, 2048);
+}
+
 // f32 conv2d GEMM accumulation A/B at a ResNet-ish im2col shape (out=26x26=676 rows,
 // kdim=3*3*32=288, c_out=64). The im2col GATHER is identical for both paths, so the
 // GEMM accumulation ratio is the native-f32-conv lever's win: native f32 (16-lane
@@ -5151,6 +5171,8 @@ criterion_group!(
     bench_f16_matmul_512_f32accum,
     bench_f16_matmul_512_promote_reference,
     bench_matmul_2d_512,
+    bench_f32_gemm_1024,
+    bench_f32_gemm_2048,
     bench_conv2d_gemm_f32_native,
     bench_conv2d_gemm_f64_promote_reference,
     bench_matmul_2d_1024,

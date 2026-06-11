@@ -1206,10 +1206,117 @@ pub fn batched_matmul_2d_f32_in(
     result
 }
 
-/// f32-input row-block kernel: accumulates each output row in an `f32` scratch
-/// (ascending-`l`) and writes it directly into the output. The `acc` scratch is
-/// reused across the block's rows to avoid per-row allocation.
+/// Output rows accumulated together in one register tile (mirrors the f64
+/// [`matmul_2d_row_block`] microkernel). `F32_MR` rows are computed simultaneously so
+/// each `B[l]` panel is loaded ONCE into a register and reused across all `F32_MR`
+/// rows, and the `F32_MR` accumulators live in registers across the whole `k` sweep —
+/// no per-FMA L1 round-trip (the flaw of the prior Vec-accumulator attempt). MR=4 is
+/// the measured sweet spot: it keeps 4 F32xN accumulator chains in flight while needing
+/// only 4 strided A loads per `l` (MR=8 doubled the A-load traffic and regressed).
+const F32_MR: usize = 4;
+
+/// Register-blocked native-f32 GEMM row-block: an `F32_MR × F32_NR` output tile is held
+/// in `F32_MR` local `F32xN` accumulators (compiler-register-resident) and streamed over
+/// `k`. Each output still folds its own ascending-`l` f32 multiply-add (lanes = output
+/// columns; tile rows = independent outputs), so this is BIT-IDENTICAL to the per-row
+/// kernel [`batched_matmul_row_block_f32_in_rowref`] — same per-output order, same f32
+/// `*`/`+`. Tiles never cross a batch boundary (rows in a tile share `b_off`); the MR/NR
+/// remainders run the same ascending-`l` sweep with scalar / per-row accumulators.
 fn batched_matmul_row_block_f32_in(
+    a: &[f32],
+    b: &[f32],
+    m: usize,
+    k: usize,
+    n: usize,
+    g_start: usize,
+    block: &mut [f32],
+) {
+    let total_rows = block.len() / n;
+    let full_cols = n / F32_NR * F32_NR;
+    let mut ri = 0;
+    while ri < total_rows {
+        // A row-tile must stay inside one batch (shared `b_off`) and inside the block.
+        let g0 = g_start + ri;
+        let bt = g0 / m;
+        let b_off = bt * k * n;
+        let tile_rows = (total_rows - ri).min((bt + 1) * m - g0);
+        let full_rows = tile_rows / F32_MR * F32_MR;
+
+        // Full MR×NR register-microkernel tiles. Process each NR-wide B panel across
+        // every MR-row tile; B[l][j..j+NR] is loaded once and fanned into the MR rows.
+        let mut j = 0;
+        while j < full_cols {
+            let mut i = 0;
+            while i < full_rows {
+                let ar0 = (g0 + i) * k;
+                let (ar1, ar2, ar3) = (ar0 + k, ar0 + 2 * k, ar0 + 3 * k);
+                let mut c0 = F32xN::splat(0.0);
+                let mut c1 = F32xN::splat(0.0);
+                let mut c2 = F32xN::splat(0.0);
+                let mut c3 = F32xN::splat(0.0);
+                for l in 0..k {
+                    let bbase = b_off + l * n + j;
+                    let bv = F32xN::from_slice(&b[bbase..bbase + F32_NR]);
+                    c0 += F32xN::splat(a[ar0 + l]) * bv;
+                    c1 += F32xN::splat(a[ar1 + l]) * bv;
+                    c2 += F32xN::splat(a[ar2 + l]) * bv;
+                    c3 += F32xN::splat(a[ar3 + l]) * bv;
+                }
+                let ob = (ri + i) * n + j;
+                block[ob..ob + F32_NR].copy_from_slice(c0.as_array());
+                block[ob + n..ob + n + F32_NR].copy_from_slice(c1.as_array());
+                block[ob + 2 * n..ob + 2 * n + F32_NR].copy_from_slice(c2.as_array());
+                block[ob + 3 * n..ob + 3 * n + F32_NR].copy_from_slice(c3.as_array());
+                i += F32_MR;
+            }
+            j += F32_NR;
+        }
+
+        // Column remainder (n not a multiple of F32_NR) for the full MR-row tiles:
+        // F32_MR scalar accumulators, same ascending-`l` order.
+        let mut i = 0;
+        while i < full_rows {
+            let ar0 = (g0 + i) * k;
+            let mut jj = full_cols;
+            while jj < n {
+                let mut s = [0.0f32; F32_MR];
+                for l in 0..k {
+                    let bv = b[b_off + l * n + jj];
+                    for (r, sr) in s.iter_mut().enumerate() {
+                        *sr += a[ar0 + r * k + l] * bv;
+                    }
+                }
+                for (r, sr) in s.iter().enumerate() {
+                    block[(ri + i + r) * n + jj] = *sr;
+                }
+                jj += 1;
+            }
+            i += F32_MR;
+        }
+
+        // Row remainder (tile_rows not a multiple of MR): per-row ascending-`l` sweep.
+        while i < tile_rows {
+            let a_row = (g0 + i) * k;
+            let c_row = &mut block[(ri + i) * n..(ri + i) * n + n];
+            c_row.fill(0.0);
+            for l in 0..k {
+                let a_il = a[a_row + l];
+                let src = &b[b_off + l * n..b_off + l * n + n];
+                for (cx, bx) in c_row.iter_mut().zip(src) {
+                    *cx += a_il * *bx;
+                }
+            }
+            i += 1;
+        }
+
+        ri += tile_rows;
+    }
+}
+
+/// Pre-cache-blocking per-row reference kernel, kept only so a same-binary A/B can
+/// isolate the F32_MR register-blocking win.
+#[doc(hidden)]
+fn batched_matmul_row_block_f32_in_rowref(
     a: &[f32],
     b: &[f32],
     m: usize,
@@ -1251,6 +1358,19 @@ fn batched_matmul_row_block_f32_in(
         let tail_start = full_cols * F32_NR;
         c_row[tail_start..].copy_from_slice(&acc_tail);
     }
+}
+
+/// Bench-only single-batch f32 GEMM A/B: `blocked=true` runs the F32_MR cache-blocked
+/// kernel (production), `false` the per-row reference, isolating the register-blocking win.
+#[doc(hidden)]
+pub fn f32_matmul_bench(a: &[f32], m: usize, k: usize, b: &[f32], n: usize, blocked: bool) -> Vec<f32> {
+    let mut out = vec![0.0f32; m * n];
+    if blocked {
+        batched_matmul_row_block_f32_in(a, b, m, k, n, 0, &mut out);
+    } else {
+        batched_matmul_row_block_f32_in_rowref(a, b, m, k, n, 0, &mut out);
+    }
+    out
 }
 
 /// Mixed-precision batched matmul: **BF16 inputs, native f32 accumulation, BF16
@@ -1857,6 +1977,45 @@ mod tests {
                         want.to_bits(),
                         "mismatch at batch={batch}, row={i}, col={j}"
                     );
+                }
+            }
+        }
+    }
+
+    /// The register-blocked microkernel must equal the ascending-`l` reference for
+    /// shapes that trigger every MR/NR remainder path: rows not a multiple of F32_MR
+    /// (row remainder), columns not a multiple of F32_NR (scalar column remainder), and
+    /// a batch boundary that does NOT fall on an MR tile edge.
+    #[test]
+    fn batched_matmul_2d_f32_in_remainders_match_reference() {
+        for &(bt, m, k, n) in &[
+            (2usize, 11usize, 7usize, 19usize), // m%4=3, n%16=3, batch edge at row 11
+            (3, 13, 5, 33),                     // m%4=1, n%16=1
+            (1, 7, 9, 16),                      // m%4=3, n%16=0 (microkernel + row rem only)
+            (1, 8, 4, 5),                        // m%4=0, n<16 (column remainder only)
+        ] {
+            let af: Vec<f32> = (0..bt * m * k)
+                .map(|i| (i as f32 * 0.011).sin() * 1.7 - 0.4)
+                .collect();
+            let bf: Vec<f32> = (0..bt * k * n)
+                .map(|i| (i as f32 * 0.017).cos() * 1.3 + 0.2)
+                .collect();
+            let got = batched_matmul_2d_f32_in(&af, bt, m, k, &bf, n);
+            assert_eq!(got.len(), bt * m * n);
+            for batch in 0..bt {
+                for i in 0..m {
+                    for j in 0..n {
+                        let mut want = 0.0f32;
+                        for l in 0..k {
+                            want += af[(batch * m + i) * k + l] * bf[(batch * k + l) * n + j];
+                        }
+                        let idx = (batch * m + i) * n + j;
+                        assert_eq!(
+                            got[idx].to_bits(),
+                            want.to_bits(),
+                            "mismatch bt={bt} m={m} k={k} n={n} at batch={batch} row={i} col={j}"
+                        );
+                    }
                 }
             }
         }
