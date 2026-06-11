@@ -4092,21 +4092,46 @@ fn eig_qr_iteration(a: &[f64], n: usize) -> EigQrResult {
         let scale = t[(j - 1) * n + j - 1].abs() + t[j * n + j].abs();
         t[j * n + j - 1].abs() <= f64::EPSILON * scale.max(f64::MIN_POSITIVE)
     };
-    let mut reached_quasi_triangular = false;
-    for _iter in 0..(200 * n) {
-        hessenberg_qr_step(&mut t, None, n);
-        let mut converged = true;
-        for j in 2..n {
-            if !subdiag_negligible(&t, j) && !subdiag_negligible(&t, j - 1) {
-                converged = false;
+    // Deflation window: the unshifted iteration converges BOTTOM-UP (the bottom
+    // subdiagonal shrinks at rate |λ_p/λ_{p-1}|), so peel converged 1×1 / isolated
+    // 2×2 blocks off the bottom of the active leading `p×p` block and only sweep
+    // `[0, p)`. The diagonal blocks (hence eigenvalues) are unchanged by skipping
+    // the decoupled trailing columns; this cuts the per-iteration cost from O(n²)
+    // toward O(p²) as eigenvalues deflate. Same total-iteration safety cap; the
+    // global quasi-triangular check below still gates the fallback.
+    let mut p = n;
+    let max_iters = 200 * n;
+    let mut iters = 0usize;
+    while p > 2 {
+        // Peel deflated bottom blocks: a 1×1 when its top subdiagonal is negligible,
+        // an isolated 2×2 (complex-conjugate pair) when the subdiagonal above it is.
+        let prev_p = p;
+        loop {
+            if p > 1 && subdiag_negligible(&t, p - 1) {
+                t[(p - 1) * n + (p - 2)] = 0.0;
+                p -= 1;
+            } else if p > 2 && subdiag_negligible(&t, p - 2) {
+                t[(p - 2) * n + (p - 3)] = 0.0;
+                p -= 2;
+            } else {
                 break;
             }
         }
-        if converged {
-            reached_quasi_triangular = true;
+        if p <= 2 {
             break;
         }
+        if prev_p == p && iters >= max_iters {
+            break; // no progress within the cap → leave it to the fallback check
+        }
+        hessenberg_qr_step_leading(&mut t, n, p);
+        iters += 1;
     }
+    // Global gate (the definition of convergence): quasi-triangular iff no two
+    // *consecutive* non-negligible subdiagonals remain anywhere (which would be an
+    // unconverged ≥3×3 coupled block). A stalled run that hit the cap without
+    // deflating leaves such a pair → this is false → fall back to complex_eig_qr.
+    let reached_quasi_triangular =
+        (2..n).all(|j| subdiag_negligible(&t, j) || subdiag_negligible(&t, j - 1));
 
     // Unshifted real QR cannot reach quasi-triangular form when ≥3 eigenvalues share
     // a modulus (e.g. cube-roots-of-unity: {1, e^{±2πi/3}}, all |λ|=1) — it would
@@ -4286,6 +4311,56 @@ fn hessenberg_qr_step(h: &mut [f64], mut q_total: Option<&mut [f64]>, n: usize) 
         apply_givens_right(h, n, i, c, s);
         if let Some(q_total) = q_total.as_deref_mut() {
             apply_givens_right(q_total, n, i, c, s);
+        }
+    }
+}
+
+/// One unshifted Hessenberg QR sweep restricted to the ACTIVE leading `p×p` block
+/// of a row-major `n×n` Hessenberg matrix (`p ≤ n`). Identical in form to
+/// [`hessenberg_qr_step`] but every Givens rotation touches only columns/rows
+/// `< p`, so the per-step cost is O(p²) instead of O(n²). When the trailing
+/// `[p, n)` block has deflated (its coupling subdiagonal `t[p][p-1] ≈ 0`), the
+/// matrix is block-upper-triangular and the active block's eigenvalues are
+/// independent of the (now stale) coupling columns `[p, n)` — so skipping them
+/// leaves every diagonal block's eigenvalues unchanged. The `eig_qr_iteration`
+/// caller reads eigenvalues off those diagonal blocks and takes eigenvectors from
+/// the separate `h_hess` copy, so the stale coupling region is never observed.
+fn hessenberg_qr_step_leading(h: &mut [f64], n: usize, p: usize) {
+    if p < 2 {
+        return;
+    }
+    let mut rotations = Vec::with_capacity(p - 1);
+    for i in 0..p - 1 {
+        let diagonal = h[i * n + i];
+        let subdiagonal = h[(i + 1) * n + i];
+        let radius = diagonal.hypot(subdiagonal);
+        let (c, s) = if radius <= 1e-300 {
+            (1.0, 0.0)
+        } else {
+            (diagonal / radius, subdiagonal / radius)
+        };
+        rotations.push((c, s));
+
+        for col in i..p {
+            let top_idx = i * n + col;
+            let bottom_idx = (i + 1) * n + col;
+            let top = h[top_idx];
+            let bottom = h[bottom_idx];
+            h[top_idx] = c * top + s * bottom;
+            h[bottom_idx] = -s * top + c * bottom;
+        }
+        h[(i + 1) * n + i] = 0.0;
+    }
+
+    for (i, (c, s)) in rotations.into_iter().enumerate() {
+        // RQ accumulation, restricted to the active rows `< p`.
+        for row in 0..p {
+            let left_idx = row * n + i;
+            let right_idx = left_idx + 1;
+            let left = h[left_idx];
+            let right = h[right_idx];
+            h[left_idx] = c * left + s * right;
+            h[right_idx] = -s * left + c * right;
         }
     }
 }
@@ -5701,6 +5776,82 @@ mod tests {
         run(64);
         run(128);
         run(192);
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_eig_qr_iteration_window_vs_full_sweep() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let neg = |t: &[f64], n: usize, j: usize| -> bool {
+            let scale = t[(j - 1) * n + j - 1].abs() + t[j * n + j].abs();
+            t[j * n + j - 1].abs() <= f64::EPSILON * scale.max(f64::MIN_POSITIVE)
+        };
+        let run = |n: usize| {
+            let a = eig_test_matrix(n);
+            let (h0, _q0) = hessenberg_reduction(&a, n);
+            // (a) OLD full-sweep loop: sweep the whole n×n each iteration.
+            let full = best_time(|| {
+                let mut t = h0.clone();
+                for _ in 0..(200 * n) {
+                    hessenberg_qr_step(&mut t, None, n);
+                    if (2..n).all(|j| neg(&t, n, j) || neg(&t, n, j - 1)) {
+                        break;
+                    }
+                }
+                std::hint::black_box(&t);
+            });
+            // (b) NEW deflation-window loop: sweep only the active leading p×p.
+            let window = best_time(|| {
+                let mut t = h0.clone();
+                let mut p = n;
+                let mut iters = 0usize;
+                while p > 2 {
+                    let prev_p = p;
+                    loop {
+                        if p > 1 && neg(&t, n, p - 1) {
+                            t[(p - 1) * n + (p - 2)] = 0.0;
+                            p -= 1;
+                        } else if p > 2 && neg(&t, n, p - 2) {
+                            t[(p - 2) * n + (p - 3)] = 0.0;
+                            p -= 2;
+                        } else {
+                            break;
+                        }
+                    }
+                    if p <= 2 {
+                        break;
+                    }
+                    if prev_p == p && iters >= 200 * n {
+                        break;
+                    }
+                    hessenberg_qr_step_leading(&mut t, n, p);
+                    iters += 1;
+                }
+                std::hint::black_box(&t);
+            });
+            println!(
+                "BENCH eig QR-iter n={n}: full-sweep O(n²)/it {:.3}ms -> deflation-window {:.3}ms = {:.2}x",
+                full * 1e3,
+                window * 1e3,
+                full / window
+            );
+        };
+        // Sizes where unshifted QR converges within the cap (the regime the real
+        // path serves — larger/clustered matrices that stall fall back to
+        // complex_eig_qr, where windowing is neutral and never regresses).
+        run(32);
+        run(48);
+        run(64);
     }
 
     fn make_matrix(m: usize, n: usize, data: &[f64]) -> Value {
