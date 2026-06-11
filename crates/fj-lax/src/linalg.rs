@@ -11,6 +11,7 @@ use crate::type_promotion::promote_dtype;
 
 type ComplexScalar = (f64, f64);
 type ComplexVector = Vec<ComplexScalar>;
+type ComplexMatrix = Vec<ComplexScalar>;
 type EigQrResult = (ComplexVector, ComplexVector);
 
 // ── Complex Arithmetic Helpers ──────────────────────────────────────
@@ -3081,7 +3082,7 @@ fn complex_perm_sign(perm: &[usize]) -> f64 {
             node = perm[node];
             len += 1;
         }
-        if len % 2 == 0 {
+        if len.is_multiple_of(2) {
             sign = -sign;
         }
     }
@@ -3588,9 +3589,138 @@ fn complex_matmul_n(x: &[(f64, f64)], y: &[(f64, f64)], n: usize) -> Vec<(f64, f
     out
 }
 
+/// Complex Givens rotation `G = [[c, s], [-conj(s), c]]` (c real ≥ 0, `|c|²+|s|²=1`)
+/// zeroing the second component: `G·(f, g)ᵀ = (r, 0)ᵀ`. Returns `(c, s)`.
+#[inline]
+fn complex_givens(f: (f64, f64), g: (f64, f64)) -> (f64, (f64, f64)) {
+    let absf = complex_abs(f);
+    let absg = complex_abs(g);
+    let r = (absf * absf + absg * absg).sqrt();
+    if r == 0.0 {
+        return (1.0, (0.0, 0.0));
+    }
+    if absf == 0.0 {
+        // c = 0, s = conj(g)/|g| so that s·g = |g| = r.
+        return (0.0, (g.0 / absg, -g.1 / absg));
+    }
+    let c = absf / r;
+    // s = (f/|f|)·conj(g)/r.
+    let phase_f = (f.0 / absf, f.1 / absf);
+    let conj_g_scaled = (g.0 / r, -g.1 / r);
+    (c, complex_mul(phase_f, conj_g_scaled))
+}
+
+/// Reduce a complex `n×n` matrix `a` (row-major) to upper-Hessenberg form `H` by a
+/// sequence of complex Givens similarities, returning `(H, Q0)` with `A = Q0·H·Q0ᴴ`
+/// and `Q0` unitary. The complex analog of [`hessenberg_reduction`]: for each column
+/// `k` it zeros the sub-subdiagonal entries `h[k+2..n][k]` against the pivot row
+/// `k+1`, applying each rotation `G` on the left (rows `k+1, j`) and `Gᴴ` on the
+/// right (cols `k+1, j`), accumulating `Gᴴ` into `Q0`. O(n³), Givens-based so it
+/// avoids complex Householder bookkeeping; each rotation is an explicit 2×2 unitary.
+fn complex_hessenberg_reduction(a: &[(f64, f64)], n: usize) -> (ComplexMatrix, ComplexMatrix) {
+    let mut h = a.to_vec();
+    let mut q = vec![(0.0_f64, 0.0_f64); n * n];
+    for i in 0..n {
+        q[i * n + i] = (1.0, 0.0);
+    }
+    if n < 3 {
+        return (h, q);
+    }
+    for k in 0..n - 2 {
+        for j in (k + 2)..n {
+            let f = h[(k + 1) * n + k];
+            let g = h[j * n + k];
+            if complex_abs(g) == 0.0 {
+                continue;
+            }
+            let (c, s) = complex_givens(f, g);
+            let cc = (c, 0.0);
+            let s_conj = complex_conj(s);
+            // Left: rows (k+1, j) ← G·rows.
+            for col in 0..n {
+                let r1 = h[(k + 1) * n + col];
+                let r2 = h[j * n + col];
+                h[(k + 1) * n + col] = complex_add(complex_mul(cc, r1), complex_mul(s, r2));
+                h[j * n + col] = complex_sub(complex_mul(cc, r2), complex_mul(s_conj, r1));
+            }
+            // Right: cols (k+1, j) ← cols·Gᴴ  (Gᴴ = [[c, -s], [conj(s), c]]).
+            for row in 0..n {
+                let ca = h[row * n + (k + 1)];
+                let cb = h[row * n + j];
+                h[row * n + (k + 1)] = complex_add(complex_mul(cc, ca), complex_mul(s_conj, cb));
+                h[row * n + j] = complex_sub(complex_mul(cc, cb), complex_mul(s, ca));
+            }
+            // Accumulate Gᴴ into Q (same right-multiply on cols k+1, j).
+            for row in 0..n {
+                let ca = q[row * n + (k + 1)];
+                let cb = q[row * n + j];
+                q[row * n + (k + 1)] = complex_add(complex_mul(cc, ca), complex_mul(s_conj, cb));
+                q[row * n + j] = complex_sub(complex_mul(cc, cb), complex_mul(s, ca));
+            }
+        }
+        // Force exact Hessenberg structure (rotations zero these, but be explicit).
+        for j in (k + 2)..n {
+            h[j * n + k] = (0.0, 0.0);
+        }
+    }
+    (h, q)
+}
+
+/// Eigenvector of complex `A` (= `Q0·H·Q0ᴴ`, with `H` its complex upper-Hessenberg
+/// form) for eigenvalue `lambda`, by two steps of inverse iteration on the
+/// HESSENBERG factor `(H − λI)` (O(n²) via [`complex_hessenberg_solve`]) then the
+/// unitary back-transform `v_A = Q0·v_H`. Because `H = Q0ᴴ A Q0`, a unit eigenvector
+/// `y` of `H` gives the eigenvector `Q0·y` of `A`. Computing all `n` eigenvectors is
+/// O(n³) versus O(n⁴) for the full inverse iteration in [`complex_eig_eigenvector`];
+/// eig parity is reconstruction (`A·v = λ·v`), preserved up to scale/phase.
+fn complex_eig_eigenvector_hessenberg(
+    h: &[(f64, f64)],
+    q0: &[(f64, f64)],
+    n: usize,
+    lambda: (f64, f64),
+) -> Vec<(f64, f64)> {
+    let mut y = vec![(1.0_f64, 0.0_f64); n];
+    for _ in 0..2 {
+        let mut m: Vec<(f64, f64)> = (0..n * n)
+            .map(|idx| {
+                let e = h[idx];
+                if idx / n == idx % n {
+                    complex_sub(e, lambda)
+                } else {
+                    e
+                }
+            })
+            .collect();
+        let mut b = y.clone();
+        let x = complex_hessenberg_solve(&mut m, &mut b, n);
+        let norm = x
+            .iter()
+            .map(|z| complex_abs(*z).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        if !norm.is_finite() || norm == 0.0 {
+            break;
+        }
+        y = x.iter().map(|z| (z.0 / norm, z.1 / norm)).collect();
+    }
+    let mut v = vec![(0.0_f64, 0.0_f64); n];
+    for (row, slot) in v.iter_mut().enumerate().take(n) {
+        let mut acc = (0.0_f64, 0.0_f64);
+        let qbase = row * n;
+        for (col, yc) in y.iter().enumerate() {
+            acc = complex_add(acc, complex_mul(q0[qbase + col], *yc));
+        }
+        *slot = acc;
+    }
+    normalize_vector(v)
+}
+
 /// Eigenvector for complex eigenvalue `lambda` of complex `a` by two steps of inverse
 /// iteration on `(A − λI)`, reusing the nudging [`complex_linear_solve`] (which keeps
 /// the intentionally near-singular solve finite). Returns a unit-norm complex vector.
+/// Superseded in production by [`complex_eig_eigenvector_hessenberg`] (O(n²)); kept as
+/// a `#[cfg(test)]` reference oracle.
+#[cfg(test)]
 fn complex_eig_eigenvector(a: &[(f64, f64)], n: usize, lambda: (f64, f64)) -> Vec<(f64, f64)> {
     let mut x = vec![(1.0_f64, 0.0_f64); n];
     for _ in 0..2 {
@@ -3726,9 +3856,16 @@ fn complex_eig_qr(a: &[ComplexScalar], n: usize) -> EigQrResult {
         }
     }
     let eigenvalues: Vec<(f64, f64)> = (0..n).map(|i| t[i * n + i]).collect();
+    // Eigenvectors via O(n²) inverse iteration on the complex Hessenberg factor
+    // (H − λI) + unitary back-transform, instead of the O(n³)-per-eigenvalue full
+    // inverse iteration on (A − λI). Reduce A to complex Hessenberg once (Q0 unitary,
+    // A = Q0·H·Q0ᴴ); all n eigenvectors then cost O(n³) total. This phase dominated
+    // complex_eig_qr (≈4× the shifted-QR cost). Eigenvalues are read from the Schur
+    // diagonal above, unchanged.
+    let (h_hess, q0) = complex_hessenberg_reduction(a, n);
     let mut eigenvectors = vec![(0.0_f64, 0.0_f64); n * n];
     for (col, &lambda) in eigenvalues.iter().enumerate() {
-        let v = complex_eig_eigenvector(a, n, lambda);
+        let v = complex_eig_eigenvector_hessenberg(&h_hess, &q0, n, lambda);
         for row in 0..n {
             eigenvectors[row * n + col] = v[row];
         }
@@ -3800,6 +3937,9 @@ pub(crate) fn eval_eig(
 /// underflows the matrix scale is nudged to `ε·scale`, so the solve never divides
 /// by zero: for inverse iteration `M = A − λI` is intentionally near-singular and
 /// the resulting large-norm solution is exactly the (un-normalized) eigenvector.
+/// Superseded in production by [`complex_hessenberg_solve`] (O(n²)); now a
+/// `#[cfg(test)]` reference used only by the eigenvector oracles.
+#[cfg(test)]
 fn complex_linear_solve(m: &mut [(f64, f64)], b: &mut [(f64, f64)], n: usize) -> Vec<(f64, f64)> {
     let scale = m.iter().map(|z| complex_abs(*z)).fold(0.0_f64, f64::max);
     let tiny = (f64::EPSILON * scale).max(f64::MIN_POSITIVE);
@@ -3931,7 +4071,7 @@ fn eig_eigenvector_hessenberg(
     // Back-transform v_A = Q0 · y (real Q0 × complex y), then renormalize (Q0 is
     // orthogonal so this is already unit-norm to rounding; renormalize for safety).
     let mut v = vec![(0.0_f64, 0.0_f64); n];
-    for row in 0..n {
+    for (row, slot) in v.iter_mut().enumerate().take(n) {
         let mut acc = (0.0_f64, 0.0_f64);
         let qbase = row * n;
         for (col, yc) in y.iter().enumerate() {
@@ -3939,7 +4079,7 @@ fn eig_eigenvector_hessenberg(
             acc.0 += q * yc.0;
             acc.1 += q * yc.1;
         }
-        v[row] = acc;
+        *slot = acc;
     }
     normalize_vector(v)
 }
@@ -4016,9 +4156,7 @@ fn make_house(a: &[f64]) -> ([f64; 3], f64) {
     // Choose the reflection sign to avoid cancellation in `a[0] − r`.
     let r = if a[0] >= 0.0 { -norm } else { norm };
     v[0] = a[0] - r;
-    for i in 1..len {
-        v[i] = a[i];
-    }
+    v[1..len].copy_from_slice(&a[1..len]);
     let vnorm2: f64 = v[..len].iter().map(|x| x * x).sum();
     let tau = if vnorm2 == 0.0 { 0.0 } else { 2.0 / vnorm2 };
     (v, tau)
@@ -5664,6 +5802,168 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Deterministic dense complex non-Hermitian matrix `A = H·T·Hᴴ` (H a complex
+    /// Householder reflector, unitary; T diagonal with distinct complex eigenvalues),
+    /// for exercising the complex Hessenberg eigenvector path at moderate n.
+    fn complex_eig_test_matrix(n: usize) -> Vec<(f64, f64)> {
+        let mut t = vec![(0.0_f64, 0.0_f64); n * n];
+        for i in 0..n {
+            let re = (i as f64) * 1.3 - 2.0;
+            let im = (((i * 37 + 5) % 11) as f64) - 5.0;
+            t[i * n + i] = (re, im);
+        }
+        let mut v = vec![(0.0_f64, 0.0_f64); n];
+        for (r, slot) in v.iter_mut().enumerate() {
+            *slot = (
+                (((r * 13 + 3) % 17) as f64) - 8.0,
+                (((r * 29 + 7) % 13) as f64) - 6.0,
+            );
+        }
+        let vhv: f64 = v.iter().map(|z| complex_abs(*z).powi(2)).sum();
+        let mut h = vec![(0.0_f64, 0.0_f64); n * n];
+        for r in 0..n {
+            for c in 0..n {
+                let id = if r == c { (1.0, 0.0) } else { (0.0, 0.0) };
+                let vvh = complex_mul(v[r], complex_conj(v[c]));
+                h[r * n + c] = complex_sub(id, (2.0 / vhv * vvh.0, 2.0 / vhv * vvh.1));
+            }
+        }
+        complex_matmul_n(&complex_matmul_n(&h, &t, n), &h, n)
+    }
+
+    #[test]
+    fn complex_hessenberg_reduction_is_unitary_similarity() {
+        // H must be upper-Hessenberg and A = Q0·H·Q0ᴴ with Q0 unitary.
+        for &n in &[4usize, 6, 8] {
+            let a = complex_eig_test_matrix(n);
+            let (h, q0) = complex_hessenberg_reduction(&a, n);
+            // (1) H upper-Hessenberg: entries below the first subdiagonal are zero.
+            for row in 2..n {
+                for col in 0..row - 1 {
+                    assert!(
+                        complex_abs(h[row * n + col]) < 1e-9,
+                        "n={n}: H[{row}][{col}] not zero"
+                    );
+                }
+            }
+            // (2) Q0 unitary: Q0ᴴ·Q0 = I.
+            for i in 0..n {
+                for j in 0..n {
+                    let mut acc = (0.0_f64, 0.0_f64);
+                    for k in 0..n {
+                        acc = complex_add(
+                            acc,
+                            complex_mul(complex_conj(q0[k * n + i]), q0[k * n + j]),
+                        );
+                    }
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (acc.0 - want).abs() < 1e-9 && acc.1.abs() < 1e-9,
+                        "n={n}: Q0ᴴQ0[{i}][{j}]={acc:?}"
+                    );
+                }
+            }
+            // (3) Reconstruction Q0·H·Q0ᴴ = A.
+            let q0h: Vec<(f64, f64)> = {
+                let mut out = vec![(0.0_f64, 0.0_f64); n * n];
+                for i in 0..n {
+                    for j in 0..n {
+                        out[i * n + j] = complex_conj(q0[j * n + i]);
+                    }
+                }
+                out
+            };
+            let recon = complex_matmul_n(&complex_matmul_n(&q0, &h, n), &q0h, n);
+            for idx in 0..n * n {
+                assert!(
+                    (recon[idx].0 - a[idx].0).abs() < 1e-7
+                        && (recon[idx].1 - a[idx].1).abs() < 1e-7,
+                    "n={n}: reconstruction mismatch at {idx}: {:?} vs {:?}",
+                    recon[idx],
+                    a[idx]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complex_eig_eigenvector_hessenberg_matches_full_reference() {
+        // The O(n²) complex Hessenberg eigenvector path must (a) satisfy A·v = λ·v and
+        // (b) span the same direction as the O(n³) full-matrix oracle
+        // `complex_eig_eigenvector` (|⟨v_hess, v_full⟩| ≈ 1, up to scale/phase).
+        for &n in &[4usize, 6, 8] {
+            let a = complex_eig_test_matrix(n);
+            let (w, v) = complex_eig_qr(&a, n);
+            // (a) public reconstruction contract on the production output.
+            for col in 0..n {
+                for row in 0..n {
+                    let mut acc = (0.0_f64, 0.0_f64);
+                    for k in 0..n {
+                        acc = complex_add(acc, complex_mul(a[row * n + k], v[k * n + col]));
+                    }
+                    let want = complex_mul(w[col], v[row * n + col]);
+                    assert!(
+                        complex_abs(complex_sub(acc, want)) < 1e-7,
+                        "n={n}: A·v≠λ·v at ({row},{col})"
+                    );
+                }
+            }
+            // (b) direction match vs the full-matrix oracle.
+            for (col, &lambda) in w.iter().enumerate() {
+                let v_full = complex_eig_eigenvector(&a, n, lambda);
+                let mut dot = (0.0_f64, 0.0_f64);
+                for k in 0..n {
+                    dot = complex_add(dot, complex_mul(v[k * n + col], complex_conj(v_full[k])));
+                }
+                assert!(
+                    (complex_abs(dot) - 1.0).abs() < 1e-5,
+                    "n={n} col={col}: |⟨v_hess,v_full⟩|={}",
+                    complex_abs(dot)
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_complex_eig_eigenvectors_hessenberg_vs_full() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let run = |n: usize| {
+            let a = complex_eig_test_matrix(n);
+            let (w, _v) = complex_eig_qr(&a, n);
+            let full = best_time(|| {
+                for &lambda in &w {
+                    std::hint::black_box(complex_eig_eigenvector(&a, n, lambda));
+                }
+            });
+            let (h, q0) = complex_hessenberg_reduction(&a, n);
+            let hess = best_time(|| {
+                for &lambda in &w {
+                    std::hint::black_box(complex_eig_eigenvector_hessenberg(&h, &q0, n, lambda));
+                }
+            });
+            println!(
+                "BENCH complex eig eigenvectors n={n}: full-LU O(n⁴) {:.3}ms -> Hessenberg O(n³) {:.3}ms = {:.2}x",
+                full * 1e3,
+                hess * 1e3,
+                full / hess
+            );
+        };
+        run(48);
+        run(96);
+        run(160);
     }
 
     /// T, so eig must recover the spectrum {2, 3i, -3i}. The pre-fix kernel read only
