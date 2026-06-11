@@ -53,6 +53,11 @@ fn is_expensive_binary(primitive: Primitive) -> bool {
             // (normalization / softmax / ratios). This routes the same-shape, scalar-
             // broadcast, and general-broadcast f64 div paths to the threaded fast paths.
             | Primitive::Div
+            // Rem (modulo) is the same div-unit/fmod-bound class: f64 `a % b` lowers to
+            // an `fmod` libm CALL (x86 has no fast hardware frem), so the closure-`map`
+            // path is ~compute-bound just like Div — threads the same way. Routes the
+            // same-shape / scalar-broadcast / general-broadcast f64 + f32 Rem paths.
+            | Primitive::Rem
     )
 }
 
@@ -10253,6 +10258,65 @@ mod tests {
         let serial_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
         println!(
             "[div same-shape n={n}] threaded={:.3}ms serial={:.3}ms ratio={:.2}x",
+            threaded_ns / 1e6,
+            serial_ns / 1e6,
+            serial_ns / threaded_ns,
+        );
+    }
+
+    /// Rem (modulo) joins the threaded expensive-binary path (fmod-unit-bound, like
+    /// Div). Output must equal the per-element `a % b` bit-for-bit (chunking never
+    /// changes a result), including the IEEE specials, and beat the serial map.
+    #[test]
+    fn rem_same_shape_threaded_bit_identical_and_faster() {
+        use std::time::Instant;
+
+        let n: usize = 1 << 20; // > EXPENSIVE_BINARY_PARALLEL_MIN (65_536), threads at 16
+        let mut a: Vec<f64> = (0..n).map(|i| (i as f64) * 0.013 - 5.0).collect();
+        let mut b: Vec<f64> = (0..n).map(|i| (i as f64) * 0.007 + 2.0).collect();
+        // Edge cases: x % 0 -> NaN, inf % y -> NaN, x % inf -> x.
+        a[0] = 1.0;
+        b[0] = 0.0;
+        a[1] = f64::INFINITY;
+        b[1] = 3.0;
+        a[2] = 3.0;
+        b[2] = f64::INFINITY;
+        let shape = Shape {
+            dims: vec![n as u32],
+        };
+        let va = Value::Tensor(TensorValue::new_f64_values(shape.clone(), a.clone()).unwrap());
+        let vb = Value::Tensor(TensorValue::new_f64_values(shape.clone(), b.clone()).unwrap());
+
+        let out =
+            crate::eval_primitive(Primitive::Rem, &[va.clone(), vb.clone()], &BTreeMap::new())
+                .unwrap();
+        let ot = out.as_tensor().unwrap();
+        let ov = ot.elements.as_f64_slice().expect("rem output dense f64");
+        for i in 0..n {
+            assert_eq!(
+                ov[i].to_bits(),
+                (a[i] % b[i]).to_bits(),
+                "rem mismatch at {i}"
+            );
+        }
+
+        let reps = 10u32;
+        let t0 = Instant::now();
+        for _ in 0..reps {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Rem, &[va.clone(), vb.clone()], &BTreeMap::new())
+                    .unwrap(),
+            );
+        }
+        let threaded_ns = t0.elapsed().as_nanos() as f64 / reps as f64;
+        let t1 = Instant::now();
+        for _ in 0..reps {
+            let r: Vec<f64> = a.iter().zip(&b).map(|(&x, &y)| x % y).collect();
+            std::hint::black_box(TensorValue::new_f64_values(shape.clone(), r).unwrap());
+        }
+        let serial_ns = t1.elapsed().as_nanos() as f64 / reps as f64;
+        println!(
+            "[rem same-shape n={n}] threaded={:.3}ms serial={:.3}ms ratio={:.2}x",
             threaded_ns / 1e6,
             serial_ns / 1e6,
             serial_ns / threaded_ns,
