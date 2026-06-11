@@ -6614,6 +6614,54 @@ fn eval_conv_1d(
 
     let is_complex = matches!(out_dtype, DType::Complex64 | DType::Complex128);
 
+    // NATIVE f32-accum 1D conv path (XLA parity, the conv1d sibling of eval_conv_2d's
+    // native path): XLA accumulates f32/bf16/f16 conv in f32, NOT f64 — fj's f64-promote
+    // path was MORE precise than the reference. When the output is f32/bf16/f16 and both
+    // operands share that dtype, decode operands to f32 (bf16/f16 widen EXACTLY, never
+    // via f64), build the f32 im2col, run the native-f32 GEMM (which threads internally),
+    // then round to out_dtype. Always uses the im2col GEMM (correct + threaded for every
+    // size; the alloc is negligible for tiny convs). BIT-IDENTICAL to the scalar f32-accum
+    // ascending-(k,ci) fold (zero-padded taps add 0·w; the GEMM matches the scalar f32
+    // fold per the cz0g0 contract).
+    if matches!(out_dtype, DType::F32 | DType::BF16 | DType::F16)
+        && lhs.dtype == out_dtype
+        && rhs.dtype == out_dtype
+        && let (Some(lhs_f32), Some(rhs_f32)) = (conv_decode_to_f32(lhs), conv_decode_to_f32(rhs))
+    {
+        let kdim = kernel_w.checked_mul(c_in).ok_or_else(|| EvalError::Unsupported {
+            primitive,
+            detail: "conv1d im2col kdim overflow".into(),
+        })?;
+        let num_rows = if c_out == 0 { 0 } else { total / c_out };
+        let col_len = num_rows.checked_mul(kdim).ok_or_else(|| EvalError::Unsupported {
+            primitive,
+            detail: "conv1d im2col size overflow".into(),
+        })?;
+        let mut col = vec![0.0_f32; col_len];
+        for n in 0..batch {
+            let n_offset = n * width_c_in;
+            for w in 0..out_w {
+                let row_base = (n * out_w + w) * kdim;
+                for k in 0..kernel_w {
+                    let in_pos = (w * stride + k * dil) as isize - pad_left as isize;
+                    if in_pos < 0 || (in_pos as usize) >= width {
+                        continue;
+                    }
+                    let src_base = n_offset + (in_pos as usize) * c_in;
+                    let col_base = row_base + k * c_in;
+                    col[col_base..col_base + c_in]
+                        .copy_from_slice(&lhs_f32[src_base..src_base + c_in]);
+                }
+            }
+        }
+        let out = batched_matmul_2d_f32_in(&col, 1, num_rows, kdim, rhs_f32.as_ref(), c_out);
+        return conv_f32_output_to_value(
+            out_dtype,
+            vec![batch as u32, out_w as u32, c_out as u32],
+            out,
+        );
+    }
+
     // Dense F64 fast path: read both operands straight from their contiguous f64
     // backings, bypassing the per-multiply Literal materialization + match in the
     // innermost conv loop. Bit-identical to the generic non-complex path — same
@@ -6621,7 +6669,8 @@ fn eval_conv_1d(
     // same from_f64 output (out_dtype == F64; for dense f64,
     // src[idx] == as_f64().unwrap_or(0.0)). Large output spaces are split into
     // independent output morsels; each output element still performs its own
-    // inner reduction in the same serial k/ci order.
+    // inner reduction in the same serial k/ci order. Reached by F64 outputs and
+    // MIXED-dtype convs (same-dtype f32/bf16/f16 took the native path above).
     if !is_complex
         && matches!(
             out_dtype,
@@ -7315,7 +7364,11 @@ fn eval_conv_2d(
                         for kh in 0..kernel_h {
                             let in_h = (oh * stride_h + kh * dil_h) as isize - pad_top as isize;
                             let h_oob = in_h < 0 || (in_h as usize) >= height;
-                            let h_offset = if h_oob { 0 } else { (in_h as usize) * width_c_in };
+                            let h_offset = if h_oob {
+                                0
+                            } else {
+                                (in_h as usize) * width_c_in
+                            };
                             for kw in 0..kernel_w {
                                 let in_w =
                                     (ow * stride_w + kw * dil_w) as isize - pad_left as isize;
@@ -8738,6 +8791,95 @@ mod tests {
     }
 
     #[test]
+    fn conv1d_native_f32_accum_matches_reference() {
+        // f32/bf16/f16 conv1d now accumulates in f32 (XLA parity — the prior path
+        // promoted to f64). Bit-for-bit identical to the textbook reference: decode the
+        // operands to f32, fold each output ascending-(k,ci) in f32, then round to
+        // out_dtype. Sized above CONV_IM2COL_MIN_OPS to exercise the im2col GEMM.
+        let (width, c_in, c_out, kw) = (200usize, 6usize, 12usize, 5usize);
+        for dt in [DType::F32, DType::BF16, DType::F16] {
+            let to_dt = |v: f64| -> Literal { conv_float_literal_from_f64(dt, v) };
+            let bits = |l: Literal| -> u16 {
+                match l {
+                    Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+                    _ => 0,
+                }
+            };
+            let decode = |l: &Literal| -> f32 {
+                match dt {
+                    DType::F32 => match l {
+                        Literal::F32Bits(b) => f32::from_bits(*b),
+                        _ => 0.0,
+                    },
+                    DType::BF16 => l.as_bf16_f32().unwrap(),
+                    _ => l.as_f16_f32().unwrap(),
+                }
+            };
+            let xv: Vec<Literal> = (0..width * c_in)
+                .map(|i| to_dt((i as f64 * 0.013).sin() * 1.2 - 0.3))
+                .collect();
+            let kv: Vec<Literal> = (0..kw * c_in * c_out)
+                .map(|i| to_dt((i as f64 * 0.019).cos() * 0.8 + 0.2))
+                .collect();
+            let mk = |dims: Vec<u32>, data: &[Literal]| {
+                Value::Tensor(TensorValue::new(dt, Shape { dims }, data.to_vec()).unwrap())
+            };
+            let out = eval_conv(
+                Primitive::Conv,
+                &[
+                    mk(vec![1, width as u32, c_in as u32], &xv),
+                    mk(vec![kw as u32, c_in as u32, c_out as u32], &kv),
+                ],
+                &params(&[("padding", "valid"), ("strides", "1")]),
+            )
+            .unwrap();
+            let out_w = width - kw + 1;
+            let Value::Tensor(t) = out else {
+                panic!("expected tensor")
+            };
+            assert_eq!(t.dtype, dt);
+            assert_eq!(t.shape.dims, vec![1, out_w as u32, c_out as u32]);
+            // Reference: decode -> f32, ascending-(k,ci) f32 fold, round to out_dtype.
+            let mut want: Vec<Literal> = Vec::new();
+            for ow in 0..out_w {
+                for co in 0..c_out {
+                    let mut acc = 0.0f32;
+                    for k in 0..kw {
+                        for ci in 0..c_in {
+                            let lv = decode(&xv[(ow + k) * c_in + ci]);
+                            let wv = decode(&kv[(k * c_in + ci) * c_out + co]);
+                            acc += lv * wv;
+                        }
+                    }
+                    want.push(to_dt(f64::from(acc)));
+                }
+            }
+            let got: Vec<Literal> = t.elements.iter().copied().collect();
+            if dt == DType::F32 {
+                let gb: Vec<u32> = got
+                    .iter()
+                    .map(|l| match l {
+                        Literal::F32Bits(b) => *b,
+                        _ => panic!("expected f32"),
+                    })
+                    .collect();
+                let wb: Vec<u32> = want
+                    .iter()
+                    .map(|l| match l {
+                        Literal::F32Bits(b) => *b,
+                        _ => 0,
+                    })
+                    .collect();
+                assert_eq!(gb, wb, "f32 conv1d must match the f32-accum reference");
+            } else {
+                let gb: Vec<u16> = got.iter().map(|l| bits(*l)).collect();
+                let wb: Vec<u16> = want.iter().map(|l| bits(*l)).collect();
+                assert_eq!(gb, wb, "{dt:?} conv1d must match the f32-accum reference");
+            }
+        }
+    }
+
+    #[test]
     fn conv2d_f32_native_accum_golden_sha256() -> Result<(), Box<dyn std::error::Error>> {
         fn run_case(
             h: usize,
@@ -8789,7 +8931,15 @@ mod tests {
         let fixtures = [
             (
                 "im2col_valid",
-                run_case(20, 20, 4, 8, 3, 3, &[("padding", "valid"), ("strides", "1")]),
+                run_case(
+                    20,
+                    20,
+                    4,
+                    8,
+                    3,
+                    3,
+                    &[("padding", "valid"), ("strides", "1")],
+                ),
             ),
             (
                 "direct_same_stride2",
