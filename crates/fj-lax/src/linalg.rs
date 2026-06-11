@@ -3543,8 +3543,9 @@ pub(crate) fn eval_slogdet(
 /// since non-symmetric matrices can have complex eigenvalues.
 /// Complex QR factorization by modified Gram-Schmidt: `A = Q R` with `Q` unitary
 /// (columns orthonormal under the Hermitian inner product) and `R` upper-triangular,
-/// both row-major n×n. Small-n only (the QR-iteration eigensolver re-orthogonalizes
-/// every step, so MGS's conditioning is adequate here).
+/// both row-major n×n. Superseded in `complex_eig_qr` by the O(p²) Hessenberg Givens
+/// step; retained as a `#[cfg(test)]` reference factorization.
+#[cfg(test)]
 fn complex_qr_mgs(a: &[ComplexScalar], n: usize) -> EigQrResult {
     let mut q = a.to_vec();
     let mut r = vec![(0.0_f64, 0.0_f64); n * n];
@@ -3574,7 +3575,9 @@ fn complex_qr_mgs(a: &[ComplexScalar], n: usize) -> EigQrResult {
     (q, r)
 }
 
-/// Row-major complex n×n matrix product.
+/// Row-major complex n×n matrix product. Only used to build test matrices and the
+/// `complex_qr_mgs` oracle now that `complex_eig_qr` runs on Hessenberg form.
+#[cfg(test)]
 fn complex_matmul_n(x: &[(f64, f64)], y: &[(f64, f64)], n: usize) -> Vec<(f64, f64)> {
     let mut out = vec![(0.0_f64, 0.0_f64); n * n];
     for i in 0..n {
@@ -3761,6 +3764,57 @@ fn complex_sqrt(z: (f64, f64)) -> (f64, f64) {
     (re, if z.1 < 0.0 { -im } else { im })
 }
 
+/// One Wilkinson-shifted QR sweep on the leading `p×p` active block of the complex
+/// upper-Hessenberg matrix `t` (row-major `n×n`), done with complex Givens rotations
+/// in O(p²): `B = t − μI` is reduced to upper-triangular `R` by left rotations
+/// (`G_i` zeros the subdiagonal `B[i+1][i]`), then `t ← R·Q + μI` with `Q = G_0ᴴ…
+/// G_{p-2}ᴴ` applied as right rotations — the standard explicit single-shift
+/// Hessenberg QR step. Replaces the previous O(p³) `complex_qr_mgs` + `complex_matmul_n`
+/// per sweep (which copied and densely re-factored the whole block), making
+/// `complex_eig_qr`'s iteration O(n³) total. Only the leading `p×p` block is touched
+/// (the deflated trailing rows/cols stay frozen), exactly as the dense version did.
+fn complex_hessenberg_shifted_qr_step(
+    t: &mut [ComplexScalar],
+    n: usize,
+    p: usize,
+    mu: ComplexScalar,
+) {
+    for i in 0..p {
+        t[i * n + i] = complex_sub(t[i * n + i], mu);
+    }
+    // Left rotations: reduce (t − μI) to upper triangular R, recording each G_i.
+    let mut rots: Vec<(f64, ComplexScalar)> = Vec::with_capacity(p.saturating_sub(1));
+    for i in 0..p - 1 {
+        let (c, s) = complex_givens(t[i * n + i], t[(i + 1) * n + i]);
+        rots.push((c, s));
+        let cc = (c, 0.0);
+        let s_conj = complex_conj(s);
+        for col in i..p {
+            let r1 = t[i * n + col];
+            let r2 = t[(i + 1) * n + col];
+            t[i * n + col] = complex_add(complex_mul(cc, r1), complex_mul(s, r2));
+            t[(i + 1) * n + col] = complex_sub(complex_mul(cc, r2), complex_mul(s_conj, r1));
+        }
+        t[(i + 1) * n + i] = (0.0, 0.0);
+    }
+    // Right rotations: t ← R·Q (Q = ∏ G_iᴴ). G_iᴴ acts on columns (i, i+1); it fills
+    // only down to row i+1, so restrict to rows 0..=i+1.
+    for (i, &(c, s)) in rots.iter().enumerate() {
+        let cc = (c, 0.0);
+        let s_conj = complex_conj(s);
+        let rend = (i + 2).min(p);
+        for row in 0..rend {
+            let ca = t[row * n + i];
+            let cb = t[row * n + (i + 1)];
+            t[row * n + i] = complex_add(complex_mul(cc, ca), complex_mul(s_conj, cb));
+            t[row * n + (i + 1)] = complex_sub(complex_mul(cc, cb), complex_mul(s, ca));
+        }
+    }
+    for i in 0..p {
+        t[i * n + i] = complex_add(t[i * n + i], mu);
+    }
+}
+
 /// Complex non-Hermitian eigendecomposition: Wilkinson-shifted QR with deflation
 /// drives `A` to its (fully upper-triangular) complex Schur form — every eigenvalue
 /// lands on the diagonal (unlike the real case there are no 2×2 blocks) — then each
@@ -3775,7 +3829,12 @@ fn complex_eig_qr(a: &[ComplexScalar], n: usize) -> EigQrResult {
     if n == 1 {
         return (vec![a[0]], vec![(1.0, 0.0)]);
     }
-    let mut t = a.to_vec();
+    // Reduce A to complex upper-Hessenberg ONCE (A = Q0·H·Q0ᴴ, Q0 unitary). The QR
+    // iteration runs on a copy (destroyed into Schur form); H0 + Q0 are reused for
+    // the O(n³) eigenvector phase below. Working on a Hessenberg matrix lets each QR
+    // sweep be an O(p²) complex-Givens step instead of a full O(p³) re-factorization.
+    let (h0, q0) = complex_hessenberg_reduction(a, n);
+    let mut t = h0.clone();
 
     // Wilkinson-shifted QR with deflation. The unshifted iteration fails to
     // converge when eigenvalues share a modulus — subdiagonals shrink at rate
@@ -3834,38 +3893,16 @@ fn complex_eig_qr(a: &[ComplexScalar], n: usize) -> EigQrResult {
             }
         };
 
-        // Shifted QR step on the active p×p block: (B − μI) = QR, B ← RQ + μI.
-        let mut bsub = vec![(0.0_f64, 0.0_f64); p * p];
-        for i in 0..p {
-            for j in 0..p {
-                bsub[i * p + j] = t[i * n + j];
-            }
-        }
-        for i in 0..p {
-            bsub[i * p + i] = complex_sub(bsub[i * p + i], mu);
-        }
-        let (q, r) = complex_qr_mgs(&bsub, p);
-        let mut rq = complex_matmul_n(&r, &q, p);
-        for i in 0..p {
-            rq[i * p + i] = complex_add(rq[i * p + i], mu);
-        }
-        for i in 0..p {
-            for j in 0..p {
-                t[i * n + j] = rq[i * p + j];
-            }
-        }
+        // Shifted QR step on the active p×p Hessenberg block, O(p²) via Givens.
+        complex_hessenberg_shifted_qr_step(&mut t, n, p, mu);
     }
     let eigenvalues: Vec<(f64, f64)> = (0..n).map(|i| t[i * n + i]).collect();
     // Eigenvectors via O(n²) inverse iteration on the complex Hessenberg factor
-    // (H − λI) + unitary back-transform, instead of the O(n³)-per-eigenvalue full
-    // inverse iteration on (A − λI). Reduce A to complex Hessenberg once (Q0 unitary,
-    // A = Q0·H·Q0ᴴ); all n eigenvectors then cost O(n³) total. This phase dominated
-    // complex_eig_qr (≈4× the shifted-QR cost). Eigenvalues are read from the Schur
-    // diagonal above, unchanged.
-    let (h_hess, q0) = complex_hessenberg_reduction(a, n);
+    // (H − λI) + unitary back-transform — O(n³) total. Reuse the same H0/Q0 the QR
+    // iteration started from (A = Q0·H0·Q0ᴴ); no second reduction needed.
     let mut eigenvectors = vec![(0.0_f64, 0.0_f64); n * n];
     for (col, &lambda) in eigenvalues.iter().enumerate() {
-        let v = complex_eig_eigenvector_hessenberg(&h_hess, &q0, n, lambda);
+        let v = complex_eig_eigenvector_hessenberg(&h0, &q0, n, lambda);
         for row in 0..n {
             eigenvectors[row * n + col] = v[row];
         }
@@ -5927,6 +5964,44 @@ mod tests {
     }
 
     #[test]
+    fn complex_qr_mgs_is_valid_factorization() {
+        // Oracle check on the retained reference QR: Q unitary and Q·R = A.
+        let n = 5usize;
+        let a = complex_eig_test_matrix(n);
+        let (q, r) = complex_qr_mgs(&a, n);
+        // Q unitary: QᴴQ = I.
+        for i in 0..n {
+            for j in 0..n {
+                let mut acc = (0.0_f64, 0.0_f64);
+                for k in 0..n {
+                    acc = complex_add(acc, complex_mul(complex_conj(q[k * n + i]), q[k * n + j]));
+                }
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (acc.0 - want).abs() < 1e-9 && acc.1.abs() < 1e-9,
+                    "QᴴQ[{i}][{j}]={acc:?}"
+                );
+            }
+        }
+        // R upper-triangular and Q·R = A.
+        for row in 1..n {
+            for col in 0..row {
+                assert!(
+                    complex_abs(r[row * n + col]) < 1e-12,
+                    "R[{row}][{col}] not zero"
+                );
+            }
+        }
+        let recon = complex_matmul_n(&q, &r, n);
+        for idx in 0..n * n {
+            assert!(
+                complex_abs(complex_sub(recon[idx], a[idx])) < 1e-9,
+                "Q·R ≠ A at {idx}"
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "benchmark: run with --ignored --nocapture"]
     fn bench_complex_eig_eigenvectors_hessenberg_vs_full() {
         use std::time::Instant;
@@ -5959,6 +6034,131 @@ mod tests {
                 full * 1e3,
                 hess * 1e3,
                 full / hess
+            );
+        };
+        run(48);
+        run(96);
+        run(160);
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_complex_eig_qr_iteration_hessenberg_vs_mgs() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        // Wilkinson/exceptional shift for the trailing 2×2 of the active leading p×p
+        // (identical to complex_eig_qr's; the only thing the two QR steps share).
+        let shift = |t: &[(f64, f64)], n: usize, p: usize, since_deflate: usize| -> (f64, f64) {
+            let aa = t[(p - 2) * n + (p - 2)];
+            let bb = t[(p - 2) * n + (p - 1)];
+            let cc = t[(p - 1) * n + (p - 2)];
+            let dd = t[(p - 1) * n + (p - 1)];
+            if since_deflate.is_multiple_of(10) {
+                let s = complex_abs(t[(p - 1) * n + (p - 2)])
+                    + if p >= 3 {
+                        complex_abs(t[(p - 2) * n + (p - 3)])
+                    } else {
+                        0.0
+                    };
+                let s = if s > 0.0 { s } else { 1.0 };
+                complex_add(dd, (0.75 * s, 0.31 * s))
+            } else {
+                let mid = (0.5 * (aa.0 + dd.0), 0.5 * (aa.1 + dd.1));
+                let hd = (0.5 * (aa.0 - dd.0), 0.5 * (aa.1 - dd.1));
+                let disc = complex_add(complex_mul(hd, hd), complex_mul(bb, cc));
+                let sq = complex_sqrt(disc);
+                let m1 = complex_add(mid, sq);
+                let m2 = complex_sub(mid, sq);
+                if complex_abs(complex_sub(m1, dd)) <= complex_abs(complex_sub(m2, dd)) {
+                    m1
+                } else {
+                    m2
+                }
+            }
+        };
+        let run = |n: usize| {
+            let a = complex_eig_test_matrix(n);
+            let (h0, _q0) = complex_hessenberg_reduction(&a, n);
+            // (a) OLD per-sweep: copy active block, full MGS QR + dense RQ matmul (O(p³)).
+            let mgs = best_time(|| {
+                let mut t = h0.clone();
+                let (mut p, mut iters, mut since) = (n, 0usize, 0usize);
+                while p > 1 {
+                    let sub = complex_abs(t[(p - 1) * n + (p - 2)]);
+                    let ds = complex_abs(t[(p - 2) * n + (p - 2)])
+                        + complex_abs(t[(p - 1) * n + (p - 1)]);
+                    if sub <= f64::EPSILON * ds.max(f64::MIN_POSITIVE) {
+                        t[(p - 1) * n + (p - 2)] = (0.0, 0.0);
+                        p -= 1;
+                        since = 0;
+                        continue;
+                    }
+                    if iters >= 100 * n + 100 {
+                        break;
+                    }
+                    iters += 1;
+                    since += 1;
+                    let mu = shift(&t, n, p, since);
+                    let mut b = vec![(0.0_f64, 0.0_f64); p * p];
+                    for i in 0..p {
+                        for j in 0..p {
+                            b[i * p + j] = t[i * n + j];
+                        }
+                    }
+                    for i in 0..p {
+                        b[i * p + i] = complex_sub(b[i * p + i], mu);
+                    }
+                    let (q, r) = complex_qr_mgs(&b, p);
+                    let mut rq = complex_matmul_n(&r, &q, p);
+                    for i in 0..p {
+                        rq[i * p + i] = complex_add(rq[i * p + i], mu);
+                    }
+                    for i in 0..p {
+                        for j in 0..p {
+                            t[i * n + j] = rq[i * p + j];
+                        }
+                    }
+                }
+                std::hint::black_box(&t);
+            });
+            // (b) NEW per-sweep: O(p²) Hessenberg complex-Givens step.
+            let hess = best_time(|| {
+                let mut t = h0.clone();
+                let (mut p, mut iters, mut since) = (n, 0usize, 0usize);
+                while p > 1 {
+                    let sub = complex_abs(t[(p - 1) * n + (p - 2)]);
+                    let ds = complex_abs(t[(p - 2) * n + (p - 2)])
+                        + complex_abs(t[(p - 1) * n + (p - 1)]);
+                    if sub <= f64::EPSILON * ds.max(f64::MIN_POSITIVE) {
+                        t[(p - 1) * n + (p - 2)] = (0.0, 0.0);
+                        p -= 1;
+                        since = 0;
+                        continue;
+                    }
+                    if iters >= 100 * n + 100 {
+                        break;
+                    }
+                    iters += 1;
+                    since += 1;
+                    let mu = shift(&t, n, p, since);
+                    complex_hessenberg_shifted_qr_step(&mut t, n, p, mu);
+                }
+                std::hint::black_box(&t);
+            });
+            println!(
+                "BENCH complex eig QR-iter n={n}: MGS O(p³)/sweep {:.3}ms -> Hessenberg-Givens O(p²) {:.3}ms = {:.2}x",
+                mgs * 1e3,
+                hess * 1e3,
+                mgs / hess
             );
         };
         run(48);
