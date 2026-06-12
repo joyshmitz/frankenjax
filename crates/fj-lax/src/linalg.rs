@@ -587,6 +587,68 @@ fn cholesky_real_blocked(n: usize, a_in: &[f64]) -> Vec<f64> {
 ///   - `lower` (default "true"): if "true", A is lower-triangular; else upper.
 ///   - `transpose_a` (default "false"): if "true", solve A^T X = B instead.
 ///   - `unit_diagonal` (default "false"): if "true", diagonal of A is assumed 1.
+/// Batched triangular solve `op(A)·X = B` for ALL `n_b` RHS columns at once
+/// (`X` starts as `B`, n×n_b row-major, solved in place). Reads each `A` entry
+/// ONCE and applies it across every column (inner column loop auto-vectorizes),
+/// so the triangular factor streams from cache once instead of once per column.
+/// BIT-IDENTICAL to a per-column solve: each column's ascending-`k` fold is
+/// unchanged — only the loop nesting differs. `forward` = substitute rows in
+/// ascending order (`lower != transpose`); `transpose` reads `A[k][i]` instead of
+/// `A[i][k]`; the diagonal is `A[i][i]` in every case.
+fn batched_tri_solve(
+    a: &[(f64, f64)],
+    x: &mut [(f64, f64)],
+    n: usize,
+    n_b: usize,
+    forward: bool,
+    transpose: bool,
+    unit_diagonal: bool,
+) {
+    let one = (1.0, 0.0);
+    let a_at = |i: usize, k: usize| -> (f64, f64) {
+        if transpose { a[k * n + i] } else { a[i * n + k] }
+    };
+    // Process one pivot row `i` (subtract its already-solved neighbours `k`, then
+    // divide by the diagonal) across all columns.
+    let mut solve_row = |i: usize, ks: &[usize], x: &mut [(f64, f64)]| {
+        for &k in ks {
+            let aik = a_at(i, k);
+            // x[i][:] and x[k][:] are disjoint rows; split so both can be borrowed.
+            if k < i {
+                let (head, tail) = x.split_at_mut(i * n_b);
+                let xk = &head[k * n_b..k * n_b + n_b];
+                let xi = &mut tail[..n_b];
+                for col in 0..n_b {
+                    xi[col] = complex_sub(xi[col], complex_mul(aik, xk[col]));
+                }
+            } else {
+                let (head, tail) = x.split_at_mut(k * n_b);
+                let xi = &mut head[i * n_b..i * n_b + n_b];
+                let xk = &tail[..n_b];
+                for col in 0..n_b {
+                    xi[col] = complex_sub(xi[col], complex_mul(aik, xk[col]));
+                }
+            }
+        }
+        let diag = if unit_diagonal { one } else { a[i * n + i] };
+        let xi = &mut x[i * n_b..i * n_b + n_b];
+        for col in 0..n_b {
+            xi[col] = complex_div(xi[col], diag);
+        }
+    };
+    if forward {
+        for i in 0..n {
+            let ks: Vec<usize> = (0..i).collect();
+            solve_row(i, &ks, x);
+        }
+    } else {
+        for i in (0..n).rev() {
+            let ks: Vec<usize> = ((i + 1)..n).collect();
+            solve_row(i, &ks, x);
+        }
+    }
+}
+
 pub(crate) fn eval_triangular_solve(
     inputs: &[Value],
     params: &std::collections::BTreeMap<String, String>,
@@ -632,61 +694,13 @@ pub(crate) fn eval_triangular_solve(
         .is_some_and(|v| v.trim() == "true");
 
     let n = m_a;
-    let one = (1.0, 0.0);
-    let mut x = vec![(0.0_f64, 0.0_f64); n * n_b];
-    let mut b_col = vec![(0.0_f64, 0.0_f64); n];
-
-    for col in 0..n_b {
-        for row in 0..n {
-            b_col[row] = b[row * n_b + col];
-        }
-
-        if lower && !transpose_a {
-            for i in 0..n {
-                for k in 0..i {
-                    b_col[i] = complex_sub(b_col[i], complex_mul(a[i * n + k], x[k * n_b + col]));
-                }
-                let diag = if unit_diagonal { one } else { a[i * n + i] };
-                // JAX's triangular_solve does not raise for a zero/near-zero
-                // diagonal — complex_div yields inf/nan (singular) or a finite
-                // large value (near-singular), matching jnp (NumPy raises).
-                x[i * n_b + col] = complex_div(b_col[i], diag);
-            }
-        } else if !lower && !transpose_a {
-            for i in (0..n).rev() {
-                for k in (i + 1)..n {
-                    b_col[i] = complex_sub(b_col[i], complex_mul(a[i * n + k], x[k * n_b + col]));
-                }
-                let diag = if unit_diagonal { one } else { a[i * n + i] };
-                // JAX's triangular_solve does not raise for a zero/near-zero
-                // diagonal — complex_div yields inf/nan (singular) or a finite
-                // large value (near-singular), matching jnp (NumPy raises).
-                x[i * n_b + col] = complex_div(b_col[i], diag);
-            }
-        } else if lower && transpose_a {
-            for i in (0..n).rev() {
-                for k in (i + 1)..n {
-                    b_col[i] = complex_sub(b_col[i], complex_mul(a[k * n + i], x[k * n_b + col]));
-                }
-                let diag = if unit_diagonal { one } else { a[i * n + i] };
-                // JAX's triangular_solve does not raise for a zero/near-zero
-                // diagonal — complex_div yields inf/nan (singular) or a finite
-                // large value (near-singular), matching jnp (NumPy raises).
-                x[i * n_b + col] = complex_div(b_col[i], diag);
-            }
-        } else {
-            for i in 0..n {
-                for k in 0..i {
-                    b_col[i] = complex_sub(b_col[i], complex_mul(a[k * n + i], x[k * n_b + col]));
-                }
-                let diag = if unit_diagonal { one } else { a[i * n + i] };
-                // JAX's triangular_solve does not raise for a zero/near-zero
-                // diagonal — complex_div yields inf/nan (singular) or a finite
-                // large value (near-singular), matching jnp (NumPy raises).
-                x[i * n_b + col] = complex_div(b_col[i], diag);
-            }
-        }
-    }
+    // Solve all n_b RHS columns together, streaming A once (bit-identical to the
+    // per-column substitution). JAX's triangular_solve does not raise for a
+    // zero/near-zero diagonal — complex_div yields inf/nan (singular) or a finite
+    // large value (near-singular), matching jnp (NumPy raises).
+    let mut x = b.clone();
+    let forward = lower != transpose_a;
+    batched_tri_solve(&a, &mut x, n, n_b, forward, transpose_a, unit_diagonal);
 
     let out_dtype = promote_dtype(dtype_a, dtype_b);
     complex_matrix_to_value(n, n_b, &x, out_dtype)
@@ -8273,6 +8287,97 @@ mod tests {
                 (row_sum - b_elems[i]).abs() < 1e-10,
                 "A*x[{i}] = {row_sum}, expected {}",
                 b_elems[i]
+            );
+        }
+    }
+
+    // Inline per-column lower/no-transpose triangular solve reference using the SAME
+    // complex arithmetic as eval_triangular_solve (the prior loop structure), so the
+    // batched-vs-per-column comparison is bit-exact. Returns the real parts.
+    fn tri_solve_per_column_lower(adata: &[f64], bdata: &[f64], n: usize, n_b: usize) -> Vec<f64> {
+        let a: Vec<(f64, f64)> = adata.iter().map(|&v| (v, 0.0)).collect();
+        let b: Vec<(f64, f64)> = bdata.iter().map(|&v| (v, 0.0)).collect();
+        let mut x = vec![(0.0_f64, 0.0_f64); n * n_b];
+        let mut b_col = vec![(0.0_f64, 0.0_f64); n];
+        for col in 0..n_b {
+            for row in 0..n {
+                b_col[row] = b[row * n_b + col];
+            }
+            for i in 0..n {
+                for k in 0..i {
+                    b_col[i] = complex_sub(b_col[i], complex_mul(a[i * n + k], x[k * n_b + col]));
+                }
+                x[i * n_b + col] = complex_div(b_col[i], a[i * n + i]);
+            }
+        }
+        x.iter().map(|t| t.0).collect()
+    }
+
+    #[test]
+    fn triangular_solve_batched_bit_identical_to_per_column() {
+        // The batched eval_triangular_solve must equal the per-column substitution
+        // bit-for-bit (only loop nesting differs) at a size/column count that
+        // exercises the vectorized inner loop.
+        let n = 160usize;
+        let n_b = 40usize;
+        // Lower-triangular, diagonally dominant A.
+        let mut adata = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..=i {
+                adata[i * n + j] = (((i * 7 + j * 5 + 1) % 9) as f64 - 4.0) * 0.1;
+            }
+            adata[i * n + i] = (i as f64) * 0.05 + 3.0;
+        }
+        let bdata: Vec<f64> = (0..n * n_b)
+            .map(|k| (((k * 53 + 11) % 37) as f64) * 0.1 - 1.8)
+            .collect();
+        let a = make_matrix(n, n, &adata);
+        let b = make_matrix(n, n_b, &bdata);
+        let got = extract_f64_elements(&eval_triangular_solve(&[a, b], &BTreeMap::new()).unwrap());
+        let want = tri_solve_per_column_lower(&adata, &bdata, n, n_b);
+        for k in 0..n * n_b {
+            assert_eq!(got[k].to_bits(), want[k].to_bits(), "batched tri-solve diverged at {k}");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_triangular_solve_batched_vs_per_column() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        for &(n, n_b) in &[(1024usize, 64usize), (1024, 256), (2048, 128)] {
+            let mut adata = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in 0..=i {
+                    adata[i * n + j] = (((i * 7 + j * 5 + 1) % 9) as f64 - 4.0) * 0.1;
+                }
+                adata[i * n + i] = (i as f64) * 0.001 + 3.0;
+            }
+            let bdata: Vec<f64> = (0..n * n_b)
+                .map(|k| (((k * 53 + 11) % 37) as f64) * 0.1 - 1.8)
+                .collect();
+            let a = make_matrix(n, n, &adata);
+            let b = make_matrix(n, n_b, &bdata);
+            let t_batched = best_time(|| {
+                std::hint::black_box(eval_triangular_solve(&[a.clone(), b.clone()], &BTreeMap::new()).unwrap());
+            });
+            let t_percol = best_time(|| {
+                std::hint::black_box(tri_solve_per_column_lower(&adata, &bdata, n, n_b));
+            });
+            println!(
+                "BENCH triangular_solve n={n} n_b={n_b}: per-column {:.2}ms -> batched {:.2}ms = {:.2}x",
+                t_percol * 1e3,
+                t_batched * 1e3,
+                t_percol / t_batched
             );
         }
     }
