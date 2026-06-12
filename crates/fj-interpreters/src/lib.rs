@@ -523,8 +523,20 @@ fn evaluate_scan_sub_jaxprs(
     let init_dtypes: Vec<_> = carry.iter().map(Value::dtype).collect();
     let mut per_y = vec![Vec::with_capacity(scan_len); y_count];
 
+    // The body sub-jaxpr is re-evaluated once per scan step. Its slot/liveness
+    // analysis is value-independent, so derive it ONCE and reuse a single env
+    // buffer + scratch + output buffer across all steps — eliminating the
+    // per-step re-analysis and env/last_use/scratch/output allocations that
+    // otherwise dominate a scan with a cheap body. Falls back to the
+    // self-contained `eval_jaxpr_with_consts` when the body is not dense-eligible.
+    let body_plan = build_dense_plan(body_jaxpr);
+    let mut body_env: Vec<Option<Value>> = vec![None; body_plan.as_ref().map_or(0, |p| p.slots)];
+    let mut scratch: Vec<Value> = Vec::new();
+    let mut body_out: Vec<Value> = Vec::new();
+
     let scan_context = ScanIterationContext {
         body_jaxpr,
+        body_plan: &body_plan,
         const_values,
         xs,
         init_shapes: &init_shapes,
@@ -539,6 +551,9 @@ fn evaluate_scan_sub_jaxprs(
                 &mut carry,
                 &mut per_y,
                 &mut body_args,
+                &mut body_env,
+                &mut scratch,
+                &mut body_out,
             )?;
         }
     } else {
@@ -549,6 +564,9 @@ fn evaluate_scan_sub_jaxprs(
                 &mut carry,
                 &mut per_y,
                 &mut body_args,
+                &mut body_env,
+                &mut scratch,
+                &mut body_out,
             )?;
         }
     }
@@ -691,18 +709,23 @@ fn is_i64_add_emit_scan_body(jaxpr: &Jaxpr) -> bool {
 
 struct ScanIterationContext<'a> {
     body_jaxpr: &'a Jaxpr,
+    body_plan: &'a Option<DenseEvalPlan>,
     const_values: &'a [Value],
     xs: &'a Value,
     init_shapes: &'a [Shape],
     init_dtypes: &'a [DType],
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_scan_iteration(
     context: &ScanIterationContext<'_>,
     scan_idx: usize,
     carry: &mut [Value],
     per_y: &mut [Vec<Value>],
     body_args: &mut Vec<Value>,
+    body_env: &mut [Option<Value>],
+    scratch: &mut Vec<Value>,
+    body_out: &mut Vec<Value>,
 ) -> Result<(), InterpreterError> {
     let x_slice = scan_slice_at(context.xs, scan_idx)?;
     body_args.clear();
@@ -711,21 +734,35 @@ fn evaluate_scan_iteration(
 
     let carry_count = carry.len();
     let y_count = per_y.len();
-    let body_outputs = eval_jaxpr_with_consts(context.body_jaxpr, context.const_values, body_args)
-        .map_err(|err| {
-            InterpreterError::Primitive(map_sub_jaxpr_error(Primitive::Scan, "scan body", err))
-        })?;
-    if body_outputs.len() != carry_count + y_count {
+    // Reuse the prepared plan + buffers when the body is dense-eligible (zero
+    // per-step analysis/allocation); else the self-contained allocating path.
+    match context.body_plan {
+        Some(plan) => run_dense_env_into(
+            context.body_jaxpr,
+            context.const_values,
+            body_args,
+            body_env,
+            &plan.last_use,
+            scratch,
+            body_out,
+        ),
+        None => eval_jaxpr_with_consts(context.body_jaxpr, context.const_values, body_args)
+            .map(|o| *body_out = o),
+    }
+    .map_err(|err| {
+        InterpreterError::Primitive(map_sub_jaxpr_error(Primitive::Scan, "scan body", err))
+    })?;
+    if body_out.len() != carry_count + y_count {
         return Err(InterpreterError::InvariantViolation {
             detail: format!(
                 "scan body sub_jaxpr returned {} outputs; expected {}",
-                body_outputs.len(),
+                body_out.len(),
                 carry_count + y_count
             ),
         });
     }
 
-    for (idx, value) in body_outputs[..carry_count].iter().enumerate() {
+    for (idx, value) in body_out[..carry_count].iter().enumerate() {
         let new_shape = value_shape(value);
         if new_shape != context.init_shapes[idx] {
             return Err(InterpreterError::Primitive(EvalError::ShapeChanged {
@@ -744,7 +781,10 @@ fn evaluate_scan_iteration(
         }
     }
 
-    let mut outputs = body_outputs.into_iter();
+    // Drain the reused output buffer (owning the values, leaving it empty for
+    // the next step): first `carry_count` update the carry in place, the rest
+    // are appended to the per-output `y` stacks.
+    let mut outputs = body_out.drain(..);
     for (slot, value) in carry.iter_mut().zip(outputs.by_ref().take(carry_count)) {
         *slot = value;
     }
@@ -4534,6 +4574,89 @@ mod tests {
 
         println!(
             "BENCH while-body dispatch {n} evals: OLD {:.1}ns/eval -> NEW {:.1}ns/eval = {:.2}x",
+            t_old * 1e9 / n as f64,
+            t_new * 1e9 / n as f64,
+            t_old / t_new,
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_scan_body_interpreter_overhead() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        // SAME-INVOCATION A/B for the scan per-step body eval: a realistic
+        // multi-equation f64 body (carry,x -> mul,add,sub), which does NOT hit
+        // the i64 add/emit scan fast path, so a real scan now runs each step
+        // through run_dense_env_into (NEW) instead of eval_jaxpr_with_consts (OLD).
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let (carry, x, v2, v3, out) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let body = Jaxpr::new(
+            vec![carry, x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(carry), Atom::Var(x)], v2),
+                mk(Primitive::Add, smallvec![Atom::Var(v2), Atom::Var(carry)], v3),
+                mk(Primitive::Sub, smallvec![Atom::Var(v3), Atom::Var(x)], out),
+            ],
+        );
+        let n: usize = 4_000_000;
+        let args = [Value::scalar_f64(1.0001), Value::scalar_f64(0.9999)];
+
+        let t_old = best_time(|| {
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                let o = eval_jaxpr_with_consts(&body, &[], &args).expect("old");
+                if let Value::Scalar(Literal::F64Bits(b)) = &o[0] {
+                    acc += f64::from_bits(*b);
+                }
+            }
+            std::hint::black_box(acc);
+        });
+
+        let plan = super::build_dense_plan(&body).expect("dense");
+        let t_new = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                super::run_dense_env_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan.last_use,
+                    &mut scratch,
+                    &mut o,
+                )
+                .expect("new");
+                if let Value::Scalar(Literal::F64Bits(b)) = &o[0] {
+                    acc += f64::from_bits(*b);
+                }
+            }
+            std::hint::black_box(acc);
+        });
+
+        println!(
+            "BENCH scan-body dispatch {n} evals (3-op f64): OLD {:.1}ns/eval -> NEW {:.1}ns/eval = {:.2}x",
             t_old * 1e9 / n as f64,
             t_new * 1e9 / n as f64,
             t_old / t_new,
