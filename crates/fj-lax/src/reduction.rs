@@ -547,7 +547,6 @@ fn eval_dense_float_full_reduce(
         // to the per-element scalar fold incl ±inf/NaN/subnormal/signed-zero.
         DType::F16 => {
             use std::simd::Simd;
-            use std::simd::num::SimdFloat;
             const LANES: usize = 8;
             let values = tensor.elements.as_half_float_slice()?;
             let mut acc = float_init;
@@ -940,6 +939,91 @@ fn dense_f64_axis_reduce<T: Copy + Sync>(
     for &value in values {
         let out_idx = odometer.next_index();
         result[out_idx] = float_op(result[out_idx], widen(value));
+    }
+    Some(result)
+}
+
+#[inline]
+fn fold_f16_axis_block(
+    values: &[u16],
+    float_init: f64,
+    float_op: &(impl Fn(f64, f64) -> f64 + Sync),
+) -> f64 {
+    use std::simd::Simd;
+    const LANES: usize = 8;
+
+    let mut acc = float_init;
+    let chunks = values.chunks_exact(LANES);
+    let tail = chunks.remainder();
+    for chunk in chunks {
+        let u = Simd::<u16, LANES>::from_slice(chunk);
+        if crate::arithmetic::f16_input_needs_scalar(u) {
+            for &bits in chunk {
+                acc = float_op(acc, Literal::F16Bits(bits).as_f64().unwrap_or(0.0));
+            }
+        } else {
+            for &value in crate::arithmetic::f16_widen8(u).to_array().iter() {
+                acc = float_op(acc, value);
+            }
+        }
+    }
+    for &bits in tail {
+        acc = float_op(acc, Literal::F16Bits(bits).as_f64().unwrap_or(0.0));
+    }
+    acc
+}
+
+#[inline]
+fn dense_f16_trailing_axis_reduce(
+    tensor: &TensorValue,
+    values: &[u16],
+    kept_axes: &[usize],
+    out_count: usize,
+    float_init: f64,
+    float_op: &(impl Fn(f64, f64) -> f64 + Sync),
+) -> Option<Vec<f64>> {
+    if tensor.shape.dims.is_empty() || out_count == 0 {
+        return None;
+    }
+    let kept_is_leading_prefix = kept_axes.iter().enumerate().all(|(i, &ax)| ax == i);
+    if !kept_is_leading_prefix || values.len() != out_count * (values.len() / out_count) {
+        return None;
+    }
+
+    let reduce = values.len() / out_count;
+    let mut result = vec![float_init; out_count];
+    let threads = if values.len() >= (1 << 18) {
+        crate::arithmetic::work_scaled_threads(values.len()).min(out_count)
+    } else {
+        1
+    };
+    if threads > 1 {
+        let rows_per = out_count.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut res_rest: &mut [f64] = result.as_mut_slice();
+            let mut row0 = 0usize;
+            while row0 < out_count {
+                let rows = rows_per.min(out_count - row0);
+                let (res_blk, res_tail) = res_rest.split_at_mut(rows);
+                res_rest = res_tail;
+                let vblk = &values[row0 * reduce..(row0 + rows) * reduce];
+                row0 += rows;
+                scope.spawn(move || {
+                    for (r, slot) in res_blk.iter_mut().enumerate() {
+                        *slot = fold_f16_axis_block(
+                            &vblk[r * reduce..r * reduce + reduce],
+                            float_init,
+                            float_op,
+                        );
+                    }
+                });
+            }
+        });
+    } else {
+        for (row, slot) in result.iter_mut().enumerate() {
+            let base = row * reduce;
+            *slot = fold_f16_axis_block(&values[base..base + reduce], float_init, float_op);
+        }
     }
     Some(result)
 }
@@ -1431,16 +1515,21 @@ pub(crate) fn eval_reduce_axes(
                         )
                     }),
                     DType::F16 => tensor.elements.as_half_float_slice().and_then(|v| {
-                        dense_f64_axis_reduce(
-                            tensor,
-                            v,
-                            |b| Literal::F16Bits(b).as_f64().unwrap_or(0.0),
-                            &kept_axes,
-                            &out_dims,
-                            out_count,
-                            float_init,
-                            &float_op,
+                        dense_f16_trailing_axis_reduce(
+                            tensor, v, &kept_axes, out_count, float_init, &float_op,
                         )
+                        .or_else(|| {
+                            dense_f64_axis_reduce(
+                                tensor,
+                                v,
+                                |b| Literal::F16Bits(b).as_f64().unwrap_or(0.0),
+                                &kept_axes,
+                                &out_dims,
+                                out_count,
+                                float_init,
+                                &float_op,
+                            )
+                        })
                     }),
                     _ => None,
                 });
@@ -3225,6 +3314,223 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn dense_f16_trailing_axis_reduce_simd_decode_matches_boxed_edge_rows() {
+        // Axis=1 is the F16 trailing-axis SIMD decode path. Compare raw output
+        // bits with the boxed Literal::F16Bits odometer path, without NaN
+        // canonicalization in the assertion, across normal chunks, scalar-fallback
+        // chunks, and scalar tail elements.
+        let cols = 18u32;
+        let raw: Vec<u16> = vec![
+            // Row 0: all normal/zero chunks plus a scalar tail.
+            0x3c00, 0xbc00, 0x4000, 0xc000, 0x3555, 0xb555, 0x0000, 0x8000, 0x4200, 0xc200, 0x3a00,
+            0xba00, 0x2c00, 0xac00, 0x1000, 0x9000, 0x3400, 0xb400,
+            // Row 1: first chunk vectorizes; second chunk falls back for special values.
+            0x3c00, 0x3800, 0x4000, 0xbc00, 0x3555, 0xb555, 0x0400, 0x8400, 0x0001, 0x03ff, 0x7c00,
+            0xfc00, 0x7e01, 0x7d55, 0xfe00, 0x8001, 0x3000, 0xb000,
+            // Row 2: first chunk falls back; second chunk vectorizes; tail has a NaN.
+            0x7c00, 0xfc00, 0x7e00, 0x0001, 0x8001, 0x0000, 0x8000, 0x3c00, 0x4200, 0xc200, 0x3a00,
+            0xba00, 0x2c00, 0xac00, 0x1000, 0x9000, 0x7e11, 0x3555,
+        ];
+        let rows = (raw.len() as u32) / cols;
+        let dims = vec![rows, cols];
+        let dense = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::F16,
+                Shape { dims: dims.clone() },
+                raw.clone(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F16,
+                Shape { dims: dims.clone() },
+                raw.iter().copied().map(Literal::F16Bits).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_half_float_slice()
+                .is_some()
+        );
+        assert!(
+            boxed
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_half_float_slice()
+                .is_none()
+        );
+
+        let output_bits = |value: &Value| -> Vec<u16> {
+            let tensor = value.as_tensor().unwrap();
+            assert_eq!(tensor.dtype, DType::F16);
+            assert_eq!(tensor.shape.dims, vec![rows]);
+            tensor
+                .elements
+                .iter()
+                .map(|literal| match literal {
+                    Literal::F16Bits(bits) => *bits,
+                    other => panic!("expected F16Bits, got {other:?}"),
+                })
+                .collect()
+        };
+        let cases: [(Primitive, f64, fn(f64, f64) -> f64); 4] = [
+            (Primitive::ReduceSum, 0.0, |a, b| a + b),
+            (Primitive::ReduceProd, 1.0, |a, b| a * b),
+            (Primitive::ReduceMax, f64::NEG_INFINITY, crate::jax_max_f64),
+            (Primitive::ReduceMin, f64::INFINITY, crate::jax_min_f64),
+        ];
+        let params = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+        for (primitive, float_init, float_op) in cases {
+            let dense_result = eval_reduce_axes(
+                primitive,
+                std::slice::from_ref(&dense),
+                &params,
+                0,
+                float_init,
+                |a, _| a,
+                float_op,
+            )
+            .unwrap();
+            let boxed_result = eval_reduce_axes(
+                primitive,
+                std::slice::from_ref(&boxed),
+                &params,
+                0,
+                float_init,
+                |a, _| a,
+                float_op,
+            )
+            .unwrap();
+            assert_eq!(
+                output_bits(&dense_result),
+                output_bits(&boxed_result),
+                "{primitive:?} dense F16 trailing-axis SIMD decode diverged from boxed path"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f16_reduce_sum_axis_simd_decode_vs_scalar_dense() {
+        use std::time::Instant;
+
+        let (rows, cols) = (4096usize, 1024usize);
+        let raw: Vec<u16> = (0..rows * cols)
+            .map(|i| {
+                let x = ((i % 251) as f64) * 0.03125 - 3.75;
+                match Literal::from_f16_f64(x) {
+                    Literal::F16Bits(bits) => bits,
+                    other => panic!("expected f16 literal, got {other:?}"),
+                }
+            })
+            .collect();
+        let tensor = TensorValue::new_half_float_values(
+            DType::F16,
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            raw,
+        )
+        .unwrap();
+        let values = tensor.elements.as_half_float_slice().unwrap();
+        let kept_axes = [0usize];
+        let out_dims = [rows as u32];
+        let out_count = rows;
+        let add = |a: f64, b: f64| a + b;
+
+        let scalar_reference = dense_f64_axis_reduce(
+            &tensor,
+            values,
+            |b| Literal::F16Bits(b).as_f64().unwrap_or(0.0),
+            &kept_axes,
+            &out_dims,
+            out_count,
+            0.0,
+            &add,
+        )
+        .unwrap();
+        let simd_reference =
+            dense_f16_trailing_axis_reduce(&tensor, values, &kept_axes, out_count, 0.0, &add)
+                .unwrap();
+        assert_eq!(
+            scalar_reference
+                .iter()
+                .map(|v| Literal::from_f16_f64(*v))
+                .collect::<Vec<_>>(),
+            simd_reference
+                .iter()
+                .map(|v| Literal::from_f16_f64(*v))
+                .collect::<Vec<_>>(),
+            "SIMD F16 axis reduce must preserve the old scalar dense output"
+        );
+
+        let time_scalar = || {
+            let mut best = f64::MAX;
+            for _ in 0..12 {
+                let start = Instant::now();
+                let out = dense_f64_axis_reduce(
+                    &tensor,
+                    values,
+                    |b| Literal::F16Bits(b).as_f64().unwrap_or(0.0),
+                    &kept_axes,
+                    &out_dims,
+                    out_count,
+                    0.0,
+                    &add,
+                )
+                .unwrap();
+                std::hint::black_box(out);
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            best
+        };
+        let time_simd = || {
+            let mut best = f64::MAX;
+            for _ in 0..12 {
+                let start = Instant::now();
+                let out = dense_f16_trailing_axis_reduce(
+                    &tensor, values, &kept_axes, out_count, 0.0, &add,
+                )
+                .unwrap();
+                std::hint::black_box(out);
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            best
+        };
+
+        let scalar = time_scalar();
+        let simd = time_simd();
+        let golden_bits: Vec<u16> = simd_reference
+            .iter()
+            .map(|v| Literal::from_f16_f64(*v))
+            .map(|lit| {
+                let Literal::F16Bits(bits) = lit else {
+                    unreachable!("f16 reduce emits f16");
+                };
+                bits
+            })
+            .collect();
+        let golden = fj_test_utils::fixture_id_from_json(&golden_bits)
+            .expect("F16 axis reduce golden digest should build");
+        assert_eq!(
+            golden, "a321e41484cba20e931270f7c083710b843a9a031cb6c90830e82ab112739b4e",
+            "F16 trailing-axis reduce golden output changed"
+        );
+        println!(
+            "BENCH f16 reduce_sum axis1 [{rows},{cols}]: scalar_dense={:.4}ms simd_decode={:.4}ms speedup={:.2}x sha256={golden}",
+            scalar * 1e3,
+            simd * 1e3,
+            scalar / simd
+        );
     }
 
     #[test]

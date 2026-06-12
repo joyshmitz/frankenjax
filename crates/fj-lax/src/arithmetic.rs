@@ -659,7 +659,6 @@ fn round_to_odd_f64x8(x: std::simd::Simd<f64, BF16_SIMD_L>) -> std::simd::Simd<f
 #[inline]
 pub(crate) fn f16_input_needs_scalar(h: std::simd::Simd<u16, BF16_SIMD_L>) -> bool {
     use std::simd::cmp::SimdPartialEq;
-    use std::simd::num::SimdFloat;
     use std::simd::Simd;
     type U16s = Simd<u16, BF16_SIMD_L>;
     let he = h & U16s::splat(0x7C00);
@@ -706,7 +705,7 @@ fn f16_result_needs_scalar(f: std::simd::Simd<f32, BF16_SIMD_L>) -> bool {
 /// [`f16_result_needs_scalar`]), replicating `half::f16::from_f32`'s normal branch.
 #[inline]
 fn f16_rne_from_f32x8(f: std::simd::Simd<f32, BF16_SIMD_L>) -> std::simd::Simd<u16, BF16_SIMD_L> {
-    use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+    use std::simd::cmp::SimdPartialEq;
     use std::simd::num::{SimdFloat, SimdUint};
     use std::simd::{Select, Simd};
     type U32s = Simd<u32, BF16_SIMD_L>;
