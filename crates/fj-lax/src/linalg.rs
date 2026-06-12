@@ -6022,6 +6022,49 @@ pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     Some(lu_solve(&lu, &p, b, n))
 }
 
+/// Batched multi-RHS triangular solve `L·U·X = P·B` (B and X are n×m row-major)
+/// from a combined `lu` factor. Reads each `lu[i][k]` ONCE and applies it across
+/// ALL m columns (the inner column loop auto-vectorizes), so the shared factor
+/// streams from cache once instead of once per column. BIT-IDENTICAL to running
+/// `m` independent [`lu_solve`] calls: each column's forward/back substitution is
+/// the same ascending-`k` fold, unchanged — only the loop nesting differs.
+fn lu_solve_multi(lu: &[f64], p: &[usize], b: &[f64], n: usize, m: usize) -> Vec<f64> {
+    let mut x = vec![0.0f64; n * m];
+    // Forward: y[i][:] = (P·B)[i][:] − Σ_{k<i} lu[i][k]·y[k][:]  (stored in x).
+    for i in 0..n {
+        let xi = i * m;
+        let src = p[i] * m;
+        x[xi..xi + m].copy_from_slice(&b[src..src + m]);
+        for k in 0..i {
+            let l = lu[i * n + k];
+            let (head, tail) = x.split_at_mut(xi);
+            let yk = &head[k * m..k * m + m];
+            let yi = &mut tail[..m];
+            for col in 0..m {
+                yi[col] -= l * yk[col];
+            }
+        }
+    }
+    // Back: x[i][:] = (y[i][:] − Σ_{k>i} lu[i][k]·x[k][:]) / lu[i][i].
+    for i in (0..n).rev() {
+        let xi = i * m;
+        for k in (i + 1)..n {
+            let u = lu[i * n + k];
+            let (head, tail) = x.split_at_mut(k * m);
+            let yi = &mut head[xi..xi + m];
+            let xk = &tail[..m];
+            for col in 0..m {
+                yi[col] -= u * xk[col];
+            }
+        }
+        let diag = lu[i * n + i];
+        for col in 0..m {
+            x[xi + col] /= diag;
+        }
+    }
+    x
+}
+
 /// Solve the linear system Ax = b for multiple right-hand sides.
 ///
 /// A is n x n, B is n x m, returns X which is n x m. The LU factorization is
@@ -6031,15 +6074,10 @@ pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
 /// same `A`.
 pub fn solve_multi_rhs(a: &[f64], b: &[f64], n: usize, m: usize) -> Option<Vec<f64>> {
     let (lu, p) = lu_factor_for_solve(a, n)?;
-    let mut result = vec![0.0; n * m];
-    for j in 0..m {
-        let rhs: Vec<f64> = (0..n).map(|i| b[i * m + j]).collect();
-        let x = lu_solve(&lu, &p, &rhs, n);
-        for i in 0..n {
-            result[i * m + j] = x[i];
-        }
-    }
-    Some(result)
+    // Batched forward/back substitution: stream the shared L\U factor once and
+    // apply across all m columns, instead of `m` per-column passes each re-reading
+    // it (memory-bound at scale). Bit-identical to the per-column solve.
+    Some(lu_solve_multi(&lu, &p, b, n, m))
 }
 
 /// Minimum-norm least-squares solution to Ax = b, matching `jnp.linalg.lstsq`.
@@ -10478,6 +10516,75 @@ mod tests {
                 t_lu_f64 * 1e3,
                 t_lu_blk * 1e3,
                 t_lu_f64 / t_lu_blk,
+            );
+        }
+    }
+
+    #[test]
+    fn lu_solve_multi_bit_identical_to_per_column_large() {
+        // The batched multi-RHS triangular solve must be BIT-IDENTICAL to running
+        // the per-column `lu_solve` (only the loop nesting differs) — at a size and
+        // column count that exercise the vectorized inner loop.
+        let n = 200usize;
+        let m = 48usize;
+        let (a, _b) = mixed_solve_system(n);
+        let bmat: Vec<f64> = (0..n * m)
+            .map(|k| (((k * 53 + 11) % 37) as f64) * 0.1 - 1.8)
+            .collect();
+        let (lu, p) = super::lu_factor_for_solve(&a, n).unwrap();
+        let batched = super::lu_solve_multi(&lu, &p, &bmat, n, m);
+        for j in 0..m {
+            let rhs: Vec<f64> = (0..n).map(|i| bmat[i * m + j]).collect();
+            let col = super::lu_solve(&lu, &p, &rhs, n);
+            for i in 0..n {
+                assert_eq!(
+                    batched[i * m + j].to_bits(),
+                    col[i].to_bits(),
+                    "batched multi-RHS solve diverged at i={i} j={j}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_lu_solve_multi_vs_per_column() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        for &(n, m) in &[(1024usize, 64usize), (1024, 256), (2048, 128)] {
+            let (a, _b) = mixed_solve_system(n);
+            let bmat: Vec<f64> = (0..n * m)
+                .map(|k| (((k * 53 + 11) % 37) as f64) * 0.1 - 1.8)
+                .collect();
+            let (lu, p) = super::lu_factor_for_solve(&a, n).unwrap();
+            let t_batched = best_time(|| {
+                std::hint::black_box(super::lu_solve_multi(&lu, &p, &bmat, n, m));
+            });
+            let t_percol = best_time(|| {
+                let mut res = vec![0.0; n * m];
+                for j in 0..m {
+                    let rhs: Vec<f64> = (0..n).map(|i| bmat[i * m + j]).collect();
+                    let x = super::lu_solve(&lu, &p, &rhs, n);
+                    for i in 0..n {
+                        res[i * m + j] = x[i];
+                    }
+                }
+                std::hint::black_box(res);
+            });
+            println!(
+                "BENCH multi-RHS triangular solve n={n} m={m}: per-column {:.2}ms -> batched {:.2}ms = {:.2}x",
+                t_percol * 1e3,
+                t_batched * 1e3,
+                t_percol / t_batched
             );
         }
     }
