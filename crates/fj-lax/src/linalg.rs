@@ -5959,15 +5959,16 @@ fn solve_mixed_precision(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     if bnorm == 0.0 {
         return Some(vec![0.0; n]);
     }
-    // `r = b − A·x` in f64; returns its 2-norm.
+    // `r = b − A·x` in f64; returns its 2-norm. The `A·x` matvec is the refinement's
+    // dominant per-iteration cost (O(n²), and A streams from RAM), so it runs through
+    // the cache-blocked, auto-threaded f64 `matmul_2d` (A as n×n, x as n×1) instead of
+    // a serial dot-product loop — without it the refinement caps the solve well below
+    // the f32 LU's ~2× speedup.
     let residual = |x: &[f64], r: &mut [f64]| -> f64 {
+        let ax = crate::tensor_contraction::matmul_2d(a, n, n, x, 1);
         let mut s2 = 0.0f64;
         for i in 0..n {
-            let row = i * n;
-            let mut s = b[i];
-            for j in 0..n {
-                s -= a[row + j] * x[j];
-            }
+            let s = b[i] - ax[i];
             r[i] = s;
             s2 += s * s;
         }
@@ -10459,11 +10460,24 @@ mod tests {
                 let (lu, p) = super::lu_factor_for_solve(&a, n).unwrap();
                 std::hint::black_box(super::lu_solve(&lu, &p, &b, n));
             });
+            // LU-only ratios (same-invocation → reliable even on a noisy worker):
+            // f64 blocked vs f32 blocked vs f32 recursive.
+            let a32: Vec<f32> = a.iter().map(|&x| x as f32).collect();
+            let t_lu_f64 = best_time(|| {
+                std::hint::black_box(super::lu_factor_for_solve(&a, n).unwrap());
+            });
+            let t_lu_blk = best_time(|| {
+                let mut lu = a32.clone();
+                std::hint::black_box(super::lu_factor_real_blocked_f32(&mut lu, n));
+            });
             println!(
-                "BENCH mixed-precision solve n={n}: f64 {:.2}ms -> mixed {:.2}ms = {:.2}x",
+                "BENCH mixed-precision solve n={n}: f64 {:.2}ms -> mixed {:.2}ms = {:.2}x | LU-only f64 {:.1}ms / f32 {:.1}ms = {:.2}x",
                 t_f64 * 1e3,
                 t_mixed * 1e3,
-                t_f64 / t_mixed
+                t_f64 / t_mixed,
+                t_lu_f64 * 1e3,
+                t_lu_blk * 1e3,
+                t_lu_f64 / t_lu_blk,
             );
         }
     }
