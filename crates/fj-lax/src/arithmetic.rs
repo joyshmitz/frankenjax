@@ -774,6 +774,94 @@ fn half_unary_pair_f16(l: u16, r: u16, op: &impl Fn(f64, f64) -> f64) -> u16 {
     half_binary_apply(DType::F16, l, r, op)
 }
 
+/// SIMD F16 Max/Min (same-shape), BIT-IDENTICAL to the scalar `jax_max_f64`/`jax_min_f64`
+/// half map. A max/min of two in-range f16 values is one of them (no overflow/subnormal
+/// result), so only INPUT edges (subnormal/inf/NaN) fall back to scalar. The both-±0 tie
+/// uses the shared right-operand fixup ([`bf16_minmax_zero_fixup`], dtype-agnostic).
+fn f16_minmax_into(lhs: &[u16], rhs: &[u16], is_max: bool, out: &mut [u16]) {
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+    const L: usize = BF16_SIMD_L;
+    let scalar_op: fn(f64, f64) -> f64 = if is_max {
+        crate::jax_max_f64
+    } else {
+        crate::jax_min_f64
+    };
+    let n = lhs.len();
+    let mut i = 0;
+    while i + L <= n {
+        let lu = Simd::<u16, L>::from_slice(&lhs[i..i + L]);
+        let ru = Simd::<u16, L>::from_slice(&rhs[i..i + L]);
+        if f16_input_needs_scalar(lu) || f16_input_needs_scalar(ru) {
+            for t in 0..L {
+                out[i + t] = half_binary_apply(DType::F16, lhs[i + t], rhs[i + t], &scalar_op);
+            }
+        } else {
+            let (a, b) = (f16_widen8(lu), f16_widen8(ru));
+            let m = if is_max { a.simd_max(b) } else { a.simd_min(b) };
+            let res = f16_rne_from_f32x8(round_to_odd_f64x8(m));
+            bf16_minmax_zero_fixup(lu, ru, res).copy_to_slice(&mut out[i..i + L]);
+        }
+        i += L;
+    }
+    for j in i..n {
+        out[j] = half_binary_apply(DType::F16, lhs[j], rhs[j], &scalar_op);
+    }
+}
+
+/// SIMD F16 Max/Min against a splatted scalar — the f16 relu (`max(x, +0)`) / clamp path.
+fn f16_minmax_scalar_into(
+    values: &[u16],
+    scalar_bits: u16,
+    scalar_on_left: bool,
+    is_max: bool,
+    out: &mut [u16],
+) {
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+    const L: usize = BF16_SIMD_L;
+    let scalar_op: fn(f64, f64) -> f64 = if is_max {
+        crate::jax_max_f64
+    } else {
+        crate::jax_min_f64
+    };
+    let svec_bits = Simd::<u16, L>::splat(scalar_bits);
+    let scalar_edge = f16_input_needs_scalar(svec_bits);
+    let scalar_apply = |bits: u16| -> u16 {
+        let (l, r) = if scalar_on_left {
+            (scalar_bits, bits)
+        } else {
+            (bits, scalar_bits)
+        };
+        half_binary_apply(DType::F16, l, r, &scalar_op)
+    };
+    let svec = f16_widen8(svec_bits);
+    let n = values.len();
+    let mut i = 0;
+    while i + L <= n {
+        let xu = Simd::<u16, L>::from_slice(&values[i..i + L]);
+        if scalar_edge || f16_input_needs_scalar(xu) {
+            for t in 0..L {
+                out[i + t] = scalar_apply(values[i + t]);
+            }
+        } else {
+            let x = f16_widen8(xu);
+            let m = if is_max { x.simd_max(svec) } else { x.simd_min(svec) };
+            let res = f16_rne_from_f32x8(round_to_odd_f64x8(m));
+            let (lb, rb) = if scalar_on_left {
+                (svec_bits, xu)
+            } else {
+                (xu, svec_bits)
+            };
+            bf16_minmax_zero_fixup(lb, rb, res).copy_to_slice(&mut out[i..i + L]);
+        }
+        i += L;
+    }
+    for j in i..n {
+        out[j] = scalar_apply(values[j]);
+    }
+}
+
 #[inline]
 fn bf16_op_f64(op: Bf16Op, a: std::simd::Simd<f64, BF16_SIMD_L>, b: std::simd::Simd<f64, BF16_SIMD_L>) -> std::simd::Simd<f64, BF16_SIMD_L> {
     match op {
@@ -1045,6 +1133,21 @@ pub fn f16_binary_bench(a: &[u16], b: &[u16], simd: bool) -> Vec<u16> {
     }
 }
 
+/// Bench-only same-binary A/B for the f16 relu lever (`max(x, +0)`).
+#[doc(hidden)]
+pub fn f16_relu_bench(values: &[u16], simd: bool) -> Vec<u16> {
+    if simd {
+        let mut out = vec![0u16; values.len()];
+        f16_minmax_scalar_into(values, 0x0000, false, true, &mut out);
+        out
+    } else {
+        values
+            .iter()
+            .map(|&v| half_binary_apply(DType::F16, v, 0x0000, &crate::jax_max_f64))
+            .collect()
+    }
+}
+
 /// Bench-only same-binary A/B for the bf16 relu lever (`max(x, +0)`).
 #[doc(hidden)]
 pub fn bf16_relu_bench(values: &[u16], simd: bool) -> Vec<u16> {
@@ -1116,21 +1219,31 @@ fn eval_same_shape_half_float_binop(
             )?)));
         }
     }
-    // Dense F16 add/sub/mul/div: vectorize normal/±0 lanes (edge inputs/results fall back
-    // to scalar), bit-identical to the scalar map. Max/Min stay scalar.
+    // Dense F16 add/sub/mul/div/max/min: vectorize normal/±0 lanes (edge inputs/results
+    // fall back to scalar), bit-identical to the scalar map.
     if lhs.dtype == DType::F16
         && rhs.dtype == DType::F16
-        && let Some(op) = bf16_op_of(primitive)
         && let (Some(a), Some(b)) = (
             lhs.elements.as_half_float_slice(),
             rhs.elements.as_half_float_slice(),
         )
     {
-        return Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
-            DType::F16,
-            lhs.shape.clone(),
-            f16_binary_simd(a, b, op),
-        )?)));
+        let values = if let Some(op) = bf16_op_of(primitive) {
+            Some(f16_binary_simd(a, b, op))
+        } else if matches!(primitive, Primitive::Max | Primitive::Min) {
+            let mut out = vec![0u16; a.len()];
+            f16_minmax_into(a, b, primitive == Primitive::Max, &mut out);
+            Some(out)
+        } else {
+            None
+        };
+        if let Some(values) = values {
+            return Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+                DType::F16,
+                lhs.shape.clone(),
+                values,
+            )?)));
+        }
     }
     match primitive {
         Primitive::Add => eval_same_shape_half_float_map(lhs, rhs, |a, b| a + b),
@@ -1577,6 +1690,22 @@ fn eval_half_float_scalar_broadcast_binop(
                 out,
             )?)));
         }
+    }
+    // Dense F16 Max/Min scalar broadcast: f16 relu (`max(x,0)`) / clamp.
+    if dt == DType::F16 && matches!(primitive, Primitive::Max | Primitive::Min) {
+        let mut out = vec![0u16; values.len()];
+        f16_minmax_scalar_into(
+            values,
+            scalar_bits,
+            scalar_on_left,
+            primitive == Primitive::Max,
+            &mut out,
+        );
+        return Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+            dt,
+            tensor.shape.clone(),
+            out,
+        )?)));
     }
     let op: fn(f64, f64) -> f64 = match primitive {
         Primitive::Add => |a, b| a + b,
@@ -14560,6 +14689,52 @@ mod tests {
                     "bf16 simd mismatch op={} a={a:#06x} b={b:#06x}: got {:#06x} want {:#06x}",
                     op as u8, got[k], want
                 );
+            }
+        }
+    }
+
+    /// SIMD f16 Max/Min (same-shape + scalar-broadcast incl. relu `max(x,0)`) must be
+    /// BIT-IDENTICAL to the scalar `jax_max_f64`/`jax_min_f64` half map over the f16 edge
+    /// patterns (incl. ±0 ties, subnormal/inf/NaN input fallback), crossing 8-lane+remainder.
+    #[test]
+    fn f16_minmax_simd_bit_identical_to_scalar() {
+        let pats: [u16; 24] = [
+            0x0000, 0x8000, 0x0001, 0x03FF, 0x0400, 0x7BFF, 0x3C00, 0xBC00, 0x3800, 0x4000,
+            0x6400, 0xEC00, 0x7C00, 0xFC00, 0x7E00, 0x7D00, 0x3555, 0xB555, 0x0200, 0x7800,
+            0x4900, 0xC900, 0x5640, 0x1234,
+        ];
+        let mut lhs = Vec::new();
+        let mut rhs = Vec::new();
+        for (i, &a) in pats.iter().enumerate() {
+            for j in 0..pats.len() {
+                lhs.push(a);
+                rhs.push(pats[(i + j) % pats.len()]);
+            }
+        }
+        lhs.push(0x3C00);
+        rhs.push(0x4000);
+        for is_max in [true, false] {
+            let scalar_op: fn(f64, f64) -> f64 = if is_max {
+                crate::jax_max_f64
+            } else {
+                crate::jax_min_f64
+            };
+            let mut got = vec![0u16; lhs.len()];
+            f16_minmax_into(&lhs, &rhs, is_max, &mut got);
+            for (k, (&a, &b)) in lhs.iter().zip(&rhs).enumerate() {
+                let want = half_binary_apply(DType::F16, a, b, &scalar_op);
+                assert_eq!(got[k], want, "f16 minmax same-shape is_max={is_max} a={a:#06x} b={b:#06x}: got {:#06x} want {:#06x}", got[k], want);
+            }
+            for &scalar in &[0x0000u16, 0x3C00, 0x7C00, 0x7E00, 0x0200, 0x8000] {
+                for &on_left in &[false, true] {
+                    let mut g = vec![0u16; lhs.len()];
+                    f16_minmax_scalar_into(&lhs, scalar, on_left, is_max, &mut g);
+                    for (k, &v) in lhs.iter().enumerate() {
+                        let (l, r) = if on_left { (scalar, v) } else { (v, scalar) };
+                        let want = half_binary_apply(DType::F16, l, r, &scalar_op);
+                        assert_eq!(g[k], want, "f16 minmax scalar is_max={is_max} on_left={on_left} s={scalar:#06x} v={v:#06x}: got {:#06x} want {:#06x}", g[k], want);
+                    }
+                }
             }
         }
     }
