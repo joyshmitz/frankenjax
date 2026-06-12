@@ -1189,9 +1189,27 @@ pub fn batched_matmul_2d_f32_in(
     // microkernel streams it sequentially (bit-identical, just B read order). Batched
     // (batch>1) GEMM keeps the unpacked register kernel (B differs per batch).
     if batch == 1 && k.saturating_mul(n) >= PACK_B_MIN_KN_F32 {
-        let bpack = pack_b_panels_f32(b, k, n);
+        // Past 2048³ the flat packed path re-streams the whole A matrix once per B
+        // panel (A traffic ≈ n/F32_NR × |A|, the binding cost). The KC-blocked nest
+        // keeps a packed [F32_MR×F32_KC] A slab L1/L2-resident and reuses it across
+        // every column panel — A is read once per pc-block. Bit-identical (running-C
+        // f32 store→reload is exact); gated to the regime where the A re-stream wins.
+        let kn = k.saturating_mul(n);
+        let blocked = k > F32_KC && (F32_BLOCKED_B_MIN_KN..F32_BLOCKED_B_MAX_KN).contains(&kn);
+        let bpack = if blocked {
+            pack_b_pc_panels_f32(b, k, n, threads)
+        } else {
+            pack_b_panels_f32(b, k, n)
+        };
+        let run = |gs: usize, block: &mut [f32], bp: &[f32]| {
+            if blocked {
+                matmul_2d_blocked_row_block_f32(a, k, b, bp, n, gs, block);
+            } else {
+                matmul_2d_packed_row_block_f32(a, k, bp, b, n, gs, block);
+            }
+        };
         if threads <= 1 {
-            matmul_2d_packed_row_block_f32(a, k, &bpack, b, n, 0, &mut result);
+            run(0, &mut result, &bpack);
         } else {
             let rows_per = total_rows.div_ceil(threads);
             std::thread::scope(|scope| {
@@ -1203,9 +1221,7 @@ pub fn batched_matmul_2d_f32_in(
                     let (block, tail) = rest.split_at_mut(chunk_rows * n);
                     rest = tail;
                     let gs = g_start;
-                    scope.spawn(move || {
-                        matmul_2d_packed_row_block_f32(a, k, bpack, b, n, gs, block)
-                    });
+                    scope.spawn(move || run(gs, block, bpack));
                     g_start += chunk_rows;
                 }
             });
@@ -1496,6 +1512,232 @@ fn matmul_2d_packed_row_block_f32(
     }
 }
 
+/// k-dimension block for the native-f32 cache-blocked macro-kernel (f32 sibling of
+/// the f64 [`KC`]). At F32_KC=256 an [F32_MR×F32_KC] A tile is ~4 KB and a
+/// [F32_KC×F32_NR] B panel is ~16 KB — both stay L1/L2-resident across a pc-block,
+/// so the packed [F32_MR×F32_KC] A-slab is reused across all column panels and each
+/// B panel is reused across all row tiles, instead of re-streaming the full A matrix
+/// from RAM once per B panel (the binding constraint of the flat packed path: at
+/// 2048³ that flat path re-reads all 16 MB of A once per `n/F32_NR` panel ≈ 2 GB).
+const F32_KC: usize = 256;
+
+/// `k·n` band (B element count) for the native-f32 KC-blocked macro-kernel. Below
+/// `MIN` the flat packed path's B-panel-in-L2 reuse already covers the traffic and the
+/// extra per-pc-block C read/write passes do not pay. Above `MAX` the GEMM is so large
+/// that B AND C are both fully RAM-bound (each ≥ 64 MB at 4096³): the unavoidable
+/// B+C transfers dominate and eliminating the A re-stream washes out — same-worker
+/// A/B at 4096³ measured neutral (3.95 s flat vs 3.91 s blocked, within noise), so
+/// stay on the simpler flat path there. The sweet spot is the ~2048³ band where B
+/// spills L2 (so the flat path re-streams A once per panel) but the problem is small
+/// enough that killing that A re-stream is the binding win: same-worker A/B measured
+/// **1.16x** at 2048³ (packed 551 ms → kcblocked 474 ms). Paired with `k > F32_KC`.
+const F32_BLOCKED_B_MIN_KN: usize = 1 << 22;
+const F32_BLOCKED_B_MAX_KN: usize = 1 << 24;
+
+/// Pack B's `F32_NR`-wide column panels for ONE pc-block into pc-major panel order
+/// (f32 sibling of [`pack_b_pc_panel_block`]):
+/// `out[jp*kc*F32_NR + l*F32_NR + jj] == b[(pc+l)*n + jp*F32_NR + jj]`.
+/// Pure copy — reorders *where* each B value is read, never the accumulation order.
+fn pack_b_pc_panel_block_f32(b: &[f32], k: usize, n: usize, pc: usize, out: &mut [f32]) {
+    let npanels = n / F32_NR;
+    let kc = F32_KC.min(k - pc);
+    let panel_elems = kc * F32_NR;
+    debug_assert_eq!(out.len(), npanels * panel_elems);
+    for l in 0..kc {
+        let row = &b[(pc + l) * n..(pc + l + 1) * n];
+        for jp in 0..npanels {
+            let src = jp * F32_NR;
+            let dst = jp * panel_elems + l * F32_NR;
+            out[dst..dst + F32_NR].copy_from_slice(&row[src..src + F32_NR]);
+        }
+    }
+}
+
+/// Pack B by F32_KC-sized pc blocks, then F32_NR column panels inside each block
+/// (f32 sibling of [`pack_b_pc_panels`]):
+/// `bpack[pc*npanels*F32_NR + jp*kc*F32_NR + l*F32_NR + jj] == b[(pc+l)*n + jp*F32_NR + jj]`.
+fn pack_b_pc_panels_f32(b: &[f32], k: usize, n: usize, threads: usize) -> Vec<f32> {
+    let npanels = n / F32_NR;
+    let mut bpack = vec![0.0f32; npanels * k * F32_NR];
+    if threads <= 1 || k <= F32_KC {
+        let mut pc = 0;
+        while pc < k {
+            let kc = F32_KC.min(k - pc);
+            let elems = npanels * kc * F32_NR;
+            let start = pc * npanels * F32_NR;
+            pack_b_pc_panel_block_f32(b, k, n, pc, &mut bpack[start..start + elems]);
+            pc += F32_KC;
+        }
+        return bpack;
+    }
+
+    let blocks = k.div_ceil(F32_KC);
+    let workers = threads.min(blocks);
+    let blocks_per_worker = blocks.div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut rest = bpack.as_mut_slice();
+        let mut block_start = 0usize;
+        while block_start < blocks {
+            let block_end = (block_start + blocks_per_worker).min(blocks);
+            let pc_start = block_start * F32_KC;
+            let pc_end = (block_end * F32_KC).min(k);
+            let elems = (pc_end - pc_start) * npanels * F32_NR;
+            let (chunk, tail) = rest.split_at_mut(elems);
+            rest = tail;
+            scope.spawn(move || {
+                let mut local = chunk;
+                let mut pc = pc_start;
+                while pc < pc_end {
+                    let kc = F32_KC.min(k - pc);
+                    let elems = npanels * kc * F32_NR;
+                    let (block, tail) = local.split_at_mut(elems);
+                    local = tail;
+                    pack_b_pc_panel_block_f32(b, k, n, pc, block);
+                    pc += F32_KC;
+                }
+            });
+            block_start = block_end;
+        }
+    });
+    bpack
+}
+
+/// Native-f32 cache-blocked GEMM macro-kernel for one thread's contiguous row-block,
+/// with B already packed into pc-major panel order (`bpack`, see [`pack_b_pc_panels_f32`]).
+/// f32 sibling of [`matmul_2d_blocked_row_block`].
+///
+/// Loop order: pc (k in F32_KC chunks) → row/col superpanels → tile → jp. The packed
+/// B panel for a pc-block is reused across every row tile while L1/L2-resident; the
+/// [F32_MR×F32_KC] packed A tile is reused across panels. C is read-modify-written
+/// once per pc-block: each pc-block LOADS the running C (or 0 on the first block) and
+/// accumulates its kc products in ascending `l`, so every output element is summed in
+/// the exact ascending-`l` order of the textbook / [`batched_matmul_row_block_f32_in`]
+/// kernel — the pc-blocking never regroups a partial sum, and an f32 store→reload is
+/// the exact identity, so this is BIT-FOR-BIT identical to the flat packed kernel.
+///
+/// The MR/NR remainder border is computed once with a single full-`k` ascending sweep
+/// (also bit-identical, negligible size) so it never enters the pc-loop.
+fn matmul_2d_blocked_row_block_f32(
+    a: &[f32],
+    k: usize,
+    b: &[f32],
+    bpack: &[f32],
+    n: usize,
+    row_start: usize,
+    block: &mut [f32],
+) {
+    let rows = block.len() / n;
+    let full_rows = rows - rows % F32_MR;
+    let full_cols = n - n % F32_NR;
+    let row_tiles = full_rows / F32_MR;
+    let mut apack = vec![0.0f32; row_tiles * F32_KC * F32_MR];
+
+    let mut pc = 0;
+    while pc < k {
+        let kc = F32_KC.min(k - pc);
+        let first = pc == 0;
+
+        // Pack this thread's full-row A slab for the pc-block, [tile][l][row] order.
+        for tile in 0..row_tiles {
+            let i = tile * F32_MR;
+            let ar0 = (row_start + i) * k + pc;
+            let (ar1, ar2, ar3) = (ar0 + k, ar0 + 2 * k, ar0 + 3 * k);
+            let dst = tile * F32_KC * F32_MR;
+            for l in 0..kc {
+                let base = dst + l * F32_MR;
+                apack[base] = a[ar0 + l];
+                apack[base + 1] = a[ar1 + l];
+                apack[base + 2] = a[ar2 + l];
+                apack[base + 3] = a[ar3 + l];
+            }
+        }
+
+        let col_panels = full_cols / F32_NR;
+        let mut row_super = 0;
+        while row_super < row_tiles {
+            let row_super_end = (row_super + ROW_SUPERPANEL_TILES).min(row_tiles);
+            let mut col_super = 0;
+            while col_super < col_panels {
+                let col_super_end = (col_super + COL_SUPERPANEL_PANELS).min(col_panels);
+                let pc_base = pc * col_panels * F32_NR;
+                let mut tile = row_super;
+                while tile < row_super_end {
+                    let i = tile * F32_MR;
+                    let abase = tile * F32_KC * F32_MR;
+                    let mut jp = col_super;
+                    while jp < col_super_end {
+                        let j = jp * F32_NR;
+                        let panel = &bpack[pc_base + jp * kc * F32_NR..];
+                        let mut c0 = if first {
+                            F32xN::splat(0.0)
+                        } else {
+                            F32xN::from_slice(&block[i * n + j..i * n + j + F32_NR])
+                        };
+                        let mut c1 = if first {
+                            F32xN::splat(0.0)
+                        } else {
+                            F32xN::from_slice(&block[(i + 1) * n + j..(i + 1) * n + j + F32_NR])
+                        };
+                        let mut c2 = if first {
+                            F32xN::splat(0.0)
+                        } else {
+                            F32xN::from_slice(&block[(i + 2) * n + j..(i + 2) * n + j + F32_NR])
+                        };
+                        let mut c3 = if first {
+                            F32xN::splat(0.0)
+                        } else {
+                            F32xN::from_slice(&block[(i + 3) * n + j..(i + 3) * n + j + F32_NR])
+                        };
+                        for l in 0..kc {
+                            let bv = F32xN::from_slice(&panel[l * F32_NR..l * F32_NR + F32_NR]);
+                            let ap = abase + l * F32_MR;
+                            c0 += F32xN::splat(apack[ap]) * bv;
+                            c1 += F32xN::splat(apack[ap + 1]) * bv;
+                            c2 += F32xN::splat(apack[ap + 2]) * bv;
+                            c3 += F32xN::splat(apack[ap + 3]) * bv;
+                        }
+                        block[i * n + j..i * n + j + F32_NR].copy_from_slice(c0.as_array());
+                        block[(i + 1) * n + j..(i + 1) * n + j + F32_NR]
+                            .copy_from_slice(c1.as_array());
+                        block[(i + 2) * n + j..(i + 2) * n + j + F32_NR]
+                            .copy_from_slice(c2.as_array());
+                        block[(i + 3) * n + j..(i + 3) * n + j + F32_NR]
+                            .copy_from_slice(c3.as_array());
+                        jp += 1;
+                    }
+                    tile += 1;
+                }
+                col_super = col_super_end;
+            }
+            row_super = row_super_end;
+        }
+        pc += F32_KC;
+    }
+
+    // Border (bottom remainder rows × all cols; full rows × remainder cols), single
+    // full-k ascending sweep — disjoint and bit-identical.
+    for i in full_rows..rows {
+        let a_row = (row_start + i) * k;
+        for j in 0..n {
+            let mut s = 0.0f32;
+            for l in 0..k {
+                s += a[a_row + l] * b[l * n + j];
+            }
+            block[i * n + j] = s;
+        }
+    }
+    for i in 0..full_rows {
+        let a_row = (row_start + i) * k;
+        for j in full_cols..n {
+            let mut s = 0.0f32;
+            for l in 0..k {
+                s += a[a_row + l] * b[l * n + j];
+            }
+            block[i * n + j] = s;
+        }
+    }
+}
+
 /// Bench-only single-batch f32 GEMM A/B: `blocked=true` runs the F32_MR cache-blocked
 /// kernel (production), `false` the per-row reference, isolating the register-blocking win.
 #[doc(hidden)]
@@ -1506,6 +1748,10 @@ pub fn f32_matmul_bench(a: &[f32], m: usize, k: usize, b: &[f32], n: usize, mode
         "packed" => {
             let bpack = pack_b_panels_f32(b, k, n);
             matmul_2d_packed_row_block_f32(a, k, &bpack, b, n, 0, &mut out);
+        }
+        "kcblocked" => {
+            let bpack = pack_b_pc_panels_f32(b, k, n, 1);
+            matmul_2d_blocked_row_block_f32(a, k, b, &bpack, n, 0, &mut out);
         }
         _ => batched_matmul_row_block_f32_in(a, b, m, k, n, 0, &mut out),
     }
@@ -2252,6 +2498,45 @@ mod tests {
                     "packed f32 mismatch m={m} k={k} n={n} at {idx}"
                 );
             }
+        }
+    }
+
+    /// The native-f32 KC-blocked macro-kernel must be BIT-FOR-BIT identical to the
+    /// flat register-blocked reference. k=700 > F32_KC (256) spans THREE pc-blocks
+    /// (256+256+188), exercising the running-C reload/store carry; m,n are non-multiples
+    /// of F32_MR/F32_NR so the border sweep is hit too. Tested directly because the
+    /// production gate (k·n ≥ 4 Mi) is too large for a unit test.
+    #[test]
+    fn matmul_2d_blocked_row_block_f32_bit_identical_to_packed() {
+        let (m, k, n) = (101usize, 700usize, 134usize);
+        assert!(k > super::F32_KC);
+        let af: Vec<f32> = (0..m * k)
+            .map(|i| (i as f32 * 0.0079).sin() * 2.5 - 0.4)
+            .collect();
+        let bf: Vec<f32> = (0..k * n)
+            .map(|i| (i as f32 * 0.0051).cos() * 1.7 + 0.3)
+            .collect();
+
+        let bpack = super::pack_b_pc_panels_f32(&bf, k, n, 1);
+        let mut got = vec![0.0f32; m * n];
+        super::matmul_2d_blocked_row_block_f32(&af, k, &bf, &bpack, n, 0, &mut got);
+
+        // Reference: the proven flat ascending-`l` register kernel.
+        let mut want = vec![0.0f32; m * n];
+        super::batched_matmul_row_block_f32_in(&af, &bf, m, k, n, 0, &mut want);
+
+        for idx in 0..m * n {
+            assert_eq!(
+                got[idx].to_bits(),
+                want[idx].to_bits(),
+                "blocked f32 mismatch at {idx}"
+            );
+        }
+
+        // Also verify the threaded-pack layout matches the serial pack bit-for-bit.
+        for threads in [2usize, 3, 4, 7] {
+            let par = super::pack_b_pc_panels_f32(&bf, k, n, threads);
+            assert_eq!(par, bpack, "threaded pack mismatch threads={threads}");
         }
     }
 
