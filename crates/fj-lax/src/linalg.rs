@@ -796,11 +796,13 @@ pub(crate) fn eval_qr(
         .get("full_matrices")
         .is_some_and(|v| v.trim() == "true");
 
+    // Real input → the (blocked) real Householder QR. Householder handles zero
+    // pivots/columns fine, so this runs for ALL real matrices (the prior
+    // `all elements != 0` gate needlessly sent any real matrix containing a zero
+    // onto the ~3-4× slower complex path — see qr_real_path_handles_zeros_*).
     if !matches!(inputs[0].dtype(), DType::Complex64 | DType::Complex128) {
         let (m, n, a, dtype) = extract_matrix(primitive, &inputs[0])?;
-        if a.iter().all(|v| *v != 0.0) {
-            return eval_qr_real_matrix(m, n, a, dtype, full_matrices);
-        }
+        return eval_qr_real_matrix(m, n, a, dtype, full_matrices);
     }
 
     let (m, n, a, dtype) = extract_complex_matrix(primitive, &inputs[0])?;
@@ -8807,6 +8809,100 @@ mod tests {
             max_vs_scalar < 1e-9,
             "blocked Q vs scalar Q {max_vs_scalar}"
         );
+    }
+
+    #[test]
+    fn qr_real_path_handles_zeros_reconstructs_and_orthonormal() {
+        // The real QR path must work for real matrices CONTAINING ZEROS (the
+        // previous `a.iter().all(|v| *v != 0.0)` gate was overly broad — Householder
+        // QR handles zero pivots/columns fine). Verify A=Q·R and Qᵀ·Q=I to tolerance
+        // for several zero patterns, on the real path directly.
+        for n in [4usize, 17, 64] {
+            // Diagonally dominant (full rank) but with many deliberate zeros.
+            let a: Vec<f64> = (0..n * n)
+                .map(|idx| {
+                    let (i, j) = (idx / n, idx % n);
+                    if i == j {
+                        (n as f64) + (i as f64) * 0.1 + 2.0
+                    } else if idx % 3 == 0 {
+                        0.0 // scatter zeros through the off-diagonal
+                    } else {
+                        (((i * 31 + j * 17) % 11) as f64 - 5.0) * 0.2
+                    }
+                })
+                .collect();
+            let qr = super::qr_real_bench(a.clone(), n, n, false);
+            let qd = extract_f64_elements(&qr[0]);
+            let rd = extract_f64_elements(&qr[1]);
+            let mut max_res = 0.0f64;
+            let mut max_orth = 0.0f64;
+            for i in 0..n {
+                for j in 0..n {
+                    let mut qrij = 0.0;
+                    let mut qtq = 0.0;
+                    for kk in 0..n {
+                        qrij += qd[i * n + kk] * rd[kk * n + j];
+                        qtq += qd[kk * n + i] * qd[kk * n + j];
+                    }
+                    max_res = max_res.max((qrij - a[i * n + j]).abs());
+                    max_orth = max_orth.max((qtq - if i == j { 1.0 } else { 0.0 }).abs());
+                }
+            }
+            assert!(max_res < 1e-9, "n={n} real-QR-with-zeros reconstruction {max_res:e}");
+            assert!(max_orth < 1e-9, "n={n} real-QR-with-zeros orthonormality {max_orth:e}");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_qr_real_vs_complex_path() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        // Real matrix WITH zeros (previously forced onto the complex QR path).
+        for &n in &[256usize, 512] {
+            let a: Vec<f64> = (0..n * n)
+                .map(|idx| {
+                    let (i, j) = (idx / n, idx % n);
+                    if i == j {
+                        (n as f64) + (i as f64) * 0.01 + 2.0
+                    } else if idx % 3 == 0 {
+                        0.0
+                    } else {
+                        (((i * 31 + j * 17) % 11) as f64 - 5.0) * 0.1
+                    }
+                })
+                .collect();
+            let t_real = best_time(|| {
+                std::hint::black_box(super::qr_real_bench(a.clone(), n, n, true));
+            });
+            let celems: Vec<Literal> = a.iter().map(|&v| Literal::from_complex128(v, 0.0)).collect();
+            let cval = Value::Tensor(
+                TensorValue::new(
+                    DType::Complex128,
+                    Shape { dims: vec![n as u32, n as u32] },
+                    celems,
+                )
+                .unwrap(),
+            );
+            let t_complex = best_time(|| {
+                std::hint::black_box(eval_qr(&[cval.clone()], &BTreeMap::new()).unwrap());
+            });
+            println!(
+                "BENCH QR real vs complex-path n={n}: complex {:.1}ms -> real {:.1}ms = {:.2}x",
+                t_complex * 1e3,
+                t_real * 1e3,
+                t_complex / t_real
+            );
+        }
     }
 
     #[test]
