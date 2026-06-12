@@ -4949,45 +4949,56 @@ fn triangular_solve_slice(
     transpose_a: bool,
     unit_diagonal: bool,
 ) {
-    let diag = |i: usize| -> f64 {
-        if unit_diagonal {
+    // Solve all n_b RHS columns together (X starts as B, solved in place): read each
+    // A entry ONCE and apply it across every column (inner column loop vectorizes), so
+    // the triangular factor streams from cache once instead of once per column.
+    // BIT-IDENTICAL to the prior per-column substitution — same ascending-k fold per
+    // column, only the loop nesting differs. forward = lower != transpose_a; transpose
+    // reads A[k][i] instead of A[i][k]; the diagonal is A[i][i] in every case.
+    x.copy_from_slice(b);
+    let a_at = |i: usize, k: usize| -> f64 {
+        if transpose_a {
+            a[row_major_index(k, i, n_a)]
+        } else {
+            a[row_major_index(i, k, n_a)]
+        }
+    };
+    let mut solve_row = |i: usize, ks: std::ops::Range<usize>, x: &mut [f64]| {
+        for k in ks {
+            let aik = a_at(i, k);
+            if k < i {
+                let (head, tail) = x.split_at_mut(i * n_b);
+                let xk = &head[k * n_b..k * n_b + n_b];
+                let xi = &mut tail[..n_b];
+                for col in 0..n_b {
+                    xi[col] -= aik * xk[col];
+                }
+            } else {
+                let (head, tail) = x.split_at_mut(k * n_b);
+                let xi = &mut head[i * n_b..i * n_b + n_b];
+                let xk = &tail[..n_b];
+                for col in 0..n_b {
+                    xi[col] -= aik * xk[col];
+                }
+            }
+        }
+        let d = if unit_diagonal {
             1.0
         } else {
             a[row_major_index(i, i, n_a)]
+        };
+        let xi = &mut x[i * n_b..i * n_b + n_b];
+        for col in 0..n_b {
+            xi[col] /= d;
         }
     };
-
-    for col in 0..n_b {
-        let mut b_col: Vec<f64> = (0..m).map(|row| b[row * n_b + col]).collect();
-
-        if lower && !transpose_a {
-            for i in 0..m {
-                for k in 0..i {
-                    b_col[i] -= a[row_major_index(i, k, n_a)] * x[k * n_b + col];
-                }
-                x[i * n_b + col] = b_col[i] / diag(i);
-            }
-        } else if !lower && !transpose_a {
-            for i in (0..m).rev() {
-                for k in (i + 1)..m {
-                    b_col[i] -= a[row_major_index(i, k, n_a)] * x[k * n_b + col];
-                }
-                x[i * n_b + col] = b_col[i] / diag(i);
-            }
-        } else if lower && transpose_a {
-            for i in (0..m).rev() {
-                for k in (i + 1)..m {
-                    b_col[i] -= a[row_major_index(k, i, n_a)] * x[k * n_b + col];
-                }
-                x[i * n_b + col] = b_col[i] / diag(i);
-            }
-        } else {
-            for i in 0..m {
-                for k in 0..i {
-                    b_col[i] -= a[row_major_index(k, i, n_a)] * x[k * n_b + col];
-                }
-                x[i * n_b + col] = b_col[i] / diag(i);
-            }
+    if lower != transpose_a {
+        for i in 0..m {
+            solve_row(i, 0..i, x);
+        }
+    } else {
+        for i in (0..m).rev() {
+            solve_row(i, (i + 1)..m, x);
         }
     }
 }
