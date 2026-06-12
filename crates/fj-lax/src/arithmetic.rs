@@ -561,12 +561,144 @@ fn eval_same_shape_f32_map(
 /// result via `literal_from_numeric_f64(half, float_op(a,b))` = `from_{bf16,f16}_f64(...)`.
 /// We do exactly that on the dense `u16` backing (2B/elem vs a 24B boxed `Literal`), so the
 /// output is BIT-FOR-BIT identical while skipping per-`Literal` materialization + dispatch.
-#[inline]
+/// Which arithmetic op a [`bf16_binary_simd`] chunk applies in f64.
+#[derive(Clone, Copy)]
+enum Bf16Op {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// SIMD BF16⊗BF16 → BF16 for add/sub/mul/div, BIT-IDENTICAL to the scalar
+/// [`half_binary_apply`] path: it runs the EXACT same chain — widen each bf16 to f64
+/// (bf16→f32 bitcast is exact, f32→f64 exact), apply the op in f64, then round f64→bf16
+/// via the round-to-odd f32 intermediate ([`Literal::from_bf16_f64`]) — only 8 lanes
+/// wide. The widen/round bit-shuffling is the measured compute floor of the scalar half
+/// path, so it vectorizes cleanly under AVX2. The `< 8` remainder runs the scalar
+/// `half_binary_apply` (identical f64 op + `from_bf16_f64` round).
+fn bf16_binary_simd(lhs: &[u16], rhs: &[u16], op: Bf16Op) -> Vec<u16> {
+    use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+    use std::simd::num::{SimdFloat, SimdUint};
+    use std::simd::{Select, Simd};
+    const L: usize = 8;
+    let scalar_op: fn(f64, f64) -> f64 = match op {
+        Bf16Op::Add => |a, b| a + b,
+        Bf16Op::Sub => |a, b| a - b,
+        Bf16Op::Mul => |a, b| a * b,
+        Bf16Op::Div => |a, b| a / b,
+    };
+    type U16s = Simd<u16, L>;
+    type U32s = Simd<u32, L>;
+    type F32s = Simd<f32, L>;
+    type F64s = Simd<f64, L>;
+
+    // u16 bf16 bits -> exact f64 value (bf16 is the high 16 bits of an f32).
+    let widen = |u: U16s| -> F64s { F32s::from_bits(u.cast::<u32>() << U32s::splat(16)).cast() };
+
+    // f64 -> f32 round-to-odd, replicating `Literal::f64_to_f32_round_to_odd` lane-wise.
+    let round_to_odd = |x: F64s| -> F32s {
+        let nearest: F32s = x.cast();
+        let nbits: U32s = nearest.to_bits();
+        let back: F64s = nearest.cast();
+        // passthrough when exact / already-odd / non-finite (all in the u32 mask domain).
+        let exact = back.simd_eq(x).cast::<i32>();
+        let odd = (nbits & U32s::splat(1)).simd_eq(U32s::splat(1));
+        let expmask = U32s::splat(0x7F80_0000);
+        let nonfinite = (nbits & expmask).simd_eq(expmask);
+        let passthrough = exact | odd | nonfinite;
+        let toward_larger = x.simd_gt(back).cast::<i32>();
+        let negative = (nbits & U32s::splat(0x8000_0000)).simd_ne(U32s::splat(0));
+        let step_up = toward_larger ^ negative;
+        let neighbor = step_up.select(nbits + U32s::splat(1), nbits - U32s::splat(1));
+        F32s::from_bits(passthrough.select(nbits, neighbor))
+    };
+
+    // f32 -> bf16 round-to-nearest-even, replicating `half::bf16::from_f32` lane-wise.
+    let to_bf16 = |f: F32s| -> U16s {
+        let x: U32s = f.to_bits();
+        let nan = (x & U32s::splat(0x7FFF_FFFF)).simd_gt(U32s::splat(0x7F80_0000));
+        let nan_res = (x >> U32s::splat(16)) | U32s::splat(0x0040);
+        let rb_set = (x & U32s::splat(0x0000_8000)).simd_ne(U32s::splat(0));
+        let sticky = (x & U32s::splat(0x0001_7FFF)).simd_ne(U32s::splat(0));
+        let round_up = (rb_set & sticky).select(U32s::splat(1), U32s::splat(0));
+        let normal = (x >> U32s::splat(16)) + round_up;
+        nan.select(nan_res, normal).cast::<u16>()
+    };
+
+    let n = lhs.len();
+    let mut out = vec![0u16; n];
+    let mut i = 0;
+    while i + L <= n {
+        let a = widen(U16s::from_slice(&lhs[i..i + L]));
+        let b = widen(U16s::from_slice(&rhs[i..i + L]));
+        let r = match op {
+            Bf16Op::Add => a + b,
+            Bf16Op::Sub => a - b,
+            Bf16Op::Mul => a * b,
+            Bf16Op::Div => a / b,
+        };
+        // A NaN result's payload bits are IEEE-UNSPECIFIED, and the SIMD `vaddpd`/etc.
+        // can pick a different payload than the scalar add. Fall the (rare) NaN-producing
+        // chunk back to the scalar path so the output stays byte-identical to it.
+        if r.is_nan().any() {
+            for t in 0..L {
+                out[i + t] = half_binary_apply(DType::BF16, lhs[i + t], rhs[i + t], &scalar_op);
+            }
+        } else {
+            to_bf16(round_to_odd(r)).copy_to_slice(&mut out[i..i + L]);
+        }
+        i += L;
+    }
+    for j in i..n {
+        out[j] = half_binary_apply(DType::BF16, lhs[j], rhs[j], &scalar_op);
+    }
+    out
+}
+
+/// Bench-only same-binary A/B for the bf16 elementwise lever: `simd=true` runs the
+/// vectorized [`bf16_binary_simd`], `false` the scalar per-element widen→f64→round map.
+#[doc(hidden)]
+pub fn bf16_binary_bench(a: &[u16], b: &[u16], simd: bool) -> Vec<u16> {
+    if simd {
+        bf16_binary_simd(a, b, Bf16Op::Mul)
+    } else {
+        a.iter()
+            .zip(b)
+            .map(|(&l, &r)| half_binary_apply(DType::BF16, l, r, &|x, y| x * y))
+            .collect()
+    }
+}
+
 fn eval_same_shape_half_float_binop(
     primitive: Primitive,
     lhs: &TensorValue,
     rhs: &TensorValue,
 ) -> Result<Option<Value>, EvalError> {
+    // Dense BF16 add/sub/mul/div: vectorize the widen/round floor (bit-identical to the
+    // scalar map). F16 (5-bit-exponent decode) and Max/Min (NaN/±0 ordering) stay scalar.
+    if lhs.dtype == DType::BF16 && rhs.dtype == DType::BF16 {
+        let op = match primitive {
+            Primitive::Add => Some(Bf16Op::Add),
+            Primitive::Sub => Some(Bf16Op::Sub),
+            Primitive::Mul => Some(Bf16Op::Mul),
+            Primitive::Div => Some(Bf16Op::Div),
+            _ => None,
+        };
+        if let Some(op) = op
+            && let (Some(a), Some(b)) = (
+                lhs.elements.as_half_float_slice(),
+                rhs.elements.as_half_float_slice(),
+            )
+        {
+            let values = bf16_binary_simd(a, b, op);
+            return Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+                DType::BF16,
+                lhs.shape.clone(),
+                values,
+            )?)));
+        }
+    }
     match primitive {
         Primitive::Add => eval_same_shape_half_float_map(lhs, rhs, |a, b| a + b),
         Primitive::Sub => eval_same_shape_half_float_map(lhs, rhs, |a, b| a - b),
@@ -13854,6 +13986,46 @@ mod tests {
     }
 
     /// Isomorphism proof for the dense BF16/F16 same-shape binary fast path: dense
+    /// The SIMD bf16 add/sub/mul/div path must be BIT-IDENTICAL to the scalar
+    /// `half_binary_apply` over an exhaustive set of edge-case bit patterns (±0,
+    /// subnormals, max/min normal, ±inf, qNaN/sNaN, round-half-to-even ties) AND across
+    /// the 8-lane boundary + scalar remainder.
+    #[test]
+    fn bf16_binary_simd_bit_identical_to_scalar() {
+        let pats: [u16; 22] = [
+            0x0000, 0x8000, 0x0001, 0x007F, 0x0080, 0x7F7F, 0x3F80, 0xBF80, 0x4049, 0x40C9,
+            0x7F80, 0xFF80, 0x7FC0, 0x7F81, 0x3F81, 0x4100, 0xC100, 0x0040, 0x7E00, 0x7F00,
+            0x3FAB, 0xBFAB,
+        ];
+        let mut lhs = Vec::new();
+        let mut rhs = Vec::new();
+        for (i, &a) in pats.iter().enumerate() {
+            for j in 0..pats.len() {
+                lhs.push(a);
+                rhs.push(pats[(i + j) % pats.len()]);
+            }
+        }
+        lhs.push(0x3F80);
+        rhs.push(0x4049); // make len % 8 != 0 so the scalar remainder is exercised
+        for op in [Bf16Op::Add, Bf16Op::Sub, Bf16Op::Mul, Bf16Op::Div] {
+            let got = bf16_binary_simd(&lhs, &rhs, op);
+            let scalar_op: fn(f64, f64) -> f64 = match op {
+                Bf16Op::Add => |a, b| a + b,
+                Bf16Op::Sub => |a, b| a - b,
+                Bf16Op::Mul => |a, b| a * b,
+                Bf16Op::Div => |a, b| a / b,
+            };
+            for (k, (&a, &b)) in lhs.iter().zip(&rhs).enumerate() {
+                let want = half_binary_apply(DType::BF16, a, b, &scalar_op);
+                assert_eq!(
+                    got[k], want,
+                    "bf16 simd mismatch op={} a={a:#06x} b={b:#06x}: got {:#06x} want {:#06x}",
+                    op as u8, got[k], want
+                );
+            }
+        }
+    }
+
     /// half-float Add/Sub/Mul/Div/Max/Min must equal the boxed-`Literal` generic map
     /// bit-for-bit. Both widen via `Literal::{BF16,F16}Bits.as_f64()` and round via
     /// `from_{bf16,f16}_f64`, so they are bit-identical.

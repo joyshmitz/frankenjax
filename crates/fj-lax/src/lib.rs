@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![feature(portable_simd)]
 
-mod arithmetic;
+pub mod arithmetic;
 pub mod array_creation;
 mod comparison;
 pub mod cz0g0_f32accum_evidence;
