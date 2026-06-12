@@ -342,15 +342,43 @@ fn evaluate_while_sub_jaxprs(
     let init_shapes: Vec<Shape> = carry.iter().map(value_shape).collect();
     let init_dtypes: Vec<_> = carry.iter().map(Value::dtype).collect();
 
+    // The cond/body sub-jaxprs are re-evaluated once per iteration. Their
+    // slot/liveness analysis is value-independent, so derive it ONCE and reuse a
+    // single env buffer per sub-jaxpr across all iterations — eliminating the
+    // per-iteration re-analysis + env/last_use allocations that otherwise dominate
+    // the dispatch cost of a loop with a cheap body. Falls back to the
+    // self-contained `eval_jaxpr_with_consts` for any sub-jaxpr that is not
+    // dense-eligible (sparse/huge var ids), so behavior is unchanged.
+    let cond_plan = build_dense_plan(cond_jaxpr);
+    let body_plan = build_dense_plan(body_jaxpr);
+    let mut cond_env: Vec<Option<Value>> = vec![None; cond_plan.as_ref().map_or(0, |p| p.slots)];
+    let mut body_env: Vec<Option<Value>> = vec![None; body_plan.as_ref().map_or(0, |p| p.slots)];
+    // Reusable per-iteration buffers: one input-resolution scratch shared by both
+    // sub-jaxprs (they run sequentially, never concurrently), plus output buffers
+    // for the cond result and the next carry — so a converged-body loop performs
+    // ZERO heap allocations per iteration (the carry is swapped, not reallocated).
+    let mut scratch: Vec<Value> = Vec::new();
+    let mut cond_outputs: Vec<Value> = Vec::new();
+    let mut next_carry: Vec<Value> = Vec::new();
+
     for _ in 0..max_iter {
-        let cond_outputs =
-            eval_jaxpr_with_consts(cond_jaxpr, cond_consts, &carry).map_err(|err| {
-                InterpreterError::Primitive(map_sub_jaxpr_error(
-                    Primitive::While,
-                    "while cond",
-                    err,
-                ))
-            })?;
+        match &cond_plan {
+            Some(plan) => run_dense_env_into(
+                cond_jaxpr,
+                cond_consts,
+                &carry,
+                &mut cond_env,
+                &plan.last_use,
+                &mut scratch,
+                &mut cond_outputs,
+            ),
+            None => eval_jaxpr_with_consts(cond_jaxpr, cond_consts, &carry).map(|o| {
+                cond_outputs = o;
+            }),
+        }
+        .map_err(|err| {
+            InterpreterError::Primitive(map_sub_jaxpr_error(Primitive::While, "while cond", err))
+        })?;
         if cond_outputs.len() != 1 {
             return Err(InterpreterError::InvariantViolation {
                 detail: format!(
@@ -365,14 +393,23 @@ fn evaluate_while_sub_jaxprs(
             return Ok(carry);
         }
 
-        let next_carry =
-            eval_jaxpr_with_consts(body_jaxpr, body_consts, &carry).map_err(|err| {
-                InterpreterError::Primitive(map_sub_jaxpr_error(
-                    Primitive::While,
-                    "while body",
-                    err,
-                ))
-            })?;
+        match &body_plan {
+            Some(plan) => run_dense_env_into(
+                body_jaxpr,
+                body_consts,
+                &carry,
+                &mut body_env,
+                &plan.last_use,
+                &mut scratch,
+                &mut next_carry,
+            ),
+            None => eval_jaxpr_with_consts(body_jaxpr, body_consts, &carry).map(|o| {
+                next_carry = o;
+            }),
+        }
+        .map_err(|err| {
+            InterpreterError::Primitive(map_sub_jaxpr_error(Primitive::While, "while body", err))
+        })?;
         if next_carry.len() != carry.len() {
             return Err(InterpreterError::InvariantViolation {
                 detail: format!(
@@ -401,7 +438,9 @@ fn evaluate_while_sub_jaxprs(
                 }));
             }
         }
-        carry = next_carry;
+        // Swap (not move): `carry` adopts this iteration's result while the old
+        // `carry` allocation is recycled as next iteration's `next_carry` buffer.
+        std::mem::swap(&mut carry, &mut next_carry);
     }
 
     Err(InterpreterError::Primitive(
@@ -2590,27 +2629,13 @@ fn try_fuse_elementwise_chain(
         .or_else(|| try_fuse_elementwise_chain_half(jaxpr, start, env, last_use))
 }
 
-fn eval_jaxpr_dense_env(
-    jaxpr: &Jaxpr,
-    const_values: &[Value],
-    args: &[Value],
-    slots: usize,
-) -> Result<Vec<Value>, InterpreterError> {
-    let mut env: Vec<Option<Value>> = vec![None; slots];
-    for (idx, var) in jaxpr.constvars.iter().enumerate() {
-        env[var.0 as usize] = Some(const_values[idx].clone());
-    }
-    for (idx, var) in jaxpr.invars.iter().enumerate() {
-        env[var.0 as usize] = Some(args[idx].clone());
-    }
-
-    // Liveness: `last_use[slot]` = index of the LAST equation that reads this var as
-    // an input (`usize::MAX` = never read; outvars are pinned `usize::MAX` so they
-    // survive to the return). After an equation runs we drop every input slot whose
-    // last use was this equation, so an N-equation elementwise CHAIN holds only its
-    // live working set (~2 tensors) instead of all N intermediates at once — a large
-    // peak-memory reduction for deep jaxprs. Bit-identical: a slot is freed strictly
-    // after its final read, outvars are never freed, so outputs are unchanged.
+/// Precompute the per-equation liveness map (`last_use`) for the dense
+/// interpreter. `last_use[slot]` = index of the LAST equation that reads this var
+/// as an input (`usize::MAX` = never read; outvars are pinned `usize::MAX` so they
+/// survive to the return). This is a pure function of the jaxpr SHAPE (not the
+/// argument values), so for a sub-jaxpr re-run many times (a `while`/`scan` body)
+/// it is computed ONCE and reused across iterations — see [`run_dense_env`].
+fn compute_dense_last_use(jaxpr: &Jaxpr, slots: usize) -> Vec<usize> {
     let mut last_use: Vec<usize> = vec![usize::MAX; slots];
     for (i, eqn) in jaxpr.equations.iter().enumerate() {
         for atom in &eqn.inputs {
@@ -2629,8 +2654,109 @@ fn eval_jaxpr_dense_env(
             *slot = usize::MAX; // pin: returned, never free
         }
     }
+    last_use
+}
 
+/// A reusable dense-evaluation plan for a jaxpr: the slot count and the
+/// value-independent liveness map. Build it ONCE with [`build_dense_plan`] and
+/// feed it (plus a reusable `env` buffer) to [`run_dense_env`] on every call —
+/// this is what lets a `while`/`scan` body skip re-deriving its slot/liveness
+/// analysis (≈the bulk of the per-iteration dispatch overhead) on each iteration.
+struct DenseEvalPlan {
+    slots: usize,
+    last_use: Vec<usize>,
+}
+
+/// Build a [`DenseEvalPlan`] iff the jaxpr's variable ids are dense enough for the
+/// flat-`Vec` environment (same gate as [`eval_jaxpr_with_consts`]); returns
+/// `None` for sparse/huge id ranges so the caller keeps the hash-map fallback.
+fn build_dense_plan(jaxpr: &Jaxpr) -> Option<DenseEvalPlan> {
+    let mut max_var: u32 = 0;
+    let mut def_count: usize = 0;
+    for var in jaxpr.constvars.iter().chain(jaxpr.invars.iter()) {
+        max_var = max_var.max(var.0);
+        def_count += 1;
+    }
+    for eqn in &jaxpr.equations {
+        for out_var in &eqn.outputs {
+            max_var = max_var.max(out_var.0);
+            def_count += 1;
+        }
+    }
+    let slots = max_var as usize + 1;
+    if slots <= def_count.saturating_mul(8).max(256) {
+        Some(DenseEvalPlan {
+            slots,
+            last_use: compute_dense_last_use(jaxpr, slots),
+        })
+    } else {
+        None
+    }
+}
+
+fn eval_jaxpr_dense_env(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+    slots: usize,
+) -> Result<Vec<Value>, InterpreterError> {
+    let last_use = compute_dense_last_use(jaxpr, slots);
+    let mut env: Vec<Option<Value>> = vec![None; slots];
+    run_dense_env(jaxpr, const_values, args, &mut env, &last_use)
+}
+
+/// Run the dense interpreter over a CALLER-OWNED `env` buffer and a PRECOMPUTED
+/// `last_use` map. `env` only needs `len() >= slots`; it is reset to `None` on
+/// entry, so the same allocation can be reused across many calls (e.g. every
+/// iteration of a `while` body). Bit-for-bit identical to the original
+/// per-call-allocating loop — same input resolution, same fusion, same liveness
+/// frees, same dispatch, same `MissingVariable` errors.
+fn run_dense_env(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+    env: &mut [Option<Value>],
+    last_use: &[usize],
+) -> Result<Vec<Value>, InterpreterError> {
     let mut scratch: Vec<Value> = Vec::new();
+    let mut out: Vec<Value> = Vec::new();
+    run_dense_env_into(
+        jaxpr,
+        const_values,
+        args,
+        env,
+        last_use,
+        &mut scratch,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+/// [`run_dense_env`] writing its `outvars` into a caller-owned `out` buffer and
+/// resolving inputs through a caller-owned `scratch` buffer, so a loop re-running
+/// the same sub-jaxpr reuses BOTH allocations instead of a fresh `Vec` per call.
+/// `scratch` and `out` are cleared on entry. Bit-for-bit identical to
+/// [`run_dense_env`]; only the output-vector ownership differs.
+#[allow(clippy::too_many_arguments)]
+fn run_dense_env_into(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+    env: &mut [Option<Value>],
+    last_use: &[usize],
+    scratch: &mut Vec<Value>,
+    out: &mut Vec<Value>,
+) -> Result<(), InterpreterError> {
+    for slot in env.iter_mut() {
+        *slot = None;
+    }
+    for (idx, var) in jaxpr.constvars.iter().enumerate() {
+        env[var.0 as usize] = Some(const_values[idx].clone());
+    }
+    for (idx, var) in jaxpr.invars.iter().enumerate() {
+        env[var.0 as usize] = Some(args[idx].clone());
+    }
+
     let mut i = 0;
     while i < jaxpr.equations.len() {
         // Fast path: fuse a maximal cheap-elementwise run starting here into one
@@ -2704,15 +2830,16 @@ fn eval_jaxpr_dense_env(
         i += 1;
     }
 
-    jaxpr
-        .outvars
-        .iter()
-        .map(|var| {
-            env.get(var.0 as usize)
-                .and_then(|slot| slot.clone())
-                .ok_or(InterpreterError::MissingVariable(*var))
-        })
-        .collect()
+    out.clear();
+    out.reserve(jaxpr.outvars.len());
+    for var in &jaxpr.outvars {
+        let value = env
+            .get(var.0 as usize)
+            .and_then(|slot| slot.clone())
+            .ok_or(InterpreterError::MissingVariable(*var))?;
+        out.push(value);
+    }
+    Ok(())
 }
 
 /// Hash-map interpreter environment — fallback for jaxprs whose variable ids
@@ -4326,6 +4453,72 @@ mod tests {
                 effects: vec![],
             }],
         )
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_while_loop_interpreter_overhead() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        // SAME-INVOCATION A/B: the per-iteration sub-jaxpr eval is the loop body
+        // cost. OLD = self-contained `eval_jaxpr_with_consts` (re-derives slot +
+        // liveness analysis and allocates env/last_use/scratch every call). NEW =
+        // `run_dense_env_buf` over a plan + buffers built ONCE (what the `while`
+        // handler now does). Both compute the identical scalar Sub.
+        let n: usize = 4_000_000;
+        let body = make_while_body_sub_step_jaxpr(1);
+        let arg = vec![Value::scalar_i64(7)];
+
+        let t_old = best_time(|| {
+            let mut acc = 0i64;
+            for _ in 0..n {
+                let out = eval_jaxpr_with_consts(&body, &[], &arg).expect("old");
+                if let Value::Scalar(Literal::I64(v)) = &out[0] {
+                    acc = acc.wrapping_add(*v);
+                }
+            }
+            std::hint::black_box(acc);
+        });
+
+        let plan = super::build_dense_plan(&body).expect("dense");
+        let t_new = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut out: Vec<Value> = Vec::new();
+            let mut acc = 0i64;
+            for _ in 0..n {
+                super::run_dense_env_into(
+                    &body,
+                    &[],
+                    &arg,
+                    &mut env,
+                    &plan.last_use,
+                    &mut scratch,
+                    &mut out,
+                )
+                .expect("new");
+                if let Value::Scalar(Literal::I64(v)) = &out[0] {
+                    acc = acc.wrapping_add(*v);
+                }
+            }
+            std::hint::black_box(acc);
+        });
+
+        println!(
+            "BENCH while-body dispatch {n} evals: OLD {:.1}ns/eval -> NEW {:.1}ns/eval = {:.2}x",
+            t_old * 1e9 / n as f64,
+            t_new * 1e9 / n as f64,
+            t_old / t_new,
+        );
     }
 
     #[test]
