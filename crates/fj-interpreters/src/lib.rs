@@ -358,7 +358,7 @@ fn evaluate_while_sub_jaxprs(
     // for the cond result and the next carry — so a converged-body loop performs
     // ZERO heap allocations per iteration (the carry is swapped, not reallocated).
     let mut scratch: Vec<Value> = Vec::new();
-    let mut scalar_slots: Vec<ScalarF64Slot> = Vec::new();
+    let mut scalar_buffers = ScalarPlanBuffers::default();
     let mut cond_outputs: Vec<Value> = Vec::new();
     let mut next_carry: Vec<Value> = Vec::new();
 
@@ -372,7 +372,7 @@ fn evaluate_while_sub_jaxprs(
                 plan,
                 &mut scratch,
                 &mut cond_outputs,
-                &mut scalar_slots,
+                &mut scalar_buffers,
             ),
             None => eval_jaxpr_with_consts(cond_jaxpr, cond_consts, &carry).map(|o| {
                 cond_outputs = o;
@@ -404,7 +404,7 @@ fn evaluate_while_sub_jaxprs(
                 plan,
                 &mut scratch,
                 &mut next_carry,
-                &mut scalar_slots,
+                &mut scalar_buffers,
             ),
             None => eval_jaxpr_with_consts(body_jaxpr, body_consts, &carry).map(|o| {
                 next_carry = o;
@@ -535,7 +535,7 @@ fn evaluate_scan_sub_jaxprs(
     let body_plan = build_dense_plan(body_jaxpr);
     let mut body_env: Vec<Option<Value>> = vec![None; body_plan.as_ref().map_or(0, |p| p.slots)];
     let mut scratch: Vec<Value> = Vec::new();
-    let mut scalar_slots: Vec<ScalarF64Slot> = Vec::new();
+    let mut scalar_buffers = ScalarPlanBuffers::default();
     let mut body_out: Vec<Value> = Vec::new();
 
     let scan_context = ScanIterationContext {
@@ -557,7 +557,7 @@ fn evaluate_scan_sub_jaxprs(
                 &mut body_args,
                 &mut body_env,
                 &mut scratch,
-                &mut scalar_slots,
+                &mut scalar_buffers,
                 &mut body_out,
             )?;
         }
@@ -571,7 +571,7 @@ fn evaluate_scan_sub_jaxprs(
                 &mut body_args,
                 &mut body_env,
                 &mut scratch,
-                &mut scalar_slots,
+                &mut scalar_buffers,
                 &mut body_out,
             )?;
         }
@@ -731,7 +731,7 @@ fn evaluate_scan_iteration(
     body_args: &mut Vec<Value>,
     body_env: &mut [Option<Value>],
     scratch: &mut Vec<Value>,
-    scalar_slots: &mut Vec<ScalarF64Slot>,
+    scalar_buffers: &mut ScalarPlanBuffers,
     body_out: &mut Vec<Value>,
 ) -> Result<(), InterpreterError> {
     let x_slice = scan_slice_at(context.xs, scan_idx)?;
@@ -752,7 +752,7 @@ fn evaluate_scan_iteration(
             plan,
             scratch,
             body_out,
-            scalar_slots,
+            scalar_buffers,
         ),
         None => eval_jaxpr_with_consts(context.body_jaxpr, context.const_values, body_args)
             .map(|o| *body_out = o),
@@ -2912,6 +2912,359 @@ fn run_scalar_f64_arith_plan_into(
     Some(Ok(()))
 }
 
+// ── scalar-i64 arena plan (sibling of the scalar-f64 plan) ──────────────────
+// i64 scalar Add/Sub/Mul/Div use the EXACT wrapping/checked ops eval_primitive's
+// `int_op` applies (wrapping_add/sub/mul, checked_div(_).unwrap_or(0)), and two
+// I64 literals fold to `Literal::I64(int_op(..))` — see
+// `type_promotion::binary_literal_op` I64 arm — so the result is bit-identical.
+// NOTE: i32-dtype scalars are stored as `Literal::I64` (no Literal::I32 exists),
+// exactly as the generic scalar path treats them, so this matches the (dtype-less)
+// generic i64 behavior; genuine i32 tensors are NonI64 and bail.
+
+#[derive(Clone, Copy)]
+enum ScalarI64Operand {
+    Slot(usize),
+    Literal(i64),
+}
+
+struct ScalarI64Step {
+    op: ScalarF64BinaryOp,
+    lhs: ScalarI64Operand,
+    rhs: ScalarI64Operand,
+    out_slot: usize,
+}
+
+struct ScalarI64Plan {
+    slots: usize,
+    const_slots: Vec<usize>,
+    input_slots: Vec<usize>,
+    out_slots: Vec<usize>,
+    steps: Vec<ScalarI64Step>,
+}
+
+#[derive(Clone, Copy)]
+enum ScalarI64Slot {
+    Missing,
+    NonI64,
+    I64(i64),
+}
+
+fn scalar_i64_operand(atom: &Atom, slots: usize) -> Option<ScalarI64Operand> {
+    match atom {
+        Atom::Var(var) => {
+            let slot = var.0 as usize;
+            (slot < slots).then_some(ScalarI64Operand::Slot(slot))
+        }
+        Atom::Lit(Literal::I64(value)) => Some(ScalarI64Operand::Literal(*value)),
+        Atom::Lit(_) => None,
+    }
+}
+
+fn build_scalar_i64_arith_plan(jaxpr: &Jaxpr, slots: usize) -> Option<ScalarI64Plan> {
+    if jaxpr.equations.is_empty() || !jaxpr.effects.is_empty() {
+        return None;
+    }
+    let mut steps = Vec::with_capacity(jaxpr.equations.len());
+    for equation in &jaxpr.equations {
+        if !equation.params.is_empty()
+            || !equation.sub_jaxprs.is_empty()
+            || !equation.effects.is_empty()
+            || equation.inputs.len() != 2
+            || equation.outputs.len() != 1
+        {
+            return None;
+        }
+        let op = scalar_f64_binary_op(equation.primitive)?;
+        let out_slot = equation.outputs[0].0 as usize;
+        if out_slot >= slots {
+            return None;
+        }
+        steps.push(ScalarI64Step {
+            op,
+            lhs: scalar_i64_operand(&equation.inputs[0], slots)?,
+            rhs: scalar_i64_operand(&equation.inputs[1], slots)?,
+            out_slot,
+        });
+    }
+    Some(ScalarI64Plan {
+        slots,
+        const_slots: var_slots(&jaxpr.constvars, slots)?,
+        input_slots: var_slots(&jaxpr.invars, slots)?,
+        out_slots: var_slots(&jaxpr.outvars, slots)?,
+        steps,
+    })
+}
+
+fn scalar_i64_slot_from_value(value: &Value) -> ScalarI64Slot {
+    match value {
+        Value::Scalar(Literal::I64(value)) => ScalarI64Slot::I64(*value),
+        Value::Scalar(_) | Value::Tensor(_) => ScalarI64Slot::NonI64,
+    }
+}
+
+fn read_scalar_i64_operand(
+    slots: &[ScalarI64Slot],
+    operand: ScalarI64Operand,
+) -> Result<Option<i64>, InterpreterError> {
+    match operand {
+        ScalarI64Operand::Literal(value) => Ok(Some(value)),
+        ScalarI64Operand::Slot(slot) => match slots[slot] {
+            ScalarI64Slot::I64(value) => Ok(Some(value)),
+            ScalarI64Slot::NonI64 => Ok(None),
+            ScalarI64Slot::Missing => Err(InterpreterError::MissingVariable(VarId(slot as u32))),
+        },
+    }
+}
+
+fn apply_scalar_i64_binary(op: ScalarF64BinaryOp, lhs: i64, rhs: i64) -> i64 {
+    match op {
+        ScalarF64BinaryOp::Add => lhs.wrapping_add(rhs),
+        ScalarF64BinaryOp::Sub => lhs.wrapping_sub(rhs),
+        ScalarF64BinaryOp::Mul => lhs.wrapping_mul(rhs),
+        ScalarF64BinaryOp::Div => lhs.checked_div(rhs).unwrap_or(0),
+    }
+}
+
+fn run_scalar_i64_arith_plan_into(
+    plan: &ScalarI64Plan,
+    const_values: &[Value],
+    args: &[Value],
+    out: &mut Vec<Value>,
+    slots: &mut Vec<ScalarI64Slot>,
+) -> Option<Result<(), InterpreterError>> {
+    if const_values.len() != plan.const_slots.len() {
+        return Some(Err(InterpreterError::ConstArity {
+            expected: plan.const_slots.len(),
+            actual: const_values.len(),
+        }));
+    }
+    if args.len() != plan.input_slots.len() {
+        return Some(Err(InterpreterError::InputArity {
+            expected: plan.input_slots.len(),
+            actual: args.len(),
+        }));
+    }
+
+    slots.clear();
+    slots.resize(plan.slots, ScalarI64Slot::Missing);
+    for (&slot, value) in plan.const_slots.iter().zip(const_values) {
+        slots[slot] = scalar_i64_slot_from_value(value);
+    }
+    for (&slot, value) in plan.input_slots.iter().zip(args) {
+        slots[slot] = scalar_i64_slot_from_value(value);
+    }
+
+    for step in &plan.steps {
+        let lhs = match read_scalar_i64_operand(slots, step.lhs) {
+            Ok(Some(value)) => value,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error)),
+        };
+        let rhs = match read_scalar_i64_operand(slots, step.rhs) {
+            Ok(Some(value)) => value,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error)),
+        };
+        slots[step.out_slot] = ScalarI64Slot::I64(apply_scalar_i64_binary(step.op, lhs, rhs));
+    }
+
+    out.clear();
+    out.reserve(plan.out_slots.len());
+    for &slot in &plan.out_slots {
+        match slots[slot] {
+            ScalarI64Slot::I64(value) => out.push(Value::scalar_i64(value)),
+            ScalarI64Slot::NonI64 => return None,
+            ScalarI64Slot::Missing => {
+                return Some(Err(InterpreterError::MissingVariable(VarId(slot as u32))));
+            }
+        }
+    }
+    Some(Ok(()))
+}
+
+// ── scalar-f32 arena plan ───────────────────────────────────────────────────
+// f32 scalar Add/Sub/Mul/Div go through eval_primitive's `binary_literal_op`
+// `_ =>` arm, which WIDENS each f32 operand to f64, applies the f64 op, then
+// narrows to f32 (`literal_from_numeric_f64(F32, ..)`). A NATIVE f32 op would
+// diverge on NaN sign (see bh7y5), so the plan replicates the widen→f64→narrow
+// contract exactly: `((lhs as f64) OP (rhs as f64)) as f32`.
+
+#[derive(Clone, Copy)]
+enum ScalarF32Operand {
+    Slot(usize),
+    Literal(f32),
+}
+
+struct ScalarF32Step {
+    op: ScalarF64BinaryOp,
+    lhs: ScalarF32Operand,
+    rhs: ScalarF32Operand,
+    out_slot: usize,
+}
+
+struct ScalarF32Plan {
+    slots: usize,
+    const_slots: Vec<usize>,
+    input_slots: Vec<usize>,
+    out_slots: Vec<usize>,
+    steps: Vec<ScalarF32Step>,
+}
+
+#[derive(Clone, Copy)]
+enum ScalarF32Slot {
+    Missing,
+    NonF32,
+    F32(f32),
+}
+
+fn scalar_f32_operand(atom: &Atom, slots: usize) -> Option<ScalarF32Operand> {
+    match atom {
+        Atom::Var(var) => {
+            let slot = var.0 as usize;
+            (slot < slots).then_some(ScalarF32Operand::Slot(slot))
+        }
+        Atom::Lit(Literal::F32Bits(bits)) => Some(ScalarF32Operand::Literal(f32::from_bits(*bits))),
+        Atom::Lit(_) => None,
+    }
+}
+
+fn build_scalar_f32_arith_plan(jaxpr: &Jaxpr, slots: usize) -> Option<ScalarF32Plan> {
+    if jaxpr.equations.is_empty() || !jaxpr.effects.is_empty() {
+        return None;
+    }
+    let mut steps = Vec::with_capacity(jaxpr.equations.len());
+    for equation in &jaxpr.equations {
+        if !equation.params.is_empty()
+            || !equation.sub_jaxprs.is_empty()
+            || !equation.effects.is_empty()
+            || equation.inputs.len() != 2
+            || equation.outputs.len() != 1
+        {
+            return None;
+        }
+        let op = scalar_f64_binary_op(equation.primitive)?;
+        let out_slot = equation.outputs[0].0 as usize;
+        if out_slot >= slots {
+            return None;
+        }
+        steps.push(ScalarF32Step {
+            op,
+            lhs: scalar_f32_operand(&equation.inputs[0], slots)?,
+            rhs: scalar_f32_operand(&equation.inputs[1], slots)?,
+            out_slot,
+        });
+    }
+    Some(ScalarF32Plan {
+        slots,
+        const_slots: var_slots(&jaxpr.constvars, slots)?,
+        input_slots: var_slots(&jaxpr.invars, slots)?,
+        out_slots: var_slots(&jaxpr.outvars, slots)?,
+        steps,
+    })
+}
+
+fn scalar_f32_slot_from_value(value: &Value) -> ScalarF32Slot {
+    match value {
+        Value::Scalar(Literal::F32Bits(bits)) => ScalarF32Slot::F32(f32::from_bits(*bits)),
+        Value::Scalar(_) | Value::Tensor(_) => ScalarF32Slot::NonF32,
+    }
+}
+
+fn read_scalar_f32_operand(
+    slots: &[ScalarF32Slot],
+    operand: ScalarF32Operand,
+) -> Result<Option<f32>, InterpreterError> {
+    match operand {
+        ScalarF32Operand::Literal(value) => Ok(Some(value)),
+        ScalarF32Operand::Slot(slot) => match slots[slot] {
+            ScalarF32Slot::F32(value) => Ok(Some(value)),
+            ScalarF32Slot::NonF32 => Ok(None),
+            ScalarF32Slot::Missing => Err(InterpreterError::MissingVariable(VarId(slot as u32))),
+        },
+    }
+}
+
+fn apply_scalar_f32_binary(op: ScalarF64BinaryOp, lhs: f32, rhs: f32) -> f32 {
+    // Widen→f64-op→narrow, matching eval_primitive's f32 scalar contract exactly.
+    let (lhs, rhs) = (f64::from(lhs), f64::from(rhs));
+    let result = match op {
+        ScalarF64BinaryOp::Add => lhs + rhs,
+        ScalarF64BinaryOp::Sub => lhs - rhs,
+        ScalarF64BinaryOp::Mul => lhs * rhs,
+        ScalarF64BinaryOp::Div => lhs / rhs,
+    };
+    result as f32
+}
+
+fn run_scalar_f32_arith_plan_into(
+    plan: &ScalarF32Plan,
+    const_values: &[Value],
+    args: &[Value],
+    out: &mut Vec<Value>,
+    slots: &mut Vec<ScalarF32Slot>,
+) -> Option<Result<(), InterpreterError>> {
+    if const_values.len() != plan.const_slots.len() {
+        return Some(Err(InterpreterError::ConstArity {
+            expected: plan.const_slots.len(),
+            actual: const_values.len(),
+        }));
+    }
+    if args.len() != plan.input_slots.len() {
+        return Some(Err(InterpreterError::InputArity {
+            expected: plan.input_slots.len(),
+            actual: args.len(),
+        }));
+    }
+
+    slots.clear();
+    slots.resize(plan.slots, ScalarF32Slot::Missing);
+    for (&slot, value) in plan.const_slots.iter().zip(const_values) {
+        slots[slot] = scalar_f32_slot_from_value(value);
+    }
+    for (&slot, value) in plan.input_slots.iter().zip(args) {
+        slots[slot] = scalar_f32_slot_from_value(value);
+    }
+
+    for step in &plan.steps {
+        let lhs = match read_scalar_f32_operand(slots, step.lhs) {
+            Ok(Some(value)) => value,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error)),
+        };
+        let rhs = match read_scalar_f32_operand(slots, step.rhs) {
+            Ok(Some(value)) => value,
+            Ok(None) => return None,
+            Err(error) => return Some(Err(error)),
+        };
+        slots[step.out_slot] = ScalarF32Slot::F32(apply_scalar_f32_binary(step.op, lhs, rhs));
+    }
+
+    out.clear();
+    out.reserve(plan.out_slots.len());
+    for &slot in &plan.out_slots {
+        match slots[slot] {
+            ScalarF32Slot::F32(value) => out.push(Value::scalar_f32(value)),
+            ScalarF32Slot::NonF32 => return None,
+            ScalarF32Slot::Missing => {
+                return Some(Err(InterpreterError::MissingVariable(VarId(slot as u32))));
+            }
+        }
+    }
+    Some(Ok(()))
+}
+
+/// Reusable scratch arenas for the three monomorphic scalar-arith executors —
+/// one allocation each, reused across every loop iteration. A loop body builds
+/// only the plan(s) whose literals match its dtype (or all, if it has no
+/// literals), and the runner tries them in order; each non-matching plan bails
+/// on the first operand read, so the unused buffers stay empty.
+#[derive(Default)]
+struct ScalarPlanBuffers {
+    f64: Vec<ScalarF64Slot>,
+    i64: Vec<ScalarI64Slot>,
+    f32: Vec<ScalarF32Slot>,
+}
+
 /// A reusable dense-evaluation plan for a jaxpr: the slot count and the
 /// value-independent liveness map. Build it ONCE with [`build_dense_plan`] and
 /// feed it (plus a reusable `env` buffer) to [`run_dense_env`] on every call —
@@ -2921,6 +3274,8 @@ struct DenseEvalPlan {
     slots: usize,
     last_use: Vec<usize>,
     scalar_f64_plan: Option<ScalarF64Plan>,
+    scalar_i64_plan: Option<ScalarI64Plan>,
+    scalar_f32_plan: Option<ScalarF32Plan>,
 }
 
 /// Build a [`DenseEvalPlan`] iff the jaxpr's variable ids are dense enough for the
@@ -2945,6 +3300,8 @@ fn build_dense_plan(jaxpr: &Jaxpr) -> Option<DenseEvalPlan> {
             slots,
             last_use: compute_dense_last_use(jaxpr, slots),
             scalar_f64_plan: build_scalar_f64_arith_plan(jaxpr, slots),
+            scalar_i64_plan: build_scalar_i64_arith_plan(jaxpr, slots),
+            scalar_f32_plan: build_scalar_f32_arith_plan(jaxpr, slots),
         })
     } else {
         None
@@ -2961,6 +3318,8 @@ fn eval_jaxpr_dense_env(
         slots,
         last_use: compute_dense_last_use(jaxpr, slots),
         scalar_f64_plan: build_scalar_f64_arith_plan(jaxpr, slots),
+        scalar_i64_plan: build_scalar_i64_arith_plan(jaxpr, slots),
+        scalar_f32_plan: build_scalar_f32_arith_plan(jaxpr, slots),
     };
     let mut env: Vec<Option<Value>> = vec![None; slots];
     run_dense_plan(jaxpr, const_values, args, &mut env, &plan)
@@ -2975,7 +3334,7 @@ fn run_dense_plan(
 ) -> Result<Vec<Value>, InterpreterError> {
     let mut scratch: Vec<Value> = Vec::new();
     let mut out: Vec<Value> = Vec::new();
-    let mut scalar_slots: Vec<ScalarF64Slot> = Vec::new();
+    let mut scalar_buffers = ScalarPlanBuffers::default();
     run_dense_plan_into(
         jaxpr,
         const_values,
@@ -2984,7 +3343,7 @@ fn run_dense_plan(
         plan,
         &mut scratch,
         &mut out,
-        &mut scalar_slots,
+        &mut scalar_buffers,
     )?;
     Ok(out)
 }
@@ -2998,11 +3357,27 @@ fn run_dense_plan_into(
     plan: &DenseEvalPlan,
     scratch: &mut Vec<Value>,
     out: &mut Vec<Value>,
-    scalar_slots: &mut Vec<ScalarF64Slot>,
+    scalar_buffers: &mut ScalarPlanBuffers,
 ) -> Result<(), InterpreterError> {
-    if let Some(scalar_plan) = &plan.scalar_f64_plan
+    // Try each monomorphic scalar-arith executor; each bails (returns None) on the
+    // first operand that is not its dtype at runtime, so for a given call at most
+    // one actually runs. A body with a typed literal builds only the matching plan;
+    // a literal-free body builds all three and the runtime dtype selects one.
+    if let Some(p) = &plan.scalar_f64_plan
         && let Some(result) =
-            run_scalar_f64_arith_plan_into(scalar_plan, const_values, args, out, scalar_slots)
+            run_scalar_f64_arith_plan_into(p, const_values, args, out, &mut scalar_buffers.f64)
+    {
+        return result;
+    }
+    if let Some(p) = &plan.scalar_i64_plan
+        && let Some(result) =
+            run_scalar_i64_arith_plan_into(p, const_values, args, out, &mut scalar_buffers.i64)
+    {
+        return result;
+    }
+    if let Some(p) = &plan.scalar_f32_plan
+        && let Some(result) =
+            run_scalar_f32_arith_plan_into(p, const_values, args, out, &mut scalar_buffers.f32)
     {
         return result;
     }
@@ -3039,7 +3414,7 @@ fn run_dense_env_into(
         // Fast path: fuse a maximal cheap-elementwise run starting here into one
         // chunked pass (materializes only the final output). Bails to the normal
         // path below for anything not fuse-eligible.
-        if let Some(run) = try_fuse_elementwise_chain(jaxpr, i, &env, &last_use) {
+        if let Some(run) = try_fuse_elementwise_chain(jaxpr, i, env, last_use) {
             let tensor = match run.values {
                 FusedValues::F64(values) => TensorValue::new_f64_values(run.shape, values),
                 FusedValues::F32(values) => TensorValue::new_f32_values(run.shape, values),
@@ -3083,11 +3458,11 @@ fn run_dense_env_into(
             && eqn.outputs.len() == 1
             && !is_multi_output_primitive(eqn.primitive)
         {
-            let output = eval_primitive(eqn.primitive, &scratch, &eqn.params)
+            let output = eval_primitive(eqn.primitive, scratch, &eqn.params)
                 .map_err(InterpreterError::Primitive)?;
             env[eqn.outputs[0].0 as usize] = Some(output);
         } else {
-            let outputs = eval_equation_outputs_from_resolved(eqn, &scratch)?;
+            let outputs = eval_equation_outputs_from_resolved(eqn, scratch)?;
             for (out_var, output) in eqn.outputs.iter().zip(outputs) {
                 env[out_var.0 as usize] = Some(output);
             }
@@ -4464,6 +4839,107 @@ mod tests {
         assert_eq!(planned, generic);
     }
 
+    // Single-equation `div(a, b)` body for exercising the i64 checked_div / f64
+    // div paths (div-by-zero, i64::MIN / -1 overflow).
+    fn scalar_div_body_jaxpr() -> Jaxpr {
+        let (a, b, out) = (VarId(0), VarId(1), VarId(2));
+        Jaxpr::new(
+            vec![a, b],
+            vec![],
+            vec![out],
+            vec![Equation {
+                primitive: Primitive::Div,
+                inputs: smallvec![Atom::Var(a), Atom::Var(b)],
+                outputs: smallvec![out],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            }],
+        )
+    }
+
+    #[test]
+    fn scalar_i64_arith_plan_matches_generic() {
+        // The literal-free Mul/Add/Sub body builds all three scalar plans; i64
+        // args select the i64 executor at runtime. Cover wrapping at the extremes.
+        let jaxpr = scalar_f64_arith_body_jaxpr();
+        let cases = [
+            (7_i64, 3),
+            (-5, 4),
+            (i64::MAX, 2),
+            (i64::MIN, 3),
+            (i64::MAX, i64::MAX),
+            (1_000_000_007, 1_000_000_009),
+        ];
+        for (carry, x) in cases {
+            let args = [Value::scalar_i64(carry), Value::scalar_i64(x)];
+            let planned = eval_jaxpr(&jaxpr, &args).expect("planned");
+            let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("generic");
+            assert_eq!(planned, generic, "carry={carry} x={x}");
+        }
+    }
+
+    #[test]
+    fn scalar_i64_div_matches_generic() {
+        let jaxpr = scalar_div_body_jaxpr();
+        let cases = [(10_i64, 3), (10, 0), (i64::MIN, -1), (-7, 2), (0, 0)];
+        for (a, b) in cases {
+            let args = [Value::scalar_i64(a), Value::scalar_i64(b)];
+            let planned = eval_jaxpr(&jaxpr, &args).expect("planned");
+            let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("generic");
+            assert_eq!(planned, generic, "a={a} b={b}");
+        }
+    }
+
+    #[test]
+    fn scalar_i64_guard_miss_uses_generic_path() {
+        let jaxpr = scalar_f64_arith_body_jaxpr();
+        let args = [Value::scalar_f64(7.5), Value::scalar_f64(3.0)];
+        let planned = eval_jaxpr(&jaxpr, &args).expect("guard miss falls back");
+        let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("generic");
+        assert_eq!(planned, generic);
+    }
+
+    #[test]
+    fn scalar_f32_arith_plan_matches_generic_bits() {
+        // f32 must match eval_primitive's widen->f64-op->narrow contract bit-for-bit,
+        // including NaN / inf / -0 / subnormal (a native-f32 op would diverge on NaN).
+        let jaxpr = scalar_f64_arith_body_jaxpr();
+        let cases = [
+            (1.0001_f32, 0.9999_f32),
+            (-0.0, 3.0),
+            (f32::INFINITY, 0.0),
+            (f32::NEG_INFINITY, -2.0),
+            (f32::from_bits(0x7fc0_1234), 2.0),
+            (f32::MIN_POSITIVE, -2.0),
+            (f32::from_bits(0x0000_0001), 3.0),
+        ];
+        for (carry, x) in cases {
+            let args = [Value::scalar_f32(carry), Value::scalar_f32(x)];
+            let planned = eval_jaxpr(&jaxpr, &args).expect("planned");
+            let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("generic");
+            assert_eq!(planned, generic, "carry={carry:?} x={x:?}");
+        }
+    }
+
+    #[test]
+    fn scalar_f32_div_matches_generic_bits() {
+        let jaxpr = scalar_div_body_jaxpr();
+        let cases = [
+            (1.0_f32, 0.0_f32),
+            (-1.0, 0.0),
+            (0.0, 0.0),
+            (3.5, 2.0),
+            (f32::from_bits(0x7fc0_5678), 2.0),
+        ];
+        for (a, b) in cases {
+            let args = [Value::scalar_f32(a), Value::scalar_f32(b)];
+            let planned = eval_jaxpr(&jaxpr, &args).expect("planned");
+            let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("generic");
+            assert_eq!(planned, generic, "a={a:?} b={b:?}");
+        }
+    }
+
     #[test]
     fn const_arity_mismatch_is_reported() {
         let jaxpr = Jaxpr::new(
@@ -4955,7 +5431,7 @@ mod tests {
         let mut compiled_env: Vec<Option<Value>> = vec![None; plan.slots];
         let mut compiled_scratch: Vec<Value> = Vec::new();
         let mut compiled_out: Vec<Value> = Vec::new();
-        let mut scalar_slots: Vec<super::ScalarF64Slot> = Vec::new();
+        let mut scalar_buffers = super::ScalarPlanBuffers::default();
         super::run_dense_plan_into(
             &body,
             &[],
@@ -4964,7 +5440,7 @@ mod tests {
             &plan,
             &mut compiled_scratch,
             &mut compiled_out,
-            &mut scalar_slots,
+            &mut scalar_buffers,
         )
         .expect("compiled sample");
         assert_eq!(compiled_out, generic_out);
@@ -5002,7 +5478,7 @@ mod tests {
             let mut env: Vec<Option<Value>> = vec![None; plan.slots];
             let mut scratch: Vec<Value> = Vec::new();
             let mut o: Vec<Value> = Vec::new();
-            let mut scalar_slots: Vec<super::ScalarF64Slot> = Vec::new();
+            let mut scalar_buffers = super::ScalarPlanBuffers::default();
             let mut acc = 0.0f64;
             for _ in 0..n {
                 super::run_dense_plan_into(
@@ -5013,7 +5489,7 @@ mod tests {
                     &plan,
                     &mut scratch,
                     &mut o,
-                    &mut scalar_slots,
+                    &mut scalar_buffers,
                 )
                 .expect("compiled");
                 if let Value::Scalar(Literal::F64Bits(b)) = &o[0] {
@@ -5029,6 +5505,83 @@ mod tests {
             t_compiled * 1e9 / n as f64,
             t_generic / t_compiled,
             sha256,
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_scalar_i64_plan_overhead() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        // i64 sibling of the f64 A/B: GENERIC = run_dense_env_into (full generic
+        // machinery), COMPILED = the pre-resolved scalar-i64 step plan.
+        let body = scalar_f64_arith_body_jaxpr(); // literal-free Mul/Add/Sub
+        let n: usize = 4_000_000;
+        let args = [Value::scalar_i64(1_000_003), Value::scalar_i64(99)];
+        let plan = super::build_dense_plan(&body).expect("dense");
+
+        let t_generic = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut acc = 0i64;
+            for _ in 0..n {
+                super::run_dense_env_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan.last_use,
+                    &mut scratch,
+                    &mut o,
+                )
+                .expect("generic");
+                if let Value::Scalar(Literal::I64(v)) = &o[0] {
+                    acc = acc.wrapping_add(*v);
+                }
+            }
+            std::hint::black_box(acc);
+        });
+
+        let t_compiled = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            let mut acc = 0i64;
+            for _ in 0..n {
+                super::run_dense_plan_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan,
+                    &mut scratch,
+                    &mut o,
+                    &mut bufs,
+                )
+                .expect("compiled");
+                if let Value::Scalar(Literal::I64(v)) = &o[0] {
+                    acc = acc.wrapping_add(*v);
+                }
+            }
+            std::hint::black_box(acc);
+        });
+
+        println!(
+            "BENCH scalar-i64 dispatch {n} evals (3-op): GENERIC {:.1}ns/eval -> COMPILED {:.1}ns/eval = {:.2}x",
+            t_generic * 1e9 / n as f64,
+            t_compiled * 1e9 / n as f64,
+            t_generic / t_compiled,
         );
     }
 
