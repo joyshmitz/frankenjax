@@ -1137,7 +1137,10 @@ enum FusedValues {
     I64(Vec<i64>),
     /// Dense half-float (BF16/F16) bit patterns tagged with the logical dtype, so
     /// the chain materializes back via `new_half_float_values` bit-identically.
-    Half { dtype: DType, values: Vec<u16> },
+    Half {
+        dtype: DType,
+        values: Vec<u16>,
+    },
 }
 
 struct FusedRun {
@@ -2479,10 +2482,20 @@ fn apply_half_fusion_other(
             let sl = &ext[i][base..base + out.len()];
             match chain_left {
                 true => out.iter_mut().zip(sl).for_each(|(o, e)| {
-                    *o = half_fused_binary(dt, op, half_fusion_widen(dt, *o), half_fusion_widen(dt, *e))
+                    *o = half_fused_binary(
+                        dt,
+                        op,
+                        half_fusion_widen(dt, *o),
+                        half_fusion_widen(dt, *e),
+                    )
                 }),
                 false => out.iter_mut().zip(sl).for_each(|(o, e)| {
-                    *o = half_fused_binary(dt, op, half_fusion_widen(dt, *e), half_fusion_widen(dt, *o))
+                    *o = half_fused_binary(
+                        dt,
+                        op,
+                        half_fusion_widen(dt, *e),
+                        half_fusion_widen(dt, *o),
+                    )
                 }),
             }
         }
@@ -3330,7 +3343,9 @@ mod tests {
         // widen→f64→op→round-to-bf16 (round-to-odd) per-step contract. The fused
         // path must reproduce those bits exactly, incl. ±0 / inf / NaN / subnormal.
         let n = 4096usize;
-        let mut xb: Vec<u16> = (0..n).map(|i| bf16_bits_of(i as f64 * 0.013 - 9.0)).collect();
+        let mut xb: Vec<u16> = (0..n)
+            .map(|i| bf16_bits_of(i as f64 * 0.013 - 9.0))
+            .collect();
         let mut yb: Vec<u16> = (0..n)
             .map(|i| bf16_bits_of((i as f64 * 0.007).sin() + 1.5))
             .collect();
@@ -3403,7 +3418,9 @@ mod tests {
             }
         }
         let n = 2048usize;
-        let mut xb: Vec<u16> = (0..n).map(|i| f16_bits_of(i as f64 * 0.001 - 1.0)).collect();
+        let mut xb: Vec<u16> = (0..n)
+            .map(|i| f16_bits_of(i as f64 * 0.001 - 1.0))
+            .collect();
         let yb: Vec<u16> = (0..n)
             .map(|i| f16_bits_of((i as f64 * 0.005).cos()))
             .collect();
@@ -3433,7 +3450,9 @@ mod tests {
             Value::Tensor(
                 TensorValue::new_half_float_values(
                     DType::F16,
-                    Shape { dims: vec![n as u32] },
+                    Shape {
+                        dims: vec![n as u32],
+                    },
                     bits.to_vec(),
                 )
                 .unwrap(),
@@ -3455,7 +3474,10 @@ mod tests {
         );
         let digest = fj_test_utils::fixture_id_from_json(&want_bits)
             .expect("reference output bits should hash");
-        assert_eq!(digest, "50bd04003ca23bfb110a239a785969d8f4f5da9d3c9ab96f6a79a332d41a149c");
+        assert_eq!(
+            digest,
+            "50bd04003ca23bfb110a239a785969d8f4f5da9d3c9ab96f6a79a332d41a149c"
+        );
     }
 
     #[test]
@@ -4612,8 +4634,16 @@ mod tests {
             vec![],
             vec![out],
             vec![
-                mk(Primitive::Mul, smallvec![Atom::Var(carry), Atom::Var(x)], v2),
-                mk(Primitive::Add, smallvec![Atom::Var(v2), Atom::Var(carry)], v3),
+                mk(
+                    Primitive::Mul,
+                    smallvec![Atom::Var(carry), Atom::Var(x)],
+                    v2,
+                ),
+                mk(
+                    Primitive::Add,
+                    smallvec![Atom::Var(v2), Atom::Var(carry)],
+                    v3,
+                ),
                 mk(Primitive::Sub, smallvec![Atom::Var(v3), Atom::Var(x)], out),
             ],
         );
