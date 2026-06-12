@@ -3367,22 +3367,43 @@ fn complex_lu_solve(
     n: usize,
     ncols: usize,
 ) -> Vec<(f64, f64)> {
+    // Solve all `ncols` RHS columns together (X starts as P·B, solved in place): read
+    // each `lu[i][k]` ONCE and apply it across every column (inner column loop
+    // vectorizes) so the shared L\U factor streams from cache once instead of once
+    // per column. BIT-IDENTICAL to the per-column forward/back substitution — each
+    // column's ascending-`k` complex fold is unchanged, only the loop nesting differs.
     let mut x = vec![(0.0_f64, 0.0_f64); n * ncols];
-    for jcol in 0..ncols {
-        let mut y = vec![(0.0_f64, 0.0_f64); n];
-        for i in 0..n {
-            let mut s = b[perm[i] * ncols + jcol];
-            for k in 0..i {
-                s = complex_sub(s, complex_mul(lu[i * n + k], y[k]));
+    // Forward: y[i][:] = (P·B)[i][:] − Σ_{k<i} lu[i][k]·y[k][:]  (stored in x).
+    for i in 0..n {
+        let xi = i * ncols;
+        let src = perm[i] * ncols;
+        x[xi..xi + ncols].copy_from_slice(&b[src..src + ncols]);
+        for k in 0..i {
+            let l = lu[i * n + k];
+            let (head, tail) = x.split_at_mut(xi);
+            let yk = &head[k * ncols..k * ncols + ncols];
+            let yi = &mut tail[..ncols];
+            for col in 0..ncols {
+                yi[col] = complex_sub(yi[col], complex_mul(l, yk[col]));
             }
-            y[i] = s;
         }
-        for i in (0..n).rev() {
-            let mut s = y[i];
-            for k in (i + 1)..n {
-                s = complex_sub(s, complex_mul(lu[i * n + k], x[k * ncols + jcol]));
+    }
+    // Back: x[i][:] = (y[i][:] − Σ_{k>i} lu[i][k]·x[k][:]) / lu[i][i].
+    for i in (0..n).rev() {
+        let xi = i * ncols;
+        for k in (i + 1)..n {
+            let u = lu[i * n + k];
+            let (head, tail) = x.split_at_mut(k * ncols);
+            let yi = &mut head[xi..xi + ncols];
+            let xk = &tail[..ncols];
+            for col in 0..ncols {
+                yi[col] = complex_sub(yi[col], complex_mul(u, xk[col]));
             }
-            x[i * ncols + jcol] = complex_div(s, lu[i * n + i]);
+        }
+        let diag = lu[i * n + i];
+        let xi_slice = &mut x[xi..xi + ncols];
+        for col in 0..ncols {
+            xi_slice[col] = complex_div(xi_slice[col], diag);
         }
     }
     x
@@ -10447,6 +10468,98 @@ mod tests {
                     "A·X≠B at ({row},{col}): {acc:?} vs {want:?}"
                 );
             }
+        }
+    }
+
+    // Inline per-column complex LU solve reference (the prior structure) for the
+    // batched-vs-per-column bit-identity test + bench.
+    fn complex_lu_solve_per_column(
+        lu: &[(f64, f64)],
+        perm: &[usize],
+        b: &[(f64, f64)],
+        n: usize,
+        ncols: usize,
+    ) -> Vec<(f64, f64)> {
+        let mut x = vec![(0.0_f64, 0.0_f64); n * ncols];
+        for jcol in 0..ncols {
+            let mut y = vec![(0.0_f64, 0.0_f64); n];
+            for i in 0..n {
+                let mut s = b[perm[i] * ncols + jcol];
+                for k in 0..i {
+                    s = complex_sub(s, complex_mul(lu[i * n + k], y[k]));
+                }
+                y[i] = s;
+            }
+            for i in (0..n).rev() {
+                let mut s = y[i];
+                for k in (i + 1)..n {
+                    s = complex_sub(s, complex_mul(lu[i * n + k], x[k * ncols + jcol]));
+                }
+                x[i * ncols + jcol] = complex_div(s, lu[i * n + i]);
+            }
+        }
+        x
+    }
+
+    fn complex_lu_system(n: usize, ncols: usize) -> (Vec<(f64, f64)>, Vec<usize>, Vec<(f64, f64)>) {
+        let mut a = vec![(0.0_f64, 0.0_f64); n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = if i == j {
+                    ((n as f64) + 4.0, 1.0)
+                } else {
+                    ((((i * 31 + j * 17) % 11) as f64 - 5.0) * 0.1, (((i + j) % 7) as f64 - 3.0) * 0.05)
+                };
+            }
+        }
+        let perm = super::complex_lu_factor_blocked(&mut a, n);
+        let b: Vec<(f64, f64)> = (0..n * ncols)
+            .map(|k| ((((k * 53 + 11) % 37) as f64) * 0.1 - 1.8, (((k * 13) % 19) as f64 - 9.0) * 0.05))
+            .collect();
+        (a, perm, b)
+    }
+
+    #[test]
+    fn complex_lu_solve_batched_bit_identical_to_per_column() {
+        let n = 160usize;
+        let ncols = 40usize;
+        let (lu, perm, b) = complex_lu_system(n, ncols);
+        let got = super::complex_lu_solve(&lu, &perm, &b, n, ncols);
+        let want = complex_lu_solve_per_column(&lu, &perm, &b, n, ncols);
+        for k in 0..n * ncols {
+            assert_eq!(got[k].0.to_bits(), want[k].0.to_bits(), "re diverged at {k}");
+            assert_eq!(got[k].1.to_bits(), want[k].1.to_bits(), "im diverged at {k}");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_complex_lu_solve_batched_vs_per_column() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        for &(n, ncols) in &[(1024usize, 64usize), (1024, 256), (2048, 128)] {
+            let (lu, perm, b) = complex_lu_system(n, ncols);
+            let t_batched = best_time(|| {
+                std::hint::black_box(super::complex_lu_solve(&lu, &perm, &b, n, ncols));
+            });
+            let t_percol = best_time(|| {
+                std::hint::black_box(complex_lu_solve_per_column(&lu, &perm, &b, n, ncols));
+            });
+            println!(
+                "BENCH complex_lu_solve n={n} ncols={ncols}: per-column {:.2}ms -> batched {:.2}ms = {:.2}x",
+                t_percol * 1e3,
+                t_batched * 1e3,
+                t_percol / t_batched
+            );
         }
     }
 
