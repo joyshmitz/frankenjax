@@ -2954,6 +2954,25 @@ mod tests {
         }
     }
 
+    /// Canonicalize NaN lanes to one fixed bit pattern before a bit-exact f32
+    /// comparison. A NaN's sign and payload are IEEE-UNSPECIFIED through
+    /// arithmetic, so a fused NATIVE-f32 chain and the unfused f32→f64→f32
+    /// reference legitimately disagree on the NaN sign after a `Neg`/`Mul`
+    /// (both are NaN — observably identical to JAX/XLA, which likewise does not
+    /// pin NaN bits). Finite values, ±0, and ±inf stay EXACT, so the proof still
+    /// catches any real NaN-vs-finite / inf-sign / ±0 / subnormal divergence.
+    fn canon_f32_nan_bits(bits: &[u32]) -> Vec<u32> {
+        bits.iter()
+            .map(|&b| {
+                if f32::from_bits(b).is_nan() {
+                    0x7fc0_0000
+                } else {
+                    b
+                }
+            })
+            .collect()
+    }
+
     fn lit32(x: f32) -> Atom {
         Atom::Lit(Literal::from_f32(x))
     }
@@ -3249,17 +3268,17 @@ mod tests {
             out_tensor.elements.as_f32_slice().is_some(),
             "fused output should stay dense f32"
         );
-        let got_bits = f32_bits(&fused_outputs[0]);
-        let want_bits = f32_bits(&unfused_outputs[0]);
+        let got_bits = canon_f32_nan_bits(&f32_bits(&fused_outputs[0]));
+        let want_bits = canon_f32_nan_bits(&f32_bits(&unfused_outputs[0]));
         assert_eq!(
             got_bits, want_bits,
-            "fused f32 chain must match forced unfused path bit-for-bit"
+            "fused f32 chain must match forced unfused path bit-for-bit (NaN canonicalized)"
         );
         let digest = fj_test_utils::fixture_id_from_json(&want_bits)
             .expect("reference output bits should hash");
         assert_eq!(
             digest,
-            "fef28624a52e5647abc35f0d388072b443cf081e5941243c6c58a8bd91f40a84"
+            "49d07f45aa58ec10dfd8469ebd0bd5f5105faa366a242abe7543e4bde7d10be8"
         );
     }
 
@@ -3585,17 +3604,17 @@ mod tests {
             out_tensor.elements.as_f32_slice().is_some(),
             "fused col-broadcast output should stay dense f32"
         );
-        let got_bits = f32_bits(&fused_outputs[0]);
-        let want_bits = f32_bits(&unfused_outputs[0]);
+        let got_bits = canon_f32_nan_bits(&f32_bits(&fused_outputs[0]));
+        let want_bits = canon_f32_nan_bits(&f32_bits(&unfused_outputs[0]));
         assert_eq!(
             got_bits, want_bits,
-            "fused f32 col-broadcast chain must match forced unfused path bit-for-bit"
+            "fused f32 col-broadcast chain must match forced unfused path bit-for-bit (NaN canonicalized)"
         );
         let digest = fj_test_utils::fixture_id_from_json(&want_bits)
             .expect("reference output bits should hash");
         assert_eq!(
             digest,
-            "5762f3ec4614f491d21407cbb09c5cd92915840f65d145070f8d8b5e8c7c5e3a"
+            "ebbd5cfb379f28217357239c207690880113a017fa908b1a07a878bb4c8bcc0d"
         );
     }
 
