@@ -610,7 +610,7 @@ fn batched_tri_solve(
     };
     // Process one pivot row `i` (subtract its already-solved neighbours `k`, then
     // divide by the diagonal) across all columns.
-    let mut solve_row = |i: usize, ks: &[usize], x: &mut [(f64, f64)]| {
+    let solve_row = |i: usize, ks: &[usize], x: &mut [(f64, f64)]| {
         for &k in ks {
             let aik = a_at(i, k);
             // x[i][:] and x[k][:] are disjoint rows; split so both can be borrowed.
@@ -6060,6 +6060,98 @@ pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     Some(lu_solve(&lu, &p, b, n))
 }
 
+/// Block size for the communication-avoiding multi-RHS triangular solve.
+const TRSM_BLOCK: usize = 64;
+
+/// Blocked (communication-avoiding) multi-RHS triangular solve `L·U·X = P·B`.
+/// Splits the substitution into `TRSM_BLOCK`-row blocks: the bulk cross-block
+/// elimination `X_block −= L_block·X_solved` runs through the cache-blocked,
+/// threaded `matmul_2d` (X streams from cache instead of being re-read O(n) times
+/// by the scalar SAXPY sweep), and only the small diagonal block is solved by
+/// scalar substitution. NOT bit-identical to the per-column / batched solve (the
+/// GEMM sums a block's contributions before subtracting, vs the running scalar
+/// subtraction) — but within solve's tolerance, so it is gated to large `n`/`m`
+/// where the GEMM pays and the bit-exact small-`n` goldens keep the scalar path.
+fn lu_solve_multi_blocked(lu: &[f64], p: &[usize], b: &[f64], n: usize, m: usize) -> Vec<f64> {
+    let nb = TRSM_BLOCK;
+    let mut x = vec![0.0f64; n * m];
+    for i in 0..n {
+        let src = p[i] * m;
+        x[i * m..i * m + m].copy_from_slice(&b[src..src + m]);
+    }
+    // Forward (L, unit lower): left-looking blocks ascending.
+    let mut r0 = 0;
+    while r0 < n {
+        let r1 = (r0 + nb).min(n);
+        let bsz = r1 - r0;
+        if r0 > 0 {
+            let mut l_sub = vec![0.0f64; bsz * r0];
+            for ii in 0..bsz {
+                let s = (r0 + ii) * n;
+                l_sub[ii * r0..ii * r0 + r0].copy_from_slice(&lu[s..s + r0]);
+            }
+            let prod = crate::tensor_contraction::matmul_2d(&l_sub, bsz, r0, &x[0..r0 * m], m);
+            for ii in 0..bsz {
+                let xb = (r0 + ii) * m;
+                for col in 0..m {
+                    x[xb + col] -= prod[ii * m + col];
+                }
+            }
+        }
+        for i in r0..r1 {
+            for k in r0..i {
+                let l = lu[i * n + k];
+                let (head, tail) = x.split_at_mut(i * m);
+                let xk = &head[k * m..k * m + m];
+                let xi = &mut tail[..m];
+                for col in 0..m {
+                    xi[col] -= l * xk[col];
+                }
+            }
+        }
+        r0 = r1;
+    }
+    // Back (U, upper): left-looking blocks descending.
+    let mut r1 = n;
+    while r1 > 0 {
+        let r0 = r1.saturating_sub(nb);
+        let bsz = r1 - r0;
+        if r1 < n {
+            let cw = n - r1;
+            let mut u_sub = vec![0.0f64; bsz * cw];
+            for ii in 0..bsz {
+                let s = (r0 + ii) * n + r1;
+                u_sub[ii * cw..ii * cw + cw].copy_from_slice(&lu[s..s + cw]);
+            }
+            let prod = crate::tensor_contraction::matmul_2d(&u_sub, bsz, cw, &x[r1 * m..n * m], m);
+            for ii in 0..bsz {
+                let xb = (r0 + ii) * m;
+                for col in 0..m {
+                    x[xb + col] -= prod[ii * m + col];
+                }
+            }
+        }
+        for i in (r0..r1).rev() {
+            for k in (i + 1)..r1 {
+                let u = lu[i * n + k];
+                let (head, tail) = x.split_at_mut(k * m);
+                let xi = &mut head[i * m..i * m + m];
+                let xk = &tail[..m];
+                for col in 0..m {
+                    xi[col] -= u * xk[col];
+                }
+            }
+            let diag = lu[i * n + i];
+            let xi = &mut x[i * m..i * m + m];
+            for col in 0..m {
+                xi[col] /= diag;
+            }
+        }
+        r1 = r0;
+    }
+    x
+}
+
 /// Batched multi-RHS triangular solve `L·U·X = P·B` (B and X are n×m row-major)
 /// from a combined `lu` factor. Reads each `lu[i][k]` ONCE and applies it across
 /// ALL m columns (the inner column loop auto-vectorizes), so the shared factor
@@ -6067,6 +6159,13 @@ pub fn solve(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
 /// `m` independent [`lu_solve`] calls: each column's forward/back substitution is
 /// the same ascending-`k` fold, unchanged — only the loop nesting differs.
 fn lu_solve_multi(lu: &[f64], p: &[usize], b: &[f64], n: usize, m: usize) -> Vec<f64> {
+    // At scale, the communication-avoiding blocked TRSM (cross-block elimination via
+    // matmul_2d) beats the scalar SAXPY sweep ~2-2.7x. It is not bit-identical (block
+    // sum vs running subtract) — within solve tolerance — so the small-n bit-exact
+    // path below is preserved (and the bit-identity goldens use n < this gate).
+    if n >= MIXED_PRECISION_SOLVE_MIN_N && m >= 64 {
+        return lu_solve_multi_blocked(lu, p, b, n, m);
+    }
     let mut x = vec![0.0f64; n * m];
     // Forward: y[i][:] = (P·B)[i][:] − Σ_{k<i} lu[i][k]·y[k][:]  (stored in x).
     for i in 0..n {
@@ -10811,6 +10910,61 @@ mod tests {
                     "batched multi-RHS solve diverged at i={i} j={j}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn lu_solve_multi_blocked_matches_batched_within_tolerance() {
+        // The blocked (GEMM cross-block) TRSM is not bit-identical to the scalar
+        // batched solve (block-sum vs running subtract) but must agree to tolerance.
+        let n = 600usize;
+        let m = 32usize;
+        let (a, _b) = mixed_solve_system(n);
+        let bmat: Vec<f64> = (0..n * m)
+            .map(|k| (((k * 53 + 11) % 37) as f64) * 0.1 - 1.8)
+            .collect();
+        let (lu, p) = super::lu_factor_for_solve(&a, n).unwrap();
+        let batched = super::lu_solve_multi(&lu, &p, &bmat, n, m);
+        let blocked = super::lu_solve_multi_blocked(&lu, &p, &bmat, n, m);
+        let mut max_rel = 0.0f64;
+        for k in 0..n * m {
+            max_rel = max_rel.max((blocked[k] - batched[k]).abs() / (batched[k].abs() + 1.0));
+        }
+        assert!(max_rel < 1e-9, "blocked TRSM diverged from batched: {max_rel:.3e}");
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_lu_solve_multi_blocked_vs_batched() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        for &(n, m) in &[(1024usize, 256usize), (1024, 512), (2048, 256)] {
+            let (a, _b) = mixed_solve_system(n);
+            let bmat: Vec<f64> = (0..n * m)
+                .map(|k| (((k * 53 + 11) % 37) as f64) * 0.1 - 1.8)
+                .collect();
+            let (lu, p) = super::lu_factor_for_solve(&a, n).unwrap();
+            let t_batched = best_time(|| {
+                std::hint::black_box(super::lu_solve_multi(&lu, &p, &bmat, n, m));
+            });
+            let t_blocked = best_time(|| {
+                std::hint::black_box(super::lu_solve_multi_blocked(&lu, &p, &bmat, n, m));
+            });
+            println!(
+                "BENCH lu_solve_multi n={n} m={m}: batched {:.2}ms -> blocked {:.2}ms = {:.2}x",
+                t_batched * 1e3,
+                t_blocked * 1e3,
+                t_batched / t_blocked
+            );
         }
     }
 
