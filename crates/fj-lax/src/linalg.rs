@@ -6043,6 +6043,157 @@ fn lu_solve_f32(lu: &[f32], p: &[usize], b: &[f32], n: usize) -> Vec<f32> {
     x
 }
 
+/// Blocked (communication-avoiding) f32 multi-RHS triangular solve `L·U·X = P·B` —
+/// the single-precision sibling of [`lu_solve_multi_blocked`]. The bulk cross-block
+/// elimination `X_block −= L_block·X_solved` runs through the native-f32 GEMM
+/// [`batched_matmul_2d_f32_in`] (~2× the f64 kernel and X streams from cache instead
+/// of being re-read O(n) times by the scalar sweep); only the small diagonal block
+/// is solved by scalar substitution. For the mixed-precision multi-RHS path, where
+/// the result is refined to f64 accuracy against f64 residuals — so the f32 block
+/// rounding is absorbed by refinement.
+fn lu_solve_multi_blocked_f32(lu: &[f32], p: &[usize], b: &[f32], n: usize, m: usize) -> Vec<f32> {
+    let nb = TRSM_BLOCK;
+    let mut x = vec![0.0f32; n * m];
+    for i in 0..n {
+        let src = p[i] * m;
+        x[i * m..i * m + m].copy_from_slice(&b[src..src + m]);
+    }
+    // Forward (L, unit lower): left-looking blocks ascending.
+    let mut r0 = 0;
+    while r0 < n {
+        let r1 = (r0 + nb).min(n);
+        let bsz = r1 - r0;
+        if r0 > 0 {
+            let mut l_sub = vec![0.0f32; bsz * r0];
+            for ii in 0..bsz {
+                let s = (r0 + ii) * n;
+                l_sub[ii * r0..ii * r0 + r0].copy_from_slice(&lu[s..s + r0]);
+            }
+            let prod = crate::tensor_contraction::batched_matmul_2d_f32_in(
+                &l_sub,
+                1,
+                bsz,
+                r0,
+                &x[0..r0 * m],
+                m,
+            );
+            for ii in 0..bsz {
+                let xb = (r0 + ii) * m;
+                for col in 0..m {
+                    x[xb + col] -= prod[ii * m + col];
+                }
+            }
+        }
+        for i in r0..r1 {
+            for k in r0..i {
+                let l = lu[i * n + k];
+                let (head, tail) = x.split_at_mut(i * m);
+                let xk = &head[k * m..k * m + m];
+                let xi = &mut tail[..m];
+                for col in 0..m {
+                    xi[col] -= l * xk[col];
+                }
+            }
+        }
+        r0 = r1;
+    }
+    // Back (U, upper): left-looking blocks descending.
+    let mut r1 = n;
+    while r1 > 0 {
+        let r0 = r1.saturating_sub(nb);
+        let bsz = r1 - r0;
+        if r1 < n {
+            let cw = n - r1;
+            let mut u_sub = vec![0.0f32; bsz * cw];
+            for ii in 0..bsz {
+                let s = (r0 + ii) * n + r1;
+                u_sub[ii * cw..ii * cw + cw].copy_from_slice(&lu[s..s + cw]);
+            }
+            let prod = crate::tensor_contraction::batched_matmul_2d_f32_in(
+                &u_sub,
+                1,
+                bsz,
+                cw,
+                &x[r1 * m..n * m],
+                m,
+            );
+            for ii in 0..bsz {
+                let xb = (r0 + ii) * m;
+                for col in 0..m {
+                    x[xb + col] -= prod[ii * m + col];
+                }
+            }
+        }
+        for i in (r0..r1).rev() {
+            for k in (i + 1)..r1 {
+                let u = lu[i * n + k];
+                let (head, tail) = x.split_at_mut(k * m);
+                let xi = &mut head[i * m..i * m + m];
+                let xk = &tail[..m];
+                for col in 0..m {
+                    xi[col] -= u * xk[col];
+                }
+            }
+            let diag = lu[i * n + i];
+            let xi = &mut x[i * m..i * m + m];
+            for col in 0..m {
+                xi[col] /= diag;
+            }
+        }
+        r1 = r0;
+    }
+    x
+}
+
+/// f32 batched multi-RHS triangular solve `L·U·X = P·B` (`B`, `X` row-major `n×m`)
+/// from a combined f32 `lu` factor — the single-precision sibling of
+/// [`lu_solve_multi`]. Each `lu[i][k]` is read once and applied across all `m`
+/// columns (the inner column loop auto-vectorizes), so the shared factor streams
+/// from cache once instead of once per column. Used by the mixed-precision
+/// multi-RHS solve (initial f32 solve + each f32 refinement correction). At scale
+/// (large `m`) the scalar column sweep is the bottleneck, so it switches to the
+/// communication-avoiding [`lu_solve_multi_blocked_f32`] (f32 GEMM cross-block
+/// elimination) — the f32 block rounding is absorbed by f64 residual refinement.
+fn lu_solve_multi_f32(lu: &[f32], p: &[usize], b: &[f32], n: usize, m: usize) -> Vec<f32> {
+    if n >= MIXED_PRECISION_SOLVE_MIN_N && m >= 64 {
+        return lu_solve_multi_blocked_f32(lu, p, b, n, m);
+    }
+    let mut x = vec![0.0f32; n * m];
+    // Forward (unit-lower L): y[i][:] = (P·B)[i][:] − Σ_{k<i} lu[i][k]·y[k][:].
+    for i in 0..n {
+        let xi = i * m;
+        let src = p[i] * m;
+        x[xi..xi + m].copy_from_slice(&b[src..src + m]);
+        for k in 0..i {
+            let l = lu[i * n + k];
+            let (head, tail) = x.split_at_mut(xi);
+            let yk = &head[k * m..k * m + m];
+            let yi = &mut tail[..m];
+            for col in 0..m {
+                yi[col] -= l * yk[col];
+            }
+        }
+    }
+    // Back (upper U): x[i][:] = (y[i][:] − Σ_{k>i} lu[i][k]·x[k][:]) / lu[i][i].
+    for i in (0..n).rev() {
+        let xi = i * m;
+        for k in (i + 1)..n {
+            let u = lu[i * n + k];
+            let (head, tail) = x.split_at_mut(k * m);
+            let yi = &mut head[xi..xi + m];
+            let xk = &tail[..m];
+            for col in 0..m {
+                yi[col] -= u * xk[col];
+            }
+        }
+        let diag = lu[i * n + i];
+        for col in 0..m {
+            x[xi + col] /= diag;
+        }
+    }
+    x
+}
+
 /// Mixed-precision iterative-refinement solve: factor `A` ONCE in f32 (≈2× faster
 /// than f64 at scale), then recover f64 accuracy by refining against f64-precision
 /// residuals (`r = b − A·x` in f64; solve `A·dx = r` with the cached f32 factors;
@@ -6103,6 +6254,80 @@ fn solve_mixed_precision(a: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
         let r32: Vec<f32> = r.iter().map(|&v| v as f32).collect();
         let dx = lu_solve_f32(&lu32, &perm, &r32, n);
         for i in 0..n {
+            x[i] += dx[i] as f64;
+        }
+    }
+    if residual(&x, &mut r) <= accept {
+        Some(x)
+    } else {
+        None
+    }
+}
+
+/// Mixed-precision iterative-refinement multi-RHS solve `A·X = B` (`B`, `X` are
+/// `n×m` row-major) — the dense-RHS sibling of [`solve_mixed_precision`]. Factor
+/// `A` ONCE in f32 (≈2× faster than f64 at scale), solve all `m` columns in f32,
+/// then recover f64 accuracy by refining against f64-precision residuals
+/// (`R = B − A·X` in f64; solve `A·dX = R` with the cached f32 factors; `X += dX`).
+/// The dominant per-iteration cost — the `A·X` residual GEMM, O(n²·m) — runs
+/// through the cache-blocked, auto-threaded f64 [`matmul_2d`] (`A` as `n×n`, `X` as
+/// `n×m`); the f32 triangular re-solves reuse [`lu_solve_multi_f32`]. Returns `None`
+/// (caller falls back to the f64 [`lu_solve_multi`]) when the f32 factor is singular
+/// or refinement fails to reach f64-quality within [`MIXED_REFINE_MAX_ITERS`]
+/// (ill-conditioned `A`), so parity is never at risk. Convergence is judged on the
+/// Frobenius norm of the full residual, matching the single-RHS 2-norm target.
+fn solve_multi_rhs_mixed_precision(a: &[f64], b: &[f64], n: usize, m: usize) -> Option<Vec<f64>> {
+    if a.len() != n * n || b.len() != n * m {
+        return None;
+    }
+    let mut lu32: Vec<f32> = a.iter().map(|&x| x as f32).collect();
+    let perm = lu_factor_real_blocked_f32(&mut lu32, n);
+    for i in 0..n {
+        let d = lu32[i * n + i];
+        if !d.is_finite() || d == 0.0 {
+            return None;
+        }
+    }
+    let bnorm = b.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if bnorm == 0.0 {
+        return Some(vec![0.0; n * m]);
+    }
+    // `R = B − A·X` in f64; returns its Frobenius norm. `A·X` is the refinement's
+    // dominant per-iteration cost (O(n²·m), and A streams from RAM), so it runs
+    // through the cache-blocked, auto-threaded f64 `matmul_2d` (A as n×n, X as n×m).
+    let residual = |x: &[f64], r: &mut [f64]| -> f64 {
+        let ax = crate::tensor_contraction::matmul_2d(a, n, n, x, m);
+        let mut s2 = 0.0f64;
+        for i in 0..n * m {
+            let s = b[i] - ax[i];
+            r[i] = s;
+            s2 += s * s;
+        }
+        s2.sqrt()
+    };
+
+    let b32: Vec<f32> = b.iter().map(|&v| v as f32).collect();
+    let mut x: Vec<f64> = lu_solve_multi_f32(&lu32, &perm, &b32, n, m)
+        .iter()
+        .map(|&v| v as f64)
+        .collect();
+
+    let accept = 1e-12 * (bnorm + 1.0); // f64-quality residual → matches the f64 solve
+    let mut r = vec![0.0f64; n * m];
+    let mut prev = f64::INFINITY;
+    for _ in 0..MIXED_REFINE_MAX_ITERS {
+        let rnorm = residual(&x, &mut r);
+        if rnorm <= accept {
+            return Some(x);
+        }
+        if rnorm >= prev {
+            // refinement stalled (f32-factor / conditioning limit) — fail to f64.
+            return None;
+        }
+        prev = rnorm;
+        let r32: Vec<f32> = r.iter().map(|&v| v as f32).collect();
+        let dx = lu_solve_multi_f32(&lu32, &perm, &r32, n, m);
+        for i in 0..n * m {
             x[i] += dx[i] as f64;
         }
     }
@@ -6278,6 +6503,20 @@ fn lu_solve_multi(lu: &[f64], p: &[usize], b: &[f64], n: usize, m: usize) -> Vec
 /// identical: every column previously received the same factorization of the
 /// same `A`.
 pub fn solve_multi_rhs(a: &[f64], b: &[f64], n: usize, m: usize) -> Option<Vec<f64>> {
+    // Mixed-precision iterative refinement in the factorization-dominated regime:
+    // the O(n³) factor runs ~2× faster in f32 while the refinement overhead is
+    // O(n²·m·iters) (an f64 residual GEMM + f32 re-solve per iteration). The f32-LU
+    // win only survives the refinement tax when the cubic factor dominates the
+    // quadratic refinement, i.e. `n ≥ 8·m`; beyond that the already-blocked f64
+    // multi-RHS solve is hard to beat, so fall through. Always falls back to the
+    // f64 path on singular / ill-conditioned non-convergence, so the result is
+    // f64-quality regardless (parity preserved).
+    if n >= MIXED_PRECISION_SOLVE_MIN_N
+        && n >= 8 * m
+        && let Some(x) = solve_multi_rhs_mixed_precision(a, b, n, m)
+    {
+        return Some(x);
+    }
     let (lu, p) = lu_factor_for_solve(a, n)?;
     // Batched forward/back substitution: stream the shared L\U factor once and
     // apply across all m columns, instead of `m` per-column passes each re-reading
@@ -11004,6 +11243,90 @@ mod tests {
         let prod = super::solve(&a, &b, n).unwrap();
         for i in 0..n {
             assert!((prod[i] - f64ref[i]).abs() / (f64ref[i].abs() + 1.0) < 1e-9);
+        }
+    }
+
+    // Multi-column RHS for the mixed-precision multi-RHS tests/bench: column `c`
+    // is the single-RHS vector cyclically shifted, so each column is a distinct,
+    // well-posed system against the same diagonally-dominant `A`.
+    fn mixed_solve_system_multi(n: usize, m: usize) -> (Vec<f64>, Vec<f64>) {
+        let (a, b1) = mixed_solve_system(n);
+        let mut b = vec![0.0f64; n * m];
+        for i in 0..n {
+            for c in 0..m {
+                b[i * m + c] = b1[(i + c) % n] + (c as f64) * 0.013;
+            }
+        }
+        (a, b)
+    }
+
+    #[test]
+    fn mixed_precision_solve_multi_matches_f64_within_tolerance() {
+        // At n ≥ MIXED_PRECISION_SOLVE_MIN_N `solve_multi_rhs` runs the
+        // mixed-precision multi-RHS path; its result must match the f64 reference
+        // (batched f64 solve) to within solve tolerance for every column.
+        let n = super::MIXED_PRECISION_SOLVE_MIN_N + 9;
+        let m = 32; // n ≥ 8·m so production `solve_multi_rhs` routes through mixed.
+        let (a, b) = mixed_solve_system_multi(n, m);
+        let mixed =
+            super::solve_multi_rhs_mixed_precision(&a, &b, n, m).expect("mixed-multi should converge");
+        // f64 reference (the pre-mixed batched path).
+        let (lu, p) = super::lu_factor_for_solve(&a, n).unwrap();
+        let f64ref = super::lu_solve_multi(&lu, &p, &b, n, m);
+        let mut max_rel = 0.0f64;
+        for i in 0..n * m {
+            let d = (mixed[i] - f64ref[i]).abs();
+            max_rel = max_rel.max(d / (f64ref[i].abs() + 1.0));
+        }
+        assert!(
+            max_rel < 1e-9,
+            "mixed-precision multi-RHS solve diverged from f64: max_rel={max_rel:.3e}"
+        );
+        // And the production `solve_multi_rhs` (which routes through mixed) matches.
+        let prod = super::solve_multi_rhs(&a, &b, n, m).unwrap();
+        for i in 0..n * m {
+            assert!((prod[i] - f64ref[i]).abs() / (f64ref[i].abs() + 1.0) < 1e-9);
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_mixed_precision_solve_multi_vs_f64() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        // Factorization-dominated regime (n ≥ 8·m), where the production
+        // `solve_multi_rhs` gate engages the mixed-precision path.
+        for &(n, m) in &[
+            (1024usize, 16usize),
+            (1024, 64),
+            (1024, 128),
+            (2048, 64),
+            (2048, 128),
+            (2048, 256),
+        ] {
+            let (a, b) = mixed_solve_system_multi(n, m);
+            let t_mixed = best_time(|| {
+                std::hint::black_box(super::solve_multi_rhs_mixed_precision(&a, &b, n, m).unwrap());
+            });
+            let t_f64 = best_time(|| {
+                let (lu, p) = super::lu_factor_for_solve(&a, n).unwrap();
+                std::hint::black_box(super::lu_solve_multi(&lu, &p, &b, n, m));
+            });
+            println!(
+                "BENCH mixed-precision multi-RHS solve n={n} m={m}: f64 {:.2}ms -> mixed {:.2}ms = {:.2}x",
+                t_f64 * 1e3,
+                t_mixed * 1e3,
+                t_f64 / t_mixed,
+            );
         }
     }
 
