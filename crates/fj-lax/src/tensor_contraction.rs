@@ -2035,6 +2035,21 @@ pub fn batched_matmul_2d_bf16_in(
     if batch == 0 || m == 0 || n == 0 || k == 0 {
         return result;
     }
+    // Single-matrix bf16 GEMM with B past L2 (the FFN / projection / out-proj
+    // matmuls — the bulk of bf16 training FLOPs come through batch==1 dot_general):
+    // decode bf16->f32 and run the PACKED+KC-blocked f32 GEMM, which keeps B
+    // panel-major and A L1-resident instead of re-streaming A per B panel. The
+    // native register kernel (kept for batch>1 attention, where B differs per batch)
+    // tops out memory-bound at scale. BIT-IDENTICAL: bf16->f32 decode is exact, the
+    // f32 path folds the SAME ascending-`l` f32 accumulation, and the f32->bf16 round
+    // is the same `round_f32_to_bf16` — exactly as `batched_matmul_2d_f16_in` already
+    // routes f16 through the f32 path.
+    if batch == 1 && k.saturating_mul(n) >= PACK_B_MIN_KN_F32 {
+        let a32: Vec<f32> = a.iter().map(|&x| bf16_bits_to_f32(x)).collect();
+        let b32: Vec<f32> = b.iter().map(|&x| bf16_bits_to_f32(x)).collect();
+        let out32 = batched_matmul_2d_f32_in(&a32, 1, m, k, &b32, n);
+        return out32.iter().map(|&v| round_f32_to_bf16(v)).collect();
+    }
     let total_rows = batch * m;
     let ops = total_rows.saturating_mul(k).saturating_mul(n);
     let threads = matmul_thread_count(ops, total_rows);
@@ -2798,6 +2813,56 @@ mod tests {
 
     #[test]
     #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batched_matmul_f64_batch_gt1_packed_vs_register() {
+        use std::time::Instant;
+        fn best(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        }
+        // batch>1 with LARGE per-matrix (MoE experts / batched FFN). Current
+        // batched_matmul_2d keeps the unpacked register kernel; compare to looping
+        // the packed+KC matmul_2d per batch.
+        let cases: [(usize, usize, usize, usize); 2] = [(4, 1024, 1024, 1024), (8, 512, 1024, 512)];
+        for &(bt, m, k, n) in &cases {
+            let a: Vec<f64> = (0..bt * m * k).map(|i| (i as f64 * 1e-4).sin()).collect();
+            let b: Vec<f64> = (0..bt * k * n).map(|i| (i as f64 * 7e-5).cos()).collect();
+            let t_cur = best(|| {
+                std::hint::black_box(batched_matmul_2d(&a, bt, m, k, &b, n));
+            });
+            let t_perbatch = best(|| {
+                let mut out = vec![0.0f64; bt * m * n];
+                for bi in 0..bt {
+                    super::matmul_2d_into(
+                        &a[bi * m * k..(bi + 1) * m * k],
+                        m,
+                        k,
+                        &b[bi * k * n..(bi + 1) * k * n],
+                        n,
+                        &mut out[bi * m * n..(bi + 1) * m * n],
+                    );
+                }
+                std::hint::black_box(&out);
+            });
+            let gflop = 2.0 * (bt * m * k * n) as f64;
+            println!(
+                "BENCH batched(b={bt}) f64 {m}x{k}x{n}: CURRENT {:.1}ms ({:.1} GF/s) -> PER-BATCH-matmul_2d {:.1}ms ({:.1} GF/s) = {:.2}x",
+                t_cur * 1e3,
+                gflop / t_cur,
+                t_perbatch * 1e3,
+                gflop / t_perbatch,
+                t_cur / t_perbatch,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
     fn bench_batched_matmul_f64_microkernel_vs_naive() {
         use std::time::Instant;
         fn best(mut f: impl FnMut()) -> f64 {
@@ -3083,6 +3148,82 @@ mod tests {
         assert_eq!(got.len(), want.len());
         for idx in 0..got.len() {
             assert_eq!(got[idx], want[idx], "mismatch at {idx}");
+        }
+    }
+
+    /// At batch==1 with B past the f32 pack threshold, `batched_matmul_2d_bf16_in`
+    /// routes through the packed f32 GEMM; result must be BIT-FOR-BIT identical to
+    /// the native bf16 register kernel (same exact decode, same ascending-`l` f32
+    /// accumulation, same round_f32_to_bf16).
+    #[test]
+    fn batched_matmul_2d_bf16_batch1_packed_route_matches_register_kernel() {
+        let to_bf16 = |v: f64| -> u16 {
+            match fj_core::Literal::from_bf16_f64(v) {
+                fj_core::Literal::BF16Bits(b) => b,
+                _ => 0,
+            }
+        };
+        // k*n = 256*512 = 131072; PACK_B_MIN_KN_F32 = 2^18 = 262144, so use k=512,n=512.
+        let (m, k, n) = (96usize, 512usize, 512usize);
+        assert!(k * n >= super::PACK_B_MIN_KN_F32);
+        let a16: Vec<u16> = (0..m * k)
+            .map(|i| to_bf16((i as f64 * 0.011).sin() - 0.3))
+            .collect();
+        let b16: Vec<u16> = (0..k * n)
+            .map(|i| to_bf16((i as f64 * 0.017).cos() + 0.6))
+            .collect();
+        let routed = batched_matmul_2d_bf16_in(&a16, 1, m, k, &b16, n); // packed f32 route
+        let mut want = vec![0u16; m * n];
+        super::batched_matmul_row_block_bf16_in(&a16, &b16, m, k, n, 0, &mut want); // native
+        for idx in 0..m * n {
+            assert_eq!(routed[idx], want[idx], "at {idx}");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batched_matmul_bf16_batch1_packed_route() {
+        use std::time::Instant;
+        fn best(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        }
+        let to_bf16 = |v: f64| -> u16 {
+            match fj_core::Literal::from_bf16_f64(v) {
+                fj_core::Literal::BF16Bits(b) => b,
+                _ => 0,
+            }
+        };
+        for &(m, k, n) in &[(1024usize, 1024usize, 1024usize), (2048, 1024, 2048)] {
+            let a16: Vec<u16> = (0..m * k)
+                .map(|i| to_bf16((i as f64 * 1e-4).sin()))
+                .collect();
+            let b16: Vec<u16> = (0..k * n)
+                .map(|i| to_bf16((i as f64 * 7e-5).cos()))
+                .collect();
+            let t_native = best(|| {
+                let mut out = vec![0u16; m * n];
+                super::batched_matmul_row_block_bf16_in(&a16, &b16, m, k, n, 0, &mut out);
+                std::hint::black_box(&out);
+            });
+            let t_routed = best(|| {
+                std::hint::black_box(batched_matmul_2d_bf16_in(&a16, 1, m, k, &b16, n));
+            });
+            let gflop = 2.0 * (m * k * n) as f64;
+            println!(
+                "BENCH bf16 batched(b=1) {m}x{k}x{n}: NATIVE {:.1}ms ({:.1} GF/s) -> PACKED-f32-route {:.1}ms ({:.1} GF/s) = {:.2}x",
+                t_native * 1e3,
+                gflop / t_native,
+                t_routed * 1e3,
+                gflop / t_routed,
+                t_native / t_routed,
+            );
         }
     }
 
