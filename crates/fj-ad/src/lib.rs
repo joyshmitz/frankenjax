@@ -7436,21 +7436,21 @@ fn conv_vjp(
     params: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, AdError> {
     // conv_vjp implements stride + padding directly; rhs_dilation (atrous),
-    // lhs_dilation (transposed) and feature_group_count (grouped) are each reduced to
-    // the trusted plain path: atrous == plain conv with the kernel inflated by
-    // zero-insertion (grad_rhs is then de-inflated); transposed == plain conv over the
-    // zero-dilated input (grad_lhs is then de-dilated); grouped == G independent convs.
-    // batch_group_count is unsupported. Default ("1"/absent) values fall through.
-    let nondefault_scalar = |key: &str| {
-        params
-            .get(key)
-            .is_some_and(|v| !matches!(v.trim(), "" | "1"))
-    };
-    if nondefault_scalar("batch_group_count") {
-        return Err(AdError::EvalFailed(
-            "conv gradient (VJP) does not support batch_group_count".to_owned(),
-        ));
-    }
+    // lhs_dilation (transposed), feature_group_count (grouped) and batch_group_count
+    // are each reduced to the trusted plain path: atrous == plain conv with the kernel
+    // inflated by zero-insertion (grad_rhs is then de-inflated); transposed == plain conv
+    // over the zero-dilated input (grad_lhs is then de-dilated); feature/batch grouping
+    // == G independent convs. Default ("1"/absent) values fall through.
+    let batch_groups = params
+        .get("batch_group_count")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map_or(Ok(1usize), |v| {
+            v.parse::<usize>()
+                .ok()
+                .filter(|&g| g >= 1)
+                .ok_or_else(|| AdError::EvalFailed(format!("invalid batch_group_count {v:?}")))
+        })?;
     let group_count = params
         .get("feature_group_count")
         .map(|v| v.trim())
@@ -7474,6 +7474,15 @@ fn conv_vjp(
         Value::Tensor(t) => t,
         Value::Scalar(_) => return Ok(vec![zeros_like(&inputs[0]), zeros_like(&inputs[1])]),
     };
+
+    // batch_group_count VJP: the forward decomposes into G independent plain convs
+    // (batch block go ⊛ out-channel block go), so the gradient is the adjoint of that
+    // decomposition — split the cotangent by out-channel block, run the per-group
+    // conv VJP, then concatenate grad_lhs over the BATCH axis and grad_rhs over the
+    // output-channel axis. Correct by construction; reuses the trusted plain conv_vjp.
+    if batch_groups > 1 {
+        return conv_vjp_batch_grouped(lhs, rhs, g_tensor, batch_groups, params);
+    }
 
     let lhs_rank = lhs.shape.rank();
     let num_spatial = lhs_rank.saturating_sub(2);
@@ -7719,6 +7728,81 @@ fn conv_vjp_grouped(
     }
     let grad_lhs = concat_last(&grad_lhs_parts, lhs_rank)?;
     let grad_rhs = concat_last(&grad_rhs_parts, rhs.shape.rank())?;
+    Ok(vec![grad_lhs, grad_rhs])
+}
+
+/// VJP for a conv with `batch_group_count = g`. The adjoint of the forward
+/// decomposition (`eval_conv_batch_grouped`): the forward splits the batch (axis 0)
+/// and output channels (rhs last axis) into `g` group-major blocks and convolves
+/// block `go` of the batch with block `go` of the out-channels into out-channel block
+/// `go`. So the gradient splits the cotangent by out-channel block, runs the trusted
+/// plain `conv_vjp` per group, then concatenates `grad_lhs` over the BATCH axis (axis 0)
+/// and `grad_rhs` over the output-channel axis (last). Correct by construction.
+fn conv_vjp_batch_grouped(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    g_tensor: &TensorValue,
+    batch_groups: usize,
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, AdError> {
+    let lhs_rank = lhs.shape.rank();
+    let n = lhs.shape.dims[0] as usize; // batch = axis 0
+    let c_out = rhs.shape.dims[rhs.shape.rank() - 1] as usize; // Cout = last axis of kernel
+    if !n.is_multiple_of(batch_groups) || !c_out.is_multiple_of(batch_groups) {
+        return Err(AdError::EvalFailed(format!(
+            "batch-grouped conv VJP: batch={n}/c_out={c_out} not divisible by batch_group_count={batch_groups}"
+        )));
+    }
+    let m = n / batch_groups;
+    let k = c_out / batch_groups;
+
+    // Slice `v` to [start, end) along `axis`, full extent elsewhere, via the Slice prim.
+    let slice_axis = |v: &Value, axis: usize, start: usize, end: usize| -> Result<Value, AdError> {
+        let t = v
+            .as_tensor()
+            .ok_or_else(|| AdError::EvalFailed("batch-grouped conv VJP expects tensors".to_owned()))?;
+        let dims = &t.shape.dims;
+        let starts: Vec<String> = (0..dims.len())
+            .map(|i| if i == axis { start } else { 0 }.to_string())
+            .collect();
+        let limits: Vec<String> = dims
+            .iter()
+            .enumerate()
+            .map(|(i, &d)| if i == axis { end } else { d as usize }.to_string())
+            .collect();
+        let p = BTreeMap::from([
+            ("start_indices".to_owned(), starts.join(",")),
+            ("limit_indices".to_owned(), limits.join(",")),
+        ]);
+        eval_primitive(Primitive::Slice, std::slice::from_ref(v), &p)
+            .map_err(|e| AdError::EvalFailed(e.to_string()))
+    };
+    let concat_axis = |parts: &[Value], axis: usize| -> Result<Value, AdError> {
+        let p = BTreeMap::from([("dimension".to_owned(), axis.to_string())]);
+        eval_primitive(Primitive::Concatenate, parts, &p)
+            .map_err(|e| AdError::EvalFailed(e.to_string()))
+    };
+
+    let mut inner = params.clone();
+    inner.remove("batch_group_count");
+    let lhs_v = Value::Tensor(lhs.clone());
+    let rhs_v = Value::Tensor(rhs.clone());
+    let g_v = Value::Tensor(g_tensor.clone());
+    let rhs_chan_axis = rhs.shape.rank() - 1;
+
+    let mut grad_lhs_parts = Vec::with_capacity(batch_groups);
+    let mut grad_rhs_parts = Vec::with_capacity(batch_groups);
+    for grp in 0..batch_groups {
+        let sub_lhs = slice_axis(&lhs_v, 0, grp * m, (grp + 1) * m)?;
+        let sub_rhs = slice_axis(&rhs_v, rhs_chan_axis, grp * k, (grp + 1) * k)?;
+        let sub_g = slice_axis(&g_v, rhs_chan_axis, grp * k, (grp + 1) * k)?; // out chan = last axis of output too
+        let grads = conv_vjp(&[sub_lhs, sub_rhs], &sub_g, &inner)?;
+        grad_lhs_parts.push(grads[0].clone());
+        grad_rhs_parts.push(grads[1].clone());
+    }
+    // grad_lhs blocks tile the batch axis (axis 0); grad_rhs blocks tile out-channels.
+    let grad_lhs = concat_axis(&grad_lhs_parts, 0)?;
+    let grad_rhs = concat_axis(&grad_rhs_parts, rhs_chan_axis)?;
     Ok(vec![grad_lhs, grad_rhs])
 }
 
@@ -15866,10 +15950,10 @@ mod tests {
     }
 
     #[test]
-    fn conv_vjp_rejects_batch_group_count_fail_closed() {
-        // rhs_dilation / lhs_dilation / feature_group_count VJP are all implemented now
-        // (see conv_vjp_{dilation,grouped}_matches_numerical). batch_group_count is the
-        // only conv param whose gradient is unimplemented — it must fail-closed rather
+    fn conv_vjp_batch_group_count_indivisible_errors() {
+        // batch_group_count VJP is now implemented (see
+        // conv_vjp_batch_group_count_matches_numerical). What must still fail loudly is a
+        // batch_group_count that does not divide the batch — N=1 with g=2 here — rather
         // than return a silently-wrong gradient. Plain conv VJP still succeeds.
         let mk = |dims: Vec<u32>, n: usize| {
             Value::Tensor(
@@ -15996,6 +16080,72 @@ mod tests {
                 "grad_rhs[{j}] analytic={} fd={fd}",
                 grhs[j]
             );
+        }
+    }
+
+    #[test]
+    fn conv_vjp_batch_group_count_matches_numerical() {
+        // batch_group_count=2 conv VJP vs central finite differences of
+        // L(lhs,rhs) = sum(conv(lhs,rhs) . g). lhs[N=2,W=5,Cin=2], rhs[K=2,Cin=2,Cout=4],
+        // VALID stride 1 -> out[N/2=1, 4, 4]. Exercises the per-group decomposition
+        // gradient (grad_lhs concatenated over batch, grad_rhs over out-channels).
+        let (n, w, cin, kw, cout) = (2usize, 5usize, 2usize, 2usize, 4usize);
+        let ow = w - kw + 1;
+        let mk = |dims: Vec<u32>, d: &[f64]| {
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims }, d.to_vec()).unwrap())
+        };
+        let params = BTreeMap::from([
+            ("padding".to_owned(), "valid".to_owned()),
+            ("strides".to_owned(), "1".to_owned()),
+            ("batch_group_count".to_owned(), "2".to_owned()),
+        ]);
+        let ld = vec![n as u32, w as u32, cin as u32];
+        let rd = vec![kw as u32, cin as u32, cout as u32];
+        let lhs0: Vec<f64> = (0..n * w * cin)
+            .map(|i| (i as f64 * 0.019).sin() * 1.1 + 0.15)
+            .collect();
+        let rhs0: Vec<f64> = (0..kw * cin * cout)
+            .map(|i| (i as f64 * 0.023).cos() * 0.8 - 0.05)
+            .collect();
+        // out batch = N/2 = 1.
+        let gv: Vec<f64> = (0..ow * cout)
+            .map(|i| (i as f64 * 0.011).sin() + 0.3)
+            .collect();
+        let g = mk(vec![1, ow as u32, cout as u32], &gv);
+        let loss = |lv: &[f64], rv: &[f64]| -> f64 {
+            let out = eval_primitive(
+                Primitive::Conv,
+                &[mk(ld.clone(), lv), mk(rd.clone(), rv)],
+                &params,
+            )
+            .unwrap();
+            tensor_f64_values(&out).iter().zip(&gv).map(|(o, gg)| o * gg).sum()
+        };
+        let grads = vjp_single(
+            Primitive::Conv,
+            &[mk(ld.clone(), &lhs0), mk(rd.clone(), &rhs0)],
+            &g,
+            &params,
+        )
+        .unwrap();
+        let glhs = tensor_f64_values(&grads[0]);
+        let grhs = tensor_f64_values(&grads[1]);
+        assert_eq!(glhs.len(), lhs0.len(), "grad_lhs shape");
+        assert_eq!(grhs.len(), rhs0.len(), "grad_rhs shape");
+        let eps = 1e-6;
+        for j in 0..lhs0.len() {
+            let (mut up, mut dn) = (lhs0.clone(), lhs0.clone());
+            up[j] += eps;
+            dn[j] -= eps;
+            let fd = (loss(&up, &rhs0) - loss(&dn, &rhs0)) / (2.0 * eps);
+            assert!((fd - glhs[j]).abs() < 1e-5, "grad_lhs[{j}]={} fd={fd}", glhs[j]);
+        }
+        for j in 0..rhs0.len() {
+            let (mut up, mut dn) = (rhs0.clone(), rhs0.clone());
+            up[j] += eps;
+            dn[j] -= eps;
+            let fd = (loss(&lhs0, &up) - loss(&lhs0, &dn)) / (2.0 * eps);
+            assert!((fd - grhs[j]).abs() < 1e-5, "grad_rhs[{j}]={} fd={fd}", grhs[j]);
         }
     }
 
