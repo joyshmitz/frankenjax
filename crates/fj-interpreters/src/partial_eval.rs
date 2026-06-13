@@ -223,6 +223,14 @@ pub fn partial_eval_jaxpr_typed_with_consts(
         });
     }
 
+    if const_values.is_empty()
+        && jaxpr.constvars.is_empty()
+        && in_avals.is_none()
+        && let Some(result) = try_partial_eval_two_eq_mixed_residual(jaxpr, unknowns)
+    {
+        return Ok(result);
+    }
+
     // Mixed case: use VarId-indexed bitset for O(1) lookups.
     let max_var_id = max_var_in_jaxpr(jaxpr);
     let bitset_len = max_var_id + 1;
@@ -413,6 +421,84 @@ pub fn partial_eval_jaxpr_typed_with_consts(
         jaxpr_unknown,
         out_unknowns,
         residual_avals,
+    })
+}
+
+fn try_partial_eval_two_eq_mixed_residual(
+    jaxpr: &Jaxpr,
+    unknowns: &[bool],
+) -> Option<PartialEvalResult> {
+    if jaxpr.invars.len() != 2
+        || unknowns.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 2
+    {
+        return None;
+    }
+
+    let (known_var, unknown_var) = match unknowns {
+        [false, true] => (jaxpr.invars[0], jaxpr.invars[1]),
+        [true, false] => (jaxpr.invars[1], jaxpr.invars[0]),
+        _ => return None,
+    };
+    let [known_eqn, unknown_eqn] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+    let [residual_var] = known_eqn.outputs.as_slice() else {
+        return None;
+    };
+    let [unknown_out] = unknown_eqn.outputs.as_slice() else {
+        return None;
+    };
+    if *unknown_out != jaxpr.outvars[0] {
+        return None;
+    }
+
+    let known_inputs_are_known = known_eqn.inputs.iter().all(|atom| match atom {
+        Atom::Var(var) => *var == known_var,
+        Atom::Lit(_) => true,
+    });
+    if !known_inputs_are_known {
+        return None;
+    }
+
+    let mut sees_residual = false;
+    let mut sees_unknown = false;
+    for atom in &unknown_eqn.inputs {
+        let Atom::Var(var) = atom else {
+            continue;
+        };
+        if *var == *residual_var {
+            sees_residual = true;
+        } else if *var == unknown_var {
+            sees_unknown = true;
+        } else {
+            return None;
+        }
+    }
+    if !sees_residual || !sees_unknown {
+        return None;
+    }
+
+    Some(PartialEvalResult {
+        jaxpr_known: Jaxpr::new(
+            vec![known_var],
+            vec![],
+            vec![*residual_var],
+            vec![known_eqn.clone()],
+        ),
+        known_consts: vec![],
+        jaxpr_unknown: Jaxpr::new(
+            vec![*residual_var, unknown_var],
+            vec![],
+            vec![*unknown_out],
+            vec![unknown_eqn.clone()],
+        ),
+        out_unknowns: vec![true],
+        residual_avals: vec![AbstractValue {
+            dtype: DType::F64,
+            shape: Shape::scalar(),
+        }],
     })
 }
 
@@ -4199,6 +4285,80 @@ mod tests {
                 assert!(
                     !result.residual_avals.is_empty(),
                     "v3 should be a residual flowing from known to unknown"
+                );
+                Ok(vec![])
+            },
+        );
+    }
+
+    #[test]
+    fn test_pe_two_eq_mixed_residual_fast_path_golden() {
+        run_logged_test(
+            "test_pe_two_eq_mixed_residual_fast_path_golden",
+            &("pe", "perf", "two_eq_mixed_residual"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let known = VarId(1);
+                let unknown = VarId(2);
+                let residual = VarId(3);
+                let out = VarId(4);
+                let jaxpr = Jaxpr::new(
+                    vec![known, unknown],
+                    vec![],
+                    vec![out],
+                    vec![
+                        Equation {
+                            primitive: Primitive::Neg,
+                            inputs: smallvec![Atom::Var(known)],
+                            outputs: smallvec![residual],
+                            params: BTreeMap::new(),
+                            effects: vec![],
+                            sub_jaxprs: vec![],
+                        },
+                        Equation {
+                            primitive: Primitive::Mul,
+                            inputs: smallvec![Atom::Var(residual), Atom::Var(unknown)],
+                            outputs: smallvec![out],
+                            params: BTreeMap::new(),
+                            effects: vec![],
+                            sub_jaxprs: vec![],
+                        },
+                    ],
+                );
+
+                let result = partial_eval_jaxpr(&jaxpr, &[false, true]).unwrap();
+                assert_eq!(result.jaxpr_known.invars, vec![known]);
+                assert!(result.jaxpr_known.constvars.is_empty());
+                assert_eq!(result.jaxpr_known.outvars, vec![residual]);
+                assert_eq!(result.jaxpr_known.equations.len(), 1);
+                assert_eq!(result.jaxpr_known.equations[0].primitive, Primitive::Neg);
+                assert_eq!(result.known_consts, Vec::<Value>::new());
+                assert_eq!(result.jaxpr_unknown.invars, vec![residual, unknown]);
+                assert!(result.jaxpr_unknown.constvars.is_empty());
+                assert_eq!(result.jaxpr_unknown.outvars, vec![out]);
+                assert_eq!(result.jaxpr_unknown.equations.len(), 1);
+                assert_eq!(result.jaxpr_unknown.equations[0].primitive, Primitive::Mul);
+                assert_eq!(result.out_unknowns, vec![true]);
+                assert_eq!(
+                    result.residual_avals,
+                    vec![AbstractValue {
+                        dtype: DType::F64,
+                        shape: Shape::scalar(),
+                    }]
+                );
+
+                let digest = fj_test_utils::fixture_id_from_json(&(
+                    "frankenjax-4kwjw",
+                    &result.jaxpr_known,
+                    &result.jaxpr_unknown,
+                    &result.out_unknowns,
+                    &result.residual_avals,
+                ))
+                .expect("two-equation PE golden rows should hash");
+                eprintln!("two-equation mixed partial-eval golden digest: {digest}");
+                assert_eq!(
+                    digest,
+                    "f51e1a62763e23c83ec7a1433ef7e3ec3e1e9122a78edcc2559f1e5d4f97e88d"
                 );
                 Ok(vec![])
             },
