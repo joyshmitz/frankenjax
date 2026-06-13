@@ -2793,6 +2793,7 @@ where
 #[inline]
 fn eval_cumulative_dense(
     tensor: &TensorValue,
+    cum_primitive: Primitive,
     axis: usize,
     reverse: bool,
     int_init: i64,
@@ -2998,6 +2999,76 @@ fn eval_cumulative_dense(
         )?)));
     }
 
+    // Dense complex cumulative (cumsum/cumprod/cummax/cummin). Reads the contiguous
+    // (re, im) backing and scans each line, BIT-IDENTICAL to the generic per-`Literal`
+    // complex path: same seeds (cumprod=(1,0), cummax/cummin=(float_init,float_init),
+    // cumsum=(0,0)), same complex-multiply / lexicographic complex_lex_cmp / component
+    // add in the same per-line order, and `new_complex_values` rounds Complex64 to f32
+    // exactly as `complex_literal_from_parts` does (== the generic store). Reading
+    // `out[fi]` is the original input: each position is read once before its own write.
+    if matches!(tensor.dtype, DType::Complex64 | DType::Complex128) {
+        if !matches!(
+            cum_primitive,
+            Primitive::Cumsum | Primitive::Cumprod | Primitive::Cummax | Primitive::Cummin
+        ) {
+            return Ok(None);
+        }
+        let Some(src) = tensor.elements.as_complex_slice() else {
+            return Ok(None);
+        };
+        let mut out: Vec<(f64, f64)> = src.to_vec();
+        for outer in 0..outer_count {
+            let base = line_base(outer);
+            let (mut acc_re, mut acc_im) = match cum_primitive {
+                Primitive::Cumprod => (1.0_f64, 0.0_f64),
+                Primitive::Cummax | Primitive::Cummin => (float_init, float_init),
+                _ => (0.0_f64, 0.0_f64),
+            };
+            let mut step = |fi: usize, out: &mut [(f64, f64)]| {
+                let (re, im) = out[fi];
+                match cum_primitive {
+                    Primitive::Cumprod => {
+                        let nr = acc_re * re - acc_im * im;
+                        let ni = acc_re * im + acc_im * re;
+                        acc_re = nr;
+                        acc_im = ni;
+                    }
+                    Primitive::Cummax => {
+                        if complex_lex_cmp((re, im), (acc_re, acc_im)).is_gt() {
+                            acc_re = re;
+                            acc_im = im;
+                        }
+                    }
+                    Primitive::Cummin => {
+                        if complex_lex_cmp((re, im), (acc_re, acc_im)).is_lt() {
+                            acc_re = re;
+                            acc_im = im;
+                        }
+                    }
+                    _ => {
+                        acc_re += re;
+                        acc_im += im;
+                    }
+                }
+                out[fi] = (acc_re, acc_im);
+            };
+            if reverse {
+                for i in (0..axis_dim).rev() {
+                    step(base + i * axis_stride, &mut out);
+                }
+            } else {
+                for i in 0..axis_dim {
+                    step(base + i * axis_stride, &mut out);
+                }
+            }
+        }
+        return Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+            tensor.dtype,
+            tensor.shape.clone(),
+            out,
+        )?)));
+    }
+
     Ok(None)
 }
 
@@ -3050,7 +3121,7 @@ pub(crate) fn eval_cumulative(
             // skipping the Vec<Literal> materialization + per-element Literal
             // dispatch. Returns None for non-dense / non-F64/I64 -> generic below.
             if let Some(value) = eval_cumulative_dense(
-                tensor, axis, reverse, int_init, float_init, &int_op, &float_op,
+                tensor, primitive, axis, reverse, int_init, float_init, &int_op, &float_op,
             )? {
                 return Ok(value);
             }
@@ -5819,6 +5890,79 @@ mod tests {
                     "{prim:?} row {o} threaded != serial reference"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn complex_cumulative_dense_matches_boxed() {
+        // Dense complex cumulative (new_complex_values storage → dense path) must
+        // equal the boxed-Literal construction, for cumsum/cumprod/cummax/cummin,
+        // forward and reverse, on a 2-D [lines, axis] tensor.
+        let (lines, axdim) = (5usize, 9usize);
+        let cplx: Vec<(f64, f64)> = (0..lines * axdim)
+            .map(|k| {
+                let a = (((k * 2_654_435_761) % 41) as f64 - 20.0) * 0.05;
+                let b = (((k * 40_503) % 37) as f64 - 18.0) * 0.05;
+                (a, b)
+            })
+            .collect();
+        let dims = vec![lines as u32, axdim as u32];
+        let dense = Value::Tensor(
+            TensorValue::new_complex_values(DType::Complex128, Shape { dims: dims.clone() }, cplx.clone()).unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::Complex128,
+                Shape { dims: dims.clone() },
+                cplx.iter().map(|&(re, im)| Literal::from_complex128(re, im)).collect(),
+            )
+            .unwrap(),
+        );
+        let bits = |v: &Value| -> Vec<(u64, u64)> {
+            v.as_tensor().unwrap().elements.iter().map(|l| match l {
+                Literal::Complex128Bits(re, im) => (*re, *im),
+                o => panic!("expected Complex128Bits, got {o:?}"),
+            }).collect()
+        };
+        for prim in ["cumsum", "cumprod", "cummax", "cummin"] {
+            for rev in ["false", "true"] {
+                let p = BTreeMap::from([("axis".to_owned(), "1".to_owned()), ("reverse".to_owned(), rev.to_owned())]);
+                let d = crate::eval_primitive(cum_prim(prim), std::slice::from_ref(&dense), &p).unwrap();
+                let g = crate::eval_primitive(cum_prim(prim), std::slice::from_ref(&boxed), &p).unwrap();
+                assert_eq!(bits(&d), bits(&g), "complex {prim} rev={rev}: dense != boxed");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_complex_cumsum_dense_vs_generic() {
+        use std::time::Instant;
+        let (lines, axdim) = (4096usize, 1024usize);
+        let cplx: Vec<(f64, f64)> = (0..lines * axdim).map(|k| ((k % 251) as f64 * 0.01, (k % 97) as f64 * 0.02)).collect();
+        let dims = vec![lines as u32, axdim as u32];
+        let dense = Value::Tensor(TensorValue::new_complex_values(DType::Complex128, Shape { dims: dims.clone() }, cplx.clone()).unwrap());
+        let boxed = Value::Tensor(TensorValue::new(DType::Complex128, Shape { dims: dims.clone() }, cplx.iter().map(|&(re,im)| Literal::from_complex128(re,im)).collect()).unwrap());
+        let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+        let csum = |v: Value| -> u64 { v.as_tensor().unwrap().elements.iter().fold(0u64, |a, l| match l { Literal::Complex128Bits(re,_) => a.wrapping_add(*re), _=>a }) };
+        let time = |input: &Value| {
+            let _ = crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(input), &p).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..10 { let t = Instant::now(); let _ = crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(input), &p).unwrap(); best = best.min(t.elapsed().as_secs_f64()); }
+            best
+        };
+        assert_eq!(csum(crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(&dense), &p).unwrap()),
+                   csum(crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(&boxed), &p).unwrap()), "parity");
+        let g = time(&boxed); let d = time(&dense);
+        println!("BENCH complex128 cumsum axis1 [{lines},{axdim}]: generic={:.4}ms dense={:.4}ms speedup={:.2}x", g*1e3, d*1e3, g/d);
+    }
+
+    fn cum_prim(name: &str) -> Primitive {
+        match name {
+            "cumprod" => Primitive::Cumprod,
+            "cummax" => Primitive::Cummax,
+            "cummin" => Primitive::Cummin,
+            _ => Primitive::Cumsum,
         }
     }
 
