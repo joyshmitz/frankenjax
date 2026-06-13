@@ -514,7 +514,7 @@ pub fn apply_batch_rule(
         Primitive::Squeeze => batch_squeeze(inputs, params),
         Primitive::Split => batch_split(inputs, params),
         Primitive::ExpandDims => batch_expand_dims(inputs, params),
-        Primitive::Tile => batch_passthrough_leading(primitive, inputs, params),
+        Primitive::Tile => batch_tile(inputs, params),
         Primitive::Cholesky => batch_cholesky(inputs, params),
         Primitive::TriangularSolve => batch_triangular_solve(inputs, params),
         Primitive::Qr | Primitive::Svd | Primitive::Eigh => {
@@ -991,6 +991,56 @@ fn batch_argmax_argmin(
     let mut new_params = params.clone();
     new_params.insert("axis".to_owned(), (axis + 1).to_string());
     let result = eval_primitive(primitive, &[value], &new_params)
+        .map_err(|e| BatchError::EvalError(e.to_string()))?;
+    Ok(BatchTracer::batched(result, 0))
+}
+
+/// vmap rule for Tile. `tile` reads the `"reps"` param (one positive rep per
+/// per-element axis, output keeps the same rank). vmap of a tile is the SAME
+/// tile applied to every batch slice — i.e. tile the batch-front tensor with a
+/// leading rep of `1` for the batch axis, in ONE `eval_primitive` call, instead
+/// of the per-slice eval+stack of `batch_passthrough_leading`.
+///
+/// PARITY: the batch axis (now at 0) gets rep `1`, so it is left untouched and
+/// passes through; every per-element axis keeps its original rep, so each slice
+/// is tiled identically to the per-slice path — output `[B, tiled…]` equals the
+/// stack of per-slice results (tile is a deterministic block copy). The rank-0
+/// per-element case (scalar tile, which CHANGES rank 0→1) has no batch-front
+/// prepend equivalent and defers to the per-slice path.
+fn batch_tile(
+    inputs: &[BatchTracer],
+    params: &BTreeMap<String, String>,
+) -> Result<BatchTracer, BatchError> {
+    let input = &inputs[0];
+    let batch_dim = match input.batch_dim {
+        None => {
+            let result = eval_primitive(Primitive::Tile, std::slice::from_ref(&input.value), params)
+                .map_err(|e| BatchError::EvalError(e.to_string()))?;
+            return Ok(BatchTracer::unbatched(result));
+        }
+        Some(bd) => bd,
+    };
+
+    let value = move_batch_dim_to_front(&input.value, batch_dim)?;
+    let per_elem_rank = match &value {
+        Value::Scalar(_) => 0,
+        Value::Tensor(tensor) => tensor.rank().saturating_sub(1),
+    };
+
+    // Scalar tile (rank 0 → rank 1) has no "prepend a batch rep" equivalent;
+    // defer to the correct per-slice path.
+    let Some(reps_raw) = params.get("reps") else {
+        return batch_passthrough_leading(Primitive::Tile, inputs, params);
+    };
+    if per_elem_rank == 0 {
+        return batch_passthrough_leading(Primitive::Tile, inputs, params);
+    }
+
+    // Prepend a unit rep for the batch axis (now at position 0); per-element reps
+    // pass through unchanged. eval_tile requires reps.len() == rank.
+    let mut new_params = params.clone();
+    new_params.insert("reps".to_owned(), format!("1,{reps_raw}"));
+    let result = eval_primitive(Primitive::Tile, &[value], &new_params)
         .map_err(|e| BatchError::EvalError(e.to_string()))?;
     Ok(BatchTracer::batched(result, 0))
 }
@@ -14523,6 +14573,109 @@ mod tests {
         assert_eq!(d_slow, d_fast, "bench parity: single-call != per-slice");
         println!(
             "BENCH vmap(argmax) [{b},{n}] axis=-1: per-slice={:.4}ms single-call={:.4}ms speedup={:.2}x",
+            t_slow * 1e3,
+            t_fast * 1e3,
+            t_slow / t_fast,
+        );
+    }
+
+    #[test]
+    fn batch_tile_matches_per_slice_fallback() {
+        // The single-call (prepend unit batch rep) path must be element-identical
+        // to the per-slice eval+stack across reps forms, ranks, and batch dims.
+        let summary = |t: &BatchTracer| -> (Option<usize>, Vec<u32>, Vec<f64>) {
+            let tensor = t.value.as_tensor().unwrap();
+            (t.batch_dim, tensor.shape.dims.clone(), extract_f64_vec(&t.value))
+        };
+        // batch-front [B=3, R=2, C=2]
+        let data: Vec<f64> = (0..12).map(|i| i as f64).collect();
+        let front = || -> BatchTracer {
+            BatchTracer::batched(
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims: vec![3, 2, 2] },
+                        data.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                ),
+                0,
+            )
+        };
+        // batch-middle physical [R=2, B=3, C=2], batch_dim=1
+        let mid = || -> BatchTracer {
+            let (b, r, c) = (3usize, 2usize, 2usize);
+            let mut out = vec![0.0f64; b * r * c];
+            for bi in 0..b {
+                for ri in 0..r {
+                    for ci in 0..c {
+                        out[(ri * b + bi) * c + ci] = data[(bi * r + ri) * c + ci];
+                    }
+                }
+            }
+            BatchTracer::batched(
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims: vec![r as u32, b as u32, c as u32] },
+                        out.into_iter().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                ),
+                1,
+            )
+        };
+        for reps in ["1,1", "2,1", "1,3", "2,3"] {
+            for mk in [&front as &dyn Fn() -> BatchTracer, &mid] {
+                let params = BTreeMap::from([("reps".to_owned(), reps.to_owned())]);
+                let fast = batch_tile(&[mk()], &params).unwrap();
+                let slow = batch_passthrough_leading(Primitive::Tile, &[mk()], &params).unwrap();
+                assert_eq!(summary(&fast), summary(&slow), "tile reps={reps}: single-call != per-slice");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_batch_tile_single_call_vs_per_slice() {
+        use std::time::Instant;
+        // vmap(tile) on a large batch of small per-element tensors (broadcast-via-
+        // tile pattern): per-slice pays B dispatches + B tile allocs + a stack;
+        // single-call tiles the whole batch-front tensor once.
+        let (b, n, rep) = (262144usize, 4usize, 8usize);
+        let data: Vec<f64> = (0..b * n).map(|i| (i % 97) as f64).collect();
+        let make = || -> BatchTracer {
+            BatchTracer::batched(
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims: vec![b as u32, n as u32] },
+                        data.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                ),
+                0,
+            )
+        };
+        let params = BTreeMap::from([("reps".to_owned(), rep.to_string())]);
+        let best = |mut f: Box<dyn FnMut() -> usize>| {
+            let first = f();
+            let mut t = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let _ = std::hint::black_box(f());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            (t, first)
+        };
+        let len = |r: BatchTracer| -> usize { r.value.as_tensor().unwrap().elements.len() };
+        let (t_slow, l_slow) =
+            best(Box::new(move || len(batch_passthrough_leading(Primitive::Tile, &[make()], &params).unwrap())));
+        let params2 = BTreeMap::from([("reps".to_owned(), rep.to_string())]);
+        let (t_fast, l_fast) = best(Box::new(move || len(batch_tile(&[make()], &params2).unwrap())));
+        assert_eq!(l_slow, l_fast, "bench parity: output element count differs");
+        println!(
+            "BENCH vmap(tile) [{b},{n}] reps={rep}: per-slice={:.4}ms single-call={:.4}ms speedup={:.2}x",
             t_slow * 1e3,
             t_fast * 1e3,
             t_slow / t_fast,
