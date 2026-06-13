@@ -7625,6 +7625,175 @@ mod tests {
     }
 
     #[test]
+    fn scalar_select_i64_arena_bit_identical_to_generic() {
+        // The mixed i64/bool SELECT arena must match the generic interpreter on
+        // integer-conditional bodies (masked increment / integer clamp / where), and
+        // be actually selected (scalar_select_i64_plan.is_some()).
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let ilit = |v: i64| Atom::Lit(Literal::I64(v));
+        let val_i64 = |v: &Value| -> i64 {
+            match v {
+                Value::Scalar(Literal::I64(b)) => *b,
+                other => panic!("expected i64 scalar, got {other:?}"),
+            }
+        };
+        let xs = [i64::MIN, -1000, -11, -1, 0, 1, 5, 10, 11, 1000, i64::MAX];
+
+        // masked increment: select(i < n, i+1, i), with n a fixed const.
+        let (i, n, lt, inc, out) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let masked_inc = Jaxpr::new(
+            vec![i, n],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Lt, smallvec![Atom::Var(i), Atom::Var(n)], lt),
+                mk(Primitive::Add, smallvec![Atom::Var(i), ilit(1)], inc),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(lt), Atom::Var(inc), Atom::Var(i)],
+                    out,
+                ),
+            ],
+        );
+
+        // integer clamp to [0,10]: select(x>10, 10, select(x<0, 0, x)).
+        let (x2, gt, lt0, inner, out2) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let clamp = Jaxpr::new(
+            vec![x2],
+            vec![],
+            vec![out2],
+            vec![
+                mk(Primitive::Gt, smallvec![Atom::Var(x2), ilit(10)], gt),
+                mk(Primitive::Lt, smallvec![Atom::Var(x2), ilit(0)], lt0),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(lt0), ilit(0), Atom::Var(x2)],
+                    inner,
+                ),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(gt), ilit(10), Atom::Var(inner)],
+                    out2,
+                ),
+            ],
+        );
+
+        for (label, body, nargs) in [("masked_inc", &masked_inc, 2usize), ("clamp", &clamp, 1)] {
+            let plan = super::build_dense_plan(body).expect("dense plan");
+            assert!(
+                plan.scalar_select_i64_plan.is_some(),
+                "{label} not routed through the i64 select arena"
+            );
+            assert!(
+                plan.scalar_select_plan.is_none(),
+                "{label} unexpectedly built an f64 select plan"
+            );
+            for &xv in &xs {
+                let args: Vec<Value> = if nargs == 2 {
+                    vec![Value::scalar_i64(xv), Value::scalar_i64(5)]
+                } else {
+                    vec![Value::scalar_i64(xv)]
+                };
+                let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+                let mut gscr: Vec<Value> = Vec::new();
+                let mut gout: Vec<Value> = Vec::new();
+                super::run_dense_env_into(
+                    body,
+                    &[],
+                    &args,
+                    &mut genv,
+                    &plan.last_use,
+                    &mut gscr,
+                    &mut gout,
+                )
+                .expect("generic i64 select");
+                let mut cenv: Vec<Option<Value>> = vec![None; plan.slots];
+                let mut cscr: Vec<Value> = Vec::new();
+                let mut cout: Vec<Value> = Vec::new();
+                let mut bufs = super::ScalarPlanBuffers::default();
+                super::run_dense_plan_into(
+                    body,
+                    &[],
+                    &args,
+                    &mut cenv,
+                    &plan,
+                    &mut cscr,
+                    &mut cout,
+                    &mut bufs,
+                )
+                .expect("compiled i64 select");
+                assert_eq!(
+                    val_i64(&cout[0]),
+                    val_i64(&gout[0]),
+                    "{label}({xv}) i64 select arena differs from generic"
+                );
+            }
+        }
+
+        // select with a bool INPUT predicate and i64 branches.
+        let (p, a, b, o) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let where_body = Jaxpr::new(
+            vec![p, a, b],
+            vec![],
+            vec![o],
+            vec![mk(
+                Primitive::Select,
+                smallvec![Atom::Var(p), Atom::Var(a), Atom::Var(b)],
+                o,
+            )],
+        );
+        let plan = super::build_dense_plan(&where_body).expect("dense plan");
+        assert!(plan.scalar_select_i64_plan.is_some());
+        for &pred in &[true, false] {
+            let args = [
+                Value::scalar_bool(pred),
+                Value::scalar_i64(i64::MIN),
+                Value::scalar_i64(i64::MAX),
+            ];
+            let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut gscr: Vec<Value> = Vec::new();
+            let mut gout: Vec<Value> = Vec::new();
+            super::run_dense_env_into(
+                &where_body,
+                &[],
+                &args,
+                &mut genv,
+                &plan.last_use,
+                &mut gscr,
+                &mut gout,
+            )
+            .expect("generic i64 where");
+            let mut cenv: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut cscr: Vec<Value> = Vec::new();
+            let mut cout: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            super::run_dense_plan_into(
+                &where_body,
+                &[],
+                &args,
+                &mut cenv,
+                &plan,
+                &mut cscr,
+                &mut cout,
+                &mut bufs,
+            )
+            .expect("compiled i64 where");
+            assert_eq!(
+                val_i64(&cout[0]),
+                val_i64(&gout[0]),
+                "i64 where({pred}) differs"
+            );
+        }
+    }
+
+    #[test]
     fn scalar_arena_transcendentals_bit_identical_to_generic() {
         // Proves the scalar-f64/f32 arena handles unary transcendental/rounding ops
         // BIT-FOR-BIT identically to the generic tree-walking interpreter, and that
@@ -7973,6 +8142,101 @@ mod tests {
                 "chained activation body bits differ at x={xv}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_scalar_select_i64_arena() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let ilit = |v: i64| Atom::Lit(Literal::I64(v));
+        // integer-clamp carry body (2 compares + 2 selects): clamp x to [0,10].
+        let (x, gt, lt0, inner, out) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let body = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Gt, smallvec![Atom::Var(x), ilit(10)], gt),
+                mk(Primitive::Lt, smallvec![Atom::Var(x), ilit(0)], lt0),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(lt0), ilit(0), Atom::Var(x)],
+                    inner,
+                ),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(gt), ilit(10), Atom::Var(inner)],
+                    out,
+                ),
+            ],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        assert!(plan.scalar_select_i64_plan.is_some());
+        let n: usize = 2_000_000;
+        let args = [Value::scalar_i64(5)];
+        let run = |use_plan: bool| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            let mut acc = 0i64;
+            for _ in 0..n {
+                if use_plan {
+                    super::run_dense_plan_into(
+                        &body,
+                        &[],
+                        &args,
+                        &mut env,
+                        &plan,
+                        &mut scratch,
+                        &mut o,
+                        &mut bufs,
+                    )
+                    .expect("compiled");
+                } else {
+                    super::run_dense_env_into(
+                        &body,
+                        &[],
+                        &args,
+                        &mut env,
+                        &plan.last_use,
+                        &mut scratch,
+                        &mut o,
+                    )
+                    .expect("generic");
+                }
+                if let Value::Scalar(Literal::I64(b)) = &o[0] {
+                    acc = acc.wrapping_add(*b);
+                }
+            }
+            std::hint::black_box(acc);
+        };
+        let t_generic = best_time(|| run(false));
+        let t_compiled = best_time(|| run(true));
+        println!(
+            "BENCH i64-select-body dispatch {n} evals (clamp: 2 cmp + 2 select): GENERIC {:.1}ns/eval -> COMPILED {:.1}ns/eval = {:.2}x",
+            t_generic * 1e9 / n as f64,
+            t_compiled * 1e9 / n as f64,
+            t_generic / t_compiled,
+        );
     }
 
     #[test]
