@@ -594,7 +594,7 @@ fn apply_batch_rule_multi(
         // TopK is multi-output (values, indices) and reduces the last axis;
         // the per-slice batcher preserves that per-element semantics and
         // stacks both outputs, matching JAX's top_k batch rule.
-        Primitive::TopK => batch_passthrough_leading_multi(primitive, inputs, params),
+        Primitive::TopK => batch_top_k_multi(inputs, params),
         // Slogdet → (sign, logabsdet) scalars. Per-slice eval + stack along
         // axis 0 is the correct vmap; scalar outputs stack into rank-1
         // [batch] vectors.
@@ -3848,6 +3848,51 @@ fn qr_decompose_matrix(
 /// decomposition flops) is large enough to amortize thread spawn (~tens of µs each).
 /// Below this, the serial loop wins.
 const EIGH_BATCH_PARALLEL_MIN_WORK: usize = 1 << 18;
+
+/// vmap rule for TopK (multi-output: values + indices). top_k always operates on
+/// the operand's LAST axis and treats every leading dim as an independent slice,
+/// so a vmap batch axis is just another leading slice dim: move it to front and
+/// eval ONCE on `[B, …, N]` — the eval's multi-slice (threaded radix) path handles
+/// all `B·…` slices in one call — instead of B per-slice top_k evals + a stack.
+///
+/// PARITY: the batch axis is prepended (the top_k axis stays last), and top_k is
+/// deterministic per slice, so both outputs `[B, …, k]` equal the per-slice stack.
+/// `k` passes through unchanged. Non-tensor / rank-0 inputs defer to the per-slice
+/// multi rule.
+fn batch_top_k_multi(
+    inputs: &[BatchTracer],
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<BatchTracer>, BatchError> {
+    let Some((input, batch_dim)) = inputs
+        .iter()
+        .find_map(|t| t.batch_dim.map(|batch_dim| (t, batch_dim)))
+    else {
+        let values: Vec<Value> = inputs.iter().map(|t| t.value.clone()).collect();
+        return eval_primitive_multi(Primitive::TopK, &values, params)
+            .map(|outputs| outputs.into_iter().map(BatchTracer::unbatched).collect())
+            .map_err(|e| BatchError::EvalError(e.to_string()));
+    };
+
+    // top_k is unary; with any other shape defer to the safe per-slice multi rule.
+    if inputs.len() != 1 {
+        return batch_passthrough_leading_multi(Primitive::TopK, inputs, params);
+    }
+
+    let value = move_batch_dim_to_front(&input.value, batch_dim)?;
+    // Need at least [B, N] so the prepended batch axis is distinct from the
+    // last (top_k) axis; a rank-0/scalar per-element has no top_k axis.
+    let rank_ok = matches!(&value, Value::Tensor(t) if t.rank() >= 2);
+    if !rank_ok {
+        return batch_passthrough_leading_multi(Primitive::TopK, inputs, params);
+    }
+
+    let outputs = eval_primitive_multi(Primitive::TopK, &[value], params)
+        .map_err(|e| BatchError::EvalError(e.to_string()))?;
+    Ok(outputs
+        .into_iter()
+        .map(|out| BatchTracer::batched(out, 0))
+        .collect())
+}
 
 fn batch_eigh_multi(
     inputs: &[BatchTracer],
@@ -15150,6 +15195,110 @@ mod tests {
         assert_eq!(l_slow, l_fast);
         println!(
             "BENCH vmap(associative_scan) [{b},{t}]: per-slice={:.4}ms single-call={:.4}ms speedup={:.2}x",
+            t_slow * 1e3,
+            t_fast * 1e3,
+            t_slow / t_fast,
+        );
+    }
+
+    #[test]
+    fn batch_top_k_multi_matches_per_slice_fallback() {
+        let summary = |outs: &[BatchTracer]| -> Vec<(Option<usize>, Vec<u32>, Vec<u64>)> {
+            outs.iter()
+                .map(|t| {
+                    let tensor = t.value.as_tensor().unwrap();
+                    let bits: Vec<u64> = tensor
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap_or(0.0).to_bits())
+                        .collect();
+                    (t.batch_dim, tensor.shape.dims.clone(), bits)
+                })
+                .collect()
+        };
+        let d2: Vec<f64> = (0..15).map(|i| ((i * 7 + 3) % 13) as f64).collect(); // [3,5]
+        let d3: Vec<f64> = (0..24).map(|i| ((i * 5 + 1) % 11) as f64).collect(); // [2,3,4]
+        let mk = |data: &[f64], dims: Vec<u32>, bd: usize| -> BatchTracer {
+            BatchTracer::batched(
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims },
+                        data.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                ),
+                bd,
+            )
+        };
+        // batch-middle [N,B] physical for the 1-D-per-element case ([B=3] vectors of len 5).
+        let mid = || -> BatchTracer {
+            let (b, n) = (3usize, 5usize);
+            let mut out = vec![0.0; b * n];
+            for bi in 0..b {
+                for ni in 0..n {
+                    out[ni * b + bi] = d2[bi * n + ni];
+                }
+            }
+            mk(&out, vec![n as u32, b as u32], 1)
+        };
+        for k in ["1", "2", "3"] {
+            let params = BTreeMap::from([("k".to_owned(), k.to_owned())]);
+            for ins in [
+                vec![mk(&d2, vec![3, 5], 0)],
+                vec![mk(&d3, vec![2, 3, 4], 0)],
+                vec![mid()],
+            ] {
+                let fast = batch_top_k_multi(&ins, &params).unwrap();
+                let slow =
+                    batch_passthrough_leading_multi(Primitive::TopK, &ins, &params).unwrap();
+                assert_eq!(summary(&fast), summary(&slow), "top_k k={k}: single-call != per-slice");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_batch_top_k_single_call_vs_per_slice() {
+        use std::time::Instant;
+        let (b, n) = (131072usize, 16usize);
+        let data: Vec<f64> = (0..b * n).map(|i| ((i.wrapping_mul(2_654_435_761) >> 9) & 0xffff) as f64).collect();
+        let make = || -> Vec<BatchTracer> {
+            vec![BatchTracer::batched(
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims: vec![b as u32, n as u32] },
+                        data.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                ),
+                0,
+            )]
+        };
+        let params = BTreeMap::from([("k".to_owned(), "4".to_owned())]);
+        let best = |mut f: Box<dyn FnMut() -> usize>| {
+            let first = f();
+            let mut tm = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let _ = std::hint::black_box(f());
+                tm = tm.min(s.elapsed().as_secs_f64());
+            }
+            (tm, first)
+        };
+        let nelem = |outs: Vec<BatchTracer>| -> usize {
+            outs.iter().map(|t| t.value.as_tensor().unwrap().elements.len()).sum()
+        };
+        let (t_slow, l_slow) = best(Box::new(move || {
+            nelem(batch_passthrough_leading_multi(Primitive::TopK, &make(), &params).unwrap())
+        }));
+        let params2 = BTreeMap::from([("k".to_owned(), "4".to_owned())]);
+        let (t_fast, l_fast) =
+            best(Box::new(move || nelem(batch_top_k_multi(&make(), &params2).unwrap())));
+        assert_eq!(l_slow, l_fast);
+        println!(
+            "BENCH vmap(top_k) [{b},{n}] k=4: per-slice={:.4}ms single-call={:.4}ms speedup={:.2}x",
             t_slow * 1e3,
             t_fast * 1e3,
             t_slow / t_fast,
