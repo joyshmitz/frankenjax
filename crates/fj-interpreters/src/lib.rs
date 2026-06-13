@@ -2781,6 +2781,28 @@ enum ScalarF64BinaryOp {
     // wrapping_pow — neither modeled here).
     Square,
     IntegerPow(i32),
+    // More plain-`f64::FUNC` unary ops (fj-lax float arms): Reciprocal `1/x`,
+    // Cbrt `f64::cbrt`, Logistic/sigmoid `1/(1+e^-x)`, and Sign (NaN→NaN, ±0→±0,
+    // else `signum`). All float-only; Sign's i64 path (signum) and the others'
+    // non-float dtypes stay on the generic interpreter.
+    Reciprocal,
+    Cbrt,
+    Logistic,
+    Sign,
+}
+
+/// Sign for a real f64 scalar, matching fj-lax `eval_unary_int_or_float`'s float arm
+/// (`|x| if x.is_nan() { NaN } else if x == 0.0 { x } else { x.signum() }`): propagates
+/// NaN and preserves the ±0 input (`x == 0.0` is true for both +0 and -0).
+#[inline]
+fn scalar_f64_sign(x: f64) -> f64 {
+    if x.is_nan() {
+        f64::NAN
+    } else if x == 0.0 {
+        x
+    } else {
+        x.signum()
+    }
 }
 
 fn scalar_unary_op(primitive: Primitive) -> Option<ScalarF64BinaryOp> {
@@ -2816,6 +2838,10 @@ fn scalar_unary_op(primitive: Primitive) -> Option<ScalarF64BinaryOp> {
         Primitive::Deg2Rad => Some(ScalarF64BinaryOp::Deg2Rad),
         Primitive::Rad2Deg => Some(ScalarF64BinaryOp::Rad2Deg),
         Primitive::Square => Some(ScalarF64BinaryOp::Square),
+        Primitive::Reciprocal => Some(ScalarF64BinaryOp::Reciprocal),
+        Primitive::Cbrt => Some(ScalarF64BinaryOp::Cbrt),
+        Primitive::Logistic => Some(ScalarF64BinaryOp::Logistic),
+        Primitive::Sign => Some(ScalarF64BinaryOp::Sign),
         _ => None,
     }
 }
@@ -3067,6 +3093,10 @@ fn apply_scalar_f64_binary(op: ScalarF64BinaryOp, lhs: f64, rhs: f64) -> f64 {
         ScalarF64BinaryOp::Rad2Deg => lhs.to_degrees(),
         ScalarF64BinaryOp::Square => lhs * lhs,
         ScalarF64BinaryOp::IntegerPow(exp) => lhs.powi(exp),
+        ScalarF64BinaryOp::Reciprocal => 1.0 / lhs,
+        ScalarF64BinaryOp::Cbrt => lhs.cbrt(),
+        ScalarF64BinaryOp::Logistic => 1.0 / (1.0 + (-lhs).exp()),
+        ScalarF64BinaryOp::Sign => scalar_f64_sign(lhs),
     }
 }
 
@@ -3484,6 +3514,10 @@ fn apply_scalar_f32_binary(op: ScalarF64BinaryOp, lhs: f32, rhs: f32) -> f32 {
         ScalarF64BinaryOp::Rad2Deg => lhs.to_degrees(),
         ScalarF64BinaryOp::Square => lhs * lhs,
         ScalarF64BinaryOp::IntegerPow(exp) => lhs.powi(exp),
+        ScalarF64BinaryOp::Reciprocal => 1.0 / lhs,
+        ScalarF64BinaryOp::Cbrt => lhs.cbrt(),
+        ScalarF64BinaryOp::Logistic => 1.0 / (1.0 + (-lhs).exp()),
+        ScalarF64BinaryOp::Sign => scalar_f64_sign(lhs),
     };
     result as f32
 }
@@ -6491,6 +6525,10 @@ mod tests {
             Primitive::Deg2Rad,
             Primitive::Rad2Deg,
             Primitive::Square,
+            Primitive::Reciprocal,
+            Primitive::Cbrt,
+            Primitive::Logistic,
+            Primitive::Sign,
         ];
         let xs = [
             -100.0_f64, -5.0, -1.5, -1.0, -0.5, -0.0, 0.0, 0.3, 0.5, 0.9999, 1.0, 1.5, 2.0, 3.7,
