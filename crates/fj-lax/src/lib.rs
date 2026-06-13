@@ -958,52 +958,95 @@ fn eval_associative_scan(
                 return Ok(xs.clone());
             }
 
-            // Dense f64 fast path for the commutative scalar body_ops. The generic
-            // path below does `leading_dim` separate `eval_primitive` dispatches,
-            // each allocating slice/result `Value`s plus two clones, then a final
-            // `stack_axis0` — O(leading_dim) heap churn dominated by dispatch/alloc,
-            // not the elementwise op itself. Here we scan the typed buffer in place:
-            // out[i] = op(out[i-1], x[i]) (forward) / op(x[i], out[i+1]) (reverse),
-            // matching the generic path's EXACT operand order so even order-sensitive
-            // scalar ops stay bit-for-bit identical. Uses the same IEEE/`jax_*` scalar
-            // fn the elementwise primitive uses. Non-f64 / non-scalar body_ops fall
-            // through to the generic path unchanged.
-            if let Some(values) = t.elements.as_f64_slice() {
-                let op: Option<fn(f64, f64) -> f64> = match body_op {
-                    Primitive::Add => Some(|a, b| a + b),
-                    Primitive::Mul => Some(|a, b| a * b),
-                    Primitive::Max => Some(jax_max_f64),
-                    Primitive::Min => Some(jax_min_f64),
-                    _ => None,
-                };
-                if let Some(op) = op {
+            // Dense fast path for the scalar body_ops. The generic path below does
+            // `leading_dim` separate `eval_primitive` dispatches, each allocating
+            // slice/result `Value`s plus two clones, then a final `stack_axis0` —
+            // O(leading_dim) heap churn dominated by dispatch/alloc, not the
+            // elementwise op itself (13x on 1-D scans where inner==1). Here we scan
+            // the typed buffer in place: out[i] = op(out[i-1], x[i]) (forward) /
+            // op(x[i], out[i+1]) (reverse), matching the generic path's EXACT operand
+            // order (so order-sensitive max/min on signed zero stay identical) and
+            // the SAME scalar fn the elementwise primitive uses for that dtype:
+            //   f64  -> IEEE +/* and jax_max_f64/jax_min_f64
+            //   f32  -> op(a as f64, b as f64) as f32  (mirrors eval_same_shape_f32_map)
+            // Other dtypes / body_ops fall through to the generic path unchanged.
+            // (Integer body_ops keep the generic path: the elementwise integer
+            // semantics — overflow/wrap behaviour and i32 mod-2^32 narrowing — live
+            // behind the dispatcher and are not mirrored here; see bead follow-up.)
+            macro_rules! dense_scan_return {
+                ($values:expr, $op:expr, $ctor:path) => {{
+                    let values = $values;
+                    let op = $op;
                     let inner = values.len() / leading_dim;
-                    let mut out = vec![0.0_f64; values.len()];
+                    let mut out = values.to_vec(); // seeds every row; non-seed rows overwritten
                     if reverse {
-                        let last = (leading_dim - 1) * inner;
-                        out[last..last + inner].copy_from_slice(&values[last..last + inner]);
                         for i in (0..leading_dim - 1).rev() {
-                            let base = i * inner;
-                            let next = (i + 1) * inner;
+                            let (base, next) = (i * inner, (i + 1) * inner);
                             for j in 0..inner {
-                                // generic reverse step is op(x_slice, acc).
                                 out[base + j] = op(values[base + j], out[next + j]);
                             }
                         }
                     } else {
-                        out[0..inner].copy_from_slice(&values[0..inner]);
                         for i in 1..leading_dim {
-                            let base = i * inner;
-                            let prev = (i - 1) * inner;
+                            let (base, prev) = (i * inner, (i - 1) * inner);
                             for j in 0..inner {
-                                // generic forward step is op(acc, x_slice).
                                 out[base + j] = op(out[prev + j], values[base + j]);
                             }
                         }
                     }
-                    return TensorValue::new_f64_values(t.shape.clone(), out)
+                    return $ctor(t.shape.clone(), out)
                         .map(Value::Tensor)
                         .map_err(EvalError::InvalidTensor);
+                }};
+            }
+            if let Some(values) = t.elements.as_f64_slice() {
+                match body_op {
+                    Primitive::Add => {
+                        dense_scan_return!(
+                            values,
+                            |a: f64, b: f64| a + b,
+                            TensorValue::new_f64_values
+                        )
+                    }
+                    Primitive::Mul => {
+                        dense_scan_return!(
+                            values,
+                            |a: f64, b: f64| a * b,
+                            TensorValue::new_f64_values
+                        )
+                    }
+                    Primitive::Max => {
+                        dense_scan_return!(values, jax_max_f64, TensorValue::new_f64_values)
+                    }
+                    Primitive::Min => {
+                        dense_scan_return!(values, jax_min_f64, TensorValue::new_f64_values)
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(values) = t.elements.as_f32_slice() {
+                match body_op {
+                    Primitive::Add => dense_scan_return!(
+                        values,
+                        |a: f32, b: f32| (a as f64 + b as f64) as f32,
+                        TensorValue::new_f32_values
+                    ),
+                    Primitive::Mul => dense_scan_return!(
+                        values,
+                        |a: f32, b: f32| (a as f64 * b as f64) as f32,
+                        TensorValue::new_f32_values
+                    ),
+                    Primitive::Max => dense_scan_return!(
+                        values,
+                        |a: f32, b: f32| jax_max_f64(a as f64, b as f64) as f32,
+                        TensorValue::new_f32_values
+                    ),
+                    Primitive::Min => dense_scan_return!(
+                        values,
+                        |a: f32, b: f32| jax_min_f64(a as f64, b as f64) as f32,
+                        TensorValue::new_f32_values
+                    ),
+                    _ => {}
                 }
             }
 
@@ -9352,6 +9395,109 @@ mod tests {
                     got,
                     reference(prim, reverse),
                     "associative_scan {name} reverse={reverse}: fast path != slice-dispatch"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn associative_scan_dense_f32_bit_identical_to_slice_dispatch() {
+        // f32 (JAX's default float): the fast path mirrors eval_same_shape_f32_map
+        // (op in f64, narrow to f32). Must equal the per-slice dispatch bit-for-bit
+        // across add/mul/max/min x forward/reverse with NaN/±0/±inf.
+        let (l, d) = (6usize, 4usize);
+        let raw: Vec<f32> = vec![
+            1.0,
+            -0.0,
+            f32::NAN,
+            -3.25,
+            f32::INFINITY,
+            0.0,
+            2.5,
+            -1.0,
+            f32::NEG_INFINITY,
+            7.0,
+            -0.0,
+            4.0,
+            0.5,
+            -2.0,
+            3.0,
+            f32::NAN,
+            -8.0,
+            6.0,
+            -6.0,
+            1.5,
+            9.0,
+            -9.0,
+            0.25,
+            -0.25,
+        ];
+        let tensor = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![l as u32, d as u32],
+                },
+                raw,
+            )
+            .unwrap(),
+        );
+        let reference = |body_op: Primitive, reverse: bool| -> Vec<u64> {
+            let t = tensor.as_tensor().unwrap();
+            let mut results: Vec<Value> = Vec::new();
+            if reverse {
+                let mut acc = t.slice_axis0(l - 1).unwrap();
+                results.push(acc.clone());
+                for i in (0..l - 1).rev() {
+                    let x = t.slice_axis0(i).unwrap();
+                    acc = eval_primitive(body_op, &[x, acc], &BTreeMap::new()).unwrap();
+                    results.push(acc.clone());
+                }
+                results.reverse();
+            } else {
+                let mut acc = t.slice_axis0(0).unwrap();
+                results.push(acc.clone());
+                for i in 1..l {
+                    let x = t.slice_axis0(i).unwrap();
+                    acc = eval_primitive(body_op, &[acc, x], &BTreeMap::new()).unwrap();
+                    results.push(acc.clone());
+                }
+            }
+            TensorValue::stack_axis0(&results)
+                .unwrap()
+                .elements
+                .iter()
+                .map(|x| x.as_f64().unwrap().to_bits())
+                .collect()
+        };
+        for (name, prim) in [
+            ("add", Primitive::Add),
+            ("mul", Primitive::Mul),
+            ("max", Primitive::Max),
+            ("min", Primitive::Min),
+        ] {
+            for reverse in [false, true] {
+                let params = if reverse {
+                    assoc_scan_params_reverse(name)
+                } else {
+                    assoc_scan_params(name)
+                };
+                let out = eval_primitive(
+                    Primitive::AssociativeScan,
+                    std::slice::from_ref(&tensor),
+                    &params,
+                )
+                .unwrap();
+                let got: Vec<u64> = out
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|x| x.as_f64().unwrap().to_bits())
+                    .collect();
+                assert_eq!(
+                    got,
+                    reference(prim, reverse),
+                    "f32 associative_scan {name} reverse={reverse}: fast path != slice-dispatch"
                 );
             }
         }
