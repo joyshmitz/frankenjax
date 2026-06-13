@@ -1136,6 +1136,7 @@ fn complex_inner1_reduce_rows(
 /// (only the iteration order over distinct cells changes, never a cell's own fold
 /// sequence). Prod/Max/Min route here (no `float_op`); ReduceSum stays serial.
 /// Gated on the `1<<18` total-work threshold like the trailing-axis paths.
+#[allow(clippy::too_many_arguments)]
 fn complex_inner_axis_reduce_rows(
     result_re: &mut [f64],
     result_im: &mut [f64],
@@ -2791,6 +2792,7 @@ where
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn eval_cumulative_dense(
     tensor: &TensorValue,
     cum_primitive: Primitive,

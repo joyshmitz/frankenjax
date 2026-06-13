@@ -3659,7 +3659,7 @@ fn eval_reduce_window_rank2_i64_sum_sat(
 /// sum equals the per-window ascending wrapping tap sum bit-for-bit (OOB/pad taps
 /// contribute 0 in both = the clamped in-bounds box). Caller gates `rank ≤ 6` so
 /// the 2^rank corner loop stays bounded.
-fn eval_reduce_window_iN_sum_sat(
+fn eval_reduce_window_in_sum_sat(
     src: &[i64],
     window_dims: &[usize],
     strides: &[usize],
@@ -3754,7 +3754,7 @@ fn eval_reduce_window_iN_sum_sat(
                         lows += 1;
                     }
                 }
-                if lows % 2 == 0 {
+                if lows.is_multiple_of(2) {
                     s = s.wrapping_add(sat[p_idx]);
                 } else {
                     s = s.wrapping_sub(sat[p_idx]);
@@ -3786,6 +3786,7 @@ fn eval_reduce_window_iN_sum_sat(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn eval_reduce_window_dense_i64(
     reduce_op: &str,
     src: &[i64],
@@ -4777,7 +4778,7 @@ fn eval_reduce_window(
         && let Some(src) = tensor.elements.as_i64_slice()
     {
         let input_dims: Vec<usize> = tensor.shape.dims.iter().map(|d| *d as usize).collect();
-        return eval_reduce_window_iN_sum_sat(
+        return eval_reduce_window_in_sum_sat(
             src,
             &window_dims,
             &strides,
@@ -13459,7 +13460,7 @@ mod tests {
     }
 
     #[test]
-    fn reduce_window_iN_sum_sat_matches_generic() {
+    fn reduce_window_in_sum_sat_matches_generic() {
         // General-rank i64 SAT sum (rank 1, 3, 4) must match the generic per-window
         // path element-for-element across padding/strides. The SAT path is gated
         // ∏window ≥ 16; the generic eval (which these compare against via a second
@@ -13641,7 +13642,7 @@ mod tests {
 
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
-    fn bench_reduce_window_iN_sum_sat_vs_dense() {
+    fn bench_reduce_window_in_sum_sat_vs_dense() {
         use std::time::Instant;
         // Rank-1 sliding-window i64 sum (box filter): general-rank SAT
         // (window-independent) vs the per-window O(out·win) tap sum.

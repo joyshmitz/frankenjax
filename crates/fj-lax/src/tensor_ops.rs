@@ -2492,6 +2492,7 @@ fn scatter_combine_literal(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn eval_scatter_dense(
     operand: &TensorValue,
     updates: &TensorValue,
@@ -6141,6 +6142,7 @@ fn radix_sort_slice_8pass(data: &mut [(u64, u32)], tmp: &mut [(u64, u32)]) {
 /// the flat 8-pass LSD — and both are stable, so the permutation is BIT-IDENTICAL
 /// to [`radix_pairs_ascending`] (proven by
 /// `parallel_radix_matches_serial_radix_with_ties`). The result is left in `pairs`.
+#[allow(clippy::ptr_arg)]
 fn radix_pairs_ascending_parallel(pairs: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>) {
     let n = pairs.len();
     if n <= 1 {
