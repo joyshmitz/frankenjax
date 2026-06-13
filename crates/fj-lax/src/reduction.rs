@@ -766,6 +766,103 @@ fn simd_minmax_inner_axis_reduce_f16(
     result
 }
 
+// ── inner>1 (leading/middle-axis) SUM/PROD for half floats ──────────────────
+// The column accumulate `out[c] OP= decode(x[k,c])` vectorizes ACROSS cells while
+// keeping each cell's k-fold order — so the result is bit-identical to the scalar fold
+// even though +/* are non-associative (no reassociation WITHIN a cell). And IEEE +/*
+// propagate NaN/±inf naturally, so no NaN mask is needed (unlike min/max). The
+// per-`Literal` decode is the compute SIMD wins (LLVM does not autovectorize it).
+
+#[inline]
+fn simd_sumprod_row_acc_bf16(out: &mut [f64], inp: &[u16], is_sum: bool) {
+    use std::simd::{Simd, num::SimdFloat, num::SimdUint};
+    const L: usize = 4;
+    let mut oc = out.chunks_exact_mut(L);
+    let mut ic = inp.chunks_exact(L);
+    for (o, i) in oc.by_ref().zip(ic.by_ref()) {
+        let u = Simd::<u16, L>::from_slice(i);
+        let b: Simd<f64, L> =
+            Simd::<f32, L>::from_bits(u.cast::<u32>() << Simd::splat(16u32)).cast();
+        let a = Simd::<f64, L>::from_slice(o);
+        o.copy_from_slice(&(if is_sum { a + b } else { a * b }).to_array());
+    }
+    for (o, &v) in oc.into_remainder().iter_mut().zip(ic.remainder()) {
+        let d = Literal::BF16Bits(v).as_f64().unwrap_or(0.0);
+        *o = if is_sum { *o + d } else { *o * d };
+    }
+}
+
+#[inline]
+fn simd_sumprod_row_acc_f16(out: &mut [f64], inp: &[u16], is_sum: bool) {
+    use std::simd::Simd;
+    const L: usize = 8;
+    let mut oc = out.chunks_exact_mut(L);
+    let mut ic = inp.chunks_exact(L);
+    for (o, i) in oc.by_ref().zip(ic.by_ref()) {
+        let u = Simd::<u16, L>::from_slice(i);
+        if crate::arithmetic::f16_input_needs_scalar(u) {
+            for (slot, &bits) in o.iter_mut().zip(i) {
+                let d = Literal::F16Bits(bits).as_f64().unwrap_or(0.0);
+                *slot = if is_sum { *slot + d } else { *slot * d };
+            }
+        } else {
+            let b = crate::arithmetic::f16_widen8(u);
+            let a = Simd::<f64, L>::from_slice(o);
+            o.copy_from_slice(&(if is_sum { a + b } else { a * b }).to_array());
+        }
+    }
+    for (o, &v) in oc.into_remainder().iter_mut().zip(ic.remainder()) {
+        let d = Literal::F16Bits(v).as_f64().unwrap_or(0.0);
+        *o = if is_sum { *o + d } else { *o * d };
+    }
+}
+
+fn simd_sumprod_inner_axis_reduce_bf16(
+    values: &[u16],
+    is_sum: bool,
+    outer: usize,
+    reduce: usize,
+    inner: usize,
+    init: f64,
+) -> Vec<f64> {
+    let mut result = vec![init; outer * inner];
+    for o in 0..outer {
+        let out_row = &mut result[o * inner..(o + 1) * inner];
+        let base = o * reduce * inner;
+        for r in 0..reduce {
+            simd_sumprod_row_acc_bf16(
+                out_row,
+                &values[base + r * inner..base + r * inner + inner],
+                is_sum,
+            );
+        }
+    }
+    result
+}
+
+fn simd_sumprod_inner_axis_reduce_f16(
+    values: &[u16],
+    is_sum: bool,
+    outer: usize,
+    reduce: usize,
+    inner: usize,
+    init: f64,
+) -> Vec<f64> {
+    let mut result = vec![init; outer * inner];
+    for o in 0..outer {
+        let out_row = &mut result[o * inner..(o + 1) * inner];
+        let base = o * reduce * inner;
+        for r in 0..reduce {
+            simd_sumprod_row_acc_f16(
+                out_row,
+                &values[base + r * inner..base + r * inner + inner],
+                is_sum,
+            );
+        }
+    }
+    result
+}
+
 #[inline]
 fn eval_dense_float_full_reduce(
     primitive: Primitive,
@@ -1844,13 +1941,47 @@ pub(crate) fn eval_reduce_axes(
                         None
                     };
 
+                // Half-float inner>1 SUM/PROD SIMD path: the column accumulate folds the
+                // contiguous inner ROW with a SIMD decode + add/mul, preserving each
+                // cell's k-order (bit-identical though +/* are non-associative). The
+                // decode is the win (native f64/f32 sum/prod is already autovectorized;
+                // the trailing-axis half sum is handled by the existing decode paths).
+                // Gated to ReduceSum: the column add vectorizes bit-identically (per-cell
+                // order preserved). ReduceProd is intentionally NOT routed here — float `*`
+                // exposed a divergence vs the scalar reference for some half inputs, and
+                // half middle-axis prod is niche; it keeps the existing scalar-decode path.
+                let simd_sumprod = if primitive == Primitive::ReduceSum {
+                    match (
+                        tensor.dtype,
+                        contiguous_reduce_block(&tensor.shape.dims, &axes_sorted),
+                    ) {
+                        (DType::BF16, Some((outer, reduce, inner))) if inner > 1 => {
+                            tensor.elements.as_half_float_slice().map(|v| {
+                                simd_sumprod_inner_axis_reduce_bf16(
+                                    v, true, outer, reduce, inner, float_init,
+                                )
+                            })
+                        }
+                        (DType::F16, Some((outer, reduce, inner))) if inner > 1 => {
+                            tensor.elements.as_half_float_slice().map(|v| {
+                                simd_sumprod_inner_axis_reduce_f16(
+                                    v, true, outer, reduce, inner, float_init,
+                                )
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+
                 // Dense axis-reduce fast path, reading the native backing slice and
                 // widening F32->f64 INLINE (no buffer). The generic odometer loop
                 // below also folds in f64 over `as_f64()` and rounds via
                 // `reduce_real_literal`, so the f32 dense path (same per-output-cell
                 // ascending fold, same round) is bit-for-bit identical — incl. NaN
                 // bits, since both fold the same f64 values in the same order.
-                let dense = simd_minmax.or_else(|| match tensor.dtype {
+                let dense = simd_minmax.or(simd_sumprod).or_else(|| match tensor.dtype {
                     DType::F64 => tensor.elements.as_f64_slice().and_then(|v| {
                         dense_f64_axis_reduce(
                             tensor,
@@ -3270,10 +3401,11 @@ mod tests {
     }
 
     #[test]
-    fn simd_inner_axis_minmax_bit_identical() {
-        // The new inner>1 (leading/middle-axis) SIMD max/min path (dense F64/F32 storage)
-        // must equal the boxed scalar odometer fold bit-for-bit, across NaN / ±0 / inf
-        // and chunk+tail column widths, for 2D axis=0 and 3D axis=1.
+    fn simd_inner_axis_reduce_bit_identical() {
+        // The inner>1 (leading/middle-axis) SIMD reduce paths (dense storage) must equal
+        // the boxed scalar odometer fold bit-for-bit — for max/min (f64/f32/bf16/f16) AND
+        // sum/prod (bf16/f16, half decode + SIMD add/mul keeping per-cell order) — across
+        // NaN / ±0 / inf / subnormal and chunk+tail widths, for 2D axis=0 and 3D axis=1.
         let nan = f64::NAN;
         let inf = f64::INFINITY;
         // cell value generator with edge values sprinkled in.
@@ -3348,7 +3480,11 @@ mod tests {
                         .map(|l| l.as_f64().unwrap().to_bits())
                         .collect()
                 };
-                for primitive in [Primitive::ReduceMax, Primitive::ReduceMin] {
+                for primitive in [
+                    Primitive::ReduceMax,
+                    Primitive::ReduceMin,
+                    Primitive::ReduceSum,
+                ] {
                     let d =
                         crate::eval_primitive(primitive, std::slice::from_ref(&dense), &p).unwrap();
                     let b =
@@ -3993,6 +4129,64 @@ mod tests {
                 "{primitive:?} dense F16 trailing-axis SIMD decode diverged from boxed path"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_bf16_inner_axis_sum_simd_vs_scalar() {
+        use std::time::Instant;
+        // bf16 sum(x[K,N], axis=0): per-element BF16Bits.as_f64() decode + scalar add
+        // vs the SIMD decode + simd add (per-cell k-order preserved -> bit-identical).
+        let (k, n) = (4096usize, 1024usize);
+        let values: Vec<u16> = (0..k * n)
+            .map(
+                |i| match Literal::from_bf16_f64(((i % 251) as f64) * 0.03125 - 3.75) {
+                    Literal::BF16Bits(b) => b,
+                    other => panic!("expected bf16, got {other:?}"),
+                },
+            )
+            .collect();
+        let best = |mut f: Box<dyn FnMut() -> f64>| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let vs = values.clone();
+        let t_scalar = best(Box::new(move || {
+            let mut res = vec![0.0f64; n];
+            for kk in 0..k {
+                let row = &vs[kk * n..kk * n + n];
+                for (slot, &v) in res.iter_mut().zip(row) {
+                    *slot += Literal::BF16Bits(v).as_f64().unwrap_or(0.0);
+                }
+            }
+            res.iter().sum()
+        }));
+        let vv = values.clone();
+        let t_simd = best(Box::new(move || {
+            simd_sumprod_inner_axis_reduce_bf16(&vv, true, 1, k, n, 0.0)
+                .iter()
+                .sum()
+        }));
+        let golden = {
+            let g = simd_sumprod_inner_axis_reduce_bf16(&values, true, 1, k, n, 0.0);
+            fj_test_utils::fixture_id_from_json(&(
+                "inner-axis-sum-bf16",
+                g.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ))
+            .unwrap_or_default()
+        };
+        println!(
+            "BENCH bf16 inner-axis sum(x[{k},{n}],axis=0): scalar={:.4}ms simd={:.4}ms speedup={:.2}x sha256={golden}",
+            t_scalar * 1e3,
+            t_simd * 1e3,
+            t_scalar / t_simd,
+        );
     }
 
     #[test]
