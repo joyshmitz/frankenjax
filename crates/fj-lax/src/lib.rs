@@ -9739,6 +9739,61 @@ mod tests {
     }
 
     #[test]
+    fn associative_scan_i32_rank1_wraps_mod_2e32() {
+        // Rank-1 (inner==1) i32 associative_scan: the dense integer fast path
+        // (convergent commit 9933139b) routes i32 add/mul/max/min through
+        // `i64::from(op(a, b) as i32)`, narrowing every prefix step mod-2^32 —
+        // the JAX-correct i32 contract. This INTENTIONALLY differs from the
+        // generic per-slice dispatch path, whose rank-1 i32 slices are
+        // dtype-less `Literal::I64` scalars that wrap mod-2^64 (the bug tracked
+        // by frankenjax-b6w3l). The dense path is now the production path for
+        // these ops, so this test pins mod-2^32 to guard against a silent
+        // regression back to mod-2^64 scalar semantics. The existing
+        // bit-identical golden only exercises inner>1 (where slices are I32
+        // tensors that the dispatcher already narrows), so rank-1 was untested.
+        let raw: Vec<i64> = vec![i64::from(i32::MAX), 1, 1, 1];
+        let tensor = Value::Tensor(
+            TensorValue::new_i32_values(Shape { dims: vec![4] }, raw.clone()).unwrap(),
+        );
+        let out = eval_primitive(
+            Primitive::AssociativeScan,
+            std::slice::from_ref(&tensor),
+            &assoc_scan_params("add"),
+        )
+        .unwrap();
+        let got: Vec<i64> = out
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::I64(v) => *v,
+                other => panic!("expected I64, got {other:?}"),
+            })
+            .collect();
+
+        // Independent mod-2^32 prefix-sum reference (plain i32 wrapping add).
+        let mut expected = Vec::with_capacity(raw.len());
+        let mut acc = raw[0] as i32;
+        expected.push(i64::from(acc));
+        for &x in &raw[1..] {
+            acc = acc.wrapping_add(x as i32);
+            expected.push(i64::from(acc));
+        }
+        assert_eq!(
+            got, expected,
+            "rank-1 i32 scan must wrap mod-2^32 (JAX semantics)"
+        );
+
+        // Index 1 is exactly where mod-2^32 diverges from the legacy mod-2^64
+        // generic path: i32::MAX + 1 wraps to i32::MIN, not 2^31.
+        assert_eq!(got[1], i64::from(i32::MIN));
+        assert_ne!(got[1], i64::from(i32::MAX) + 1);
+        // Output dtype stays I32.
+        assert_eq!(out.as_tensor().unwrap().dtype, fj_core::DType::I32);
+    }
+
+    #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_associative_scan_dense_vs_slice_dispatch() {
         use std::time::Instant;
