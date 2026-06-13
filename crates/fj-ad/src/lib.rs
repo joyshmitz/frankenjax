@@ -726,6 +726,61 @@ fn try_scalar_f64_add_mul_jvp(
     }))
 }
 
+#[inline]
+fn scalar_f64_cubic_plus_square_plus_linear_jvp_values(x: f64, dx: f64) -> (f64, f64) {
+    let x2 = x * x;
+    let x2_tangent = (dx * x) + (x * dx);
+    let x3 = x2 * x;
+    let x3_tangent = (x2_tangent * x) + (x2 * dx);
+    let x3_plus_x2 = x3 + x2;
+    let x3_plus_x2_tangent = x3_tangent + x2_tangent;
+    let output = x3_plus_x2 + x;
+    let tangent = x3_plus_x2_tangent + dx;
+    (output, tangent)
+}
+
+#[inline(never)]
+fn try_scalar_f64_cubic_plus_square_plus_linear_jvp(
+    jaxpr: &Jaxpr,
+    primals: &[Value],
+    tangents: &[Value],
+) -> Result<Option<JvpResult>, AdError> {
+    if scalar_f64_cubic_plus_square_plus_linear_input(jaxpr).is_none() {
+        return Ok(None);
+    }
+    if !scalar_add_mul_fast_path_uses_builtin_jvp() {
+        return Ok(None);
+    }
+    if primals.len() != jaxpr.invars.len() {
+        return Err(AdError::InputArity {
+            expected: jaxpr.invars.len(),
+            actual: primals.len(),
+        });
+    }
+    if tangents.len() != primals.len() {
+        return Err(AdError::InputArity {
+            expected: primals.len(),
+            actual: tangents.len(),
+        });
+    }
+
+    let [Value::Scalar(Literal::F64Bits(x_bits))] = primals else {
+        return Ok(None);
+    };
+    let [Value::Scalar(Literal::F64Bits(dx_bits))] = tangents else {
+        return Ok(None);
+    };
+    let (primal, tangent) = scalar_f64_cubic_plus_square_plus_linear_jvp_values(
+        f64::from_bits(*x_bits),
+        f64::from_bits(*dx_bits),
+    );
+
+    Ok(Some(JvpResult {
+        primals: vec![Value::Scalar(Literal::from_f64(primal))],
+        tangents: vec![Value::Scalar(Literal::from_f64(tangent))],
+    }))
+}
+
 fn try_scalar_f64_cubic_plus_square_plus_linear_value_and_grad(
     jaxpr: &Jaxpr,
     args: &[Value],
@@ -9186,6 +9241,15 @@ fn jvp_inner(
     if jaxpr
         .equations
         .first()
+        .is_some_and(|eqn| eqn.primitive == Primitive::Mul)
+        && let Some(result) =
+            try_scalar_f64_cubic_plus_square_plus_linear_jvp(jaxpr, primals, tangents)?
+    {
+        return Ok(result);
+    }
+    if jaxpr
+        .equations
+        .first()
         .is_some_and(|eqn| matches!(eqn.primitive, Primitive::Add | Primitive::Mul))
         && let Some(result) = try_scalar_f64_add_mul_jvp(jaxpr, primals, tangents)?
     {
@@ -14508,6 +14572,64 @@ mod tests {
             digest,
             "0de357fc34872ec8485ed674662a533718400a68b9e690ae8016f84b6fba4b31"
         );
+        clear_custom_derivative_rules();
+    }
+
+    #[test]
+    fn scalar_f64_polynomial_jvp_matches_generic_order_bits() {
+        let _guard = custom_rule_test_guard();
+        clear_custom_derivative_rules();
+        let jaxpr = poly_jvp_jaxpr_from_base(0);
+        let cases = [
+            (2.0, 1.0),
+            (0.0, -0.0),
+            (-0.0, 1.0),
+            (-2.5, -0.25),
+            (f64::MIN_POSITIVE, f64::MIN_POSITIVE),
+            (f64::INFINITY, 1.0),
+            (f64::NEG_INFINITY, -1.0),
+            (f64::from_bits(0x7ff8_0000_0000_0042), 1.0),
+        ];
+        let mut digest_rows = Vec::with_capacity(cases.len());
+
+        for (x, dx) in cases {
+            let primals = [Value::scalar_f64(x)];
+            let tangents = [Value::scalar_f64(dx)];
+            let direct =
+                try_scalar_f64_cubic_plus_square_plus_linear_jvp(&jaxpr, &primals, &tangents)
+                    .expect("direct polynomial jvp")
+                    .expect("direct polynomial fast path");
+            let generic = try_scalar_f64_add_mul_jvp(&jaxpr, &primals, &tangents)
+                .expect("generic scalar add/mul jvp")
+                .expect("generic scalar add/mul fast path");
+            let public = jvp(&jaxpr, &primals, &tangents).expect("public jvp");
+            let direct_bits = jvp_scalar_bits(&direct);
+            assert_eq!(direct_bits, jvp_scalar_bits(&generic));
+            assert_eq!(direct_bits, jvp_scalar_bits(&public));
+            digest_rows.push(direct_bits);
+        }
+
+        let digest = fj_test_utils::fixture_id_from_json(&digest_rows).expect("sha256 digest");
+        assert_eq!(
+            digest,
+            "1161a25bcc839668145518ffa39be3cdae32e63ae95c433fc722d7c8ab1ee62f"
+        );
+        clear_custom_derivative_rules();
+    }
+
+    #[test]
+    fn scalar_f64_polynomial_jvp_respects_custom_primitive_rule() {
+        let _guard = custom_rule_test_guard();
+        clear_custom_derivative_rules();
+        register_custom_jvp(Primitive::Mul, |_primals, _tangents, _params| {
+            Ok(Value::scalar_f64(123.0))
+        });
+
+        let jaxpr = poly_jvp_jaxpr_from_base(0);
+        let result = jvp(&jaxpr, &[Value::scalar_f64(2.0)], &[Value::scalar_f64(1.0)])
+            .expect("custom primitive jvp should route through generic interpreter");
+        assert_eq!(result.primals[0].as_f64_scalar(), Some(14.0));
+        assert_eq!(result.tangents[0].as_f64_scalar(), Some(247.0));
         clear_custom_derivative_rules();
     }
 
