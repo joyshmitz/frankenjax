@@ -1097,19 +1097,52 @@ fn try_scalar_f64_exp_log_value_and_grad(
 
     let forward_exp = x.exp();
     let output = forward_exp.ln();
-    let log_cotangent = 1.0_f64 / forward_exp;
-    let grad = if log_cotangent == 0.0 {
-        0.0
-    } else {
-        let exp_vjp = x.exp();
-        log_cotangent * exp_vjp
-    };
+    let grad = scalar_f64_exp_log_grad_for_generic_reverse(x);
 
     Ok(Some((
         vec![Value::Scalar(Literal::from_f64(output))],
         vec![Value::Scalar(Literal::from_f64(grad))],
         jaxpr.equations.len(),
     )))
+}
+
+#[inline]
+fn scalar_f64_exp_log_grad_for_generic_reverse(x: f64) -> f64 {
+    let forward_exp = x.exp();
+    let log_cotangent = 1.0_f64 / forward_exp;
+    if log_cotangent == 0.0 {
+        0.0
+    } else {
+        let exp_vjp = x.exp();
+        log_cotangent * exp_vjp
+    }
+}
+
+#[inline(never)]
+fn try_scalar_f64_exp_log_grad(
+    jaxpr: &Jaxpr,
+    args: &[Value],
+) -> Result<Option<Vec<Value>>, AdError> {
+    if scalar_f64_exp_log_input(jaxpr).is_none() {
+        return Ok(None);
+    }
+    if !scalar_exp_log_fast_path_uses_builtin_vjp(jaxpr) {
+        return Ok(None);
+    }
+    if args.len() != jaxpr.invars.len() {
+        return Err(AdError::InputArity {
+            expected: jaxpr.invars.len(),
+            actual: args.len(),
+        });
+    }
+
+    let [Value::Scalar(Literal::F64Bits(bits))] = args else {
+        return Ok(None);
+    };
+    let x = f64::from_bits(*bits);
+    let grad = scalar_f64_exp_log_grad_for_generic_reverse(x);
+
+    Ok(Some(vec![Value::Scalar(Literal::from_f64(grad))]))
 }
 
 fn dense_f64_add_mul_reducesum_fast_path_uses_builtin_vjp(jaxpr: &Jaxpr) -> bool {
@@ -11039,6 +11072,14 @@ pub fn grad_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, AdError> 
     {
         return Ok(grads);
     }
+    if jaxpr
+        .equations
+        .first()
+        .is_some_and(|eqn| eqn.primitive == Primitive::Exp)
+        && let Some(grads) = try_scalar_f64_exp_log_grad(jaxpr, args)?
+    {
+        return Ok(grads);
+    }
     let (_, grads, _) = value_and_grad_jaxpr_inner(jaxpr, args)?;
     Ok(grads)
 }
@@ -20260,6 +20301,86 @@ mod tests {
         assert_eq!(
             digest,
             "e0b86a6503bf24506cc007fb3d75260ec216581ff9ccdfea749d7f0e6e59e909"
+        );
+
+        clear_custom_derivative_rules();
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_f64_exp_log_grad_matches_generic_bits() -> Result<(), String> {
+        use fj_core::{Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let _guard = custom_rule_test_guard();
+        clear_custom_derivative_rules();
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(2)],
+            vec![
+                Equation {
+                    primitive: Primitive::Exp,
+                    inputs: smallvec![Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(1)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Log,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+        let data = [
+            0.0,
+            -0.0,
+            1.0,
+            -2.5,
+            f64::MIN_POSITIVE,
+            709.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_0042),
+        ];
+        let mut bits_hex = Vec::new();
+
+        for x in data {
+            let args = [Value::scalar_f64(x)];
+            let direct_grads = try_scalar_f64_exp_log_grad(&jaxpr, &args)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "exp-log grad fast path did not match".to_string())?;
+            let fast_grads = grad_jaxpr(&jaxpr, &args).map_err(|e| e.to_string())?;
+            let generic_grads = grad_jaxpr_with_custom_vjp_key(&jaxpr, &args, "force-generic")
+                .map_err(|e| e.to_string())?;
+
+            assert_eq!(direct_grads, fast_grads, "direct/public mismatch x={x:?}");
+
+            let fast_grad_bits = fast_grads
+                .first()
+                .and_then(Value::as_f64_scalar)
+                .ok_or_else(|| "fast scalar gradient missing".to_string())?
+                .to_bits();
+            let generic_grad_bits = generic_grads
+                .first()
+                .and_then(Value::as_f64_scalar)
+                .ok_or_else(|| "generic scalar gradient missing".to_string())?
+                .to_bits();
+            assert_eq!(fast_grad_bits, generic_grad_bits, "grad x={x:?}");
+
+            bits_hex.push(format!("{fast_grad_bits:016x}"));
+        }
+
+        let digest = fj_test_utils::fixture_id_from_json(&bits_hex).expect("sha256 digest");
+        assert_eq!(
+            digest,
+            "bbbf792543a06f6978db4103c4bd5246a6b7d5d853d8d8afeb98c57abf8b4f97"
         );
 
         clear_custom_derivative_rules();
