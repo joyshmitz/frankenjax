@@ -509,6 +509,10 @@ fn try_partial_eval_two_eq_mixed_residual(
 ///
 /// Returns the pruned Jaxpr and a mask of which inputs are still needed.
 pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
+    if let Some(result) = try_dce_all_used_linear_chain(jaxpr, used_outputs) {
+        return result;
+    }
+
     let max_var = max_var_in_jaxpr(jaxpr);
     let bitset_len = max_var + 1;
 
@@ -583,6 +587,50 @@ pub fn dce_jaxpr(jaxpr: &Jaxpr, used_outputs: &[bool]) -> (Jaxpr, Vec<bool>) {
     );
 
     (new_jaxpr, used_inputs)
+}
+
+fn try_dce_all_used_linear_chain(
+    jaxpr: &Jaxpr,
+    used_outputs: &[bool],
+) -> Option<(Jaxpr, Vec<bool>)> {
+    if used_outputs.len() != jaxpr.outvars.len()
+        || !used_outputs.iter().all(|used| *used)
+        || jaxpr.invars.len() != 1
+        || !jaxpr.constvars.is_empty()
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.is_empty()
+    {
+        return None;
+    }
+
+    let mut current = jaxpr.invars[0];
+    for eqn in &jaxpr.equations {
+        let [output] = eqn.outputs.as_slice() else {
+            return None;
+        };
+
+        let mut consumes_current = false;
+        for atom in &eqn.inputs {
+            let Atom::Var(var) = atom else {
+                continue;
+            };
+            if *var != current {
+                return None;
+            }
+            consumes_current = true;
+        }
+        if !consumes_current {
+            return None;
+        }
+
+        current = *output;
+    }
+
+    if current != jaxpr.outvars[0] {
+        return None;
+    }
+
+    Some((jaxpr.clone(), vec![true]))
 }
 
 /// Infer the output abstract value of an equation from the first input's aval.
