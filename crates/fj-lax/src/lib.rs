@@ -4157,6 +4157,96 @@ fn reduce_window_separable_maxmin(
     cur
 }
 
+/// Separable sliding-window max/min for dense i64 — the integer sibling of
+/// `reduce_window_separable_maxmin`. Reduces each window axis with an independent
+/// monotonic-deque 1D pass: O(input+output) per axis, WINDOW-INDEPENDENT, vs the
+/// per-window O(output·∏window) dense path. i64 max/min is a total order (no NaN /
+/// signed-zero), so the window extremum VALUE is unique and the deque result is
+/// bit-identical to the ascending per-window `i64::max`/`i64::min` fold regardless
+/// of order; OOB taps contribute the init (`i64::MIN`/`i64::MAX`), a no-op.
+fn reduce_window_separable_maxmin_i64(
+    src: &[i64],
+    input_dims: &[usize],
+    window_dims: &[usize],
+    strides: &[usize],
+    pad_lows: &[usize],
+    out_dims: &[usize],
+    is_max: bool,
+) -> Vec<i64> {
+    let init = if is_max { i64::MIN } else { i64::MAX };
+    let rank = input_dims.len();
+    let mut cur = src.to_vec();
+    let mut cur_dims = input_dims.to_vec();
+    for d in 0..rank {
+        if window_dims[d] == 1 && strides[d] == 1 && pad_lows[d] == 0 && cur_dims[d] == out_dims[d]
+        {
+            continue;
+        }
+        let l = cur_dims[d];
+        let out_l = out_dims[d];
+        let inner: usize = cur_dims[d + 1..].iter().product();
+        let outer: usize = cur_dims[..d].iter().product();
+        let (wd, sd, pd) = (window_dims[d], strides[d], pad_lows[d]);
+        let mut next = vec![init; outer * out_l * inner];
+        for o in 0..outer {
+            let cur_o = o * l * inner;
+            let next_o = o * out_l * inner;
+            for lane in 0..inner {
+                let line_base = cur_o + lane;
+                let out_base = next_o + lane;
+                let mut deque: Vec<usize> = Vec::with_capacity(l);
+                let mut head = 0usize;
+                let mut pushed_until = 0usize;
+                for ol in 0..out_l {
+                    let raw_start = ol as isize * sd as isize - pd as isize;
+                    let raw_end = raw_start + wd as isize;
+                    let start = raw_start.clamp(0, l as isize) as usize;
+                    let end = raw_end.clamp(0, l as isize) as usize;
+
+                    while pushed_until < end {
+                        let v = cur[line_base + pushed_until * inner];
+                        while deque.len() > head {
+                            let Some(&back) = deque.last() else {
+                                break;
+                            };
+                            let back_value = cur[line_base + back * inner];
+                            let dominated = if is_max {
+                                back_value <= v
+                            } else {
+                                back_value >= v
+                            };
+                            if dominated {
+                                deque.pop();
+                            } else {
+                                break;
+                            }
+                        }
+                        if deque.len() == head {
+                            deque.clear();
+                            head = 0;
+                        }
+                        deque.push(pushed_until);
+                        pushed_until += 1;
+                    }
+
+                    while deque.get(head).is_some_and(|&idx| idx < start) {
+                        head += 1;
+                    }
+
+                    next[out_base + ol * inner] = if let Some(&idx) = deque.get(head) {
+                        cur[line_base + idx * inner]
+                    } else {
+                        init
+                    };
+                }
+            }
+        }
+        cur = next;
+        cur_dims[d] = out_l;
+    }
+    cur
+}
+
 /// Evaluate ReduceWindow: apply a reduction over sliding windows of a tensor.
 ///
 /// inputs: [tensor]
@@ -4322,6 +4412,40 @@ fn eval_reduce_window(
                     TensorValue::new_f64_values(shape, values).map_err(EvalError::from)?,
                 )),
             };
+        }
+    }
+
+    // Separable i64 max/min: integer sibling of the float deque above. Large-window
+    // integer max/min pooling otherwise ran the per-window O(output·∏window) dense
+    // path; the monotonic-deque per-axis pass is window-independent and bit-identical
+    // (i64 max/min is a unique total order). Same ∏window > 2·∑window gate.
+    if no_base_dilation
+        && no_window_dilation
+        && tensor.dtype == fj_core::DType::I64
+        && matches!(reduce_op, "max" | "min")
+    {
+        let win_total: usize = window_dims.iter().product();
+        let win_sum: usize = window_dims.iter().sum();
+        if win_total > 2 * win_sum
+            && let Some(src) = tensor.elements.as_i64_slice()
+        {
+            let input_dims: Vec<usize> = tensor.shape.dims.iter().map(|d| *d as usize).collect();
+            let out_dims_usize: Vec<usize> = out_dims.iter().map(|&d| d as usize).collect();
+            let values = reduce_window_separable_maxmin_i64(
+                src,
+                &input_dims,
+                &window_dims,
+                &strides,
+                &pad_lows,
+                &out_dims_usize,
+                reduce_op == "max",
+            );
+            let shape = Shape {
+                dims: out_dims.clone(),
+            };
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(shape, values).map_err(EvalError::from)?,
+            ));
         }
     }
 
@@ -13161,6 +13285,110 @@ mod tests {
             let expect = ref_sum(&raw, &in_dims, &win, &strd, &pad_lows, &out_dims);
             assert_eq!(got, expect, "iN SAT rank {rank} win={win:?} stride={strd:?} pad={pad} mismatch");
         }
+    }
+
+    #[test]
+    fn reduce_window_i64_maxmin_separable_matches_per_window() {
+        // Large-window i64 max/min (separable deque path) must equal an independent
+        // per-window in-bounds extremum reference across VALID/SAME, strides, ranks.
+        let ref_ext = |raw: &[i64], in_dims: &[usize], win: &[usize], strd: &[usize], pad: &[usize], out_dims: &[usize], is_max: bool| -> Vec<i64> {
+            let rank = in_dims.len();
+            let mut in_strides = vec![1usize; rank];
+            let mut a = 1;
+            for d in (0..rank).rev() { in_strides[d] = a; a *= in_dims[d]; }
+            let total_out: usize = out_dims.iter().product();
+            let init = if is_max { i64::MIN } else { i64::MAX };
+            let mut out = Vec::with_capacity(total_out);
+            let mut oi = vec![0usize; rank];
+            for _ in 0..total_out {
+                let mut acc = init;
+                let win_total: usize = win.iter().product();
+                let mut wi = vec![0usize; rank];
+                for _ in 0..win_total {
+                    let mut ok = true;
+                    let mut idx = 0usize;
+                    for d in 0..rank {
+                        let p = oi[d]*strd[d] + wi[d];
+                        if p < pad[d] { ok=false; break; }
+                        let ic = p - pad[d];
+                        if ic >= in_dims[d] { ok=false; break; }
+                        idx += ic*in_strides[d];
+                    }
+                    if ok { acc = if is_max { acc.max(raw[idx]) } else { acc.min(raw[idx]) }; }
+                    let mut c = true;
+                    for d in (0..rank).rev() { if c { wi[d]+=1; if wi[d]>=win[d] { wi[d]=0; } else { c=false; } } }
+                }
+                out.push(acc);
+                let mut c = true;
+                for d in (0..rank).rev() { if c { oi[d]+=1; if oi[d]>=out_dims[d] { oi[d]=0; } else { c=false; } } }
+            }
+            out
+        };
+        let cases: Vec<(Vec<usize>, Vec<usize>, Vec<usize>, &str)> = vec![
+            (vec![64], vec![16], vec![1], "VALID"),
+            (vec![50], vec![20], vec![3], "SAME"),
+            (vec![23, 19], vec![7, 5], vec![2, 2], "VALID"),
+            (vec![20, 20], vec![6, 6], vec![1, 1], "SAME"),
+            (vec![9, 9, 3], vec![4, 4, 1], vec![1, 1, 1], "VALID"),
+        ];
+        for is_max in [true, false] {
+            for (in_dims, win, strd, pad) in &cases {
+                let rank = in_dims.len();
+                let total: usize = in_dims.iter().product();
+                let raw: Vec<i64> = (0..total).map(|i| ((i as i64).wrapping_mul(2_654_435_761) >> 3) ^ 0x2b).collect();
+                let dims_u32: Vec<u32> = in_dims.iter().map(|&d| d as u32).collect();
+                let tensor = Value::Tensor(TensorValue::new_i64_values(Shape { dims: dims_u32 }, raw.clone()).unwrap());
+                let win_s = win.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
+                let str_s = strd.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
+                let op = if is_max { "max" } else { "min" };
+                let params = rw_params_with_padding(op, &win_s, &str_s, pad);
+                let out = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&tensor), &params).unwrap();
+                let out_t = out.as_tensor().unwrap();
+                let out_dims: Vec<usize> = out_t.shape.dims.iter().map(|&d| d as usize).collect();
+                let pad_lows: Vec<usize> = (0..rank).map(|d| if *pad == "SAME" { (((out_dims[d]-1)*strd[d]+win[d]).saturating_sub(in_dims[d]))/2 } else { 0 }).collect();
+                let got: Vec<i64> = out_t.elements.iter().map(|l| match l { Literal::I64(v)=>*v, o=>panic!("{o:?}") }).collect();
+                let expect = ref_ext(&raw, in_dims, win, strd, &pad_lows, &out_dims, is_max);
+                assert_eq!(got, expect, "i64 {op} separable win={win:?} stride={strd:?} pad={pad} mismatch");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_reduce_window_i64_maxmin_separable_vs_dense() {
+        use std::time::Instant;
+        let (rows, cols) = (512usize, 512usize);
+        let win = 15usize;
+        let raw: Vec<i64> = (0..rows*cols).map(|i| (i as i64).wrapping_mul(40_503) ^ 0x5).collect();
+        let tensor = Value::Tensor(TensorValue::new_i64_values(Shape { dims: vec![rows as u32, cols as u32] }, raw.clone()).unwrap());
+        let params = rw_params_with_padding("max", &format!("{win},{win}"), "1,1", "VALID");
+        let out_n = rows - win + 1;
+        let best = |mut f: Box<dyn FnMut() -> i64>| {
+            f();
+            let mut b = f64::MAX; let mut dg = 0i64;
+            for _ in 0..5 { let t = Instant::now(); dg = std::hint::black_box(f()); b = b.min(t.elapsed().as_secs_f64()); }
+            (b, dg)
+        };
+        let raw_ref = raw.clone();
+        let (t_win, d_win) = best(Box::new(move || {
+            let mut s = 0i64;
+            for or in 0..out_n { for oc in 0..out_n {
+                let mut m = i64::MIN;
+                for dr in 0..win { let base=(or+dr)*cols+oc; for dc in 0..win { m = m.max(raw_ref[base+dc]); } }
+                s = s.wrapping_add(m);
+            }}
+            s
+        }));
+        let t_ref = tensor.clone();
+        let (t_sep, d_sep) = best(Box::new(move || {
+            let out = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&t_ref), &params).unwrap();
+            out.as_tensor().unwrap().elements.iter().fold(0i64, |a, l| match l { Literal::I64(v)=>a.wrapping_add(*v), _=>a })
+        }));
+        assert_eq!(d_win, d_sep, "separable i64 max checksum must match per-window");
+        println!(
+            "BENCH reduce_window i64 max([{rows},{cols}],win={win}x{win},s=1): per-window={:.4}ms separable={:.4}ms speedup={:.2}x",
+            t_win*1e3, t_sep*1e3, t_win/t_sep,
+        );
     }
 
     #[test]
