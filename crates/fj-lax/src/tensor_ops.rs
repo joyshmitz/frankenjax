@@ -2230,6 +2230,83 @@ pub(crate) fn eval_gather(
 
     let op_strides = checked_row_major_strides(primitive, "gather", op_dims)?;
 
+    // Dense fast path for the NON-contiguous (partial trailing slice / strided)
+    // gather: read each gathered element straight from the typed backing using the
+    // SAME odometer offset math as the generic loop, into dense typed output —
+    // bypassing the 24-byte `Literal` reconstruction per access AND the boxed
+    // output. Bit-for-bit identical (same offsets, same order, same OOB fill bits
+    // = `gather_fill_literal`). Covers f64/f32/i64/bf16/f16; other dtypes fall to
+    // the generic Literal loop below.
+    macro_rules! dense_strided_gather {
+        ($src:expr, $fill:expr, $ctor:expr) => {{
+            let src = $src;
+            let mut out = Vec::with_capacity(resolved.len().saturating_mul(slice_elems));
+            for &resolved_idx in &resolved {
+                let Some(idx) = resolved_idx else {
+                    out.extend(std::iter::repeat_n($fill, slice_elems));
+                    continue;
+                };
+                let base_offset =
+                    idx.checked_mul(op_strides[0]).ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: "gather base offset overflows usize".to_owned(),
+                    })?;
+                let mut slice_coords = vec![0_usize; rank.saturating_sub(1)];
+                for _ in 0..slice_elems {
+                    let mut flat = base_offset;
+                    for (ax, &coord) in slice_coords.iter().enumerate() {
+                        let offset =
+                            coord.checked_mul(op_strides[ax + 1]).ok_or_else(|| {
+                                EvalError::Unsupported {
+                                    primitive,
+                                    detail: format!(
+                                        "gather offset overflows usize on axis {}",
+                                        ax + 1
+                                    ),
+                                }
+                            })?;
+                        flat = flat.checked_add(offset).ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: "gather flat offset overflows usize".to_owned(),
+                        })?;
+                    }
+                    let v = *src.get(flat).ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: "gather offset exceeds operand element count".to_owned(),
+                    })?;
+                    out.push(v);
+                    if rank > 1 {
+                        for ax in (0..rank - 1).rev() {
+                            slice_coords[ax] += 1;
+                            if slice_coords[ax] < slice_sizes[ax + 1] {
+                                break;
+                            }
+                            slice_coords[ax] = 0;
+                        }
+                    }
+                }
+            }
+            return Ok(Value::Tensor($ctor(Shape { dims: out_dims }, out)?));
+        }};
+    }
+    if let Some(s) = operand.elements.as_f64_slice() {
+        dense_strided_gather!(s, f64::NAN, TensorValue::new_f64_values);
+    }
+    if let Some(s) = operand.elements.as_f32_slice() {
+        dense_strided_gather!(s, f32::NAN, TensorValue::new_f32_values);
+    }
+    if let Some(s) = operand.elements.as_i64_slice() {
+        dense_strided_gather!(s, i64::MIN, TensorValue::new_i64_values);
+    }
+    if let Some(s) = operand.elements.as_half_float_slice() {
+        let dt = operand.dtype;
+        let fill: u16 = match gather_fill_literal(dt) {
+            Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+            _ => 0,
+        };
+        dense_strided_gather!(s, fill, |sh, o| TensorValue::new_half_float_values(dt, sh, o));
+    }
+
     for &resolved_idx in &resolved {
         let Some(idx) = resolved_idx else {
             // FILL_OR_DROP out-of-bounds slice: emit the fill value.
@@ -16908,6 +16985,69 @@ mod tests {
             dense_t * 1e3,
             generic / dense_t
         );
+    }
+
+    #[test]
+    fn dense_gather_strided_matches_literal_path() {
+        // Non-contiguous gather (partial trailing slice: slice_sizes[1..] < dims[1..])
+        // takes the strided dense path. Compare dense (new_*_values) vs boxed
+        // (new with literals → generic) across dtypes, clip + fill_or_drop.
+        let (rows, cols, pc) = (24usize, 40usize, 13usize); // pc < cols ⇒ strided
+        let dims = vec![rows as u32, cols as u32];
+        let idx = Value::vector_i64(&[0, 5, 23, 999, 1, 7, 23, 0]).unwrap();
+        for imode in ["clip", "fill_or_drop"] {
+            let p = params(&[("slice_sizes", &format!("1,{pc}")), ("index_mode", imode)]);
+            // f64
+            let f: Vec<f64> = (0..rows * cols).map(|i| i as f64 * 0.5 - 7.0).collect();
+            let df = Value::Tensor(TensorValue::new_f64_values(Shape { dims: dims.clone() }, f.clone()).unwrap());
+            let bf = Value::Tensor(TensorValue::new(DType::F64, Shape { dims: dims.clone() }, f.iter().copied().map(Literal::from_f64).collect()).unwrap());
+            let getf = |v: &Value| -> Vec<u64> { v.as_tensor().unwrap().elements.iter().map(|l| l.as_f64().unwrap_or(0.0).to_bits()).collect() };
+            assert_eq!(getf(&super::eval_gather(&[df.clone(), idx.clone()], &p).unwrap()),
+                       getf(&super::eval_gather(&[bf.clone(), idx.clone()], &p).unwrap()), "f64 strided gather imode={imode}");
+            // i64
+            let n: Vec<i64> = (0..rows * cols).map(|i| (i as i64).wrapping_mul(7) - 3).collect();
+            let dn = Value::Tensor(TensorValue::new_i64_values(Shape { dims: dims.clone() }, n.clone()).unwrap());
+            let bn = Value::Tensor(TensorValue::new(DType::I64, Shape { dims: dims.clone() }, n.iter().map(|&v| Literal::I64(v)).collect()).unwrap());
+            let geti = |v: &Value| -> Vec<i64> { v.as_tensor().unwrap().elements.iter().map(|l| match l { Literal::I64(x)=>*x, _=>0 }).collect() };
+            assert_eq!(geti(&super::eval_gather(&[dn.clone(), idx.clone()], &p).unwrap()),
+                       geti(&super::eval_gather(&[bn.clone(), idx.clone()], &p).unwrap()), "i64 strided gather imode={imode}");
+            // bf16
+            let bits = |x: f64| match Literal::from_bf16_f64(x) { Literal::BF16Bits(b)=>b, _=>0 };
+            let h: Vec<u16> = (0..rows * cols).map(|i| bits((i % 19) as f64 * 0.3 - 2.0)).collect();
+            let dh = Value::Tensor(TensorValue::new_half_float_values(DType::BF16, Shape { dims: dims.clone() }, h.clone()).unwrap());
+            let bh = Value::Tensor(TensorValue::new(DType::BF16, Shape { dims: dims.clone() }, h.iter().map(|&b| Literal::BF16Bits(b)).collect()).unwrap());
+            let geth = |v: &Value| -> Vec<u16> { v.as_tensor().unwrap().elements.iter().map(|l| match l { Literal::BF16Bits(b)|Literal::F16Bits(b)=>*b, _=>0 }).collect() };
+            assert_eq!(geth(&super::eval_gather(&[dh.clone(), idx.clone()], &p).unwrap()),
+                       geth(&super::eval_gather(&[bh.clone(), idx.clone()], &p).unwrap()), "bf16 strided gather imode={imode}");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_strided_gather_dense_vs_generic() {
+        use std::time::Instant;
+        // Partial-column gather of a large [vocab, dim] f32 table (gather first `pc`
+        // columns of each selected row) — strided dense path vs generic per-Literal.
+        let (vocab, dim, pc) = (50000usize, 256usize, 96usize);
+        let batch = 8192usize;
+        let data: Vec<f32> = (0..vocab * dim).map(|i| ((i % 1009) as f32) * 0.001 - 0.5).collect();
+        let dims = vec![vocab as u32, dim as u32];
+        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        let boxed = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: dims.clone() }, data.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let idx: Vec<i64> = (0..batch as i64).map(|i| (i * 7919) % vocab as i64).collect();
+        let idx_v = Value::vector_i64(&idx).unwrap();
+        let p = params(&[("slice_sizes", &format!("1,{pc}")), ("index_mode", "clip")]);
+        let bits = |v: Value| -> Vec<u32> { v.as_tensor().unwrap().elements.iter().map(|l| match l { Literal::F32Bits(b)=>*b, _=>0 }).collect() };
+        let time = |op: &Value| {
+            let _ = eval_gather(&[op.clone(), idx_v.clone()], &p).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..10 { let t = Instant::now(); let _ = eval_gather(&[op.clone(), idx_v.clone()], &p).unwrap(); best = best.min(t.elapsed().as_secs_f64()); }
+            best
+        };
+        assert_eq!(bits(super::eval_gather(&[dense.clone(), idx_v.clone()], &p).unwrap()),
+                   bits(super::eval_gather(&[boxed.clone(), idx_v.clone()], &p).unwrap()), "parity");
+        let g = time(&boxed); let d = time(&dense);
+        println!("BENCH f32 strided gather [{vocab},{dim}]->[{batch},{pc}]: generic={:.4}ms dense={:.4}ms speedup={:.2}x", g*1e3, d*1e3, g/d);
     }
 
     #[test]
