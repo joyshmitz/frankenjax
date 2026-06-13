@@ -3673,6 +3673,137 @@ fn eval_reduce_window_dense_i64(
     ))
 }
 
+/// Dense bool reduce_window (any rank, logical and/or pooling, Bool input).
+///
+/// The Bool-accumulator case of the generic loop, specialized for a dense `bool`
+/// source: the per-tap `Literal` gather + string-dispatched accumulate is
+/// replaced by a direct `bool` read and a single op selected ONCE, over the same
+/// row-major tap-offset stencil with the same interior/border split as
+/// `eval_reduce_window_dense_i64`.
+///
+/// BIT-FOR-BIT identical to the generic Bool accumulator: `min` reduces with `&`
+/// (init `true`), every other op with `|` (init `false`) — exactly the Bool arm
+/// of `reduce_window_accumulate_literal`. OOB/border taps contribute `init`,
+/// which is the identity for each op (`acc & true == acc`, `acc | false == acc`),
+/// matching the generic `pad_literal` contribution. Output is `Literal::Bool`.
+#[allow(clippy::too_many_arguments)]
+fn eval_reduce_window_dense_bool(
+    reduce_op: &str,
+    src: &[bool],
+    window_dims: &[usize],
+    strides: &[usize],
+    out_dims: &[u32],
+    pad_lows: &[usize],
+    input_dims: &[usize],
+    input_strides: &[usize],
+    total_output: usize,
+) -> Result<Value, EvalError> {
+    let rank = window_dims.len();
+    let win_total: usize = window_dims.iter().product();
+
+    let mut tap_coord = vec![0usize; rank];
+    let mut tap_offsets: Vec<usize> = Vec::with_capacity(win_total);
+    let mut tap_coords: Vec<Vec<usize>> = Vec::with_capacity(win_total);
+    for _ in 0..win_total {
+        let mut off = 0usize;
+        for d in 0..rank {
+            off += tap_coord[d] * input_strides[d];
+        }
+        tap_offsets.push(off);
+        tap_coords.push(tap_coord.clone());
+        let mut carry = true;
+        for d in (0..rank).rev() {
+            if carry {
+                tap_coord[d] += 1;
+                if tap_coord[d] >= window_dims[d] {
+                    tap_coord[d] = 0;
+                } else {
+                    carry = false;
+                }
+            }
+        }
+    }
+
+    // `min` => logical AND (init true); every other op => logical OR (init false).
+    let is_and = reduce_op == "min";
+    let init = is_and;
+
+    let out_dims_usize: Vec<usize> = out_dims.iter().map(|&d| d as usize).collect();
+    let mut out_idx = vec![0usize; rank];
+    let mut values: Vec<bool> = Vec::with_capacity(total_output);
+
+    for _ in 0..total_output {
+        let mut interior = true;
+        let mut base: isize = 0;
+        for d in 0..rank {
+            let corner = out_idx[d] as isize * strides[d] as isize - pad_lows[d] as isize;
+            if corner < 0 || corner + (window_dims[d] as isize - 1) >= input_dims[d] as isize {
+                interior = false;
+                break;
+            }
+            base += corner * input_strides[d] as isize;
+        }
+
+        let mut acc = init;
+        if interior {
+            let base = base as usize;
+            if is_and {
+                for &off in &tap_offsets {
+                    acc &= src[base + off];
+                }
+            } else {
+                for &off in &tap_offsets {
+                    acc |= src[base + off];
+                }
+            }
+        } else {
+            for coords in &tap_coords {
+                let mut in_bounds = true;
+                let mut flat = 0usize;
+                for d in (0..rank).rev() {
+                    let padded = out_idx[d] * strides[d] + coords[d];
+                    if padded < pad_lows[d] {
+                        in_bounds = false;
+                        break;
+                    }
+                    let ip = padded - pad_lows[d];
+                    if ip >= input_dims[d] {
+                        in_bounds = false;
+                        break;
+                    }
+                    flat += ip * input_strides[d];
+                }
+                let tap = if in_bounds { src[flat] } else { init };
+                if is_and {
+                    acc &= tap;
+                } else {
+                    acc |= tap;
+                }
+            }
+        }
+        values.push(acc);
+
+        let mut carry = true;
+        for d in (0..rank).rev() {
+            if carry {
+                out_idx[d] += 1;
+                if out_idx[d] >= out_dims_usize[d] {
+                    out_idx[d] = 0;
+                } else {
+                    carry = false;
+                }
+            }
+        }
+    }
+
+    let shape = Shape {
+        dims: out_dims.to_vec(),
+    };
+    Ok(Value::Tensor(
+        TensorValue::new_bool_values(shape, values).map_err(EvalError::from)?,
+    ))
+}
+
 #[inline]
 fn reduce_window_new_extreme_dominates(old: f64, new: f64, is_max: bool) -> bool {
     debug_assert!(!old.is_nan());
@@ -4074,6 +4205,40 @@ fn eval_reduce_window(
             })?;
         }
         return eval_reduce_window_dense_i64(
+            reduce_op,
+            src,
+            &window_dims,
+            &strides,
+            &out_dims,
+            &pad_lows,
+            &input_dims,
+            &input_strides,
+            total_output,
+        );
+    }
+
+    // Dense bool fast path (ANY rank, logical and/or pooling): boolean windowed
+    // reductions (binary morphology dilation/erosion, validity-mask pooling) ran
+    // the generic per-`Literal` gather. Dense Bool storage exposes a `bool` slice,
+    // so read it directly and run the hoisted op. Bit-identical to the generic
+    // Bool accumulator (see eval_reduce_window_dense_bool). Bit-packed BoolWords
+    // storage returns no slice view → stays on the generic path.
+    if no_base_dilation
+        && no_window_dilation
+        && tensor.dtype == fj_core::DType::Bool
+        && matches!(reduce_op, "max" | "min" | "sum")
+        && let Some(src) = tensor.elements.as_bool_slice()
+    {
+        let input_dims: Vec<usize> = tensor.shape.dims.iter().map(|d| *d as usize).collect();
+        let mut input_strides = vec![1usize; rank];
+        let mut stride_mult = 1usize;
+        for d in (0..rank).rev() {
+            input_strides[d] = stride_mult;
+            stride_mult = stride_mult.checked_mul(input_dims[d]).ok_or_else(|| {
+                reduce_window_unsupported(primitive, "reduce_window stride multiplier overflow")
+            })?;
+        }
+        return eval_reduce_window_dense_bool(
             reduce_op,
             src,
             &window_dims,
@@ -12554,6 +12719,105 @@ mod tests {
         );
         println!(
             "BENCH reduce_window i64 sum([{n},{n}],win=3x3,stride=1): generic={:.4}ms dense={:.4}ms speedup={:.2}x",
+            t_gen * 1e3,
+            t_dense * 1e3,
+            t_gen / t_dense,
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_reduce_window_dense_bool_vs_generic() {
+        use std::time::Instant;
+        // 2D bool OR-pool [512,512] window 3x3 stride 1 (VALID -> [510,510]).
+        // Dense bool fast path (production) vs the generic per-`Literal` gather +
+        // reduce_window_accumulate_literal loop it replaces. Also a parity proof:
+        // the checksum (count of `true`) must match. Built via new_bool_values so
+        // the dense Bool storage path (as_bool_slice) is exercised.
+        let (n, w) = (512usize, 3usize);
+        let raw: Vec<bool> = (0..n * n)
+            .map(|i| ((i.wrapping_mul(2_654_435_761) >> 7) & 1) == 0)
+            .collect();
+        let tensor = Value::Tensor(
+            TensorValue::new_bool_values(
+                Shape {
+                    dims: vec![n as u32, n as u32],
+                },
+                raw,
+            )
+            .unwrap(),
+        );
+        let params = rw_params("max", "3,3", "1,1");
+        let out_n = n - w + 1;
+
+        let best = |mut f: Box<dyn FnMut() -> u64>| {
+            f();
+            let mut b = f64::MAX;
+            let mut dg = 0u64;
+            for _ in 0..5 {
+                let t = Instant::now();
+                dg = std::hint::black_box(f());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            (b, dg)
+        };
+
+        let t_ref = tensor.clone();
+        let (t_gen, d_gen) = best(Box::new(move || {
+            let t = t_ref.as_tensor().unwrap();
+            let mut out_elems: Vec<Literal> = Vec::with_capacity(out_n * out_n);
+            for oy in 0..out_n {
+                for ox in 0..out_n {
+                    let mut accum = reduce_window_initial_accumulator(DType::Bool, "max");
+                    for wy in 0..w {
+                        for wx in 0..w {
+                            let flat = (oy + wy) * n + (ox + wx);
+                            reduce_window_accumulate_literal(
+                                Primitive::ReduceWindow,
+                                "max",
+                                &mut accum,
+                                t.elements[flat],
+                            )
+                            .unwrap();
+                        }
+                    }
+                    out_elems.push(
+                        reduce_window_accumulator_literal(
+                            Primitive::ReduceWindow,
+                            DType::Bool,
+                            accum,
+                        )
+                        .unwrap(),
+                    );
+                }
+            }
+            out_elems.iter().fold(0u64, |acc, l| match l {
+                Literal::Bool(v) => acc + u64::from(*v),
+                _ => acc,
+            })
+        }));
+
+        let t_fast = tensor.clone();
+        let (t_dense, d_dense) = best(Box::new(move || {
+            let out =
+                eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&t_fast), &params)
+                    .unwrap();
+            out.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .fold(0u64, |acc, l| match l {
+                    Literal::Bool(v) => acc + u64::from(*v),
+                    _ => acc,
+                })
+        }));
+
+        assert_eq!(
+            d_gen, d_dense,
+            "dense bool reduce_window checksum must match generic"
+        );
+        println!(
+            "BENCH reduce_window bool or([{n},{n}],win=3x3,stride=1): generic={:.4}ms dense={:.4}ms speedup={:.2}x",
             t_gen * 1e3,
             t_dense * 1e3,
             t_gen / t_dense,
