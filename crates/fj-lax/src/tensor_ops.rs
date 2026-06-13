@@ -5369,6 +5369,8 @@ fn sort_along_axis_dense_i64(
     let mut out = vec![0_i64; total];
     if axis_stride == 1 {
         // Contiguous last axis: slices are disjoint blocks -> fan out across threads.
+        // A single large slice instead parallelizes its radix intra-slice.
+        let parallel = use_parallel_radix(outer_count, axis_dim);
         for_each_contiguous_sort_slice(
             &mut out,
             axis_dim,
@@ -5381,7 +5383,7 @@ fn sort_along_axis_dense_i64(
                     let v = values[in_base + i];
                     pairs.push((((v as u64) ^ (1_u64 << 63)) ^ key_mask, i as u32));
                 }
-                radix_pairs_ascending(pairs, scratch);
+                radix_pairs_ascending_maybe_parallel(pairs, scratch, parallel);
                 for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
                     out_slice[out_pos] = if return_indices {
                         i64::from(orig)
@@ -5496,6 +5498,7 @@ fn sort_along_axis_dense_f64(
     // Contiguous last axis (axis_stride == 1) fans its disjoint slices across
     // threads; argsort writes i64 indices, sort writes f64 values — each to its
     // own output buffer so only the needed one is allocated/filled.
+    let parallel = use_parallel_radix(outer_count, axis_dim);
     let out_value = if axis_stride == 1 {
         if return_indices {
             let mut out_idx = vec![0_i64; total];
@@ -5509,7 +5512,7 @@ fn sort_along_axis_dense_f64(
                     for i in 0..axis_dim {
                         pairs.push((f64_sort_order_key(values[in_base + i]) ^ key_mask, i as u32));
                     }
-                    radix_pairs_ascending(pairs, scratch);
+                    radix_pairs_ascending_maybe_parallel(pairs, scratch, parallel);
                     for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
                         out_slice[out_pos] = i64::from(orig);
                     }
@@ -5528,7 +5531,7 @@ fn sort_along_axis_dense_f64(
                     for i in 0..axis_dim {
                         pairs.push((f64_sort_order_key(values[in_base + i]) ^ key_mask, i as u32));
                     }
-                    radix_pairs_ascending(pairs, scratch);
+                    radix_pairs_ascending_maybe_parallel(pairs, scratch, parallel);
                     for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
                         out_slice[out_pos] = values[in_base + orig as usize];
                     }
@@ -5653,11 +5656,14 @@ fn sort_along_axis_literal_radix(
     }
 
     let is_u32 = tensor.dtype == DType::U32;
+    // u32 keys live in the low 32 bits, so the top-byte MSD partition is degenerate
+    // (one bucket) — parallel radix only helps the full 8-byte (Float/I32) keys.
+    let parallel = !is_u32 && use_parallel_radix(outer_count, axis_dim);
     let order_pairs = |pairs: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>| {
         if is_u32 {
             radix_pairs_ascending_u32(pairs, scratch);
         } else {
-            radix_pairs_ascending(pairs, scratch);
+            radix_pairs_ascending_maybe_parallel(pairs, scratch, parallel);
         }
     };
 
@@ -5881,6 +5887,181 @@ fn radix_pairs_ascending_passes<const PASSES: usize>(
             counts[bucket] += 1;
         }
         std::mem::swap(pairs, scratch);
+    }
+}
+
+/// Minimum pairs in a SINGLE sort slice before its radix is parallelized
+/// intra-slice (MSD partition + parallel per-bucket LSD). Inter-slice threading
+/// ([`for_each_contiguous_sort_slice`]) handles many-small-slice sorts; this
+/// covers the complementary case — few huge slices (the 1-D `jnp.sort(x)` over
+/// millions of elements) where there is only one slice to hand a thread.
+const PARALLEL_RADIX_MIN_PAIRS: usize = 1 << 19;
+
+/// Stable ascending 8-pass LSD radix of a `(key,index)` SLICE, ping-ponging with
+/// the equal-length `tmp`. Eight passes (even) leave the sorted result back in
+/// `data`. Identical ordering to [`radix_pairs_ascending`]; the slice form lets a
+/// thread sort one MSD bucket in place.
+#[inline]
+fn radix_sort_slice_8pass(data: &mut [(u64, u32)], tmp: &mut [(u64, u32)]) {
+    let mut src: &mut [(u64, u32)] = data;
+    let mut dst: &mut [(u64, u32)] = tmp;
+    for byte in 0..8 {
+        let shift = byte * 8;
+        let mut counts = [0_usize; 256];
+        for &(key, _) in src.iter() {
+            counts[((key >> shift) & 0xff) as usize] += 1;
+        }
+        let mut sum = 0_usize;
+        for c in counts.iter_mut() {
+            let count = *c;
+            *c = sum;
+            sum += count;
+        }
+        for &pair in src.iter() {
+            let bucket = ((pair.0 >> shift) & 0xff) as usize;
+            dst[counts[bucket]] = pair;
+            counts[bucket] += 1;
+        }
+        std::mem::swap(&mut src, &mut dst);
+    }
+    // 8 swaps -> `src` aliases the original `data`, which holds the result.
+}
+
+/// Parallel stable ascending radix of `(key,index)` pairs, for a single LARGE
+/// slice. One serial MSD pass on the top key byte stably scatters the pairs into
+/// 256 globally key-ordered, contiguous buckets (`scratch`); the buckets are then
+/// LSD-sorted on the low 7 bytes IN PARALLEL (disjoint sub-slices, each thread its
+/// own temp). The top-byte LSD pass within a bucket is a constant no-op, so
+/// "MSD(byte7) then within-bucket LSD(bytes 0..7)" yields the SAME total order as
+/// the flat 8-pass LSD — and both are stable, so the permutation is BIT-IDENTICAL
+/// to [`radix_pairs_ascending`] (proven by
+/// `parallel_radix_matches_serial_radix_with_ties`). The result is left in `pairs`.
+fn radix_pairs_ascending_parallel(pairs: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>) {
+    let n = pairs.len();
+    if n <= 1 {
+        return;
+    }
+    if scratch.len() < n {
+        scratch.resize(n, (0, 0));
+    }
+    const SHIFT: u32 = 56; // top byte
+
+    // MSD histogram + exclusive prefix (bucket start offsets).
+    let mut starts = [0_usize; 256];
+    {
+        let mut counts = [0_usize; 256];
+        for &(key, _) in pairs.iter() {
+            counts[(key >> SHIFT) as usize] += 1;
+        }
+        let mut sum = 0_usize;
+        for b in 0..256 {
+            starts[b] = sum;
+            sum += counts[b];
+        }
+    }
+    // Stable scatter pairs -> scratch[0..n] by top byte.
+    let mut wpos = starts;
+    for &pair in pairs.iter() {
+        let b = (pair.0 >> SHIFT) as usize;
+        scratch[wpos[b]] = pair;
+        wpos[b] += 1;
+    }
+
+    // Sort each non-empty bucket (a disjoint contiguous span of scratch) on the
+    // low bytes, in parallel. Buckets are already globally ordered by top byte, so
+    // no merge is needed — after per-bucket sort, scratch[0..n] is fully sorted.
+    let hardware = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    let buf = &mut scratch[..n];
+    if hardware <= 1 {
+        let mut tmp = vec![(0_u64, 0_u32); 0];
+        let mut start = 0usize;
+        for b in 0..256 {
+            let end = if b == 255 { n } else { starts[b + 1] };
+            let len = end - start;
+            if len > 1 {
+                if tmp.len() < len {
+                    tmp.resize(len, (0, 0));
+                }
+                radix_sort_slice_8pass(&mut buf[start..end], &mut tmp[..len]);
+            }
+            start = end;
+        }
+    } else {
+        // Partition the 256 buckets into contiguous GROUPS of roughly equal element
+        // count (target = n/threads), each a disjoint sub-slice of `buf`. A group is
+        // closed once its accumulated element count reaches `target`. `bucket_end(b)`
+        // is the exclusive element offset of bucket `b`.
+        let target = n.div_ceil(hardware).max(1);
+        let bucket_end = |b: usize| -> usize { if b + 1 >= 256 { n } else { starts[b + 1] } };
+        // group_bucket_bounds: bucket indices marking group starts, ending with 256.
+        let mut group_bucket_bounds: Vec<usize> = vec![0];
+        let mut group_start_elem = 0usize;
+        for b in 0..256 {
+            if bucket_end(b) - group_start_elem >= target && b + 1 < 256 {
+                group_bucket_bounds.push(b + 1);
+                group_start_elem = starts[b + 1];
+            }
+        }
+        group_bucket_bounds.push(256);
+
+        std::thread::scope(|scope| {
+            let mut rest: &mut [(u64, u32)] = buf;
+            for w in 0..group_bucket_bounds.len() - 1 {
+                let gb_start = group_bucket_bounds[w];
+                let gb_end = group_bucket_bounds[w + 1];
+                let elem_start = starts[gb_start];
+                let elem_end = if gb_end >= 256 { n } else { starts[gb_end] };
+                let group_len = elem_end - elem_start;
+                let (group_slice, tail) = rest.split_at_mut(group_len);
+                rest = tail;
+                // Per-bucket boundaries within this group, rebased to the group start.
+                let local_bounds: Vec<usize> = (gb_start..=gb_end)
+                    .map(|b| (if b >= 256 { n } else { starts[b] }) - elem_start)
+                    .collect();
+                scope.spawn(move || {
+                    let mut tmp = vec![(0_u64, 0_u32); 0];
+                    for win in local_bounds.windows(2) {
+                        let (s, e) = (win[0], win[1]);
+                        let len = e - s;
+                        if len > 1 {
+                            if tmp.len() < len {
+                                tmp.resize(len, (0, 0));
+                            }
+                            radix_sort_slice_8pass(&mut group_slice[s..e], &mut tmp[..len]);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    // Sorted result currently lives in scratch[0..n]; move it back into pairs.
+    pairs[..n].copy_from_slice(&scratch[..n]);
+}
+
+/// Whether a sort slice of `axis_dim` pairs, in a tensor with `outer_count`
+/// slices, should use the intra-slice parallel radix: only when there is a SINGLE
+/// large slice (the 1-D `jnp.sort(x)` case), where inter-slice threading has no
+/// slices to fan out and the per-slice radix would otherwise run single-threaded.
+#[inline]
+fn use_parallel_radix(outer_count: usize, axis_dim: usize) -> bool {
+    outer_count == 1 && axis_dim >= PARALLEL_RADIX_MIN_PAIRS
+}
+
+/// 8-pass `(key,index)` radix, parallel intra-slice when `parallel` is set
+/// (single large slice), else the serial LSD. Bit-identical either way.
+#[inline]
+fn radix_pairs_ascending_maybe_parallel(
+    pairs: &mut Vec<(u64, u32)>,
+    scratch: &mut Vec<(u64, u32)>,
+    parallel: bool,
+) {
+    if parallel {
+        radix_pairs_ascending_parallel(pairs, scratch);
+    } else {
+        radix_pairs_ascending(pairs, scratch);
     }
 }
 
@@ -13863,6 +14044,143 @@ mod tests {
             mat_want.extend_from_slice(&row);
         }
         assert_eq!(mat_sorted, mat_want, "radix per-row sort");
+    }
+
+    #[test]
+    fn parallel_radix_matches_serial_radix_with_ties() {
+        // The MSD-partition + parallel-per-bucket radix must produce the EXACT same
+        // (key,index) permutation as the serial 8-pass LSD radix — both are stable
+        // sorts by the same key. Fuzz many key distributions: heavy top-byte ties
+        // (most pairs in one MSD bucket), full-range keys, and small-range keys with
+        // many equal-key ties (stability), plus boundary sizes around the bucketing.
+        for &n in &[2usize, 17, 256, 1000, 70_000, 262_145] {
+            for seed in 0u64..6 {
+                let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+                let mut next = || {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    s
+                };
+                let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(n);
+                for i in 0..n {
+                    let r = next();
+                    let key = match seed % 3 {
+                        0 => r,                            // full range
+                        1 => r & 0xff,                     // heavy ties, all in MSD bucket 0
+                        _ => (r % 50) | ((r & 0x3) << 56), // few top bytes, many key ties
+                    };
+                    pairs.push((key, i as u32));
+                }
+                let mut want = pairs.clone();
+                let mut scratch_a: Vec<(u64, u32)> = vec![(0, 0); n];
+                radix_pairs_ascending(&mut want, &mut scratch_a);
+
+                let mut got = pairs.clone();
+                let mut scratch_b: Vec<(u64, u32)> = Vec::new();
+                radix_pairs_ascending_parallel(&mut got, &mut scratch_b);
+
+                assert_eq!(
+                    got, want,
+                    "parallel radix != serial radix (n={n}, seed={seed})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_radix_1d_sort_matches_reference() {
+        // A single 1-D sort over >= PARALLEL_RADIX_MIN_PAIRS elements routes through
+        // the intra-slice parallel radix (outer_count == 1). f64 sort + argsort must
+        // equal a stable comparison reference, including ties.
+        let n = (1usize << 19) + 123; // > threshold, not a round number
+        let raw: Vec<i64> = (0..n)
+            .map(|i| (((i as i64) * 2_654_435_761).rem_euclid(401)) - 200) // many ties
+            .collect();
+        let data: Vec<f64> = raw.iter().map(|&v| v as f64).collect();
+        let tensor = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let p = params(&[("dimension", "0"), ("descending", "false")]);
+
+        let sorted = extract_f64_vec(
+            &eval_sort(Primitive::Sort, std::slice::from_ref(&tensor), &p).unwrap(),
+        );
+        let mut want = data.clone();
+        want.sort_by(|a, b| a.total_cmp(b));
+        assert_eq!(
+            sorted.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel-radix 1-D sort values"
+        );
+
+        let idx = extract_i64_vec(
+            &eval_argsort(Primitive::Argsort, std::slice::from_ref(&tensor), &p).unwrap(),
+        );
+        let mut want_idx: Vec<i64> = (0..n as i64).collect();
+        want_idx.sort_by(|&a, &b| {
+            data[a as usize]
+                .total_cmp(&data[b as usize])
+                .then(a.cmp(&b))
+        });
+        assert_eq!(idx, want_idx, "parallel-radix 1-D argsort indices");
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_parallel_vs_serial_radix_1d() {
+        use std::time::Instant;
+        // Single large 1-D radix: serial 8-pass LSD vs MSD-partition + parallel
+        // per-bucket. Bit-identical (asserted); isolates the intra-slice parallelism.
+        let n = 1usize << 22; // 4.19M pairs
+        let mut s = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let pairs0: Vec<(u64, u32)> = (0..n).map(|i| (next(), i as u32)).collect();
+        let best = |mut f: Box<dyn FnMut() -> u64>| {
+            f();
+            let mut b = f64::MAX;
+            let mut d = 0u64;
+            for _ in 0..5 {
+                let t = Instant::now();
+                d = std::hint::black_box(f());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            (b, d)
+        };
+        let digest = |v: &[(u64, u32)]| v.iter().fold(0u64, |a, &(k, i)| a ^ k ^ (i as u64));
+
+        let p1 = pairs0.clone();
+        let (t_serial, d_serial) = best(Box::new(move || {
+            let mut p = p1.clone();
+            let mut sc = vec![(0u64, 0u32); p.len()];
+            radix_pairs_ascending(&mut p, &mut sc);
+            digest(&p)
+        }));
+        let p2 = pairs0.clone();
+        let (t_par, d_par) = best(Box::new(move || {
+            let mut p = p2.clone();
+            let mut sc: Vec<(u64, u32)> = Vec::new();
+            radix_pairs_ascending_parallel(&mut p, &mut sc);
+            digest(&p)
+        }));
+        assert_eq!(d_serial, d_par, "parallel radix digest must match serial");
+        println!(
+            "BENCH 1-D radix sort ({n} pairs): serial={:.4}ms parallel={:.4}ms speedup={:.2}x",
+            t_serial * 1e3,
+            t_par * 1e3,
+            t_serial / t_par,
+        );
     }
 
     #[test]
