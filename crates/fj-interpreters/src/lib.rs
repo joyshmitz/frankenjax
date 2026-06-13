@@ -3918,6 +3918,299 @@ fn run_scalar_compound_compare_plan(
     }
 }
 
+// ── scalar mixed f64/bool SELECT arena ──────────────────────────────────────
+// The f64/i64/f32 arena plans are SINGLE-dtype, so a scalar body that mixes f64
+// arithmetic with a comparison (-> bool) and a `select` (the where / piecewise /
+// leaky-relu / relu6 / hardtanh / clamp-via-select class) falls to the tree-walker.
+// This plan carries a per-slot MIXED type (f64 OR bool) so such bodies stay on the
+// compile-once fast path. Steps reuse `apply_scalar_f64_binary` (every f64 arith op,
+// incl. transcendentals/Square/IntegerPow) and `apply_float_compare` (the proven
+// bit-identical comparison), and `select` is `if cond { on_true } else { on_false }`
+// — bit-identical to fj-lax `eval_select`'s same-dtype scalar arm (both F64 operands
+// promote to F64 with no conversion). At runtime any non-f64/bool slot value bails
+// the whole plan to the generic interpreter.
+
+#[derive(Clone, Copy)]
+enum MixedSlot {
+    Missing,
+    NonScalar,
+    F64(f64),
+    Bool(bool),
+}
+
+#[derive(Clone, Copy)]
+enum BoolOperand {
+    Slot(usize),
+    Lit(bool),
+}
+
+enum ScalarSelectStep {
+    F64 {
+        op: ScalarF64BinaryOp,
+        lhs: ScalarF64Operand,
+        rhs: Option<ScalarF64Operand>,
+        out_slot: usize,
+    },
+    Compare {
+        op: Primitive,
+        lhs: ScalarF64Operand,
+        rhs: ScalarF64Operand,
+        out_slot: usize,
+    },
+    Select {
+        cond: BoolOperand,
+        on_true: ScalarF64Operand,
+        on_false: ScalarF64Operand,
+        out_slot: usize,
+    },
+}
+
+struct ScalarSelectPlan {
+    slots: usize,
+    const_slots: Vec<usize>,
+    input_slots: Vec<usize>,
+    out_slots: Vec<usize>,
+    steps: Vec<ScalarSelectStep>,
+}
+
+fn bool_operand(atom: &Atom, slots: usize) -> Option<BoolOperand> {
+    match atom {
+        Atom::Var(var) => {
+            let slot = var.0 as usize;
+            (slot < slots).then_some(BoolOperand::Slot(slot))
+        }
+        Atom::Lit(Literal::Bool(b)) => Some(BoolOperand::Lit(*b)),
+        Atom::Lit(_) => None,
+    }
+}
+
+fn build_scalar_select_plan(jaxpr: &Jaxpr, slots: usize) -> Option<ScalarSelectPlan> {
+    if jaxpr.equations.is_empty() || !jaxpr.effects.is_empty() {
+        return None;
+    }
+    // Only build this (slower, type-tagged) plan when the body actually needs the
+    // mixed capability — i.e. it contains a `Select`. Pure-f64 bodies use the faster
+    // monomorphic f64 plan, which is tried first in `run_dense_plan_into`.
+    if !jaxpr
+        .equations
+        .iter()
+        .any(|e| e.primitive == Primitive::Select)
+    {
+        return None;
+    }
+
+    let mut steps = Vec::with_capacity(jaxpr.equations.len());
+    for equation in &jaxpr.equations {
+        if !equation.sub_jaxprs.is_empty()
+            || !equation.effects.is_empty()
+            || equation.outputs.len() != 1
+        {
+            return None;
+        }
+        let out_slot = equation.outputs[0].0 as usize;
+        if out_slot >= slots {
+            return None;
+        }
+
+        if equation.primitive == Primitive::Select {
+            // lax.select(cond, on_true, on_false): 3 inputs, no params.
+            if !equation.params.is_empty() || equation.inputs.len() != 3 {
+                return None;
+            }
+            steps.push(ScalarSelectStep::Select {
+                cond: bool_operand(&equation.inputs[0], slots)?,
+                on_true: scalar_f64_operand(&equation.inputs[1], slots)?,
+                on_false: scalar_f64_operand(&equation.inputs[2], slots)?,
+                out_slot,
+            });
+            continue;
+        }
+
+        if let Some(op) = scalar_compare_primitive(equation.primitive) {
+            if !equation.params.is_empty() || equation.inputs.len() != 2 {
+                return None;
+            }
+            steps.push(ScalarSelectStep::Compare {
+                op,
+                lhs: scalar_f64_operand(&equation.inputs[0], slots)?,
+                rhs: scalar_f64_operand(&equation.inputs[1], slots)?,
+                out_slot,
+            });
+            continue;
+        }
+
+        // Otherwise it must be an f64 arithmetic op (binary, or unary incl.
+        // IntegerPow's exponent param), reusing the f64 plan's resolvers.
+        let (op, lhs, rhs) = match equation.inputs.as_slice() {
+            [a, b] => {
+                if !equation.params.is_empty() {
+                    return None;
+                }
+                (
+                    scalar_f64_binary_op(equation.primitive)?,
+                    scalar_f64_operand(a, slots)?,
+                    Some(scalar_f64_operand(b, slots)?),
+                )
+            }
+            [a] => (
+                scalar_f64_unary_op_with_params(equation.primitive, &equation.params)?,
+                scalar_f64_operand(a, slots)?,
+                None,
+            ),
+            _ => return None,
+        };
+        steps.push(ScalarSelectStep::F64 {
+            op,
+            lhs,
+            rhs,
+            out_slot,
+        });
+    }
+
+    Some(ScalarSelectPlan {
+        slots,
+        const_slots: var_slots(&jaxpr.constvars, slots)?,
+        input_slots: var_slots(&jaxpr.invars, slots)?,
+        out_slots: var_slots(&jaxpr.outvars, slots)?,
+        steps,
+    })
+}
+
+fn mixed_slot_from_value(value: &Value) -> MixedSlot {
+    match value {
+        Value::Scalar(Literal::F64Bits(bits)) => MixedSlot::F64(f64::from_bits(*bits)),
+        Value::Scalar(Literal::Bool(b)) => MixedSlot::Bool(*b),
+        Value::Scalar(_) | Value::Tensor(_) => MixedSlot::NonScalar,
+    }
+}
+
+fn read_mixed_f64(
+    slots: &[MixedSlot],
+    operand: ScalarF64Operand,
+) -> Result<Option<f64>, InterpreterError> {
+    match operand {
+        ScalarF64Operand::Literal(value) => Ok(Some(value)),
+        ScalarF64Operand::Slot(slot) => match slots[slot] {
+            MixedSlot::F64(value) => Ok(Some(value)),
+            MixedSlot::Bool(_) | MixedSlot::NonScalar => Ok(None),
+            MixedSlot::Missing => Err(InterpreterError::MissingVariable(VarId(slot as u32))),
+        },
+    }
+}
+
+fn read_mixed_bool(
+    slots: &[MixedSlot],
+    operand: BoolOperand,
+) -> Result<Option<bool>, InterpreterError> {
+    match operand {
+        BoolOperand::Lit(value) => Ok(Some(value)),
+        BoolOperand::Slot(slot) => match slots[slot] {
+            MixedSlot::Bool(value) => Ok(Some(value)),
+            MixedSlot::F64(_) | MixedSlot::NonScalar => Ok(None),
+            MixedSlot::Missing => Err(InterpreterError::MissingVariable(VarId(slot as u32))),
+        },
+    }
+}
+
+fn run_scalar_select_plan_into(
+    plan: &ScalarSelectPlan,
+    const_values: &[Value],
+    args: &[Value],
+    out: &mut Vec<Value>,
+    slots: &mut Vec<MixedSlot>,
+) -> Option<Result<(), InterpreterError>> {
+    if const_values.len() != plan.const_slots.len() {
+        return Some(Err(InterpreterError::ConstArity {
+            expected: plan.const_slots.len(),
+            actual: const_values.len(),
+        }));
+    }
+    if args.len() != plan.input_slots.len() {
+        return Some(Err(InterpreterError::InputArity {
+            expected: plan.input_slots.len(),
+            actual: args.len(),
+        }));
+    }
+
+    slots.clear();
+    slots.resize(plan.slots, MixedSlot::Missing);
+    for (&slot, value) in plan.const_slots.iter().zip(const_values) {
+        slots[slot] = mixed_slot_from_value(value);
+    }
+    for (&slot, value) in plan.input_slots.iter().zip(args) {
+        slots[slot] = mixed_slot_from_value(value);
+    }
+
+    macro_rules! read_f64 {
+        ($op:expr) => {
+            match read_mixed_f64(slots, $op) {
+                Ok(Some(v)) => v,
+                Ok(None) => return None,
+                Err(e) => return Some(Err(e)),
+            }
+        };
+    }
+
+    for step in &plan.steps {
+        match step {
+            ScalarSelectStep::F64 {
+                op,
+                lhs,
+                rhs,
+                out_slot,
+            } => {
+                let l = read_f64!(*lhs);
+                let r = match rhs {
+                    Some(rhs) => read_f64!(*rhs),
+                    None => l,
+                };
+                slots[*out_slot] = MixedSlot::F64(apply_scalar_f64_binary(*op, l, r));
+            }
+            ScalarSelectStep::Compare {
+                op,
+                lhs,
+                rhs,
+                out_slot,
+            } => {
+                let l = read_f64!(*lhs);
+                let r = read_f64!(*rhs);
+                slots[*out_slot] = MixedSlot::Bool(apply_float_compare(*op, l, r));
+            }
+            ScalarSelectStep::Select {
+                cond,
+                on_true,
+                on_false,
+                out_slot,
+            } => {
+                let c = match read_mixed_bool(slots, *cond) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => return None,
+                    Err(e) => return Some(Err(e)),
+                };
+                // Read BOTH branches (matches the generic interpreter, which has both
+                // operands resolved); pick by the condition.
+                let t = read_f64!(*on_true);
+                let f = read_f64!(*on_false);
+                slots[*out_slot] = MixedSlot::F64(if c { t } else { f });
+            }
+        }
+    }
+
+    out.clear();
+    out.reserve(plan.out_slots.len());
+    for &slot in &plan.out_slots {
+        match slots[slot] {
+            MixedSlot::F64(value) => out.push(Value::scalar_f64(value)),
+            MixedSlot::Bool(value) => out.push(Value::scalar_bool(value)),
+            MixedSlot::NonScalar => return None,
+            MixedSlot::Missing => {
+                return Some(Err(InterpreterError::MissingVariable(VarId(slot as u32))));
+            }
+        }
+    }
+    Some(Ok(()))
+}
+
 /// Reusable scratch arenas for monomorphic scalar executors. A loop body builds
 /// only the plan(s) whose literals and boolean intermediates match its shape,
 /// and the runner tries them in order; each non-matching plan bails on the first
@@ -3928,6 +4221,7 @@ struct ScalarPlanBuffers {
     i64: Vec<ScalarI64Slot>,
     f32: Vec<ScalarF32Slot>,
     bools: Vec<Option<bool>>,
+    mixed: Vec<MixedSlot>,
 }
 
 /// A reusable dense-evaluation plan for a jaxpr: the slot count and the
@@ -3943,6 +4237,7 @@ struct DenseEvalPlan {
     scalar_f32_plan: Option<ScalarF32Plan>,
     scalar_compare_plan: Option<ScalarComparePlan>,
     scalar_compound_compare_plan: Option<ScalarCompoundComparePlan>,
+    scalar_select_plan: Option<ScalarSelectPlan>,
 }
 
 /// Build a [`DenseEvalPlan`] iff the jaxpr's variable ids are dense enough for the
@@ -3971,6 +4266,7 @@ fn build_dense_plan(jaxpr: &Jaxpr) -> Option<DenseEvalPlan> {
             scalar_f32_plan: build_scalar_f32_arith_plan(jaxpr, slots),
             scalar_compare_plan: build_scalar_compare_plan(jaxpr),
             scalar_compound_compare_plan: build_scalar_compound_compare_plan(jaxpr, slots),
+            scalar_select_plan: build_scalar_select_plan(jaxpr, slots),
         })
     } else {
         None
@@ -3991,6 +4287,7 @@ fn eval_jaxpr_dense_env(
         scalar_f32_plan: build_scalar_f32_arith_plan(jaxpr, slots),
         scalar_compare_plan: build_scalar_compare_plan(jaxpr),
         scalar_compound_compare_plan: build_scalar_compound_compare_plan(jaxpr, slots),
+        scalar_select_plan: build_scalar_select_plan(jaxpr, slots),
     };
     let mut env: Vec<Option<Value>> = vec![None; slots];
     run_dense_plan(jaxpr, const_values, args, &mut env, &plan)
@@ -4067,6 +4364,12 @@ fn run_dense_plan_into(
         out.clear();
         out.push(Value::scalar_bool(result));
         return Ok(());
+    }
+    if let Some(p) = &plan.scalar_select_plan
+        && let Some(result) =
+            run_scalar_select_plan_into(p, const_values, args, out, &mut scalar_buffers.mixed)
+    {
+        return result;
     }
     run_dense_env_into(jaxpr, const_values, args, env, &plan.last_use, scratch, out)
 }
@@ -6481,6 +6784,188 @@ mod tests {
     }
 
     #[test]
+    fn scalar_select_arena_bit_identical_to_generic() {
+        // The mixed f64/bool SELECT arena must match the generic interpreter bit-for-bit
+        // on conditional scalar bodies (leaky-relu / relu6-clamp / where), AND actually
+        // be selected (scalar_select_plan.is_some()) — a non-vacuous check.
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let lit = |v: f64| Atom::Lit(Literal::from_f64(v));
+        let bits_f64 = |v: &Value| -> u64 {
+            match v {
+                Value::Scalar(Literal::F64Bits(b)) => *b,
+                other => panic!("expected f64 scalar, got {other:?}"),
+            }
+        };
+        let xs = [
+            f64::NEG_INFINITY,
+            -100.0,
+            -6.5,
+            -1.0,
+            -0.0,
+            0.0,
+            0.01,
+            3.0,
+            6.0,
+            6.5,
+            100.0,
+            f64::INFINITY,
+            f64::NAN,
+        ];
+
+        // leaky_relu(x) = select(x > 0, x, 0.01*x).
+        let (x, gt, scaled, out) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let leaky = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Gt, smallvec![Atom::Var(x), lit(0.0)], gt),
+                mk(Primitive::Mul, smallvec![Atom::Var(x), lit(0.01)], scaled),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(gt), Atom::Var(x), Atom::Var(scaled)],
+                    out,
+                ),
+            ],
+        );
+
+        // relu6(x) = clamp to [0,6] via nested select: select(x>6, 6, select(x<0, 0, x)).
+        let (x2, gt6, lt0, inner, out2) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let relu6 = Jaxpr::new(
+            vec![x2],
+            vec![],
+            vec![out2],
+            vec![
+                mk(Primitive::Gt, smallvec![Atom::Var(x2), lit(6.0)], gt6),
+                mk(Primitive::Lt, smallvec![Atom::Var(x2), lit(0.0)], lt0),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(lt0), lit(0.0), Atom::Var(x2)],
+                    inner,
+                ),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(gt6), lit(6.0), Atom::Var(inner)],
+                    out2,
+                ),
+            ],
+        );
+
+        for (label, body) in [("leaky_relu", &leaky), ("relu6", &relu6)] {
+            let plan = super::build_dense_plan(body).expect("dense plan");
+            assert!(
+                plan.scalar_select_plan.is_some(),
+                "{label} not routed through the select arena"
+            );
+            // The pure-f64 plan must NOT swallow a select body (it has no Select op).
+            assert!(
+                plan.scalar_f64_plan.is_none(),
+                "{label} unexpectedly built an f64-only plan"
+            );
+            for &xv in &xs {
+                let args = [Value::scalar_f64(xv)];
+                let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+                let mut gscr: Vec<Value> = Vec::new();
+                let mut gout: Vec<Value> = Vec::new();
+                super::run_dense_env_into(
+                    body,
+                    &[],
+                    &args,
+                    &mut genv,
+                    &plan.last_use,
+                    &mut gscr,
+                    &mut gout,
+                )
+                .expect("generic select");
+                let mut cenv: Vec<Option<Value>> = vec![None; plan.slots];
+                let mut cscr: Vec<Value> = Vec::new();
+                let mut cout: Vec<Value> = Vec::new();
+                let mut bufs = super::ScalarPlanBuffers::default();
+                super::run_dense_plan_into(
+                    body,
+                    &[],
+                    &args,
+                    &mut cenv,
+                    &plan,
+                    &mut cscr,
+                    &mut cout,
+                    &mut bufs,
+                )
+                .expect("compiled select");
+                assert_eq!(
+                    bits_f64(&cout[0]),
+                    bits_f64(&gout[0]),
+                    "{label}({xv}) select arena bits differ from generic"
+                );
+            }
+        }
+
+        // select with a bool INPUT predicate: select(pred, a, b).
+        let (p, a, b, o) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let where_body = Jaxpr::new(
+            vec![p, a, b],
+            vec![],
+            vec![o],
+            vec![mk(
+                Primitive::Select,
+                smallvec![Atom::Var(p), Atom::Var(a), Atom::Var(b)],
+                o,
+            )],
+        );
+        let plan = super::build_dense_plan(&where_body).expect("dense plan");
+        assert!(plan.scalar_select_plan.is_some());
+        for &pred in &[true, false] {
+            for &(av, bv) in &[(1.5_f64, -2.0), (f64::NAN, 0.0), (-0.0, 0.0)] {
+                let args = [
+                    Value::scalar_bool(pred),
+                    Value::scalar_f64(av),
+                    Value::scalar_f64(bv),
+                ];
+                let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+                let mut gscr: Vec<Value> = Vec::new();
+                let mut gout: Vec<Value> = Vec::new();
+                super::run_dense_env_into(
+                    &where_body,
+                    &[],
+                    &args,
+                    &mut genv,
+                    &plan.last_use,
+                    &mut gscr,
+                    &mut gout,
+                )
+                .expect("generic where");
+                let mut cenv: Vec<Option<Value>> = vec![None; plan.slots];
+                let mut cscr: Vec<Value> = Vec::new();
+                let mut cout: Vec<Value> = Vec::new();
+                let mut bufs = super::ScalarPlanBuffers::default();
+                super::run_dense_plan_into(
+                    &where_body,
+                    &[],
+                    &args,
+                    &mut cenv,
+                    &plan,
+                    &mut cscr,
+                    &mut cout,
+                    &mut bufs,
+                )
+                .expect("compiled where");
+                assert_eq!(
+                    bits_f64(&cout[0]),
+                    bits_f64(&gout[0]),
+                    "where({pred},{av},{bv}) select arena bits differ"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn scalar_arena_transcendentals_bit_identical_to_generic() {
         // Proves the scalar-f64/f32 arena handles unary transcendental/rounding ops
         // BIT-FOR-BIT identically to the generic tree-walking interpreter, and that
@@ -6829,6 +7314,104 @@ mod tests {
                 "chained activation body bits differ at x={xv}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_scalar_select_arena() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let lit = |v: f64| Atom::Lit(Literal::from_f64(v));
+        // relu6-style clamp body (2 compares + 2 selects + arithmetic):
+        //   t = x*1.0; select(x>6, 6, select(x<0, 0, t)).
+        let (x, gt6, lt0, t, inner, out) =
+            (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4), VarId(5));
+        let body = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Gt, smallvec![Atom::Var(x), lit(6.0)], gt6),
+                mk(Primitive::Lt, smallvec![Atom::Var(x), lit(0.0)], lt0),
+                mk(Primitive::Mul, smallvec![Atom::Var(x), lit(1.0)], t),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(lt0), lit(0.0), Atom::Var(t)],
+                    inner,
+                ),
+                mk(
+                    Primitive::Select,
+                    smallvec![Atom::Var(gt6), lit(6.0), Atom::Var(inner)],
+                    out,
+                ),
+            ],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        assert!(plan.scalar_select_plan.is_some());
+        let n: usize = 2_000_000;
+        let args = [Value::scalar_f64(3.5)];
+        let run = |use_plan: bool| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                if use_plan {
+                    super::run_dense_plan_into(
+                        &body,
+                        &[],
+                        &args,
+                        &mut env,
+                        &plan,
+                        &mut scratch,
+                        &mut o,
+                        &mut bufs,
+                    )
+                    .expect("compiled");
+                } else {
+                    super::run_dense_env_into(
+                        &body,
+                        &[],
+                        &args,
+                        &mut env,
+                        &plan.last_use,
+                        &mut scratch,
+                        &mut o,
+                    )
+                    .expect("generic");
+                }
+                if let Value::Scalar(Literal::F64Bits(b)) = &o[0] {
+                    acc += f64::from_bits(*b);
+                }
+            }
+            std::hint::black_box(acc);
+        };
+        let t_generic = best_time(|| run(false));
+        let t_compiled = best_time(|| run(true));
+        println!(
+            "BENCH select-body dispatch {n} evals (relu6: 2 cmp + 2 select + mul): GENERIC {:.1}ns/eval -> COMPILED {:.1}ns/eval = {:.2}x",
+            t_generic * 1e9 / n as f64,
+            t_compiled * 1e9 / n as f64,
+            t_generic / t_compiled,
+        );
     }
 
     #[test]
