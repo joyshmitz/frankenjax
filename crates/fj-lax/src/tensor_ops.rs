@@ -2368,18 +2368,16 @@ fn eval_scatter_dense(
     combine: ScatterCombine,
 ) -> Result<Option<Value>, EvalError> {
     let primitive = Primitive::Scatter;
-    // The dense typed fast paths only accelerate Overwrite + Add (the hot embedding
-    // lookup/gradient cases). Mul/Min/Max scatter is rarer and falls through to the
-    // generic `binary_literal_op` path below (return None = "not handled here").
-    let add_mode = match combine {
-        ScatterCombine::Overwrite => false,
-        ScatterCombine::Add => true,
-        ScatterCombine::Mul | ScatterCombine::Min | ScatterCombine::Max => return Ok(None),
-    };
+    // The dense typed fast paths handle Overwrite + all four reduce combiners
+    // (Add/Mul/Min/Max), each computed identically to the generic
+    // `scatter_combine_literal`/`binary_literal_op` path. Non-dense / other dtypes
+    // (u32/u64/bool/complex) return None and fall to the generic path below.
+    let is_overwrite = combine == ScatterCombine::Overwrite;
     macro_rules! scatter_typed {
-        ($op:expr, $upd:expr, $ctor:expr, $add_fn:expr) => {{
+        ($op:expr, $upd:expr, $ctor:expr, $combine_fn:expr) => {{
             let mut out = $op.to_vec();
             let upd_src = $upd;
+            let cf = $combine_fn;
             for (i, &raw_idx) in index_vals.iter().enumerate() {
                 let Some(idx) = resolve_axis0_index(raw_idx, dim0, index_mode) else {
                     continue;
@@ -2420,12 +2418,12 @@ fn eval_scatter_dense(
                         detail: "scatter update slice exceeds update element count".to_owned(),
                     });
                 }
-                if add_mode {
-                    for j in 0..slice_elems {
-                        out[base + j] = $add_fn(out[base + j], upd_src[uoff + j]);
-                    }
-                } else {
+                if is_overwrite {
                     out[base..rend].copy_from_slice(&upd_src[uoff..uend]);
+                } else {
+                    for j in 0..slice_elems {
+                        out[base + j] = cf(out[base + j], upd_src[uoff + j]);
+                    }
                 }
             }
             return Ok(Some(Value::Tensor($ctor(operand.shape.clone(), out)?)));
@@ -2437,7 +2435,15 @@ fn eval_scatter_dense(
             updates.elements.as_f64_slice(),
         )
     {
-        scatter_typed!(op, upd, TensorValue::new_f64_values, |a: f64, b: f64| a + b);
+        // float ops match scatter_combine_literal's f64 branch exactly.
+        let cf: fn(f64, f64) -> f64 = match combine {
+            ScatterCombine::Add => |a, b| a + b,
+            ScatterCombine::Mul => |a, b| a * b,
+            ScatterCombine::Min => crate::jax_min_f64,
+            ScatterCombine::Max => crate::jax_max_f64,
+            ScatterCombine::Overwrite => |_, b| b,
+        };
+        scatter_typed!(op, upd, TensorValue::new_f64_values, cf);
     }
     // Dense F32 scatter (the embedding-gradient scatter-add case). f32 is JAX's
     // DEFAULT dtype. Overwrite is a contiguous copy; scatter-ADD computes
@@ -2450,9 +2456,16 @@ fn eval_scatter_dense(
             updates.elements.as_f32_slice(),
         )
     {
-        scatter_typed!(op, upd, TensorValue::new_f32_values, |a: f32, b: f32| {
-            (f64::from(a) + f64::from(b)) as f32
-        });
+        // f32 promotes to f64, applies the op, rounds back — exactly
+        // binary_literal_op's f32 branch for each combine.
+        let cf: fn(f32, f32) -> f32 = match combine {
+            ScatterCombine::Add => |a, b| (f64::from(a) + f64::from(b)) as f32,
+            ScatterCombine::Mul => |a, b| (f64::from(a) * f64::from(b)) as f32,
+            ScatterCombine::Min => |a, b| crate::jax_min_f64(f64::from(a), f64::from(b)) as f32,
+            ScatterCombine::Max => |a, b| crate::jax_max_f64(f64::from(a), f64::from(b)) as f32,
+            ScatterCombine::Overwrite => |_, b| b,
+        };
+        scatter_typed!(op, upd, TensorValue::new_f32_values, cf);
     }
     if operand.dtype == DType::I64
         && let (Some(op), Some(upd)) = (
@@ -2460,8 +2473,15 @@ fn eval_scatter_dense(
             updates.elements.as_i64_slice(),
         )
     {
-        scatter_typed!(op, upd, TensorValue::new_i64_values, |a: i64, b: i64| a
-            .wrapping_add(b));
+        // i64 ops match scatter_combine_literal's I64 branch exactly.
+        let cf: fn(i64, i64) -> i64 = match combine {
+            ScatterCombine::Add => |a, b| a.wrapping_add(b),
+            ScatterCombine::Mul => |a, b| a.wrapping_mul(b),
+            ScatterCombine::Min => |a, b| a.min(b),
+            ScatterCombine::Max => |a, b| a.max(b),
+            ScatterCombine::Overwrite => |_, b| b,
+        };
+        scatter_typed!(op, upd, TensorValue::new_i64_values, cf);
     }
     // Dense BF16/F16 scatter (half-precision embedding update). bf16 is the dominant
     // training dtype. Overwrite is a contiguous u16-bit copy; scatter-ADD routes the
@@ -2483,22 +2503,51 @@ fn eval_scatter_dense(
                 Literal::F16Bits(bits)
             }
         };
-        scatter_typed!(
-            op,
-            upd,
-            |shape, out| TensorValue::new_half_float_values(dt, shape, out),
-            |a: u16, b: u16| -> u16 {
-                match binary_literal_op(
+        // Each combiner routes the two half bit patterns through the SAME
+        // binary_literal_op the generic scatter_combine_literal uses (widen u16->f64,
+        // apply the op, round back to half), so it is bit-for-bit identical.
+        let cf = move |a: u16, b: u16| -> u16 {
+            let r = match combine {
+                ScatterCombine::Add => binary_literal_op(
                     half_lit(a),
                     half_lit(b),
                     Primitive::Add,
                     &|x: i64, y: i64| x.wrapping_add(y),
                     &|x: f64, y: f64| x + y,
-                ) {
-                    Ok(Literal::BF16Bits(x) | Literal::F16Bits(x)) => x,
-                    _ => 0,
-                }
+                ),
+                ScatterCombine::Mul => binary_literal_op(
+                    half_lit(a),
+                    half_lit(b),
+                    Primitive::Mul,
+                    &|x: i64, y: i64| x.wrapping_mul(y),
+                    &|x: f64, y: f64| x * y,
+                ),
+                ScatterCombine::Min => binary_literal_op(
+                    half_lit(a),
+                    half_lit(b),
+                    Primitive::Min,
+                    &|x: i64, y: i64| x.min(y),
+                    &crate::jax_min_f64,
+                ),
+                ScatterCombine::Max => binary_literal_op(
+                    half_lit(a),
+                    half_lit(b),
+                    Primitive::Max,
+                    &|x: i64, y: i64| x.max(y),
+                    &crate::jax_max_f64,
+                ),
+                ScatterCombine::Overwrite => Ok(half_lit(b)),
+            };
+            match r {
+                Ok(Literal::BF16Bits(x) | Literal::F16Bits(x)) => x,
+                _ => 0,
             }
+        };
+        scatter_typed!(
+            op,
+            upd,
+            |shape, out| TensorValue::new_half_float_values(dt, shape, out),
+            cf
         );
     }
     Ok(None)
@@ -16391,7 +16440,7 @@ mod tests {
         let idx = Value::vector_i64(&idxs).unwrap();
         let upd_dims = vec![n_upd as u32, cols as u32];
 
-        for mode in ["overwrite", "add"] {
+        for mode in ["overwrite", "add", "mul", "min", "max"] {
             for imode in ["fill_or_drop", "clip"] {
                 let p = params(&[("mode", mode), ("index_mode", imode)]);
 
@@ -16540,7 +16589,7 @@ mod tests {
                 })
                 .collect()
         };
-        for mode in ["overwrite", "add"] {
+        for mode in ["overwrite", "add", "mul", "min", "max"] {
             for imode in ["fill_or_drop", "clip"] {
                 let p = params(&[("mode", mode), ("index_mode", imode)]);
                 let d = super::eval_scatter(
@@ -16646,6 +16695,44 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f32_scatter_max_dense_vs_generic() {
+        use std::time::Instant;
+        // scatter-MAX (segment_max / maxpool-backward shape) — now dense for the
+        // Min/Max/Mul combiners (previously generic per-Literal). f32 boxed storage
+        // (TensorValue::new with F32Bits literals) stays on the generic path, so this
+        // is a genuine dense-vs-generic comparison (unlike i64, which densifies).
+        let (rows, dim) = (50000usize, 256usize);
+        let batch = 8192usize;
+        let base: Vec<f32> = vec![f32::NEG_INFINITY; rows * dim];
+        let updates: Vec<f32> = (0..batch * dim).map(|i| ((i % 1009) as f32) * 0.001 - 0.5).collect();
+        let op_dims = vec![rows as u32, dim as u32];
+        let upd_dims = vec![batch as u32, dim as u32];
+        let dense_op = Value::Tensor(TensorValue::new_f32_values(Shape { dims: op_dims.clone() }, base.clone()).unwrap());
+        let boxed_op = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: op_dims.clone() }, base.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let dense_upd = Value::Tensor(TensorValue::new_f32_values(Shape { dims: upd_dims.clone() }, updates.clone()).unwrap());
+        let boxed_upd = Value::Tensor(TensorValue::new(DType::F32, Shape { dims: upd_dims.clone() }, updates.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        let idx: Vec<i64> = (0..batch as i64).map(|i| (i * 7919) % rows as i64).collect();
+        let idx_v = Value::vector_i64(&idx).unwrap();
+        let p = params(&[("mode", "max"), ("index_mode", "clip")]);
+        let bits = |v: Value| -> Vec<u32> { v.as_tensor().unwrap().elements.iter().map(|l| match l { Literal::F32Bits(b)=>*b, _=>0 }).collect() };
+        let time = |op: &Value, upd: &Value| {
+            let _ = super::eval_scatter(&[op.clone(), idx_v.clone(), upd.clone()], &p).unwrap();
+            let mut best = f64::MAX;
+            for _ in 0..10 { let t = Instant::now(); let _ = super::eval_scatter(&[op.clone(), idx_v.clone(), upd.clone()], &p).unwrap(); best = best.min(t.elapsed().as_secs_f64()); }
+            best
+        };
+        assert_eq!(bits(super::eval_scatter(&[dense_op.clone(), idx_v.clone(), dense_upd.clone()], &p).unwrap()),
+                   bits(super::eval_scatter(&[boxed_op.clone(), idx_v.clone(), boxed_upd.clone()], &p).unwrap()), "parity");
+        let generic = time(&boxed_op, &boxed_upd);
+        let dense_t = time(&dense_op, &dense_upd);
+        println!(
+            "BENCH f32 scatter-max [{rows},{dim}] x {batch}: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3, dense_t * 1e3, generic / dense_t
+        );
+    }
+
     /// Dense BF16/F16 scatter (overwrite + scatter-ADD) must be BIT-FOR-BIT identical
     /// to the generic per-`Literal` path, incl. repeated-index accumulation (15) and
     /// OOB (99), across fill_or_drop/clip and NaN/±inf/±0 bit patterns. scatter-add
@@ -16710,7 +16797,7 @@ mod tests {
                     })
                     .collect()
             };
-            for mode in ["overwrite", "add"] {
+            for mode in ["overwrite", "add", "mul", "min", "max"] {
                 for imode in ["fill_or_drop", "clip"] {
                     let p = params(&[("mode", mode), ("index_mode", imode)]);
                     let d = super::eval_scatter(
