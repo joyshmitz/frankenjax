@@ -969,10 +969,10 @@ fn eval_associative_scan(
             // the SAME scalar fn the elementwise primitive uses for that dtype:
             //   f64  -> IEEE +/* and jax_max_f64/jax_min_f64
             //   f32  -> op(a as f64, b as f64) as f32  (mirrors eval_same_shape_f32_map)
+            //   i64  -> wrapping add/mul, signed max/min, bitwise and/or/xor
+            //   i32  -> same integer ops, then narrow every computed prefix step
+            //           through the public mod-2^32 chokepoint.
             // Other dtypes / body_ops fall through to the generic path unchanged.
-            // (Integer body_ops keep the generic path: the elementwise integer
-            // semantics — overflow/wrap behaviour and i32 mod-2^32 narrowing — live
-            // behind the dispatcher and are not mirrored here; see bead follow-up.)
             macro_rules! dense_scan_return {
                 ($values:expr, $op:expr, $ctor:path) => {{
                     let values = $values;
@@ -1045,6 +1045,66 @@ fn eval_associative_scan(
                         values,
                         |a: f32, b: f32| jax_min_f64(a as f64, b as f64) as f32,
                         TensorValue::new_f32_values
+                    ),
+                    _ => {}
+                }
+            }
+            if let Some(values) = t.elements.as_i64_slice() {
+                match (t.dtype, body_op) {
+                    (fj_core::DType::I64, Primitive::Add) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| a.wrapping_add(b),
+                        TensorValue::new_i64_values
+                    ),
+                    (fj_core::DType::I64, Primitive::Mul) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| a.wrapping_mul(b),
+                        TensorValue::new_i64_values
+                    ),
+                    (fj_core::DType::I64, Primitive::Max) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| a.max(b),
+                        TensorValue::new_i64_values
+                    ),
+                    (fj_core::DType::I64, Primitive::Min) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| a.min(b),
+                        TensorValue::new_i64_values
+                    ),
+                    (fj_core::DType::I64, Primitive::BitwiseAnd) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| a & b,
+                        TensorValue::new_i64_values
+                    ),
+                    (fj_core::DType::I64, Primitive::BitwiseOr) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| a | b,
+                        TensorValue::new_i64_values
+                    ),
+                    (fj_core::DType::I64, Primitive::BitwiseXor) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| a ^ b,
+                        TensorValue::new_i64_values
+                    ),
+                    (fj_core::DType::I32, Primitive::Add) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| i64::from(a.wrapping_add(b) as i32),
+                        TensorValue::new_i32_values
+                    ),
+                    (fj_core::DType::I32, Primitive::Mul) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| i64::from(a.wrapping_mul(b) as i32),
+                        TensorValue::new_i32_values
+                    ),
+                    (fj_core::DType::I32, Primitive::Max) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| i64::from(a.max(b) as i32),
+                        TensorValue::new_i32_values
+                    ),
+                    (fj_core::DType::I32, Primitive::Min) => dense_scan_return!(
+                        values,
+                        |a: i64, b: i64| i64::from(a.min(b) as i32),
+                        TensorValue::new_i32_values
                     ),
                     _ => {}
                 }
@@ -9516,6 +9576,169 @@ mod tests {
     }
 
     #[test]
+    fn associative_scan_dense_integer_bit_identical_to_slice_dispatch() {
+        // Integer dense scan must mirror the old per-slice dispatcher exactly:
+        // i64 accumulates in wrapping two's-complement i64, while i32 narrows
+        // after each dispatcher step through the public narrow_i32 chokepoint.
+        let (l, d) = (6usize, 4usize);
+        let raw_i64: Vec<i64> = vec![
+            1,
+            i64::MAX,
+            i64::MIN,
+            -3,
+            2_654_435_761,
+            -9,
+            17,
+            i64::MAX - 5,
+            -11,
+            0x0f0f_0f0f_0f0f_0f0f,
+            -0x0101_0101_0101_0101,
+            4,
+            i64::MIN + 7,
+            13,
+            -21,
+            0x5555_5555_5555_5555,
+            -8,
+            6,
+            -6,
+            1_234_567_890_123_456_789,
+            9,
+            -9,
+            0x3333_3333_3333_3333,
+            -0x2222_2222_2222_2222,
+        ];
+        let raw_i32: Vec<i64> = vec![
+            i64::from(i32::MAX),
+            1,
+            -1,
+            i64::from(i32::MIN),
+            65_537,
+            -65_539,
+            12_345_678,
+            -98_765_432,
+            0x7fff_0001,
+            0x0000_ffff,
+            -0x0001_0000,
+            17,
+            -3,
+            5,
+            i64::from(i32::MAX - 7),
+            -11,
+            0x5555_5555,
+            0x3333_3333,
+            -0x2222_2222,
+            9,
+            -9,
+            0,
+            42,
+            -42,
+        ];
+
+        let tensor_i64 = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![l as u32, d as u32],
+                },
+                raw_i64,
+            )
+            .unwrap(),
+        );
+        let tensor_i32 = Value::Tensor(
+            TensorValue::new_i32_values(
+                Shape {
+                    dims: vec![l as u32, d as u32],
+                },
+                raw_i32,
+            )
+            .unwrap(),
+        );
+        let bits = |value: &Value| -> Vec<i64> {
+            value
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|x| match x {
+                    Literal::I64(v) => *v,
+                    other => panic!("expected integer literal, got {other:?}"),
+                })
+                .collect()
+        };
+        let reference = |tensor: &Value, body_op: Primitive, reverse: bool| -> Vec<i64> {
+            let t = tensor.as_tensor().unwrap();
+            let mut results: Vec<Value> = Vec::new();
+            if reverse {
+                let mut acc = t.slice_axis0(l - 1).unwrap();
+                results.push(acc.clone());
+                for i in (0..l - 1).rev() {
+                    let x = t.slice_axis0(i).unwrap();
+                    acc = eval_primitive(body_op, &[x, acc], &BTreeMap::new()).unwrap();
+                    results.push(acc.clone());
+                }
+                results.reverse();
+            } else {
+                let mut acc = t.slice_axis0(0).unwrap();
+                results.push(acc.clone());
+                for i in 1..l {
+                    let x = t.slice_axis0(i).unwrap();
+                    acc = eval_primitive(body_op, &[acc, x], &BTreeMap::new()).unwrap();
+                    results.push(acc.clone());
+                }
+            }
+            bits(&Value::Tensor(TensorValue::stack_axis0(&results).unwrap()))
+        };
+
+        let mut fixtures = Vec::new();
+        for (name, prim) in [
+            ("add", Primitive::Add),
+            ("mul", Primitive::Mul),
+            ("max", Primitive::Max),
+            ("min", Primitive::Min),
+            ("and", Primitive::BitwiseAnd),
+            ("or", Primitive::BitwiseOr),
+            ("xor", Primitive::BitwiseXor),
+        ] {
+            for (dtype_name, tensor) in [("i64", &tensor_i64), ("i32", &tensor_i32)] {
+                if dtype_name == "i32"
+                    && matches!(
+                        prim,
+                        Primitive::BitwiseAnd | Primitive::BitwiseOr | Primitive::BitwiseXor
+                    )
+                {
+                    continue;
+                }
+                for reverse in [false, true] {
+                    let params = if reverse {
+                        assoc_scan_params_reverse(name)
+                    } else {
+                        assoc_scan_params(name)
+                    };
+                    let out = eval_primitive(
+                        Primitive::AssociativeScan,
+                        std::slice::from_ref(tensor),
+                        &params,
+                    )
+                    .unwrap();
+                    let got = bits(&out);
+                    assert_eq!(
+                        got,
+                        reference(tensor, prim, reverse),
+                        "{dtype_name} associative_scan {name} reverse={reverse}: fast path != slice-dispatch"
+                    );
+                    fixtures.push((dtype_name.to_owned(), name.to_owned(), reverse, got));
+                }
+            }
+        }
+        let digest = fj_test_utils::fixture_id_from_json(&fixtures)
+            .expect("integer associative_scan digest");
+        eprintln!("integer associative_scan golden digest: {digest}");
+        assert_eq!(
+            digest, "83ffbd381da3466a8a439360580be405087f409ceb95af001cc3488889aface3",
+            "integer associative_scan golden output digest changed"
+        );
+    }
+
+    #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_associative_scan_dense_vs_slice_dispatch() {
         use std::time::Instant;
@@ -9645,6 +9868,99 @@ mod tests {
             t_dense * 1e3,
             t_slice / t_dense,
         );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_associative_scan_dense_integer_vs_slice_dispatch() {
+        use std::time::Instant;
+
+        let l = 1usize << 20;
+        let mk_i64 = |i: usize| {
+            (i as i64)
+                .wrapping_mul(2_654_435_761)
+                .wrapping_sub(0x4000_0000_0000 * ((i & 1) as i64))
+        };
+        let raw_i64: Vec<i64> = (0..l).map(mk_i64).collect();
+        let raw_i32: Vec<i64> = (0..l)
+            .map(|i| i64::from((mk_i64(i) as i32).wrapping_add(17)))
+            .collect();
+        let tensor_i64 = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![l as u32],
+                },
+                raw_i64,
+            )
+            .unwrap(),
+        );
+        let tensor_i32 = Value::Tensor(
+            TensorValue::new_i32_values(
+                Shape {
+                    dims: vec![l as u32],
+                },
+                raw_i32,
+            )
+            .unwrap(),
+        );
+        let best = |mut f: Box<dyn FnMut() -> u64>| {
+            f();
+            let mut best = f64::MAX;
+            let mut digest = 0u64;
+            for _ in 0..3 {
+                let t = Instant::now();
+                digest = std::hint::black_box(f());
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            (best, digest)
+        };
+        let digest_i64 = |value: &Value| -> u64 {
+            value
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .fold(0u64, |acc, x| acc ^ (x.as_i64().unwrap() as u64))
+        };
+        let run_slice = |tensor: &Value, body_op: Primitive| -> u64 {
+            let t = tensor.as_tensor().unwrap();
+            let mut results: Vec<Value> = Vec::with_capacity(l);
+            let mut acc = t.slice_axis0(0).unwrap();
+            results.push(acc.clone());
+            for i in 1..l {
+                let x = t.slice_axis0(i).unwrap();
+                acc = eval_primitive(body_op, &[acc, x], &BTreeMap::new()).unwrap();
+                results.push(acc.clone());
+            }
+            digest_i64(&Value::Tensor(TensorValue::stack_axis0(&results).unwrap()))
+        };
+        let run_assoc = |tensor: &Value, name: &str| -> u64 {
+            let params = assoc_scan_params(name);
+            let out = eval_primitive(
+                Primitive::AssociativeScan,
+                std::slice::from_ref(tensor),
+                &params,
+            )
+            .unwrap();
+            digest_i64(&out)
+        };
+
+        for (label, tensor) in [("i64", tensor_i64), ("i32", tensor_i32)] {
+            let t_ref = tensor.clone();
+            let (t_slice, d_slice) = best(Box::new(move || run_slice(&t_ref, Primitive::Add)));
+            let t_fast = tensor.clone();
+            let (t_assoc, d_assoc) = best(Box::new(move || run_assoc(&t_fast, "add")));
+            assert_eq!(
+                d_slice, d_assoc,
+                "{label} fast-path digest must match slice-dispatch"
+            );
+            println!(
+                "BENCH associative_scan {label} add(x[{l}],axis=0): slice-dispatch={:.4}ms assoc-eval={:.4}ms speedup={:.2}x digest={d_assoc:016x}",
+                t_slice * 1e3,
+                t_assoc * 1e3,
+                t_slice / t_assoc,
+            );
+        }
     }
 
     // ── Scan functional tests (bd-3eyv) ──────────────────────────────
