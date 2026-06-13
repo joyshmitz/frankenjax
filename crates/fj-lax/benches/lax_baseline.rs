@@ -1,5 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
+// [cc-temp] foreign WIP stub: use fj_lax::linalg::svd_jacobi_profile_counters;
 use fj_lax::threefry::{random_key, random_normal, random_uniform};
 use fj_lax::{eval_primitive, eval_primitive_multi};
 use std::collections::BTreeMap;
@@ -1543,6 +1544,8 @@ fn bench_svd_48_f64(c: &mut Criterion) {
     });
 }
 
+fn bench_svd_48_f64_jacobi_counters(_c: &mut Criterion) { /* [cc-temp] foreign WIP stubbed to compile bench */ }
+
 /// Same numeric data as `bench_svd_48_f64`, but typed Complex128 (imag 0) so it
 /// forces the complex SVD kernel. Lets the real-path speedup be measured against
 /// the complex path inside one binary on one worker (no cross-invocation drift).
@@ -1739,12 +1742,18 @@ fn f32_gemm_blocked_ab(c: &mut Criterion, m: usize, k: usize, n: usize) {
     c.bench_function(&format!("linalg/f32_gemm_{m}_register"), |bencher| {
         bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, "register"))
     });
+    c.bench_function(&format!("linalg/f32_gemm_{m}_kcblocked"), |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, "kcblocked"))
+    });
 }
 fn bench_f32_gemm_1024(c: &mut Criterion) {
     f32_gemm_blocked_ab(c, 1024, 1024, 1024);
 }
 fn bench_f32_gemm_2048(c: &mut Criterion) {
     f32_gemm_blocked_ab(c, 2048, 2048, 2048);
+}
+fn bench_f32_gemm_4096(c: &mut Criterion) {
+    f32_gemm_blocked_ab(c, 4096, 4096, 4096);
 }
 
 // f32 conv2d GEMM accumulation A/B at a ResNet-ish im2col shape (out=26x26=676 rows,
@@ -1796,6 +1805,26 @@ fn bench_matmul_2d_2048(c: &mut Criterion) {
     c.bench_function("linalg/matmul_2d_2048x2048x2048_f64", |bencher| {
         bencher.iter(|| fj_lax::tensor_contraction::matmul_2d(&a, m, k, &b, n))
     });
+}
+
+// Strassen vs matmul_2d same-invocation A/B (load-robust ratio). Strassen only wins
+// if the GEMM is compute-bound; if matmul_2d is RAM-bound here, Strassen's extra
+// submatrix traffic loses — this measures which regime we're in at n=1024/2048.
+fn strassen_ab(c: &mut Criterion, n: usize) {
+    let a: Vec<f64> = (0..n * n).map(|i| (i as f64 * 1e-5).sin()).collect();
+    let b: Vec<f64> = (0..n * n).map(|i| (i as f64 * 2e-5).cos()).collect();
+    c.bench_function(&format!("linalg/strassen_ab_{n}_matmul2d"), |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::matmul_2d(&a, n, n, &b, n))
+    });
+    c.bench_function(&format!("linalg/strassen_ab_{n}_strassen"), |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::strassen_matmul_2d(&a, n, n, &b, n))
+    });
+}
+fn bench_strassen_ab_1024(c: &mut Criterion) {
+    strassen_ab(c, 1024);
+}
+fn bench_strassen_ab_2048(c: &mut Criterion) {
+    strassen_ab(c, 2048);
 }
 
 // 2D conv (1x32x32x8 input, 3x3x8x16 kernel, SAME): dense f64 conv path (pass87)
@@ -2094,6 +2123,100 @@ fn bench_reduce_sum_64k_f32_literal_reference(c: &mut Criterion) {
 // vs Vec<Literal> boxed BF16Bits (generic per-element as_f64() + 24-byte stride). Both
 // fold a single f64 accumulator ascending, so bit-identical. Same-invocation A/B. This
 // is the bf16 loss / grad-norm hot path.
+// bf16 elementwise mul A/B (same binary): SIMD widen→f64→round-to-odd→RNE vs the scalar
+// per-element map. 64k bf16 = 128KB/operand (L2-resident), so this isolates the
+// compute (widen/round) floor the SIMD path attacks.
+fn bench_bf16_elementwise_mul(c: &mut Criterion) {
+    let n = LARGE_ELEMENTWISE_LEN;
+    let a: Vec<u16> = (0..n)
+        .map(|i| match Literal::from_bf16_f64((i as f64) * 1e-3 - 17.0) {
+            Literal::BF16Bits(b) => b,
+            _ => 0,
+        })
+        .collect();
+    let b: Vec<u16> = (0..n)
+        .map(|i| match Literal::from_bf16_f64((i as f64) * 2e-3 + 3.0) {
+            Literal::BF16Bits(x) => x,
+            _ => 0,
+        })
+        .collect();
+    c.bench_function("eval/bf16_abs_64k_simd", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_neg_abs_bench(&a, true, true))
+    });
+    c.bench_function("eval/bf16_abs_64k_scalar", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_neg_abs_bench(&a, true, false))
+    });
+    c.bench_function("eval/bf16_mul_64k_simd", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_binary_bench(&a, &b, true))
+    });
+    c.bench_function("eval/bf16_mul_64k_scalar", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_binary_bench(&a, &b, false))
+    });
+    // f16 mul (normal-range inputs so the SIMD path, not the edge fallback, is exercised).
+    let f16bits = |x: f64| -> u16 {
+        match Literal::from_f16_f64(x) {
+            Literal::F16Bits(b) => b,
+            _ => 0,
+        }
+    };
+    let af16: Vec<u16> = (0..n).map(|i| f16bits((i as f64) * 1e-3 + 1.0)).collect();
+    let bf16v: Vec<u16> = (0..n).map(|i| f16bits((i as f64) * 7e-4 + 0.5)).collect();
+    c.bench_function("eval/f16_mul_64k_simd", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::f16_binary_bench(&af16, &bf16v, true))
+    });
+    c.bench_function("eval/f16_mul_64k_scalar", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::f16_binary_bench(&af16, &bf16v, false))
+    });
+    // f16 relu: max(x, 0) — inputs span ± so ~half are clamped.
+    let af16r: Vec<u16> = (0..n).map(|i| f16bits((i as f64) * 1e-3 - 30.0)).collect();
+    c.bench_function("eval/f16_relu_64k_simd", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::f16_relu_bench(&af16r, true))
+    });
+    c.bench_function("eval/f16_relu_64k_scalar", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::f16_relu_bench(&af16r, false))
+    });
+    let s = a[3];
+    c.bench_function("eval/bf16_scale_64k_simd", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_scalar_broadcast_bench(&a, s, true))
+    });
+    c.bench_function("eval/bf16_scale_64k_scalar", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_scalar_broadcast_bench(&a, s, false))
+    });
+    c.bench_function("eval/bf16_relu_64k_simd", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_relu_bench(&a, true))
+    });
+    c.bench_function("eval/bf16_relu_64k_scalar", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_relu_bench(&a, false))
+    });
+    // bias-add [N,C]+[C]: 512x128 = 64k, bias row reused across rows (the (1,1) case).
+    let cols = 128usize;
+    let bias: Vec<u16> = b[..cols].to_vec();
+    c.bench_function("eval/bf16_bias_add_64k_simd", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_bias_add_bench(&a, &bias, cols, true))
+    });
+    c.bench_function("eval/bf16_bias_add_64k_scalar", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::bf16_bias_add_bench(&a, &bias, cols, false))
+    });
+}
+
+// f16 reduce-sum A/B (same binary): SIMD IEEE-decode widen vs scalar per-element decode.
+fn bench_f16_reduce_sum(c: &mut Criterion) {
+    let n = LARGE_ELEMENTWISE_LEN;
+    let f16bits = |x: f64| -> u16 {
+        match Literal::from_f16_f64(x) {
+            Literal::F16Bits(b) => b,
+            _ => 0,
+        }
+    };
+    let v: Vec<u16> = (0..n).map(|i| f16bits((i as f64) * 1e-3 + 1.0)).collect();
+    c.bench_function("eval/f16_reduce_sum_64k_simd", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::f16_reduce_sum_bench(&v, true))
+    });
+    c.bench_function("eval/f16_reduce_sum_64k_scalar", |bencher| {
+        bencher.iter(|| fj_lax::arithmetic::f16_reduce_sum_bench(&v, false))
+    });
+}
+
 fn bench_reduce_sum_64k_bf16_dense(c: &mut Criterion) {
     let bits: Vec<u16> = (0..LARGE_ELEMENTWISE_LEN)
         .map(|i| match Literal::from_bf16_f64((i as f64) * 1e-3) {
@@ -5189,6 +5312,7 @@ criterion_group!(
     bench_lu_128_f64,
     bench_lu_1024_f64,
     bench_svd_48_f64,
+    // bench_svd_48_f64_jacobi_counters, [cc-temp]
     bench_svd_48_complex_path,
     bench_svd_48_full_f64,
     bench_svd_48_full_complex_path,
@@ -5202,6 +5326,9 @@ criterion_group!(
     bench_matmul_2d_512,
     bench_f32_gemm_1024,
     bench_f32_gemm_2048,
+    bench_f32_gemm_4096,
+    bench_strassen_ab_1024,
+    bench_strassen_ab_2048,
     bench_conv2d_gemm_f32_native,
     bench_conv2d_gemm_f64_promote_reference,
     bench_matmul_2d_1024,
@@ -5240,6 +5367,8 @@ criterion_group!(
     bench_reduce_sum_64k_i64_literal_reference,
     bench_reduce_sum_64k_f32_dense,
     bench_reduce_sum_64k_f32_literal_reference,
+    bench_bf16_elementwise_mul,
+    bench_f16_reduce_sum,
     bench_reduce_sum_64k_bf16_dense,
     bench_reduce_max_64k_bf16_dense,
     bench_reduce_max_axis1_256_bf16,

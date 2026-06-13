@@ -985,7 +985,9 @@ fn run_i64() {
 /// win is the eliminated N-1 intermediate half tensors, same op mix as run_i64.
 fn run_bf16() {
     let n = 1usize << 20; // 1M bf16 = 2 MB per tensor
-    let x: Vec<u16> = (0..n).map(|i| bf16_bits_of(i as f64 * 1e-6 - 0.5)).collect();
+    let x: Vec<u16> = (0..n)
+        .map(|i| bf16_bits_of(i as f64 * 1e-6 - 0.5))
+        .collect();
     let y: Vec<u16> = (0..n)
         .map(|i| bf16_bits_of((i as f64 * 3e-7).cos() + 1.2))
         .collect();
