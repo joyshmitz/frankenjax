@@ -1116,13 +1116,11 @@ fn try_dense_f64_square_plus_linear_reducesum_grad(
         return Ok(None);
     };
 
-    let grad = TensorValue::new_with_literal_buffer(
-        DType::F64,
-        tensor.shape.clone(),
-        LiteralBuffer::from_f64_one_plus_x_plus_x(input),
-    )
-    .map(Value::Tensor)
-    .map_err(|e| AdError::EvalFailed(e.to_string()))?;
+    let grad = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: tensor.shape.clone(),
+        elements: LiteralBuffer::from_f64_one_plus_x_plus_x(input),
+    });
     Ok(Some(vec![grad]))
 }
 
