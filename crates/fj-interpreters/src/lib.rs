@@ -5166,6 +5166,159 @@ fn run_scalar_poly_plan_into(
     Some(Ok(()))
 }
 
+// ── dense-f64 SMALL-TENSOR elementwise arena ────────────────────────────────
+// The elementwise FUSION (try_fuse_elementwise_chain) is gated to tensors with
+// >= FUSION_MIN_ELEMS (1024) elements, so a scan/while body whose carry is a SMALL
+// dense-f64 tensor ([H] RNN state, optimizer moments, …) pays full per-equation
+// dispatch (Value boxing, env churn, scratch-collect, an intermediate alloc per op)
+// EVERY iteration. This arena REUSES the already-built `scalar_f64_plan` (same op set,
+// incl. transcendentals / Square / IntegerPow that the cheap-op fusion can't do) and
+// runs each step ELEMENTWISE over dense-f64 tensor cells with scalar broadcast — no
+// dispatch, no boxing. Per element it calls the SAME `apply_scalar_f64_binary` the
+// scalar arena uses, so it is bit-identical to the generic per-op path. It only fires
+// for a same-shape dense-f64 body BELOW the fusion threshold (>= 1024 bails so the
+// chunked/threaded fusion still owns large tensors); any non-dense-f64 slot bails it
+// to the generic interpreter.
+
+enum DenseF64Cell {
+    Missing,
+    NonDense,
+    Scalar(f64),
+    Tensor(Vec<f64>),
+}
+
+#[derive(Clone, Copy)]
+enum DenseRef<'a> {
+    Scalar(f64),
+    Tensor(&'a [f64]),
+}
+
+fn resolve_dense_operand<'a>(
+    cells: &'a [DenseF64Cell],
+    operand: ScalarF64Operand,
+) -> Option<DenseRef<'a>> {
+    match operand {
+        ScalarF64Operand::Literal(v) => Some(DenseRef::Scalar(v)),
+        ScalarF64Operand::Slot(s) => match &cells[s] {
+            DenseF64Cell::Scalar(v) => Some(DenseRef::Scalar(*v)),
+            DenseF64Cell::Tensor(t) => Some(DenseRef::Tensor(t)),
+            DenseF64Cell::Missing | DenseF64Cell::NonDense => None,
+        },
+    }
+}
+
+fn run_scalar_f64_plan_as_tensor_into(
+    plan: &ScalarF64Plan,
+    const_values: &[Value],
+    args: &[Value],
+    out: &mut Vec<Value>,
+    cells: &mut Vec<DenseF64Cell>,
+) -> Option<Result<(), InterpreterError>> {
+    if const_values.len() != plan.const_slots.len() {
+        return Some(Err(InterpreterError::ConstArity {
+            expected: plan.const_slots.len(),
+            actual: const_values.len(),
+        }));
+    }
+    if args.len() != plan.input_slots.len() {
+        return Some(Err(InterpreterError::InputArity {
+            expected: plan.input_slots.len(),
+            actual: args.len(),
+        }));
+    }
+
+    cells.clear();
+    cells.resize_with(plan.slots, || DenseF64Cell::Missing);
+
+    // Load consts + inputs; the body shape comes from the dense-f64 tensors (all must
+    // agree). A body with NO tensor input is scalar — let the scalar plan own it.
+    let mut shape: Option<Shape> = None;
+    let mut n: usize = 0;
+    for (&slot, value) in plan
+        .const_slots
+        .iter()
+        .zip(const_values)
+        .chain(plan.input_slots.iter().zip(args))
+    {
+        cells[slot] = match value {
+            Value::Scalar(Literal::F64Bits(b)) => DenseF64Cell::Scalar(f64::from_bits(*b)),
+            Value::Tensor(t) => match t.elements.as_f64_slice() {
+                Some(s) => {
+                    match &shape {
+                        None => {
+                            shape = Some(t.shape.clone());
+                            n = s.len();
+                        }
+                        Some(sh) if *sh == t.shape => {}
+                        Some(_) => return None, // mixed shapes -> generic
+                    }
+                    DenseF64Cell::Tensor(s.to_vec())
+                }
+                None => DenseF64Cell::NonDense,
+            },
+            _ => DenseF64Cell::NonDense,
+        };
+    }
+
+    let shape = shape?;
+    // Large tensors are owned by the chunked/threaded fusion; only small bodies here.
+    if n >= FUSION_MIN_ELEMS {
+        return None;
+    }
+
+    for step in &plan.steps {
+        let a = resolve_dense_operand(cells, step.lhs)?;
+        let b = match step.rhs {
+            Some(rhs) => resolve_dense_operand(cells, rhs)?,
+            None => a,
+        };
+        let result = match (a, b) {
+            (DenseRef::Scalar(av), DenseRef::Scalar(bv)) => {
+                DenseF64Cell::Scalar(apply_scalar_f64_binary(step.op, av, bv))
+            }
+            _ => {
+                let mut o = vec![0.0_f64; n];
+                for (i, slot) in o.iter_mut().enumerate() {
+                    let av = match a {
+                        DenseRef::Scalar(v) => v,
+                        DenseRef::Tensor(t) => t[i],
+                    };
+                    let bv = match b {
+                        DenseRef::Scalar(v) => v,
+                        DenseRef::Tensor(t) => t[i],
+                    };
+                    *slot = apply_scalar_f64_binary(step.op, av, bv);
+                }
+                DenseF64Cell::Tensor(o)
+            }
+        };
+        cells[step.out_slot] = result;
+    }
+
+    out.clear();
+    out.reserve(plan.out_slots.len());
+    for &slot in &plan.out_slots {
+        match std::mem::replace(&mut cells[slot], DenseF64Cell::Missing) {
+            DenseF64Cell::Tensor(values) => {
+                match TensorValue::new_f64_values(shape.clone(), values) {
+                    Ok(t) => out.push(Value::Tensor(t)),
+                    Err(e) => {
+                        return Some(Err(InterpreterError::Primitive(EvalError::InvalidTensor(
+                            e,
+                        ))));
+                    }
+                }
+            }
+            DenseF64Cell::Scalar(v) => out.push(Value::scalar_f64(v)),
+            DenseF64Cell::NonDense => return None,
+            DenseF64Cell::Missing => {
+                return Some(Err(InterpreterError::MissingVariable(VarId(slot as u32))));
+            }
+        }
+    }
+    Some(Ok(()))
+}
+
 /// Reusable scratch arenas for monomorphic scalar executors. A loop body builds
 /// only the plan(s) whose literals and boolean intermediates match its shape,
 /// and the runner tries them in order; each non-matching plan bails on the first
@@ -5181,6 +5334,7 @@ struct ScalarPlanBuffers {
     mixed: Vec<MixedSlot>,
     mixed_i64: Vec<MixedI64Slot>,
     poly: Vec<PolySlot>,
+    dense_f64: Vec<DenseF64Cell>,
 }
 
 /// A reusable dense-evaluation plan for a jaxpr: the slot count and the
@@ -5368,6 +5522,20 @@ fn run_dense_plan_into(
     if let Some(p) = &plan.scalar_poly_plan
         && let Some(result) =
             run_scalar_poly_plan_into(p, const_values, args, out, &mut scalar_buffers.poly)
+    {
+        return result;
+    }
+    // Small dense-f64 same-shape elementwise tensor body: reuse the scalar f64 plan's
+    // steps but run them elementwise (no per-op dispatch). Bails for non-dense / large
+    // (>= FUSION_MIN_ELEMS) bodies, which the generic path + chunked fusion own.
+    if let Some(p) = &plan.scalar_f64_plan
+        && let Some(result) = run_scalar_f64_plan_as_tensor_into(
+            p,
+            const_values,
+            args,
+            out,
+            &mut scalar_buffers.dense_f64,
+        )
     {
         return result;
     }
@@ -8094,6 +8262,174 @@ mod tests {
     }
 
     #[test]
+    fn dense_f64_tensor_arena_bit_identical_to_generic() {
+        // The small-tensor dense-f64 elementwise arena must (a) actually HANDLE these
+        // bodies (run_..._as_tensor_into returns Some(Ok), not a None bail) and (b)
+        // match the generic interpreter bit-for-bit, including transcendentals, NaN-
+        // propagating max/min, and scalar broadcast.
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let f64lit = |v: f64| Atom::Lit(Literal::from_f64(v));
+        let tensor = |data: &[f64]| -> Value {
+            Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![data.len() as u32],
+                    },
+                    data.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
+        let bits = |v: &Value| -> Vec<u64> {
+            match v {
+                Value::Tensor(t) => t
+                    .elements
+                    .as_f64_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect(),
+                Value::Scalar(Literal::F64Bits(b)) => vec![*b],
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+
+        let data: Vec<f64> = vec![
+            -3.0,
+            -0.5,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            2.0,
+            f64::NAN,
+            f64::INFINITY,
+            7.5,
+        ];
+
+        // relu-ish: max(x*2 + 1, 0)  (cheap ops + scalar broadcast + NaN-prop max).
+        let (x, m, a, out) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let relu = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(x), f64lit(2.0)], m),
+                mk(Primitive::Add, smallvec![Atom::Var(m), f64lit(1.0)], a),
+                mk(Primitive::Max, smallvec![Atom::Var(a), f64lit(0.0)], out),
+            ],
+        );
+        // transcendental: tanh(x * 0.5)  (the arena handles ops the cheap fusion can't).
+        let (x2, h, o2) = (VarId(0), VarId(1), VarId(2));
+        let act = Jaxpr::new(
+            vec![x2],
+            vec![],
+            vec![o2],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(x2), f64lit(0.5)], h),
+                mk(Primitive::Tanh, smallvec![Atom::Var(h)], o2),
+            ],
+        );
+        // two tensor operands same shape: (x + y) * x.
+        let (xa, ya, s, o3) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let two = Jaxpr::new(
+            vec![xa, ya],
+            vec![],
+            vec![o3],
+            vec![
+                mk(Primitive::Add, smallvec![Atom::Var(xa), Atom::Var(ya)], s),
+                mk(Primitive::Mul, smallvec![Atom::Var(s), Atom::Var(xa)], o3),
+            ],
+        );
+
+        let cases: Vec<(&str, Jaxpr, Vec<Value>)> = vec![
+            ("relu", relu, vec![tensor(&data)]),
+            ("act", act, vec![tensor(&data)]),
+            (
+                "two",
+                two,
+                vec![
+                    tensor(&data),
+                    tensor(&[1.0, -2.0, 3.0, -0.0, 0.0, 9.0, -1.5, 2.5, -3.5, 0.25]),
+                ],
+            ),
+        ];
+
+        for (name, body, args) in &cases {
+            let plan = super::build_dense_plan(body).expect("dense plan");
+            let p = plan
+                .scalar_f64_plan
+                .as_ref()
+                .expect("scalar f64 plan built for elementwise body");
+
+            // Generic reference.
+            let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut gscr: Vec<Value> = Vec::new();
+            let mut gout: Vec<Value> = Vec::new();
+            super::run_dense_env_into(
+                body,
+                &[],
+                args,
+                &mut genv,
+                &plan.last_use,
+                &mut gscr,
+                &mut gout,
+            )
+            .expect("generic");
+
+            // Tensor arena — must HANDLE it (Some(Ok)), proving non-vacuous.
+            let mut tout: Vec<Value> = Vec::new();
+            let mut cells: Vec<super::DenseF64Cell> = Vec::new();
+            let handled =
+                super::run_scalar_f64_plan_as_tensor_into(p, &[], args, &mut tout, &mut cells)
+                    .unwrap_or_else(|| {
+                        panic!("{name}: tensor arena bailed (None) — should handle it")
+                    });
+            handled.expect("tensor arena ok");
+            assert_eq!(
+                bits(&tout[0]),
+                bits(&gout[0]),
+                "{name} tensor arena vs generic"
+            );
+        }
+
+        // A LARGE tensor (>= FUSION_MIN_ELEMS) must BAIL (None) so the fusion owns it.
+        let big = vec![1.0f64; super::FUSION_MIN_ELEMS];
+        let (xb, mb, ob) = (VarId(0), VarId(1), VarId(2));
+        let big_body = Jaxpr::new(
+            vec![xb],
+            vec![],
+            vec![ob],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(xb), f64lit(2.0)], mb),
+                mk(Primitive::Add, smallvec![Atom::Var(mb), f64lit(1.0)], ob),
+            ],
+        );
+        let plan = super::build_dense_plan(&big_body).expect("plan");
+        let p = plan.scalar_f64_plan.as_ref().unwrap();
+        let mut tout: Vec<Value> = Vec::new();
+        let mut cells: Vec<super::DenseF64Cell> = Vec::new();
+        assert!(
+            super::run_scalar_f64_plan_as_tensor_into(
+                p,
+                &[],
+                &[tensor(&big)],
+                &mut tout,
+                &mut cells
+            )
+            .is_none(),
+            "large tensor must bail to the fusion"
+        );
+    }
+
+    #[test]
     fn scalar_poly_arena_bit_identical_to_generic() {
         // The polymorphic dtype-tagged core (f64/i64/bool + convert) must match the
         // generic interpreter bit-for-bit on dtype-MIXING bodies, and be actually
@@ -9033,6 +9369,94 @@ mod tests {
                 "chained activation body bits differ at x={xv}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_dense_f64_tensor_arena() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let f64lit = |v: f64| Atom::Lit(Literal::from_f64(v));
+        // Small-tensor [64] RNN-carry-style body: 4 elementwise ops (x*a + b; max 0; *c).
+        let (x, m, a, r, out) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let body = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(x), f64lit(0.9)], m),
+                mk(Primitive::Add, smallvec![Atom::Var(m), f64lit(0.1)], a),
+                mk(Primitive::Max, smallvec![Atom::Var(a), f64lit(0.0)], r),
+                mk(Primitive::Mul, smallvec![Atom::Var(r), f64lit(1.01)], out),
+            ],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        let p = plan.scalar_f64_plan.as_ref().expect("f64 plan");
+        let data = vec![0.5f64; 64];
+        let arg =
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![64] }, data).unwrap());
+        let n: usize = 1_000_000;
+        let args = [arg];
+
+        let t_generic = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                super::run_dense_env_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan.last_use,
+                    &mut scratch,
+                    &mut o,
+                )
+                .expect("generic");
+                if let Value::Tensor(t) = &o[0] {
+                    acc += t.elements.as_f64_slice().unwrap()[0];
+                }
+            }
+            std::hint::black_box(acc);
+        });
+        let t_arena = best_time(|| {
+            let mut o: Vec<Value> = Vec::new();
+            let mut cells: Vec<super::DenseF64Cell> = Vec::new();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                super::run_scalar_f64_plan_as_tensor_into(p, &[], &args, &mut o, &mut cells)
+                    .expect("handled")
+                    .expect("ok");
+                if let Value::Tensor(t) = &o[0] {
+                    acc += t.elements.as_f64_slice().unwrap()[0];
+                }
+            }
+            std::hint::black_box(acc);
+        });
+        println!(
+            "BENCH dense-f64 tensor arena [64] {n} evals (4 elementwise ops): GENERIC {:.1}ns/eval -> ARENA {:.1}ns/eval = {:.2}x",
+            t_generic * 1e9 / n as f64,
+            t_arena * 1e9 / n as f64,
+            t_generic / t_arena,
+        );
     }
 
     #[test]
