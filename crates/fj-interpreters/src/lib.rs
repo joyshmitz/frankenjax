@@ -966,6 +966,10 @@ pub fn eval_jaxpr_with_consts(
         });
     }
 
+    if let Some(result) = try_eval_top_level_scan_i64_add_emit(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_scalar_i64_add_chain(jaxpr, const_values, args) {
         return result;
     }
@@ -996,6 +1000,55 @@ pub fn eval_jaxpr_with_consts(
     } else {
         eval_jaxpr_hashed_env(jaxpr, const_values, args)
     }
+}
+
+fn try_eval_top_level_scan_i64_add_emit(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 2
+        || jaxpr.equations.len() != 1
+    {
+        return None;
+    }
+
+    let equation = &jaxpr.equations[0];
+    if equation.primitive != Primitive::Scan
+        || !equation.effects.is_empty()
+        || equation.sub_jaxprs.len() != 1
+        || equation.inputs.len() != 2
+        || equation.outputs.as_slice() != jaxpr.outvars.as_slice()
+    {
+        return None;
+    }
+    let [Atom::Var(carry_var), Atom::Var(xs_var)] = equation.inputs.as_slice() else {
+        return None;
+    };
+    if *carry_var != jaxpr.invars[0] || *xs_var != jaxpr.invars[1] {
+        return None;
+    }
+
+    let reverse = equation
+        .params
+        .get("reverse")
+        .is_some_and(|value| value == "true");
+    let scan_len = match scan_input_len(&args[1]) {
+        Ok(scan_len) => scan_len,
+        Err(error) => return Some(Err(error)),
+    };
+    try_eval_scan_i64_add_emit(
+        equation,
+        &equation.sub_jaxprs[0],
+        &args[..1],
+        &args[1],
+        scan_len,
+        reverse,
+    )
 }
 
 fn try_eval_scalar_i64_add_chain(
@@ -11860,6 +11913,37 @@ mod tests {
         let generic_outputs =
             eval_jaxpr(&forced_generic, &inputs).expect("generic scan should evaluate");
         assert_eq!(guard_miss_outputs, generic_outputs);
+    }
+
+    #[test]
+    fn eval_top_level_scan_i64_add_emit_fast_path_matches_generic_and_golden() {
+        let mut golden_rows = Vec::new();
+        for reverse in [false, true] {
+            let fast = make_scan_sub_jaxpr_control_flow_jaxpr(reverse);
+            let mut generic = fast.clone();
+            generic.equations[0].sub_jaxprs[0].equations[1]
+                .params
+                .insert("force_generic".to_owned(), "1".to_owned());
+            let inputs = [
+                Value::scalar_i64(i64::MAX - 3),
+                Value::vector_i64(&[4, -7, i64::MIN, 11]).expect("xs vector should build"),
+            ];
+
+            let fast_outputs =
+                eval_jaxpr(&fast, &inputs).expect("top-level fast scan should evaluate");
+            let generic_outputs =
+                eval_jaxpr(&generic, &inputs).expect("generic scan should evaluate");
+            assert_eq!(fast_outputs, generic_outputs, "reverse={reverse}");
+            golden_rows.push(fast_outputs);
+        }
+
+        let digest = fj_test_utils::fixture_id_from_json(&("frankenjax-0jakq", &golden_rows))
+            .expect("golden digest");
+        eprintln!("top-level i64 scan add-emit golden digest: {digest}");
+        assert_eq!(
+            digest,
+            "775f4b39aa923c00abea919a50d2de053c9a09f18ce1e9758a10eccc8b4d1e3b"
+        );
     }
 
     #[test]
