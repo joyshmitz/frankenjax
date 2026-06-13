@@ -4549,6 +4549,28 @@ pub fn simulate_nested_trace_contexts(
     transforms: &[Transform],
     args: &[Value],
 ) -> Result<NestedTraceSummary, TraceError> {
+    if transforms
+        .iter()
+        .all(|transform| *transform == Transform::Jit)
+    {
+        let frames = transforms
+            .iter()
+            .enumerate()
+            .map(|(idx, transform)| NestedTraceFrameSummary {
+                transform: *transform,
+                trace_id: idx as u64 + 2,
+                depth: idx + 2,
+                equation_count: 0,
+                invar_count: args.len(),
+                outvar_count: 0,
+            })
+            .collect();
+        return Ok(NestedTraceSummary {
+            max_depth: transforms.len() + 1,
+            frames,
+        });
+    }
+
     let in_avals: Vec<ShapedArray> = args.iter().map(ShapedArray::from_value).collect();
     let mut ctx = SimpleTraceContext::with_inputs(in_avals.clone());
     let mut opened = Vec::with_capacity(transforms.len());
@@ -4601,7 +4623,8 @@ mod tests {
         TraceOperatorFailure, TraceToJaxpr, TracerId, TracerRef,
     };
     use fj_core::{
-        Atom, DType, Equation, Jaxpr, Literal, Primitive, Shape, TensorValue, Value, VarId,
+        Atom, DType, Equation, Jaxpr, Literal, Primitive, Shape, TensorValue, Transform, Value,
+        VarId,
     };
     use proptest::prelude::*;
     use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
@@ -4805,6 +4828,59 @@ mod tests {
                     .expect("root reduce_sum should infer");
                 let closed = ctx.finalize().expect("root finalize should succeed");
                 assert_eq!(closed.jaxpr.equations.len(), 1);
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
+    fn pure_jit_nested_trace_summary_preserves_frame_contract() {
+        run_logged_test(
+            "pure_jit_nested_trace_summary_preserves_frame_contract",
+            fj_test_utils::fixture_id_from_json(&("pure-jit-nested-trace-summary", [2_u32]))
+                .expect("fixture digest"),
+            fj_test_utils::TestMode::Strict,
+            || {
+                let args = [
+                    Value::scalar_i64(2),
+                    Value::vector_i64(&[3, 5, 8]).expect("vector should build"),
+                ];
+                let transforms = [Transform::Jit, Transform::Jit];
+                let summary = super::simulate_nested_trace_contexts(&transforms, &args)
+                    .expect("pure jit trace summary should succeed");
+
+                assert_eq!(summary.max_depth, 3);
+                assert_eq!(summary.frames.len(), 2);
+                for (idx, frame) in summary.frames.iter().enumerate() {
+                    assert_eq!(frame.transform, Transform::Jit);
+                    assert_eq!(frame.trace_id, idx as u64 + 2);
+                    assert_eq!(frame.depth, idx + 2);
+                    assert_eq!(frame.equation_count, 0);
+                    assert_eq!(frame.invar_count, args.len());
+                    assert_eq!(frame.outvar_count, 0);
+                }
+                let golden_contract = (
+                    summary.max_depth,
+                    summary
+                        .frames
+                        .iter()
+                        .map(|frame| {
+                            (
+                                frame.transform.as_str(),
+                                frame.trace_id,
+                                frame.depth,
+                                frame.equation_count,
+                                frame.invar_count,
+                                frame.outvar_count,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                assert_eq!(
+                    fj_test_utils::fixture_id_from_json(&golden_contract)
+                        .expect("golden summary contract sha should build"),
+                    "7ecd3b83d07c77799f97a478915bbca86e8634e86e85e7aea61f1a4c51f3bd6c",
+                );
                 Ok(Vec::new())
             },
         );
