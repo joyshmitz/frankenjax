@@ -1790,22 +1790,25 @@ impl SimpleTraceContext {
                 let padding = parse_conv_padding_param(primitive, params)?;
 
                 // conv_general_dilated params rhs_dilation (atrous), lhs_dilation
-                // (transposed conv) and feature_group_count (grouped/depthwise) are
-                // all implemented by eval_conv, so staging infers the matching
-                // dilated/grouped output shape. batch_group_count stays unsupported.
-                if params
+                // (transposed conv), feature_group_count (grouped/depthwise), and
+                // batch_group_count (grad of grouped conv) are all implemented by
+                // eval_conv, so staging infers the matching output shape. With
+                // batch_group_count = g the output batch is N/g (applied below).
+                let batch_groups = params
                     .get("batch_group_count")
-                    .is_some_and(|v| !matches!(v.trim(), "" | "1"))
-                {
-                    return Err(TraceError::ShapeInferenceFailed {
-                        primitive,
-                        detail: "conv batch_group_count > 1 is not supported".to_owned(),
-                    });
-                }
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                    .map_or(Ok(1usize), |v| {
+                        v.parse::<usize>().ok().filter(|&g| g >= 1).ok_or_else(|| {
+                            TraceError::ShapeInferenceFailed {
+                                primitive,
+                                detail: format!("invalid conv batch_group_count {v:?}"),
+                            }
+                        })
+                    })?;
                 // Parse per-spatial-dim factor lists (empty => all 1s). A dilation `d`
                 // gives effective extent `(n-1)*d+1`; output uses dilated input AND
                 // dilated kernel extents (matching eval_conv).
-                let num_spatial = lhs_rank - 2;
                 let conv_factors = |key: &str| -> Result<Vec<usize>, TraceError> {
                     let Some(raw) = params.get(key) else {
                         return Ok(Vec::new());
@@ -1846,6 +1849,13 @@ impl SimpleTraceContext {
                             }
                         })
                     })?;
+                if batch_groups > 1 && group_count > 1 {
+                    return Err(TraceError::ShapeInferenceFailed {
+                        primitive,
+                        detail: "conv: at most one of batch_group_count and feature_group_count may be > 1"
+                            .to_owned(),
+                    });
+                }
 
                 let out_dims = if lhs_rank == 3 {
                     if rhs.shape.rank() != 3 {
@@ -1993,6 +2003,32 @@ impl SimpleTraceContext {
                     };
                     vec![lhs.shape.dims[0], out_h as u32, out_w as u32, c_out]
                 };
+
+                // batch_group_count = g: the batch dim splits into g group-major blocks
+                // and the output channels into g blocks; output batch = N/g, output
+                // channels = C_out (unchanged). Mirror eval_conv_batch_grouped's checks.
+                let mut out_dims = out_dims;
+                if batch_groups > 1 {
+                    let n = out_dims[0] as usize;
+                    let c_out = *out_dims.last().expect("conv out_dims non-empty") as usize;
+                    if !n.is_multiple_of(batch_groups) {
+                        return Err(TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!(
+                                "conv batch_group_count {batch_groups} must divide lhs batch {n}"
+                            ),
+                        });
+                    }
+                    if !c_out.is_multiple_of(batch_groups) {
+                        return Err(TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!(
+                                "conv: rhs output-feature count {c_out} must be a multiple of batch_group_count {batch_groups}"
+                            ),
+                        });
+                    }
+                    out_dims[0] = (n / batch_groups) as u32;
+                }
 
                 let dtype = promote_dtype(lhs.dtype, rhs.dtype);
                 Ok(vec![ShapedArray {
@@ -9636,7 +9672,17 @@ mod tests {
             vec![1, 6, 6],
             "1D grouped shape"
         );
-        // batch_group_count still rejected.
+        // 1D batch_group_count G=2: N=4→out batch 2, W=8,K=3→6, Cout=6 unchanged.
+        assert_eq!(
+            infer(
+                vec![4, 8, 2],
+                vec![3, 2, 6],
+                &[("padding", "valid"), ("batch_group_count", "2")]
+            ),
+            vec![2, 6, 6],
+            "1D batch_group_count shape (out batch = N/g)"
+        );
+        // batch_group_count that does not divide the batch is rejected (N=1, g=2).
         let mut ctx = SimpleTraceContext::with_inputs(vec![
             ShapedArray {
                 dtype: DType::F64,
@@ -9657,7 +9703,7 @@ mod tests {
         assert!(
             ctx.process_primitive(Primitive::Conv, &[TracerId(1), TracerId(2)], params)
                 .is_err(),
-            "batch_group_count must still be rejected"
+            "batch_group_count not dividing the batch must be rejected"
         );
     }
 

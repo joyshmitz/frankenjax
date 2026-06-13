@@ -6801,6 +6801,20 @@ pub(crate) fn eval_conv(
         );
     }
 
+    // batch_group_count (used in the gradient w.r.t. the kernel of a grouped conv):
+    // the dual of feature_group_count. The batch splits into `g` group-major blocks
+    // and the output channels into `g` group-major blocks; group `go` convolves batch
+    // block `go` with out-channel block `go`. XLA forward signature `[gm,j][j,gk]->[m,gk]`
+    // (jax convolution.py: the group is the MAJOR part of both batch and out-feature via
+    // `_reshape_axis_out_of`), so output batch = N/g and output features = Cout. Decompose
+    // into `g` independent plain convs (slice batch + slice out-channels, recurse with the
+    // count stripped, concatenate over the channel axis) — exact by construction and reusing
+    // the full conv machinery (1D and 2D). Done before the reject guard, like lhs_dilation.
+    let batch_groups = parse_conv_named_count(primitive, params, "batch_group_count")?;
+    if batch_groups > 1 {
+        return eval_conv_batch_grouped(primitive, lhs, rhs, params, batch_groups);
+    }
+
     let padding = parse_conv_padding(primitive, params)?;
     reject_unsupported_conv_params(primitive, params)?;
 
@@ -6809,6 +6823,92 @@ pub(crate) fn eval_conv(
     } else {
         eval_conv_2d(primitive, lhs, rhs, params, padding)
     }
+}
+
+/// Convolution with `batch_group_count > 1`, decomposed into `g` independent plain
+/// convolutions. The batch dimension (axis 0) and the output-channel dimension (the
+/// last axis of `rhs`, fj layout `[(KH,)KW,Cin,Cout]`) each split into `g` group-major
+/// blocks; group `go` convolves `lhs[go*m..(go+1)*m]` with `rhs[..,go*k..(go+1)*k]`,
+/// and the per-group outputs concatenate along the output-channel axis. Bit-identical
+/// to running each group as a standalone conv (no shared accumulation across groups).
+fn eval_conv_batch_grouped(
+    primitive: Primitive,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    params: &BTreeMap<String, String>,
+    batch_groups: usize,
+) -> Result<Value, EvalError> {
+    // JAX rejects combining the two groupings (convolution.py): "At most one of
+    // batch_group_count and feature_group_count may be > 1".
+    if parse_conv_group_count(primitive, params)? > 1 {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: "conv: at most one of batch_group_count and feature_group_count may be > 1"
+                .to_owned(),
+        });
+    }
+
+    let lhs_rank = lhs.shape.rank();
+    let n = lhs.shape.dims[0] as usize;
+    let c_out = *rhs.shape.dims.last().expect("rhs has rank >= 3") as usize;
+    if !n.is_multiple_of(batch_groups) {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("conv batch_group_count {batch_groups} must divide lhs batch {n}"),
+        });
+    }
+    if !c_out.is_multiple_of(batch_groups) {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "conv: rhs output-feature count {c_out} must be a multiple of batch_group_count {batch_groups}"
+            ),
+        });
+    }
+    let m = n / batch_groups;
+    let k = c_out / batch_groups;
+
+    // Inner params: strip batch_group_count so each per-group conv is ordinary.
+    let mut inner = params.clone();
+    inner.remove("batch_group_count");
+
+    // Helper: static slice `tensor` to `[start, limit)` on `axis`, full extent elsewhere.
+    let slice_axis = |tensor: &TensorValue, axis: usize, start: usize, limit: usize| {
+        let rank = tensor.shape.rank();
+        let starts: Vec<String> = (0..rank)
+            .map(|d| if d == axis { start } else { 0 }.to_string())
+            .collect();
+        let limits: Vec<String> = (0..rank)
+            .map(|d| {
+                if d == axis {
+                    limit
+                } else {
+                    tensor.shape.dims[d] as usize
+                }
+                .to_string()
+            })
+            .collect();
+        let sp = BTreeMap::from([
+            ("start_indices".to_owned(), starts.join(",")),
+            ("limit_indices".to_owned(), limits.join(",")),
+        ]);
+        eval_slice(&[Value::Tensor(tensor.clone())], &sp)
+    };
+
+    let rhs_chan_axis = rhs.shape.rank() - 1;
+    let mut group_outs: Vec<Value> = Vec::with_capacity(batch_groups);
+    for go in 0..batch_groups {
+        let lhs_g = slice_axis(lhs, 0, go * m, (go + 1) * m)?;
+        let rhs_g = slice_axis(rhs, rhs_chan_axis, go * k, (go + 1) * k)?;
+        let out_g = eval_conv(primitive, &[lhs_g, rhs_g], &inner)?;
+        group_outs.push(out_g);
+    }
+
+    // Concatenate the per-group outputs along the output-channel axis (last axis of
+    // the output, which has the same rank as lhs: `[N/g, spatial.., Cout]`).
+    let out_chan_axis = lhs_rank - 1;
+    let cat = BTreeMap::from([("dimension".to_owned(), out_chan_axis.to_string())]);
+    eval_concatenate(&group_outs, &cat)
 }
 
 /// Parse `lhs_dilation` as `num_spatial` per-axis factors (>= 1). Absent → all 1s;
@@ -6907,31 +7007,18 @@ fn dilate_conv_lhs(
 
 /// fj-lax conv implements stride + padding (VALID/SAME/SAME_LOWER) on the default
 /// `[N,(H,)W,Cin]` / `[(KH,)KW,Cin,Cout]` layout. The `conv_general_dilated` parameters
-/// it does NOT implement — input/kernel dilation and feature/batch grouping — must be
-/// REJECTED rather than silently ignored: ignoring `rhs_dilation` (atrous conv) or
-/// `feature_group_count` (depthwise/grouped conv) would return a wrong result for the
-/// same shape, a silent parity violation vs `jax.lax.conv_general_dilated`. Fail loudly.
+/// it implements via dilation, grouping, and (now) batch grouping. The remaining
+/// `conv_general_dilated` parameters it does NOT implement must be REJECTED rather
+/// than silently ignored — a silent parity violation vs `jax.lax.conv_general_dilated`.
+/// `batch_group_count > 1` is handled in `eval_conv` (decomposed before this guard),
+/// so it never reaches here; `feature_group_count` is handled by the grouped/depthwise
+/// paths; `lhs_dilation`/`rhs_dilation` are supported. Nothing currently remains to
+/// reject at this point, but the guard is retained as the single chokepoint where any
+/// future unsupported param would fail loudly.
 fn reject_unsupported_conv_params(
-    primitive: Primitive,
-    params: &BTreeMap<String, String>,
+    _primitive: Primitive,
+    _params: &BTreeMap<String, String>,
 ) -> Result<(), EvalError> {
-    // rhs_dilation (atrous/dilated kernel) and lhs_dilation (input dilation /
-    // transposed conv) ARE supported (lhs_dilation via input zero-insertion in
-    // eval_conv); conv_1d handles its own rhs_dilation/feature_group_count rejection.
-    // Grouping counts: the no-op value is 1 (or absent). feature_group_count IS
-    // supported by eval_conv_2d (grouped/depthwise conv); conv_1d rejects it
-    // explicitly. batch_group_count is not implemented anywhere.
-    let has_nondefault_count = |key: &str| -> bool {
-        params
-            .get(key)
-            .is_some_and(|v| !matches!(v.trim(), "" | "1"))
-    };
-    if has_nondefault_count("batch_group_count") {
-        return Err(EvalError::Unsupported {
-            primitive,
-            detail: "conv batch_group_count > 1 is not supported".to_owned(),
-        });
-    }
     Ok(())
 }
 
@@ -8928,13 +9015,14 @@ fn parse_conv_1d_dilation(
     parse_positive_stride(primitive, Some(first))
 }
 
-/// Parse `feature_group_count` (grouped / depthwise conv) as a positive integer;
-/// absent or "1" means ordinary (ungrouped) conv.
-fn parse_conv_group_count(
+/// Parse a positive-integer conv group count param (`feature_group_count` /
+/// `batch_group_count`); absent, empty, or "1" means ordinary (ungrouped) conv.
+fn parse_conv_named_count(
     primitive: Primitive,
     params: &BTreeMap<String, String>,
+    key: &str,
 ) -> Result<usize, EvalError> {
-    let Some(raw) = params.get("feature_group_count") else {
+    let Some(raw) = params.get(key) else {
         return Ok(1);
     };
     let t = raw.trim();
@@ -8946,8 +9034,17 @@ fn parse_conv_group_count(
         .filter(|&g| g >= 1)
         .ok_or_else(|| EvalError::Unsupported {
             primitive,
-            detail: format!("invalid feature_group_count {raw:?}"),
+            detail: format!("invalid {key} {raw:?}"),
         })
+}
+
+/// Parse `feature_group_count` (grouped / depthwise conv) as a positive integer;
+/// absent or "1" means ordinary (ungrouped) conv.
+fn parse_conv_group_count(
+    primitive: Primitive,
+    params: &BTreeMap<String, String>,
+) -> Result<usize, EvalError> {
+    parse_conv_named_count(primitive, params, "feature_group_count")
 }
 
 fn compute_output_and_pad(
@@ -11558,10 +11655,11 @@ mod tests {
     #[test]
     fn conv_rejects_unimplemented_dilation_and_grouping() {
         // Unsupported conv_general_dilated params must fail loudly rather than be
-        // silently ignored. Still unimplemented: batch_group_count (any rank), 1D
-        // feature_group_count with an inconsistent kernel (channel mismatch), and a
-        // multi-value rhs_dilation for 1D (one spatial dim). rhs_dilation,
-        // lhs_dilation, and feature_group_count (2D) are all supported now.
+        // silently ignored. rhs_dilation, lhs_dilation, feature_group_count (1D+2D),
+        // and batch_group_count are all supported now; what stays rejected here is a
+        // multi-value rhs_dilation for 1D (one spatial dim) and a 1D feature_group_count
+        // with an inconsistent kernel (channel mismatch). (batch_group_count is covered
+        // by conv_batch_group_count_matches_per_group_decomposition.)
         let mk = |dims: Vec<u32>, data: &[f64]| {
             Value::Tensor(TensorValue::new_f64_values(Shape { dims }, data.to_vec()).unwrap())
         };
@@ -11570,7 +11668,6 @@ mod tests {
         for (key, val) in [
             ("rhs_dilation", "1,2"),
             ("feature_group_count", "2"),
-            ("batch_group_count", "2"),
         ] {
             let err = eval_conv(
                 Primitive::Conv,
@@ -11595,6 +11692,111 @@ mod tests {
             ]),
         )
         .expect("conv with default dilation/grouping must still succeed");
+    }
+
+    #[test]
+    fn conv_batch_group_count_matches_per_group_decomposition() {
+        let mkf = |dims: Vec<u32>, data: &[f64]| {
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims }, data.to_vec()).unwrap())
+        };
+        let vals = |v: &Value| -> Vec<f64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap())
+                .collect()
+        };
+
+        // --- Hand-computed 1D oracle (independent of the slice/concat impl) ---
+        // batch_group_count=2: group g uses batch block g and out-channel block g
+        // (group-major), output batch = N/2 = 1, output features = Cout = 2.
+        // lhs [N=2, W=4, Cin=1]: batch0=[1,2,3,4], batch1=[10,20,30,40].
+        // rhs [K=2, Cin=1, Cout=2]: ch0 kernel=[1,1], ch1 kernel=[1,-1].
+        let lhs1 = mkf(vec![2, 4, 1], &[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]);
+        let rhs1 = mkf(vec![2, 1, 2], &[1.0, 1.0, 1.0, -1.0]);
+        let got = eval_conv(
+            Primitive::Conv,
+            &[lhs1.clone(), rhs1.clone()],
+            &params(&[("padding", "valid"), ("strides", "1"), ("batch_group_count", "2")]),
+        )
+        .expect("batch_group_count=2 must be supported");
+        assert_eq!(got.as_tensor().unwrap().shape.dims, vec![1, 3, 2], "bgc out shape");
+        // out[0,w,0] = batch0 ⊛ [1,1]; out[0,w,1] = batch1 ⊛ [1,-1]. Row-major [m,Wout,Cout].
+        let expect = vec![3.0, -10.0, 5.0, -10.0, 7.0, -10.0];
+        assert_eq!(vals(&got), expect, "batch_group_count 1D hand reference");
+
+        // --- 2D: param path must equal explicit per-group conv + channel concat ---
+        // lhs [N=4, H=3, W=3, Cin=2], rhs [KH=2, KW=2, Cin=2, Cout=6], G=2 → m=2, k=3.
+        let (n, h, w, ci, kh, kw, cout, g) = (4, 3, 3, 2, 2, 2, 6, 2usize);
+        let lhs_data: Vec<f64> =
+            (0..n * h * w * ci).map(|i| (i % 13) as f64 - 6.0).collect();
+        let rhs_data: Vec<f64> =
+            (0..kh * kw * ci * cout).map(|i| ((i * 7) % 11) as f64 - 5.0).collect();
+        let lhs2 = mkf(vec![n as u32, h as u32, w as u32, ci as u32], &lhs_data);
+        let rhs2 = mkf(vec![kh as u32, kw as u32, ci as u32, cout as u32], &rhs_data);
+        let p2 = params(&[("padding", "valid"), ("strides", "1"), ("batch_group_count", "2")]);
+        let via_param = eval_conv(Primitive::Conv, &[lhs2.clone(), rhs2.clone()], &p2).unwrap();
+
+        let m = n / g;
+        let k = cout / g;
+        let slice = |t: &Value, axis: usize, s: usize, l: usize| {
+            let tv = t.as_tensor().unwrap();
+            let rank = tv.shape.rank();
+            let st: Vec<String> = (0..rank).map(|d| if d == axis { s } else { 0 }.to_string()).collect();
+            let li: Vec<String> = (0..rank)
+                .map(|d| if d == axis { l } else { tv.shape.dims[d] as usize }.to_string())
+                .collect();
+            eval_slice(
+                &[t.clone()],
+                &BTreeMap::from([
+                    ("start_indices".to_owned(), st.join(",")),
+                    ("limit_indices".to_owned(), li.join(",")),
+                ]),
+            )
+            .unwrap()
+        };
+        let plain = params(&[("padding", "valid"), ("strides", "1")]);
+        let mut groups = Vec::new();
+        for go in 0..g {
+            let lg = slice(&lhs2, 0, go * m, (go + 1) * m);
+            let rg = slice(&rhs2, 3, go * k, (go + 1) * k); // rhs channel axis = last (3)
+            groups.push(eval_conv(Primitive::Conv, &[lg, rg], &plain).unwrap());
+        }
+        let via_decomp =
+            eval_concatenate(&groups, &BTreeMap::from([("dimension".to_owned(), "3".to_owned())]))
+                .unwrap();
+        assert_eq!(
+            via_param.as_tensor().unwrap().shape.dims,
+            vec![m as u32, (h - kh + 1) as u32, (w - kw + 1) as u32, cout as u32],
+            "bgc 2D out shape"
+        );
+        assert_eq!(vals(&via_param), vals(&via_decomp), "batch_group_count 2D == per-group decomp");
+
+        // --- Divisibility errors (mirror jax) ---
+        // N=3 not divisible by G=2.
+        let bad_n = mkf(vec![3, 4, 1], &[0.0; 12]);
+        assert!(matches!(
+            eval_conv(
+                Primitive::Conv,
+                &[bad_n, rhs1.clone()],
+                &params(&[("padding", "valid"), ("batch_group_count", "2")]),
+            ),
+            Err(EvalError::Unsupported { .. })
+        ));
+        // batch_group_count and feature_group_count both > 1 is rejected.
+        assert!(matches!(
+            eval_conv(
+                Primitive::Conv,
+                &[lhs1, rhs1],
+                &params(&[
+                    ("padding", "valid"),
+                    ("batch_group_count", "2"),
+                    ("feature_group_count", "2"),
+                ]),
+            ),
+            Err(EvalError::Unsupported { .. })
+        ));
     }
 
     #[test]
