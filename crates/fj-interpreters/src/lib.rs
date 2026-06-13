@@ -2721,8 +2721,8 @@ fn compute_dense_last_use(jaxpr: &Jaxpr, slots: usize) -> Vec<usize> {
 // Op tag shared by all three scalar-arith plans (f64/i64/f32). Max/Min use JAX's
 // NaN-propagating semantics for floats (canonical NaN if either operand is NaN;
 // see jax_max_f64 / jax_min_f64 in fj-lax) and plain Rust max/min for i64. Neg/Abs
-// are UNARY: a unary equation is compiled to a step whose `rhs` is set equal to
-// `lhs` (a harmless duplicate read) and the apply ignores it.
+// are unary and carry no rhs operand, avoiding a duplicate slot read in tight
+// scalar loops.
 #[derive(Clone, Copy)]
 enum ScalarF64BinaryOp {
     Add,
@@ -2752,7 +2752,7 @@ enum ScalarF64Operand {
 struct ScalarF64Step {
     op: ScalarF64BinaryOp,
     lhs: ScalarF64Operand,
-    rhs: ScalarF64Operand,
+    rhs: Option<ScalarF64Operand>,
     out_slot: usize,
 }
 
@@ -2824,16 +2824,16 @@ fn build_scalar_f64_arith_plan(jaxpr: &Jaxpr, slots: usize) -> Option<ScalarF64P
         if out_slot >= slots {
             return None;
         }
-        // 2-input binary op, or 1-input unary (Neg/Abs) compiled with rhs = lhs.
+        // 2-input binary op, or 1-input unary (Neg/Abs) with no rhs slot read.
         let (op, lhs, rhs) = match equation.inputs.as_slice() {
             [a, b] => (
                 scalar_f64_binary_op(equation.primitive)?,
                 scalar_f64_operand(a, slots)?,
-                scalar_f64_operand(b, slots)?,
+                Some(scalar_f64_operand(b, slots)?),
             ),
             [a] => {
                 let operand = scalar_f64_operand(a, slots)?;
-                (scalar_unary_op(equation.primitive)?, operand, operand)
+                (scalar_unary_op(equation.primitive)?, operand, None)
             }
             _ => return None,
         };
@@ -2939,10 +2939,13 @@ fn run_scalar_f64_arith_plan_into(
             Ok(None) => return None,
             Err(error) => return Some(Err(error)),
         };
-        let rhs = match read_scalar_f64_operand(slots, step.rhs) {
-            Ok(Some(value)) => value,
-            Ok(None) => return None,
-            Err(error) => return Some(Err(error)),
+        let rhs = match step.rhs {
+            Some(rhs) => match read_scalar_f64_operand(slots, rhs) {
+                Ok(Some(value)) => value,
+                Ok(None) => return None,
+                Err(error) => return Some(Err(error)),
+            },
+            None => lhs,
         };
         slots[step.out_slot] = ScalarF64Slot::F64(apply_scalar_f64_binary(step.op, lhs, rhs));
     }
@@ -2979,7 +2982,7 @@ enum ScalarI64Operand {
 struct ScalarI64Step {
     op: ScalarF64BinaryOp,
     lhs: ScalarI64Operand,
-    rhs: ScalarI64Operand,
+    rhs: Option<ScalarI64Operand>,
     out_slot: usize,
 }
 
@@ -3030,11 +3033,11 @@ fn build_scalar_i64_arith_plan(jaxpr: &Jaxpr, slots: usize) -> Option<ScalarI64P
             [a, b] => (
                 scalar_f64_binary_op(equation.primitive)?,
                 scalar_i64_operand(a, slots)?,
-                scalar_i64_operand(b, slots)?,
+                Some(scalar_i64_operand(b, slots)?),
             ),
             [a] => {
                 let operand = scalar_i64_operand(a, slots)?;
-                (scalar_unary_op(equation.primitive)?, operand, operand)
+                (scalar_unary_op(equation.primitive)?, operand, None)
             }
             _ => return None,
         };
@@ -3123,10 +3126,13 @@ fn run_scalar_i64_arith_plan_into(
             Ok(None) => return None,
             Err(error) => return Some(Err(error)),
         };
-        let rhs = match read_scalar_i64_operand(slots, step.rhs) {
-            Ok(Some(value)) => value,
-            Ok(None) => return None,
-            Err(error) => return Some(Err(error)),
+        let rhs = match step.rhs {
+            Some(rhs) => match read_scalar_i64_operand(slots, rhs) {
+                Ok(Some(value)) => value,
+                Ok(None) => return None,
+                Err(error) => return Some(Err(error)),
+            },
+            None => lhs,
         };
         slots[step.out_slot] = ScalarI64Slot::I64(apply_scalar_i64_binary(step.op, lhs, rhs));
     }
@@ -3161,7 +3167,7 @@ enum ScalarF32Operand {
 struct ScalarF32Step {
     op: ScalarF64BinaryOp,
     lhs: ScalarF32Operand,
-    rhs: ScalarF32Operand,
+    rhs: Option<ScalarF32Operand>,
     out_slot: usize,
 }
 
@@ -3212,11 +3218,11 @@ fn build_scalar_f32_arith_plan(jaxpr: &Jaxpr, slots: usize) -> Option<ScalarF32P
             [a, b] => (
                 scalar_f64_binary_op(equation.primitive)?,
                 scalar_f32_operand(a, slots)?,
-                scalar_f32_operand(b, slots)?,
+                Some(scalar_f32_operand(b, slots)?),
             ),
             [a] => {
                 let operand = scalar_f32_operand(a, slots)?;
-                (scalar_unary_op(equation.primitive)?, operand, operand)
+                (scalar_unary_op(equation.primitive)?, operand, None)
             }
             _ => return None,
         };
@@ -3308,10 +3314,13 @@ fn run_scalar_f32_arith_plan_into(
             Ok(None) => return None,
             Err(error) => return Some(Err(error)),
         };
-        let rhs = match read_scalar_f32_operand(slots, step.rhs) {
-            Ok(Some(value)) => value,
-            Ok(None) => return None,
-            Err(error) => return Some(Err(error)),
+        let rhs = match step.rhs {
+            Some(rhs) => match read_scalar_f32_operand(slots, rhs) {
+                Ok(Some(value)) => value,
+                Ok(None) => return None,
+                Err(error) => return Some(Err(error)),
+            },
+            None => lhs,
         };
         slots[step.out_slot] = ScalarF32Slot::F32(apply_scalar_f32_binary(step.op, lhs, rhs));
     }
@@ -5376,6 +5385,14 @@ mod tests {
             let generic = eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("generic");
             assert_eq!(planned, generic, "x={x:?} y={y:?}");
         }
+        let golden =
+            eval_jaxpr(&jaxpr, &[Value::scalar_f64(2.5), Value::scalar_f64(-1.0)]).expect("golden");
+        let sha256 = fj_test_utils::fixture_id_from_json(&("frankenjax-47a5o", &golden))
+            .expect("golden digest");
+        assert_eq!(
+            sha256, "110a41d0f6848551f112522b6170fb5f5fbcf82f871a46f784b302beead86670",
+            "scalar-unary golden output digest must stay fixed"
+        );
     }
 
     #[test]
