@@ -4707,6 +4707,389 @@ fn run_scalar_select_i64_plan_into(
     Some(Ok(()))
 }
 
+// ── polymorphic dtype-tagged scalar core (f64/i64/bool + CONVERT) ───────────
+// The monomorphic f64/i64/f32/half plans are single-dtype, so a scalar body with a
+// `convert_element_type` (dtype cast — ubiquitous in mixed-precision / int↔float
+// code) bails to the tree-walker; and a body that genuinely MIXES dtypes can only
+// arise via such a cast. This plan carries a per-slot dtype-TAGGED value, dispatching
+// arithmetic / comparison / select / convert on the runtime dtype. It is slower than
+// the monomorphic plans (a small dtype match per op) but still skips all the generic
+// interpreter's Value boxing, env churn, scratch-collect and param re-parse. Built
+// ONLY when the body contains a `ConvertElementType` (the capability the others lack)
+// and tried LAST, so the fast monomorphic plans are unaffected. Every op reuses a
+// proven bit-identical primitive (apply_scalar_f64_binary / apply_scalar_i64_binary /
+// apply_float_compare / apply_int_compare); convert uses Rust `as`-casts, exactly the
+// semantics fj-lax `convert_literal` documents (f64->i64 `v as i64` NaN->0/inf-saturate,
+// f64->bool `v != 0.0`, ...). Any unsupported dtype / op bails the whole plan to generic.
+
+#[derive(Clone, Copy)]
+enum PolyVal {
+    F64(f64),
+    I64(i64),
+    Bool(bool),
+}
+
+#[derive(Clone, Copy)]
+enum PolySlot {
+    Missing,
+    NonScalar,
+    Val(PolyVal),
+}
+
+#[derive(Clone, Copy)]
+enum PolyOperand {
+    Slot(usize),
+    Lit(PolyVal),
+}
+
+#[derive(Clone, Copy)]
+enum PolyConvTarget {
+    F64,
+    I64,
+    Bool,
+}
+
+enum PolyStep {
+    Arith {
+        op: ScalarF64BinaryOp,
+        lhs: PolyOperand,
+        rhs: Option<PolyOperand>,
+        out_slot: usize,
+    },
+    Compare {
+        op: Primitive,
+        lhs: PolyOperand,
+        rhs: PolyOperand,
+        out_slot: usize,
+    },
+    Select {
+        cond: PolyOperand,
+        on_true: PolyOperand,
+        on_false: PolyOperand,
+        out_slot: usize,
+    },
+    Convert {
+        src: PolyOperand,
+        to: PolyConvTarget,
+        out_slot: usize,
+    },
+}
+
+struct ScalarPolyPlan {
+    slots: usize,
+    const_slots: Vec<usize>,
+    input_slots: Vec<usize>,
+    out_slots: Vec<usize>,
+    steps: Vec<PolyStep>,
+}
+
+fn poly_operand(atom: &Atom, slots: usize) -> Option<PolyOperand> {
+    match atom {
+        Atom::Var(var) => {
+            let slot = var.0 as usize;
+            (slot < slots).then_some(PolyOperand::Slot(slot))
+        }
+        Atom::Lit(Literal::F64Bits(b)) => Some(PolyOperand::Lit(PolyVal::F64(f64::from_bits(*b)))),
+        Atom::Lit(Literal::I64(v)) => Some(PolyOperand::Lit(PolyVal::I64(*v))),
+        Atom::Lit(Literal::Bool(b)) => Some(PolyOperand::Lit(PolyVal::Bool(*b))),
+        Atom::Lit(_) => None,
+    }
+}
+
+/// The arithmetic ops `apply_scalar_i64_binary` accepts without panicking (its other
+/// arms are `unreachable!`). A poly Arith step on i64 operands must be one of these.
+fn poly_op_is_int_valid(op: ScalarF64BinaryOp) -> bool {
+    matches!(
+        op,
+        ScalarF64BinaryOp::Add
+            | ScalarF64BinaryOp::Sub
+            | ScalarF64BinaryOp::Mul
+            | ScalarF64BinaryOp::Div
+            | ScalarF64BinaryOp::Max
+            | ScalarF64BinaryOp::Min
+            | ScalarF64BinaryOp::Neg
+            | ScalarF64BinaryOp::Abs
+    )
+}
+
+fn build_scalar_poly_plan(jaxpr: &Jaxpr, slots: usize) -> Option<ScalarPolyPlan> {
+    if jaxpr.equations.is_empty() || !jaxpr.effects.is_empty() {
+        return None;
+    }
+    // Only the dtype-mixing `convert` distinguishes this plan from the monomorphic
+    // ones; without a convert a body is single-dtype and a faster plan handles it.
+    if !jaxpr
+        .equations
+        .iter()
+        .any(|e| e.primitive == Primitive::ConvertElementType)
+    {
+        return None;
+    }
+
+    let mut steps = Vec::with_capacity(jaxpr.equations.len());
+    for equation in &jaxpr.equations {
+        if !equation.sub_jaxprs.is_empty()
+            || !equation.effects.is_empty()
+            || equation.outputs.len() != 1
+        {
+            return None;
+        }
+        let out_slot = equation.outputs[0].0 as usize;
+        if out_slot >= slots {
+            return None;
+        }
+
+        if equation.primitive == Primitive::ConvertElementType {
+            if equation.inputs.len() != 1 {
+                return None;
+            }
+            let to = match equation
+                .params
+                .get("new_dtype")?
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "f64" | "float64" => PolyConvTarget::F64,
+                "i64" => PolyConvTarget::I64,
+                "bool" => PolyConvTarget::Bool,
+                _ => return None,
+            };
+            steps.push(PolyStep::Convert {
+                src: poly_operand(&equation.inputs[0], slots)?,
+                to,
+                out_slot,
+            });
+            continue;
+        }
+
+        if equation.primitive == Primitive::Select {
+            if !equation.params.is_empty() || equation.inputs.len() != 3 {
+                return None;
+            }
+            steps.push(PolyStep::Select {
+                cond: poly_operand(&equation.inputs[0], slots)?,
+                on_true: poly_operand(&equation.inputs[1], slots)?,
+                on_false: poly_operand(&equation.inputs[2], slots)?,
+                out_slot,
+            });
+            continue;
+        }
+
+        if let Some(op) = scalar_compare_primitive(equation.primitive) {
+            if !equation.params.is_empty() || equation.inputs.len() != 2 {
+                return None;
+            }
+            steps.push(PolyStep::Compare {
+                op,
+                lhs: poly_operand(&equation.inputs[0], slots)?,
+                rhs: poly_operand(&equation.inputs[1], slots)?,
+                out_slot,
+            });
+            continue;
+        }
+
+        let (op, lhs, rhs) = match equation.inputs.as_slice() {
+            [a, b] => {
+                if !equation.params.is_empty() {
+                    return None;
+                }
+                (
+                    scalar_f64_binary_op(equation.primitive)?,
+                    poly_operand(a, slots)?,
+                    Some(poly_operand(b, slots)?),
+                )
+            }
+            [a] => (
+                scalar_f64_unary_op_with_params(equation.primitive, &equation.params)?,
+                poly_operand(a, slots)?,
+                None,
+            ),
+            _ => return None,
+        };
+        steps.push(PolyStep::Arith {
+            op,
+            lhs,
+            rhs,
+            out_slot,
+        });
+    }
+
+    Some(ScalarPolyPlan {
+        slots,
+        const_slots: var_slots(&jaxpr.constvars, slots)?,
+        input_slots: var_slots(&jaxpr.invars, slots)?,
+        out_slots: var_slots(&jaxpr.outvars, slots)?,
+        steps,
+    })
+}
+
+fn poly_slot_from_value(value: &Value) -> PolySlot {
+    match value {
+        Value::Scalar(Literal::F64Bits(b)) => PolySlot::Val(PolyVal::F64(f64::from_bits(*b))),
+        Value::Scalar(Literal::I64(v)) => PolySlot::Val(PolyVal::I64(*v)),
+        Value::Scalar(Literal::Bool(b)) => PolySlot::Val(PolyVal::Bool(*b)),
+        Value::Scalar(_) | Value::Tensor(_) => PolySlot::NonScalar,
+    }
+}
+
+fn read_poly(
+    slots: &[PolySlot],
+    operand: PolyOperand,
+) -> Result<Option<PolyVal>, InterpreterError> {
+    match operand {
+        PolyOperand::Lit(value) => Ok(Some(value)),
+        PolyOperand::Slot(slot) => match slots[slot] {
+            PolySlot::Val(value) => Ok(Some(value)),
+            PolySlot::NonScalar => Ok(None),
+            PolySlot::Missing => Err(InterpreterError::MissingVariable(VarId(slot as u32))),
+        },
+    }
+}
+
+// Rust `as`-cast convert, matching fj-lax `convert_literal`'s documented scalar
+// semantics for f64/i64/bool (verified bit-for-bit by the parity test).
+fn poly_convert(src: PolyVal, to: PolyConvTarget) -> PolyVal {
+    match to {
+        PolyConvTarget::F64 => PolyVal::F64(match src {
+            PolyVal::F64(v) => v,
+            PolyVal::I64(v) => v as f64,
+            PolyVal::Bool(b) => {
+                if b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }),
+        PolyConvTarget::I64 => PolyVal::I64(match src {
+            PolyVal::F64(v) => v as i64,
+            PolyVal::I64(v) => v,
+            PolyVal::Bool(b) => i64::from(b),
+        }),
+        PolyConvTarget::Bool => PolyVal::Bool(match src {
+            PolyVal::F64(v) => v != 0.0,
+            PolyVal::I64(v) => v != 0,
+            PolyVal::Bool(b) => b,
+        }),
+    }
+}
+
+fn run_scalar_poly_plan_into(
+    plan: &ScalarPolyPlan,
+    const_values: &[Value],
+    args: &[Value],
+    out: &mut Vec<Value>,
+    slots: &mut Vec<PolySlot>,
+) -> Option<Result<(), InterpreterError>> {
+    if const_values.len() != plan.const_slots.len() {
+        return Some(Err(InterpreterError::ConstArity {
+            expected: plan.const_slots.len(),
+            actual: const_values.len(),
+        }));
+    }
+    if args.len() != plan.input_slots.len() {
+        return Some(Err(InterpreterError::InputArity {
+            expected: plan.input_slots.len(),
+            actual: args.len(),
+        }));
+    }
+
+    slots.clear();
+    slots.resize(plan.slots, PolySlot::Missing);
+    for (&slot, value) in plan.const_slots.iter().zip(const_values) {
+        slots[slot] = poly_slot_from_value(value);
+    }
+    for (&slot, value) in plan.input_slots.iter().zip(args) {
+        slots[slot] = poly_slot_from_value(value);
+    }
+
+    macro_rules! read {
+        ($op:expr) => {
+            match read_poly(slots, $op) {
+                Ok(Some(v)) => v,
+                Ok(None) => return None,
+                Err(e) => return Some(Err(e)),
+            }
+        };
+    }
+
+    for step in &plan.steps {
+        match step {
+            PolyStep::Arith {
+                op,
+                lhs,
+                rhs,
+                out_slot,
+            } => {
+                let l = read!(*lhs);
+                let r = match rhs {
+                    Some(rhs) => read!(*rhs),
+                    None => l,
+                };
+                let result = match (l, r) {
+                    (PolyVal::F64(a), PolyVal::F64(b)) => {
+                        PolyVal::F64(apply_scalar_f64_binary(*op, a, b))
+                    }
+                    (PolyVal::I64(a), PolyVal::I64(b)) if poly_op_is_int_valid(*op) => {
+                        PolyVal::I64(apply_scalar_i64_binary(*op, a, b))
+                    }
+                    _ => return None,
+                };
+                slots[*out_slot] = PolySlot::Val(result);
+            }
+            PolyStep::Compare {
+                op,
+                lhs,
+                rhs,
+                out_slot,
+            } => {
+                let l = read!(*lhs);
+                let r = read!(*rhs);
+                let result = match (l, r) {
+                    (PolyVal::I64(a), PolyVal::I64(b)) => apply_int_compare(*op, a, b),
+                    (PolyVal::F64(a), PolyVal::F64(b)) => apply_float_compare(*op, a, b),
+                    _ => return None,
+                };
+                slots[*out_slot] = PolySlot::Val(PolyVal::Bool(result));
+            }
+            PolyStep::Select {
+                cond,
+                on_true,
+                on_false,
+                out_slot,
+            } => {
+                let c = match read!(*cond) {
+                    PolyVal::Bool(b) => b,
+                    _ => return None,
+                };
+                let t = read!(*on_true);
+                let f = read!(*on_false);
+                slots[*out_slot] = PolySlot::Val(if c { t } else { f });
+            }
+            PolyStep::Convert { src, to, out_slot } => {
+                let v = read!(*src);
+                slots[*out_slot] = PolySlot::Val(poly_convert(v, *to));
+            }
+        }
+    }
+
+    out.clear();
+    out.reserve(plan.out_slots.len());
+    for &slot in &plan.out_slots {
+        match slots[slot] {
+            PolySlot::Val(PolyVal::F64(v)) => out.push(Value::scalar_f64(v)),
+            PolySlot::Val(PolyVal::I64(v)) => out.push(Value::scalar_i64(v)),
+            PolySlot::Val(PolyVal::Bool(v)) => out.push(Value::scalar_bool(v)),
+            PolySlot::NonScalar => return None,
+            PolySlot::Missing => {
+                return Some(Err(InterpreterError::MissingVariable(VarId(slot as u32))));
+            }
+        }
+    }
+    Some(Ok(()))
+}
+
 /// Reusable scratch arenas for monomorphic scalar executors. A loop body builds
 /// only the plan(s) whose literals and boolean intermediates match its shape,
 /// and the runner tries them in order; each non-matching plan bails on the first
@@ -4721,6 +5104,7 @@ struct ScalarPlanBuffers {
     bools: Vec<Option<bool>>,
     mixed: Vec<MixedSlot>,
     mixed_i64: Vec<MixedI64Slot>,
+    poly: Vec<PolySlot>,
 }
 
 /// A reusable dense-evaluation plan for a jaxpr: the slot count and the
@@ -4740,6 +5124,7 @@ struct DenseEvalPlan {
     scalar_compound_compare_plan: Option<ScalarCompoundComparePlan>,
     scalar_select_plan: Option<ScalarSelectPlan>,
     scalar_select_i64_plan: Option<ScalarSelectI64Plan>,
+    scalar_poly_plan: Option<ScalarPolyPlan>,
 }
 
 /// Build a [`DenseEvalPlan`] iff the jaxpr's variable ids are dense enough for the
@@ -4772,6 +5157,7 @@ fn build_dense_plan(jaxpr: &Jaxpr) -> Option<DenseEvalPlan> {
             scalar_compound_compare_plan: build_scalar_compound_compare_plan(jaxpr, slots),
             scalar_select_plan: build_scalar_select_plan(jaxpr, slots),
             scalar_select_i64_plan: build_scalar_select_i64_plan(jaxpr, slots),
+            scalar_poly_plan: build_scalar_poly_plan(jaxpr, slots),
         })
     } else {
         None
@@ -4796,6 +5182,7 @@ fn eval_jaxpr_dense_env(
         scalar_compound_compare_plan: build_scalar_compound_compare_plan(jaxpr, slots),
         scalar_select_plan: build_scalar_select_plan(jaxpr, slots),
         scalar_select_i64_plan: build_scalar_select_i64_plan(jaxpr, slots),
+        scalar_poly_plan: build_scalar_poly_plan(jaxpr, slots),
     };
     let mut env: Vec<Option<Value>> = vec![None; slots];
     run_dense_plan(jaxpr, const_values, args, &mut env, &plan)
@@ -4899,6 +5286,12 @@ fn run_dense_plan_into(
             out,
             &mut scalar_buffers.mixed_i64,
         )
+    {
+        return result;
+    }
+    if let Some(p) = &plan.scalar_poly_plan
+        && let Some(result) =
+            run_scalar_poly_plan_into(p, const_values, args, out, &mut scalar_buffers.poly)
     {
         return result;
     }
@@ -7625,6 +8018,189 @@ mod tests {
     }
 
     #[test]
+    fn scalar_poly_arena_bit_identical_to_generic() {
+        // The polymorphic dtype-tagged core (f64/i64/bool + convert) must match the
+        // generic interpreter bit-for-bit on dtype-MIXING bodies, and be actually
+        // selected (scalar_poly_plan.is_some()). The generic path runs the real
+        // fj-lax eval_convert_element_type, so any convert-semantics drift fails here.
+        let mk = |p: Primitive,
+                  ins: smallvec::SmallVec<[Atom; 4]>,
+                  params: BTreeMap<String, String>,
+                  o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params,
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let conv = |to: &str| {
+            let mut p = BTreeMap::new();
+            p.insert("new_dtype".to_owned(), to.to_owned());
+            p
+        };
+        let np = BTreeMap::new;
+        let f64lit = |v: f64| Atom::Lit(Literal::from_f64(v));
+        // value-equality that is NaN-bit-aware for f64.
+        let eq_val = |a: &Value, b: &Value, ctx: &str| match (a, b) {
+            (Value::Scalar(Literal::F64Bits(x)), Value::Scalar(Literal::F64Bits(y))) => {
+                assert_eq!(x, y, "{ctx} f64 bits")
+            }
+            (Value::Scalar(Literal::I64(x)), Value::Scalar(Literal::I64(y))) => {
+                assert_eq!(x, y, "{ctx} i64")
+            }
+            (Value::Scalar(Literal::Bool(x)), Value::Scalar(Literal::Bool(y))) => {
+                assert_eq!(x, y, "{ctx} bool")
+            }
+            (x, y) => panic!("{ctx}: dtype/shape mismatch {x:?} vs {y:?}"),
+        };
+
+        // Body 1 (i64 input): f = convert(i, f64); out = f*0.5 + 1.0  (int→float math).
+        let (i, f, h, out) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let to_float = Jaxpr::new(
+            vec![i],
+            vec![],
+            vec![out],
+            vec![
+                mk(
+                    Primitive::ConvertElementType,
+                    smallvec![Atom::Var(i)],
+                    conv("f64"),
+                    f,
+                ),
+                mk(
+                    Primitive::Mul,
+                    smallvec![Atom::Var(f), f64lit(0.5)],
+                    np(),
+                    h,
+                ),
+                mk(
+                    Primitive::Add,
+                    smallvec![Atom::Var(h), f64lit(1.0)],
+                    np(),
+                    out,
+                ),
+            ],
+        );
+        // Body 2 (f64 input): out = convert(x, i64)  (truncation: NaN→0, inf saturate).
+        let (x2, o2) = (VarId(0), VarId(1));
+        let to_int = Jaxpr::new(
+            vec![x2],
+            vec![],
+            vec![o2],
+            vec![mk(
+                Primitive::ConvertElementType,
+                smallvec![Atom::Var(x2)],
+                conv("i64"),
+                o2,
+            )],
+        );
+        // Body 3 (f64 input): bool count = convert(x > 0, i64); out = convert(x, bool) too.
+        let (x3, gt, cnt) = (VarId(0), VarId(1), VarId(2));
+        let bool_to_int = Jaxpr::new(
+            vec![x3],
+            vec![],
+            vec![cnt],
+            vec![
+                mk(
+                    Primitive::Gt,
+                    smallvec![Atom::Var(x3), f64lit(0.0)],
+                    np(),
+                    gt,
+                ),
+                mk(
+                    Primitive::ConvertElementType,
+                    smallvec![Atom::Var(gt)],
+                    conv("i64"),
+                    cnt,
+                ),
+            ],
+        );
+        // Body 4 (f64 input): convert to bool directly.
+        let (x4, o4) = (VarId(0), VarId(1));
+        let to_bool = Jaxpr::new(
+            vec![x4],
+            vec![],
+            vec![o4],
+            vec![mk(
+                Primitive::ConvertElementType,
+                smallvec![Atom::Var(x4)],
+                conv("bool"),
+                o4,
+            )],
+        );
+
+        let f64_inputs = [
+            f64::NEG_INFINITY,
+            -1e20,
+            -3.7,
+            -1.0,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            3.7,
+            1e20,
+            f64::INFINITY,
+            f64::NAN,
+            9.2e18,
+            -9.3e18,
+        ];
+        let i64_inputs = [i64::MIN, -1000, -1, 0, 1, 1000, 1_000_000_007, i64::MAX];
+
+        let run_both = |body: &Jaxpr, arg: Value, ctx: &str| {
+            let plan = super::build_dense_plan(body).expect("dense plan");
+            assert!(
+                plan.scalar_poly_plan.is_some(),
+                "{ctx} not routed through poly core"
+            );
+            let args = [arg];
+            let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut gscr: Vec<Value> = Vec::new();
+            let mut gout: Vec<Value> = Vec::new();
+            super::run_dense_env_into(
+                body,
+                &[],
+                &args,
+                &mut genv,
+                &plan.last_use,
+                &mut gscr,
+                &mut gout,
+            )
+            .expect("generic");
+            let mut cenv: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut cscr: Vec<Value> = Vec::new();
+            let mut cout: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            super::run_dense_plan_into(
+                body,
+                &[],
+                &args,
+                &mut cenv,
+                &plan,
+                &mut cscr,
+                &mut cout,
+                &mut bufs,
+            )
+            .expect("compiled");
+            eq_val(&cout[0], &gout[0], ctx);
+        };
+
+        for &xv in &f64_inputs {
+            run_both(&to_int, Value::scalar_f64(xv), &format!("to_int({xv})"));
+            run_both(
+                &bool_to_int,
+                Value::scalar_f64(xv),
+                &format!("bool_to_int({xv})"),
+            );
+            run_both(&to_bool, Value::scalar_f64(xv), &format!("to_bool({xv})"));
+        }
+        for &iv in &i64_inputs {
+            run_both(&to_float, Value::scalar_i64(iv), &format!("to_float({iv})"));
+        }
+    }
+
+    #[test]
     fn scalar_select_i64_arena_bit_identical_to_generic() {
         // The mixed i64/bool SELECT arena must match the generic interpreter on
         // integer-conditional bodies (masked increment / integer clamp / where), and
@@ -8142,6 +8718,112 @@ mod tests {
                 "chained activation body bits differ at x={xv}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_scalar_poly_arena() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let mk = |p: Primitive,
+                  ins: smallvec::SmallVec<[Atom; 4]>,
+                  params: BTreeMap<String, String>,
+                  o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params,
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let mut cp = BTreeMap::new();
+        cp.insert("new_dtype".to_owned(), "f64".to_owned());
+        let f64lit = |v: f64| Atom::Lit(Literal::from_f64(v));
+        // int→float mixed body: f = convert(i, f64); out = f*0.5 + 1.0 (convert + 2 arith).
+        let (i, f, h, out) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let body = Jaxpr::new(
+            vec![i],
+            vec![],
+            vec![out],
+            vec![
+                mk(
+                    Primitive::ConvertElementType,
+                    smallvec![Atom::Var(i)],
+                    cp,
+                    f,
+                ),
+                mk(
+                    Primitive::Mul,
+                    smallvec![Atom::Var(f), f64lit(0.5)],
+                    BTreeMap::new(),
+                    h,
+                ),
+                mk(
+                    Primitive::Add,
+                    smallvec![Atom::Var(h), f64lit(1.0)],
+                    BTreeMap::new(),
+                    out,
+                ),
+            ],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        assert!(plan.scalar_poly_plan.is_some());
+        let n: usize = 2_000_000;
+        let args = [Value::scalar_i64(7)];
+        let run = |use_plan: bool| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                if use_plan {
+                    super::run_dense_plan_into(
+                        &body,
+                        &[],
+                        &args,
+                        &mut env,
+                        &plan,
+                        &mut scratch,
+                        &mut o,
+                        &mut bufs,
+                    )
+                    .expect("compiled");
+                } else {
+                    super::run_dense_env_into(
+                        &body,
+                        &[],
+                        &args,
+                        &mut env,
+                        &plan.last_use,
+                        &mut scratch,
+                        &mut o,
+                    )
+                    .expect("generic");
+                }
+                if let Value::Scalar(Literal::F64Bits(b)) = &o[0] {
+                    acc += f64::from_bits(*b);
+                }
+            }
+            std::hint::black_box(acc);
+        };
+        let t_generic = best_time(|| run(false));
+        let t_compiled = best_time(|| run(true));
+        println!(
+            "BENCH poly-body dispatch {n} evals (convert i64->f64 + mul + add): GENERIC {:.1}ns/eval -> COMPILED {:.1}ns/eval = {:.2}x",
+            t_generic * 1e9 / n as f64,
+            t_compiled * 1e9 / n as f64,
+            t_generic / t_compiled,
+        );
     }
 
     #[test]
