@@ -9441,7 +9441,21 @@ mod tests {
             )
             .unwrap(),
         );
-        let reference = |body_op: Primitive, reverse: bool| -> Vec<u64> {
+        let f32_bits = |value: &Value| -> Vec<u32> {
+            value
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|x| match x {
+                    Literal::F32Bits(bits) => *bits,
+                    other => {
+                        panic!("expected F32Bits in f32 associative_scan proof, got {other:?}")
+                    }
+                })
+                .collect()
+        };
+        let reference = |body_op: Primitive, reverse: bool| -> Vec<u32> {
             let t = tensor.as_tensor().unwrap();
             let mut results: Vec<Value> = Vec::new();
             if reverse {
@@ -9462,13 +9476,9 @@ mod tests {
                     results.push(acc.clone());
                 }
             }
-            TensorValue::stack_axis0(&results)
-                .unwrap()
-                .elements
-                .iter()
-                .map(|x| x.as_f64().unwrap().to_bits())
-                .collect()
+            f32_bits(&Value::Tensor(TensorValue::stack_axis0(&results).unwrap()))
         };
+        let mut fixtures = Vec::new();
         for (name, prim) in [
             ("add", Primitive::Add),
             ("mul", Primitive::Mul),
@@ -9487,20 +9497,22 @@ mod tests {
                     &params,
                 )
                 .unwrap();
-                let got: Vec<u64> = out
-                    .as_tensor()
-                    .unwrap()
-                    .elements
-                    .iter()
-                    .map(|x| x.as_f64().unwrap().to_bits())
-                    .collect();
+                let got = f32_bits(&out);
                 assert_eq!(
                     got,
                     reference(prim, reverse),
                     "f32 associative_scan {name} reverse={reverse}: fast path != slice-dispatch"
                 );
+                fixtures.push((name.to_owned(), reverse, got));
             }
         }
+        let digest =
+            fj_test_utils::fixture_id_from_json(&fixtures).expect("f32 associative_scan digest");
+        eprintln!("f32 associative_scan golden digest: {digest}");
+        assert_eq!(
+            digest, "922b9e035eec116a5dc10da15bcc68dc45ebacdddb3b1f4a95908e6621966f80",
+            "f32 associative_scan golden output digest changed"
+        );
     }
 
     #[test]
@@ -9572,7 +9584,63 @@ mod tests {
             "fast-path digest must match slice-dispatch"
         );
         println!(
-            "BENCH associative_scan add(x[{l}],axis=0): slice-dispatch={:.4}ms dense={:.4}ms speedup={:.2}x",
+            "BENCH associative_scan f64 add(x[{l}],axis=0): slice-dispatch={:.4}ms dense={:.4}ms speedup={:.2}x",
+            t_slice * 1e3,
+            t_dense * 1e3,
+            t_slice / t_dense,
+        );
+
+        let raw: Vec<f32> = (0..l).map(|i| ((i % 1000) as f32) * 0.001 - 0.5).collect();
+        let tensor = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![l as u32],
+                },
+                raw,
+            )
+            .unwrap(),
+        );
+        let params = assoc_scan_params("add");
+        let raw_f32_digest = |v: &Value| -> u64 {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .fold(0u64, |a, x| match x {
+                    Literal::F32Bits(bits) => a ^ u64::from(*bits),
+                    other => panic!("expected F32Bits, got {other:?}"),
+                })
+        };
+        let t_ref = tensor.clone();
+        let (t_slice, d_slice) = best(Box::new(move || {
+            let t = t_ref.as_tensor().unwrap();
+            let mut results: Vec<Value> = Vec::with_capacity(l);
+            let mut acc = t.slice_axis0(0).unwrap();
+            results.push(acc.clone());
+            for i in 1..l {
+                let x = t.slice_axis0(i).unwrap();
+                acc = eval_primitive(Primitive::Add, &[acc, x], &BTreeMap::new()).unwrap();
+                results.push(acc.clone());
+            }
+            let stacked = Value::Tensor(TensorValue::stack_axis0(&results).unwrap());
+            raw_f32_digest(&stacked)
+        }));
+        let t_fast = tensor.clone();
+        let (t_dense, d_dense) = best(Box::new(move || {
+            let out = eval_primitive(
+                Primitive::AssociativeScan,
+                std::slice::from_ref(&t_fast),
+                &params,
+            )
+            .unwrap();
+            raw_f32_digest(&out)
+        }));
+        assert_eq!(
+            d_slice, d_dense,
+            "f32 fast-path digest must match slice-dispatch"
+        );
+        println!(
+            "BENCH associative_scan f32 add(x[{l}],axis=0): slice-dispatch={:.4}ms dense={:.4}ms speedup={:.2}x",
             t_slice * 1e3,
             t_dense * 1e3,
             t_slice / t_dense,
