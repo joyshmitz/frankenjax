@@ -970,6 +970,10 @@ pub fn eval_jaxpr_with_consts(
         return result;
     }
 
+    if let Some(result) = try_eval_top_level_scalar_half_arith(jaxpr, const_values, args) {
+        return result;
+    }
+
     if let Some(result) = try_eval_scalar_i64_add_chain(jaxpr, const_values, args) {
         return result;
     }
@@ -1049,6 +1053,114 @@ fn try_eval_top_level_scan_i64_add_emit(
         scan_len,
         reverse,
     )
+}
+
+fn try_eval_top_level_scalar_half_arith(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !const_values.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 6
+    {
+        return None;
+    }
+
+    let x = jaxpr.invars[0];
+    let y = jaxpr.invars[1];
+    let out = jaxpr.outvars[0];
+    let [neg_eq, abs_eq, mul_eq, add_eq, div_eq, max_eq] = jaxpr.equations.as_slice() else {
+        return None;
+    };
+
+    let neg = single_output_for_primitive(neg_eq, Primitive::Neg)?;
+    if neg_eq.inputs.as_slice() != [Atom::Var(x)] {
+        return None;
+    }
+    let abs = single_output_for_primitive(abs_eq, Primitive::Abs)?;
+    if abs_eq.inputs.as_slice() != [Atom::Var(neg)] {
+        return None;
+    }
+    let prod = single_output_for_primitive(mul_eq, Primitive::Mul)?;
+    if mul_eq.inputs.as_slice() != [Atom::Var(abs), Atom::Var(y)] {
+        return None;
+    }
+    let sum = single_output_for_primitive(add_eq, Primitive::Add)?;
+    let [Atom::Var(add_lhs), add_rhs] = add_eq.inputs.as_slice() else {
+        return None;
+    };
+    if *add_lhs != prod {
+        return None;
+    }
+    let (dtype, literal_bits) = scalar_half_literal_bits(add_rhs)?;
+    let quot = single_output_for_primitive(div_eq, Primitive::Div)?;
+    if div_eq.inputs.as_slice() != [Atom::Var(sum), Atom::Var(y)] {
+        return None;
+    }
+    let max_out = single_output_for_primitive(max_eq, Primitive::Max)?;
+    if max_out != out || max_eq.inputs.as_slice() != [Atom::Var(quot), Atom::Var(x)] {
+        return None;
+    }
+
+    let [x_bits, y_bits] = scalar_half_args_bits(args, dtype)?;
+    let neg_bits = apply_scalar_half_op(dtype, ScalarF64BinaryOp::Neg, x_bits, x_bits)?;
+    let abs_bits = apply_scalar_half_op(dtype, ScalarF64BinaryOp::Abs, neg_bits, neg_bits)?;
+    let prod_bits = apply_scalar_half_op(dtype, ScalarF64BinaryOp::Mul, abs_bits, y_bits)?;
+    let sum_bits = apply_scalar_half_op(dtype, ScalarF64BinaryOp::Add, prod_bits, literal_bits)?;
+    let quot_bits = apply_scalar_half_op(dtype, ScalarF64BinaryOp::Div, sum_bits, y_bits)?;
+    let out_bits = apply_scalar_half_op(dtype, ScalarF64BinaryOp::Max, quot_bits, x_bits)?;
+
+    let literal = if dtype == DType::BF16 {
+        Literal::BF16Bits(out_bits)
+    } else {
+        Literal::F16Bits(out_bits)
+    };
+    Some(Ok(vec![Value::Scalar(literal)]))
+}
+
+fn single_output_for_primitive(equation: &Equation, primitive: Primitive) -> Option<VarId> {
+    if equation.primitive == primitive
+        && equation.params.is_empty()
+        && equation.sub_jaxprs.is_empty()
+        && equation.effects.is_empty()
+        && equation.outputs.len() == 1
+    {
+        Some(equation.outputs[0])
+    } else {
+        None
+    }
+}
+
+fn scalar_half_literal_bits(atom: &Atom) -> Option<(DType, u16)> {
+    match atom {
+        Atom::Lit(Literal::BF16Bits(bits)) => Some((DType::BF16, *bits)),
+        Atom::Lit(Literal::F16Bits(bits)) => Some((DType::F16, *bits)),
+        Atom::Var(_) | Atom::Lit(_) => None,
+    }
+}
+
+fn scalar_half_args_bits(args: &[Value], dtype: DType) -> Option<[u16; 2]> {
+    match (dtype, args) {
+        (
+            DType::BF16,
+            [
+                Value::Scalar(Literal::BF16Bits(x)),
+                Value::Scalar(Literal::BF16Bits(y)),
+            ],
+        )
+        | (
+            DType::F16,
+            [
+                Value::Scalar(Literal::F16Bits(x)),
+                Value::Scalar(Literal::F16Bits(y)),
+            ],
+        ) => Some([*x, *y]),
+        (_, _) => None,
+    }
 }
 
 fn try_eval_scalar_i64_add_chain(
@@ -7731,6 +7843,57 @@ mod tests {
         assert_eq!(
             digest,
             "2a61385a28dd56a659b204ce161fb1d9cbcd30bd6a6f8e42e57f328894746d1c"
+        );
+    }
+
+    #[test]
+    fn top_level_scalar_half_arith_fast_path_matches_generic_and_golden() {
+        let mut golden_rows: Vec<(&'static str, &'static str, u16, u16, u16)> = Vec::new();
+        let cases = [
+            (0x3f80, 0x4000),
+            (0x8000, 0x3f80),
+            (0x7f80, 0x4000),
+            (0xff80, 0x4000),
+            (0x7fc1, 0x4000),
+            (0x0001, 0x4000),
+        ];
+
+        for dtype in [DType::BF16, DType::F16] {
+            let jaxpr = scalar_half_arith_body_jaxpr(dtype);
+            let dtype_name = if dtype == DType::BF16 { "bf16" } else { "f16" };
+            for (a, b) in cases {
+                let args = [
+                    Value::Scalar(scalar_half_literal(dtype, a)),
+                    Value::Scalar(scalar_half_literal(dtype, b)),
+                ];
+
+                let fast = super::try_eval_top_level_scalar_half_arith(&jaxpr, &[], &args)
+                    .expect("top-level half fast path should match")
+                    .expect("top-level half fast path should evaluate");
+                let planned = eval_jaxpr(&jaxpr, &args).expect("planned eval");
+                let generic =
+                    eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("generic hash-map reference");
+                assert_eq!(fast, generic, "fast dtype={dtype:?} a={a:#06x} b={b:#06x}");
+                assert_eq!(
+                    planned, generic,
+                    "eval dtype={dtype:?} a={a:#06x} b={b:#06x}"
+                );
+                golden_rows.push((
+                    "frankenjax-m6kqz",
+                    dtype_name,
+                    a,
+                    b,
+                    scalar_half_output_bits(&fast[0], dtype),
+                ));
+            }
+        }
+
+        let digest = fj_test_utils::fixture_id_from_json(&golden_rows)
+            .expect("top-level scalar half golden rows should hash");
+        eprintln!("top-level scalar half arithmetic golden digest: {digest}");
+        assert_eq!(
+            digest,
+            "fdd1466145016f889175119a82d8a56655c636ca3beb53b5229865ab35ccaf1b"
         );
     }
 
