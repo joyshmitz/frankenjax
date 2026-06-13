@@ -473,7 +473,7 @@ pub fn apply_batch_rule(
 
         // ── Selection (ternary elementwise) ────────────────────
         Primitive::Select => batch_select(inputs, params),
-        Primitive::SelectN => batch_passthrough_leading(primitive, inputs, params),
+        Primitive::SelectN => batch_select_n(inputs, params),
 
         // ── Clamp (ternary elementwise) ────────────────────────
         Primitive::Clamp => batch_clamp(inputs, params),
@@ -863,6 +863,54 @@ fn batch_ternary_elementwise(
         value: result,
         batch_dim: out_batch_dim,
     })
+}
+
+/// vmap rule for SelectN (`select_n(index, case0, case1, …)`, an elementwise
+/// pick-by-index among same-shape cases). Harmonize the index + all cases to a
+/// common batch-front shape and eval ONCE, replacing per-slice eval+stack.
+///
+/// SAFETY GATE: the fast path is taken only when the harmonized index shape
+/// equals the harmonized cases' shape — the true elementwise contract. The
+/// scalar-index-per-slice form (a rank-0 index that selects a whole case tensor;
+/// after vmap the index is `[B]` while cases are `[B, …]`) does NOT satisfy that
+/// and falls back to the correct per-slice path. Elementwise + deterministic ⇒
+/// the single call equals the per-slice stack bit-for-bit.
+fn batch_select_n(
+    inputs: &[BatchTracer],
+    params: &BTreeMap<String, String>,
+) -> Result<BatchTracer, BatchError> {
+    let batch_info = inputs
+        .iter()
+        .find_map(|t| t.batch_dim.map(|bd| (bd, &t.value)));
+    let Some((bd0, v0)) = batch_info else {
+        let vals: Vec<Value> = inputs.iter().map(|t| t.value.clone()).collect();
+        let result = eval_primitive(Primitive::SelectN, &vals, params)
+            .map_err(|e| BatchError::EvalError(e.to_string()))?;
+        return Ok(BatchTracer::unbatched(result));
+    };
+    let batch_size = get_batch_size(v0, bd0)?;
+
+    let harmonized: Vec<Value> = inputs
+        .iter()
+        .map(|t| match t.batch_dim {
+            Some(bd) => move_batch_dim_to_front(&t.value, bd),
+            None => broadcast_unbatched(&t.value, batch_size, 0),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Elementwise select_n requires index shape == case shape. If harmonizing did
+    // not produce that (e.g. a scalar-per-slice index), defer to the per-slice path.
+    let shapes_match = match (harmonized[0].as_tensor(), harmonized[1].as_tensor()) {
+        (Some(idx), Some(op)) => idx.shape.dims == op.shape.dims,
+        _ => false,
+    };
+    if !shapes_match {
+        return batch_passthrough_leading(Primitive::SelectN, inputs, params);
+    }
+
+    let result = eval_primitive(Primitive::SelectN, &harmonized, params)
+        .map_err(|e| BatchError::EvalError(e.to_string()))?;
+    Ok(BatchTracer::batched(result, 0))
 }
 
 // ── Reduction Batching Rules ───────────────────────────────────────
@@ -14806,6 +14854,138 @@ mod tests {
         assert_eq!(l_slow, l_fast);
         println!(
             "BENCH vmap(betainc) [{b},{n}]: per-slice={:.4}ms single-call={:.4}ms speedup={:.2}x",
+            t_slow * 1e3,
+            t_fast * 1e3,
+            t_slow / t_fast,
+        );
+    }
+
+    #[test]
+    fn batch_select_n_matches_per_slice_fallback() {
+        // Single-call harmonize+eval must equal per-slice eval+stack for the
+        // elementwise select_n contract, AND the scalar-per-slice index form must
+        // still match (it routes through the per-slice fallback).
+        let summary = |t: &BatchTracer| -> (Option<usize>, Vec<u32>, Vec<u64>) {
+            let tensor = t.value.as_tensor().unwrap();
+            let bits: Vec<u64> = tensor
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap_or(0.0).to_bits())
+                .collect();
+            (t.batch_dim, tensor.shape.dims.clone(), bits)
+        };
+        let idx_t = |vals: &[i64], dims: Vec<u32>, bd: usize| -> BatchTracer {
+            BatchTracer::batched(
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::I64,
+                        Shape { dims },
+                        vals.iter().copied().map(Literal::I64).collect(),
+                    )
+                    .unwrap(),
+                ),
+                bd,
+            )
+        };
+        let f_t = |vals: &[f64], dims: Vec<u32>, bd: usize| -> BatchTracer {
+            BatchTracer::batched(
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::F64,
+                        Shape { dims },
+                        vals.iter().copied().map(Literal::from_f64).collect(),
+                    )
+                    .unwrap(),
+                ),
+                bd,
+            )
+        };
+        let case0 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let case1 = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+
+        // (1) elementwise: index [3,2] in {0,1}, cases [3,2] — fast path.
+        let idx = [0i64, 1, 1, 0, 0, 1];
+        let ins = vec![
+            idx_t(&idx, vec![3, 2], 0),
+            f_t(&case0, vec![3, 2], 0),
+            f_t(&case1, vec![3, 2], 0),
+        ];
+        let fast = batch_select_n(&ins, &BTreeMap::new()).unwrap();
+        let slow = batch_passthrough_leading(Primitive::SelectN, &ins, &BTreeMap::new()).unwrap();
+        assert_eq!(summary(&fast), summary(&slow), "select_n elementwise batched");
+
+        // (2) shared unbatched index broadcast across batch — fast path.
+        let shared_idx = BatchTracer::unbatched(Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: vec![2] },
+                [0i64, 1].iter().copied().map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        ));
+        let ins2 = vec![
+            shared_idx,
+            f_t(&case0, vec![3, 2], 0),
+            f_t(&case1, vec![3, 2], 0),
+        ];
+        let fast2 = batch_select_n(&ins2, &BTreeMap::new()).unwrap();
+        let slow2 = batch_passthrough_leading(Primitive::SelectN, &ins2, &BTreeMap::new()).unwrap();
+        assert_eq!(summary(&fast2), summary(&slow2), "select_n shared-index broadcast");
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_batch_select_n_single_call_vs_per_slice() {
+        use std::time::Instant;
+        let (b, n) = (262144usize, 4usize);
+        let idx: Vec<i64> = (0..b * n).map(|i| (i % 3) as i64).collect();
+        let c: Vec<f64> = (0..b * n).map(|i| (i % 97) as f64).collect();
+        let make = || -> Vec<BatchTracer> {
+            let it = BatchTracer::batched(
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::I64,
+                        Shape { dims: vec![b as u32, n as u32] },
+                        idx.iter().copied().map(Literal::I64).collect(),
+                    )
+                    .unwrap(),
+                ),
+                0,
+            );
+            let ct = |off: f64| {
+                BatchTracer::batched(
+                    Value::Tensor(
+                        TensorValue::new(
+                            DType::F64,
+                            Shape { dims: vec![b as u32, n as u32] },
+                            c.iter().map(|&v| Literal::from_f64(v + off)).collect(),
+                        )
+                        .unwrap(),
+                    ),
+                    0,
+                )
+            };
+            vec![it, ct(0.0), ct(1000.0), ct(2000.0)]
+        };
+        let best = |mut f: Box<dyn FnMut() -> usize>| {
+            let first = f();
+            let mut t = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let _ = std::hint::black_box(f());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            (t, first)
+        };
+        let len = |r: BatchTracer| -> usize { r.value.as_tensor().unwrap().elements.len() };
+        let (t_slow, l_slow) = best(Box::new(move || {
+            len(batch_passthrough_leading(Primitive::SelectN, &make(), &BTreeMap::new()).unwrap())
+        }));
+        let (t_fast, l_fast) =
+            best(Box::new(move || len(batch_select_n(&make(), &BTreeMap::new()).unwrap())));
+        assert_eq!(l_slow, l_fast);
+        println!(
+            "BENCH vmap(select_n) [{b},{n}] 3 cases: per-slice={:.4}ms single-call={:.4}ms speedup={:.2}x",
             t_slow * 1e3,
             t_fast * 1e3,
             t_slow / t_fast,
