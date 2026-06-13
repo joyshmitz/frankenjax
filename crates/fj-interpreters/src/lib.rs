@@ -5319,6 +5319,149 @@ fn run_scalar_f64_plan_as_tensor_into(
     Some(Ok(()))
 }
 
+// f32 sibling of the dense-f64 small-tensor arena — f32 is JAX's DEFAULT tensor dtype,
+// so a small-f32-tensor scan/while carry (RNN state / optimizer moments, the common ML
+// case) is exactly this path. Reuses the already-built `scalar_f32_plan` run elementwise
+// via the SAME `apply_scalar_f32_binary` (widen->f64-op->narrow, bit-identical to the
+// generic f32 per-element path). Same gating: same-shape dense-f32 body below
+// FUSION_MIN_ELEMS; non-dense / mixed-shape / large bails to generic.
+
+enum DenseF32Cell {
+    Missing,
+    NonDense,
+    Scalar(f32),
+    Tensor(Vec<f32>),
+}
+
+#[derive(Clone, Copy)]
+enum DenseF32Ref<'a> {
+    Scalar(f32),
+    Tensor(&'a [f32]),
+}
+
+fn resolve_dense_f32_operand<'a>(
+    cells: &'a [DenseF32Cell],
+    operand: ScalarF32Operand,
+) -> Option<DenseF32Ref<'a>> {
+    match operand {
+        ScalarF32Operand::Literal(v) => Some(DenseF32Ref::Scalar(v)),
+        ScalarF32Operand::Slot(s) => match &cells[s] {
+            DenseF32Cell::Scalar(v) => Some(DenseF32Ref::Scalar(*v)),
+            DenseF32Cell::Tensor(t) => Some(DenseF32Ref::Tensor(t)),
+            DenseF32Cell::Missing | DenseF32Cell::NonDense => None,
+        },
+    }
+}
+
+fn run_scalar_f32_plan_as_tensor_into(
+    plan: &ScalarF32Plan,
+    const_values: &[Value],
+    args: &[Value],
+    out: &mut Vec<Value>,
+    cells: &mut Vec<DenseF32Cell>,
+) -> Option<Result<(), InterpreterError>> {
+    if const_values.len() != plan.const_slots.len() {
+        return Some(Err(InterpreterError::ConstArity {
+            expected: plan.const_slots.len(),
+            actual: const_values.len(),
+        }));
+    }
+    if args.len() != plan.input_slots.len() {
+        return Some(Err(InterpreterError::InputArity {
+            expected: plan.input_slots.len(),
+            actual: args.len(),
+        }));
+    }
+
+    cells.clear();
+    cells.resize_with(plan.slots, || DenseF32Cell::Missing);
+
+    let mut shape: Option<Shape> = None;
+    let mut n: usize = 0;
+    for (&slot, value) in plan
+        .const_slots
+        .iter()
+        .zip(const_values)
+        .chain(plan.input_slots.iter().zip(args))
+    {
+        cells[slot] = match value {
+            Value::Scalar(Literal::F32Bits(b)) => DenseF32Cell::Scalar(f32::from_bits(*b)),
+            Value::Tensor(t) => match t.elements.as_f32_slice() {
+                Some(s) => {
+                    match &shape {
+                        None => {
+                            shape = Some(t.shape.clone());
+                            n = s.len();
+                        }
+                        Some(sh) if *sh == t.shape => {}
+                        Some(_) => return None,
+                    }
+                    DenseF32Cell::Tensor(s.to_vec())
+                }
+                None => DenseF32Cell::NonDense,
+            },
+            _ => DenseF32Cell::NonDense,
+        };
+    }
+
+    let shape = shape?;
+    if n >= FUSION_MIN_ELEMS {
+        return None;
+    }
+
+    for step in &plan.steps {
+        let a = resolve_dense_f32_operand(cells, step.lhs)?;
+        let b = match step.rhs {
+            Some(rhs) => resolve_dense_f32_operand(cells, rhs)?,
+            None => a,
+        };
+        let result = match (a, b) {
+            (DenseF32Ref::Scalar(av), DenseF32Ref::Scalar(bv)) => {
+                DenseF32Cell::Scalar(apply_scalar_f32_binary(step.op, av, bv))
+            }
+            _ => {
+                let mut o = vec![0.0_f32; n];
+                for (i, slot) in o.iter_mut().enumerate() {
+                    let av = match a {
+                        DenseF32Ref::Scalar(v) => v,
+                        DenseF32Ref::Tensor(t) => t[i],
+                    };
+                    let bv = match b {
+                        DenseF32Ref::Scalar(v) => v,
+                        DenseF32Ref::Tensor(t) => t[i],
+                    };
+                    *slot = apply_scalar_f32_binary(step.op, av, bv);
+                }
+                DenseF32Cell::Tensor(o)
+            }
+        };
+        cells[step.out_slot] = result;
+    }
+
+    out.clear();
+    out.reserve(plan.out_slots.len());
+    for &slot in &plan.out_slots {
+        match std::mem::replace(&mut cells[slot], DenseF32Cell::Missing) {
+            DenseF32Cell::Tensor(values) => {
+                match TensorValue::new_f32_values(shape.clone(), values) {
+                    Ok(t) => out.push(Value::Tensor(t)),
+                    Err(e) => {
+                        return Some(Err(InterpreterError::Primitive(EvalError::InvalidTensor(
+                            e,
+                        ))));
+                    }
+                }
+            }
+            DenseF32Cell::Scalar(v) => out.push(Value::scalar_f32(v)),
+            DenseF32Cell::NonDense => return None,
+            DenseF32Cell::Missing => {
+                return Some(Err(InterpreterError::MissingVariable(VarId(slot as u32))));
+            }
+        }
+    }
+    Some(Ok(()))
+}
+
 /// Reusable scratch arenas for monomorphic scalar executors. A loop body builds
 /// only the plan(s) whose literals and boolean intermediates match its shape,
 /// and the runner tries them in order; each non-matching plan bails on the first
@@ -5335,6 +5478,7 @@ struct ScalarPlanBuffers {
     mixed_i64: Vec<MixedI64Slot>,
     poly: Vec<PolySlot>,
     dense_f64: Vec<DenseF64Cell>,
+    dense_f32: Vec<DenseF32Cell>,
 }
 
 /// A reusable dense-evaluation plan for a jaxpr: the slot count and the
@@ -5535,6 +5679,18 @@ fn run_dense_plan_into(
             args,
             out,
             &mut scalar_buffers.dense_f64,
+        )
+    {
+        return result;
+    }
+    // f32 sibling (JAX's default tensor dtype): same small-tensor elementwise arena.
+    if let Some(p) = &plan.scalar_f32_plan
+        && let Some(result) = run_scalar_f32_plan_as_tensor_into(
+            p,
+            const_values,
+            args,
+            out,
+            &mut scalar_buffers.dense_f32,
         )
     {
         return result;
@@ -8262,6 +8418,169 @@ mod tests {
     }
 
     #[test]
+    fn dense_f32_tensor_arena_bit_identical_to_generic() {
+        // f32 sibling: the arena must HANDLE small dense-f32 elementwise bodies (Some(Ok),
+        // not a None bail) and match the generic interpreter bit-for-bit, incl.
+        // transcendentals, NaN-prop max, and scalar broadcast — and BAIL for large bodies.
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let f32lit = |v: f32| Atom::Lit(Literal::F32Bits(v.to_bits()));
+        let tensor = |data: &[f32]| -> Value {
+            Value::Tensor(
+                TensorValue::new_f32_values(
+                    Shape {
+                        dims: vec![data.len() as u32],
+                    },
+                    data.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
+        let bits = |v: &Value| -> Vec<u32> {
+            match v {
+                Value::Tensor(t) => t
+                    .elements
+                    .as_f32_slice()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.to_bits())
+                    .collect(),
+                Value::Scalar(Literal::F32Bits(b)) => vec![*b],
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+
+        let data: Vec<f32> = vec![
+            -3.0,
+            -0.5,
+            -0.0,
+            0.0,
+            0.5,
+            1.0,
+            2.0,
+            f32::NAN,
+            f32::INFINITY,
+            7.5,
+        ];
+
+        // relu-ish: max(x*2 + 1, 0).
+        let (x, m, a, out) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let relu = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(x), f32lit(2.0)], m),
+                mk(Primitive::Add, smallvec![Atom::Var(m), f32lit(1.0)], a),
+                mk(Primitive::Max, smallvec![Atom::Var(a), f32lit(0.0)], out),
+            ],
+        );
+        // transcendental: tanh(x * 0.5).
+        let (x2, h, o2) = (VarId(0), VarId(1), VarId(2));
+        let act = Jaxpr::new(
+            vec![x2],
+            vec![],
+            vec![o2],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(x2), f32lit(0.5)], h),
+                mk(Primitive::Tanh, smallvec![Atom::Var(h)], o2),
+            ],
+        );
+        // two same-shape tensors: (x + y) * x.
+        let (xa, ya, s, o3) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let two = Jaxpr::new(
+            vec![xa, ya],
+            vec![],
+            vec![o3],
+            vec![
+                mk(Primitive::Add, smallvec![Atom::Var(xa), Atom::Var(ya)], s),
+                mk(Primitive::Mul, smallvec![Atom::Var(s), Atom::Var(xa)], o3),
+            ],
+        );
+
+        let cases: Vec<(&str, Jaxpr, Vec<Value>)> = vec![
+            ("relu", relu, vec![tensor(&data)]),
+            ("act", act, vec![tensor(&data)]),
+            (
+                "two",
+                two,
+                vec![
+                    tensor(&data),
+                    tensor(&[1.0, -2.0, 3.0, -0.0, 0.0, 9.0, -1.5, 2.5, -3.5, 0.25]),
+                ],
+            ),
+        ];
+
+        for (name, body, args) in &cases {
+            let plan = super::build_dense_plan(body).expect("dense plan");
+            let p = plan
+                .scalar_f32_plan
+                .as_ref()
+                .expect("scalar f32 plan built for elementwise body");
+
+            let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut gscr: Vec<Value> = Vec::new();
+            let mut gout: Vec<Value> = Vec::new();
+            super::run_dense_env_into(
+                body,
+                &[],
+                args,
+                &mut genv,
+                &plan.last_use,
+                &mut gscr,
+                &mut gout,
+            )
+            .expect("generic");
+
+            let mut tout: Vec<Value> = Vec::new();
+            let mut cells: Vec<super::DenseF32Cell> = Vec::new();
+            let handled =
+                super::run_scalar_f32_plan_as_tensor_into(p, &[], args, &mut tout, &mut cells)
+                    .unwrap_or_else(|| panic!("{name}: f32 tensor arena bailed (None)"));
+            handled.expect("f32 tensor arena ok");
+            assert_eq!(
+                bits(&tout[0]),
+                bits(&gout[0]),
+                "{name} f32 tensor arena vs generic"
+            );
+        }
+
+        // Large body (>= FUSION_MIN_ELEMS) must BAIL so the fusion owns it.
+        let big = vec![1.0f32; super::FUSION_MIN_ELEMS];
+        let (xb, mb, ob) = (VarId(0), VarId(1), VarId(2));
+        let big_body = Jaxpr::new(
+            vec![xb],
+            vec![],
+            vec![ob],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(xb), f32lit(2.0)], mb),
+                mk(Primitive::Add, smallvec![Atom::Var(mb), f32lit(1.0)], ob),
+            ],
+        );
+        let plan = super::build_dense_plan(&big_body).expect("plan");
+        let p = plan.scalar_f32_plan.as_ref().unwrap();
+        let mut tout: Vec<Value> = Vec::new();
+        let mut cells: Vec<super::DenseF32Cell> = Vec::new();
+        assert!(
+            super::run_scalar_f32_plan_as_tensor_into(
+                p,
+                &[],
+                &[tensor(&big)],
+                &mut tout,
+                &mut cells
+            )
+            .is_none(),
+            "large f32 tensor must bail to the fusion"
+        );
+    }
+
+    #[test]
     fn dense_f64_tensor_arena_bit_identical_to_generic() {
         // The small-tensor dense-f64 elementwise arena must (a) actually HANDLE these
         // bodies (run_..._as_tensor_into returns Some(Ok), not a None bail) and (b)
@@ -9369,6 +9688,94 @@ mod tests {
                 "chained activation body bits differ at x={xv}"
             );
         }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_dense_f32_tensor_arena() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let f32lit = |v: f32| Atom::Lit(Literal::F32Bits(v.to_bits()));
+        // [64] f32 RNN-carry-style body: 4 elementwise ops (x*a + b; max 0; *c).
+        let (x, m, a, r, out) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let body = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Mul, smallvec![Atom::Var(x), f32lit(0.9)], m),
+                mk(Primitive::Add, smallvec![Atom::Var(m), f32lit(0.1)], a),
+                mk(Primitive::Max, smallvec![Atom::Var(a), f32lit(0.0)], r),
+                mk(Primitive::Mul, smallvec![Atom::Var(r), f32lit(1.01)], out),
+            ],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        let p = plan.scalar_f32_plan.as_ref().expect("f32 plan");
+        let data = vec![0.5f32; 64];
+        let arg =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![64] }, data).unwrap());
+        let n: usize = 1_000_000;
+        let args = [arg];
+
+        let t_generic = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut acc = 0.0f32;
+            for _ in 0..n {
+                super::run_dense_env_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan.last_use,
+                    &mut scratch,
+                    &mut o,
+                )
+                .expect("generic");
+                if let Value::Tensor(t) = &o[0] {
+                    acc += t.elements.as_f32_slice().unwrap()[0];
+                }
+            }
+            std::hint::black_box(acc);
+        });
+        let t_arena = best_time(|| {
+            let mut o: Vec<Value> = Vec::new();
+            let mut cells: Vec<super::DenseF32Cell> = Vec::new();
+            let mut acc = 0.0f32;
+            for _ in 0..n {
+                super::run_scalar_f32_plan_as_tensor_into(p, &[], &args, &mut o, &mut cells)
+                    .expect("handled")
+                    .expect("ok");
+                if let Value::Tensor(t) = &o[0] {
+                    acc += t.elements.as_f32_slice().unwrap()[0];
+                }
+            }
+            std::hint::black_box(acc);
+        });
+        println!(
+            "BENCH dense-f32 tensor arena [64] {n} evals (4 elementwise ops): GENERIC {:.1}ns/eval -> ARENA {:.1}ns/eval = {:.2}x",
+            t_generic * 1e9 / n as f64,
+            t_arena * 1e9 / n as f64,
+            t_generic / t_arena,
+        );
     }
 
     #[test]
