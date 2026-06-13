@@ -492,6 +492,12 @@ fn scalar_add_mul_fast_path_uses_builtin_jvp() -> bool {
     lookup_custom_jvp(Primitive::Add).is_none() && lookup_custom_jvp(Primitive::Mul).is_none()
 }
 
+fn scalar_sin_cos_mul_fast_path_uses_builtin_jvp() -> bool {
+    lookup_custom_jvp(Primitive::Sin).is_none()
+        && lookup_custom_jvp(Primitive::Cos).is_none()
+        && lookup_custom_jvp(Primitive::Mul).is_none()
+}
+
 fn scalar_f64_var_index(var: VarId) -> Result<usize, AdError> {
     usize::try_from(var.0).map_err(|_| AdError::MissingVariable(var))
 }
@@ -838,6 +844,55 @@ fn try_scalar_f64_sin_cos_mul_grad(
     let grad = cos_grad + sin_grad;
 
     Ok(Some(vec![Value::Scalar(Literal::from_f64(grad))]))
+}
+
+#[inline(never)]
+fn try_scalar_f64_sin_cos_mul_jvp(
+    jaxpr: &Jaxpr,
+    primals: &[Value],
+    tangents: &[Value],
+) -> Result<Option<JvpResult>, AdError> {
+    if scalar_f64_sin_cos_mul_input(jaxpr).is_none() {
+        return Ok(None);
+    }
+    if !scalar_sin_cos_mul_fast_path_uses_builtin_jvp() {
+        return Ok(None);
+    }
+    if primals.len() != jaxpr.invars.len() {
+        return Err(AdError::InputArity {
+            expected: jaxpr.invars.len(),
+            actual: primals.len(),
+        });
+    }
+    if tangents.len() != primals.len() {
+        return Err(AdError::InputArity {
+            expected: primals.len(),
+            actual: tangents.len(),
+        });
+    }
+
+    let [Value::Scalar(Literal::F64Bits(x_bits))] = primals else {
+        return Ok(None);
+    };
+    let [Value::Scalar(Literal::F64Bits(dx_bits))] = tangents else {
+        return Ok(None);
+    };
+    let x = f64::from_bits(*x_bits);
+    let dx = f64::from_bits(*dx_bits);
+
+    let primal_sin = x.sin();
+    let primal_cos = x.cos();
+    let sin_tangent = x.cos() * dx;
+    let cos_tangent = (-x.sin()) * dx;
+    let primal_out = primal_sin * primal_cos;
+    let da_b = sin_tangent * primal_cos;
+    let a_db = primal_sin * cos_tangent;
+    let tangent_out = da_b + a_db;
+
+    Ok(Some(JvpResult {
+        primals: vec![Value::Scalar(Literal::from_f64(primal_out))],
+        tangents: vec![Value::Scalar(Literal::from_f64(tangent_out))],
+    }))
 }
 
 #[inline(never)]
@@ -8969,6 +9024,15 @@ fn jvp_inner(
         .first()
         .is_some_and(|eqn| matches!(eqn.primitive, Primitive::Add | Primitive::Mul))
         && let Some(result) = try_scalar_f64_add_mul_jvp(jaxpr, primals, tangents)?
+    {
+        return Ok(result);
+    }
+    if custom_jvp_rule_key.is_none()
+        && jaxpr
+            .equations
+            .first()
+            .is_some_and(|eqn| eqn.primitive == Primitive::Sin)
+        && let Some(result) = try_scalar_f64_sin_cos_mul_jvp(jaxpr, primals, tangents)?
     {
         return Ok(result);
     }
@@ -19749,6 +19813,112 @@ mod tests {
         assert_eq!(
             digest,
             "903936a8b8dba3772ffb21833698efe29716639a722e7eabf78ebbc9fe6958fe"
+        );
+
+        clear_custom_derivative_rules();
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_f64_sin_cos_mul_jvp_matches_generic_bits() -> Result<(), String> {
+        use fj_core::{Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let _guard = custom_rule_test_guard();
+        clear_custom_derivative_rules();
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Sin,
+                    inputs: smallvec![Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(1)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Cos,
+                    inputs: smallvec![Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+        let data = [
+            (0.0, 1.0),
+            (-0.0, 1.0),
+            (1.0, 1.0),
+            (-2.5, 2.0),
+            (std::f64::consts::FRAC_PI_4, -0.0),
+            (f64::INFINITY, 1.0),
+            (f64::NEG_INFINITY, 1.0),
+            (f64::from_bits(0x7ff8_0000_0000_0042), 1.0),
+            (1.0, f64::from_bits(0x7ff8_0000_0000_0042)),
+        ];
+        let mut bits_hex = Vec::new();
+
+        for (x, dx) in data {
+            let primals = [Value::scalar_f64(x)];
+            let tangents = [Value::scalar_f64(dx)];
+            let fast = jvp(&jaxpr, &primals, &tangents).map_err(|e| e.to_string())?;
+            let generic = jvp_with_custom_jvp_key(&jaxpr, &primals, &tangents, "force-generic")
+                .map_err(|e| e.to_string())?;
+
+            let fast_primal_bits = fast
+                .primals
+                .first()
+                .and_then(Value::as_f64_scalar)
+                .ok_or_else(|| "fast scalar primal missing".to_string())?
+                .to_bits();
+            let generic_primal_bits = generic
+                .primals
+                .first()
+                .and_then(Value::as_f64_scalar)
+                .ok_or_else(|| "generic scalar primal missing".to_string())?
+                .to_bits();
+            assert_eq!(
+                fast_primal_bits, generic_primal_bits,
+                "primal x={x:?} dx={dx:?}"
+            );
+
+            let fast_tangent_bits = fast
+                .tangents
+                .first()
+                .and_then(Value::as_f64_scalar)
+                .ok_or_else(|| "fast scalar tangent missing".to_string())?
+                .to_bits();
+            let generic_tangent_bits = generic
+                .tangents
+                .first()
+                .and_then(Value::as_f64_scalar)
+                .ok_or_else(|| "generic scalar tangent missing".to_string())?
+                .to_bits();
+            assert_eq!(
+                fast_tangent_bits, generic_tangent_bits,
+                "tangent x={x:?} dx={dx:?}"
+            );
+
+            bits_hex.push(format!("{fast_primal_bits:016x}:{fast_tangent_bits:016x}"));
+        }
+
+        let digest = fj_test_utils::fixture_id_from_json(&bits_hex).map_err(|e| e.to_string())?;
+        assert_eq!(
+            digest,
+            "e5aecb887d2833d453dc40e5a4ddaa2dfe94ef3e045fcda9743f2d545eb0ca03"
         );
 
         clear_custom_derivative_rules();
