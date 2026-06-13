@@ -2310,12 +2310,13 @@ fn try_fuse_elementwise_chain_i64(
 
 // ── half-float (BF16/F16) elementwise fusion ───────────────────────────────
 //
-// The half-precision sibling of the f64/f32/i64 fusion paths — bf16 is the
-// dominant ML activation dtype, so chained bf16 elementwise ops are common.
-// A maximal run of SAME-half-dtype (all BF16 or all F16; mixed promotes to F32
-// and takes a different path) same-shape dense cheap-elementwise equations is
-// evaluated in ONE chunked pass over a `u16` working buffer, materializing only
-// the final output and skipping the N-1 intermediate half tensors.
+// The half-precision sibling of the f64/f32/i64 fusion paths. A maximal run of
+// SAME-half-dtype F16 same-shape dense cheap-elementwise equations is evaluated
+// in ONE chunked pass over a `u16` working buffer, materializing only the final
+// output and skipping the N-1 intermediate half tensors. BF16 deliberately
+// falls through to the ordinary primitive chain: the current widen/round fused
+// tape is profile-proven slower than the materialized path, so BF16 needs a
+// conversion-saving primitive rather than this per-step emulation.
 //
 // BIT-IDENTICAL to running the ops separately: every fused step reproduces the
 // EXACT half semantics fj-lax's per-op path uses — widen each operand to f64
@@ -2406,6 +2407,9 @@ fn classify_half_fusion_operand<'e>(
     // Confirm an operand's half dtype matches the run's (or set it). Returns
     // `None` on a half/half mismatch.
     fn match_half_dt(half_dt: &mut Option<DType>, dt: DType) -> Option<()> {
+        if dt == DType::BF16 {
+            return None;
+        }
         match half_dt {
             None => {
                 *half_dt = Some(dt);
