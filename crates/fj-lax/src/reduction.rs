@@ -1069,6 +1069,63 @@ fn parse_bool_param(
 }
 
 /// Generic reduction: reduces elements of a tensor along specified axes (or all axes).
+/// Thread a complex trailing-axis (inner==1) reduce over its INDEPENDENT output
+/// rows: row `o` folds the contiguous run `values[o*reduce..(o+1)*reduce]` via
+/// `fold_row` into `(result_re[o], result_im[o])`. Each row's fold is a
+/// sequential complex-multiply / lexicographic-compare dependency CHAIN
+/// (non-associative — its ascending-r order is preserved WITHIN a row), so the
+/// win is parallelizing the independent rows' latency, NOT reassociating inside a
+/// row; the result is BIT-IDENTICAL to the serial loop for any row partition
+/// (each thread owns disjoint `result_re`/`result_im` sub-slices). Mirrors the
+/// real-f64 trailing-axis threaded path (`dense_f64_axis_reduce`); gated on the
+/// same `1<<18` total-work threshold so small reductions stay serial.
+fn complex_inner1_reduce_rows(
+    result_re: &mut [f64],
+    result_im: &mut [f64],
+    values: &[(f64, f64)],
+    outer: usize,
+    reduce: usize,
+    fold_row: impl Fn(&[(f64, f64)]) -> (f64, f64) + Sync,
+) {
+    let total = outer.saturating_mul(reduce);
+    let threads = if total >= (1 << 18) && outer > 1 {
+        crate::arithmetic::work_scaled_threads(total).min(outer)
+    } else {
+        1
+    };
+    if threads <= 1 {
+        for o in 0..outer {
+            let (re, im) = fold_row(&values[o * reduce..o * reduce + reduce]);
+            result_re[o] = re;
+            result_im[o] = im;
+        }
+        return;
+    }
+    let rows_per = outer.div_ceil(threads);
+    let fold_row = &fold_row;
+    std::thread::scope(|scope| {
+        let mut re_rest: &mut [f64] = result_re;
+        let mut im_rest: &mut [f64] = result_im;
+        let mut row0 = 0usize;
+        while row0 < outer {
+            let rows = rows_per.min(outer - row0);
+            let (re_blk, re_tail) = re_rest.split_at_mut(rows);
+            let (im_blk, im_tail) = im_rest.split_at_mut(rows);
+            re_rest = re_tail;
+            im_rest = im_tail;
+            let vblk = &values[row0 * reduce..(row0 + rows) * reduce];
+            row0 += rows;
+            scope.spawn(move || {
+                for r in 0..rows {
+                    let (re, im) = fold_row(&vblk[r * reduce..r * reduce + reduce]);
+                    re_blk[r] = re;
+                    im_blk[r] = im;
+                }
+            });
+        }
+    });
+}
+
 pub(crate) fn eval_reduce(
     primitive: Primitive,
     inputs: &[Value],
@@ -1708,48 +1765,60 @@ pub(crate) fn eval_reduce_axes(
                                     result_im[o] = acc_im;
                                 }
                             }
-                            Primitive::ReduceProd => {
-                                for o in 0..outer {
-                                    let base = o * reduce;
+                            // Prod/Max/Min are per-row complex-multiply /
+                            // lexicographic-compare dependency chains (no `float_op`):
+                            // thread the independent rows (bit-identical, latency-bound).
+                            Primitive::ReduceProd => complex_inner1_reduce_rows(
+                                &mut result_re,
+                                &mut result_im,
+                                values,
+                                outer,
+                                reduce,
+                                |row| {
                                     let mut acc_re = init_re;
                                     let mut acc_im = init_im;
-                                    for &(re, im) in &values[base..base + reduce] {
+                                    for &(re, im) in row {
                                         let nr = acc_re * re - acc_im * im;
                                         let ni = acc_re * im + acc_im * re;
                                         acc_re = nr;
                                         acc_im = ni;
                                     }
-                                    result_re[o] = acc_re;
-                                    result_im[o] = acc_im;
-                                }
-                            }
-                            Primitive::ReduceMax => {
-                                for o in 0..outer {
-                                    let base = o * reduce;
+                                    (acc_re, acc_im)
+                                },
+                            ),
+                            Primitive::ReduceMax => complex_inner1_reduce_rows(
+                                &mut result_re,
+                                &mut result_im,
+                                values,
+                                outer,
+                                reduce,
+                                |row| {
                                     let mut best = (init_re, init_im);
-                                    for &(re, im) in &values[base..base + reduce] {
+                                    for &(re, im) in row {
                                         if complex_lex_cmp((re, im), best).is_gt() {
                                             best = (re, im);
                                         }
                                     }
-                                    result_re[o] = best.0;
-                                    result_im[o] = best.1;
-                                }
-                            }
-                            _ => {
+                                    best
+                                },
+                            ),
+                            _ => complex_inner1_reduce_rows(
                                 // ReduceMin
-                                for o in 0..outer {
-                                    let base = o * reduce;
+                                &mut result_re,
+                                &mut result_im,
+                                values,
+                                outer,
+                                reduce,
+                                |row| {
                                     let mut best = (init_re, init_im);
-                                    for &(re, im) in &values[base..base + reduce] {
+                                    for &(re, im) in row {
                                         if complex_lex_cmp((re, im), best).is_lt() {
                                             best = (re, im);
                                         }
                                     }
-                                    result_re[o] = best.0;
-                                    result_im[o] = best.1;
-                                }
-                            }
+                                    best
+                                },
+                            ),
                         }
                     } else {
                         for o in 0..outer {
@@ -5448,6 +5517,210 @@ mod tests {
     }
 
     // ── Reduce along axes ──
+
+    #[test]
+    fn threaded_complex_trailing_axis_reduce_bit_identical_to_serial() {
+        // Complex128 trailing-axis (inner==1) prod/max/min over a tensor large
+        // enough to fan rows across threads (outer*reduce >= 1<<18, outer > 1).
+        // Each output row is an independent dependency chain, so the threaded
+        // result must be bit-identical to a hand-written serial fold for any row
+        // partition. (Sum stays serial — verified to match the same reference.)
+        let outer = 2048usize;
+        let reduce = 128usize; // outer*reduce = 262144 = 1<<18.
+        let n = outer * reduce;
+        // Magnitudes near 1 so the 128-fold product stays finite and varied.
+        let cplx: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let a = 1.0 + (((i * 2_654_435_761) % 97) as f64 - 48.0) * 1e-3;
+                let b = (((i * 40_503) % 89) as f64 - 44.0) * 1e-3;
+                (a, b)
+            })
+            .collect();
+        let tensor = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![outer as u32, reduce as u32],
+                },
+                cplx.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            tensor
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_complex_slice()
+                .is_some(),
+            "test must exercise the dense-complex (threaded) path"
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axes".to_owned(), "1".to_owned());
+
+        let cases: [(Primitive, f64, fn(f64, f64) -> f64); 4] = [
+            (Primitive::ReduceSum, 0.0, |a, b| a + b),
+            (Primitive::ReduceProd, 1.0, |a, b| a * b),
+            (Primitive::ReduceMax, f64::NEG_INFINITY, crate::jax_max_f64),
+            (Primitive::ReduceMin, f64::INFINITY, crate::jax_min_f64),
+        ];
+        for (prim, finit, fop) in cases {
+            let got = eval_reduce_axes(
+                prim,
+                std::slice::from_ref(&tensor),
+                &params,
+                0,
+                finit,
+                |a, _| a,
+                fop,
+            )
+            .unwrap();
+            let got_t = got.as_tensor().unwrap();
+            assert_eq!(got_t.elements.len(), outer, "{prim:?} output row count");
+
+            // Independent serial reference, mirroring the production fold exactly.
+            let (init_re, init_im) = if prim == Primitive::ReduceProd {
+                (1.0, 0.0)
+            } else {
+                (finit, finit)
+            };
+            for o in 0..outer {
+                let row = &cplx[o * reduce..(o + 1) * reduce];
+                let (want_re, want_im) = match prim {
+                    Primitive::ReduceProd => {
+                        let mut acc = (init_re, init_im);
+                        for &(re, im) in row {
+                            acc = (acc.0 * re - acc.1 * im, acc.0 * im + acc.1 * re);
+                        }
+                        acc
+                    }
+                    Primitive::ReduceMax => {
+                        let mut best = (init_re, init_im);
+                        for &(re, im) in row {
+                            if super::complex_lex_cmp((re, im), best).is_gt() {
+                                best = (re, im);
+                            }
+                        }
+                        best
+                    }
+                    Primitive::ReduceMin => {
+                        let mut best = (init_re, init_im);
+                        for &(re, im) in row {
+                            if super::complex_lex_cmp((re, im), best).is_lt() {
+                                best = (re, im);
+                            }
+                        }
+                        best
+                    }
+                    _ => {
+                        let mut acc = (init_re, init_im);
+                        for &(re, im) in row {
+                            acc = (acc.0 + re, acc.1 + im);
+                        }
+                        acc
+                    }
+                };
+                let (got_re, got_im) = match got_t.elements.get(o) {
+                    Some(Literal::Complex128Bits(rb, ib)) => {
+                        (f64::from_bits(*rb), f64::from_bits(*ib))
+                    }
+                    other => panic!("expected complex128, got {other:?}"),
+                };
+                assert_eq!(
+                    (got_re.to_bits(), got_im.to_bits()),
+                    (want_re.to_bits(), want_im.to_bits()),
+                    "{prim:?} row {o} threaded != serial reference"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_threaded_complex_trailing_axis_prod() {
+        use std::time::Instant;
+        // Complex128 prod over the trailing axis: threaded eval_reduce_axes vs the
+        // identical single-threaded per-row complex-multiply chain. Bit-identical;
+        // digested zero-copy.
+        let (outer, reduce) = (16384usize, 256usize);
+        let n = outer * reduce;
+        let cplx: Vec<(f64, f64)> = (0..n)
+            .map(|i| {
+                let a = 1.0 + (((i * 2_654_435_761) % 97) as f64 - 48.0) * 1e-4;
+                let b = (((i * 40_503) % 89) as f64 - 44.0) * 1e-4;
+                (a, b)
+            })
+            .collect();
+        let tensor = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![outer as u32, reduce as u32],
+                },
+                cplx.clone(),
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("axes".to_owned(), "1".to_owned());
+        let best = |mut f: Box<dyn FnMut() -> u64>| {
+            f();
+            let mut b = f64::MAX;
+            let mut d = 0u64;
+            for _ in 0..5 {
+                let t = Instant::now();
+                d = std::hint::black_box(f());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            (b, d)
+        };
+
+        let cs = cplx.clone();
+        let (t_serial, d_serial) = best(Box::new(move || {
+            let mut acc = 0u64;
+            for o in 0..outer {
+                let row = &cs[o * reduce..(o + 1) * reduce];
+                let mut a = (1.0_f64, 0.0_f64);
+                for &(re, im) in row {
+                    a = (a.0 * re - a.1 * im, a.0 * im + a.1 * re);
+                }
+                acc ^= a.0.to_bits() ^ a.1.to_bits();
+            }
+            acc
+        }));
+
+        let (t_threaded, d_threaded) = best(Box::new(move || {
+            let out = eval_reduce_axes(
+                Primitive::ReduceProd,
+                std::slice::from_ref(&tensor),
+                &params,
+                0,
+                1.0,
+                |a, _| a,
+                |a, b| a * b,
+            )
+            .unwrap();
+            out.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .fold(0u64, |acc, l| match l {
+                    Literal::Complex128Bits(rb, ib) => acc ^ rb ^ ib,
+                    _ => acc,
+                })
+        }));
+
+        assert_eq!(
+            d_serial, d_threaded,
+            "threaded complex prod digest must match serial"
+        );
+        println!(
+            "BENCH complex128 prod(x[{outer},{reduce}],axis=-1): serial={:.4}ms threaded={:.4}ms speedup={:.2}x",
+            t_serial * 1e3,
+            t_threaded * 1e3,
+            t_serial / t_threaded,
+        );
+    }
 
     #[test]
     fn reduce_axes_sum_rows() {
