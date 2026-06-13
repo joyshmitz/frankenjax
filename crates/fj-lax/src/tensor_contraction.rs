@@ -2693,11 +2693,11 @@ mod tests {
             let b: Vec<f64> = (0..bt * k * n)
                 .map(|i| (i as f64 * 0.023).cos() * 1.6 + 0.3)
                 .collect();
-            let total_rows = bt * m;
-            let mut got = vec![0.0f64; bt * m * n];
-            super::batched_matmul_row_block(&a, &b, m, k, n, 0, &mut got[..total_rows * n]);
-            let mut want = vec![0.0f64; bt * m * n];
-            super::batched_matmul_row_block_naive(&a, &b, m, k, n, 0, &mut want[..total_rows * n]);
+            let rows = bt * m * n;
+            let mut got = vec![0.0f64; rows];
+            super::batched_matmul_row_block(&a, &b, m, k, n, 0, &mut got);
+            let mut want = vec![0.0f64; rows];
+            super::batched_matmul_row_block_naive(&a, &b, m, k, n, 0, &mut want);
             for idx in 0..bt * m * n {
                 assert_eq!(
                     got[idx].to_bits(),
@@ -2711,6 +2711,21 @@ mod tests {
                 assert_eq!(threaded[idx].to_bits(), want[idx].to_bits());
             }
         }
+
+        let (bt, m, k, n) = (3usize, 10usize, 6usize, 11usize);
+        let a: Vec<f64> = (0..bt * m * k)
+            .map(|i| (i as f64 * 0.017).sin() * 2.0 - 0.5)
+            .collect();
+        let b: Vec<f64> = (0..bt * k * n)
+            .map(|i| (i as f64 * 0.023).cos() * 1.6 + 0.3)
+            .collect();
+        let threaded = batched_matmul_2d(&a, bt, m, k, &b, n);
+        let output_bits: Vec<u64> = threaded.iter().map(|value| value.to_bits()).collect();
+        let digest = fj_test_utils::fixture_id_from_json(&output_bits).expect("f64 matmul digest");
+        assert_eq!(
+            digest, "0ded581c470b08bf46ac2ad16967f620cd90603917fab8565a2a9c832d4715d3",
+            "register-blocked f64 batched matmul golden output digest changed"
+        );
     }
 
     #[test]
@@ -2728,18 +2743,21 @@ mod tests {
             b
         }
         // Attention-shaped batched matmul: bt batches of [m,k]@[k,n].
-        for &(bt, m, k, n) in &[(64usize, 128usize, 64usize, 128usize), (32, 256, 128, 256)] {
+        for &(bt, m, k, n) in &[
+            (64usize, 128usize, 64usize, 128usize),
+            (32, 256, 128, 256),
+            (16, 512, 128, 512),
+        ] {
             let a: Vec<f64> = (0..bt * m * k).map(|i| (i as f64 * 1e-3).sin()).collect();
             let b: Vec<f64> = (0..bt * k * n).map(|i| (i as f64 * 7e-4).cos()).collect();
-            let total_rows = bt * m;
             let t_naive = best(|| {
                 let mut out = vec![0.0f64; bt * m * n];
-                super::batched_matmul_row_block_naive(&a, &b, m, k, n, 0, &mut out[..total_rows * n]);
+                super::batched_matmul_row_block_naive(&a, &b, m, k, n, 0, &mut out);
                 std::hint::black_box(&out);
             });
             let t_micro = best(|| {
                 let mut out = vec![0.0f64; bt * m * n];
-                super::batched_matmul_row_block(&a, &b, m, k, n, 0, &mut out[..total_rows * n]);
+                super::batched_matmul_row_block(&a, &b, m, k, n, 0, &mut out);
                 std::hint::black_box(&out);
             });
             let gflop = 2.0 * (bt * m * k * n) as f64;
