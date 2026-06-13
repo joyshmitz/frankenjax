@@ -2684,6 +2684,28 @@ fn eval_scatter_dense(
             cf
         );
     }
+    // Dense complex scatter: Overwrite (copy), Add (component-wise) and Mul (complex
+    // multiply) over the dense `(re, im)` backing — closing a real coverage gap, the
+    // generic per-`Literal` path ERRORS on complex (binary_literal_op has no complex
+    // arm). Min/Max return None → generic (preserving the prior error, since complex
+    // ordering for scatter min/max is intentionally unsupported). `new_complex_values`
+    // rounds Complex64 to f32 exactly as the literal storage does → bit-exact.
+    if matches!(operand.dtype, DType::Complex64 | DType::Complex128)
+        && let (Some(op), Some(upd)) = (
+            operand.elements.as_complex_slice(),
+            updates.elements.as_complex_slice(),
+        )
+    {
+        let dt = operand.dtype;
+        let cf: fn((f64, f64), (f64, f64)) -> (f64, f64) = match combine {
+            ScatterCombine::Overwrite => |_, b| b, // unused (is_overwrite copies)
+            ScatterCombine::Add => |a, b| (a.0 + b.0, a.1 + b.1),
+            ScatterCombine::Mul => |a, b| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0),
+            // complex min/max in scatter stays unsupported → generic (errors).
+            ScatterCombine::Min | ScatterCombine::Max => return Ok(None),
+        };
+        scatter_typed!(op, upd, |shape, out| TensorValue::new_complex_values(dt, shape, out), cf);
+    }
     Ok(None)
 }
 
@@ -16870,6 +16892,48 @@ mod tests {
     /// Dense BF16/F16 scatter (overwrite + scatter-ADD) must be BIT-FOR-BIT identical
     /// to the generic per-`Literal` path, incl. repeated-index accumulation (15) and
     /// OOB (99), across fill_or_drop/clip and NaN/±inf/±0 bit patterns. scatter-add
+    #[test]
+    fn complex_scatter_add_mul_overwrite_works() {
+        // Complex scatter (add/mul/overwrite) previously ERRORED (binary_literal_op
+        // has no complex arm). Now handled by the dense path; verify against a hand
+        // reference (component-add / complex-multiply / overwrite, fill_or_drop OOB).
+        let (rows, cols) = (8usize, 4usize);
+        let dims = vec![rows as u32, cols as u32];
+        let idxs = [0_i64, 3, 7, 99, 1, 3]; // 99 OOB (dropped), 3 repeated (accumulates)
+        let n = idxs.len();
+        let idx = Value::vector_i64(&idxs).unwrap();
+        let base: Vec<(f64, f64)> = (0..rows * cols).map(|i| (i as f64 * 0.5, (i % 5) as f64 - 2.0)).collect();
+        let upd: Vec<(f64, f64)> = (0..n * cols).map(|i| ((i % 7) as f64 - 3.0, (i % 3) as f64)).collect();
+        let mk = |v: &[(f64, f64)], d: &[u32]| Value::Tensor(TensorValue::new_complex_values(DType::Complex128, Shape { dims: d.to_vec() }, v.to_vec()).unwrap());
+        let opv = mk(&base, &dims);
+        let updv = mk(&upd, &[n as u32, cols as u32]);
+        let getc = |v: &Value| -> Vec<(u64, u64)> {
+            v.as_tensor().unwrap().elements.iter().map(|l| match l { Literal::Complex128Bits(re, im) => (*re, *im), o => panic!("{o:?}") }).collect()
+        };
+        for mode in ["overwrite", "add", "mul"] {
+            let p = params(&[("mode", mode), ("index_mode", "fill_or_drop")]);
+            let got = getc(&super::eval_scatter(&[opv.clone(), idx.clone(), updv.clone()], &p).unwrap());
+            // Hand reference.
+            let mut r = base.clone();
+            for (i, &raw) in idxs.iter().enumerate() {
+                if raw < 0 || raw as usize >= rows { continue; }
+                let bi = raw as usize * cols;
+                let ui = i * cols;
+                for j in 0..cols {
+                    let (a, b) = r[bi + j];
+                    let (c, d) = upd[ui + j];
+                    r[bi + j] = match mode {
+                        "overwrite" => (c, d),
+                        "add" => (a + c, b + d),
+                        _ => (a * c - b * d, a * d + b * c),
+                    };
+                }
+            }
+            let expect: Vec<(u64, u64)> = r.iter().map(|&(re, im)| (re.to_bits(), im.to_bits())).collect();
+            assert_eq!(got, expect, "complex scatter {mode} mismatch");
+        }
+    }
+
     /// matches because the dense path routes through the same `binary_literal_op` Add.
     #[test]
     fn dense_half_float_scatter_matches_literal_path() {
