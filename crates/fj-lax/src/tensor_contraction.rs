@@ -1103,6 +1103,18 @@ pub fn batched_matmul_2d(
     if batch == 0 || m == 0 || n == 0 || k == 0 {
         return result;
     }
+    // Single-matrix GEMM with B past L2: route through the non-batched `matmul_2d`,
+    // which packs B panel-major and KC-blocks A (keeping it L1-resident, read once
+    // per pc-block) instead of re-streaming the whole A matrix per B panel — the
+    // binding cost the batched register kernel pays at scale. BIT-IDENTICAL: the
+    // KC/pc-blocking never regroups a partial sum (ascending-`l` preserved), so the
+    // product matches the batched register kernel exactly (mirrors the f32 batched
+    // entry). Batched (batch>1) keeps the unpacked register kernel — B differs per
+    // batch, so packing each one is net overhead.
+    if batch == 1 && k.saturating_mul(n) >= PACK_B_MIN_KN {
+        matmul_2d_into(a, m, k, b, n, &mut result);
+        return result;
+    }
     let total_rows = batch * m;
     let ops = total_rows.saturating_mul(k).saturating_mul(n);
     let threads = matmul_thread_count(ops, total_rows);
@@ -2726,6 +2738,62 @@ mod tests {
             digest, "0ded581c470b08bf46ac2ad16967f620cd90603917fab8565a2a9c832d4715d3",
             "register-blocked f64 batched matmul golden output digest changed"
         );
+    }
+
+    /// At batch==1 with B past the pack threshold, `batched_matmul_2d` routes
+    /// through the packed+KC-blocked `matmul_2d`; the result must be BIT-FOR-BIT
+    /// identical to the unpacked batched register kernel (KC never regroups the
+    /// ascending-`l` sum).
+    #[test]
+    fn batched_matmul_2d_f64_batch1_packed_route_matches_register_kernel() {
+        // k*n = 256*512 = 131072 == PACK_B_MIN_KN, so the route engages.
+        let (m, k, n) = (130usize, 256usize, 512usize);
+        assert!(k * n >= super::PACK_B_MIN_KN);
+        let a: Vec<f64> = (0..m * k).map(|i| (i as f64 * 0.013).sin() - 0.4).collect();
+        let b: Vec<f64> = (0..k * n).map(|i| (i as f64 * 0.019).cos() + 0.7).collect();
+        let routed = batched_matmul_2d(&a, 1, m, k, &b, n); // packed matmul_2d
+        let mut want = vec![0.0f64; m * n];
+        super::batched_matmul_row_block(&a, &b, m, k, n, 0, &mut want); // register kernel
+        for idx in 0..m * n {
+            assert_eq!(routed[idx].to_bits(), want[idx].to_bits(), "at {idx}");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_batched_matmul_f64_batch1_packed_route() {
+        use std::time::Instant;
+        fn best(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..3 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        }
+        for &(m, k, n) in &[(1024usize, 1024usize, 1024usize), (2048, 512, 2048)] {
+            let a: Vec<f64> = (0..m * k).map(|i| (i as f64 * 1e-4).sin()).collect();
+            let b: Vec<f64> = (0..k * n).map(|i| (i as f64 * 7e-5).cos()).collect();
+            let t_kernel = best(|| {
+                let mut out = vec![0.0f64; m * n];
+                super::batched_matmul_row_block(&a, &b, m, k, n, 0, &mut out);
+                std::hint::black_box(&out);
+            });
+            let t_routed = best(|| {
+                std::hint::black_box(batched_matmul_2d(&a, 1, m, k, &b, n));
+            });
+            let gflop = 2.0 * (m * k * n) as f64;
+            println!(
+                "BENCH batched(b=1) f64 {m}x{k}x{n}: REGISTER {:.1}ms ({:.1} GF/s) -> PACKED-matmul_2d {:.1}ms ({:.1} GF/s) = {:.2}x",
+                t_kernel * 1e3,
+                gflop / t_kernel,
+                t_routed * 1e3,
+                gflop / t_routed,
+                t_kernel / t_routed,
+            );
+        }
     }
 
     #[test]
