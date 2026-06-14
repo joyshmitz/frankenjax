@@ -1684,6 +1684,67 @@ pub(crate) fn eval_reduce_axes(
         });
     }
 
+    // u32 reductions: JAX keeps the uint32 dtype and wraps sum/prod mod 2^32, but
+    // the integral dense path below gates on I64|I32 — so u32 used to fall to the
+    // FLOAT arm (f64 accumulation, F64 output): wrong dtype, no wrap, precision loss
+    // above 2^53. Fix by widening u32→i64 EXACTLY (always non-negative), reusing the
+    // fully-tested i64 reduce machinery, then retagging the I64 result back to U32.
+    // This is bit-exact vs JAX: signed i64 max/min on non-negative values == unsigned
+    // max/min; sum/prod fold mod 2^64 then `as u32` == mod 2^32 (ring homomorphism,
+    // since 2^64 ≡ 0 (mod 2^32)). Only sum/prod/max/min reach here (and/or/xor route
+    // through eval_reduce_bitwise_axes). u64 is NOT handled (signed i64 max/min would
+    // be wrong for values > i64::MAX) — see bead frankenjax-2iotb.
+    if let Value::Tensor(t) = &inputs[0]
+        && t.dtype == DType::U32
+        && matches!(
+            primitive,
+            Primitive::ReduceSum | Primitive::ReduceProd | Primitive::ReduceMax | Primitive::ReduceMin
+        )
+    {
+        let widened: Vec<i64> = match t.elements.as_u32_slice() {
+            Some(s) => s.iter().map(|&v| i64::from(v)).collect(),
+            None => t
+                .elements
+                .iter()
+                .map(|l| {
+                    l.as_u64()
+                        .map(|v| v as i64)
+                        .ok_or(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "expected u32 tensor",
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let widened_input = vec![Value::Tensor(TensorValue::new_i64_values(
+            t.shape.clone(),
+            widened,
+        )?)];
+        let result = eval_reduce_axes(
+            primitive, &widened_input, params, int_init, float_init, int_op, float_op,
+        )?;
+        // sum/prod wrap mod 2^32; max/min are already in u32 range. Retag I64 -> U32.
+        let wrap = matches!(primitive, Primitive::ReduceSum | Primitive::ReduceProd);
+        return Ok(match result {
+            Value::Scalar(Literal::I64(v)) => Value::Scalar(Literal::U32(v as u32)),
+            Value::Scalar(other) => Value::Scalar(other),
+            Value::Tensor(rt) => {
+                let vals: Vec<u32> = rt
+                    .elements
+                    .as_i64_slice()
+                    .map(|s| s.iter().map(|&v| v as u32).collect())
+                    .unwrap_or_else(|| {
+                        rt.elements
+                            .iter()
+                            .map(|l| l.as_i64().unwrap_or(0) as u32)
+                            .collect()
+                    });
+                let _ = wrap; // max/min: v already in range so `as u32` is a no-op too
+                Value::Tensor(TensorValue::new_u32_values(rt.shape.clone(), vals)?)
+            }
+        });
+    }
+
     // If no axes param, fall back to full reduction. Empty list means identity.
     let axes_str = match params.get("axes") {
         Some(s) => s,
@@ -6430,6 +6491,59 @@ mod tests {
             vec![i64::from(i32::MIN), 3],
             "2^31 must wrap to i32::MIN; in-range column unchanged"
         );
+    }
+
+    #[test]
+    fn u32_reductions_keep_dtype_and_wrap_unsigned() {
+        // BUG FIX (bead 2iotb): u32 reductions used to fall to the float arm (f64
+        // accumulation, F64 output). JAX keeps uint32 and wraps sum/prod mod 2^32,
+        // with UNSIGNED max/min. Verified via the real dispatch (eval_primitive).
+        let mk = |dims: Vec<u32>, data: &[u32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::U32,
+                    Shape { dims },
+                    data.iter().map(|&v| Literal::U32(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let two31 = 1u32 << 31; // 2147483648 > i32::MAX
+        let p = BTreeMap::new();
+
+        // Full sum: 2^31 + 2^31 + 1 = 2^32 + 1 ≡ 1 (mod 2^32).
+        let r = crate::eval_primitive(Primitive::ReduceSum, &[mk(vec![3], &[two31, two31, 1])], &p)
+            .unwrap();
+        assert_eq!(r, Value::Scalar(Literal::U32(1)), "u32 sum must wrap mod 2^32");
+
+        // Full prod: 65536 * 65536 = 2^32 ≡ 0 (mod 2^32).
+        let r = crate::eval_primitive(Primitive::ReduceProd, &[mk(vec![2], &[65536, 65536])], &p)
+            .unwrap();
+        assert_eq!(r, Value::Scalar(Literal::U32(0)), "u32 prod must wrap mod 2^32");
+
+        // Full max/min must be UNSIGNED (3e9 > i32::MAX must win the max, not look negative).
+        let big = 3_000_000_000u32;
+        let r = crate::eval_primitive(Primitive::ReduceMax, &[mk(vec![3], &[5, big, 7])], &p).unwrap();
+        assert_eq!(r, Value::Scalar(Literal::U32(big)), "u32 max must be unsigned");
+        let r = crate::eval_primitive(Primitive::ReduceMin, &[mk(vec![3], &[5, big, 7])], &p).unwrap();
+        assert_eq!(r, Value::Scalar(Literal::U32(5)), "u32 min must be unsigned");
+
+        // Partial axis-0 sum of [[2^31,1],[2^31,2]] → [2^32 mod 2^32 = 0, 3], stays U32.
+        let mut pa = BTreeMap::new();
+        pa.insert("axes".to_owned(), "0".to_owned());
+        let r = crate::eval_primitive(
+            Primitive::ReduceSum,
+            &[mk(vec![2, 2], &[two31, 1, two31, 2])],
+            &pa,
+        )
+        .unwrap();
+        let Value::Tensor(t) = &r else { panic!("expected tensor, got {r:?}") };
+        assert_eq!(t.dtype, DType::U32, "partial u32 sum stays u32");
+        let vals: Vec<u32> = t.elements.iter().map(|l| match l {
+            Literal::U32(v) => *v,
+            o => panic!("expected U32, got {o:?}"),
+        }).collect();
+        assert_eq!(vals, vec![0, 3], "partial u32 sum wraps mod 2^32 per-cell");
     }
 
     #[test]
