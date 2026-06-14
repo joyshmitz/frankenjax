@@ -3203,6 +3203,74 @@ pub(crate) fn eval_cumulative(
                 return Ok(Value::Scalar(tensor.elements[0]));
             }
 
+            // Unsigned (u32/u64) cumulative scans: same bug + fix as eval_reduce_axes
+            // (bead 2iotb). u32/u64 used to fall to the float arm (F64 output, no wrap).
+            // Map unsigned→i64 with the order/ring-faithful transform, reuse the tested
+            // i64 cumulative machinery (same-shape output), then map each element back.
+            // cumsum/cumprod wrap mod 2^N (per-step == map-back per element, ring
+            // homomorphism); cummax/cummin use the sign-flip so signed cmp == unsigned.
+            if matches!(tensor.dtype, DType::U32 | DType::U64)
+                && matches!(
+                    primitive,
+                    Primitive::Cumsum | Primitive::Cumprod | Primitive::Cummax | Primitive::Cummin
+                )
+            {
+                const FLIP: u64 = 1u64 << 63;
+                let is_u32 = tensor.dtype == DType::U32;
+                let is_minmax = matches!(primitive, Primitive::Cummax | Primitive::Cummin);
+                let fwd = |v: u64| -> i64 {
+                    if !is_u32 && is_minmax {
+                        (v ^ FLIP) as i64
+                    } else {
+                        v as i64
+                    }
+                };
+                let inv = |v: i64| -> u64 {
+                    if is_u32 {
+                        u64::from(v as u32)
+                    } else if is_minmax {
+                        (v as u64) ^ FLIP
+                    } else {
+                        v as u64
+                    }
+                };
+                let widened: Vec<i64> = match tensor.elements.as_u32_slice() {
+                    Some(s) => s.iter().map(|&v| fwd(u64::from(v))).collect(),
+                    None => match tensor.elements.as_u64_slice() {
+                        Some(s) => s.iter().map(|&v| fwd(v)).collect(),
+                        None => tensor
+                            .elements
+                            .iter()
+                            .map(|l| {
+                                l.as_u64().map(fwd).ok_or(EvalError::TypeMismatch {
+                                    primitive,
+                                    detail: "expected unsigned tensor",
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    },
+                };
+                let widened_input = vec![Value::Tensor(TensorValue::new_i64_values(
+                    tensor.shape.clone(),
+                    widened,
+                )?)];
+                let result = eval_cumulative(
+                    primitive, &widened_input, params, int_init, float_init, int_op, float_op,
+                )?;
+                let Value::Tensor(rt) = result else {
+                    return Ok(result);
+                };
+                let vals: Vec<u64> = match rt.elements.as_i64_slice() {
+                    Some(s) => s.iter().map(|&v| inv(v)).collect(),
+                    None => rt.elements.iter().map(|l| inv(l.as_i64().unwrap_or(0))).collect(),
+                };
+                return Ok(Value::Tensor(if is_u32 {
+                    TensorValue::new_u32_values(rt.shape.clone(), vals.iter().map(|&v| v as u32).collect())?
+                } else {
+                    TensorValue::new_u64_values(rt.shape.clone(), vals)?
+                }));
+            }
+
             let axis: usize = {
                 let raw: i64 = params
                     .get("axis")
@@ -6638,6 +6706,67 @@ mod tests {
             o => panic!("expected U64, got {o:?}"),
         }).collect();
         assert_eq!(vals, vec![big, u64::MAX], "partial u64 max unsigned per-cell");
+    }
+
+    #[test]
+    fn u32_u64_cumulative_keep_dtype_and_wrap_unsigned() {
+        // Cumulative scans had the same float-arm bug as reductions (bead 2iotb).
+        // cumsum/cumprod wrap mod 2^N, cummax/cummin are UNSIGNED, dtype preserved.
+        let p = BTreeMap::new();
+        let u32t = |data: &[u32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::U32,
+                    Shape::vector(data.len() as u32),
+                    data.iter().map(|&v| Literal::U32(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let u64t = |data: &[u64]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::U64,
+                    Shape::vector(data.len() as u32),
+                    data.iter().map(|&v| Literal::U64(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let getu32 = |v: &Value| -> Vec<u32> {
+            v.as_tensor().unwrap().elements.iter().map(|l| match l {
+                Literal::U32(x) => *x,
+                o => panic!("expected U32, got {o:?}"),
+            }).collect()
+        };
+        let getu64 = |v: &Value| -> Vec<u64> {
+            v.as_tensor().unwrap().elements.iter().map(|l| match l {
+                Literal::U64(x) => *x,
+                o => panic!("expected U64, got {o:?}"),
+            }).collect()
+        };
+
+        // u32 cumsum [2^31, 2^31, 1] → [2^31, 0 (2^32 wraps), 1].
+        let two31 = 1u32 << 31;
+        let r = crate::eval_primitive(Primitive::Cumsum, &[u32t(&[two31, two31, 1])], &p).unwrap();
+        assert_eq!(r.as_tensor().unwrap().dtype, DType::U32);
+        assert_eq!(getu32(&r), vec![two31, 0, 1], "u32 cumsum wraps mod 2^32");
+
+        // u32 cummax [5, 3e9, 7] → [5, 3e9, 3e9] (unsigned; 3e9 > i32::MAX).
+        let big = 3_000_000_000u32;
+        let r = crate::eval_primitive(Primitive::Cummax, &[u32t(&[5, big, 7])], &p).unwrap();
+        assert_eq!(getu32(&r), vec![5, big, big], "u32 cummax unsigned");
+
+        // u64 cumsum [2^63, 2^63] → [2^63, 0 (2^64 wraps)].
+        let two63 = 1u64 << 63;
+        let r = crate::eval_primitive(Primitive::Cumsum, &[u64t(&[two63, two63])], &p).unwrap();
+        assert_eq!(r.as_tensor().unwrap().dtype, DType::U64);
+        assert_eq!(getu64(&r), vec![two63, 0], "u64 cumsum wraps mod 2^64");
+
+        // u64 cummax [5, 2^63+100, u64::MAX, 7] → running unsigned max.
+        let r = crate::eval_primitive(Primitive::Cummax, &[u64t(&[5, two63 + 100, u64::MAX, 7])], &p)
+            .unwrap();
+        assert_eq!(getu64(&r), vec![5, two63 + 100, u64::MAX, u64::MAX], "u64 cummax unsigned");
     }
 
     #[test]
