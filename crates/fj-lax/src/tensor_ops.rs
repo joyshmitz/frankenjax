@@ -3733,6 +3733,13 @@ pub(crate) fn eval_convert_element_type(
                         shape.clone(),
                         values.iter().map(|&v| v as i64).collect(),
                     )),
+                    // f64->i32 (quantization / float-to-index): raw `v as i64` into the
+                    // I32 tensor; the narrow chokepoint wraps mod 2^32, exactly as
+                    // convert_literal (Literal::I64(v as i64) tagged I32). Was per-Literal.
+                    DType::I32 => Some(TensorValue::new_i32_values(
+                        shape.clone(),
+                        values.iter().map(|&v| v as i64).collect(),
+                    )),
                     // bool_val(F64Bits) == v != 0.0 (NaN -> true).
                     DType::Bool => Some(TensorValue::new_bool_values(
                         shape.clone(),
@@ -3772,6 +3779,12 @@ pub(crate) fn eval_convert_element_type(
                     )),
                     // i64_val(F32Bits) == f32 as i64 (NOT via f64).
                     DType::I64 => Some(TensorValue::new_i64_values(
+                        shape.clone(),
+                        values.iter().map(|&v| v as i64).collect(),
+                    )),
+                    // f32->i32: raw `f32 as i64` into the I32 tensor (chokepoint wraps
+                    // mod 2^32), matching convert_literal. Was per-Literal.
+                    DType::I32 => Some(TensorValue::new_i32_values(
                         shape.clone(),
                         values.iter().map(|&v| v as i64).collect(),
                     )),
@@ -16544,6 +16557,35 @@ mod tests {
                 "i32 -> {t} dense != generic"
             );
         }
+    }
+
+    #[test]
+    fn dense_float_to_i32_convert_matches_generic() {
+        // float->i32 (quantization / float-to-index) previously fell to the per-Literal
+        // convert path. Dense (f64/f32 source) must match the boxed generic path, incl
+        // NaN (->0), ±inf (saturate i64 then wrap i32), and out-of-i32-range magnitudes.
+        let lits = |v: &Value| v.as_tensor().unwrap().elements.iter().copied().collect::<Vec<Literal>>();
+        let f64d = [1.9_f64, -3.7, 0.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e10, -1e10, 3e9, -2.5, 2_147_483_647.0, 2_147_483_648.0];
+        let f64_dense = Value::Tensor(TensorValue::new_f64_values(Shape::vector(f64d.len() as u32), f64d.to_vec()).unwrap());
+        let f64_boxed = Value::Tensor(TensorValue::new(DType::F64, Shape::vector(f64d.len() as u32), f64d.iter().copied().map(Literal::from_f64).collect()).unwrap());
+        assert!(f64_dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        assert!(f64_boxed.as_tensor().unwrap().elements.as_f64_slice().is_none());
+        let f32d = [1.9_f32, -3.7, 0.0, -0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e10, -1e10, 3e9, -2.5];
+        let f32_dense = Value::Tensor(TensorValue::new_f32_values(Shape::vector(f32d.len() as u32), f32d.to_vec()).unwrap());
+        let f32_boxed = Value::Tensor(TensorValue::new(DType::F32, Shape::vector(f32d.len() as u32), f32d.iter().copied().map(Literal::from_f32).collect()).unwrap());
+        assert!(f32_dense.as_tensor().unwrap().elements.as_f32_slice().is_some());
+        assert!(f32_boxed.as_tensor().unwrap().elements.as_f32_slice().is_none());
+        let p = params(&[("new_dtype", "i32")]);
+        assert_eq!(
+            lits(&eval_convert_element_type(std::slice::from_ref(&f64_dense), &p).unwrap()),
+            lits(&eval_convert_element_type(std::slice::from_ref(&f64_boxed), &p).unwrap()),
+            "f64 -> i32 dense != generic"
+        );
+        assert_eq!(
+            lits(&eval_convert_element_type(std::slice::from_ref(&f32_dense), &p).unwrap()),
+            lits(&eval_convert_element_type(std::slice::from_ref(&f32_boxed), &p).unwrap()),
+            "f32 -> i32 dense != generic"
+        );
     }
 
     #[test]
