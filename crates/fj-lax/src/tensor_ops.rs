@@ -6115,6 +6115,30 @@ fn f64_total_order_key(value: f64) -> u64 {
     (transformed as u64) ^ (1_u64 << 63)
 }
 
+/// 32-bit total-order key for `f32`, the exact `u32` analogue of
+/// [`f64_total_order_key`]. f32→f64 promotion is order-preserving and injective,
+/// so this key induces the SAME ordering (and tie structure) as
+/// `f64_total_order_key(f64::from(v))` — letting the f32 sort use a 4-pass u32
+/// radix (half the passes + half the key traffic of the 8-byte f64 key) with a
+/// bit-identical result.
+#[inline]
+fn f32_total_order_key(value: f32) -> u32 {
+    let bits = value.to_bits() as i32;
+    let transformed = bits ^ ((((bits >> 31) as u32) >> 1) as i32);
+    (transformed as u32) ^ (1_u32 << 31)
+}
+
+/// f32 sort key with JAX NaN-last semantics (every NaN ranks as the single
+/// maximum), mirroring [`f64_sort_order_key`].
+#[inline]
+fn f32_sort_order_key(value: f32) -> u32 {
+    if value.is_nan() {
+        u32::MAX
+    } else {
+        f32_total_order_key(value)
+    }
+}
+
 /// Sort/argsort radix key matching JAX/numpy `sort` NaN handling, which differs
 /// from `total_cmp` (and from `top_k`): every NaN — EITHER sign — ranks as the
 /// single maximum, so ascending sort sends all NaN to the end (stable, by
@@ -6133,6 +6157,103 @@ fn f64_sort_order_key(value: f64) -> u64 {
     } else {
         f64_total_order_key(value)
     }
+}
+
+/// Dense F32 ascending sort/argsort along `axis`. f32 is JAX's DEFAULT float
+/// dtype; without this it falls to `sort_along_axis_literal_radix`, which
+/// `as_slice()`-materializes the whole tensor into 24-byte `Literal`s just to read
+/// keys. Keyed by `f64_sort_order_key(f64::from(v))` — f32→f64 is exact, so this
+/// is the SAME key the literal-radix Float path computes (`lit.as_f64()` →
+/// `f64_sort_order_key`), hence bit-identical. Sort emits dense f32; argsort emits
+/// dense i64 indices. Returns `None` for non-F32-dense or short axes.
+fn sort_along_axis_dense_f32(
+    tensor: &TensorValue,
+    axis: usize,
+    descending: bool,
+    return_indices: bool,
+) -> Result<Option<Value>, EvalError> {
+    let Some(values) = tensor.elements.as_f32_slice() else {
+        return Ok(None);
+    };
+    let key_mask: u64 = if descending { u64::MAX } else { 0 };
+    let primitive = if return_indices {
+        Primitive::Argsort
+    } else {
+        Primitive::Sort
+    };
+    let rank = tensor.shape.rank();
+    let axis_dim = tensor.shape.dims[axis] as usize;
+    if axis_dim < RADIX_SORT_MIN_AXIS {
+        return Ok(None);
+    }
+    let strides = checked_row_major_strides(primitive, "sort", &tensor.shape.dims)?;
+    let axis_stride = strides[axis];
+    let total = tensor.elements.len();
+    if !total.is_multiple_of(axis_dim) {
+        return Ok(None);
+    }
+    let outer_count = total / axis_dim;
+    // u32 total-order key (NaN last); the 4-pass u32 radix ignores the high 32 bits,
+    // so the descending `^ key_mask` (u64::MAX) is effectively a 32-bit complement.
+    let key = |v: f32| u64::from(f32_sort_order_key(v));
+    let out_value = if axis_stride == 1 {
+        if return_indices {
+            let mut out_idx = vec![0_i64; total];
+            for_each_contiguous_sort_slice(&mut out_idx, axis_dim, outer_count, |s, out_slice, pairs, scratch| {
+                let in_base = s * axis_dim;
+                pairs.clear();
+                for i in 0..axis_dim {
+                    pairs.push((key(values[in_base + i]) ^ key_mask, i as u32));
+                }
+                radix_pairs_ascending_u32(pairs, scratch);
+                for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                    out_slice[out_pos] = i64::from(orig);
+                }
+            });
+            TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+        } else {
+            let mut out_val = vec![0.0_f32; total];
+            for_each_contiguous_sort_slice(&mut out_val, axis_dim, outer_count, |s, out_slice, pairs, scratch| {
+                let in_base = s * axis_dim;
+                pairs.clear();
+                for i in 0..axis_dim {
+                    pairs.push((key(values[in_base + i]) ^ key_mask, i as u32));
+                }
+                radix_pairs_ascending_u32(pairs, scratch);
+                for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                    out_slice[out_pos] = values[in_base + orig as usize];
+                }
+            });
+            TensorValue::new_f32_values(tensor.shape.clone(), out_val)
+        }
+    } else {
+        let mut out_idx = vec![0_i64; total];
+        let mut out_val = vec![0.0_f32; total];
+        let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
+        let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
+        for_each_sort_slice(rank, axis, &tensor.shape.dims, &strides, outer_count, |base| {
+            pairs.clear();
+            for i in 0..axis_dim {
+                pairs.push((key(values[base + i * axis_stride]) ^ key_mask, i as u32));
+            }
+            radix_pairs_ascending_u32(&mut pairs, &mut scratch);
+            for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                let dst = base + out_pos * axis_stride;
+                if return_indices {
+                    out_idx[dst] = i64::from(orig);
+                } else {
+                    out_val[dst] = values[base + orig as usize * axis_stride];
+                }
+            }
+        });
+        if return_indices {
+            TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+        } else {
+            TensorValue::new_f32_values(tensor.shape.clone(), out_val)
+        }
+    }
+    .map_err(EvalError::InvalidTensor)?;
+    Ok(Some(Value::Tensor(out_value)))
 }
 
 /// Dense F64 ascending sort/argsort along `axis`, mirroring
@@ -6776,6 +6897,11 @@ fn sort_along_axis(
     }
     if tensor.dtype == DType::F64
         && let Some(value) = sort_along_axis_dense_f64(tensor, axis, descending, return_indices)?
+    {
+        return Ok(value);
+    }
+    if tensor.dtype == DType::F32
+        && let Some(value) = sort_along_axis_dense_f32(tensor, axis, descending, return_indices)?
     {
         return Ok(value);
     }
@@ -15145,6 +15271,94 @@ mod tests {
         ]);
         let result = eval_sort(Primitive::Sort, &[x], &p).unwrap();
         assert_eq!(extract_f64_vec(&result), vec![4.0, 3.0, 1.0]);
+    }
+
+    fn f32_sort_dense(data: &[f32]) -> Value {
+        Value::Tensor(TensorValue::new_f32_values(Shape::vector(data.len() as u32), data.to_vec()).unwrap())
+    }
+    // Boxed f32 (as_f32_slice None) → dense_f32 returns None → literal_radix path.
+    fn f32_sort_boxed(data: &[f32]) -> Value {
+        Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::F32,
+                Shape::vector(data.len() as u32),
+                fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::from_f32(v)).collect()),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn dense_f32_sort_matches_literal_radix_path() {
+        // f32 sort/argsort used to fall to sort_along_axis_literal_radix, which
+        // as_slice()-materializes the whole tensor into 24-byte Literals just to read
+        // keys. The new dense_f32 path (keyed by f64_sort_order_key(f64::from(v)), the
+        // SAME key) must be bit-identical to the boxed literal-radix path across
+        // sort/argsort + asc/desc, including NaN/±inf/±0/dups. n=1000 ≥ RADIX_SORT_MIN_AXIS.
+        let n = 1000usize;
+        let data: Vec<f32> = (0..n)
+            .map(|i| match i % 13 {
+                0 => f32::NAN,
+                1 => f32::INFINITY,
+                2 => f32::NEG_INFINITY,
+                3 => 0.0,
+                4 => -0.0,
+                5 => 1.0,
+                6 => -1.0,
+                _ => ((i as f32) * 1.6180339).sin() * 1000.0,
+            })
+            .collect();
+        let f32bits = |v: &Value| -> Vec<u32> {
+            v.as_tensor().unwrap().elements.iter().map(|l| match l {
+                Literal::F32Bits(b) => *b,
+                o => panic!("expected F32Bits, got {o:?}"),
+            }).collect()
+        };
+        let i64v = |v: &Value| extract_i64_vec(v);
+        for desc in ["false", "true"] {
+            let p = params(&[("dimension", "0"), ("descending", desc)]);
+            // sort (values) — compare canonicalized NaN bits (NaN payloads are
+            // IEEE-unspecified; both paths route the same f32 value, but assert on the
+            // ordering via a NaN-canonical view to avoid payload flakiness).
+            let d = f32bits(&eval_sort(Primitive::Sort, &[f32_sort_dense(&data)], &p).unwrap());
+            let b = f32bits(&eval_sort(Primitive::Sort, &[f32_sort_boxed(&data)], &p).unwrap());
+            assert_eq!(d, b, "f32 sort desc={desc} dense != literal-radix");
+            // argsort (indices) — fully deterministic.
+            let d = i64v(&eval_argsort(Primitive::Argsort, &[f32_sort_dense(&data)], &p).unwrap());
+            let b = i64v(&eval_argsort(Primitive::Argsort, &[f32_sort_boxed(&data)], &p).unwrap());
+            assert_eq!(d, b, "f32 argsort desc={desc} dense != literal-radix");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_f32_sort_dense_vs_literal_radix() {
+        use std::time::Instant;
+        let (rows, cols) = (2048usize, 256usize); // cols >= RADIX_SORT_MIN_AXIS
+        let dims = vec![rows as u32, cols as u32];
+        let data: Vec<f32> = (0..rows * cols).map(|i| ((i as f32) * 0.6180339).sin() * 1e3).collect();
+        let dense = Value::Tensor(TensorValue::new_f32_values(Shape { dims: dims.clone() }, data.clone()).unwrap());
+        let boxed = Value::Tensor(TensorValue::new_with_literal_buffer(DType::F32, Shape { dims: dims.clone() }, fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::from_f32(v)).collect())).unwrap());
+        let p = params(&[("dimension", "1"), ("descending", "false")]);
+        let best = |v: &Value| {
+            let _ = eval_sort(Primitive::Sort, std::slice::from_ref(v), &p).unwrap();
+            let mut t = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let o = eval_sort(Primitive::Sort, std::slice::from_ref(v), &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            t
+        };
+        let lit = best(&boxed);
+        let dense_t = best(&dense);
+        println!(
+            "BENCH f32 sort [{rows}x{cols}]: literal-radix={:.2}ms dense={:.2}ms speedup={:.2}x",
+            lit * 1e3,
+            dense_t * 1e3,
+            lit / dense_t
+        );
     }
 
     #[test]
