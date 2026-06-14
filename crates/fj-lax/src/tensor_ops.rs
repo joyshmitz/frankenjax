@@ -6256,6 +6256,110 @@ fn sort_along_axis_dense_f32(
     Ok(Some(Value::Tensor(out_value)))
 }
 
+/// Dense BF16/F16 ascending sort/argsort along `axis`. Half-float is the dominant
+/// ML training dtype; without this it falls to `sort_along_axis_literal_radix`,
+/// which `as_slice()`-materializes the tensor into 24-byte `Literal`s AND uses an
+/// 8-byte f64 key (8 radix passes). Reads `as_half_float_slice` directly and keys
+/// by `f32_sort_order_key(decode→f32)` — half→f32 is exact and order-preserving,
+/// so this is the SAME ordering the literal-radix Float path computes
+/// (`f64_sort_order_key(decode→f64)`), with a 4-pass u32 radix. Sort emits dense
+/// half (the original u16 bits, reordered); argsort emits dense i64 indices.
+fn sort_along_axis_dense_half(
+    tensor: &TensorValue,
+    axis: usize,
+    descending: bool,
+    return_indices: bool,
+) -> Result<Option<Value>, EvalError> {
+    let Some(bits) = tensor.elements.as_half_float_slice() else {
+        return Ok(None);
+    };
+    let is_bf16 = tensor.dtype == DType::BF16;
+    let decode = |b: u16| -> f32 {
+        if is_bf16 {
+            Literal::BF16Bits(b).as_bf16_f32().unwrap_or(f32::NAN)
+        } else {
+            Literal::F16Bits(b).as_f16_f32().unwrap_or(f32::NAN)
+        }
+    };
+    let key = |b: u16| u64::from(f32_sort_order_key(decode(b)));
+    let key_mask: u64 = if descending { u64::MAX } else { 0 };
+    let primitive = if return_indices {
+        Primitive::Argsort
+    } else {
+        Primitive::Sort
+    };
+    let rank = tensor.shape.rank();
+    let axis_dim = tensor.shape.dims[axis] as usize;
+    if axis_dim < RADIX_SORT_MIN_AXIS {
+        return Ok(None);
+    }
+    let strides = checked_row_major_strides(primitive, "sort", &tensor.shape.dims)?;
+    let axis_stride = strides[axis];
+    let total = tensor.elements.len();
+    if !total.is_multiple_of(axis_dim) {
+        return Ok(None);
+    }
+    let outer_count = total / axis_dim;
+    let out_value = if axis_stride == 1 {
+        if return_indices {
+            let mut out_idx = vec![0_i64; total];
+            for_each_contiguous_sort_slice(&mut out_idx, axis_dim, outer_count, |s, out_slice, pairs, scratch| {
+                let in_base = s * axis_dim;
+                pairs.clear();
+                for i in 0..axis_dim {
+                    pairs.push((key(bits[in_base + i]) ^ key_mask, i as u32));
+                }
+                radix_pairs_ascending_u32(pairs, scratch);
+                for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                    out_slice[out_pos] = i64::from(orig);
+                }
+            });
+            TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+        } else {
+            let mut out_val = vec![0_u16; total];
+            for_each_contiguous_sort_slice(&mut out_val, axis_dim, outer_count, |s, out_slice, pairs, scratch| {
+                let in_base = s * axis_dim;
+                pairs.clear();
+                for i in 0..axis_dim {
+                    pairs.push((key(bits[in_base + i]) ^ key_mask, i as u32));
+                }
+                radix_pairs_ascending_u32(pairs, scratch);
+                for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                    out_slice[out_pos] = bits[in_base + orig as usize];
+                }
+            });
+            TensorValue::new_half_float_values(tensor.dtype, tensor.shape.clone(), out_val)
+        }
+    } else {
+        let mut out_idx = vec![0_i64; total];
+        let mut out_val = vec![0_u16; total];
+        let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
+        let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
+        for_each_sort_slice(rank, axis, &tensor.shape.dims, &strides, outer_count, |base| {
+            pairs.clear();
+            for i in 0..axis_dim {
+                pairs.push((key(bits[base + i * axis_stride]) ^ key_mask, i as u32));
+            }
+            radix_pairs_ascending_u32(&mut pairs, &mut scratch);
+            for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                let dst = base + out_pos * axis_stride;
+                if return_indices {
+                    out_idx[dst] = i64::from(orig);
+                } else {
+                    out_val[dst] = bits[base + orig as usize * axis_stride];
+                }
+            }
+        });
+        if return_indices {
+            TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+        } else {
+            TensorValue::new_half_float_values(tensor.dtype, tensor.shape.clone(), out_val)
+        }
+    }
+    .map_err(EvalError::InvalidTensor)?;
+    Ok(Some(Value::Tensor(out_value)))
+}
+
 /// Dense F64 ascending sort/argsort along `axis`, mirroring
 /// [`sort_along_axis_dense_i64`] but keyed by [`f64_sort_order_key`]. Sort emits
 /// a dense f64 output; argsort emits dense i64 in-slice indices. Bit-for-bit
@@ -6902,6 +7006,11 @@ fn sort_along_axis(
     }
     if tensor.dtype == DType::F32
         && let Some(value) = sort_along_axis_dense_f32(tensor, axis, descending, return_indices)?
+    {
+        return Ok(value);
+    }
+    if matches!(tensor.dtype, DType::BF16 | DType::F16)
+        && let Some(value) = sort_along_axis_dense_half(tensor, axis, descending, return_indices)?
     {
         return Ok(value);
     }
@@ -15358,6 +15467,81 @@ mod tests {
             lit * 1e3,
             dense_t * 1e3,
             lit / dense_t
+        );
+    }
+
+    #[test]
+    fn dense_half_sort_matches_literal_radix_path() {
+        // bf16/f16 sort/argsort used to materialize via literal_radix (f64 key, 8 passes).
+        // The dense_half path (key = f32_sort_order_key(decode→f32), 4-pass u32 radix)
+        // must be bit-identical across sort/argsort + asc/desc incl NaN/±inf/±0/dups.
+        let n = 1000usize;
+        for dt in [DType::BF16, DType::F16] {
+            // Representative half bit patterns (decoded values span the f32 range).
+            let mk_bits = |i: usize| -> u16 {
+                match i % 13 {
+                    0 => if dt == DType::F16 { 0x7e00 } else { 0x7fc0 }, // NaN
+                    1 => if dt == DType::F16 { 0x7c00 } else { 0x7f80 }, // +inf
+                    2 => if dt == DType::F16 { 0xfc00 } else { 0xff80 }, // -inf
+                    3 => 0x0000,                                          // +0
+                    4 => 0x8000,                                          // -0
+                    5 => if dt == DType::F16 { 0x3c00 } else { 0x3f80 }, // 1.0
+                    6 => if dt == DType::F16 { 0xbc00 } else { 0xbf80 }, // -1.0
+                    _ => ((i as u32).wrapping_mul(40_503) & 0xFFFF) as u16,
+                }
+            };
+            let bits: Vec<u16> = (0..n).map(mk_bits).collect();
+            let dense = Value::Tensor(TensorValue::new_half_float_values(dt, Shape::vector(n as u32), bits.clone()).unwrap());
+            let mk_lit = |b: u16| if dt == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
+            let boxed = Value::Tensor(TensorValue::new_with_literal_buffer(dt, Shape::vector(n as u32), fj_core::LiteralBuffer::new(bits.iter().map(|&b| mk_lit(b)).collect())).unwrap());
+            let hbits = |v: &Value| -> Vec<u16> {
+                v.as_tensor().unwrap().elements.iter().map(|l| match l {
+                    Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
+                    o => panic!("expected half bits, got {o:?}"),
+                }).collect()
+            };
+            for desc in ["false", "true"] {
+                let p = params(&[("dimension", "0"), ("descending", desc)]);
+                assert_eq!(
+                    hbits(&eval_sort(Primitive::Sort, &[dense.clone()], &p).unwrap()),
+                    hbits(&eval_sort(Primitive::Sort, &[boxed.clone()], &p).unwrap()),
+                    "{dt:?} sort desc={desc}"
+                );
+                assert_eq!(
+                    extract_i64_vec(&eval_argsort(Primitive::Argsort, &[dense.clone()], &p).unwrap()),
+                    extract_i64_vec(&eval_argsort(Primitive::Argsort, &[boxed.clone()], &p).unwrap()),
+                    "{dt:?} argsort desc={desc}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_bf16_sort_dense_vs_literal_radix() {
+        use std::time::Instant;
+        let (rows, cols) = (2048usize, 256usize);
+        let dims = vec![rows as u32, cols as u32];
+        let bits: Vec<u16> = (0..rows * cols).map(|i| ((i as u32).wrapping_mul(2_654_435_761) >> 16) as u16).collect();
+        let dense = Value::Tensor(TensorValue::new_half_float_values(DType::BF16, Shape { dims: dims.clone() }, bits.clone()).unwrap());
+        let boxed = Value::Tensor(TensorValue::new_with_literal_buffer(DType::BF16, Shape { dims: dims.clone() }, fj_core::LiteralBuffer::new(bits.iter().map(|&b| Literal::BF16Bits(b)).collect())).unwrap());
+        let p = params(&[("dimension", "1"), ("descending", "false")]);
+        let best = |v: &Value| {
+            let _ = eval_sort(Primitive::Sort, std::slice::from_ref(v), &p).unwrap();
+            let mut t = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let o = eval_sort(Primitive::Sort, std::slice::from_ref(v), &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            t
+        };
+        let lit = best(&boxed);
+        let dense_t = best(&dense);
+        println!(
+            "BENCH bf16 sort [{rows}x{cols}]: literal-radix={:.2}ms dense={:.2}ms speedup={:.2}x",
+            lit * 1e3, dense_t * 1e3, lit / dense_t
         );
     }
 
