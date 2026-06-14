@@ -2672,6 +2672,25 @@ fn eval_scatter_dense(
         };
         scatter_typed!(op, upd, TensorValue::new_i64_values, cf);
     }
+    // I32 (JAX's default int) shares the dense i64 backing; an i32 value is sign-extended
+    // in its i64 slot, so the same i64 wrapping combiner is correct. The I32-tagged output
+    // is wrapped mod 2^32 by the eval_primitive chokepoint (Add/Mul may overflow i32;
+    // Min/Max/Overwrite select an in-range input). i32 otherwise ran the generic scatter.
+    if operand.dtype == DType::I32
+        && let (Some(op), Some(upd)) = (
+            operand.elements.as_i64_slice(),
+            updates.elements.as_i64_slice(),
+        )
+    {
+        let cf: fn(i64, i64) -> i64 = match combine {
+            ScatterCombine::Add => |a, b| a.wrapping_add(b),
+            ScatterCombine::Mul => |a, b| a.wrapping_mul(b),
+            ScatterCombine::Min => |a, b| a.min(b),
+            ScatterCombine::Max => |a, b| a.max(b),
+            ScatterCombine::Overwrite => |_, b| b,
+        };
+        scatter_typed!(op, upd, TensorValue::new_i32_values, cf);
+    }
     // Dense BF16/F16 scatter (half-precision embedding update). bf16 is the dominant
     // training dtype. Overwrite is a contiguous u16-bit copy; scatter-ADD routes the
     // two half-float bit patterns through the SAME `binary_literal_op` Add the generic
@@ -17246,6 +17265,98 @@ mod tests {
         println!(
             "BENCH f32 scatter-max [{rows},{dim}] x {batch}: generic(per-Literal)={:.4}ms dense={:.4}ms speedup={:.2}x",
             generic * 1e3, dense_t * 1e3, generic / dense_t
+        );
+    }
+
+    #[test]
+    fn dense_i32_scatter_matches_generic() {
+        // i32 (JAX's default int) scatter (overwrite/add/mul/min/max) now uses the dense
+        // i64 path (was generic per-Literal). i32 shares the i64 backing and sign-extends,
+        // so the i64 wrapping combiner is identical. Dense (densified) must match the boxed
+        // generic path bit-for-bit AND stay I32, incl repeated index (15) + OOB (99).
+        let (rows, cols) = (16usize, 24usize);
+        let dims = vec![rows as u32, cols as u32];
+        let idxs = [0_i64, 3, 15, 99, 1, 15];
+        let n = idxs.len();
+        let idx = Value::vector_i64(&idxs).unwrap();
+        let updims = vec![n as u32, cols as u32];
+        // magnitudes large enough that add/mul overflow i32 (exercises the i64-wrap path)
+        let opd: Vec<i64> = (0..rows * cols)
+            .map(|i| i64::from((i as i32).wrapping_mul(50_021).wrapping_sub(100)))
+            .collect();
+        let upd: Vec<i64> = (0..n * cols)
+            .map(|i| i64::from((i as i32).wrapping_mul(40_009).wrapping_add(7)))
+            .collect();
+        let mk_d = |d: &[i64], dm: &[u32]| {
+            Value::Tensor(
+                TensorValue::new(DType::I32, Shape { dims: dm.to_vec() }, d.iter().map(|&v| Literal::I64(v)).collect())
+                    .unwrap(),
+            )
+        };
+        let mk_b = |d: &[i64], dm: &[u32]| {
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::I32,
+                    Shape { dims: dm.to_vec() },
+                    fj_core::LiteralBuffer::new(d.iter().map(|&v| Literal::I64(v)).collect()),
+                )
+                .unwrap(),
+            )
+        };
+        let geti = |v: &Value| -> Vec<i64> {
+            v.as_tensor().unwrap().elements.iter().map(|l| match l {
+                Literal::I64(x) => *x,
+                o => panic!("expected I64-backed i32, got {o:?}"),
+            }).collect()
+        };
+        for mode in ["overwrite", "add", "mul", "min", "max"] {
+            for imode in ["fill_or_drop", "clip"] {
+                let p = params(&[("mode", mode), ("index_mode", imode)]);
+                let d = super::eval_scatter(&[mk_d(&opd, &dims), idx.clone(), mk_d(&upd, &updims)], &p).unwrap();
+                let b = super::eval_scatter(&[mk_b(&opd, &dims), idx.clone(), mk_b(&upd, &updims)], &p).unwrap();
+                assert_eq!(d.as_tensor().unwrap().dtype, DType::I32, "{mode}/{imode}: dtype must stay I32");
+                assert_eq!(geti(&d), geti(&b), "{mode}/{imode}: dense != generic");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_i32_scatter_dense_vs_generic() {
+        use std::time::Instant;
+        let (rows, cols) = (20000usize, 128usize);
+        let n_upd = 8192usize;
+        let dims = vec![rows as u32, cols as u32];
+        let updims = vec![n_upd as u32, cols as u32];
+        let idxs: Vec<i64> = (0..n_upd).map(|i| ((i * 7919) % rows) as i64).collect();
+        let idx = Value::vector_i64(&idxs).unwrap();
+        let opd: Vec<i64> = (0..rows * cols).map(|i| i64::from(i as i32)).collect();
+        let upd: Vec<i64> = (0..n_upd * cols).map(|i| i64::from(i as i32)).collect();
+        let mk_d = |d: &[i64], dm: &[u32]| {
+            Value::Tensor(TensorValue::new(DType::I32, Shape { dims: dm.to_vec() }, d.iter().map(|&v| Literal::I64(v)).collect()).unwrap())
+        };
+        let mk_b = |d: &[i64], dm: &[u32]| {
+            Value::Tensor(TensorValue::new_with_literal_buffer(DType::I32, Shape { dims: dm.to_vec() }, fj_core::LiteralBuffer::new(d.iter().map(|&v| Literal::I64(v)).collect())).unwrap())
+        };
+        let p = params(&[("mode", "add"), ("index_mode", "clip")]);
+        let best = |op: &Value, up: &Value| {
+            let _ = super::eval_scatter(&[op.clone(), idx.clone(), up.clone()], &p).unwrap();
+            let mut t = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let o = super::eval_scatter(&[op.clone(), idx.clone(), up.clone()], &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            t
+        };
+        let generic = best(&mk_b(&opd, &dims), &mk_b(&upd, &updims));
+        let dense = best(&mk_d(&opd, &dims), &mk_d(&upd, &updims));
+        println!(
+            "BENCH i32 scatter-add [{rows}x{cols}] <- {n_upd} rows: generic={:.2}ms dense={:.2}ms speedup={:.2}x",
+            generic * 1e3,
+            dense * 1e3,
+            generic / dense
         );
     }
 
