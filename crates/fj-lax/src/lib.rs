@@ -1969,6 +1969,16 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         (Value::Scalar(fj_core::Literal::U32(scalar)), Value::Tensor(tensor))
             if tensor.dtype == fj_core::DType::U32 =>
         {
+            if let Some(vals) = tensor.elements.as_u32_slice() {
+                let out: Vec<u32> = vals
+                    .iter()
+                    .map(|&v| apply_bitwise_binary_u32(primitive, *scalar, v))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_u32_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for el in tensor.elements.iter() {
                 match el {
@@ -1993,6 +2003,16 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         (Value::Scalar(fj_core::Literal::U64(scalar)), Value::Tensor(tensor))
             if tensor.dtype == fj_core::DType::U64 =>
         {
+            if let Some(vals) = tensor.elements.as_u64_slice() {
+                let out: Vec<u64> = vals
+                    .iter()
+                    .map(|&v| apply_bitwise_binary_u64(primitive, *scalar, v))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_u64_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for el in tensor.elements.iter() {
                 match el {
@@ -2043,6 +2063,16 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         (Value::Tensor(tensor), Value::Scalar(fj_core::Literal::U32(scalar)))
             if tensor.dtype == fj_core::DType::U32 =>
         {
+            if let Some(vals) = tensor.elements.as_u32_slice() {
+                let out: Vec<u32> = vals
+                    .iter()
+                    .map(|&v| apply_bitwise_binary_u32(primitive, v, *scalar))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_u32_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for el in tensor.elements.iter() {
                 match el {
@@ -2067,6 +2097,16 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         (Value::Tensor(tensor), Value::Scalar(fj_core::Literal::U64(scalar)))
             if tensor.dtype == fj_core::DType::U64 =>
         {
+            if let Some(vals) = tensor.elements.as_u64_slice() {
+                let out: Vec<u64> = vals
+                    .iter()
+                    .map(|&v| apply_bitwise_binary_u64(primitive, v, *scalar))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_u64_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for el in tensor.elements.iter() {
                 match el {
@@ -2209,6 +2249,26 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                     ))
                 }
                 fj_core::DType::U32 => {
+                    // Dense u32 broadcast via the shared contiguous-inner traversal
+                    // (same output-aligned strides as the I64/I32 arms → identical
+                    // (a_idx, b_idx) sequence and result).
+                    if let (Some(av), Some(bv)) =
+                        (a.elements.as_u32_slice(), b.elements.as_u32_slice())
+                    {
+                        let mut out = Vec::with_capacity(out_count);
+                        crate::arithmetic::broadcast_visit_row_major(
+                            &out_shape.dims,
+                            &a_strides,
+                            &b_strides,
+                            |ai, bi| {
+                                out.push(apply_bitwise_binary_u32(primitive, av[ai], bv[bi]));
+                            },
+                        );
+                        return Ok(Value::Tensor(
+                            TensorValue::new_u32_values(out_shape, out)
+                                .map_err(EvalError::InvalidTensor)?,
+                        ));
+                    }
                     let mut elements = Vec::with_capacity(out_count);
                     for flat_idx in 0..out_count {
                         let multi = bitwise_flat_to_multi(flat_idx, &out_strides);
@@ -2235,6 +2295,23 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                     ))
                 }
                 fj_core::DType::U64 => {
+                    if let (Some(av), Some(bv)) =
+                        (a.elements.as_u64_slice(), b.elements.as_u64_slice())
+                    {
+                        let mut out = Vec::with_capacity(out_count);
+                        crate::arithmetic::broadcast_visit_row_major(
+                            &out_shape.dims,
+                            &a_strides,
+                            &b_strides,
+                            |ai, bi| {
+                                out.push(apply_bitwise_binary_u64(primitive, av[ai], bv[bi]));
+                            },
+                        );
+                        return Ok(Value::Tensor(
+                            TensorValue::new_u64_values(out_shape, out)
+                                .map_err(EvalError::InvalidTensor)?,
+                        ));
+                    }
                     let mut elements = Vec::with_capacity(out_count);
                     for flat_idx in 0..out_count {
                         let multi = bitwise_flat_to_multi(flat_idx, &out_strides);
@@ -2401,6 +2478,21 @@ fn eval_bitwise_tensor_same_shape(
             ))
         }
         fj_core::DType::U32 => {
+            // Dense u32 path: contiguous apply_bitwise_binary_u32 map straight into a
+            // dense u32 backing (skips per-Literal::U32 match + 24-byte enum stride on
+            // both inputs and output). Bit-identical to the per-Literal fallback below
+            // (same op, same order). `as_u32_slice` is `Some` only for dense u32.
+            if let (Some(av), Some(bv)) = (a.elements.as_u32_slice(), b.elements.as_u32_slice()) {
+                let out: Vec<u32> = av
+                    .iter()
+                    .zip(bv)
+                    .map(|(&va, &vb)| apply_bitwise_binary_u32(primitive, va, vb))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_u32_values(a.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
             let mut elements = Vec::with_capacity(a.elements.len());
             for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
                 match (ea, eb) {
@@ -2423,6 +2515,18 @@ fn eval_bitwise_tensor_same_shape(
             ))
         }
         fj_core::DType::U64 => {
+            // Dense u64 path (mirror of the u32 arm above).
+            if let (Some(av), Some(bv)) = (a.elements.as_u64_slice(), b.elements.as_u64_slice()) {
+                let out: Vec<u64> = av
+                    .iter()
+                    .zip(bv)
+                    .map(|(&va, &vb)| apply_bitwise_binary_u64(primitive, va, vb))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_u64_values(a.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
             let mut elements = Vec::with_capacity(a.elements.len());
             for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
                 match (ea, eb) {
@@ -11942,6 +12046,168 @@ mod tests {
         let r = eval_primitive(BitwiseAnd, &[m, mk(&[7i32, -1, 0])], &p).unwrap();
         assert_eq!(r.as_tensor().unwrap().dtype, fj_core::DType::I32, "broadcast dtype");
         assert_eq!(geti(&r), vec![-1 & 7, 2 & -1, 3 & 0, 4 & 7, 5 & -1, 6 & 0], "broadcast and");
+    }
+
+    // u32 dense (densified) vs boxed (as_u32_slice None → per-Literal) for A/B + iso.
+    fn u32_bw_dense(d: &[u32]) -> Value {
+        Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::U32,
+                Shape::vector(d.len() as u32),
+                d.iter().map(|&v| fj_core::Literal::U32(v)).collect(),
+            )
+            .unwrap(),
+        )
+    }
+    fn u32_bw_boxed(d: &[u32]) -> Value {
+        Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                fj_core::DType::U32,
+                Shape::vector(d.len() as u32),
+                fj_core::LiteralBuffer::new(d.iter().map(|&v| fj_core::Literal::U32(v)).collect()),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn u32_u64_bitwise_dense_matches_generic() {
+        // The dense as_u32_slice/as_u64_slice bitwise paths (same-shape, scalar both
+        // orders, broadcast) must be bit-identical to the boxed per-Literal fallback,
+        // for all six ops, incl high-bit-set values and ShiftRightLogical (unsigned
+        // zero-fill is the whole-width shift for u32/u64 — no sign-extension).
+        use fj_core::Primitive::{
+            BitwiseAnd, BitwiseOr, BitwiseXor, ShiftLeft, ShiftRightArithmetic,
+            ShiftRightLogical,
+        };
+        let geti = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    fj_core::Literal::U32(x) => u64::from(*x),
+                    fj_core::Literal::U64(x) => *x,
+                    o => panic!("expected unsigned literal, got {o:?}"),
+                })
+                .collect()
+        };
+        let p = BTreeMap::new();
+        let a32 = [0xFFFF_FFFFu32, 0x1234_5678, 0x8000_0000, 5, 7, 0];
+        let b32 = [0x0F0F_0F0Fu32, 0xFFFF_FFFF, 3, 2, 1, 31];
+        let u64d = |d: &[u64]| {
+            Value::Tensor(
+                TensorValue::new(
+                    fj_core::DType::U64,
+                    Shape::vector(d.len() as u32),
+                    d.iter().map(|&v| fj_core::Literal::U64(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let u64b = |d: &[u64]| {
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    fj_core::DType::U64,
+                    Shape::vector(d.len() as u32),
+                    fj_core::LiteralBuffer::new(
+                        d.iter().map(|&v| fj_core::Literal::U64(v)).collect(),
+                    ),
+                )
+                .unwrap(),
+            )
+        };
+        let a64 = [u64::MAX, 1u64 << 63, 0x1234_5678_9ABC_DEF0, 5, 7, 0];
+        let b64 = [0x0F0F_0F0F_0F0F_0F0Fu64, u64::MAX, 4, 2, 1, 63];
+
+        for op in [BitwiseAnd, BitwiseOr, BitwiseXor, ShiftLeft, ShiftRightArithmetic, ShiftRightLogical] {
+            // u32 same-shape
+            let d = geti(&eval_primitive(op, &[u32_bw_dense(&a32), u32_bw_dense(&b32)], &p).unwrap());
+            let g = geti(&eval_primitive(op, &[u32_bw_boxed(&a32), u32_bw_boxed(&b32)], &p).unwrap());
+            assert_eq!(d, g, "{op:?} u32 same-shape dense!=generic");
+            // u32 scalar both orders
+            let s = Value::Scalar(fj_core::Literal::U32(b32[0]));
+            let d = geti(&eval_primitive(op, &[u32_bw_dense(&a32), s.clone()], &p).unwrap());
+            let g = geti(&eval_primitive(op, &[u32_bw_boxed(&a32), s.clone()], &p).unwrap());
+            assert_eq!(d, g, "{op:?} u32 tensor⊗scalar dense!=generic");
+            let d = geti(&eval_primitive(op, &[s.clone(), u32_bw_dense(&a32)], &p).unwrap());
+            let g = geti(&eval_primitive(op, &[s.clone(), u32_bw_boxed(&a32)], &p).unwrap());
+            assert_eq!(d, g, "{op:?} u32 scalar⊗tensor dense!=generic");
+            // u64 same-shape
+            let d = geti(&eval_primitive(op, &[u64d(&a64), u64d(&b64)], &p).unwrap());
+            let g = geti(&eval_primitive(op, &[u64b(&a64), u64b(&b64)], &p).unwrap());
+            assert_eq!(d, g, "{op:?} u64 same-shape dense!=generic");
+        }
+
+        // u32 broadcast [2,3] op [3], dense vs boxed.
+        let m_dense = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::U32,
+                Shape { dims: vec![2, 3] },
+                [1u32, 2, 3, 4, 5, 6].iter().map(|&v| fj_core::Literal::U32(v)).collect(),
+            )
+            .unwrap(),
+        );
+        let m_boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                fj_core::DType::U32,
+                Shape { dims: vec![2, 3] },
+                fj_core::LiteralBuffer::new(
+                    [1u32, 2, 3, 4, 5, 6].iter().map(|&v| fj_core::Literal::U32(v)).collect(),
+                ),
+            )
+            .unwrap(),
+        );
+        let d = geti(&eval_primitive(BitwiseXor, &[m_dense, u32_bw_dense(&[7, 0xFF, 0])], &p).unwrap());
+        let g = geti(&eval_primitive(BitwiseXor, &[m_boxed, u32_bw_boxed(&[7, 0xFF, 0])], &p).unwrap());
+        assert_eq!(d, g, "u32 broadcast xor dense!=generic");
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_u32_bitwise_dense_vs_generic() {
+        use std::time::Instant;
+        let n = 1_000_000usize;
+        let a: Vec<u32> = (0..n).map(|i| (i as u32).wrapping_mul(2_654_435_761)).collect();
+        let b: Vec<u32> = (0..n).map(|i| (i as u32).wrapping_mul(40_503) ^ 0x9E37_79B9).collect();
+        let (ad, ab) = (u32_bw_dense(&a), u32_bw_boxed(&a));
+        let (bd, bb) = (u32_bw_dense(&b), u32_bw_boxed(&b));
+        let p = BTreeMap::new();
+        let best = |mut f: Box<dyn FnMut() -> usize>| {
+            f();
+            let mut t = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            t
+        };
+        let (abc, bbc) = (ab.clone(), bb.clone());
+        let generic = best(Box::new(move || {
+            eval_primitive(Primitive::BitwiseXor, &[abc.clone(), bbc.clone()], &p)
+                .unwrap()
+                .as_tensor()
+                .unwrap()
+                .elements
+                .len()
+        }));
+        let p2 = BTreeMap::new();
+        let (adc, bdc) = (ad.clone(), bd.clone());
+        let dense = best(Box::new(move || {
+            eval_primitive(Primitive::BitwiseXor, &[adc.clone(), bdc.clone()], &p2)
+                .unwrap()
+                .as_tensor()
+                .unwrap()
+                .elements
+                .len()
+        }));
+        println!(
+            "BENCH u32 same-shape BitwiseXor [1e6]: generic={:.2}ms dense={:.2}ms speedup={:.2}x",
+            generic * 1e3,
+            dense * 1e3,
+            generic / dense
+        );
     }
 
     #[test]
