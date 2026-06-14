@@ -2147,6 +2147,15 @@ pub(crate) fn eval_gather(
         {
             dense_contiguous_gather!(src, i64::MIN, TensorValue::new_i64_values);
         }
+        // I32 (JAX's default int) shares the dense i64 backing; gather is a structural
+        // copy (no arithmetic, no mod-2^32 wrap), so it reuses the same stencil with the
+        // I32 OOB fill (`gather_fill_literal(I32)` == i32::MIN sign-extended) and the
+        // I32 dense ctor. Bit-identical to the generic per-`Literal` copy.
+        if operand.dtype == DType::I32
+            && let Some(src) = operand.elements.as_i64_slice()
+        {
+            dense_contiguous_gather!(src, i64::from(i32::MIN), TensorValue::new_i32_values);
+        }
         // Dense BF16/F16 gather (half-precision embedding lookup — bf16 is the
         // dominant training dtype). Pure contiguous u16-bit copy, bit-identical to
         // the generic per-`Literal` copy. The `new_half_float_values` ctor takes a
@@ -2341,8 +2350,19 @@ pub(crate) fn eval_gather(
     if let Some(s) = operand.elements.as_f32_slice() {
         dense_strided_gather!(s, f32::NAN, TensorValue::new_f32_values);
     }
-    if let Some(s) = operand.elements.as_i64_slice() {
+    // NOTE: `as_i64_slice()` is Some for BOTH I64 and I32 (i32 densifies into the same
+    // i64 backing), so this MUST be dtype-gated — otherwise an i32 strided gather would
+    // be emitted as I64 (widening) with the I64 OOB fill (i64::MIN, wrong). Gate I64 here
+    // and handle I32 with its own dtype tag + fill below.
+    if operand.dtype == DType::I64
+        && let Some(s) = operand.elements.as_i64_slice()
+    {
         dense_strided_gather!(s, i64::MIN, TensorValue::new_i64_values);
+    }
+    if operand.dtype == DType::I32
+        && let Some(s) = operand.elements.as_i64_slice()
+    {
+        dense_strided_gather!(s, i64::from(i32::MIN), TensorValue::new_i32_values);
     }
     if let Some(s) = operand.elements.as_half_float_slice() {
         let dt = operand.dtype;
@@ -17433,6 +17453,115 @@ mod tests {
             assert_eq!(geth(&super::eval_gather(&[dh.clone(), idx.clone()], &p).unwrap()),
                        geth(&super::eval_gather(&[bh.clone(), idx.clone()], &p).unwrap()), "bf16 strided gather imode={imode}");
         }
+    }
+
+    #[test]
+    fn dense_i32_gather_matches_generic_and_preserves_dtype() {
+        // i32 (JAX's default int) gather, contiguous + strided. i32 densifies into the
+        // i64 backing, so the strided path (gated on as_i64_slice) USED to emit I64 with
+        // the i64::MIN OOB fill — a widening + wrong-fill bug; now dtype-gated. The dense
+        // (densified) path must match the boxed generic path bit-for-bit AND stay I32,
+        // including the i32::MIN OOB fill under fill_or_drop.
+        let (rows, cols) = (20usize, 24usize);
+        let dims = vec![rows as u32, cols as u32];
+        let idx = Value::vector_i64(&[0, 5, 19, 999, 1, 7, 19, 0]).unwrap(); // 999 is OOB
+        let data: Vec<i64> = (0..rows * cols)
+            .map(|i| i64::from((i as i32).wrapping_mul(7).wrapping_sub(3)))
+            .collect();
+        let dense = Value::Tensor(
+            TensorValue::new(
+                DType::I32,
+                Shape { dims: dims.clone() },
+                data.iter().map(|&v| Literal::I64(v)).collect(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::I32,
+                Shape { dims: dims.clone() },
+                fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::I64(v)).collect()),
+            )
+            .unwrap(),
+        );
+        assert!(dense.as_tensor().unwrap().elements.as_i64_slice().is_some());
+        assert!(boxed.as_tensor().unwrap().elements.as_i64_slice().is_none());
+        let geti = |v: &Value| -> Vec<i64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::I64(x) => *x,
+                    o => panic!("expected I64-backed i32, got {o:?}"),
+                })
+                .collect()
+        };
+        for (ss, label) in [(format!("1,{cols}"), "contiguous"), ("1,13".to_owned(), "strided")] {
+            for imode in ["clip", "fill_or_drop"] {
+                let p = params(&[("slice_sizes", &ss), ("index_mode", imode)]);
+                let d = super::eval_gather(&[dense.clone(), idx.clone()], &p).unwrap();
+                let b = super::eval_gather(&[boxed.clone(), idx.clone()], &p).unwrap();
+                assert_eq!(
+                    d.as_tensor().unwrap().dtype,
+                    DType::I32,
+                    "i32 {label} gather must stay I32 (imode={imode})"
+                );
+                assert_eq!(
+                    b.as_tensor().unwrap().dtype,
+                    DType::I32,
+                    "i32 {label} gather generic dtype (imode={imode})"
+                );
+                assert_eq!(geti(&d), geti(&b), "i32 {label} gather imode={imode}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_i32_strided_gather_dense_vs_generic() {
+        use std::time::Instant;
+        let (rows, cols, pc) = (50000usize, 256usize, 96usize); // pc < cols ⇒ strided
+        let dims = vec![rows as u32, cols as u32];
+        let idxs: Vec<i64> = (0..8192).map(|i| ((i * 7919) % rows) as i64).collect();
+        let idx = Value::vector_i64(&idxs).unwrap();
+        let data: Vec<i64> = (0..rows * cols).map(|i| i64::from(i as i32)).collect();
+        let dense = Value::Tensor(
+            TensorValue::new(
+                DType::I32,
+                Shape { dims: dims.clone() },
+                data.iter().map(|&v| Literal::I64(v)).collect(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::I32,
+                Shape { dims: dims.clone() },
+                fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::I64(v)).collect()),
+            )
+            .unwrap(),
+        );
+        let p = params(&[("slice_sizes", &format!("1,{pc}")), ("index_mode", "clip")]);
+        let best = |v: &Value| {
+            let _ = super::eval_gather(&[v.clone(), idx.clone()], &p).unwrap();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let o = super::eval_gather(&[v.clone(), idx.clone()], &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let generic = best(&boxed);
+        let dense_t = best(&dense);
+        println!(
+            "BENCH i32 strided gather [{rows},{cols}]->[8192,{pc}]: generic={:.4}ms dense={:.4}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
     }
 
     #[test]
