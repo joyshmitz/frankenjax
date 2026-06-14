@@ -196,7 +196,7 @@ fn cached_staged_program(
         let cache = cache.borrow();
         let entry = cache.as_ref()?;
         if entry.jaxpr_fingerprint.as_str() == fingerprint
-            && entry.jaxpr.eq(jaxpr)
+            && cached_jaxpr_eq(&entry.jaxpr, jaxpr)
             && entry.const_values.as_slice() == const_values
             && entry.unknowns.as_slice() == unknowns
             && entry.known_values.as_slice() == known_values
@@ -206,6 +206,20 @@ fn cached_staged_program(
             None
         }
     })
+}
+
+fn cached_jaxpr_eq(cached: &Jaxpr, candidate: &Jaxpr) -> bool {
+    let cached_equations = cached.equations.as_slice();
+    let candidate_equations = candidate.equations.as_slice();
+    let equations_match = cached_equations.len() == candidate_equations.len()
+        && (std::ptr::eq(cached_equations.as_ptr(), candidate_equations.as_ptr())
+            || cached_equations == candidate_equations);
+
+    cached.invars == candidate.invars
+        && cached.constvars == candidate.constvars
+        && cached.outvars == candidate.outvars
+        && cached.effects == candidate.effects
+        && equations_match
 }
 
 fn remember_staged_program(
@@ -843,6 +857,15 @@ mod tests {
                 let cached_result =
                     execute_staged(&cached_staged, &[Value::scalar_i64(3)]).unwrap();
                 assert_eq!(cached_result, result);
+
+                let mut mutated_jaxpr = jaxpr.clone();
+                mutated_jaxpr.equations[0].primitive = Primitive::Abs;
+                let mutated_staged =
+                    stage_jaxpr(&mutated_jaxpr, &[false, true], &[Value::scalar_i64(5)]).unwrap();
+                let mutated_result =
+                    execute_staged(&mutated_staged, &[Value::scalar_i64(3)]).unwrap();
+                assert_eq!(mutated_result, vec![Value::scalar_i64(15)]);
+                assert_ne!(mutated_result, result);
 
                 let digest = fj_test_utils::fixture_id_from_json(&(
                     &staged.jaxpr_unknown,
