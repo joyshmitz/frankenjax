@@ -3785,12 +3785,25 @@ pub(crate) fn eval_convert_element_type(
                     return Ok(Value::Tensor(t.map_err(EvalError::InvalidTensor)?));
                 }
             } else if let Some(values) = tensor.elements.as_i64_slice() {
+                // Source is dense I64 OR I32 (both back onto the i64 slice). For an I32
+                // source each value is the i32 already sign-extended, so the same casts
+                // apply. F32/I32 targets (int→float32 and i64→i32 narrowing — both common
+                // ML casts, F32 is JAX's default float) previously fell to the per-Literal
+                // path. F32 uses `(v as f64) as f32` to match convert_literal's
+                // `from_f32(f64_val as f32)` (double-round-safe for |v| > 2^24). I32 stores
+                // the raw value and lets the narrow chokepoint wrap mod 2^32, exactly as
+                // convert_literal (`Literal::I64(i64_val)` tagged I32) does.
                 let dense = match target_dtype {
                     DType::F64 => Some(TensorValue::new_f64_values(
                         shape.clone(),
                         values.iter().map(|&v| v as f64).collect(),
                     )),
+                    DType::F32 => Some(TensorValue::new_f32_values(
+                        shape.clone(),
+                        values.iter().map(|&v| (v as f64) as f32).collect(),
+                    )),
                     DType::I64 => Some(TensorValue::new_i64_values(shape.clone(), values.to_vec())),
+                    DType::I32 => Some(TensorValue::new_i32_values(shape.clone(), values.to_vec())),
                     DType::Bool => Some(TensorValue::new_bool_values(
                         shape.clone(),
                         values.iter().map(|&v| v != 0).collect(),
@@ -16478,6 +16491,96 @@ mod tests {
                 assert!(is_dense(&got), "convert -> {t} must stay dense");
             }
         }
+    }
+
+    #[test]
+    fn dense_int_to_f32_and_i32_convert_matches_generic() {
+        // int→f32 (F32 is JAX's default float) and i64→i32 narrowing previously fell to
+        // the per-Literal convert path. Dense (densified i64/i32 source) must match the
+        // boxed generic path (forced via new_with_literal_buffer), incl large values
+        // exercising f32 rounding (>2^24), i64→f32 double-round (>2^53), i32 wrap (>2^31).
+        let data: Vec<i64> = vec![
+            0, 1, -1, 7, -7, 100,
+            i64::from(i32::MAX), i64::from(i32::MIN),
+            16_777_217, 16_777_219, // > 2^24: f32 rounds
+            1 << 53, (1 << 53) + 1, // > 2^53: i64->f64 rounds
+            5_000_000_000, -123_456_789, 9_007_199_254_740_993,
+        ];
+        let lits = |v: &Value| v.as_tensor().unwrap().elements.iter().copied().collect::<Vec<Literal>>();
+        let n = data.len() as u32;
+        let i64_dense = Value::Tensor(TensorValue::new_i64_values(Shape::vector(n), data.clone()).unwrap());
+        let i64_boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::I64,
+                Shape::vector(n),
+                fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::I64(v)).collect()),
+            )
+            .unwrap(),
+        );
+        assert!(i64_dense.as_tensor().unwrap().elements.as_i64_slice().is_some());
+        assert!(i64_boxed.as_tensor().unwrap().elements.as_i64_slice().is_none());
+        let i32data: Vec<i64> = data.iter().map(|&v| i64::from(v as i32)).collect();
+        let i32_dense = Value::Tensor(
+            TensorValue::new(DType::I32, Shape::vector(n), i32data.iter().map(|&v| Literal::I64(v)).collect()).unwrap(),
+        );
+        let i32_boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::I32,
+                Shape::vector(n),
+                fj_core::LiteralBuffer::new(i32data.iter().map(|&v| Literal::I64(v)).collect()),
+            )
+            .unwrap(),
+        );
+        for t in ["f32", "i32", "f64", "i64", "bf16", "f16"] {
+            let p = params(&[("new_dtype", t)]);
+            assert_eq!(
+                lits(&eval_convert_element_type(std::slice::from_ref(&i64_dense), &p).unwrap()),
+                lits(&eval_convert_element_type(std::slice::from_ref(&i64_boxed), &p).unwrap()),
+                "i64 -> {t} dense != generic"
+            );
+            assert_eq!(
+                lits(&eval_convert_element_type(std::slice::from_ref(&i32_dense), &p).unwrap()),
+                lits(&eval_convert_element_type(std::slice::from_ref(&i32_boxed), &p).unwrap()),
+                "i32 -> {t} dense != generic"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_convert_int_to_f32_dense_vs_generic() {
+        use std::time::Instant;
+        let n = 2_000_000usize;
+        let data: Vec<i64> = (0..n).map(|i| i64::from((i as i32).wrapping_mul(2_654_435_761u32 as i32))).collect();
+        let dense = Value::Tensor(TensorValue::new_i64_values(Shape::vector(n as u32), data.clone()).unwrap());
+        let boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::I64,
+                Shape::vector(n as u32),
+                fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::I64(v)).collect()),
+            )
+            .unwrap(),
+        );
+        let p = params(&[("new_dtype", "f32")]);
+        let best = |v: &Value| {
+            let _ = eval_convert_element_type(std::slice::from_ref(v), &p).unwrap();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let t = Instant::now();
+                let o = eval_convert_element_type(std::slice::from_ref(v), &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let generic = best(&boxed);
+        let dense_t = best(&dense);
+        println!(
+            "BENCH convert i64->f32 [{n}]: generic={:.2}ms dense={:.2}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
     }
 
     #[test]
