@@ -3940,8 +3940,8 @@ fn batch_eigh_multi(
     }
 
     let matrix_len = m * n;
-    let mut w_elements = Vec::with_capacity(batch_size * m);
-    let mut v_elements = Vec::with_capacity(batch_size * m * m);
+    let mut w_values = Vec::with_capacity(batch_size * m);
+    let mut v_values = Vec::with_capacity(batch_size * m * m);
 
     if m == 3 {
         let mut matrix = Vec::new();
@@ -3961,14 +3961,14 @@ fn batch_eigh_multi(
                 elements[8].as_f64().ok_or_else(eigh_type_mismatch)?,
             ];
             if let Some((w3, v3)) = analytic_eigh_3x3(&a) {
-                append_eigh_3x3_outputs(w3, v3, &mut w_elements, &mut v_elements);
+                append_eigh_3x3_outputs(w3, v3, &mut w_values, &mut v_values);
                 continue;
             }
 
             matrix.clear();
             matrix.extend_from_slice(&a);
             let scratch = fallback_scratch.get_or_insert_with(|| EighScratch::with_order(3));
-            append_eigh_decomposition(&mut matrix, m, scratch, &mut w_elements, &mut v_elements);
+            append_eigh_decomposition(&mut matrix, m, scratch, &mut w_values, &mut v_values);
         }
     } else {
         // Extract every batch matrix to f64 once (cheap, serial — also surfaces any
@@ -4036,8 +4036,8 @@ fn batch_eigh_multi(
             });
         }
 
-        w_elements.extend(w_out.into_iter().map(Literal::from_f64));
-        v_elements.extend(v_out.into_iter().map(Literal::from_f64));
+        w_values = w_out;
+        v_values = v_out;
     }
 
     let w_shape = Shape {
@@ -4046,11 +4046,11 @@ fn batch_eigh_multi(
     let v_shape = Shape {
         dims: vec![batch_size as u32, m as u32, m as u32],
     };
-    let w = TensorValue::new(tensor.dtype, w_shape, w_elements)
+    let w = batched_eigh_output_tensor(tensor.dtype, w_shape, w_values)
         .map(Value::Tensor)
         .map(|result| BatchTracer::batched(result, 0))
         .map_err(|e| BatchError::TensorError(e.to_string()))?;
-    let v = TensorValue::new(tensor.dtype, v_shape, v_elements)
+    let v = batched_eigh_output_tensor(tensor.dtype, v_shape, v_values)
         .map(Value::Tensor)
         .map(|result| BatchTracer::batched(result, 0))
         .map_err(|e| BatchError::TensorError(e.to_string()))?;
@@ -4064,11 +4064,27 @@ fn eigh_type_mismatch() -> BatchError {
 fn append_eigh_3x3_outputs(
     w: [f64; 3],
     v: [f64; 9],
-    w_elements: &mut Vec<Literal>,
-    v_elements: &mut Vec<Literal>,
+    w_values: &mut Vec<f64>,
+    v_values: &mut Vec<f64>,
 ) {
-    w_elements.extend(w.into_iter().map(Literal::from_f64));
-    v_elements.extend(v.into_iter().map(Literal::from_f64));
+    w_values.extend_from_slice(&w);
+    v_values.extend_from_slice(&v);
+}
+
+fn batched_eigh_output_tensor(
+    dtype: DType,
+    shape: Shape,
+    values: Vec<f64>,
+) -> Result<TensorValue, fj_core::ValueError> {
+    if dtype == DType::F64 {
+        TensorValue::new_with_literal_buffer(dtype, shape, LiteralBuffer::from_f64_values(values))
+    } else {
+        TensorValue::new(
+            dtype,
+            shape,
+            values.into_iter().map(Literal::from_f64).collect(),
+        )
+    }
 }
 
 #[derive(Default)]
@@ -4131,12 +4147,12 @@ fn append_eigh_decomposition(
     a: &mut [f64],
     n: usize,
     scratch: &mut EighScratch,
-    w_elements: &mut Vec<Literal>,
-    v_elements: &mut Vec<Literal>,
+    w_values: &mut Vec<f64>,
+    v_values: &mut Vec<f64>,
 ) {
     eigh_decompose_matrix_into(a, n, scratch);
-    w_elements.extend(scratch.w_sorted.iter().copied().map(Literal::from_f64));
-    v_elements.extend(scratch.v_sorted.iter().copied().map(Literal::from_f64));
+    w_values.extend_from_slice(&scratch.w_sorted);
+    v_values.extend_from_slice(&scratch.v_sorted);
 }
 
 fn eigh_decompose_matrix_into(a: &mut [f64], n: usize, scratch: &mut EighScratch) {
