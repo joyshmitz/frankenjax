@@ -1031,7 +1031,13 @@ pub(crate) fn eval_broadcast_in_dim(
             }
             if let Some(src) = tensor.elements.as_u32_slice() {
                 let out = broadcast_replicate(
-                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                    total,
+                    out_rank,
+                    &target_dims,
+                    &out_to_in,
+                    in_dims,
+                    &in_strides,
+                    src,
                 );
                 return Ok(Value::Tensor(TensorValue::new_u32_values(
                     Shape { dims: target_dims },
@@ -1040,7 +1046,13 @@ pub(crate) fn eval_broadcast_in_dim(
             }
             if let Some(src) = tensor.elements.as_u64_slice() {
                 let out = broadcast_replicate(
-                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                    total,
+                    out_rank,
+                    &target_dims,
+                    &out_to_in,
+                    in_dims,
+                    &in_strides,
+                    src,
                 );
                 return Ok(Value::Tensor(TensorValue::new_u64_values(
                     Shape { dims: target_dims },
@@ -1564,7 +1576,15 @@ pub(crate) fn eval_pad(
             pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
         } else {
             pad_fill_place(
-                src, pad, out_total, rank, in_dims, &lows, &interiors, &out_dims, &out_strides,
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &interiors,
+                &out_dims,
+                &out_strides,
             )
         };
         return Ok(Value::Tensor(TensorValue::new_u32_values(
@@ -1577,7 +1597,15 @@ pub(crate) fn eval_pad(
             pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
         } else {
             pad_fill_place(
-                src, pad, out_total, rank, in_dims, &lows, &interiors, &out_dims, &out_strides,
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &interiors,
+                &out_dims,
+                &out_strides,
             )
         };
         return Ok(Value::Tensor(TensorValue::new_u64_values(
@@ -13349,36 +13377,95 @@ mod tests {
     }
 
     #[test]
-    fn u32_u64_structural_ops_dense_match_generic_and_preserve_dtype() {
+    fn u32_u64_structural_ops_dense_match_generic_and_preserve_dtype()
+    -> Result<(), Box<dyn std::error::Error>> {
         // u32/u64 structural ops (transpose / slice contig+strided / reverse / tile /
         // broadcast_in_dim / pad) used to fall to the generic per-Literal path (gated on
         // as_i64_slice, None for u32/u64). The new dense as_u32/u64_slice paths must keep
         // the uint dtype AND match the boxed generic path bit-for-bit (incl values above
         // i32::MAX / i64::MAX to prove no signed reinterpretation).
+        let mut fixtures: Vec<(String, Vec<u32>, Vec<u64>)> = Vec::new();
         for dt in [DType::U32, DType::U64] {
-            let lit = |v: u64| if dt == DType::U32 { Literal::U32(v as u32) } else { Literal::U64(v) };
+            let lit = |v: u64| {
+                if dt == DType::U32 {
+                    Literal::U32(v as u32)
+                } else {
+                    Literal::U64(v)
+                }
+            };
             let mk_d = |dims: &[u32], d: &[u64]| {
-                Value::Tensor(TensorValue::new(dt, Shape { dims: dims.to_vec() }, d.iter().map(|&v| lit(v)).collect()).unwrap())
+                Value::Tensor(
+                    TensorValue::new(
+                        dt,
+                        Shape {
+                            dims: dims.to_vec(),
+                        },
+                        d.iter().map(|&v| lit(v)).collect(),
+                    )
+                    .unwrap(),
+                )
             };
             let mk_b = |dims: &[u32], d: &[u64]| {
-                Value::Tensor(TensorValue::new_with_literal_buffer(dt, Shape { dims: dims.to_vec() }, fj_core::LiteralBuffer::new(d.iter().map(|&v| lit(v)).collect())).unwrap())
+                Value::Tensor(
+                    TensorValue::new_with_literal_buffer(
+                        dt,
+                        Shape {
+                            dims: dims.to_vec(),
+                        },
+                        fj_core::LiteralBuffer::new(d.iter().map(|&v| lit(v)).collect()),
+                    )
+                    .unwrap(),
+                )
             };
-            let getu = |v: &Value| -> (DType, Vec<u64>) {
+            let getu = |v: &Value| -> (DType, Vec<u32>, Vec<u64>) {
                 let t = v.as_tensor().unwrap();
-                (t.dtype, t.elements.iter().map(|l| match l {
-                    Literal::U32(x) => u64::from(*x),
-                    Literal::U64(x) => *x,
-                    o => panic!("expected unsigned, got {o:?}"),
-                }).collect())
+                (
+                    t.dtype,
+                    t.shape.dims.clone(),
+                    t.elements
+                        .iter()
+                        .map(|l| match l {
+                            Literal::U32(x) => u64::from(*x),
+                            Literal::U64(x) => *x,
+                            o => panic!("expected unsigned, got {o:?}"),
+                        })
+                        .collect(),
+                )
             };
             // Values straddling the i32/i64 sign boundary.
-            let hi: u64 = if dt == DType::U32 { 1u64 << 31 } else { 1u64 << 63 };
-            let data: Vec<u64> = (0..24u64).map(|i| hi.wrapping_add(i.wrapping_mul(7))).collect();
+            let hi: u64 = if dt == DType::U32 {
+                1u64 << 31
+            } else {
+                1u64 << 63
+            };
+            let data: Vec<u64> = (0..24u64)
+                .map(|i| hi.wrapping_add(i.wrapping_mul(7)))
+                .collect();
 
-            let single: &[(fn(&[Value], &BTreeMap<String, String>) -> Result<Value, EvalError>, BTreeMap<String, String>, &str)] = &[
-                (eval_transpose, params(&[("permutation", "1,0")]), "transpose"),
-                (eval_slice, params(&[("start_indices", "0,0"), ("limit_indices", "4,6")]), "slice-contig"),
-                (eval_slice, params(&[("start_indices", "0,0"), ("limit_indices", "4,6"), ("strides", "2,2")]), "slice-strided"),
+            let single: &[(
+                fn(&[Value], &BTreeMap<String, String>) -> Result<Value, EvalError>,
+                BTreeMap<String, String>,
+                &str,
+            )] = &[
+                (
+                    eval_transpose,
+                    params(&[("permutation", "1,0")]),
+                    "transpose",
+                ),
+                (
+                    eval_slice,
+                    params(&[("start_indices", "0,0"), ("limit_indices", "4,6")]),
+                    "slice-contig",
+                ),
+                (
+                    eval_slice,
+                    params(&[
+                        ("start_indices", "0,0"),
+                        ("limit_indices", "4,6"),
+                        ("strides", "2,2"),
+                    ]),
+                    "slice-strided",
+                ),
                 (eval_rev, params(&[("axes", "0,1")]), "reverse"),
                 (eval_tile, params(&[("reps", "2,1")]), "tile"),
             ];
@@ -13387,24 +13474,44 @@ mod tests {
                 let b = f(std::slice::from_ref(&mk_b(&[4, 6], &data)), p).unwrap();
                 assert_eq!(getu(&d).0, dt, "{dt:?} {label}: dense dtype");
                 assert_eq!(getu(&d), getu(&b), "{dt:?} {label}: dense != generic");
+                let (_, shape, words) = getu(&d);
+                fixtures.push((format!("{dt:?}_{label}"), shape, words));
             }
 
             // broadcast_in_dim [3] -> [4,3]
             let bd = data[..3].to_vec();
             let pbc = params(&[("shape", "4,3"), ("broadcast_dimensions", "1")]);
-            let d = eval_broadcast_in_dim(std::slice::from_ref(&mk_d(&[3], &bd)), &pbc).unwrap();
-            let b = eval_broadcast_in_dim(std::slice::from_ref(&mk_b(&[3], &bd)), &pbc).unwrap();
+            let d = eval_broadcast_in_dim(std::slice::from_ref(&mk_d(&[3], &bd)), &pbc)
+                .unwrap();
+            let b = eval_broadcast_in_dim(std::slice::from_ref(&mk_b(&[3], &bd)), &pbc)
+                .unwrap();
             assert_eq!(getu(&d).0, dt, "{dt:?} broadcast dtype");
             assert_eq!(getu(&d), getu(&b), "{dt:?} broadcast dense != generic");
+            let (_, shape, words) = getu(&d);
+            fixtures.push((format!("{dt:?}_broadcast"), shape, words));
 
             // pad [4,6] with a 0-d uint pad value (dtype must match operand), interior 1.
-            let padv = Value::Tensor(TensorValue::new(dt, Shape { dims: vec![] }, vec![lit(hi + 5)]).unwrap());
-            let pp = params(&[("padding_low", "1,1"), ("padding_high", "1,1"), ("padding_interior", "1,0")]);
+            let padv = Value::Tensor(
+                TensorValue::new(dt, Shape { dims: vec![] }, vec![lit(hi + 5)]).unwrap(),
+            );
+            let pp = params(&[
+                ("padding_low", "1,1"),
+                ("padding_high", "1,1"),
+                ("padding_interior", "1,0"),
+            ]);
             let d = eval_pad(&[mk_d(&[4, 6], &data), padv.clone()], &pp).unwrap();
             let b = eval_pad(&[mk_b(&[4, 6], &data), padv.clone()], &pp).unwrap();
             assert_eq!(getu(&d).0, dt, "{dt:?} pad dtype");
             assert_eq!(getu(&d), getu(&b), "{dt:?} pad dense != generic");
+            let (_, shape, words) = getu(&d);
+            fixtures.push((format!("{dt:?}_pad"), shape, words));
         }
+        let digest = fj_test_utils::fixture_id_from_json(&fixtures)?;
+        assert_eq!(
+            digest, "0ff54f1e6c29ea74d3ae1999fef679dc08bfb9e1913e92bd0387fa9030b94beb",
+            "u32/u64 structural dense fixture digest changed"
+        );
+        Ok(())
     }
 
     #[test]
@@ -13417,9 +13524,26 @@ mod tests {
         let (rows, cols) = (2048usize, 2048usize);
         let dims = vec![rows as u32, cols as u32];
         let data: Vec<u32> = (0..rows * cols).map(|i| i as u32).collect();
-        let dense = Value::Tensor(TensorValue::new(DType::U32, Shape { dims: dims.clone() }, data.iter().map(|&v| Literal::U32(v)).collect()).unwrap());
-        let boxed = Value::Tensor(TensorValue::new_with_literal_buffer(DType::U32, Shape { dims: dims.clone() }, fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::U32(v)).collect())).unwrap());
-        let p = params(&[("start_indices", "0,0"), ("limit_indices", &format!("{},{cols}", rows / 2))]);
+        let dense = Value::Tensor(
+            TensorValue::new(
+                DType::U32,
+                Shape { dims: dims.clone() },
+                data.iter().map(|&v| Literal::U32(v)).collect(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::U32,
+                Shape { dims: dims.clone() },
+                fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::U32(v)).collect()),
+            )
+            .unwrap(),
+        );
+        let p = params(&[
+            ("start_indices", "0,0"),
+            ("limit_indices", &format!("{},{cols}", rows / 2)),
+        ]);
         let best = |v: &Value| {
             let _ = eval_slice(std::slice::from_ref(v), &p).unwrap();
             let mut b = f64::MAX;
