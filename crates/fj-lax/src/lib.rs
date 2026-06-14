@@ -1661,6 +1661,27 @@ fn apply_bitwise_binary_i64(primitive: Primitive, lhs: i64, rhs: i64) -> i64 {
     }
 }
 
+/// Bitwise binary on i32 operands (stored sign-extended in i64). Done at i32 WIDTH —
+/// crucially ShiftRightLogical must zero-fill from bit 31 (mask the sign extension via
+/// `as u32`), NOT bit 63, and ShiftLeft/arithmetic shr mask the count to <32 (i32 width).
+/// AND/OR/XOR are bit-preserving and stay valid i32. The i32 result is sign-extended back
+/// into i64 storage. JAX/XLA leave shift-by-≥width undefined; Rust's `wrapping_sh*`
+/// (count % 32) is a consistent definition.
+fn apply_bitwise_binary_i32(primitive: Primitive, lhs: i64, rhs: i64) -> i64 {
+    let a = lhs as i32;
+    let b = rhs as i32;
+    let r: i32 = match primitive {
+        Primitive::BitwiseAnd => a & b,
+        Primitive::BitwiseOr => a | b,
+        Primitive::BitwiseXor => a ^ b,
+        Primitive::ShiftLeft => a.wrapping_shl(b as u32),
+        Primitive::ShiftRightArithmetic => a.wrapping_shr(b as u32),
+        Primitive::ShiftRightLogical => ((a as u32).wrapping_shr(b as u32)) as i32,
+        _ => a,
+    };
+    i64::from(r)
+}
+
 /// Bitwise (= logical) `and`/`or`/`xor` on `Bool`. JAX lowers `logical_and`,
 /// bool `&`, and even bool `*` to `lax.bitwise_and` on the bool (PRED) dtype
 /// (jax/_src/numpy/ufuncs.py), so the eval layer must accept Bool operands and
@@ -1883,6 +1904,68 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                     .map_err(EvalError::InvalidTensor)?,
             ))
         }
+        // i32 (JAX's default int) scalar⊗tensor: was unsupported (fell through to error).
+        // The scalar is a dtype-less Literal::I64 taken as i32 here (tensor is i32).
+        (Value::Scalar(fj_core::Literal::I64(scalar)), Value::Tensor(tensor))
+            if tensor.dtype == fj_core::DType::I32 =>
+        {
+            if let Some(vals) = tensor.elements.as_i64_slice() {
+                let out: Vec<i64> = vals
+                    .iter()
+                    .map(|&v| apply_bitwise_binary_i32(primitive, *scalar, v))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_i32_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for el in tensor.elements.iter() {
+                let fj_core::Literal::I64(v) = el else {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "bitwise ops require integer tensors",
+                    });
+                };
+                elements.push(fj_core::Literal::I64(apply_bitwise_binary_i32(
+                    primitive, *scalar, *v,
+                )));
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::I32, tensor.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        (Value::Tensor(tensor), Value::Scalar(fj_core::Literal::I64(scalar)))
+            if tensor.dtype == fj_core::DType::I32 =>
+        {
+            if let Some(vals) = tensor.elements.as_i64_slice() {
+                let out: Vec<i64> = vals
+                    .iter()
+                    .map(|&v| apply_bitwise_binary_i32(primitive, v, *scalar))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_i32_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
+            let mut elements = Vec::with_capacity(tensor.elements.len());
+            for el in tensor.elements.iter() {
+                let fj_core::Literal::I64(v) = el else {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "bitwise ops require integer tensors",
+                    });
+                };
+                elements.push(fj_core::Literal::I64(apply_bitwise_binary_i32(
+                    primitive, *v, *scalar,
+                )));
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::I32, tensor.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
         (Value::Scalar(fj_core::Literal::U32(scalar)), Value::Tensor(tensor))
             if tensor.dtype == fj_core::DType::U32 =>
         {
@@ -2083,6 +2166,48 @@ fn eval_bitwise_binary(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
                             .map_err(EvalError::InvalidTensor)?,
                     ))
                 }
+                fj_core::DType::I32 => {
+                    // i32 broadcast bitwise (was unsupported). Same dense broadcast as
+                    // I64 but applied at i32 width via apply_bitwise_binary_i32.
+                    if let (Some(av), Some(bv)) =
+                        (a.elements.as_i64_slice(), b.elements.as_i64_slice())
+                    {
+                        let mut out = Vec::with_capacity(out_count);
+                        crate::arithmetic::broadcast_visit_row_major(
+                            &out_shape.dims,
+                            &a_strides,
+                            &b_strides,
+                            |ai, bi| {
+                                out.push(apply_bitwise_binary_i32(primitive, av[ai], bv[bi]));
+                            },
+                        );
+                        return Ok(Value::Tensor(
+                            TensorValue::new_i32_values(out_shape, out)
+                                .map_err(EvalError::InvalidTensor)?,
+                        ));
+                    }
+                    let mut elements = Vec::with_capacity(out_count);
+                    for flat_idx in 0..out_count {
+                        let multi = bitwise_flat_to_multi(flat_idx, &out_strides);
+                        let a_idx = bitwise_broadcast_flat_index(&multi, &a_strides);
+                        let b_idx = bitwise_broadcast_flat_index(&multi, &b_strides);
+                        let (fj_core::Literal::I64(va), fj_core::Literal::I64(vb)) =
+                            (&a.elements[a_idx], &b.elements[b_idx])
+                        else {
+                            return Err(EvalError::TypeMismatch {
+                                primitive,
+                                detail: "bitwise ops require integer tensors",
+                            });
+                        };
+                        elements.push(fj_core::Literal::I64(apply_bitwise_binary_i32(
+                            primitive, *va, *vb,
+                        )));
+                    }
+                    Ok(Value::Tensor(
+                        TensorValue::new(fj_core::DType::I32, out_shape, elements)
+                            .map_err(EvalError::InvalidTensor)?,
+                    ))
+                }
                 fj_core::DType::U32 => {
                     let mut elements = Vec::with_capacity(out_count);
                     for flat_idx in 0..out_count {
@@ -2239,6 +2364,39 @@ fn eval_bitwise_tensor_same_shape(
             }
             Ok(Value::Tensor(
                 TensorValue::new(fj_core::DType::I64, a.shape.clone(), elements)
+                    .map_err(EvalError::InvalidTensor)?,
+            ))
+        }
+        fj_core::DType::I32 => {
+            // i32 (JAX's default int) bitwise previously hit the `_ => Err` arm and was
+            // UNSUPPORTED. i32 shares the i64 backing; apply at i32 width (see
+            // apply_bitwise_binary_i32 — ShiftRightLogical zero-fills from bit 31).
+            // Dense as_i64_slice path → dense I32 output; boxed Literal::I64 fallback.
+            if let (Some(av), Some(bv)) = (a.elements.as_i64_slice(), b.elements.as_i64_slice()) {
+                let out: Vec<i64> = av
+                    .iter()
+                    .zip(bv)
+                    .map(|(&va, &vb)| apply_bitwise_binary_i32(primitive, va, vb))
+                    .collect();
+                return Ok(Value::Tensor(
+                    TensorValue::new_i32_values(a.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
+            let mut elements = Vec::with_capacity(a.elements.len());
+            for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
+                let (fj_core::Literal::I64(va), fj_core::Literal::I64(vb)) = (ea, eb) else {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "bitwise ops require integer tensors",
+                    });
+                };
+                elements.push(fj_core::Literal::I64(apply_bitwise_binary_i32(
+                    primitive, *va, *vb,
+                )));
+            }
+            Ok(Value::Tensor(
+                TensorValue::new(fj_core::DType::I32, a.shape.clone(), elements)
                     .map_err(EvalError::InvalidTensor)?,
             ))
         }
@@ -11712,6 +11870,79 @@ mod tests {
     }
 
     // ── Bitwise tests ───────────────────────────────────────────────
+
+    #[test]
+    fn i32_bitwise_ops_supported_and_correct() {
+        // i32 (JAX's default int) bitwise previously ERRORED ("bitwise ops require
+        // integer types"). Verify every op now works at i32 width — especially
+        // ShiftRightLogical, which must zero-fill from bit 31 (negative i32), not bit 63.
+        use fj_core::Primitive::{
+            BitwiseAnd, BitwiseOr, BitwiseXor, ShiftLeft, ShiftRightArithmetic,
+            ShiftRightLogical,
+        };
+        let mk = |d: &[i32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    fj_core::DType::I32,
+                    Shape::vector(d.len() as u32),
+                    d.iter().map(|&v| fj_core::Literal::I64(i64::from(v))).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let geti = |v: &Value| -> Vec<i32> {
+            v.as_tensor().unwrap().elements.iter().map(|l| match l {
+                fj_core::Literal::I64(x) => *x as i32,
+                o => panic!("expected I64-backed i32, got {o:?}"),
+            }).collect()
+        };
+        let refop = |op: fj_core::Primitive, x: i32, y: i32| -> i32 {
+            match op {
+                BitwiseAnd => x & y,
+                BitwiseOr => x | y,
+                BitwiseXor => x ^ y,
+                ShiftLeft => x.wrapping_shl(y as u32),
+                ShiftRightArithmetic => x.wrapping_shr(y as u32),
+                ShiftRightLogical => ((x as u32).wrapping_shr(y as u32)) as i32,
+                _ => x,
+            }
+        };
+        let a = [-1i32, 0x1234_5678, i32::MIN, 5, -7, 0];
+        let b = [0x0f0f_0f0f, -1, 3, 2, 1, 31];
+        let p = BTreeMap::new();
+        for op in [BitwiseAnd, BitwiseOr, BitwiseXor, ShiftLeft, ShiftRightArithmetic, ShiftRightLogical] {
+            let r = eval_primitive(op, &[mk(&a), mk(&b)], &p).unwrap();
+            assert_eq!(r.as_tensor().unwrap().dtype, fj_core::DType::I32, "{op:?} dtype");
+            assert_eq!(
+                geti(&r),
+                a.iter().zip(&b).map(|(&x, &y)| refop(op, x, y)).collect::<Vec<_>>(),
+                "{op:?} same-shape"
+            );
+            let s = Value::Scalar(fj_core::Literal::I64(i64::from(b[0])));
+            assert_eq!(
+                geti(&eval_primitive(op, &[mk(&a), s.clone()], &p).unwrap()),
+                a.iter().map(|&x| refop(op, x, b[0])).collect::<Vec<_>>(),
+                "{op:?} tensor⊗scalar"
+            );
+            assert_eq!(
+                geti(&eval_primitive(op, &[s.clone(), mk(&a)], &p).unwrap()),
+                a.iter().map(|&x| refop(op, b[0], x)).collect::<Vec<_>>(),
+                "{op:?} scalar⊗tensor"
+            );
+        }
+        // Broadcast [2,3] & [3].
+        let m = Value::Tensor(
+            TensorValue::new(
+                fj_core::DType::I32,
+                Shape { dims: vec![2, 3] },
+                [-1i32, 2, 3, 4, 5, 6].iter().map(|&v| fj_core::Literal::I64(i64::from(v))).collect(),
+            )
+            .unwrap(),
+        );
+        let r = eval_primitive(BitwiseAnd, &[m, mk(&[7i32, -1, 0])], &p).unwrap();
+        assert_eq!(r.as_tensor().unwrap().dtype, fj_core::DType::I32, "broadcast dtype");
+        assert_eq!(geti(&r), vec![-1 & 7, 2 & -1, 3 & 0, 4 & 7, 5 & -1, 6 & 0], "broadcast and");
+    }
 
     #[test]
     fn bitwise_and_scalars() {
