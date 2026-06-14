@@ -4603,13 +4603,18 @@ fn batch_svd_multi(
             let base = b * matrix_len;
             if thin_3x2 {
                 let a = &all[base..base + 6];
-                svd_decompose_matrix_3x2_thin([a[0], a[1], a[2], a[3], a[4], a[5]], scratch);
+                svd_decompose_matrix_3x2_thin_into(
+                    [a[0], a[1], a[2], a[3], a[4], a[5]],
+                    u,
+                    s,
+                    vt,
+                );
             } else {
                 svd_decompose_matrix(m, n, &all[base..base + matrix_len], full_matrices, scratch);
+                u.copy_from_slice(&scratch.u_out);
+                s.copy_from_slice(&scratch.sigma);
+                vt.copy_from_slice(&scratch.vt);
             }
-            u.copy_from_slice(&scratch.u_out);
-            s.copy_from_slice(&scratch.sigma);
-            vt.copy_from_slice(&scratch.vt);
         };
 
     let total_work = batch_size
@@ -4742,13 +4747,18 @@ fn batch_svd_multi_f64_outputs(
             let base = b * matrix_len;
             if thin_3x2 {
                 let a = &all[base..base + 6];
-                svd_decompose_matrix_3x2_thin([a[0], a[1], a[2], a[3], a[4], a[5]], scratch);
+                svd_decompose_matrix_3x2_thin_into(
+                    [a[0], a[1], a[2], a[3], a[4], a[5]],
+                    u,
+                    s,
+                    vt,
+                );
             } else {
                 svd_decompose_matrix(m, n, &all[base..base + matrix_len], full_matrices, scratch);
+                u.copy_from_slice(&scratch.u_out);
+                s.copy_from_slice(&scratch.sigma);
+                vt.copy_from_slice(&scratch.vt);
             }
-            u.copy_from_slice(&scratch.u_out);
-            s.copy_from_slice(&scratch.sigma);
-            vt.copy_from_slice(&scratch.vt);
         };
 
     let total_work = batch_size
@@ -4937,7 +4947,41 @@ fn svd_decompose_matrix(
     }
 }
 
+#[cfg(test)]
 fn svd_decompose_matrix_3x2_thin(a: [f64; 6], scratch: &mut SvdScratch) {
+    let mut u_values = [0.0_f64; 6];
+    let mut sigma_values = [0.0_f64; 2];
+    let mut vt_values = [0.0_f64; 4];
+    svd_decompose_matrix_3x2_thin_into(a, &mut u_values, &mut sigma_values, &mut vt_values);
+
+    let SvdScratch {
+        sigma,
+        u,
+        u_out,
+        vt,
+        ..
+    } = scratch;
+
+    sigma.clear();
+    sigma.extend_from_slice(&sigma_values);
+    u.clear();
+    u.extend_from_slice(&u_values);
+    u_out.clear();
+    u_out.extend_from_slice(&u_values);
+    vt.clear();
+    vt.extend_from_slice(&vt_values);
+}
+
+fn svd_decompose_matrix_3x2_thin_into(
+    a: [f64; 6],
+    u: &mut [f64],
+    sigma: &mut [f64],
+    vt: &mut [f64],
+) {
+    debug_assert_eq!(u.len(), 6);
+    debug_assert_eq!(sigma.len(), 2);
+    debug_assert_eq!(vt.len(), 4);
+
     let a00 = a[0];
     let a01 = a[1];
     let a10 = a[2];
@@ -5021,21 +5065,11 @@ fn svd_decompose_matrix_3x2_thin(a: [f64; 6], scratch: &mut SvdScratch) {
     let v_sorted10 = if col0 == 0 { v10 } else { v11 };
     let v_sorted11 = if col1 == 0 { v10 } else { v11 };
 
-    let SvdScratch {
-        sigma,
-        u,
-        u_out,
-        vt,
-        ..
-    } = scratch;
-
-    sigma.clear();
-    sigma.resize(2, 0.0_f64);
+    sigma.fill(0.0);
     sigma[0] = lambda0.max(0.0).sqrt();
     sigma[1] = lambda1.max(0.0).sqrt();
 
-    u.clear();
-    u.resize(6, 0.0_f64);
+    u.fill(0.0);
     if sigma[0] > f64::EPSILON * 1e4 {
         let mut val = 0.0;
         val += a00 * v_sorted00;
@@ -5069,11 +5103,6 @@ fn svd_decompose_matrix_3x2_thin(a: [f64; 6], scratch: &mut SvdScratch) {
         u[5] = val / sigma[1];
     }
 
-    u_out.clear();
-    u_out.extend_from_slice(u);
-
-    vt.clear();
-    vt.resize(4, 0.0_f64);
     vt[0] = v_sorted00;
     vt[1] = v_sorted10;
     vt[2] = v_sorted01;
