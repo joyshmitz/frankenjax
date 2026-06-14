@@ -2558,6 +2558,41 @@ fn eval_bitwise_tensor_same_shape(
             ) {
                 return Err(bool_shift_unsupported(primitive));
             }
+            // SWAR fast path: two bit-packed BoolWords operands — the common
+            // mask-combine case (`(a<b) & (c<d)`, since f64 same-shape comparisons
+            // emit BoolWords) — combine 64 bools per u64 word instead of per-element
+            // (and BoolWords otherwise misses as_bool_slice → the per-Literal path).
+            // Bit-identical: unused tail bits are canonicalized to 0 and &/|/^ of
+            // canonical tails stay 0, plus from_bool_words re-canonicalizes. Requires
+            // equal logical lengths (same shape ⇒ same word layout).
+            if let (Some((aw, alen)), Some((bw, blen))) =
+                (a.elements.as_bool_words(), b.elements.as_bool_words())
+                && alen == blen
+            {
+                let words: Vec<u64> = aw
+                    .iter()
+                    .zip(bw)
+                    .map(|(&x, &y)| match primitive {
+                        Primitive::BitwiseAnd => x & y,
+                        Primitive::BitwiseOr => x | y,
+                        _ => x ^ y, // BitwiseXor (only and/or/xor reach here)
+                    })
+                    .collect();
+                let buf = fj_core::LiteralBuffer::from_bool_words(words, alen).ok_or(
+                    EvalError::TypeMismatch {
+                        primitive,
+                        detail: "bool word mask length mismatch",
+                    },
+                )?;
+                return Ok(Value::Tensor(
+                    TensorValue::new_with_literal_buffer(
+                        fj_core::DType::Bool,
+                        a.shape.clone(),
+                        buf,
+                    )
+                    .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
             if let (Some(av), Some(bv)) = (a.elements.as_bool_slice(), b.elements.as_bool_slice()) {
                 let out: Vec<bool> = av
                     .iter()
@@ -12216,6 +12251,82 @@ mod tests {
         let b = Value::scalar_i64(0b1010);
         let out = eval_primitive(Primitive::BitwiseAnd, &[a, b], &no_params()).unwrap();
         assert_eq!(out.as_i64_scalar().unwrap(), 0b1000);
+    }
+
+    #[test]
+    fn bool_words_swar_bitwise_matches_per_element() {
+        // f64 same-shape comparisons emit bit-packed BoolWords. Combining two such
+        // masks with bitwise and/or/xor must take the SWAR word-level path and be
+        // bit-identical to the per-element (Bool storage) reference. n=200 spans
+        // multiple u64 words + a partial tail (200 % 64 = 8).
+        let n = 200usize;
+        let a: Vec<f64> = (0..n).map(|i| (i as f64 * 0.123).sin()).collect();
+        let b: Vec<f64> = (0..n).map(|i| (i as f64 * 0.077).cos()).collect();
+        let va = Value::Tensor(TensorValue::new_f64_values(Shape::vector(n as u32), a).unwrap());
+        let vb = Value::Tensor(TensorValue::new_f64_values(Shape::vector(n as u32), b).unwrap());
+        let p = no_params();
+        // Two BoolWords masks (f64 same-shape ⇒ BoolWords storage).
+        let m1 = eval_primitive(Primitive::Lt, &[va.clone(), vb.clone()], &p).unwrap();
+        let m2 = eval_primitive(Primitive::Ge, &[va.clone(), vb.clone()], &p).unwrap();
+        assert!(m1.as_tensor().unwrap().elements.as_bool_words().is_some(), "m1 must be BoolWords");
+        assert!(m2.as_tensor().unwrap().elements.as_bool_words().is_some(), "m2 must be BoolWords");
+        let bits = |v: &Value| -> Vec<bool> {
+            v.as_tensor().unwrap().elements.iter().map(|l| matches!(l, Literal::Bool(true))).collect()
+        };
+        let m1b = bits(&m1);
+        let m2b = bits(&m2);
+        // Per-element reference via Bool (Vec<bool>) storage.
+        let ref_mk = |d: &[bool]| Value::Tensor(TensorValue::new_bool_values(Shape::vector(n as u32), d.to_vec()).unwrap());
+        for prim in [Primitive::BitwiseAnd, Primitive::BitwiseOr, Primitive::BitwiseXor] {
+            let swar = eval_primitive(prim, &[m1.clone(), m2.clone()], &p).unwrap();
+            assert_eq!(swar.as_tensor().unwrap().dtype, DType::Bool, "{prim:?} dtype");
+            let want: Vec<bool> = m1b.iter().zip(&m2b).map(|(&x, &y)| match prim {
+                Primitive::BitwiseAnd => x & y,
+                Primitive::BitwiseOr => x | y,
+                _ => x ^ y,
+            }).collect();
+            assert_eq!(bits(&swar), want, "{prim:?} SWAR != per-element reference");
+            // Also equals the Bool-storage path bit-for-bit.
+            let perelem = eval_primitive(prim, &[ref_mk(&m1b), ref_mk(&m2b)], &p).unwrap();
+            assert_eq!(bits(&swar), bits(&perelem), "{prim:?} SWAR != Bool-storage path");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_bool_words_swar_bitwise() {
+        use std::time::Instant;
+        let n = 1_000_000usize;
+        let a: Vec<f64> = (0..n).map(|i| (i as f64 * 0.001).sin()).collect();
+        let b: Vec<f64> = (0..n).map(|i| (i as f64 * 0.002).cos()).collect();
+        let va = Value::Tensor(TensorValue::new_f64_values(Shape::vector(n as u32), a).unwrap());
+        let vb = Value::Tensor(TensorValue::new_f64_values(Shape::vector(n as u32), b).unwrap());
+        let p = no_params();
+        let m1 = eval_primitive(Primitive::Lt, &[va.clone(), vb.clone()], &p).unwrap(); // BoolWords
+        let m2 = eval_primitive(Primitive::Ge, &[va.clone(), vb.clone()], &p).unwrap(); // BoolWords
+        let m1b: Vec<bool> = m1.as_tensor().unwrap().elements.iter().map(|l| matches!(l, Literal::Bool(true))).collect();
+        let m2b: Vec<bool> = m2.as_tensor().unwrap().elements.iter().map(|l| matches!(l, Literal::Bool(true))).collect();
+        let b1 = Value::Tensor(TensorValue::new_bool_values(Shape::vector(n as u32), m1b).unwrap());
+        let b2 = Value::Tensor(TensorValue::new_bool_values(Shape::vector(n as u32), m2b).unwrap());
+        let best = |x: &Value, y: &Value| {
+            let _ = eval_primitive(Primitive::BitwiseAnd, &[x.clone(), y.clone()], &p).unwrap();
+            let mut t = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                let o = eval_primitive(Primitive::BitwiseAnd, &[x.clone(), y.clone()], &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            t
+        };
+        let perelem = best(&b1, &b2);   // Bool (Vec<bool>) per-element path
+        let swar = best(&m1, &m2);      // BoolWords SWAR word path
+        println!(
+            "BENCH bool bitwise-and [1e6]: per-element(Bool)={:.3}ms SWAR(BoolWords)={:.3}ms speedup={:.2}x",
+            perelem * 1e3,
+            swar * 1e3,
+            perelem / swar
+        );
     }
 
     #[test]
