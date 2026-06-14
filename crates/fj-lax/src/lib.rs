@@ -3389,6 +3389,7 @@ fn eval_reduce_window_dense_float(
     src: &[f64],
     window_dims: &[usize],
     strides: &[usize],
+    window_dilation: &[usize],
     out_dims: &[u32],
     pad_lows: &[usize],
     input_dims: &[usize],
@@ -3407,7 +3408,9 @@ fn eval_reduce_window_dense_float(
     for _ in 0..win_total {
         let mut off = 0usize;
         for d in 0..rank {
-            off += tap_coord[d] * input_strides[d];
+            // window_dilation spaces taps `wd` apart (atrous pooling); wd==1 (the
+            // contiguous case) is bit-identical to the undilated stencil.
+            off += tap_coord[d] * window_dilation[d] * input_strides[d];
         }
         tap_offsets.push(off);
         tap_coords.push(tap_coord.clone());
@@ -3453,7 +3456,10 @@ fn eval_reduce_window_dense_float(
         let mut base: isize = 0;
         for d in 0..rank {
             let corner = out_idx[d] as isize * strides[d] as isize - pad_lows[d] as isize;
-            if corner < 0 || corner + (window_dims[d] as isize - 1) >= input_dims[d] as isize {
+            if corner < 0
+                || corner + (window_dims[d] as isize - 1) * window_dilation[d] as isize
+                    >= input_dims[d] as isize
+            {
                 interior = false;
                 break;
             }
@@ -3485,7 +3491,7 @@ fn eval_reduce_window_dense_float(
                 let mut in_bounds = true;
                 let mut flat = 0usize;
                 for d in (0..rank).rev() {
-                    let padded = out_idx[d] * strides[d] + coords[d];
+                    let padded = out_idx[d] * strides[d] + coords[d] * window_dilation[d];
                     if padded < pad_lows[d] {
                         in_bounds = false;
                         break;
@@ -3792,6 +3798,7 @@ fn eval_reduce_window_dense_i64(
     src: &[i64],
     window_dims: &[usize],
     strides: &[usize],
+    window_dilation: &[usize],
     out_dims: &[u32],
     pad_lows: &[usize],
     input_dims: &[usize],
@@ -3810,7 +3817,9 @@ fn eval_reduce_window_dense_i64(
     for _ in 0..win_total {
         let mut off = 0usize;
         for d in 0..rank {
-            off += tap_coord[d] * input_strides[d];
+            // window_dilation spaces taps `wd` apart (atrous pooling); wd==1 (the
+            // contiguous case) is bit-identical to the undilated stencil.
+            off += tap_coord[d] * window_dilation[d] * input_strides[d];
         }
         tap_offsets.push(off);
         tap_coords.push(tap_coord.clone());
@@ -3855,7 +3864,10 @@ fn eval_reduce_window_dense_i64(
         let mut base: isize = 0;
         for d in 0..rank {
             let corner = out_idx[d] as isize * strides[d] as isize - pad_lows[d] as isize;
-            if corner < 0 || corner + (window_dims[d] as isize - 1) >= input_dims[d] as isize {
+            if corner < 0
+                || corner + (window_dims[d] as isize - 1) * window_dilation[d] as isize
+                    >= input_dims[d] as isize
+            {
                 interior = false;
                 break;
             }
@@ -3887,7 +3899,7 @@ fn eval_reduce_window_dense_i64(
                 let mut in_bounds = true;
                 let mut flat = 0usize;
                 for d in (0..rank).rev() {
-                    let padded = out_idx[d] * strides[d] + coords[d];
+                    let padded = out_idx[d] * strides[d] + coords[d] * window_dilation[d];
                     if padded < pad_lows[d] {
                         in_bounds = false;
                         break;
@@ -3954,6 +3966,7 @@ fn eval_reduce_window_dense_complex(
     src: &[(f64, f64)],
     window_dims: &[usize],
     strides: &[usize],
+    window_dilation: &[usize],
     out_dims: &[u32],
     pad_lows: &[usize],
     input_dims: &[usize],
@@ -3969,7 +3982,9 @@ fn eval_reduce_window_dense_complex(
     for _ in 0..win_total {
         let mut off = 0usize;
         for d in 0..rank {
-            off += tap_coord[d] * input_strides[d];
+            // window_dilation spaces taps `wd` apart (atrous pooling); wd==1 (the
+            // contiguous case) is bit-identical to the undilated stencil.
+            off += tap_coord[d] * window_dilation[d] * input_strides[d];
         }
         tap_offsets.push(off);
         tap_coords.push(tap_coord.clone());
@@ -4027,7 +4042,10 @@ fn eval_reduce_window_dense_complex(
         let mut base: isize = 0;
         for d in 0..rank {
             let corner = out_idx[d] as isize * strides[d] as isize - pad_lows[d] as isize;
-            if corner < 0 || corner + (window_dims[d] as isize - 1) >= input_dims[d] as isize {
+            if corner < 0
+                || corner + (window_dims[d] as isize - 1) * window_dilation[d] as isize
+                    >= input_dims[d] as isize
+            {
                 interior = false;
                 break;
             }
@@ -4045,7 +4063,7 @@ fn eval_reduce_window_dense_complex(
                 let mut in_bounds = true;
                 let mut flat = 0usize;
                 for d in (0..rank).rev() {
-                    let padded = out_idx[d] * strides[d] + coords[d];
+                    let padded = out_idx[d] * strides[d] + coords[d] * window_dilation[d];
                     if padded < pad_lows[d] {
                         in_bounds = false;
                         break;
@@ -4099,6 +4117,7 @@ fn eval_reduce_window_dense_bool(
     src: &[bool],
     window_dims: &[usize],
     strides: &[usize],
+    window_dilation: &[usize],
     out_dims: &[u32],
     pad_lows: &[usize],
     input_dims: &[usize],
@@ -4114,7 +4133,9 @@ fn eval_reduce_window_dense_bool(
     for _ in 0..win_total {
         let mut off = 0usize;
         for d in 0..rank {
-            off += tap_coord[d] * input_strides[d];
+            // window_dilation spaces taps `wd` apart (atrous pooling); wd==1 (the
+            // contiguous case) is bit-identical to the undilated stencil.
+            off += tap_coord[d] * window_dilation[d] * input_strides[d];
         }
         tap_offsets.push(off);
         tap_coords.push(tap_coord.clone());
@@ -4144,7 +4165,10 @@ fn eval_reduce_window_dense_bool(
         let mut base: isize = 0;
         for d in 0..rank {
             let corner = out_idx[d] as isize * strides[d] as isize - pad_lows[d] as isize;
-            if corner < 0 || corner + (window_dims[d] as isize - 1) >= input_dims[d] as isize {
+            if corner < 0
+                || corner + (window_dims[d] as isize - 1) * window_dilation[d] as isize
+                    >= input_dims[d] as isize
+            {
                 interior = false;
                 break;
             }
@@ -4168,7 +4192,7 @@ fn eval_reduce_window_dense_bool(
                 let mut in_bounds = true;
                 let mut flat = 0usize;
                 for d in (0..rank).rev() {
-                    let padded = out_idx[d] * strides[d] + coords[d];
+                    let padded = out_idx[d] * strides[d] + coords[d] * window_dilation[d];
                     if padded < pad_lows[d] {
                         in_bounds = false;
                         break;
@@ -4705,7 +4729,6 @@ fn eval_reduce_window(
     // through (returns None view) for boxed/non-float input. Bit-identical to the
     // generic loop below (see eval_reduce_window_dense_float).
     if no_base_dilation
-        && no_window_dilation
         && matches!(
             output_dtype,
             fj_core::DType::F64 | fj_core::DType::F32 | fj_core::DType::BF16 | fj_core::DType::F16
@@ -4728,6 +4751,7 @@ fn eval_reduce_window(
             src.as_ref(),
             &window_dims,
             &strides,
+            &window_dilation,
             &out_dims,
             &pad_lows,
             &input_dims,
@@ -4798,7 +4822,6 @@ fn eval_reduce_window(
     // boxed → no i64 slice view) and is narrowed mod-2^32 by the eval_primitive
     // chokepoint regardless.
     if no_base_dilation
-        && no_window_dilation
         && tensor.dtype == fj_core::DType::I64
         && (matches!(reduce_op, "max" | "min") || reduce_window_sum_like(reduce_op))
         && let Some(src) = tensor.elements.as_i64_slice()
@@ -4817,6 +4840,7 @@ fn eval_reduce_window(
             src,
             &window_dims,
             &strides,
+            &window_dilation,
             &out_dims,
             &pad_lows,
             &input_dims,
@@ -4832,7 +4856,6 @@ fn eval_reduce_window(
     // Bool accumulator (see eval_reduce_window_dense_bool). Bit-packed BoolWords
     // storage returns no slice view → stays on the generic path.
     if no_base_dilation
-        && no_window_dilation
         && tensor.dtype == fj_core::DType::Bool
         && matches!(reduce_op, "max" | "min" | "sum")
         && let Some(src) = tensor.elements.as_bool_slice()
@@ -4851,6 +4874,7 @@ fn eval_reduce_window(
             src,
             &window_dims,
             &strides,
+            &window_dilation,
             &out_dims,
             &pad_lows,
             &input_dims,
@@ -4866,7 +4890,6 @@ fn eval_reduce_window(
     // order for the component sums, same lexicographic complex_ge for max/min,
     // same ∓∞/(0,0) init — see eval_reduce_window_dense_complex).
     if no_base_dilation
-        && no_window_dilation
         && matches!(tensor.dtype, fj_core::DType::Complex64 | fj_core::DType::Complex128)
         && matches!(reduce_op, "max" | "min" | "sum")
         && let Some(src) = tensor.elements.as_complex_slice()
@@ -4886,6 +4909,7 @@ fn eval_reduce_window(
             src,
             &window_dims,
             &strides,
+            &window_dilation,
             &out_dims,
             &pad_lows,
             &input_dims,
@@ -12671,6 +12695,164 @@ mod tests {
                 assert_eq!(bits(&l), reference, "{op} {win:?} {stride:?} {pad} literal");
             }
         }
+    }
+
+    /// Atrous pooling (window_dilation > 1) now takes the dense f64/i64 stencil path
+    /// (gated on no_base_dilation only). The dilated-tap dense path must be BIT-FOR-BIT
+    /// identical to the generic per-`Literal` loop, which still handles window_dilation
+    /// for the boxed input (whose `as_*_slice` is None). Covers max/min/sum, f64 + i64,
+    /// SAME + VALID, single and per-axis dilation, incl NaN/±inf/-0.0.
+    #[test]
+    fn dense_reduce_window_window_dilation_matches_generic() {
+        let (rows, cols) = (9usize, 11usize);
+        let data64: Vec<f64> = (0..rows * cols)
+            .map(|i| match i % 11 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                _ => ((i as f64) * 0.41).cos() * 7.0 - (i as f64) * 0.5,
+            })
+            .collect();
+        // F64 forces the generic path via a boxed input (`new` with F64Bits literals
+        // keeps `as_f64_slice` == None); I64 cannot (I64 `new` densifies), so the i64
+        // dilated path — which shares the IDENTICAL tap stencil — is covered against a
+        // hand-computed reference below.
+        let f64_dense = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![rows as u32, cols as u32] }, data64.clone())
+                .unwrap(),
+        );
+        let f64_boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![rows as u32, cols as u32] },
+                data64.iter().copied().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        assert!(f64_boxed.as_tensor().unwrap().elements.as_f64_slice().is_none());
+        assert!(f64_dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+
+        let bits = |v: &Value| -> Vec<u64> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect()
+        };
+
+        for op in ["max", "min", "sum"] {
+            for (win, dil, pad) in [
+                ("3,3", "2,2", "VALID"),
+                ("2,3", "3,2", "VALID"),
+                ("3,3", "2,2", "SAME"),
+                ("2,2", "2,1", "SAME"),
+            ] {
+                let mut p = rw_params_with_padding(op, win, "1,1", pad);
+                p.insert("window_dilation".to_owned(), dil.to_owned());
+                let d = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&f64_dense), &p)
+                    .unwrap();
+                let l = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&f64_boxed), &p)
+                    .unwrap();
+                assert_eq!(
+                    d.as_tensor().unwrap().shape.dims,
+                    l.as_tensor().unwrap().shape.dims,
+                    "{op} win={win} dil={dil} {pad} shape"
+                );
+                assert_eq!(bits(&d), bits(&l), "{op} win={win} dil={dil} {pad} dense!=generic");
+            }
+        }
+
+        // I64 dilated path vs a hand-computed reference (VALID, window 3x3, dilation 2x2).
+        let datai: Vec<i64> = (0..rows * cols).map(|i| (i as i64 * 37 - 211) % 97).collect();
+        let i64_dense = Value::Tensor(
+            TensorValue::new_i64_values(Shape { dims: vec![rows as u32, cols as u32] }, datai.clone())
+                .unwrap(),
+        );
+        let (wr, wc, dr, dc) = (3usize, 3usize, 2usize, 2usize);
+        let eff_r = (wr - 1) * dr + 1;
+        let eff_c = (wc - 1) * dc + 1;
+        let (out_r, out_c) = ((rows - eff_r) / 1 + 1, (cols - eff_c) / 1 + 1);
+        for op in ["max", "min", "sum"] {
+            let mut p = rw_params_with_padding(op, "3,3", "1,1", "VALID");
+            p.insert("window_dilation".to_owned(), "2,2".to_owned());
+            let got = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&i64_dense), &p)
+                .unwrap();
+            let got_vals: Vec<i64> = got
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| if let Literal::I64(x) = l { *x } else { panic!() })
+                .collect();
+            let mut want = Vec::with_capacity(out_r * out_c);
+            for orow in 0..out_r {
+                for ocol in 0..out_c {
+                    let mut acc: i64 = match op {
+                        "max" => i64::MIN,
+                        "min" => i64::MAX,
+                        _ => 0,
+                    };
+                    for tr in 0..wr {
+                        for tc in 0..wc {
+                            let v = datai[(orow + tr * dr) * cols + (ocol + tc * dc)];
+                            acc = match op {
+                                "max" => acc.max(v),
+                                "min" => acc.min(v),
+                                _ => acc.wrapping_add(v),
+                            };
+                        }
+                    }
+                    want.push(acc);
+                }
+            }
+            assert_eq!(got_vals, want, "i64 {op} dilated reduce_window vs hand reference");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_reduce_window_window_dilation_dense_vs_generic() {
+        use std::time::Instant;
+        let (rows, cols) = (512usize, 512usize);
+        let data: Vec<f64> = (0..rows * cols).map(|i| ((i as f64) * 0.013).sin()).collect();
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(Shape { dims: vec![rows as u32, cols as u32] }, data.clone())
+                .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![rows as u32, cols as u32] },
+                data.iter().copied().map(Literal::from_f64).collect(),
+            )
+            .unwrap(),
+        );
+        let mut p = rw_params_with_padding("max", "5,5", "1,1", "VALID");
+        p.insert("window_dilation".to_owned(), "3,3".to_owned());
+        let run = |v: &Value| {
+            let mut acc = 0u64;
+            for _ in 0..20 {
+                let o = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(v), &p).unwrap();
+                acc = acc.wrapping_add(o.as_tensor().unwrap().elements.len() as u64);
+            }
+            acc
+        };
+        run(&dense);
+        run(&boxed); // warm
+        let t = Instant::now();
+        let _ = run(&boxed);
+        let generic = t.elapsed();
+        let t = Instant::now();
+        let _ = run(&dense);
+        let dense_t = t.elapsed();
+        println!(
+            "BENCH reduce_window window_dilation [512x512] win5x5 dil3: generic={:.2}ms dense={:.2}ms speedup={:.2}x",
+            generic.as_secs_f64() * 1e3 / 20.0,
+            dense_t.as_secs_f64() * 1e3 / 20.0,
+            generic.as_secs_f64() / dense_t.as_secs_f64()
+        );
     }
 
     /// Real 2D pooling on rank-4 NHWC (and all f32 pooling) routes through the new
