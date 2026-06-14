@@ -15494,6 +15494,8 @@ mod tests {
             let dense = Value::Tensor(TensorValue::new_half_float_values(dt, Shape::vector(n as u32), bits.clone()).unwrap());
             let mk_lit = |b: u16| if dt == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) };
             let boxed = Value::Tensor(TensorValue::new_with_literal_buffer(dt, Shape::vector(n as u32), fj_core::LiteralBuffer::new(bits.iter().map(|&b| mk_lit(b)).collect())).unwrap());
+            assert!(dense.as_tensor().unwrap().elements.as_half_float_slice().is_some());
+            assert!(boxed.as_tensor().unwrap().elements.as_half_float_slice().is_none());
             let hbits = |v: &Value| -> Vec<u16> {
                 v.as_tensor().unwrap().elements.iter().map(|l| match l {
                     Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
@@ -15511,6 +15513,28 @@ mod tests {
                     extract_i64_vec(&eval_argsort(Primitive::Argsort, &[dense.clone()], &p).unwrap()),
                     extract_i64_vec(&eval_argsort(Primitive::Argsort, &[boxed.clone()], &p).unwrap()),
                     "{dt:?} argsort desc={desc}"
+                );
+            }
+
+            let strided_dims = vec![256_u32, 3_u32];
+            let strided_bits: Vec<u16> = (0..(strided_dims[0] as usize * strided_dims[1] as usize))
+                .map(|i| mk_bits(i.wrapping_mul(17) ^ (i / 3)))
+                .collect();
+            let dense_strided = Value::Tensor(TensorValue::new_half_float_values(dt, Shape { dims: strided_dims.clone() }, strided_bits.clone()).unwrap());
+            let boxed_strided = Value::Tensor(TensorValue::new_with_literal_buffer(dt, Shape { dims: strided_dims }, fj_core::LiteralBuffer::new(strided_bits.iter().map(|&b| mk_lit(b)).collect())).unwrap());
+            assert!(dense_strided.as_tensor().unwrap().elements.as_half_float_slice().is_some());
+            assert!(boxed_strided.as_tensor().unwrap().elements.as_half_float_slice().is_none());
+            for desc in ["false", "true"] {
+                let p = params(&[("dimension", "0"), ("descending", desc)]);
+                assert_eq!(
+                    hbits(&eval_sort(Primitive::Sort, &[dense_strided.clone()], &p).unwrap()),
+                    hbits(&eval_sort(Primitive::Sort, &[boxed_strided.clone()], &p).unwrap()),
+                    "{dt:?} strided sort desc={desc}"
+                );
+                assert_eq!(
+                    extract_i64_vec(&eval_argsort(Primitive::Argsort, &[dense_strided.clone()], &p).unwrap()),
+                    extract_i64_vec(&eval_argsort(Primitive::Argsort, &[boxed_strided.clone()], &p).unwrap()),
+                    "{dt:?} strided argsort desc={desc}"
                 );
             }
         }
