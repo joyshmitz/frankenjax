@@ -3815,6 +3815,18 @@ pub(crate) fn eval_convert_element_type(
                         shape.clone(),
                         values.iter().map(|&v| (v as f64) as f32).collect(),
                     )),
+                    // int->half (mixed-precision): convert_bf16/f16_bits(v as f64) matches
+                    // convert_literal (f64_val = v as f64, then single-round to half).
+                    DType::F16 => Some(TensorValue::new_half_float_values(
+                        DType::F16,
+                        shape.clone(),
+                        values.iter().map(|&v| convert_f16_bits(v as f64)).collect(),
+                    )),
+                    DType::BF16 => Some(TensorValue::new_half_float_values(
+                        DType::BF16,
+                        shape.clone(),
+                        values.iter().map(|&v| convert_bf16_bits(v as f64)).collect(),
+                    )),
                     DType::I64 => Some(TensorValue::new_i64_values(shape.clone(), values.to_vec())),
                     DType::I32 => Some(TensorValue::new_i32_values(shape.clone(), values.to_vec())),
                     DType::Bool => Some(TensorValue::new_bool_values(
