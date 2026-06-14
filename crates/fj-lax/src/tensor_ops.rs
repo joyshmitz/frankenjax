@@ -3728,6 +3728,14 @@ pub(crate) fn eval_convert_element_type(
                         shape.clone(),
                         values.iter().map(|&v| convert_bf16_bits(v)).collect(),
                     )),
+                    // f64->complex (FFT input prep): re = v, im = 0. new_complex_values
+                    // rounds Complex64's re to f32, matching convert_literal's
+                    // from_complex64(v as f32, 0) / from_complex128(v, 0). Was per-Literal.
+                    DType::Complex128 | DType::Complex64 => Some(TensorValue::new_complex_values(
+                        target_dtype,
+                        shape.clone(),
+                        values.iter().map(|&v| (v, 0.0)).collect(),
+                    )),
                     // i64_val(F64Bits) == v as i64 (NaN->0, +-inf saturate).
                     DType::I64 => Some(TensorValue::new_i64_values(
                         shape.clone(),
@@ -3776,6 +3784,13 @@ pub(crate) fn eval_convert_element_type(
                             .iter()
                             .map(|&v| convert_bf16_bits(f64::from(v)))
                             .collect(),
+                    )),
+                    // f32->complex: re = f64::from(v), im = 0 (new_complex_values rounds
+                    // Complex64's re to f32 == convert_literal's from_complex64(v, 0)).
+                    DType::Complex128 | DType::Complex64 => Some(TensorValue::new_complex_values(
+                        target_dtype,
+                        shape.clone(),
+                        values.iter().map(|&v| (f64::from(v), 0.0)).collect(),
                     )),
                     // i64_val(F32Bits) == f32 as i64 (NOT via f64).
                     DType::I64 => Some(TensorValue::new_i64_values(
@@ -3901,6 +3916,30 @@ pub(crate) fn eval_convert_element_type(
                 if let Some(t) = dense {
                     return Ok(Value::Tensor(t.map_err(EvalError::InvalidTensor)?));
                 }
+            } else if let Some(values) = tensor.elements.as_complex_slice() {
+                // Complex source (FFT/signal pipelines): real-part extraction for float
+                // targets (im dropped, matching convert_literal's `re` read) and
+                // complex->complex precision change (new_complex_values rounds a Complex64
+                // target's components to f32, == convert_literal's from_complex64).
+                let dense = match target_dtype {
+                    DType::F64 => Some(TensorValue::new_f64_values(
+                        shape.clone(),
+                        values.iter().map(|&(re, _)| re).collect(),
+                    )),
+                    DType::F32 => Some(TensorValue::new_f32_values(
+                        shape.clone(),
+                        values.iter().map(|&(re, _)| re as f32).collect(),
+                    )),
+                    DType::Complex128 | DType::Complex64 => Some(TensorValue::new_complex_values(
+                        target_dtype,
+                        shape.clone(),
+                        values.to_vec(),
+                    )),
+                    _ => None,
+                };
+                if let Some(t) = dense {
+                    return Ok(Value::Tensor(t.map_err(EvalError::InvalidTensor)?));
+                }
             }
 
             let mut out = Vec::with_capacity(tensor.elements.len());
@@ -4010,12 +4049,24 @@ fn convert_literal(lit: Literal, target: DType) -> Result<Literal, EvalError> {
         DType::U32 => Literal::U32(u64_val().unwrap_or(0) as u32),
         DType::Bool => Literal::Bool(bool_val()),
         DType::Complex64 => {
+            // Preserve the source's imaginary part (a complex->complex precision cast must
+            // keep both components; real->complex has im=0). Previously dropped im.
             let re = f64_val().unwrap_or(0.0) as f32;
-            Literal::from_complex64(re, 0.0)
+            let im = match lit {
+                Literal::Complex64Bits(_, im) => f32::from_bits(im),
+                Literal::Complex128Bits(_, im) => f64::from_bits(im) as f32,
+                _ => 0.0,
+            };
+            Literal::from_complex64(re, im)
         }
         DType::Complex128 => {
             let re = f64_val().unwrap_or(0.0);
-            Literal::from_complex128(re, 0.0)
+            let im = match lit {
+                Literal::Complex64Bits(_, im) => f64::from(f32::from_bits(im)),
+                Literal::Complex128Bits(_, im) => f64::from_bits(im),
+                _ => 0.0,
+            };
+            Literal::from_complex128(re, im)
         }
     })
 }
@@ -16575,6 +16626,70 @@ mod tests {
                 "i32 -> {t} dense != generic"
             );
         }
+    }
+
+    #[test]
+    fn dense_complex_float_convert_matches_generic() {
+        // float<->complex convert (FFT/signal pipelines) previously ran per-Literal.
+        // float->complex: re=v, im=0. complex->float: real-part extraction. complex->
+        // complex: precision change. Dense must match the boxed generic path bit-for-bit.
+        let lits = |v: &Value| v.as_tensor().unwrap().elements.iter().copied().collect::<Vec<Literal>>();
+        // float source -> complex.
+        let fd = [1.5_f64, -2.0, 0.0, -0.0, 3.25, -7.0, 1e10];
+        let f64_dense = Value::Tensor(TensorValue::new_f64_values(Shape::vector(fd.len() as u32), fd.to_vec()).unwrap());
+        let f64_boxed = Value::Tensor(TensorValue::new(DType::F64, Shape::vector(fd.len() as u32), fd.iter().map(|&v| Literal::from_f64(v)).collect()).unwrap());
+        assert!(f64_dense.as_tensor().unwrap().elements.as_f64_slice().is_some());
+        assert!(f64_boxed.as_tensor().unwrap().elements.as_f64_slice().is_none());
+        let f32v: Vec<f32> = fd.iter().map(|&v| v as f32).collect();
+        let f32_dense = Value::Tensor(TensorValue::new_f32_values(Shape::vector(f32v.len() as u32), f32v.clone()).unwrap());
+        let f32_boxed = Value::Tensor(TensorValue::new(DType::F32, Shape::vector(f32v.len() as u32), f32v.iter().map(|&v| Literal::from_f32(v)).collect()).unwrap());
+        for t in ["complex128", "complex64"] {
+            let p = params(&[("new_dtype", t)]);
+            assert_eq!(lits(&eval_convert_element_type(std::slice::from_ref(&f64_dense), &p).unwrap()), lits(&eval_convert_element_type(std::slice::from_ref(&f64_boxed), &p).unwrap()), "f64 -> {t}");
+            assert_eq!(lits(&eval_convert_element_type(std::slice::from_ref(&f32_dense), &p).unwrap()), lits(&eval_convert_element_type(std::slice::from_ref(&f32_boxed), &p).unwrap()), "f32 -> {t}");
+        }
+        // complex source -> float / complex.
+        let cd: Vec<(f64, f64)> = vec![(1.5, -0.5), (2.0, 3.0), (-7.25, 0.0), (0.0, 1.0), (1e10, -1e10)];
+        for src_dt in [DType::Complex128, DType::Complex64] {
+            let c_dense = Value::Tensor(TensorValue::new_complex_values(src_dt, Shape::vector(cd.len() as u32), cd.clone()).unwrap());
+            let c_boxed = Value::Tensor(TensorValue::new_with_literal_buffer(src_dt, Shape::vector(cd.len() as u32), fj_core::LiteralBuffer::new(cd.iter().map(|&(re, im)| if src_dt == DType::Complex64 { Literal::from_complex64(re as f32, im as f32) } else { Literal::from_complex128(re, im) }).collect())).unwrap());
+            assert!(c_dense.as_tensor().unwrap().elements.as_complex_slice().is_some());
+            assert!(c_boxed.as_tensor().unwrap().elements.as_complex_slice().is_none());
+            for t in ["f64", "f32", "complex64", "complex128"] {
+                let p = params(&[("new_dtype", t)]);
+                assert_eq!(lits(&eval_convert_element_type(std::slice::from_ref(&c_dense), &p).unwrap()), lits(&eval_convert_element_type(std::slice::from_ref(&c_boxed), &p).unwrap()), "{src_dt:?} -> {t}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_convert_f64_to_complex128_dense_vs_generic() {
+        use std::time::Instant;
+        let n = 1_000_000usize;
+        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001 - 500.0).collect();
+        let dense = Value::Tensor(TensorValue::new_f64_values(Shape::vector(n as u32), data.clone()).unwrap());
+        let boxed = Value::Tensor(TensorValue::new(DType::F64, Shape::vector(n as u32), data.iter().map(|&v| Literal::from_f64(v)).collect()).unwrap());
+        let p = params(&[("new_dtype", "complex128")]);
+        let best = |v: &Value| {
+            let _ = eval_convert_element_type(std::slice::from_ref(v), &p).unwrap();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let t = Instant::now();
+                let o = eval_convert_element_type(std::slice::from_ref(v), &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let generic = best(&boxed);
+        let dense_t = best(&dense);
+        println!(
+            "BENCH convert f64->complex128 [{n}]: generic={:.2}ms dense={:.2}ms speedup={:.2}x",
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
     }
 
     #[test]
