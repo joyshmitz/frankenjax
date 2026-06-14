@@ -656,6 +656,12 @@ fn radix2_fft_1d_into(input: &[(f64, f64)], output: &mut Vec<(f64, f64)>, invers
     }
     bit_reverse_permute(output);
 
+    // Twiddle scratch reused across stages (max length n/2). Precomputing each stage's
+    // twiddles via the SAME first-order recurrence the inline loop used produces
+    // BIT-IDENTICAL values (deterministic from (1,0)), but lifts the loop-carried
+    // recurrence dependency out of the butterfly loop so consecutive butterflies are
+    // independent and the compiler can pipeline/vectorize the complex multiply.
+    let mut tw: Vec<(f64, f64)> = Vec::with_capacity(n / 2);
     let mut len = 2_usize;
     while len <= n {
         let half = len / 2;
@@ -666,23 +672,30 @@ fn radix2_fft_1d_into(input: &[(f64, f64)], output: &mut Vec<(f64, f64)>, invers
         };
         let (sin_step, cos_step) = angle.sin_cos();
 
-        for start in (0..n).step_by(len) {
-            let mut twiddle_re = 1.0;
-            let mut twiddle_im = 0.0;
+        // Build the stage's twiddle table via the identical recurrence (tw[k] equals the
+        // inline `twiddle` at offset k, so the butterfly results are bit-for-bit unchanged).
+        tw.clear();
+        let mut twiddle_re = 1.0;
+        let mut twiddle_im = 0.0;
+        for _ in 0..half {
+            tw.push((twiddle_re, twiddle_im));
+            let next_re = twiddle_re * cos_step - twiddle_im * sin_step;
+            let next_im = twiddle_re * sin_step + twiddle_im * cos_step;
+            twiddle_re = next_re;
+            twiddle_im = next_im;
+        }
 
+        for start in (0..n).step_by(len) {
+            let (lo, hi) = output[start..start + len].split_at_mut(half);
             for offset in 0..half {
-                let even = output[start + offset];
-                let odd = output[start + offset + half];
+                let (twiddle_re, twiddle_im) = tw[offset];
+                let even = lo[offset];
+                let odd = hi[offset];
                 let rotated_re = odd.0 * twiddle_re - odd.1 * twiddle_im;
                 let rotated_im = odd.0 * twiddle_im + odd.1 * twiddle_re;
 
-                output[start + offset] = (even.0 + rotated_re, even.1 + rotated_im);
-                output[start + offset + half] = (even.0 - rotated_re, even.1 - rotated_im);
-
-                let next_re = twiddle_re * cos_step - twiddle_im * sin_step;
-                let next_im = twiddle_re * sin_step + twiddle_im * cos_step;
-                twiddle_re = next_re;
-                twiddle_im = next_im;
+                lo[offset] = (even.0 + rotated_re, even.1 + rotated_im);
+                hi[offset] = (even.0 - rotated_re, even.1 - rotated_im);
             }
         }
 
@@ -1677,6 +1690,99 @@ pub(crate) fn eval_irfft(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    /// Old inline-recurrence radix-2 (pre-frankenjax-* twiddle-hoist), kept only as the
+    /// bench baseline. Bit-identical to the production `radix2_fft_1d_into`.
+    #[cfg(test)]
+    fn radix2_fft_serial_ref(input: &[(f64, f64)], output: &mut Vec<(f64, f64)>) {
+        let n = input.len();
+        output.clear();
+        output.extend_from_slice(input);
+        if n <= 1 {
+            return;
+        }
+        bit_reverse_permute(output);
+        let mut len = 2_usize;
+        while len <= n {
+            let half = len / 2;
+            let angle = -2.0 * std::f64::consts::PI / (len as f64);
+            let (sin_step, cos_step) = angle.sin_cos();
+            for start in (0..n).step_by(len) {
+                let mut tr = 1.0;
+                let mut ti = 0.0;
+                for offset in 0..half {
+                    let even = output[start + offset];
+                    let odd = output[start + offset + half];
+                    let rr = odd.0 * tr - odd.1 * ti;
+                    let ri = odd.0 * ti + odd.1 * tr;
+                    output[start + offset] = (even.0 + rr, even.1 + ri);
+                    output[start + offset + half] = (even.0 - rr, even.1 - ri);
+                    let nr = tr * cos_step - ti * sin_step;
+                    let ni = tr * sin_step + ti * cos_step;
+                    tr = nr;
+                    ti = ni;
+                }
+            }
+            len *= 2;
+        }
+    }
+
+    #[test]
+    fn radix2_twiddle_hoist_bit_identical_to_serial() {
+        // The production (twiddle-precomputed) radix-2 must equal the inline-recurrence
+        // version bit-for-bit across sizes.
+        for log2 in [1u32, 2, 5, 8, 10] {
+            let n = 1usize << log2;
+            let input: Vec<(f64, f64)> = (0..n)
+                .map(|i| ((i as f64 * 0.013).sin(), (i as f64 * 0.027).cos()))
+                .collect();
+            let mut a = Vec::new();
+            radix2_fft_1d_into(&input, &mut a, false);
+            let mut b = Vec::new();
+            radix2_fft_serial_ref(&input, &mut b);
+            let bits: Vec<(u64, u64)> = a.iter().map(|&(re, im)| (re.to_bits(), im.to_bits())).collect();
+            let bref: Vec<(u64, u64)> = b.iter().map(|&(re, im)| (re.to_bits(), im.to_bits())).collect();
+            assert_eq!(bits, bref, "n={n} hoisted != serial");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_radix2_twiddle_hoist_vs_serial() {
+        use std::time::Instant;
+        let n = 1usize << 20;
+        let input: Vec<(f64, f64)> = (0..n)
+            .map(|i| ((i as f64 * 0.001).sin(), (i as f64 * 0.002).cos()))
+            .collect();
+        let best = |mut f: Box<dyn FnMut() -> usize>| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let t = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let i1 = input.clone();
+        let serial = best(Box::new(move || {
+            let mut o = Vec::new();
+            radix2_fft_serial_ref(&i1, &mut o);
+            o.len()
+        }));
+        let i2 = input.clone();
+        let hoist = best(Box::new(move || {
+            let mut o = Vec::new();
+            radix2_fft_1d_into(&i2, &mut o, false);
+            o.len()
+        }));
+        println!(
+            "BENCH radix2 FFT [2^20] twiddle-hoist: serial={:.2}ms hoist={:.2}ms speedup={:.2}x",
+            serial * 1e3,
+            hoist * 1e3,
+            serial / hoist
+        );
+    }
 
     fn make_real_vector(data: &[f64]) -> Value {
         let elements: Vec<Literal> = data.iter().map(|&v| Literal::from_f64(v)).collect();
