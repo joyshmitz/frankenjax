@@ -3885,6 +3885,12 @@ pub(crate) fn eval_convert_element_type(
                         shape.clone(),
                         values.iter().map(|&b| decode(b) as i64).collect(),
                     )),
+                    // half->i32: `decode(b) as i64` into the I32 tensor (chokepoint wraps),
+                    // matching convert_literal's Literal::I64(decode as i64) tagged I32.
+                    DType::I32 => Some(TensorValue::new_i32_values(
+                        shape.clone(),
+                        values.iter().map(|&b| decode(b) as i64).collect(),
+                    )),
                     // bool_val half branch == `f32 != 0.0`.
                     DType::Bool => Some(TensorValue::new_bool_values(
                         shape.clone(),
@@ -16598,6 +16604,26 @@ mod tests {
             lits(&eval_convert_element_type(std::slice::from_ref(&f32_boxed), &p).unwrap()),
             "f32 -> i32 dense != generic"
         );
+        // half (bf16/f16) source -> i32.
+        let hd = [1.9_f32, -3.7, 0.0, f32::NAN, f32::INFINITY, 100.5, -7.2, 1e6];
+        for dt in [DType::BF16, DType::F16] {
+            let bits: Vec<u16> = hd
+                .iter()
+                .map(|&v| match if dt == DType::BF16 { Literal::from_bf16_f64(f64::from(v)) } else { Literal::from_f16_f64(f64::from(v)) } {
+                    Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+                    _ => 0,
+                })
+                .collect();
+            let h_dense = Value::Tensor(TensorValue::new_half_float_values(dt, Shape::vector(bits.len() as u32), bits.clone()).unwrap());
+            let h_boxed = Value::Tensor(TensorValue::new(dt, Shape::vector(bits.len() as u32), bits.iter().map(|&b| if dt == DType::BF16 { Literal::BF16Bits(b) } else { Literal::F16Bits(b) }).collect()).unwrap());
+            assert!(h_dense.as_tensor().unwrap().elements.as_half_float_slice().is_some());
+            assert!(h_boxed.as_tensor().unwrap().elements.as_half_float_slice().is_none());
+            assert_eq!(
+                lits(&eval_convert_element_type(std::slice::from_ref(&h_dense), &p).unwrap()),
+                lits(&eval_convert_element_type(std::slice::from_ref(&h_boxed), &p).unwrap()),
+                "{dt:?} -> i32 dense != generic"
+            );
+        }
     }
 
     #[test]
