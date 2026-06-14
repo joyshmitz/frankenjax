@@ -706,6 +706,16 @@ pub(crate) fn eval_transpose(
                         return Ok(Value::Tensor(TensorValue::new_complex_values(
                             tensor.dtype, Shape { dims: new_dims.clone() }, $kernel(s, $($arg)*))?));
                     }
+                    // u32/u64 transpose (structural data movement; each dtype has its own
+                    // packed backing, so no dtype check needed).
+                    if let Some(s) = tensor.elements.as_u32_slice() {
+                        return Ok(Value::Tensor(TensorValue::new_u32_values(
+                            Shape { dims: new_dims.clone() }, $kernel(s, $($arg)*))?));
+                    }
+                    if let Some(s) = tensor.elements.as_u64_slice() {
+                        return Ok(Value::Tensor(TensorValue::new_u64_values(
+                            Shape { dims: new_dims.clone() }, $kernel(s, $($arg)*))?));
+                    }
                 }};
             }
 
@@ -1015,6 +1025,24 @@ pub(crate) fn eval_broadcast_in_dim(
                 );
                 return Ok(Value::Tensor(TensorValue::new_half_float_values(
                     tensor.dtype,
+                    Shape { dims: target_dims },
+                    out,
+                )?));
+            }
+            if let Some(src) = tensor.elements.as_u32_slice() {
+                let out = broadcast_replicate(
+                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                );
+                return Ok(Value::Tensor(TensorValue::new_u32_values(
+                    Shape { dims: target_dims },
+                    out,
+                )?));
+            }
+            if let Some(src) = tensor.elements.as_u64_slice() {
+                let out = broadcast_replicate(
+                    total, out_rank, &target_dims, &out_to_in, in_dims, &in_strides, src,
+                );
+                return Ok(Value::Tensor(TensorValue::new_u64_values(
                     Shape { dims: target_dims },
                     out,
                 )?));
@@ -1531,6 +1559,32 @@ pub(crate) fn eval_pad(
             out,
         )?));
     }
+    if let (Some(src), Literal::U32(pad)) = (operand.elements.as_u32_slice(), pad_literal) {
+        let out = if row_copyable {
+            pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
+        } else {
+            pad_fill_place(
+                src, pad, out_total, rank, in_dims, &lows, &interiors, &out_dims, &out_strides,
+            )
+        };
+        return Ok(Value::Tensor(TensorValue::new_u32_values(
+            Shape { dims: out_dims },
+            out,
+        )?));
+    }
+    if let (Some(src), Literal::U64(pad)) = (operand.elements.as_u64_slice(), pad_literal) {
+        let out = if row_copyable {
+            pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
+        } else {
+            pad_fill_place(
+                src, pad, out_total, rank, in_dims, &lows, &interiors, &out_dims, &out_strides,
+            )
+        };
+        return Ok(Value::Tensor(TensorValue::new_u64_values(
+            Shape { dims: out_dims },
+            out,
+        )?));
+    }
 
     // Generic Literal path.
     let mut out_elements = vec![pad_literal; out_total];
@@ -1839,6 +1893,18 @@ pub(crate) fn eval_slice(
                     };
                     return Ok(Value::Tensor(tv?));
                 }
+                if let Some(src) = tensor.elements.as_u32_slice() {
+                    return Ok(Value::Tensor(TensorValue::new_u32_values(
+                        shape,
+                        src[start_offset..end_offset].to_vec(),
+                    )?));
+                }
+                if let Some(src) = tensor.elements.as_u64_slice() {
+                    return Ok(Value::Tensor(TensorValue::new_u64_values(
+                        shape,
+                        src[start_offset..end_offset].to_vec(),
+                    )?));
+                }
                 return Ok(Value::Tensor(TensorValue::new(
                     tensor.dtype,
                     shape,
@@ -1883,6 +1949,12 @@ pub(crate) fn eval_slice(
                 } else {
                     TensorValue::new_i64_values(sh, o)
                 });
+            }
+            if let Some(s) = tensor.elements.as_u32_slice() {
+                dense_strided_slice!(s, TensorValue::new_u32_values);
+            }
+            if let Some(s) = tensor.elements.as_u64_slice() {
+                dense_strided_slice!(s, TensorValue::new_u64_values);
             }
 
             // Literal fallback (boxed/other dtypes): the same gather over Literals.
@@ -3351,6 +3423,12 @@ pub(crate) fn eval_dynamic_slice(
             TensorValue::new_i64_values(sh, o)
         });
     }
+    if let Some(s) = tensor.elements.as_u32_slice() {
+        dense_ds!(s, TensorValue::new_u32_values);
+    }
+    if let Some(s) = tensor.elements.as_u64_slice() {
+        dense_ds!(s, TensorValue::new_u64_values);
+    }
 
     // Literal fallback (boxed/other dtypes): the same gather over Literals.
     if let Some((start_offset, end_offset)) = contig_range {
@@ -3639,6 +3717,18 @@ pub(crate) fn eval_dynamic_update_slice(
         } else {
             TensorValue::new_i64_values(sh, out)
         });
+    }
+    if let (Some(o), Some(u)) = (
+        operand.elements.as_u32_slice(),
+        update.elements.as_u32_slice(),
+    ) {
+        dense_dus!(o, u, TensorValue::new_u32_values);
+    }
+    if let (Some(o), Some(u)) = (
+        operand.elements.as_u64_slice(),
+        update.elements.as_u64_slice(),
+    ) {
+        dense_dus!(o, u, TensorValue::new_u64_values);
     }
 
     // Literal fallback (boxed/other dtypes): the same copy over Literals.
@@ -9524,6 +9614,20 @@ pub(crate) fn eval_rev(
                         .map_err(EvalError::InvalidTensor)?,
                 ));
             }
+            if let Some(src) = tensor.elements.as_u32_slice() {
+                let out = rev_gather(src, dims, &strides, &reversed, total);
+                return Ok(Value::Tensor(
+                    TensorValue::new_u32_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
+            if let Some(src) = tensor.elements.as_u64_slice() {
+                let out = rev_gather(src, dims, &strides, &reversed, total);
+                return Ok(Value::Tensor(
+                    TensorValue::new_u64_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
 
             let src = tensor.elements.as_slice();
             let result = rev_gather(src, dims, &strides, &reversed, total);
@@ -10155,6 +10259,12 @@ pub(crate) fn eval_tile(
                 } else {
                     TensorValue::new_i64_values(sh, o)
                 });
+            }
+            if let Some(s) = tensor.elements.as_u32_slice() {
+                dense_tile!(s, TensorValue::new_u32_values);
+            }
+            if let Some(s) = tensor.elements.as_u64_slice() {
+                dense_tile!(s, TensorValue::new_u64_values);
             }
 
             let mut result = Vec::with_capacity(new_count as usize);
@@ -13236,6 +13346,100 @@ mod tests {
         let b = eval_pad(&[mk_b(&[4, 6], &data), padv.clone()], &pp).unwrap();
         assert_eq!(geti(&d).0, DType::I32, "pad: dense must stay I32");
         assert_eq!(geti(&d), geti(&b), "pad: dense != generic");
+    }
+
+    #[test]
+    fn u32_u64_structural_ops_dense_match_generic_and_preserve_dtype() {
+        // u32/u64 structural ops (transpose / slice contig+strided / reverse / tile /
+        // broadcast_in_dim / pad) used to fall to the generic per-Literal path (gated on
+        // as_i64_slice, None for u32/u64). The new dense as_u32/u64_slice paths must keep
+        // the uint dtype AND match the boxed generic path bit-for-bit (incl values above
+        // i32::MAX / i64::MAX to prove no signed reinterpretation).
+        for dt in [DType::U32, DType::U64] {
+            let lit = |v: u64| if dt == DType::U32 { Literal::U32(v as u32) } else { Literal::U64(v) };
+            let mk_d = |dims: &[u32], d: &[u64]| {
+                Value::Tensor(TensorValue::new(dt, Shape { dims: dims.to_vec() }, d.iter().map(|&v| lit(v)).collect()).unwrap())
+            };
+            let mk_b = |dims: &[u32], d: &[u64]| {
+                Value::Tensor(TensorValue::new_with_literal_buffer(dt, Shape { dims: dims.to_vec() }, fj_core::LiteralBuffer::new(d.iter().map(|&v| lit(v)).collect())).unwrap())
+            };
+            let getu = |v: &Value| -> (DType, Vec<u64>) {
+                let t = v.as_tensor().unwrap();
+                (t.dtype, t.elements.iter().map(|l| match l {
+                    Literal::U32(x) => u64::from(*x),
+                    Literal::U64(x) => *x,
+                    o => panic!("expected unsigned, got {o:?}"),
+                }).collect())
+            };
+            // Values straddling the i32/i64 sign boundary.
+            let hi: u64 = if dt == DType::U32 { 1u64 << 31 } else { 1u64 << 63 };
+            let data: Vec<u64> = (0..24u64).map(|i| hi.wrapping_add(i.wrapping_mul(7))).collect();
+
+            let single: &[(fn(&[Value], &BTreeMap<String, String>) -> Result<Value, EvalError>, BTreeMap<String, String>, &str)] = &[
+                (eval_transpose, params(&[("permutation", "1,0")]), "transpose"),
+                (eval_slice, params(&[("start_indices", "0,0"), ("limit_indices", "4,6")]), "slice-contig"),
+                (eval_slice, params(&[("start_indices", "0,0"), ("limit_indices", "4,6"), ("strides", "2,2")]), "slice-strided"),
+                (eval_rev, params(&[("axes", "0,1")]), "reverse"),
+                (eval_tile, params(&[("reps", "2,1")]), "tile"),
+            ];
+            for (f, p, label) in single {
+                let d = f(std::slice::from_ref(&mk_d(&[4, 6], &data)), p).unwrap();
+                let b = f(std::slice::from_ref(&mk_b(&[4, 6], &data)), p).unwrap();
+                assert_eq!(getu(&d).0, dt, "{dt:?} {label}: dense dtype");
+                assert_eq!(getu(&d), getu(&b), "{dt:?} {label}: dense != generic");
+            }
+
+            // broadcast_in_dim [3] -> [4,3]
+            let bd = data[..3].to_vec();
+            let pbc = params(&[("shape", "4,3"), ("broadcast_dimensions", "1")]);
+            let d = eval_broadcast_in_dim(std::slice::from_ref(&mk_d(&[3], &bd)), &pbc).unwrap();
+            let b = eval_broadcast_in_dim(std::slice::from_ref(&mk_b(&[3], &bd)), &pbc).unwrap();
+            assert_eq!(getu(&d).0, dt, "{dt:?} broadcast dtype");
+            assert_eq!(getu(&d), getu(&b), "{dt:?} broadcast dense != generic");
+
+            // pad [4,6] with a 0-d uint pad value (dtype must match operand), interior 1.
+            let padv = Value::Tensor(TensorValue::new(dt, Shape { dims: vec![] }, vec![lit(hi + 5)]).unwrap());
+            let pp = params(&[("padding_low", "1,1"), ("padding_high", "1,1"), ("padding_interior", "1,0")]);
+            let d = eval_pad(&[mk_d(&[4, 6], &data), padv.clone()], &pp).unwrap();
+            let b = eval_pad(&[mk_b(&[4, 6], &data), padv.clone()], &pp).unwrap();
+            assert_eq!(getu(&d).0, dt, "{dt:?} pad dtype");
+            assert_eq!(getu(&d), getu(&b), "{dt:?} pad dense != generic");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_u32_structural_dense_vs_generic() {
+        use std::time::Instant;
+        // Contiguous slice and tile are the materialization-avoidance wins (the generic
+        // path reconstructs the whole input into 24-byte Literals; transpose is more
+        // memory-bound so its dense win is smaller, ~1-2.5x — reported separately).
+        let (rows, cols) = (2048usize, 2048usize);
+        let dims = vec![rows as u32, cols as u32];
+        let data: Vec<u32> = (0..rows * cols).map(|i| i as u32).collect();
+        let dense = Value::Tensor(TensorValue::new(DType::U32, Shape { dims: dims.clone() }, data.iter().map(|&v| Literal::U32(v)).collect()).unwrap());
+        let boxed = Value::Tensor(TensorValue::new_with_literal_buffer(DType::U32, Shape { dims: dims.clone() }, fj_core::LiteralBuffer::new(data.iter().map(|&v| Literal::U32(v)).collect())).unwrap());
+        let p = params(&[("start_indices", "0,0"), ("limit_indices", &format!("{},{cols}", rows / 2))]);
+        let best = |v: &Value| {
+            let _ = eval_slice(std::slice::from_ref(v), &p).unwrap();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let o = eval_slice(std::slice::from_ref(v), &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let generic = best(&boxed);
+        let dense_t = best(&dense);
+        println!(
+            "BENCH u32 slice-contig [{rows}x{cols}]->[{},{cols}]: generic={:.2}ms dense={:.2}ms speedup={:.2}x",
+            rows / 2,
+            generic * 1e3,
+            dense_t * 1e3,
+            generic / dense_t
+        );
     }
 
     // ── Transpose ──
