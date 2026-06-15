@@ -266,6 +266,13 @@ pub(crate) fn eval_comparison(
                 {
                     return Ok(value);
                 }
+                if matches!(lhs.dtype, DType::BF16 | DType::F16)
+                    && lhs.dtype == rhs.dtype
+                    && let Some(value) =
+                        eval_same_shape_half_float_compare(lhs, rhs, &float_cmp)?
+                {
+                    return Ok(value);
+                }
 
                 let mut elements = Vec::with_capacity(lhs.elements.len());
                 for (lhs, rhs) in lhs
@@ -520,6 +527,46 @@ fn eval_same_shape_f32_compare(
         .iter()
         .zip(right)
         .map(|(&a, &b)| float_cmp(f64::from(a), f64::from(b)))
+        .collect();
+    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+        lhs.shape.clone(),
+        out,
+    )?)))
+}
+
+/// Same-shape BF16/F16 comparison fast path producing a `DType::Bool` tensor.
+/// Half-float is the dominant mixed-precision training dtype and `x > thresh`
+/// mask idioms (ReLU/dropout masks) run on it. Bit-for-bit identical to the
+/// generic `compare_literals` path, which for half operands (`literal_to_i128`
+/// returns `None`) widens each to f64 via `Literal::{BF16,F16}Bits::as_f64()`
+/// (exact, order- and NaN-preserving) and applies `float_cmp`; this does the same
+/// off the packed `as_half_float_slice` (u16) backing into a dense `Vec<bool>`
+/// (1 byte/elem vs 24). Both operands must share the half dtype. Returns `None`
+/// otherwise (caller falls through to the generic per-`Literal` loop).
+#[inline]
+fn eval_same_shape_half_float_compare(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    float_cmp: &impl Fn(f64, f64) -> bool,
+) -> Result<Option<Value>, EvalError> {
+    if lhs.dtype != rhs.dtype {
+        return Ok(None);
+    }
+    let (Some(left), Some(right)) = (
+        lhs.elements.as_half_float_slice(),
+        rhs.elements.as_half_float_slice(),
+    ) else {
+        return Ok(None);
+    };
+    let decode: fn(u16) -> f64 = match lhs.dtype {
+        DType::BF16 => |b| Literal::BF16Bits(b).as_f64().unwrap_or(f64::NAN),
+        DType::F16 => |b| Literal::F16Bits(b).as_f64().unwrap_or(f64::NAN),
+        _ => return Ok(None),
+    };
+    let out: Vec<bool> = left
+        .iter()
+        .zip(right)
+        .map(|(&a, &b)| float_cmp(decode(a), decode(b)))
         .collect();
     Ok(Some(Value::Tensor(TensorValue::new_bool_values(
         lhs.shape.clone(),
@@ -1784,5 +1831,156 @@ mod tests {
     fn comparison_arity_error() {
         let result = eval_comparison(Primitive::Eq, &[s_f64(1.0)], |a, b| a == b, |a, b| a == b);
         assert!(result.is_err());
+    }
+
+    fn half_bits(l: Literal) -> u16 {
+        match l {
+            Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+            o => panic!("expected half literal, got {o:?}"),
+        }
+    }
+
+    #[test]
+    fn half_float_compare_dense_matches_generic() {
+        // bf16/f16 same-shape compares now take the dense half-float path; must be
+        // bit-identical to the boxed generic path (widen→f64→float_cmp) across all
+        // six comparisons, incl NaN/±inf/±0.
+        let vals_a = [
+            1.5f32,
+            -0.0,
+            f32::INFINITY,
+            f32::NAN,
+            7.0,
+            -3.25,
+            0.0,
+            f32::NEG_INFINITY,
+        ];
+        let vals_b = [
+            2.0f32,
+            0.0,
+            -4.0,
+            5.0,
+            7.0,
+            -3.25,
+            f32::NAN,
+            f32::NEG_INFINITY,
+        ];
+        let params = BTreeMap::new();
+        for (dt, mk) in [
+            (DType::BF16, Literal::from_bf16_f32 as fn(f32) -> Literal),
+            (DType::F16, Literal::from_f16_f32 as fn(f32) -> Literal),
+        ] {
+            let lits_a: Vec<Literal> = vals_a.iter().map(|&v| mk(v)).collect();
+            let lits_b: Vec<Literal> = vals_b.iter().map(|&v| mk(v)).collect();
+            let abits: Vec<u16> = lits_a.iter().map(|&l| half_bits(l)).collect();
+            let bbits: Vec<u16> = lits_b.iter().map(|&l| half_bits(l)).collect();
+            let shape = Shape::vector(abits.len() as u32);
+            let dense_a = Value::Tensor(
+                TensorValue::new_half_float_values(dt, shape.clone(), abits).unwrap(),
+            );
+            let dense_b = Value::Tensor(
+                TensorValue::new_half_float_values(dt, shape.clone(), bbits).unwrap(),
+            );
+            let boxed_a = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    dt,
+                    shape.clone(),
+                    fj_core::LiteralBuffer::new(lits_a.clone()),
+                )
+                .unwrap(),
+            );
+            let boxed_b = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    dt,
+                    shape.clone(),
+                    fj_core::LiteralBuffer::new(lits_b.clone()),
+                )
+                .unwrap(),
+            );
+            assert!(
+                dense_a.as_tensor().unwrap().elements.as_half_float_slice().is_some(),
+                "dense {dt:?} should expose half slice"
+            );
+            assert!(
+                boxed_a.as_tensor().unwrap().elements.as_half_float_slice().is_none(),
+                "boxed {dt:?} should NOT expose half slice"
+            );
+            for p in [
+                Primitive::Eq,
+                Primitive::Ne,
+                Primitive::Lt,
+                Primitive::Le,
+                Primitive::Gt,
+                Primitive::Ge,
+            ] {
+                let d = extract_bools(
+                    &crate::eval_primitive(p, &[dense_a.clone(), dense_b.clone()], &params).unwrap(),
+                );
+                let g = extract_bools(
+                    &crate::eval_primitive(p, &[boxed_a.clone(), boxed_b.clone()], &params).unwrap(),
+                );
+                assert_eq!(d, g, "{dt:?} {p:?} half compare dense != boxed");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_bf16_compare_dense_vs_boxed() {
+        use std::time::Instant;
+        let n = 1_000_000usize;
+        let a: Vec<u16> = (0..n)
+            .map(|i| half_bits(Literal::from_bf16_f32((i as f32) * 0.01 - 5000.0)))
+            .collect();
+        let b: Vec<u16> = (0..n)
+            .map(|i| half_bits(Literal::from_bf16_f32(((n - i) as f32) * 0.01 - 5000.0)))
+            .collect();
+        let shape = Shape::vector(n as u32);
+        let dense = [
+            Value::Tensor(
+                TensorValue::new_half_float_values(DType::BF16, shape.clone(), a.clone()).unwrap(),
+            ),
+            Value::Tensor(
+                TensorValue::new_half_float_values(DType::BF16, shape.clone(), b.clone()).unwrap(),
+            ),
+        ];
+        let boxed = [
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::BF16,
+                    shape.clone(),
+                    fj_core::LiteralBuffer::new(a.iter().map(|&x| Literal::BF16Bits(x)).collect()),
+                )
+                .unwrap(),
+            ),
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::BF16,
+                    shape.clone(),
+                    fj_core::LiteralBuffer::new(b.iter().map(|&x| Literal::BF16Bits(x)).collect()),
+                )
+                .unwrap(),
+            ),
+        ];
+        let params = BTreeMap::new();
+        let best = |inputs: &[Value]| {
+            let _ = crate::eval_primitive(Primitive::Gt, inputs, &params).unwrap();
+            let mut tm = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let o = crate::eval_primitive(Primitive::Gt, inputs, &params).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                tm = tm.min(s.elapsed().as_secs_f64());
+            }
+            tm
+        };
+        let bx = best(&boxed);
+        let dn = best(&dense);
+        println!(
+            "BENCH bf16 Gt [{n}]: boxed={:.2}ms dense={:.2}ms speedup={:.2}x",
+            bx * 1e3,
+            dn * 1e3,
+            bx / dn
+        );
     }
 }
