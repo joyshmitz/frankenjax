@@ -5585,6 +5585,65 @@ fn eval_top_k_dense(
         ]));
     }
 
+    // Dense half-float (BF16/F16) fast path. Mixed-precision ML keeps logits in
+    // bf16/f16, so top_k over half-float is hot. half->f32->f64 promotion is
+    // exact and order-preserving, so keying via
+    // `f64_total_order_key(f64::from(decode(b)))` induces the SAME ordering (and
+    // tie structure) as the generic literal path's `f64_total_order_key(lit.as_f64())`
+    // — bit-identical results — while borrowing the packed `&[u16]` slice and
+    // emitting dense half output (the original u16 bits) instead of materializing
+    // a `Vec<Literal>`. Mirrors the dense half-float sort path.
+    if let Some(values) = tensor.elements.as_half_float_slice() {
+        let is_bf16 = tensor.dtype == DType::BF16;
+        let decode = |b: u16| -> f32 {
+            if is_bf16 {
+                Literal::BF16Bits(b).as_bf16_f32().unwrap_or(f32::NAN)
+            } else {
+                Literal::F16Bits(b).as_f16_f32().unwrap_or(f32::NAN)
+            }
+        };
+        let mut out_vals = vec![0_u16; n_slices * k];
+        let mut out_idx = vec![0_i64; n_slices * k];
+        for_each_top_k_slice(
+            &mut out_vals,
+            &mut out_idx,
+            k,
+            stride,
+            n_slices,
+            |slice, vchunk, ichunk, pairs, scratch| {
+                let base = slice * stride;
+                pairs.clear();
+                for (i, &b) in values[base..base + stride].iter().enumerate() {
+                    pairs.push((!f64_total_order_key(f64::from(decode(b))), i as u32));
+                }
+                order_top_k_pairs(pairs, scratch, k);
+                for (dst, &(_, orig)) in pairs.iter().take(k).enumerate() {
+                    vchunk[dst] = values[base + orig as usize];
+                    ichunk[dst] = i64::from(orig);
+                }
+            },
+        );
+        let values_t = TensorValue::new_half_float_values(
+            tensor.dtype,
+            Shape {
+                dims: output_dims.to_vec(),
+            },
+            out_vals,
+        )
+        .map_err(EvalError::InvalidTensor)?;
+        let indices_t = TensorValue::new_i64_values(
+            Shape {
+                dims: output_dims.to_vec(),
+            },
+            out_idx,
+        )
+        .map_err(EvalError::InvalidTensor)?;
+        return Ok(Some(vec![
+            Value::Tensor(values_t),
+            Value::Tensor(indices_t),
+        ]));
+    }
+
     // Literal-backed numeric dtypes with no dense storage (F32/F16/BF16, U32/U64,
     // I32): same complement-key radix as i64/f64, keyed per dtype family to match
     // the generic `compare_sort_keys` order — Float via f64_total_order_key(as_f64),
@@ -16311,6 +16370,86 @@ mod tests {
 
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
+    fn bench_top_k_bf16_dense_vs_literal() {
+        use std::time::Instant;
+        // bf16 top_k(x[R,C], k): NEW dense `as_half_float_slice` path vs the
+        // generic Literal-backed path (same u16 data, same eval_top_k entry).
+        // Same-invocation A/B; digested so the fold doesn't bias timing.
+        let (rows, cols, k) = (4096usize, 1024usize, 128usize);
+        let total = rows * cols;
+        let raw: Vec<u16> = (0..total)
+            .map(|i| ((i as u32).wrapping_mul(40_503) ^ (i as u32 >> 3)) as u16)
+            .collect();
+        let dims = vec![rows as u32, cols as u32];
+        let dense = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape { dims: dims.clone() },
+                raw.clone(),
+            )
+            .unwrap(),
+        );
+        let literal = Value::Tensor(
+            TensorValue::new(
+                DType::BF16,
+                Shape { dims: dims.clone() },
+                raw.iter().map(|&b| Literal::BF16Bits(b)).collect(),
+            )
+            .unwrap(),
+        );
+        let p = params(&[("k", "128")]);
+        let best = |mut f: Box<dyn FnMut() -> u64>| {
+            f();
+            let mut b = f64::MAX;
+            let mut digest = 0u64;
+            for _ in 0..5 {
+                let t = Instant::now();
+                digest = std::hint::black_box(f());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            (b, digest)
+        };
+
+        let pl = p.clone();
+        let (t_literal, d_literal) = best(Box::new(move || {
+            let out = super::eval_top_k(std::slice::from_ref(&literal), &pl).unwrap();
+            out[0]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .fold(0u64, |a, l| match l {
+                    Literal::BF16Bits(b) => a ^ u64::from(*b),
+                    _ => a,
+                })
+        }));
+
+        let (t_dense, d_dense) = best(Box::new(move || {
+            let out = super::eval_top_k(std::slice::from_ref(&dense), &p).unwrap();
+            out[0]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_half_float_slice()
+                .unwrap()
+                .iter()
+                .fold(0u64, |a, &b| a ^ u64::from(b))
+        }));
+
+        assert_eq!(
+            d_literal, d_dense,
+            "dense bf16 top_k digest must match literal"
+        );
+        println!(
+            "BENCH bf16 top_k(x[{rows},{cols}],k={k}): literal={:.4}ms dense={:.4}ms speedup={:.2}x digest={d_literal:016x}",
+            t_literal * 1e3,
+            t_dense * 1e3,
+            t_literal / t_dense,
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
     fn bench_top_k_f32_dense_vs_literal() {
         use std::time::Instant;
         // f32 top_k(x[R,C], k): NEW dense `as_f32_slice` path vs the generic
@@ -21052,6 +21191,101 @@ mod tests {
                 extract_i64_vec(&lit_out[1]),
                 "top_k f32 dense vs literal indices, k={k}"
             );
+        }
+    }
+
+    #[test]
+    fn top_k_half_float_dense_matches_literal() {
+        // Proves the dense `as_half_float_slice` top_k fast path is a bit-for-bit
+        // drop-in for the generic Literal-backed path for BF16 and F16, over
+        // varied bit patterns incl high-exponent (NaN/inf) words, signed zeros,
+        // and dups. Same u16 bits built once as DENSE half storage
+        // (`new_half_float_values` -> `as_half_float_slice` is Some) and once
+        // Literal-backed (`as_half_float_slice` is None -> generic path).
+        let n = 1000usize;
+        let raw: Vec<u16> = (0..n)
+            .map(|i| match i % 11 {
+                0 => 0x7FC0, // NaN-ish (high exp, nonzero frac)
+                1 => 0x7F80, // +inf-ish
+                2 => 0xFF80, // -inf-ish
+                3 => 0x8000, // -0
+                4 => 0x0000, // +0
+                5 => 0x7FC1, // NaN payload variant
+                6 => 0x4000, // small finite
+                _ => ((i as u32).wrapping_mul(40_503) ^ (i as u32 >> 3)) as u16,
+            })
+            .collect();
+
+        for dtype in [DType::BF16, DType::F16] {
+            let dense = Value::Tensor(
+                TensorValue::new_half_float_values(
+                    dtype,
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    raw.clone(),
+                )
+                .unwrap(),
+            );
+            assert!(
+                dense
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some(),
+                "expected dense half storage for {dtype:?}"
+            );
+            let make_lit = |b: u16| match dtype {
+                DType::BF16 => Literal::BF16Bits(b),
+                _ => Literal::F16Bits(b),
+            };
+            let literal = Value::Tensor(
+                TensorValue::new(
+                    dtype,
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    raw.iter().map(|&b| make_lit(b)).collect(),
+                )
+                .unwrap(),
+            );
+            assert!(
+                literal
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_none(),
+                "literal-backed half tensor must not be dense for {dtype:?}"
+            );
+
+            for k in [1usize, 32, 257] {
+                let p = params(&[("k", &k.to_string())]);
+                let dense_out = super::eval_top_k(std::slice::from_ref(&dense), &p).unwrap();
+                let lit_out = super::eval_top_k(std::slice::from_ref(&literal), &p).unwrap();
+                let bits = |v: &Value| -> Vec<u16> {
+                    v.as_tensor()
+                        .unwrap()
+                        .elements
+                        .iter()
+                        .map(|l| match l {
+                            Literal::BF16Bits(b) | Literal::F16Bits(b) => *b,
+                            other => panic!("expected half bits, got {other:?}"),
+                        })
+                        .collect()
+                };
+                assert_eq!(
+                    bits(&dense_out[0]),
+                    bits(&lit_out[0]),
+                    "top_k {dtype:?} dense vs literal values, k={k}"
+                );
+                assert_eq!(
+                    extract_i64_vec(&dense_out[1]),
+                    extract_i64_vec(&lit_out[1]),
+                    "top_k {dtype:?} dense vs literal indices, k={k}"
+                );
+            }
         }
     }
 }
