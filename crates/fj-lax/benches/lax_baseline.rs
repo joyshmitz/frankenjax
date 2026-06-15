@@ -5208,9 +5208,10 @@ fn bench_dispatch_overhead(c: &mut Criterion) {
 // WY-blocked QR (bead wpjbg): same-binary A/B of the scalar reflector loop vs the
 // WY-blocked GEMM-trailing-update path at large n, where the trailing matrix spills L3
 // repeatedly under the BLAS-2 rank-1 update. `qr_real_bench` forces the path so this
-// isolates the algorithm from the auto-gate. Small sample count: each n=4096 QR is ~1s.
+// isolates the algorithm from the auto-gate. n=1024 probes the production gate;
+// small sample count because each n=4096 QR is ~1s.
 fn bench_qr_blocked_ab(c: &mut Criterion) {
-    for &n in &[2048usize, 4096usize] {
+    for &n in &[1024usize, 2048usize, 4096usize] {
         let a: Vec<f64> = (0..n * n)
             .map(|i| {
                 let x = i as f64;

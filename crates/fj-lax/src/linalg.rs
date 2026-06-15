@@ -1258,9 +1258,9 @@ const QR_BLOCK: usize = 32;
 /// goldens are preserved (they all use small n); at/above it the trailing matrix spills
 /// L3 repeatedly under the BLAS-2 rank-1 update, so the in-place rank-b block apply —
 /// which sweeps the trailing matrix only twice per panel instead of `b` times — wins:
-/// measured (same-binary A/B) 1.05x at n=2048 and 1.25x at n=4096, growing with n. See
-/// bead wpjbg / project_qr_matmul2d_unsuitable.
-const QR_BLOCK_MIN: usize = 2048;
+/// measured (same-binary A/B) 1.67x at n=1024, 1.05x at n=2048, and 1.25x at
+/// n=4096. See bead wpjbg / project_qr_matmul2d_unsuitable and frankenjax-p1vbf.59.
+const QR_BLOCK_MIN: usize = 1024;
 
 /// Compact-WY upper-triangular `T` (b×b) for the panel of `b` Householder reflectors
 /// starting at global column `p`: the block reflector `H_p…H_{p+b-1} = I − V T Vᵀ`
