@@ -169,6 +169,12 @@ pub fn einsum2(
     if let Some(fast) = try_einsum2_matmul(sub_a, sub_b, &sub_out, a, a_shape, b, b_shape) {
         return Ok(fast);
     }
+    // Fast path: transposed-rhs matrix product "B…XY,B…ZY->B…XZ" (A·Bᵀ — attention
+    // QKᵀ / linear-layer x·Wᵀ). Same BLAS-class routing as above after an exact
+    // per-slice [n,k]->[k,n] transpose; bit-identical to the generic odometer.
+    if let Some(fast) = try_einsum2_matmul_bt(sub_a, sub_b, &sub_out, a, a_shape, b, b_shape) {
+        return Ok(fast);
+    }
 
     // Compute output shape
     let out_shape: Vec<usize> = sub_out.chars().map(|c| index_dims[&c]).collect();
@@ -567,6 +573,112 @@ fn try_einsum2_matmul(
     Some((out, out_shape))
 }
 
+/// Detect the **transposed-rhs** single-contraction matrix product
+/// "B…XY,B…ZY->B…XZ" — i.e. `A · Bᵀ`, the dominant attention-score (`QKᵀ`) and
+/// linear-layer-weight (`x·Wᵀ`) layout — where the contracted label `Y` is the
+/// **trailing** axis of *both* operands (so the rhs is stored `[…, Z, Y]`).
+/// This pattern is NOT caught by [`try_einsum2_matmul`] (which needs the rhs as
+/// `[…, Y, Z]`) and otherwise falls to the generic O(out·sum) odometer. Each rhs
+/// batch slice `[n, k]` is transposed to `[k, n]` — O(n·k), cheap against the
+/// O(m·n·k) product — then routed through the cache-blocked [`matmul_2d`] kernel.
+///
+/// Bit-for-bit identical to the generic path: the transpose is exact data
+/// movement, and `matmul_2d` accumulates the contracted index `Y` in ascending
+/// order into `result[(batch)·M·N + X·N + Z]` — the same order and output layout
+/// the generic odometer uses (verified by `matmul_2d`'s own ascending-sum
+/// bit-identity, see [`try_einsum2_matmul`]). Returns `None` for any other
+/// pattern, leaving the generic path to handle it.
+fn try_einsum2_matmul_bt(
+    sub_a: &str,
+    sub_b: &str,
+    sub_out: &str,
+    a: &[f64],
+    a_shape: &[usize],
+    b: &[f64],
+    b_shape: &[usize],
+) -> Option<(Vec<f64>, Vec<usize>)> {
+    let sa: Vec<char> = sub_a.chars().collect();
+    let sb: Vec<char> = sub_b.chars().collect();
+    let so: Vec<char> = sub_out.chars().collect();
+    let len = sa.len();
+    if len < 2 || sb.len() != len || so.len() != len {
+        return None;
+    }
+    let nb = len - 2;
+
+    // Identical, distinct leading batch prefix across a, b, out.
+    for i in 0..nb {
+        if sa[i] != sb[i] || sa[i] != so[i] {
+            return None;
+        }
+        for j in (i + 1)..nb {
+            if sa[i] == sa[j] {
+                return None;
+            }
+        }
+    }
+
+    let x = sa[nb];
+    let y = sa[nb + 1];
+    // Transposed rhs "…ZY": Z leads, the contracted Y trails (vs "…YZ" canonical).
+    let (z, y2) = (sb[nb], sb[nb + 1]);
+    if y != y2 || so[nb] != x || so[nb + 1] != z {
+        return None;
+    }
+    if x == y || y == z || x == z {
+        return None;
+    }
+    for &c in &sa[..nb] {
+        if c == x || c == y || c == z {
+            return None;
+        }
+    }
+
+    let m = a_shape[nb];
+    let k = a_shape[nb + 1];
+    let n = b_shape[nb]; // rhs slice is [n, k]
+    if b_shape[nb + 1] != k || m == 0 || k == 0 || n == 0 {
+        return None;
+    }
+    let mut batch_size = 1usize;
+    for i in 0..nb {
+        if a_shape[i] != b_shape[i] || a_shape[i] == 0 {
+            return None;
+        }
+        batch_size = batch_size.checked_mul(a_shape[i])?;
+    }
+    let lhs_stride = m.checked_mul(k)?;
+    let rhs_stride = n.checked_mul(k)?;
+    let out_stride = m.checked_mul(n)?;
+    if a.len() < batch_size.checked_mul(lhs_stride)?
+        || b.len() < batch_size.checked_mul(rhs_stride)?
+    {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(batch_size.checked_mul(out_stride)?);
+    let mut bt_buf = vec![0.0f64; rhs_stride]; // [k, n] transpose scratch, reused
+    for bt in 0..batch_size {
+        let a_slice = &a[bt * lhs_stride..bt * lhs_stride + lhs_stride];
+        let b_slice = &b[bt * rhs_stride..bt * rhs_stride + rhs_stride]; // [n, k]
+        // Transpose [n, k] -> [k, n] so matmul_2d sees the canonical rhs layout.
+        for r in 0..n {
+            let row = &b_slice[r * k..r * k + k];
+            for (c, &v) in row.iter().enumerate() {
+                bt_buf[c * n + r] = v;
+            }
+        }
+        out.extend_from_slice(&crate::tensor_contraction::matmul_2d(
+            a_slice, m, k, &bt_buf, n,
+        ));
+    }
+
+    let mut out_shape: Vec<usize> = a_shape[..nb].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    Some((out, out_shape))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,5 +1048,76 @@ mod tests {
         let b = [1.0, 2.0]; // 2 elements
         let result = einsum2("i,i->", &a, &[3], &b, &[2]);
         assert!(matches!(result, Err(EinsumError::ShapeMismatch { .. })));
+    }
+
+    #[test]
+    fn einsum2_transposed_matmul_batched_bit_identical() {
+        // Batched A·Bᵀ "bij,bkj->bik" must hit try_einsum2_matmul_bt and equal the
+        // textbook ascending-contracted reference bit-for-bit.
+        let (bt, m, k, n) = (3usize, 9usize, 13usize, 7usize);
+        let a: Vec<f64> = (0..bt * m * k).map(|i| (i as f64 * 0.029).sin() * 1.9).collect();
+        let b: Vec<f64> = (0..bt * n * k).map(|i| (i as f64 * 0.047).cos() * 2.3).collect();
+        let mut want = vec![0.0f64; bt * m * n];
+        for bb in 0..bt {
+            for i in 0..m {
+                for z in 0..n {
+                    let mut s = 0.0;
+                    for y in 0..k {
+                        s += a[(bb * m + i) * k + y] * b[(bb * n + z) * k + y];
+                    }
+                    want[(bb * m + i) * n + z] = s;
+                }
+            }
+        }
+        let (got, shape) = einsum2("bij,bkj->bik", &a, &[bt, m, k], &b, &[bt, n, k]).unwrap();
+        assert_eq!(shape, vec![bt, m, n]);
+        for idx in 0..bt * m * n {
+            assert_eq!(got[idx].to_bits(), want[idx].to_bits(), "batched a@bT at {idx}");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_einsum2_transposed_vs_dot_loop() {
+        use std::time::Instant;
+        let (m, k, n) = (1024usize, 1024usize, 1024usize);
+        let a: Vec<f64> = (0..m * k).map(|i| ((i as f64) * 0.0007).sin()).collect();
+        let b: Vec<f64> = (0..n * k).map(|i| ((i as f64) * 0.0009).cos()).collect();
+        // "Before": the contiguous-contiguous dot loop the generic odometer reduces
+        // to for A·Bᵀ (both contracted strides == 1) — the cache-friendly baseline.
+        let dot_loop = || {
+            let mut out = vec![0.0f64; m * n];
+            for i in 0..m {
+                let arow = &a[i * k..i * k + k];
+                for z in 0..n {
+                    let brow = &b[z * k..z * k + k];
+                    let mut s = 0.0;
+                    for y in 0..k {
+                        s += arow[y] * brow[y];
+                    }
+                    out[i * n + z] = s;
+                }
+            }
+            out
+        };
+        let fast = || einsum2("ij,kj->ik", &a, &[m, k], &b, &[n, k]).unwrap().0;
+        let best = |f: &dyn Fn() -> Vec<f64>| {
+            let _ = f();
+            let mut t = f64::MAX;
+            for _ in 0..3 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            t
+        };
+        let base = best(&dot_loop);
+        let fst = best(&fast);
+        println!(
+            "BENCH einsum2 A·Bᵀ [{m}x{k}·{n}x{k}]: dot_loop={:.2}ms matmul2d={:.2}ms speedup={:.2}x",
+            base * 1e3,
+            fst * 1e3,
+            base / fst
+        );
     }
 }
