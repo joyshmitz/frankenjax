@@ -1054,8 +1054,55 @@ fn evaluate_jaxpr_parallel_inner(
 }
 
 fn evaluate_jaxpr_parallel(jaxpr: &Jaxpr, args: &[Value]) -> Result<Vec<Value>, InterpreterError> {
+    if let Some(result) = try_execute_single_equation_scalar_jaxpr(jaxpr, args) {
+        return result;
+    }
+
     let mut ignored_max_ready_wave = 0_usize;
     evaluate_jaxpr_parallel_inner(jaxpr, args, &mut ignored_max_ready_wave)
+}
+
+fn try_execute_single_equation_scalar_jaxpr(
+    jaxpr: &Jaxpr,
+    args: &[Value],
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    if !jaxpr.constvars.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 1
+        || args.len() != jaxpr.invars.len()
+    {
+        return None;
+    }
+
+    let equation = &jaxpr.equations[0];
+    if !equation.effects.is_empty()
+        || !equation.sub_jaxprs.is_empty()
+        || equation.outputs.len() != 1
+        || jaxpr.outvars[0] != equation.outputs[0]
+    {
+        return None;
+    }
+
+    let mut resolved = Vec::with_capacity(equation.inputs.len());
+    for atom in &equation.inputs {
+        match atom {
+            Atom::Lit(literal) => resolved.push(Value::Scalar(*literal)),
+            Atom::Var(var) => {
+                let index = jaxpr.invars.iter().position(|invar| invar == var)?;
+                match &args[index] {
+                    Value::Scalar(literal) => resolved.push(Value::Scalar(*literal)),
+                    Value::Tensor(_) => return None,
+                }
+            }
+        }
+    }
+
+    Some(
+        fj_lax::eval_primitive(equation.primitive, &resolved, &equation.params)
+            .map(|output| vec![output])
+            .map_err(InterpreterError::Primitive),
+    )
 }
 
 /// CPU backend: interprets Jaxpr programs on the host CPU.
@@ -2285,6 +2332,37 @@ mod tests {
             .execute(&jaxpr, &[Value::scalar_i64(41)], DeviceId(0))
             .expect("should succeed");
         assert_eq!(result, vec![Value::scalar_i64(42)]);
+    }
+
+    #[test]
+    fn cpu_single_equation_scalar_fast_path_matches_interpreter_and_golden_sha256() {
+        let backend = CpuBackend::new();
+        let jaxpr = build_program(ProgramSpec::Add2);
+        let cases = vec![
+            vec![Value::scalar_i64(3), Value::scalar_i64(4)],
+            vec![Value::scalar_i64(i64::MAX), Value::scalar_i64(1)],
+            vec![Value::scalar_f64(-0.0), Value::scalar_f64(0.0)],
+            vec![Value::scalar_f64(1.5), Value::scalar_f64(-2.25)],
+        ];
+
+        let mut outputs = Vec::with_capacity(cases.len());
+        for args in cases {
+            let fast = backend
+                .execute(&jaxpr, &args, DeviceId(0))
+                .expect("fast scalar CPU execution should succeed");
+            let reference =
+                fj_interpreters::eval_jaxpr(&jaxpr, &args).expect("interpreter reference");
+            assert_eq!(fast, reference);
+            outputs.push(fast);
+        }
+
+        let digest = fj_test_utils::fixture_id_from_json(&("frankenjax-so4wo", outputs))
+            .expect("golden digest should build");
+        eprintln!("cpu single-equation scalar golden digest: {digest}");
+        assert_eq!(
+            digest, "458d418a96e2c77d5f9fb43b857ecd4de5e0004c136eea3c2a2eb4e91b1f7f4b",
+            "single-equation scalar CPU output digest changed"
+        );
     }
 
     #[test]
