@@ -335,6 +335,20 @@ pub fn log_softmax(x: &[f64]) -> Vec<f64> {
     x.iter().map(|&v| v - lse).collect()
 }
 
+#[inline]
+fn log_softmax_row_into(src: &[f64], dst: &mut [f64]) {
+    let max_val = src.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let lse = if max_val.is_infinite() {
+        max_val
+    } else {
+        let sum_exp: f64 = src.iter().map(|&v| (v - max_val).exp()).sum();
+        max_val + sum_exp.ln()
+    };
+    for (d, &v) in dst.iter_mut().zip(src.iter()) {
+        *d = v - lse;
+    }
+}
+
 /// Log-softmax along the last axis of a 2D array.
 ///
 /// Matches `jax.nn.log_softmax(x, axis=-1)` for a 2D array.
@@ -349,22 +363,7 @@ pub fn log_softmax_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     if cols == 0 {
         return result;
     }
-    for i in 0..rows {
-        let src = &x[i * cols..(i + 1) * cols];
-        let dst = &mut result[i * cols..(i + 1) * cols];
-        // Identical to logsumexp(src): max, then sum of exp(x - max), then
-        // max + ln(sum). Preserves the infinite-max early return.
-        let max_val = src.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        let lse = if max_val.is_infinite() {
-            max_val
-        } else {
-            let sum_exp: f64 = src.iter().map(|&v| (v - max_val).exp()).sum();
-            max_val + sum_exp.ln()
-        };
-        for (d, &v) in dst.iter_mut().zip(src.iter()) {
-            *d = v - lse;
-        }
-    }
+    fill_softmax_rows_parallel(x, &mut result, rows, cols, log_softmax_row_into);
     result
 }
 
@@ -526,6 +525,15 @@ mod tests {
         result
     }
 
+    fn log_softmax_2d_fused_serial_ref(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+        let mut result = vec![0.0; rows * cols];
+        for i in 0..rows {
+            let start = i * cols;
+            log_softmax_row_into(&x[start..start + cols], &mut result[start..start + cols]);
+        }
+        result
+    }
+
     #[test]
     fn softmax_2d_fused_bit_identical_to_rowmap() {
         // Mixed magnitudes, signs, duplicates, and a row with a large value to
@@ -610,6 +618,40 @@ mod tests {
         assert_eq!(
             digest, "804d2a4abc52612601a766311fbe9a8e230766c65110b667b35676a7803bc6dd",
             "softmax_2d parallel golden output digest changed"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn log_softmax_2d_parallel_bit_identical_to_serial_fused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cols = 17;
+        let rows = (SOFTMAX_2D_PARALLEL_MIN / cols) + 64;
+        let x = softmax_parallel_fixture(rows, cols);
+        if std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            > 1
+        {
+            assert!(softmax_2d_thread_count(rows, rows * cols) > 1);
+        }
+
+        let parallel = log_softmax_2d(&x, rows, cols);
+        let reference = log_softmax_2d_fused_serial_ref(&x, rows, cols);
+        assert_eq!(parallel.len(), reference.len());
+        for (idx, (a, b)) in parallel.iter().zip(reference.iter()).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "parallel log_softmax_2d diverged at {idx}: {a} vs {b}"
+            );
+        }
+
+        let output_bits: Vec<u64> = parallel.iter().map(|v| v.to_bits()).collect();
+        let digest = fj_test_utils::fixture_id_from_json(&output_bits)?;
+        assert_eq!(
+            digest, "34e1e76bbcfde76e7bb49161efd7e6b7a8225967e35aa16a6c2ab41d96b8e2d2",
+            "log_softmax_2d parallel golden output digest changed"
         );
         Ok(())
     }
