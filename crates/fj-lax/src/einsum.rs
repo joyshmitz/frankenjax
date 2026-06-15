@@ -181,6 +181,13 @@ pub fn einsum2(
     if let Some(fast) = try_einsum2_matmul_at(sub_a, sub_b, &sub_out, a, a_shape, b, b_shape) {
         return Ok(fast);
     }
+    // Fast path: pre-aligned GROUPED contraction "FA…K…,K…FB…->FA…FB…" — a matrix
+    // product whose free (M) / contracted (K) / free (N) roles are each a group of
+    // already-aligned axes (e.g. "abcd,cdef->abef"). A is [M,K] and B is [K,N]
+    // contiguous, so reshape is a no-op; route to matmul_2d.
+    if let Some(fast) = try_einsum2_matmul_grouped(sub_a, sub_b, &sub_out, a, a_shape, b, b_shape) {
+        return Ok(fast);
+    }
 
     // Compute output shape
     let out_shape: Vec<usize> = sub_out.chars().map(|c| index_dims[&c]).collect();
@@ -808,6 +815,139 @@ fn try_einsum2_matmul_at(
     Some((out, out_shape))
 }
 
+/// Detect a pre-aligned **grouped** matrix product "[FA][K],[K][FB]->[FA][FB]"
+/// where the free-lhs (M), contracted (K), and free-rhs (N) roles are each a
+/// CONTIGUOUS, already-aligned group of labels — e.g. "abcd,cdef->abef" (contract
+/// c,d) or "abc,cde->abde" (grouped free axes, single contraction). Because A is
+/// laid out `[FA…, K…]` and B `[K…, FB…]` in row-major, the [M,K]/[K,N] reshape is
+/// a no-op view, so each is routed straight through the cache-blocked `matmul_2d`
+/// (B is otherwise strided in the generic odometer's inner contraction).
+///
+/// Gated to a non-empty free-lhs AND non-empty free-rhs, so it only fires for a
+/// genuine M×N matrix product (never matrix-vector or Frobenius, whose tested
+/// behavior is left untouched); the plain single-axis i/j/k products are already
+/// claimed by the earlier fast paths. Bit-for-bit identical to a textbook
+/// ascending-K reference (matmul_2d's accumulation order); for ≥2 contracted axes
+/// that order is one valid ordering of the generic path's nondeterministic
+/// `sum_indices` (HashSet) order — i.e. tolerance-equal, not necessarily
+/// bit-equal, to the generic loop (cf. the Frobenius test). Returns `None`
+/// otherwise.
+fn try_einsum2_matmul_grouped(
+    sub_a: &str,
+    sub_b: &str,
+    sub_out: &str,
+    a: &[f64],
+    a_shape: &[usize],
+    b: &[f64],
+    b_shape: &[usize],
+) -> Option<(Vec<f64>, Vec<usize>)> {
+    let sa: Vec<char> = sub_a.chars().collect();
+    let sb: Vec<char> = sub_b.chars().collect();
+    let so: Vec<char> = sub_out.chars().collect();
+
+    // No repeated labels within any subscript (excludes diagonal/trace patterns).
+    let distinct = |v: &[char]| {
+        for i in 0..v.len() {
+            for j in (i + 1)..v.len() {
+                if v[i] == v[j] {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+    if !distinct(&sa) || !distinct(&sb) || !distinct(&so) {
+        return None;
+    }
+
+    let in_a = |c: char| sa.contains(&c);
+    let in_b = |c: char| sb.contains(&c);
+    let in_o = |c: char| so.contains(&c);
+
+    // Every A label is exactly free (in output) XOR contracted (in B, not output).
+    for &c in &sa {
+        if in_o(c) == in_b(c) {
+            return None;
+        }
+    }
+    // Every B label is exactly free (in output) XOR contracted (in A).
+    for &c in &sb {
+        if in_o(c) == in_a(c) {
+            return None;
+        }
+    }
+    // Every output label comes from exactly one operand (and is not contracted).
+    for &c in &so {
+        if in_a(c) == in_b(c) {
+            return None;
+        }
+    }
+
+    // A must be [free_A…, contracted…]; contracted labels are A's labels that are in B.
+    let n_k = sa.iter().filter(|&&c| in_b(c)).count();
+    if n_k == 0 {
+        return None;
+    }
+    let split_a = sa.len() - n_k; // free_A count
+    let free_b_len = sb.len() - n_k;
+    // Require a genuine M×N product: non-empty free-lhs and free-rhs.
+    if split_a == 0 || free_b_len == 0 {
+        return None;
+    }
+    for (i, &c) in sa.iter().enumerate() {
+        if (i >= split_a) != in_b(c) {
+            return None; // free_A prefix, contracted suffix
+        }
+    }
+    // B must be [contracted…, free_B…] with contracted in the SAME order as A's suffix.
+    for i in 0..n_k {
+        if sb[i] != sa[split_a + i] {
+            return None;
+        }
+    }
+    for &c in &sb[n_k..] {
+        if in_a(c) {
+            return None; // free_B must not appear in A
+        }
+    }
+    // Output must be exactly [free_A…, free_B…] in order.
+    if so.len() != split_a + free_b_len {
+        return None;
+    }
+    for i in 0..split_a {
+        if so[i] != sa[i] {
+            return None;
+        }
+    }
+    for i in 0..free_b_len {
+        if so[split_a + i] != sb[n_k + i] {
+            return None;
+        }
+    }
+
+    // Contracted extents must agree per-axis (A suffix vs B prefix).
+    for i in 0..n_k {
+        if a_shape[split_a + i] != b_shape[i] {
+            return None;
+        }
+    }
+    let m: usize = a_shape[..split_a].iter().product();
+    let k: usize = a_shape[split_a..].iter().product();
+    let n: usize = b_shape[n_k..].iter().product();
+    if m == 0 || k == 0 || n == 0 {
+        return None;
+    }
+    if a.len() < m.checked_mul(k)? || b.len() < k.checked_mul(n)? {
+        return None;
+    }
+
+    // A is contiguous [M, K], B is contiguous [K, N] — feed matmul_2d directly.
+    let out = crate::tensor_contraction::matmul_2d(a, m, k, b, n);
+    let mut out_shape: Vec<usize> = a_shape[..split_a].to_vec();
+    out_shape.extend_from_slice(&b_shape[n_k..]);
+    Some((out, out_shape))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1247,6 +1387,103 @@ mod tests {
         for idx in 0..m * n {
             assert_eq!(got2[idx].to_bits(), want_atbt[idx].to_bits(), "AtBt at {idx}");
         }
+    }
+
+    #[test]
+    fn einsum2_grouped_matmul_bit_identical() {
+        // Grouped free axes, single contraction "abc,cde->abde": M=[a,b], K=[c],
+        // N=[d,e]. Bit-identical to the ascending-K textbook reference.
+        let (da, db, dc, dd, de) = (3usize, 4, 5, 2, 6);
+        let a: Vec<f64> = (0..da * db * dc).map(|i| (i as f64 * 0.021).sin() * 1.3).collect();
+        let b: Vec<f64> = (0..dc * dd * de).map(|i| (i as f64 * 0.033).cos() * 1.7).collect();
+        let (mm, kk, nn) = (da * db, dc, dd * de);
+        let mut want = vec![0.0f64; mm * nn];
+        for mi in 0..mm {
+            for ni in 0..nn {
+                let mut s = 0.0;
+                for ki in 0..kk {
+                    s += a[mi * kk + ki] * b[ki * nn + ni];
+                }
+                want[mi * nn + ni] = s;
+            }
+        }
+        let (got, sh) = einsum2("abc,cde->abde", &a, &[da, db, dc], &b, &[dc, dd, de]).unwrap();
+        assert_eq!(sh, vec![da, db, dd, de]);
+        for idx in 0..mm * nn {
+            assert_eq!(got[idx].to_bits(), want[idx].to_bits(), "abc,cde->abde at {idx}");
+        }
+
+        // Grouped contraction "abcd,cdef->abef": M=[a,b], K=[c,d], N=[e,f]. The
+        // collapsed-K ascending order matches matmul_2d (one valid ordering of the
+        // generic's nondeterministic multi-axis sum).
+        let (a2, b2, c2, d2, e2, f2) = (2usize, 3, 2, 3, 2, 4);
+        let av: Vec<f64> = (0..a2 * b2 * c2 * d2).map(|i| (i as f64 * 0.017).sin()).collect();
+        let bv: Vec<f64> = (0..c2 * d2 * e2 * f2).map(|i| (i as f64 * 0.029).cos()).collect();
+        let (mm2, kk2, nn2) = (a2 * b2, c2 * d2, e2 * f2);
+        let mut want2 = vec![0.0f64; mm2 * nn2];
+        for mi in 0..mm2 {
+            for ni in 0..nn2 {
+                let mut s = 0.0;
+                for ki in 0..kk2 {
+                    s += av[mi * kk2 + ki] * bv[ki * nn2 + ni];
+                }
+                want2[mi * nn2 + ni] = s;
+            }
+        }
+        let (got2, sh2) =
+            einsum2("abcd,cdef->abef", &av, &[a2, b2, c2, d2], &bv, &[c2, d2, e2, f2]).unwrap();
+        assert_eq!(sh2, vec![a2, b2, e2, f2]);
+        for idx in 0..mm2 * nn2 {
+            assert_eq!(got2[idx].to_bits(), want2[idx].to_bits(), "abcd,cdef->abef at {idx}");
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_einsum2_grouped_vs_odometer() {
+        use std::time::Instant;
+        let (a, b, c, d, e, f) = (32usize, 32, 32, 32, 32, 32); // M=K=N=1024
+        let (mm, kk, nn) = (a * b, c * d, e * f);
+        let av: Vec<f64> = (0..mm * kk).map(|i| ((i as f64) * 0.0007).sin()).collect();
+        let bv: Vec<f64> = (0..kk * nn).map(|i| ((i as f64) * 0.0009).cos()).collect();
+        // "Before": the generic odometer's effective inner contraction — b strided
+        // by N over the contracted index (the cache-pathological rhs orientation).
+        let odometer = || {
+            let mut out = vec![0.0f64; mm * nn];
+            for mi in 0..mm {
+                for ni in 0..nn {
+                    let mut s = 0.0;
+                    for ki in 0..kk {
+                        s += av[mi * kk + ki] * bv[ki * nn + ni];
+                    }
+                    out[mi * nn + ni] = s;
+                }
+            }
+            out
+        };
+        let fast = || {
+            einsum2("abcd,cdef->abef", &av, &[a, b, c, d], &bv, &[c, d, e, f])
+                .unwrap()
+                .0
+        };
+        let best = |g: &dyn Fn() -> Vec<f64>| {
+            let _ = g();
+            let mut t = f64::MAX;
+            for _ in 0..3 {
+                let s = Instant::now();
+                std::hint::black_box(g());
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            t
+        };
+        let base = best(&odometer);
+        let fst = best(&fast);
+        println!(
+            "BENCH einsum2 grouped [{mm}x{kk}·{kk}x{nn}]: odometer={:.2}ms matmul2d={:.2}ms speedup={:.2}x",
+            base * 1e3,
+            fst * 1e3,
+            base / fst
+        );
     }
 
     #[test]
