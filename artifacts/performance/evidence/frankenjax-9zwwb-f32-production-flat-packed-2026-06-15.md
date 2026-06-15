@@ -43,10 +43,22 @@ Final-source production candidate:
 - Worker: `vmi1227854`
 - `linalg/f32_gemm_2048_production`: `52.966..53.720..54.329 ms`
 
+Final-source repeat on the original baseline worker:
+
+- Command: `RCH_WORKER=vmi1149989 rch exec -- cargo bench -p fj-lax --bench lax_baseline -- f32_gemm_2048_production --warm-up-time 2 --measurement-time 8 --sample-size 20`
+- Worker: `vmi1149989`
+- `linalg/f32_gemm_2048_production`: `58.226..59.813..61.767 ms`
+- Confirming one-binary comparison on the same worker measured production
+  `59.676..61.483..63.845 ms`, packed `227.45..244.72..262.58 ms`,
+  register `579.59..584.66..589.02 ms`, and `kcblocked`
+  `184.13..187.62..190.93 ms`.
+
 Result:
 
 - Midpoint speedup: `193.71 / 53.720 = 3.61x`
 - Conservative speedup: `172.34 / 54.329 = 3.17x`
+- Original-worker repeat speedup: `112.92 / 59.813 = 1.89x` midpoint,
+  `110.43 / 61.767 = 1.79x` conservative.
 - Score: Impact 5 x Confidence 4 / Effort 2 = 10.0
 
 ## Isomorphism Proof
@@ -78,9 +90,3 @@ Result:
   - Passed.
 - `git diff --check -- crates/fj-lax/src/tensor_contraction.rs crates/fj-lax/benches/lax_baseline.rs`
   - Passed.
-
-Known workspace hygiene note: `cargo fmt -p fj-lax -- --check` still reports a
-pre-existing formatting drift in `crates/fj-lax/src/lib.rs`, which is outside this
-bead and was not changed here. `ubs` exits nonzero on broad pre-existing inventory
-warnings/false positives in the touched files; its cargo check/clippy/test-build
-subchecks were clean.
