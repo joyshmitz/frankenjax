@@ -458,6 +458,74 @@ fn bench_jit_compiled_eval_cache(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// 7b. Repeated JIT compiled evaluator cache for NON-scalar (tensor/reduction)
+// programs: same-binary A/B.
+//
+// These programs have no scalar fast-path plan, so before the compile gate was
+// broadened they fell through to the full per-call dispatch every time. The API
+// arm now reuses the cached generic dense plan. Both run ReduceSum over a small
+// f64 vector and must return the same sum.
+// ---------------------------------------------------------------------------
+
+fn bench_jit_compiled_eval_cache_tensor(c: &mut Criterion) {
+    use fj_dispatch::{DispatchRequestRef, dispatch_ref, prepare_dispatch_meta};
+
+    let mut group = c.benchmark_group("jit_compiled_eval_cache_tensor");
+    let jaxpr = build_program(ProgramSpec::ReduceSumVec);
+    let transforms = [Transform::Jit];
+    let evidence: Vec<String> = vec!["fj-api-jit-0".to_owned()];
+    let compile_options = std::collections::BTreeMap::new();
+    let backend = "cpu";
+    let mode = fj_core::CompatibilityMode::Strict;
+    let features: Vec<String> = Vec::new();
+    let input = Value::vector_f64(&[1.5, -2.25, 3.0, 4.75, 0.5, -1.0, 2.0, 8.0]).expect("vector");
+    let meta = prepare_dispatch_meta(
+        mode,
+        &jaxpr,
+        &transforms,
+        &evidence,
+        backend,
+        &compile_options,
+        None,
+        &features,
+    )
+    .expect("prepare dispatch meta");
+
+    let wrapped = jit(jaxpr.clone());
+    wrapped
+        .call(vec![input.clone()])
+        .expect("warm compiled jit");
+
+    group.bench_function("dispatch_prepared/reduce_sum", |b| {
+        b.iter(|| {
+            let response = dispatch_ref(DispatchRequestRef {
+                mode,
+                root_jaxpr: &jaxpr,
+                transform_stack: &transforms,
+                transform_evidence: &evidence,
+                args: vec![input.clone()],
+                backend,
+                compile_options: compile_options.clone(),
+                custom_hook: None,
+                unknown_incompatible_features: &features,
+                prepared: Some(&meta),
+            })
+            .expect("prepared dispatch");
+            std::hint::black_box(&response.outputs);
+        });
+    });
+
+    group.bench_function("api_compiled/reduce_sum", |b| {
+        b.iter(|| {
+            let outputs = wrapped.call(vec![input.clone()]).expect("compiled jit");
+            std::hint::black_box(&outputs);
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -470,5 +538,6 @@ criterion_group!(
     bench_api_mode_config,
     bench_prepared_dispatch_metadata,
     bench_jit_compiled_eval_cache,
+    bench_jit_compiled_eval_cache_tensor,
 );
 criterion_main!(api_benches);

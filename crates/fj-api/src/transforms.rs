@@ -1558,6 +1558,77 @@ mod tests {
     }
 
     #[test]
+    fn jit_repeated_call_compiled_cache_matches_dispatch_tensor_programs() {
+        use fj_core::ProgramSpec;
+
+        // Non-scalar (tensor / reduction / dot) programs: these have no scalar
+        // fast-path plan, so before the gate was relaxed they fell through to the
+        // full per-call dispatch. They must now compile to the generic dense
+        // path and stay bit-for-bit identical to the backend dispatch result.
+        fn assert_compiled_cache_matches_dispatch(name: &str, jaxpr: Jaxpr, args: Vec<Value>) {
+            assert!(
+                fj_interpreters::compile_jaxpr_for_repeated_eval(&jaxpr).is_some(),
+                "{name} should now be eligible for the repeated-JIT compiled dense path"
+            );
+
+            let wrapped = jit(jaxpr.clone());
+            // Call twice so the second call exercises the warmed compiled cache.
+            let _ = wrapped.call(args.clone()).expect("warm compiled call");
+            let fast = wrapped.call(args.clone()).expect("compiled jit call");
+
+            let dispatch = dispatch_with_options(
+                &jaxpr,
+                &[Transform::Jit],
+                args,
+                DEFAULT_BACKEND,
+                CompatibilityMode::Strict,
+                BTreeMap::new(),
+            )
+            .expect("dispatch reference should succeed");
+
+            assert_eq!(fast, dispatch, "{name}: compiled cache must match dispatch");
+        }
+
+        assert_compiled_cache_matches_dispatch(
+            "reduce_sum_vec",
+            fj_core::build_program(ProgramSpec::ReduceSumVec),
+            vec![Value::vector_f64(&[1.5, -2.25, 3.0, 4.75]).expect("vec")],
+        );
+        assert_compiled_cache_matches_dispatch(
+            "dot3",
+            fj_core::build_program(ProgramSpec::Dot3),
+            vec![
+                Value::vector_f64(&[1.0, 2.0, 3.0]).expect("vec"),
+                Value::vector_f64(&[4.0, 5.0, 6.0]).expect("vec"),
+            ],
+        );
+        assert_compiled_cache_matches_dispatch(
+            "add_one_vec",
+            fj_core::build_program(ProgramSpec::AddOne),
+            vec![Value::vector_i64(&[10, 20, 30, 40]).expect("vec")],
+        );
+    }
+
+    #[test]
+    fn jit_repeated_call_compiled_tensor_golden_sha256() {
+        use fj_core::ProgramSpec;
+
+        let jaxpr = fj_core::build_program(ProgramSpec::ReduceSumVec);
+        let wrapped = jit(jaxpr);
+        let out = wrapped
+            .call(vec![
+                Value::vector_f64(&[1.5, -2.25, 3.0, 4.75]).expect("vec"),
+            ])
+            .expect("compiled jit call should succeed");
+        let digest = fj_test_utils::fixture_id_from_json(&("frankenjax-so4wo", &out))
+            .expect("golden output should hash");
+        assert_eq!(
+            digest,
+            "00973a72bf25a5a56152d373c887ddc555877c6e09545140c723080675c2676a"
+        );
+    }
+
+    #[test]
     fn jit_call_mul() {
         let wrapped = jit(make_mul_jaxpr());
         let result = wrapped

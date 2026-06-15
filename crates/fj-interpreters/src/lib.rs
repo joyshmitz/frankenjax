@@ -5878,21 +5878,6 @@ struct DenseEvalPlan {
     scalar_poly_plan: Option<ScalarPolyPlan>,
 }
 
-impl DenseEvalPlan {
-    fn has_scalar_fast_path(&self) -> bool {
-        self.scalar_f64_plan.is_some()
-            || self.scalar_i64_plan.is_some()
-            || self.scalar_f32_plan.is_some()
-            || self.scalar_bf16_plan.is_some()
-            || self.scalar_f16_plan.is_some()
-            || self.scalar_compare_plan.is_some()
-            || self.scalar_compound_compare_plan.is_some()
-            || self.scalar_select_plan.is_some()
-            || self.scalar_select_i64_plan.is_some()
-            || self.scalar_poly_plan.is_some()
-    }
-}
-
 /// One-time compiled evaluator for hot repeated calls of the same small Jaxpr.
 ///
 /// The compiled form reuses the existing dense slot plan and scalar step plans;
@@ -5919,12 +5904,23 @@ impl CompiledJaxpr {
     }
 }
 
-/// Compile a pure dense scalar Jaxpr for repeated evaluation.
+/// Compile a pure dense Jaxpr for repeated evaluation.
 ///
 /// This deliberately accepts only no-const, effect-free, sub-jaxpr-free programs
-/// with unique bindings and an existing scalar dense plan. Everything else keeps
-/// the normal interpreter/backend route so malformed or non-scalar programs keep
-/// their existing behavior.
+/// with unique bindings and a buildable dense slot plan. Everything else keeps
+/// the normal interpreter/backend route so malformed programs keep their
+/// existing behavior.
+///
+/// The compiled form caches the [`DenseEvalPlan`] (slot-indexed env layout,
+/// per-equation last-use liveness, and the pre-scanned scalar step plans) so a
+/// hot repeated call pays the plan-build cost once instead of per call. It runs
+/// through [`run_dense_plan`], whose generic per-equation fallback
+/// ([`run_dense_env_into`]) dispatches the same `eval_primitive` kernels in the
+/// same order as [`eval_jaxpr_with_consts`] — so the result is bit-for-bit
+/// identical, scalar *or* tensor. Earlier this gated on `has_scalar_fast_path`,
+/// which left small tensor/reduction programs paying the full per-call dispatch
+/// tax; that gate is gone because the generic dense path is an equally exact
+/// drop-in.
 #[must_use]
 pub fn compile_jaxpr_for_repeated_eval(jaxpr: &Jaxpr) -> Option<CompiledJaxpr> {
     if !jaxpr.constvars.is_empty() || !jaxpr.effects.is_empty() {
@@ -5935,9 +5931,6 @@ pub fn compile_jaxpr_for_repeated_eval(jaxpr: &Jaxpr) -> Option<CompiledJaxpr> {
     }
 
     let plan = build_dense_plan(jaxpr)?;
-    if !plan.has_scalar_fast_path() {
-        return None;
-    }
 
     Some(CompiledJaxpr {
         jaxpr: jaxpr.clone(),
