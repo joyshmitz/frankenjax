@@ -4468,7 +4468,58 @@ pub(crate) fn eval_iota(
     } else {
         DType::I64
     };
-    let elements: Vec<Literal> = (0..length as usize)
+
+    // Dense-output fast paths (mirror eval_broadcasted_iota): emit a packed native
+    // buffer instead of a Vec<Literal> (24 B/elem), so iota stays on the dense path
+    // for downstream ops. Each `index as T` reproduces literal_from_index_for_dtype
+    // exactly: I64/F64/F32 are `index as {i64,f64,f32}`, and the half dtypes take
+    // their u16 bits straight from literal_from_index_for_dtype so the round-trip is
+    // bit-for-bit identical. I32/U32/U64/Complex stay on the generic path below.
+    let n = length as usize;
+    match dtype {
+        DType::I64 => {
+            let out: Vec<i64> = (0..length as i64).collect();
+            return Ok(Value::Tensor(TensorValue::new_i64_values(
+                Shape::vector(length),
+                out,
+            )?));
+        }
+        DType::F64 => {
+            let out: Vec<f64> = (0..n).map(|i| i as f64).collect();
+            return Ok(Value::Tensor(TensorValue::new_f64_values(
+                Shape::vector(length),
+                out,
+            )?));
+        }
+        DType::F32 => {
+            let out: Vec<f32> = (0..n).map(|i| i as f32).collect();
+            return Ok(Value::Tensor(TensorValue::new_f32_values(
+                Shape::vector(length),
+                out,
+            )?));
+        }
+        DType::BF16 | DType::F16 => {
+            let out: Vec<u16> = (0..n)
+                .map(
+                    |i| match literal_from_index_for_dtype(primitive, dtype, i)? {
+                        Literal::BF16Bits(b) | Literal::F16Bits(b) => Ok(b),
+                        other => Err(EvalError::Unsupported {
+                            primitive,
+                            detail: format!("iota half dtype produced {other:?}"),
+                        }),
+                    },
+                )
+                .collect::<Result<_, _>>()?;
+            return Ok(Value::Tensor(TensorValue::new_half_float_values(
+                dtype,
+                Shape::vector(length),
+                out,
+            )?));
+        }
+        _ => {}
+    }
+
+    let elements: Vec<Literal> = (0..n)
         .map(|index| literal_from_index_for_dtype(primitive, dtype, index))
         .collect::<Result<_, _>>()?;
 
@@ -15319,6 +15370,84 @@ mod tests {
         let p = params(&[("length", "5"), ("dtype", "F64")]);
         let result = eval_iota(&[], &p).unwrap();
         assert_eq!(extract_f64_vec(&result), vec![0.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn iota_dense_matches_generic_reference() {
+        // Dense I64/F64/F32/BF16/F16 eval_iota must be bit-for-bit identical to the
+        // generic per-`Literal` path (value at position i == i), and must stay
+        // dense. Independent reference via literal_from_index_for_dtype.
+        for (dt, len) in [
+            ("i64", 257usize),
+            ("f64", 257),
+            ("f32", 300),
+            ("bf16", 300),
+            ("f16", 300),
+        ] {
+            let dtype = super::parse_dtype_name(Primitive::Iota, "dtype", dt).unwrap();
+            let p = params(&[("length", &len.to_string()), ("dtype", dt)]);
+            let got = eval_iota(&[], &p).unwrap();
+            let t = got.as_tensor().unwrap();
+            match dt {
+                "i64" => assert!(t.elements.as_i64_slice().is_some(), "i64 iota dense"),
+                "f64" => assert!(t.elements.as_f64_slice().is_some(), "f64 iota dense"),
+                "f32" => assert!(t.elements.as_f32_slice().is_some(), "f32 iota dense"),
+                _ => assert!(
+                    t.elements.as_half_float_slice().is_some(),
+                    "{dt} iota dense"
+                ),
+            }
+            let want: Vec<Literal> = (0..len)
+                .map(|i| super::literal_from_index_for_dtype(Primitive::Iota, dtype, i).unwrap())
+                .collect();
+            let got_lits: Vec<Literal> = t.elements.iter().copied().collect();
+            assert_eq!(got_lits, want, "{dt} iota dense vs generic reference");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_iota_f32_dense_vs_generic() {
+        use std::time::Instant;
+        // Producer-side A/B: NEW dense f32 iota vs the OLD generic Vec<Literal> path.
+        let n = 1usize << 22; // 4M
+        let p = params(&[("length", &n.to_string()), ("dtype", "f32")]);
+        let best = |mut f: Box<dyn FnMut() -> u64>| {
+            f();
+            let mut b = f64::MAX;
+            let mut digest = 0u64;
+            for _ in 0..10 {
+                let t = Instant::now();
+                digest = std::hint::black_box(f());
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            (b, digest)
+        };
+        let (t_generic, d_generic) = best(Box::new(move || {
+            let elems: Vec<Literal> = (0..n).map(|i| Literal::from_f32(i as f32)).collect();
+            let tv = TensorValue::new(DType::F32, Shape::vector(n as u32), elems).unwrap();
+            tv.elements.iter().fold(0u64, |a, l| match l {
+                Literal::F32Bits(b) => a ^ u64::from(*b),
+                _ => a,
+            })
+        }));
+        let (t_dense, d_dense) = best(Box::new(move || {
+            let out = eval_iota(&[], &p).unwrap();
+            out.as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .fold(0u64, |a, &v| a ^ u64::from(v.to_bits()))
+        }));
+        assert_eq!(d_generic, d_dense, "dense iota digest must match generic");
+        println!(
+            "BENCH iota f32 n={n}: generic(Vec<Literal>)={:.4}ms dense={:.4}ms speedup={:.2}x digest={d_generic:016x}",
+            t_generic * 1e3,
+            t_dense * 1e3,
+            t_generic / t_dense,
+        );
     }
 
     #[test]
