@@ -41,6 +41,15 @@ Speedup:
 - Conservative interval: 1033.4 / 313.98 = **3.29x**
 - Score: 10.0 (Impact 4, Confidence 5, Effort 2)
 
+Final closeout rerun:
+
+- Command: `rch exec -- cargo bench -p fj-api --bench api_overhead -- jit_compiled_eval_cache_tensor`
+- Worker: `vmi1149989`
+- `jit_compiled_eval_cache_tensor/dispatch_prepared/reduce_sum`: 1.1771 us, 1.2631 us, 1.3611 us
+- `jit_compiled_eval_cache_tensor/api_compiled/reduce_sum`: 278.61 ns, 286.25 ns, 294.26 ns
+- Midpoint: 1263.1 / 286.25 = **4.41x**
+- Conservative interval: 1177.1 / 294.26 = **4.00x**
+
 ## Isomorphism proof
 
 - Ordering: compiled eval reuses the existing dense plan and runs the same step
@@ -66,3 +75,12 @@ Speedup:
   - new `transforms::tests::jit_repeated_call_compiled_tensor_golden_sha256`
     pins the ReduceSum golden output.
 - `rch exec -- cargo test -p fj-conformance`
+
+Final closeout reruns:
+
+- `cargo fmt --check -p fj-api -p fj-interpreters`
+- `rch exec -- cargo test -j 1 -p fj-interpreters -p fj-api --lib`
+  - `fj-api`: 92 passed
+  - `fj-interpreters`: 191 passed, 17 ignored
+- `rch exec -- cargo check -j 1 -p fj-api -p fj-interpreters --all-targets`
+- `rch exec -- cargo clippy -j 1 -p fj-api -p fj-interpreters --all-targets -- -D warnings`

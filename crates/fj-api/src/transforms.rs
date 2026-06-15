@@ -39,6 +39,11 @@ pub struct GradWrapped {
     backend: BackendName,
     mode: CompatibilityMode,
     custom_vjp_rule_key: Option<String>,
+    /// Lazily-computed, args-independent dispatch metadata (composition proof +
+    /// cache key) shared across repeated `call`s, mirroring [`ValueAndGradWrapped`].
+    /// Excluded from equality/Debug so the wrapper's observable identity is
+    /// unchanged.
+    meta_cache: DispatchMetaCache,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -205,6 +210,7 @@ pub fn grad(jaxpr: Jaxpr) -> GradWrapped {
         backend: Cow::Borrowed(DEFAULT_BACKEND),
         mode: CompatibilityMode::Strict,
         custom_vjp_rule_key: None,
+        meta_cache: DispatchMetaCache::default(),
     }
 }
 
@@ -818,12 +824,15 @@ impl GradWrapped {
     #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = Cow::Owned(backend.to_owned());
+        // Backend feeds the cache key — invalidate any memoized metadata.
+        self.meta_cache = DispatchMetaCache::default();
         self
     }
 
     #[must_use]
     pub fn with_mode(mut self, mode: CompatibilityMode) -> Self {
         self.mode = mode;
+        self.meta_cache = DispatchMetaCache::default();
         self
     }
 
@@ -832,13 +841,38 @@ impl GradWrapped {
         if let Some(rule_key) = &self.custom_vjp_rule_key {
             compile_options.insert(CUSTOM_VJP_RULE_KEY_OPTION.to_owned(), rule_key.clone());
         }
-        dispatch_with_options(
+        let transforms = [Transform::Grad];
+        let evidence = transform_evidence(&transforms);
+        // Memoize the args-independent composition proof + cache key so repeated
+        // calls skip re-hashing the canonical Jaxpr fingerprint (mirrors
+        // `ValueAndGradWrapped::call`). The AD pass itself is value-dependent and
+        // still runs per call.
+        let prepared = self
+            .meta_cache
+            .0
+            .get_or_init(|| {
+                prepare_dispatch_meta(
+                    self.mode,
+                    &self.jaxpr,
+                    &transforms,
+                    &evidence,
+                    self.backend.as_ref(),
+                    &compile_options,
+                    None,
+                    &[],
+                )
+                .ok()
+            })
+            .as_ref();
+        dispatch_with_options_prepared(
             &self.jaxpr,
-            &[Transform::Grad],
+            &transforms,
+            &evidence,
             args,
             self.backend.as_ref(),
             self.mode,
             compile_options,
+            prepared,
         )
     }
 }
@@ -1080,6 +1114,7 @@ impl CustomVjpWrapped {
             backend: self.backend.clone(),
             mode: self.mode,
             custom_vjp_rule_key: Some(self.rule_key.clone()),
+            meta_cache: DispatchMetaCache::default(),
         }
     }
 
@@ -1188,6 +1223,7 @@ impl CheckpointWrapped {
             backend: self.backend.clone(),
             mode: self.mode,
             custom_vjp_rule_key: Some(self.custom_vjp_rule_key.clone()),
+            meta_cache: DispatchMetaCache::default(),
         }
     }
 
