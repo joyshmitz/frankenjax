@@ -101,6 +101,12 @@ fn eval_f64_scalar_expensive_parallel(
     if !is_expensive_binary(primitive) {
         return None;
     }
+    // Scalar Atan2 is libm-call dominated but does not amortize scoped thread
+    // fan-out on current workers; keep it on the dense serial map below while
+    // preserving the same per-lane f64::atan2 operation and operand order.
+    if primitive == Primitive::Atan2 {
+        return None;
+    }
     let Literal::F64Bits(scalar_bits) = scalar else {
         return None;
     };
@@ -1711,16 +1717,17 @@ fn eval_f64_scalar_broadcast_binop(
         Primitive::Min => {
             f64_scalar_broadcast_jax(scalar, tensor, scalar_on_left, crate::jax_min_f64)
         }
+        Primitive::Atan2 => f64_scalar_broadcast_fn(scalar, tensor, scalar_on_left, f64::atan2),
         _ => Ok(None),
     }
 }
 
-/// Dense f64 scalar⊗tensor map for a NaN-propagating op (`jax_max_f64`/`jax_min_f64`)
-/// that has no `dense::ArithOp` variant. Maps the contiguous `as_f64_slice` directly
-/// (the fast path) or falls back to the per-`Literal` loop; bit-for-bit identical to
-/// the generic broadcast path, which applies the same `op` in the same operand order.
+/// Dense f64 scalar⊗tensor map for a primitive-specific binary f64 function.
+/// This preserves the generic scalar broadcast contract exactly: same operand
+/// order, same per-lane function, same traversal order, and dense f64 output
+/// whose bits round-trip through `Literal::F64Bits`.
 #[inline]
-fn f64_scalar_broadcast_jax(
+fn f64_scalar_broadcast_fn(
     scalar: f64,
     tensor: &TensorValue,
     scalar_on_left: bool,
@@ -1753,6 +1760,20 @@ fn f64_scalar_broadcast_jax(
         tensor.shape.clone(),
         elements,
     )?)))
+}
+
+/// Dense f64 scalar⊗tensor map for a NaN-propagating op (`jax_max_f64`/`jax_min_f64`)
+/// that has no `dense::ArithOp` variant. Maps the contiguous `as_f64_slice` directly
+/// (the fast path) or falls back to the per-`Literal` loop; bit-for-bit identical to
+/// the generic broadcast path, which applies the same `op` in the same operand order.
+#[inline]
+fn f64_scalar_broadcast_jax(
+    scalar: f64,
+    tensor: &TensorValue,
+    scalar_on_left: bool,
+    op: fn(f64, f64) -> f64,
+) -> Result<Option<Value>, EvalError> {
+    f64_scalar_broadcast_fn(scalar, tensor, scalar_on_left, op)
 }
 
 #[inline]
@@ -14804,6 +14825,74 @@ mod tests {
                 "{prim:?} scalar⊗tensor threaded != reference"
             );
         }
+    }
+
+    #[test]
+    fn dense_f64_scalar_atan2_serial_route_preserves_bits_and_golden() {
+        let n = EXPENSIVE_BINARY_PARALLEL_MIN + 17;
+        let mut data: Vec<f64> = (0..n)
+            .map(|i| ((i as f64) * 0.0078125 - 257.0).sin() * 32.0)
+            .collect();
+        data[0] = -0.0;
+        data[1] = 0.0;
+        data[2] = f64::INFINITY;
+        data[3] = f64::NEG_INFINITY;
+        data[4] = f64::from_bits(0x7ff8_0000_0000_0123);
+
+        let shape = Shape {
+            dims: vec![n as u32],
+        };
+        let tensor = Value::Tensor(TensorValue::new_f64_values(shape, data.clone()).unwrap());
+        let scalar_value = -3.25f64;
+        let scalar = Value::scalar_f64(scalar_value);
+        let params = BTreeMap::new();
+        let mut golden_bits = Vec::with_capacity(n * 2);
+
+        let tensor_scalar =
+            crate::eval_primitive(Primitive::Atan2, &[tensor.clone(), scalar.clone()], &params)
+                .unwrap();
+        assert!(
+            tensor_scalar
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_some(),
+            "tensor-scalar atan2 output should stay dense f64"
+        );
+        let tensor_scalar_bits = extract_f64_bits_vec(&tensor_scalar);
+        let expected: Vec<u64> = data
+            .iter()
+            .map(|&x| x.atan2(scalar_value).to_bits())
+            .collect();
+        assert_eq!(tensor_scalar_bits, expected);
+        golden_bits.extend(tensor_scalar_bits);
+
+        let scalar_tensor =
+            crate::eval_primitive(Primitive::Atan2, &[scalar.clone(), tensor.clone()], &params)
+                .unwrap();
+        assert!(
+            scalar_tensor
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_some(),
+            "scalar-tensor atan2 output should stay dense f64"
+        );
+        let scalar_tensor_bits = extract_f64_bits_vec(&scalar_tensor);
+        let expected: Vec<u64> = data
+            .iter()
+            .map(|&x| scalar_value.atan2(x).to_bits())
+            .collect();
+        assert_eq!(scalar_tensor_bits, expected);
+        golden_bits.extend(scalar_tensor_bits);
+
+        let digest = fixture_id_from_json(&golden_bits).unwrap();
+        assert_eq!(
+            digest,
+            "2d89e8c1aeb21c2033b4ba82dfa30d2cf90767131bc896454cc8289a6e020896"
+        );
     }
 
     #[test]
