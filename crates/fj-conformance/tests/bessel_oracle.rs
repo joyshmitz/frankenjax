@@ -17,6 +17,9 @@
 //! - Special values: infinity, NaN
 //! - Tensor shapes
 
+// Golden reference constants are transcribed at full source precision on purpose.
+#![allow(clippy::excessive_precision)]
+
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;

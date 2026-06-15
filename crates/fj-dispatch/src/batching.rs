@@ -5337,7 +5337,7 @@ fn triangular_solve_slice(
             a[row_major_index(i, k, n_a)]
         }
     };
-    let mut solve_row = |i: usize, ks: std::ops::Range<usize>, x: &mut [f64]| {
+    let solve_row = |i: usize, ks: std::ops::Range<usize>, x: &mut [f64]| {
         for k in ks {
             let aik = a_at(i, k);
             if k < i {
@@ -5362,8 +5362,8 @@ fn triangular_solve_slice(
             a[row_major_index(i, i, n_a)]
         };
         let xi = &mut x[i * n_b..i * n_b + n_b];
-        for col in 0..n_b {
-            xi[col] /= d;
+        for v in xi.iter_mut() {
+            *v /= d;
         }
     };
     if lower != transpose_a {
@@ -10774,11 +10774,11 @@ mod tests {
             let slices_ref = &slices;
             let serial = best_time(|| {
                 let mut out = Vec::with_capacity(batch);
-                for b in 0..batch {
+                for slice in slices_ref.iter().take(batch) {
                     out.push(
                         eval_primitive_multi(
                             Primitive::Eig,
-                            std::slice::from_ref(&slices_ref[b]),
+                            std::slice::from_ref(slice),
                             &BTreeMap::new(),
                         )
                         .unwrap(),

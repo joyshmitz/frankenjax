@@ -1741,6 +1741,9 @@ fn bench_matmul_2d_512(c: &mut Criterion) {
 fn f32_gemm_blocked_ab(c: &mut Criterion, m: usize, k: usize, n: usize) {
     let a: Vec<f32> = (0..m * k).map(|i| (i as f32 * 1e-4).sin()).collect();
     let b: Vec<f32> = (0..k * n).map(|i| (i as f32 * 2e-4).cos()).collect();
+    c.bench_function(&format!("linalg/f32_gemm_{m}_production"), |bencher| {
+        bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, "production"))
+    });
     c.bench_function(&format!("linalg/f32_gemm_{m}_packed"), |bencher| {
         bencher.iter(|| fj_lax::tensor_contraction::f32_matmul_bench(&a, m, k, &b, n, "packed"))
     });

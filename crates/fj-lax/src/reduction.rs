@@ -3944,11 +3944,11 @@ mod tests {
         // cell value generator with edge values sprinkled in.
         let cell = |i: usize, n: usize| -> f64 {
             match i % 7 {
-                0 if i % 13 == 0 => nan,
+                0 if i.is_multiple_of(13) => nan,
                 1 => -0.0,
                 2 => 0.0,
-                3 if i % 11 == 0 => inf,
-                4 if i % 11 == 0 => -inf,
+                3 if i.is_multiple_of(11) => inf,
+                4 if i.is_multiple_of(11) => -inf,
                 _ => ((i as f64) * 0.37).sin() * 5.0 - ((i % n) as f64) * 0.25,
             }
         };

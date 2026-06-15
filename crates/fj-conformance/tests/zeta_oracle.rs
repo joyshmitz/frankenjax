@@ -14,6 +14,9 @@
 //! - Hurwitz zeta with various q values
 //! - Tensor shapes and broadcasting
 
+// Golden reference constants are transcribed at full source precision on purpose.
+#![allow(clippy::excessive_precision)]
+
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;

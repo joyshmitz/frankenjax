@@ -5463,10 +5463,10 @@ fn run_scalar_f64_plan_as_tensor_into(
                     Some(full) => {
                         if let Some(cols) = row_broadcast_len(full, &t.shape) {
                             DenseF64Cell::RowBcast(s.to_vec(), cols)
-                        } else if let Some(cols) = col_broadcast_cols(full, &t.shape) {
-                            DenseF64Cell::ColBcast(s.to_vec(), cols)
                         } else {
-                            return None; // incompatible shapes -> generic
+                            // col-broadcast or incompatible (-> generic via `?`)
+                            let cols = col_broadcast_cols(full, &t.shape)?;
+                            DenseF64Cell::ColBcast(s.to_vec(), cols)
                         }
                     }
                 },

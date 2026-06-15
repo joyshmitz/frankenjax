@@ -3547,7 +3547,7 @@ fn broadcast_binary_unsigned(
             out_count,
             lhs_strides,
             rhs_strides,
-            |a, b| u_op(a, b),
+            u_op,
         );
         return Ok(Some(Value::Tensor(TensorValue::new_u64_values(
             out_shape.clone(),
@@ -13617,7 +13617,7 @@ mod tests {
             ("rhs_contracting_dims".to_owned(), "0,1".to_owned()),
         ]);
         let got = eval_dot_general(&[tc(vec![2, 3, 4], &a), tc(vec![3, 4, 5], &b)], &p).unwrap();
-        let mut want = vec![(0.0f64, 0.0f64); 2 * 5];
+        let mut want = [(0.0f64, 0.0f64); 2 * 5];
         for i in 0..2 {
             for l in 0..5 {
                 let (mut re, mut im) = (0.0f64, 0.0f64);
@@ -13990,7 +13990,7 @@ mod tests {
         // contraction A[b,m,k]·B[b,n,k] (contract last dim of both) -> [b,m,n].
         use std::time::Instant;
         let (bt, m, k, n) = (8usize, 96usize, 96usize, 128usize);
-        let a: Vec<i64> = (0..bt * m * k as usize)
+        let a: Vec<i64> = (0..bt * m * k)
             .map(|i| (i as i64).wrapping_mul(0x1_0000_0001))
             .collect();
         let b: Vec<i64> = (0..bt * n * k)

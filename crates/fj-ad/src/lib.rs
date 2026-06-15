@@ -7847,7 +7847,6 @@ fn conv_vjp_batch_grouped(
     batch_groups: usize,
     params: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, AdError> {
-    let lhs_rank = lhs.shape.rank();
     let n = lhs.shape.dims[0] as usize; // batch = axis 0
     let c_out = rhs.shape.dims[rhs.shape.rank() - 1] as usize; // Cout = last axis of kernel
     if !n.is_multiple_of(batch_groups) || !c_out.is_multiple_of(batch_groups) {

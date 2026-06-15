@@ -12401,7 +12401,8 @@ mod tests {
             );
         }
         // Unary NOT on a BoolWords mask (SWAR word-flip) must match per-element !.
-        let not_swar = eval_primitive(Primitive::BitwiseNot, &[m1.clone()], &p).unwrap();
+        let not_swar =
+            eval_primitive(Primitive::BitwiseNot, std::slice::from_ref(&m1), &p).unwrap();
         assert_eq!(
             not_swar.as_tensor().unwrap().dtype,
             DType::Bool,
@@ -13499,6 +13500,7 @@ mod tests {
     /// for the boxed input (whose `as_*_slice` is None). Covers max/min/sum, f64 + i64,
     /// SAME + VALID, single and per-axis dilation, incl NaN/±inf/-0.0.
     #[test]
+    #[allow(clippy::identity_op)] // `/1`/`*1` keep the stride-general formula explicit
     fn dense_reduce_window_window_dilation_matches_generic() {
         let (rows, cols) = (9usize, 11usize);
         let data64: Vec<f64> = (0..rows * cols)
@@ -14602,6 +14604,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::identity_op)] // `/1`/`*1` keep the stride-general formula explicit
     fn dense_reduce_window_i32_matches_reference() {
         // i32 (JAX's default int) now routes through the dense i64 stencil (was the
         // generic per-`Literal` path). i32 densifies (`as_i64_slice` is Some) so it can't
@@ -14998,6 +15001,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)] // explicit case-table tuple reads clearer inline
     fn reduce_window_in_sum_sat_matches_generic() {
         // General-rank i64 SAT sum (rank 1, 3, 4) must match the generic per-window
         // path element-for-element across padding/strides. The SAT path is gated
@@ -15140,6 +15144,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)] // explicit case-table tuple reads clearer inline
     fn reduce_window_i64_maxmin_separable_matches_per_window() {
         // Large-window i64 max/min (separable deque path) must equal an independent
         // per-window in-bounds extremum reference across VALID/SAME, strides, ranks.
@@ -15697,7 +15702,7 @@ mod tests {
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_reduce_window_complex_dense_vs_generic() {
         use std::time::Instant;
-        let (n, w) = (384usize, 3usize);
+        let (n, _w) = (384usize, 3usize);
         let raw: Vec<(f64, f64)> = (0..n * n)
             .map(|i| ((i % 97) as f64 * 0.1, (i % 53) as f64 * 0.2))
             .collect();

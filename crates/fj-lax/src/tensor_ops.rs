@@ -12546,7 +12546,7 @@ mod tests {
                 })
                 .collect();
             eval_slice(
-                &[t.clone()],
+                std::slice::from_ref(t),
                 &BTreeMap::from([
                     ("start_indices".to_owned(), st.join(",")),
                     ("limit_indices".to_owned(), li.join(",")),
@@ -13620,6 +13620,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)] // op-table tuple reads clearer inline than aliased
     fn i32_structural_ops_preserve_dtype_not_widen_to_i64() {
         // i32 densifies into the i64 backing, so the dense structural paths gated on
         // `as_i64_slice()` (transpose / slice contiguous+strided / reverse / tile /
@@ -13663,8 +13664,8 @@ mod tests {
                     .collect(),
             )
         };
-        let data: Vec<i64> = (0..24)
-            .map(|i| i64::from((i as i32).wrapping_mul(7) - 11))
+        let data: Vec<i64> = (0..24i32)
+            .map(|i| i64::from(i.wrapping_mul(7) - 11))
             .collect();
 
         // Single-operand structural ops over a [4,6] i32 tensor.
@@ -13733,6 +13734,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::type_complexity)] // op-table tuple reads clearer inline than aliased
     fn u32_u64_structural_ops_dense_match_generic_and_preserve_dtype()
     -> Result<(), Box<dyn std::error::Error>> {
         // u32/u64 structural ops (transpose / slice contig+strided / reverse / tile /
@@ -15707,16 +15709,18 @@ mod tests {
             for desc in ["false", "true"] {
                 let p = params(&[("dimension", "0"), ("descending", desc)]);
                 assert_eq!(
-                    hbits(&eval_sort(Primitive::Sort, &[dense.clone()], &p).unwrap()),
-                    hbits(&eval_sort(Primitive::Sort, &[boxed.clone()], &p).unwrap()),
+                    hbits(&eval_sort(Primitive::Sort, std::slice::from_ref(&dense), &p).unwrap()),
+                    hbits(&eval_sort(Primitive::Sort, std::slice::from_ref(&boxed), &p).unwrap()),
                     "{dt:?} sort desc={desc}"
                 );
                 assert_eq!(
                     extract_i64_vec(
-                        &eval_argsort(Primitive::Argsort, &[dense.clone()], &p).unwrap()
+                        &eval_argsort(Primitive::Argsort, std::slice::from_ref(&dense), &p)
+                            .unwrap()
                     ),
                     extract_i64_vec(
-                        &eval_argsort(Primitive::Argsort, &[boxed.clone()], &p).unwrap()
+                        &eval_argsort(Primitive::Argsort, std::slice::from_ref(&boxed), &p)
+                            .unwrap()
                     ),
                     "{dt:?} argsort desc={desc}"
                 );
@@ -15763,16 +15767,24 @@ mod tests {
             for desc in ["false", "true"] {
                 let p = params(&[("dimension", "0"), ("descending", desc)]);
                 assert_eq!(
-                    hbits(&eval_sort(Primitive::Sort, &[dense_strided.clone()], &p).unwrap()),
-                    hbits(&eval_sort(Primitive::Sort, &[boxed_strided.clone()], &p).unwrap()),
+                    hbits(
+                        &eval_sort(Primitive::Sort, std::slice::from_ref(&dense_strided), &p)
+                            .unwrap()
+                    ),
+                    hbits(
+                        &eval_sort(Primitive::Sort, std::slice::from_ref(&boxed_strided), &p)
+                            .unwrap()
+                    ),
                     "{dt:?} strided sort desc={desc}"
                 );
                 assert_eq!(
                     extract_i64_vec(
-                        &eval_argsort(Primitive::Argsort, &[dense_strided.clone()], &p).unwrap()
+                        &eval_argsort(Primitive::Argsort, std::slice::from_ref(&dense_strided), &p)
+                            .unwrap()
                     ),
                     extract_i64_vec(
-                        &eval_argsort(Primitive::Argsort, &[boxed_strided.clone()], &p).unwrap()
+                        &eval_argsort(Primitive::Argsort, std::slice::from_ref(&boxed_strided), &p)
+                            .unwrap()
                     ),
                     "{dt:?} strided argsort desc={desc}"
                 );
