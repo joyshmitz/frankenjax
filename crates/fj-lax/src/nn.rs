@@ -241,13 +241,32 @@ pub fn softmax(x: &[f64]) -> Vec<f64> {
 ///
 /// Matches `jax.nn.softmax(x, axis=-1)` for a 2D array.
 /// Returns a flattened result with the same shape as input.
+///
+/// Each row is computed in place directly into the output buffer — no per-row
+/// `Vec` allocation or copy — using the SAME operations in the SAME order as the
+/// 1D [`softmax`] (`exp(x-max)` written to the output slot, summed, then divided
+/// in place), so the result is bit-for-bit identical to mapping [`softmax`] over
+/// the rows. The per-row heap allocation [`softmax`] performs dominated the
+/// many-rows/small-cols batched regime; this removes it.
 #[must_use]
 pub fn softmax_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     let mut result = vec![0.0; rows * cols];
+    if cols == 0 {
+        return result;
+    }
     for i in 0..rows {
-        let row = &x[i * cols..(i + 1) * cols];
-        let sm = softmax(row);
-        result[i * cols..(i + 1) * cols].copy_from_slice(&sm);
+        let src = &x[i * cols..(i + 1) * cols];
+        let dst = &mut result[i * cols..(i + 1) * cols];
+        let max_val = src.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let mut sum_exp = 0.0;
+        for (d, &v) in dst.iter_mut().zip(src.iter()) {
+            let e = (v - max_val).exp();
+            *d = e;
+            sum_exp += e;
+        }
+        for d in dst.iter_mut() {
+            *d /= sum_exp;
+        }
     }
     result
 }
@@ -268,13 +287,32 @@ pub fn log_softmax(x: &[f64]) -> Vec<f64> {
 /// Log-softmax along the last axis of a 2D array.
 ///
 /// Matches `jax.nn.log_softmax(x, axis=-1)` for a 2D array.
+///
+/// Each row is computed in place directly into the output buffer — no per-row
+/// `Vec` allocation or copy — using the SAME operations in the SAME order as the
+/// 1D [`log_softmax`] (`lse = max + ln(sum(exp(x-max)))`, then `x - lse`), so the
+/// result is bit-for-bit identical to mapping [`log_softmax`] over the rows.
 #[must_use]
 pub fn log_softmax_2d(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     let mut result = vec![0.0; rows * cols];
+    if cols == 0 {
+        return result;
+    }
     for i in 0..rows {
-        let row = &x[i * cols..(i + 1) * cols];
-        let lsm = log_softmax(row);
-        result[i * cols..(i + 1) * cols].copy_from_slice(&lsm);
+        let src = &x[i * cols..(i + 1) * cols];
+        let dst = &mut result[i * cols..(i + 1) * cols];
+        // Identical to logsumexp(src): max, then sum of exp(x - max), then
+        // max + ln(sum). Preserves the infinite-max early return.
+        let max_val = src.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let lse = if max_val.is_infinite() {
+            max_val
+        } else {
+            let sum_exp: f64 = src.iter().map(|&v| (v - max_val).exp()).sum();
+            max_val + sum_exp.ln()
+        };
+        for (d, &v) in dst.iter_mut().zip(src.iter()) {
+            *d = v - lse;
+        }
     }
     result
 }
@@ -404,6 +442,70 @@ mod tests {
 
     fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol
+    }
+
+    /// Per-row reference: map the 1D helper over rows (the prior `softmax_2d`
+    /// body). The fused in-place kernel must be BIT-for-BIT identical to this.
+    fn softmax_2d_rowmap_ref(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+        let mut result = vec![0.0; rows * cols];
+        for i in 0..rows {
+            let row = &x[i * cols..(i + 1) * cols];
+            let sm = softmax(row);
+            result[i * cols..(i + 1) * cols].copy_from_slice(&sm);
+        }
+        result
+    }
+
+    fn log_softmax_2d_rowmap_ref(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+        let mut result = vec![0.0; rows * cols];
+        for i in 0..rows {
+            let row = &x[i * cols..(i + 1) * cols];
+            let lsm = log_softmax(row);
+            result[i * cols..(i + 1) * cols].copy_from_slice(&lsm);
+        }
+        result
+    }
+
+    #[test]
+    fn softmax_2d_fused_bit_identical_to_rowmap() {
+        // Mixed magnitudes, signs, duplicates, and a row with a large value to
+        // exercise the max-subtraction; assert raw bit equality (not approx).
+        let rows = 7;
+        let cols = 5;
+        let x: Vec<f64> = (0..rows * cols)
+            .map(|k| ((k as f64) * 0.37).sin() * 1000.0 - (k as f64) * 1.5)
+            .collect();
+        let fused = softmax_2d(&x, rows, cols);
+        let reference = softmax_2d_rowmap_ref(&x, rows, cols);
+        assert_eq!(fused.len(), reference.len());
+        for (a, b) in fused.iter().zip(reference.iter()) {
+            assert_eq!(a.to_bits(), b.to_bits(), "softmax_2d diverged: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn log_softmax_2d_fused_bit_identical_to_rowmap() {
+        let rows = 6;
+        let cols = 8;
+        let x: Vec<f64> = (0..rows * cols)
+            .map(|k| ((k as f64) * 0.91).cos() * 50.0 + (k as f64))
+            .collect();
+        let fused = log_softmax_2d(&x, rows, cols);
+        let reference = log_softmax_2d_rowmap_ref(&x, rows, cols);
+        assert_eq!(fused.len(), reference.len());
+        for (a, b) in fused.iter().zip(reference.iter()) {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "log_softmax_2d diverged: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn softmax_2d_log_softmax_2d_handle_zero_cols() {
+        assert!(softmax_2d(&[], 0, 0).is_empty());
+        assert!(log_softmax_2d(&[], 3, 0).is_empty());
     }
 
     #[test]

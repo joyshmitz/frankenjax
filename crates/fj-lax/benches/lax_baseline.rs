@@ -5241,11 +5241,58 @@ fn bench_qr_blocked_ab(c: &mut Criterion) {
     }
 }
 
+// Fused 2D softmax/log_softmax (no per-row Vec allocation): same-binary A/B.
+// The "rowmap_ref" arm is the prior implementation (map the 1D helper over rows,
+// allocating 2 Vecs + a copy per row); the "fused" arm writes each row in place.
+// Many-rows/small-cols is the allocation-dominated batched regime where removing
+// the per-row heap traffic wins. Both produce bit-identical output.
+fn bench_softmax_2d_fused_ab(c: &mut Criterion) {
+    let rows = 65_536usize;
+    let cols = 16usize;
+    let x: Vec<f64> = (0..rows * cols)
+        .map(|k| ((k as f64) * 0.013).sin() * 4.0)
+        .collect();
+
+    c.bench_function("nn/softmax_2d_65536x16_rowmap_ref", |bencher| {
+        bencher.iter(|| {
+            let mut result = vec![0.0; rows * cols];
+            for i in 0..rows {
+                let row = &x[i * cols..(i + 1) * cols];
+                let sm = fj_lax::nn::softmax(black_box(row));
+                result[i * cols..(i + 1) * cols].copy_from_slice(&sm);
+            }
+            black_box(result)
+        })
+    });
+
+    c.bench_function("nn/softmax_2d_65536x16_fused", |bencher| {
+        bencher.iter(|| black_box(fj_lax::nn::softmax_2d(black_box(&x), rows, cols)))
+    });
+
+    c.bench_function("nn/log_softmax_2d_65536x16_rowmap_ref", |bencher| {
+        bencher.iter(|| {
+            let mut result = vec![0.0; rows * cols];
+            for i in 0..rows {
+                let row = &x[i * cols..(i + 1) * cols];
+                let lsm = fj_lax::nn::log_softmax(black_box(row));
+                result[i * cols..(i + 1) * cols].copy_from_slice(&lsm);
+            }
+            black_box(result)
+        })
+    });
+
+    c.bench_function("nn/log_softmax_2d_65536x16_fused", |bencher| {
+        bencher.iter(|| black_box(fj_lax::nn::log_softmax_2d(black_box(&x), rows, cols)))
+    });
+}
+
 criterion_group!(
     name = qr_blocked_ab;
     config = Criterion::default().sample_size(10);
     targets = bench_qr_blocked_ab
 );
+
+criterion_group!(softmax_2d_fused_ab, bench_softmax_2d_fused_ab);
 
 criterion_group!(
     benches,
@@ -5511,4 +5558,4 @@ criterion_group!(
     bench_eq_1k,
     bench_bitwise_and_1k,
 );
-criterion_main!(benches, qr_blocked_ab);
+criterion_main!(benches, qr_blocked_ab, softmax_2d_fused_ab);
