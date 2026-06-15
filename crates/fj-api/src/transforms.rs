@@ -17,6 +17,7 @@ static CUSTOM_DERIVATIVE_WRAPPER_ID: AtomicU64 = AtomicU64::new(1);
 const CUSTOM_VJP_RULE_KEY_OPTION: &str = "custom_vjp_rule_key";
 const DEFAULT_BACKEND: &str = "cpu";
 type BackendName = Cow<'static, str>;
+type ValueAndGradOutputs = (Vec<Value>, Vec<Value>);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct JitWrapped {
@@ -851,6 +852,24 @@ impl JitWrapped {
 }
 
 impl GradWrapped {
+    fn try_default_cpu_compiled_grad(&self, args: &[Value]) -> Result<Option<Value>, ApiError> {
+        if self.custom_vjp_rule_key.is_some() || self.backend.as_ref() != DEFAULT_BACKEND {
+            return Ok(None);
+        }
+        let Some(compiled) = self
+            .compiled_ad_cache
+            .0
+            .get_or_init(|| fj_ad::compile_value_and_grad_jaxpr_for_repeated_eval(&self.jaxpr))
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        let Some(grads) = compiled.grad(args)? else {
+            return Ok(None);
+        };
+        Ok(grads.into_iter().next())
+    }
+
     #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = Cow::Owned(backend.to_owned());
@@ -869,6 +888,9 @@ impl GradWrapped {
     }
 
     pub fn call(&self, args: Vec<Value>) -> Result<Vec<Value>, ApiError> {
+        if let Some(first_grad) = self.try_default_cpu_compiled_grad(&args)? {
+            return Ok(vec![first_grad]);
+        }
         let mut compile_options = BTreeMap::new();
         if let Some(rule_key) = &self.custom_vjp_rule_key {
             compile_options.insert(CUSTOM_VJP_RULE_KEY_OPTION.to_owned(), rule_key.clone());
@@ -896,19 +918,6 @@ impl GradWrapped {
                 .ok()
             })
             .as_ref();
-        if self.custom_vjp_rule_key.is_none()
-            && prepared.is_some()
-            && self.backend.as_ref() == DEFAULT_BACKEND
-            && let Some(compiled) = self
-                .compiled_ad_cache
-                .0
-                .get_or_init(|| fj_ad::compile_value_and_grad_jaxpr_for_repeated_eval(&self.jaxpr))
-                .as_ref()
-            && let Some(grads) = compiled.grad(&args)?
-            && let Some(first_grad) = grads.into_iter().next()
-        {
-            return Ok(vec![first_grad]);
-        }
         dispatch_with_options_prepared(
             &self.jaxpr,
             &transforms,
@@ -1090,6 +1099,24 @@ impl ComposedTransform {
 }
 
 impl ValueAndGradWrapped {
+    fn try_default_cpu_compiled_value_and_grad(
+        &self,
+        args: &[Value],
+    ) -> Result<Option<ValueAndGradOutputs>, ApiError> {
+        if self.custom_vjp_rule_key.is_some() || self.backend.as_ref() != DEFAULT_BACKEND {
+            return Ok(None);
+        }
+        let Some(compiled) = self
+            .compiled_ad_cache
+            .0
+            .get_or_init(|| fj_ad::compile_value_and_grad_jaxpr_for_repeated_eval(&self.jaxpr))
+            .as_ref()
+        else {
+            return Ok(None);
+        };
+        compiled.value_and_grad(args).map_err(ApiError::from)
+    }
+
     #[must_use]
     pub fn with_backend(mut self, backend: &str) -> Self {
         self.backend = Cow::Owned(backend.to_owned());
@@ -1120,6 +1147,9 @@ impl ValueAndGradWrapped {
     }
 
     pub fn call(&self, args: Vec<Value>) -> Result<(Vec<Value>, Vec<Value>), ApiError> {
+        if let Some(result) = self.try_default_cpu_compiled_value_and_grad(&args)? {
+            return Ok(result);
+        }
         let compile_options = self.compile_options();
         let transforms = [Transform::Grad];
         let evidence = transform_evidence(&transforms);
@@ -1142,18 +1172,6 @@ impl ValueAndGradWrapped {
                 .ok()
             })
             .as_ref();
-        if self.custom_vjp_rule_key.is_none()
-            && prepared.is_some()
-            && self.backend.as_ref() == DEFAULT_BACKEND
-            && let Some(compiled) = self
-                .compiled_ad_cache
-                .0
-                .get_or_init(|| fj_ad::compile_value_and_grad_jaxpr_for_repeated_eval(&self.jaxpr))
-                .as_ref()
-            && let Some((values, gradients)) = compiled.value_and_grad(&args)?
-        {
-            return Ok((values, gradients));
-        }
         let outputs = dispatch_with_options_prepared(
             &self.jaxpr,
             &transforms,
@@ -1898,6 +1916,64 @@ mod tests {
         assert_eq!(
             digest,
             "984585309be003365780a1f999422efc949c360ec9933d354a6bd50b5b41653a"
+        );
+    }
+
+    #[test]
+    fn cold_compiled_ad_fast_path_matches_dispatch_golden_sha256() {
+        use fj_core::ProgramSpec;
+
+        let jaxpr = fj_core::build_program(ProgramSpec::Square);
+        let arg = Value::scalar_f64(3.0);
+        let grad_values = grad(jaxpr.clone())
+            .call(vec![arg.clone()])
+            .expect("cold compiled grad should succeed");
+        let reference_grad = dispatch_with_options(
+            &jaxpr,
+            &[Transform::Grad],
+            vec![arg.clone()],
+            DEFAULT_BACKEND,
+            CompatibilityMode::Strict,
+            BTreeMap::new(),
+        )
+        .expect("reference grad dispatch should succeed");
+        assert_eq!(grad_values, reference_grad);
+
+        let (values, gradients) = value_and_grad(jaxpr.clone())
+            .call(vec![arg.clone()])
+            .expect("cold compiled value_and_grad should succeed");
+        let mut value_and_grad_options = BTreeMap::new();
+        value_and_grad_options.insert("value_and_grad".to_owned(), "true".to_owned());
+        let reference_value_and_grad = dispatch_with_options(
+            &jaxpr,
+            &[Transform::Grad],
+            vec![arg],
+            DEFAULT_BACKEND,
+            CompatibilityMode::Strict,
+            value_and_grad_options,
+        )
+        .expect("reference value_and_grad dispatch should succeed");
+        assert_eq!(values, reference_value_and_grad[..jaxpr.outvars.len()]);
+        assert_eq!(gradients, reference_value_and_grad[jaxpr.outvars.len()..]);
+
+        let payload = [
+            grad_values[0]
+                .as_f64_scalar()
+                .expect("grad output should be f64")
+                .to_bits(),
+            values[0]
+                .as_f64_scalar()
+                .expect("value output should be f64")
+                .to_bits(),
+            gradients[0]
+                .as_f64_scalar()
+                .expect("value_and_grad output should be f64")
+                .to_bits(),
+        ];
+        let digest = fj_test_utils::fixture_id_from_json(&payload).expect("payload hashes");
+        assert_eq!(
+            digest,
+            "04e2c5d5b04781ce3140dd383e1d5b7dba88f3b87f716d6c86ee40b210cad05a"
         );
     }
 
