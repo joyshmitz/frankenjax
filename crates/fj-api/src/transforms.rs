@@ -1726,6 +1726,13 @@ mod tests {
         )
         .expect("reference vmap dispatch");
         assert_eq!(second, reference);
+
+        let digest = fj_test_utils::fixture_id_from_json(&("frankenjax-wy3zc", &second))
+            .expect("golden output should hash");
+        assert_eq!(
+            digest,
+            "33a874be08713435d9a6dedb68458fb54dbed7266029df04d4dfd95dd4b5b102"
+        );
     }
 
     #[test]
