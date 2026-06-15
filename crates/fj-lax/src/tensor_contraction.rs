@@ -484,8 +484,7 @@ pub fn matmul_2d(a: &[f64], m: usize, k: usize, b: &[f64], n: usize) -> Vec<f64>
     // (pass119, REJECTED: k-blocked all-core threading measured 5.82ms vs 4.6ms
     // serial at 256³; the missing primitive was not B-panel reuse, it was
     // right-sizing fanout so each worker owns enough row work.)
-    let ops = m.saturating_mul(k).saturating_mul(n);
-    let threads = matmul_thread_count(ops, m);
+    let threads = matmul_2d_thread_count(m, k, n);
     let b_elems = k.saturating_mul(n);
     let plan = MatmulPlan {
         threads,
@@ -503,8 +502,7 @@ pub(crate) fn matmul_2d_into(
     n: usize,
     result: &mut [f64],
 ) {
-    let ops = m.saturating_mul(k).saturating_mul(n);
-    let threads = matmul_thread_count(ops, m);
+    let threads = matmul_2d_thread_count(m, k, n);
     let b_elems = k.saturating_mul(n);
     let plan = MatmulPlan {
         threads,
@@ -528,8 +526,7 @@ pub fn matmul_2d_with_pack(
     n: usize,
     do_pack: bool,
 ) -> Vec<f64> {
-    let ops = m.saturating_mul(k).saturating_mul(n);
-    let threads = matmul_thread_count(ops, m);
+    let threads = matmul_2d_thread_count(m, k, n);
     let plan = MatmulPlan {
         threads,
         pack_b: do_pack,
@@ -555,6 +552,20 @@ fn matmul_thread_count(ops: usize, rows: usize) -> usize {
         .min(rows)
         .min(by_work)
         .max(1)
+}
+
+#[inline]
+fn matmul_2d_thread_count(m: usize, k: usize, n: usize) -> usize {
+    const SHALLOW_K_PANEL: usize = 128;
+    const SHALLOW_K_MAX_THREADS: usize = 8;
+
+    let ops = m.saturating_mul(k).saturating_mul(n);
+    let threads = matmul_thread_count(ops, m);
+    if k <= SHALLOW_K_PANEL {
+        threads.min(SHALLOW_K_MAX_THREADS)
+    } else {
+        threads
+    }
 }
 
 /// `matmul_2d` driver with an explicit thread count (1 = serial). Splitting the
@@ -3836,6 +3847,19 @@ mod tests {
         let large = super::matmul_thread_count(512 * 512 * 512, 512);
         assert!(large >= medium);
         assert!(large <= available.min(512));
+    }
+
+    #[test]
+    fn matmul_2d_thread_count_caps_shallow_panel_gemm_only() {
+        let shallow = super::matmul_2d_thread_count(896, 128, 896);
+        assert!(shallow <= 8);
+        assert_eq!(
+            shallow,
+            super::matmul_thread_count(896 * 128 * 896, 896).min(8)
+        );
+
+        let deep = super::matmul_2d_thread_count(1024, 1024, 1024);
+        assert_eq!(deep, super::matmul_thread_count(1024 * 1024 * 1024, 1024));
     }
 
     #[test]
