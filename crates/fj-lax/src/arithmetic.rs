@@ -6369,6 +6369,48 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         )?)))
     }
 
+    // F32 sibling of clamp_f64_scalar_bounds — F32 is JAX's default dtype and the
+    // clamp(min, x, max) idiom (relu6, gradient clipping) is an f32 hot path. For
+    // all-F32Bits operands the generic clamp_literal hits the (F32Bits,F32Bits,
+    // F32Bits) arm computing Literal::from_f32(clamp_f32(lo, x, hi)) and IGNORES
+    // target_dtype, which is exactly this. `as_f32_slice` round-trips each F32Bits
+    // exactly, clamp_f32 normalizes any-NaN to canonical f32 NaN (so the dense
+    // store and from_f32 agree bit-for-bit), and new_f32_values keeps the bits.
+    // Returns None for non-F32 x or non-F32Bits bounds (mixed bounds fall through).
+    fn clamp_f32_scalar_bounds(
+        x: &TensorValue,
+        lo: Literal,
+        hi: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        if x.dtype != DType::F32 {
+            return Ok(None);
+        }
+        let (Literal::F32Bits(lo_bits), Literal::F32Bits(hi_bits)) = (lo, hi) else {
+            return Ok(None);
+        };
+        let lof = f32::from_bits(lo_bits);
+        let hif = f32::from_bits(hi_bits);
+        if let Some(xs) = x.elements.as_f32_slice() {
+            let out: Vec<f32> = xs.iter().map(|&xv| clamp_f32(lof, xv, hif)).collect();
+            return Ok(Some(Value::Tensor(TensorValue::new_f32_values(
+                x.shape.clone(),
+                out,
+            )?)));
+        }
+        let mut elements = Vec::with_capacity(x.elements.len());
+        for &elem in &x.elements {
+            let Literal::F32Bits(xb) = elem else {
+                return Ok(None);
+            };
+            elements.push(Literal::from_f32(clamp_f32(lof, f32::from_bits(xb), hif)));
+        }
+        Ok(Some(Value::Tensor(TensorValue::new(
+            DType::F32,
+            x.shape.clone(),
+            elements,
+        )?)))
+    }
+
     match (&inputs[0], &inputs[1], &inputs[2]) {
         (Value::Scalar(lo), Value::Scalar(x), Value::Scalar(hi)) => {
             let result = clamp_literal(*lo, *x, *hi, None)
@@ -6378,6 +6420,9 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         // JAX order: clamp(min, x, max) with scalar bounds
         (Value::Scalar(lo), Value::Tensor(x), Value::Scalar(hi)) => {
             if let Some(value) = clamp_f64_scalar_bounds(x, *lo, *hi)? {
+                return Ok(value);
+            }
+            if let Some(value) = clamp_f32_scalar_bounds(x, *lo, *hi)? {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(x.elements.len());
@@ -6396,6 +6441,9 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         // Legacy (x, lo, hi) order kept for compatibility
         (Value::Tensor(x), Value::Scalar(lo), Value::Scalar(hi)) => {
             if let Some(value) = clamp_f64_scalar_bounds(x, *lo, *hi)? {
+                return Ok(value);
+            }
+            if let Some(value) = clamp_f32_scalar_bounds(x, *lo, *hi)? {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(x.elements.len());
@@ -19634,6 +19682,116 @@ mod tests {
         let dn = best(&dense);
         println!(
             "BENCH u32 select [{n}]: boxed={:.2}ms dense={:.2}ms speedup={:.2}x",
+            bx * 1e3,
+            dn * 1e3,
+            bx / dn
+        );
+    }
+
+    fn f32_dense_vec(d: &[f32]) -> Value {
+        Value::Tensor(
+            TensorValue::new_f32_values(Shape::vector(d.len() as u32), d.to_vec()).unwrap(),
+        )
+    }
+    fn f32_boxed_vec(d: &[f32]) -> Value {
+        Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::F32,
+                Shape::vector(d.len() as u32),
+                fj_core::LiteralBuffer::new(d.iter().map(|&v| Literal::from_f32(v)).collect()),
+            )
+            .unwrap(),
+        )
+    }
+    fn f32_bits_vec(v: &Value) -> Vec<u32> {
+        v.as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F32Bits(b) => *b,
+                o => panic!("expected f32 literal, got {o:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn f32_clamp_scalar_bounds_dense_matches_generic() {
+        // Dense F32 clamp(min, x, max) with f32 scalar bounds must be bit-identical
+        // to the boxed generic path in BOTH JAX (min,x,max) and legacy (x,lo,hi)
+        // operand orders, incl ±0, ±inf, NaN (clamp_f32 canonicalizes any-NaN).
+        let p = std::collections::BTreeMap::new();
+        let x = [
+            -5.0f32,
+            0.0,
+            0.3,
+            1.0,
+            6.0,
+            f32::NAN,
+            -0.0,
+            100.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let lo = Value::Scalar(Literal::from_f32(0.0));
+        let hi = Value::Scalar(Literal::from_f32(6.0));
+
+        let dense = crate::eval_primitive(
+            Primitive::Clamp,
+            &[lo.clone(), f32_dense_vec(&x), hi.clone()],
+            &p,
+        )
+        .unwrap();
+        let boxed = crate::eval_primitive(
+            Primitive::Clamp,
+            &[lo.clone(), f32_boxed_vec(&x), hi.clone()],
+            &p,
+        )
+        .unwrap();
+        assert_eq!(f32_bits_vec(&dense), f32_bits_vec(&boxed), "f32 clamp(min,x,max)");
+        assert_eq!(dense.as_tensor().unwrap().dtype, DType::F32);
+
+        let dense2 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[f32_dense_vec(&x), lo.clone(), hi.clone()],
+            &p,
+        )
+        .unwrap();
+        let boxed2 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[f32_boxed_vec(&x), lo.clone(), hi.clone()],
+            &p,
+        )
+        .unwrap();
+        assert_eq!(f32_bits_vec(&dense2), f32_bits_vec(&boxed2), "f32 clamp(x,lo,hi)");
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_f32_clamp_dense_vs_boxed() {
+        use std::time::Instant;
+        let n = 1_000_000usize;
+        let x: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 - 500.0).collect();
+        let lo = Value::Scalar(Literal::from_f32(0.0));
+        let hi = Value::Scalar(Literal::from_f32(6.0));
+        let dense = [lo.clone(), f32_dense_vec(&x), hi.clone()];
+        let boxed = [lo.clone(), f32_boxed_vec(&x), hi.clone()];
+        let p = std::collections::BTreeMap::new();
+        let best = |inputs: &[Value]| {
+            let _ = crate::eval_primitive(Primitive::Clamp, inputs, &p).unwrap();
+            let mut tm = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let o = crate::eval_primitive(Primitive::Clamp, inputs, &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                tm = tm.min(s.elapsed().as_secs_f64());
+            }
+            tm
+        };
+        let bx = best(&boxed);
+        let dn = best(&dense);
+        println!(
+            "BENCH f32 clamp [{n}]: boxed={:.2}ms dense={:.2}ms speedup={:.2}x",
             bx * 1e3,
             dn * 1e3,
             bx / dn
