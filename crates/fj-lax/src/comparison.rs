@@ -385,6 +385,32 @@ pub(crate) fn eval_comparison(
                 );
                 return Ok(Value::Tensor(TensorValue::new_bool_values(out_shape, out)?));
             }
+            // Half-float (BF16/F16) dense broadcast compare — the broadcast sibling of
+            // eval_same_shape_half_float_compare. Decode each u16 to f64 exactly via
+            // as_f64() (same widen the generic float branch uses) and apply float_cmp.
+            if matches!(lhs.dtype, DType::BF16 | DType::F16)
+                && lhs.dtype == rhs.dtype
+                && let (Some(left), Some(right)) = (
+                    lhs.elements.as_half_float_slice(),
+                    rhs.elements.as_half_float_slice(),
+                )
+            {
+                let decode: fn(u16) -> f64 = if lhs.dtype == DType::BF16 {
+                    |b| Literal::BF16Bits(b).as_f64().unwrap_or(f64::NAN)
+                } else {
+                    |b| Literal::F16Bits(b).as_f64().unwrap_or(f64::NAN)
+                };
+                let mut out = Vec::with_capacity(out_count);
+                crate::arithmetic::broadcast_visit_row_major(
+                    &out_shape.dims,
+                    &lhs_strides,
+                    &rhs_strides,
+                    |li, ri| {
+                        out.push(float_cmp(decode(left[li]), decode(right[ri])));
+                    },
+                );
+                return Ok(Value::Tensor(TensorValue::new_bool_values(out_shape, out)?));
+            }
 
             let mut elements = Vec::with_capacity(out_count);
             for flat_idx in 0..out_count {
@@ -1978,6 +2004,134 @@ mod tests {
         let dn = best(&dense);
         println!(
             "BENCH bf16 Gt [{n}]: boxed={:.2}ms dense={:.2}ms speedup={:.2}x",
+            bx * 1e3,
+            dn * 1e3,
+            bx / dn
+        );
+    }
+
+    fn half_lit(dt: DType, v: f32) -> Literal {
+        if dt == DType::BF16 {
+            Literal::from_bf16_f32(v)
+        } else {
+            Literal::from_f16_f32(v)
+        }
+    }
+    fn half_dense_sh(dt: DType, dims: &[u32], vals: &[f32]) -> Value {
+        let bits: Vec<u16> = vals.iter().map(|&v| half_bits(half_lit(dt, v))).collect();
+        Value::Tensor(
+            TensorValue::new_half_float_values(dt, Shape { dims: dims.to_vec() }, bits).unwrap(),
+        )
+    }
+    fn half_boxed_sh(dt: DType, dims: &[u32], vals: &[f32]) -> Value {
+        let lits: Vec<Literal> = vals.iter().map(|&v| half_lit(dt, v)).collect();
+        Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                dt,
+                Shape { dims: dims.to_vec() },
+                fj_core::LiteralBuffer::new(lits),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn half_float_broadcast_compare_dense_matches_generic() {
+        // bf16/f16 broadcast (row/col/rank-1) compares now take the dense half path;
+        // must be bit-identical to the boxed generic broadcast loop across all six
+        // comparisons, both operand orders, incl NaN/±inf/±0.
+        let params = BTreeMap::new();
+        let m = [1.5f32, -0.0, f32::INFINITY, f32::NAN, 7.0, -3.25];
+        let row = [2.0f32, 0.0, 7.0];
+        let col = [3.0f32, -1.0];
+        let v = [4.0f32, f32::NAN, 0.0];
+        for dt in [DType::BF16, DType::F16] {
+            for (rd, rdims) in [
+                (&row[..], vec![1u32, 3]),
+                (&col[..], vec![2, 1]),
+                (&v[..], vec![3]),
+            ] {
+                for p in [
+                    Primitive::Eq,
+                    Primitive::Ne,
+                    Primitive::Lt,
+                    Primitive::Le,
+                    Primitive::Gt,
+                    Primitive::Ge,
+                ] {
+                    let d = extract_bools(
+                        &crate::eval_primitive(
+                            p,
+                            &[half_dense_sh(dt, &[2, 3], &m), half_dense_sh(dt, &rdims, rd)],
+                            &params,
+                        )
+                        .unwrap(),
+                    );
+                    let g = extract_bools(
+                        &crate::eval_primitive(
+                            p,
+                            &[half_boxed_sh(dt, &[2, 3], &m), half_boxed_sh(dt, &rdims, rd)],
+                            &params,
+                        )
+                        .unwrap(),
+                    );
+                    assert_eq!(d, g, "{dt:?} {p:?} bcast {rdims:?}");
+                    let d2 = extract_bools(
+                        &crate::eval_primitive(
+                            p,
+                            &[half_dense_sh(dt, &rdims, rd), half_dense_sh(dt, &[2, 3], &m)],
+                            &params,
+                        )
+                        .unwrap(),
+                    );
+                    let g2 = extract_bools(
+                        &crate::eval_primitive(
+                            p,
+                            &[half_boxed_sh(dt, &rdims, rd), half_boxed_sh(dt, &[2, 3], &m)],
+                            &params,
+                        )
+                        .unwrap(),
+                    );
+                    assert_eq!(d2, g2, "{dt:?} {p:?} bcast-swapped {rdims:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_bf16_broadcast_compare_dense_vs_boxed() {
+        use std::time::Instant;
+        let (rows, cols) = (1000usize, 1000usize);
+        let n = rows * cols;
+        let m: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01 - 5000.0).collect();
+        let row: Vec<f32> = (0..cols).map(|i| (i as f32) * 0.02 - 1000.0).collect();
+        let mat_dims = vec![rows as u32, cols as u32];
+        let row_dims = vec![1u32, cols as u32];
+        let dense = [
+            half_dense_sh(DType::BF16, &mat_dims, &m),
+            half_dense_sh(DType::BF16, &row_dims, &row),
+        ];
+        let boxed = [
+            half_boxed_sh(DType::BF16, &mat_dims, &m),
+            half_boxed_sh(DType::BF16, &row_dims, &row),
+        ];
+        let params = BTreeMap::new();
+        let best = |inputs: &[Value]| {
+            let _ = crate::eval_primitive(Primitive::Gt, inputs, &params).unwrap();
+            let mut tm = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let o = crate::eval_primitive(Primitive::Gt, inputs, &params).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                tm = tm.min(s.elapsed().as_secs_f64());
+            }
+            tm
+        };
+        let bx = best(&boxed);
+        let dn = best(&dense);
+        println!(
+            "BENCH bf16 broadcast Gt [{rows}x{cols} ⊗ 1x{cols}]: boxed={:.2}ms dense={:.2}ms speedup={:.2}x",
             bx * 1e3,
             dn * 1e3,
             bx / dn
