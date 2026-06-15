@@ -72,6 +72,40 @@ fn build_trig_value_and_grad_jaxpr() -> Jaxpr {
     )
 }
 
+fn build_sum_x2_plus_x_reducesum_jaxpr() -> Jaxpr {
+    Jaxpr::new(
+        vec![VarId(0)],
+        vec![],
+        vec![VarId(3)],
+        vec![
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: vec![Atom::Var(VarId(0)), Atom::Var(VarId(0))].into(),
+                outputs: vec![VarId(1)].into(),
+                params: std::collections::BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            },
+            Equation {
+                primitive: Primitive::Add,
+                inputs: vec![Atom::Var(VarId(1)), Atom::Var(VarId(0))].into(),
+                outputs: vec![VarId(2)].into(),
+                params: std::collections::BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: vec![Atom::Var(VarId(2))].into(),
+                outputs: vec![VarId(3)].into(),
+                params: std::collections::BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            },
+        ],
+    )
+}
+
 // ---------------------------------------------------------------------------
 // 1. API Entry Point Overhead (individual transforms)
 // ---------------------------------------------------------------------------
@@ -752,6 +786,43 @@ fn bench_ad_compiled_reverse_plan(c: &mut Criterion) {
             let outputs = wrapped
                 .call(args.clone())
                 .expect("api compiled value_and_grad");
+            std::hint::black_box(outputs);
+        });
+    });
+
+    let tensor_jaxpr = build_sum_x2_plus_x_reducesum_jaxpr();
+    let tensor_data: Vec<f64> = (0..1024).map(|i| i as f64 * 0.001).collect();
+    let tensor_args = vec![Value::vector_f64(&tensor_data).expect("vector")];
+    let tensor_compiled = fj_ad::compile_value_and_grad_jaxpr_for_repeated_eval(&tensor_jaxpr)
+        .expect("dense tensor graph should compile");
+    let tensor_wrapped = value_and_grad(tensor_jaxpr.clone());
+    tensor_wrapped
+        .call(tensor_args.clone())
+        .expect("warm tensor value_and_grad wrapper");
+
+    group.bench_function("direct/value_and_grad_sum_x2_plus_x_1k", |b| {
+        b.iter(|| {
+            let outputs =
+                fj_ad::value_and_grad_jaxpr(&tensor_jaxpr, &tensor_args).expect("value_and_grad");
+            std::hint::black_box(outputs);
+        });
+    });
+
+    group.bench_function("compiled/value_and_grad_sum_x2_plus_x_1k", |b| {
+        b.iter(|| {
+            let outputs = tensor_compiled
+                .value_and_grad(&tensor_args)
+                .expect("compiled tensor value_and_grad")
+                .expect("compiled dense-F64 path");
+            std::hint::black_box(outputs);
+        });
+    });
+
+    group.bench_function("api_warmed/value_and_grad_sum_x2_plus_x_1k", |b| {
+        b.iter(|| {
+            let outputs = tensor_wrapped
+                .call(tensor_args.clone())
+                .expect("api compiled tensor value_and_grad");
             std::hint::black_box(outputs);
         });
     });

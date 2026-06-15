@@ -286,6 +286,20 @@ struct ScalarF64ReverseStep {
     output: usize,
 }
 
+#[derive(Debug, Clone)]
+enum CompiledValueAndGradPlan {
+    ScalarF64 {
+        jaxpr_fingerprint: String,
+        input_slots: Vec<usize>,
+        output_slot: usize,
+        steps: Vec<ScalarF64ReverseStep>,
+        slots: usize,
+    },
+    DenseF64SquarePlusLinearReduceSum {
+        jaxpr_fingerprint: String,
+    },
+}
+
 /// Reusable reverse-mode plan for hot repeated scalar-F64 AD calls.
 ///
 /// This is the first safe-Rust lowering step toward a cached backward Jaxpr:
@@ -295,11 +309,7 @@ struct ScalarF64ReverseStep {
 /// keep the existing tape-based AD path.
 #[derive(Debug, Clone)]
 pub struct CompiledValueAndGradJaxpr {
-    jaxpr_fingerprint: String,
-    input_slots: Vec<usize>,
-    output_slot: usize,
-    steps: Vec<ScalarF64ReverseStep>,
-    slots: usize,
+    plan: CompiledValueAndGradPlan,
 }
 
 impl CompiledValueAndGradJaxpr {
@@ -311,56 +321,18 @@ impl CompiledValueAndGradJaxpr {
         if !self.uses_builtin_vjp_rules() {
             return Ok(None);
         }
-        if args.len() != self.input_slots.len() {
-            return Err(AdError::InputArity {
-                expected: self.input_slots.len(),
-                actual: args.len(),
-            });
-        }
-
-        let mut values = vec![None; self.slots];
-        for (slot, arg) in self.input_slots.iter().copied().zip(args) {
-            let Value::Scalar(Literal::F64Bits(bits)) = arg else {
-                return Ok(None);
-            };
-            let value = f64::from_bits(*bits);
-            if !value.is_finite() {
-                return Ok(None);
+        match &self.plan {
+            CompiledValueAndGradPlan::ScalarF64 {
+                input_slots,
+                output_slot,
+                steps,
+                slots,
+                ..
+            } => compiled_scalar_f64_value_and_grad(input_slots, *output_slot, steps, *slots, args),
+            CompiledValueAndGradPlan::DenseF64SquarePlusLinearReduceSum { .. } => {
+                compiled_dense_f64_square_plus_linear_reducesum_value_and_grad(args)
             }
-            values[slot] = Some(value);
         }
-
-        for step in &self.steps {
-            let result = scalar_f64_step_forward(step.primitive, &step.inputs, &values)?;
-            if !result.is_finite() {
-                return Ok(None);
-            }
-            values[step.output] = Some(result);
-        }
-
-        let output = values
-            .get(self.output_slot)
-            .and_then(|value| *value)
-            .ok_or(AdError::MissingVariable(VarId(self.output_slot as u32)))?;
-
-        let mut adjoints = vec![None; self.slots];
-        adjoints[self.output_slot] = Some(1.0);
-        for step in self.steps.iter().rev() {
-            let Some(g) = adjoints[step.output] else {
-                continue;
-            };
-            if g == 0.0 {
-                continue;
-            }
-            scalar_f64_step_backward(step, &values, &mut adjoints, g)?;
-        }
-
-        let grads = self
-            .input_slots
-            .iter()
-            .map(|slot| Value::scalar_f64(adjoints[*slot].unwrap_or(0.0)))
-            .collect();
-        Ok(Some((vec![Value::scalar_f64(output)], grads)))
     }
 
     /// Evaluate only the gradient outputs.
@@ -369,12 +341,120 @@ impl CompiledValueAndGradJaxpr {
     }
 
     fn uses_builtin_vjp_rules(&self) -> bool {
-        lookup_custom_jaxpr_vjp_fingerprint(&self.jaxpr_fingerprint).is_none()
-            && self
-                .steps
-                .iter()
-                .all(|step| lookup_custom_vjp(step.primitive).is_none())
+        match &self.plan {
+            CompiledValueAndGradPlan::ScalarF64 {
+                jaxpr_fingerprint,
+                steps,
+                ..
+            } => {
+                lookup_custom_jaxpr_vjp_fingerprint(jaxpr_fingerprint).is_none()
+                    && steps
+                        .iter()
+                        .all(|step| lookup_custom_vjp(step.primitive).is_none())
+            }
+            CompiledValueAndGradPlan::DenseF64SquarePlusLinearReduceSum { jaxpr_fingerprint } => {
+                lookup_custom_jaxpr_vjp_fingerprint(jaxpr_fingerprint).is_none()
+                    && lookup_custom_vjp(Primitive::Add).is_none()
+                    && lookup_custom_vjp(Primitive::Mul).is_none()
+                    && lookup_custom_vjp(Primitive::ReduceSum).is_none()
+            }
+        }
     }
+}
+
+fn compiled_scalar_f64_value_and_grad(
+    input_slots: &[usize],
+    output_slot: usize,
+    steps: &[ScalarF64ReverseStep],
+    slots: usize,
+    args: &[Value],
+) -> Result<CompiledValueAndGradOutput, AdError> {
+    if args.len() != input_slots.len() {
+        return Err(AdError::InputArity {
+            expected: input_slots.len(),
+            actual: args.len(),
+        });
+    }
+
+    let mut values = vec![None; slots];
+    for (slot, arg) in input_slots.iter().copied().zip(args) {
+        let Value::Scalar(Literal::F64Bits(bits)) = arg else {
+            return Ok(None);
+        };
+        let value = f64::from_bits(*bits);
+        if !value.is_finite() {
+            return Ok(None);
+        }
+        values[slot] = Some(value);
+    }
+
+    for step in steps {
+        let result = scalar_f64_step_forward(step.primitive, &step.inputs, &values)?;
+        if !result.is_finite() {
+            return Ok(None);
+        }
+        values[step.output] = Some(result);
+    }
+
+    let output = values
+        .get(output_slot)
+        .and_then(|value| *value)
+        .ok_or(AdError::MissingVariable(VarId(output_slot as u32)))?;
+
+    let mut adjoints = vec![None; slots];
+    adjoints[output_slot] = Some(1.0);
+    for step in steps.iter().rev() {
+        let Some(g) = adjoints[step.output] else {
+            continue;
+        };
+        if g == 0.0 {
+            continue;
+        }
+        scalar_f64_step_backward(step, &values, &mut adjoints, g)?;
+    }
+
+    let grads = input_slots
+        .iter()
+        .map(|slot| Value::scalar_f64(adjoints[*slot].unwrap_or(0.0)))
+        .collect();
+    Ok(Some((vec![Value::scalar_f64(output)], grads)))
+}
+
+fn compiled_dense_f64_square_plus_linear_reducesum_value_and_grad(
+    args: &[Value],
+) -> Result<CompiledValueAndGradOutput, AdError> {
+    if args.len() != 1 {
+        return Err(AdError::InputArity {
+            expected: 1,
+            actual: args.len(),
+        });
+    }
+    let [Value::Tensor(tensor)] = args else {
+        return Ok(None);
+    };
+    if tensor.dtype != DType::F64 {
+        return Ok(None);
+    }
+    let Some(input) = tensor.elements.f64_values_arc() else {
+        return Ok(None);
+    };
+
+    let mut output = 0.0_f64;
+    for &x in input.as_slice() {
+        let squared = x * x;
+        let shifted = squared + x;
+        output += shifted;
+    }
+
+    let grad = Value::Tensor(TensorValue {
+        dtype: DType::F64,
+        shape: tensor.shape.clone(),
+        elements: LiteralBuffer::from_f64_one_plus_x_plus_x(input),
+    });
+    Ok(Some((
+        vec![Value::Scalar(Literal::from_f64(output))],
+        vec![grad],
+    )))
 }
 
 #[must_use]
@@ -387,6 +467,15 @@ pub fn compile_value_and_grad_jaxpr_for_repeated_eval(
         || lookup_custom_jaxpr_vjp(jaxpr).is_some()
     {
         return None;
+    }
+    if dense_f64_square_plus_linear_reducesum_input(jaxpr).is_some()
+        && dense_f64_add_mul_reducesum_fast_path_uses_builtin_vjp(jaxpr)
+    {
+        return Some(CompiledValueAndGradJaxpr {
+            plan: CompiledValueAndGradPlan::DenseF64SquarePlusLinearReduceSum {
+                jaxpr_fingerprint: jaxpr.canonical_fingerprint().to_owned(),
+            },
+        });
     }
     let max_var = max_var_index(jaxpr)?;
     let slots = max_var.checked_add(1)?;
@@ -457,11 +546,13 @@ pub fn compile_value_and_grad_jaxpr_for_repeated_eval(
     }
 
     Some(CompiledValueAndGradJaxpr {
-        jaxpr_fingerprint: jaxpr.canonical_fingerprint().to_owned(),
-        input_slots,
-        output_slot,
-        steps,
-        slots,
+        plan: CompiledValueAndGradPlan::ScalarF64 {
+            jaxpr_fingerprint: jaxpr.canonical_fingerprint().to_owned(),
+            input_slots,
+            output_slot,
+            steps,
+            slots,
+        },
     })
 }
 
@@ -20731,6 +20822,186 @@ mod tests {
             .map(|value| value.to_bits())
             .collect();
         assert_eq!(fast_bits, generic_bits);
+        clear_custom_derivative_rules();
+        Ok(())
+    }
+
+    #[test]
+    fn compiled_dense_f64_square_plus_linear_reducesum_matches_generic_bits() -> Result<(), String>
+    {
+        use fj_core::{Jaxpr, VarId};
+        use smallvec::smallvec;
+
+        let _guard = custom_rule_test_guard();
+        clear_custom_derivative_rules();
+
+        let jaxpr = Jaxpr::new(
+            vec![VarId(0)],
+            vec![],
+            vec![VarId(3)],
+            vec![
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(VarId(0)), Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(1)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(0))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+        let compiled = compile_value_and_grad_jaxpr_for_repeated_eval(&jaxpr)
+            .ok_or_else(|| "compiled dense-F64 reverse plan did not match".to_string())?;
+        let data = [
+            0.0,
+            -0.0,
+            1.5,
+            -2.0,
+            f64::INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_0042),
+        ];
+        let args = [Value::vector_f64(&data).map_err(|e| e.to_string())?];
+
+        let (compiled_outputs, compiled_grads) = compiled
+            .value_and_grad(&args)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "compiled dense-F64 path returned None".to_string())?;
+        let (generic_outputs, generic_grads) =
+            value_and_grad_jaxpr_with_custom_vjp_key(&jaxpr, &args, "force-generic")
+                .map_err(|e| e.to_string())?;
+
+        assert_eq!(
+            compiled_outputs[0]
+                .as_f64_scalar()
+                .ok_or_else(|| "compiled scalar output missing".to_string())?
+                .to_bits(),
+            generic_outputs[0]
+                .as_f64_scalar()
+                .ok_or_else(|| "generic scalar output missing".to_string())?
+                .to_bits()
+        );
+
+        let compiled_tensor = compiled_grads[0]
+            .as_tensor()
+            .ok_or_else(|| "compiled gradient tensor missing".to_string())?;
+        let generic_tensor = generic_grads[0]
+            .as_tensor()
+            .ok_or_else(|| "generic gradient tensor missing".to_string())?;
+        assert_eq!(compiled_tensor.dtype, generic_tensor.dtype);
+        assert_eq!(compiled_tensor.shape, generic_tensor.shape);
+        assert!(
+            compiled_tensor.elements.as_f64_slice().is_some(),
+            "compiled gradient should expose dense F64 storage"
+        );
+        let compiled_bits: Vec<u64> = compiled_tensor
+            .to_f64_vec()
+            .ok_or_else(|| "compiled f64 gradient missing".to_string())?
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        let generic_bits: Vec<u64> = generic_tensor
+            .to_f64_vec()
+            .ok_or_else(|| "generic f64 gradient missing".to_string())?
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        assert_eq!(compiled_bits, generic_bits);
+
+        let data_1k: Vec<f64> = (0..1024).map(|i| i as f64 * 0.001).collect();
+        let args_1k = [Value::vector_f64(&data_1k).map_err(|e| e.to_string())?];
+        let (_, grads_1k) = compiled
+            .value_and_grad(&args_1k)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "compiled dense-F64 1k path returned None".to_string())?;
+        let tensor_1k = grads_1k[0]
+            .as_tensor()
+            .ok_or_else(|| "compiled 1k gradient tensor missing".to_string())?;
+        assert_eq!(tensor_1k.shape.dims, vec![1024]);
+        let bits_hex: Vec<String> = tensor_1k
+            .to_f64_vec()
+            .ok_or_else(|| "compiled 1k f64 gradient missing".to_string())?
+            .iter()
+            .map(|value| format!("{:016x}", value.to_bits()))
+            .collect();
+        let digest = fj_test_utils::fixture_id_from_json(&bits_hex).expect("sha256 digest");
+        assert_eq!(
+            digest,
+            "5282853e2bd187c1c1bfdfa612bd74776fb403e6b767eb0a8bf0c8bcd2fe2a19"
+        );
+
+        let args_3 = [Value::vector_f64(&[1.0, 2.0, 3.0]).map_err(|e| e.to_string())?];
+        let (_, grads_3) = compiled
+            .value_and_grad(&args_3)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "compiled dense-F64 len-3 path returned None".to_string())?;
+        assert_eq!(
+            grads_3[0]
+                .as_tensor()
+                .ok_or_else(|| "compiled len-3 gradient tensor missing".to_string())?
+                .shape
+                .dims,
+            vec![3]
+        );
+
+        let scalar_args = [Value::scalar_f64(1.0)];
+        assert!(
+            compiled
+                .value_and_grad(&scalar_args)
+                .map_err(|e| e.to_string())?
+                .is_none(),
+            "non-tensor input should fall back"
+        );
+        let i64_args = [Value::vector_i64(&[1, 2]).map_err(|e| e.to_string())?];
+        assert!(
+            compiled
+                .value_and_grad(&i64_args)
+                .map_err(|e| e.to_string())?
+                .is_none(),
+            "non-F64 tensor should fall back"
+        );
+        let literal_f64_args = [Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape::vector(2),
+                vec![Literal::from_f64(1.0), Literal::from_f64(2.0)],
+            )
+            .map_err(|e| e.to_string())?,
+        )];
+        assert!(
+            compiled
+                .value_and_grad(&literal_f64_args)
+                .map_err(|e| e.to_string())?
+                .is_none(),
+            "non-packed F64 tensor should fall back"
+        );
+
+        register_custom_vjp(Primitive::ReduceSum, |_inputs, g, _params| {
+            Ok(vec![g.clone()])
+        });
+        assert!(
+            compiled
+                .value_and_grad(&args)
+                .map_err(|e| e.to_string())?
+                .is_none(),
+            "warmed compiled plan must defer to custom primitive VJP rules"
+        );
+
         clear_custom_derivative_rules();
         Ok(())
     }
