@@ -3159,6 +3159,20 @@ struct DenseAxisReducePlan {
     axes: Vec<usize>,
 }
 
+/// Single-equation row-gather (`table[indices]` — embedding lookup), the common
+/// contiguous-full-row case: `slice_sizes = [1, op_dims[1..]]` so each gathered
+/// slice is a whole contiguous row. The default `Clip` index mode (no mode param)
+/// clamps OOB indices, never drops, so the output is a pure contiguous copy. The
+/// `slice_sizes` are parsed once at build time, skipping the per-call param parse
+/// + eval_primitive dispatch + boxed index extraction.
+struct DenseGatherPlan {
+    const_slots: Vec<usize>,
+    input_slots: Vec<usize>,
+    operand_slot: usize,
+    indices_slot: usize,
+    slice_sizes: Vec<usize>,
+}
+
 #[derive(Clone, Copy)]
 enum ScalarF64Slot {
     Missing,
@@ -3298,6 +3312,57 @@ fn build_dense_axis_reduce_plan(jaxpr: &Jaxpr, slots: usize) -> Option<DenseAxis
         input_slot,
         op,
         axes,
+    })
+}
+
+fn build_dense_gather_plan(jaxpr: &Jaxpr, slots: usize) -> Option<DenseGatherPlan> {
+    if !jaxpr.effects.is_empty() || jaxpr.equations.len() != 1 {
+        return None;
+    }
+    let equation = &jaxpr.equations[0];
+    if equation.primitive != Primitive::Gather
+        || !equation.sub_jaxprs.is_empty()
+        || !equation.effects.is_empty()
+        || equation.inputs.len() != 2
+        || equation.outputs.len() != 1
+        || jaxpr.outvars.as_slice() != equation.outputs.as_slice()
+    {
+        return None;
+    }
+    // Require EXACTLY {"slice_sizes": <list>} — no index_mode param, so the eval
+    // uses the default Clip mode (clamp OOB, never drop -> pure contiguous copy).
+    // Any extra param bails to generic, preserving its behavior.
+    if equation.params.len() != 1 {
+        return None;
+    }
+    let raw = equation.params.get("slice_sizes")?;
+    let mut slice_sizes: Vec<usize> = Vec::new();
+    for part in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        slice_sizes.push(part.parse().ok()?);
+    }
+    if slice_sizes.is_empty() || slice_sizes[0] != 1 {
+        return None;
+    }
+
+    let Atom::Var(operand_var) = equation.inputs[0] else {
+        return None;
+    };
+    let Atom::Var(indices_var) = equation.inputs[1] else {
+        return None;
+    };
+    let operand_slot = operand_var.0 as usize;
+    let indices_slot = indices_var.0 as usize;
+    let out_slot = equation.outputs[0].0 as usize;
+    if operand_slot >= slots || indices_slot >= slots || out_slot >= slots {
+        return None;
+    }
+
+    Some(DenseGatherPlan {
+        const_slots: var_slots(&jaxpr.constvars, slots)?,
+        input_slots: var_slots(&jaxpr.invars, slots)?,
+        operand_slot,
+        indices_slot,
+        slice_sizes,
     })
 }
 
@@ -6088,6 +6153,7 @@ struct DenseEvalPlan {
     dense_f64_reduce_sum_plan: Option<DenseF64ReduceSumPlan>,
     dense_f64_dot_plan: Option<DenseF64DotPlan>,
     dense_axis_reduce_plan: Option<DenseAxisReducePlan>,
+    dense_gather_plan: Option<DenseGatherPlan>,
 }
 
 /// One-time compiled evaluator for hot repeated calls of the same small Jaxpr.
@@ -6215,6 +6281,7 @@ fn build_dense_plan(jaxpr: &Jaxpr) -> Option<DenseEvalPlan> {
             dense_f64_reduce_sum_plan: build_dense_f64_reduce_sum_plan(jaxpr, slots),
             dense_f64_dot_plan: build_dense_f64_dot_plan(jaxpr, slots),
             dense_axis_reduce_plan: build_dense_axis_reduce_plan(jaxpr, slots),
+            dense_gather_plan: build_dense_gather_plan(jaxpr, slots),
         })
     } else {
         None
@@ -6243,6 +6310,7 @@ fn eval_jaxpr_dense_env(
         dense_f64_reduce_sum_plan: build_dense_f64_reduce_sum_plan(jaxpr, slots),
         dense_f64_dot_plan: build_dense_f64_dot_plan(jaxpr, slots),
         dense_axis_reduce_plan: build_dense_axis_reduce_plan(jaxpr, slots),
+        dense_gather_plan: build_dense_gather_plan(jaxpr, slots),
     };
     let mut env: Vec<Option<Value>> = vec![None; slots];
     run_dense_plan(jaxpr, const_values, args, &mut env, &plan)
@@ -6500,6 +6568,131 @@ fn run_dense_axis_reduce_plan_into(
     }
 }
 
+fn run_dense_gather_plan_into(
+    plan: &DenseGatherPlan,
+    const_values: &[Value],
+    args: &[Value],
+    out: &mut Vec<Value>,
+) -> Option<Result<(), InterpreterError>> {
+    if const_values.len() != plan.const_slots.len() {
+        return Some(Err(InterpreterError::ConstArity {
+            expected: plan.const_slots.len(),
+            actual: const_values.len(),
+        }));
+    }
+    if args.len() != plan.input_slots.len() {
+        return Some(Err(InterpreterError::InputArity {
+            expected: plan.input_slots.len(),
+            actual: args.len(),
+        }));
+    }
+
+    let operand = match dense_f64_dot_input(
+        &plan.const_slots,
+        &plan.input_slots,
+        plan.operand_slot,
+        const_values,
+        args,
+    ) {
+        Ok(value) => value,
+        Err(err) => return Some(Err(err)),
+    };
+    let indices = match dense_f64_dot_input(
+        &plan.const_slots,
+        &plan.input_slots,
+        plan.indices_slot,
+        const_values,
+        args,
+    ) {
+        Ok(value) => value,
+        Err(err) => return Some(Err(err)),
+    };
+    let (Value::Tensor(operand), Value::Tensor(indices)) = (operand, indices) else {
+        return None;
+    };
+
+    let rank = operand.shape.rank();
+    // slice_sizes must describe a full contiguous row: len == rank, [0]==1 (checked
+    // at build), and [1..] == operand dims[1..]. Then each gathered slice is one
+    // contiguous run of `slice_elems = product(op_dims[1..])` elements.
+    if rank == 0 || plan.slice_sizes.len() != rank {
+        return None;
+    }
+    let op_dims = &operand.shape.dims;
+    if plan
+        .slice_sizes
+        .iter()
+        .skip(1)
+        .zip(op_dims.iter().skip(1))
+        .any(|(&ss, &d)| ss != d as usize)
+    {
+        return None;
+    }
+    let dim0 = op_dims[0] as usize;
+    if dim0 == 0 {
+        return None;
+    }
+    let mut slice_elems = 1usize;
+    for &d in &op_dims[1..] {
+        slice_elems = slice_elems.checked_mul(d as usize)?;
+    }
+
+    // Indices: dense i64 (covers I64 + I32 dense storage). Resolve each via the
+    // default Clip mode (idx<dim0 ? idx : dim0-1). Negative indices ERROR in the
+    // eager path (lit_to_usize) — bail so the generic interpreter reports it.
+    let idx_slice = indices.elements.as_i64_slice()?;
+    let mut resolved: Vec<usize> = Vec::with_capacity(idx_slice.len());
+    for &raw in idx_slice {
+        if raw < 0 {
+            return None;
+        }
+        let i = raw as usize;
+        resolved.push(if i < dim0 { i } else { dim0 - 1 });
+    }
+
+    // Output shape = indices.shape ++ slice_sizes[1..] (== op_dims[1..]).
+    let mut out_dims: Vec<u32> = indices.shape.dims.clone();
+    out_dims.extend_from_slice(&op_dims[1..]);
+
+    let built = match operand.dtype {
+        DType::F64 => {
+            let src = operand.elements.as_f64_slice()?;
+            let mut data = Vec::with_capacity(resolved.len() * slice_elems);
+            for &idx in &resolved {
+                let base = idx * slice_elems;
+                if base + slice_elems > src.len() {
+                    return None;
+                }
+                data.extend_from_slice(&src[base..base + slice_elems]);
+            }
+            TensorValue::new_f64_values(Shape { dims: out_dims }, data)
+        }
+        DType::F32 => {
+            let src = operand.elements.as_f32_slice()?;
+            let mut data = Vec::with_capacity(resolved.len() * slice_elems);
+            for &idx in &resolved {
+                let base = idx * slice_elems;
+                if base + slice_elems > src.len() {
+                    return None;
+                }
+                data.extend_from_slice(&src[base..base + slice_elems]);
+            }
+            TensorValue::new_f32_values(Shape { dims: out_dims }, data)
+        }
+        _ => return None,
+    };
+    match built {
+        Ok(t) => {
+            out.clear();
+            out.push(Value::Tensor(t));
+            Some(Ok(()))
+        }
+        Err(e) => Some(Err(InterpreterError::Primitive(EvalError::InvalidTensor(
+            e,
+        )))),
+    }
+}
+
 fn dense_f64_dot_input<'a>(
     const_slots: &[usize],
     input_slots: &[usize],
@@ -6686,6 +6879,15 @@ fn run_dense_plan_into(
     // half/int/complex, or non-dense fall through to the generic interpreter.
     if let Some(p) = &plan.dense_axis_reduce_plan
         && let Some(result) = run_dense_axis_reduce_plan_into(p, const_values, args, out)
+    {
+        return result;
+    }
+    // One-equation contiguous row-gather (embedding lookup) over a dense f64/f32
+    // table with i64 indices and default Clip mode: pure contiguous slice copy,
+    // bit-identical to fj-lax's dense contiguous gather. Non-row slices, other
+    // index/dtype, OOB-fill mode, or negative indices fall to the generic interp.
+    if let Some(p) = &plan.dense_gather_plan
+        && let Some(result) = run_dense_gather_plan_into(p, const_values, args, out)
     {
         return result;
     }
@@ -12019,6 +12221,222 @@ mod tests {
         assert_eq!(
             sha,
             "1bcf973d9732ae43f0400652c2559be5b187f4b9560dbf28fb926d295f8647d7"
+        );
+    }
+
+    #[test]
+    fn dense_gather_plan_matches_generic_and_golden() {
+        // Contiguous row-gather (embedding lookup) over a dense f64/f32 [V,D] table
+        // with i64 indices (incl OOB, exercising default Clip clamp) must take the
+        // typed plan and be value-equal (dtype + native bits) to the generic
+        // interpreter (eval_primitive -> fj-lax oracle). Golden freezes f64.
+        let (table, idx, out) = (VarId(0), VarId(1), VarId(2));
+        let (v, d) = (10usize, 4usize);
+        let table_f64: Vec<f64> = (0..v * d).map(|i| (i as f64) * 0.5 - 3.0).collect();
+        let table_f32: Vec<f32> = table_f64.iter().map(|&x| x as f32).collect();
+        // Mix in-bounds, first, last, and OOB (>=v -> clip to v-1) indices.
+        let idx_vals: Vec<i64> = vec![2, 0, 9, 15, 7, 3];
+        let nidx = idx_vals.len();
+        let indices = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![nidx as u32],
+                },
+                idx_vals,
+            )
+            .unwrap(),
+        );
+        let body = Jaxpr::new(
+            vec![table, idx],
+            vec![],
+            vec![out],
+            vec![Equation {
+                primitive: Primitive::Gather,
+                inputs: smallvec![Atom::Var(table), Atom::Var(idx)],
+                outputs: smallvec![out],
+                params: BTreeMap::from([("slice_sizes".to_owned(), format!("1,{d}"))]),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            }],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        assert!(
+            plan.dense_gather_plan.is_some(),
+            "row-gather should compile to the dense gather plan"
+        );
+
+        let mut golden: Option<Vec<u64>> = None;
+        for (is_f64, table_arg) in [
+            (
+                true,
+                Value::Tensor(
+                    TensorValue::new_f64_values(
+                        Shape {
+                            dims: vec![v as u32, d as u32],
+                        },
+                        table_f64.clone(),
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                false,
+                Value::Tensor(
+                    TensorValue::new_f32_values(
+                        Shape {
+                            dims: vec![v as u32, d as u32],
+                        },
+                        table_f32.clone(),
+                    )
+                    .unwrap(),
+                ),
+            ),
+        ] {
+            let args = [table_arg, indices.clone()];
+            let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut gscratch: Vec<Value> = Vec::new();
+            let mut gout: Vec<Value> = Vec::new();
+            super::run_dense_env_into(
+                &body,
+                &[],
+                &args,
+                &mut genv,
+                &plan.last_use,
+                &mut gscratch,
+                &mut gout,
+            )
+            .expect("generic gather");
+
+            let mut penv: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut pscratch: Vec<Value> = Vec::new();
+            let mut pout: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            super::run_dense_plan_into(
+                &body,
+                &[],
+                &args,
+                &mut penv,
+                &plan,
+                &mut pscratch,
+                &mut pout,
+                &mut bufs,
+            )
+            .expect("planned gather");
+
+            assert_eq!(
+                tensor_dtype_bits(&pout[0]),
+                tensor_dtype_bits(&gout[0]),
+                "gather f64={is_f64} plan diverged from oracle"
+            );
+            if is_f64 {
+                golden = Some(tensor_dtype_bits(&pout[0]).1);
+            }
+        }
+        let sha = fj_test_utils::fixture_id_from_json(&(
+            "frankenjax-zmdg5-gather",
+            &golden.expect("golden ran"),
+        ))
+        .expect("digest");
+        assert_eq!(
+            sha,
+            "4b618ca529cc6bf02e477c6bdf9d42cee93562ad1711ddb239596de1bdc4198f"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_dense_gather_plan_overhead() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+        let (table, idx, out) = (VarId(0), VarId(1), VarId(2));
+        let (v, d) = (64usize, 8usize);
+        let table_data: Vec<f32> = (0..v * d).map(|i| i as f32 * 0.01).collect();
+        let body = Jaxpr::new(
+            vec![table, idx],
+            vec![],
+            vec![out],
+            vec![Equation {
+                primitive: Primitive::Gather,
+                inputs: smallvec![Atom::Var(table), Atom::Var(idx)],
+                outputs: smallvec![out],
+                params: BTreeMap::from([("slice_sizes".to_owned(), format!("1,{d}"))]),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            }],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        let args = [
+            Value::Tensor(
+                TensorValue::new_f32_values(
+                    Shape {
+                        dims: vec![v as u32, d as u32],
+                    },
+                    table_data,
+                )
+                .unwrap(),
+            ),
+            Value::Tensor(
+                TensorValue::new_i64_values(Shape { dims: vec![4] }, vec![3i64, 17, 40, 8])
+                    .unwrap(),
+            ),
+        ];
+        let n: usize = 500_000;
+        let t_generic = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                super::run_dense_env_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan.last_use,
+                    &mut scratch,
+                    &mut o,
+                )
+                .expect("generic");
+                acc += tensor_dtype_bits(&o[0]).1[0] as f64;
+            }
+            std::hint::black_box(acc);
+        });
+        let t_planned = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                super::run_dense_plan_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan,
+                    &mut scratch,
+                    &mut o,
+                    &mut bufs,
+                )
+                .expect("planned");
+                acc += tensor_dtype_bits(&o[0]).1[0] as f64;
+            }
+            std::hint::black_box(acc);
+        });
+        println!(
+            "BENCH dense-f32 gather [64,8] 4-idx {n} evals: GENERIC {:.1}ns/eval -> PLANNED {:.1}ns/eval = {:.2}x",
+            t_generic * 1e9 / n as f64,
+            t_planned * 1e9 / n as f64,
+            t_generic / t_planned,
         );
     }
 
