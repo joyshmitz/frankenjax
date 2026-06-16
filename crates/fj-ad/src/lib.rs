@@ -22614,6 +22614,20 @@ mod tests {
         ];
         let mut bits_hex = Vec::new();
 
+        // The fused fast path and the generic path are algebraically identical but
+        // accumulate in different orders, so for NaN-producing inputs (±inf, NaN)
+        // they can disagree only in the (semantically meaningless) NaN sign/payload
+        // — e.g. fused jvp at x=inf yields a -NaN where the generic path yields a
+        // +NaN. JAX makes no NaN-bit guarantee, so canonicalize any NaN to a single
+        // quiet-NaN pattern before comparing bits / hashing the golden digest.
+        let canon = |b: u64| -> u64 {
+            if f64::from_bits(b).is_nan() {
+                0x7ff8_0000_0000_0000
+            } else {
+                b
+            }
+        };
+
         for (x, dx) in data {
             let primals = [Value::scalar_f64(x)];
             let tangents = [Value::scalar_f64(dx)];
@@ -22627,12 +22641,14 @@ mod tests {
                 .and_then(Value::as_f64_scalar)
                 .ok_or_else(|| "fast scalar primal missing".to_string())?
                 .to_bits();
+            let fast_primal_bits = canon(fast_primal_bits);
             let generic_primal_bits = generic
                 .primals
                 .first()
                 .and_then(Value::as_f64_scalar)
                 .ok_or_else(|| "generic scalar primal missing".to_string())?
                 .to_bits();
+            let generic_primal_bits = canon(generic_primal_bits);
             assert_eq!(
                 fast_primal_bits, generic_primal_bits,
                 "primal x={x:?} dx={dx:?}"
@@ -22644,12 +22660,14 @@ mod tests {
                 .and_then(Value::as_f64_scalar)
                 .ok_or_else(|| "fast scalar tangent missing".to_string())?
                 .to_bits();
+            let fast_tangent_bits = canon(fast_tangent_bits);
             let generic_tangent_bits = generic
                 .tangents
                 .first()
                 .and_then(Value::as_f64_scalar)
                 .ok_or_else(|| "generic scalar tangent missing".to_string())?
                 .to_bits();
+            let generic_tangent_bits = canon(generic_tangent_bits);
             assert_eq!(
                 fast_tangent_bits, generic_tangent_bits,
                 "tangent x={x:?} dx={dx:?}"
@@ -22661,7 +22679,7 @@ mod tests {
         let digest = fj_test_utils::fixture_id_from_json(&bits_hex).map_err(|e| e.to_string())?;
         assert_eq!(
             digest,
-            "e5aecb887d2833d453dc40e5a4ddaa2dfe94ef3e045fcda9743f2d545eb0ca03"
+            "a3ba03e36346be746fad0ab8eaba57ef24975ebb9c31385fe1412757e5e1bb9d"
         );
 
         clear_custom_derivative_rules();
