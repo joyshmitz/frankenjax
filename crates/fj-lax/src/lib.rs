@@ -3881,6 +3881,151 @@ fn eval_reduce_window_dense_float(
     }
 }
 
+/// One 1-D sliding-window max/min pass along `axis` of a row-major dense f64
+/// tensor `cur` (shape `dims`), via a MONOTONIC DEQUE: O(axis_len) per line,
+/// WINDOW-INDEPENDENT (vs the naive O(axis_len·window) tap loop). A separate
+/// `nan_count` over the window makes any NaN-containing window emit `f64::NAN`,
+/// matching `jax_max_f64`/`jax_min_f64` (which canonicalize NaN to `f64::NAN`),
+/// so the result is bit-for-bit identical to the naive accumulator — finite
+/// windows reduce to the unique max/min, NaN windows to canonical NaN. Out-of-
+/// bounds (padded) taps are the op identity (-inf max / +inf min) and so are
+/// simply never visited, exactly as the naive halo treats them. Returns the new
+/// buffer with `out_ax` positions along `axis`.
+fn reduce_window_extremum_1d_axis_f64(
+    cur: &[f64],
+    dims: &[usize],
+    axis: usize,
+    window: usize,
+    stride: usize,
+    pad_low: usize,
+    out_ax: usize,
+    is_max: bool,
+) -> Vec<f64> {
+    let axis_len = dims[axis];
+    let inner: usize = dims[axis + 1..].iter().product();
+    let outer: usize = dims[..axis].iter().product();
+    let ident = if is_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let mut out = vec![0.0_f64; outer * out_ax * inner];
+    let mut dq: std::collections::VecDeque<(f64, usize)> = std::collections::VecDeque::new();
+    for o in 0..outer {
+        for ii in 0..inner {
+            let line_base = o * axis_len * inner + ii;
+            let get = |k: usize| cur[line_base + k * inner];
+            dq.clear();
+            let mut nan_count = 0usize;
+            let mut added = 0usize; // indices [0, added) entered
+            let mut left = 0usize; // indices [0, left) removed
+            let out_base = o * out_ax * inner + ii;
+            for oa in 0..out_ax {
+                let start = oa * stride;
+                let lo = start.saturating_sub(pad_low);
+                let hi = (start + window).saturating_sub(pad_low).min(axis_len);
+                // Enter all indices below `hi` (monotonic: hi non-decreasing in oa).
+                while added < hi {
+                    let v = get(added);
+                    if v.is_nan() {
+                        nan_count += 1;
+                    } else {
+                        while let Some(&(bv, _)) = dq.back() {
+                            let dominated = if is_max { bv <= v } else { bv >= v };
+                            if dominated {
+                                dq.pop_back();
+                            } else {
+                                break;
+                            }
+                        }
+                        dq.push_back((v, added));
+                    }
+                    added += 1;
+                }
+                // Evict indices below `lo` (monotonic: lo non-decreasing).
+                while left < lo {
+                    if get(left).is_nan() {
+                        nan_count -= 1;
+                    }
+                    if dq.front().map(|&(_, i)| i) == Some(left) {
+                        dq.pop_front();
+                    }
+                    left += 1;
+                }
+                let val = if hi <= lo {
+                    ident // window entirely in padding → all-identity
+                } else if nan_count > 0 {
+                    f64::NAN
+                } else {
+                    dq.front().map(|&(v, _)| v).unwrap_or(ident)
+                };
+                out[out_base + oa * inner] = val;
+            }
+        }
+    }
+    out
+}
+
+/// Separable monotonic-deque max/min `reduce_window` (any rank, no dilation): a box
+/// max/min over a window is the composition of per-axis 1-D sliding max/min (max and
+/// min are separable and order-independent), so we run [`reduce_window_extremum_1d_axis_f64`]
+/// along each windowed axis in turn — O(total) overall, WINDOW-INDEPENDENT, vs the
+/// naive O(out·∏window). Bit-for-bit identical to `eval_reduce_window_dense_float`'s
+/// max/min path. Output dtype handling mirrors that function (max/min select an
+/// exactly-widened input value, so F32/half downcast is exact).
+#[allow(clippy::too_many_arguments)]
+fn eval_reduce_window_separable_extremum(
+    output_dtype: fj_core::DType,
+    is_max: bool,
+    src: &[f64],
+    window_dims: &[usize],
+    strides: &[usize],
+    out_dims: &[u32],
+    pad_lows: &[usize],
+    input_dims: &[usize],
+) -> Result<Value, EvalError> {
+    let rank = window_dims.len();
+    let mut cur = src.to_vec();
+    let mut cur_dims = input_dims.to_vec();
+    for ax in 0..rank {
+        let w = window_dims[ax];
+        let s = strides[ax];
+        let p = pad_lows[ax];
+        let out_ax = out_dims[ax] as usize;
+        // Pure pass-through axis (no window, unit stride, no pad, unchanged length).
+        if w == 1 && s == 1 && p == 0 && out_ax == cur_dims[ax] {
+            continue;
+        }
+        cur = reduce_window_extremum_1d_axis_f64(&cur, &cur_dims, ax, w, s, p, out_ax, is_max);
+        cur_dims[ax] = out_ax;
+    }
+    let shape = Shape {
+        dims: out_dims.to_vec(),
+    };
+    match output_dtype {
+        fj_core::DType::F32 => Ok(Value::Tensor(
+            TensorValue::new_f32_values(shape, cur.iter().map(|&v| v as f32).collect())
+                .map_err(EvalError::from)?,
+        )),
+        fj_core::DType::BF16 | fj_core::DType::F16 => {
+            let bits: Vec<u16> = cur
+                .iter()
+                .map(|&v| match reduce_window_literal_from_f64(output_dtype, v) {
+                    fj_core::Literal::BF16Bits(b) | fj_core::Literal::F16Bits(b) => b,
+                    _ => 0,
+                })
+                .collect();
+            Ok(Value::Tensor(
+                TensorValue::new_half_float_values(output_dtype, shape, bits)
+                    .map_err(EvalError::from)?,
+            ))
+        }
+        _ => Ok(Value::Tensor(
+            TensorValue::new_f64_values(shape, cur).map_err(EvalError::from)?,
+        )),
+    }
+}
+
 /// Dense i64 reduce_window (any rank, sum/max/min, I64 input).
 ///
 /// The I64-accumulator integer case of the generic loop, specialized for a dense
@@ -5077,6 +5222,37 @@ fn eval_reduce_window(
             &out_dims,
             &pad_lows,
             total_output,
+        );
+    }
+
+    // Separable monotonic-deque MAX/MIN fast path: a box max/min is the composition
+    // of per-axis 1-D sliding extrema (max/min are separable + order-independent),
+    // each computable WINDOW-INDEPENDENTLY in O(axis_len) by a monotonic deque —
+    // O(total) vs the naive O(out·∏window) tap loop below. Gated to OVERLAPPING
+    // windows (some windowed axis has stride < window); non-overlapping pooling
+    // (stride == window) is already O(input) on the dense_float path, where the
+    // deque's bookkeeping would only add overhead. No (base/window) dilation.
+    // Bit-identical to eval_reduce_window_dense_float for max/min (finite → unique
+    // extremum; NaN → canonical f64::NAN, since jax_max/min_f64 canonicalize too).
+    if no_base_dilation
+        && no_window_dilation
+        && matches!(reduce_op, "max" | "min")
+        && window_dims
+            .iter()
+            .zip(strides.iter())
+            .any(|(&w, &s)| w > 1 && s < w)
+        && let Some(src) = reduce_window_dense_f64_view(tensor)
+    {
+        let input_dims: Vec<usize> = tensor.shape.dims.iter().map(|d| *d as usize).collect();
+        return eval_reduce_window_separable_extremum(
+            output_dtype,
+            reduce_op == "max",
+            src.as_ref(),
+            &window_dims,
+            &strides,
+            &out_dims,
+            &pad_lows,
+            &input_dims,
         );
     }
 
@@ -13492,6 +13668,155 @@ mod tests {
                 assert_eq!(bits(&l), reference, "{op} {win:?} {stride:?} {pad} literal");
             }
         }
+    }
+
+    #[test]
+    fn separable_deque_maxpool_matches_naive_dense_float_large_window() {
+        // Large OVERLAPPING window (stride 1) — the deque's regime. Bit-identical to
+        // the naive tap-loop dense_float path across max/min, incl NaN/±inf, for a
+        // window big enough that the naive O(out·window²) clearly differs in cost.
+        let (rows, cols) = (40usize, 48usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| match i % 13 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                _ => ((i as f64) * 0.21).cos() * 7.0 - (i as f64) * 0.01,
+            })
+            .collect();
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let canon = |bits: u64| {
+            if f64::from_bits(bits).is_nan() {
+                0x7ff8_0000_0000_0000
+            } else {
+                bits
+            }
+        };
+        for op in ["max", "min"] {
+            for (wr, wc) in [(5usize, 7usize), (8, 8), (6, 3)] {
+                let out_r = rows - wr + 1;
+                let out_c = cols - wc + 1;
+                let p = rw_params(op, &format!("{wr},{wc}"), "1,1"); // VALID, stride 1
+                let deque =
+                    eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense), &p)
+                        .unwrap();
+                // Naive baseline: call the dense_float tap-loop directly.
+                let naive = super::eval_reduce_window_dense_float(
+                    DType::F64,
+                    op,
+                    &data,
+                    &[wr, wc],
+                    &[1, 1],
+                    &[1, 1],
+                    &[out_r as u32, out_c as u32],
+                    &[0, 0],
+                    &[rows, cols],
+                    &[cols, 1],
+                    out_r * out_c,
+                )
+                .unwrap();
+                let db: Vec<u64> = deque
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| canon(l.as_f64().unwrap().to_bits()))
+                    .collect();
+                let nb: Vec<u64> = naive
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| canon(l.as_f64().unwrap().to_bits()))
+                    .collect();
+                assert_eq!(
+                    db, nb,
+                    "{op} window {wr}x{wc} deque vs naive (NaN-canonicalized)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_separable_deque_maxpool_vs_naive() {
+        use std::time::Instant;
+        // Large overlapping maxpool [256,256] window 8x8 stride 1 VALID: the NEW
+        // separable monotonic-deque path (O(input)) vs the naive O(out·window²)
+        // tap loop (eval_reduce_window_dense_float).
+        let (rows, cols, w) = (256usize, 256usize, 8usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| ((i as f64) * 0.0013).sin())
+            .collect();
+        let dense = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let out_r = rows - w + 1;
+        let out_c = cols - w + 1;
+        let p = rw_params("max", &format!("{w},{w}"), "1,1");
+        let best = |f: &dyn Fn() -> u64| {
+            let _ = f();
+            let mut t = f64::MAX;
+            let mut d = 0u64;
+            for _ in 0..5 {
+                let s = Instant::now();
+                d = f();
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            (t, d)
+        };
+        let (t_new, d_new) = best(&|| {
+            let r =
+                eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&dense), &p).unwrap();
+            r.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .fold(0u64, |a, l| a ^ l.as_f64().unwrap().to_bits())
+        });
+        let (t_old, d_old) = best(&|| {
+            let r = super::eval_reduce_window_dense_float(
+                DType::F64,
+                "max",
+                &data,
+                &[w, w],
+                &[1, 1],
+                &[1, 1],
+                &[out_r as u32, out_c as u32],
+                &[0, 0],
+                &[rows, cols],
+                &[cols, 1],
+                out_r * out_c,
+            )
+            .unwrap();
+            r.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .fold(0u64, |a, l| a ^ l.as_f64().unwrap().to_bits())
+        });
+        assert_eq!(d_new, d_old, "deque vs naive maxpool digest");
+        println!(
+            "BENCH maxpool [{rows},{cols}] {w}x{w} stride1 VALID: naive={:.2}ms deque={:.2}ms speedup={:.2}x digest={d_new:016x}",
+            t_old * 1e3,
+            t_new * 1e3,
+            t_old / t_new
+        );
     }
 
     /// Atrous pooling (window_dilation > 1) now takes the dense f64/i64 stencil path
