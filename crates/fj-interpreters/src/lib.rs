@@ -3089,6 +3089,12 @@ struct ScalarF64Plan {
     steps: Vec<ScalarF64Step>,
 }
 
+struct DenseF64ReduceSumPlan {
+    const_slots: Vec<usize>,
+    input_slots: Vec<usize>,
+    input_slot: usize,
+}
+
 #[derive(Clone, Copy)]
 enum ScalarF64Slot {
     Missing,
@@ -3146,6 +3152,38 @@ fn var_slots(vars: &[VarId], slots: usize) -> Option<Vec<usize>> {
         out.push(slot);
     }
     Some(out)
+}
+
+fn build_dense_f64_reduce_sum_plan(jaxpr: &Jaxpr, slots: usize) -> Option<DenseF64ReduceSumPlan> {
+    if !jaxpr.effects.is_empty() || jaxpr.equations.len() != 1 {
+        return None;
+    }
+    let equation = &jaxpr.equations[0];
+    if equation.primitive != Primitive::ReduceSum
+        || !equation.params.is_empty()
+        || !equation.sub_jaxprs.is_empty()
+        || !equation.effects.is_empty()
+        || equation.inputs.len() != 1
+        || equation.outputs.len() != 1
+        || jaxpr.outvars.as_slice() != equation.outputs.as_slice()
+    {
+        return None;
+    }
+
+    let Atom::Var(input_var) = equation.inputs[0] else {
+        return None;
+    };
+    let input_slot = input_var.0 as usize;
+    let out_slot = equation.outputs[0].0 as usize;
+    if input_slot >= slots || out_slot >= slots {
+        return None;
+    }
+
+    Some(DenseF64ReduceSumPlan {
+        const_slots: var_slots(&jaxpr.constvars, slots)?,
+        input_slots: var_slots(&jaxpr.invars, slots)?,
+        input_slot,
+    })
 }
 
 fn build_scalar_f64_arith_plan(jaxpr: &Jaxpr, slots: usize) -> Option<ScalarF64Plan> {
@@ -5897,6 +5935,7 @@ struct DenseEvalPlan {
     scalar_select_plan: Option<ScalarSelectPlan>,
     scalar_select_i64_plan: Option<ScalarSelectI64Plan>,
     scalar_poly_plan: Option<ScalarPolyPlan>,
+    dense_f64_reduce_sum_plan: Option<DenseF64ReduceSumPlan>,
 }
 
 /// One-time compiled evaluator for hot repeated calls of the same small Jaxpr.
@@ -6021,6 +6060,7 @@ fn build_dense_plan(jaxpr: &Jaxpr) -> Option<DenseEvalPlan> {
             scalar_select_plan: build_scalar_select_plan(jaxpr, slots),
             scalar_select_i64_plan: build_scalar_select_i64_plan(jaxpr, slots),
             scalar_poly_plan: build_scalar_poly_plan(jaxpr, slots),
+            dense_f64_reduce_sum_plan: build_dense_f64_reduce_sum_plan(jaxpr, slots),
         })
     } else {
         None
@@ -6046,6 +6086,7 @@ fn eval_jaxpr_dense_env(
         scalar_select_plan: build_scalar_select_plan(jaxpr, slots),
         scalar_select_i64_plan: build_scalar_select_i64_plan(jaxpr, slots),
         scalar_poly_plan: build_scalar_poly_plan(jaxpr, slots),
+        dense_f64_reduce_sum_plan: build_dense_f64_reduce_sum_plan(jaxpr, slots),
     };
     let mut env: Vec<Option<Value>> = vec![None; slots];
     run_dense_plan(jaxpr, const_values, args, &mut env, &plan)
@@ -6072,6 +6113,72 @@ fn run_dense_plan(
         &mut scalar_buffers,
     )?;
     Ok(out)
+}
+
+fn dense_f64_reduce_sum_input<'a>(
+    plan: &DenseF64ReduceSumPlan,
+    const_values: &'a [Value],
+    args: &'a [Value],
+) -> Result<&'a Value, InterpreterError> {
+    for (&slot, value) in plan.const_slots.iter().zip(const_values) {
+        if slot == plan.input_slot {
+            return Ok(value);
+        }
+    }
+    for (&slot, value) in plan.input_slots.iter().zip(args) {
+        if slot == plan.input_slot {
+            return Ok(value);
+        }
+    }
+    Err(InterpreterError::MissingVariable(VarId(
+        plan.input_slot as u32,
+    )))
+}
+
+fn run_dense_f64_reduce_sum_plan_into(
+    plan: &DenseF64ReduceSumPlan,
+    const_values: &[Value],
+    args: &[Value],
+    out: &mut Vec<Value>,
+) -> Option<Result<(), InterpreterError>> {
+    if const_values.len() != plan.const_slots.len() {
+        return Some(Err(InterpreterError::ConstArity {
+            expected: plan.const_slots.len(),
+            actual: const_values.len(),
+        }));
+    }
+    if args.len() != plan.input_slots.len() {
+        return Some(Err(InterpreterError::InputArity {
+            expected: plan.input_slots.len(),
+            actual: args.len(),
+        }));
+    }
+
+    let input = match dense_f64_reduce_sum_input(plan, const_values, args) {
+        Ok(value) => value,
+        Err(err) => return Some(Err(err)),
+    };
+    let Value::Tensor(tensor) = input else {
+        return None;
+    };
+    if tensor.dtype != DType::F64 {
+        return None;
+    }
+    let values = tensor.elements.as_f64_slice()?;
+    let reduced = if tensor.shape.rank() == 0 {
+        *values.first()?
+    } else {
+        let mut acc = 0.0_f64;
+        for &value in values {
+            acc += value;
+        }
+        acc
+    };
+
+    out.clear();
+    out.reserve(1);
+    out.push(Value::scalar_f64(reduced));
+    Some(Ok(()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6155,6 +6262,15 @@ fn run_dense_plan_into(
     if let Some(p) = &plan.scalar_poly_plan
         && let Some(result) =
             run_scalar_poly_plan_into(p, const_values, args, out, &mut scalar_buffers.poly)
+    {
+        return result;
+    }
+    // One-equation full reduce_sum over dense-f64 tensors. This mirrors
+    // fj-lax's full-reduce fold exactly: seed 0.0 and visit the backing slice in
+    // ascending order, with no reassociation. Scalars, axes, non-F64, or
+    // non-dense storage fall through to the generic interpreter.
+    if let Some(p) = &plan.dense_f64_reduce_sum_plan
+        && let Some(result) = run_dense_f64_reduce_sum_plan_into(p, const_values, args, out)
     {
         return result;
     }
@@ -11053,6 +11169,222 @@ mod tests {
             t_generic * 1e9 / n as f64,
             t_arena * 1e9 / n as f64,
             t_generic / t_arena,
+        );
+    }
+
+    #[test]
+    fn dense_f64_reduce_sum_plan_matches_generic_sha256() {
+        let (x, out) = (VarId(0), VarId(1));
+        let body = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec![Atom::Var(x)],
+                outputs: smallvec![out],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            }],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        assert!(
+            plan.dense_f64_reduce_sum_plan.is_some(),
+            "reduce_sum body should compile to the dense-f64 plan"
+        );
+
+        let data: Vec<f64> = (0..64)
+            .map(|i| {
+                if i == 7 {
+                    -0.0
+                } else {
+                    (i as f64) * 0.125 - 3.5
+                }
+            })
+            .collect();
+        let manual = data.iter().fold(0.0_f64, |acc, &value| acc + value);
+        let arg =
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![64] }, data).unwrap());
+        let args = [arg];
+
+        let mut generic_env: Vec<Option<Value>> = vec![None; plan.slots];
+        let mut generic_scratch: Vec<Value> = Vec::new();
+        let mut generic_out: Vec<Value> = Vec::new();
+        super::run_dense_env_into(
+            &body,
+            &[],
+            &args,
+            &mut generic_env,
+            &plan.last_use,
+            &mut generic_scratch,
+            &mut generic_out,
+        )
+        .expect("generic reduce_sum");
+
+        let mut planned_env: Vec<Option<Value>> = vec![None; plan.slots];
+        let mut planned_scratch: Vec<Value> = Vec::new();
+        let mut planned_out: Vec<Value> = Vec::new();
+        let mut bufs = super::ScalarPlanBuffers::default();
+        super::run_dense_plan_into(
+            &body,
+            &[],
+            &args,
+            &mut planned_env,
+            &plan,
+            &mut planned_scratch,
+            &mut planned_out,
+            &mut bufs,
+        )
+        .expect("planned reduce_sum");
+
+        assert_eq!(planned_out, generic_out);
+        let Value::Scalar(Literal::F64Bits(bits)) = &planned_out[0] else {
+            panic!("dense reduce_sum must return f64 scalar");
+        };
+        assert_eq!(*bits, manual.to_bits());
+        let sha256 =
+            fj_test_utils::fixture_id_from_json(&("frankenjax-0x3pu-reduce-sum", &planned_out))
+                .expect("golden digest");
+        assert_eq!(
+            sha256,
+            "561117f6fd0383063821dfcf3074491ba1e5f3943a828629e080c4fa7897c8cd"
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_dense_f64_reduce_sum_plan_overhead() {
+        use std::time::Instant;
+        fn best_time(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                best = best.min(t.elapsed().as_secs_f64());
+            }
+            best
+        }
+
+        let (x, out) = (VarId(0), VarId(1));
+        let body = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec![Atom::Var(x)],
+                outputs: smallvec![out],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            }],
+        );
+        let plan = super::build_dense_plan(&body).expect("dense plan");
+        assert!(
+            plan.dense_f64_reduce_sum_plan.is_some(),
+            "reduce_sum body should compile to the dense-f64 plan"
+        );
+        let data: Vec<f64> = (0..64)
+            .map(|i| {
+                if i == 7 {
+                    -0.0
+                } else {
+                    (i as f64) * 0.125 - 3.5
+                }
+            })
+            .collect();
+        let arg =
+            Value::Tensor(TensorValue::new_f64_values(Shape { dims: vec![64] }, data).unwrap());
+        let args = [arg];
+        let mut generic_env: Vec<Option<Value>> = vec![None; plan.slots];
+        let mut generic_scratch: Vec<Value> = Vec::new();
+        let mut generic_out: Vec<Value> = Vec::new();
+        super::run_dense_env_into(
+            &body,
+            &[],
+            &args,
+            &mut generic_env,
+            &plan.last_use,
+            &mut generic_scratch,
+            &mut generic_out,
+        )
+        .expect("generic sample");
+
+        let mut planned_env: Vec<Option<Value>> = vec![None; plan.slots];
+        let mut planned_scratch: Vec<Value> = Vec::new();
+        let mut planned_out: Vec<Value> = Vec::new();
+        let mut bufs = super::ScalarPlanBuffers::default();
+        super::run_dense_plan_into(
+            &body,
+            &[],
+            &args,
+            &mut planned_env,
+            &plan,
+            &mut planned_scratch,
+            &mut planned_out,
+            &mut bufs,
+        )
+        .expect("planned sample");
+        assert_eq!(planned_out, generic_out);
+        let sha256 =
+            fj_test_utils::fixture_id_from_json(&("frankenjax-0x3pu-reduce-sum", &planned_out))
+                .expect("golden digest");
+        assert_eq!(
+            sha256,
+            "561117f6fd0383063821dfcf3074491ba1e5f3943a828629e080c4fa7897c8cd"
+        );
+
+        let n: usize = 1_000_000;
+        let t_generic = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                super::run_dense_env_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan.last_use,
+                    &mut scratch,
+                    &mut o,
+                )
+                .expect("generic");
+                acc += o[0].as_f64_scalar().expect("scalar reduce_sum");
+            }
+            std::hint::black_box(acc);
+        });
+        let t_planned = best_time(|| {
+            let mut env: Vec<Option<Value>> = vec![None; plan.slots];
+            let mut scratch: Vec<Value> = Vec::new();
+            let mut o: Vec<Value> = Vec::new();
+            let mut bufs = super::ScalarPlanBuffers::default();
+            let mut acc = 0.0f64;
+            for _ in 0..n {
+                super::run_dense_plan_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut env,
+                    &plan,
+                    &mut scratch,
+                    &mut o,
+                    &mut bufs,
+                )
+                .expect("planned");
+                acc += o[0].as_f64_scalar().expect("scalar reduce_sum");
+            }
+            std::hint::black_box(acc);
+        });
+        println!(
+            "BENCH dense-f64 reduce_sum [64] {n} evals: GENERIC {:.1}ns/eval -> PLANNED {:.1}ns/eval = {:.2}x sha256={}",
+            t_generic * 1e9 / n as f64,
+            t_planned * 1e9 / n as f64,
+            t_generic / t_planned,
+            sha256,
         );
     }
 
