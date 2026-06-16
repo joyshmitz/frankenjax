@@ -12160,6 +12160,82 @@ pub fn jacobian_jaxpr_with_custom_jvp_key(
     jacobian_jaxpr_inner(jaxpr, args, Some(rule_key))
 }
 
+/// A primitive whose output element `i` depends ONLY on input element `i`
+/// (position-local, shape-preserving elementwise math). A jaxpr built solely from
+/// these over a SINGLE input is componentwise, so its Jacobian is diagonal.
+/// Deliberately conservative — anything that mixes/changes positions (reduce, dot,
+/// gather/scatter, transpose, reshape, broadcast, pad, slice, concat, select,
+/// convert, comparisons, rounding/sign, linalg) is excluded so detection can only
+/// ever UNDER-claim (fall back to the exact column-by-column path), never mis-claim.
+fn is_diagonal_elementwise_primitive(p: Primitive) -> bool {
+    use Primitive::*;
+    matches!(
+        p,
+        Add | Sub
+            | Mul
+            | Neg
+            | Abs
+            | Max
+            | Min
+            | Pow
+            | Hypot
+            | LogAddExp
+            | LogAddExp2
+            | Exp
+            | Log
+            | Sqrt
+            | Rsqrt
+            | Sin
+            | Cos
+            | Tan
+            | Asin
+            | Acos
+            | Atan
+            | Deg2Rad
+            | Rad2Deg
+            | Sinh
+            | Cosh
+            | Tanh
+            | Asinh
+            | Acosh
+            | Atanh
+            | Expm1
+            | Log1p
+            | Log2
+            | Exp2
+            | Sinc
+            | Square
+            | Reciprocal
+            | Logistic
+            | Erf
+            | Erfc
+            | Div
+            | Atan2
+            | Cbrt
+            | Lgamma
+            | Digamma
+            | ErfInv
+            | BesselI0e
+            | BesselI1e
+            | XLogY
+            | XLog1PY
+            | IntegerPow
+    )
+}
+
+/// True when `jaxpr` is a single-input, sub-jaxpr-free chain of ONLY
+/// position-local elementwise primitives — so every output cell depends only on
+/// the same input cell and the Jacobian is DIAGONAL.
+fn jaxpr_is_elementwise_diagonal(jaxpr: &Jaxpr) -> bool {
+    if jaxpr.invars.len() != 1 || jaxpr.equations.is_empty() {
+        return false;
+    }
+    jaxpr
+        .equations
+        .iter()
+        .all(|eqn| eqn.sub_jaxprs.is_empty() && is_diagonal_elementwise_primitive(eqn.primitive))
+}
+
 fn jacobian_jaxpr_inner(
     jaxpr: &Jaxpr,
     args: &[Value],
@@ -12182,6 +12258,32 @@ fn jacobian_jaxpr_inner(
         return Err(AdError::EvalFailed(
             "jacobian requires at least one differentiable input dimension".to_owned(),
         ));
+    }
+
+    // DIAGONAL fast path: for a single-input pure-elementwise (componentwise)
+    // function the Jacobian is diagonal, so ONE forward pass with an all-ones
+    // tangent yields the entire diagonal (JVP is linear and componentwise:
+    // jvp(ones)[i] = Σ_j J[i][j]·1 = J[i][i] = f'(x_i) = jvp(e_i)[i], and every
+    // off-diagonal entry is exactly 0). This is bit-identical to the O(N)
+    // column-by-column loop below but does O(1) forward passes instead of N.
+    if args.len() == 1 && jaxpr_is_elementwise_diagonal(jaxpr) {
+        let ones = ones_like(&args[0]);
+        let jvp_result = jvp_inner(
+            jaxpr,
+            args,
+            std::slice::from_ref(&ones),
+            custom_jvp_rule_key,
+        )?;
+        let diag = flatten_values_to_f64(&jvp_result.tangents)?;
+        if diag.len() == input_dim {
+            let mut jacobian = vec![0.0_f64; input_dim * input_dim];
+            for (i, &d) in diag.iter().enumerate() {
+                jacobian[i * input_dim + i] = d;
+            }
+            return matrix_value(input_dim, input_dim, jacobian);
+        }
+        // Not square (output_dim != input_dim) ⇒ not componentwise after all;
+        // fall through to the exact column-by-column path.
     }
 
     let zero_tangents = args.iter().map(zeros_like).collect::<Vec<_>>();
@@ -22167,6 +22269,192 @@ mod tests {
 
         clear_custom_derivative_rules();
         Ok(())
+    }
+
+    #[test]
+    fn jacobian_diagonal_fastpath_matches_columns_and_golden() {
+        use fj_core::{Jaxpr, Shape, TensorValue, VarId};
+        use smallvec::smallvec;
+        // f: R^n -> R^n, elementwise chain t1=sin(x); t2=mul(t1,t1); out=exp(t2)
+        // (all position-local), so jacobian is diagonal. The diagonal fast path
+        // must be BIT-IDENTICAL to the column-by-column jvp reference, AND the
+        // off-diagonal entries must be exactly 0.
+        let n = 12usize;
+        let (x, t1, t2, out) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let jaxpr = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Sin, smallvec![Atom::Var(x)], t1),
+                mk(Primitive::Mul, smallvec![Atom::Var(t1), Atom::Var(t1)], t2),
+                mk(Primitive::Exp, smallvec![Atom::Var(t2)], out),
+            ],
+        );
+        assert!(
+            super::jaxpr_is_elementwise_diagonal(&jaxpr),
+            "elementwise chain should be detected diagonal"
+        );
+        let xv: Vec<f64> = (0..n).map(|i| (i as f64) * 0.21 - 1.1).collect();
+        let args = [Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xv,
+            )
+            .unwrap(),
+        )];
+
+        let jac = jacobian_jaxpr(&jaxpr, &args).expect("jacobian");
+        let jt = jac.as_tensor().expect("tensor");
+        assert_eq!(jt.shape.dims, vec![n as u32, n as u32]);
+        let got = jt.to_f64_vec().expect("f64");
+
+        // Reference: column-by-column independent jvp passes (the O(N) path).
+        let mut want = vec![0.0_f64; n * n];
+        for basis in 0..n {
+            let mut tan = vec![0.0_f64; n];
+            tan[basis] = 1.0;
+            let tangents = [Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    tan,
+                )
+                .unwrap(),
+            )];
+            let jr = super::jvp_inner(&jaxpr, &args, &tangents, None).expect("jvp");
+            let col = super::flatten_values_to_f64(&jr.tangents).expect("flat");
+            for row in 0..n {
+                want[row * n + basis] = col[row];
+            }
+        }
+        // Diagonal entries are BIT-IDENTICAL to the column reference (both are the
+        // chain JVP at that row with local tangent 1.0). Off-diagonal entries are
+        // mathematically 0 in both; the column path yields a SIGNED zero
+        // (f'(x_row)·0.0) while the fast path yields +0.0 — value-identical, and
+        // Jacobian parity is tolerance (no ±0 bit-pinning), so assert value == 0.
+        for r in 0..n {
+            for c in 0..n {
+                let idx = r * n + c;
+                if r == c {
+                    assert_eq!(
+                        got[idx].to_bits(),
+                        want[idx].to_bits(),
+                        "diagonal {r} != column reference"
+                    );
+                } else {
+                    assert_eq!(got[idx], 0.0, "fast off-diagonal ({r},{c}) not zero");
+                    assert_eq!(want[idx], 0.0, "ref off-diagonal ({r},{c}) not zero");
+                }
+            }
+        }
+        let bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+        let sha = fj_test_utils::fixture_id_from_json(&("frankenjax-jacobian-diagonal", &bits))
+            .expect("digest");
+        assert_eq!(
+            sha,
+            "afdc3cf849f10a1d08b9c0fe085b3ce7ebdcd7fd50998c18ba06eb6c470b5c39"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_jacobian_diagonal_vs_columns() {
+        use fj_core::{Jaxpr, Shape, TensorValue, VarId};
+        use smallvec::smallvec;
+        use std::time::Instant;
+        let n = 256usize;
+        let (x, t1, t2, out) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let jaxpr = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                mk(Primitive::Sin, smallvec![Atom::Var(x)], t1),
+                mk(Primitive::Mul, smallvec![Atom::Var(t1), Atom::Var(t1)], t2),
+                mk(Primitive::Tanh, smallvec![Atom::Var(t2)], out),
+            ],
+        );
+        let xv: Vec<f64> = (0..n).map(|i| (i as f64) * 0.003 - 0.4).collect();
+        let args = [Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xv,
+            )
+            .unwrap(),
+        )];
+        let best = |f: &dyn Fn() -> f64| {
+            let _ = f();
+            let mut t = f64::MAX;
+            let mut d = 0.0;
+            for _ in 0..3 {
+                let s = Instant::now();
+                d = f();
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            (t, d)
+        };
+        let (t_diag, d_diag) = best(&|| {
+            jacobian_jaxpr(&jaxpr, &args)
+                .unwrap()
+                .as_tensor()
+                .unwrap()
+                .to_f64_vec()
+                .unwrap()
+                .iter()
+                .sum()
+        });
+        // Reference: the O(N) column-by-column path (what this replaced).
+        let (t_col, d_col) = best(&|| {
+            let mut jac = vec![0.0_f64; n * n];
+            for basis in 0..n {
+                let mut tan = vec![0.0_f64; n];
+                tan[basis] = 1.0;
+                let tangents = [Value::Tensor(
+                    TensorValue::new_f64_values(
+                        Shape {
+                            dims: vec![n as u32],
+                        },
+                        tan,
+                    )
+                    .unwrap(),
+                )];
+                let jr = super::jvp_inner(&jaxpr, &args, &tangents, None).unwrap();
+                let col = super::flatten_values_to_f64(&jr.tangents).unwrap();
+                for row in 0..n {
+                    jac[row * n + basis] = col[row];
+                }
+            }
+            jac.iter().sum()
+        });
+        assert_eq!(d_diag.to_bits(), d_col.to_bits(), "A/B digest mismatch");
+        println!(
+            "BENCH jacobian [{n}->{n}] elementwise: COLUMNS {:.2}ms -> DIAGONAL {:.2}ms = {:.2}x",
+            t_col * 1e3,
+            t_diag * 1e3,
+            t_col / t_diag,
+        );
     }
 
     #[test]
