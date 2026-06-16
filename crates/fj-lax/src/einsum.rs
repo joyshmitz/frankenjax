@@ -1075,10 +1075,10 @@ fn try_einsum2_matmul_general(
         ext.insert(c, a_shape[i]);
     }
     for (i, &c) in sb.iter().enumerate() {
-        if let Some(&e) = ext.get(&c) {
-            if e != b_shape[i] {
-                return None;
-            }
+        if let Some(&e) = ext.get(&c)
+            && e != b_shape[i]
+        {
+            return None;
         }
         ext.insert(c, b_shape[i]);
     }
@@ -1870,7 +1870,7 @@ mod tests {
         let k_total: usize = k_dims.iter().product::<usize>().max(1);
         let mut out = vec![0.0f64; out_total];
         let mut coord = std::collections::HashMap::new();
-        for out_idx in 0..out_total {
+        for (out_idx, slot) in out.iter_mut().enumerate() {
             for (ax, &c) in so.iter().enumerate() {
                 coord.insert(c, (out_idx / o_str[ax]) % out_shape[ax]);
             }
@@ -1897,7 +1897,7 @@ mod tests {
                     kc[j] = 0;
                 }
             }
-            out[out_idx] = sum;
+            *slot = sum;
         }
         (out, out_shape)
     }

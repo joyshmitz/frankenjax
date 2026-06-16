@@ -3881,6 +3881,15 @@ fn eval_reduce_window_dense_float(
     }
 }
 
+struct ReduceWindowExtremumAxis {
+    axis: usize,
+    window: usize,
+    stride: usize,
+    pad_low: usize,
+    out_ax: usize,
+    is_max: bool,
+}
+
 /// One 1-D sliding-window max/min pass along `axis` of a row-major dense f64
 /// tensor `cur` (shape `dims`), via a MONOTONIC DEQUE: O(axis_len) per line,
 /// WINDOW-INDEPENDENT (vs the naive O(axis_len·window) tap loop). A separate
@@ -3894,22 +3903,17 @@ fn eval_reduce_window_dense_float(
 fn reduce_window_extremum_1d_axis_f64(
     cur: &[f64],
     dims: &[usize],
-    axis: usize,
-    window: usize,
-    stride: usize,
-    pad_low: usize,
-    out_ax: usize,
-    is_max: bool,
+    spec: ReduceWindowExtremumAxis,
 ) -> Vec<f64> {
-    let axis_len = dims[axis];
-    let inner: usize = dims[axis + 1..].iter().product();
-    let outer: usize = dims[..axis].iter().product();
-    let ident = if is_max {
+    let axis_len = dims[spec.axis];
+    let inner: usize = dims[spec.axis + 1..].iter().product();
+    let outer: usize = dims[..spec.axis].iter().product();
+    let ident = if spec.is_max {
         f64::NEG_INFINITY
     } else {
         f64::INFINITY
     };
-    let mut out = vec![0.0_f64; outer * out_ax * inner];
+    let mut out = vec![0.0_f64; outer * spec.out_ax * inner];
     let mut dq: std::collections::VecDeque<(f64, usize)> = std::collections::VecDeque::new();
     for o in 0..outer {
         for ii in 0..inner {
@@ -3919,11 +3923,13 @@ fn reduce_window_extremum_1d_axis_f64(
             let mut nan_count = 0usize;
             let mut added = 0usize; // indices [0, added) entered
             let mut left = 0usize; // indices [0, left) removed
-            let out_base = o * out_ax * inner + ii;
-            for oa in 0..out_ax {
-                let start = oa * stride;
-                let lo = start.saturating_sub(pad_low);
-                let hi = (start + window).saturating_sub(pad_low).min(axis_len);
+            let out_base = o * spec.out_ax * inner + ii;
+            for oa in 0..spec.out_ax {
+                let start = oa * spec.stride;
+                let lo = start.saturating_sub(spec.pad_low);
+                let hi = (start + spec.window)
+                    .saturating_sub(spec.pad_low)
+                    .min(axis_len);
                 // Enter all indices below `hi` (monotonic: hi non-decreasing in oa).
                 while added < hi {
                     let v = get(added);
@@ -3931,7 +3937,7 @@ fn reduce_window_extremum_1d_axis_f64(
                         nan_count += 1;
                     } else {
                         while let Some(&(bv, _)) = dq.back() {
-                            let dominated = if is_max { bv <= v } else { bv >= v };
+                            let dominated = if spec.is_max { bv <= v } else { bv >= v };
                             if dominated {
                                 dq.pop_back();
                             } else {
@@ -3996,7 +4002,18 @@ fn eval_reduce_window_separable_extremum(
         if w == 1 && s == 1 && p == 0 && out_ax == cur_dims[ax] {
             continue;
         }
-        cur = reduce_window_extremum_1d_axis_f64(&cur, &cur_dims, ax, w, s, p, out_ax, is_max);
+        cur = reduce_window_extremum_1d_axis_f64(
+            &cur,
+            &cur_dims,
+            ReduceWindowExtremumAxis {
+                axis: ax,
+                window: w,
+                stride: s,
+                pad_low: p,
+                out_ax,
+                is_max,
+            },
+        );
         cur_dims[ax] = out_ax;
     }
     let shape = Shape {
@@ -4034,18 +4051,13 @@ fn eval_reduce_window_separable_extremum(
 fn reduce_window_extremum_1d_axis_i64(
     cur: &[i64],
     dims: &[usize],
-    axis: usize,
-    window: usize,
-    stride: usize,
-    pad_low: usize,
-    out_ax: usize,
-    is_max: bool,
+    spec: ReduceWindowExtremumAxis,
 ) -> Vec<i64> {
-    let axis_len = dims[axis];
-    let inner: usize = dims[axis + 1..].iter().product();
-    let outer: usize = dims[..axis].iter().product();
-    let ident = if is_max { i64::MIN } else { i64::MAX };
-    let mut out = vec![0_i64; outer * out_ax * inner];
+    let axis_len = dims[spec.axis];
+    let inner: usize = dims[spec.axis + 1..].iter().product();
+    let outer: usize = dims[..spec.axis].iter().product();
+    let ident = if spec.is_max { i64::MIN } else { i64::MAX };
+    let mut out = vec![0_i64; outer * spec.out_ax * inner];
     let mut dq: std::collections::VecDeque<(i64, usize)> = std::collections::VecDeque::new();
     for o in 0..outer {
         for ii in 0..inner {
@@ -4054,15 +4066,17 @@ fn reduce_window_extremum_1d_axis_i64(
             dq.clear();
             let mut added = 0usize;
             let mut left = 0usize;
-            let out_base = o * out_ax * inner + ii;
-            for oa in 0..out_ax {
-                let start = oa * stride;
-                let lo = start.saturating_sub(pad_low);
-                let hi = (start + window).saturating_sub(pad_low).min(axis_len);
+            let out_base = o * spec.out_ax * inner + ii;
+            for oa in 0..spec.out_ax {
+                let start = oa * spec.stride;
+                let lo = start.saturating_sub(spec.pad_low);
+                let hi = (start + spec.window)
+                    .saturating_sub(spec.pad_low)
+                    .min(axis_len);
                 while added < hi {
                     let v = get(added);
                     while let Some(&(bv, _)) = dq.back() {
-                        let dominated = if is_max { bv <= v } else { bv >= v };
+                        let dominated = if spec.is_max { bv <= v } else { bv >= v };
                         if dominated {
                             dq.pop_back();
                         } else {
@@ -4118,7 +4132,18 @@ fn eval_reduce_window_separable_extremum_i64(
         if w == 1 && s == 1 && p == 0 && out_ax == cur_dims[ax] {
             continue;
         }
-        cur = reduce_window_extremum_1d_axis_i64(&cur, &cur_dims, ax, w, s, p, out_ax, is_max);
+        cur = reduce_window_extremum_1d_axis_i64(
+            &cur,
+            &cur_dims,
+            ReduceWindowExtremumAxis {
+                axis: ax,
+                window: w,
+                stride: s,
+                pad_low: p,
+                out_ax,
+                is_max,
+            },
+        );
         cur_dims[ax] = out_ax;
     }
     let shape = Shape {
