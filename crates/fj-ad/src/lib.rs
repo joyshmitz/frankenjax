@@ -12662,15 +12662,20 @@ fn jacobian_jaxpr_inner(
         if let Some(out_template) = probe.primals.first() {
             let output_dim = flatten_values_to_f64(&probe.primals)?.len();
             if output_dim >= 1 && output_dim < input_dim {
-                // Each ROW is an independent reverse pass (gradient of f·e_j), and
-                // grad_jaxpr_with_cotangent is a pure function of (jaxpr, args,
-                // cotangent) — so rows can be evaluated across threads and scattered
-                // into disjoint row slabs with identical values. grad is two passes
-                // (forward+backward) per row, heavy enough that the fan-out amortizes
-                // malloc, mirroring the parallel general-Hessian column loop.
+                // REVERSE-MODE LINEARIZE: the forward pass (and its tape) depends only
+                // on `args`, which is identical for every row — so build the tape ONCE
+                // and replay only the backward pass per output basis e_j, instead of
+                // recomputing forward_with_tape (all the primals, incl. transcendentals)
+                // for each of the `output_dim` rows. `backward` reads the tape/env
+                // immutably and accumulates into its own adjoint store, so the shared
+                // tape is safe to replay across threads. Bit-identical: this is exactly
+                // the (forward, backward) grad_jaxpr_with_cotangent computes per row,
+                // with the row-invariant forward hoisted out.
+                let (_, tape, fwd_env) = forward_with_tape(jaxpr, args)?;
+                let output_var = jaxpr.outvars[0];
                 let row_fn = |j: usize| -> Result<Vec<f64>, AdError> {
                     let cotangent = basis_value_like(out_template, j)?;
-                    let grads = grad_jaxpr_with_cotangent(jaxpr, args, &cotangent)?;
+                    let grads = backward(&tape, output_var, cotangent, jaxpr, &fwd_env)?;
                     flatten_values_to_f64(&grads)
                 };
 
@@ -23545,9 +23550,32 @@ mod tests {
             jac
         };
 
+        // Serial SHARED-TAPE: hoist the row-invariant forward_with_tape out of the
+        // loop, replay only backward per row — isolates the tape-sharing lever from
+        // the (separately shipped) row parallelism.
+        let serial_shared = || {
+            let (_, tape, env) = super::forward_with_tape(&jaxpr, &args).unwrap();
+            let out_var = jaxpr.outvars[0];
+            let mut jac = vec![0.0_f64; rows * n];
+            for j in 0..rows {
+                let mut oh = vec![0.0_f64; rows];
+                oh[j] = 1.0;
+                let cot = Value::Tensor(
+                    TensorValue::new_f64_values(Shape { dims: vec![rows as u32] }, oh).unwrap(),
+                );
+                let row = super::flatten_values_to_f64(
+                    &super::backward(&tape, out_var, cot, &jaxpr, &env).unwrap(),
+                )
+                .unwrap();
+                jac[j * n..(j + 1) * n].copy_from_slice(&row);
+            }
+            jac
+        };
+
         let iters = 5;
         for _ in 0..2 {
             std::hint::black_box(serial());
+            std::hint::black_box(serial_shared());
             std::hint::black_box(jacobian_jaxpr(&jaxpr, &args).unwrap());
         }
         let t = Instant::now();
@@ -23557,11 +23585,17 @@ mod tests {
         let serial_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
         let t = Instant::now();
         for _ in 0..iters {
+            std::hint::black_box(serial_shared());
+        }
+        let shared_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        let t = Instant::now();
+        for _ in 0..iters {
             std::hint::black_box(jacobian_jaxpr(&jaxpr, &args).unwrap());
         }
         let par_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
         eprintln!(
-            "jacobian wide rows={rows}: SERIAL {serial_ms:.3}ms  PARALLEL {par_ms:.3}ms  speedup {:.2}x",
+            "jacobian wide rows={rows}: SERIAL(fwd/row) {serial_ms:.3}ms  SERIAL(shared-tape) {shared_ms:.3}ms ({:.2}x)  PARALLEL(shared) {par_ms:.3}ms ({:.2}x)",
+            serial_ms / shared_ms,
             serial_ms / par_ms
         );
     }
