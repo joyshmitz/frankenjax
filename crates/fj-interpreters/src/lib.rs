@@ -1774,17 +1774,38 @@ fn classify_f32_fusion_operand<'e>(
 
 /// Shape-only (dtype-agnostic) broadcast classifiers shared by the f64 and f32
 /// fusion scanners.
+/// Detect a TRAILING-axis row broadcast: a 1-D `[C]` vector broadcasting against
+/// the last axis of any rank-≥2 full tensor `[…, C]`. Element flat-index `i` reads
+/// `vec[i % C]` (row-major) — exactly what the flat seed/apply (`base % row_len`)
+/// and the `at_rc` col index already compute for ANY rank, so generalizing past the
+/// old rank-2-only `[R,C]+[C]` is free and bit-identical to the dense-broadcast
+/// kernel (whose `[C]` operand has broadcast strides `[0,…,0,1]`). Covers the
+/// ubiquitous `[B,S,D] + [D]` transformer bias/scale add.
 fn row_broadcast_len(full: &Shape, candidate: &Shape) -> Option<usize> {
-    match (full.dims.as_slice(), candidate.dims.as_slice()) {
-        ([_, cols], [row_cols]) if cols == row_cols => Some(*cols as usize),
+    match candidate.dims.as_slice() {
+        [row_cols] if full.dims.len() >= 2 && full.dims.last() == Some(row_cols) => {
+            Some(*row_cols as usize)
+        }
         _ => None,
     }
 }
 
+/// Detect a column broadcast: a `[…, 1]` vector with the SAME leading dims as the
+/// full tensor `[…, C]` and trailing dim 1. Element flat-index `i` reads
+/// `vec[i / C]` — what the flat seed/apply (`linear / cols`) and `at_rc` row index
+/// compute for ANY rank, so generalizing past the old rank-2-only `[R,C]+[R,1]` is
+/// free and bit-identical (the `[…,1]` operand broadcasts with trailing stride 0).
 fn col_broadcast_cols(full: &Shape, candidate: &Shape) -> Option<usize> {
-    match (full.dims.as_slice(), candidate.dims.as_slice()) {
-        ([rows, cols], [candidate_rows, 1]) if rows == candidate_rows => Some(*cols as usize),
-        _ => None,
+    let f = full.dims.as_slice();
+    let c = candidate.dims.as_slice();
+    if f.len() == c.len()
+        && f.len() >= 2
+        && c.last() == Some(&1)
+        && f[..f.len() - 1] == c[..c.len() - 1]
+    {
+        Some(f[f.len() - 1] as usize)
+    } else {
+        None
     }
 }
 
@@ -7249,6 +7270,199 @@ mod tests {
             f64_bits(&fused_outputs[0]),
             f64_bits(&unfused_outputs[0]),
             "fused f64 col-broadcast chain must match forced unfused path bit-for-bit"
+        );
+    }
+
+    #[test]
+    fn broadcast_matchers_generalize_past_rank2() {
+        let s = |d: &[u32]| Shape { dims: d.to_vec() };
+        // Row broadcast: a [C] vector against the trailing axis of any rank.
+        assert_eq!(super::row_broadcast_len(&s(&[4, 64]), &s(&[64])), Some(64));
+        assert_eq!(
+            super::row_broadcast_len(&s(&[4, 8, 64]), &s(&[64])),
+            Some(64)
+        ); // rank-3 [B,S,D]+[D]
+        assert_eq!(
+            super::row_broadcast_len(&s(&[2, 4, 8, 64]), &s(&[64])),
+            Some(64)
+        ); // rank-4
+        assert_eq!(super::row_broadcast_len(&s(&[4, 8, 64]), &s(&[8])), None); // wrong trailing
+        // Col broadcast: a [..,1] vector with matching leading dims, any rank.
+        assert_eq!(
+            super::col_broadcast_cols(&s(&[4, 64]), &s(&[4, 1])),
+            Some(64)
+        );
+        assert_eq!(
+            super::col_broadcast_cols(&s(&[4, 8, 64]), &s(&[4, 8, 1])),
+            Some(64)
+        ); // rank-3 [B,S,D]+[B,S,1]
+        assert_eq!(
+            super::col_broadcast_cols(&s(&[4, 8, 64]), &s(&[4, 9, 1])),
+            None
+        ); // leading mismatch
+    }
+
+    #[test]
+    fn fusion_rank3_trailing_broadcast_chain_matches_unfused_bit_for_bit() {
+        // The hot transformer pattern: rank-3 [B,S,D] activations with a [D] row-
+        // broadcast bias/scale AND a [B,S,1] col-broadcast, in one fused elementwise
+        // chain. Must match the forced-unfused per-equation path bit-for-bit (incl
+        // signed zeros / inf / NaN), proving the rank>2 matcher generalization is
+        // sound. The fused output must also stay dense (so the fusion really ran).
+        let (b, s_dim, d) = (4usize, 8usize, 64usize);
+        let n = b * s_dim * d; // 2048 >= FUSION_MIN_ELEMS
+        let mut x: Vec<f64> = (0..n).map(|i| i as f64 * 0.0017 - 5.0).collect();
+        let mut scale: Vec<f64> = (0..d).map(|i| (i as f64 * 0.013).cos() + 1.1).collect();
+        let mut colv: Vec<f64> = (0..b * s_dim).map(|i| i as f64 * 0.05 - 1.0).collect();
+        x[0] = -0.0;
+        x[1] = f64::INFINITY;
+        x[2] = f64::from_bits(0x7ff8_0000_0000_1234);
+        scale[0] = -0.0;
+        scale[1] = f64::from_bits(1);
+        colv[0] = f64::NEG_INFINITY;
+
+        let xv = VarId(0);
+        let sv = VarId(1); // [D] row-broadcast
+        let cv = VarId(2); // [B,S,1] col-broadcast
+        let v: Vec<VarId> = (3..=8).map(VarId).collect();
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(
+                Primitive::Mul,
+                smallvec![Atom::Var(xv), Atom::Var(sv)],
+                v[0],
+            ),
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(v[0]), Atom::Var(cv)],
+                v[1],
+            ),
+            mk(
+                Primitive::Sub,
+                smallvec![Atom::Var(v[1]), Atom::Var(sv)],
+                v[2],
+            ),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[2]), lit(1.5)], v[3]),
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(v[3]), Atom::Var(cv)],
+                v[4],
+            ),
+        ];
+        let jaxpr = Jaxpr::new(vec![xv, sv, cv], vec![], vec![v[4]], eqns);
+        let args = [
+            f64_tensor_values(vec![b as u32, s_dim as u32, d as u32], x),
+            f64_tensor_values(vec![d as u32], scale),
+            f64_tensor_values(vec![b as u32, s_dim as u32, 1], colv),
+        ];
+        let fused = eval_jaxpr(&jaxpr, &args).unwrap();
+        let unfused = eval_jaxpr_hashed_env(&jaxpr, &[], &args).expect("unfused reference");
+        let Value::Tensor(t) = &fused[0] else {
+            panic!("tensor")
+        };
+        assert_eq!(t.shape.dims, vec![b as u32, s_dim as u32, d as u32]);
+        assert!(
+            t.elements.as_f64_slice().is_some(),
+            "fused rank-3 broadcast output should stay dense"
+        );
+        assert_eq!(
+            f64_bits(&fused[0]),
+            f64_bits(&unfused[0]),
+            "fused rank-3 trailing-broadcast chain must match unfused bit-for-bit"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_fusion_rank3_broadcast_vs_unfused() {
+        use std::time::Instant;
+        // Rank-3 [B,S,D] + [D] bias/scale chain: fused (eval_jaxpr) vs forced
+        // per-equation unfused path. The fusion does ONE pass; unfused materializes a
+        // [B,S,D] intermediate per equation + re-dispatches.
+        let (b, s_dim, d) = (64usize, 128usize, 256usize);
+        let n = b * s_dim * d;
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.0001).sin()).collect();
+        let scale: Vec<f64> = (0..d).map(|i| 1.0 + i as f64 * 1e-4).collect();
+        let bias: Vec<f64> = (0..d).map(|i| i as f64 * 1e-3).collect();
+        let xv = VarId(0);
+        let sv = VarId(1);
+        let bvv = VarId(2);
+        let v: Vec<VarId> = (3..=8).map(VarId).collect();
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(
+                Primitive::Mul,
+                smallvec![Atom::Var(xv), Atom::Var(sv)],
+                v[0],
+            ),
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(v[0]), Atom::Var(bvv)],
+                v[1],
+            ),
+            mk(
+                Primitive::Mul,
+                smallvec![Atom::Var(v[1]), Atom::Var(sv)],
+                v[2],
+            ),
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(v[2]), Atom::Var(bvv)],
+                v[3],
+            ),
+            mk(
+                Primitive::Sub,
+                smallvec![Atom::Var(v[3]), Atom::Var(bvv)],
+                v[4],
+            ),
+        ];
+        let jaxpr = Jaxpr::new(vec![xv, sv, bvv], vec![], vec![v[4]], eqns);
+        let args = [
+            f64_tensor_values(vec![b as u32, s_dim as u32, d as u32], x),
+            f64_tensor_values(vec![d as u32], scale),
+            f64_tensor_values(vec![d as u32], bias),
+        ];
+        let best = |f: &dyn Fn() -> u64| {
+            let _ = f();
+            let mut t = f64::MAX;
+            let mut digest = 0u64;
+            for _ in 0..5 {
+                let s = Instant::now();
+                digest = f();
+                t = t.min(s.elapsed().as_secs_f64());
+            }
+            (t, digest)
+        };
+        let (t_fused, d_fused) = best(&|| {
+            f64_bits(&eval_jaxpr(&jaxpr, &args).unwrap()[0])
+                .iter()
+                .fold(0u64, |a, &x| a ^ x)
+        });
+        let (t_unfused, d_unfused) = best(&|| {
+            f64_bits(&eval_jaxpr_hashed_env(&jaxpr, &[], &args).unwrap()[0])
+                .iter()
+                .fold(0u64, |a, &x| a ^ x)
+        });
+        assert_eq!(d_fused, d_unfused, "fused vs unfused digest");
+        println!(
+            "BENCH rank3 [B{b},S{s_dim},D{d}] bias/scale chain: unfused={:.2}ms fused={:.2}ms speedup={:.2}x digest={d_fused:016x}",
+            t_unfused * 1e3,
+            t_fused * 1e3,
+            t_unfused / t_fused
         );
     }
 
