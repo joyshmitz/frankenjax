@@ -3089,10 +3089,52 @@ struct ScalarF64Plan {
     steps: Vec<ScalarF64Step>,
 }
 
+/// The four real full-reduction ops the dense plan covers. Each maps to a
+/// (seed, fold) pair that mirrors fj-lax's full-reduce exactly (see
+/// [`run_dense_f64_reduce_sum_plan_into`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DenseReduceOp {
+    Sum,
+    Prod,
+    Max,
+    Min,
+}
+
+impl DenseReduceOp {
+    fn from_primitive(primitive: Primitive) -> Option<Self> {
+        match primitive {
+            Primitive::ReduceSum => Some(Self::Sum),
+            Primitive::ReduceProd => Some(Self::Prod),
+            Primitive::ReduceMax => Some(Self::Max),
+            Primitive::ReduceMin => Some(Self::Min),
+            _ => None,
+        }
+    }
+
+    fn seed(self) -> f64 {
+        match self {
+            Self::Sum => 0.0,
+            Self::Prod => 1.0,
+            Self::Max => f64::NEG_INFINITY,
+            Self::Min => f64::INFINITY,
+        }
+    }
+
+    fn fold(self, acc: f64, value: f64) -> f64 {
+        match self {
+            Self::Sum => acc + value,
+            Self::Prod => acc * value,
+            Self::Max => jax_max_f64(acc, value),
+            Self::Min => jax_min_f64(acc, value),
+        }
+    }
+}
+
 struct DenseF64ReduceSumPlan {
     const_slots: Vec<usize>,
     input_slots: Vec<usize>,
     input_slot: usize,
+    op: DenseReduceOp,
 }
 
 #[derive(Clone, Copy)]
@@ -3159,8 +3201,8 @@ fn build_dense_f64_reduce_sum_plan(jaxpr: &Jaxpr, slots: usize) -> Option<DenseF
         return None;
     }
     let equation = &jaxpr.equations[0];
-    if equation.primitive != Primitive::ReduceSum
-        || !equation.params.is_empty()
+    let op = DenseReduceOp::from_primitive(equation.primitive)?;
+    if !equation.params.is_empty()
         || !equation.sub_jaxprs.is_empty()
         || !equation.effects.is_empty()
         || equation.inputs.len() != 1
@@ -3183,6 +3225,7 @@ fn build_dense_f64_reduce_sum_plan(jaxpr: &Jaxpr, slots: usize) -> Option<DenseF
         const_slots: var_slots(&jaxpr.constvars, slots)?,
         input_slots: var_slots(&jaxpr.invars, slots)?,
         input_slot,
+        op,
     })
 }
 
@@ -6161,23 +6204,26 @@ fn run_dense_f64_reduce_sum_plan_into(
     let Value::Tensor(tensor) = input else {
         return None;
     };
-    // F64 and F32 dense full reduce_sum (no axes). Both fold the contiguous
-    // backing slice in ascending order with NO reassociation, accumulating in
-    // f64 — exactly fj-lax's full-reduce path: the dense-F64 fast path folds the
-    // f64 slice, and F32 falls to the generic loop, which widens each element to
-    // f64 (`Literal::as_f64`), seeds 0.0, adds in f64, then rounds the result
-    // back to F32 (`reduce_real_literal(F32, acc) == from_f32(acc as f32)`). So
-    // the bits match either route. Other dtypes (half/int/complex/non-dense)
-    // return None and keep the generic interpreter.
+    // F64 and F32 dense full reduction (sum/prod/max/min, no axes). Both fold the
+    // contiguous backing slice in ascending order with NO reassociation,
+    // accumulating in f64 — exactly fj-lax's full-reduce path: the dense-F64 fast
+    // path folds the f64 slice (max/min via SIMD that is bit-identical to the
+    // scalar jax_max/jax_min fold), and F32 falls to the generic loop, which
+    // widens each element to f64 (`Literal::as_f64`), seeds the op init, folds in
+    // f64, then rounds back to F32 (`reduce_real_literal(F32, acc) ==
+    // from_f32(acc as f32)`). For max/min the result is always one of the inputs,
+    // so widen→fold→round round-trips exactly; NaN collapses to canonical NaN on
+    // both sides. So the bits match either route. Other dtypes
+    // (half/int/complex/non-dense) return None and keep the generic interpreter.
     match tensor.dtype {
         DType::F64 => {
             let values = tensor.elements.as_f64_slice()?;
             let reduced = if tensor.shape.rank() == 0 {
                 *values.first()?
             } else {
-                let mut acc = 0.0_f64;
+                let mut acc = plan.op.seed();
                 for &value in values {
-                    acc += value;
+                    acc = plan.op.fold(acc, value);
                 }
                 acc
             };
@@ -6197,9 +6243,9 @@ fn run_dense_f64_reduce_sum_plan_into(
                 out.push(Value::Scalar(Literal::from_f32(v)));
                 return Some(Ok(()));
             }
-            let mut acc = 0.0_f64;
+            let mut acc = plan.op.seed();
             for &value in values {
-                acc += f64::from(value);
+                acc = plan.op.fold(acc, f64::from(value));
             }
             out.clear();
             out.reserve(1);
@@ -6294,12 +6340,12 @@ fn run_dense_plan_into(
     {
         return result;
     }
-    // One-equation full reduce_sum over dense f64/f32 tensors. This mirrors
-    // fj-lax's full-reduce fold exactly: seed 0.0, accumulate in f64, and visit
-    // the backing slice in ascending order with no reassociation (F32 rounds the
-    // final f64 accumulator back to f32, matching reduce_real_literal). Axes,
-    // half/int/complex dtypes, or non-dense storage fall through to the generic
-    // interpreter.
+    // One-equation full reduction (sum/prod/max/min) over dense f64/f32 tensors.
+    // This mirrors fj-lax's full-reduce fold exactly: seed the op init,
+    // accumulate in f64, and visit the backing slice in ascending order with no
+    // reassociation (F32 rounds the final f64 accumulator back to f32, matching
+    // reduce_real_literal). Axes, half/int/complex dtypes, or non-dense storage
+    // fall through to the generic interpreter.
     if let Some(p) = &plan.dense_f64_reduce_sum_plan
         && let Some(result) = run_dense_f64_reduce_sum_plan_into(p, const_values, args, out)
     {
@@ -11370,6 +11416,113 @@ mod tests {
             sha256, "13863282368fc5ed093b41839f1ce31488de738b630ea96a904d028197023ba7",
             "f32 reduce_sum golden"
         );
+    }
+
+    #[test]
+    fn dense_reduce_prod_max_min_plans_match_generic() {
+        // Prod/Max/Min full reductions over f64 AND f32 must take the dense plan
+        // and produce BIT-IDENTICAL output to the generic interpreter (which
+        // routes eval_primitive -> fj-lax, the production oracle), including the
+        // ±0 / NaN / mixed-magnitude patterns that distinguish a naive fold.
+        let (x, out) = (VarId(0), VarId(1));
+        let f64_data: Vec<f64> = (0..130)
+            .map(|i| match i {
+                7 => -0.0,
+                40 => f64::NAN,
+                _ => (i as f64) * 0.37 - 24.0,
+            })
+            .collect();
+        let f32_data: Vec<f32> = (0..130)
+            .map(|i| match i {
+                7 => -0.0,
+                40 => f32::NAN,
+                _ => (i as f32) * 0.37 - 24.0,
+            })
+            .collect();
+
+        for primitive in [
+            Primitive::ReduceProd,
+            Primitive::ReduceMax,
+            Primitive::ReduceMin,
+        ] {
+            let body = Jaxpr::new(
+                vec![x],
+                vec![],
+                vec![out],
+                vec![Equation {
+                    primitive,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                }],
+            );
+            let plan = super::build_dense_plan(&body).expect("dense plan");
+            assert!(
+                plan.dense_f64_reduce_sum_plan.is_some(),
+                "{primitive:?} should compile to the dense reduce plan"
+            );
+
+            for arg in [
+                Value::Tensor(
+                    TensorValue::new_f64_values(Shape { dims: vec![130] }, f64_data.clone())
+                        .unwrap(),
+                ),
+                Value::Tensor(
+                    TensorValue::new_f32_values(Shape { dims: vec![130] }, f32_data.clone())
+                        .unwrap(),
+                ),
+            ] {
+                let args = [arg];
+                let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+                let mut gscratch: Vec<Value> = Vec::new();
+                let mut gout: Vec<Value> = Vec::new();
+                super::run_dense_env_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut genv,
+                    &plan.last_use,
+                    &mut gscratch,
+                    &mut gout,
+                )
+                .expect("generic reduce");
+
+                let mut penv: Vec<Option<Value>> = vec![None; plan.slots];
+                let mut pscratch: Vec<Value> = Vec::new();
+                let mut pout: Vec<Value> = Vec::new();
+                let mut bufs = super::ScalarPlanBuffers::default();
+                super::run_dense_plan_into(
+                    &body,
+                    &[],
+                    &args,
+                    &mut penv,
+                    &plan,
+                    &mut pscratch,
+                    &mut pout,
+                    &mut bufs,
+                )
+                .expect("planned reduce");
+
+                // Compare bit-for-bit (NaN payloads included) via the scalar bits.
+                let pbits = scalar_real_bits(&pout[0]);
+                let gbits = scalar_real_bits(&gout[0]);
+                assert_eq!(
+                    pbits, gbits,
+                    "{primitive:?} dense plan diverged from generic oracle"
+                );
+            }
+        }
+    }
+
+    // Raw bit pattern of a real scalar (f64 or f32), for NaN-payload-exact compare.
+    fn scalar_real_bits(value: &Value) -> u64 {
+        match value {
+            Value::Scalar(Literal::F64Bits(b)) => *b,
+            Value::Scalar(Literal::F32Bits(b)) => u64::from(*b),
+            other => panic!("expected real scalar, got {other:?}"),
+        }
     }
 
     #[test]
