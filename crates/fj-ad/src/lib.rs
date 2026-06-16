@@ -279,6 +279,73 @@ const DENSE_AD_VALUE_STORE_MAX_SLOTS: usize = 1_000_000;
 /// dominates, so we stay serial.
 const HESSIAN_PARALLEL_WORK_PER_THREAD: usize = 512;
 
+/// Minimum total compute-heavy work (heavy-equation-count × input_dim) before the
+/// forward (jvp) Jacobian column loop fans out across threads. The forward pass is
+/// single-pass, so its compute/malloc ratio is only high enough to beat threading
+/// overhead + allocator contention when the jaxpr contains enough EXPENSIVE
+/// primitives (transcendentals/special/dot/conv). Gating on heavy-op count — not
+/// raw equation count — keeps cheap-but-large jaxprs (which are malloc-bound and
+/// regress under threading, measured 0.51x) on the serial path while letting
+/// transcendental-heavy ones fan out (measured 4.63x). See
+/// [`primitive_is_compute_heavy`].
+const JVP_COLUMN_HEAVY_WORK_THRESHOLD: usize = 1024;
+
+/// Classifies a primitive as compute-heavy: a transcendental, special function,
+/// power/compound transcendental, or a dense linear-algebra op (dot/conv). Used
+/// ONLY to gate the forward-Jacobian column thread fan-out — it never affects
+/// results, so a conservative (under-inclusive) list at worst forgoes a speedup.
+fn primitive_is_compute_heavy(p: Primitive) -> bool {
+    matches!(
+        p,
+        Primitive::Exp
+            | Primitive::Expm1
+            | Primitive::Exp2
+            | Primitive::Log
+            | Primitive::Log1p
+            | Primitive::Log2
+            | Primitive::Sqrt
+            | Primitive::Rsqrt
+            | Primitive::Cbrt
+            | Primitive::Sin
+            | Primitive::Cos
+            | Primitive::Tan
+            | Primitive::Asin
+            | Primitive::Acos
+            | Primitive::Atan
+            | Primitive::Atan2
+            | Primitive::Sinh
+            | Primitive::Cosh
+            | Primitive::Tanh
+            | Primitive::Asinh
+            | Primitive::Acosh
+            | Primitive::Atanh
+            | Primitive::Sinc
+            | Primitive::Logistic
+            | Primitive::Erf
+            | Primitive::Erfc
+            | Primitive::ErfInv
+            | Primitive::Lgamma
+            | Primitive::Digamma
+            | Primitive::BesselI0e
+            | Primitive::BesselI1e
+            | Primitive::Igamma
+            | Primitive::Igammac
+            | Primitive::Betainc
+            | Primitive::Zeta
+            | Primitive::Polygamma
+            | Primitive::Pow
+            | Primitive::IntegerPow
+            | Primitive::Hypot
+            | Primitive::LogAddExp
+            | Primitive::LogAddExp2
+            | Primitive::XLogY
+            | Primitive::XLog1PY
+            | Primitive::Dot
+            | Primitive::DotGeneral
+            | Primitive::Conv
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ScalarF64Atom {
     Slot(usize),
@@ -12446,38 +12513,100 @@ fn jacobian_jaxpr_inner(
         }
     }
 
-    let mut output_dim = None::<usize>;
-    let mut jacobian = Vec::<f64>::new();
-
-    for basis_idx in 0..input_dim {
+    // FORWARD column path (jacfwd): one jvp pass per input basis e_j fills column j.
+    // The passes are independent and jvp_inner is pure, so for a COMPUTE-HEAVY jaxpr
+    // (enough transcendental/special/dot/conv equations) the columns fan out across
+    // threads with bit-identical values. Cheap jaxprs stay serial — jvp is a single
+    // pass, so a cheap one is malloc-bound and regresses under threading (0.51x),
+    // which the heavy-op gate (not raw equation count) screens out.
+    let column_jvp = |basis_idx: usize| -> Result<Vec<f64>, AdError> {
         let (arg_idx, local_idx) = global_basis_to_arg_index(&input_lengths, basis_idx)
             .ok_or_else(|| {
                 AdError::EvalFailed(format!("unable to resolve basis index {basis_idx}"))
             })?;
         let mut tangents = zero_tangents.clone();
         tangents[arg_idx] = basis_value_like(&args[arg_idx], local_idx)?;
-
         let jvp_result = jvp_inner(jaxpr, args, &tangents, custom_jvp_rule_key)?;
-        let tangent_flat = flatten_values_to_f64(&jvp_result.tangents)?;
-        let current_output_dim = tangent_flat.len();
+        flatten_values_to_f64(&jvp_result.tangents)
+    };
 
-        if let Some(expected) = output_dim {
-            if expected != current_output_dim {
-                return Err(AdError::EvalFailed(format!(
-                    "inconsistent Jacobian output dimension: expected {expected}, got {current_output_dim}"
-                )));
+    let heavy_ops = jaxpr
+        .equations
+        .iter()
+        .filter(|e| primitive_is_compute_heavy(e.primitive))
+        .count();
+    let heavy_work = heavy_ops.saturating_mul(input_dim);
+    let n_threads = if heavy_work < JVP_COLUMN_HEAVY_WORK_THRESHOLD {
+        1
+    } else {
+        let cores = std::thread::available_parallelism()
+            .map(|t| t.get())
+            .unwrap_or(1);
+        cores.min(input_dim).max(1)
+    };
+
+    let columns: Vec<Vec<f64>> = if n_threads <= 1 {
+        (0..input_dim)
+            .map(column_jvp)
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        let column_jvp = &column_jvp;
+        let chunk = input_dim.div_ceil(n_threads);
+        let bounds: Vec<(usize, usize)> = (0..n_threads)
+            .map(|t| (t * chunk, ((t + 1) * chunk).min(input_dim)))
+            .filter(|(s, e)| s < e)
+            .collect();
+        type ColChunk = Result<Vec<(usize, Vec<f64>)>, AdError>;
+        let chunk_results: Vec<ColChunk> = std::thread::scope(|scope| {
+            let handles: Vec<_> = bounds
+                .iter()
+                .map(|&(start, end)| {
+                    scope.spawn(move || {
+                        let mut out = Vec::with_capacity(end - start);
+                        for basis_idx in start..end {
+                            out.push((basis_idx, column_jvp(basis_idx)?));
+                        }
+                        Ok(out)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        Err(AdError::EvalFailed(
+                            "Jacobian worker thread panicked".to_owned(),
+                        ))
+                    })
+                })
+                .collect()
+        });
+        let mut assembled = vec![Vec::new(); input_dim];
+        for cr in chunk_results {
+            for (basis_idx, col) in cr? {
+                assembled[basis_idx] = col;
             }
-        } else {
-            output_dim = Some(current_output_dim);
-            jacobian.resize(current_output_dim * input_dim, 0.0);
         }
+        assembled
+    };
 
-        for (row, value) in tangent_flat.into_iter().enumerate() {
+    let output_dim = columns.first().map_or(0, Vec::len);
+    for (basis_idx, col) in columns.iter().enumerate() {
+        if col.len() != output_dim {
+            return Err(AdError::EvalFailed(format!(
+                "inconsistent Jacobian output dimension: expected {output_dim}, got {} at column {basis_idx}",
+                col.len()
+            )));
+        }
+    }
+    let mut jacobian = vec![0.0_f64; output_dim * input_dim];
+    for (basis_idx, col) in columns.iter().enumerate() {
+        for (row, &value) in col.iter().enumerate() {
             jacobian[row * input_dim + basis_idx] = value;
         }
     }
 
-    matrix_value(output_dim.unwrap_or(0), input_dim, jacobian)
+    matrix_value(output_dim, input_dim, jacobian)
 }
 
 /// Compute Hessian matrix of a scalar-output function with respect to all inputs.
@@ -22642,6 +22771,198 @@ mod tests {
         assert_eq!(
             sha,
             "07709116fc9660f9f8daeb78ff6ca6e5756e586fb4589a5cffb1bd0a03758c8d"
+        );
+    }
+
+    /// Builds a SQUARE non-diagonal jaxpr x[n] -> chain(x) -> cumsum -> [n].
+    /// cumsum couples coordinates (lower-triangular Jacobian), so neither the
+    /// diagonal nor the wide reverse fast path fires — the forward jvp column loop
+    /// runs. The chain primitives are passed in to control heavy-op count.
+    #[cfg(test)]
+    fn build_forward_column_jaxpr(chain: &[Primitive]) -> fj_core::Jaxpr {
+        use fj_core::{Jaxpr, VarId};
+        use smallvec::smallvec;
+        let mut equations = Vec::new();
+        let mut cur = VarId(0);
+        let mut next = 1u32;
+        for &p in chain {
+            let out_v = VarId(next);
+            next += 1;
+            equations.push(Equation {
+                primitive: p,
+                inputs: smallvec![Atom::Var(cur)],
+                outputs: smallvec![out_v],
+                params: BTreeMap::new(),
+                sub_jaxprs: vec![],
+                effects: vec![],
+            });
+            cur = out_v;
+        }
+        let out = VarId(next);
+        equations.push(Equation {
+            primitive: Primitive::Cumsum,
+            inputs: smallvec![Atom::Var(cur)],
+            outputs: smallvec![out],
+            params: BTreeMap::from([("axis".to_owned(), "0".to_owned())]),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        });
+        Jaxpr::new(vec![VarId(0)], vec![], vec![out], equations)
+    }
+
+    #[test]
+    fn jacobian_forward_column_parallel_matches_serial() {
+        use fj_core::{Shape, TensorValue};
+        // Heavy transcendental chain so heavy_ops × input_dim crosses the gate and
+        // the forward column loop fans out across threads. The threaded Jacobian
+        // must be BIT-IDENTICAL to an inline serial jvp_inner column reference.
+        let n = 160usize;
+        let chain: &[Primitive] = &[
+            Primitive::Sin,
+            Primitive::Cos,
+            Primitive::Tanh,
+            Primitive::Exp,
+            Primitive::Log1p,
+            Primitive::Atan,
+            Primitive::Erf,
+        ];
+        let jaxpr = build_forward_column_jaxpr(chain);
+        let heavy = jaxpr
+            .equations
+            .iter()
+            .filter(|e| super::primitive_is_compute_heavy(e.primitive))
+            .count();
+        assert!(
+            heavy.saturating_mul(n) >= super::JVP_COLUMN_HEAVY_WORK_THRESHOLD,
+            "test must cross the heavy-work gate to exercise the threaded path"
+        );
+        let xv: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.013).sin() * 0.7).collect();
+        let args = [Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xv.clone(),
+            )
+            .unwrap(),
+        )];
+
+        let jac = jacobian_jaxpr(&jaxpr, &args).expect("jacobian");
+        let jt = jac.as_tensor().expect("tensor");
+        assert_eq!(jt.shape.dims, vec![n as u32, n as u32]);
+        let got = jt.to_f64_vec().expect("f64");
+
+        // Inline serial column reference (single-threaded jvp_inner per basis).
+        for basis in 0..n {
+            let mut tan = vec![0.0_f64; n];
+            tan[basis] = 1.0;
+            let tangents = [Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    tan,
+                )
+                .unwrap(),
+            )];
+            let jr = super::jvp_inner(&jaxpr, &args, &tangents, None).expect("jvp");
+            let col = super::flatten_values_to_f64(&jr.tangents).expect("flat");
+            for row in 0..n {
+                assert_eq!(
+                    got[row * n + basis].to_bits(),
+                    col[row].to_bits(),
+                    "parallel column ({row},{basis}) != serial jvp reference"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jacobian_forward_column_cheap_stays_serial() {
+        // A cheap (non-heavy) chain must NOT cross the heavy-work gate even at large
+        // n, so the malloc-bound forward column loop stays serial (no 0.51x regress).
+        let n = 4096usize;
+        let cheap: &[Primitive] = &[Primitive::Square, Primitive::Neg, Primitive::Abs];
+        let jaxpr = build_forward_column_jaxpr(cheap);
+        let heavy = jaxpr
+            .equations
+            .iter()
+            .filter(|e| super::primitive_is_compute_heavy(e.primitive))
+            .count();
+        assert_eq!(heavy, 0, "cheap chain must have zero heavy ops");
+        assert!(
+            heavy.saturating_mul(n) < super::JVP_COLUMN_HEAVY_WORK_THRESHOLD,
+            "cheap chain must stay below the gate at any n (stays serial)"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_jacobian_forward_column_parallel_vs_serial() {
+        use fj_core::{Shape, TensorValue};
+        use std::time::Instant;
+        let n = 384usize;
+        let chain: &[Primitive] = &[
+            Primitive::Sin,
+            Primitive::Cos,
+            Primitive::Tanh,
+            Primitive::Exp,
+            Primitive::Log1p,
+            Primitive::Atan,
+            Primitive::Sinh,
+            Primitive::Erf,
+        ];
+        let jaxpr = build_forward_column_jaxpr(chain);
+        let xv: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.007).sin() * 0.7).collect();
+        let args = [Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xv.clone(),
+            )
+            .unwrap(),
+        )];
+        let serial = || {
+            let mut jac = vec![0.0_f64; n * n];
+            for basis in 0..n {
+                let mut tan = vec![0.0_f64; n];
+                tan[basis] = 1.0;
+                let tangents = [Value::Tensor(
+                    TensorValue::new_f64_values(
+                        Shape {
+                            dims: vec![n as u32],
+                        },
+                        tan,
+                    )
+                    .unwrap(),
+                )];
+                let jr = super::jvp_inner(&jaxpr, &args, &tangents, None).unwrap();
+                let col = super::flatten_values_to_f64(&jr.tangents).unwrap();
+                for row in 0..n {
+                    jac[row * n + basis] = col[row];
+                }
+            }
+            jac
+        };
+        let iters = 5;
+        for _ in 0..2 {
+            std::hint::black_box(serial());
+            std::hint::black_box(jacobian_jaxpr(&jaxpr, &args).unwrap());
+        }
+        let t = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(serial());
+        }
+        let serial_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        let t = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(jacobian_jaxpr(&jaxpr, &args).unwrap());
+        }
+        let par_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        eprintln!(
+            "jacobian forward-column n={n}: SERIAL {serial_ms:.3}ms  PARALLEL {par_ms:.3}ms  speedup {:.2}x",
+            serial_ms / par_ms
         );
     }
 
