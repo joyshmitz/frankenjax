@@ -17921,11 +17921,11 @@ mod tests {
                         2,
                     )
                     .unwrap();
-                    if let Some(fi) = flat {
-                        if x[fi] > best_val {
-                            best_val = x[fi];
-                            best_flat = Some(fi);
-                        }
+                    if let Some(fi) = flat
+                        && x[fi] > best_val
+                    {
+                        best_val = x[fi];
+                        best_flat = Some(fi);
                     }
                     increment_nd_index(&mut win_idx, &window_dims);
                 }
@@ -23579,7 +23579,13 @@ mod tests {
                 let mut oh = vec![0.0_f64; rows];
                 oh[j] = 1.0;
                 let cot = Value::Tensor(
-                    TensorValue::new_f64_values(Shape { dims: vec![rows as u32] }, oh).unwrap(),
+                    TensorValue::new_f64_values(
+                        Shape {
+                            dims: vec![rows as u32],
+                        },
+                        oh,
+                    )
+                    .unwrap(),
                 );
                 let row = super::flatten_values_to_f64(
                     &super::backward(&tape, out_var, cot, &jaxpr, &env).unwrap(),
@@ -24102,7 +24108,7 @@ mod tests {
                 want[row * n + basis] = col[row];
             }
         }
-        for r in 0..n {
+        for (r, &x_value) in xv.iter().enumerate().take(n) {
             for c in 0..n {
                 let idx = r * n + c;
                 if r == c {
@@ -24111,7 +24117,7 @@ mod tests {
                         want[idx].to_bits(),
                         "diagonal {r} != column reference"
                     );
-                    let expect = if xv[r] > 0.0 { 1.0 } else { 0.01 };
+                    let expect = if x_value > 0.0 { 1.0 } else { 0.01 };
                     assert!((got[idx] - expect).abs() < 1e-12, "diag {r} = {}", got[idx]);
                 } else {
                     assert_eq!(got[idx], 0.0, "off-diagonal ({r},{c}) not zero");
