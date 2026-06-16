@@ -6550,28 +6550,22 @@ fn vjp_reduce_window(
 
     // Real magnitudes used only for max/min window selection (complex max/min
     // pooling is undefined). Skip the O(input) boxed extraction for sum.
-    let input_vals: Vec<f64> = if want_extremum {
-        input_tensor
-            .elements
-            .iter()
-            .map(|e| e.as_f64().unwrap_or(0.0))
-            .collect()
+    let input_cow = if want_extremum {
+        vjp_extract_dense_f64(input_tensor)
     } else {
-        Vec::new()
+        std::borrow::Cow::Owned(Vec::new())
     };
+    let input_vals: &[f64] = &input_cow;
 
     let is_complex = matches!(input_tensor.dtype, DType::Complex64 | DType::Complex128);
 
     // Cotangent extracted once in the accumulation regime (see dtype note below).
-    let g_vals: Vec<f64> = if is_complex {
-        Vec::new()
+    let g_cow = if is_complex {
+        std::borrow::Cow::Owned(Vec::new())
     } else {
-        g_tensor
-            .elements
-            .iter()
-            .map(|e| e.as_f64().unwrap_or(0.0))
-            .collect()
+        vjp_extract_dense_f64(g_tensor)
     };
+    let g_vals: &[f64] = &g_cow;
     let g_pairs: Vec<(f64, f64)> = if is_complex {
         g_tensor
             .elements
@@ -6830,11 +6824,8 @@ fn jvp_reduce_window_select(
         &strides,
     );
 
-    let input_vals: Vec<f64> = input_tensor
-        .elements
-        .iter()
-        .map(|e| e.as_f64().unwrap_or(0.0))
-        .collect();
+    let input_cow = vjp_extract_dense_f64(input_tensor);
+    let input_vals: &[f64] = &input_cow;
     let tan_elems: Vec<Literal> = tan_tensor.elements.iter().cloned().collect();
     let zero = literal_from_f64_for_dtype(tan_tensor.dtype, 0.0);
     let mut out_elems: Vec<Literal> = vec![zero; total_output];
@@ -8484,13 +8475,13 @@ fn conv_vjp_batch_grouped(
     Ok(vec![grad_lhs, grad_rhs])
 }
 
-/// Zero-copy f64 extraction for the GEMM-routed conv VJPs: borrows the packed
+/// Zero-copy f64 extraction for VJP kernels: borrows the packed
 /// `as_f64_slice()` backing for dense F64 tensors (avoiding an O(n) per-element
 /// `as_f64()` unbox + a fresh `Vec<f64>` per operand), falling back to the boxed
 /// path only for non-dense storage. Bit-identical: for a dense F64 element the
 /// slice value equals `as_f64().unwrap()` (NaN/inf bit patterns included), and the
 /// fallback is exactly the prior `as_f64().unwrap_or(0.0)` expression.
-fn conv_vjp_extract_f64(tensor: &TensorValue) -> std::borrow::Cow<'_, [f64]> {
+fn vjp_extract_dense_f64(tensor: &TensorValue) -> std::borrow::Cow<'_, [f64]> {
     if let Some(slice) = tensor.elements.as_f64_slice() {
         std::borrow::Cow::Borrowed(slice)
     } else {
@@ -8544,11 +8535,11 @@ fn conv_vjp_1d(
     //   cols2[P,K] = matmul_2d(G,P,Cout, rhsT,K)  (rhsT[Cout,K]=rhsᵀ) ; col2im → grad_lhs
     // PARITY: conv-VJP parity is TOLERANCE (finite-diff tests; JAX uses GEMM), so the
     // GEMM accumulation order is legal.
-    let lhs_cow = conv_vjp_extract_f64(lhs);
+    let lhs_cow = vjp_extract_dense_f64(lhs);
     let lhs_f64: &[f64] = &lhs_cow;
-    let g_cow = conv_vjp_extract_f64(g_tensor);
+    let g_cow = vjp_extract_dense_f64(g_tensor);
     let g_f64: &[f64] = &g_cow;
-    let rhs_cow = conv_vjp_extract_f64(rhs);
+    let rhs_cow = vjp_extract_dense_f64(rhs);
     let rhs_f64: &[f64] = &rhs_cow;
 
     let k_patch = kernel_w * c_in;
@@ -8674,11 +8665,11 @@ fn conv_vjp_2d(
     // PARITY: conv-VJP parity is TOLERANCE (the conv_vjp tests are finite-difference,
     // and JAX itself computes conv backward via GEMM), so the GEMM accumulation order
     // is legal — and matches XLA more closely than the old scalar order.
-    let lhs_cow = conv_vjp_extract_f64(lhs);
+    let lhs_cow = vjp_extract_dense_f64(lhs);
     let lhs_f64: &[f64] = &lhs_cow;
-    let g_cow = conv_vjp_extract_f64(g_tensor);
+    let g_cow = vjp_extract_dense_f64(g_tensor);
     let g_f64: &[f64] = &g_cow;
-    let rhs_cow = conv_vjp_extract_f64(rhs);
+    let rhs_cow = vjp_extract_dense_f64(rhs);
     let rhs_f64: &[f64] = &rhs_cow;
 
     let k_patch = kernel_h * kernel_w * c_in; // K
