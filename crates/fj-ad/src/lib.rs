@@ -8595,7 +8595,7 @@ fn conv_vjp_1d(
     }
     debug_assert_eq!(grad_rhs_elems.len(), rhs_total);
 
-    make_conv_grad_pair(&lhs.shape, &rhs.shape, grad_lhs_elems, grad_rhs_elems)
+    make_conv_grad_pair(lhs.dtype, rhs.dtype, &lhs.shape, &rhs.shape, grad_lhs_elems, grad_rhs_elems)
 }
 
 /// 2D Conv VJP: lhs=[N, H, W, C_in], rhs=[KH, KW, C_in, C_out], g=[N, OH, OW, C_out]
@@ -8751,28 +8751,40 @@ fn conv_vjp_2d(
     }
     debug_assert_eq!(grad_rhs_elems.len(), rhs_total);
 
-    make_conv_grad_pair(&lhs.shape, &rhs.shape, grad_lhs_elems, grad_rhs_elems)
+    make_conv_grad_pair(lhs.dtype, rhs.dtype, &lhs.shape, &rhs.shape, grad_lhs_elems, grad_rhs_elems)
 }
 
 fn make_conv_grad_pair(
+    lhs_dtype: DType,
+    rhs_dtype: DType,
     lhs_shape: &Shape,
     rhs_shape: &Shape,
     grad_lhs_elems: Vec<f64>,
     grad_rhs_elems: Vec<f64>,
 ) -> Result<Vec<Value>, AdError> {
+    // grad of a primal of dtype D is dtype D (JAX convention). The GEMM-routed
+    // conv backward accumulates in f64; round each grad back to its INPUT's dtype
+    // (lhs dtype -> grad_lhs, rhs dtype -> grad_rhs) instead of hardcoding F64,
+    // which silently widened f32/half conv grads to f64 (dtype-widening parity bug).
     let grad_lhs = Value::Tensor(
         TensorValue::new(
-            DType::F64,
+            lhs_dtype,
             lhs_shape.clone(),
-            grad_lhs_elems.into_iter().map(Literal::from_f64).collect(),
+            grad_lhs_elems
+                .into_iter()
+                .map(|v| literal_from_f64_for_dtype(lhs_dtype, v))
+                .collect(),
         )
         .map_err(|e| AdError::EvalFailed(e.to_string()))?,
     );
     let grad_rhs = Value::Tensor(
         TensorValue::new(
-            DType::F64,
+            rhs_dtype,
             rhs_shape.clone(),
-            grad_rhs_elems.into_iter().map(Literal::from_f64).collect(),
+            grad_rhs_elems
+                .into_iter()
+                .map(|v| literal_from_f64_for_dtype(rhs_dtype, v))
+                .collect(),
         )
         .map_err(|e| AdError::EvalFailed(e.to_string()))?,
     );
@@ -17561,6 +17573,46 @@ mod tests {
                 grhs[j]
             );
         }
+    }
+
+    #[test]
+    fn conv_vjp_f32_grads_preserve_f32_dtype() {
+        use fj_core::{Shape, TensorValue};
+        // grad of an f32 conv must be f32 (JAX convention). Before the fix
+        // make_conv_grad_pair hardcoded DType::F64, silently widening f32 conv grads.
+        let (n, h, w, cin, kh, kw, cout) = (1usize, 4usize, 4usize, 2usize, 3usize, 3usize, 2usize);
+        let oh = h;
+        let ow = w;
+        let params = BTreeMap::from([
+            ("padding".to_owned(), "same".to_owned()),
+            ("strides".to_owned(), "1,1".to_owned()),
+        ]);
+        let mkf32 = |dims: Vec<u32>, n_elems: usize, scale: f32| {
+            let d: Vec<f32> = (0..n_elems).map(|i| (i as f32 * scale).sin() * 0.5).collect();
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims }, d).unwrap())
+        };
+        let lhs = mkf32(vec![n as u32, h as u32, w as u32, cin as u32], n * h * w * cin, 0.013);
+        let rhs = mkf32(
+            vec![kh as u32, kw as u32, cin as u32, cout as u32],
+            kh * kw * cin * cout,
+            0.009,
+        );
+        let g = mkf32(
+            vec![n as u32, oh as u32, ow as u32, cout as u32],
+            n * oh * ow * cout,
+            0.007,
+        );
+        let grads = vjp_single(Primitive::Conv, &[lhs, rhs], &g, &params).unwrap();
+        assert_eq!(
+            grads[0].as_tensor().unwrap().dtype,
+            fj_core::DType::F32,
+            "grad_lhs dtype must match f32 input"
+        );
+        assert_eq!(
+            grads[1].as_tensor().unwrap().dtype,
+            fj_core::DType::F32,
+            "grad_rhs dtype must match f32 input"
+        );
     }
 
     #[test]
