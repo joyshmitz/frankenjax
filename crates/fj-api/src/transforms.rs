@@ -1815,9 +1815,13 @@ mod tests {
 
         let digest = fj_test_utils::fixture_id_from_json(&("frankenjax-mcqr.62", &second))
             .expect("golden output should hash");
+        // Golden refreshed after the dense-i64 TensorValue storage migration: the
+        // vmap(AddOne) output value is unchanged (asserted equal to the dispatch
+        // reference above) but its serialized representation — and thus this digest —
+        // changed when i64 vectors moved from boxed Literal to dense storage.
         assert_eq!(
             digest,
-            "71cc9ad54fc35b1240b1419bccafd0ed93ade694ca3368fc2aa008ab4184e65d"
+            "e27c853509a151f4fc6ab2832c28b68e11ed12f69987306e3a6aeb00826db2bf"
         );
     }
 
