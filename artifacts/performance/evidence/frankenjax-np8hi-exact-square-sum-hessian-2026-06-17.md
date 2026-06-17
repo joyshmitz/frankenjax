@@ -1,65 +1,152 @@
-# frankenjax-np8hi exact square-of-separable-sum Hessian
+# frankenjax-np8hi: exact square-of-separable-sum Hessian
 
 ## Target
 
-- Bead: `frankenjax-np8hi`
-- Surface: `fj-ad::hessian_jaxpr` general nonseparable path
-- Pattern shipped: `f(x) = square(reduce_sum(g(x)))`, where `g` is a unary elementwise chain over one dense F64 tensor input.
-
-## Baseline
-
-Local release benchmark before the change:
+`frankenjax-np8hi` tracks the general Hessian gap: the fallback path computes
+central-difference columns of `grad_jaxpr`, which is approximate and costs two
+gradient evaluations per input dimension. This pass keeps the existing
+bit-pinned separable `sum(g(x_i))` path unchanged and adds a narrower exact
+closed-form path for:
 
 ```text
-CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-target CARGO_BUILD_JOBS=1 \
-  cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --release --lib -- --ignored --nocapture
-
-hessian general n=192: SERIAL 22.900ms  PARALLEL 5.678ms  speedup 4.03x
+f(x) = square(reduce_sum(g(x)))
 ```
 
-Accepted baseline for `hessian_jaxpr` itself: `5.678 ms`.
+where `g` is a single-input unary elementwise chain over a finite dense F64
+tensor.
+
+## Local Baseline
+
+ts1/rch remote was offline, so this used local cargo with
+`RCH_REQUIRE_REMOTE=0`.
+
+Baseline worktree:
+`/data/projects/.scratch/frankenjax-np8hi-baseline-20260617` at `HEAD`
+`f20529af`.
+
+Command:
+
+```bash
+RCH_REQUIRE_REMOTE=0 CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-np8hi-baseline-target cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --lib --release -- --ignored --nocapture
+```
+
+Result:
+
+```text
+hessian general n=192: SERIAL 20.324ms  PARALLEL 6.235ms  speedup 3.26x
+```
+
+Hyperfine wrapper, warmed target:
+
+```text
+Time (mean +/- sigma): 332.4 ms +/- 19.7 ms
+Range: 307.1 ms ... 358.4 ms
+```
 
 ## Candidate
 
-The new exact fast path uses the closed form for `s = sum_i g_i(x_i)`:
+Command:
 
-```text
-H_ij = 2 * g'_i * g'_j + [i == j] * 2 * s * g''_i
+```bash
+RCH_REQUIRE_REMOTE=0 CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-ad-target cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --lib --release -- --ignored --nocapture
 ```
 
-It calls `fj-lax::eval_primitive` for every unary primal step, so primitive values match existing JAXPR semantics; only the derivative assembly is analytic.
-
-Local release candidate:
+Result:
 
 ```text
-hessian general n=192: SERIAL 22.141ms  PARALLEL 0.124ms  speedup 179.16x
+hessian general n=192: SERIAL 19.460ms  PARALLEL 0.088ms  speedup 220.79x
 ```
 
-Accepted comparison: `5.678 ms -> 0.124 ms = 45.8x`.
+Accepted comparison: old `hessian_jaxpr` path `6.235ms` to exact fast path
+`0.088ms` = `70.9x`.
 
-The hyperfine wrapper was attempted after the warmed release benchmark, but the process exited `143` before producing a useful summary. The release benchmark above is the performance gate.
+Hyperfine wrapper, warmed target:
+
+```text
+Time (mean +/- sigma): 292.3 ms +/- 14.7 ms
+Range: 275.1 ms ... 310.3 ms
+```
+
+Command-level wrapper speedup is `1.14x`; the in-bench Hessian kernel speedup is
+`70.9x`. Score: `4.5 = Impact 5.0 x Confidence 0.90 / Effort 1.0`.
 
 ## Proof
 
-- Golden exact fast-path test: `hessian_square_of_separable_sum_matches_closed_form_and_golden`
-- Golden SHA-256: `8830a0367731e540bba251bcccd2b18d3aa64ac3a9ca96d0696d780de48974c0`
-- Fallback central-difference coverage preserved by spelling the old fallback test's final square as `Mul(sum, sum)`, which does not match the new `Square(ReduceSum(...))` fast path.
+Focused Hessian proof suite:
+
+```bash
+RCH_REQUIRE_REMOTE=0 CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-ad-target cargo test -j 1 -p fj-ad hessian_ --lib --release -- --nocapture
+```
+
+Result:
+
+```text
+6 passed; 0 failed; 2 ignored
+```
+
+Covered checks:
+
+- `hessian_square_of_separable_sum_matches_closed_form_and_golden`
+- `hessian_general_parallel_matches_serial_central_difference`
+- `hessian_separable_diagonal_matches_perbasis_and_golden`
+- scalar/quadratic Hessian regression tests
+
+Golden SHA-256 for the new exact path:
+
+```text
+8830a0367731e540bba251bcccd2b18d3aa64ac3a9ca96d0696d780de48974c0
+```
+
+Rejected sublever during this pass: an exact fast path for the already
+bit-pinned separable `sum(g(x_i))` path changed the existing golden from
+`7a42b4e6a4b18cf77a7efcf248f694db80fe7b76ea40488f73210b4920e12764` to
+`eadb652b927b81142b9671ff9d09b08af425a08df149aab40ecc7e93cf94fe8f`, so it was
+removed. The separable golden remains unchanged and passing.
 
 ## Isomorphism
 
-- Supported pattern is mathematically exact for dense F64 `square(reduce_sum(unary_chain(x)))`.
-- Unsupported primitives, non-F64 inputs, non-tensor inputs, params/effects/sub-jaxprs, nonfinite intermediate values, custom JVP/VJP rules, and nonmatching graph shapes fall through to the existing central-difference path.
-- No unsafe code, no RNG, no tie-breaking surface, and no C BLAS/LAPACK/XLA linkage.
+- Scope is deliberately narrow: one dense finite F64 input, unary elementwise
+  chain, full `ReduceSum`, final `Square`.
+- Unsupported graph shapes, non-F64/non-tensor inputs, params/effects/sub-jaxprs,
+  custom JVP/VJP rules, and nonfinite intermediates fall through to the existing
+  central-difference path.
+- Output shape and order remain row-major `[input_dim, input_dim]`.
+- The accepted pattern intentionally changes the numerical contract from
+  finite-difference approximate to exact closed form, matching the `np8hi`
+  correctness target while leaving existing separable bit goldens unchanged.
+- No tie-breaking surface, no RNG, no unsafe code, and no C BLAS/LAPACK/XLA
+  linkage.
 
 ## Validation
 
+Passed:
+
 ```text
+cargo test -j 1 -p fj-ad hessian_ --lib --release -- --nocapture
+cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --lib --release -- --ignored --nocapture
+cargo check -j 1 -p fj-ad --all-targets
+cargo clippy -j 1 -p fj-ad --all-targets --no-deps -- -D warnings
 cargo fmt --check -p fj-ad
 git diff --check -- crates/fj-ad/src/lib.rs
-CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-target CARGO_BUILD_JOBS=1 cargo test -j 1 -p fj-ad hessian --lib -- --nocapture
-CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-target CARGO_BUILD_JOBS=1 cargo check -j 1 -p fj-ad --all-targets
-CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-target CARGO_BUILD_JOBS=1 cargo clippy -j 1 -p fj-ad --all-targets -- -D warnings
 ubs crates/fj-ad/src/lib.rs
 ```
 
-UBS exited nonzero from the pre-existing `fj-ad` file-wide inventory. Its embedded formatter, clippy, cargo check, test-build, audit, and deny sections were clean, and it reported no unsafe blocks.
+Full dependency clippy:
+
+```text
+cargo clippy -j 1 -p fj-ad --all-targets -- -D warnings
+```
+
+failed in unrelated dependency code:
+
+```text
+crates/fj-interpreters/src/partial_eval.rs:940:20:
+cannot find function `det_scalar_dtype` in this scope
+```
+
+That file is outside this bead's reservation and was not modified by this pass.
+
+UBS exited nonzero on pre-existing file-wide `fj-ad` inventory
+(`unwrap`/`panic`/indexing/clone/string-allocation heuristics). Its embedded
+fmt/clippy/check/test-build/audit/deny sections were clean and it reported no
+unsafe blocks.
