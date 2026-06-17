@@ -2,60 +2,64 @@
 
 ## Target
 
-After the square/self-mul exact Hessian slices, the next profile-backed fallback
-shape is a product of two distinct scalar reductions:
+`frankenjax-mcqr.71` tracks the remaining exact Hessian gap after the
+`Square(ReduceSum(unary_chain(x)))` and `Mul(sum, sum)` exact slices. This pass
+ships one profile-backed spelling:
 
 ```text
 f(x) = reduce_sum(g(x)) * reduce_sum(h(x))
 ```
 
-where `g` and `h` are independent unary elementwise chains over one finite dense
-F64 tensor input. Before this pass, this shape fell through to central
-differences.
+where `g` and `h` are independent finite dense F64 unary elementwise chains over
+the same input tensor.
 
 ## Baseline
 
-Local release benchmark while ts1/rch remote was offline:
+Local release benchmark while ts1/rch remote was offline. The detached baseline
+worktree was `/data/projects/.scratch/frankenjax-mcqr71-prod-sums-baseline-20260617`
+at `HEAD` `e9ee8022`, patched only to use the same two-reduction benchmark
+workload while leaving production code unchanged.
 
 ```bash
-CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-ad-target CARGO_BUILD_JOBS=1 cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --lib --release -- --ignored --nocapture
+RCH_REQUIRE_REMOTE=0 CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-mcqr71-prod-sums-baseline-target cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --lib --release -- --ignored --nocapture
 ```
 
-Result before the production recognizer change:
+Result:
 
 ```text
-hessian general n=192: SERIAL 41.036ms  PARALLEL 6.998ms  speedup 5.86x
+hessian general n=192: SERIAL 41.963ms  PARALLEL 8.198ms  speedup 5.12x
 ```
 
-Accepted baseline for `hessian_jaxpr`: `6.998ms`.
+Warmed hyperfine wrapper:
+
+```text
+Time (mean +/- sigma): 470.7 ms +/- 3.5 ms
+Range: 465.5 ms ... 474.4 ms
+```
+
+Accepted baseline for `hessian_jaxpr`: `8.198ms`.
 
 ## Candidate
 
-The new recognizer traces two independent unary chains backward from the final
-`Mul` inputs through their `ReduceSum` producers. It accepts only one dense F64
-input, single-output/effect-free/param-free unary equations with known first and
-second derivatives, two distinct reduction branches, no custom JVP/VJP rules,
-and no unused or shared producer equations.
+The candidate recognizes only a final `Mul(left_sum, right_sum)` where each input
+is produced by a distinct `ReduceSum` over a single-input unary elementwise F64
+chain from the same input tensor, and every equation in the JAXPR is consumed by
+one of the two chains plus the final multiply. Unsupported forms fall through to
+the existing central-difference path.
 
-Formula:
+Same benchmark command in the candidate tree:
 
 ```text
-H_ij = g'_i h'_j + h'_i g'_j + [i == j] * (sum(h) g''_i + sum(g) h''_i)
+hessian general n=192: SERIAL 38.499ms  PARALLEL 0.162ms  speedup 237.91x
 ```
 
-Same benchmark after the change:
+Accepted comparison: `8.198ms -> 0.162ms` = `50.6x`.
+
+Warmed hyperfine wrapper:
 
 ```text
-hessian general n=192: SERIAL 38.511ms  PARALLEL 0.173ms  speedup 222.84x
-```
-
-Accepted comparison: `6.998ms -> 0.173ms` = `40.5x`.
-
-Warmed hyperfine wrapper for the candidate command:
-
-```text
-Time (mean +/- sigma): 443.5 ms +/- 10.8 ms
-Range: 431.3 ms ... 451.8 ms
+Time (mean +/- sigma): 428.1 ms +/- 13.5 ms
+Range: 408.3 ms ... 441.3 ms
 ```
 
 Score: `4.5 = Impact 5.0 x Confidence 0.90 / Effort 1.0`.
@@ -65,7 +69,7 @@ Score: `4.5 = Impact 5.0 x Confidence 0.90 / Effort 1.0`.
 Focused Hessian release proof:
 
 ```bash
-CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-ad-target CARGO_BUILD_JOBS=1 cargo test -j 1 -p fj-ad hessian --lib --release -- --nocapture
+RCH_REQUIRE_REMOTE=0 CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-ad-target cargo test -j 1 -p fj-ad hessian_ --lib --release -- --nocapture
 ```
 
 Result:
@@ -74,44 +78,48 @@ Result:
 7 passed; 0 failed; 2 ignored
 ```
 
-New product golden SHA:
+New product-of-sums golden SHA:
 
 ```text
 dde9f0a7db4485d9dc9b6aaee09b7d179772c978ebbde7b024feff64deef46ad
 ```
 
-Existing goldens preserved:
+Existing exact square/self-mul golden SHA remains pinned:
 
 ```text
-square/self-mul exact: 8830a0367731e540bba251bcccd2b18d3aa64ac3a9ca96d0696d780de48974c0
-separable diagonal:   7a42b4e6a4b18cf77a7efcf248f694db80fe7b76ea40488f73210b4920e12764
+8830a0367731e540bba251bcccd2b18d3aa64ac3a9ca96d0696d780de48974c0
+```
+
+Existing separable diagonal golden SHA remains pinned:
+
+```text
+7a42b4e6a4b18cf77a7efcf248f694db80fe7b76ea40488f73210b4920e12764
 ```
 
 ## Isomorphism
 
-- The accepted pattern uses the exact analytic Hessian for a product of two
-  separable sums.
-- Branch tracing rejects shared producers, unused equations, distinct-variable
-  self-mul ambiguity, params/effects/sub-jaxprs, unsupported primitives, custom
-  JVP/VJP rules, non-F64 inputs, non-tensor inputs, and nonfinite intermediates.
+- For the accepted pattern, the new path computes the analytic exact Hessian:
+  `H_ij = g'_i h'_j + h'_i g'_j + [i == j] * (sum(h) g''_i + sum(g) h''_i)`.
 - Output shape and order remain row-major `[input_dim, input_dim]`.
-- Existing square/self-mul and central-difference fallback behavior remains
-  covered by tests.
-- No tie-breaking surface, no RNG, no unsafe code, and no C BLAS/LAPACK/XLA
-  linkage.
+- Floating-point operation order for each analytic entry is fixed by the formula
+  above; no reduction order, tie-breaking, or RNG surface is introduced.
+- Custom JAXPR JVP/VJP, custom primitive JVP/VJP, params, effects, sub-JAXPRs,
+  non-F64 inputs, non-tensor inputs, nonfinite intermediates, shared reduce
+  variables, unused equations, and partially matched graphs all fall through.
+- No unsafe code and no C BLAS/LAPACK/XLA linkage.
 
 ## Validation
 
-Passed:
+Passed locally:
 
 ```text
 cargo fmt --check -p fj-ad
 git diff --check -- crates/fj-ad/src/lib.rs
-cargo test -j 1 -p fj-ad hessian --lib --release -- --nocapture
+cargo test -j 1 -p fj-ad hessian_ --lib --release -- --nocapture
 cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --lib --release -- --ignored --nocapture
 cargo check -j 1 -p fj-ad --all-targets
-cargo clippy -j 1 -p fj-ad --all-targets -- -D warnings
-hyperfine --warmup 1 --runs 3 'CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-ad-target CARGO_BUILD_JOBS=1 cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --lib --release -- --ignored --nocapture'
+cargo clippy -j 1 -p fj-ad --all-targets --no-deps -- -D warnings
+hyperfine --warmup 1 --runs 5 'RCH_REQUIRE_REMOTE=0 CARGO_TARGET_DIR=/data/projects/.scratch/frankenjax-silvermaple-ad-target cargo test -j 1 -p fj-ad bench_hessian_general_parallel_vs_serial --lib --release -- --ignored --nocapture'
 ```
 
 UBS on `crates/fj-ad/src/lib.rs` remained nonzero from the existing large-file
