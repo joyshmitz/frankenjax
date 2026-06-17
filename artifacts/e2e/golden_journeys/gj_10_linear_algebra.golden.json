@@ -31,7 +31,7 @@
       "passed": true
     },
     {
-      "detail": "eigenvalues=[1.0, 3.0], expected ~[1.0, 3.0]",
+      "detail": "eigenvalues=[1.000000, 3.000000], expected ~[1.0, 3.0]",
       "name": "eigh_eigenvalues_correct",
       "passed": true
     },

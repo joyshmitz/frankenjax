@@ -1035,10 +1035,15 @@ fn golden_journey_10_linear_algebra() {
         // Known eigenvalues of [[2,1],[1,2]] are 1 and 3
         let has_expected = eigenvalues.iter().any(|&e| (e - 1.0).abs() < 0.1)
             && eigenvalues.iter().any(|&e| (e - 3.0).abs() < 0.1);
+        // Round in the snapshot detail: the eigenvalues are ULP-sensitive to legitimate
+        // floating-point reassociations in the QR/eigh kernels (e.g. 1.0 vs
+        // 1.0000000000000002), so a full-precision {:?} makes this golden drift across
+        // codegen while the tolerance-based `passed` check stays correct.
+        let ev_str: Vec<String> = eigenvalues.iter().map(|e| format!("{e:.6}")).collect();
         assertions.push(JourneyAssertion {
             name: "eigh_eigenvalues_correct".into(),
             passed: has_expected,
-            detail: format!("eigenvalues={:?}, expected ~[1.0, 3.0]", eigenvalues),
+            detail: format!("eigenvalues=[{}], expected ~[1.0, 3.0]", ev_str.join(", ")),
         });
     }
 
