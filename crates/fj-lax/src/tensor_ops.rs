@@ -685,6 +685,13 @@ pub(crate) fn eval_transpose(
                         return Ok(Value::Tensor(TensorValue::new_half_float_values(
                             tensor.dtype, Shape { dims: new_dims.clone() }, $kernel(s, $($arg)*))?));
                     }
+                    // Bool mask transpose (the same generic Copy kernel) — attention/
+                    // masking masks otherwise box every element through the per-Literal
+                    // odometer. Pure data movement; new_bool_values stores the same bools.
+                    if let Some(s) = tensor.elements.as_bool_slice() {
+                        return Ok(Value::Tensor(TensorValue::new_bool_values(
+                            Shape { dims: new_dims.clone() }, $kernel(s, $($arg)*))?));
+                    }
                     if let Some(s) = tensor.elements.as_i64_slice() {
                         // I64 backing also holds I32-dtype tensors; preserve the input
                         // integer width (i32 transpose must stay I32, not widen to I64).
@@ -14489,6 +14496,19 @@ mod tests {
                     .unwrap()
                 ),
                 |t: &TensorValue| t.elements.as_i64_slice().is_some()
+            );
+            let boold: Vec<bool> = (0..n).map(|i| (i * 3 + 1) % 5 < 2).collect();
+            check!(
+                Value::Tensor(TensorValue::new_bool_values(sh(), boold.clone()).unwrap()),
+                Value::Tensor(
+                    TensorValue::new_with_literal_buffer(
+                        DType::Bool,
+                        sh(),
+                        LiteralBuffer::new(boold.iter().copied().map(Literal::Bool).collect())
+                    )
+                    .unwrap()
+                ),
+                |t: &TensorValue| t.elements.as_bool_slice().is_some()
             );
         }
     }
