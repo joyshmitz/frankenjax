@@ -4270,13 +4270,23 @@ fn complex_eig_eigenvector(a: &[(f64, f64)], n: usize, lambda: (f64, f64)) -> Ve
 /// Principal complex square root: `re ≥ 0`, with the imaginary part taking the
 /// sign of `z`'s imaginary part. `(complex_sqrt(z))² == z`.
 fn complex_sqrt(z: (f64, f64)) -> (f64, f64) {
+    // Numerically stable principal square root (Kahan / numpy npy_csqrt). The naive
+    // `im = sqrt((|z| - re)/2)` catastrophically cancels when re >> |im| and drops the
+    // imaginary part (violating sqrt(z)^2 == z); derive the smaller component from the
+    // identity 2*re_out*im_out == z.1 instead. See the matching fix in arithmetic.rs.
     let r = complex_abs(z);
     if r == 0.0 {
         return (0.0, 0.0);
     }
-    let re = ((r + z.0) * 0.5).max(0.0).sqrt();
-    let im = ((r - z.0) * 0.5).max(0.0).sqrt();
-    (re, if z.1 < 0.0 { -im } else { im })
+    if z.0 >= 0.0 {
+        let re = ((r + z.0) * 0.5).sqrt();
+        let im = z.1 / (2.0 * re);
+        (re, im)
+    } else {
+        let im_mag = ((r - z.0) * 0.5).sqrt();
+        let re = z.1.abs() / (2.0 * im_mag);
+        (re, if z.1 < 0.0 { -im_mag } else { im_mag })
+    }
 }
 
 /// One Wilkinson-shifted QR sweep on the leading `p×p` active block of the complex
