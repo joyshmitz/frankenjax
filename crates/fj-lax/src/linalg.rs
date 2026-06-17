@@ -11106,6 +11106,54 @@ mod tests {
     }
 
     #[test]
+    fn eval_lu_triangular_solve_preserve_f32_dtype() {
+        // LU factor (f32 matrix, i32 pivots/perm) and triangular_solve (f32 in -> f32 out)
+        // must preserve dtype. Closes the last gap in the f32 linalg-forward family coverage
+        // (qr/svd/cholesky/det/slogdet/solve already pinned); det/slogdet had real
+        // f32->f64 widening bugs, so the whole family is guarded explicitly.
+        let f32_mat = |dims: Vec<u32>, vals: &[f32]| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims },
+                    vals.iter().map(|&v| Literal::from_f32(v)).collect(),
+                )
+                .unwrap(),
+            )
+        };
+
+        // LU of [[2,1],[1,3]] (f32): lu -> F32, pivots/perm -> I32.
+        let lu_out = eval_lu(&[f32_mat(vec![2, 2], &[2.0, 1.0, 1.0, 3.0])], &BTreeMap::new())
+            .expect("lu");
+        assert_eq!(lu_out.len(), 3, "lu returns [lu, pivots, perm]");
+        let expect_dtype = [DType::F32, DType::I32, DType::I32];
+        for (i, v) in lu_out.iter().enumerate() {
+            if let Value::Tensor(t) = v {
+                assert_eq!(
+                    t.dtype, expect_dtype[i],
+                    "lu output[{i}] dtype, got {:?}",
+                    t.dtype
+                );
+                t.validate_dtype_consistency()
+                    .unwrap_or_else(|e| panic!("lu output[{i}] dtype/literal mismatch: {e:?}"));
+            }
+        }
+
+        // triangular_solve: lower A=[[2,0],[1,3]], b=[[2],[5]] (f32) -> x f32 [2,1].
+        let a = f32_mat(vec![2, 2], &[2.0, 0.0, 1.0, 3.0]);
+        let b = f32_mat(vec![2, 1], &[2.0, 5.0]);
+        let x = eval_triangular_solve(&[a, b], &BTreeMap::new()).expect("triangular_solve");
+        match x {
+            Value::Tensor(t) => {
+                assert_eq!(t.dtype, DType::F32, "triangular_solve must preserve f32");
+                t.validate_dtype_consistency()
+                    .unwrap_or_else(|e| panic!("triangular_solve dtype/literal mismatch: {e:?}"));
+            }
+            other => panic!("triangular_solve must return an f32 tensor, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn eval_det_slogdet_preserve_f32_dtype() {
         // det/slogdet of an f32 matrix must return f32 scalars (JAX: f32 in -> f32 out).
         // The real paths previously hardcoded Value::scalar_f64, widening f32 -> f64.
