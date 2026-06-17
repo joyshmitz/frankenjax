@@ -378,6 +378,16 @@ mod tests {
         reg.register("target_fn", extern_test_success)
             .expect("registration should succeed");
 
+        // Baseline captured from the registry's own stored value. Function-pointer
+        // addresses are NOT guaranteed stable across `as` casts at different call
+        // sites — in release builds identical-code-folding can give a fresh
+        // `extern_test_success as FfiFnPtr` cast a different alias address than the
+        // one `register` received. The invariant under test is that concurrent reads
+        // return data CONSISTENT with a single registry baseline, so compare against
+        // that baseline rather than re-casting the source function each iteration.
+        let baseline = reg.get("target_fn").expect("target should exist");
+        let baseline_ptr = baseline.fn_ptr as usize;
+
         let mut handles = vec![];
 
         for _ in 0..8 {
@@ -386,10 +396,7 @@ mod tests {
                 for _ in 0..1000 {
                     let target = reg.get("target_fn").expect("target should exist");
                     assert_eq!(target.name, "target_fn");
-                    assert_eq!(
-                        target.fn_ptr as usize,
-                        (extern_test_success as FfiFnPtr) as usize
-                    );
+                    assert_eq!(target.fn_ptr as usize, baseline_ptr);
                 }
             }));
         }
