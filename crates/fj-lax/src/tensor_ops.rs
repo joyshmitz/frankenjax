@@ -1644,6 +1644,39 @@ pub(crate) fn eval_pad(
             out,
         )?));
     }
+    // Complex pad (zero-padding a spectrum for FFT). Extract the (re,im) fill from
+    // the complex pad literal; new_complex_values applies the same dtype rounding
+    // (Complex64 → f32) the generic path's stored literal already carries, so it is
+    // bit-identical.
+    let complex_fill = match pad_literal {
+        Literal::Complex128Bits(re, im) => Some((f64::from_bits(re), f64::from_bits(im))),
+        Literal::Complex64Bits(re, im) => {
+            Some((f64::from(f32::from_bits(re)), f64::from(f32::from_bits(im))))
+        }
+        _ => None,
+    };
+    if let (Some(src), Some(fill)) = (operand.elements.as_complex_slice(), complex_fill) {
+        let out = if row_copyable {
+            pad_copy_rows(src, fill, out_total, rank, in_dims, &lows, &out_strides)
+        } else {
+            pad_fill_place(
+                src,
+                fill,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &interiors,
+                &out_dims,
+                &out_strides,
+            )
+        };
+        return Ok(Value::Tensor(TensorValue::new_complex_values(
+            operand.dtype,
+            Shape { dims: out_dims },
+            out,
+        )?));
+    }
 
     // Generic Literal path.
     let mut out_elements = vec![pad_literal; out_total];
@@ -1972,6 +2005,15 @@ pub(crate) fn eval_slice(
                         src[start_offset..end_offset].to_vec(),
                     )?));
                 }
+                // Complex slice (windowing a spectrum in an FFT/signal pipeline) —
+                // copy the contiguous (re,im) sub-range into dense complex storage.
+                if let Some(src) = tensor.elements.as_complex_slice() {
+                    return Ok(Value::Tensor(TensorValue::new_complex_values(
+                        tensor.dtype,
+                        shape,
+                        src[start_offset..end_offset].to_vec(),
+                    )?));
+                }
                 return Ok(Value::Tensor(TensorValue::new(
                     tensor.dtype,
                     shape,
@@ -2025,6 +2067,10 @@ pub(crate) fn eval_slice(
             }
             if let Some(s) = tensor.elements.as_bool_slice() {
                 dense_strided_slice!(s, TensorValue::new_bool_values);
+            }
+            if let Some(s) = tensor.elements.as_complex_slice() {
+                let dt = tensor.dtype;
+                dense_strided_slice!(s, |sh, o| TensorValue::new_complex_values(dt, sh, o));
             }
 
             // Literal fallback (boxed/other dtypes): the same gather over Literals.
@@ -10331,6 +10377,14 @@ pub(crate) fn eval_rev(
                         .map_err(EvalError::InvalidTensor)?,
                 ));
             }
+            // Complex reverse (FFT conjugate-symmetry / fftshift over a spectrum).
+            if let Some(src) = tensor.elements.as_complex_slice() {
+                let out = rev_gather(src, dims, &strides, &reversed, total);
+                return Ok(Value::Tensor(
+                    TensorValue::new_complex_values(tensor.dtype, tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
 
             let src = tensor.elements.as_slice();
             let result = rev_gather(src, dims, &strides, &reversed, total);
@@ -14944,6 +14998,40 @@ mod tests {
                 d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
                 "bool pad output dense"
             );
+
+            // complex (zero-padding a spectrum for FFT)
+            let cdata: Vec<(f64, f64)> = (0..rows * cols)
+                .map(|i| (i as f64 * 0.5 - 2.0, (i as f64) * 0.25))
+                .collect();
+            let dense = Value::Tensor(
+                TensorValue::new_complex_values(
+                    DType::Complex128,
+                    Shape { dims: dims.clone() },
+                    cdata.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Complex128,
+                    Shape { dims: dims.clone() },
+                    LiteralBuffer::new(
+                        cdata
+                            .iter()
+                            .map(|&(re, im)| Literal::from_complex128(re, im))
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            );
+            let pv = Value::Scalar(Literal::from_complex128(0.0, 0.0));
+            let d = eval_pad(&[dense, pv.clone()], &p).unwrap();
+            let l = eval_pad(&[boxed, pv], &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "complex pad values");
+            assert!(
+                d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
+                "complex pad output dense"
+            );
         }
     }
 
@@ -15133,6 +15221,38 @@ mod tests {
                 d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
                 "bool strided slice dense"
             );
+
+            let cdata: Vec<(f64, f64)> = (0..rows * cols)
+                .map(|i| (i as f64 - 30.0, (i as f64) * 0.5))
+                .collect();
+            let dense = Value::Tensor(
+                TensorValue::new_complex_values(
+                    DType::Complex128,
+                    Shape { dims: dims.clone() },
+                    cdata.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Complex128,
+                    Shape { dims: dims.clone() },
+                    LiteralBuffer::new(
+                        cdata
+                            .iter()
+                            .map(|&(re, im)| Literal::from_complex128(re, im))
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            );
+            let d = eval_slice(std::slice::from_ref(&dense), &p).unwrap();
+            let l = eval_slice(std::slice::from_ref(&boxed), &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "complex strided slice");
+            assert!(
+                d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
+                "complex strided slice dense"
+            );
         }
     }
 
@@ -15310,6 +15430,39 @@ mod tests {
         assert!(
             d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
             "bool slice output dense"
+        );
+
+        // complex (windowing a spectrum)
+        let cdata: Vec<(f64, f64)> = (0..rows * cols)
+            .map(|i| (i as f64 * 0.5 - 2.0, -(i as f64) * 0.25))
+            .collect();
+        let dense = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: dims.clone() },
+                cdata.clone(),
+            )
+            .unwrap(),
+        );
+        let boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::Complex128,
+                Shape { dims: dims.clone() },
+                LiteralBuffer::new(
+                    cdata
+                        .iter()
+                        .map(|&(re, im)| Literal::from_complex128(re, im))
+                        .collect(),
+                ),
+            )
+            .unwrap(),
+        );
+        let d = eval_slice(&[dense], &p).unwrap();
+        let l = eval_slice(&[boxed], &p).unwrap();
+        assert_eq!(lits(&d), lits(&l), "complex slice");
+        assert!(
+            d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
+            "complex slice output dense"
         );
     }
 
@@ -15655,6 +15808,49 @@ mod tests {
                 "{dtype:?} rev output dense"
             );
         }
+
+        // complex rev (FFT conjugate-symmetry / fftshift) vs generic.
+        let cdata: Vec<(f64, f64)> = (0..n)
+            .map(|i| (i as f64 - 13.0, (i as f64) * 0.5))
+            .collect();
+        let c_dense = Value::Tensor(
+            TensorValue::new_complex_values(DType::Complex128, shape.clone(), cdata.clone())
+                .unwrap(),
+        );
+        let c_lit = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::Complex128,
+                shape.clone(),
+                LiteralBuffer::new(
+                    cdata
+                        .iter()
+                        .map(|&(re, im)| Literal::from_complex128(re, im))
+                        .collect(),
+                ),
+            )
+            .unwrap(),
+        );
+        let cbits = |v: &Value| -> Vec<(u64, u64)> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::Complex128Bits(re, im) => (*re, *im),
+                    o => panic!("{o:?}"),
+                })
+                .collect()
+        };
+        let d = eval_rev(std::slice::from_ref(&c_dense), &p).unwrap();
+        assert_eq!(
+            cbits(&d),
+            cbits(&eval_rev(std::slice::from_ref(&c_lit), &p).unwrap()),
+            "complex rev"
+        );
+        assert!(
+            d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
+            "complex rev output dense"
+        );
     }
 
     #[test]
