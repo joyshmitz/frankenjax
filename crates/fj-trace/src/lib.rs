@@ -3123,6 +3123,31 @@ fn infer_eigh(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
     ])
 }
 
+/// Determinant scalar dtype, matching eval_det: complex -> same complex dtype;
+/// real float (f32/bf16/f16/f64) -> same float dtype; integer -> F64 (int linalg
+/// promotes to float). Keeps the three layers (eval / fj-trace / partial_eval) in
+/// agreement (the prior hardcoded F64 widened f32 determinants in inference).
+fn det_scalar_dtype(input: DType) -> DType {
+    match input {
+        DType::Complex64 => DType::Complex64,
+        DType::Complex128 => DType::Complex128,
+        DType::F32 => DType::F32,
+        DType::BF16 => DType::BF16,
+        DType::F16 => DType::F16,
+        _ => DType::F64,
+    }
+}
+
+/// slogdet's logabsdet is always real: complex -> its real component float
+/// (Complex64 -> F32, Complex128 -> F64); otherwise same as `det_scalar_dtype`.
+fn slogdet_logabsdet_dtype(input: DType) -> DType {
+    match input {
+        DType::Complex64 => DType::F32,
+        DType::Complex128 => DType::F64,
+        other => det_scalar_dtype(other),
+    }
+}
+
 fn infer_det(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
     let primitive = Primitive::Det;
     let input = expect_single_matrix_input(primitive, inputs)?;
@@ -3136,9 +3161,9 @@ fn infer_det(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
         });
     }
     expect_square_trailing_dims(primitive, input)?;
-    // eval_det computes on the real part and returns an F64 scalar.
+    // eval_det preserves the input's float/complex dtype (int -> F64).
     Ok(vec![ShapedArray {
-        dtype: DType::F64,
+        dtype: det_scalar_dtype(input.dtype),
         shape: Shape { dims: Vec::new() },
     }])
 }
@@ -3156,12 +3181,18 @@ fn infer_slogdet(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError>
         });
     }
     expect_square_trailing_dims(primitive, input)?;
-    // eval_slogdet returns (sign, logabsdet) as F64 scalars.
-    let scalar = ShapedArray {
-        dtype: DType::F64,
-        shape: Shape { dims: Vec::new() },
-    };
-    Ok(vec![scalar.clone(), scalar])
+    // eval_slogdet preserves dtype: sign keeps det_scalar_dtype (complex for complex
+    // input, float for real); logabsdet is real (complex -> real-component float).
+    Ok(vec![
+        ShapedArray {
+            dtype: det_scalar_dtype(input.dtype),
+            shape: Shape { dims: Vec::new() },
+        },
+        ShapedArray {
+            dtype: slogdet_logabsdet_dtype(input.dtype),
+            shape: Shape { dims: Vec::new() },
+        },
+    ])
 }
 
 fn infer_eig(inputs: &[ShapedArray]) -> Result<Vec<ShapedArray>, TraceError> {
@@ -8827,6 +8858,30 @@ mod tests {
         let result = fj_interpreters::eval_jaxpr(&closed.jaxpr, &[input]).unwrap();
         let vals = result[0].as_tensor().unwrap().to_f64_vec().unwrap();
         assert_eq!(vals, vec![10.0, 26.0, 42.0]);
+    }
+
+    #[test]
+    fn shape_inference_det_slogdet_preserve_f32() {
+        // det/slogdet shape inference must preserve f32 (matching the eval fix); the
+        // prior hardcoded F64 diverged from eval_det/eval_slogdet for f32 inputs.
+        let f32_mat = || {
+            ShapedArray {
+                dtype: DType::F32,
+                shape: Shape { dims: vec![3, 3] },
+            }
+        };
+        let mut ctx = SimpleTraceContext::with_inputs(vec![f32_mat()]);
+        let det = ctx
+            .process_primitive(Primitive::Det, &[TracerId(1)], BTreeMap::new())
+            .unwrap();
+        assert_eq!(ctx.tracer_aval(det[0]).unwrap().dtype, DType::F32);
+        let mut ctx2 = SimpleTraceContext::with_inputs(vec![f32_mat()]);
+        let sld = ctx2
+            .process_primitive(Primitive::Slogdet, &[TracerId(1)], BTreeMap::new())
+            .unwrap();
+        assert_eq!(sld.len(), 2);
+        assert_eq!(ctx2.tracer_aval(sld[0]).unwrap().dtype, DType::F32);
+        assert_eq!(ctx2.tracer_aval(sld[1]).unwrap().dtype, DType::F32);
     }
 
     #[test]

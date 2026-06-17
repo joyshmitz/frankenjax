@@ -830,7 +830,7 @@ fn infer_equation_output_avals(
         Qr => Ok(infer_qr_output_avals(first_input, eqn)),
         Svd => Ok(infer_svd_output_avals(first_input, eqn)),
         Eigh => Ok(infer_eigh_output_avals(first_input)),
-        Slogdet => Ok(infer_slogdet_output_avals()),
+        Slogdet => Ok(infer_slogdet_output_avals(first_input)),
         Eig => Ok(infer_eig_output_avals(first_input)),
         TopK => Ok(infer_topk_output_avals(first_input, eqn)),
         Solve => Ok(infer_solve_output_avals(input_avals)),
@@ -933,9 +933,11 @@ fn infer_equation_output_aval(
             dtype: first_input.dtype,
             shape: Shape::scalar(),
         },
-        // Det produces an F64 scalar (eval_det computes on the real part).
+        // Det preserves the input's float/complex dtype (int -> F64), matching
+        // eval_det and fj-trace's infer_det. The prior hardcoded F64 widened f32
+        // determinants in partial-eval (silent dtype divergence from eval).
         Det => AbstractValue {
-            dtype: DType::F64,
+            dtype: det_scalar_dtype(first_input.dtype),
             shape: Shape::scalar(),
         },
         // associative_scan is a prefix scan in place: same shape and dtype.
@@ -1494,13 +1496,37 @@ fn infer_eigh_output_avals(input: &AbstractValue) -> Vec<AbstractValue> {
     ]
 }
 
-fn infer_slogdet_output_avals() -> Vec<AbstractValue> {
-    // eval_slogdet returns (sign, logabsdet) as F64 scalars.
-    let scalar = AbstractValue {
-        dtype: DType::F64,
-        shape: Shape::scalar(),
+/// Determinant scalar dtype, matching eval_det / fj-trace infer_det: complex ->
+/// same complex; real float -> same float; integer -> F64 (int linalg -> float).
+fn det_scalar_dtype(input: DType) -> DType {
+    match input {
+        DType::Complex64 => DType::Complex64,
+        DType::Complex128 => DType::Complex128,
+        DType::F32 => DType::F32,
+        DType::BF16 => DType::BF16,
+        DType::F16 => DType::F16,
+        _ => DType::F64,
+    }
+}
+
+fn infer_slogdet_output_avals(input: &AbstractValue) -> Vec<AbstractValue> {
+    // eval_slogdet preserves dtype: sign keeps det_scalar_dtype; logabsdet is real
+    // (complex -> real-component float). Prior hardcoded F64 widened f32 slogdet.
+    let logabsdet_dtype = match input.dtype {
+        DType::Complex64 => DType::F32,
+        DType::Complex128 => DType::F64,
+        other => det_scalar_dtype(other),
     };
-    vec![scalar.clone(), scalar]
+    vec![
+        AbstractValue {
+            dtype: det_scalar_dtype(input.dtype),
+            shape: Shape::scalar(),
+        },
+        AbstractValue {
+            dtype: logabsdet_dtype,
+            shape: Shape::scalar(),
+        },
+    ]
 }
 
 fn infer_eig_output_avals(input: &AbstractValue) -> Vec<AbstractValue> {
