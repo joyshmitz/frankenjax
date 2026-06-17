@@ -8589,7 +8589,14 @@ fn conv_vjp_1d(
     }
     debug_assert_eq!(grad_rhs_elems.len(), rhs_total);
 
-    make_conv_grad_pair(lhs.dtype, rhs.dtype, &lhs.shape, &rhs.shape, grad_lhs_elems, grad_rhs_elems)
+    make_conv_grad_pair(
+        lhs.dtype,
+        rhs.dtype,
+        &lhs.shape,
+        &rhs.shape,
+        grad_lhs_elems,
+        grad_rhs_elems,
+    )
 }
 
 /// 2D Conv VJP: lhs=[N, H, W, C_in], rhs=[KH, KW, C_in, C_out], g=[N, OH, OW, C_out]
@@ -8745,7 +8752,14 @@ fn conv_vjp_2d(
     }
     debug_assert_eq!(grad_rhs_elems.len(), rhs_total);
 
-    make_conv_grad_pair(lhs.dtype, rhs.dtype, &lhs.shape, &rhs.shape, grad_lhs_elems, grad_rhs_elems)
+    make_conv_grad_pair(
+        lhs.dtype,
+        rhs.dtype,
+        &lhs.shape,
+        &rhs.shape,
+        grad_lhs_elems,
+        grad_rhs_elems,
+    )
 }
 
 fn make_conv_grad_pair(
@@ -12894,6 +12908,186 @@ fn jaxpr_is_separable_sum(jaxpr: &Jaxpr) -> bool {
         .all(|e| e.sub_jaxprs.is_empty() && is_diagonal_elementwise_primitive(e.primitive))
 }
 
+fn unary_first_second_derivative(primitive: Primitive, x: f64) -> Option<(f64, f64)> {
+    match primitive {
+        Primitive::Neg => Some((-1.0, 0.0)),
+        Primitive::Square => Some((2.0 * x, 2.0)),
+        Primitive::Exp => {
+            let y = x.exp();
+            Some((y, y))
+        }
+        Primitive::Sin => Some((x.cos(), -x.sin())),
+        Primitive::Cos => Some((-x.sin(), -x.cos())),
+        Primitive::Atan => {
+            let d = 1.0 + x * x;
+            Some((1.0 / d, -2.0 * x / (d * d)))
+        }
+        Primitive::Sinh => Some((x.cosh(), x.sinh())),
+        Primitive::Cosh => Some((x.sinh(), x.cosh())),
+        Primitive::Tanh => {
+            let y = x.tanh();
+            let first = 1.0 - y * y;
+            Some((first, -2.0 * y * first))
+        }
+        Primitive::Asinh => {
+            let d = 1.0 + x * x;
+            let sqrt_d = d.sqrt();
+            Some((1.0 / sqrt_d, -x / (d * sqrt_d)))
+        }
+        Primitive::Log1p => {
+            let d = 1.0 + x;
+            Some((1.0 / d, -1.0 / (d * d)))
+        }
+        Primitive::Erf => {
+            let first = std::f64::consts::FRAC_2_SQRT_PI * (-(x * x)).exp();
+            Some((first, -2.0 * x * first))
+        }
+        _ => None,
+    }
+}
+
+fn tensor_from_f64_values(shape: Shape, values: Vec<f64>) -> Result<Value, AdError> {
+    TensorValue::new_f64_values(shape, values)
+        .map(Value::Tensor)
+        .map_err(|e| AdError::EvalFailed(e.to_string()))
+}
+
+/// Exact fast path for `f(x) = square(reduce_sum(g(x)))`, where `g` is a
+/// single-input unary elementwise chain. If `s = sum_i g_i(x_i)`, then
+/// `H_ij = 2 g'_i g'_j + [i == j] 2 s g''_i`.
+fn hessian_square_of_separable_sum(
+    jaxpr: &Jaxpr,
+    args: &[Value],
+    input_dim: usize,
+) -> Result<Option<Value>, AdError> {
+    if args.len() != 1
+        || jaxpr.invars.len() != 1
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() < 3
+        || lookup_custom_jaxpr_jvp(jaxpr).is_some()
+        || lookup_custom_jaxpr_vjp(jaxpr).is_some()
+    {
+        return Ok(None);
+    }
+
+    let input_tensor = match &args[0] {
+        Value::Tensor(tensor) if tensor.dtype == DType::F64 && tensor.len() == input_dim => tensor,
+        _ => return Ok(None),
+    };
+
+    let final_eq = &jaxpr.equations[jaxpr.equations.len() - 1];
+    let reduce_eq = &jaxpr.equations[jaxpr.equations.len() - 2];
+    if final_eq.primitive != Primitive::Square
+        || reduce_eq.primitive != Primitive::ReduceSum
+        || !final_eq.params.is_empty()
+        || !reduce_eq.params.is_empty()
+        || !final_eq.effects.is_empty()
+        || !reduce_eq.effects.is_empty()
+        || !final_eq.sub_jaxprs.is_empty()
+        || !reduce_eq.sub_jaxprs.is_empty()
+        || final_eq.outputs.as_slice() != jaxpr.outvars.as_slice()
+        || final_eq.inputs.len() != 1
+        || reduce_eq.inputs.len() != 1
+        || reduce_eq.outputs.len() != 1
+        || final_eq.inputs[0] != Atom::Var(reduce_eq.outputs[0])
+        || lookup_custom_vjp(Primitive::Square).is_some()
+        || lookup_custom_vjp(Primitive::ReduceSum).is_some()
+        || lookup_custom_jvp(Primitive::Square).is_some()
+        || lookup_custom_jvp(Primitive::ReduceSum).is_some()
+    {
+        return Ok(None);
+    }
+
+    let mut expected_input = jaxpr.invars[0];
+    let mut values = input_tensor
+        .to_f64_vec()
+        .ok_or_else(|| AdError::EvalFailed("expected f64 Hessian input".to_owned()))?;
+    if values.iter().any(|v| !v.is_finite()) {
+        return Ok(None);
+    }
+    let mut first = vec![1.0_f64; values.len()];
+    let mut second = vec![0.0_f64; values.len()];
+    let shape = input_tensor.shape.clone();
+
+    for eq in &jaxpr.equations[..jaxpr.equations.len() - 2] {
+        if eq.inputs.len() != 1
+            || eq.outputs.len() != 1
+            || eq.inputs[0] != Atom::Var(expected_input)
+            || !eq.params.is_empty()
+            || !eq.effects.is_empty()
+            || !eq.sub_jaxprs.is_empty()
+            || lookup_custom_vjp(eq.primitive).is_some()
+            || lookup_custom_jvp(eq.primitive).is_some()
+        {
+            return Ok(None);
+        }
+
+        let mut next_first = Vec::with_capacity(values.len());
+        let mut next_second = Vec::with_capacity(values.len());
+        for ((&x, &dx), &d2x) in values.iter().zip(first.iter()).zip(second.iter()) {
+            let Some((df, d2f)) = unary_first_second_derivative(eq.primitive, x) else {
+                return Ok(None);
+            };
+            if !df.is_finite() || !d2f.is_finite() {
+                return Ok(None);
+            }
+            next_first.push(df * dx);
+            next_second.push(d2f * dx * dx + df * d2x);
+        }
+
+        let primal = tensor_from_f64_values(shape.clone(), values)?;
+        let out = match eval_primitive(eq.primitive, &[primal], &eq.params) {
+            Ok(value) => value,
+            Err(_) => return Ok(None),
+        };
+        let Some(out_tensor) = out.as_tensor() else {
+            return Ok(None);
+        };
+        if out_tensor.dtype != DType::F64
+            || out_tensor.shape != shape
+            || out_tensor.len() != input_dim
+        {
+            return Ok(None);
+        }
+        values = out_tensor
+            .to_f64_vec()
+            .ok_or_else(|| AdError::EvalFailed("expected f64 unary Hessian value".to_owned()))?;
+        if values.iter().any(|v| !v.is_finite()) {
+            return Ok(None);
+        }
+        first = next_first;
+        second = next_second;
+        expected_input = eq.outputs[0];
+    }
+
+    if reduce_eq.inputs[0] != Atom::Var(expected_input) {
+        return Ok(None);
+    }
+
+    let reduce_input = tensor_from_f64_values(shape, values)?;
+    let sum_value = match eval_primitive(Primitive::ReduceSum, &[reduce_input], &reduce_eq.params) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let sum_values = flatten_value_to_f64(&sum_value)?;
+    if sum_values.len() != 1 || !sum_values[0].is_finite() {
+        return Ok(None);
+    }
+    let sum = sum_values[0];
+
+    let mut hessian = vec![0.0_f64; input_dim * input_dim];
+    for (row, (&row_first, &row_second)) in first.iter().zip(second.iter()).enumerate() {
+        for (col, &col_first) in first.iter().enumerate() {
+            let mut value = 2.0 * row_first * col_first;
+            if row == col {
+                value += 2.0 * sum * row_second;
+            }
+            hessian[row * input_dim + col] = value;
+        }
+    }
+    matrix_value(input_dim, input_dim, hessian).map(Some)
+}
+
 pub fn hessian_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Value, AdError> {
     if args.is_empty() {
         return Err(AdError::InputArity {
@@ -12948,6 +13142,10 @@ pub fn hessian_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Value, AdError> {
             return matrix_value(input_dim, input_dim, hessian);
         }
         // Unexpected grad shape ⇒ fall through to the exact per-basis path.
+    }
+
+    if let Some(exact) = hessian_square_of_separable_sum(jaxpr, args, input_dim)? {
+        return Ok(exact);
     }
 
     // Each Hessian COLUMN is two INDEPENDENT grad calls (central difference at
@@ -17496,7 +17694,11 @@ mod tests {
             Value::Tensor(TensorValue::new_f32_values(Shape { dims }, d).unwrap())
         };
         let lhs = mkf32(vec![1, w as u32, cin as u32], w * cin, 0.017);
-        let rhs = mkf32(vec![kw as u32, kcin as u32, cout as u32], kw * kcin * cout, 0.013);
+        let rhs = mkf32(
+            vec![kw as u32, kcin as u32, cout as u32],
+            kw * kcin * cout,
+            0.013,
+        );
         let g = mkf32(vec![1, ow as u32, cout as u32], ow * cout, 0.011);
         let grads = vjp_single(Primitive::Conv, &[lhs, rhs], &g, &params).unwrap();
         assert_eq!(
@@ -17616,10 +17818,16 @@ mod tests {
             ("strides".to_owned(), "1,1".to_owned()),
         ]);
         let mkf32 = |dims: Vec<u32>, n_elems: usize, scale: f32| {
-            let d: Vec<f32> = (0..n_elems).map(|i| (i as f32 * scale).sin() * 0.5).collect();
+            let d: Vec<f32> = (0..n_elems)
+                .map(|i| (i as f32 * scale).sin() * 0.5)
+                .collect();
             Value::Tensor(TensorValue::new_f32_values(Shape { dims }, d).unwrap())
         };
-        let lhs = mkf32(vec![n as u32, h as u32, w as u32, cin as u32], n * h * w * cin, 0.013);
+        let lhs = mkf32(
+            vec![n as u32, h as u32, w as u32, cin as u32],
+            n * h * w * cin,
+            0.013,
+        );
         let rhs = mkf32(
             vec![kh as u32, kw as u32, cin as u32, cout as u32],
             kh * kw * cin * cout,
@@ -24586,9 +24794,9 @@ mod tests {
     fn hessian_general_parallel_matches_serial_central_difference() {
         use fj_core::{Jaxpr, Shape, TensorValue, VarId};
         use smallvec::smallvec;
-        // NON-separable f(x) = (Σ chain(x_i))² — final op is Square AFTER ReduceSum,
-        // so the separable fast path does NOT fire and the general central-difference
-        // column loop runs. The multi-equation chain pushes the work proxy past
+        // NON-separable f(x) = (Σ chain(x_i))². Spell the final square as Mul(sum,sum)
+        // so this test keeps covering the central-difference fallback rather than the
+        // exact square-of-separable-sum fast path. The multi-equation chain pushes the work proxy past
         // HESSIAN_PARALLEL_WORK_PER_THREAD so the loop FANS OUT across threads (with
         // input_dim=128 columns on a multi-core host n_threads > 1). Each column is
         // an independent ±ε central difference, so the threaded result must be
@@ -24630,8 +24838,8 @@ mod tests {
         });
         let out = VarId(next);
         equations.push(Equation {
-            primitive: Primitive::Square,
-            inputs: smallvec![Atom::Var(summed)],
+            primitive: Primitive::Mul,
+            inputs: smallvec![Atom::Var(summed), Atom::Var(summed)],
             outputs: smallvec![out],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
@@ -24686,6 +24894,85 @@ mod tests {
                 "parallel Hessian entry {idx} != serial central-difference reference"
             );
         }
+    }
+
+    #[test]
+    fn hessian_square_of_separable_sum_matches_closed_form_and_golden() {
+        use fj_core::{Jaxpr, Shape, TensorValue, VarId};
+        use smallvec::smallvec;
+
+        let n = 16usize;
+        let (x, sin_x, summed, out) = (VarId(0), VarId(1), VarId(2), VarId(3));
+        let jaxpr = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Sin,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![sin_x],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(sin_x)],
+                    outputs: smallvec![summed],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Square,
+                    inputs: smallvec![Atom::Var(summed)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+        let xv: Vec<f64> = (0..n).map(|i| (i as f64) * 0.11 - 0.7).collect();
+        let args = [Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xv.clone(),
+            )
+            .unwrap(),
+        )];
+
+        let hessian = hessian_jaxpr(&jaxpr, &args).expect("hessian");
+        let tensor = hessian.as_tensor().expect("tensor");
+        assert_eq!(tensor.shape.dims, vec![n as u32, n as u32]);
+        let got = tensor.to_f64_vec().expect("f64");
+        let sum = xv.iter().map(|x| x.sin()).sum::<f64>();
+        for (row, &x_row) in xv.iter().enumerate() {
+            for (col, &x_col) in xv.iter().enumerate() {
+                let mut want = 2.0 * x_row.cos() * x_col.cos();
+                if row == col {
+                    want += 2.0 * sum * -x_row.sin();
+                }
+                assert!(
+                    (got[row * n + col] - want).abs() <= 1e-12,
+                    "entry ({row},{col}) got {} want {want}",
+                    got[row * n + col]
+                );
+            }
+        }
+        let bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+        let sha = fj_test_utils::fixture_id_from_json(&(
+            "frankenjax-hessian-square-separable-sum-exact",
+            &bits,
+        ))
+        .expect("digest");
+        assert_eq!(
+            sha,
+            "8830a0367731e540bba251bcccd2b18d3aa64ac3a9ca96d0696d780de48974c0"
+        );
     }
 
     #[test]
