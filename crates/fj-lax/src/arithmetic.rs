@@ -2142,10 +2142,28 @@ fn complex_reciprocal(z: (f64, f64)) -> (f64, f64) {
 }
 
 fn complex_sqrt((re, im): (f64, f64)) -> (f64, f64) {
+    // Numerically stable principal square root (Kahan / numpy `npy_csqrt`). The naive
+    // `out_im = sqrt((|z| - re)/2)` catastrophically cancels when re >> |im|: for
+    // sqrt(1e8 + 1i), `|z| - re` rounds to 0, so the entire imaginary part was lost
+    // (returning (1e4, 0), whose square is (1e8, 0) != (1e8, 1)). We compute the
+    // smaller component from the identity `2 * out_re * out_im == im`, which avoids the
+    // cancellation and restores `sqrt(z)^2 == z` to full precision. Bit-identical sign
+    // conventions (principal branch, Re >= 0; the +/-0 cut on the negative real axis,
+    // sqrt(-4 +/- 0i) = (0, +/-2)) are preserved via copysign.
+    if re == 0.0 && im == 0.0 {
+        return (0.0, 0.0);
+    }
     let magnitude = re.hypot(im);
-    let out_re = ((magnitude + re) * 0.5).sqrt();
-    let out_im = ((magnitude - re) * 0.5).sqrt().copysign(im);
-    (out_re, out_im)
+    if re >= 0.0 {
+        let out_re = ((magnitude + re) * 0.5).sqrt();
+        let out_im = im / (2.0 * out_re);
+        (out_re, out_im)
+    } else {
+        let out_im_mag = ((magnitude - re) * 0.5).sqrt();
+        let out_re = im.abs() / (2.0 * out_im_mag);
+        let out_im = out_im_mag.copysign(im);
+        (out_re, out_im)
+    }
 }
 
 fn complex_cbrt(input: (f64, f64)) -> (f64, f64) {
@@ -10796,6 +10814,60 @@ mod tests {
                 "non-finite quotient for ({re},{im}): {q:?}"
             );
         }
+    }
+
+    #[test]
+    fn complex_sqrt_satisfies_w_squared_eq_z_without_cancellation() {
+        // Defining invariant of the principal square root: w = sqrt(z) must satisfy
+        // w*w == z and Re(w) >= 0. The previous `out_im = sqrt((|z|-re)/2)` form
+        // catastrophically cancelled when re >> |im| and silently dropped the entire
+        // imaginary part (e.g. sqrt(1e8 + 1i) -> (1e4, 0), whose square is (1e8, 0)).
+        let w_sq = |w: (f64, f64)| complex_mul(w, w);
+        let rel_close = |a: (f64, f64), b: (f64, f64), tol: f64| {
+            assert!(
+                (a.0 - b.0).abs() <= tol * (1.0 + b.0.abs())
+                    && (a.1 - b.1).abs() <= tol * (1.0 + b.1.abs()),
+                "got {a:?}, expected {b:?}"
+            );
+        };
+
+        // Cancellation regime: re >> |im|. Previously the imaginary part was lost.
+        for &z in &[
+            (1e8, 1.0),
+            (1e16, 1.0),
+            (1e200, 3.0),
+            (1e8, -1.0),
+            (1e150, 2.5),
+        ] {
+            let w = complex_sqrt(z);
+            assert!(w.0 >= 0.0, "principal branch Re(w) >= 0 for {z:?}: {w:?}");
+            rel_close(w_sq(w), z, 1e-13);
+        }
+
+        // Negative-real cancellation regime (re << -|im|): mirror case.
+        for &z in &[(-1e8, 1.0), (-1e16, -1.0), (-1e200, 4.0)] {
+            let w = complex_sqrt(z);
+            assert!(w.0 >= 0.0, "principal branch Re(w) >= 0 for {z:?}: {w:?}");
+            rel_close(w_sq(w), z, 1e-13);
+        }
+
+        // Balanced/normal inputs: still correct (no regression beyond rounding).
+        for &z in &[(3.0, 4.0), (1.0, 1.0), (0.0, 2.0), (5.0, 0.0)] {
+            let w = complex_sqrt(z);
+            assert!(w.0 >= 0.0);
+            rel_close(w_sq(w), z, 1e-14);
+        }
+        // sqrt(3+4i) = 2+i exactly.
+        rel_close(complex_sqrt((3.0, 4.0)), (2.0, 1.0), 1e-14);
+
+        // Signed-zero branch cut on the negative real axis: sqrt(-4 +/- 0i) = (0, +/-2).
+        let pos = complex_sqrt((-4.0, 0.0));
+        rel_close(pos, (0.0, 2.0), 1e-14);
+        let neg = complex_sqrt((-4.0, -0.0));
+        rel_close(neg, (0.0, -2.0), 1e-14);
+
+        // Zero maps to zero.
+        assert_eq!(complex_sqrt((0.0, 0.0)), (0.0, 0.0));
     }
 
     /// Isomorphism + golden proof for threading Sinc: the parallel path must be
