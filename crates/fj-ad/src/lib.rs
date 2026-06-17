@@ -2,7 +2,8 @@
 #![allow(clippy::cloned_ref_to_slice_refs)]
 
 use fj_core::{
-    Atom, DType, Jaxpr, Literal, LiteralBuffer, Primitive, Shape, TensorValue, Value, VarId,
+    Atom, DType, Equation, Jaxpr, Literal, LiteralBuffer, Primitive, Shape, TensorValue, Value,
+    VarId,
 };
 use fj_lax::{eval_igamma_grad_a, eval_primitive, eval_primitive_multi};
 use smallvec::SmallVec;
@@ -13344,6 +13345,156 @@ fn hessian_product_of_separable_sums(
     matrix_value(input_dim, input_dim, hessian).map(Some)
 }
 
+fn parse_exact_usize_list(raw: &str) -> Option<Vec<usize>> {
+    if raw.trim().is_empty() {
+        return Some(Vec::new());
+    }
+
+    let mut parsed = Vec::new();
+    for part in raw.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        parsed.push(trimmed.parse::<usize>().ok()?);
+    }
+    Some(parsed)
+}
+
+fn exact_1d_slice_interval(
+    eq: &Equation,
+    input_var: VarId,
+    input_dim: usize,
+) -> Option<(VarId, usize, usize)> {
+    if eq.primitive != Primitive::Slice
+        || eq.inputs.len() != 1
+        || eq.inputs[0] != Atom::Var(input_var)
+        || eq.outputs.len() != 1
+        || eq.params.len() != 2
+        || !eq.effects.is_empty()
+        || !eq.sub_jaxprs.is_empty()
+        || lookup_custom_vjp(Primitive::Slice).is_some()
+        || lookup_custom_jvp(Primitive::Slice).is_some()
+    {
+        return None;
+    }
+
+    let starts = parse_exact_usize_list(eq.params.get("start_indices")?)?;
+    let limits = parse_exact_usize_list(eq.params.get("limit_indices")?)?;
+    if starts.len() != 1 || limits.len() != 1 {
+        return None;
+    }
+    let (start, limit) = (starts[0], limits[0]);
+    if start >= limit || limit > input_dim {
+        return None;
+    }
+
+    Some((eq.outputs[0], start, limit))
+}
+
+/// Exact fast path for the nearest-neighbor quadratic
+/// `f(x) = reduce_sum(slice(x, 0..n-1) * slice(x, 1..n))`.
+fn hessian_adjacent_pair_sum(
+    jaxpr: &Jaxpr,
+    args: &[Value],
+    input_dim: usize,
+) -> Result<Option<Value>, AdError> {
+    if args.len() != 1
+        || jaxpr.invars.len() != 1
+        || jaxpr.outvars.len() != 1
+        || jaxpr.equations.len() != 4
+        || input_dim < 2
+        || lookup_custom_jaxpr_jvp(jaxpr).is_some()
+        || lookup_custom_jaxpr_vjp(jaxpr).is_some()
+    {
+        return Ok(None);
+    }
+
+    let input_tensor = match &args[0] {
+        Value::Tensor(tensor)
+            if tensor.dtype == DType::F64
+                && tensor.shape.rank() == 1
+                && tensor.len() == input_dim =>
+        {
+            tensor
+        }
+        _ => return Ok(None),
+    };
+    let input_values = input_tensor
+        .to_f64_vec()
+        .ok_or_else(|| AdError::EvalFailed("expected f64 Hessian input".to_owned()))?;
+    if input_values.iter().any(|value| !value.is_finite()) {
+        return Ok(None);
+    }
+
+    let input_var = jaxpr.invars[0];
+    let Some(first_slice) = exact_1d_slice_interval(&jaxpr.equations[0], input_var, input_dim)
+    else {
+        return Ok(None);
+    };
+    let Some(second_slice) = exact_1d_slice_interval(&jaxpr.equations[1], input_var, input_dim)
+    else {
+        return Ok(None);
+    };
+    let slice_vars = [first_slice.0, second_slice.0];
+    let intervals = [
+        (first_slice.1, first_slice.2),
+        (second_slice.1, second_slice.2),
+    ];
+    let has_left = intervals
+        .iter()
+        .any(|&(start, limit)| start == 0 && limit == input_dim - 1);
+    let has_right = intervals
+        .iter()
+        .any(|&(start, limit)| start == 1 && limit == input_dim);
+    if !has_left || !has_right {
+        return Ok(None);
+    }
+
+    let mul_eq = &jaxpr.equations[2];
+    if mul_eq.primitive != Primitive::Mul
+        || !mul_eq.params.is_empty()
+        || !mul_eq.effects.is_empty()
+        || !mul_eq.sub_jaxprs.is_empty()
+        || mul_eq.inputs.len() != 2
+        || mul_eq.outputs.len() != 1
+        || lookup_custom_vjp(Primitive::Mul).is_some()
+        || lookup_custom_jvp(Primitive::Mul).is_some()
+    {
+        return Ok(None);
+    }
+    let mul_inputs_match = matches!(
+        mul_eq.inputs.as_slice(),
+        [Atom::Var(a), Atom::Var(b)]
+            if (*a == slice_vars[0] && *b == slice_vars[1])
+                || (*a == slice_vars[1] && *b == slice_vars[0])
+    );
+    if !mul_inputs_match {
+        return Ok(None);
+    }
+
+    let reduce_eq = &jaxpr.equations[3];
+    if reduce_eq.primitive != Primitive::ReduceSum
+        || !reduce_eq.params.is_empty()
+        || !reduce_eq.effects.is_empty()
+        || !reduce_eq.sub_jaxprs.is_empty()
+        || reduce_eq.inputs.len() != 1
+        || reduce_eq.inputs[0] != Atom::Var(mul_eq.outputs[0])
+        || reduce_eq.outputs.as_slice() != jaxpr.outvars.as_slice()
+        || lookup_custom_vjp(Primitive::ReduceSum).is_some()
+        || lookup_custom_jvp(Primitive::ReduceSum).is_some()
+    {
+        return Ok(None);
+    }
+
+    let mut hessian = vec![0.0_f64; input_dim * input_dim];
+    for index in 0..input_dim - 1 {
+        hessian[index * input_dim + index + 1] = 1.0;
+        hessian[(index + 1) * input_dim + index] = 1.0;
+    }
+    matrix_value(input_dim, input_dim, hessian).map(Some)
+}
+
 pub fn hessian_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Value, AdError> {
     if args.is_empty() {
         return Err(AdError::InputArity {
@@ -13404,6 +13555,9 @@ pub fn hessian_jaxpr(jaxpr: &Jaxpr, args: &[Value]) -> Result<Value, AdError> {
         return Ok(exact);
     }
     if let Some(exact) = hessian_product_of_separable_sums(jaxpr, args, input_dim)? {
+        return Ok(exact);
+    }
+    if let Some(exact) = hessian_adjacent_pair_sum(jaxpr, args, input_dim)? {
         return Ok(exact);
     }
 
@@ -25390,100 +25544,178 @@ mod tests {
     }
 
     #[test]
+    fn hessian_adjacent_pair_sum_matches_tridiagonal_and_golden() {
+        use fj_core::{Jaxpr, Shape, TensorValue, VarId};
+        use smallvec::smallvec;
+
+        let n = 18usize;
+        let build_jaxpr = |force_fallback: bool| {
+            let (x, left, right, pairwise, reduced, shifted) =
+                (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4), VarId(5));
+            let mut left_params = BTreeMap::new();
+            left_params.insert("start_indices".to_owned(), "0".to_owned());
+            left_params.insert("limit_indices".to_owned(), (n - 1).to_string());
+            let mut right_params = BTreeMap::new();
+            right_params.insert("start_indices".to_owned(), "1".to_owned());
+            right_params.insert("limit_indices".to_owned(), n.to_string());
+            let mut equations = vec![
+                Equation {
+                    primitive: Primitive::Slice,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![left],
+                    params: left_params,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Slice,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![right],
+                    params: right_params,
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(left), Atom::Var(right)],
+                    outputs: smallvec![pairwise],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(pairwise)],
+                    outputs: smallvec![reduced],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ];
+            let out = if force_fallback {
+                equations.push(Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(reduced), Atom::Lit(Literal::from_f64(0.0))],
+                    outputs: smallvec![shifted],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                });
+                shifted
+            } else {
+                reduced
+            };
+            Jaxpr::new(vec![x], vec![], vec![out], equations)
+        };
+
+        let xv: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.07).cos()).collect();
+        let args = [Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xv,
+            )
+            .unwrap(),
+        )];
+
+        let exact = hessian_jaxpr(&build_jaxpr(false), &args).expect("exact hessian");
+        let exact_tensor = exact.as_tensor().expect("exact tensor");
+        assert_eq!(exact_tensor.shape.dims, vec![n as u32, n as u32]);
+        let got = exact_tensor.to_f64_vec().expect("f64 exact");
+        for row in 0..n {
+            for col in 0..n {
+                let want = if row.abs_diff(col) == 1 {
+                    1.0_f64
+                } else {
+                    0.0_f64
+                };
+                assert_eq!(
+                    got[row * n + col].to_bits(),
+                    want.to_bits(),
+                    "tridiagonal entry ({row},{col})"
+                );
+            }
+        }
+
+        let fallback = hessian_jaxpr(&build_jaxpr(true), &args).expect("forced fallback hessian");
+        let fallback_vals = fallback
+            .as_tensor()
+            .expect("fallback tensor")
+            .to_f64_vec()
+            .expect("f64 fallback");
+        for idx in 0..n * n {
+            assert!(
+                (got[idx] - fallback_vals[idx]).abs() <= 1e-9,
+                "exact entry {idx} differs from fallback central difference: got {} fallback {}",
+                got[idx],
+                fallback_vals[idx]
+            );
+        }
+
+        let bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+        let sha = fj_test_utils::fixture_id_from_json(&(
+            "frankenjax-hessian-adjacent-pair-sum-exact",
+            &bits,
+        ))
+        .expect("digest");
+        assert_eq!(
+            sha,
+            "398f8f89b8579b1fc6de33dc44588af05bdd05ede91546372a5f9f25d3307cc6"
+        );
+    }
+
+    #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_hessian_general_parallel_vs_serial() {
         use fj_core::{Jaxpr, Shape, TensorValue, VarId};
         use smallvec::smallvec;
         use std::time::Instant;
-        // COMPUTE-HEAVY body: two independent transcendental elementwise chains,
-        // each reduced to a scalar, then multiplied. This remains on the
-        // central-difference fallback after the self-mul exact slice and is the
-        // next profile-backed arbitrary-Hessian spelling.
-        let n = 192usize;
-        let left_chain: &[Primitive] = &[
-            Primitive::Sin,
-            Primitive::Cos,
-            Primitive::Tanh,
-            Primitive::Exp,
-            Primitive::Log1p,
-            Primitive::Atan,
-            Primitive::Sinh,
-            Primitive::Erf,
-            Primitive::Asinh,
-            Primitive::Sin,
-        ];
-        let right_chain: &[Primitive] = &[
-            Primitive::Cos,
-            Primitive::Tanh,
-            Primitive::Sin,
-            Primitive::Atan,
-            Primitive::Exp,
-            Primitive::Log1p,
-            Primitive::Cosh,
-            Primitive::Asinh,
-            Primitive::Erf,
-            Primitive::Cos,
-        ];
-        let mut equations = Vec::new();
-        let mut cur = VarId(0);
-        let mut next = 1u32;
-        for &p in left_chain {
-            let out_v = VarId(next);
-            next += 1;
-            equations.push(Equation {
-                primitive: p,
-                inputs: smallvec![Atom::Var(cur)],
-                outputs: smallvec![out_v],
+        // Local-interaction body: f(x) = Σ_i x_i * x_{i+1}. This is genuinely
+        // nonseparable (nearest-neighbor cross partials) and remains on the
+        // central-difference fallback before the exact banded-Hessian slice.
+        let n = 512usize;
+        let (x, left, right, pairwise, out) = (VarId(0), VarId(1), VarId(2), VarId(3), VarId(4));
+        let mut left_params = BTreeMap::new();
+        left_params.insert("start_indices".to_owned(), "0".to_owned());
+        left_params.insert("limit_indices".to_owned(), (n - 1).to_string());
+        let mut right_params = BTreeMap::new();
+        right_params.insert("start_indices".to_owned(), "1".to_owned());
+        right_params.insert("limit_indices".to_owned(), n.to_string());
+        let equations = vec![
+            Equation {
+                primitive: Primitive::Slice,
+                inputs: smallvec![Atom::Var(x)],
+                outputs: smallvec![left],
+                params: left_params,
+                sub_jaxprs: vec![],
+                effects: vec![],
+            },
+            Equation {
+                primitive: Primitive::Slice,
+                inputs: smallvec![Atom::Var(x)],
+                outputs: smallvec![right],
+                params: right_params,
+                sub_jaxprs: vec![],
+                effects: vec![],
+            },
+            Equation {
+                primitive: Primitive::Mul,
+                inputs: smallvec![Atom::Var(left), Atom::Var(right)],
+                outputs: smallvec![pairwise],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
                 effects: vec![],
-            });
-            cur = out_v;
-        }
-        let summed = VarId(next);
-        next += 1;
-        equations.push(Equation {
-            primitive: Primitive::ReduceSum,
-            inputs: smallvec![Atom::Var(cur)],
-            outputs: smallvec![summed],
-            params: BTreeMap::new(),
-            sub_jaxprs: vec![],
-            effects: vec![],
-        });
-        let left_sum = summed;
-        let mut cur = VarId(0);
-        for &p in right_chain {
-            let out_v = VarId(next);
-            next += 1;
-            equations.push(Equation {
-                primitive: p,
-                inputs: smallvec![Atom::Var(cur)],
-                outputs: smallvec![out_v],
+            },
+            Equation {
+                primitive: Primitive::ReduceSum,
+                inputs: smallvec![Atom::Var(pairwise)],
+                outputs: smallvec![out],
                 params: BTreeMap::new(),
                 sub_jaxprs: vec![],
                 effects: vec![],
-            });
-            cur = out_v;
-        }
-        let right_sum = VarId(next);
-        next += 1;
-        equations.push(Equation {
-            primitive: Primitive::ReduceSum,
-            inputs: smallvec![Atom::Var(cur)],
-            outputs: smallvec![right_sum],
-            params: BTreeMap::new(),
-            sub_jaxprs: vec![],
-            effects: vec![],
-        });
-        let out = VarId(next);
-        equations.push(Equation {
-            primitive: Primitive::Mul,
-            inputs: smallvec![Atom::Var(left_sum), Atom::Var(right_sum)],
-            outputs: smallvec![out],
-            params: BTreeMap::new(),
-            sub_jaxprs: vec![],
-            effects: vec![],
-        });
+            },
+        ];
         let jaxpr = Jaxpr::new(vec![VarId(0)], vec![], vec![out], equations);
         let xv: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.017).sin() * 0.9).collect();
         let args = [Value::Tensor(
@@ -25548,7 +25780,7 @@ mod tests {
         }
         let par_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
         eprintln!(
-            "hessian general n={n}: SERIAL {serial_ms:.3}ms  PARALLEL {par_ms:.3}ms  speedup {:.2}x",
+            "hessian local-pair n={n}: SERIAL {serial_ms:.3}ms  PARALLEL {par_ms:.3}ms  speedup {:.2}x",
             serial_ms / par_ms
         );
     }
