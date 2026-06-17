@@ -15103,6 +15103,49 @@ mod tests {
     }
 
     #[test]
+    fn batch_gather_direct_paths_match_per_slice() {
+        // The gather fast paths (unbatched-operand rank-1 indices via eval_gather's
+        // index-mapping, and batched-operand direct) must equal the per-slice ground
+        // truth (batch_passthrough_leading). The existing gather batch tests assert
+        // hand-computed outputs; this asserts the vmap invariant directly, so a subtle
+        // direct-path divergence is caught without hand-computing expected values.
+        let cmp = |label: &str, inputs: &[BatchTracer], params: &BTreeMap<String, String>| {
+            let fast = apply_batch_rule(Primitive::Gather, inputs, params).unwrap();
+            let slow = batch_passthrough_leading(Primitive::Gather, inputs, params).unwrap();
+            assert_eq!(fast.batch_dim, slow.batch_dim, "{label} batch_dim");
+            assert_eq!(
+                fast.value.as_tensor().unwrap().shape.dims,
+                slow.value.as_tensor().unwrap().shape.dims,
+                "{label} shape"
+            );
+            assert_eq!(
+                extract_i64_vec(&fast.value),
+                extract_i64_vec(&slow.value),
+                "{label} values"
+            );
+        };
+        // Unbatched operand + batched rank-1 indices (default clip mode + fill_or_drop).
+        for mode in [None, Some("fill_or_drop")] {
+            let mut params = BTreeMap::from([("slice_sizes".to_owned(), "1".to_owned())]);
+            if let Some(m) = mode {
+                params.insert("index_mode".to_owned(), m.to_owned());
+            }
+            let inputs = [
+                BatchTracer::unbatched(make_i64_vector(&[10, 20, 30, 40])),
+                BatchTracer::batched(make_i64_matrix(2, 3, &[3, 1, 0, 2, 4, 1]), 0),
+            ];
+            cmp(&format!("unbatched_op mode={mode:?}"), &inputs, &params);
+        }
+        // Batched operand + batched indices (per-slice gathers operand[i] with idx[i]).
+        let params = BTreeMap::from([("slice_sizes".to_owned(), "1".to_owned())]);
+        let inputs = [
+            BatchTracer::batched(make_i64_matrix(2, 4, &[10, 20, 30, 40, 50, 60, 70, 80]), 0),
+            BatchTracer::batched(make_i64_matrix(2, 3, &[3, 1, 0, 2, 2, 1]), 0),
+        ];
+        cmp("batched_op batched_idx", &inputs, &params);
+    }
+
+    #[test]
     fn batch_reshape_broadcast_match_per_slice() {
         // vmap-vs-loop for the shape-emitting rules reshape (incl. the -1 INFER form,
         // whose inferred dim must scale with the batch) and broadcast_in_dim (batch maps
