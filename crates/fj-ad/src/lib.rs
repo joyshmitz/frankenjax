@@ -17478,6 +17478,40 @@ mod tests {
     }
 
     #[test]
+    fn conv_vjp_grouped_f32_preserves_dtype() {
+        use fj_core::{Shape, TensorValue};
+        // Depthwise/grouped conv VJP (feature_group_count=2) on f32 inputs must return
+        // f32 grads — the grouped path recurses into the (dtype-fixed) plain conv_vjp and
+        // concatenates, so it inherits dtype fidelity. Regression guard for the common
+        // f32 depthwise-conv training path (MobileNet-class).
+        let (cin, kcin, cout, w, kw) = (4usize, 2usize, 4usize, 5usize, 2usize);
+        let ow = w - kw + 1;
+        let params = BTreeMap::from([
+            ("padding".to_owned(), "valid".to_owned()),
+            ("strides".to_owned(), "1".to_owned()),
+            ("feature_group_count".to_owned(), "2".to_owned()),
+        ]);
+        let mkf32 = |dims: Vec<u32>, n: usize, s: f32| {
+            let d: Vec<f32> = (0..n).map(|i| (i as f32 * s).sin() * 0.4 + 0.1).collect();
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims }, d).unwrap())
+        };
+        let lhs = mkf32(vec![1, w as u32, cin as u32], w * cin, 0.017);
+        let rhs = mkf32(vec![kw as u32, kcin as u32, cout as u32], kw * kcin * cout, 0.013);
+        let g = mkf32(vec![1, ow as u32, cout as u32], ow * cout, 0.011);
+        let grads = vjp_single(Primitive::Conv, &[lhs, rhs], &g, &params).unwrap();
+        assert_eq!(
+            grads[0].as_tensor().unwrap().dtype,
+            fj_core::DType::F32,
+            "grouped conv grad_lhs must be f32"
+        );
+        assert_eq!(
+            grads[1].as_tensor().unwrap().dtype,
+            fj_core::DType::F32,
+            "grouped conv grad_rhs must be f32"
+        );
+    }
+
+    #[test]
     fn conv_vjp_grouped_matches_numerical() {
         // Grouped 1D conv VJP (feature_group_count=2) vs central finite differences of
         // L(lhs,rhs) = sum(conv(lhs,rhs) . g). lhs[1,5,4] (Cin=4), rhs[2,2,4]
