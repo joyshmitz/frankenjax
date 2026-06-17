@@ -978,6 +978,10 @@ pub struct LiteralBuffer {
     storage: LiteralBufferStorage,
 }
 
+/// A lazily-materialized dense lane of a `Concat` buffer: `None` once computed if
+/// the parts aren't all that dtype, else the concatenated dense `Vec<T>`.
+type ConcatLane<T> = Arc<OnceLock<Option<Arc<Vec<T>>>>>;
+
 enum LiteralBufferStorage {
     Literals(Arc<Vec<Literal>>),
     F64 {
@@ -1058,10 +1062,11 @@ enum LiteralBufferStorage {
         parts: Arc<Vec<LiteralBufferSlice>>,
         len: usize,
         literals: Arc<OnceLock<Arc<Vec<Literal>>>>,
-        f64_values: Arc<OnceLock<Option<Arc<Vec<f64>>>>>,
-        f32_values: Arc<OnceLock<Option<Arc<Vec<f32>>>>>,
-        i64_values: Arc<OnceLock<Option<Arc<Vec<i64>>>>>,
-        half_values: Arc<OnceLock<Option<Arc<Vec<u16>>>>>,
+        f64_values: ConcatLane<f64>,
+        f32_values: ConcatLane<f32>,
+        i64_values: ConcatLane<i64>,
+        half_values: ConcatLane<u16>,
+        complex_values: ConcatLane<(f64, f64)>,
     },
 }
 
@@ -1261,6 +1266,7 @@ impl LiteralBuffer {
                 f32_values: Arc::new(OnceLock::new()),
                 i64_values: Arc::new(OnceLock::new()),
                 half_values: Arc::new(OnceLock::new()),
+                complex_values: Arc::new(OnceLock::new()),
             },
         })
     }
@@ -1482,6 +1488,18 @@ impl LiteralBuffer {
     pub fn as_complex_slice(&self) -> Option<&[(f64, f64)]> {
         match &self.storage {
             LiteralBufferStorage::Complex { values, .. } => Some(values.as_slice()),
+            // Lazy concat of complex parts (e.g. concatenating spectra in an FFT/
+            // signal pipeline): materialize the contiguous (re,im) backing once,
+            // bypassing the per-Literal Vec<Literal> the generic path would build.
+            LiteralBufferStorage::Concat {
+                parts,
+                len,
+                complex_values,
+                ..
+            } => complex_values
+                .get_or_init(|| materialize_concat_complex_slices(parts, *len).map(Arc::new))
+                .as_deref()
+                .map(Vec::as_slice),
             _ => None,
         }
     }
@@ -1749,6 +1767,7 @@ impl Clone for LiteralBuffer {
                 f32_values,
                 i64_values,
                 half_values,
+                complex_values,
             } => Self {
                 storage: LiteralBufferStorage::Concat {
                     parts: Arc::clone(parts),
@@ -1758,6 +1777,7 @@ impl Clone for LiteralBuffer {
                     f32_values: Arc::clone(f32_values),
                     i64_values: Arc::clone(i64_values),
                     half_values: Arc::clone(half_values),
+                    complex_values: Arc::clone(complex_values),
                 },
             },
         }
@@ -2166,6 +2186,19 @@ fn materialize_concat_half_slices(parts: &[LiteralBufferSlice], len: usize) -> O
     let mut values = Vec::with_capacity(len);
     for part in parts {
         let source = part.buffer.as_half_float_slice()?;
+        let end = part.start.checked_add(part.len)?;
+        values.extend_from_slice(source.get(part.start..end)?);
+    }
+    Some(values)
+}
+
+fn materialize_concat_complex_slices(
+    parts: &[LiteralBufferSlice],
+    len: usize,
+) -> Option<Vec<(f64, f64)>> {
+    let mut values = Vec::with_capacity(len);
+    for part in parts {
+        let source = part.buffer.as_complex_slice()?;
         let end = part.start.checked_add(part.len)?;
         values.extend_from_slice(source.get(part.start..end)?);
     }
@@ -7337,6 +7370,40 @@ mod tests {
                 .as_half_float_slice()
                 .expect("dense half concat"),
             &[0x3c00, 0xbc00, 0x7e00]
+        );
+
+        // Complex concat (FFT/signal pipelines): as_complex_slice materializes the
+        // contiguous (re,im) backing in slice order, and as_slice (the per-Literal
+        // path) yields the identical complex literals — dense path is bit-identical.
+        let complex_concat = LiteralBuffer::from_concat_slices(vec![
+            (
+                LiteralBuffer::from_complex_values(
+                    vec![(1.0, 2.0), (3.0, -4.0)],
+                    DType::Complex128,
+                ),
+                0,
+                2,
+            ),
+            (
+                LiteralBuffer::from_complex_values(vec![(5.0, 6.0)], DType::Complex128),
+                0,
+                1,
+            ),
+        ])
+        .ok_or_else(|| "valid complex concat slices should construct".to_owned())?;
+        assert_eq!(
+            complex_concat
+                .as_complex_slice()
+                .expect("dense complex concat"),
+            &[(1.0, 2.0), (3.0, -4.0), (5.0, 6.0)]
+        );
+        assert_eq!(
+            complex_concat.as_slice(),
+            &[
+                Literal::from_complex128(1.0, 2.0),
+                Literal::from_complex128(3.0, -4.0),
+                Literal::from_complex128(5.0, 6.0),
+            ]
         );
 
         let digest = fj_test_utils::fixture_id_from_json(&(
