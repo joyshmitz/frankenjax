@@ -12952,8 +12952,9 @@ fn tensor_from_f64_values(shape: Shape, values: Vec<f64>) -> Result<Value, AdErr
         .map_err(|e| AdError::EvalFailed(e.to_string()))
 }
 
-/// Exact fast path for `f(x) = square(reduce_sum(g(x)))`, where `g` is a
-/// single-input unary elementwise chain. If `s = sum_i g_i(x_i)`, then
+/// Exact fast path for `f(x) = square(reduce_sum(g(x)))`, including the
+/// equivalent `mul(sum, sum)` spelling, where `g` is a single-input unary
+/// elementwise chain. If `s = sum_i g_i(x_i)`, then
 /// `H_ij = 2 g'_i g'_j + [i == j] 2 s g''_i`.
 fn hessian_square_of_separable_sum(
     jaxpr: &Jaxpr,
@@ -12977,8 +12978,7 @@ fn hessian_square_of_separable_sum(
 
     let final_eq = &jaxpr.equations[jaxpr.equations.len() - 1];
     let reduce_eq = &jaxpr.equations[jaxpr.equations.len() - 2];
-    if final_eq.primitive != Primitive::Square
-        || reduce_eq.primitive != Primitive::ReduceSum
+    if reduce_eq.primitive != Primitive::ReduceSum
         || !final_eq.params.is_empty()
         || !reduce_eq.params.is_empty()
         || !final_eq.effects.is_empty()
@@ -12986,14 +12986,25 @@ fn hessian_square_of_separable_sum(
         || !final_eq.sub_jaxprs.is_empty()
         || !reduce_eq.sub_jaxprs.is_empty()
         || final_eq.outputs.as_slice() != jaxpr.outvars.as_slice()
-        || final_eq.inputs.len() != 1
         || reduce_eq.inputs.len() != 1
         || reduce_eq.outputs.len() != 1
-        || final_eq.inputs[0] != Atom::Var(reduce_eq.outputs[0])
-        || lookup_custom_vjp(Primitive::Square).is_some()
         || lookup_custom_vjp(Primitive::ReduceSum).is_some()
-        || lookup_custom_jvp(Primitive::Square).is_some()
         || lookup_custom_jvp(Primitive::ReduceSum).is_some()
+    {
+        return Ok(None);
+    }
+
+    let sum_var = reduce_eq.outputs[0];
+    let final_matches_square = final_eq.primitive == Primitive::Square
+        && final_eq.inputs.len() == 1
+        && final_eq.inputs[0] == Atom::Var(sum_var);
+    let final_matches_self_mul = final_eq.primitive == Primitive::Mul
+        && final_eq.inputs.len() == 2
+        && final_eq.inputs[0] == Atom::Var(sum_var)
+        && final_eq.inputs[1] == Atom::Var(sum_var);
+    if !(final_matches_square || final_matches_self_mul)
+        || lookup_custom_vjp(final_eq.primitive).is_some()
+        || lookup_custom_jvp(final_eq.primitive).is_some()
     {
         return Ok(None);
     }
@@ -24794,9 +24805,9 @@ mod tests {
     fn hessian_general_parallel_matches_serial_central_difference() {
         use fj_core::{Jaxpr, Shape, TensorValue, VarId};
         use smallvec::smallvec;
-        // NON-separable f(x) = (Σ chain(x_i))². Spell the final square as Mul(sum,sum)
-        // so this test keeps covering the central-difference fallback rather than the
-        // exact square-of-separable-sum fast path. The multi-equation chain pushes the work proxy past
+        // NON-separable f(x) = sum(chain(x)) * (sum(chain(x)) + 0). The extra Add
+        // keeps this test on the central-difference fallback rather than the exact
+        // square/self-mul fast path. The multi-equation chain pushes the work proxy past
         // HESSIAN_PARALLEL_WORK_PER_THREAD so the loop FANS OUT across threads (with
         // input_dim=128 columns on a multi-core host n_threads > 1). Each column is
         // an independent ±ε central difference, so the threaded result must be
@@ -24836,10 +24847,20 @@ mod tests {
             sub_jaxprs: vec![],
             effects: vec![],
         });
+        let shifted_sum = VarId(next);
+        next += 1;
+        equations.push(Equation {
+            primitive: Primitive::Add,
+            inputs: smallvec![Atom::Var(summed), Atom::Lit(Literal::from_f64(0.0))],
+            outputs: smallvec![shifted_sum],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        });
         let out = VarId(next);
         equations.push(Equation {
             primitive: Primitive::Mul,
-            inputs: smallvec![Atom::Var(summed), Atom::Var(summed)],
+            inputs: smallvec![Atom::Var(summed), Atom::Var(shifted_sum)],
             outputs: smallvec![out],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
@@ -24973,6 +24994,54 @@ mod tests {
             sha,
             "8830a0367731e540bba251bcccd2b18d3aa64ac3a9ca96d0696d780de48974c0"
         );
+
+        let self_mul_jaxpr = Jaxpr::new(
+            vec![x],
+            vec![],
+            vec![out],
+            vec![
+                Equation {
+                    primitive: Primitive::Sin,
+                    inputs: smallvec![Atom::Var(x)],
+                    outputs: smallvec![sin_x],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::ReduceSum,
+                    inputs: smallvec![Atom::Var(sin_x)],
+                    outputs: smallvec![summed],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Mul,
+                    inputs: smallvec![Atom::Var(summed), Atom::Var(summed)],
+                    outputs: smallvec![out],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        );
+        let self_mul_hessian = hessian_jaxpr(&self_mul_jaxpr, &args).expect("self-mul hessian");
+        let self_mul_tensor = self_mul_hessian.as_tensor().expect("self-mul tensor");
+        assert_eq!(self_mul_tensor.shape.dims, vec![n as u32, n as u32]);
+        let self_mul_bits: Vec<u64> = self_mul_tensor
+            .to_f64_vec()
+            .expect("self-mul f64")
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(self_mul_bits, bits);
+        let self_mul_sha = fj_test_utils::fixture_id_from_json(&(
+            "frankenjax-hessian-square-separable-sum-exact",
+            &self_mul_bits,
+        ))
+        .expect("self-mul digest");
+        assert_eq!(self_mul_sha, sha);
     }
 
     #[test]
@@ -24981,11 +25050,13 @@ mod tests {
         use fj_core::{Jaxpr, Shape, TensorValue, VarId};
         use smallvec::smallvec;
         use std::time::Instant;
-        // Non-separable, COMPUTE-HEAVY body: a deep chain of transcendental
-        // elementwise ops, then ReduceSum, then Square — (Σ chain(x_i))². The deep
-        // chain makes each grad_jaxpr call expensive enough that the per-column
-        // compute dominates malloc/thread overhead, the regime where fanning the
-        // 2·n independent central-difference grad calls across threads pays off.
+        // COMPUTE-HEAVY body: a deep chain of transcendental elementwise ops,
+        // then ReduceSum, then Mul(sum, sum). This is algebraically the same as
+        // Square(sum) but historically stayed on the central-difference fallback.
+        // The deep chain makes each grad_jaxpr call expensive enough that the
+        // per-column compute dominates malloc/thread overhead, the regime where
+        // fanning the 2·n independent central-difference grad calls across
+        // threads pays off.
         let n = 192usize;
         let chain: &[Primitive] = &[
             Primitive::Sin,
@@ -25027,8 +25098,8 @@ mod tests {
         });
         let out = VarId(next);
         equations.push(Equation {
-            primitive: Primitive::Square,
-            inputs: smallvec![Atom::Var(summed)],
+            primitive: Primitive::Mul,
+            inputs: smallvec![Atom::Var(summed), Atom::Var(summed)],
             outputs: smallvec![out],
             params: BTreeMap::new(),
             sub_jaxprs: vec![],
