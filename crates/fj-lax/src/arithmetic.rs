@@ -392,6 +392,28 @@ pub(crate) fn eval_binary_elementwise(
                 {
                     return Ok(value);
                 }
+                // Dense F32 sibling of the f64 de-box above: f32 binary ops not in the
+                // expensive (threaded) set or the f32 arith binop set (copysign/heaviside/
+                // ldexp/xlog1py/logaddexp2) boxed a Vec<Literal> output via the generic
+                // fallthrough. f32 is JAX's default float dtype. Emit dense f32, promoting
+                // f32->f64, applying float_op, rounding back `as f32` — EXACTLY the generic
+                // f32 contract (from_f32(float_op(a as f64, b as f64) as f32)), so
+                // bit-identical.
+                if lhs.dtype == DType::F32
+                    && rhs.dtype == DType::F32
+                    && let (Some(la), Some(lb)) =
+                        (lhs.elements.as_f32_slice(), rhs.elements.as_f32_slice())
+                {
+                    let out: Vec<f32> = la
+                        .iter()
+                        .zip(lb.iter())
+                        .map(|(&a, &b)| float_op(f64::from(a), f64::from(b)) as f32)
+                        .collect();
+                    return Ok(Value::Tensor(TensorValue::new_f32_values(
+                        lhs.shape.clone(),
+                        out,
+                    )?));
+                }
                 if matches!(lhs.dtype, DType::BF16 | DType::F16)
                     && lhs.dtype == rhs.dtype
                     && let Some(value) = eval_same_shape_half_float_binop(primitive, lhs, rhs)?
@@ -14955,6 +14977,65 @@ mod tests {
                 .map(|(&x, &y)| refop(x, y).to_bits())
                 .collect();
             assert_eq!(got, expect, "{prim:?} dense path != element-wise reference");
+        }
+    }
+
+    #[test]
+    fn dense_f32_binary_path_bit_identical_and_dense_output() {
+        // f32 sibling of the dense-f64 binary de-box: non-arith/non-expensive f32 binary
+        // ops must emit dense f32 output (as_f32_slice Some) and equal the generic f32
+        // contract `from_f32(float_op(a as f64, b as f64) as f32)` bit-for-bit.
+        let n = 4096usize;
+        let a: Vec<f32> = (0..n).map(|i| (i as f32 % 7.0) - 3.0).collect();
+        let b: Vec<f32> = (0..n).map(|i| (i as f32 % 5.0) - 2.0 + 0.25).collect();
+        let mk = |d: &[f32]| {
+            Value::Tensor(
+                TensorValue::new_f32_values(
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    d.to_vec(),
+                )
+                .unwrap(),
+            )
+        };
+        type Ref = fn(f64, f64) -> f64;
+        let cases: [(Primitive, Ref); 3] = [
+            (Primitive::CopySign, |x, y| f64::copysign(x, y)),
+            (Primitive::Heaviside, |x, h0| {
+                if x < 0.0 {
+                    0.0
+                } else if x > 0.0 {
+                    1.0
+                } else {
+                    h0
+                }
+            }),
+            (Primitive::XLog1PY, |x, y| {
+                if x == 0.0 { 0.0 } else { x * y.ln_1p() }
+            }),
+        ];
+        for (prim, refop) in cases {
+            let out = crate::eval_primitive(prim, &[mk(&a), mk(&b)], &BTreeMap::new()).unwrap();
+            let t = out.as_tensor().unwrap();
+            assert_eq!(t.dtype, DType::F32, "{prim:?} should stay f32");
+            assert!(
+                t.elements.as_f32_slice().is_some(),
+                "{prim:?} output should be dense f32 (de-boxed)"
+            );
+            let got: Vec<u32> = t
+                .elements
+                .as_f32_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let expect: Vec<u32> = a
+                .iter()
+                .zip(b.iter())
+                .map(|(&x, &y)| (refop(f64::from(x), f64::from(y)) as f32).to_bits())
+                .collect();
+            assert_eq!(got, expect, "{prim:?} dense f32 path != reference");
         }
     }
 
