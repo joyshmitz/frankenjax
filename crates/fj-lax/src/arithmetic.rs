@@ -2561,14 +2561,35 @@ fn complex_digamma(z: (f64, f64)) -> (f64, f64) {
     result
 }
 
+// Maximum ascending-series terms for the complex modified Bessel functions. The
+// series I0(z) = Σ (z²/4)^k / (k!)² has terms that peak near k ≈ |z|/2 and only
+// then decay, so a fixed low cap with an ABSOLUTE cutoff truncated before the
+// peak for |z| ≳ 40, returning grossly wrong values. The series stays
+// representable until |z| ≈ 709 (where e^{|z|} overflows f64), so the cap must
+// exceed ~2·|z| there; the relative early-exit below terminates far sooner for
+// the common small-|z| inputs. (Verified on the real axis against the Cephes
+// `bessel_i0e_approx`/`bessel_i1e_approx`.)
+const COMPLEX_BESSEL_MAX_TERMS: i64 = 1500;
+
+/// Relative convergence for the ascending series: stop once a term is negligible
+/// against the partial sum. An absolute cutoff is wrong here because, for large
+/// |z|, individual terms are enormous (≈ e^{|z|}) and never fall below an
+/// absolute epsilon until well past the peak. The real-axis series is all
+/// positive (no cancellation), so this is well-conditioned.
+fn complex_series_converged(term: (f64, f64), sum: (f64, f64)) -> bool {
+    let term_mag = term.0.abs() + term.1.abs();
+    let sum_mag = sum.0.abs() + sum.1.abs();
+    term_mag <= 1e-16 * sum_mag
+}
+
 fn complex_bessel_i0e(z: (f64, f64)) -> (f64, f64) {
     let z_sq_4 = complex_mul(complex_mul(z, z), (0.25, 0.0));
     let mut sum = (1.0, 0.0);
     let mut term = (1.0, 0.0);
-    for k in 1..40 {
+    for k in 1..COMPLEX_BESSEL_MAX_TERMS {
         term = complex_div(complex_mul(term, z_sq_4), ((k * k) as f64, 0.0));
         sum = complex_add(sum, term);
-        if term.0.abs() < 1e-15 && term.1.abs() < 1e-15 {
+        if complex_series_converged(term, sum) {
             break;
         }
     }
@@ -2580,10 +2601,10 @@ fn complex_bessel_i1e(z: (f64, f64)) -> (f64, f64) {
     let z_sq_4 = complex_mul(complex_mul(z, z), (0.25, 0.0));
     let mut sum = (1.0, 0.0);
     let mut term = (1.0, 0.0);
-    for k in 1..40 {
+    for k in 1..COMPLEX_BESSEL_MAX_TERMS {
         term = complex_div(complex_mul(term, z_sq_4), ((k * (k + 1)) as f64, 0.0));
         sum = complex_add(sum, term);
-        if term.0.abs() < 1e-15 && term.1.abs() < 1e-15 {
+        if complex_series_converged(term, sum) {
             break;
         }
     }
@@ -20136,6 +20157,38 @@ mod tests {
             (extract_f64(&pos) + extract_f64(&neg)).abs() < 1e-10,
             "I1e(-x) = -I1e(x)"
         );
+    }
+
+    /// On the real axis the complex modified-Bessel path computes the SAME
+    /// function as the real Cephes path, so `complex_bessel_i0e(x, 0)` must equal
+    /// `bessel_i0e_approx(x)` (and likewise for i1e) — a self-consistent oracle
+    /// needing no external reference. The old fixed-40-term/absolute-cutoff series
+    /// truncated before convergence for |x| ≳ 40 and failed this badly; the
+    /// relative-convergence series matches Cephes across the representable range.
+    #[test]
+    fn complex_bessel_matches_real_cephes_on_real_axis() {
+        for &x in &[0.0, 0.5, 1.0, 5.0, 10.0, 25.0, 50.0, 80.0, 120.0, 200.0] {
+            let i0_ref = bessel_i0e_approx(x);
+            let i1_ref = bessel_i1e_approx(x);
+            let i0c = complex_bessel_i0e((x, 0.0));
+            let i1c = complex_bessel_i1e((x, 0.0));
+            // Imaginary part must vanish on the real axis.
+            assert!(i0c.1.abs() < 1e-12, "I0e imag at x={x}: {}", i0c.1);
+            assert!(i1c.1.abs() < 1e-12, "I1e imag at x={x}: {}", i1c.1);
+            // Real part matches Cephes to a tight relative tolerance.
+            let i0_tol = 1e-9 * i0_ref.abs().max(1e-300);
+            let i1_tol = 1e-9 * i1_ref.abs().max(1e-300);
+            assert!(
+                (i0c.0 - i0_ref).abs() <= i0_tol,
+                "I0e at x={x}: complex {} vs cephes {i0_ref}",
+                i0c.0
+            );
+            assert!(
+                (i1c.0 - i1_ref).abs() <= i1_tol,
+                "I1e at x={x}: complex {} vs cephes {i1_ref}",
+                i1c.0
+            );
+        }
     }
 
     // ---- dense u32/u64 elementwise arithmetic (frankenjax-crrx7) ----
