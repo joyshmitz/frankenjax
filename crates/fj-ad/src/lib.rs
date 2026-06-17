@@ -5269,11 +5269,12 @@ pub fn vjp(
                         .iter()
                         .map(|l| l.as_f64().unwrap_or(0.0))
                         .collect();
-                    let g_vals: Vec<f64> = gt
-                        .elements
-                        .iter()
-                        .map(|l| l.as_f64().unwrap_or(0.0))
-                        .collect();
+                    // Carry the cotangent's literals VERBATIM through the inverse
+                    // permutation so the gradient preserves gt's dtype/values exactly
+                    // (f32/bf16/f16/complex/int). The old path extracted g as f64 and
+                    // rebuilt a hardcoded DType::F64 tensor, which widened f32/half sort
+                    // grads to F64 and zeroed complex grads via as_f64().unwrap_or(0.0).
+                    let g_lits: Vec<Literal> = gt.elements.iter().copied().collect();
 
                     let dims: Vec<usize> = xt.shape.dims.iter().map(|&d| d as usize).collect();
                     let mut strides = vec![1usize; rank];
@@ -5286,15 +5287,15 @@ pub fn vjp(
                     }
                     let axis_stride = strides[axis];
                     let total = x_vals.len();
-                    if g_vals.len() != total {
+                    if g_lits.len() != total {
                         return Err(AdError::EvalFailed(format!(
                             "sort VJP gradient size mismatch: expected {total}, got {}",
-                            g_vals.len()
+                            g_lits.len()
                         )));
                     }
                     let outer_count = total / axis_dim;
 
-                    let mut result = vec![0.0_f64; total];
+                    let mut result = vec![zero_literal_for_dtype(xt.dtype); total];
 
                     let descending = params
                         .get("descending")
@@ -5336,17 +5337,13 @@ pub fn vjp(
                         // Averaging tied gradients would break that JVP/VJP duality.
                         for (sorted_pos, &(orig_idx, _)) in indexed.iter().enumerate() {
                             result[base + orig_idx * axis_stride] =
-                                g_vals[base + sorted_pos * axis_stride];
+                                g_lits[base + sorted_pos * axis_stride];
                         }
                     }
 
                     Ok(vec![Value::Tensor(
-                        TensorValue::new(
-                            DType::F64,
-                            xt.shape.clone(),
-                            result.into_iter().map(Literal::from_f64).collect(),
-                        )
-                        .map_err(|e| AdError::EvalFailed(e.to_string()))?,
+                        TensorValue::new(xt.dtype, xt.shape.clone(), result)
+                            .map_err(|e| AdError::EvalFailed(e.to_string()))?,
                     )])
                 }
                 _ => Ok(vec![g.clone()]),
@@ -18978,6 +18975,26 @@ mod tests {
         assert!((result[0] - 30.0).abs() < 1e-10, "got {}", result[0]);
         assert!((result[1] - 10.0).abs() < 1e-10, "got {}", result[1]);
         assert!((result[2] - 20.0).abs() < 1e-10, "got {}", result[2]);
+    }
+
+    #[test]
+    fn sort_vjp_f32_preserves_dtype_and_values() {
+        // Sort VJP must preserve the input dtype (f32) and carry the cotangent
+        // values verbatim through the inverse permutation. Before the fix it emitted
+        // a hardcoded DType::F64 tensor (widening f32 grads). x=[3,1,2] (f32),
+        // g=[10,20,30] -> argsort ascending [1(idx1),2(idx2),3(idx0)] -> grad routes
+        // sorted-pos 0->orig 1, 1->orig 2, 2->orig 0 => [30,10,20].
+        let x = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![3] }, vec![3.0, 1.0, 2.0]).unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![3] }, vec![10.0, 20.0, 30.0]).unwrap(),
+        );
+        let grads = vjp_single(Primitive::Sort, &[x], &g, &BTreeMap::new()).unwrap();
+        let gt = grads[0].as_tensor().unwrap();
+        assert_eq!(gt.dtype, DType::F32, "sort grad must keep f32 input dtype");
+        let r = tensor_f64_values(&grads[0]);
+        assert_eq!(r, vec![30.0, 10.0, 20.0]);
     }
 
     #[test]
