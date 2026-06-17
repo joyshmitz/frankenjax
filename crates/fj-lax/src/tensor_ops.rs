@@ -1066,6 +1066,22 @@ pub(crate) fn eval_broadcast_in_dim(
                     out,
                 )?));
             }
+            if let Some(src) = tensor.elements.as_complex_slice() {
+                let out = broadcast_replicate(
+                    total,
+                    out_rank,
+                    &target_dims,
+                    &out_to_in,
+                    in_dims,
+                    &in_strides,
+                    src,
+                );
+                return Ok(Value::Tensor(TensorValue::new_complex_values(
+                    tensor.dtype,
+                    Shape { dims: target_dims },
+                    out,
+                )?));
+            }
 
             let src = tensor.elements.as_slice();
             let elements = broadcast_replicate(
@@ -3555,6 +3571,10 @@ pub(crate) fn eval_dynamic_slice(
     if let Some(s) = tensor.elements.as_bool_slice() {
         dense_ds!(s, TensorValue::new_bool_values);
     }
+    if let Some(s) = tensor.elements.as_complex_slice() {
+        let dt = tensor.dtype;
+        dense_ds!(s, |sh, o| TensorValue::new_complex_values(dt, sh, o));
+    }
 
     // Literal fallback (boxed/other dtypes): the same gather over Literals.
     if let Some((start_offset, end_offset)) = contig_range {
@@ -3861,6 +3881,13 @@ pub(crate) fn eval_dynamic_update_slice(
         update.elements.as_bool_slice(),
     ) {
         dense_dus!(o, u, TensorValue::new_bool_values);
+    }
+    if let (Some(o), Some(u)) = (
+        operand.elements.as_complex_slice(),
+        update.elements.as_complex_slice(),
+    ) {
+        let dt = operand.dtype;
+        dense_dus!(o, u, |sh, out| TensorValue::new_complex_values(dt, sh, out));
     }
 
     // Literal fallback (boxed/other dtypes): the same copy over Literals.
@@ -11026,6 +11053,10 @@ pub(crate) fn eval_tile(
             if let Some(s) = tensor.elements.as_bool_slice() {
                 dense_tile!(s, TensorValue::new_bool_values);
             }
+            if let Some(s) = tensor.elements.as_complex_slice() {
+                let dt = tensor.dtype;
+                dense_tile!(s, |sh, o| TensorValue::new_complex_values(dt, sh, o));
+            }
 
             let mut result = Vec::with_capacity(new_count as usize);
             tile_recursive(&tensor.elements, &tensor.shape.dims, &reps, 0, &mut result);
@@ -13772,6 +13803,68 @@ mod tests {
                 d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
                 "bool DUS dense"
             );
+
+            // complex (KV-cache of a complex spectrum)
+            let opc: Vec<(f64, f64)> = (0..rows * cols)
+                .map(|i| (i as f64 * 0.5 - 6.0, -(i as f64) * 0.25))
+                .collect();
+            let upc: Vec<(f64, f64)> = (0..usz).map(|i| (1000.0 + i as f64, i as f64)).collect();
+            let dense_op = Value::Tensor(
+                TensorValue::new_complex_values(
+                    DType::Complex128,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opc.clone(),
+                )
+                .unwrap(),
+            );
+            let dense_up = Value::Tensor(
+                TensorValue::new_complex_values(
+                    DType::Complex128,
+                    Shape {
+                        dims: udimsv.clone(),
+                    },
+                    upc.clone(),
+                )
+                .unwrap(),
+            );
+            let box_op = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Complex128,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    LiteralBuffer::new(
+                        opc.iter()
+                            .map(|&(re, im)| Literal::from_complex128(re, im))
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            );
+            let box_up = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Complex128,
+                    Shape {
+                        dims: udimsv.clone(),
+                    },
+                    LiteralBuffer::new(
+                        upc.iter()
+                            .map(|&(re, im)| Literal::from_complex128(re, im))
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            );
+            let d =
+                eval_dynamic_update_slice(&mk_inputs(dense_op, dense_up), &params(&[])).unwrap();
+            let l = eval_dynamic_update_slice(&mk_inputs(box_op, box_up), &params(&[])).unwrap();
+            assert_eq!(lits(&d), lits(&l), "complex DUS {starts:?}");
+            assert!(
+                d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
+                "complex DUS dense"
+            );
         }
     }
 
@@ -14031,6 +14124,41 @@ mod tests {
             assert!(
                 d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
                 "bool DS dense"
+            );
+
+            let opc: Vec<(f64, f64)> = (0..rows * cols)
+                .map(|i| (i as f64 * 0.5 - 3.0, -(i as f64) * 0.125))
+                .collect();
+            let dense = Value::Tensor(
+                TensorValue::new_complex_values(
+                    DType::Complex128,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opc.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Complex128,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    LiteralBuffer::new(
+                        opc.iter()
+                            .map(|&(re, im)| Literal::from_complex128(re, im))
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            );
+            let d = eval_dynamic_slice(&mk_inputs(dense), &p).unwrap();
+            let l = eval_dynamic_slice(&mk_inputs(boxed), &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "complex DS {starts:?}");
+            assert!(
+                d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
+                "complex DS dense"
             );
         }
     }
