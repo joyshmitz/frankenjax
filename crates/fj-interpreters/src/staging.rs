@@ -36,7 +36,6 @@ pub struct StagedProgram {
 #[derive(Debug, Clone)]
 struct StagedProgramCacheEntry {
     jaxpr: Jaxpr,
-    jaxpr_fingerprint: String,
     const_values: Vec<Value>,
     unknowns: Vec<bool>,
     known_values: Vec<Value>,
@@ -191,15 +190,13 @@ fn cached_staged_program(
     unknowns: &[bool],
     known_values: &[Value],
 ) -> Option<StagedProgram> {
-    let fingerprint = jaxpr.canonical_fingerprint();
     STAGED_PROGRAM_CACHE.with(|cache| {
         let cache = cache.borrow();
         let entry = cache.as_ref()?;
-        if entry.jaxpr_fingerprint.as_str() == fingerprint
-            && cached_jaxpr_eq(&entry.jaxpr, jaxpr)
-            && entry.const_values.as_slice() == const_values
+        if entry.const_values.as_slice() == const_values
             && entry.unknowns.as_slice() == unknowns
             && entry.known_values.as_slice() == known_values
+            && cached_jaxpr_eq(&entry.jaxpr, jaxpr)
         {
             Some(entry.staged.clone())
         } else {
@@ -235,7 +232,6 @@ fn remember_staged_program(
 
     let entry = StagedProgramCacheEntry {
         jaxpr: jaxpr.clone(),
-        jaxpr_fingerprint: jaxpr.canonical_fingerprint().to_owned(),
         const_values: const_values.to_vec(),
         unknowns: unknowns.to_vec(),
         known_values: known_values.to_vec(),
