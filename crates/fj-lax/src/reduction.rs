@@ -2380,15 +2380,38 @@ pub(crate) fn eval_reduce_axes(
                     result
                 };
                 let out_dtype = reduce_real_output_dtype(tensor.dtype);
-                let elements: Vec<Literal> = result
-                    .into_iter()
-                    .map(|v| reduce_real_literal(out_dtype, v))
-                    .collect();
-                Ok(Value::Tensor(TensorValue::new(
-                    out_dtype,
-                    Shape { dims: out_dims },
-                    elements,
-                )?))
+                // De-box the dense `Vec<f64> result` directly into dense storage instead
+                // of mapping it through `reduce_real_literal` into a boxed `Vec<Literal>`
+                // (16 B/elem + enum tag, per-element construction). Bit-identical:
+                // reduce_real_literal(F64, v) == F64Bits(v) and (F32, v) == F32Bits(v as
+                // f32), exactly what new_f64_values / new_f32_values store. Keeps the
+                // reduced output on the dense fast path so downstream ops (e.g. softmax's
+                // divide after its sum) avoid re-boxing. BF16/F16 stay on the boxed map
+                // (niche + already decode-dominated).
+                match out_dtype {
+                    DType::F64 => Ok(Value::Tensor(TensorValue::new_f64_values(
+                        Shape { dims: out_dims },
+                        result,
+                    )?)),
+                    DType::F32 => {
+                        let f32s: Vec<f32> = result.iter().map(|&v| v as f32).collect();
+                        Ok(Value::Tensor(TensorValue::new_f32_values(
+                            Shape { dims: out_dims },
+                            f32s,
+                        )?))
+                    }
+                    _ => {
+                        let elements: Vec<Literal> = result
+                            .into_iter()
+                            .map(|v| reduce_real_literal(out_dtype, v))
+                            .collect();
+                        Ok(Value::Tensor(TensorValue::new(
+                            out_dtype,
+                            Shape { dims: out_dims },
+                            elements,
+                        )?))
+                    }
+                }
             }
         }
     }
@@ -3455,6 +3478,71 @@ mod tests {
     use super::*;
     use fj_core::LiteralBuffer;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn axis_reduce_output_is_dense_and_bit_identical() {
+        // The float axis-reduce output must be dense (as_*_slice Some, not boxed Literals)
+        // and byte-identical to the reduce_real_literal reference. De-boxing it is ~14x for
+        // large outputs (the per-element Literal construction + TensorValue::new validation
+        // dominated; A/B [2,2M] sum axis0: boxed 28ms -> dense 2ms).
+        let (f, n) = (3usize, 5usize);
+        let data: Vec<f64> = (0..f * n).map(|i| (i as f64) - 6.0).collect();
+        let params = BTreeMap::from([("axes".to_owned(), "0".to_owned())]);
+        // F64 sum.
+        let va = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![f as u32, n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let out = crate::eval_primitive(Primitive::ReduceSum, &[va], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.dtype, DType::F64);
+        assert!(
+            t.elements.as_f64_slice().is_some(),
+            "f64 reduce output must be dense"
+        );
+        let got = t.elements.as_f64_slice().unwrap();
+        for (j, &g) in got.iter().enumerate() {
+            let expect: f64 = (0..f).map(|r| data[r * n + j]).sum();
+            assert_eq!(g.to_bits(), expect.to_bits(), "f64 reduce[{j}]");
+        }
+        // F32 sum — output stays dense f32, rounded.
+        let vf32 = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![f as u32, n as u32],
+                },
+                data.iter().map(|&v| v as f32).collect(),
+            )
+            .unwrap(),
+        );
+        let out = crate::eval_primitive(Primitive::ReduceSum, &[vf32], &params).unwrap();
+        let t = out.as_tensor().unwrap();
+        assert_eq!(t.dtype, DType::F32);
+        assert!(
+            t.elements.as_f32_slice().is_some(),
+            "f32 reduce output must be dense"
+        );
+        // F64 max — dense path covers all real reducers.
+        let vmax = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![f as u32, n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let out = crate::eval_primitive(Primitive::ReduceMax, &[vmax], &params).unwrap();
+        assert!(
+            out.as_tensor().unwrap().elements.as_f64_slice().is_some(),
+            "f64 max reduce output must be dense"
+        );
+    }
 
     fn s_f64(v: f64) -> Value {
         Value::Scalar(Literal::from_f64(v))
