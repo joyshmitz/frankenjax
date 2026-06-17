@@ -3506,6 +3506,9 @@ pub(crate) fn eval_dynamic_slice(
     if let Some(s) = tensor.elements.as_u64_slice() {
         dense_ds!(s, TensorValue::new_u64_values);
     }
+    if let Some(s) = tensor.elements.as_bool_slice() {
+        dense_ds!(s, TensorValue::new_bool_values);
+    }
 
     // Literal fallback (boxed/other dtypes): the same gather over Literals.
     if let Some((start_offset, end_offset)) = contig_range {
@@ -3806,6 +3809,12 @@ pub(crate) fn eval_dynamic_update_slice(
         update.elements.as_u64_slice(),
     ) {
         dense_dus!(o, u, TensorValue::new_u64_values);
+    }
+    if let (Some(o), Some(u)) = (
+        operand.elements.as_bool_slice(),
+        update.elements.as_bool_slice(),
+    ) {
+        dense_dus!(o, u, TensorValue::new_bool_values);
     }
 
     // Literal fallback (boxed/other dtypes): the same copy over Literals.
@@ -10960,6 +10969,9 @@ pub(crate) fn eval_tile(
             if let Some(s) = tensor.elements.as_u64_slice() {
                 dense_tile!(s, TensorValue::new_u64_values);
             }
+            if let Some(s) = tensor.elements.as_bool_slice() {
+                dense_tile!(s, TensorValue::new_bool_values);
+            }
 
             let mut result = Vec::with_capacity(new_count as usize);
             tile_recursive(&tensor.elements, &tensor.shape.dims, &reps, 0, &mut result);
@@ -13656,6 +13668,56 @@ mod tests {
                 d.as_tensor().unwrap().elements.as_i64_slice().is_some(),
                 "i64 DUS dense"
             );
+
+            // bool
+            let opb: Vec<bool> = (0..rows * cols).map(|i| (i * 2 + 1) % 3 == 0).collect();
+            let upb: Vec<bool> = (0..usz).map(|i| i % 2 == 0).collect();
+            let dense_op = Value::Tensor(
+                TensorValue::new_bool_values(
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opb.clone(),
+                )
+                .unwrap(),
+            );
+            let dense_up = Value::Tensor(
+                TensorValue::new_bool_values(
+                    Shape {
+                        dims: udimsv.clone(),
+                    },
+                    upb.clone(),
+                )
+                .unwrap(),
+            );
+            let box_op = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Bool,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    LiteralBuffer::new(opb.iter().copied().map(Literal::Bool).collect()),
+                )
+                .unwrap(),
+            );
+            let box_up = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Bool,
+                    Shape {
+                        dims: udimsv.clone(),
+                    },
+                    LiteralBuffer::new(upb.iter().copied().map(Literal::Bool).collect()),
+                )
+                .unwrap(),
+            );
+            let d =
+                eval_dynamic_update_slice(&mk_inputs(dense_op, dense_up), &params(&[])).unwrap();
+            let l = eval_dynamic_update_slice(&mk_inputs(box_op, box_up), &params(&[])).unwrap();
+            assert_eq!(lits(&d), lits(&l), "bool DUS {starts:?}");
+            assert!(
+                d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
+                "bool DUS dense"
+            );
         }
     }
 
@@ -13887,6 +13949,34 @@ mod tests {
             assert!(
                 d.as_tensor().unwrap().elements.as_i64_slice().is_some(),
                 "i64 DS dense"
+            );
+
+            let opb: Vec<bool> = (0..rows * cols).map(|i| (i ^ (i >> 2)) & 1 == 0).collect();
+            let dense = Value::Tensor(
+                TensorValue::new_bool_values(
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    opb.clone(),
+                )
+                .unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Bool,
+                    Shape {
+                        dims: odims.clone(),
+                    },
+                    LiteralBuffer::new(opb.iter().copied().map(Literal::Bool).collect()),
+                )
+                .unwrap(),
+            );
+            let d = eval_dynamic_slice(&mk_inputs(dense), &p).unwrap();
+            let l = eval_dynamic_slice(&mk_inputs(boxed), &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "bool DS {starts:?}");
+            assert!(
+                d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
+                "bool DS dense"
             );
         }
     }
@@ -19736,6 +19826,26 @@ mod tests {
             assert!(
                 d.as_tensor().unwrap().elements.as_i64_slice().is_some(),
                 "i64 tile dense"
+            );
+
+            let boold: Vec<bool> = (0..rows * cols).map(|i| (i * 3 + 2) % 5 < 3).collect();
+            let dense = Value::Tensor(
+                TensorValue::new_bool_values(Shape { dims: dims.clone() }, boold.clone()).unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Bool,
+                    Shape { dims: dims.clone() },
+                    LiteralBuffer::new(boold.iter().copied().map(Literal::Bool).collect()),
+                )
+                .unwrap(),
+            );
+            let d = eval_tile(std::slice::from_ref(&dense), &p).unwrap();
+            let l = eval_tile(std::slice::from_ref(&boxed), &p).unwrap();
+            assert_eq!(lits(&d), lits(&l), "bool tile");
+            assert!(
+                d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
+                "bool tile dense"
             );
         }
     }
