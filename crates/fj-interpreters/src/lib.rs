@@ -16127,6 +16127,73 @@ mod tests {
     }
 
     #[test]
+    fn compiled_jaxpr_eval_matches_eager_eval_jaxpr() {
+        // The jit compiled fast path (CompiledJaxpr::eval -> run_dense_plan) must produce
+        // results IDENTICAL to eager eval_jaxpr, which ADDITIONALLY applies special
+        // pre-plan fast paths (scalar i64 add-chain, scalar half arith) that the compiled
+        // path skips. This guards that those fast paths agree with the dense plan — a
+        // divergence would make jit(f) silently != f. Pure internal-consistency invariant,
+        // no JAX oracle needed.
+        let check = |label: &str, jaxpr: &Jaxpr, args: &[Value]| {
+            let eager = eval_jaxpr(jaxpr, args).expect("eager eval");
+            let compiled = super::compile_jaxpr_for_repeated_eval(jaxpr)
+                .expect("program should compile")
+                .eval(args)
+                .expect("compiled eval");
+            assert_eq!(compiled, eager, "{label}: compiled jit != eager eval_jaxpr");
+        };
+
+        // i64 add chain f(x) = (x + x) + x — triggers eager's scalar_i64_add_chain fast
+        // path; the compiled path runs the dense plan instead, so this checks they agree.
+        let add = |a: VarId, b: VarId, out: VarId| Equation {
+            primitive: Primitive::Add,
+            inputs: smallvec![Atom::Var(a), Atom::Var(b)],
+            outputs: smallvec![out],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let chain = Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(3)],
+            vec![add(VarId(1), VarId(1), VarId(2)), add(VarId(2), VarId(1), VarId(3))],
+        );
+        check("i64_add_chain", &chain, &[Value::scalar_i64(7)]);
+        check("i64_add_chain_neg", &chain, &[Value::scalar_i64(-3)]);
+        check("i64_add_chain_overflowy", &chain, &[Value::scalar_i64(i64::MAX - 1)]);
+
+        // scalar f64 / i64 single ops.
+        check(
+            "f64_mul",
+            &make_binary_jaxpr(Primitive::Mul),
+            &[Value::scalar_f64(3.0), Value::scalar_f64(7.0)],
+        );
+        check(
+            "i64_sub",
+            &make_binary_jaxpr(Primitive::Sub),
+            &[Value::scalar_i64(10), Value::scalar_i64(3)],
+        );
+
+        // tensor elementwise add (dense plan path, no special fast path).
+        let t = |v: Vec<f64>| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F64,
+                    Shape { dims: vec![v.len() as u32] },
+                    v.into_iter().map(Literal::from_f64).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        check(
+            "tensor_add",
+            &make_binary_jaxpr(Primitive::Add),
+            &[t(vec![1.0, 2.0, 3.0]), t(vec![10.0, 20.0, 30.0])],
+        );
+    }
+
+    #[test]
     fn eval_neg_scalar() {
         let jaxpr = make_unary_jaxpr(Primitive::Neg);
         let out = eval_jaxpr(&jaxpr, &[Value::scalar_f64(5.0)]).unwrap();
