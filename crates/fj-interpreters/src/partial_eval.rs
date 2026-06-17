@@ -4848,5 +4848,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.shape.dims, vec![2, 2, 2]);
+
+        // det/slogdet of an f32 matrix must stage f32 output avals (validates the
+        // delegate_infer_to_trace path returns the f32-preserving fj-trace inference,
+        // matching eval — the prior hardcoded-F64 inference diverged for f32 inputs).
+        let det = infer_equation_output_avals(&eqn_n(Primitive::Det, 1, &[]), &[av(&[3, 3], DType::F32)])
+            .unwrap();
+        assert_eq!(det.len(), 1);
+        assert_eq!(det[0].dtype, DType::F32);
+        assert_eq!(det[0].shape.dims, Vec::<u32>::new());
+        let sld = infer_equation_output_avals(
+            &eqn_n(Primitive::Slogdet, 2, &[]),
+            &[av(&[3, 3], DType::F32)],
+        )
+        .unwrap();
+        assert_eq!(sld.len(), 2);
+        assert_eq!(sld[0].dtype, DType::F32);
+        assert_eq!(sld[1].dtype, DType::F32);
+        // f64 input still stages f64 (unchanged).
+        let det64 = infer_equation_output_avals(&eqn_n(Primitive::Det, 1, &[]), &[av(&[2, 2], DType::F64)])
+            .unwrap();
+        assert_eq!(det64[0].dtype, DType::F64);
     }
 }
