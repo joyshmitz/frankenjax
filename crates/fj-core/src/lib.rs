@@ -1067,6 +1067,9 @@ enum LiteralBufferStorage {
         i64_values: ConcatLane<i64>,
         half_values: ConcatLane<u16>,
         complex_values: ConcatLane<(f64, f64)>,
+        bool_values: ConcatLane<bool>,
+        u32_values: ConcatLane<u32>,
+        u64_values: ConcatLane<u64>,
     },
 }
 
@@ -1267,6 +1270,9 @@ impl LiteralBuffer {
                 i64_values: Arc::new(OnceLock::new()),
                 half_values: Arc::new(OnceLock::new()),
                 complex_values: Arc::new(OnceLock::new()),
+                bool_values: Arc::new(OnceLock::new()),
+                u32_values: Arc::new(OnceLock::new()),
+                u64_values: Arc::new(OnceLock::new()),
             },
         })
     }
@@ -1403,6 +1409,15 @@ impl LiteralBuffer {
     pub fn as_u32_slice(&self) -> Option<&[u32]> {
         match &self.storage {
             LiteralBufferStorage::U32 { values, .. } => Some(values.as_slice()),
+            LiteralBufferStorage::Concat {
+                parts,
+                len,
+                u32_values,
+                ..
+            } => u32_values
+                .get_or_init(|| materialize_concat_u32_slices(parts, *len).map(Arc::new))
+                .as_deref()
+                .map(Vec::as_slice),
             _ => None,
         }
     }
@@ -1413,6 +1428,15 @@ impl LiteralBuffer {
     pub fn as_u64_slice(&self) -> Option<&[u64]> {
         match &self.storage {
             LiteralBufferStorage::U64 { values, .. } => Some(values.as_slice()),
+            LiteralBufferStorage::Concat {
+                parts,
+                len,
+                u64_values,
+                ..
+            } => u64_values
+                .get_or_init(|| materialize_concat_u64_slices(parts, *len).map(Arc::new))
+                .as_deref()
+                .map(Vec::as_slice),
             _ => None,
         }
     }
@@ -1545,6 +1569,15 @@ impl LiteralBuffer {
     pub fn as_bool_slice(&self) -> Option<&[bool]> {
         match &self.storage {
             LiteralBufferStorage::Bool { values, .. } => Some(values.as_slice()),
+            LiteralBufferStorage::Concat {
+                parts,
+                len,
+                bool_values,
+                ..
+            } => bool_values
+                .get_or_init(|| materialize_concat_bool_slices(parts, *len).map(Arc::new))
+                .as_deref()
+                .map(Vec::as_slice),
             LiteralBufferStorage::Literals(_)
             | LiteralBufferStorage::F64 { .. }
             | LiteralBufferStorage::F64OnePlusXPlusX { .. }
@@ -1555,8 +1588,7 @@ impl LiteralBuffer {
             | LiteralBufferStorage::Complex { .. }
             | LiteralBufferStorage::U32 { .. }
             | LiteralBufferStorage::U64 { .. }
-            | LiteralBufferStorage::RepeatedPatches { .. }
-            | LiteralBufferStorage::Concat { .. } => None,
+            | LiteralBufferStorage::RepeatedPatches { .. } => None,
         }
     }
 
@@ -1768,6 +1800,9 @@ impl Clone for LiteralBuffer {
                 i64_values,
                 half_values,
                 complex_values,
+                bool_values,
+                u32_values,
+                u64_values,
             } => Self {
                 storage: LiteralBufferStorage::Concat {
                     parts: Arc::clone(parts),
@@ -1778,6 +1813,9 @@ impl Clone for LiteralBuffer {
                     i64_values: Arc::clone(i64_values),
                     half_values: Arc::clone(half_values),
                     complex_values: Arc::clone(complex_values),
+                    bool_values: Arc::clone(bool_values),
+                    u32_values: Arc::clone(u32_values),
+                    u64_values: Arc::clone(u64_values),
                 },
             },
         }
@@ -2199,6 +2237,36 @@ fn materialize_concat_complex_slices(
     let mut values = Vec::with_capacity(len);
     for part in parts {
         let source = part.buffer.as_complex_slice()?;
+        let end = part.start.checked_add(part.len)?;
+        values.extend_from_slice(source.get(part.start..end)?);
+    }
+    Some(values)
+}
+
+fn materialize_concat_bool_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<bool>> {
+    let mut values = Vec::with_capacity(len);
+    for part in parts {
+        let source = part.buffer.as_bool_slice()?;
+        let end = part.start.checked_add(part.len)?;
+        values.extend_from_slice(source.get(part.start..end)?);
+    }
+    Some(values)
+}
+
+fn materialize_concat_u32_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<u32>> {
+    let mut values = Vec::with_capacity(len);
+    for part in parts {
+        let source = part.buffer.as_u32_slice()?;
+        let end = part.start.checked_add(part.len)?;
+        values.extend_from_slice(source.get(part.start..end)?);
+    }
+    Some(values)
+}
+
+fn materialize_concat_u64_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<u64>> {
+    let mut values = Vec::with_capacity(len);
+    for part in parts {
+        let source = part.buffer.as_u64_slice()?;
         let end = part.start.checked_add(part.len)?;
         values.extend_from_slice(source.get(part.start..end)?);
     }
@@ -7404,6 +7472,58 @@ mod tests {
                 Literal::from_complex128(3.0, -4.0),
                 Literal::from_complex128(5.0, 6.0),
             ]
+        );
+
+        // bool / u32 / u64 concat: dense accessors materialize in slice order, and
+        // as_slice (per-Literal) yields the identical literals — dense bit-identical.
+        let bool_concat = LiteralBuffer::from_concat_slices(vec![
+            (
+                LiteralBuffer::from_bool_values(vec![true, false, true]),
+                1,
+                2,
+            ),
+            (LiteralBuffer::from_bool_values(vec![false]), 0, 1),
+        ])
+        .ok_or_else(|| "valid bool concat slices should construct".to_owned())?;
+        assert_eq!(
+            bool_concat.as_bool_slice().expect("dense bool concat"),
+            &[false, true, false]
+        );
+        assert_eq!(
+            bool_concat.as_slice(),
+            &[
+                Literal::Bool(false),
+                Literal::Bool(true),
+                Literal::Bool(false)
+            ]
+        );
+
+        let u32_concat = LiteralBuffer::from_concat_slices(vec![
+            (LiteralBuffer::from_u32_values(vec![10, 20, 30]), 0, 2),
+            (LiteralBuffer::from_u32_values(vec![40]), 0, 1),
+        ])
+        .ok_or_else(|| "valid u32 concat slices should construct".to_owned())?;
+        assert_eq!(
+            u32_concat.as_u32_slice().expect("dense u32 concat"),
+            &[10, 20, 40]
+        );
+        assert_eq!(
+            u32_concat.as_slice(),
+            &[Literal::U32(10), Literal::U32(20), Literal::U32(40)]
+        );
+
+        let u64_concat = LiteralBuffer::from_concat_slices(vec![
+            (LiteralBuffer::from_u64_values(vec![100, 200]), 1, 1),
+            (LiteralBuffer::from_u64_values(vec![300, 400]), 0, 2),
+        ])
+        .ok_or_else(|| "valid u64 concat slices should construct".to_owned())?;
+        assert_eq!(
+            u64_concat.as_u64_slice().expect("dense u64 concat"),
+            &[200, 300, 400]
+        );
+        assert_eq!(
+            u64_concat.as_slice(),
+            &[Literal::U64(200), Literal::U64(300), Literal::U64(400)]
         );
 
         let digest = fj_test_utils::fixture_id_from_json(&(
