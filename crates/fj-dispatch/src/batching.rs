@@ -14853,6 +14853,105 @@ mod tests {
     }
 
     #[test]
+    fn batch_axis_rules_match_per_slice_across_axes() {
+        // vmap-vs-loop guard for the axis-shifting batch rules (reduce / cumulative /
+        // transpose), extending the argmax/argmin sweep
+        // (batch_argmax_argmin_matches_per_slice_fallback) to the rest of the
+        // historically-buggy axis-param vmap family (see project_vmap_param_key_mismatch:
+        // a batch rule that shifts the wrong param key the eval never reads silently
+        // operates on the batch axis). The single-call fast path must be element-identical
+        // to batch_passthrough_leading (the per-slice eval+stack — the definition of vmap)
+        // across axis forms (positive / negative) and batch positions (front / mid).
+        // I64 data so reduce/cumsum/cumprod are order-independent (associative) and the
+        // comparison is bit-exact regardless of the fast vs per-slice traversal order.
+        let data: Vec<i64> = (0..24).map(|i| (i * 7 + 3) % 11 - 5).collect();
+        // logical [B=3, R=2, C=4]; bd==0 keeps it, bd==1 stores physically as [R, B, C].
+        let make = |bd: usize| -> BatchTracer {
+            let (b, r, c) = (3usize, 2usize, 4usize);
+            if bd == 0 {
+                let t = TensorValue::new(
+                    DType::I64,
+                    Shape { dims: vec![3, 2, 4] },
+                    data.iter().copied().map(Literal::I64).collect(),
+                )
+                .unwrap();
+                BatchTracer::batched(Value::Tensor(t), 0)
+            } else {
+                let mut out = vec![0i64; b * r * c];
+                for bi in 0..b {
+                    for ri in 0..r {
+                        for ci in 0..c {
+                            out[(ri * b + bi) * c + ci] = data[(bi * r + ri) * c + ci];
+                        }
+                    }
+                }
+                let t = TensorValue::new(
+                    DType::I64,
+                    Shape { dims: vec![r as u32, b as u32, c as u32] },
+                    out.into_iter().map(Literal::I64).collect(),
+                )
+                .unwrap();
+                BatchTracer::batched(Value::Tensor(t), 1)
+            }
+        };
+        let extract = |t: &BatchTracer| -> (Option<usize>, Vec<u32>, Vec<i64>) {
+            let tensor = t.value.as_tensor().unwrap();
+            (
+                t.batch_dim,
+                tensor.shape.dims.clone(),
+                tensor
+                    .elements
+                    .iter()
+                    .map(|l| match l {
+                        Literal::I64(v) => *v,
+                        other => panic!("expected I64, got {other:?}"),
+                    })
+                    .collect(),
+            )
+        };
+
+        for bd in [0usize, 1] {
+            for ax in ["0", "1", "-1"] {
+                for &prim in &[
+                    Primitive::ReduceSum,
+                    Primitive::ReduceMax,
+                    Primitive::ReduceMin,
+                    Primitive::ReduceProd,
+                ] {
+                    let params = BTreeMap::from([("axes".to_owned(), ax.to_owned())]);
+                    let fast = batch_reduce(prim, &[make(bd)], &params).unwrap();
+                    let slow = batch_passthrough_leading(prim, &[make(bd)], &params).unwrap();
+                    assert_eq!(
+                        extract(&fast),
+                        extract(&slow),
+                        "{prim:?} bd={bd} axes={ax}: single-call != per-slice"
+                    );
+                }
+                for &prim in &[Primitive::Cumsum, Primitive::Cumprod] {
+                    let params = BTreeMap::from([("axis".to_owned(), ax.to_owned())]);
+                    let fast = batch_cumulative(prim, &[make(bd)], &params).unwrap();
+                    let slow = batch_passthrough_leading(prim, &[make(bd)], &params).unwrap();
+                    assert_eq!(
+                        extract(&fast),
+                        extract(&slow),
+                        "{prim:?} bd={bd} axis={ax}: single-call != per-slice"
+                    );
+                }
+            }
+            // transpose: swap the two per-element axes (R<->C).
+            let params = BTreeMap::from([("permutation".to_owned(), "1,0".to_owned())]);
+            let fast = batch_transpose(&[make(bd)], &params).unwrap();
+            let slow =
+                batch_passthrough_leading(Primitive::Transpose, &[make(bd)], &params).unwrap();
+            assert_eq!(
+                extract(&fast),
+                extract(&slow),
+                "transpose bd={bd} perm=1,0: single-call != per-slice"
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_batch_argmax_single_call_vs_per_slice() {
         use std::time::Instant;
