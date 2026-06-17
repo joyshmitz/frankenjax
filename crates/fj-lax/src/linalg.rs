@@ -11068,6 +11068,44 @@ mod tests {
     }
 
     #[test]
+    fn eval_qr_svd_preserve_f32_dtype() {
+        // QR (Q,R) and SVD (U,S,Vt) of an f32 matrix must return f32 outputs (JAX:
+        // f32 in -> f32 out). Completes the f32 linalg-forward family dtype coverage
+        // (solve/cholesky/det/slogdet already pinned).
+        let mk = || {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape { dims: vec![3, 2] },
+                    [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+                        .iter()
+                        .map(|&v| Literal::from_f32(v))
+                        .collect(),
+                )
+                .unwrap(),
+            )
+        };
+        for (label, out) in [
+            ("qr", eval_qr(&[mk()], &BTreeMap::new()).expect("qr")),
+            ("svd", eval_svd(&[mk()], &BTreeMap::new()).expect("svd")),
+        ] {
+            for (i, v) in out.iter().enumerate() {
+                if let Value::Tensor(t) = v {
+                    assert_eq!(
+                        t.dtype,
+                        DType::F32,
+                        "{label} output[{i}] must preserve f32, got {:?}",
+                        t.dtype
+                    );
+                    t.validate_dtype_consistency().unwrap_or_else(|e| {
+                        panic!("{label} output[{i}] dtype/literal mismatch: {e:?}")
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
     fn eval_det_slogdet_preserve_f32_dtype() {
         // det/slogdet of an f32 matrix must return f32 scalars (JAX: f32 in -> f32 out).
         // The real paths previously hardcoded Value::scalar_f64, widening f32 -> f64.
