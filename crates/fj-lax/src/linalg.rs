@@ -11019,6 +11019,47 @@ mod tests {
     }
 
     #[test]
+    fn eval_cholesky_preserves_f32_dtype() {
+        // Cholesky factors in f64 internally but must emit the input's dtype.
+        // SPD f32 A = [[4,2],[2,3]] -> L = [[2,0],[1,sqrt(2)]]. Pin dtype-consistent F32
+        // (regression guard for the f32 linalg-forward family — matrix_to_value +
+        // linalg_literal_from_f64).
+        let a = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: vec![2, 2] },
+                vec![
+                    Literal::from_f32(4.0),
+                    Literal::from_f32(2.0),
+                    Literal::from_f32(2.0),
+                    Literal::from_f32(3.0),
+                ],
+            )
+            .unwrap(),
+        );
+        let out = eval_cholesky(&[a], &BTreeMap::new()).expect("cholesky");
+        match out {
+            Value::Tensor(t) => {
+                assert_eq!(t.dtype, DType::F32, "cholesky must preserve F32, not widen");
+                t.validate_dtype_consistency()
+                    .expect("declared dtype must match element literal kinds");
+                let l: Vec<f32> = t
+                    .elements
+                    .iter()
+                    .map(|x| match x {
+                        Literal::F32Bits(b) => f32::from_bits(*b),
+                        other => panic!("element not F32: {other:?}"),
+                    })
+                    .collect();
+                assert!((l[0] - 2.0).abs() < 1e-5, "L00={}", l[0]);
+                assert!((l[2] - 1.0).abs() < 1e-5, "L10={}", l[2]);
+                assert!((l[3] - std::f32::consts::SQRT_2).abs() < 1e-5, "L11={}", l[3]);
+            }
+            other => panic!("expected tensor, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn eval_solve_complex_vector_matches_closed_form() {
         // A = diag(1+i, 1+i), b = (2, 4). Since (1+i)(1−i)=2, the solution is
         // x = (1−i, 2−2i). Complex solve must now compute it (jnp.linalg.solve
