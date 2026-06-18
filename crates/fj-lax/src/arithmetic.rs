@@ -130,6 +130,7 @@ fn is_expensive_complex_binary(primitive: Primitive) -> bool {
             | Primitive::Atan2
             | Primitive::LogAddExp
             | Primitive::LogAddExp2
+            | Primitive::XLog1PY
             | Primitive::XLogY
     )
 }
@@ -2239,6 +2240,13 @@ fn apply_complex_binary(
                 Ok(complex_mul(lhs, complex_log(rhs)))
             }
         }
+        Primitive::XLog1PY => {
+            if ar == 0.0 && ai == 0.0 {
+                Ok((0.0, 0.0))
+            } else {
+                Ok(complex_mul(lhs, complex_log(complex_add((1.0, 0.0), rhs))))
+            }
+        }
         Primitive::LogAddExp => {
             let exp_lhs = complex_exp(lhs);
             let exp_rhs = complex_exp(rhs);
@@ -2949,6 +2957,7 @@ fn eval_binary_elementwise_complex(
         | Primitive::Min
         | Primitive::Pow
         | Primitive::XLogY
+        | Primitive::XLog1PY
         | Primitive::LogAddExp
         | Primitive::LogAddExp2 => {}
         _ => {
@@ -2976,7 +2985,7 @@ fn eval_binary_elementwise_complex(
                 }
 
                 // Threaded dense fast path for the EXPENSIVE complex binary ops
-                // (Pow/XLogY/LogAddExp/LogAddExp2 — each several complex transcendentals
+                // (Pow/XLogY/XLog1PY/LogAddExp/LogAddExp2 — each several complex transcendentals
                 // per element). `apply_complex_binary` is infallible for these, and
                 // the packed values + dtype narrowing match the serial path, so this
                 // is bit-for-bit identical.

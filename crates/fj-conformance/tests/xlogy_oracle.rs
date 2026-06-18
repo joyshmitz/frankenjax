@@ -579,6 +579,34 @@ fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
     )
 }
 
+fn extract_complex_vec(v: &Value) -> Vec<(f64, f64)> {
+    let tensor = v.as_tensor().expect("expected tensor result");
+    tensor
+        .elements
+        .iter()
+        .map(|literal| match *literal {
+            Literal::Complex64Bits(re, im) => (f32::from_bits(re) as f64, f32::from_bits(im) as f64),
+            Literal::Complex128Bits(re, im) => (f64::from_bits(re), f64::from_bits(im)),
+            other => panic!("expected complex literal, got {other:?}"),
+        })
+        .collect()
+}
+
+fn assert_complex_close(actual: (f64, f64), expected: (f64, f64), tol: f64, label: &str) {
+    assert!(
+        (actual.0 - expected.0).abs() <= tol,
+        "{label} real: expected {}, got {}",
+        expected.0,
+        actual.0
+    );
+    assert!(
+        (actual.1 - expected.1).abs() <= tol,
+        "{label} imag: expected {}, got {}",
+        expected.1,
+        actual.1
+    );
+}
+
 #[test]
 
 fn oracle_xlogy_complex64_basic() {
@@ -619,4 +647,39 @@ fn property_xlogy_preserves_complex_dtypes() {
             .expect("xlogy should succeed for complex dtype");
         assert_eq!(result.dtype(), dtype, "xlogy {dtype:?}: dtype mismatch");
     }
+}
+
+#[test]
+fn oracle_xlog1py_complex64_basic_and_zero_mask() {
+    let x = make_complex64_tensor(&[2], vec![(1.0, 0.0), (0.0, 0.0)]);
+    let y = make_complex64_tensor(&[2], vec![(0.0, 1.0), (-1.0, 0.0)]);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params())
+        .expect("xlog1py complex64 should succeed");
+
+    assert_eq!(result.dtype(), DType::Complex64);
+    let actual = extract_complex_vec(&result);
+    assert_complex_close(
+        actual[0],
+        (0.5 * 2.0_f64.ln(), std::f64::consts::FRAC_PI_4),
+        1e-6,
+        "complex64 xlog1py(1, i)",
+    );
+    assert_complex_close(actual[1], (0.0, 0.0), 1e-6, "complex64 xlog1py(0, -1)");
+}
+
+#[test]
+fn oracle_xlog1py_complex128_basic() {
+    let x = make_complex128_tensor(&[1], vec![(2.0, 0.0)]);
+    let y = make_complex128_tensor(&[1], vec![(0.0, 1.0)]);
+    let result = eval_primitive(Primitive::XLog1PY, &[x, y], &no_params())
+        .expect("xlog1py complex128 should succeed");
+
+    assert_eq!(result.dtype(), DType::Complex128);
+    let actual = extract_complex_vec(&result);
+    assert_complex_close(
+        actual[0],
+        (2.0_f64.ln(), std::f64::consts::FRAC_PI_2),
+        1e-14,
+        "complex128 xlog1py(2, i)",
+    );
 }
