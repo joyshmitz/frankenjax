@@ -1648,20 +1648,34 @@ fn infer_equation_output_aval(
             let shape = if rank == 0 {
                 Shape::scalar()
             } else {
-                let raw_axis: i64 = eqn
-                    .params
-                    .get("axis")
-                    .and_then(|s| s.trim().parse::<i64>().ok())
-                    .unwrap_or(rank - 1);
-                let norm = if raw_axis < 0 {
-                    raw_axis + rank
-                } else {
-                    raw_axis
+                // fj-trace strict-parses the axis and rejects out-of-range; the old
+                // fallback defaulted a bad token to the last axis and SILENTLY KEPT the
+                // input shape on an out-of-range axis (no reduction, no error). Fail
+                // closed; a missing axis still defaults to the last axis.
+                let norm = match eqn.params.get("axis") {
+                    Some(s) => {
+                        let raw: i64 =
+                            s.trim()
+                                .parse()
+                                .map_err(|_| PartialEvalError::ShapeInference {
+                                    primitive: eqn.primitive,
+                                    detail: format!("invalid argmax/argmin axis: '{s}'"),
+                                })?;
+                        let n = if raw < 0 { raw + rank } else { raw };
+                        if n < 0 || n >= rank {
+                            return Err(PartialEvalError::ShapeInference {
+                                primitive: eqn.primitive,
+                                detail: format!(
+                                    "argmax/argmin axis {raw} out of range for rank {rank}"
+                                ),
+                            });
+                        }
+                        n
+                    }
+                    None => rank - 1,
                 };
                 let mut dims = first_input.shape.dims.clone();
-                if norm >= 0 && (norm as usize) < dims.len() {
-                    dims.remove(norm as usize);
-                }
+                dims.remove(norm as usize);
                 Shape { dims }
             };
             AbstractValue {
@@ -5814,6 +5828,20 @@ mod tests {
                 &[("reps", "2,bad")][..],
                 av(&[2, 3], DType::F64),
                 "invalid tile reps token",
+            ),
+            (
+                Primitive::Argmax,
+                "argmax out-of-range axis",
+                &[("axis", "5")][..],
+                av(&[4, 3], DType::F64),
+                "out of range",
+            ),
+            (
+                Primitive::Argmin,
+                "argmin bad axis token",
+                &[("axis", "bad")][..],
+                av(&[4, 3], DType::F64),
+                "invalid argmax/argmin axis",
             ),
         ] {
             match infer_equation_output_aval(&eqn(prim, params), &input).unwrap_err() {
