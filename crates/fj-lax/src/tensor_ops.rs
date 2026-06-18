@@ -2089,17 +2089,51 @@ fn slice_strided_gather<T: Copy>(
     slice_strides: &[usize],
     in_strides: &[usize],
     out_dims: &[u32],
+    in_dims: &[u32],
 ) -> Vec<T> {
-    let mut out = Vec::with_capacity(total);
-    let mut out_coords = vec![0_usize; rank];
-    for _ in 0..total {
-        let mut in_flat = 0_usize;
-        for ax in 0..rank {
-            let coord = starts[ax] + out_coords[ax] * slice_strides[ax];
-            in_flat += coord * in_strides[ax];
+    // Identify the largest trailing block of output axes that copies a CONTIGUOUS
+    // run of the source verbatim. Scanning from the innermost axis: an axis joins
+    // the block iff its slice stride is 1, and every axis already INSIDE the block
+    // fully spans its input dim (out_dim==in_dim) — the outermost block axis may be
+    // cropped. Under those conditions consecutive output positions along the block
+    // map to consecutive source indices, so the block is `src[base..base+block_len]`
+    // for a base offset fixed by the outer axes plus the block's own start offsets.
+    // Replicate it via extend_from_slice (memcpy) and decode only the outer axes.
+    // Common: contiguous crops (1D/2D image crop, unit-stride windows). Bit-identical
+    // — same src flat indices, same row-major order. Strict generalization: block_len
+    // ==1 (e.g. a strided innermost axis) reproduces the per-element loop.
+    let mut block_len = 1_usize;
+    let mut block_start = rank;
+    for ax in (0..rank).rev() {
+        if slice_strides[ax] != 1 {
+            break;
         }
-        out.push(src[in_flat]);
-        for ax in (0..rank).rev() {
+        // To extend across this axis, the axis immediately inside the block (the one
+        // added last) must fully span its input — otherwise rows are not adjacent.
+        if block_start < rank && out_dims[block_start] as usize != in_dims[block_start] as usize {
+            break;
+        }
+        block_len *= out_dims[ax] as usize;
+        block_start = ax;
+    }
+
+    // Constant source offset contributed by the block axes' slice starts (inner
+    // full-span axes have start 0; the outermost block axis may have a nonzero start).
+    let block_base: usize = (block_start..rank)
+        .map(|ax| starts[ax] * in_strides[ax])
+        .sum();
+
+    let mut out = Vec::with_capacity(total);
+    let outer_total = total / block_len.max(1);
+    let mut out_coords = vec![0_usize; block_start];
+    for _ in 0..outer_total {
+        let mut base = block_base;
+        for ax in 0..block_start {
+            let coord = starts[ax] + out_coords[ax] * slice_strides[ax];
+            base += coord * in_strides[ax];
+        }
+        out.extend_from_slice(&src[base..base + block_len]);
+        for ax in (0..block_start).rev() {
             out_coords[ax] += 1;
             if out_coords[ax] < out_dims[ax] as usize {
                 break;
@@ -2309,6 +2343,7 @@ pub(crate) fn eval_slice(
                         &slice_strides,
                         &in_strides,
                         &out_dims,
+                        in_dims,
                     );
                     return Ok(Value::Tensor($ctor(Shape { dims: out_dims }, out)?));
                 }};
@@ -2353,6 +2388,7 @@ pub(crate) fn eval_slice(
                 &slice_strides,
                 &in_strides,
                 &out_dims,
+                in_dims,
             );
             Ok(Value::Tensor(TensorValue::new(
                 tensor.dtype,
