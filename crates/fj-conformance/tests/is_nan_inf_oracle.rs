@@ -27,6 +27,19 @@ fn make_f64_tensor(shape: &[u32], data: Vec<f64>) -> Value {
     )
 }
 
+fn make_f32_bits_tensor(shape: &[u32], bits: Vec<u32>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            bits.into_iter().map(Literal::F32Bits).collect(),
+        )
+        .unwrap(),
+    )
+}
+
 fn extract_bool_literal(literal: &Literal) -> bool {
     match literal {
         Literal::Bool(value) => *value,
@@ -271,6 +284,38 @@ fn oracle_isinf_subnormal() {
     let input = make_f64_tensor(&[2], vec![tiny, -tiny]);
     let result = eval_primitive(Primitive::IsInf, &[input], &no_params()).unwrap();
     assert_eq!(extract_bool_vec(&result), vec![false, false]);
+}
+
+#[test]
+fn oracle_isnan_isinf_f32_truth_table() {
+    let input = make_f32_bits_tensor(
+        &[8],
+        vec![
+            0.0_f32.to_bits(),
+            (-0.0_f32).to_bits(),
+            1.5_f32.to_bits(),
+            1,
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits(),
+            0x7fc0_0001,
+            0xffc0_0001,
+        ],
+    );
+
+    let isnan_result =
+        eval_primitive(Primitive::IsNan, &[input.clone()], &no_params()).unwrap();
+    assert_eq!(extract_shape(&isnan_result), vec![8]);
+    assert_eq!(
+        extract_bool_vec(&isnan_result),
+        vec![false, false, false, false, false, false, true, true]
+    );
+
+    let isinf_result = eval_primitive(Primitive::IsInf, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&isinf_result), vec![8]);
+    assert_eq!(
+        extract_bool_vec(&isinf_result),
+        vec![false, false, false, false, true, true, false, false]
+    );
 }
 
 // ======================== PROPERTY: isnan/isinf always return Bool ========================
