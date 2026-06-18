@@ -2718,34 +2718,38 @@ fn infer_dot_general(
     let lhs = &inputs[0];
     let rhs = &inputs[1];
 
-    fn parse_dims_str(s: &str) -> Vec<usize> {
+    // Strict-parse the dimension_numbers: the previous filter_map silently dropped
+    // malformed tokens (e.g. "0,bad" -> [0]), inferring a wrong matmul shape instead of
+    // failing closed. Valid dimension_numbers parse identically.
+    fn parse_dims_str(primitive: Primitive, key: &str, s: &str) -> Result<Vec<usize>, TraceError> {
         if s.is_empty() || s == "[]" {
-            vec![]
+            Ok(vec![])
         } else {
             s.trim_matches(|c| c == '[' || c == ']')
                 .split(',')
                 .filter(|s| !s.trim().is_empty())
-                .filter_map(|x| x.trim().parse::<usize>().ok())
+                .map(|x| {
+                    x.trim()
+                        .parse::<usize>()
+                        .map_err(|_| TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: format!("invalid {key} token: '{}'", x.trim()),
+                        })
+                })
                 .collect()
         }
     }
 
-    let lhs_contracting = params
-        .get("lhs_contracting_dims")
-        .map(|s| parse_dims_str(s))
-        .unwrap_or_default();
-    let rhs_contracting = params
-        .get("rhs_contracting_dims")
-        .map(|s| parse_dims_str(s))
-        .unwrap_or_default();
-    let lhs_batch = params
-        .get("lhs_batch_dims")
-        .map(|s| parse_dims_str(s))
-        .unwrap_or_default();
-    let rhs_batch = params
-        .get("rhs_batch_dims")
-        .map(|s| parse_dims_str(s))
-        .unwrap_or_default();
+    let parse_key = |key: &str| -> Result<Vec<usize>, TraceError> {
+        match params.get(key) {
+            Some(s) => parse_dims_str(primitive, key, s),
+            None => Ok(vec![]),
+        }
+    };
+    let lhs_contracting = parse_key("lhs_contracting_dims")?;
+    let rhs_contracting = parse_key("rhs_contracting_dims")?;
+    let lhs_batch = parse_key("lhs_batch_dims")?;
+    let rhs_batch = parse_key("rhs_batch_dims")?;
 
     let mut out_dims = Vec::new();
     for &b in &lhs_batch {

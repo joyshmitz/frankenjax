@@ -10150,12 +10150,22 @@ pub(crate) fn eval_dot(inputs: &[Value]) -> Result<Value, EvalError> {
     }
 }
 
-fn parse_dim_list(s: &str) -> Vec<usize> {
+// Strict: malformed dimension_numbers tokens were silently dropped by the old filter_map
+// (e.g. "0,bad" -> [0]), computing a wrong contraction instead of failing closed. Valid
+// dimension lists parse identically.
+fn parse_dim_list(primitive: Primitive, key: &str, s: &str) -> Result<Vec<usize>, EvalError> {
     if s.trim().is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     s.split(',')
-        .filter_map(|x| x.trim().parse::<usize>().ok())
+        .map(|x| {
+            x.trim()
+                .parse::<usize>()
+                .map_err(|_| EvalError::Unsupported {
+                    primitive,
+                    detail: format!("invalid {key} token: '{}'", x.trim()),
+                })
+        })
         .collect()
 }
 
@@ -10172,10 +10182,26 @@ pub(crate) fn eval_dot_general(
         });
     }
 
-    let lhs_contracting = parse_dim_list(params.get("lhs_contracting_dims").map_or("", |s| s));
-    let rhs_contracting = parse_dim_list(params.get("rhs_contracting_dims").map_or("", |s| s));
-    let lhs_batch = parse_dim_list(params.get("lhs_batch_dims").map_or("", |s| s));
-    let rhs_batch = parse_dim_list(params.get("rhs_batch_dims").map_or("", |s| s));
+    let lhs_contracting = parse_dim_list(
+        primitive,
+        "lhs_contracting_dims",
+        params.get("lhs_contracting_dims").map_or("", |s| s),
+    )?;
+    let rhs_contracting = parse_dim_list(
+        primitive,
+        "rhs_contracting_dims",
+        params.get("rhs_contracting_dims").map_or("", |s| s),
+    )?;
+    let lhs_batch = parse_dim_list(
+        primitive,
+        "lhs_batch_dims",
+        params.get("lhs_batch_dims").map_or("", |s| s),
+    )?;
+    let rhs_batch = parse_dim_list(
+        primitive,
+        "rhs_batch_dims",
+        params.get("rhs_batch_dims").map_or("", |s| s),
+    )?;
 
     if lhs_contracting.len() != rhs_contracting.len() {
         return Err(EvalError::Unsupported {
