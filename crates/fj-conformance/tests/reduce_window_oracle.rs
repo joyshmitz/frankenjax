@@ -309,6 +309,29 @@ fn oracle_reduce_window_1d_max_window_dilation_atrous() {
 }
 
 #[test]
+fn oracle_reduce_window_1d_sum_base_dilation() {
+    // base_dilation (input/operand dilation) inserts (db-1) identity-valued holes
+    // between input elements before windowing. For SUM the identity is 0, so
+    // [1,2,3] with base_dilation=2 dilates to [1,0,2,0,3], then a window=2/stride=1
+    // valid sum gives [1+0, 0+2, 2+0, 0+3] = [1,2,2,3]. Supported in the impl
+    // (holes skipped at lib.rs:5780) but untested at the conformance/parity layer.
+    let input = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let mut params = sum_window("2", "1", "valid");
+    params.insert("base_dilation".to_string(), "2".to_string());
+    let result = eval_primitive(Primitive::ReduceWindow, &[input], &params).unwrap();
+    assert_eq!(
+        extract_shape(&result),
+        vec![4],
+        "dilated base length 5, window 2 -> output length 4"
+    );
+    let vals = extract_f64_vec(&result);
+    assert!((vals[0] - 1.0).abs() < 1e-10, "1+0 = 1");
+    assert!((vals[1] - 2.0).abs() < 1e-10, "0+2 = 2");
+    assert!((vals[2] - 2.0).abs() < 1e-10, "2+0 = 2");
+    assert!((vals[3] - 3.0).abs() < 1e-10, "0+3 = 3");
+}
+
+#[test]
 fn oracle_reduce_window_1d_max_stride2() {
     // input=[1,3,2,5,4,6], window=2, stride=2, valid
     // output = [max(1,3), max(2,5), max(4,6)] = [3, 5, 6]
