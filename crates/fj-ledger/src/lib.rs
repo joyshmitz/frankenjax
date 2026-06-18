@@ -167,7 +167,9 @@ impl ConformalPredictor {
     }
 
     pub fn observe(&mut self, score: f64) {
-        self.calibration_scores.push(score);
+        if score.is_finite() {
+            self.calibration_scores.push(score);
+        }
     }
 
     #[must_use]
@@ -455,6 +457,28 @@ mod tests {
         let estimate = cp.calibrated_posterior(0.5);
         assert!(estimate.used_conformal);
         assert!((estimate.coverage - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn conformal_predictor_ignores_non_finite_scores() {
+        let mut cp = super::ConformalPredictor::new(0.8, 3);
+        cp.observe(f64::NAN);
+        cp.observe(f64::INFINITY);
+        cp.observe(f64::NEG_INFINITY);
+        assert_eq!(cp.calibration_size(), 0);
+        assert!(!cp.is_calibrated());
+
+        cp.observe(0.1);
+        cp.observe(0.2);
+        cp.observe(0.3);
+        assert!(cp.is_calibrated());
+        let threshold = cp.prediction_threshold().expect("finite scores calibrate");
+        assert!(threshold.is_finite());
+
+        let estimate = cp.calibrated_posterior(0.5);
+        assert!(estimate.used_conformal);
+        assert!(estimate.lower.is_finite());
+        assert!(estimate.upper.is_finite());
     }
 
     #[test]
