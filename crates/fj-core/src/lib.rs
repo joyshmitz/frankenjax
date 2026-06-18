@@ -1787,7 +1787,7 @@ impl LiteralBuffer {
                 | LiteralBufferStorage::RepeatedPatches { .. }
                 | LiteralBufferStorage::Concat { .. }
         ) {
-            let elements = self.as_slice().to_vec();
+            let elements = self.to_vec();
             self.storage = LiteralBufferStorage::Literals(Arc::new(elements));
         }
 
@@ -9117,6 +9117,98 @@ mod tests {
                 (LiteralBuffer::new(vec![Literal::from_f64(4.0)]), 0, 1),
             ])
             .expect("valid concat slices"),
+        );
+    }
+
+    #[test]
+    fn literal_buffer_make_mut_direct_paths_preserve_cow_sequences() {
+        fn assert_index_mut_matches_literal(mut buffer: LiteralBuffer, replacement: Literal) {
+            let before = buffer.to_vec();
+            let original = buffer.clone();
+            let mut literal = LiteralBuffer::new(before.clone());
+
+            buffer[0] = replacement.clone();
+            literal[0] = replacement;
+
+            assert_eq!(original.to_vec(), before);
+            assert_eq!(buffer.to_vec(), literal.to_vec());
+        }
+
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_f64_values(vec![1.0, -0.0, f64::from_bits(0x7ff8_0000_0000_0042)]),
+            Literal::from_f64(9.0),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_f64_one_plus_x_plus_x(std::sync::Arc::new(vec![0.25, -0.5])),
+            Literal::from_f64(8.0),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_f32_values(vec![1.0, -0.0, f32::from_bits(0x7fc0_0042)]),
+            Literal::from_f32(7.0),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_i64_values(vec![i64::MIN, -1, 0, 7]),
+            Literal::I64(42),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_u32_values(vec![0, 17, u32::MAX]),
+            Literal::U32(99),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_u64_values(vec![0, 17, u64::MAX]),
+            Literal::U64(99),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_bool_values(vec![true, false, true]),
+            Literal::Bool(false),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_bool_words(vec![0b1011], 4).expect("valid bool words"),
+            Literal::Bool(false),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_half_float_values(vec![0x3c00, 0xbc00, 0x7e00], DType::F16),
+            Literal::F16Bits(0x4000),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_half_float_values(vec![0x3f80, 0xbf80, 0x7fc0], DType::BF16),
+            Literal::BF16Bits(0x4000),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_complex_values(vec![(1.0, -2.0), (3.5, 4.25)], DType::Complex64),
+            Literal::from_complex64(0.5, -0.25),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_complex_values(vec![(1.0, -2.0), (3.5, 4.25)], DType::Complex128),
+            Literal::from_complex128(0.5, -0.25),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_repeated_with_patches(
+                vec![Literal::I64(1), Literal::I64(2)],
+                3,
+                vec![(1, Literal::I64(99)), (4, Literal::I64(-5))],
+            )
+            .expect("valid repeated patches"),
+            Literal::I64(123),
+        );
+        assert_index_mut_matches_literal(
+            LiteralBuffer::from_concat_slices(vec![
+                (LiteralBuffer::from_f64_values(vec![1.0, 2.0, 3.0]), 1, 2),
+                (LiteralBuffer::new(vec![Literal::from_f64(4.0)]), 0, 1),
+            ])
+            .expect("valid concat slices"),
+            Literal::from_f64(10.0),
+        );
+
+        let mut sortable = LiteralBuffer::from_i64_values(vec![3, 1, 2]);
+        sortable.sort_by(|left, right| left.as_i64().cmp(&right.as_i64()));
+        assert_eq!(
+            sortable.to_vec(),
+            vec![Literal::I64(1), Literal::I64(2), Literal::I64(3)]
+        );
+        assert!(
+            sortable.as_i64_slice().is_none(),
+            "sort_by should materialize dense storage to literal storage"
         );
     }
 

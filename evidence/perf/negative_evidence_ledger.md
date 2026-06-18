@@ -38,3 +38,24 @@ ends are not rediscovered without new evidence.
   or `TensorValue::new` dense-storage families under this bead. Do not revisit
   FMA, SIMD exp, GEMM, QR, SVD, cumsum, or eager concat without fresh
   same-worker benchmark evidence and ownership check.
+
+## frankenjax-q59j4 - Direct Dense LiteralBuffer COW Mutation
+
+- Date: 2026-06-18
+- Agent: cod-b / WildForge
+- Lever: make `LiteralBuffer::make_mut()` materialize dense/lazy storage through
+  the direct storage-aware `to_vec()` path instead of forcing `as_slice()` to
+  build/cache an intermediate full literal vector before mutation.
+- Status: batch-test pending.
+- Benchmark guard: `core/literal_buffer_index_mut_dense_f64_64k`,
+  `core/literal_buffer_index_mut_literal_f64_64k`.
+- Conformance guard: dense and lazy COW mutation preserves the original cloned
+  sequence and mutates to the same materialized literal sequence as a literal
+  buffer for F64/F64OnePlusX/F32/I64/U32/U64/Bool/BoolWords/Half/Complex,
+  repeated-patches, concat, plus a dense-sort materialization path.
+- Retry predicate: do not retry the already committed stack/repeat/slice/to_i64,
+  `TensorValue::new`, or `LiteralBuffer::to_vec` dense-storage families under
+  this bead. Reopen the dense COW mutation family only with focused criterion
+  evidence showing mutation/materialization cost remains a top-five fj-core
+  bottleneck. Do not revisit FMA, SIMD exp, GEMM, QR, SVD, cumsum, or eager
+  concat without fresh same-worker benchmark evidence and ownership check.
