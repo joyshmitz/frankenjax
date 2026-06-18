@@ -2435,6 +2435,13 @@ impl TensorValue {
         shape: Shape,
         values: Vec<u16>,
     ) -> Result<Self, ValueError> {
+        if !matches!(dtype, DType::BF16 | DType::F16) {
+            return Err(ValueError::InvalidArgument {
+                op: "TensorValue::new_half_float_values",
+                reason: "dtype must be BF16 or F16",
+            });
+        }
+
         let expected_count = shape.element_count().ok_or(ValueError::ShapeOverflow {
             shape: shape.clone(),
         })?;
@@ -2568,6 +2575,13 @@ impl TensorValue {
         shape: Shape,
         values: Vec<(f64, f64)>,
     ) -> Result<Self, ValueError> {
+        if !matches!(dtype, DType::Complex64 | DType::Complex128) {
+            return Err(ValueError::InvalidArgument {
+                op: "TensorValue::new_complex_values",
+                reason: "dtype must be Complex64 or Complex128",
+            });
+        }
+
         let expected_count = shape.element_count().ok_or(ValueError::ShapeOverflow {
             shape: shape.clone(),
         })?;
@@ -5946,6 +5960,31 @@ mod tests {
         assert_eq!(index, 0);
         assert_eq!(declared, DType::F32);
         assert!(matches!(literal, Literal::F64Bits(_)));
+    }
+
+    #[test]
+    fn dense_typed_constructors_reject_wrong_dtype_families() {
+        let half_err =
+            TensorValue::new_half_float_values(DType::F32, Shape::vector(1), vec![0x3c00])
+                .expect_err("half-float constructor must reject non-half dtypes");
+        assert!(matches!(
+            half_err,
+            ValueError::InvalidArgument {
+                op: "TensorValue::new_half_float_values",
+                ..
+            }
+        ));
+
+        let complex_err =
+            TensorValue::new_complex_values(DType::F64, Shape::vector(1), vec![(1.0, 2.0)])
+                .expect_err("complex constructor must reject non-complex dtypes");
+        assert!(matches!(
+            complex_err,
+            ValueError::InvalidArgument {
+                op: "TensorValue::new_complex_values",
+                ..
+            }
+        ));
     }
 
     #[test]
