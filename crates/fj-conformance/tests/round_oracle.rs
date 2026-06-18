@@ -31,9 +31,36 @@ fn make_f64_tensor(shape: &[u32], data: Vec<f64>) -> Value {
     )
 }
 
+fn make_f32_bits_tensor(shape: &[u32], bits: Vec<u32>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            bits.into_iter().map(Literal::F32Bits).collect(),
+        )
+        .unwrap(),
+    )
+}
+
 fn extract_f64_vec(v: &Value) -> Vec<f64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_f32_bits_vec(v: &Value) -> Vec<u32> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|literal| match literal {
+                Literal::F32Bits(bits) => *bits,
+                other => panic!("expected F32Bits, got {other:?}"),
+            })
+            .collect(),
         _ => unreachable!("expected tensor"),
     }
 }
@@ -81,6 +108,46 @@ fn oracle_round_neg_zero() {
     let result = eval_primitive(Primitive::Round, &[input], &no_params()).unwrap();
     let actual = extract_f64_scalar(&result);
     assert_eq!(actual.to_bits(), (-0.0_f64).to_bits(), "round(-0.0) = -0");
+}
+
+#[test]
+fn oracle_round_f32_default_signed_zero_and_nan_bits() {
+    let input = make_f32_bits_tensor(
+        &[10],
+        vec![
+            0.0_f32.to_bits(),
+            (-0.0_f32).to_bits(),
+            0.5_f32.to_bits(),
+            (-0.5_f32).to_bits(),
+            1.4_f32.to_bits(),
+            (-1.6_f32).to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits(),
+            f32::NAN.to_bits(),
+            0xffc0_0000,
+        ],
+    );
+    let result = eval_primitive(Primitive::Round, &[input], &no_params()).unwrap();
+    let bits = extract_f32_bits_vec(&result);
+
+    assert_eq!(bits[0], 0.0_f32.to_bits(), "round(+0.0_f32) = +0");
+    assert_eq!(
+        bits[1],
+        (-0.0_f32).to_bits(),
+        "round(-0.0_f32) = -0"
+    );
+    assert_eq!(bits[2], 1.0_f32.to_bits(), "round(0.5_f32) = 1");
+    assert_eq!(bits[3], (-1.0_f32).to_bits(), "round(-0.5_f32) = -1");
+    assert_eq!(bits[4], 1.0_f32.to_bits(), "round(1.4_f32) = 1");
+    assert_eq!(bits[5], (-2.0_f32).to_bits(), "round(-1.6_f32) = -2");
+    assert_eq!(bits[6], f32::INFINITY.to_bits(), "round(+inf_f32)");
+    assert_eq!(
+        bits[7],
+        f32::NEG_INFINITY.to_bits(),
+        "round(-inf_f32)"
+    );
+    assert!(f32::from_bits(bits[8]).is_nan(), "round(+nan_f32) = NaN");
+    assert!(f32::from_bits(bits[9]).is_nan(), "round(-nan_f32) = NaN");
 }
 
 #[test]
@@ -257,6 +324,41 @@ fn oracle_round_to_nearest_even_half_values() {
         (-0.0_f64).to_bits(),
         "round(-0.5) should produce exact -0.0 bits"
     );
+}
+
+#[test]
+fn oracle_round_f32_to_nearest_even_half_bits() {
+    let input = make_f32_bits_tensor(
+        &[7],
+        vec![
+            (-1.5_f32).to_bits(),
+            (-1.0_f32).to_bits(),
+            (-0.5_f32).to_bits(),
+            0.0_f32.to_bits(),
+            0.5_f32.to_bits(),
+            1.0_f32.to_bits(),
+            1.5_f32.to_bits(),
+        ],
+    );
+    let result = eval_primitive(
+        Primitive::Round,
+        &[input],
+        &rounding_params("TO_NEAREST_EVEN"),
+    )
+    .unwrap();
+    let bits = extract_f32_bits_vec(&result);
+
+    assert_eq!(bits[0], (-2.0_f32).to_bits(), "round_even(-1.5_f32)");
+    assert_eq!(bits[1], (-1.0_f32).to_bits(), "round_even(-1.0_f32)");
+    assert_eq!(
+        bits[2],
+        (-0.0_f32).to_bits(),
+        "round_even(-0.5_f32) = -0"
+    );
+    assert_eq!(bits[3], 0.0_f32.to_bits(), "round_even(+0.0_f32)");
+    assert_eq!(bits[4], 0.0_f32.to_bits(), "round_even(+0.5_f32) = +0");
+    assert_eq!(bits[5], 1.0_f32.to_bits(), "round_even(1.0_f32)");
+    assert_eq!(bits[6], 2.0_f32.to_bits(), "round_even(1.5_f32)");
 }
 
 #[test]
