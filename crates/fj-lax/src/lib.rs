@@ -34,6 +34,7 @@ use arithmetic::{
     eval_bessel_i1e, eval_betainc, eval_binary_elementwise, eval_clamp, eval_complex, eval_conj,
     eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general, eval_erf_inv, eval_exp,
     eval_fma, eval_igamma, eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf,
+    ensure_float_or_complex_operands,
     eval_float_complex_unary, eval_is_nan, eval_lgamma, eval_log, eval_neg, eval_nextafter,
     eval_polygamma, eval_real, eval_round, eval_select, eval_select_n, eval_signbit, eval_sin,
     eval_sinh, eval_tan, eval_tanh, eval_unary_elementwise, eval_unary_elementwise_parallel,
@@ -434,12 +435,18 @@ fn eval_primitive_inner(
                 (prod / ga) as f64
             },
         ),
-        Primitive::Atan2 => eval_binary_elementwise(
-            primitive,
-            inputs,
-            |a, b| (a as f64).atan2(b as f64) as i64,
-            f64::atan2,
-        ),
+        Primitive::Atan2 => {
+            // JAX atan2_p = standard_naryop([_float | _complex, _float | _complex]):
+            // integer operands are rejected at the lax level (the generic path would
+            // otherwise compute atan2 in f64 and truncate back to i64).
+            ensure_float_or_complex_operands(primitive, inputs)?;
+            eval_binary_elementwise(
+                primitive,
+                inputs,
+                |a, b| (a as f64).atan2(b as f64) as i64,
+                f64::atan2,
+            )
+        }
         Primitive::Complex => eval_complex(primitive, inputs),
         // Selection
         Primitive::Select => eval_select(primitive, inputs),

@@ -1411,6 +1411,30 @@ fn oracle_bessel_erfinv_reject_integer_operands() {
 }
 
 #[test]
+fn oracle_atan2_rejects_integer_operands() {
+    // JAX atan2 = standard_naryop([_float | _complex, _float | _complex]): integer
+    // operands are rejected at the lax level (the generic path would otherwise compute
+    // atan2 in f64 and truncate back to i64). Floats still evaluate.
+    let i = Value::scalar_i64(1);
+    let err = eval_primitive(Primitive::Atan2, &[i.clone(), i], &no_params())
+        .expect_err("atan2 must reject integer operands");
+    assert!(
+        matches!(
+            &err,
+            EvalError::TypeMismatch { primitive: Primitive::Atan2, detail }
+                if detail.contains("floating")
+        ),
+        "atan2 integer input returned unexpected error: {err:?}"
+    );
+    eval_primitive(
+        Primitive::Atan2,
+        &[Value::scalar_f64(1.0), Value::scalar_f64(1.0)],
+        &no_params(),
+    )
+    .expect("atan2(1.0, 1.0) should evaluate");
+}
+
+#[test]
 fn oracle_atan2() {
     // atan2(0, 1) = 0, atan2(1, 0) = pi/2, atan2(1, 1) = pi/4
     assert_f64_close(

@@ -8452,6 +8452,26 @@ fn ensure_float_operands(primitive: Primitive, inputs: &[Value]) -> Result<(), E
     }
 }
 
+/// Binary guard for JAX `standard_naryop([_float | _complex, _float | _complex])` ops
+/// (e.g. atan2): integer/bool operands are rejected at the lax level (not widened/
+/// truncated through the generic elementwise path) while float and complex pass through.
+pub(crate) fn ensure_float_or_complex_operands(
+    primitive: Primitive,
+    inputs: &[Value],
+) -> Result<(), EvalError> {
+    if inputs
+        .iter()
+        .all(|value| is_float_dtype(value.dtype()) || is_complex_dtype(value.dtype()))
+    {
+        Ok(())
+    } else {
+        Err(EvalError::TypeMismatch {
+            primitive,
+            detail: "expected floating operands",
+        })
+    }
+}
+
 /// Evaluate a Chebyshev series at `x` using Clenshaw recurrence — the Cephes
 /// `chbevl` routine. The coefficient arrays are ordered from highest to lowest
 /// Chebyshev order and the series is evaluated as `0.5*(b0 - b2)` over a shifted
