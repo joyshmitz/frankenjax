@@ -2691,26 +2691,96 @@ fn bench_sort_64k_f32(c: &mut Criterion) {
     });
 }
 
-// U32 sort: previously the generic O(n log n) comparison path (U32 is
-// Literal-backed); now the LSD radix path (pass99).
+fn sort_u32_data() -> Vec<u32> {
+    (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| match i % 257 {
+            0 => u32::MAX,
+            1 => 0,
+            2 => 1 << 31,
+            3 | 4 => 19_999,
+            _ => (i as u32)
+                .wrapping_mul(2_654_435_761)
+                .rotate_left((i & 31) as u32)
+                ^ ((i as u32) >> 3),
+        })
+        .collect()
+}
+
+// U32 sort: dense radix path over typed storage vs the Literal-backed radix
+// reference, which must materialize boxed literals before sorting.
 fn bench_sort_64k_u32(c: &mut Criterion) {
-    let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
-        .map(|i| Literal::U32((i as u32).wrapping_mul(2_654_435_761) ^ (i as u32)))
-        .collect();
     let input = Value::Tensor(
-        TensorValue::new(
+        TensorValue::new_u32_values(Shape::vector(LARGE_ELEMENTWISE_LEN as u32), sort_u32_data())
+            .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("dimension".to_owned(), "0".to_owned());
+    p.insert("descending".to_owned(), "false".to_owned());
+    c.bench_function("eval/sort_64k_u32", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Sort, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_sort_64k_u32_literal_reference(c: &mut Criterion) {
+    let data = sort_u32_data();
+    let input = Value::Tensor(
+        TensorValue::new_with_literal_buffer(
             DType::U32,
-            Shape {
-                dims: vec![LARGE_ELEMENTWISE_LEN as u32],
-            },
-            elements,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            fj_core::LiteralBuffer::new(data.iter().copied().map(Literal::U32).collect()),
         )
         .unwrap(),
     );
     let mut p = BTreeMap::new();
     p.insert("dimension".to_owned(), "0".to_owned());
     p.insert("descending".to_owned(), "false".to_owned());
-    c.bench_function("eval/sort_64k_u32", |bencher| {
+    c.bench_function("eval/sort_64k_u32_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Sort, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn sort_u64_data() -> Vec<u64> {
+    (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| match i % 263 {
+            0 => u64::MAX,
+            1 => 0,
+            2 => 1 << 63,
+            3 | 4 => 9_223_372_036_854_775_900,
+            _ => (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left((i & 63) as u32)
+                ^ ((i as u64) << 32),
+        })
+        .collect();
+}
+
+fn bench_sort_64k_u64(c: &mut Criterion) {
+    let input = Value::Tensor(
+        TensorValue::new_u64_values(Shape::vector(LARGE_ELEMENTWISE_LEN as u32), sort_u64_data())
+            .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("dimension".to_owned(), "0".to_owned());
+    p.insert("descending".to_owned(), "false".to_owned());
+    c.bench_function("eval/sort_64k_u64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Sort, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_sort_64k_u64_literal_reference(c: &mut Criterion) {
+    let data = sort_u64_data();
+    let input = Value::Tensor(
+        TensorValue::new_with_literal_buffer(
+            DType::U64,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            fj_core::LiteralBuffer::new(data.iter().copied().map(Literal::U64).collect()),
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("dimension".to_owned(), "0".to_owned());
+    p.insert("descending".to_owned(), "false".to_owned());
+    c.bench_function("eval/sort_64k_u64_literal_ref", |bencher| {
         bencher.iter(|| eval_primitive(Primitive::Sort, std::slice::from_ref(&input), &p))
     });
 }
@@ -5582,6 +5652,9 @@ criterion_group!(
     bench_broadcasted_iota_512x512_i64,
     bench_sort_64k_f32,
     bench_sort_64k_u32,
+    bench_sort_64k_u32_literal_reference,
+    bench_sort_64k_u64,
+    bench_sort_64k_u64_literal_reference,
     bench_sort_calib_reduce_64k_i64,
     bench_topk_64k_k128_f64_vec,
     bench_topk_64k_k128_f32,

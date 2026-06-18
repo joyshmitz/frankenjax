@@ -7367,20 +7367,238 @@ fn sort_along_axis_dense_f64(
     Ok(Some(Value::Tensor(out_value)))
 }
 
+/// Dense U32 ascending sort/argsort along `axis`. Unsigned integer keys are
+/// already radix-orderable, so this avoids `as_slice()` materializing dense data
+/// into `Literal`s and emits dense U32 output. Descending uses the same
+/// complement-key rule as the other radix paths; equal keys keep input order.
+fn sort_along_axis_dense_u32(
+    tensor: &TensorValue,
+    axis: usize,
+    descending: bool,
+    return_indices: bool,
+) -> Result<Option<Value>, EvalError> {
+    let Some(values) = tensor.elements.as_u32_slice() else {
+        return Ok(None);
+    };
+    let key_mask: u64 = if descending { u64::MAX } else { 0 };
+    let primitive = if return_indices {
+        Primitive::Argsort
+    } else {
+        Primitive::Sort
+    };
+    let rank = tensor.shape.rank();
+    let axis_dim = tensor.shape.dims[axis] as usize;
+    if axis_dim < RADIX_SORT_MIN_AXIS {
+        return Ok(None);
+    }
+    let strides = checked_row_major_strides(primitive, "sort", &tensor.shape.dims)?;
+    let axis_stride = strides[axis];
+    let total = tensor.elements.len();
+    if !total.is_multiple_of(axis_dim) {
+        return Ok(None);
+    }
+    let outer_count = total / axis_dim;
+
+    let out_value = if axis_stride == 1 {
+        if return_indices {
+            let mut out_idx = vec![0_i64; total];
+            for_each_contiguous_sort_slice(
+                &mut out_idx,
+                axis_dim,
+                outer_count,
+                |s, out_slice, pairs, scratch| {
+                    let in_base = s * axis_dim;
+                    pairs.clear();
+                    for i in 0..axis_dim {
+                        pairs.push((u64::from(values[in_base + i]) ^ key_mask, i as u32));
+                    }
+                    radix_pairs_ascending_u32(pairs, scratch);
+                    for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                        out_slice[out_pos] = i64::from(orig);
+                    }
+                },
+            );
+            TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+        } else {
+            let mut out_val = vec![0_u32; total];
+            for_each_contiguous_sort_slice(
+                &mut out_val,
+                axis_dim,
+                outer_count,
+                |s, out_slice, pairs, scratch| {
+                    let in_base = s * axis_dim;
+                    pairs.clear();
+                    for i in 0..axis_dim {
+                        pairs.push((u64::from(values[in_base + i]) ^ key_mask, i as u32));
+                    }
+                    radix_pairs_ascending_u32(pairs, scratch);
+                    for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                        out_slice[out_pos] = values[in_base + orig as usize];
+                    }
+                },
+            );
+            TensorValue::new_u32_values(tensor.shape.clone(), out_val)
+        }
+    } else {
+        let mut out_idx = vec![0_i64; total];
+        let mut out_val = vec![0_u32; total];
+        let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
+        let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
+        for_each_sort_slice(
+            rank,
+            axis,
+            &tensor.shape.dims,
+            &strides,
+            outer_count,
+            |base| {
+                pairs.clear();
+                for i in 0..axis_dim {
+                    pairs.push((
+                        u64::from(values[base + i * axis_stride]) ^ key_mask,
+                        i as u32,
+                    ));
+                }
+                radix_pairs_ascending_u32(&mut pairs, &mut scratch);
+                for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                    let dst = base + out_pos * axis_stride;
+                    if return_indices {
+                        out_idx[dst] = i64::from(orig);
+                    } else {
+                        out_val[dst] = values[base + orig as usize * axis_stride];
+                    }
+                }
+            },
+        );
+        if return_indices {
+            TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+        } else {
+            TensorValue::new_u32_values(tensor.shape.clone(), out_val)
+        }
+    }
+    .map_err(EvalError::InvalidTensor)?;
+    Ok(Some(Value::Tensor(out_value)))
+}
+
+/// Dense U64 ascending sort/argsort along `axis`, preserving the literal-radix
+/// unsigned ordering without boxing the whole tensor into `Literal`s.
+fn sort_along_axis_dense_u64(
+    tensor: &TensorValue,
+    axis: usize,
+    descending: bool,
+    return_indices: bool,
+) -> Result<Option<Value>, EvalError> {
+    let Some(values) = tensor.elements.as_u64_slice() else {
+        return Ok(None);
+    };
+    let key_mask: u64 = if descending { u64::MAX } else { 0 };
+    let primitive = if return_indices {
+        Primitive::Argsort
+    } else {
+        Primitive::Sort
+    };
+    let rank = tensor.shape.rank();
+    let axis_dim = tensor.shape.dims[axis] as usize;
+    if axis_dim < RADIX_SORT_MIN_AXIS {
+        return Ok(None);
+    }
+    let strides = checked_row_major_strides(primitive, "sort", &tensor.shape.dims)?;
+    let axis_stride = strides[axis];
+    let total = tensor.elements.len();
+    if !total.is_multiple_of(axis_dim) {
+        return Ok(None);
+    }
+    let outer_count = total / axis_dim;
+    let parallel = use_parallel_radix(outer_count, axis_dim);
+
+    let out_value = if axis_stride == 1 {
+        if return_indices {
+            let mut out_idx = vec![0_i64; total];
+            for_each_contiguous_sort_slice(
+                &mut out_idx,
+                axis_dim,
+                outer_count,
+                |s, out_slice, pairs, scratch| {
+                    let in_base = s * axis_dim;
+                    pairs.clear();
+                    for i in 0..axis_dim {
+                        pairs.push((values[in_base + i] ^ key_mask, i as u32));
+                    }
+                    radix_pairs_ascending_maybe_parallel(pairs, scratch, parallel);
+                    for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                        out_slice[out_pos] = i64::from(orig);
+                    }
+                },
+            );
+            TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+        } else {
+            let mut out_val = vec![0_u64; total];
+            for_each_contiguous_sort_slice(
+                &mut out_val,
+                axis_dim,
+                outer_count,
+                |s, out_slice, pairs, scratch| {
+                    let in_base = s * axis_dim;
+                    pairs.clear();
+                    for i in 0..axis_dim {
+                        pairs.push((values[in_base + i] ^ key_mask, i as u32));
+                    }
+                    radix_pairs_ascending_maybe_parallel(pairs, scratch, parallel);
+                    for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                        out_slice[out_pos] = values[in_base + orig as usize];
+                    }
+                },
+            );
+            TensorValue::new_u64_values(tensor.shape.clone(), out_val)
+        }
+    } else {
+        let mut out_idx = vec![0_i64; total];
+        let mut out_val = vec![0_u64; total];
+        let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
+        let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
+        for_each_sort_slice(
+            rank,
+            axis,
+            &tensor.shape.dims,
+            &strides,
+            outer_count,
+            |base| {
+                pairs.clear();
+                for i in 0..axis_dim {
+                    pairs.push((values[base + i * axis_stride] ^ key_mask, i as u32));
+                }
+                radix_pairs_ascending(&mut pairs, &mut scratch);
+                for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                    let dst = base + out_pos * axis_stride;
+                    if return_indices {
+                        out_idx[dst] = i64::from(orig);
+                    } else {
+                        out_val[dst] = values[base + orig as usize * axis_stride];
+                    }
+                }
+            },
+        );
+        if return_indices {
+            TensorValue::new_i64_values(tensor.shape.clone(), out_idx)
+        } else {
+            TensorValue::new_u64_values(tensor.shape.clone(), out_val)
+        }
+    }
+    .map_err(EvalError::InvalidTensor)?;
+    Ok(Some(Value::Tensor(out_value)))
+}
+
 /// Ascending radix sort/argsort along `axis` for Literal-backed numeric tensors
-/// that have no dense storage variant (F32/F16/BF16, U32/U64, I32). The generic
-/// path keys these via `compare_sort_keys_nan_last` — `SortKey::Float(as_f64)`
-/// with NaN-last (else `total_cmp`) for floats, unsigned `cmp` for U32/U64,
-/// signed `cmp` for integers. Each maps to an ascending `u64` radix key that
-/// reproduces that exact order:
+/// still boxed for this tensor (I32 plus forced literal F32/F16/BF16/U32/U64).
+/// The generic path keys these via `compare_sort_keys_nan_last` —
+/// `SortKey::Float(as_f64)` with NaN-last (else `total_cmp`) for floats,
+/// unsigned `cmp` for U32/U64, signed `cmp` for integers. Each maps to an
+/// ascending `u64` radix key that reproduces that exact order:
 /// `f64_sort_order_key(as_f64)` (float), `as_u64` (unsigned), and
 /// `(as_i64 as u64) ^ (1<<63)` (signed). Both the generic `sort_by` and LSD radix
 /// are stable, so the output permutation is bit-for-bit identical — in O(n) radix
-/// passes instead of O(n log n) comparisons. Sort emits the reordered original
-/// literals (exact bits); argsort emits dense i64 in-slice indices. F64/I64 are
-/// excluded (their dedicated dense paths run first; Literal-backed F64/I64 keep
-/// the generic path so their radix-vs-generic tests stay meaningful). Returns
-/// `None` (generic path) for Bool/Complex, short axes, or non-orderable elements.
+/// passes instead of O(n log n) comparisons. Dense storage is handled by the
+/// dedicated paths first; Bool/Complex, short axes, or non-orderable elements
+/// return `None` for the generic comparison path.
 fn sort_along_axis_literal_radix(
     tensor: &TensorValue,
     axis: usize,
@@ -7896,6 +8114,16 @@ fn sort_along_axis(
     }
     if matches!(tensor.dtype, DType::BF16 | DType::F16)
         && let Some(value) = sort_along_axis_dense_half(tensor, axis, descending, return_indices)?
+    {
+        return Ok(value);
+    }
+    if tensor.dtype == DType::U32
+        && let Some(value) = sort_along_axis_dense_u32(tensor, axis, descending, return_indices)?
+    {
+        return Ok(value);
+    }
+    if tensor.dtype == DType::U64
+        && let Some(value) = sort_along_axis_dense_u64(tensor, axis, descending, return_indices)?
     {
         return Ok(value);
     }
@@ -19044,6 +19272,198 @@ mod tests {
             desc_arg, expected_desc_arg,
             "descending radix u32 argsort vs unsigned reference"
         );
+    }
+
+    #[test]
+    fn dense_unsigned_sort_matches_literal_radix() {
+        // Proves dense U32/U64 sort/argsort are drop-in replacements for the
+        // forced Literal-backed radix path, including descending order and
+        // duplicate tie order.
+        let n = 1000usize;
+
+        let u32_data: Vec<u32> = (0..n)
+            .map(|i| match i % 17 {
+                0 => 0,
+                1 => u32::MAX,
+                2 => 1 << 31,
+                3 | 4 => 123,
+                _ => (i as u32)
+                    .wrapping_mul(2_654_435_761)
+                    .rotate_left((i & 31) as u32)
+                    ^ ((i as u32) >> 5),
+            })
+            .collect();
+        let dense_u32 = Value::Tensor(
+            TensorValue::new_u32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                u32_data.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            dense_u32
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u32_slice()
+                .is_some(),
+            "expected dense u32 storage"
+        );
+        let literal_u32 = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::U32,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                fj_core::LiteralBuffer::new(
+                    u32_data.iter().copied().map(Literal::U32).collect(),
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            literal_u32
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u32_slice()
+                .is_none(),
+            "literal-backed u32 input must not be dense"
+        );
+
+        for descending in ["false", "true"] {
+            let p = params(&[("dimension", "0"), ("descending", descending)]);
+            let dense_sorted =
+                eval_sort(Primitive::Sort, std::slice::from_ref(&dense_u32), &p).unwrap();
+            let literal_sorted =
+                eval_sort(Primitive::Sort, std::slice::from_ref(&literal_u32), &p).unwrap();
+            let dense_vals = dense_sorted
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u32_slice()
+                .expect("dense u32 sorted output")
+                .to_vec();
+            let literal_vals: Vec<u32> = literal_sorted
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::U32(v) => *v,
+                    other => panic!("expected U32, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                dense_vals, literal_vals,
+                "u32 dense vs literal sort descending={descending}"
+            );
+
+            let dense_args = extract_i64_vec(
+                &eval_argsort(Primitive::Argsort, &[dense_u32.clone()], &p).unwrap(),
+            );
+            let literal_args = extract_i64_vec(
+                &eval_argsort(Primitive::Argsort, &[literal_u32.clone()], &p).unwrap(),
+            );
+            assert_eq!(
+                dense_args, literal_args,
+                "u32 dense vs literal argsort descending={descending}"
+            );
+        }
+
+        let u64_data: Vec<u64> = (0..n)
+            .map(|i| match i % 19 {
+                0 => 0,
+                1 => u64::MAX,
+                2 => 1 << 63,
+                3 | 4 => 9_223_372_036_854_775_900,
+                _ => (i as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .rotate_left((i & 63) as u32)
+                    ^ ((i as u64) << 31),
+            })
+            .collect();
+        let dense_u64 = Value::Tensor(
+            TensorValue::new_u64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                u64_data.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            dense_u64
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u64_slice()
+                .is_some(),
+            "expected dense u64 storage"
+        );
+        let literal_u64 = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::U64,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                fj_core::LiteralBuffer::new(
+                    u64_data.iter().copied().map(Literal::U64).collect(),
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            literal_u64
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u64_slice()
+                .is_none(),
+            "literal-backed u64 input must not be dense"
+        );
+
+        for descending in ["false", "true"] {
+            let p = params(&[("dimension", "0"), ("descending", descending)]);
+            let dense_sorted =
+                eval_sort(Primitive::Sort, std::slice::from_ref(&dense_u64), &p).unwrap();
+            let literal_sorted =
+                eval_sort(Primitive::Sort, std::slice::from_ref(&literal_u64), &p).unwrap();
+            let dense_vals = dense_sorted
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u64_slice()
+                .expect("dense u64 sorted output")
+                .to_vec();
+            let literal_vals: Vec<u64> = literal_sorted
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::U64(v) => *v,
+                    other => panic!("expected U64, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                dense_vals, literal_vals,
+                "u64 dense vs literal sort descending={descending}"
+            );
+
+            let dense_args = extract_i64_vec(
+                &eval_argsort(Primitive::Argsort, &[dense_u64.clone()], &p).unwrap(),
+            );
+            let literal_args = extract_i64_vec(
+                &eval_argsort(Primitive::Argsort, &[literal_u64.clone()], &p).unwrap(),
+            );
+            assert_eq!(
+                dense_args, literal_args,
+                "u64 dense vs literal argsort descending={descending}"
+            );
+        }
     }
 
     // ── Argsort ──
