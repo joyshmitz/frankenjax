@@ -266,6 +266,34 @@ fn convert_element_type_f64_to_i32() {
 }
 
 #[test]
+fn convert_element_type_f32_to_i32_truncates_toward_zero() {
+    // f32 is JAX's DEFAULT float dtype; f32 -> i32 truncates toward zero exactly like
+    // f64 -> i32 (negative truncates toward zero too: -2.9 -> -2, not -3). Guards the
+    // f32 source boundary the f64-only conversion tests miss.
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape { dims: vec![4] },
+            [1.9_f32, -2.9, 0.0, 100.7]
+                .into_iter()
+                .map(|x| Literal::F32Bits(x.to_bits()))
+                .collect(),
+        )
+        .unwrap(),
+    );
+    let result = convert(input, "i32").expect("f32 to i32 conversion should succeed");
+    assert_eq!(result.dtype(), DType::I32);
+    let values: Vec<i64> = result
+        .as_tensor()
+        .expect("expected tensor")
+        .elements
+        .iter()
+        .map(|l| l.as_i64().expect("expected i32 stored as i64"))
+        .collect();
+    assert_eq!(values, vec![1, -2, 0, 100]);
+}
+
+#[test]
 fn convert_element_type_empty_tensor() {
     let input =
         Value::Tensor(TensorValue::new(DType::F64, Shape { dims: vec![0] }, vec![]).unwrap());
