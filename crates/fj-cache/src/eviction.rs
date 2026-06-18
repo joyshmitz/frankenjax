@@ -68,6 +68,20 @@ impl<B: CacheBackend> LruCache<B> {
         order.pop_front()
     }
 
+    fn restore_oldest_cache_key_if_absent(&self, key: CacheKey) {
+        let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
+        if !order.iter().any(|cached_key| cached_key == &key) {
+            order.push_front(key);
+        }
+    }
+
+    fn evict_inner_with_failure_status(&mut self, key: &CacheKey) -> (bool, bool) {
+        let evict_failures_before = self.inner.evict_failure_count();
+        let evicted = self.inner.evict(key);
+        let evict_failed = self.inner.evict_failure_count() != evict_failures_before;
+        (evicted, evict_failed)
+    }
+
     /// Move a key to the most-recently-used position.
     /// Safe to call from `&self` thanks to interior mutability.
     fn touch(&self, key: &CacheKey) {
@@ -80,23 +94,24 @@ impl<B: CacheBackend> LruCache<B> {
 
     /// Evict least-recently-used entries until within budget.
     fn enforce_budget(&mut self) {
-        let entry_count_evictions = {
-            let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
-            let mut evict_keys = Vec::new();
-
-            while order.len() > self.config.max_entries {
-                if let Some(evict_key) = order.pop_front() {
-                    evict_keys.push(evict_key);
+        loop {
+            let evict_key = {
+                let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
+                if order.len() > self.config.max_entries {
+                    order.pop_front()
                 } else {
-                    break;
+                    None
                 }
+            };
+            let Some(evict_key) = evict_key else {
+                break;
+            };
+
+            let (_, evict_failed) = self.evict_inner_with_failure_status(&evict_key);
+            if evict_failed {
+                self.restore_oldest_cache_key_if_absent(evict_key);
+                break;
             }
-
-            evict_keys
-        };
-
-        for evict_key in entry_count_evictions {
-            self.inner.evict(&evict_key);
         }
 
         // Evict by byte budget (if configured).
@@ -105,7 +120,11 @@ impl<B: CacheBackend> LruCache<B> {
                 let Some(evict_key) = self.pop_oldest_cache_key() else {
                     break;
                 };
-                self.inner.evict(&evict_key);
+                let (_, evict_failed) = self.evict_inner_with_failure_status(&evict_key);
+                if evict_failed {
+                    self.restore_oldest_cache_key_if_absent(evict_key);
+                    break;
+                }
             }
         }
     }
@@ -133,9 +152,7 @@ impl<B: CacheBackend> CacheBackend for LruCache<B> {
     }
 
     fn evict(&mut self, key: &CacheKey) -> bool {
-        let evict_failures_before = self.inner.evict_failure_count();
-        let evicted = self.inner.evict(key);
-        let evict_failed = self.inner.evict_failure_count() != evict_failures_before;
+        let (evicted, evict_failed) = self.evict_inner_with_failure_status(key);
 
         if evicted || !evict_failed {
             let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
@@ -540,6 +557,40 @@ mod tests {
         // Adding more should trigger eviction to stay under 10 bytes.
         cache.put(&test_key("c"), test_artifact(b"XXXXX")); // 5 more bytes
         assert!(cache.stats().total_bytes <= 10);
+    }
+
+    #[test]
+    fn lru_budget_failed_evict_restores_oldest_order_key() {
+        let config = LruConfig {
+            max_entries: 1,
+            max_bytes: 0,
+        };
+        let mut cache = LruCache::new(FailingEvictBackend::default(), config);
+        let oldest = test_key("oldest");
+        let newest = test_key("newest");
+
+        cache.put(&oldest, test_artifact(b"oldest"));
+        cache.inner.fail_next_evict = true;
+        cache.put(&newest, test_artifact(b"newest"));
+
+        assert_eq!(cache.evict_failure_count(), 1);
+        assert_eq!(
+            cache.stats().entry_count,
+            2,
+            "backend keeps both entries because budget eviction failed"
+        );
+        {
+            let order = cache.order.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                order.len(),
+                2,
+                "failed budget eviction must not drop LRU tracking"
+            );
+            assert_eq!(order.front(), Some(&oldest));
+            assert_eq!(order.back(), Some(&newest));
+        }
+        assert!(cache.get(&oldest).is_some());
+        assert!(cache.get(&newest).is_some());
     }
 
     #[test]
