@@ -40,6 +40,19 @@ fn make_f64_tensor(shape: &[u32], data: Vec<f64>) -> Value {
     )
 }
 
+fn make_f32_bits_tensor(shape: &[u32], bits: Vec<u32>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            bits.into_iter().map(Literal::F32Bits).collect(),
+        )
+        .unwrap(),
+    )
+}
+
 fn extract_i64_vec(v: &Value) -> Vec<i64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_i64().unwrap()).collect(),
@@ -50,6 +63,20 @@ fn extract_i64_vec(v: &Value) -> Vec<i64> {
 fn extract_f64_vec(v: &Value) -> Vec<f64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_f32_bits_vec(v: &Value) -> Vec<u32> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|literal| match literal {
+                Literal::F32Bits(bits) => *bits,
+                other => panic!("expected F32Bits, got {other:?}"),
+            })
+            .collect(),
         _ => unreachable!("expected tensor"),
     }
 }
@@ -232,6 +259,42 @@ fn oracle_square_f64_neg_zero() {
     let result = eval_primitive(Primitive::Square, &[input], &no_params()).unwrap();
     let val = extract_f64_scalar(&result);
     assert_eq!(val.to_bits(), 0.0_f64.to_bits(), "square(-0.0) = +0.0");
+}
+
+#[test]
+fn oracle_square_f32_signed_zero_and_nan_bits() {
+    let input = make_f32_bits_tensor(
+        &[8],
+        vec![
+            0.0_f32.to_bits(),
+            (-0.0_f32).to_bits(),
+            3.5_f32.to_bits(),
+            (-3.5_f32).to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits(),
+            f32::NAN.to_bits(),
+            0xffc0_0000,
+        ],
+    );
+    let result = eval_primitive(Primitive::Square, &[input], &no_params()).unwrap();
+    let bits = extract_f32_bits_vec(&result);
+
+    assert_eq!(bits[0], 0.0_f32.to_bits(), "square(+0.0_f32) = +0.0");
+    assert_eq!(bits[1], 0.0_f32.to_bits(), "square(-0.0_f32) = +0.0");
+    assert_eq!(bits[2], 12.25_f32.to_bits(), "square(3.5_f32)");
+    assert_eq!(bits[3], 12.25_f32.to_bits(), "square(-3.5_f32)");
+    assert_eq!(
+        bits[4],
+        f32::INFINITY.to_bits(),
+        "square(+inf_f32) = +inf"
+    );
+    assert_eq!(
+        bits[5],
+        f32::INFINITY.to_bits(),
+        "square(-inf_f32) = +inf"
+    );
+    assert!(f32::from_bits(bits[6]).is_nan(), "square(+nan_f32) = NaN");
+    assert!(f32::from_bits(bits[7]).is_nan(), "square(-nan_f32) = NaN");
 }
 
 // ======================== Float Infinity ========================
