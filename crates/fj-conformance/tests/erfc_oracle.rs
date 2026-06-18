@@ -445,36 +445,45 @@ fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
     )
 }
 
+// erfc is JAX standard_unop(_float): it REJECTS complex operands (w8u0a float-only;
+// complex_unary_elementwise returns None for Erfc), matching complex_ops_oracle's
+// float-vs-complex boundary guard. These tests previously asserted success + dtype
+// preservation, which became stale after w8u0a — rewritten to assert rejection.
 #[test]
-
-fn oracle_erfc_complex64_real_axis() {
-    // erfc on real axis: erfc(0) = 1, erfc(1) ≈ 0.157
+fn oracle_erfc_complex64_rejected() {
     let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
-    let result = eval_primitive(Primitive::Erfc, &[input], &no_params())
-        .expect("erfc complex64 should succeed");
-    assert_eq!(result.dtype(), DType::Complex64);
+    let err = eval_primitive(Primitive::Erfc, &[input], &no_params())
+        .expect_err("erfc is float-only and must reject complex64");
+    assert!(
+        err.to_string().contains("complex"),
+        "unexpected complex erfc error: {err}"
+    );
 }
 
 #[test]
-
-fn oracle_erfc_complex128_preserves_dtype() {
+fn oracle_erfc_complex128_rejected() {
     let input = make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
-    let result = eval_primitive(Primitive::Erfc, &[input], &no_params())
-        .expect("erfc complex128 should succeed");
-    assert_eq!(result.dtype(), DType::Complex128);
+    let err = eval_primitive(Primitive::Erfc, &[input], &no_params())
+        .expect_err("erfc is float-only and must reject complex128");
+    assert!(
+        err.to_string().contains("complex"),
+        "unexpected complex erfc error: {err}"
+    );
 }
 
 #[test]
-
-fn property_erfc_preserves_complex_dtypes() {
+fn property_erfc_rejects_complex_dtypes() {
     for dtype in [DType::Complex64, DType::Complex128] {
         let input = match dtype {
             DType::Complex64 => make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]),
             DType::Complex128 => make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]),
             _ => unreachable!(),
         };
-        let result = eval_primitive(Primitive::Erfc, &[input], &no_params())
-            .expect("erfc should succeed for complex dtype");
-        assert_eq!(result.dtype(), dtype, "erfc {dtype:?}: dtype mismatch");
+        let err = eval_primitive(Primitive::Erfc, &[input], &no_params())
+            .expect_err("erfc is float-only and must reject complex");
+        assert!(
+            err.to_string().contains("complex"),
+            "erfc {dtype:?}: unexpected error {err}"
+        );
     }
 }
