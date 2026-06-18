@@ -1659,15 +1659,27 @@ fn infer_equation_output_aval(
         // Tile: NumPy/JAX-style rank promotion left-pads the shorter side with
         // ones before multiplying dimensions. Catch-all kept the input shape.
         Tile => {
-            let reps: Vec<u32> = eqn
+            // fj-trace requires 'reps' and strict-parses it; the previous filter_map
+            // silently dropped malformed tokens (e.g. "2,bad,3" -> [2,3]) and defaulted a
+            // missing param to no tiling, staging a wrong residual shape. Fail closed.
+            let raw_reps = eqn
                 .params
                 .get("reps")
-                .map(|s| {
-                    s.split(',')
-                        .filter_map(|r| r.trim().parse::<u32>().ok())
-                        .collect()
+                .ok_or_else(|| PartialEvalError::ShapeInference {
+                    primitive: eqn.primitive,
+                    detail: "tile requires 'reps' param".to_owned(),
+                })?;
+            let reps: Vec<u32> = raw_reps
+                .split(',')
+                .map(|r| {
+                    r.trim()
+                        .parse::<u32>()
+                        .map_err(|_| PartialEvalError::ShapeInference {
+                            primitive: eqn.primitive,
+                            detail: format!("invalid tile reps token: '{}'", r.trim()),
+                        })
                 })
-                .unwrap_or_default();
+                .collect::<Result<Vec<_>, _>>()?;
             let in_dims = &first_input.shape.dims;
             let rank = in_dims.len().max(reps.len());
             let mut tile_dims = Vec::with_capacity(rank);
