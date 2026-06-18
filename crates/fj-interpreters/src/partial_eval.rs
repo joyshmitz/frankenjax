@@ -918,6 +918,39 @@ fn infer_slice_shape(eqn: &Equation, input: &AbstractValue) -> Result<Shape, Par
     Ok(Shape { dims })
 }
 
+fn infer_transpose_shape(eqn: &Equation, input: &AbstractValue) -> Result<Shape, PartialEvalError> {
+    let rank = input.shape.rank();
+    let permutation = match eqn.params.get("permutation") {
+        Some(raw) => parse_usize_list_param(eqn.primitive, "permutation", raw)?,
+        None => (0..rank).rev().collect(),
+    };
+
+    if permutation.len() != rank {
+        return Err(PartialEvalError::ShapeInference {
+            primitive: eqn.primitive,
+            detail: format!(
+                "permutation rank mismatch: perm={} rank={rank}",
+                permutation.len()
+            ),
+        });
+    }
+
+    let mut seen = vec![false; rank];
+    let mut dims = Vec::with_capacity(rank);
+    for axis in permutation {
+        if axis >= rank || seen[axis] {
+            return Err(PartialEvalError::ShapeInference {
+                primitive: eqn.primitive,
+                detail: "permutation must be a unique in-range axis list".to_owned(),
+            });
+        }
+        seen[axis] = true;
+        dims.push(input.shape.dims[axis]);
+    }
+
+    Ok(Shape { dims })
+}
+
 /// Complex(re, im): dtype (F32,F32)→Complex64 else Complex128; shape = broadcast.
 fn infer_complex_aval(input_avals: &[AbstractValue]) -> AbstractValue {
     let dtype = match (
@@ -1167,26 +1200,7 @@ fn infer_equation_output_aval(
         }
         // Transpose: permute dims according to "permutation" param
         Transpose => {
-            let shape = eqn
-                .params
-                .get("permutation")
-                .map(|s| {
-                    let perm: Vec<usize> = s
-                        .split(',')
-                        .filter_map(|p| p.trim().parse::<usize>().ok())
-                        .collect();
-                    let dims: Vec<u32> = perm
-                        .iter()
-                        .filter_map(|&i| first_input.shape.dims.get(i).copied())
-                        .collect();
-                    Shape { dims }
-                })
-                .unwrap_or_else(|| {
-                    // Default: reverse dims
-                    let mut dims = first_input.shape.dims.clone();
-                    dims.reverse();
-                    Shape { dims }
-                });
+            let shape = infer_transpose_shape(eqn, first_input)?;
             AbstractValue {
                 dtype: first_input.dtype,
                 shape,
@@ -5258,6 +5272,54 @@ mod tests {
             match err {
                 PartialEvalError::ShapeInference { primitive, detail } => {
                     assert_eq!(primitive, Primitive::Slice, "{label}");
+                    assert!(
+                        detail.contains(expected_detail),
+                        "{label}: unexpected detail: {detail}"
+                    );
+                }
+                other => panic!("{label}: unexpected error: {other}"),
+            }
+        }
+
+        let out =
+            infer_equation_output_aval(&eqn(Primitive::Transpose, &[]), &av(&[2, 3, 4], DType::F64))
+                .unwrap();
+        assert_eq!(out.shape.dims, vec![4, 3, 2]);
+
+        for (label, permutation, input, expected_detail) in [
+            (
+                "bad transpose token",
+                "2,bad,0",
+                av(&[2, 3, 4], DType::F64),
+                "invalid usize in param 'permutation'",
+            ),
+            (
+                "transpose rank mismatch",
+                "1,0",
+                av(&[2, 3, 4], DType::F64),
+                "permutation rank mismatch",
+            ),
+            (
+                "duplicate transpose axis",
+                "0,0",
+                av(&[2, 3], DType::F64),
+                "permutation must be a unique in-range axis list",
+            ),
+            (
+                "transpose axis out of range",
+                "0,2",
+                av(&[2, 3], DType::F64),
+                "permutation must be a unique in-range axis list",
+            ),
+        ] {
+            let err = infer_equation_output_aval(
+                &eqn(Primitive::Transpose, &[("permutation", permutation)]),
+                &input,
+            )
+            .unwrap_err();
+            match err {
+                PartialEvalError::ShapeInference { primitive, detail } => {
+                    assert_eq!(primitive, Primitive::Transpose, "{label}");
                     assert!(
                         detail.contains(expected_detail),
                         "{label}: unexpected detail: {detail}"
