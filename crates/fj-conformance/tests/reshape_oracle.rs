@@ -486,6 +486,66 @@ fn property_reshape_preserves_all_float_dtypes() {
     }
 }
 
+#[test]
+fn property_reshape_inferred_dim_preserves_all_float_dtypes() -> Result<(), String> {
+    fn check_inferred_reshape(dtype: DType, elements: Vec<Literal>) -> Result<(), String> {
+        let input = Value::Tensor(
+            TensorValue::new(dtype, Shape { dims: vec![6] }, elements)
+                .map_err(|err| err.to_string())?,
+        );
+        let result = eval_primitive(Primitive::Reshape, &[input], &reshape_params(&[3, -1]))
+            .map_err(|err| err.to_string())?;
+        let Some(tensor) = result.as_tensor() else {
+            return Err(format!("reshape {dtype:?}: expected tensor"));
+        };
+
+        assert_eq!(tensor.shape.dims, vec![3, 2], "reshape {dtype:?}: shape");
+        assert_eq!(tensor.dtype, dtype, "reshape {dtype:?}: dtype mismatch");
+        tensor
+            .validate_dtype_consistency()
+            .map_err(|err| err.to_string())?;
+        Ok(())
+    }
+
+    let values = [1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let cases = vec![
+        (
+            DType::BF16,
+            values
+                .iter()
+                .map(|&v| Literal::from_bf16_f32(v as f32))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            DType::F16,
+            values
+                .iter()
+                .map(|&v| Literal::from_f16_f32(v as f32))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            DType::F32,
+            values
+                .iter()
+                .map(|&v| Literal::from_f32(v as f32))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            DType::F64,
+            values
+                .iter()
+                .map(|&v| Literal::from_f64(v))
+                .collect::<Vec<_>>(),
+        ),
+    ];
+
+    for (dtype, elements) in cases {
+        check_inferred_reshape(dtype, elements)?;
+    }
+
+    Ok(())
+}
+
 // ======================== Complex64/Complex128 Tests ========================
 
 fn make_complex64_tensor(shape: &[u32], data: Vec<(f32, f32)>) -> Value {
