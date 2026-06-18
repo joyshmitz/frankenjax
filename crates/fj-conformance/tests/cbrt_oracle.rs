@@ -458,6 +458,9 @@ fn make_complex128_tensor(shape: &[u32], data: &[(f64, f64)]) -> Value {
     )
 }
 
+// cbrt no longer computes complex (float-only per w8u0a); these complex helpers are
+// retained for potential future complex coverage but are currently unused.
+#[allow(dead_code)]
 fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
     match v {
         Value::Tensor(t) => t
@@ -472,6 +475,7 @@ fn extract_complex64_vec(v: &Value) -> Vec<(f32, f32)> {
     }
 }
 
+#[allow(dead_code)]
 fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
     match v {
         Value::Tensor(t) => t
@@ -483,6 +487,7 @@ fn extract_complex128_vec(v: &Value) -> Vec<(f64, f64)> {
     }
 }
 
+#[allow(dead_code)]
 fn assert_complex_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg: &str) {
     let (ar, ai) = actual;
     let (er, ei) = expected;
@@ -501,124 +506,64 @@ fn assert_complex_close(actual: (f64, f64), expected: (f64, f64), tol: f64, msg:
     );
 }
 
+// cbrt is JAX standard_unop(_float): it REJECTS complex operands (w8u0a float-only;
+// complex_unary_elementwise returns None for Cbrt), matching complex_ops_oracle's
+// float-vs-complex boundary guard. These tests previously asserted complex cbrt VALUES /
+// dtype preservation, which became stale after w8u0a — rewritten to assert rejection.
 #[test]
-fn oracle_cbrt_complex128_real_positive() {
-    // cbrt(8+0i) = 2+0i
-    let input = make_complex128_tensor(&[], &[(8.0, 0.0)]);
-    let result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
-    let vec = extract_complex128_vec(&result);
-    assert_eq!(vec.len(), 1);
-    assert_complex_close(vec[0], (2.0, 0.0), 1e-10, "cbrt(8+0i) = 2");
-}
-
-#[test]
-fn oracle_cbrt_complex128_real_negative() {
-    // cbrt(-8+0i) should give principal root (not -2 which is real but not principal)
-    // Principal cube root of -8 = 8 * e^(i*pi) has principal root 2 * e^(i*pi/3)
-    // = 2 * (cos(pi/3) + i*sin(pi/3)) = 2 * (0.5 + i*sqrt(3)/2) = 1 + i*sqrt(3)
-    let input = make_complex128_tensor(&[], &[(-8.0, 0.0)]);
-    let result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
-    let vec = extract_complex128_vec(&result);
-    assert_eq!(vec.len(), 1);
-    let expected = (1.0, 3.0_f64.sqrt());
-    assert_complex_close(vec[0], expected, 1e-10, "cbrt(-8+0i) = 1 + sqrt(3)i");
-}
-
-#[test]
-fn oracle_cbrt_complex128_pure_imaginary() {
-    // cbrt(i) = cbrt(e^(i*pi/2)) = e^(i*pi/6) = cos(pi/6) + i*sin(pi/6) = sqrt(3)/2 + 0.5i
-    let input = make_complex128_tensor(&[], &[(0.0, 1.0)]);
-    let result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
-    let vec = extract_complex128_vec(&result);
-    assert_eq!(vec.len(), 1);
-    let expected = (3.0_f64.sqrt() / 2.0, 0.5);
-    assert_complex_close(vec[0], expected, 1e-10, "cbrt(i)");
-}
-
-#[test]
-fn oracle_cbrt_complex64_vector() {
-    let data: &[(f32, f32)] = &[(8.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
-    let input = make_complex64_tensor(&[3], data);
-    let result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
-    let vec = extract_complex64_vec(&result);
-    assert_eq!(vec.len(), 3);
-
-    // cbrt(8) = 2
-    assert_complex_close(
-        (vec[0].0 as f64, vec[0].1 as f64),
-        (2.0, 0.0),
-        1e-4,
-        "cbrt(8)",
-    );
-
-    // cbrt(1) = 1
-    assert_complex_close(
-        (vec[1].0 as f64, vec[1].1 as f64),
-        (1.0, 0.0),
-        1e-4,
-        "cbrt(1)",
-    );
-
-    // cbrt(i) ≈ (sqrt(3)/2, 0.5)
-    let expected_i = (3.0_f64.sqrt() / 2.0, 0.5);
-    assert_complex_close(
-        (vec[2].0 as f64, vec[2].1 as f64),
-        expected_i,
-        1e-4,
-        "cbrt(i)",
-    );
-}
-
-#[test]
-fn oracle_cbrt_complex_cubed_identity() {
-    // cbrt(z)³ = z
-    let values: &[(f64, f64)] = &[(8.0, 0.0), (1.0, 1.0), (2.0, 3.0)];
-
-    for &(a, b) in values {
-        let input = make_complex128_tensor(&[], &[(a, b)]);
-        let cbrt_result = eval_primitive(Primitive::Cbrt, &[input], &no_params()).unwrap();
-        let cbrt_val = extract_complex128_vec(&cbrt_result)[0];
-
-        // Cube the result: z³ = z * z * z
-        let z_sq_re = cbrt_val.0 * cbrt_val.0 - cbrt_val.1 * cbrt_val.1;
-        let z_sq_im = 2.0 * cbrt_val.0 * cbrt_val.1;
-        let z_cubed_re = z_sq_re * cbrt_val.0 - z_sq_im * cbrt_val.1;
-        let z_cubed_im = z_sq_re * cbrt_val.1 + z_sq_im * cbrt_val.0;
-
-        assert_complex_close(
-            (z_cubed_re, z_cubed_im),
-            (a, b),
-            1e-9,
-            &format!("cbrt({a}+{b}i)³ = {a}+{b}i"),
+fn oracle_cbrt_complex128_scalar_rejected() {
+    // Rejection holds across the real (+/-) axis and the imaginary axis.
+    for z in [(8.0, 0.0), (-8.0, 0.0), (0.0, 1.0)] {
+        let input = make_complex128_tensor(&[], &[z]);
+        let err = eval_primitive(Primitive::Cbrt, &[input], &no_params())
+            .expect_err("cbrt is float-only and must reject complex128");
+        assert!(
+            err.to_string().contains("complex"),
+            "cbrt({z:?}): unexpected error {err}"
         );
     }
 }
 
 #[test]
-fn oracle_cbrt_complex_dtype_preservation() {
-    // Complex64 -> Complex64
-    let c64_input = make_complex64_tensor(&[2], &[(8.0, 0.0), (1.0, 1.0)]);
-    let c64_result = eval_primitive(Primitive::Cbrt, &[c64_input], &no_params()).unwrap();
-    match &c64_result {
-        Value::Tensor(t) => {
-            assert_eq!(t.dtype, DType::Complex64, "cbrt should preserve Complex64");
-            t.validate_dtype_consistency().unwrap();
-        }
-        _ => panic!("expected tensor"),
-    }
+fn oracle_cbrt_complex64_vector_rejected() {
+    let data: &[(f32, f32)] = &[(8.0, 0.0), (1.0, 0.0), (0.0, 1.0)];
+    let input = make_complex64_tensor(&[3], data);
+    let err = eval_primitive(Primitive::Cbrt, &[input], &no_params())
+        .expect_err("cbrt is float-only and must reject complex64");
+    assert!(
+        err.to_string().contains("complex"),
+        "unexpected complex cbrt error: {err}"
+    );
+}
 
-    // Complex128 -> Complex128
-    let c128_input = make_complex128_tensor(&[2], &[(8.0, 0.0), (1.0, 1.0)]);
-    let c128_result = eval_primitive(Primitive::Cbrt, &[c128_input], &no_params()).unwrap();
-    match &c128_result {
-        Value::Tensor(t) => {
-            assert_eq!(
-                t.dtype,
-                DType::Complex128,
-                "cbrt should preserve Complex128"
-            );
-            t.validate_dtype_consistency().unwrap();
-        }
-        _ => panic!("expected tensor"),
+#[test]
+fn oracle_cbrt_complex_multiple_values_rejected() {
+    // (Previously a cbrt(z)³ = z identity; cbrt is now float-only, so every complex
+    // input is rejected.)
+    for z in [(8.0, 0.0), (1.0, 1.0), (2.0, 3.0)] {
+        let input = make_complex128_tensor(&[], &[z]);
+        let err = eval_primitive(Primitive::Cbrt, &[input], &no_params())
+            .expect_err("cbrt is float-only and must reject complex");
+        assert!(
+            err.to_string().contains("complex"),
+            "cbrt({z:?}): unexpected error {err}"
+        );
+    }
+}
+
+#[test]
+fn oracle_cbrt_complex_dtype_rejected() {
+    // (Previously asserted complex dtype preservation; cbrt is float-only, so both
+    // complex dtypes are rejected.)
+    for input in [
+        make_complex64_tensor(&[2], &[(8.0, 0.0), (1.0, 1.0)]),
+        make_complex128_tensor(&[2], &[(8.0, 0.0), (1.0, 1.0)]),
+    ] {
+        let err = eval_primitive(Primitive::Cbrt, &[input], &no_params())
+            .expect_err("cbrt is float-only and must reject complex");
+        assert!(
+            err.to_string().contains("complex"),
+            "unexpected complex cbrt error: {err}"
+        );
     }
 }
