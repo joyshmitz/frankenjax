@@ -9999,6 +9999,16 @@ mod tests {
         assert_eq!(result.batch_dim, Some(0));
         let tensor = result.value.as_tensor().unwrap();
         assert_eq!(tensor.shape.dims, vec![3, 4]);
+        // Value-level guard (project_vmap_param_key_mismatch class): reshaping each
+        // [2,2] slice to [4] with the batch axis prepended preserves the row-major
+        // buffer — a batch-dim mishandling that reordered values would pass the
+        // shape check above but fail here.
+        let vals = extract_f64_vec(&result.value);
+        assert_eq!(
+            vals,
+            (1..=12).map(|x| x as f64).collect::<Vec<_>>(),
+            "vmap(reshape) must preserve each slice's row-major buffer"
+        );
     }
 
     #[test]
