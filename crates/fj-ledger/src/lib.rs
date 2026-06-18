@@ -258,7 +258,9 @@ pub struct LogDomainPosterior {
 impl LogDomainPosterior {
     #[must_use]
     pub fn new(prior_abandoned: f64) -> Self {
-        let prior = prior_abandoned.clamp(1e-10, 1.0 - 1e-10);
+        let prior = normalize_probability(prior_abandoned)
+            .unwrap_or(0.5)
+            .clamp(1e-10, 1.0 - 1e-10);
         Self {
             log_prior_abandoned: prior.ln(),
             log_prior_useful: (1.0 - prior).ln(),
@@ -692,6 +694,17 @@ mod tests {
         let ldp = super::LogDomainPosterior::new(0.999);
         let p = ldp.posterior_abandoned();
         assert!(p > 0.99, "near-one prior should yield high posterior: {p}");
+    }
+
+    #[test]
+    fn log_domain_posterior_sanitizes_non_finite_prior() {
+        for prior in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let ldp = super::LogDomainPosterior::new(prior);
+            let posterior = ldp.posterior_abandoned();
+            assert!(posterior.is_finite());
+            assert!((posterior - 0.5).abs() < 1e-10);
+            assert_eq!(ldp.bayes_factor().to_bits(), 1.0_f64.to_bits());
+        }
     }
 
     #[test]
