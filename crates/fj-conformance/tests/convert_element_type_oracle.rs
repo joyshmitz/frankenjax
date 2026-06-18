@@ -311,6 +311,20 @@ fn convert_element_type_f32_to_i32_truncates_toward_zero() {
 }
 
 #[test]
+fn convert_element_type_f64_to_f32_overflows_to_signed_infinity() {
+    // A finite f64 magnitude beyond f32::MAX (~3.4e38) narrows to signed infinity
+    // (IEEE round-to-nearest overflow), matching JAX/XLA convert_element_type —
+    // it must NOT saturate to f32::MAX or produce NaN. In-range values are exact.
+    let input = f64_tensor(&[3], &[1e300, -1e300, 1.0]);
+    let result = convert(input, "f32").expect("f64 to f32 conversion should succeed");
+    assert_eq!(result.dtype(), DType::F32);
+    assert_eq!(
+        f32_values(&result),
+        vec![Some(f32::INFINITY), Some(f32::NEG_INFINITY), Some(1.0)]
+    );
+}
+
+#[test]
 fn convert_element_type_i64_to_f32_rounds_to_nearest_even() {
     // f32 has a 24-bit mantissa, so not every integer above 2^24 is representable
     // (the step is 2 there). i64 -> f32 rounds to nearest-even (IEEE), matching
