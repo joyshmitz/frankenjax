@@ -1588,11 +1588,14 @@ pub(crate) fn eval_irfft(
     let plan = (fft_length > 1 && !fft_length.is_power_of_two())
         .then(|| BatchFftPlan::new(fft_length, true));
 
-    // Dense + threaded fast path for the common F64 output (Complex128 input).
-    // Rows are independent (Hermitian reconstruct + inverse transform + real
-    // extraction), so large batches fan out across threads into a dense f64
-    // output — bit-identical to the serial path.
-    if out_dtype == DType::F64 {
+    // Dense + threaded fast path for F64 (Complex128 input) AND F32 (Complex64
+    // input — JAX's default-precision inverse real FFT, previously stuck on the
+    // serial boxed path). Rows are independent (Hermitian reconstruct + inverse
+    // transform + real extraction), so large batches fan out across threads into a
+    // dense f64 buffer; F32 then casts each value down (`v as f32` ==
+    // make_real_literal(re, F32) = from_f32(re as f32)). Bit-identical to the serial
+    // path: irfft_rows_f64_into runs the identical per-row algorithm in the same order.
+    if matches!(out_dtype, DType::F64 | DType::F32) {
         let mut out = vec![0.0f64; output_count];
         const IRFFT_PARALLEL_MIN_ELEMS: usize = 1 << 17; // 131_072
         let threads = if output_count >= IRFFT_PARALLEL_MIN_ELEMS && batch_size > 1 {
@@ -1641,12 +1644,16 @@ pub(crate) fn eval_irfft(
                 }
             });
         }
-        let tensor =
-            TensorValue::new_f64_values(out_shape, out).map_err(EvalError::InvalidTensor)?;
+        let tensor = if out_dtype == DType::F64 {
+            TensorValue::new_f64_values(out_shape, out)
+        } else {
+            TensorValue::new_f32_values(out_shape, out.iter().map(|&v| v as f32).collect())
+        }
+        .map_err(EvalError::InvalidTensor)?;
         return Ok(Value::Tensor(tensor));
     }
 
-    // Non-F64 output dtypes (F32/F16/BF16 from Complex64 etc.) keep the serial
+    // Remaining output dtypes (F16/BF16 from Complex64 etc.) keep the serial
     // Literal path.
     let mut out_elements = Vec::with_capacity(output_count);
     let mut full = vec![(0.0, 0.0); fft_length];
