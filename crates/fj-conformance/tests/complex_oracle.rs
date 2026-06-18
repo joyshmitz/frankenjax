@@ -497,3 +497,20 @@ fn metamorphic_complex_pythagorean_identity() {
     let ones: Vec<(f64, f64)> = pts.iter().map(|_| (1.0, 0.0)).collect();
     assert_complex_close(&sum, &ones, 1e-9, "sin(z)^2 + cos(z)^2 == 1");
 }
+
+#[test]
+fn metamorphic_complex_hyperbolic_identity() {
+    // cosh(z)^2 - sinh(z)^2 == 1 for every complex z. Exercises complex_sinh and
+    // complex_cosh (eval_sinh/eval_cosh route complex through eval_unary_complex_map)
+    // — distinct code paths from the sin/cos Pythagorean test. Imag parts kept
+    // moderate so the cancellation stays well-conditioned.
+    let pts = [(1.5, 0.7), (-0.8, 1.2), (2.0, -1.0), (0.3, 0.4)];
+    let z = complex_from_pairs(&pts);
+    let sh = unary(Primitive::Sinh, &z);
+    let ch = unary(Primitive::Cosh, &z);
+    let sh2 = eval_primitive(Primitive::Mul, &[sh.clone(), sh], &no_params()).unwrap();
+    let ch2 = eval_primitive(Primitive::Mul, &[ch.clone(), ch], &no_params()).unwrap();
+    let diff = eval_primitive(Primitive::Sub, &[ch2, sh2], &no_params()).unwrap();
+    let ones: Vec<(f64, f64)> = pts.iter().map(|_| (1.0, 0.0)).collect();
+    assert_complex_close(&diff, &ones, 1e-9, "cosh(z)^2 - sinh(z)^2 == 1");
+}
