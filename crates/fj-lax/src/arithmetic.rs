@@ -7004,6 +7004,46 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         )?)))
     }
 
+    // Half (BF16/F16) sibling — half is the dominant mixed-precision dtype and the
+    // clamp(min, x, max) idiom (activation bounds, relu6) runs on it. The generic
+    // path routes half through clamp_literal's promote-to-f64 branch then boxes the
+    // output (TensorValue::new doesn't densify half). This reuses clamp_literal per
+    // element (so it is BIT-FOR-BIT identical, incl. the f64 widen/clamp/round) but
+    // writes dense half storage. Returns None for non-half x.
+    fn clamp_half_scalar_bounds(
+        primitive: Primitive,
+        x: &TensorValue,
+        lo: Literal,
+        hi: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        let dt = x.dtype;
+        if !matches!(dt, DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        let Some(xs) = x.elements.as_half_float_slice() else {
+            return Ok(None);
+        };
+        let mut out: Vec<u16> = Vec::with_capacity(xs.len());
+        for &bits in xs {
+            let x_lit = if dt == DType::BF16 {
+                Literal::BF16Bits(bits)
+            } else {
+                Literal::F16Bits(bits)
+            };
+            let r = clamp_literal(lo, x_lit, hi, Some(dt))
+                .map_err(|detail| EvalError::TypeMismatch { primitive, detail })?;
+            match r {
+                Literal::BF16Bits(b) | Literal::F16Bits(b) => out.push(b),
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+            dt,
+            x.shape.clone(),
+            out,
+        )?)))
+    }
+
     match (&inputs[0], &inputs[1], &inputs[2]) {
         (Value::Scalar(lo), Value::Scalar(x), Value::Scalar(hi)) => {
             let result = clamp_literal(*lo, *x, *hi, None)
@@ -7016,6 +7056,9 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                 return Ok(value);
             }
             if let Some(value) = clamp_f32_scalar_bounds(x, *lo, *hi)? {
+                return Ok(value);
+            }
+            if let Some(value) = clamp_half_scalar_bounds(primitive, x, *lo, *hi)? {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(x.elements.len());
@@ -7037,6 +7080,9 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                 return Ok(value);
             }
             if let Some(value) = clamp_f32_scalar_bounds(x, *lo, *hi)? {
+                return Ok(value);
+            }
+            if let Some(value) = clamp_half_scalar_bounds(primitive, x, *lo, *hi)? {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(x.elements.len());
