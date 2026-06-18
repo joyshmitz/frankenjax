@@ -958,3 +958,19 @@ fn property_reduce_window_preserves_float_dtypes() {
             .expect("literal/dtype consistency");
     }
 }
+
+#[test]
+fn reduce_window_rejects_unknown_reduce_op() {
+    // reduce_window implements only sum/max/min. An unknown reduce_op ("mul"/"prod" or a
+    // typo) must fail closed, not silently fall through to the sum accumulator (the
+    // combiner's `_ => wrapping_add` default would otherwise compute a wrong result).
+    let input = make_f64_tensor(&[5], vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    let params = window_params("mul", "2", "1", "valid");
+    let err = eval_primitive(Primitive::ReduceWindow, &[input], &params)
+        .expect_err("unknown reduce_window reduce_op must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("reduce_op") || msg.contains("reduce_window"),
+        "unexpected error for unknown reduce_op: {err:?}"
+    );
+}

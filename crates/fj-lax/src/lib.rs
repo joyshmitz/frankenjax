@@ -5277,6 +5277,17 @@ fn eval_reduce_window(
 
     // Determine reduction operation
     let reduce_op = params.get("reduce_op").map(|s| s.as_str()).unwrap_or("sum");
+    // Fail closed on unknown reducers: only sum/max/min are implemented. Without this an
+    // unrecognized reduce_op (e.g. "mul"/"prod" or a typo) silently falls through to the
+    // sum accumulator (init 0, wrapping_add), computing a wrong result with no error.
+    if !matches!(reduce_op, "sum" | "max" | "min") {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "unsupported reduce_window reduce_op {reduce_op:?}; expected \"sum\", \"max\", or \"min\""
+            ),
+        });
+    }
 
     let padding = parse_reduce_window_padding(primitive, params)?;
 
