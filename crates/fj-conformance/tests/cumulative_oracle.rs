@@ -712,3 +712,29 @@ fn property_cumulative_preserves_complex_dtypes() {
         }
     }
 }
+
+#[test]
+fn oracle_associative_scan_body_ops() {
+    // associative_scan (jax.lax.associative_scan) produces the cumulative result along
+    // axis 0 via the body_op reducer; it had no conformance value oracle. Covers the
+    // arithmetic (add/mul/max/min) and bitwise (and/or/xor) reducers.
+    let scan = |data: Vec<i64>, op: &str| -> Vec<i64> {
+        let mut p = BTreeMap::new();
+        p.insert("body_op".to_string(), op.to_string());
+        let r = eval_primitive(
+            Primitive::AssociativeScan,
+            &[make_i64_tensor(&[data.len() as u32], data)],
+            &p,
+        )
+        .unwrap_or_else(|e| panic!("associative_scan body_op={op} failed: {e:?}"));
+        extract_i64_vec(&r)
+    };
+    assert_eq!(scan(vec![1, 2, 3, 4], "add"), vec![1, 3, 6, 10], "add = cumulative sum");
+    assert_eq!(scan(vec![1, 2, 3, 4], "mul"), vec![1, 2, 6, 24], "mul = cumulative product");
+    assert_eq!(scan(vec![1, 3, 2, 4], "max"), vec![1, 3, 3, 4], "max = cumulative max");
+    assert_eq!(scan(vec![4, 2, 3, 1], "min"), vec![4, 2, 2, 1], "min = cumulative min");
+    // bitwise reducers (i64): accumulate left-to-right.
+    assert_eq!(scan(vec![7, 3, 6], "and"), vec![7, 3, 2], "and: 7, 7&3=3, 3&6=2");
+    assert_eq!(scan(vec![1, 2, 4], "or"), vec![1, 3, 7], "or: 1, 1|2=3, 3|4=7");
+    assert_eq!(scan(vec![1, 3, 5], "xor"), vec![1, 2, 7], "xor: 1, 1^3=2, 2^5=7");
+}
