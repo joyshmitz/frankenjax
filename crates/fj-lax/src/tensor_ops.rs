@@ -5718,6 +5718,80 @@ pub(crate) fn eval_sort(
     }
 }
 
+pub(crate) fn eval_sort_multi(
+    primitive: Primitive,
+    inputs: &[Value],
+    params: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, EvalError> {
+    if inputs.is_empty() {
+        return Err(EvalError::ArityMismatch {
+            primitive,
+            expected: 1,
+            actual: 0,
+        });
+    }
+    if inputs.len() == 1 {
+        return eval_sort(primitive, inputs, params).map(|value| vec![value]);
+    }
+
+    let descending = params
+        .get("descending")
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+    let num_keys = match params.get("num_keys") {
+        Some(raw) => raw
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| EvalError::Unsupported {
+                primitive,
+                detail: format!("invalid usize in param 'num_keys': '{raw}'"),
+            })?,
+        None => 1,
+    };
+    if num_keys == 0 || num_keys > inputs.len() {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!("sort num_keys={num_keys} must be in 1..={}", inputs.len()),
+        });
+    }
+
+    if inputs.iter().all(|value| matches!(value, Value::Scalar(_))) {
+        return Ok(inputs.to_vec());
+    }
+
+    let mut tensors = Vec::with_capacity(inputs.len());
+    for value in inputs {
+        match value {
+            Value::Tensor(tensor) => tensors.push(tensor),
+            Value::Scalar(_) => {
+                return Err(EvalError::TypeMismatch {
+                    primitive,
+                    detail: "sort operands must be all scalars or all tensors",
+                });
+            }
+        }
+    }
+
+    let first_shape = tensors[0].shape.clone();
+    for tensor in tensors.iter().skip(1) {
+        if tensor.shape != first_shape {
+            return Err(EvalError::ShapeMismatch {
+                primitive,
+                left: first_shape,
+                right: tensor.shape.clone(),
+            });
+        }
+    }
+
+    let rank = tensors[0].shape.rank();
+    if rank == 0 {
+        return Ok(inputs.to_vec());
+    }
+
+    let axis = parse_axis_param(primitive, "axis", params, rank, rank - 1)?;
+    sort_multiple_along_axis(primitive, &tensors, num_keys, axis, descending)
+}
+
 /// Argsort: return indices that would sort along a specified axis.
 pub(crate) fn eval_argsort(
     primitive: Primitive,
@@ -7783,6 +7857,160 @@ fn sort_along_axis(
     ))
 }
 
+fn sort_multiple_along_axis(
+    primitive: Primitive,
+    tensors: &[&TensorValue],
+    num_keys: usize,
+    axis: usize,
+    descending: bool,
+) -> Result<Vec<Value>, EvalError> {
+    let rank = tensors[0].shape.rank();
+    let axis_dim = tensors[0].shape.dims[axis] as usize;
+
+    if axis_dim == 0 || tensors[0].elements.is_empty() {
+        return Ok(tensors
+            .iter()
+            .map(|tensor| Value::Tensor((*tensor).clone()))
+            .collect());
+    }
+
+    let strides = checked_row_major_strides(primitive, "sort", &tensors[0].shape.dims)?;
+    let axis_stride = strides[axis];
+    let total = tensors[0].elements.len();
+    if !total.is_multiple_of(axis_dim) {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "sort axis dimension {axis_dim} does not divide {total} input elements"
+            ),
+        });
+    }
+    let outer_count = total / axis_dim;
+
+    let mut result_elements: Vec<Vec<Literal>> = tensors
+        .iter()
+        .map(|tensor| tensor.elements.to_vec())
+        .collect();
+    let mut indexed: Vec<(usize, Vec<SortKey>)> = Vec::with_capacity(axis_dim);
+
+    for outer in 0..outer_count {
+        let base = {
+            let mut idx = outer;
+            let mut flat = 0_usize;
+            for ax in (0..rank).rev() {
+                if ax == axis {
+                    continue;
+                }
+                let dim = tensors[0].shape.dims[ax] as usize;
+                if dim == 0 {
+                    return Err(EvalError::Unsupported {
+                        primitive,
+                        detail: "sort encountered zero non-axis dimension in non-empty tensor"
+                            .to_owned(),
+                    });
+                }
+                let offset =
+                    (idx % dim)
+                        .checked_mul(strides[ax])
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: "sort flat offset multiplication overflowed usize".to_owned(),
+                        })?;
+                flat = flat
+                    .checked_add(offset)
+                    .ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: "sort flat offset addition overflowed usize".to_owned(),
+                    })?;
+                idx /= dim;
+            }
+            flat
+        };
+
+        indexed.clear();
+        for i in 0..axis_dim {
+            let flat_idx = i
+                .checked_mul(axis_stride)
+                .and_then(|offset| base.checked_add(offset))
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "sort axis offset overflowed usize".to_owned(),
+                })?;
+            let mut keys = Vec::with_capacity(num_keys);
+            for tensor in tensors.iter().take(num_keys) {
+                let literal =
+                    *tensor
+                        .elements
+                        .get(flat_idx)
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: format!(
+                                "sort flat index {flat_idx} out of bounds for {total} elements"
+                            ),
+                        })?;
+                keys.push(
+                    sort_key(literal)
+                        .map_err(|detail| EvalError::Unsupported { primitive, detail })?,
+                );
+            }
+            indexed.push((i, keys));
+        }
+
+        if descending {
+            indexed.sort_by(|a, b| compare_sort_key_tuples(&b.1, &a.1));
+        } else {
+            indexed.sort_by(|a, b| compare_sort_key_tuples(&a.1, &b.1));
+        }
+
+        for (out_pos, (orig_idx, _)) in indexed.iter().enumerate() {
+            let flat_idx = out_pos
+                .checked_mul(axis_stride)
+                .and_then(|offset| base.checked_add(offset))
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "sort output offset overflowed usize".to_owned(),
+                })?;
+            let source_idx = orig_idx
+                .checked_mul(axis_stride)
+                .and_then(|offset| base.checked_add(offset))
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "sort source offset overflowed usize".to_owned(),
+                })?;
+            for (result, tensor) in result_elements.iter_mut().zip(tensors.iter()) {
+                let source =
+                    *tensor
+                        .elements
+                        .get(source_idx)
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: format!(
+                                "sort source index {source_idx} out of bounds for {total} elements"
+                            ),
+                        })?;
+                *result
+                    .get_mut(flat_idx)
+                    .ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: format!(
+                            "sort output index {flat_idx} out of bounds for {total} elements"
+                        ),
+                    })? = source;
+            }
+        }
+    }
+
+    tensors
+        .iter()
+        .zip(result_elements)
+        .map(|(tensor, elements)| {
+            TensorValue::new(tensor.dtype, tensor.shape.clone(), elements)
+                .map(Value::Tensor)
+                .map_err(EvalError::InvalidTensor)
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy)]
 enum SortKey {
     Bool(bool),
@@ -8025,6 +8253,16 @@ fn compare_sort_keys_nan_last(lhs: SortKey, rhs: SortKey) -> Ordering {
         },
         (lhs, rhs) => compare_sort_keys(lhs, rhs),
     }
+}
+
+fn compare_sort_key_tuples(lhs: &[SortKey], rhs: &[SortKey]) -> Ordering {
+    for (left, right) in lhs.iter().zip(rhs.iter()) {
+        let ordering = compare_sort_keys_nan_last(*left, *right);
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    lhs.len().cmp(&rhs.len())
 }
 
 /// Conv: N-dimensional convolution.
@@ -16879,6 +17117,48 @@ mod tests {
         ]);
         let result = eval_sort(Primitive::Sort, &[x], &p).unwrap();
         assert_eq!(extract_f64_vec(&result), vec![4.0, 3.0, 1.0]);
+    }
+
+    #[test]
+    fn sort_multi_operand_key_val_applies_stable_permutation() {
+        let keys = Value::vector_i64(&[2, 1, 2, 1]).unwrap();
+        let values = Value::vector_i64(&[20, 10, 21, 11]).unwrap();
+        let p = params(&[("axis", "0")]);
+
+        let outputs = crate::eval_primitive_multi(Primitive::Sort, &[keys, values], &p).unwrap();
+
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(extract_i64_vec(&outputs[0]), vec![1, 1, 2, 2]);
+        assert_eq!(extract_i64_vec(&outputs[1]), vec![10, 11, 20, 21]);
+    }
+
+    #[test]
+    fn sort_multi_operand_num_keys_uses_lexicographic_keys() {
+        let key0 = Value::vector_i64(&[1, 1, 0, 0]).unwrap();
+        let key1 = Value::vector_i64(&[2, 1, 2, 1]).unwrap();
+        let values = Value::vector_i64(&[12, 11, 2, 1]).unwrap();
+        let p = params(&[("axis", "0"), ("num_keys", "2")]);
+
+        let outputs = crate::eval_primitive_multi(Primitive::Sort, &[key0, key1, values], &p)
+            .unwrap();
+
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(extract_i64_vec(&outputs[0]), vec![0, 0, 1, 1]);
+        assert_eq!(extract_i64_vec(&outputs[1]), vec![1, 2, 1, 2]);
+        assert_eq!(extract_i64_vec(&outputs[2]), vec![1, 2, 11, 12]);
+    }
+
+    #[test]
+    fn sort_multi_operand_rejects_shape_mismatch() {
+        let keys = Value::vector_i64(&[1, 0]).unwrap();
+        let values = Value::vector_i64(&[10, 20, 30]).unwrap();
+        let err = crate::eval_primitive_multi(Primitive::Sort, &[keys, values], &BTreeMap::new())
+            .expect_err("multi-operand sort requires matching shapes");
+
+        assert!(
+            matches!(err, EvalError::ShapeMismatch { .. }),
+            "unexpected error: {err}"
+        );
     }
 
     fn f32_sort_dense(data: &[f32]) -> Value {
