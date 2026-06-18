@@ -11035,11 +11035,21 @@ pub(crate) fn eval_squeeze(
                     .collect()
             };
 
+            // JAX (lax._compute_squeeze_shape) rejects duplicate dimensions
+            // ("dimensions are not unique") before the size-1 check; mirror that
+            // fail-closed behavior rather than silently squeezing an axis once.
+            let mut seen = std::collections::BTreeSet::new();
             for &d in &squeeze_dims {
                 if d >= dims.len() {
                     return Err(EvalError::Unsupported {
                         primitive,
                         detail: format!("dimension {d} out of range for rank {}", dims.len()),
+                    });
+                }
+                if !seen.insert(d) {
+                    return Err(EvalError::Unsupported {
+                        primitive,
+                        detail: format!("squeeze dimensions are not unique: duplicate {d}"),
                     });
                 }
                 if dims[d] != 1 {
