@@ -7479,6 +7479,53 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
             )?))
         }
         (Value::Tensor(lo), Value::Tensor(x), Value::Tensor(hi)) => {
+            // Dense same-shape fast path (per-element clipping, no broadcast): clamp
+            // the typed slices straight into dense output, skipping the broadcast
+            // odometer + the per-element 24-byte Literal reconstruction of three
+            // operands + boxed output. The `as_f{64,32}_slice` guards also enforce
+            // that all three operands are that dtype (None otherwise -> fall through),
+            // so it can never reach clamp_literal's mixed promote-to-f64 branch.
+            // Bit-identical to the (F64,F64,F64)/(F32,F32,F32) arms of clamp_literal
+            // (from_f{64,32}(clamp_f{64,32}(lo, x, hi)); clamp_f* normalizes NaN so
+            // the dense store and from_f* agree bit-for-bit).
+            if lo.shape == x.shape && hi.shape == x.shape {
+                if x.dtype == DType::F64
+                    && let (Some(lov), Some(xv), Some(hiv)) = (
+                        lo.elements.as_f64_slice(),
+                        x.elements.as_f64_slice(),
+                        hi.elements.as_f64_slice(),
+                    )
+                {
+                    let out: Vec<f64> = lov
+                        .iter()
+                        .zip(xv)
+                        .zip(hiv)
+                        .map(|((&l, &xx), &h)| clamp_f64(l, xx, h))
+                        .collect();
+                    return Ok(Value::Tensor(TensorValue::new_f64_values(
+                        x.shape.clone(),
+                        out,
+                    )?));
+                }
+                if x.dtype == DType::F32
+                    && let (Some(lov), Some(xv), Some(hiv)) = (
+                        lo.elements.as_f32_slice(),
+                        x.elements.as_f32_slice(),
+                        hi.elements.as_f32_slice(),
+                    )
+                {
+                    let out: Vec<f32> = lov
+                        .iter()
+                        .zip(xv)
+                        .zip(hiv)
+                        .map(|((&l, &xx), &h)| clamp_f32(l, xx, h))
+                        .collect();
+                    return Ok(Value::Tensor(TensorValue::new_f32_values(
+                        x.shape.clone(),
+                        out,
+                    )?));
+                }
+            }
             // Support broadcasting for tensor bounds
             let out_shape = broadcast_shape(&x.shape, &lo.shape)
                 .and_then(|s| broadcast_shape(&s, &hi.shape))
