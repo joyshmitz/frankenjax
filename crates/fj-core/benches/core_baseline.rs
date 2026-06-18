@@ -164,6 +164,19 @@ fn bench_literal_buffer_to_vec(c: &mut Criterion) {
     });
 }
 
+fn bench_literal_buffer_serialize(c: &mut Criterion) {
+    let values: Vec<f64> = (0..65_536).map(|i| i as f64 + 0.25).collect();
+    let dense = LiteralBuffer::from_f64_values(values.clone());
+    let literal = LiteralBuffer::new(values.into_iter().map(Literal::from_f64).collect());
+
+    c.bench_function("core/literal_buffer_serialize_dense_f64_64k", |b| {
+        b.iter(|| serde_json::to_vec(black_box(&dense)).expect("serialize dense buffer"))
+    });
+    c.bench_function("core/literal_buffer_serialize_literal_f64_64k", |b| {
+        b.iter(|| serde_json::to_vec(black_box(&literal)).expect("serialize literal buffer"))
+    });
+}
+
 fn bench_literal_buffer_index_mut(c: &mut Criterion) {
     let values: Vec<f64> = (0..65_536).map(|i| i as f64 + 0.25).collect();
     let dense = LiteralBuffer::from_f64_values(values.clone());
@@ -270,6 +283,7 @@ criterion_group!(
     bench_tensor_value_new,
     bench_tensor_to_i64_vec,
     bench_literal_buffer_to_vec,
+    bench_literal_buffer_serialize,
     bench_literal_buffer_index_mut,
     bench_tensor_repeat_axis0,
     bench_tensor_stack_axis0,

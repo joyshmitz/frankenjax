@@ -80,3 +80,23 @@ ends are not rediscovered without new evidence.
   bottleneck. Do not merge it with FMA/SIMD exp, GEMM, QR, SVD, cumsum,
   OneHot, SelectN/iota, or peer-owned fj-core dense-storage lanes without fresh
   same-worker benchmark evidence and ownership check.
+
+## frankenjax-co009 - Stream Dense LiteralBuffer Serialization
+
+- Date: 2026-06-18
+- Agent: cod-b / WildForge
+- Lever: make `Serialize for LiteralBuffer` stream storage-direct elements
+  through `SerializeSeq` instead of forcing `as_slice()` to cache a full
+  materialized literal vector for dense packed buffers.
+- Status: batch-test pending.
+- Benchmark guard: `core/literal_buffer_serialize_dense_f64_64k`,
+  `core/literal_buffer_serialize_literal_f64_64k`.
+- Conformance guard: streamed JSON matches materialized `Vec<Literal>` JSON
+  across F64/F64OnePlusX/F32/I64/U32/U64/Bool/BoolWords/Half/Complex,
+  repeated-patches, concat, and mixed dense/literal concat paths.
+- Retry predicate: do not retry the already committed stack/repeat/slice/to_i64,
+  `TensorValue::new`, `LiteralBuffer::to_vec`, dense COW mutation, or this
+  serialization streaming family without fresh focused criterion evidence
+  showing it remains a top-five fj-core bottleneck. Do not revisit FMA/SIMD exp,
+  GEMM, QR, SVD, cumsum, OneHot, SelectN/iota, or eager concat without fresh
+  same-worker benchmark evidence and ownership check.

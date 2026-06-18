@@ -5,6 +5,7 @@ pub mod proptest_strategies;
 
 use half::{bf16, f16};
 use rustc_hash::FxHashSet;
+use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1995,7 +1996,9 @@ impl Serialize for LiteralBuffer {
     where
         S: Serializer,
     {
-        self.as_slice().serialize(serializer)
+        let mut seq = serializer.serialize_seq(Some(self.len()))?;
+        serialize_literal_buffer_range(&mut seq, self, 0, self.len())?;
+        seq.end()
     }
 }
 
@@ -2334,6 +2337,210 @@ fn materialize_concat_slices(parts: &[LiteralBufferSlice], len: usize) -> Vec<Li
         elements.extend_from_slice(&part.buffer.as_slice()[part.start..end]);
     }
     elements
+}
+
+fn serialize_literal_buffer_range<Seq>(
+    seq: &mut Seq,
+    buffer: &LiteralBuffer,
+    start: usize,
+    len: usize,
+) -> Result<(), Seq::Error>
+where
+    Seq: SerializeSeq,
+{
+    let end = start + len;
+    match &buffer.storage {
+        LiteralBufferStorage::Literals(elements) => {
+            for literal in &elements[start..end] {
+                seq.serialize_element(literal)?;
+            }
+        }
+        LiteralBufferStorage::F64 { values, literals } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                for &value in &values[start..end] {
+                    seq.serialize_element(&Literal::from_f64(value))?;
+                }
+            }
+        }
+        LiteralBufferStorage::F64OnePlusXPlusX {
+            base,
+            values,
+            literals,
+        } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                let values =
+                    values.get_or_init(|| Arc::new(materialize_f64_one_plus_x_plus_x(base)));
+                for &value in &values[start..end] {
+                    seq.serialize_element(&Literal::from_f64(value))?;
+                }
+            }
+        }
+        LiteralBufferStorage::F32 { values, literals } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                for &value in &values[start..end] {
+                    seq.serialize_element(&Literal::from_f32(value))?;
+                }
+            }
+        }
+        LiteralBufferStorage::I64 { values, literals } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                for &value in &values[start..end] {
+                    seq.serialize_element(&Literal::I64(value))?;
+                }
+            }
+        }
+        LiteralBufferStorage::Bool { values, literals } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                for &value in &values[start..end] {
+                    seq.serialize_element(&Literal::Bool(value))?;
+                }
+            }
+        }
+        LiteralBufferStorage::BoolWords {
+            words,
+            len: value_len,
+            literals,
+        } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                debug_assert!(end <= *value_len);
+                for index in start..end {
+                    let word = words[index / u64::BITS as usize];
+                    let bit = (word >> (index % u64::BITS as usize)) & 1;
+                    seq.serialize_element(&Literal::Bool(bit != 0))?;
+                }
+            }
+        }
+        LiteralBufferStorage::Complex {
+            values,
+            dtype,
+            literals,
+        } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                for &(re, im) in &values[start..end] {
+                    seq.serialize_element(&complex_pair_to_literal(re, im, *dtype))?;
+                }
+            }
+        }
+        LiteralBufferStorage::HalfFloat {
+            values,
+            dtype,
+            literals,
+        } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                for &bits in &values[start..end] {
+                    seq.serialize_element(&half_bits_to_literal(bits, *dtype))?;
+                }
+            }
+        }
+        LiteralBufferStorage::U32 { values, literals } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                for &value in &values[start..end] {
+                    seq.serialize_element(&Literal::U32(value))?;
+                }
+            }
+        }
+        LiteralBufferStorage::U64 { values, literals } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                for &value in &values[start..end] {
+                    seq.serialize_element(&Literal::U64(value))?;
+                }
+            }
+        }
+        LiteralBufferStorage::RepeatedPatches {
+            base,
+            repeats,
+            patches,
+            literals,
+        } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                let elements = materialize_repeated_patches(base, *repeats, patches);
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            }
+        }
+        LiteralBufferStorage::Concat {
+            parts,
+            len: value_len,
+            literals,
+            ..
+        } => {
+            if let Some(elements) = literals.get() {
+                for literal in &elements[start..end] {
+                    seq.serialize_element(literal)?;
+                }
+            } else {
+                debug_assert!(end <= *value_len);
+                let mut skipped = start;
+                let mut remaining = len;
+                for part in parts.iter() {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if skipped >= part.len {
+                        skipped -= part.len;
+                        continue;
+                    }
+
+                    let part_offset = skipped;
+                    let take_len = (part.len - part_offset).min(remaining);
+                    serialize_literal_buffer_range(
+                        seq,
+                        &part.buffer,
+                        part.start + part_offset,
+                        take_len,
+                    )?;
+                    remaining -= take_len;
+                    skipped = 0;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn materialize_concat_f64_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<f64>> {
@@ -9114,6 +9321,88 @@ mod tests {
         assert_direct_to_vec_matches_slice(
             LiteralBuffer::from_concat_slices(vec![
                 (LiteralBuffer::from_f64_values(vec![1.0, 2.0, 3.0]), 1, 2),
+                (LiteralBuffer::new(vec![Literal::from_f64(4.0)]), 0, 1),
+            ])
+            .expect("valid concat slices"),
+        );
+    }
+
+    #[test]
+    fn literal_buffer_streamed_serialization_matches_materialized_json() {
+        fn assert_streamed_json_matches_materialized(buffer: LiteralBuffer) {
+            let streamed = serde_json::to_vec(&buffer).expect("stream serialize literal buffer");
+            let materialized =
+                serde_json::to_vec(&buffer.to_vec()).expect("serialize materialized literals");
+            assert_eq!(streamed, materialized);
+        }
+
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_f64_values(vec![
+            1.0,
+            -0.0,
+            f64::from_bits(0x7ff8_0000_0000_0042),
+        ]));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_f64_one_plus_x_plus_x(
+            std::sync::Arc::new(vec![0.25, -0.5]),
+        ));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_f32_values(vec![
+            1.0,
+            -0.0,
+            f32::from_bits(0x7fc0_0042),
+        ]));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_i64_values(vec![
+            i64::MIN,
+            -1,
+            0,
+            7,
+        ]));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_u32_values(vec![
+            0,
+            17,
+            u32::MAX,
+        ]));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_u64_values(vec![
+            0,
+            17,
+            u64::MAX,
+        ]));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_bool_values(vec![
+            true, false, true,
+        ]));
+        assert_streamed_json_matches_materialized(
+            LiteralBuffer::from_bool_words(vec![0b1011], 4).expect("valid bool words"),
+        );
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_half_float_values(
+            vec![0x3c00, 0xbc00, 0x7e00],
+            DType::F16,
+        ));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_half_float_values(
+            vec![0x3f80, 0xbf80, 0x7fc0],
+            DType::BF16,
+        ));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_complex_values(
+            vec![(1.0, -2.0), (3.5, 4.25)],
+            DType::Complex64,
+        ));
+        assert_streamed_json_matches_materialized(LiteralBuffer::from_complex_values(
+            vec![(1.0, -2.0), (3.5, 4.25)],
+            DType::Complex128,
+        ));
+        assert_streamed_json_matches_materialized(
+            LiteralBuffer::from_repeated_with_patches(
+                vec![Literal::I64(1), Literal::I64(2)],
+                3,
+                vec![(1, Literal::I64(99)), (4, Literal::I64(-5))],
+            )
+            .expect("valid repeated patches"),
+        );
+        assert_streamed_json_matches_materialized(
+            LiteralBuffer::from_concat_slices(vec![
+                (LiteralBuffer::from_f64_values(vec![1.0, 2.0, 3.0]), 1, 2),
+                (
+                    LiteralBuffer::from_bool_words(vec![0b1011], 4).expect("valid bool words"),
+                    1,
+                    2,
+                ),
                 (LiteralBuffer::new(vec![Literal::from_f64(4.0)]), 0, 1),
             ])
             .expect("valid concat slices"),
