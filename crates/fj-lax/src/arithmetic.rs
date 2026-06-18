@@ -5904,6 +5904,35 @@ pub(crate) fn eval_unary_int_or_float(
                     out,
                 )?));
             }
+            // Dense I32 (JAX's default int) fast path: the I32 dense backing holds the
+            // sign-extended i32 values, so `int_op(v) as i32` matches the generic I32
+            // arm `Literal::I32(int_op(i64::from(v)) as i32)`; new_i32_values re-stores
+            // it. Bit-identical (no NaN/round concerns for integers).
+            if tensor.dtype == DType::I32
+                && let Some(src) = tensor.elements.as_i64_slice()
+            {
+                let out: Vec<i64> = src.iter().map(|&v| i64::from(int_op(v) as i32)).collect();
+                return Ok(Value::Tensor(TensorValue::new_i32_values(
+                    tensor.shape.clone(),
+                    out,
+                )?));
+            }
+            // Dense U32/U64 fast paths (as_u32/u64_slice are Some only for that dtype):
+            // mirror the generic U32/U64 arms (u32_op/u64_op) into dense storage.
+            if let Some(src) = tensor.elements.as_u32_slice() {
+                let out: Vec<u32> = src.iter().map(|&v| u32_op(v)).collect();
+                return Ok(Value::Tensor(TensorValue::new_u32_values(
+                    tensor.shape.clone(),
+                    out,
+                )?));
+            }
+            if let Some(src) = tensor.elements.as_u64_slice() {
+                let out: Vec<u64> = src.iter().map(|&v| u64_op(v)).collect();
+                return Ok(Value::Tensor(TensorValue::new_u64_values(
+                    tensor.shape.clone(),
+                    out,
+                )?));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in tensor.elements.iter().copied() {
                 let out = match literal {
