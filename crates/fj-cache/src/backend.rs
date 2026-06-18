@@ -608,13 +608,15 @@ mod tests {
     }
 
     #[test]
-    fn file_cache_clear_bumps_counter_when_dir_missing() {
-        // Point clear() at a directory that does not exist: read_dir fails,
-        // bumping clear_failures by 1.
-        let dir = std::env::temp_dir().join(format!(
-            "fj-cache-test-clear-missing-{}/never_created",
+    fn file_cache_clear_bumps_counter_when_root_is_not_directory() {
+        // FileCache::new creates normal missing directories, so use a regular
+        // file as the parent to keep read_dir failing in a stable way.
+        let parent_file = std::env::temp_dir().join(format!(
+            "fj-cache-test-clear-file-parent-{}",
             std::process::id()
         ));
+        std::fs::write(&parent_file, b"not a directory").expect("parent marker should write");
+        let dir = parent_file.join("never_created");
 
         let mut cache = FileCache::new(dir.clone());
         assert_eq!(cache.clear_failure_count(), 0);
@@ -628,6 +630,8 @@ mod tests {
 
         cache.clear();
         assert_eq!(cache.clear_failure_count(), 2);
+
+        let _ = std::fs::remove_file(&parent_file);
     }
 
     #[test]
