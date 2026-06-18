@@ -27,6 +27,19 @@ fn make_f64_tensor(shape: &[u32], data: Vec<f64>) -> Value {
     )
 }
 
+fn make_f32_tensor(shape: &[u32], data: Vec<f32>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter().map(Literal::from_f32).collect(),
+        )
+        .unwrap(),
+    )
+}
+
 fn extract_f64_vec(v: &Value) -> Vec<f64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
@@ -41,6 +54,20 @@ fn extract_f64_scalar(v: &Value) -> f64 {
             t.elements[0].as_f64().unwrap()
         }
         Value::Scalar(l) => l.as_f64().unwrap(),
+    }
+}
+
+fn extract_f32_scalar_bits(v: &Value) -> u32 {
+    match v {
+        Value::Tensor(t) => {
+            assert_eq!(t.shape.dims.len(), 0, "expected scalar");
+            match t.elements[0] {
+                Literal::F32Bits(bits) => bits,
+                ref other => panic!("expected F32Bits, got {other:?}"),
+            }
+        }
+        Value::Scalar(Literal::F32Bits(bits)) => *bits,
+        other => panic!("expected F32 scalar, got {other:?}"),
     }
 }
 
@@ -119,6 +146,72 @@ fn oracle_copysign_with_neg_zero() {
     let y = make_f64_tensor(&[], vec![-0.0]);
     let result = eval_primitive(Primitive::CopySign, &[x, y], &no_params()).unwrap();
     assert_eq!(extract_f64_scalar(&result), -5.0, "copysign(5, -0) = -5");
+}
+
+#[test]
+fn oracle_copysign_f32_zero_sign_bits() {
+    let positive_zero = eval_primitive(
+        Primitive::CopySign,
+        &[
+            make_f32_tensor(&[], vec![0.0]),
+            make_f32_tensor(&[], vec![1.0]),
+        ],
+        &no_params(),
+    )
+    .unwrap();
+    assert_eq!(
+        extract_f32_scalar_bits(&positive_zero),
+        0.0_f32.to_bits(),
+        "copysign(+0.0f32, +1.0f32) = +0.0f32"
+    );
+
+    let negative_zero = eval_primitive(
+        Primitive::CopySign,
+        &[
+            make_f32_tensor(&[], vec![0.0]),
+            make_f32_tensor(&[], vec![-1.0]),
+        ],
+        &no_params(),
+    )
+    .unwrap();
+    assert_eq!(
+        extract_f32_scalar_bits(&negative_zero),
+        (-0.0_f32).to_bits(),
+        "copysign(+0.0f32, -1.0f32) = -0.0f32"
+    );
+}
+
+#[test]
+fn oracle_copysign_f32_zero_sign_source_bits() {
+    let negative_from_zero = eval_primitive(
+        Primitive::CopySign,
+        &[
+            make_f32_tensor(&[], vec![5.0]),
+            make_f32_tensor(&[], vec![-0.0]),
+        ],
+        &no_params(),
+    )
+    .unwrap();
+    assert_eq!(
+        extract_f32_scalar_bits(&negative_from_zero),
+        (-5.0_f32).to_bits(),
+        "copysign(5.0f32, -0.0f32) = -5.0f32"
+    );
+
+    let positive_from_zero = eval_primitive(
+        Primitive::CopySign,
+        &[
+            make_f32_tensor(&[], vec![-5.0]),
+            make_f32_tensor(&[], vec![0.0]),
+        ],
+        &no_params(),
+    )
+    .unwrap();
+    assert_eq!(
+        extract_f32_scalar_bits(&positive_from_zero),
+        5.0_f32.to_bits(),
+        "copysign(-5.0f32, +0.0f32) = +5.0f32"
+    );
 }
 
 // ======================== Special Values ========================
