@@ -35,6 +35,19 @@ fn make_i64_tensor(shape: &[u32], data: Vec<i64>) -> Value {
     )
 }
 
+fn make_f32_bits_tensor(shape: &[u32], bits: Vec<u32>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            bits.into_iter().map(Literal::F32Bits).collect(),
+        )
+        .unwrap(),
+    )
+}
+
 fn extract_bool_vec(v: &Value) -> Vec<bool> {
     match v {
         Value::Tensor(t) => t
@@ -261,6 +274,29 @@ fn oracle_is_finite_subnormal() {
     let input = make_f64_tensor(&[2], vec![tiny, -tiny]);
     let result = eval_primitive(Primitive::IsFinite, &[input], &no_params()).unwrap();
     assert_eq!(extract_bool_vec(&result), vec![true, true]);
+}
+
+#[test]
+fn oracle_is_finite_f32_truth_table() {
+    let input = make_f32_bits_tensor(
+        &[8],
+        vec![
+            0.0_f32.to_bits(),
+            (-0.0_f32).to_bits(),
+            1.5_f32.to_bits(),
+            1,
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits(),
+            0x7fc0_0001,
+            0xffc0_0001,
+        ],
+    );
+    let result = eval_primitive(Primitive::IsFinite, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![8]);
+    assert_eq!(
+        extract_bool_vec(&result),
+        vec![true, true, true, true, false, false, false, false]
+    );
 }
 
 // ======================== PROPERTY: is_finite always returns Bool ========================
