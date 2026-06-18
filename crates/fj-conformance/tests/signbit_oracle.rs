@@ -244,6 +244,26 @@ fn oracle_signbit_f32_dtype() {
 }
 
 #[test]
+fn oracle_signbit_f32_signed_zero_and_nan_bits() {
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape { dims: vec![4] },
+            vec![
+                Literal::F32Bits(0.0_f32.to_bits()),
+                Literal::F32Bits((-0.0_f32).to_bits()),
+                Literal::F32Bits(0x7fc0_0001),
+                Literal::F32Bits(0xffc0_0001),
+            ],
+        )
+        .unwrap(),
+    );
+    let result = eval_primitive(Primitive::Signbit, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![4]);
+    assert_eq!(extract_bool_vec(&result), vec![false, true, false, true]);
+}
+
+#[test]
 fn oracle_signbit_large_tensor() {
     let data: Vec<f64> = (0..100)
         .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
