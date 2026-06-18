@@ -16430,6 +16430,58 @@ mod tests {
     }
 
     #[test]
+    fn eval_equation_single_matches_eval_jaxpr() {
+        // The two public eval entry points must agree on a single-output equation:
+        // eval_equation_single(eqn, env) == eval_jaxpr(single-eqn jaxpr, args)[0].
+        // Cross-validates the per-equation path against the full interpreter — a
+        // divergence would make callers of eval_equation_single silently differ.
+        let check = |label: &str, jaxpr: &Jaxpr, args: &[Value]| {
+            let via_jaxpr = eval_jaxpr(jaxpr, args).expect("eval_jaxpr");
+            assert_eq!(via_jaxpr.len(), 1, "{label}: single output expected");
+            let mut env: rustc_hash::FxHashMap<VarId, Value> = rustc_hash::FxHashMap::default();
+            for (var, val) in jaxpr.invars.iter().zip(args) {
+                env.insert(*var, val.clone());
+            }
+            let via_single = crate::eval_equation_single(&jaxpr.equations[0], &env)
+                .expect("eval_equation_single");
+            assert_eq!(
+                via_single, via_jaxpr[0],
+                "{label}: eval_equation_single != eval_jaxpr"
+            );
+        };
+        check(
+            "f64_add",
+            &make_binary_jaxpr(Primitive::Add),
+            &[Value::scalar_f64(2.0), Value::scalar_f64(3.0)],
+        );
+        check(
+            "f64_mul",
+            &make_binary_jaxpr(Primitive::Mul),
+            &[Value::scalar_f64(2.5), Value::scalar_f64(4.0)],
+        );
+        check(
+            "i64_sub",
+            &make_binary_jaxpr(Primitive::Sub),
+            &[Value::scalar_i64(10), Value::scalar_i64(3)],
+        );
+        check(
+            "f64_exp",
+            &make_unary_jaxpr(Primitive::Exp),
+            &[Value::scalar_f64(1.0)],
+        );
+        check(
+            "f64_neg",
+            &make_unary_jaxpr(Primitive::Neg),
+            &[Value::scalar_f64(5.0)],
+        );
+        check(
+            "f64_abs",
+            &make_unary_jaxpr(Primitive::Abs),
+            &[Value::scalar_f64(-7.0)],
+        );
+    }
+
+    #[test]
     fn eval_exp_scalar() {
         let jaxpr = make_unary_jaxpr(Primitive::Exp);
         let out = eval_jaxpr(&jaxpr, &[Value::scalar_f64(1.0)]).unwrap();
