@@ -94,6 +94,20 @@ fn test_tree_unflatten_roundtrip() {
 }
 
 #[test]
+#[should_panic(expected = "tree_unflatten leaf underflow")]
+fn test_tree_unflatten_rejects_missing_leaves() {
+    let def = TreeDef::Tuple(vec![TreeDef::Leaf, TreeDef::Leaf]);
+    let _ = tree_unflatten(&def, &[1.0]);
+}
+
+#[test]
+#[should_panic(expected = "tree_unflatten leaf overflow")]
+fn test_tree_unflatten_rejects_extra_leaves() {
+    let def = TreeDef::Leaf;
+    let _ = tree_unflatten(&def, &[1.0, 2.0]);
+}
+
+#[test]
 fn test_tree_leaves_simple() {
     let tree = make_simple_tree();
     let leaves = tree_leaves(&tree);
