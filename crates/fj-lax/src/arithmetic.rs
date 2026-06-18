@@ -7339,6 +7339,34 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         )?)))
     }
 
+    // Integer (I64) sibling of clamp_f64/f32_scalar_bounds. For an I64 tensor with
+    // I64 bounds, clamp_literal hits the (I64,I64,I64) arm computing
+    // `Literal::I64(lov.max(xv).min(hiv))`; replicate that on the dense i64 slice
+    // straight into dense I64 storage, skipping the per-`Literal` unpack + boxed
+    // output. Restricted to dtype==I64 with I64 bounds so it can never reach
+    // clamp_literal's mixed promote-to-f64 branch (bit-identical). Returns None
+    // otherwise (mixed/other dtypes fall through to the per-element path).
+    fn clamp_i64_scalar_bounds(
+        x: &TensorValue,
+        lo: Literal,
+        hi: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        if x.dtype != DType::I64 {
+            return Ok(None);
+        }
+        let (Literal::I64(lov), Literal::I64(hiv)) = (lo, hi) else {
+            return Ok(None);
+        };
+        let Some(xs) = x.elements.as_i64_slice() else {
+            return Ok(None);
+        };
+        let out: Vec<i64> = xs.iter().map(|&xv| lov.max(xv).min(hiv)).collect();
+        Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+            x.shape.clone(),
+            out,
+        )?)))
+    }
+
     match (&inputs[0], &inputs[1], &inputs[2]) {
         (Value::Scalar(lo), Value::Scalar(x), Value::Scalar(hi)) => {
             let result = clamp_literal(*lo, *x, *hi, None)
@@ -7354,6 +7382,9 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                 return Ok(value);
             }
             if let Some(value) = clamp_half_scalar_bounds(primitive, x, *lo, *hi)? {
+                return Ok(value);
+            }
+            if let Some(value) = clamp_i64_scalar_bounds(x, *lo, *hi)? {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(x.elements.len());
@@ -7378,6 +7409,9 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                 return Ok(value);
             }
             if let Some(value) = clamp_half_scalar_bounds(primitive, x, *lo, *hi)? {
+                return Ok(value);
+            }
+            if let Some(value) = clamp_i64_scalar_bounds(x, *lo, *hi)? {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(x.elements.len());
