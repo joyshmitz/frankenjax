@@ -1121,4 +1121,37 @@ mod tests {
         let var = s.iter().map(|&v| (v - mean).powi(2)).sum::<f64>() / n;
         assert!(approx_eq(var, 1.0, 1e-10));
     }
+
+    #[test]
+    fn differential_activations_match_raw_f64_definitions() {
+        // Differential checks vs references computed with raw std f64 ops (independent
+        // of nn.rs internals) across a range — catches formula/precision drift the
+        // existing point/property tests can miss. Range avoids exp overflow.
+        let xs = [-5.0_f64, -2.0, -0.5, 0.0, 0.5, 2.0, 5.0];
+        for &x in &xs {
+            // silu(x) = x * sigmoid(x) = x / (1 + e^-x)
+            let sigmoid_ref = 1.0 / (1.0 + (-x).exp());
+            assert!(
+                approx_eq(silu(&[x])[0], x * sigmoid_ref, 1e-12),
+                "silu({x}) vs x*sigmoid(x)"
+            );
+            // mish(x) = x * tanh(softplus(x)), softplus(x) = ln(1 + e^x)
+            let mish_ref = x * x.exp().ln_1p().tanh();
+            assert!(
+                approx_eq(mish(&[x])[0], mish_ref, 1e-9),
+                "mish({x}) vs x*tanh(softplus(x))"
+            );
+            // log_sigmoid(x) = ln(sigmoid(x)) = -ln(1 + e^-x)
+            let log_sigmoid_ref = -(-x).exp().ln_1p();
+            assert!(
+                approx_eq(log_sigmoid(&[x])[0], log_sigmoid_ref, 1e-12),
+                "log_sigmoid({x}) vs -ln(1+e^-x)"
+            );
+            // softplus(x) = ln(1 + e^x)
+            assert!(
+                approx_eq(softplus(&[x])[0], x.exp().ln_1p(), 1e-12),
+                "softplus({x}) vs ln(1+e^x)"
+            );
+        }
+    }
 }
