@@ -104,6 +104,18 @@ fn oracle_ctz_zero_u32() {
     assert_eq!(extract_i64_scalar(&result), 32, "ctz(0u32) = 32");
 }
 
+#[test]
+fn oracle_ctz_zero_i32() {
+    // i32 is stored as Literal::I64, but ctz must use the LOGICAL 32-bit width:
+    // ctz(0i32) = 32, NOT 64. Guards the `dtype == I32` width branch in the bitwise
+    // unary eval — a refactor conflating i32 with i64 storage would return 64.
+    let input = Value::Tensor(
+        TensorValue::new(DType::I32, Shape { dims: vec![] }, vec![Literal::I64(0)]).unwrap(),
+    );
+    let result = eval_primitive(Primitive::CountTrailingZeros, &[input], &no_params()).unwrap();
+    assert_eq!(extract_i64_scalar(&result), 32, "ctz(0i32) = 32, not the i64 width 64");
+}
+
 // ====================== SCALAR ONE ======================
 
 #[test]
