@@ -1217,6 +1217,32 @@ fn oracle_rounding_float_only_unary_rejects_integer_operands() {
 }
 
 #[test]
+fn oracle_rounding_float_only_unary_rejects_complex_operands() {
+    // Floor/Ceil/Round are JAX standard_unop(_float): complex operands are rejected too,
+    // not just integers (rsxjp covered the integer path). This pins the complex rejection
+    // (arithmetic.rs complex_unary_unsupported_detail).
+    let complex_input = eval_primitive(
+        Primitive::Complex,
+        &[Value::scalar_f64(1.5), Value::scalar_f64(2.5)],
+        &no_params(),
+    )
+    .expect("complex(1.5, 2.5) should construct a complex value");
+
+    for primitive in [Primitive::Floor, Primitive::Ceil, Primitive::Round] {
+        let err = eval_primitive(primitive, std::slice::from_ref(&complex_input), &no_params())
+            .expect_err("JAX rounding primitive accepted complex input");
+        assert!(
+            matches!(
+                &err,
+                EvalError::TypeMismatch { primitive: got, detail }
+                    if *got == primitive && detail.contains("complex")
+            ),
+            "{primitive:?} complex input returned unexpected error: {err:?}"
+        );
+    }
+}
+
+#[test]
 fn oracle_atan2() {
     // atan2(0, 1) = 0, atan2(1, 0) = pi/2, atan2(1, 1) = pi/4
     assert_f64_close(
