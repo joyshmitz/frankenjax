@@ -545,3 +545,23 @@ fn metamorphic_complex_tanh_equals_sinh_over_cosh() {
     let expected = extract_complex_vec(&ratio);
     assert_complex_close(&tanh, &expected, 1e-9, "tanh(z) == sinh(z)/cosh(z)");
 }
+
+#[test]
+fn metamorphic_complex_inverse_trig_round_trips() {
+    // Forward-of-inverse round trips for the recently-stabilized complex_asin/acos/
+    // atan (commit 01152b59, HFT): sin(asin(z)) == z, cos(acos(z)) == z, and
+    // tan(atan(z)) == z. The forward function recovers z from the inverse's
+    // principal value for these points (away from the atan singularities ±i).
+    // Regression coverage on recently-modified inverse-trig code.
+    let pts = [(0.5, 0.3), (-0.8, 0.6), (1.2, -0.4), (0.3, 0.7)];
+    let z = complex_from_pairs(&pts);
+
+    let sin_asin = unary(Primitive::Sin, &unary(Primitive::Asin, &z));
+    assert_complex_close(&sin_asin, &pts, 1e-9, "sin(asin(z)) == z");
+
+    let cos_acos = unary(Primitive::Cos, &unary(Primitive::Acos, &z));
+    assert_complex_close(&cos_acos, &pts, 1e-9, "cos(acos(z)) == z");
+
+    let tan_atan = unary(Primitive::Tan, &unary(Primitive::Atan, &z));
+    assert_complex_close(&tan_atan, &pts, 1e-9, "tan(atan(z)) == z");
+}
