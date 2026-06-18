@@ -50,26 +50,53 @@ fn linspace_elements(start: f64, stop: f64, num: usize, endpoint: bool) -> Vec<L
     elements
 }
 
+/// Build a dense-storage tensor of `size` copies of `value` (cast to `dtype`).
+///
+/// Bit-for-bit identical to `TensorValue::new(dtype, shape, vec![<literal>; size])`:
+/// `TensorValue::new` already densifies a uniform fill for every dtype (see
+/// `dense_buffer_for_declared_dtype` in fj-core), so this yields the identical
+/// dense storage — but skips materializing the `size`-element `Vec<Literal>`
+/// (24 B/elem) and the densify rescan, building the typed backing directly with a
+/// memset-friendly fill. The per-dtype casts mirror the prior literal constructors
+/// (`value as f32`/`as i64`/`as u32`/`!= 0.0`; complex re rounds to f32 for
+/// Complex64 inside `new_complex_values`; half goes through the same
+/// `from_f16_f64`/`from_bf16_f64` rounding).
+fn dense_filled(dtype: DType, shape: Shape, size: usize, value: f64) -> Result<Value, ValueError> {
+    let tensor = match dtype {
+        DType::F64 => TensorValue::new_f64_values(shape, vec![value; size])?,
+        DType::F32 => TensorValue::new_f32_values(shape, vec![value as f32; size])?,
+        DType::I32 => TensorValue::new_i32_values(shape, vec![value as i64; size])?,
+        DType::I64 => TensorValue::new_i64_values(shape, vec![value as i64; size])?,
+        DType::U32 => TensorValue::new_u32_values(shape, vec![value as u32; size])?,
+        DType::U64 => TensorValue::new_u64_values(shape, vec![value as u64; size])?,
+        DType::Bool => TensorValue::new_bool_values(shape, vec![value != 0.0; size])?,
+        DType::Complex64 | DType::Complex128 => {
+            TensorValue::new_complex_values(dtype, shape, vec![(value, 0.0); size])?
+        }
+        DType::F16 => {
+            let bits = match Literal::from_f16_f64(value) {
+                Literal::F16Bits(b) => b,
+                _ => unreachable!("from_f16_f64 yields F16Bits"),
+            };
+            TensorValue::new_half_float_values(DType::F16, shape, vec![bits; size])?
+        }
+        DType::BF16 => {
+            let bits = match Literal::from_bf16_f64(value) {
+                Literal::BF16Bits(b) => b,
+                _ => unreachable!("from_bf16_f64 yields BF16Bits"),
+            };
+            TensorValue::new_half_float_values(DType::BF16, shape, vec![bits; size])?
+        }
+    };
+    Ok(Value::Tensor(tensor))
+}
+
 /// Create an array filled with zeros.
 ///
 /// Matches `jnp.zeros(shape, dtype)`.
 pub fn zeros(shape: &[u32], dtype: DType) -> Result<Value, ValueError> {
     let (shape, size) = checked_shape_and_size(shape)?;
-    let elements = match dtype {
-        DType::F32 => vec![Literal::from_f32(0.0); size],
-        DType::F64 => vec![Literal::from_f64(0.0); size],
-        DType::I32 => vec![Literal::I64(0); size],
-        DType::I64 => vec![Literal::I64(0); size],
-        DType::U32 => vec![Literal::U32(0); size],
-        DType::U64 => vec![Literal::U64(0); size],
-        DType::Bool => vec![Literal::Bool(false); size],
-        DType::Complex64 => vec![Literal::from_complex64(0.0, 0.0); size],
-        DType::Complex128 => vec![Literal::from_complex128(0.0, 0.0); size],
-        DType::F16 => vec![Literal::from_f16_f32(0.0); size],
-        DType::BF16 => vec![Literal::from_bf16_f32(0.0); size],
-    };
-    let tensor = TensorValue::new(dtype, shape, elements)?;
-    Ok(Value::Tensor(tensor))
+    dense_filled(dtype, shape, size, 0.0)
 }
 
 /// Create an array filled with ones.
@@ -77,21 +104,7 @@ pub fn zeros(shape: &[u32], dtype: DType) -> Result<Value, ValueError> {
 /// Matches `jnp.ones(shape, dtype)`.
 pub fn ones(shape: &[u32], dtype: DType) -> Result<Value, ValueError> {
     let (shape, size) = checked_shape_and_size(shape)?;
-    let elements = match dtype {
-        DType::F32 => vec![Literal::from_f32(1.0); size],
-        DType::F64 => vec![Literal::from_f64(1.0); size],
-        DType::I32 => vec![Literal::I64(1); size],
-        DType::I64 => vec![Literal::I64(1); size],
-        DType::U32 => vec![Literal::U32(1); size],
-        DType::U64 => vec![Literal::U64(1); size],
-        DType::Bool => vec![Literal::Bool(true); size],
-        DType::Complex64 => vec![Literal::from_complex64(1.0, 0.0); size],
-        DType::Complex128 => vec![Literal::from_complex128(1.0, 0.0); size],
-        DType::F16 => vec![Literal::from_f16_f32(1.0); size],
-        DType::BF16 => vec![Literal::from_bf16_f32(1.0); size],
-    };
-    let tensor = TensorValue::new(dtype, shape, elements)?;
-    Ok(Value::Tensor(tensor))
+    dense_filled(dtype, shape, size, 1.0)
 }
 
 /// Create an array filled with a specified value.
@@ -99,21 +112,7 @@ pub fn ones(shape: &[u32], dtype: DType) -> Result<Value, ValueError> {
 /// Matches `jnp.full(shape, fill_value, dtype)`.
 pub fn full(shape: &[u32], fill_value: f64, dtype: DType) -> Result<Value, ValueError> {
     let (shape, size) = checked_shape_and_size(shape)?;
-    let elements = match dtype {
-        DType::F32 => vec![Literal::from_f32(fill_value as f32); size],
-        DType::F64 => vec![Literal::from_f64(fill_value); size],
-        DType::I32 => vec![Literal::I64(fill_value as i64); size],
-        DType::I64 => vec![Literal::I64(fill_value as i64); size],
-        DType::U32 => vec![Literal::U32(fill_value as u32); size],
-        DType::U64 => vec![Literal::U64(fill_value as u64); size],
-        DType::Bool => vec![Literal::Bool(fill_value != 0.0); size],
-        DType::Complex64 => vec![Literal::from_complex64(fill_value as f32, 0.0); size],
-        DType::Complex128 => vec![Literal::from_complex128(fill_value, 0.0); size],
-        DType::F16 => vec![Literal::from_f16_f64(fill_value); size],
-        DType::BF16 => vec![Literal::from_bf16_f64(fill_value); size],
-    };
-    let tensor = TensorValue::new(dtype, shape, elements)?;
-    Ok(Value::Tensor(tensor))
+    dense_filled(dtype, shape, size, fill_value)
 }
 
 /// Create a 2D identity matrix.
