@@ -1743,54 +1743,76 @@ fn infer_equation_output_aval(
             } else {
                 raw_axis
             };
+            // Fail closed (eqsll): the old fallback staged the INPUT shape on a bad axis
+            // or bad sizes, and filter_map silently dropped malformed sizes tokens. Valid
+            // splits are handled by fj-trace's authoritative path or compute identically
+            // below; only malformed residuals now error.
             if rank == 0 || axis_i < 0 || axis_i >= rank as i64 {
-                first_input.clone()
-            } else {
-                let axis = axis_i as usize;
-                let axis_size = dims[axis];
-                let sizes: Vec<u32> =
-                    if let Some(s) = eqn.params.get("sizes").filter(|s| !s.trim().is_empty()) {
-                        s.split(',')
-                            .filter_map(|x| x.trim().parse::<u32>().ok())
-                            .collect()
-                    } else if let Some(ns) = eqn
-                        .params
-                        .get("num_sections")
-                        .and_then(|s| s.trim().parse::<u32>().ok())
-                        .filter(|&n| n > 0)
-                    {
-                        if axis_size.is_multiple_of(ns) {
-                            vec![axis_size / ns; ns as usize]
-                        } else {
-                            Vec::new()
-                        }
+                return Err(PartialEvalError::ShapeInference {
+                    primitive: eqn.primitive,
+                    detail: format!("split axis {raw_axis} out of range for rank {rank}"),
+                });
+            }
+            let axis = axis_i as usize;
+            let axis_size = dims[axis];
+            let sizes: Vec<u32> =
+                if let Some(s) = eqn.params.get("sizes").filter(|s| !s.trim().is_empty()) {
+                    s.split(',')
+                        .map(|x| {
+                            x.trim()
+                                .parse::<u32>()
+                                .map_err(|_| PartialEvalError::ShapeInference {
+                                    primitive: eqn.primitive,
+                                    detail: format!("invalid split sizes token: '{}'", x.trim()),
+                                })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?
+                } else if let Some(ns) = eqn
+                    .params
+                    .get("num_sections")
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .filter(|&n| n > 0)
+                {
+                    if axis_size.is_multiple_of(ns) {
+                        vec![axis_size / ns; ns as usize]
                     } else {
-                        vec![axis_size]
-                    };
-
-                if sizes.is_empty() || sizes.iter().sum::<u32>() != axis_size {
-                    first_input.clone()
-                } else if sizes.len() == 1 || sizes.windows(2).all(|w| w[0] == w[1]) {
-                    let mut new_dims = Vec::with_capacity(dims.len() + 1);
-                    for (i, &d) in dims.iter().enumerate() {
-                        if i == axis {
-                            new_dims.push(sizes.len() as u32);
-                            new_dims.push(sizes[0]);
-                        } else {
-                            new_dims.push(d);
-                        }
-                    }
-                    AbstractValue {
-                        dtype: first_input.dtype,
-                        shape: Shape { dims: new_dims },
+                        return Err(PartialEvalError::ShapeInference {
+                            primitive: eqn.primitive,
+                            detail: format!(
+                                "split: axis size {axis_size} not divisible by num_sections {ns}"
+                            ),
+                        });
                     }
                 } else {
-                    let mut new_dims = dims.clone();
-                    new_dims[axis] = sizes[0];
-                    AbstractValue {
-                        dtype: first_input.dtype,
-                        shape: Shape { dims: new_dims },
+                    vec![axis_size]
+                };
+
+            if sizes.is_empty() || sizes.iter().sum::<u32>() != axis_size {
+                return Err(PartialEvalError::ShapeInference {
+                    primitive: eqn.primitive,
+                    detail: format!("split sizes must sum to axis size {axis_size}"),
+                });
+            }
+            if sizes.len() == 1 || sizes.windows(2).all(|w| w[0] == w[1]) {
+                let mut new_dims = Vec::with_capacity(dims.len() + 1);
+                for (i, &d) in dims.iter().enumerate() {
+                    if i == axis {
+                        new_dims.push(sizes.len() as u32);
+                        new_dims.push(sizes[0]);
+                    } else {
+                        new_dims.push(d);
                     }
+                }
+                AbstractValue {
+                    dtype: first_input.dtype,
+                    shape: Shape { dims: new_dims },
+                }
+            } else {
+                let mut new_dims = dims.clone();
+                new_dims[axis] = sizes[0];
+                AbstractValue {
+                    dtype: first_input.dtype,
+                    shape: Shape { dims: new_dims },
                 }
             }
         }
@@ -5968,6 +5990,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.shape.dims, vec![2, 2, 2]);
+
+        // Split fails closed on bad axis / sizes (eqsll): old fallback staged input shape
+        // or silent-dropped malformed sizes tokens.
+        for (label, params, input, expected) in [
+            (
+                "split out-of-range axis",
+                &[("axis", "5"), ("num_sections", "2")][..],
+                av(&[4], DType::F64),
+                "out of range",
+            ),
+            (
+                "split sizes sum mismatch",
+                &[("axis", "0"), ("sizes", "2,2")][..],
+                av(&[5], DType::F64),
+                "sum to axis size",
+            ),
+            (
+                "split bad sizes token",
+                &[("axis", "0"), ("sizes", "2,bad")][..],
+                av(&[4], DType::F64),
+                "invalid split sizes token",
+            ),
+            (
+                "split indivisible num_sections",
+                &[("axis", "0"), ("num_sections", "3")][..],
+                av(&[5], DType::F64),
+                "not divisible",
+            ),
+        ] {
+            match infer_equation_output_aval(&eqn(Primitive::Split, params), &input).unwrap_err() {
+                PartialEvalError::ShapeInference { primitive, detail } => {
+                    assert_eq!(primitive, Primitive::Split, "{label}");
+                    assert!(detail.contains(expected), "{label}: unexpected detail: {detail}");
+                }
+                other => panic!("{label}: unexpected error: {other}"),
+            }
+        }
 
         // det/slogdet of an f32 matrix must stage f32 output avals (validates the
         // delegate_infer_to_trace path returns the f32-preserving fj-trace inference,
