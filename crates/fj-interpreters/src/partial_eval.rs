@@ -703,23 +703,7 @@ fn broadcast_dims(a: &[u32], b: &[u32]) -> Vec<u32> {
 /// BroadcastedIota takes NO inputs — its aval comes entirely from params.
 fn infer_broadcasted_iota_aval(eqn: &Equation) -> Result<AbstractValue, PartialEvalError> {
     let primitive = Primitive::BroadcastedIota;
-    let raw_shape = eqn
-        .params
-        .get("shape")
-        .ok_or_else(|| PartialEvalError::ShapeInference {
-            primitive,
-            detail: "missing required param 'shape'".to_owned(),
-        })?;
-    let mut dims = Vec::new();
-    for piece in raw_shape.split(',').map(str::trim) {
-        let dim = piece
-            .parse::<u32>()
-            .map_err(|_| PartialEvalError::ShapeInference {
-                primitive,
-                detail: format!("invalid u32 in param 'shape': '{piece}'"),
-            })?;
-        dims.push(dim);
-    }
+    let dims = parse_required_u32_list_param(eqn, "shape")?;
 
     let dimension = match eqn.params.get("dimension") {
         Some(raw) => {
@@ -767,6 +751,108 @@ fn infer_broadcasted_iota_aval(eqn: &Equation) -> Result<AbstractValue, PartialE
         dtype,
         shape: Shape { dims },
     })
+}
+
+fn parse_required_u32_list_param(
+    eqn: &Equation,
+    key: &str,
+) -> Result<Vec<u32>, PartialEvalError> {
+    let raw = eqn
+        .params
+        .get(key)
+        .ok_or_else(|| PartialEvalError::ShapeInference {
+            primitive: eqn.primitive,
+            detail: format!("missing required param '{key}'"),
+        })?;
+    raw.split(',')
+        .map(str::trim)
+        .map(|piece| {
+            piece
+                .parse::<u32>()
+                .map_err(|_| PartialEvalError::ShapeInference {
+                    primitive: eqn.primitive,
+                    detail: format!("invalid u32 in param '{key}': '{piece}'"),
+                })
+        })
+        .collect()
+}
+
+fn parse_usize_list_param(
+    primitive: Primitive,
+    key: &str,
+    raw: &str,
+) -> Result<Vec<usize>, PartialEvalError> {
+    raw.split(',')
+        .map(str::trim)
+        .map(|piece| {
+            piece
+                .parse::<usize>()
+                .map_err(|_| PartialEvalError::ShapeInference {
+                    primitive,
+                    detail: format!("invalid usize in param '{key}': '{piece}'"),
+                })
+        })
+        .collect()
+}
+
+fn infer_broadcast_in_dim_shape(
+    eqn: &Equation,
+    input: &AbstractValue,
+) -> Result<Shape, PartialEvalError> {
+    let target_dims = parse_required_u32_list_param(eqn, "shape")?;
+    let target_rank = target_dims.len();
+    let input_rank = input.shape.rank();
+    let broadcast_dims = if let Some(raw) = eqn.params.get("broadcast_dimensions") {
+        parse_usize_list_param(eqn.primitive, "broadcast_dimensions", raw)?
+    } else {
+        if input_rank > target_rank {
+            return Err(PartialEvalError::ShapeInference {
+                primitive: eqn.primitive,
+                detail: format!("input rank {input_rank} exceeds output rank {target_rank}"),
+            });
+        }
+        (target_rank - input_rank..target_rank).collect()
+    };
+
+    if broadcast_dims.len() != input_rank {
+        return Err(PartialEvalError::ShapeInference {
+            primitive: eqn.primitive,
+            detail: format!(
+                "broadcast_dimensions length {} must equal input rank {input_rank}",
+                broadcast_dims.len()
+            ),
+        });
+    }
+
+    let mut seen = Vec::with_capacity(broadcast_dims.len());
+    for (input_axis, &target_axis) in broadcast_dims.iter().enumerate() {
+        if target_axis >= target_rank {
+            return Err(PartialEvalError::ShapeInference {
+                primitive: eqn.primitive,
+                detail: format!("target axis {target_axis} out of range"),
+            });
+        }
+        if seen.contains(&target_axis) {
+            return Err(PartialEvalError::ShapeInference {
+                primitive: eqn.primitive,
+                detail: "broadcast_dimensions must be unique".to_owned(),
+            });
+        }
+        seen.push(target_axis);
+
+        let input_dim = input.shape.dims[input_axis];
+        let target_dim = target_dims[target_axis];
+        if input_dim != 1 && input_dim != target_dim {
+            return Err(PartialEvalError::ShapeInference {
+                primitive: eqn.primitive,
+                detail: format!(
+                    "cannot broadcast input dim {input_dim} into target dim {target_dim} at axis {target_axis}"
+                ),
+            });
+        }
+    }
+
+    Ok(Shape { dims: target_dims })
 }
 
 /// Complex(re, im): dtype (F32,F32)→Complex64 else Complex128; shape = broadcast.
@@ -1066,17 +1152,7 @@ fn infer_equation_output_aval(
         }
         // BroadcastInDim: parse "shape" param for target shape
         BroadcastInDim => {
-            let shape = eqn
-                .params
-                .get("shape")
-                .map(|s| {
-                    let dims: Vec<u32> = s
-                        .split(',')
-                        .filter_map(|d| d.trim().parse::<u32>().ok())
-                        .collect();
-                    Shape { dims }
-                })
-                .unwrap_or_else(|| first_input.shape.clone());
+            let shape = infer_broadcast_in_dim_shape(eqn, first_input)?;
             AbstractValue {
                 dtype: first_input.dtype,
                 shape,
@@ -5099,6 +5175,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.shape.dims, vec![5, 2]);
+
+        for (label, params, input, expected_detail) in [
+            (
+                "bad broadcast shape token",
+                &[("shape", "2,bad,3"), ("broadcast_dimensions", "1")][..],
+                av(&[3], DType::F64),
+                "invalid u32 in param 'shape'",
+            ),
+            (
+                "missing broadcast shape",
+                &[("broadcast_dimensions", "0")][..],
+                av(&[3], DType::F64),
+                "missing required param 'shape'",
+            ),
+            (
+                "duplicate broadcast target axis",
+                &[("shape", "2,3"), ("broadcast_dimensions", "0,0")][..],
+                av(&[1, 1], DType::F64),
+                "broadcast_dimensions must be unique",
+            ),
+            (
+                "broadcast target axis out of bounds",
+                &[("shape", "2,3"), ("broadcast_dimensions", "2")][..],
+                av(&[3], DType::F64),
+                "target axis 2 out of range",
+            ),
+            (
+                "incompatible broadcast dimension",
+                &[("shape", "2,3"), ("broadcast_dimensions", "0")][..],
+                av(&[4], DType::F64),
+                "cannot broadcast input dim 4 into target dim 2",
+            ),
+        ] {
+            let err = infer_equation_output_aval(
+                &eqn(Primitive::BroadcastInDim, params),
+                &input,
+            )
+            .unwrap_err();
+            match err {
+                PartialEvalError::ShapeInference { primitive, detail } => {
+                    assert_eq!(primitive, Primitive::BroadcastInDim, "{label}");
+                    assert!(
+                        detail.contains(expected_detail),
+                        "{label}: unexpected detail: {detail}"
+                    );
+                }
+                other => panic!("{label}: unexpected error: {other}"),
+            }
+        }
 
         // Plural-fn paths: BroadcastedIota (0 inputs) + Complex (binary).
         fn eqn_n(prim: Primitive, outs: usize, params: &[(&str, &str)]) -> Equation {
