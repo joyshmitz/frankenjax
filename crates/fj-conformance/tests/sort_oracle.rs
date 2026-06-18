@@ -6,7 +6,7 @@
 //! - jnp.argsort: returns indices that would sort the array
 
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
-use fj_lax::eval_primitive;
+use fj_lax::{eval_primitive, eval_primitive_multi};
 use std::collections::BTreeMap;
 
 fn no_params() -> BTreeMap<String, String> {
@@ -547,5 +547,27 @@ fn oracle_sort_complex64_lexicographic() {
         got,
         vec![(1.0, 1.0), (1.0, 2.0), (2.0, 0.0), (3.0, 1.0)],
         "complex64 sort must order lexicographically by (real, imag)"
+    );
+}
+
+#[test]
+fn oracle_sort_multi_operand_2d_axis1_applies_per_row_permutation() {
+    // Multi-operand (key, value) sort along axis=1 of a 2D tensor exercises the per-row
+    // odometer index arithmetic — the impl's own unit tests cover only 1D axis=0. Each
+    // row is sorted independently by its key, and the SAME permutation reorders values.
+    let keys = make_i64_tensor(&[2, 3], vec![3, 1, 2, 6, 4, 5]);
+    let values = make_i64_tensor(&[2, 3], vec![30, 10, 20, 60, 40, 50]);
+    let out =
+        eval_primitive_multi(Primitive::Sort, &[keys, values], &axis_params(1)).unwrap();
+    assert_eq!(out.len(), 2, "multi-operand sort returns one output per operand");
+    assert_eq!(
+        extract_i64_vec(&out[0]),
+        vec![1, 2, 3, 4, 5, 6],
+        "keys sorted ascending within each row"
+    );
+    assert_eq!(
+        extract_i64_vec(&out[1]),
+        vec![10, 20, 30, 40, 50, 60],
+        "values follow the per-row key permutation"
     );
 }
