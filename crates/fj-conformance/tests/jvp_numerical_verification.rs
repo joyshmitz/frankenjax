@@ -2091,3 +2091,44 @@ fn integer_pow_jvp_zero_exponent_and_general() {
         "d(x^-1) = -1/x^2 = -0.25 at x=2"
     );
 }
+
+#[test]
+fn clamp_jvp_routes_tangent_through_active_branch() {
+    // Forward-mode dual of the Clamp VJP: the tangent flows from whichever input is the
+    // output — operand when min<x<max, min when x<min, max when x>max.
+    let jaxpr = Jaxpr::new(
+        vec![VarId(1), VarId(2), VarId(3)],
+        vec![],
+        vec![VarId(4)],
+        vec![Equation {
+            primitive: Primitive::Clamp,
+            inputs: smallvec![
+                Atom::Var(VarId(1)),
+                Atom::Var(VarId(2)),
+                Atom::Var(VarId(3))
+            ],
+            outputs: smallvec![VarId(4)],
+            params: BTreeMap::new(),
+            effects: vec![],
+            sub_jaxprs: vec![],
+        }],
+    );
+    // tangents: dmin=1, doperand=2, dmax=3 — the result reveals which branch is active.
+    let jvp = |x: f64| -> f64 {
+        let primals = [
+            Value::scalar_f64(0.0),
+            Value::scalar_f64(x),
+            Value::scalar_f64(1.0),
+        ];
+        let tangents = [
+            Value::scalar_f64(1.0),
+            Value::scalar_f64(2.0),
+            Value::scalar_f64(3.0),
+        ];
+        let r = fj_ad::jvp(&jaxpr, &primals, &tangents).unwrap();
+        extract_f64_scalar(&r.tangents[0])
+    };
+    assert_eq!(jvp(0.5), 2.0, "in-range: tangent flows from operand");
+    assert_eq!(jvp(-0.5), 1.0, "below min: tangent flows from min");
+    assert_eq!(jvp(1.5), 3.0, "above max: tangent flows from max");
+}
