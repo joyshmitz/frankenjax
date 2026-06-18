@@ -355,6 +355,68 @@ fn oracle_scatter_1d_multiple_updates() {
 }
 
 #[test]
+fn oracle_scatter_combiner_modes_via_dispatch() {
+    // Conformance-layer coverage of the scatter combiner `mode` param (add/mul/min/max);
+    // the existing scatter oracle uses only the default (overwrite). This verifies the
+    // eval_primitive dispatch threads "mode" through to eval_scatter. indices=[0,2,0]
+    // writes index 0 twice, so the combiner reduces both updates into operand[0].
+    let mode_params = |m: &str| {
+        let mut p = BTreeMap::new();
+        p.insert("mode".to_string(), m.to_string());
+        p
+    };
+    let indices = make_i64_tensor(&[3], vec![0, 2, 0]);
+    // add: operand[0] = 0 + 10 + 30 = 40; operand[2] = 0 + 20 = 20
+    let r = eval_primitive(
+        Primitive::Scatter,
+        &[
+            make_i64_tensor(&[4], vec![0, 0, 0, 0]),
+            indices.clone(),
+            make_i64_tensor(&[3], vec![10, 20, 30]),
+        ],
+        &mode_params("add"),
+    )
+    .unwrap();
+    assert_eq!(extract_i64_vec(&r), vec![40, 0, 20, 0], "scatter-add sums duplicate-index updates");
+    // mul: operand[0] = 1 * 10 * 30 = 300; operand[2] = 1 * 20 = 20
+    let r = eval_primitive(
+        Primitive::Scatter,
+        &[
+            make_i64_tensor(&[4], vec![1, 1, 1, 1]),
+            indices.clone(),
+            make_i64_tensor(&[3], vec![10, 20, 30]),
+        ],
+        &mode_params("mul"),
+    )
+    .unwrap();
+    assert_eq!(extract_i64_vec(&r), vec![300, 1, 20, 1], "scatter-mul multiplies updates");
+    // max: operand[0] = max(5,10,7) = 10; operand[2] = max(5,3) = 5
+    let r = eval_primitive(
+        Primitive::Scatter,
+        &[
+            make_i64_tensor(&[4], vec![5, 5, 5, 5]),
+            indices.clone(),
+            make_i64_tensor(&[3], vec![10, 3, 7]),
+        ],
+        &mode_params("max"),
+    )
+    .unwrap();
+    assert_eq!(extract_i64_vec(&r), vec![10, 5, 5, 5], "scatter-max keeps the largest");
+    // min: operand[0] = min(5,10,7) = 5; operand[2] = min(5,3) = 3
+    let r = eval_primitive(
+        Primitive::Scatter,
+        &[
+            make_i64_tensor(&[4], vec![5, 5, 5, 5]),
+            indices,
+            make_i64_tensor(&[3], vec![10, 3, 7]),
+        ],
+        &mode_params("min"),
+    )
+    .unwrap();
+    assert_eq!(extract_i64_vec(&r), vec![5, 5, 3, 5], "scatter-min keeps the smallest");
+}
+
+#[test]
 fn oracle_scatter_1d_first_position() {
     let operand = make_i64_tensor(&[5], vec![1, 2, 3, 4, 5]);
     let indices = make_i64_tensor(&[1], vec![0]);
