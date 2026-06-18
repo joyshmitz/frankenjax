@@ -6034,7 +6034,7 @@ fn for_each_top_k_slice<V, F>(
     });
 }
 
-/// Dense i64/f64 TopK fast path over the last (contiguous) axis: for each slice,
+/// Dense numeric TopK fast path over the last (contiguous) axis: for each slice,
 /// order `(complement key, in-slice index)` pairs and take the first `k`. The
 /// complement (`!total_order_key`) turns ascending order into
 /// descending-by-value, and the in-slice index keeps equal values in ascending
@@ -6042,7 +6042,7 @@ fn for_each_top_k_slice<V, F>(
 /// `compare_sort_keys(b, a).then(a_idx.cmp(b_idx))`. Small `k` uses exact
 /// partial selection and sorts only the selected prefix; large `k` keeps the
 /// stable LSD radix sort. Returns `None` (generic path) for non-dense /
-/// non-i64/f64 storage or short axes.
+/// unsupported storage or short axes.
 fn eval_top_k_dense(
     tensor: &TensorValue,
     k: usize,
@@ -6245,12 +6245,105 @@ fn eval_top_k_dense(
         ]));
     }
 
-    // Literal-backed numeric dtypes with no dense storage (F32/F16/BF16, U32/U64,
-    // I32): same complement-key radix as i64/f64, keyed per dtype family to match
-    // the generic `compare_sort_keys` order — Float via f64_total_order_key(as_f64),
-    // Unsigned via as_u64, Signed via (as_i64 as u64)^(1<<63). Mirrors the sort
-    // path's sort_along_axis_literal_radix. F64/I64 are handled by the dense
-    // branches above; Bool/Complex fall through to the generic path.
+    // Dense unsigned fast paths. TopK over RNG keys, token ids, hash buckets,
+    // and packed categorical scores is common in data pipelines. The unsigned
+    // key is already total-orderable, so `!key` exactly mirrors the generic
+    // descending comparator while avoiding `Vec<Literal>` materialization.
+    if tensor.dtype == DType::U32
+        && let Some(values) = tensor.elements.as_u32_slice()
+    {
+        let mut out_vals = vec![0_u32; n_slices * k];
+        let mut out_idx = vec![0_i64; n_slices * k];
+        for_each_top_k_slice(
+            &mut out_vals,
+            &mut out_idx,
+            k,
+            stride,
+            n_slices,
+            |slice, vchunk, ichunk, pairs, scratch| {
+                let base = slice * stride;
+                pairs.clear();
+                for (i, &v) in values[base..base + stride].iter().enumerate() {
+                    pairs.push((!u64::from(v), i as u32));
+                }
+                order_top_k_pairs(pairs, scratch, k);
+                for (dst, &(_, orig)) in pairs.iter().take(k).enumerate() {
+                    vchunk[dst] = values[base + orig as usize];
+                    ichunk[dst] = i64::from(orig);
+                }
+            },
+        );
+        let values_t = TensorValue::new_u32_values(
+            Shape {
+                dims: output_dims.to_vec(),
+            },
+            out_vals,
+        )
+        .map_err(EvalError::InvalidTensor)?;
+        let indices_t = TensorValue::new_i64_values(
+            Shape {
+                dims: output_dims.to_vec(),
+            },
+            out_idx,
+        )
+        .map_err(EvalError::InvalidTensor)?;
+        return Ok(Some(vec![
+            Value::Tensor(values_t),
+            Value::Tensor(indices_t),
+        ]));
+    }
+
+    if tensor.dtype == DType::U64
+        && let Some(values) = tensor.elements.as_u64_slice()
+    {
+        let mut out_vals = vec![0_u64; n_slices * k];
+        let mut out_idx = vec![0_i64; n_slices * k];
+        for_each_top_k_slice(
+            &mut out_vals,
+            &mut out_idx,
+            k,
+            stride,
+            n_slices,
+            |slice, vchunk, ichunk, pairs, scratch| {
+                let base = slice * stride;
+                pairs.clear();
+                for (i, &v) in values[base..base + stride].iter().enumerate() {
+                    pairs.push((!v, i as u32));
+                }
+                order_top_k_pairs(pairs, scratch, k);
+                for (dst, &(_, orig)) in pairs.iter().take(k).enumerate() {
+                    vchunk[dst] = values[base + orig as usize];
+                    ichunk[dst] = i64::from(orig);
+                }
+            },
+        );
+        let values_t = TensorValue::new_u64_values(
+            Shape {
+                dims: output_dims.to_vec(),
+            },
+            out_vals,
+        )
+        .map_err(EvalError::InvalidTensor)?;
+        let indices_t = TensorValue::new_i64_values(
+            Shape {
+                dims: output_dims.to_vec(),
+            },
+            out_idx,
+        )
+        .map_err(EvalError::InvalidTensor)?;
+        return Ok(Some(vec![
+            Value::Tensor(values_t),
+            Value::Tensor(indices_t),
+        ]));
+    }
+
+    // Literal-backed numeric dtypes still boxed for this tensor (I32 plus forced
+    // literal F32/F16/BF16/U32/U64): same complement-key radix as the dense paths,
+    // keyed per dtype family to match the generic `compare_sort_keys` order —
+    // Float via f64_total_order_key(as_f64), Unsigned via as_u64, Signed via
+    // (as_i64 as u64)^(1<<63). Mirrors the sort path's
+    // sort_along_axis_literal_radix. Dense storage handled above; Bool/Complex
+    // fall through to the generic path.
     enum TopKKeyKind {
         Float,
         Unsigned,
@@ -23417,6 +23510,184 @@ mod tests {
                     "top_k {dtype:?} dense vs literal indices, k={k}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn top_k_unsigned_dense_matches_literal() {
+        // U32/U64 now take the dense unsigned TopK fast path. Compare against a
+        // forced Literal-backed tensor to prove descending unsigned order and
+        // duplicate tie order stay identical.
+        let n = 1000usize;
+
+        let u32_data: Vec<u32> = (0..n)
+            .map(|i| match i % 17 {
+                0 => u32::MAX,
+                1 => 0,
+                2 => 1,
+                3 => 1 << 31,
+                4 | 5 => 77,
+                _ => (i as u32)
+                    .wrapping_mul(2_654_435_761)
+                    .rotate_left((i & 31) as u32)
+                    ^ ((i as u32) >> 3),
+            })
+            .collect();
+        let dense_u32 = Value::Tensor(
+            TensorValue::new_u32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                u32_data.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            dense_u32
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u32_slice()
+                .is_some(),
+            "expected dense u32 storage"
+        );
+        let literal_u32 = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::U32,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                fj_core::LiteralBuffer::new(
+                    u32_data.iter().copied().map(Literal::U32).collect(),
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            literal_u32
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u32_slice()
+                .is_none(),
+            "literal-backed u32 tensor must not be dense"
+        );
+
+        for k in [1usize, 32, 257] {
+            let p = params(&[("k", &k.to_string())]);
+            let dense_out = super::eval_top_k(std::slice::from_ref(&dense_u32), &p).unwrap();
+            let lit_out = super::eval_top_k(std::slice::from_ref(&literal_u32), &p).unwrap();
+            let dense_vals = dense_out[0]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u32_slice()
+                .expect("dense u32 top_k output")
+                .to_vec();
+            let lit_vals: Vec<u32> = lit_out[0]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::U32(v) => *v,
+                    other => panic!("expected U32, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                dense_vals, lit_vals,
+                "top_k u32 dense vs literal values, k={k}"
+            );
+            assert_eq!(
+                extract_i64_vec(&dense_out[1]),
+                extract_i64_vec(&lit_out[1]),
+                "top_k u32 dense vs literal indices, k={k}"
+            );
+        }
+
+        let u64_data: Vec<u64> = (0..n)
+            .map(|i| match i % 19 {
+                0 => u64::MAX,
+                1 => 0,
+                2 => 1,
+                3 => 1 << 63,
+                4 | 5 => 9_223_372_036_854_775_900,
+                _ => (i as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .rotate_left((i & 63) as u32)
+                    ^ ((i as u64) << 32),
+            })
+            .collect();
+        let dense_u64 = Value::Tensor(
+            TensorValue::new_u64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                u64_data.clone(),
+            )
+            .unwrap(),
+        );
+        assert!(
+            dense_u64
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u64_slice()
+                .is_some(),
+            "expected dense u64 storage"
+        );
+        let literal_u64 = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::U64,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                fj_core::LiteralBuffer::new(
+                    u64_data.iter().copied().map(Literal::U64).collect(),
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            literal_u64
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u64_slice()
+                .is_none(),
+            "literal-backed u64 tensor must not be dense"
+        );
+
+        for k in [1usize, 32, 257] {
+            let p = params(&[("k", &k.to_string())]);
+            let dense_out = super::eval_top_k(std::slice::from_ref(&dense_u64), &p).unwrap();
+            let lit_out = super::eval_top_k(std::slice::from_ref(&literal_u64), &p).unwrap();
+            let dense_vals = dense_out[0]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u64_slice()
+                .expect("dense u64 top_k output")
+                .to_vec();
+            let lit_vals: Vec<u64> = lit_out[0]
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::U64(v) => *v,
+                    other => panic!("expected U64, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(
+                dense_vals, lit_vals,
+                "top_k u64 dense vs literal values, k={k}"
+            );
+            assert_eq!(
+                extract_i64_vec(&dense_out[1]),
+                extract_i64_vec(&lit_out[1]),
+                "top_k u64 dense vs literal indices, k={k}"
+            );
         }
     }
 }

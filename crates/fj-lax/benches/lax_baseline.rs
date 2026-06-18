@@ -2812,6 +2812,90 @@ fn bench_topk_64k_k128_i64_literal_reference(c: &mut Criterion) {
     });
 }
 
+fn topk_u32_data() -> Vec<u32> {
+    (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| match i % 257 {
+            0 => u32::MAX,
+            1 => 0,
+            2 => 1 << 31,
+            3 | 4 => 19_999,
+            _ => (i as u32)
+                .wrapping_mul(2_654_435_761)
+                .rotate_left((i & 31) as u32)
+                ^ ((i as u32) >> 3),
+        })
+        .collect()
+}
+
+fn bench_topk_64k_k128_u32_vec(c: &mut Criterion) {
+    let input = Value::Tensor(
+        TensorValue::new_u32_values(Shape::vector(LARGE_ELEMENTWISE_LEN as u32), topk_u32_data())
+            .unwrap(),
+    );
+    let p = topk_params();
+    c.bench_function("eval/topk_64k_k128_u32_vec", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::TopK, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_topk_64k_k128_u32_literal_reference(c: &mut Criterion) {
+    let data = topk_u32_data();
+    let input = Value::Tensor(
+        TensorValue::new_with_literal_buffer(
+            DType::U32,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            fj_core::LiteralBuffer::new(data.iter().copied().map(Literal::U32).collect()),
+        )
+        .unwrap(),
+    );
+    let p = topk_params();
+    c.bench_function("eval/topk_64k_k128_u32_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::TopK, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn topk_u64_data() -> Vec<u64> {
+    (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| match i % 263 {
+            0 => u64::MAX,
+            1 => 0,
+            2 => 1 << 63,
+            3 | 4 => 9_223_372_036_854_775_900,
+            _ => (i as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .rotate_left((i & 63) as u32)
+                ^ ((i as u64) << 32),
+        })
+        .collect()
+}
+
+fn bench_topk_64k_k128_u64_vec(c: &mut Criterion) {
+    let input = Value::Tensor(
+        TensorValue::new_u64_values(Shape::vector(LARGE_ELEMENTWISE_LEN as u32), topk_u64_data())
+            .unwrap(),
+    );
+    let p = topk_params();
+    c.bench_function("eval/topk_64k_k128_u64_vec", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::TopK, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_topk_64k_k128_u64_literal_reference(c: &mut Criterion) {
+    let data = topk_u64_data();
+    let input = Value::Tensor(
+        TensorValue::new_with_literal_buffer(
+            DType::U64,
+            Shape::vector(LARGE_ELEMENTWISE_LEN as u32),
+            fj_core::LiteralBuffer::new(data.iter().copied().map(Literal::U64).collect()),
+        )
+        .unwrap(),
+    );
+    let p = topk_params();
+    c.bench_function("eval/topk_64k_k128_u64_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive_multi(Primitive::TopK, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_sum_1k(c: &mut Criterion) {
     let data: Vec<i64> = (0..1000).collect();
     let input = Value::vector_i64(&data).unwrap();
@@ -5504,6 +5588,10 @@ criterion_group!(
     bench_topk_64k_k128_f64_literal_reference,
     bench_topk_64k_k128_i64_vec,
     bench_topk_64k_k128_i64_literal_reference,
+    bench_topk_64k_k128_u32_vec,
+    bench_topk_64k_k128_u32_literal_reference,
+    bench_topk_64k_k128_u64_vec,
+    bench_topk_64k_k128_u64_literal_reference,
     bench_reduce_window_64x64,
     bench_maxpool_256x256_f64_vec,
     bench_maxpool_256x256_f64_literal_reference,
