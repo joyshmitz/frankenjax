@@ -40,6 +40,27 @@ fn test_einsum_matmul() {
     );
 }
 
+// JAX reference: einsum('bij,bjk->bik', A, B) for BATCHED matrix multiply — the
+// batch index `b` appears in both inputs and the output (a free batch axis), j is
+// contracted. einsum2 routes this through its batched single-contraction GEMM path;
+// the conformance oracle covered only the unbatched ij,jk->ik form.
+//   batch0: [[1,2],[3,4]] @ [[1,0],[0,1]] = [[1,2],[3,4]]
+//   batch1: [[5,6],[7,8]] @ [[2,0],[0,2]] = [[10,12],[14,16]]
+#[test]
+fn test_einsum_batched_matmul() {
+    let a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let b = [1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0];
+    let (result, shape) = einsum2("bij,bjk->bik", &a, &[2, 2, 2], &b, &[2, 2, 2]).unwrap();
+    assert_eq!(shape, vec![2, 2, 2]);
+    let expected = [1.0, 2.0, 3.0, 4.0, 10.0, 12.0, 14.0, 16.0];
+    assert!(
+        vec_approx_eq(&result, &expected, 1e-10),
+        "batched matmul: got {:?}, expected {:?}",
+        result,
+        expected
+    );
+}
+
 // JAX reference: einsum('i,i->', a, b) for dot product
 // a = [1,2,3], b = [4,5,6]
 // result = 1*4 + 2*5 + 3*6 = 32
