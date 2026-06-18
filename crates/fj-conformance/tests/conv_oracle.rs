@@ -76,6 +76,31 @@ fn oracle_conv_1d_valid_basic() {
 }
 
 #[test]
+fn oracle_conv_1d_explicit_padding() {
+    // Explicit padding "EXPLICIT:low,high" — eval-layer support landed in us8kk
+    // (commit f55faa67). lhs=[1,3,1]=[1,2,3], rhs=[2,1,1]=[1,1] (moving sum of 2),
+    // pad 1 on each side, stride 1: padded=[0,1,2,3,0] -> moving-sum-2 = [1,3,5,3];
+    // output length = (3+1+1) - 2 + 1 = 4.
+    // NOTE: this exercises eval_conv directly; the fj-trace / partial_eval shape-
+    // inference layers still reject "EXPLICIT:" (tracked separately) so a traced/jit
+    // conv with explicit padding is not yet supported end-to-end.
+    let lhs = make_f64_tensor(&[1, 3, 1], vec![1.0, 2.0, 3.0]);
+    let rhs = make_f64_tensor(&[2, 1, 1], vec![1.0, 1.0]);
+    let result =
+        eval_primitive(Primitive::Conv, &[lhs, rhs], &conv_params("EXPLICIT:1,1", "1")).unwrap();
+    assert_eq!(extract_shape(&result), vec![1, 4, 1]);
+    let vals = extract_f64_vec(&result);
+    let expected = [1.0, 3.0, 5.0, 3.0];
+    for (i, e) in expected.iter().enumerate() {
+        assert!(
+            (vals[i] - e).abs() < 1e-10,
+            "explicit-pad conv[{i}] = {e}, got {}",
+            vals[i]
+        );
+    }
+}
+
+#[test]
 fn oracle_conv_1d_valid_stride2() {
     // lhs=[1, 6, 1], rhs=[2, 1, 1], stride=2
     // input = [1, 2, 3, 4, 5, 6]
