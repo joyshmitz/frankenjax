@@ -7078,6 +7078,57 @@ pub(crate) fn eval_fma(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
         get_dtype(&inputs[2]),
     );
 
+    // Dense same-shape fast path (no broadcasting): when a, b, c are all dense
+    // tensors of the same shape/dtype, mul_add the typed slices straight into dense
+    // output — skipping the per-element 24-byte `Literal` reconstruction of THREE
+    // operands plus the boxed output and densify rescan. Bit-identical: fma_literal's
+    // (F64,F64,F64)/(F32,F32,F32) arms compute `from_f{64,32}(x.mul_add(y, z))`, and
+    // `x.mul_add(y, z)` is the same single-rounded value here (this only removes
+    // boxing, not the fma arithmetic the boxed path already performed).
+    if let (Value::Tensor(ta), Value::Tensor(tb), Value::Tensor(tc)) =
+        (&inputs[0], &inputs[1], &inputs[2])
+        && ta.shape == out_shape
+        && tb.shape == out_shape
+        && tc.shape == out_shape
+    {
+        if out_dtype == DType::F64
+            && let (Some(av), Some(bv), Some(cv)) = (
+                ta.elements.as_f64_slice(),
+                tb.elements.as_f64_slice(),
+                tc.elements.as_f64_slice(),
+            )
+        {
+            let out: Vec<f64> = av
+                .iter()
+                .zip(bv)
+                .zip(cv)
+                .map(|((&x, &y), &z)| x.mul_add(y, z))
+                .collect();
+            return Ok(Value::Tensor(TensorValue::new_f64_values(
+                out_shape.clone(),
+                out,
+            )?));
+        }
+        if out_dtype == DType::F32
+            && let (Some(av), Some(bv), Some(cv)) = (
+                ta.elements.as_f32_slice(),
+                tb.elements.as_f32_slice(),
+                tc.elements.as_f32_slice(),
+            )
+        {
+            let out: Vec<f32> = av
+                .iter()
+                .zip(bv)
+                .zip(cv)
+                .map(|((&x, &y), &z)| x.mul_add(y, z))
+                .collect();
+            return Ok(Value::Tensor(TensorValue::new_f32_values(
+                out_shape.clone(),
+                out,
+            )?));
+        }
+    }
+
     let mut multi = Vec::with_capacity(out_strides.len());
     let mut elements = Vec::with_capacity(out_count);
     for flat_idx in 0..out_count {
