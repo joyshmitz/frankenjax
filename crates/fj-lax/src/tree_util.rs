@@ -50,12 +50,12 @@ fn flatten_recursive(node: &TreeNode, leaves: &mut Vec<f64>) -> TreeDef {
             TreeDef::Tuple(child_defs)
         }
         TreeNode::Dict(map) => {
-            let mut items: Vec<(String, TreeDef)> = map
-                .iter()
+            let mut entries: Vec<(&String, &TreeNode)> = map.iter().collect();
+            entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let items: Vec<(String, TreeDef)> = entries
+                .into_iter()
                 .map(|(k, v)| (k.clone(), flatten_recursive(v, leaves)))
                 .collect();
-            // Sort by key for deterministic order
-            items.sort_by(|a, b| a.0.cmp(&b.0));
             TreeDef::Dict(items)
         }
         TreeNode::None => TreeDef::None,
@@ -443,6 +443,28 @@ mod tests {
         } else {
             panic!("expected dict");
         }
+    }
+
+    #[test]
+    fn test_tree_flatten_dict_leaves_follow_sorted_treedef_order() {
+        let mut map = HashMap::new();
+        map.insert("delta".to_string(), TreeNode::Leaf(4.0));
+        map.insert("alpha".to_string(), TreeNode::Leaf(1.0));
+        map.insert("charlie".to_string(), TreeNode::Leaf(3.0));
+        map.insert("bravo".to_string(), TreeNode::Leaf(2.0));
+        let tree = TreeNode::Dict(map);
+
+        let (leaves, def) = tree_flatten(&tree);
+        let TreeDef::Dict(items) = &def else {
+            panic!("expected dict treedef");
+        };
+        let keys: Vec<&str> = items.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, vec!["alpha", "bravo", "charlie", "delta"]);
+        assert_eq!(leaves, vec![1.0, 2.0, 3.0, 4.0]);
+
+        let (reconstructed, consumed) = tree_unflatten(&def, &leaves);
+        assert_eq!(consumed, leaves.len());
+        assert_eq!(reconstructed, tree);
     }
 
     #[test]
