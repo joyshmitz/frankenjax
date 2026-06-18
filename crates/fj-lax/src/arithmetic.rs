@@ -11074,6 +11074,29 @@ pub(crate) fn eval_nextafter(primitive: Primitive, inputs: &[Value]) -> Result<V
         )?)))
     }
 
+    #[inline]
+    fn next_after_same_shape_f32_tensor(
+        lhs: &TensorValue,
+        rhs: &TensorValue,
+    ) -> Result<Option<Value>, EvalError> {
+        let mut elements = Vec::with_capacity(lhs.elements.len());
+        for (left, right) in lhs.elements.iter().zip(&rhs.elements) {
+            let (Literal::F32Bits(left), Literal::F32Bits(right)) = (*left, *right) else {
+                return Ok(None);
+            };
+            elements.push(Literal::from_f32(next_after_f32(
+                f32::from_bits(left),
+                f32::from_bits(right),
+            )));
+        }
+
+        Ok(Some(Value::Tensor(TensorValue::new(
+            DType::F32,
+            lhs.shape.clone(),
+            elements,
+        )?)))
+    }
+
     match (&inputs[0], &inputs[1]) {
         (Value::Scalar(lhs), Value::Scalar(rhs)) => {
             Ok(Value::Scalar(next_after_literal(primitive, *lhs, *rhs)?))
@@ -11083,6 +11106,13 @@ pub(crate) fn eval_nextafter(primitive: Primitive, inputs: &[Value]) -> Result<V
                 && rhs.dtype == DType::F64
                 && lhs.shape == rhs.shape
                 && let Some(value) = next_after_same_shape_f64_tensor(lhs, rhs)?
+            {
+                return Ok(value);
+            }
+            if lhs.dtype == DType::F32
+                && rhs.dtype == DType::F32
+                && lhs.shape == rhs.shape
+                && let Some(value) = next_after_same_shape_f32_tensor(lhs, rhs)?
             {
                 return Ok(value);
             }
@@ -18719,6 +18749,68 @@ mod tests {
                         assert!(
                             matches!(result, Value::Scalar(Literal::F64Bits(_))),
                             "expected scalar F64Bits output"
+                        );
+                        0
+                    }
+                    Err(err) => {
+                        assert_eq!(err.to_string(), "", "unexpected scalar nextafter error");
+                        0
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(result_bits, expected_bits);
+    }
+
+    #[test]
+    fn nextafter_same_shape_f32_tensor_matches_scalar_bits() {
+        let lhs = [
+            1.0_f32,
+            1.0,
+            0.0,
+            -0.0,
+            5.0,
+            f32::NAN,
+            f32::from_bits(1),
+        ];
+        let rhs = [2.0_f32, 0.0, 1.0, -1.0, 5.0, 1.0, 0.0];
+        let result = match eval_nextafter(Primitive::Nextafter, &[v_f32(&lhs), v_f32(&rhs)]) {
+            Ok(result) => result,
+            Err(err) => {
+                assert_eq!(err.to_string(), "", "unexpected tensor nextafter error");
+                return;
+            }
+        };
+        let Value::Tensor(tensor) = result else {
+            assert!(matches!(result, Value::Tensor(_)), "expected tensor output");
+            return;
+        };
+        assert_eq!(tensor.dtype, DType::F32);
+        let result_bits = tensor
+            .elements
+            .iter()
+            .map(|literal| match *literal {
+                Literal::F32Bits(bits) => bits,
+                _ => {
+                    assert!(
+                        matches!(literal, Literal::F32Bits(_)),
+                        "expected F32Bits output"
+                    );
+                    0
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected_bits = lhs
+            .iter()
+            .zip(rhs)
+            .map(|(&left, right)| {
+                match eval_nextafter(Primitive::Nextafter, &[s_f32(left), s_f32(right)]) {
+                    Ok(Value::Scalar(Literal::F32Bits(bits))) => bits,
+                    Ok(result) => {
+                        assert!(
+                            matches!(result, Value::Scalar(Literal::F32Bits(_))),
+                            "expected scalar F32Bits output"
                         );
                         0
                     }
