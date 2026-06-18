@@ -141,6 +141,18 @@ impl BackendRegistry {
         }
     }
 
+    fn validate_default_device(backend: &dyn Backend) -> Result<DeviceId, BackendError> {
+        let device = backend.default_device();
+        if backend.devices().iter().any(|info| info.id == device) {
+            Ok(device)
+        } else {
+            Err(BackendError::InvalidConfiguration {
+                backend: backend.name().to_owned(),
+                detail: format!("default device {device} is not advertised by devices()"),
+            })
+        }
+    }
+
     /// Create a registry with the given backends (first = highest priority).
     pub fn new(backends: Vec<Box<dyn Backend>>) -> Self {
         Self { backends }
@@ -184,7 +196,7 @@ impl BackendRegistry {
                 let backend = self.get(name).ok_or_else(|| BackendError::Unavailable {
                     backend: name.to_owned(),
                 })?;
-                Ok((backend, backend.default_device()))
+                Ok((backend, Self::validate_default_device(backend)?))
             }
             (DevicePlacement::Default, None) => {
                 let backend = self
@@ -192,7 +204,7 @@ impl BackendRegistry {
                     .ok_or_else(|| BackendError::Unavailable {
                         backend: "(none)".to_owned(),
                     })?;
-                Ok((backend, backend.default_device()))
+                Ok((backend, Self::validate_default_device(backend)?))
             }
             (DevicePlacement::Explicit(device_id), Some(name)) => {
                 let backend = self.get(name).ok_or_else(|| BackendError::Unavailable {
@@ -233,9 +245,9 @@ impl BackendRegistry {
                         backend: "(no fallback)".to_owned(),
                     })?;
                 let device = match placement {
-                    DevicePlacement::Default => fallback.default_device(),
+                    DevicePlacement::Default => Self::validate_default_device(fallback)?,
                     DevicePlacement::Explicit(id) => Self::validate_device(fallback, *id)
-                        .unwrap_or_else(|_| fallback.default_device()),
+                        .or_else(|_| Self::validate_default_device(fallback))?,
                 };
                 Ok((fallback, device, true))
             }
@@ -349,6 +361,160 @@ mod tests {
         let registry = BackendRegistry::new(vec![]);
         let result = registry.resolve_with_fallback(&DevicePlacement::Default, Some("gpu"));
         assert!(matches!(result, Err(BackendError::Unavailable { .. })));
+    }
+
+    #[test]
+    fn backend_registry_rejects_invalid_default_device() {
+        use crate::device::{DeviceInfo, Platform};
+        use fj_core::{Jaxpr, Value};
+
+        struct MisconfiguredBackend;
+
+        impl Backend for MisconfiguredBackend {
+            fn name(&self) -> &str {
+                "misconfigured"
+            }
+
+            fn devices(&self) -> Vec<DeviceInfo> {
+                vec![DeviceInfo {
+                    id: DeviceId(0),
+                    platform: Platform::Cpu,
+                    host_id: 0,
+                    process_index: 0,
+                }]
+            }
+
+            fn default_device(&self) -> DeviceId {
+                DeviceId(9)
+            }
+
+            fn execute(
+                &self,
+                _jaxpr: &Jaxpr,
+                _args: &[Value],
+                _device: DeviceId,
+            ) -> Result<Vec<Value>, BackendError> {
+                unreachable!("not used in registry validation test")
+            }
+
+            fn allocate(
+                &self,
+                _size_bytes: usize,
+                _device: DeviceId,
+            ) -> Result<crate::buffer::Buffer, BackendError> {
+                unreachable!("not used in registry validation test")
+            }
+
+            fn transfer(
+                &self,
+                _buffer: &crate::buffer::Buffer,
+                _target: DeviceId,
+            ) -> Result<crate::buffer::Buffer, BackendError> {
+                unreachable!("not used in registry validation test")
+            }
+
+            fn version(&self) -> &str {
+                "misconfigured/0"
+            }
+
+            fn capabilities(&self) -> BackendCapabilities {
+                BackendCapabilities {
+                    supported_dtypes: vec![DType::F64],
+                    max_tensor_rank: 8,
+                    memory_limit_bytes: None,
+                    multi_device: false,
+                }
+            }
+        }
+
+        let registry = BackendRegistry::new(vec![Box::new(MisconfiguredBackend)]);
+
+        let err = registry
+            .resolve_placement(&DevicePlacement::Default, Some("misconfigured"))
+            .err()
+            .expect("invalid requested default device should fail");
+        assert!(matches!(err, BackendError::InvalidConfiguration { .. }));
+        assert!(err.to_string().contains("device:9"));
+
+        let err = registry
+            .resolve_placement(&DevicePlacement::Default, None)
+            .err()
+            .expect("invalid priority default device should fail");
+        assert!(matches!(err, BackendError::InvalidConfiguration { .. }));
+        assert!(err.to_string().contains("device:9"));
+    }
+
+    #[test]
+    fn backend_registry_fallback_rejects_invalid_default_device() {
+        use crate::device::{DeviceInfo, Platform};
+        use fj_core::{Jaxpr, Value};
+
+        struct MisconfiguredBackend;
+
+        impl Backend for MisconfiguredBackend {
+            fn name(&self) -> &str {
+                "misconfigured"
+            }
+
+            fn devices(&self) -> Vec<DeviceInfo> {
+                vec![DeviceInfo {
+                    id: DeviceId(0),
+                    platform: Platform::Cpu,
+                    host_id: 0,
+                    process_index: 0,
+                }]
+            }
+
+            fn default_device(&self) -> DeviceId {
+                DeviceId(9)
+            }
+
+            fn execute(
+                &self,
+                _jaxpr: &Jaxpr,
+                _args: &[Value],
+                _device: DeviceId,
+            ) -> Result<Vec<Value>, BackendError> {
+                unreachable!("not used in registry validation test")
+            }
+
+            fn allocate(
+                &self,
+                _size_bytes: usize,
+                _device: DeviceId,
+            ) -> Result<crate::buffer::Buffer, BackendError> {
+                unreachable!("not used in registry validation test")
+            }
+
+            fn transfer(
+                &self,
+                _buffer: &crate::buffer::Buffer,
+                _target: DeviceId,
+            ) -> Result<crate::buffer::Buffer, BackendError> {
+                unreachable!("not used in registry validation test")
+            }
+
+            fn version(&self) -> &str {
+                "misconfigured/0"
+            }
+
+            fn capabilities(&self) -> BackendCapabilities {
+                BackendCapabilities {
+                    supported_dtypes: vec![DType::F64],
+                    max_tensor_rank: 8,
+                    memory_limit_bytes: None,
+                    multi_device: false,
+                }
+            }
+        }
+
+        let registry = BackendRegistry::new(vec![Box::new(MisconfiguredBackend)]);
+        let err = registry
+            .resolve_with_fallback(&DevicePlacement::Default, Some("gpu"))
+            .err()
+            .expect("missing requested backend should not fall back to invalid default");
+        assert!(matches!(err, BackendError::InvalidConfiguration { .. }));
+        assert!(err.to_string().contains("device:9"));
     }
 
     #[test]
