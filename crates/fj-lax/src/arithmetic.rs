@@ -11168,6 +11168,13 @@ pub(crate) fn eval_nextafter(primitive: Primitive, inputs: &[Value]) -> Result<V
         lhs: Literal,
         rhs: Literal,
     ) -> Result<Literal, EvalError> {
+        fn is_float_literal(literal: Literal) -> bool {
+            matches!(
+                literal,
+                Literal::BF16Bits(_) | Literal::F16Bits(_) | Literal::F32Bits(_) | Literal::F64Bits(_)
+            )
+        }
+
         match (lhs, rhs) {
             (Literal::F32Bits(left), Literal::F32Bits(right)) => Ok(Literal::from_f32(
                 next_after_f32(f32::from_bits(left), f32::from_bits(right)),
@@ -11176,13 +11183,25 @@ pub(crate) fn eval_nextafter(primitive: Primitive, inputs: &[Value]) -> Result<V
                 next_after_f64(f64::from_bits(left), f64::from_bits(right)),
             )),
             (left, right) => {
+                if !is_float_literal(left) {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "expected floating nextafter lhs",
+                    });
+                }
+                if !is_float_literal(right) {
+                    return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "expected floating nextafter rhs",
+                    });
+                }
                 let x = left.as_f64().ok_or(EvalError::TypeMismatch {
                     primitive,
-                    detail: "expected numeric nextafter lhs",
+                    detail: "expected floating nextafter lhs",
                 })?;
                 let y = right.as_f64().ok_or(EvalError::TypeMismatch {
                     primitive,
-                    detail: "expected numeric nextafter rhs",
+                    detail: "expected floating nextafter rhs",
                 })?;
                 Ok(Literal::from_f64(next_after_f64(x, y)))
             }

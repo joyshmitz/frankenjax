@@ -35,6 +35,19 @@ fn make_f32_tensor(shape: &[u32], data: Vec<f32>) -> Value {
     )
 }
 
+fn make_i64_tensor(shape: &[u32], data: Vec<i64>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::I64,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            data.into_iter().map(Literal::I64).collect(),
+        )
+        .unwrap(),
+    )
+}
+
 fn extract_f64_vec(v: &Value) -> Vec<f64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
@@ -578,6 +591,32 @@ fn oracle_nextafter_incompatible_shapes_error() {
     let y = make_f64_tensor(&[3], vec![10.0, 10.0, 10.0]);
     let result = eval_primitive(Primitive::Nextafter, &[x, y], &no_params());
     assert!(result.is_err(), "incompatible shapes should error");
+}
+
+#[test]
+fn oracle_nextafter_rejects_integer_scalars() {
+    let x = Value::Scalar(Literal::I64(1));
+    let y = Value::Scalar(Literal::I64(2));
+    let err = eval_primitive(Primitive::Nextafter, &[x, y], &no_params())
+        .expect_err("JAX nextafter is float-only and must reject integer scalars");
+
+    assert!(
+        err.to_string().contains("floating nextafter lhs"),
+        "unexpected integer nextafter error: {err}"
+    );
+}
+
+#[test]
+fn oracle_nextafter_rejects_integer_tensors() {
+    let x = make_i64_tensor(&[2], vec![1, 2]);
+    let y = make_i64_tensor(&[2], vec![3, 4]);
+    let err = eval_primitive(Primitive::Nextafter, &[x, y], &no_params())
+        .expect_err("JAX nextafter is float-only and must reject integer tensors");
+
+    assert!(
+        err.to_string().contains("floating nextafter lhs"),
+        "unexpected integer tensor nextafter error: {err}"
+    );
 }
 
 // ======================== PROPERTY: dtype preservation ========================
