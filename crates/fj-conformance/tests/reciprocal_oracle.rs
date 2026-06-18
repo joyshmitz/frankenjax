@@ -27,9 +27,36 @@ fn make_f64_tensor(shape: &[u32], data: Vec<f64>) -> Value {
     )
 }
 
+fn make_f32_bits_tensor(shape: &[u32], bits: Vec<u32>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            bits.into_iter().map(Literal::F32Bits).collect(),
+        )
+        .unwrap(),
+    )
+}
+
 fn extract_f64_vec(v: &Value) -> Vec<f64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_f32_bits_vec(v: &Value) -> Vec<u32> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|literal| match literal {
+                Literal::F32Bits(bits) => *bits,
+                other => panic!("expected F32Bits, got {other:?}"),
+            })
+            .collect(),
         _ => unreachable!("expected tensor"),
     }
 }
@@ -178,6 +205,52 @@ fn oracle_reciprocal_negative_zero() {
     let result = eval_primitive(Primitive::Reciprocal, &[input], &no_params()).unwrap();
     let val = extract_f64_scalar(&result);
     assert!(val.is_infinite() && val < 0.0, "reciprocal(-0) = -inf");
+}
+
+#[test]
+fn oracle_reciprocal_f32_signed_zero_and_infinity_bits() {
+    let input = make_f32_bits_tensor(
+        &[8],
+        vec![
+            0.0_f32.to_bits(),
+            (-0.0_f32).to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits(),
+            2.0_f32.to_bits(),
+            (-4.0_f32).to_bits(),
+            f32::NAN.to_bits(),
+            0xffc0_0000,
+        ],
+    );
+    let result = eval_primitive(Primitive::Reciprocal, &[input], &no_params()).unwrap();
+    let bits = extract_f32_bits_vec(&result);
+
+    assert_eq!(
+        bits[0],
+        f32::INFINITY.to_bits(),
+        "reciprocal(+0.0_f32) = +inf"
+    );
+    assert_eq!(
+        bits[1],
+        f32::NEG_INFINITY.to_bits(),
+        "reciprocal(-0.0_f32) = -inf"
+    );
+    assert_eq!(bits[2], 0.0_f32.to_bits(), "reciprocal(+inf_f32) = +0");
+    assert_eq!(
+        bits[3],
+        (-0.0_f32).to_bits(),
+        "reciprocal(-inf_f32) = -0"
+    );
+    assert_eq!(bits[4], 0.5_f32.to_bits(), "reciprocal(2.0_f32)");
+    assert_eq!(bits[5], (-0.25_f32).to_bits(), "reciprocal(-4.0_f32)");
+    assert!(
+        f32::from_bits(bits[6]).is_nan(),
+        "reciprocal(+nan_f32) = NaN"
+    );
+    assert!(
+        f32::from_bits(bits[7]).is_nan(),
+        "reciprocal(-nan_f32) = NaN"
+    );
 }
 
 // ======================== Infinity ========================
