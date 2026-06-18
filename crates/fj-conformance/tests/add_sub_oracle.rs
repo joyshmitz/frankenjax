@@ -1006,3 +1006,35 @@ fn oracle_sub_complex128_preserves_dtype() {
     let result = eval_primitive(Primitive::Sub, &[a, b], &no_params()).unwrap();
     assert_eq!(result.dtype(), DType::Complex128);
 }
+
+#[test]
+fn oracle_add_u32_overflow_wraps_mod_2_pow_32() {
+    // XLA/JAX unsigned arithmetic wraps mod 2^32. The u32 matmul path is tested
+    // elsewhere; this guards the ELEMENTWISE add path (wrapping_add on u64 then
+    // `as u32` truncation): u32::MAX + 1 = 0, and 0xFFFF_FFF0 + 0x20 = 0x10.
+    let mk = |data: Vec<u32>| {
+        Value::Tensor(
+            TensorValue::new(
+                DType::U32,
+                Shape {
+                    dims: vec![data.len() as u32],
+                },
+                data.into_iter().map(Literal::U32).collect(),
+            )
+            .unwrap(),
+        )
+    };
+    let a = mk(vec![u32::MAX, 0xFFFF_FFF0]);
+    let b = mk(vec![1, 0x20]);
+    let result = eval_primitive(Primitive::Add, &[a, b], &no_params()).unwrap();
+    assert_eq!(result.dtype(), DType::U32, "u32 add preserves u32 dtype");
+    let got: Vec<u32> = match &result {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| l.as_u64().unwrap() as u32)
+            .collect(),
+        _ => unreachable!("expected tensor"),
+    };
+    assert_eq!(got, vec![0, 0x10], "u32 add must wrap mod 2^32 (XLA unsigned)");
+}
