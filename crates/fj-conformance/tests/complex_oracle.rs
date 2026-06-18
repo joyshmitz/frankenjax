@@ -787,3 +787,51 @@ fn complex_unary_matches_real_on_real_axis() {
         }
     }
 }
+
+#[test]
+fn complex_inverse_unary_matches_real_on_real_axis() {
+    // Inverse trig/hyperbolic sibling of the test above: on real-axis inputs within
+    // each op's real domain, complex_f(x+0i) == (real_f(x), 0). Cross-validates the
+    // complex inverse implementations against the real ones (non-circular).
+    let extract_real = |v: &Value| -> Vec<f64> {
+        v.as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect()
+    };
+    let unit: &[f64] = &[-0.9, -0.4, 0.0, 0.4, 0.9]; // asin/acos: |x| <= 1
+    let any: &[f64] = &[-2.0, -0.5, 0.0, 0.7, 3.0]; // atan/asinh: all reals
+    let ge1: &[f64] = &[1.0, 1.5, 2.0, 5.0]; // acosh: x >= 1
+    let open_unit: &[f64] = &[-0.9, -0.3, 0.0, 0.5, 0.9]; // atanh: |x| < 1
+    let cases: &[(Primitive, &[f64])] = &[
+        (Primitive::Asin, unit),
+        (Primitive::Acos, unit),
+        (Primitive::Atan, any),
+        (Primitive::Asinh, any),
+        (Primitive::Acosh, ge1),
+        (Primitive::Atanh, open_unit),
+    ];
+    for &(prim, xs) in cases {
+        let real_in = make_f64_tensor(&[xs.len() as u32], xs.to_vec());
+        let real_out =
+            extract_real(&eval_primitive(prim, std::slice::from_ref(&real_in), &no_params()).unwrap());
+        let cplx_in = complex_from_pairs(&xs.iter().map(|&x| (x, 0.0)).collect::<Vec<_>>());
+        let cplx_out = extract_complex_vec(
+            &eval_primitive(prim, std::slice::from_ref(&cplx_in), &no_params()).unwrap(),
+        );
+        for (i, ((cre, cim), r)) in cplx_out.iter().zip(&real_out).enumerate() {
+            assert!(
+                (cre - r).abs() < 1e-9,
+                "{prim:?} real-axis re mismatch at x={}: complex {cre} vs real {r}",
+                xs[i]
+            );
+            assert!(
+                cim.abs() < 1e-9,
+                "{prim:?} real-axis imag must vanish at x={}: {cim}",
+                xs[i]
+            );
+        }
+    }
+}
