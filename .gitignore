@@ -111,3 +111,12 @@ artifacts/
 # Nested per-crate cargo build output (e.g. crates/fj-api/target/ holding
 # criterion benchmark reports); only the workspace-root /target was ignored.
 crates/*/target/
+
+# === Ephemeral build & scratch artifacts (multi-repo cleanup 2026-06-18) ===
+# Stray out-of-tree compile outputs (normal builds live under target/, already ignored).
+*.rlib
+rust_out
+# One-off local CARGO_TARGET_DIR override directories (e.g. criterion micro-benches).
+**/local-target/
+# Recurring stray empty redirect file from ad-hoc shell output.
+/from_f64
