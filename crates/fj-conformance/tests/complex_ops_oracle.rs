@@ -433,3 +433,63 @@ fn metamorphic_imag_of_imag_is_identity() {
         assert!((extracted[i] - expected).abs() < 1e-10);
     }
 }
+
+/// Differential dtype-boundary contract for complex unary ops, pinned to JAX's
+/// `standard_unop` dtype sets (legacy_jax_code `.../lax/lax.py` + `special.py`,
+/// where `_float = {np.floating}` and `_complex = {np.complexfloating}` are
+/// disjoint). Ops declared `standard_unop(_float)` raise on complex; those declared
+/// `standard_unop(_float | _complex)` (or `jnp` composites of complex-valid
+/// primitives) accept it. This complements the fail-closed-only test added with
+/// frankenjax-w8u0a by ALSO asserting the complex-valid ops still succeed — a
+/// regression guard in both directions: it fails if a float-only op is ever
+/// re-admitted to the complex dispatch, OR if a complex-valid op is wrongly
+/// fail-closed.
+#[test]
+fn complex_unary_ops_match_jax_float_vs_complex_boundary() {
+    let z = make_complex128_tensor(&[2], vec![(0.7, 0.3), (-1.2, 0.5)]);
+
+    // `standard_unop(_float)` in JAX — complex is rejected, so these must fail closed.
+    for prim in [
+        Primitive::Cbrt,
+        Primitive::Erf,
+        Primitive::Erfc,
+        Primitive::ErfInv,
+        Primitive::Lgamma,
+        Primitive::Digamma,
+        Primitive::BesselI0e,
+        Primitive::BesselI1e,
+    ] {
+        let r = eval_primitive(prim, std::slice::from_ref(&z), &no_params());
+        assert!(
+            r.is_err(),
+            "{prim:?} is standard_unop(_float) in JAX; must fail closed on complex, got {r:?}"
+        );
+    }
+
+    // `standard_unop(_float | _complex)` (or `jnp` composites of complex-valid
+    // primitives) — must succeed and return complex with the shape preserved.
+    for prim in [
+        Primitive::Sqrt,
+        Primitive::Rsqrt,
+        Primitive::Asin,
+        Primitive::Acos,
+        Primitive::Atan,
+        Primitive::Exp,
+        Primitive::Log,
+        Primitive::Exp2,
+        Primitive::Log2,
+        Primitive::Expm1,
+        Primitive::Log1p,
+        Primitive::Logistic,
+        Primitive::Reciprocal,
+        Primitive::Sinc,
+        Primitive::Neg,
+    ] {
+        let out = eval_primitive(prim, std::slice::from_ref(&z), &no_params()).unwrap_or_else(|e| {
+            panic!("{prim:?} is _float|_complex in JAX; must support complex, got {e:?}")
+        });
+        let t = out.as_tensor().expect("complex tensor output");
+        assert_eq!(t.dtype, DType::Complex128, "{prim:?} must return complex");
+        assert_eq!(t.shape.dims, vec![2], "{prim:?} shape preserved");
+    }
+}
