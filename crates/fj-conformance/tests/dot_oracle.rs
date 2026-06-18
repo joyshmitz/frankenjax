@@ -598,6 +598,36 @@ fn metamorphic_dot_with_zero_vector() {
     }
 }
 
+#[test]
+fn metamorphic_dot_transpose_identity() {
+    // (A @ B)^T == B^T @ A^T — the fundamental matmul/transpose identity. Oracle-free:
+    // both sides are computed via eval_primitive (Dot + Transpose) and compared, so
+    // no hand-derived expected values. Exercises Dot+Transpose composition together.
+    let a = make_f64_tensor(&[2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let b = make_f64_tensor(&[3, 2], vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]);
+    let perm = || BTreeMap::from([("permutation".to_string(), "1,0".to_string())]);
+    // lhs = (A @ B)^T
+    let ab = eval_primitive(Primitive::Dot, &[a.clone(), b.clone()], &no_params()).unwrap();
+    let ab_t = eval_primitive(Primitive::Transpose, &[ab], &perm()).unwrap();
+    // rhs = B^T @ A^T
+    let bt = eval_primitive(Primitive::Transpose, &[b], &perm()).unwrap();
+    let at = eval_primitive(Primitive::Transpose, &[a], &perm()).unwrap();
+    let bt_at = eval_primitive(Primitive::Dot, &[bt, at], &no_params()).unwrap();
+    assert_eq!(
+        extract_shape(&ab_t),
+        extract_shape(&bt_at),
+        "(A@B)^T and B^T@A^T must share shape"
+    );
+    let lhs = extract_f64_vec(&ab_t);
+    let rhs = extract_f64_vec(&bt_at);
+    for (l, r) in lhs.iter().zip(&rhs) {
+        assert!(
+            (l - r).abs() < 1e-9,
+            "(A@B)^T must equal B^T@A^T elementwise: {l} vs {r}"
+        );
+    }
+}
+
 // ======================== DType preservation (frankenjax-* fix wave) ========================
 
 fn make_f32_tensor(shape: &[u32], data: Vec<f32>) -> Value {
