@@ -171,11 +171,38 @@ fn oracle_tile_single_element() {
 }
 
 #[test]
-fn oracle_tile_rejects_reps_rank_mismatch() {
-    // Current impl requires reps length to match tensor rank
+fn oracle_tile_promotes_rank_when_reps_longer_than_input() {
     let input = make_f64_tensor(&[2], vec![1.0, 2.0]);
-    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[3, 2]));
-    assert!(result.is_err(), "reps length > rank should error");
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[3, 2])).unwrap();
+    assert_eq!(extract_shape(&result), vec![3, 4]);
+    assert_eq!(
+        extract_f64_vec(&result),
+        vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+    );
+}
+
+#[test]
+fn oracle_tile_left_pads_reps_when_shorter_than_input() {
+    let input = make_f64_tensor(&[2, 2], vec![1.0, 2.0, 3.0, 4.0]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 4]);
+    assert_eq!(extract_f64_vec(&result), vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]);
+}
+
+#[test]
+fn oracle_tile_scalar_promotes_to_array() {
+    let input = Value::scalar_f64(5.0);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[2, 3])).unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_f64_vec(&result), vec![5.0; 6]);
+}
+
+#[test]
+fn oracle_tile_zero_repeat_returns_empty_axis() {
+    let input = make_f64_tensor(&[2, 2], vec![1.0, 2.0, 3.0, 4.0]);
+    let result = eval_primitive(Primitive::Tile, &[input], &tile_params(&[0, 2])).unwrap();
+    assert_eq!(extract_shape(&result), vec![0, 4]);
+    assert!(extract_f64_vec(&result).is_empty());
 }
 
 #[test]

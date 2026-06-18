@@ -11064,22 +11064,6 @@ pub(crate) fn eval_tile(
 
     match &inputs[0] {
         Value::Scalar(lit) => {
-            if reps.is_empty() || reps.len() > 1 {
-                return Err(EvalError::Unsupported {
-                    primitive,
-                    detail: format!("scalar tile requires 1 rep, got {}", reps.len()),
-                });
-            }
-            let rep = reps[0];
-            if rep == 0 {
-                return Err(EvalError::Unsupported {
-                    primitive,
-                    detail: "tile rep must be positive".into(),
-                });
-            }
-            if rep == 1 {
-                return Ok(inputs[0].clone());
-            }
             let dtype = match lit {
                 Literal::I32(_) => DType::I32,
                 Literal::I64(_) => DType::I64,
@@ -11093,56 +11077,26 @@ pub(crate) fn eval_tile(
                 Literal::Complex64Bits(..) => DType::Complex64,
                 Literal::Complex128Bits(..) => DType::Complex128,
             };
+            let (tile_dims, reps, new_dims) =
+                normalize_tile_dims_and_reps(primitive, &[], &reps)?;
+            let new_count = checked_shape_element_count(primitive, "tile", &new_dims)?;
+            let base = [*lit];
+            let mut result = Vec::with_capacity(new_count);
+            tile_recursive(&base, &tile_dims, &reps, 0, &mut result);
             Ok(Value::Tensor(
-                TensorValue::new(dtype, Shape::vector(rep as u32), vec![*lit; rep])
+                TensorValue::new(dtype, Shape { dims: new_dims }, result)
                     .map_err(EvalError::InvalidTensor)?,
             ))
         }
         Value::Tensor(tensor) => {
-            let rank = tensor.shape.rank();
-            if reps.len() != rank {
-                return Err(EvalError::Unsupported {
-                    primitive,
-                    detail: format!(
-                        "reps length {} does not match tensor rank {}",
-                        reps.len(),
-                        rank
-                    ),
-                });
-            }
+            let (tile_dims, reps, new_dims) =
+                normalize_tile_dims_and_reps(primitive, &tensor.shape.dims, &reps)?;
 
-            if reps.contains(&0) {
-                return Err(EvalError::Unsupported {
-                    primitive,
-                    detail: "tile reps must all be positive".into(),
-                });
-            }
-
-            if reps.iter().all(|&r| r == 1) {
+            if tile_dims == tensor.shape.dims && reps.iter().all(|&r| r == 1) {
                 return Ok(inputs[0].clone());
             }
 
-            let new_dims: Vec<u32> = tensor
-                .shape
-                .dims
-                .iter()
-                .zip(reps.iter())
-                .map(|(&d, &r)| {
-                    d.checked_mul(r as u32)
-                        .ok_or_else(|| EvalError::Unsupported {
-                            primitive,
-                            detail: "tile result dimension overflows u32".into(),
-                        })
-                })
-                .collect::<Result<_, _>>()?;
-
-            let new_count: u64 = new_dims
-                .iter()
-                .try_fold(1_u64, |acc, &d| acc.checked_mul(u64::from(d)))
-                .ok_or_else(|| EvalError::Unsupported {
-                    primitive,
-                    detail: "tile result element count overflows u64".into(),
-                })?;
+            let new_count = checked_shape_element_count(primitive, "tile", &new_dims)?;
 
             // Dense fast paths: tile straight off the typed backing with bulk
             // `extend_from_slice` (memcpy) into dense output, avoiding the full
@@ -11151,8 +11105,8 @@ pub(crate) fn eval_tile(
             // -for-bit identical. Falls through to the Literal path for other dtypes.
             macro_rules! dense_tile {
                 ($slice:expr, $ctor:expr) => {{
-                    let mut out = Vec::with_capacity(new_count as usize);
-                    tile_recursive_dense($slice, &tensor.shape.dims, &reps, 0, &mut out);
+                    let mut out = Vec::with_capacity(new_count);
+                    tile_recursive_dense($slice, &tile_dims, &reps, 0, &mut out);
                     return Ok(Value::Tensor($ctor(
                         Shape {
                             dims: new_dims.clone(),
@@ -11192,8 +11146,8 @@ pub(crate) fn eval_tile(
                 dense_tile!(s, |sh, o| TensorValue::new_complex_values(dt, sh, o));
             }
 
-            let mut result = Vec::with_capacity(new_count as usize);
-            tile_recursive(&tensor.elements, &tensor.shape.dims, &reps, 0, &mut result);
+            let mut result = Vec::with_capacity(new_count);
+            tile_recursive(&tensor.elements, &tile_dims, &reps, 0, &mut result);
 
             Ok(Value::Tensor(
                 TensorValue::new(tensor.dtype, Shape { dims: new_dims }, result)
@@ -11201,6 +11155,53 @@ pub(crate) fn eval_tile(
             ))
         }
     }
+}
+
+fn normalize_tile_dims_and_reps(
+    primitive: Primitive,
+    input_dims: &[u32],
+    reps: &[usize],
+) -> Result<(Vec<u32>, Vec<usize>, Vec<u32>), EvalError> {
+    if reps.is_empty() {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: "tile requires at least one rep".to_owned(),
+        });
+    }
+
+    let out_rank = input_dims.len().max(reps.len());
+    let mut tile_dims = Vec::with_capacity(out_rank);
+    tile_dims.resize(out_rank - input_dims.len(), 1);
+    tile_dims.extend_from_slice(input_dims);
+
+    let mut tile_reps = Vec::with_capacity(out_rank);
+    tile_reps.resize(out_rank - reps.len(), 1);
+    tile_reps.extend_from_slice(reps);
+
+    let new_dims = tile_dims
+        .iter()
+        .zip(tile_reps.iter())
+        .map(|(&dim, &rep)| {
+            if dim == 0 || rep == 0 {
+                return Ok(0);
+            }
+            let product = u64::from(dim)
+                .checked_mul(u64::try_from(rep).map_err(|_| EvalError::Unsupported {
+                    primitive,
+                    detail: "tile rep exceeds u64 range".to_owned(),
+                })?)
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "tile result dimension overflows u32".to_owned(),
+                })?;
+            u32::try_from(product).map_err(|_| EvalError::Unsupported {
+                primitive,
+                detail: "tile result dimension overflows u32".to_owned(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok((tile_dims, tile_reps, new_dims))
 }
 
 /// Dense, type-generic sibling of [`tile_recursive`]: tiles a contiguous typed
@@ -20314,6 +20315,54 @@ mod tests {
         let result = eval_tile(&[x], &p).unwrap();
         assert_eq!(extract_shape(&result), vec![3]);
         assert_eq!(extract_f64_vec(&result), vec![5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn tile_scalar_rank_promotion() {
+        let x = Value::Scalar(Literal::from_f64(5.0));
+        let p = params(&[("reps", "2,3")]);
+        let result = eval_tile(&[x], &p).unwrap();
+        assert_eq!(extract_shape(&result), vec![2, 3]);
+        assert_eq!(extract_f64_vec(&result), vec![5.0; 6]);
+    }
+
+    #[test]
+    fn tile_scalar_single_rep_returns_rank_one_array() {
+        let x = Value::Scalar(Literal::from_f64(5.0));
+        let p = params(&[("reps", "1")]);
+        let result = eval_tile(&[x], &p).unwrap();
+        assert_eq!(extract_shape(&result), vec![1]);
+        assert_eq!(extract_f64_vec(&result), vec![5.0]);
+    }
+
+    #[test]
+    fn tile_left_pads_short_reps() {
+        let x = mat_f64(2, 2, &[1.0, 2.0, 3.0, 4.0]);
+        let p = params(&[("reps", "2")]);
+        let result = eval_tile(&[x], &p).unwrap();
+        assert_eq!(extract_shape(&result), vec![2, 4]);
+        assert_eq!(extract_f64_vec(&result), vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn tile_promotes_extra_reps_with_leading_singletons() {
+        let x = v_f64(&[1.0, 2.0]);
+        let p = params(&[("reps", "3,2")]);
+        let result = eval_tile(&[x], &p).unwrap();
+        assert_eq!(extract_shape(&result), vec![3, 4]);
+        assert_eq!(
+            extract_f64_vec(&result),
+            vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn tile_zero_rep_returns_empty_axis() {
+        let x = mat_f64(2, 2, &[1.0, 2.0, 3.0, 4.0]);
+        let p = params(&[("reps", "0,2")]);
+        let result = eval_tile(&[x], &p).unwrap();
+        assert_eq!(extract_shape(&result), vec![0, 4]);
+        assert!(extract_f64_vec(&result).is_empty());
     }
 
     #[test]

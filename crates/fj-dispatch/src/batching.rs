@@ -1067,18 +1067,17 @@ fn batch_argmax_argmin(
     Ok(BatchTracer::batched(result, 0))
 }
 
-/// vmap rule for Tile. `tile` reads the `"reps"` param (one positive rep per
-/// per-element axis, output keeps the same rank). vmap of a tile is the SAME
-/// tile applied to every batch slice — i.e. tile the batch-front tensor with a
+/// vmap rule for Tile. `tile` reads the `"reps"` param and follows NumPy/JAX
+/// rank promotion: short reps are left-padded with ones, while extra reps add
+/// leading singleton axes to the operand. vmap of a tile is the SAME tile
+/// applied to every batch slice — i.e. tile the batch-front tensor with a
 /// leading rep of `1` for the batch axis, in ONE `eval_primitive` call, instead
 /// of the per-slice eval+stack of `batch_passthrough_leading`.
 ///
 /// PARITY: the batch axis (now at 0) gets rep `1`, so it is left untouched and
-/// passes through; every per-element axis keeps its original rep, so each slice
-/// is tiled identically to the per-slice path — output `[B, tiled…]` equals the
-/// stack of per-slice results (tile is a deterministic block copy). The rank-0
-/// per-element case (scalar tile, which CHANGES rank 0→1) has no batch-front
-/// prepend equivalent and defers to the per-slice path.
+/// passes through; any leading singleton axes introduced by rank promotion are
+/// inserted AFTER that batch axis, so output `[B, tiled…]` equals the stack of
+/// per-slice results. The rank-0 per-element case defers to the per-slice path.
 fn batch_tile(
     inputs: &[BatchTracer],
     params: &BTreeMap<String, String>,
@@ -1109,10 +1108,36 @@ fn batch_tile(
         return batch_passthrough_leading(Primitive::Tile, inputs, params);
     }
 
+    let reps: Vec<usize> = reps_raw
+        .split(',')
+        .map(|rep| {
+            rep.trim()
+                .parse::<usize>()
+                .map_err(|_| BatchError::EvalError(format!("invalid tile rep {rep:?}")))
+        })
+        .collect::<Result<_, _>>()?;
+
+    // If per-slice tile would promote leading axes, insert those singleton axes
+    // after the batch axis first. Otherwise `eval_tile([B, ...], reps=[1, ...])`
+    // would promote before the batch dimension and tile B itself.
+    let mut value = value;
+    for _ in 0..reps.len().saturating_sub(per_elem_rank) {
+        value = eval_primitive(
+            Primitive::ExpandDims,
+            &[value],
+            &BTreeMap::from([("axis".to_owned(), "1".to_owned())]),
+        )
+        .map_err(|e| BatchError::EvalError(e.to_string()))?;
+    }
+
+    let mut batched_reps = Vec::with_capacity(reps.len() + 1);
+    batched_reps.push(1usize);
+    batched_reps.extend(reps);
+
     // Prepend a unit rep for the batch axis (now at position 0); per-element reps
-    // pass through unchanged. eval_tile requires reps.len() == rank.
+    // pass through unchanged.
     let mut new_params = params.clone();
-    new_params.insert("reps".to_owned(), format!("1,{reps_raw}"));
+    new_params.insert("reps".to_owned(), format_csv(&batched_reps));
     let result = eval_primitive(Primitive::Tile, &[value], &new_params)
         .map_err(|e| BatchError::EvalError(e.to_string()))?;
     Ok(BatchTracer::batched(result, 0))
@@ -15366,7 +15391,7 @@ mod tests {
                 1,
             )
         };
-        for reps in ["1,1", "2,1", "1,3", "2,3"] {
+        for reps in ["1,1", "2", "2,1", "1,3", "2,3", "3,2,1"] {
             for mk in [&front as &dyn Fn() -> BatchTracer, &mid] {
                 let params = BTreeMap::from([("reps".to_owned(), reps.to_owned())]);
                 let fast = batch_tile(&[mk()], &params).unwrap();

@@ -1270,60 +1270,39 @@ impl SimpleTraceContext {
                     });
                 }
                 let reps = parse_usize_list(primitive, "reps", raw_reps)?;
-                if reps.contains(&0) {
-                    return Err(TraceError::ShapeInferenceFailed {
-                        primitive,
-                        detail: "tile reps must all be positive".to_owned(),
-                    });
-                }
-
                 let input = &inputs[0];
                 let rank = input.shape.rank();
-                if rank == 0 {
-                    if reps.len() != 1 {
-                        return Err(TraceError::ShapeInferenceFailed {
-                            primitive,
-                            detail: format!("scalar tile requires 1 rep, got {}", reps.len()),
-                        });
-                    }
-                    let rep =
-                        u32::try_from(reps[0]).map_err(|_| TraceError::ShapeInferenceFailed {
-                            primitive,
-                            detail: "tile rep exceeds u32".to_owned(),
-                        })?;
-                    let shape = if rep == 1 {
-                        Shape::scalar()
-                    } else {
-                        Shape::vector(rep)
-                    };
-                    return Ok(vec![ShapedArray {
-                        dtype: input.dtype,
-                        shape,
-                    }]);
-                }
-                if reps.len() != rank {
-                    return Err(TraceError::ShapeInferenceFailed {
-                        primitive,
-                        detail: format!("reps length {} does not match rank {rank}", reps.len()),
-                    });
-                }
+                let out_rank = rank.max(reps.len());
+                let mut tile_dims = Vec::with_capacity(out_rank);
+                tile_dims.resize(out_rank - rank, 1);
+                tile_dims.extend_from_slice(&input.shape.dims);
 
-                let dims = input
-                    .shape
-                    .dims
+                let mut tile_reps = Vec::with_capacity(out_rank);
+                tile_reps.resize(out_rank - reps.len(), 1);
+                tile_reps.extend(reps);
+
+                let dims = tile_dims
                     .iter()
-                    .zip(reps)
-                    .map(|(&dim, rep)| {
-                        let rep =
-                            u32::try_from(rep).map_err(|_| TraceError::ShapeInferenceFailed {
-                                primitive,
-                                detail: "tile rep exceeds u32".to_owned(),
-                            })?;
-                        dim.checked_mul(rep)
+                    .zip(tile_reps.iter())
+                    .map(|(&dim, &rep)| {
+                        if dim == 0 || rep == 0 {
+                            return Ok(0);
+                        }
+                        let product = u64::from(dim)
+                            .checked_mul(u64::try_from(rep).map_err(|_| {
+                                TraceError::ShapeInferenceFailed {
+                                    primitive,
+                                    detail: "tile rep exceeds u64 range".to_owned(),
+                                }
+                            })?)
                             .ok_or_else(|| TraceError::ShapeInferenceFailed {
                                 primitive,
                                 detail: "tile result dimension overflows u32".to_owned(),
-                            })
+                            })?;
+                        u32::try_from(product).map_err(|_| TraceError::ShapeInferenceFailed {
+                            primitive,
+                            detail: "tile result dimension overflows u32".to_owned(),
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(vec![ShapedArray {
@@ -5049,6 +5028,46 @@ mod tests {
                         .expect("aval present")
                         .shape,
                     Shape { dims: vec![10, 7] }
+                );
+
+                let mut tile_params = BTreeMap::new();
+                tile_params.insert("reps".to_owned(), "2".to_owned());
+                let tiled_short = ctx
+                    .process_primitive(Primitive::Tile, &[x], tile_params)
+                    .expect("tile short-reps inference should succeed");
+                assert_eq!(
+                    ctx.tracer_aval(tiled_short[0])
+                        .expect("aval present")
+                        .shape,
+                    Shape { dims: vec![5, 14] }
+                );
+
+                let mut tile_params = BTreeMap::new();
+                tile_params.insert("reps".to_owned(), "3,2,1".to_owned());
+                let tiled_promoted = ctx
+                    .process_primitive(Primitive::Tile, &[x], tile_params)
+                    .expect("tile promoted-rank inference should succeed");
+                assert_eq!(
+                    ctx.tracer_aval(tiled_promoted[0])
+                        .expect("aval present")
+                        .shape,
+                    Shape {
+                        dims: vec![3, 10, 7]
+                    }
+                );
+
+                let tiled_zero = ctx
+                    .process_primitive(
+                        Primitive::Tile,
+                        &[x],
+                        BTreeMap::from([("reps".to_owned(), "0,2".to_owned())]),
+                    )
+                    .expect("tile zero-rep inference should succeed");
+                assert_eq!(
+                    ctx.tracer_aval(tiled_zero[0])
+                        .expect("aval present")
+                        .shape,
+                    Shape { dims: vec![0, 14] }
                 );
 
                 let selected = ctx

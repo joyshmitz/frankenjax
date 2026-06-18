@@ -1237,8 +1237,8 @@ fn infer_equation_output_aval(
                 shape,
             }
         }
-        // Tile: out_dims[i] = in_dims[i] * reps[i] (reps length == rank); a scalar
-        // tiles to a vector of length reps[0]. Catch-all kept the input shape.
+        // Tile: NumPy/JAX-style rank promotion left-pads the shorter side with
+        // ones before multiplying dimensions. Catch-all kept the input shape.
         Tile => {
             let reps: Vec<u32> = eqn
                 .params
@@ -1250,20 +1250,26 @@ fn infer_equation_output_aval(
                 })
                 .unwrap_or_default();
             let in_dims = &first_input.shape.dims;
-            let dims: Vec<u32> = if in_dims.is_empty() {
-                match reps.first().copied() {
-                    None | Some(1) => Vec::new(),
-                    Some(r) => vec![r],
-                }
-            } else if reps.len() == in_dims.len() {
-                in_dims
-                    .iter()
-                    .zip(&reps)
-                    .map(|(&d, &r)| d.saturating_mul(r))
-                    .collect()
-            } else {
-                in_dims.clone() // best-effort on a reps/rank mismatch
-            };
+            let rank = in_dims.len().max(reps.len());
+            let mut tile_dims = Vec::with_capacity(rank);
+            tile_dims.resize(rank - in_dims.len(), 1);
+            tile_dims.extend_from_slice(in_dims);
+
+            let mut tile_reps = Vec::with_capacity(rank);
+            tile_reps.resize(rank - reps.len(), 1);
+            tile_reps.extend(reps);
+
+            let dims: Vec<u32> = tile_dims
+                .iter()
+                .zip(&tile_reps)
+                .map(|(&d, &r)| {
+                    d.checked_mul(r)
+                        .ok_or_else(|| PartialEvalError::ShapeInference {
+                            primitive: eqn.primitive,
+                            detail: "tile result dimension overflows u32".to_owned(),
+                        })
+                })
+                .collect::<Result<_, _>>()?;
             AbstractValue {
                 dtype: first_input.dtype,
                 shape: Shape { dims },
@@ -4816,6 +4822,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.shape.dims, vec![4]);
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Tile, &[("reps", "2")]),
+            &av(&[2, 3], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![2, 6]);
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Tile, &[("reps", "3,2")]),
+            &av(&[2], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![3, 4]);
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::Tile, &[("reps", "0,2")]),
+            &av(&[2, 3], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![0, 6]);
 
         // OneHot [2] num_classes=5 default axis -> [2,5] dtype F64 (catch-all kept
         // the [2] index shape and its dtype).

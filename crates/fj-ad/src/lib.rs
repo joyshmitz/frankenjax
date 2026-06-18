@@ -7901,9 +7901,6 @@ fn tile_vjp(
 
     match (input, g) {
         (Value::Scalar(_), Value::Tensor(g_tensor)) => {
-            if reps.len() != 1 {
-                return Ok(vec![zeros_like(input)]);
-            }
             // Sum every cotangent back into the scalar source, preserving the
             // upstream dtype. The old `Literal::from_f64(sum)` widened F32/
             // BF16/F16 grads to F64 and zeroed complex ones (as_f64 returns
@@ -7941,21 +7938,18 @@ fn tile_vjp(
         (Value::Scalar(_), Value::Scalar(_)) => Ok(vec![g.clone()]),
         (Value::Tensor(input_tensor), Value::Tensor(g_tensor)) => {
             let input_shape = &input_tensor.shape.dims;
-            let rank = input_shape.len();
+            let (tile_shape, reps) = normalize_tile_vjp_shape(input_shape, &reps);
 
-            if reps.len() != rank {
-                return Ok(vec![zeros_like(input)]);
-            }
-
-            if reps.iter().all(|&r| r == 1) {
+            if tile_shape == *input_shape && reps.iter().all(|&r| r == 1) {
                 return Ok(vec![g.clone()]);
             }
 
             let input_count = input_tensor.elements.len();
             let g_dtype = g_tensor.dtype;
+            let rank = tile_shape.len();
 
             let input_strides: Vec<usize> = (0..rank)
-                .map(|i| input_shape[i + 1..].iter().map(|&d| d as usize).product())
+                .map(|i| tile_shape[i + 1..].iter().map(|&d| d as usize).product())
                 .collect();
 
             // Map a flat cotangent index back to its source input element
@@ -7968,12 +7962,12 @@ fn tile_vjp(
                 let mut input_flat = 0_usize;
                 for i in 0..rank {
                     let g_stride: usize = (i + 1..rank)
-                        .map(|j| (input_shape[j] as usize) * reps[j])
+                        .map(|j| (tile_shape[j] as usize) * reps[j])
                         .product();
                     let g_stride = if g_stride == 0 { 1 } else { g_stride };
                     let gc = remaining / g_stride;
                     remaining %= g_stride;
-                    let ic = gc % (input_shape[i] as usize);
+                    let ic = gc % (tile_shape[i] as usize);
                     input_flat += ic * input_strides[i];
                 }
                 (input_flat < input_count).then_some(input_flat)
@@ -8028,6 +8022,19 @@ fn tile_vjp(
         }
         _ => Ok(vec![zeros_like(input)]),
     }
+}
+
+fn normalize_tile_vjp_shape(input_shape: &[u32], reps: &[usize]) -> (Vec<u32>, Vec<usize>) {
+    let rank = input_shape.len().max(reps.len());
+    let mut tile_shape = Vec::with_capacity(rank);
+    tile_shape.resize(rank - input_shape.len(), 1);
+    tile_shape.extend_from_slice(input_shape);
+
+    let mut tile_reps = Vec::with_capacity(rank);
+    tile_reps.resize(rank - reps.len(), 1);
+    tile_reps.extend_from_slice(reps);
+
+    (tile_shape, tile_reps)
 }
 
 /// Conv 1D VJP: compute proper gradients for both input and kernel.
@@ -27906,6 +27913,98 @@ mod tests {
             }
             other => panic!("expected tensor, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tile_vjp_rank_promoted_vector_folds_all_copies() {
+        use fj_core::{DType, Literal, Shape, TensorValue};
+        use std::collections::BTreeMap;
+
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: vec![2] },
+                vec![Literal::from_f32(1.0), Literal::from_f32(2.0)],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: vec![3, 4] },
+                (0..12).map(|_| Literal::from_f32(1.0)).collect(),
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("reps".to_owned(), "3,2".to_owned());
+
+        let out = super::tile_vjp(&input, &g, &params).expect("tile vjp");
+        let t = out[0].as_tensor().expect("tensor gradient");
+        assert_eq!(t.dtype, DType::F32);
+        let vals: Vec<f32> = t
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F32Bits(b) => f32::from_bits(*b),
+                other => panic!("element not F32: {other:?}"),
+            })
+            .collect();
+        assert_eq!(vals, vec![6.0, 6.0]);
+    }
+
+    #[test]
+    fn tile_vjp_promoted_scalar_sums_cotangent_array() {
+        use fj_core::{DType, Literal, Shape, TensorValue};
+        use std::collections::BTreeMap;
+
+        let input = Value::scalar_f64(5.0);
+        let g = Value::Tensor(
+            TensorValue::new(
+                DType::F64,
+                Shape { dims: vec![2, 3] },
+                (1..=6).map(|v| Literal::from_f64(v as f64)).collect(),
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("reps".to_owned(), "2,3".to_owned());
+
+        let out = super::tile_vjp(&input, &g, &params).expect("tile vjp");
+        assert_eq!(out[0].as_f64_scalar(), Some(21.0));
+    }
+
+    #[test]
+    fn tile_vjp_zero_repeat_returns_zero_input_gradient() {
+        use fj_core::{DType, Literal, Shape, TensorValue};
+        use std::collections::BTreeMap;
+
+        let input = Value::Tensor(
+            TensorValue::new(
+                DType::F32,
+                Shape { dims: vec![2] },
+                vec![Literal::from_f32(1.0), Literal::from_f32(2.0)],
+            )
+            .unwrap(),
+        );
+        let g = Value::Tensor(
+            TensorValue::new(DType::F32, Shape { dims: vec![0] }, Vec::new()).unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("reps".to_owned(), "0".to_owned());
+
+        let out = super::tile_vjp(&input, &g, &params).expect("tile vjp");
+        let vals: Vec<f32> = out[0]
+            .as_tensor()
+            .expect("tensor gradient")
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F32Bits(b) => f32::from_bits(*b),
+                other => panic!("element not F32: {other:?}"),
+            })
+            .collect();
+        assert_eq!(vals, vec![0.0, 0.0]);
     }
 
     #[test]
