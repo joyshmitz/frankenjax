@@ -574,6 +574,48 @@ fn oracle_reduce_window_same_lower_padding() {
 }
 
 #[test]
+fn oracle_reduce_window_1d_explicit_asymmetric_padding_sum() {
+    let input = make_f64_tensor(&[3], vec![1.0, 2.0, 3.0]);
+    let result = eval_primitive(
+        Primitive::ReduceWindow,
+        &[input],
+        &sum_window("2", "1", "EXPLICIT:1,0"),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_f64_vec(&result), vec![1.0, 3.0, 5.0]);
+}
+
+#[test]
+fn oracle_reduce_window_2d_explicit_asymmetric_padding_max() {
+    let input = make_f64_tensor(&[2, 2], vec![1.0, 2.0, 3.0, 4.0]);
+    let result = eval_primitive(
+        Primitive::ReduceWindow,
+        &[input],
+        &max_window("2,2", "1,1", "EXPLICIT:0,1,1,0"),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 2]);
+    assert_eq!(extract_f64_vec(&result), vec![3.0, 4.0, 3.0, 4.0]);
+}
+
+#[test]
+fn oracle_reduce_window_explicit_padding_rank_mismatch_rejected() {
+    let input = make_f64_tensor(&[4], vec![1.0, 2.0, 3.0, 4.0]);
+    let err = eval_primitive(
+        Primitive::ReduceWindow,
+        &[input],
+        &sum_window("2", "1", "EXPLICIT:1,0,0,1"),
+    )
+    .expect_err("explicit padding rank must match tensor rank");
+    assert!(
+        err.to_string()
+            .contains("explicit padding rank 2 does not match tensor rank 1"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn oracle_reduce_window_unknown_padding_rejected() {
     let input = make_f64_tensor(&[4], vec![1.0, 2.0, 3.0, 4.0]);
     let err = eval_primitive(

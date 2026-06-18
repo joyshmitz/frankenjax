@@ -2950,11 +2950,12 @@ fn reduce_window_same_geometry(
     Ok((out_dim, pad_low))
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ReduceWindowPadding {
     Valid,
     Same,
     SameLower,
+    Explicit(Vec<(usize, usize)>),
 }
 
 fn parse_reduce_window_padding(
@@ -2972,11 +2973,71 @@ fn parse_reduce_window_padding(
     } else if trimmed.eq_ignore_ascii_case("SAME_LOWER") {
         Ok(ReduceWindowPadding::SameLower)
     } else {
+        parse_reduce_window_explicit_padding(primitive, raw).map(ReduceWindowPadding::Explicit)
+    }
+}
+
+fn parse_reduce_window_explicit_padding(
+    primitive: Primitive,
+    raw: &str,
+) -> Result<Vec<(usize, usize)>, EvalError> {
+    let trimmed = raw
+        .trim()
+        .strip_prefix("EXPLICIT:")
+        .or_else(|| raw.trim().strip_prefix("explicit:"))
+        .unwrap_or(raw.trim());
+    let numbers: Result<Vec<isize>, _> = trimmed
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '-'))
+        .filter(|part| !part.is_empty())
+        .map(str::parse::<isize>)
+        .collect();
+    let numbers = numbers.map_err(|_| EvalError::Unsupported {
+        primitive,
+        detail: format!("unsupported reduce_window padding mode {raw:?}"),
+    })?;
+    if numbers.is_empty() || !numbers.len().is_multiple_of(2) {
         Err(EvalError::Unsupported {
             primitive,
             detail: format!("unsupported reduce_window padding mode {raw:?}"),
         })
+    } else {
+        let mut pairs = Vec::with_capacity(numbers.len() / 2);
+        for pair in numbers.chunks_exact(2) {
+            let low = usize::try_from(pair[0]).map_err(|_| EvalError::Unsupported {
+                primitive,
+                detail: format!("reduce_window explicit padding must be non-negative: {raw:?}"),
+            })?;
+            let high = usize::try_from(pair[1]).map_err(|_| EvalError::Unsupported {
+                primitive,
+                detail: format!("reduce_window explicit padding must be non-negative: {raw:?}"),
+            })?;
+            pairs.push((low, high));
+        }
+        Ok(pairs)
     }
+}
+
+fn reduce_window_explicit_geometry(
+    primitive: Primitive,
+    input_dim: usize,
+    window_dim: usize,
+    stride: usize,
+    pad_low: usize,
+    pad_high: usize,
+) -> Result<(usize, usize), EvalError> {
+    let padded = input_dim
+        .checked_add(pad_low)
+        .and_then(|value| value.checked_add(pad_high))
+        .ok_or_else(|| EvalError::Unsupported {
+            primitive,
+            detail: "reduce_window explicit padded input size overflow".to_owned(),
+        })?;
+    let out_dim = if padded >= window_dim {
+        (padded - window_dim) / stride + 1
+    } else {
+        0
+    };
+    Ok((out_dim, pad_low))
 }
 
 /// ReduceWindow preserves the input dtype across all variants — every arm of
@@ -5247,6 +5308,18 @@ fn eval_reduce_window(
 
     let output_dtype = reduce_window_output_dtype(tensor.dtype);
 
+    if let ReduceWindowPadding::Explicit(pairs) = &padding
+        && pairs.len() != rank
+    {
+        return Err(EvalError::Unsupported {
+            primitive,
+            detail: format!(
+                "reduce_window explicit padding rank {} does not match tensor rank {rank}",
+                pairs.len()
+            ),
+        });
+    }
+
     // Calculate output dimensions
     let mut out_dims: Vec<u32> = Vec::with_capacity(rank);
     let mut pad_lows: Vec<usize> = Vec::with_capacity(rank);
@@ -5254,12 +5327,21 @@ fn eval_reduce_window(
         let input_dim = dilated_input_dims[d];
         let win = eff_window_dims[d];
         let stride = strides[d];
-        let (out_dim, pad_low) = match padding {
+        let (out_dim, pad_low) = match &padding {
             ReduceWindowPadding::Same => {
                 reduce_window_same_geometry(primitive, input_dim, win, stride, false)?
             }
             ReduceWindowPadding::SameLower => {
                 reduce_window_same_geometry(primitive, input_dim, win, stride, true)?
+            }
+            ReduceWindowPadding::Explicit(pairs) => {
+                let &(pad_low, pad_high) = pairs.get(d).ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: format!("reduce_window explicit padding missing axis {d}"),
+                })?;
+                reduce_window_explicit_geometry(
+                    primitive, input_dim, win, stride, pad_low, pad_high,
+                )?
             }
             ReduceWindowPadding::Valid => {
                 let out_dim = if input_dim >= win {
