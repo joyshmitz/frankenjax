@@ -588,3 +588,48 @@ fn metamorphic_complex_inverse_hyperbolic_round_trips() {
     let tanh_atanh = unary(Primitive::Tanh, &unary(Primitive::Atanh, &tz));
     assert_complex_close(&tanh_atanh, &tanh_pts, 1e-9, "tanh(atanh(z)) == z");
 }
+
+#[test]
+fn complex_inverse_trig_returns_principal_branch() {
+    // The forward∘inverse round trips (sin(asin(z))==z, ...) hold for ANY valid
+    // inverse and so do NOT pin the branch. The principal branches additionally
+    // satisfy Re(asin(z)) in [-pi/2, pi/2], Re(acos(z)) in [0, pi], and
+    // Re(atan(z)) in [-pi/2, pi/2]. Since sin/cos/tan are injective on those
+    // real-part strips, the range bound + the round trip together UNIQUELY pin the
+    // principal value — catching a wrong-branch regression (in the recently-
+    // stabilized HFT complex_asin/acos/atan) that the round trips alone cannot.
+    // Generic off-axis points across all four quadrants.
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let pts = [
+        (0.5, 0.7),
+        (-0.8, 0.6),
+        (1.2, -0.4),
+        (-0.3, -0.9),
+        (2.0, 1.5),
+        (-2.0, -1.5),
+    ];
+    let z = complex_from_pairs(&pts);
+    let eps = 1e-12;
+
+    let asin = extract_complex_vec(&unary(Primitive::Asin, &z));
+    for (i, (re, _)) in asin.iter().enumerate() {
+        assert!(
+            re.abs() <= FRAC_PI_2 + eps,
+            "Re(asin) outside [-pi/2, pi/2] at {i}: {re}"
+        );
+    }
+    let acos = extract_complex_vec(&unary(Primitive::Acos, &z));
+    for (i, (re, _)) in acos.iter().enumerate() {
+        assert!(
+            *re >= -eps && *re <= PI + eps,
+            "Re(acos) outside [0, pi] at {i}: {re}"
+        );
+    }
+    let atan = extract_complex_vec(&unary(Primitive::Atan, &z));
+    for (i, (re, _)) in atan.iter().enumerate() {
+        assert!(
+            re.abs() <= FRAC_PI_2 + eps,
+            "Re(atan) outside [-pi/2, pi/2] at {i}: {re}"
+        );
+    }
+}
