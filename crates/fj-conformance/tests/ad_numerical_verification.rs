@@ -4353,6 +4353,33 @@ fn select_vjp_routes_cotangent_per_predicate() {
 }
 
 #[test]
+fn broadcast_in_dim_vjp_sums_over_broadcast_axes() {
+    // broadcast_in_dim VJP reduce-sums the cotangent over the broadcast axes, then
+    // reshapes to the input shape. input [3] -> output [2,3] with broadcast_dimensions=[1]
+    // (input axis 0 -> output axis 1, output axis 0 is broadcast), so grad[j] = sum_i g[i,j].
+    let input = make_f64_vector(&[1.0, 2.0, 3.0]);
+    let mut params = BTreeMap::new();
+    params.insert("shape".to_string(), "2,3".to_string());
+    params.insert("broadcast_dimensions".to_string(), "1".to_string());
+    let out = eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&input), &params).unwrap();
+    // g = [[1,2,3],[4,5,6]]
+    let g = make_f64_matrix(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let vjp = fj_ad::vjp(
+        Primitive::BroadcastInDim,
+        std::slice::from_ref(&input),
+        std::slice::from_ref(&g),
+        std::slice::from_ref(&out),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        extract_f64_vec(&vjp[0]),
+        vec![5.0, 7.0, 9.0],
+        "grad sums the cotangent over the broadcast axis: [1+4, 2+5, 3+6]"
+    );
+}
+
+#[test]
 fn igamma_igammac_vjp_numerical() {
     // igamma(a, x): grad w.r.t. a (igamma_grad_a's dedicated series — the most error-prone)
     // AND x (x^(a-1)·e^{-x}/Gamma(a)). igammac = 1 - igamma, so its grads are negated.
