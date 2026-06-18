@@ -2747,6 +2747,10 @@ impl TensorValue {
         match &slices[0] {
             Value::Scalar(first) => {
                 let axis_dim = checked_axis0_dim(slices.len(), &[])?;
+                if let Some(tensor) = stack_axis0_dense_scalars(slices, axis_dim)? {
+                    return Ok(tensor);
+                }
+
                 let mut elements = Vec::with_capacity(slices.len());
                 elements.push(*first);
                 for value in &slices[1..] {
@@ -2837,6 +2841,148 @@ impl TensorValue {
     pub fn to_i64_vec(&self) -> Option<Vec<i64>> {
         self.elements.iter().copied().map(Literal::as_i64).collect()
     }
+}
+
+fn collect_homogeneous_scalar_values<T>(
+    slices: &[Value],
+    mut convert: impl FnMut(Literal) -> Option<T>,
+) -> Result<Option<Vec<T>>, ValueError> {
+    let mut values = Vec::with_capacity(slices.len());
+    for value in slices {
+        let Value::Scalar(literal) = value else {
+            return Err(ValueError::MixedAxisStackKinds);
+        };
+        let Some(converted) = convert(*literal) else {
+            return Ok(None);
+        };
+        values.push(converted);
+    }
+    Ok(Some(values))
+}
+
+fn stack_axis0_dense_scalars(
+    slices: &[Value],
+    axis_dim: u32,
+) -> Result<Option<TensorValue>, ValueError> {
+    let Some(Value::Scalar(first)) = slices.first() else {
+        return Ok(None);
+    };
+
+    macro_rules! try_dense_stack {
+        ($convert:expr, $build:expr) => {{
+            if let Some(values) = collect_homogeneous_scalar_values(slices, $convert)? {
+                return Ok(Some($build(Shape::vector(axis_dim), values)?));
+            }
+        }};
+    }
+
+    match *first {
+        Literal::I32(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::I32(value) => Some(i64::from(value)),
+                    _ => None,
+                },
+                TensorValue::new_i32_values
+            );
+        }
+        Literal::I64(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::I64(value) => Some(value),
+                    _ => None,
+                },
+                TensorValue::new_i64_values
+            );
+        }
+        Literal::U32(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::U32(value) => Some(value),
+                    _ => None,
+                },
+                TensorValue::new_u32_values
+            );
+        }
+        Literal::U64(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::U64(value) => Some(value),
+                    _ => None,
+                },
+                TensorValue::new_u64_values
+            );
+        }
+        Literal::Bool(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::Bool(value) => Some(value),
+                    _ => None,
+                },
+                TensorValue::new_bool_values
+            );
+        }
+        Literal::BF16Bits(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::BF16Bits(bits) => Some(bits),
+                    _ => None,
+                },
+                |shape, values| TensorValue::new_half_float_values(DType::BF16, shape, values)
+            );
+        }
+        Literal::F16Bits(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::F16Bits(bits) => Some(bits),
+                    _ => None,
+                },
+                |shape, values| TensorValue::new_half_float_values(DType::F16, shape, values)
+            );
+        }
+        Literal::F32Bits(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::F32Bits(bits) => Some(f32::from_bits(bits)),
+                    _ => None,
+                },
+                TensorValue::new_f32_values
+            );
+        }
+        Literal::F64Bits(_) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::F64Bits(bits) => Some(f64::from_bits(bits)),
+                    _ => None,
+                },
+                TensorValue::new_f64_values
+            );
+        }
+        Literal::Complex64Bits(_, _) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::Complex64Bits(re, im) => {
+                        Some((f64::from(f32::from_bits(re)), f64::from(f32::from_bits(im))))
+                    }
+                    _ => None,
+                },
+                |shape, values| TensorValue::new_complex_values(DType::Complex64, shape, values)
+            );
+        }
+        Literal::Complex128Bits(_, _) => {
+            try_dense_stack!(
+                |literal| match literal {
+                    Literal::Complex128Bits(re, im) => {
+                        Some((f64::from_bits(re), f64::from_bits(im)))
+                    }
+                    _ => None,
+                },
+                |shape, values| TensorValue::new_complex_values(DType::Complex128, shape, values)
+            );
+        }
+    }
+
+    Ok(None)
 }
 
 fn checked_axis0_dim(axis_len: usize, trailing_dims: &[u32]) -> Result<u32, ValueError> {
@@ -6053,6 +6199,130 @@ mod tests {
         stacked128
             .validate_dtype_consistency()
             .expect("complex128 stack dtype invariant");
+    }
+
+    #[test]
+    fn stack_axis0_homogeneous_scalars_use_dense_storage() {
+        let i32_stack = TensorValue::stack_axis0(&[Value::scalar_i32(-3), Value::scalar_i32(9)])
+            .expect("i32 scalar stack");
+        assert_eq!(i32_stack.dtype, DType::I32);
+        assert_eq!(i32_stack.elements.as_i64_slice(), Some(&[-3, 9][..]));
+        assert_eq!(
+            i32_stack.elements.as_slice(),
+            &[Literal::I64(-3), Literal::I64(9)]
+        );
+
+        let i64_stack =
+            TensorValue::stack_axis0(&[Value::scalar_i64(i64::MIN), Value::scalar_i64(7)])
+                .expect("i64 scalar stack");
+        assert_eq!(i64_stack.elements.as_i64_slice(), Some(&[i64::MIN, 7][..]));
+
+        let u32_stack = TensorValue::stack_axis0(&[
+            Value::scalar_u32(0),
+            Value::scalar_u32(u32::MAX),
+        ])
+        .expect("u32 scalar stack");
+        assert_eq!(
+            u32_stack.elements.as_u32_slice(),
+            Some(&[0, u32::MAX][..])
+        );
+
+        let u64_stack = TensorValue::stack_axis0(&[
+            Value::scalar_u64(1),
+            Value::scalar_u64(u64::MAX),
+        ])
+        .expect("u64 scalar stack");
+        assert_eq!(
+            u64_stack.elements.as_u64_slice(),
+            Some(&[1, u64::MAX][..])
+        );
+
+        let bool_stack =
+            TensorValue::stack_axis0(&[Value::scalar_bool(true), Value::scalar_bool(false)])
+                .expect("bool scalar stack");
+        assert_eq!(bool_stack.elements.as_bool_slice(), Some(&[true, false][..]));
+
+        let bf16_stack = TensorValue::stack_axis0(&[
+            Value::Scalar(Literal::BF16Bits(0x3f80)),
+            Value::Scalar(Literal::BF16Bits(0xbf80)),
+        ])
+        .expect("bf16 scalar stack");
+        assert_eq!(bf16_stack.dtype, DType::BF16);
+        assert_eq!(
+            bf16_stack.elements.as_half_float_slice(),
+            Some(&[0x3f80, 0xbf80][..])
+        );
+
+        let f16_stack = TensorValue::stack_axis0(&[
+            Value::Scalar(Literal::F16Bits(0x3c00)),
+            Value::Scalar(Literal::F16Bits(0xbc00)),
+        ])
+        .expect("f16 scalar stack");
+        assert_eq!(f16_stack.dtype, DType::F16);
+        assert_eq!(
+            f16_stack.elements.as_half_float_slice(),
+            Some(&[0x3c00, 0xbc00][..])
+        );
+
+        let f32_stack = TensorValue::stack_axis0(&[
+            Value::Scalar(Literal::from_f32(-0.0)),
+            Value::Scalar(Literal::from_f32(f32::from_bits(0x7fc0_0001))),
+        ])
+        .expect("f32 scalar stack");
+        assert_eq!(
+            f32_stack
+                .elements
+                .as_f32_slice()
+                .expect("dense f32 scalar stack")
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![(-0.0_f32).to_bits(), 0x7fc0_0001]
+        );
+
+        let f64_stack = TensorValue::stack_axis0(&[
+            Value::Scalar(Literal::from_f64(-0.0)),
+            Value::Scalar(Literal::from_f64(f64::from_bits(0x7ff8_0000_0000_0042))),
+        ])
+        .expect("f64 scalar stack");
+        assert_eq!(
+            f64_stack
+                .elements
+                .as_f64_slice()
+                .expect("dense f64 scalar stack")
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![(-0.0_f64).to_bits(), 0x7ff8_0000_0000_0042]
+        );
+
+        let complex64_stack = TensorValue::stack_axis0(&[
+            Value::scalar_complex64(1.5, -0.0),
+            Value::scalar_complex64(-2.0, 3.25),
+        ])
+        .expect("complex64 scalar stack");
+        assert_eq!(complex64_stack.dtype, DType::Complex64);
+        assert_eq!(
+            complex64_stack.elements.as_complex_slice(),
+            Some(&[(1.5, -0.0), (-2.0, 3.25)][..])
+        );
+
+        let complex128_stack = TensorValue::stack_axis0(&[
+            Value::scalar_complex128(1.5, -0.0),
+            Value::scalar_complex128(-2.0, 3.25),
+        ])
+        .expect("complex128 scalar stack");
+        assert_eq!(complex128_stack.dtype, DType::Complex128);
+        assert_eq!(
+            complex128_stack.elements.as_complex_slice(),
+            Some(&[(1.5, -0.0), (-2.0, 3.25)][..])
+        );
+
+        let mixed = TensorValue::stack_axis0(&[Value::scalar_i32(1), Value::scalar_i64(2)])
+            .expect("mixed scalar stack keeps old fallback");
+        assert_eq!(mixed.dtype, DType::F64);
+        assert!(mixed.elements.as_i64_slice().is_none());
+        assert_eq!(mixed.elements.as_slice(), &[Literal::I32(1), Literal::I64(2)]);
     }
 
     #[test]
