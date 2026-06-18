@@ -376,3 +376,65 @@ fn convert_element_type_2d_empty() {
     assert_eq!(result.dtype(), DType::I32);
     assert_eq!(shape(&result).dims, vec![0, 5]);
 }
+
+#[test]
+fn convert_lossless_round_trips_preserve_values() {
+    let extract_f64 = |v: &Value| -> Vec<f64> {
+        v.as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect()
+    };
+    let extract_i64 = |v: &Value| -> Vec<i64> {
+        v.as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect()
+    };
+
+    // f64 -> f32 -> f64 is the identity for f32-exact values.
+    let f32_exact = [0.0, 1.0, -1.0, 0.5, -3.25, 256.0, 1.0e6, -0.125];
+    let rt = convert(convert(f64_tensor(&[8], &f32_exact), "f32").unwrap(), "f64").unwrap();
+    assert_eq!(
+        extract_f64(&rt),
+        f32_exact.to_vec(),
+        "f64->f32->f64 must be identity for f32-exact values"
+    );
+
+    // i64 -> f64 -> i64 is the identity within +/-2^53 (exactly representable in f64).
+    let small = [0_i64, 1, -1, 42, -1000, 1 << 40, -(1 << 40)];
+    let rt2 = convert(convert(i64_tensor(&[7], &small), "f64").unwrap(), "i64").unwrap();
+    assert_eq!(
+        extract_i64(&rt2),
+        small.to_vec(),
+        "i64->f64->i64 must be identity within 2^53"
+    );
+
+    // i64 -> i32 -> i64 is the identity for values in i32 range.
+    let i32range = [0_i64, 1, -1, i32::MAX as i64, i32::MIN as i64, 123456];
+    let rt3 = convert(convert(i64_tensor(&[6], &i32range), "i32").unwrap(), "i64").unwrap();
+    assert_eq!(
+        extract_i64(&rt3),
+        i32range.to_vec(),
+        "i64->i32->i64 must be identity in i32 range"
+    );
+
+    // u32 -> i64 -> u32 is the identity (u32 fits losslessly in i64).
+    let us = [0_u32, 1, 42, u32::MAX, 1 << 31];
+    let rt4 = convert(convert(u32_tensor(&[5], &us), "i64").unwrap(), "u32").unwrap();
+    let u_out: Vec<u32> = rt4
+        .as_tensor()
+        .unwrap()
+        .elements
+        .iter()
+        .map(|l| match l {
+            Literal::U32(x) => *x,
+            other => panic!("expected U32, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(u_out, us.to_vec(), "u32->i64->u32 must be identity");
+}
