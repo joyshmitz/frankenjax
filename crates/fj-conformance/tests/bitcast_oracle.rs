@@ -317,6 +317,39 @@ fn oracle_bitcast_u32_to_f32_roundtrip() {
     }
 }
 
+#[test]
+fn oracle_bitcast_f32_u32_roundtrip_preserves_special_value_bits() {
+    // Round-trip f32 -> u32 -> f32 must preserve EXACT bits for NaN / +-inf / -0.0
+    // with no canonicalization on either leg. Compared by bit pattern, since NaN
+    // != NaN and -0.0 == 0.0 under `==` would hide a payload/sign change.
+    let original = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.0_f32,
+        1.5_f32,
+    ];
+    let input = make_f32_tensor(&[5], original.to_vec());
+    let as_u32 = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[input],
+        &bitcast_params("u32"),
+    )
+    .unwrap();
+    let back = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[as_u32],
+        &bitcast_params("f32"),
+    )
+    .unwrap();
+    let got_bits: Vec<u32> = extract_f32_vec(&back).iter().map(|v| v.to_bits()).collect();
+    let want_bits: Vec<u32> = original.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(
+        got_bits, want_bits,
+        "f32->u32->f32 round-trip must preserve exact special-value bits"
+    );
+}
+
 // ======================== 2D Tests ========================
 
 #[test]
