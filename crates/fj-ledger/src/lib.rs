@@ -215,6 +215,7 @@ impl ConformalPredictor {
     /// Falls back to heuristic when calibration set is too small.
     #[must_use]
     pub fn calibrated_posterior(&self, point_estimate: f64) -> CalibratedEstimate {
+        let point_estimate = normalize_probability(point_estimate).unwrap_or(0.5);
         match self.prediction_threshold() {
             Some(threshold) => {
                 let half_width = threshold;
@@ -499,6 +500,28 @@ mod tests {
 
         let estimate = cp.calibrated_posterior(0.5);
         assert!(estimate.used_conformal);
+        assert!(estimate.lower.is_finite());
+        assert!(estimate.upper.is_finite());
+    }
+
+    #[test]
+    fn calibrated_posterior_sanitizes_non_finite_point_estimates() {
+        let uncalibrated = super::ConformalPredictor::new(0.8, 3);
+        for point in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let estimate = uncalibrated.calibrated_posterior(point);
+            assert_eq!(estimate.point.to_bits(), 0.5_f64.to_bits());
+            assert_eq!(estimate.lower.to_bits(), 0.25_f64.to_bits());
+            assert_eq!(estimate.upper.to_bits(), 0.75_f64.to_bits());
+            assert!(!estimate.used_conformal);
+        }
+
+        let mut calibrated = super::ConformalPredictor::new(0.8, 3);
+        for score in [0.1, 0.2, 0.3] {
+            calibrated.observe(score);
+        }
+        let estimate = calibrated.calibrated_posterior(f64::NAN);
+        assert!(estimate.used_conformal);
+        assert_eq!(estimate.point.to_bits(), 0.5_f64.to_bits());
         assert!(estimate.lower.is_finite());
         assert!(estimate.upper.is_finite());
     }
