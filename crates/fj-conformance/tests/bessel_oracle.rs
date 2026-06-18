@@ -451,33 +451,46 @@ fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
     )
 }
 
+// bessel_i0e/i1e are JAX standard_unop(_float): they REJECT complex operands (w8u0a
+// float-only; complex_unary_elementwise returns None for them; fail-closed VJP at
+// ad_numerical:1301), matching complex_ops_oracle's boundary guard. These tests
+// previously asserted success + dtype preservation, stale after w8u0a — now assert
+// rejection.
 #[test]
-fn oracle_bessel_i0e_complex64_real_axis() {
-    // bessel_i0e on real axis should match real version
+fn oracle_bessel_i0e_complex64_rejected() {
     let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
-    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params())
-        .expect("bessel_i0e complex64 should succeed");
-    assert_eq!(result.dtype(), DType::Complex64);
+    let err = eval_primitive(Primitive::BesselI0e, &[input], &no_params())
+        .expect_err("bessel_i0e is float-only and must reject complex64");
+    assert!(
+        err.to_string().contains("complex"),
+        "unexpected complex bessel_i0e error: {err}"
+    );
 }
 
 #[test]
-fn oracle_bessel_i1e_complex64_real_axis() {
+fn oracle_bessel_i1e_complex64_rejected() {
     let input = make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
-    let result = eval_primitive(Primitive::BesselI1e, &[input], &no_params())
-        .expect("bessel_i1e complex64 should succeed");
-    assert_eq!(result.dtype(), DType::Complex64);
+    let err = eval_primitive(Primitive::BesselI1e, &[input], &no_params())
+        .expect_err("bessel_i1e is float-only and must reject complex64");
+    assert!(
+        err.to_string().contains("complex"),
+        "unexpected complex bessel_i1e error: {err}"
+    );
 }
 
 #[test]
-fn oracle_bessel_i0e_complex128_preserves_dtype() {
+fn oracle_bessel_i0e_complex128_rejected() {
     let input = make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
-    let result = eval_primitive(Primitive::BesselI0e, &[input], &no_params())
-        .expect("bessel_i0e complex128 should succeed");
-    assert_eq!(result.dtype(), DType::Complex128);
+    let err = eval_primitive(Primitive::BesselI0e, &[input], &no_params())
+        .expect_err("bessel_i0e is float-only and must reject complex128");
+    assert!(
+        err.to_string().contains("complex"),
+        "unexpected complex bessel_i0e error: {err}"
+    );
 }
 
 #[test]
-fn property_bessel_preserves_complex_dtypes() {
+fn property_bessel_rejects_complex_dtypes() {
     for dtype in [DType::Complex64, DType::Complex128] {
         let input = match dtype {
             DType::Complex64 => make_complex64_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]),
@@ -485,12 +498,11 @@ fn property_bessel_preserves_complex_dtypes() {
             _ => unreachable!(),
         };
         for primitive in [Primitive::BesselI0e, Primitive::BesselI1e] {
-            let result = eval_primitive(primitive, std::slice::from_ref(&input), &no_params())
-                .expect("bessel should succeed for complex dtype");
-            assert_eq!(
-                result.dtype(),
-                dtype,
-                "{primitive:?} {dtype:?}: dtype mismatch"
+            let err = eval_primitive(primitive, std::slice::from_ref(&input), &no_params())
+                .expect_err("bessel is float-only and must reject complex");
+            assert!(
+                err.to_string().contains("complex"),
+                "{primitive:?} {dtype:?}: unexpected error {err}"
             );
         }
     }
