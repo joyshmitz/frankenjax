@@ -4724,6 +4724,20 @@ pub(crate) fn eval_conj(primitive: Primitive, inputs: &[Value]) -> Result<Value,
     match &inputs[0] {
         Value::Scalar(lit) => Ok(Value::Scalar(conj_literal(*lit)?)),
         Value::Tensor(tensor) => {
+            // Dense complex fast path (FFT conjugate / cross-correlation): negate the
+            // imag of each (re, im) straight into dense complex output, skipping the
+            // per-element Literal reconstruction + boxed output. Bit-identical: f64/f32
+            // negation flips the sign bit exactly as conj_literal's `im_bits ^ sign`
+            // (incl. NaN), and as_complex_slice re-decode round-trips; new_complex_values
+            // re-rounds Complex64 im to f32, matching the f32 the literal already held.
+            if let Some(src) = tensor.elements.as_complex_slice() {
+                let out: Vec<(f64, f64)> = src.iter().map(|&(re, im)| (re, -im)).collect();
+                return Ok(Value::Tensor(TensorValue::new_complex_values(
+                    tensor.dtype,
+                    tensor.shape.clone(),
+                    out,
+                )?));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for lit in tensor.elements.iter().copied() {
                 elements.push(conj_literal(lit)?);
@@ -4769,6 +4783,28 @@ pub(crate) fn eval_real(primitive: Primitive, inputs: &[Value]) -> Result<Value,
         Value::Scalar(lit) => Ok(Value::Scalar(real_part(*lit)?)),
         Value::Tensor(tensor) => {
             let out_dtype = real_dtype_from_complex(tensor.dtype);
+            // Dense complex fast path: extract the real part of each (re, im) into dense
+            // real storage (F64 for Complex128, F32 for Complex64). Bit-identical to
+            // real_part: as_complex_slice re for Complex128 is f64::from_bits(re_bits)
+            // (-> new_f64_values keeps re_bits == F64Bits(re_bits)); for Complex64 re is
+            // f64::from(f32::from_bits(re_bits)) (-> `re as f32` == F32Bits(re_bits)).
+            if let Some(src) = tensor.elements.as_complex_slice() {
+                let tv = match tensor.dtype {
+                    DType::Complex128 => TensorValue::new_f64_values(
+                        tensor.shape.clone(),
+                        src.iter().map(|&(re, _)| re).collect(),
+                    ),
+                    DType::Complex64 => TensorValue::new_f32_values(
+                        tensor.shape.clone(),
+                        src.iter().map(|&(re, _)| re as f32).collect(),
+                    ),
+                    _ => return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "real expects complex-valued input",
+                    }),
+                };
+                return Ok(Value::Tensor(tv.map_err(EvalError::InvalidTensor)?));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for lit in tensor.elements.iter().copied() {
                 elements.push(real_part(lit)?);
@@ -4806,6 +4842,25 @@ pub(crate) fn eval_imag(primitive: Primitive, inputs: &[Value]) -> Result<Value,
         Value::Scalar(lit) => Ok(Value::Scalar(imag_part(*lit)?)),
         Value::Tensor(tensor) => {
             let out_dtype = real_dtype_from_complex(tensor.dtype);
+            // Dense complex fast path: extract the imag part into dense real storage.
+            // Bit-identical to imag_part (same re-decode round-trip as eval_real).
+            if let Some(src) = tensor.elements.as_complex_slice() {
+                let tv = match tensor.dtype {
+                    DType::Complex128 => TensorValue::new_f64_values(
+                        tensor.shape.clone(),
+                        src.iter().map(|&(_, im)| im).collect(),
+                    ),
+                    DType::Complex64 => TensorValue::new_f32_values(
+                        tensor.shape.clone(),
+                        src.iter().map(|&(_, im)| im as f32).collect(),
+                    ),
+                    _ => return Err(EvalError::TypeMismatch {
+                        primitive,
+                        detail: "imag expects complex-valued input",
+                    }),
+                };
+                return Ok(Value::Tensor(tv.map_err(EvalError::InvalidTensor)?));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for lit in tensor.elements.iter().copied() {
                 elements.push(imag_part(lit)?);
