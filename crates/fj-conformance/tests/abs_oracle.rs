@@ -48,6 +48,19 @@ fn make_i64_tensor(shape: &[u32], data: Vec<i64>) -> Value {
     )
 }
 
+fn make_f32_bits_tensor(shape: &[u32], bits: Vec<u32>) -> Value {
+    Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape {
+                dims: shape.to_vec(),
+            },
+            bits.into_iter().map(Literal::F32Bits).collect(),
+        )
+        .unwrap(),
+    )
+}
+
 fn make_complex128_tensor(shape: &[u32], data: Vec<(f64, f64)>) -> Value {
     Value::Tensor(
         TensorValue::new(
@@ -91,6 +104,20 @@ fn extract_f64_scalar(v: &Value) -> f64 {
 fn extract_f64_vec(v: &Value) -> Vec<f64> {
     match v {
         Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),
+        _ => unreachable!("expected tensor"),
+    }
+}
+
+fn extract_f32_bits_vec(v: &Value) -> Vec<u32> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|literal| match literal {
+                Literal::F32Bits(bits) => *bits,
+                other => panic!("expected F32Bits, got {other:?}"),
+            })
+            .collect(),
         _ => unreachable!("expected tensor"),
     }
 }
@@ -210,6 +237,35 @@ fn oracle_abs_nan() {
     let input = make_f64_tensor(&[], vec![f64::NAN]);
     let result = eval_primitive(Primitive::Abs, &[input], &no_params()).unwrap();
     assert!(extract_f64_scalar(&result).is_nan(), "abs(NaN) = NaN");
+}
+
+#[test]
+fn oracle_abs_f32_bit_patterns() {
+    let input = make_f32_bits_tensor(
+        &[8],
+        vec![
+            0.0_f32.to_bits(),
+            (-0.0_f32).to_bits(),
+            2.5_f32.to_bits(),
+            (-2.5_f32).to_bits(),
+            f32::INFINITY.to_bits(),
+            f32::NEG_INFINITY.to_bits(),
+            0x7fc0_0001,
+            0xffc0_0001,
+        ],
+    );
+    let result = eval_primitive(Primitive::Abs, &[input], &no_params()).unwrap();
+    assert_eq!(extract_shape(&result), vec![8]);
+
+    let bits = extract_f32_bits_vec(&result);
+    assert_eq!(bits[0], 0.0_f32.to_bits(), "abs(+0.0f32)");
+    assert_eq!(bits[1], 0.0_f32.to_bits(), "abs(-0.0f32)");
+    assert_eq!(bits[2], 2.5_f32.to_bits(), "abs(+finite f32)");
+    assert_eq!(bits[3], 2.5_f32.to_bits(), "abs(-finite f32)");
+    assert_eq!(bits[4], f32::INFINITY.to_bits(), "abs(+inf f32)");
+    assert_eq!(bits[5], f32::INFINITY.to_bits(), "abs(-inf f32)");
+    assert!(f32::from_bits(bits[6]).is_nan(), "abs(+NaN f32)");
+    assert!(f32::from_bits(bits[7]).is_nan(), "abs(-NaN f32)");
 }
 
 // ====================== SYMMETRY PROPERTY ======================
