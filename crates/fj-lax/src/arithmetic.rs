@@ -6239,6 +6239,38 @@ fn select_scalar_branches_fast_path(
     Ok(None)
 }
 
+/// Same-shape complex select fast path producing dense complex storage. cond is
+/// Bool, on_true/on_false are the SAME complex dtype. The generic per-`Literal` loop
+/// boxes the output (TensorValue::new doesn't densify complex). Read the bool
+/// condition + both packed (re,im) backings and pick per element straight into
+/// `new_complex_values`. Bit-for-bit identical: for a Bool cond `select_bool_condition`
+/// just yields the bool, and `new_complex_values(on_true.dtype, ..)` applies the same
+/// narrowing `select_literal_as_dtype` would for the (equal) promoted dtype.
+fn select_complex_same_shape_fast_path(
+    cond: &TensorValue,
+    on_true: &TensorValue,
+    on_false: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    let (Some(c), Some(t), Some(f)) = (
+        cond.elements.as_bool_slice(),
+        on_true.elements.as_complex_slice(),
+        on_false.elements.as_complex_slice(),
+    ) else {
+        return Ok(None);
+    };
+    let out: Vec<(f64, f64)> = c
+        .iter()
+        .zip(t)
+        .zip(f)
+        .map(|((&flag, &tv), &fv)| if flag { tv } else { fv })
+        .collect();
+    Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+        on_true.dtype,
+        cond.shape.clone(),
+        out,
+    )?)))
+}
+
 pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() != 3 {
         return Err(EvalError::ArityMismatch {
@@ -6304,6 +6336,13 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                 && matches!(on_true.dtype, DType::U32 | DType::U64)
                 && on_true.dtype == on_false.dtype
                 && let Some(value) = select_unsigned_same_shape_fast_path(cond, on_true, on_false)?
+            {
+                return Ok(value);
+            }
+            if cond.dtype == DType::Bool
+                && matches!(on_true.dtype, DType::Complex64 | DType::Complex128)
+                && on_true.dtype == on_false.dtype
+                && let Some(value) = select_complex_same_shape_fast_path(cond, on_true, on_false)?
             {
                 return Ok(value);
             }
