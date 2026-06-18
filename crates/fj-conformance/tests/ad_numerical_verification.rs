@@ -3947,6 +3947,37 @@ fn asinh_vjp_numerical() {
 }
 
 #[test]
+fn asinh_vjp_overflows_to_zero_for_large_x_matching_jax() {
+    // PARITY GUARD. JAX's asinh JVP is `rsqrt(square(x) + 1)` (jax/_src/lax/lax.py): it
+    // forms square(x), which overflows to +inf for large |x|, so the gradient is 0.
+    // frankenjax computes 1/sqrt(x²+1) the same way, so asinh'(1e200) is 0 — matching
+    // JAX — even though the mathematically-exact derivative is ~1e-200. Do NOT "fix" this
+    // to a robust form: it would DIVERGE from JAX. (The asinh FORWARD, in contrast, must
+    // stay finite ~log(2x), and does — see asinh_oracle.)
+    let x = Value::scalar_f64(1e200);
+    let g = Value::scalar_f64(1.0);
+    let params = BTreeMap::new();
+    let out = eval_primitive(Primitive::Asinh, std::slice::from_ref(&x), &params).unwrap();
+    assert!(
+        extract_f64_scalar(&out).is_finite(),
+        "asinh(1e200) forward must be finite"
+    );
+    let vjp = fj_ad::vjp(
+        Primitive::Asinh,
+        std::slice::from_ref(&x),
+        std::slice::from_ref(&g),
+        std::slice::from_ref(&out),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        extract_f64_scalar(&vjp[0]),
+        0.0,
+        "asinh'(1e200)=1/sqrt(x²+1) overflows to 0, matching JAX's square(x) JVP"
+    );
+}
+
+#[test]
 fn acosh_vjp_numerical() {
     // acosh'(x) = 1/sqrt(x^2 - 1), x > 1
     verify_unary_scalar_vjp(Primitive::Acosh, 1.5, 1.0, 1e-5, "acosh VJP at x=1.5");
