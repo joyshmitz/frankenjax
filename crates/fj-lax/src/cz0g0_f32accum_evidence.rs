@@ -32,11 +32,45 @@ const NR32: usize = 16; // 512-bit / f32
 type F64s = Simd<f64, NR64>;
 type F32s = Simd<f32, NR32>;
 
+#[track_caller]
+fn assert_tiled_matmul_inputs(
+    a: &[f32],
+    m: usize,
+    k: usize,
+    b: &[f32],
+    n: usize,
+    nr: usize,
+) {
+    assert_eq!(
+        a.len(),
+        m.checked_mul(k)
+            .expect("f32 accumulation evidence lhs shape overflow"),
+        "f32 accumulation evidence lhs length must equal m*k"
+    );
+    assert_eq!(
+        b.len(),
+        k.checked_mul(n)
+            .expect("f32 accumulation evidence rhs shape overflow"),
+        "f32 accumulation evidence rhs length must equal k*n"
+    );
+    assert_eq!(
+        m % MR,
+        0,
+        "f32 accumulation evidence kernels require m to be a multiple of MR"
+    );
+    assert_eq!(
+        n % nr,
+        0,
+        "f32 accumulation evidence kernel requires n to match its vector tile"
+    );
+}
+
 /// Register-tiled `[m,k]@[k,n]` GEMM: f32 in, **f64 accumulate**, f32 out — mirrors fj's
 /// previous `batched_matmul_2d_f32_in` arithmetic (load f32 → widen f64 → `c += a*b` in
 /// f64 → round to f32). `n` and `m` are assumed multiples of `NR64`/`MR` (the evidence
 /// benches use such shapes); a scalar tail is omitted for clarity.
 pub fn matmul_f32_f64_accumulate(a: &[f32], m: usize, k: usize, b: &[f32], n: usize) -> Vec<f32> {
+    assert_tiled_matmul_inputs(a, m, k, b, n, NR64);
     let mut c = vec![0.0_f32; m * n];
     let full_rows = m / MR * MR;
     let full_cols = n / NR64 * NR64;
@@ -74,6 +108,7 @@ pub fn matmul_f32_f64_accumulate(a: &[f32], m: usize, k: usize, b: &[f32], n: us
 /// kernel). Same tiling/order as [`matmul_f32_f64_accumulate`]; only the accumulator
 /// precision differs. `n`/`m` assumed multiples of `NR32`/`MR`.
 pub fn matmul_f32_f32_accumulate(a: &[f32], m: usize, k: usize, b: &[f32], n: usize) -> Vec<f32> {
+    assert_tiled_matmul_inputs(a, m, k, b, n, NR32);
     let mut c = vec![0.0_f32; m * n];
     let full_rows = m / MR * MR;
     let full_cols = n / NR32 * NR32;
@@ -140,6 +175,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn f32accum_evidence_kernels_reject_non_tiled_shapes() {
+        let (m, k, n) = (5usize, 3usize, 17usize);
+        let a = mk(m * k, 0.011);
+        let b = mk(k * n, 0.017);
+        assert!(
+            std::panic::catch_unwind(|| matmul_f32_f64_accumulate(&a, m, k, &b, n)).is_err(),
+            "f64-accum evidence kernel must reject shapes that would leave zeroed tail cells"
+        );
+        assert!(
+            std::panic::catch_unwind(|| matmul_f32_f32_accumulate(&a, m, k, &b, n)).is_err(),
+            "f32-accum evidence kernel must reject shapes that would leave zeroed tail cells"
+        );
     }
 
     #[test]
