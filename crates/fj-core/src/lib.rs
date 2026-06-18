@@ -2804,9 +2804,7 @@ impl TensorValue {
         match value {
             Value::Scalar(lit) => {
                 let axis_dim = checked_axis0_dim(repeat_count, &[])?;
-                let elements = vec![*lit; repeat_count];
-                let dtype = infer_dtype_from_repeated_literal(*lit);
-                TensorValue::new(dtype, Shape::vector(axis_dim), elements)
+                repeat_axis0_dense_scalar(*lit, axis_dim, repeat_count)
             }
             Value::Tensor(tensor) => {
                 let axis_dim = checked_axis0_dim(repeat_count, &tensor.shape.dims)?;
@@ -2985,6 +2983,48 @@ fn stack_axis0_dense_scalars(
     Ok(None)
 }
 
+fn repeat_axis0_dense_scalar(
+    literal: Literal,
+    axis_dim: u32,
+    repeat_count: usize,
+) -> Result<TensorValue, ValueError> {
+    let shape = Shape::vector(axis_dim);
+    match literal {
+        Literal::I32(value) => {
+            TensorValue::new_i32_values(shape, vec![i64::from(value); repeat_count])
+        }
+        Literal::I64(value) => TensorValue::new_i64_values(shape, vec![value; repeat_count]),
+        Literal::U32(value) => TensorValue::new_u32_values(shape, vec![value; repeat_count]),
+        Literal::U64(value) => TensorValue::new_u64_values(shape, vec![value; repeat_count]),
+        Literal::Bool(value) => TensorValue::new_bool_values(shape, vec![value; repeat_count]),
+        Literal::BF16Bits(bits) => {
+            TensorValue::new_half_float_values(DType::BF16, shape, vec![bits; repeat_count])
+        }
+        Literal::F16Bits(bits) => {
+            TensorValue::new_half_float_values(DType::F16, shape, vec![bits; repeat_count])
+        }
+        Literal::F32Bits(bits) => {
+            TensorValue::new_f32_values(shape, vec![f32::from_bits(bits); repeat_count])
+        }
+        Literal::F64Bits(bits) => {
+            TensorValue::new_f64_values(shape, vec![f64::from_bits(bits); repeat_count])
+        }
+        Literal::Complex64Bits(re, im) => TensorValue::new_complex_values(
+            DType::Complex64,
+            shape,
+            vec![
+                (f64::from(f32::from_bits(re)), f64::from(f32::from_bits(im)));
+                repeat_count
+            ],
+        ),
+        Literal::Complex128Bits(re, im) => TensorValue::new_complex_values(
+            DType::Complex128,
+            shape,
+            vec![(f64::from_bits(re), f64::from_bits(im)); repeat_count],
+        ),
+    }
+}
+
 fn checked_axis0_dim(axis_len: usize, trailing_dims: &[u32]) -> Result<u32, ValueError> {
     u32::try_from(axis_len).map_err(|_| axis0_shape_overflow(axis_len, trailing_dims))
 }
@@ -3158,22 +3198,6 @@ fn infer_dtype_from_literals(elements: &[Literal]) -> DType {
         DType::Complex128
     } else {
         DType::F64
-    }
-}
-
-fn infer_dtype_from_repeated_literal(literal: Literal) -> DType {
-    match literal {
-        Literal::I32(_) => DType::I32,
-        Literal::I64(_) => DType::I64,
-        Literal::U32(_) => DType::U32,
-        Literal::U64(_) => DType::U64,
-        Literal::Bool(_) => DType::Bool,
-        Literal::BF16Bits(_) => DType::BF16,
-        Literal::F16Bits(_) => DType::F16,
-        Literal::F32Bits(_) => DType::F32,
-        Literal::F64Bits(_) => DType::F64,
-        Literal::Complex64Bits(..) => DType::Complex64,
-        Literal::Complex128Bits(..) => DType::Complex128,
     }
 }
 
@@ -6072,6 +6096,84 @@ mod tests {
         let empty_repeat = TensorValue::repeat_axis0(&Value::scalar_i64(0), 0)
             .expect_err("empty repeat should preserve stack's empty-axis error");
         assert!(matches!(empty_repeat, ValueError::EmptyAxisStack));
+    }
+
+    #[test]
+    fn repeat_axis0_scalar_uses_dense_storage() {
+        let i32_repeat = TensorValue::repeat_axis0(&Value::scalar_i32(-11), 4)
+            .expect("i32 scalar repeat");
+        assert_eq!(i32_repeat.dtype, DType::I32);
+        assert_eq!(i32_repeat.elements.as_i64_slice(), Some(&[-11; 4][..]));
+        assert_eq!(
+            i32_repeat.elements.as_slice(),
+            &[
+                Literal::I64(-11),
+                Literal::I64(-11),
+                Literal::I64(-11),
+                Literal::I64(-11)
+            ]
+        );
+
+        let u32_repeat = TensorValue::repeat_axis0(&Value::scalar_u32(u32::MAX), 3)
+            .expect("u32 scalar repeat");
+        assert_eq!(
+            u32_repeat.elements.as_u32_slice(),
+            Some(&[u32::MAX; 3][..])
+        );
+
+        let bool_repeat = TensorValue::repeat_axis0(&Value::scalar_bool(true), 5)
+            .expect("bool scalar repeat");
+        assert_eq!(bool_repeat.elements.as_bool_slice(), Some(&[true; 5][..]));
+
+        let bf16_repeat =
+            TensorValue::repeat_axis0(&Value::Scalar(Literal::BF16Bits(0x7fc1)), 2)
+                .expect("bf16 scalar repeat");
+        assert_eq!(bf16_repeat.dtype, DType::BF16);
+        assert_eq!(
+            bf16_repeat.elements.as_half_float_slice(),
+            Some(&[0x7fc1, 0x7fc1][..])
+        );
+
+        let f32_repeat =
+            TensorValue::repeat_axis0(&Value::Scalar(Literal::from_f32(-0.0)), 2)
+                .expect("f32 scalar repeat");
+        assert_eq!(
+            f32_repeat
+                .elements
+                .as_f32_slice()
+                .expect("dense f32 repeat")
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![(-0.0_f32).to_bits(), (-0.0_f32).to_bits()]
+        );
+        assert_eq!(
+            f32_repeat.elements.as_slice(),
+            &[Literal::from_f32(-0.0), Literal::from_f32(-0.0)]
+        );
+
+        let f64_nan = f64::from_bits(0x7ff8_0000_0000_0042);
+        let f64_repeat =
+            TensorValue::repeat_axis0(&Value::Scalar(Literal::from_f64(f64_nan)), 2)
+                .expect("f64 scalar repeat");
+        assert_eq!(
+            f64_repeat
+                .elements
+                .as_f64_slice()
+                .expect("dense f64 repeat")
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            vec![f64_nan.to_bits(), f64_nan.to_bits()]
+        );
+
+        let complex_repeat = TensorValue::repeat_axis0(&Value::scalar_complex64(1.25, -0.5), 2)
+            .expect("complex64 scalar repeat");
+        assert_eq!(complex_repeat.dtype, DType::Complex64);
+        assert_eq!(
+            complex_repeat.elements.as_complex_slice(),
+            Some(&[(1.25, -0.5), (1.25, -0.5)][..])
+        );
     }
 
     #[test]
