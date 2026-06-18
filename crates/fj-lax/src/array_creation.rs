@@ -119,7 +119,7 @@ pub fn full(shape: &[u32], fill_value: f64, dtype: DType) -> Result<Value, Value
 /// Create a 2D identity matrix.
 ///
 /// Matches `jnp.eye(n, m, k, dtype)` where k is the diagonal offset.
-/// Supports F64, F32, I64, I32 dtypes.
+/// Supports all scalar dtypes.
 pub fn eye(n: u32, m: Option<u32>, k: i32, dtype: DType) -> Result<Value, ValueError> {
     let m = m.unwrap_or(n);
     let (shape, size) = checked_shape_and_size(&[n, m])?;
@@ -129,10 +129,22 @@ pub fn eye(n: u32, m: Option<u32>, k: i32, dtype: DType) -> Result<Value, ValueE
         DType::F32 => (Literal::from_f32(0.0), Literal::from_f32(1.0)),
         DType::I64 => (Literal::I64(0), Literal::I64(1)),
         DType::I32 => (Literal::I64(0), Literal::I64(1)),
-        _ => {
-            // For other dtypes, use F64
-            (Literal::from_f64(0.0), Literal::from_f64(1.0))
-        }
+        DType::U64 => (Literal::U64(0), Literal::U64(1)),
+        DType::U32 => (Literal::U32(0), Literal::U32(1)),
+        DType::Bool => (Literal::Bool(false), Literal::Bool(true)),
+        DType::Complex64 => (
+            Literal::from_complex64(0.0, 0.0),
+            Literal::from_complex64(1.0, 0.0),
+        ),
+        DType::Complex128 => (
+            Literal::from_complex128(0.0, 0.0),
+            Literal::from_complex128(1.0, 0.0),
+        ),
+        DType::F16 => (Literal::from_f16_f32(0.0), Literal::from_f16_f32(1.0)),
+        DType::BF16 => (
+            Literal::from_bf16_f32(0.0),
+            Literal::from_bf16_f32(1.0),
+        ),
     };
 
     let mut elements = vec![zero_lit; size];
@@ -550,6 +562,30 @@ mod tests {
         let v = eye(3, Some(3), i32::MAX, DType::F64).unwrap();
         let vals = extract_f64(&v);
         assert_eq!(vals, vec![0.0; 9]);
+    }
+
+    #[test]
+    fn eye_emits_literals_matching_declared_dtype() {
+        for dtype in [
+            DType::Bool,
+            DType::I32,
+            DType::I64,
+            DType::U32,
+            DType::U64,
+            DType::BF16,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
+        ] {
+            let value = eye(2, Some(3), 0, dtype).unwrap();
+            assert!(matches!(value, Value::Tensor(_)));
+            if let Value::Tensor(tensor) = value {
+                assert_eq!(tensor.dtype, dtype);
+                tensor.validate_dtype_consistency().unwrap();
+            }
+        }
     }
 
     #[test]
