@@ -87,13 +87,13 @@ fn exp_block(x: F64s) -> F64s {
     // whole SIMD codebase (matmul, etc.) uses separate `*`/`+` — and the exp_scalar ref
     // matches this so the SIMD and scalar paths stay bit-identical.
     let nf = (x * F64s::splat(LOG2E)).round();
-    let r = nf.mul_add(F64s::splat(-LN2_HI), x);
-    let r = nf.mul_add(F64s::splat(-LN2_LO), r);
+    let r = x - nf * F64s::splat(LN2_HI);
+    let r = r - nf * F64s::splat(LN2_LO);
 
     // Horner Taylor: p = ((C13*r + C12)*r + …)*r + C0.
     let mut p = F64s::splat(C[13]);
     for k in (0..13).rev() {
-        p = p.mul_add(r, F64s::splat(C[k]));
+        p = p * r + F64s::splat(C[k]);
     }
 
     // 2^n by placing the exponent into the f64 exponent field. Split n into two halves
@@ -122,11 +122,11 @@ fn exp_scalar(x: f64) -> f64 {
         return 0.0;
     }
     let nf = (x * LOG2E).round();
-    let r = nf.mul_add(-LN2_HI, x);
-    let r = nf.mul_add(-LN2_LO, r);
+    let r = x - nf * LN2_HI;
+    let r = r - nf * LN2_LO;
     let mut p = C[13];
     for k in (0..13).rev() {
-        p = p.mul_add(r, C[k]);
+        p = p * r + C[k];
     }
     let ni = nf as i64;
     let na = ni >> 1; // floor(n/2)
@@ -234,6 +234,38 @@ mod tests {
         let v = exp_block(F64s::from_slice(&xs)).to_array();
         for (i, &x) in xs.iter().enumerate() {
             assert_eq!(v[i].to_bits(), exp_scalar(x).to_bits(), "lane {i} x={x}");
+        }
+    }
+
+    #[test]
+    fn simd_poly_exp_matches_scalar_algorithm_across_chunks_and_tail() {
+        let xs = [
+            -740.0,
+            -120.25,
+            -12.5,
+            -1.0,
+            -0.0,
+            0.0,
+            0.125,
+            1.0,
+            12.5,
+            120.25,
+            700.0,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            f64::NAN,
+            0.5,
+            -0.5,
+            709.0,
+        ];
+        let got = simd_poly_exp(&xs);
+        for (&x, &g) in xs.iter().zip(&got) {
+            let want = exp_scalar(x);
+            if want.is_nan() {
+                assert!(g.is_nan(), "x={x}");
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "x={x}");
+            }
         }
     }
 
