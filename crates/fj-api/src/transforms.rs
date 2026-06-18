@@ -622,23 +622,16 @@ fn infer_primitive_shapes(
         }
 
         Primitive::Reshape => {
-            if let Some(shape_str) = params.get("shape") {
-                let dims: Vec<u32> = shape_str
-                    .split(',')
-                    .filter_map(|s| s.trim().parse().ok())
-                    .collect();
-                Ok(vec![ShapedArray {
-                    dtype: inputs
-                        .first()
-                        .map(|i| i.dtype)
-                        .unwrap_or(fj_core::DType::F64),
-                    shape: fj_core::Shape { dims },
-                }])
-            } else {
-                Err(ApiError::EvalError {
-                    detail: "reshape requires 'shape' param".into(),
-                })
+            if inputs.len() != 1 {
+                return Err(ApiError::EvalError {
+                    detail: format!("reshape requires one input, got {}", inputs.len()),
+                });
             }
+            let shape = infer_reshape_shape(&inputs[0], params)?;
+            Ok(vec![ShapedArray {
+                dtype: inputs[0].dtype,
+                shape,
+            }])
         }
 
         Primitive::Transpose => {
@@ -666,6 +659,102 @@ fn infer_primitive_shapes(
             }
         }
     }
+}
+
+fn infer_reshape_shape(
+    input: &ShapedArray,
+    params: &BTreeMap<String, String>,
+) -> Result<fj_core::Shape, ApiError> {
+    let raw_shape = params.get("new_shape").ok_or_else(|| ApiError::EvalError {
+        detail: "reshape requires 'new_shape' param".to_owned(),
+    })?;
+    let shape_spec = parse_i64_list_param("reshape", "new_shape", raw_shape)?;
+
+    let mut inferred_axis = None;
+    let mut known_product = 1_u64;
+    let mut dims = Vec::with_capacity(shape_spec.len());
+    for (idx, dim) in shape_spec.iter().copied().enumerate() {
+        if dim == -1 {
+            if inferred_axis.is_some() {
+                return Err(ApiError::EvalError {
+                    detail: "reshape allows at most one -1 inferred dimension".to_owned(),
+                });
+            }
+            inferred_axis = Some(idx);
+            dims.push(0_u32);
+            continue;
+        }
+        if dim < 0 {
+            return Err(ApiError::EvalError {
+                detail: format!("reshape dimension must be non-negative, got {dim}"),
+            });
+        }
+        let dim_u32 = u32::try_from(dim).map_err(|_| ApiError::EvalError {
+            detail: format!("reshape dimension out of range: {dim}"),
+        })?;
+        known_product =
+            known_product
+                .checked_mul(u64::from(dim_u32))
+                .ok_or_else(|| ApiError::EvalError {
+                    detail: "reshape target element count overflow".to_owned(),
+                })?;
+        dims.push(dim_u32);
+    }
+
+    let input_elements = input
+        .shape
+        .element_count()
+        .ok_or_else(|| ApiError::EvalError {
+            detail: "reshape input shape element count overflow".to_owned(),
+        })?;
+    if let Some(infer_idx) = inferred_axis {
+        if known_product == 0 || input_elements % known_product != 0 {
+            return Err(ApiError::EvalError {
+                detail: format!(
+                    "cannot infer reshape dimension: input elements {input_elements} not divisible by {known_product}"
+                ),
+            });
+        }
+        let inferred = input_elements / known_product;
+        dims[infer_idx] = u32::try_from(inferred).map_err(|_| ApiError::EvalError {
+            detail: format!("inferred reshape dimension out of range: {inferred}"),
+        })?;
+    }
+
+    let target_elements = dims
+        .iter()
+        .try_fold(1_u64, |acc, dim| acc.checked_mul(u64::from(*dim)))
+        .ok_or_else(|| ApiError::EvalError {
+            detail: "reshape target shape overflow".to_owned(),
+        })?;
+    if target_elements != input_elements {
+        return Err(ApiError::EvalError {
+            detail: format!(
+                "reshape element count mismatch: input={input_elements} target={target_elements}"
+            ),
+        });
+    }
+
+    Ok(fj_core::Shape { dims })
+}
+
+fn parse_i64_list_param(
+    primitive: &'static str,
+    key: &'static str,
+    raw: &str,
+) -> Result<Vec<i64>, ApiError> {
+    if raw.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    raw.split(',')
+        .map(str::trim)
+        .map(|piece| {
+            piece.parse::<i64>().map_err(|_| ApiError::EvalError {
+                detail: format!("invalid {primitive} {key} parameter {raw:?}"),
+            })
+        })
+        .collect()
 }
 
 fn custom_derivative_rule_key(transform: &str) -> String {
@@ -1444,6 +1533,109 @@ mod tests {
                 sub_jaxprs: vec![],
             }],
         )
+    }
+
+    fn make_reshape_jaxpr(new_shape: &str) -> Jaxpr {
+        let mut params = BTreeMap::new();
+        params.insert("new_shape".to_owned(), new_shape.to_owned());
+        Jaxpr::new(
+            vec![VarId(1)],
+            vec![],
+            vec![VarId(2)],
+            vec![Equation {
+                primitive: Primitive::Reshape,
+                inputs: smallvec![Atom::Var(VarId(1))],
+                outputs: smallvec![VarId(2)],
+                params,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            }],
+        )
+    }
+
+    #[test]
+    fn eval_shape_reshape_uses_new_shape_and_preserves_dtype() {
+        let jaxpr = make_reshape_jaxpr("2,3");
+        let input = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("input");
+        let shapes = eval_shape(&jaxpr, &[input]).expect("reshape eval_shape");
+
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].dtype, fj_core::DType::F64);
+        assert_eq!(shapes[0].shape, fj_core::Shape { dims: vec![2, 3] });
+    }
+
+    #[test]
+    fn eval_shape_reshape_infers_single_negative_dimension() {
+        let jaxpr = make_reshape_jaxpr("2,-1");
+        let input = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("input");
+        let shapes = eval_shape(&jaxpr, &[input]).expect("reshape eval_shape");
+
+        assert_eq!(shapes[0].shape, fj_core::Shape { dims: vec![2, 3] });
+    }
+
+    #[test]
+    fn eval_shape_reshape_rejects_malformed_new_shape() {
+        let jaxpr = make_reshape_jaxpr("2,bad,3");
+        let input = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("input");
+        let err = eval_shape(&jaxpr, &[input]).expect_err("malformed shape should fail");
+        let msg = err.to_string();
+
+        assert!(msg.contains("new_shape"), "error should name param: {msg}");
+        assert!(
+            msg.contains("2,bad,3"),
+            "error should include invalid raw shape: {msg}"
+        );
+    }
+
+    #[test]
+    fn eval_shape_reshape_rejects_missing_input() {
+        let mut params = BTreeMap::new();
+        params.insert("new_shape".to_owned(), "1".to_owned());
+        let jaxpr = Jaxpr::new(
+            vec![],
+            vec![],
+            vec![VarId(1)],
+            vec![Equation {
+                primitive: Primitive::Reshape,
+                inputs: smallvec![],
+                outputs: smallvec![VarId(1)],
+                params,
+                effects: vec![],
+                sub_jaxprs: vec![],
+            }],
+        );
+
+        let err = eval_shape(&jaxpr, &[]).expect_err("inputless reshape should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("one input"), "error should reject arity: {msg}");
+    }
+
+    #[test]
+    fn eval_shape_reshape_rejects_element_count_mismatch() {
+        let jaxpr = make_reshape_jaxpr("2,2");
+        let input = Value::vector_f64(&[1.0, 2.0, 3.0]).expect("input");
+        let err = eval_shape(&jaxpr, &[input]).expect_err("mismatched reshape should fail");
+        let msg = err.to_string();
+
+        assert!(msg.contains("mismatch"), "error should mention mismatch: {msg}");
+        assert!(msg.contains("input=3"), "error should include input size: {msg}");
+        assert!(
+            msg.contains("target=4"),
+            "error should include target size: {msg}"
+        );
+    }
+
+    #[test]
+    fn eval_shape_reshape_rejects_multiple_inferred_dimensions() {
+        let jaxpr = make_reshape_jaxpr("-1,-1");
+        let input = Value::vector_f64(&[1.0, 2.0, 3.0, 4.0]).expect("input");
+        let err = eval_shape(&jaxpr, &[input]).expect_err("two inferred dims should fail");
+        let msg = err.to_string();
+
+        assert!(
+            msg.contains("at most one"),
+            "error should reject multiple -1 dims: {msg}"
+        );
     }
 
     // ── Constructor defaults ──
