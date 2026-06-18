@@ -66,7 +66,13 @@ fn flatten_recursive(node: &TreeNode, leaves: &mut Vec<f64>) -> TreeDef {
 ///
 /// Matches `jax.tree_util.tree_unflatten(treedef, leaves)`.
 pub fn tree_unflatten(treedef: &TreeDef, leaves: &[f64]) -> (TreeNode, usize) {
-    unflatten_recursive(treedef, leaves, 0)
+    let (tree, consumed) = unflatten_recursive(treedef, leaves, 0);
+    assert!(
+        consumed == leaves.len(),
+        "tree_unflatten leaf overflow: treedef consumed {consumed} leaves but {} provided",
+        leaves.len()
+    );
+    (tree, consumed)
 }
 
 fn unflatten_recursive(def: &TreeDef, leaves: &[f64], idx: usize) -> (TreeNode, usize) {
@@ -265,6 +271,13 @@ mod tests {
     fn test_tree_unflatten_rejects_missing_leaves() {
         let def = TreeDef::Tuple(vec![TreeDef::Leaf, TreeDef::Leaf]);
         let _ = tree_unflatten(&def, &[1.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "tree_unflatten leaf overflow")]
+    fn test_tree_unflatten_rejects_extra_leaves() {
+        let def = TreeDef::Leaf;
+        let _ = tree_unflatten(&def, &[1.0, 2.0]);
     }
 
     #[test]
