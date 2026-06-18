@@ -443,6 +443,24 @@ fn oracle_acosh_complex128_real_ge_one() {
 }
 
 #[test]
+fn oracle_acosh_complex128_large_no_overflow() {
+    // Regression: complex acosh of a large magnitude must NOT overflow to inf. The
+    // principal acosh = log(z + sqrt(z+1)·sqrt(z-1)) stays finite because complex_sqrt
+    // uses an overflow-safe (hypot/Kahan) magnitude — naive z²-1 would overflow.
+    // acosh(1e200) ≈ log(2e200) = ln(2) + 200·ln(10).
+    let input = make_complex128_tensor(&[], &[(1e200, 0.0)]);
+    let result = eval_primitive(Primitive::Acosh, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert!(
+        vec[0].0.is_finite() && vec[0].1.is_finite(),
+        "acosh(1e200) must be finite, got {:?}",
+        vec[0]
+    );
+    let expected_re = 2.0_f64.ln() + 200.0 * 10.0_f64.ln();
+    assert_complex_close(vec[0], (expected_re, 0.0), 1e-6, "acosh(1e200) ≈ ln(2e200)");
+}
+
+#[test]
 fn oracle_acosh_complex128_one() {
     // acosh(1+0i) = 0+0i
     let input = make_complex128_tensor(&[], &[(1.0, 0.0)]);
