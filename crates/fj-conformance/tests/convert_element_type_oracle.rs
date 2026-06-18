@@ -137,6 +137,41 @@ fn convert_element_type_f64_tensor_to_f32_preserves_shape() {
 }
 
 #[test]
+fn convert_element_type_f32_tensor_to_f64_widens_exactly() {
+    let values = [1.5_f32, -0.5, 256.25, -0.0];
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F32,
+            Shape { dims: vec![4] },
+            values
+                .into_iter()
+                .map(|value| Literal::F32Bits(value.to_bits()))
+                .collect(),
+        )
+        .expect("valid f32 tensor"),
+    );
+    let result = convert(input, "f64").expect("f32 to f64 conversion should succeed");
+
+    assert_eq!(result.dtype(), DType::F64);
+    assert_eq!(shape(&result), Shape { dims: vec![4] });
+    let widened: Vec<u64> = result
+        .as_tensor()
+        .expect("expected tensor")
+        .elements
+        .iter()
+        .map(|literal| literal.as_f64().expect("expected f64").to_bits())
+        .collect();
+    let expected: Vec<u64> = values
+        .into_iter()
+        .map(|value| f64::from(value).to_bits())
+        .collect();
+    assert_eq!(
+        widened, expected,
+        "f32 -> f64 widening must preserve exactly representable values and signed zero"
+    );
+}
+
+#[test]
 fn convert_element_type_f64_tensor_to_i64_truncates_toward_zero() {
     let input = f64_tensor(&[4], &[1.9, -2.9, 0.0, 3.1]);
     let result = convert(input, "i64").expect("f64 to i64 conversion should succeed");
