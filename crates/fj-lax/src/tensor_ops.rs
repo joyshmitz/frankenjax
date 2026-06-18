@@ -415,6 +415,7 @@ fn bytes_to_literal(
 }
 
 fn dense_same_width_bitcast_tensor(
+    primitive: Primitive,
     tensor: &TensorValue,
     target_dtype: DType,
 ) -> Result<Option<TensorValue>, EvalError> {
@@ -434,6 +435,36 @@ fn dense_same_width_bitcast_tensor(
                 return Ok(None);
             };
             let out: Vec<f32> = values.iter().map(|&bits| f32::from_bits(bits)).collect();
+            Ok(Some(TensorValue::new_f32_values(
+                tensor.shape.clone(),
+                out,
+            )?))
+        }
+        (DType::F32, DType::I32) => {
+            let Some(values) = tensor.elements.as_f32_slice() else {
+                return Ok(None);
+            };
+            let out: Vec<i64> = values
+                .iter()
+                .map(|value| i64::from(i32::from_le_bytes(value.to_bits().to_le_bytes())))
+                .collect();
+            Ok(Some(TensorValue::new_i32_values(
+                tensor.shape.clone(),
+                out,
+            )?))
+        }
+        (DType::I32, DType::F32) => {
+            let Some(values) = tensor.elements.as_i64_slice() else {
+                return Ok(None);
+            };
+            let mut out = Vec::with_capacity(values.len());
+            for value in values {
+                let signed = i32::try_from(*value).map_err(|_| EvalError::TypeMismatch {
+                    primitive,
+                    detail: "bitcast source literal is out of i32 range",
+                })?;
+                out.push(f32::from_bits(u32::from_le_bytes(signed.to_le_bytes())));
+            }
             Ok(Some(TensorValue::new_f32_values(
                 tensor.shape.clone(),
                 out,
@@ -460,6 +491,26 @@ fn dense_same_width_bitcast_tensor(
                 .iter()
                 .map(|value| f64::from_bits(u64::from_le_bytes(value.to_le_bytes())))
                 .collect();
+            Ok(Some(TensorValue::new_f64_values(
+                tensor.shape.clone(),
+                out,
+            )?))
+        }
+        (DType::F64, DType::U64) => {
+            let Some(values) = tensor.elements.as_f64_slice() else {
+                return Ok(None);
+            };
+            let out: Vec<u64> = values.iter().map(|value| value.to_bits()).collect();
+            Ok(Some(TensorValue::new_u64_values(
+                tensor.shape.clone(),
+                out,
+            )?))
+        }
+        (DType::U64, DType::F64) => {
+            let Some(values) = tensor.elements.as_u64_slice() else {
+                return Ok(None);
+            };
+            let out: Vec<f64> = values.iter().map(|&bits| f64::from_bits(bits)).collect();
             Ok(Some(TensorValue::new_f64_values(
                 tensor.shape.clone(),
                 out,
@@ -4840,7 +4891,9 @@ pub(crate) fn eval_bitcast_convert_type(
         Value::Tensor(tensor) => {
             match source_bytes.cmp(&target_bytes) {
                 std::cmp::Ordering::Equal => {
-                    if let Some(dense) = dense_same_width_bitcast_tensor(tensor, target_dtype)? {
+                    if let Some(dense) =
+                        dense_same_width_bitcast_tensor(primitive, tensor, target_dtype)?
+                    {
                         return Ok(Value::Tensor(dense));
                     }
 

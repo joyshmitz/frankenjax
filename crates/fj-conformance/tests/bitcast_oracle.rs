@@ -107,6 +107,33 @@ fn extract_u32_vec(v: &Value) -> Vec<u32> {
     }
 }
 
+fn extract_i32_bits_vec(v: &Value) -> Vec<u32> {
+    fn literal_bits(literal: &Literal) -> u32 {
+        let value = i32::try_from(literal.as_i64().unwrap()).unwrap();
+        u32::from_le_bytes(value.to_le_bytes())
+    }
+
+    match v {
+        Value::Tensor(t) => t.elements.iter().map(literal_bits).collect(),
+        Value::Scalar(lit) => vec![literal_bits(lit)],
+    }
+}
+
+fn extract_u64_vec(v: &Value) -> Vec<u64> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::U64(v) => *v,
+                _ => l.as_u64().unwrap(),
+            })
+            .collect(),
+        Value::Scalar(Literal::U64(v)) => vec![*v],
+        _ => unreachable!("expected u64"),
+    }
+}
+
 fn extract_half_bits_vec(v: &Value) -> Vec<u16> {
     match v {
         Value::Tensor(t) => t
@@ -629,6 +656,176 @@ fn oracle_dense_same_width_bitcast_matches_literal_backing_exact_bits() {
             .as_f64_slice()
             .is_some(),
         "dense i64->f64 output should stay packed"
+    );
+}
+
+#[test]
+fn oracle_dense_signed_unsigned_same_width_bitcast_matches_literal_backing_exact_bits() {
+    let f32_values = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.0_f32,
+        1.5_f32,
+        -2.75_f32,
+        f32::from_bits(0x7fc0_1234),
+    ];
+    let f32_shape = [f32_values.len() as u32];
+    let dense_f32 = Value::Tensor(
+        TensorValue::new_f32_values(Shape { dims: f32_shape.to_vec() }, f32_values.to_vec())
+            .unwrap(),
+    );
+    let literal_f32 = make_literal_backed_tensor(
+        DType::F32,
+        &f32_shape,
+        f32_values
+            .iter()
+            .map(|value| Literal::from_f32(*value))
+            .collect(),
+    );
+
+    let dense_i32 = eval_primitive(
+        Primitive::BitcastConvertType,
+        std::slice::from_ref(&dense_f32),
+        &bitcast_params("i32"),
+    )
+    .unwrap();
+    let literal_i32 = eval_primitive(
+        Primitive::BitcastConvertType,
+        std::slice::from_ref(&literal_f32),
+        &bitcast_params("i32"),
+    )
+    .unwrap();
+    let expected_i32_bits: Vec<u32> = f32_values.iter().map(|value| value.to_bits()).collect();
+    assert_eq!(extract_shape(&dense_i32), extract_shape(&literal_i32));
+    assert_eq!(dense_i32.dtype(), literal_i32.dtype());
+    assert_eq!(
+        extract_i32_bits_vec(&dense_i32),
+        extract_i32_bits_vec(&literal_i32)
+    );
+    assert_eq!(extract_i32_bits_vec(&dense_i32), expected_i32_bits);
+    assert!(
+        dense_i32
+            .as_tensor()
+            .unwrap()
+            .elements
+            .as_i64_slice()
+            .is_some(),
+        "dense f32->i32 output should stay packed"
+    );
+
+    let dense_f32_roundtrip = eval_primitive(
+        Primitive::BitcastConvertType,
+        std::slice::from_ref(&dense_i32),
+        &bitcast_params("f32"),
+    )
+    .unwrap();
+    let literal_f32_roundtrip = eval_primitive(
+        Primitive::BitcastConvertType,
+        std::slice::from_ref(&literal_i32),
+        &bitcast_params("f32"),
+    )
+    .unwrap();
+    let dense_f32_bits: Vec<u32> = extract_f32_vec(&dense_f32_roundtrip)
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let literal_f32_bits: Vec<u32> = extract_f32_vec(&literal_f32_roundtrip)
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert_eq!(dense_f32_bits, literal_f32_bits);
+    assert_eq!(dense_f32_bits, expected_i32_bits);
+    assert!(
+        dense_f32_roundtrip
+            .as_tensor()
+            .unwrap()
+            .elements
+            .as_f32_slice()
+            .is_some(),
+        "dense i32->f32 output should stay packed"
+    );
+
+    let f64_values = [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -0.0_f64,
+        1.5_f64,
+        -2.75_f64,
+        f64::from_bits(0x7ff8_0000_0000_1234),
+    ];
+    let f64_shape = [f64_values.len() as u32];
+    let dense_f64 = Value::Tensor(
+        TensorValue::new_f64_values(Shape { dims: f64_shape.to_vec() }, f64_values.to_vec())
+            .unwrap(),
+    );
+    let literal_f64 = make_literal_backed_tensor(
+        DType::F64,
+        &f64_shape,
+        f64_values
+            .iter()
+            .map(|value| Literal::from_f64(*value))
+            .collect(),
+    );
+
+    let dense_u64 = eval_primitive(
+        Primitive::BitcastConvertType,
+        std::slice::from_ref(&dense_f64),
+        &bitcast_params("u64"),
+    )
+    .unwrap();
+    let literal_u64 = eval_primitive(
+        Primitive::BitcastConvertType,
+        std::slice::from_ref(&literal_f64),
+        &bitcast_params("u64"),
+    )
+    .unwrap();
+    let expected_u64_bits: Vec<u64> = f64_values.iter().map(|value| value.to_bits()).collect();
+    assert_eq!(extract_shape(&dense_u64), extract_shape(&literal_u64));
+    assert_eq!(dense_u64.dtype(), literal_u64.dtype());
+    assert_eq!(extract_u64_vec(&dense_u64), extract_u64_vec(&literal_u64));
+    assert_eq!(extract_u64_vec(&dense_u64), expected_u64_bits);
+    assert!(
+        dense_u64
+            .as_tensor()
+            .unwrap()
+            .elements
+            .as_u64_slice()
+            .is_some(),
+        "dense f64->u64 output should stay packed"
+    );
+
+    let dense_f64_roundtrip = eval_primitive(
+        Primitive::BitcastConvertType,
+        std::slice::from_ref(&dense_u64),
+        &bitcast_params("f64"),
+    )
+    .unwrap();
+    let literal_f64_roundtrip = eval_primitive(
+        Primitive::BitcastConvertType,
+        std::slice::from_ref(&literal_u64),
+        &bitcast_params("f64"),
+    )
+    .unwrap();
+    let dense_f64_bits: Vec<u64> = extract_f64_vec(&dense_f64_roundtrip)
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    let literal_f64_bits: Vec<u64> = extract_f64_vec(&literal_f64_roundtrip)
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+    assert_eq!(dense_f64_bits, literal_f64_bits);
+    assert_eq!(dense_f64_bits, expected_u64_bits);
+    assert!(
+        dense_f64_roundtrip
+            .as_tensor()
+            .unwrap()
+            .elements
+            .as_f64_slice()
+            .is_some(),
+        "dense u64->f64 output should stay packed"
     );
 }
 

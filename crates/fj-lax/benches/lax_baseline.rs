@@ -2670,6 +2670,182 @@ fn bench_bitcast_f64_i64_dense_1m(c: &mut Criterion) {
     });
 }
 
+// Same-width complement of f32->u32: signed integer output uses dense i32
+// storage (`as_i64_slice`) but must preserve the identical 32 raw bits.
+fn bench_bitcast_f32_i32_dense_1m(c: &mut Criterion) {
+    let data: Vec<f32> = (0..LARGE_RANDOM_LEN)
+        .map(|i| ((i as f32) * 0.000_017_3).sin() + ((i % 97) as f32 * 0.125))
+        .collect();
+    let dense = Value::Tensor(
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![LARGE_RANDOM_LEN as u32],
+            },
+            data.clone(),
+        )
+        .unwrap(),
+    );
+    let literal = literal_backed_vector(
+        DType::F32,
+        data.iter().copied().map(Literal::from_f32).collect(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("new_dtype".to_owned(), "i32".to_owned());
+
+    c.bench_function("eval/bitcast_f32_i32_dense_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&dense),
+                &p,
+            )
+        })
+    });
+    c.bench_function("eval/bitcast_f32_i32_literal_ref_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&literal),
+                &p,
+            )
+        })
+    });
+}
+
+// Same-width complement of u32->f32: signed i32 lanes are stored densely as i64
+// values and reinterpreted back to f32 without per-Literal byte vectors.
+fn bench_bitcast_i32_f32_dense_1m(c: &mut Criterion) {
+    let data: Vec<i64> = (0..LARGE_RANDOM_LEN)
+        .map(|i| {
+            let value = ((i as f32) * 0.000_017_3).sin() + ((i % 97) as f32 * 0.125);
+            i64::from(i32::from_le_bytes(value.to_bits().to_le_bytes()))
+        })
+        .collect();
+    let dense = Value::Tensor(
+        TensorValue::new_i32_values(
+            Shape {
+                dims: vec![LARGE_RANDOM_LEN as u32],
+            },
+            data.clone(),
+        )
+        .unwrap(),
+    );
+    let literal = literal_backed_vector(
+        DType::I32,
+        data.iter()
+            .map(|&value| Literal::I32(i32::try_from(value).unwrap()))
+            .collect(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("new_dtype".to_owned(), "f32".to_owned());
+
+    c.bench_function("eval/bitcast_i32_f32_dense_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&dense),
+                &p,
+            )
+        })
+    });
+    c.bench_function("eval/bitcast_i32_f32_literal_ref_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&literal),
+                &p,
+            )
+        })
+    });
+}
+
+// Same-width complement of f64->i64: unsigned integer output covers bit-level
+// views used by hashing/serialization paths that need full 64-bit payloads.
+fn bench_bitcast_f64_u64_dense_1m(c: &mut Criterion) {
+    let data: Vec<f64> = (0..LARGE_RANDOM_LEN)
+        .map(|i| ((i as f64) * 0.000_017_3).sin() + ((i % 97) as f64 * 0.125))
+        .collect();
+    let dense = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![LARGE_RANDOM_LEN as u32],
+            },
+            data.clone(),
+        )
+        .unwrap(),
+    );
+    let literal = literal_backed_vector(
+        DType::F64,
+        data.iter().copied().map(Literal::from_f64).collect(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("new_dtype".to_owned(), "u64".to_owned());
+
+    c.bench_function("eval/bitcast_f64_u64_dense_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&dense),
+                &p,
+            )
+        })
+    });
+    c.bench_function("eval/bitcast_f64_u64_literal_ref_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&literal),
+                &p,
+            )
+        })
+    });
+}
+
+// Same-width complement of i64->f64: packed u64 inputs are reinterpreted
+// directly as f64, preserving NaN payloads and signed-zero bits.
+fn bench_bitcast_u64_f64_dense_1m(c: &mut Criterion) {
+    let data: Vec<u64> = (0..LARGE_RANDOM_LEN)
+        .map(|i| {
+            let value = ((i as f64) * 0.000_017_3).sin() + ((i % 97) as f64 * 0.125);
+            value.to_bits()
+        })
+        .collect();
+    let dense = Value::Tensor(
+        TensorValue::new_u64_values(
+            Shape {
+                dims: vec![LARGE_RANDOM_LEN as u32],
+            },
+            data.clone(),
+        )
+        .unwrap(),
+    );
+    let literal = literal_backed_vector(
+        DType::U64,
+        data.iter().copied().map(Literal::U64).collect(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("new_dtype".to_owned(), "f64".to_owned());
+
+    c.bench_function("eval/bitcast_u64_f64_dense_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&dense),
+                &p,
+            )
+        })
+    });
+    c.bench_function("eval/bitcast_u64_f64_literal_ref_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&literal),
+                &p,
+            )
+        })
+    });
+}
+
 // Width-changing bitcast over 1M dense f64 words: splits each contiguous f64
 // into two little-endian u32 chunks. This catches serialization/RNG-style
 // reinterpret pipelines that used to materialize every Literal.
@@ -6106,6 +6282,10 @@ criterion_group!(
     bench_convert_64k_f64_to_i64,
     bench_bitcast_f32_u32_dense_1m,
     bench_bitcast_f64_i64_dense_1m,
+    bench_bitcast_f32_i32_dense_1m,
+    bench_bitcast_i32_f32_dense_1m,
+    bench_bitcast_f64_u64_dense_1m,
+    bench_bitcast_u64_f64_dense_1m,
     bench_bitcast_f64_u32_dense_1m,
     bench_bitcast_u32_f64_dense_1m,
     bench_bitcast_f32_bf16_dense_1m,
