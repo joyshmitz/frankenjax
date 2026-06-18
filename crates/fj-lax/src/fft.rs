@@ -192,6 +192,17 @@ fn extract_tensor_complex(
         return Ok((tensor.shape.clone(), tensor.dtype, elements));
     }
 
+    // Dense real-F32 input (f32 is JAX's default float, so f32-real RFFT/FFT is the
+    // common signal case). Lift each f32 to `(f64::from(v), 0.0)` — bit-identical to
+    // `literal_to_complex` on an `F32Bits` literal (real part = f64::from(f32),
+    // imag 0), without the per-element enum match + Literal dispatch.
+    if tensor.dtype == DType::F32
+        && let Some(reals) = tensor.elements.as_f32_slice()
+    {
+        let elements: Vec<(f64, f64)> = reals.iter().map(|&v| (f64::from(v), 0.0)).collect();
+        return Ok((tensor.shape.clone(), tensor.dtype, elements));
+    }
+
     let elements: Vec<(f64, f64)> = tensor
         .elements
         .iter()
