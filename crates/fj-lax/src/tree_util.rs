@@ -72,7 +72,9 @@ pub fn tree_unflatten(treedef: &TreeDef, leaves: &[f64]) -> (TreeNode, usize) {
 fn unflatten_recursive(def: &TreeDef, leaves: &[f64], idx: usize) -> (TreeNode, usize) {
     match def {
         TreeDef::Leaf => {
-            let value = leaves.get(idx).copied().unwrap_or(0.0);
+            let value = leaves.get(idx).copied().unwrap_or_else(|| {
+                panic!("tree_unflatten leaf underflow: treedef requires more leaves than provided")
+            });
             (TreeNode::Leaf(value), idx + 1)
         }
         TreeDef::Tuple(child_defs) => {
@@ -256,6 +258,13 @@ mod tests {
         let (leaves, def) = tree_flatten(&tree);
         let (reconstructed, _) = tree_unflatten(&def, &leaves);
         assert_eq!(reconstructed, tree);
+    }
+
+    #[test]
+    #[should_panic(expected = "tree_unflatten leaf underflow")]
+    fn test_tree_unflatten_rejects_missing_leaves() {
+        let def = TreeDef::Tuple(vec![TreeDef::Leaf, TreeDef::Leaf]);
+        let _ = tree_unflatten(&def, &[1.0]);
     }
 
     #[test]
