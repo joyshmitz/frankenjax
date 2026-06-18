@@ -14,9 +14,8 @@
 //!
 //! Hard limit: a single artifact's payload must not exceed
 //! [`MAX_PAYLOAD_SIZE`] bytes (≈ 4 GiB - 1) because the header length field
-//! is a u32. Larger payloads are clamped at the body boundary so the
-//! serialized header and body lengths still agree (deserialize then reports
-//! `LengthMismatch` cleanly instead of silently corrupting the artifact).
+//! is a u32. Larger payloads fail closed at serialization time because the
+//! format cannot represent them without truncating artifact bytes.
 
 use crate::backend::CachedArtifact;
 
@@ -32,6 +31,15 @@ const MIN_SIZE: usize = 4 + 4 + 32;
 /// `data` slice cannot exceed `u32::MAX` bytes. Callers that need to cache
 /// larger payloads must split them before invoking `serialize`.
 pub const MAX_PAYLOAD_SIZE: usize = u32::MAX as usize;
+
+#[track_caller]
+fn checked_payload_len(len: usize) -> usize {
+    assert!(
+        len <= MAX_PAYLOAD_SIZE,
+        "serialize: artifact payload ({len} bytes) exceeds MAX_PAYLOAD_SIZE ({MAX_PAYLOAD_SIZE} bytes)"
+    );
+    len
+}
 
 /// Errors during artifact serialization/deserialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,28 +90,11 @@ impl std::error::Error for PersistenceError {}
 /// Serialize a `CachedArtifact` into the wire format.
 #[must_use]
 pub fn serialize(artifact: &CachedArtifact) -> Vec<u8> {
-    // Trip-wire in debug builds. The v1 wire format cannot encode a length
-    // greater than u32::MAX, and silently truncating the header field is
-    // worse than tripping the assertion since the resulting bytes would
-    // never deserialize cleanly.
-    debug_assert!(
-        artifact.data.len() <= MAX_PAYLOAD_SIZE,
-        "serialize: artifact payload ({} bytes) exceeds MAX_PAYLOAD_SIZE ({} bytes)",
-        artifact.data.len(),
-        MAX_PAYLOAD_SIZE
-    );
-
-    // Release-mode behaviour: clamp the body to the same length the header
-    // can encode so the bytes remain self-consistent. deserialize() will
-    // then succeed if the data was already within bounds, or surface a
-    // typed `LengthMismatch` against the truncated body if the caller
-    // pushed an oversize payload through.
-    let effective_len = artifact.data.len().min(MAX_PAYLOAD_SIZE);
-    let payload_len = effective_len as u32;
-    let payload = &artifact.data[..effective_len];
+    let payload_len = checked_payload_len(artifact.data.len()) as u32;
+    let payload = artifact.data.as_slice();
     let digest = crate::sha256_bytes(payload);
 
-    let mut buf = Vec::with_capacity(MIN_SIZE + effective_len);
+    let mut buf = Vec::with_capacity(MIN_SIZE + payload.len());
     buf.extend_from_slice(MAGIC);
     buf.extend_from_slice(&payload_len.to_be_bytes());
     buf.extend_from_slice(payload);
@@ -212,6 +203,19 @@ mod tests {
     fn max_payload_size_matches_u32_max() {
         // The wire format header is a u32; the public limit must agree.
         assert_eq!(MAX_PAYLOAD_SIZE, u32::MAX as usize);
+    }
+
+    #[test]
+    fn checked_payload_len_rejects_oversized_payload_without_allocation() {
+        assert_eq!(checked_payload_len(0), 0);
+        assert_eq!(checked_payload_len(1024), 1024);
+
+        if MAX_PAYLOAD_SIZE < usize::MAX {
+            assert!(
+                std::panic::catch_unwind(|| checked_payload_len(MAX_PAYLOAD_SIZE + 1)).is_err(),
+                "payload lengths above the u32 wire limit must fail closed"
+            );
+        }
     }
 
     #[test]
