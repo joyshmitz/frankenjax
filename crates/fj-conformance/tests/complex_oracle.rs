@@ -633,3 +633,40 @@ fn complex_inverse_trig_returns_principal_branch() {
         );
     }
 }
+
+#[test]
+fn complex_sqrt_log_return_principal_branch() {
+    // sqrt(z)^2 == z and exp(log(z)) == z hold for EITHER branch, so they do not
+    // pin the principal value. The principal complex sqrt lies in the right half
+    // plane (Re(sqrt(z)) >= 0), and the principal complex log has imaginary part in
+    // (-pi, pi]. Asserting those bounds (combined with the existing round trips)
+    // pins the principal branch of complex_sqrt / complex_log — catching a
+    // wrong-branch regression the round trips alone cannot. Generic off-axis points
+    // across all four quadrants plus the negative real axis (sqrt branch cut).
+    use std::f64::consts::PI;
+    let pts = [
+        (0.5, 0.7),
+        (-0.8, 0.6),
+        (1.2, -0.4),
+        (-0.3, -0.9),
+        (-2.0, 0.5),
+        (3.0, -1.5),
+    ];
+    let z = complex_from_pairs(&pts);
+    let eps = 1e-12;
+
+    let sqrt = extract_complex_vec(&unary(Primitive::Sqrt, &z));
+    for (i, (re, _)) in sqrt.iter().enumerate() {
+        assert!(
+            *re >= -eps,
+            "principal sqrt must have Re >= 0 at {i}: {re}"
+        );
+    }
+    let log = extract_complex_vec(&unary(Primitive::Log, &z));
+    for (i, (_, im)) in log.iter().enumerate() {
+        assert!(
+            *im > -PI - eps && *im <= PI + eps,
+            "principal log must have Im in (-pi, pi] at {i}: {im}"
+        );
+    }
+}
