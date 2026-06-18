@@ -441,6 +441,26 @@ fn oracle_abs_1d_f64() {
 }
 
 #[test]
+fn abs_equals_max_of_x_and_neg_x() {
+    // Elementwise identity abs(x) == max(x, -x). Oracle-free: both sides via
+    // eval_primitive (Abs vs Max+Neg composition). Catches a disagreement between
+    // abs and the max/neg path.
+    let data = vec![-3.0, 2.0, -5.0, 0.0, 7.0, -1.5];
+    let x = make_f64_tensor(&[data.len() as u32], data.clone());
+    let abs = extract_f64_vec(&eval_primitive(Primitive::Abs, &[x.clone()], &no_params()).unwrap());
+    let neg_x = eval_primitive(Primitive::Neg, &[x.clone()], &no_params()).unwrap();
+    let max = extract_f64_vec(
+        &eval_primitive(Primitive::Max, &[x, neg_x], &no_params()).unwrap(),
+    );
+    for (a, m) in abs.iter().zip(&max) {
+        assert!(
+            (a - m).abs() < 1e-12,
+            "abs(x) must equal max(x, -x): {a} vs {m}"
+        );
+    }
+}
+
+#[test]
 fn oracle_abs_1d_i64() {
     let input = make_i64_tensor(&[5], vec![-3, -1, 0, 1, 3]);
     let result = eval_primitive(Primitive::Abs, &[input], &no_params()).unwrap();
