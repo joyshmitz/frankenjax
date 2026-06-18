@@ -272,6 +272,26 @@ fn oracle_conv_2d_valid_basic() {
 }
 
 #[test]
+fn oracle_conv_2d_rhs_dilation_atrous() {
+    // 2D atrous (dilated) convolution — the realistic dilated-CNN case, completing
+    // the dilation family. 3x3 input, 2x2 all-ones kernel, rhs_dilation 2x2 ->
+    // effective 3x3 kernel, valid -> a single 1x1 output. With the all-ones kernel
+    // the result is the (commutative, layout-robust) sum of the dilated corners
+    // {(0,0),(0,2),(2,0),(2,2)} = {1,3,7,9} = 20.
+    let lhs = make_f64_tensor(&[1, 3, 3, 1], (1..=9).map(|i| i as f64).collect());
+    let rhs = make_f64_tensor(&[2, 2, 1, 1], vec![1.0, 1.0, 1.0, 1.0]);
+    let mut params = conv_params("valid", "1");
+    params.insert("rhs_dilation".to_string(), "2,2".to_string());
+    let result = eval_primitive(Primitive::Conv, &[lhs, rhs], &params).unwrap();
+    assert_eq!(extract_shape(&result), vec![1, 1, 1, 1]);
+    let vals = extract_f64_vec(&result);
+    assert!(
+        (vals[0] - 20.0).abs() < 1e-10,
+        "sum of dilated corners {{1,3,7,9}} = 20"
+    );
+}
+
+#[test]
 fn oracle_conv_2d_same_padding() {
     // lhs=[1, 3, 3, 1], rhs=[3, 3, 1, 1], same padding
     // Output should have same spatial dims: 3x3
