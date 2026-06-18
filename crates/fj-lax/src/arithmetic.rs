@@ -2283,6 +2283,7 @@ fn complex_sqrt((re, im): (f64, f64)) -> (f64, f64) {
     }
 }
 
+#[allow(dead_code)]
 fn complex_cbrt(input: (f64, f64)) -> (f64, f64) {
     let logged = complex_log(input);
     complex_exp((logged.0 / 3.0, logged.1 / 3.0))
@@ -2384,6 +2385,7 @@ fn complex_sinc(input: (f64, f64)) -> (f64, f64) {
     complex_div(sin_pi_z, pi_z)
 }
 
+#[allow(dead_code)]
 fn complex_erf(z: (f64, f64)) -> (f64, f64) {
     // erf is odd — reduce to Re(z) ≥ 0 so the large-|z| asymptotic branch (valid for
     // |arg z| < 3π/4) always applies after the reduction.
@@ -2449,11 +2451,13 @@ fn complex_erf(z: (f64, f64)) -> (f64, f64) {
     (1.0 - erfc.0, -erfc.1)
 }
 
+#[allow(dead_code)]
 fn complex_erfc(z: (f64, f64)) -> (f64, f64) {
     let erf_z = complex_erf(z);
     (1.0 - erf_z.0, -erf_z.1)
 }
 
+#[allow(dead_code)]
 fn complex_erf_inv(w: (f64, f64)) -> (f64, f64) {
     let two_over_sqrt_pi = 2.0 / std::f64::consts::PI.sqrt();
     let mut z = if w.1.abs() < 1e-10 {
@@ -2496,6 +2500,7 @@ fn complex_erf_inv(w: (f64, f64)) -> (f64, f64) {
     z
 }
 
+#[allow(dead_code)]
 fn complex_lgamma(z: (f64, f64)) -> (f64, f64) {
     const G: f64 = 7.0;
     #[allow(clippy::excessive_precision)]
@@ -2533,6 +2538,7 @@ fn complex_lgamma(z: (f64, f64)) -> (f64, f64) {
     )
 }
 
+#[allow(dead_code)]
 fn complex_digamma(z: (f64, f64)) -> (f64, f64) {
     let (mut re, im) = z;
     let mut result = (0.0, 0.0);
@@ -2569,6 +2575,7 @@ fn complex_digamma(z: (f64, f64)) -> (f64, f64) {
 // exceed ~2·|z| there; the relative early-exit below terminates far sooner for
 // the common small-|z| inputs. (Verified on the real axis against the Cephes
 // `bessel_i0e_approx`/`bessel_i1e_approx`.)
+#[allow(dead_code)]
 const COMPLEX_BESSEL_MAX_TERMS: i64 = 1500;
 
 /// Relative convergence for the ascending series: stop once a term is negligible
@@ -2576,12 +2583,14 @@ const COMPLEX_BESSEL_MAX_TERMS: i64 = 1500;
 /// |z|, individual terms are enormous (≈ e^{|z|}) and never fall below an
 /// absolute epsilon until well past the peak. The real-axis series is all
 /// positive (no cancellation), so this is well-conditioned.
+#[allow(dead_code)]
 fn complex_series_converged(term: (f64, f64), sum: (f64, f64)) -> bool {
     let term_mag = term.0.abs() + term.1.abs();
     let sum_mag = sum.0.abs() + sum.1.abs();
     term_mag <= 1e-16 * sum_mag
 }
 
+#[allow(dead_code)]
 fn complex_bessel_i0e(z: (f64, f64)) -> (f64, f64) {
     let z_sq_4 = complex_mul(complex_mul(z, z), (0.25, 0.0));
     let mut sum = (1.0, 0.0);
@@ -2597,6 +2606,7 @@ fn complex_bessel_i0e(z: (f64, f64)) -> (f64, f64) {
     (sum.0 * scale, sum.1 * scale)
 }
 
+#[allow(dead_code)]
 fn complex_bessel_i1e(z: (f64, f64)) -> (f64, f64) {
     let z_sq_4 = complex_mul(complex_mul(z, z), (0.25, 0.0));
     let mut sum = (1.0, 0.0);
@@ -2617,7 +2627,6 @@ fn complex_unary_elementwise(primitive: Primitive, input: (f64, f64)) -> Option<
     match primitive {
         Primitive::Sqrt => Some(complex_sqrt(input)),
         Primitive::Rsqrt => Some(complex_reciprocal(complex_sqrt(input))),
-        Primitive::Cbrt => Some(complex_cbrt(input)),
         Primitive::Asin => Some(complex_asin(input)),
         Primitive::Acos => Some(complex_acos(input)),
         Primitive::Atan => Some(complex_atan(input)),
@@ -2635,13 +2644,6 @@ fn complex_unary_elementwise(primitive: Primitive, input: (f64, f64)) -> Option<
             Some((result.0 / ln2, result.1 / ln2))
         }
         Primitive::Sinc => Some(complex_sinc(input)),
-        Primitive::Erf => Some(complex_erf(input)),
-        Primitive::Erfc => Some(complex_erfc(input)),
-        Primitive::ErfInv => Some(complex_erf_inv(input)),
-        Primitive::Lgamma => Some(complex_lgamma(input)),
-        Primitive::Digamma => Some(complex_digamma(input)),
-        Primitive::BesselI0e => Some(complex_bessel_i0e(input)),
-        Primitive::BesselI1e => Some(complex_bessel_i1e(input)),
         _ => None,
     }
 }
@@ -20376,7 +20378,7 @@ mod tests {
         );
     }
 
-    /// The expensive complex unary transcendentals (asin/acos/erf/lgamma/…) route
+    /// The expensive complex unary transcendentals (asin/acos/atan/…) route
     /// through eval_unary_elementwise, whose complex branch used to box the output
     /// via a serial per-Literal loop. The new dense+threaded path must be dense and
     /// bit-for-bit identical to the boxed-input (per-Literal) path. Tested at a
@@ -20415,8 +20417,8 @@ mod tests {
                     .unwrap(),
                 )
             };
-            // Asin and Erf both route through eval_unary_elementwise's complex branch.
-            for prim in [Primitive::Asin, Primitive::Erf] {
+            // Asin and Atan both route through eval_unary_elementwise's complex branch.
+            for prim in [Primitive::Asin, Primitive::Atan] {
                 let dense = mk_dense();
                 let boxed = mk_boxed();
                 let d = eval_unary_elementwise(prim, std::slice::from_ref(&dense), |x| x).unwrap();
@@ -20427,6 +20429,50 @@ mod tests {
                 assert!(
                     d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
                     "{prim:?} n={n} dense output"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn complex_float_only_unary_primitives_fail_closed_like_jax() {
+        let primitives = [
+            Primitive::Cbrt,
+            Primitive::Erf,
+            Primitive::Erfc,
+            Primitive::ErfInv,
+            Primitive::Lgamma,
+            Primitive::Digamma,
+            Primitive::BesselI0e,
+            Primitive::BesselI1e,
+        ];
+        let scalar = Value::Scalar(Literal::from_complex128(0.25, -0.5));
+        let dense = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: vec![2] },
+                vec![(0.25, -0.5), (1.25, 0.75)],
+            )
+            .unwrap(),
+        );
+
+        for primitive in primitives {
+            for input in [&scalar, &dense] {
+                let err = eval_unary_elementwise_parallel(
+                    primitive,
+                    std::slice::from_ref(input),
+                    |x| x,
+                )
+                .expect_err("JAX float-only unary primitive accepted complex input");
+                assert!(
+                    matches!(
+                        err,
+                        EvalError::TypeMismatch {
+                            primitive: got,
+                            detail: "operation is not supported for complex operands"
+                        } if got == primitive
+                    ),
+                    "{primitive:?} complex input returned unexpected error: {err:?}"
                 );
             }
         }
