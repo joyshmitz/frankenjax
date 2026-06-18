@@ -1193,7 +1193,7 @@ impl LiteralBuffer {
     /// complex dtype. `dtype` must be `Complex64` or `Complex128`.
     #[must_use]
     pub fn from_complex_values(values: Vec<(f64, f64)>, dtype: DType) -> Self {
-        debug_assert!(
+        assert!(
             matches!(dtype, DType::Complex64 | DType::Complex128),
             "from_complex_values requires a complex dtype"
         );
@@ -1221,7 +1221,7 @@ impl LiteralBuffer {
     /// logical values, so materialization is bit-exact.
     #[must_use]
     pub fn from_half_float_values(values: Vec<u16>, dtype: DType) -> Self {
-        debug_assert!(
+        assert!(
             matches!(dtype, DType::BF16 | DType::F16),
             "from_half_float_values requires a half-float dtype"
         );
@@ -7200,6 +7200,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "from_half_float_values requires a half-float dtype")]
+    fn dense_half_float_buffer_rejects_wrong_dtype_family() {
+        let _ = LiteralBuffer::from_half_float_values(vec![0x3c00], DType::F32);
+    }
+
+    #[test]
     fn dense_f64_pass44_literal_buffer_preserves_slice_api_and_cow() {
         let mut buffer =
             LiteralBuffer::from_f64_values(vec![1.25, -0.0, f64::from_bits(0x7ff8_0000_0000_0001)]);
@@ -7275,6 +7281,12 @@ mod tests {
             .map(|&(re, im)| Literal::from_complex64(re as f32, im as f32))
             .collect();
         assert_eq!(buf64.as_slice(), expected64.as_slice());
+    }
+
+    #[test]
+    #[should_panic(expected = "from_complex_values requires a complex dtype")]
+    fn dense_complex_buffer_rejects_wrong_dtype_family() {
+        let _ = LiteralBuffer::from_complex_values(vec![(1.0, 2.0)], DType::F64);
     }
 
     #[test]
