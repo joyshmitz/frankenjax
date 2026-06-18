@@ -7095,6 +7095,48 @@ mod tests {
     }
 
     #[test]
+    fn dense_complex_literal_buffer_preserves_slice_api_and_cow() {
+        // Foundational invariant every complex de-box relies on: a dense complex
+        // LiteralBuffer round-trips through as_complex_slice and materializes the
+        // same Literals from_complex* would, and mutating a slot drops to literal
+        // storage (copy-on-write).
+        // ---- Complex128 (full f64 precision) ----
+        let pairs128 = vec![(1.25, -0.5), (0.0, 3.0), (-2.0, 0.0)];
+        let mut buffer = LiteralBuffer::from_complex_values(pairs128.clone(), DType::Complex128);
+        let expected128: Vec<Literal> = pairs128
+            .iter()
+            .map(|&(re, im)| Literal::from_complex128(re, im))
+            .collect();
+        assert_eq!(buffer.len(), 3);
+        assert_eq!(
+            buffer.as_complex_slice().expect("dense complex"),
+            pairs128.as_slice()
+        );
+        assert_eq!(buffer.as_slice(), expected128.as_slice());
+        assert_eq!(buffer.to_vec(), expected128);
+        let original = buffer.clone();
+        buffer[0] = Literal::from_complex128(9.0, 9.0);
+        assert_eq!(original.as_slice(), expected128.as_slice());
+        assert!(
+            buffer.as_complex_slice().is_none(),
+            "mutating dense complex storage should materialize to literal storage"
+        );
+
+        // ---- Complex64 (f32-exact values so narrowing is the identity) ----
+        let pairs64 = vec![(1.5, -0.5), (0.0, 2.0), (-4.0, 0.25)];
+        let buf64 = LiteralBuffer::from_complex_values(pairs64.clone(), DType::Complex64);
+        assert_eq!(
+            buf64.as_complex_slice().expect("dense complex64"),
+            pairs64.as_slice()
+        );
+        let expected64: Vec<Literal> = pairs64
+            .iter()
+            .map(|&(re, im)| Literal::from_complex64(re as f32, im as f32))
+            .collect();
+        assert_eq!(buf64.as_slice(), expected64.as_slice());
+    }
+
+    #[test]
     fn dense_i64_literal_buffer_preserves_slice_api_and_cow() {
         let mut buffer = LiteralBuffer::from_i64_values(vec![7, -3, i64::MIN, i64::MAX, 0]);
         let expected = vec![
