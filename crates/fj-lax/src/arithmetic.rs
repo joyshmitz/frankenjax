@@ -5132,6 +5132,73 @@ pub(crate) fn eval_unary_elementwise(
         }
         Value::Tensor(tensor) => {
             if matches!(tensor.dtype, DType::Complex64 | DType::Complex128) {
+                // Dense + threaded fast path for the expensive complex unary
+                // transcendentals (asin/acos/atan/erf/lgamma/digamma/bessel/… — each
+                // several real transcendentals per element). The per-Literal loop
+                // below boxes the output (TensorValue::new does not densify complex)
+                // and never threads. When the operand is dense-complex-backed and the
+                // primitive is complex-supported, map across scoped threads (large) or
+                // serially (small) straight into dense complex storage. Bit-for-bit
+                // identical to the per-Literal loop: the same `complex_unary_elementwise`
+                // op, and new_complex_values applies the same out_dtype narrowing
+                // complex_literal_from_f64_parts does. (Mirrors eval_unary_complex_map.)
+                if let Some(dense) = tensor.elements.as_complex_slice() {
+                    // Support is primitive-determined (complex_unary_elementwise is a
+                    // pure match → None for ALL inputs of an unsupported primitive), so
+                    // probe once. Unsupported falls through to the per-Literal loop,
+                    // which raises the identical TypeMismatch.
+                    if let Some(&first) = dense.first()
+                        && complex_unary_elementwise(primitive, first).is_some()
+                    {
+                        let n = dense.len();
+                        if n >= COMPLEX_UNARY_PARALLEL_MIN {
+                            let threads = std::thread::available_parallelism()
+                                .map(|p| p.get())
+                                .unwrap_or(1)
+                                .min(n);
+                            if threads > 1 {
+                                let mut out = vec![(0.0f64, 0.0f64); n];
+                                let chunk = n.div_ceil(threads);
+                                std::thread::scope(|scope| {
+                                    let mut rest: &mut [(f64, f64)] = out.as_mut_slice();
+                                    let mut start = 0usize;
+                                    while start < n {
+                                        let len = chunk.min(n - start);
+                                        let (blk, tail) = rest.split_at_mut(len);
+                                        rest = tail;
+                                        let s = start;
+                                        scope.spawn(move || {
+                                            for (i, o) in blk.iter_mut().enumerate() {
+                                                // Probe above guarantees Some for every
+                                                // element; unwrap_or is unreachable.
+                                                *o = complex_unary_elementwise(primitive, dense[s + i])
+                                                    .unwrap_or((f64::NAN, f64::NAN));
+                                            }
+                                        });
+                                        start += len;
+                                    }
+                                });
+                                return Ok(Value::Tensor(TensorValue::new_complex_values(
+                                    tensor.dtype,
+                                    tensor.shape.clone(),
+                                    out,
+                                )?));
+                            }
+                        }
+                        let out: Vec<(f64, f64)> = dense
+                            .iter()
+                            .map(|&z| {
+                                complex_unary_elementwise(primitive, z)
+                                    .unwrap_or((f64::NAN, f64::NAN))
+                            })
+                            .collect();
+                        return Ok(Value::Tensor(TensorValue::new_complex_values(
+                            tensor.dtype,
+                            tensor.shape.clone(),
+                            out,
+                        )?));
+                    }
+                }
                 return {
                     let mut elements = Vec::with_capacity(tensor.elements.len());
                     for literal in tensor.elements.iter().copied() {
@@ -20246,6 +20313,62 @@ mod tests {
             d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
             "complex Exp serial path returns dense storage"
         );
+    }
+
+    /// The expensive complex unary transcendentals (asin/acos/erf/lgamma/…) route
+    /// through eval_unary_elementwise, whose complex branch used to box the output
+    /// via a serial per-Literal loop. The new dense+threaded path must be dense and
+    /// bit-for-bit identical to the boxed-input (per-Literal) path. Tested at a
+    /// SMALL size (serial dense path) and a LARGE size (≥ COMPLEX_UNARY_PARALLEL_MIN,
+    /// threaded path) for two ops.
+    #[test]
+    fn complex_unary_elementwise_dense_matches_boxed_bit_for_bit() {
+        for &n in &[64usize, COMPLEX_UNARY_PARALLEL_MIN + 257] {
+            let pairs: Vec<(f64, f64)> = (0..n)
+                .map(|i| {
+                    let t = i as f64;
+                    (t * 0.013 - 0.7, t * 0.009 - 0.4)
+                })
+                .collect();
+            let shape = Shape {
+                dims: vec![n as u32],
+            };
+            let mk_dense = || {
+                Value::Tensor(
+                    TensorValue::new_complex_values(DType::Complex128, shape.clone(), pairs.clone())
+                        .unwrap(),
+                )
+            };
+            let mk_boxed = || {
+                Value::Tensor(
+                    TensorValue::new_with_literal_buffer(
+                        DType::Complex128,
+                        shape.clone(),
+                        fj_core::LiteralBuffer::new(
+                            pairs
+                                .iter()
+                                .map(|&(re, im)| Literal::from_complex128(re, im))
+                                .collect(),
+                        ),
+                    )
+                    .unwrap(),
+                )
+            };
+            // Asin and Erf both route through eval_unary_elementwise's complex branch.
+            for prim in [Primitive::Asin, Primitive::Erf] {
+                let dense = mk_dense();
+                let boxed = mk_boxed();
+                let d = eval_unary_elementwise(prim, std::slice::from_ref(&dense), |x| x).unwrap();
+                let b = eval_unary_elementwise(prim, std::slice::from_ref(&boxed), |x| x).unwrap();
+                let dl: Vec<Literal> = d.as_tensor().unwrap().elements.iter().copied().collect();
+                let bl: Vec<Literal> = b.as_tensor().unwrap().elements.iter().copied().collect();
+                assert_eq!(dl, bl, "{prim:?} n={n} dense vs boxed");
+                assert!(
+                    d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
+                    "{prim:?} n={n} dense output"
+                );
+            }
+        }
     }
 
     // ---- dense u32/u64 elementwise arithmetic (frankenjax-crrx7) ----
