@@ -5258,6 +5258,9 @@ pub(crate) fn eval_unary_elementwise(
             if let Some(result) = eval_unary_f32_tensor_fast_path(tensor, &op) {
                 return result;
             }
+            if let Some(result) = eval_unary_half_tensor_fast_path(tensor, &op) {
+                return result;
+            }
 
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in tensor.elements.iter().copied() {
@@ -5494,6 +5497,36 @@ fn eval_unary_f32_tensor_fast_path(
     let out: Vec<f32> = src.iter().map(|&v| op(f64::from(v)) as f32).collect();
     Some(
         TensorValue::new_f32_values(tensor.shape.clone(), out)
+            .map(Value::Tensor)
+            .map_err(EvalError::from),
+    )
+}
+
+/// Serial dense-half (BF16/F16) unary fast path — the half sibling of
+/// [`eval_unary_f64_tensor_fast_path`] / [`eval_unary_f32_tensor_fast_path`], for the
+/// unary ops dispatched through serial `eval_unary_elementwise` (sub-threshold
+/// transcendentals reaching here via `eval_unary_elementwise_parallel`'s fallback,
+/// plus Round/Floor/Ceil, Sinc, Logistic). half (bf16/f16) is the dominant training
+/// dtype and otherwise paid a 24 B/elem boxed `Vec<Literal>` output (TensorValue::new
+/// densifies only I32/I64/U32/U64). Reads the packed `as_half_float_slice` and maps each
+/// bit pattern via `half_unary_apply` — the SAME widen→op→round→bits the generic loop
+/// runs (`from_{bf16,f16}_f64(op(literal.as_f64()))`) — into dense half storage, so it is
+/// BIT-IDENTICAL. Returns `None` for non-dense / non-half.
+fn eval_unary_half_tensor_fast_path(
+    tensor: &TensorValue,
+    op: &impl Fn(f64) -> f64,
+) -> Option<Result<Value, EvalError>> {
+    let dt = tensor.dtype;
+    if !matches!(dt, DType::BF16 | DType::F16) {
+        return None;
+    }
+    let src = tensor.elements.as_half_float_slice()?;
+    let out: Vec<u16> = src
+        .iter()
+        .map(|&bits| half_unary_apply(dt, bits, op))
+        .collect();
+    Some(
+        TensorValue::new_half_float_values(dt, tensor.shape.clone(), out)
             .map(Value::Tensor)
             .map_err(EvalError::from),
     )
@@ -20442,6 +20475,65 @@ mod tests {
             } else {
                 assert!(t.elements.as_f64_slice().is_some(), "c128 abs -> dense f64");
             }
+        }
+    }
+
+    /// The serial half (bf16/f16) unary fast path must return DENSE half storage and
+    /// be bit-for-bit identical to the boxed-input per-Literal path.
+    #[test]
+    fn unary_half_dense_matches_boxed_bit_for_bit() {
+        let vals: Vec<f64> = (0..40).map(|i| i as f64 * 0.1 - 2.0).collect();
+        let shape = Shape { dims: vec![5, 8] };
+        for dt in [DType::BF16, DType::F16] {
+            let bits: Vec<u16> = vals
+                .iter()
+                .map(|&v| {
+                    let lit = if dt == DType::BF16 {
+                        Literal::from_bf16_f64(v)
+                    } else {
+                        Literal::from_f16_f64(v)
+                    };
+                    match lit {
+                        Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+                        _ => 0,
+                    }
+                })
+                .collect();
+            let dense = Value::Tensor(
+                TensorValue::new_half_float_values(dt, shape.clone(), bits.clone()).unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    dt,
+                    shape.clone(),
+                    fj_core::LiteralBuffer::new(
+                        bits.iter()
+                            .map(|&b| {
+                                if dt == DType::BF16 {
+                                    Literal::BF16Bits(b)
+                                } else {
+                                    Literal::F16Bits(b)
+                                }
+                            })
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            );
+            let op = |x: f64| x.exp();
+            let d = eval_unary_elementwise(Primitive::Exp, std::slice::from_ref(&dense), op).unwrap();
+            let b = eval_unary_elementwise(Primitive::Exp, std::slice::from_ref(&boxed), op).unwrap();
+            let dl: Vec<Literal> = d.as_tensor().unwrap().elements.iter().copied().collect();
+            let bl: Vec<Literal> = b.as_tensor().unwrap().elements.iter().copied().collect();
+            assert_eq!(dl, bl, "{dt:?} half unary dense vs boxed");
+            assert!(
+                d.as_tensor()
+                    .unwrap()
+                    .elements
+                    .as_half_float_slice()
+                    .is_some(),
+                "{dt:?} half unary dense output"
+            );
         }
     }
 
