@@ -994,6 +994,53 @@ fn infer_slice_shape(eqn: &Equation, input: &AbstractValue) -> Result<Shape, Par
     Ok(Shape { dims })
 }
 
+fn infer_dynamic_slice_shape(
+    eqn: &Equation,
+    input: &AbstractValue,
+) -> Result<Shape, PartialEvalError> {
+    let rank = input.shape.rank();
+    if rank == 0 {
+        return Err(PartialEvalError::ShapeInference {
+            primitive: eqn.primitive,
+            detail: "cannot dynamic_slice a scalar".to_owned(),
+        });
+    }
+    let raw = eqn
+        .params
+        .get("slice_sizes")
+        .ok_or_else(|| PartialEvalError::ShapeInference {
+            primitive: eqn.primitive,
+            detail: "missing required param 'slice_sizes'".to_owned(),
+        })?;
+    if raw.trim().is_empty() {
+        return Err(PartialEvalError::ShapeInference {
+            primitive: eqn.primitive,
+            detail: "invalid empty param 'slice_sizes'".to_owned(),
+        });
+    }
+    let slice_sizes = parse_u32_list_param(eqn.primitive, "slice_sizes", raw)?;
+    if slice_sizes.len() != rank {
+        return Err(PartialEvalError::ShapeInference {
+            primitive: eqn.primitive,
+            detail: format!(
+                "slice_sizes length {} does not match operand rank {rank}",
+                slice_sizes.len()
+            ),
+        });
+    }
+    for (axis, &size) in slice_sizes.iter().enumerate() {
+        let dim = input.shape.dims[axis];
+        if size > dim {
+            return Err(PartialEvalError::ShapeInference {
+                primitive: eqn.primitive,
+                detail: format!("slice size {size} exceeds dimension {dim} on axis {axis}"),
+            });
+        }
+    }
+
+    Ok(Shape { dims: slice_sizes })
+}
+
 fn infer_pad_shape(eqn: &Equation, input: &AbstractValue) -> Result<Shape, PartialEvalError> {
     let rank = input.shape.rank();
     let lows = parse_i64_list_param_for_rank(eqn, "padding_low", rank, None)?;
@@ -1358,17 +1405,7 @@ fn infer_equation_output_aval(
         }
         // DynamicSlice: output shape = slice_sizes param
         DynamicSlice => {
-            let shape = eqn
-                .params
-                .get("slice_sizes")
-                .map(|s| {
-                    let dims: Vec<u32> = s
-                        .split(',')
-                        .filter_map(|d| d.trim().parse::<u32>().ok())
-                        .collect();
-                    Shape { dims }
-                })
-                .unwrap_or_else(|| first_input.shape.clone());
+            let shape = infer_dynamic_slice_shape(eqn, first_input)?;
             AbstractValue {
                 dtype: first_input.dtype,
                 shape,
@@ -5504,6 +5541,65 @@ mod tests {
             match err {
                 PartialEvalError::ShapeInference { primitive, detail } => {
                     assert_eq!(primitive, Primitive::Pad, "{label}");
+                    assert!(
+                        detail.contains(expected_detail),
+                        "{label}: unexpected detail: {detail}"
+                    );
+                }
+                other => panic!("{label}: unexpected error: {other}"),
+            }
+        }
+
+        let out = infer_equation_output_aval(
+            &eqn(Primitive::DynamicSlice, &[("slice_sizes", "2,3")]),
+            &av(&[4, 5], DType::F64),
+        )
+        .unwrap();
+        assert_eq!(out.shape.dims, vec![2, 3]);
+
+        for (label, params, input, expected_detail) in [
+            (
+                "dynamic_slice scalar operand",
+                &[("slice_sizes", "")][..],
+                av(&[], DType::F64),
+                "cannot dynamic_slice a scalar",
+            ),
+            (
+                "missing dynamic_slice sizes",
+                &[][..],
+                av(&[4], DType::F64),
+                "missing required param 'slice_sizes'",
+            ),
+            (
+                "empty dynamic_slice sizes",
+                &[("slice_sizes", "")][..],
+                av(&[4], DType::F64),
+                "invalid empty param 'slice_sizes'",
+            ),
+            (
+                "bad dynamic_slice size token",
+                &[("slice_sizes", "2,bad")][..],
+                av(&[4, 5], DType::F64),
+                "invalid u32 in param 'slice_sizes'",
+            ),
+            (
+                "dynamic_slice size rank mismatch",
+                &[("slice_sizes", "2")][..],
+                av(&[4, 5], DType::F64),
+                "slice_sizes length 1 does not match operand rank 2",
+            ),
+            (
+                "dynamic_slice size exceeds dimension",
+                &[("slice_sizes", "2,6")][..],
+                av(&[4, 5], DType::F64),
+                "slice size 6 exceeds dimension 5 on axis 1",
+            ),
+        ] {
+            let err = infer_equation_output_aval(&eqn(Primitive::DynamicSlice, params), &input)
+                .unwrap_err();
+            match err {
+                PartialEvalError::ShapeInference { primitive, detail } => {
+                    assert_eq!(primitive, Primitive::DynamicSlice, "{label}");
                     assert!(
                         detail.contains(expected_detail),
                         "{label}: unexpected detail: {detail}"
