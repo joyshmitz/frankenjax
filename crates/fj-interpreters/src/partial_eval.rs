@@ -5323,6 +5323,31 @@ mod tests {
                 .unwrap();
         assert_eq!(out.shape.dims, vec![4]);
 
+        // Squeeze fallback fails closed on non-size-1 and duplicate dims (fm5pf): the old
+        // inline arm silently filtered/clamped instead.
+        for (label, params, input, expected) in [
+            (
+                "squeeze non-size-1 axis",
+                &[("dimensions", "0")][..],
+                av(&[2, 1], DType::F64),
+                "must be 1",
+            ),
+            (
+                "squeeze duplicate dims",
+                &[("dimensions", "0,0")][..],
+                av(&[1, 1], DType::F64),
+                "not unique",
+            ),
+        ] {
+            match infer_equation_output_aval(&eqn(Primitive::Squeeze, params), &input).unwrap_err() {
+                PartialEvalError::ShapeInference { primitive, detail } => {
+                    assert_eq!(primitive, Primitive::Squeeze, "{label}");
+                    assert!(detail.contains(expected), "{label}: unexpected detail: {detail}");
+                }
+                other => panic!("{label}: unexpected error: {other}"),
+            }
+        }
+
         // Argmax/Argmin: drop the axis AND retype to I64 (catch-all kept [4,3]/F64).
         let out = infer_equation_output_aval(
             &eqn(Primitive::Argmax, &[("axis", "0")]),
@@ -5754,6 +5779,14 @@ mod tests {
                 &[("shape", "2,3"), ("broadcast_dimensions", "0")][..],
                 av(&[4], DType::F64),
                 "cannot broadcast input dim 4 into target dim 2",
+            ),
+            (
+                // [1,1] -> [2,2] with dims [1,0]: unique, in range, size-compatible, but
+                // not strictly increasing. JAX requires strictly increasing (gnie5).
+                "non-strictly-increasing broadcast dims",
+                &[("shape", "2,2"), ("broadcast_dimensions", "1,0")][..],
+                av(&[1, 1], DType::F64),
+                "strictly increasing",
             ),
         ] {
             let err = infer_equation_output_aval(
