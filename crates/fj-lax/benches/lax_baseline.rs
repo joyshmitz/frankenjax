@@ -144,6 +144,14 @@ fn f64_to_u32_bitcast_chunks(value: f64) -> [u32; 2] {
     ]
 }
 
+fn f32_to_u16_bitcast_chunks(value: f32) -> [u16; 2] {
+    let bytes = value.to_bits().to_le_bytes();
+    [
+        u16::from_le_bytes([bytes[0], bytes[1]]),
+        u16::from_le_bytes([bytes[2], bytes[3]]),
+    ]
+}
+
 fn bench_random_uniform_1m(c: &mut Criterion) {
     let key = random_key(0x1234_5678_9ABC_DEF0);
     c.bench_function("random/uniform_1m_f64", |bencher| {
@@ -2734,6 +2742,91 @@ fn bench_bitcast_u32_f64_dense_1m(c: &mut Criterion) {
         })
     });
     c.bench_function("eval/bitcast_u32_f64_literal_ref_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&literal),
+                &p,
+            )
+        })
+    });
+}
+
+// Width-changing bitcast over 1M dense f32 words: splits each contiguous f32
+// into two little-endian BF16 chunks without numeric conversion. This covers
+// mixed-precision serialization/reinterpret pipelines that previously walked
+// every element as a boxed Literal.
+fn bench_bitcast_f32_bf16_dense_1m(c: &mut Criterion) {
+    let data: Vec<f32> = (0..LARGE_RANDOM_LEN)
+        .map(|i| ((i as f32) * 0.000_017_3).sin() + ((i % 97) as f32 * 0.125))
+        .collect();
+    let dense = Value::Tensor(
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![LARGE_RANDOM_LEN as u32],
+            },
+            data.clone(),
+        )
+        .unwrap(),
+    );
+    let literal = literal_backed_vector(
+        DType::F32,
+        data.iter().copied().map(Literal::from_f32).collect(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("new_dtype".to_owned(), "bf16".to_owned());
+
+    c.bench_function("eval/bitcast_f32_bf16_dense_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&dense),
+                &p,
+            )
+        })
+    });
+    c.bench_function("eval/bitcast_f32_bf16_literal_ref_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&literal),
+                &p,
+            )
+        })
+    });
+}
+
+// Width-changing bitcast over 1M f32-worth of dense BF16 chunks: consumes the
+// trailing chunk dimension and rebuilds f32 words from packed u16 lanes.
+fn bench_bitcast_bf16_f32_dense_1m(c: &mut Criterion) {
+    let chunks: Vec<u16> = (0..LARGE_RANDOM_LEN)
+        .map(|i| ((i as f32) * 0.000_017_3).sin() + ((i % 97) as f32 * 0.125))
+        .flat_map(f32_to_u16_bitcast_chunks)
+        .collect();
+    let shape = Shape {
+        dims: vec![LARGE_RANDOM_LEN as u32, 2],
+    };
+    let dense = Value::Tensor(
+        TensorValue::new_half_float_values(DType::BF16, shape.clone(), chunks.clone()).unwrap(),
+    );
+    let literal = literal_backed_tensor(
+        DType::BF16,
+        shape,
+        chunks.iter().copied().map(Literal::BF16Bits).collect(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("new_dtype".to_owned(), "f32".to_owned());
+
+    c.bench_function("eval/bitcast_bf16_f32_dense_1m", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BitcastConvertType,
+                std::slice::from_ref(&dense),
+                &p,
+            )
+        })
+    });
+    c.bench_function("eval/bitcast_bf16_f32_literal_ref_1m", |bencher| {
         bencher.iter(|| {
             eval_primitive(
                 Primitive::BitcastConvertType,
@@ -6015,6 +6108,8 @@ criterion_group!(
     bench_bitcast_f64_i64_dense_1m,
     bench_bitcast_f64_u32_dense_1m,
     bench_bitcast_u32_f64_dense_1m,
+    bench_bitcast_f32_bf16_dense_1m,
+    bench_bitcast_bf16_f32_dense_1m,
     bench_broadcast_256_to_256x256_f64,
     bench_pad_256x256_to_258x258_f64,
     bench_rev_256x256_f64,

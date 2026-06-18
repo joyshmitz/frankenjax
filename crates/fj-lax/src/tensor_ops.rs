@@ -496,6 +496,28 @@ fn dense_width_changing_bitcast_tensor(
                 out,
             )?)))
         }
+        (DType::F32, DType::BF16 | DType::F16) => {
+            let Some(values) = tensor.elements.as_f32_slice() else {
+                return Ok(None);
+            };
+            let out_len = values.len().checked_mul(2).ok_or_else(|| EvalError::Unsupported {
+                primitive,
+                detail: "bitcast narrowing output size overflow".to_owned(),
+            })?;
+            let mut out = Vec::with_capacity(out_len);
+            for value in values {
+                let bytes = value.to_bits().to_le_bytes();
+                out.push(u16::from_le_bytes([bytes[0], bytes[1]]));
+                out.push(u16::from_le_bytes([bytes[2], bytes[3]]));
+            }
+            let mut dims = tensor.shape.dims.clone();
+            dims.push(2);
+            Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+                target_dtype,
+                Shape { dims },
+                out,
+            )?)))
+        }
         (DType::U32, DType::F64) => {
             let Some(values) = tensor.elements.as_u32_slice() else {
                 return Ok(None);
@@ -516,6 +538,30 @@ fn dense_width_changing_bitcast_tensor(
                 ])));
             }
             Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+                Shape { dims },
+                out,
+            )?)))
+        }
+        (DType::BF16 | DType::F16, DType::F32) => {
+            let Some(values) = tensor.elements.as_half_float_slice() else {
+                return Ok(None);
+            };
+            let mut dims = tensor.shape.dims.clone();
+            let Some(last_dim) = dims.pop() else {
+                return Ok(None);
+            };
+            if last_dim != 2 {
+                return Ok(None);
+            }
+            let mut out = Vec::with_capacity(values.len() / 2);
+            for chunk in values.chunks_exact(2) {
+                let low = chunk[0].to_le_bytes();
+                let high = chunk[1].to_le_bytes();
+                out.push(f32::from_bits(u32::from_le_bytes([
+                    low[0], low[1], high[0], high[1],
+                ])));
+            }
+            Ok(Some(Value::Tensor(TensorValue::new_f32_values(
                 Shape { dims },
                 out,
             )?)))

@@ -107,6 +107,23 @@ fn extract_u32_vec(v: &Value) -> Vec<u32> {
     }
 }
 
+fn extract_half_bits_vec(v: &Value) -> Vec<u16> {
+    match v {
+        Value::Tensor(t) => t
+            .elements
+            .iter()
+            .map(|literal| match literal {
+                Literal::BF16Bits(bits) | Literal::F16Bits(bits) => *bits,
+                other => panic!("expected half bits, got {other:?}"),
+            })
+            .collect(),
+        Value::Scalar(Literal::BF16Bits(bits)) | Value::Scalar(Literal::F16Bits(bits)) => {
+            vec![*bits]
+        }
+        _ => unreachable!("expected half bits"),
+    }
+}
+
 fn extract_f32_vec(v: &Value) -> Vec<f32> {
     match v {
         Value::Tensor(t) => t
@@ -141,6 +158,22 @@ fn f64_to_u32_chunks(value: f64) -> [u32; 2] {
         u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
         u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
     ]
+}
+
+fn f32_to_u16_chunks(value: f32) -> [u16; 2] {
+    let bytes = value.to_bits().to_le_bytes();
+    [
+        u16::from_le_bytes([bytes[0], bytes[1]]),
+        u16::from_le_bytes([bytes[2], bytes[3]]),
+    ]
+}
+
+fn half_literal(dtype: DType, bits: u16) -> Literal {
+    match dtype {
+        DType::BF16 => Literal::BF16Bits(bits),
+        DType::F16 => Literal::F16Bits(bits),
+        other => panic!("expected half dtype, got {other:?}"),
+    }
 }
 
 // ======================== i64 <-> f64 Tests ========================
@@ -691,6 +724,112 @@ fn oracle_dense_width_changing_bitcast_matches_literal_backing_exact_bits() {
             .is_some(),
         "dense u32->f64 widening output should stay packed"
     );
+}
+
+#[test]
+fn oracle_dense_half_width_bitcast_matches_literal_backing_exact_bits() {
+    let f32_values = [
+        f32::NAN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -0.0_f32,
+        1.5_f32,
+        -2.75_f32,
+        f32::from_bits(0x7fc0_1234),
+    ];
+    let f32_shape = [f32_values.len() as u32];
+    let dense_f32 = Value::Tensor(
+        TensorValue::new_f32_values(Shape { dims: f32_shape.to_vec() }, f32_values.to_vec())
+            .unwrap(),
+    );
+    let literal_f32 = make_literal_backed_tensor(
+        DType::F32,
+        &f32_shape,
+        f32_values
+            .iter()
+            .map(|value| Literal::from_f32(*value))
+            .collect(),
+    );
+
+    for (target_dtype, target_name) in [(DType::BF16, "bf16"), (DType::F16, "f16")] {
+        let expected_chunks: Vec<u16> = f32_values
+            .iter()
+            .flat_map(|value| f32_to_u16_chunks(*value))
+            .collect();
+
+        let dense_half = eval_primitive(
+            Primitive::BitcastConvertType,
+            std::slice::from_ref(&dense_f32),
+            &bitcast_params(target_name),
+        )
+        .unwrap();
+        let literal_half = eval_primitive(
+            Primitive::BitcastConvertType,
+            std::slice::from_ref(&literal_f32),
+            &bitcast_params(target_name),
+        )
+        .unwrap();
+        assert_eq!(extract_shape(&dense_half), vec![f32_values.len() as u32, 2]);
+        assert_eq!(extract_shape(&dense_half), extract_shape(&literal_half));
+        assert_eq!(dense_half.dtype(), target_dtype);
+        assert_eq!(literal_half.dtype(), target_dtype);
+        assert_eq!(extract_half_bits_vec(&dense_half), expected_chunks);
+        assert_eq!(
+            extract_half_bits_vec(&dense_half),
+            extract_half_bits_vec(&literal_half)
+        );
+        assert!(
+            dense_half
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_half_float_slice()
+                .is_some(),
+            "dense f32->{target_name} narrowing output should stay packed"
+        );
+
+        let literal_half_input = make_literal_backed_tensor(
+            target_dtype,
+            &[f32_values.len() as u32, 2],
+            expected_chunks
+                .iter()
+                .copied()
+                .map(|bits| half_literal(target_dtype, bits))
+                .collect(),
+        );
+        let dense_f32_roundtrip = eval_primitive(
+            Primitive::BitcastConvertType,
+            std::slice::from_ref(&dense_half),
+            &bitcast_params("f32"),
+        )
+        .unwrap();
+        let literal_f32_roundtrip = eval_primitive(
+            Primitive::BitcastConvertType,
+            std::slice::from_ref(&literal_half_input),
+            &bitcast_params("f32"),
+        )
+        .unwrap();
+        let dense_bits: Vec<u32> = extract_f32_vec(&dense_f32_roundtrip)
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        let literal_bits: Vec<u32> = extract_f32_vec(&literal_f32_roundtrip)
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+        let original_bits: Vec<u32> = f32_values.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(dense_bits, literal_bits);
+        assert_eq!(dense_bits, original_bits);
+        assert!(
+            dense_f32_roundtrip
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .is_some(),
+            "dense {target_name}->f32 widening output should stay packed"
+        );
+    }
 }
 
 #[test]
