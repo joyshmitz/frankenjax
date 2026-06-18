@@ -5361,6 +5361,52 @@ mod tests {
     }
 
     #[test]
+    fn canonical_fingerprint_changes_when_eqn_params_change() {
+        run_logged_test(
+            "canonical_fingerprint_changes_when_eqn_params_change",
+            &("params-fingerprint", 1_u32),
+            fj_test_utils::TestMode::Strict,
+            || {
+                // eqn.params is folded into the fingerprint (the compiled-jaxpr cache
+                // key). Guard the params-only case: if a refactor dropped the params
+                // loop, two programs differing ONLY in e.g. a reduce axis / transpose
+                // permutation would collide to one cache key -> stale/wrong result
+                // (project_jaxpr_summarizer_bug_class). Clone BEFORE computing the
+                // base fingerprint so the cached OnceLock starts empty.
+                let base = build_program(ProgramSpec::SquarePlusLinear);
+
+                // Adding a param to an equation changes the fingerprint.
+                let mut added = base.clone();
+                added.equations[0]
+                    .params
+                    .insert("fj_test_param".to_owned(), "0".to_owned());
+                assert_ne!(
+                    base.canonical_fingerprint(),
+                    added.canonical_fingerprint(),
+                    "adding an eqn param must change the fingerprint"
+                );
+
+                // Changing a param VALUE (same key) changes the fingerprint. Two fresh
+                // programs so both caches start empty.
+                let mut p0 = build_program(ProgramSpec::SquarePlusLinear);
+                let mut p1 = build_program(ProgramSpec::SquarePlusLinear);
+                p0.equations[0]
+                    .params
+                    .insert("fj_test_param".to_owned(), "0".to_owned());
+                p1.equations[0]
+                    .params
+                    .insert("fj_test_param".to_owned(), "1".to_owned());
+                assert_ne!(
+                    p0.canonical_fingerprint(),
+                    p1.canonical_fingerprint(),
+                    "differing eqn param values must yield different fingerprints"
+                );
+                Ok(Vec::new())
+            },
+        );
+    }
+
+    #[test]
     fn canonical_fingerprint_changes_when_sub_jaxpr_body_changes() {
         run_logged_test(
             "canonical_fingerprint_changes_when_sub_jaxpr_body_changes",
