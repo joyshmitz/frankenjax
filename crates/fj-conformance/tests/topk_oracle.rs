@@ -190,6 +190,23 @@ fn oracle_topk_multi_output_nan_sorts_above_finite_values() {
 }
 
 #[test]
+fn oracle_topk_multi_output_negative_nan_sorts_below_finite_values() {
+    // Distinguishes top_k from sort (project_total_cmp_vs_jax_float_ordering): top_k
+    // keys by total order, where -NaN is the MINIMUM (total_cmp: -NaN < -inf) — so a
+    // -NaN sorts LAST in descending top_k, the opposite of +NaN (which is the max,
+    // tested above). sort instead sends EVERY NaN to the end regardless of sign.
+    let neg_nan = -f64::NAN;
+    assert!(neg_nan.is_nan() && neg_nan.is_sign_negative());
+    let input = make_f64_tensor(&[3], vec![5.0, neg_nan, 4.0]);
+    let result = eval_primitive_multi(Primitive::TopK, &[input], &topk_params(3)).unwrap();
+
+    let values = extract_f64_vec(&result[0]);
+    assert_eq!(values[..2], [5.0, 4.0], "finite values rank above -NaN");
+    assert!(values[2].is_nan(), "-NaN is the minimum -> sorts last in top_k");
+    assert_eq!(extract_i64_vec(&result[1]), vec![0, 2, 1]);
+}
+
+#[test]
 fn oracle_topk_multi_output_positive_zero_sorts_above_negative_zero() {
     // JAX 0.10.1 total-order behavior puts +0.0 before -0.0 for top_k.
     let input = make_f64_tensor(&[3], vec![-0.0, 0.0, 1.0]);
