@@ -6899,6 +6899,52 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_in_dim_rejects_non_strictly_increasing_dims() {
+        // [1,1] -> [2,2] with broadcast_dimensions=[1,0]: unique, in range, and size
+        // compatible (both input dims are 1), but NOT strictly increasing. JAX
+        // (lax._broadcast_in_dim_shape_rule) requires strictly increasing, so this must
+        // fail closed (frankenjax-gnie5).
+        let input = Value::Tensor(
+            fj_core::TensorValue::new(
+                DType::I64,
+                fj_core::Shape { dims: vec![1, 1] },
+                vec![fj_core::Literal::I64(5)],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("shape".into(), "2,2".into());
+        params.insert("broadcast_dimensions".into(), "1,0".into());
+        let result = eval_primitive(Primitive::BroadcastInDim, &[input], &params);
+        assert!(
+            result.is_err(),
+            "non-strictly-increasing broadcast_dimensions must be rejected"
+        );
+    }
+
+    #[test]
+    fn squeeze_rejects_duplicate_dimensions() {
+        // [1,1] squeeze dimensions=[0,0]: both axes are size 1 and in range, but the
+        // dimension list is duplicated. JAX (lax._compute_squeeze_shape) rejects duplicate
+        // dimensions, so this must fail closed (frankenjax-wsuwr).
+        let input = Value::Tensor(
+            fj_core::TensorValue::new(
+                DType::I64,
+                fj_core::Shape { dims: vec![1, 1] },
+                vec![fj_core::Literal::I64(5)],
+            )
+            .unwrap(),
+        );
+        let mut params = BTreeMap::new();
+        params.insert("dimensions".into(), "0,0".into());
+        let result = eval_primitive(Primitive::Squeeze, &[input], &params);
+        assert!(
+            result.is_err(),
+            "duplicate squeeze dimensions must be rejected"
+        );
+    }
+
+    #[test]
     fn broadcast_in_dim_rejects_incompatible_dim() {
         let input = Value::vector_i64(&[1, 2]).unwrap();
         let mut params = BTreeMap::new();
