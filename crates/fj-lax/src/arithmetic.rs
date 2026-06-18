@@ -4585,6 +4585,40 @@ pub(crate) fn eval_complex(primitive: Primitive, inputs: &[Value]) -> Result<Val
         (Value::Tensor(real), Value::Tensor(imag)) => {
             let out_dtype = complex_output_dtype(real.dtype, imag.dtype);
             if real.shape == imag.shape {
+                // Dense same-shape fast path (lax.complex(re, im) constructor, the FFT/
+                // signal-prep idiom): zip the typed real/imag slices straight into dense
+                // complex storage, skipping the per-element Literal reconstruction of
+                // both operands + the boxed complex output. The as_f{64,32}_slice guards
+                // also enforce both operands are that dtype (None -> fall through).
+                // Bit-identical: complex_literal_from_parts_fast yields Complex128Bits(
+                // re,im)/Complex64Bits(re,im) and new_complex_values stores the same
+                // (Complex64 re/im round to f32 exactly as the literal already held f32).
+                if out_dtype == DType::Complex128
+                    && let (Some(rv), Some(iv)) =
+                        (real.elements.as_f64_slice(), imag.elements.as_f64_slice())
+                {
+                    let out: Vec<(f64, f64)> = rv.iter().zip(iv).map(|(&r, &i)| (r, i)).collect();
+                    return Ok(Value::Tensor(TensorValue::new_complex_values(
+                        DType::Complex128,
+                        real.shape.clone(),
+                        out,
+                    )?));
+                }
+                if out_dtype == DType::Complex64
+                    && let (Some(rv), Some(iv)) =
+                        (real.elements.as_f32_slice(), imag.elements.as_f32_slice())
+                {
+                    let out: Vec<(f64, f64)> = rv
+                        .iter()
+                        .zip(iv)
+                        .map(|(&r, &i)| (f64::from(r), f64::from(i)))
+                        .collect();
+                    return Ok(Value::Tensor(TensorValue::new_complex_values(
+                        DType::Complex64,
+                        real.shape.clone(),
+                        out,
+                    )?));
+                }
                 let mut elements = Vec::with_capacity(real.elements.len());
                 for (re, im) in real
                     .elements
