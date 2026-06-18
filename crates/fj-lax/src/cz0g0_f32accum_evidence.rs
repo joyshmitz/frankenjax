@@ -40,7 +40,7 @@ fn assert_tiled_matmul_inputs(
     b: &[f32],
     n: usize,
     nr: usize,
-) {
+) -> usize {
     assert_eq!(
         a.len(),
         m.checked_mul(k)
@@ -63,6 +63,8 @@ fn assert_tiled_matmul_inputs(
         0,
         "f32 accumulation evidence kernel requires n to match its vector tile"
     );
+    m.checked_mul(n)
+        .expect("f32 accumulation evidence output shape overflow")
 }
 
 /// Register-tiled `[m,k]@[k,n]` GEMM: f32 in, **f64 accumulate**, f32 out — mirrors fj's
@@ -70,8 +72,8 @@ fn assert_tiled_matmul_inputs(
 /// f64 → round to f32). `n` and `m` are assumed multiples of `NR64`/`MR` (the evidence
 /// benches use such shapes); a scalar tail is omitted for clarity.
 pub fn matmul_f32_f64_accumulate(a: &[f32], m: usize, k: usize, b: &[f32], n: usize) -> Vec<f32> {
-    assert_tiled_matmul_inputs(a, m, k, b, n, NR64);
-    let mut c = vec![0.0_f32; m * n];
+    let output_len = assert_tiled_matmul_inputs(a, m, k, b, n, NR64);
+    let mut c = vec![0.0_f32; output_len];
     let full_rows = m / MR * MR;
     let full_cols = n / NR64 * NR64;
     let mut j = 0;
@@ -108,8 +110,8 @@ pub fn matmul_f32_f64_accumulate(a: &[f32], m: usize, k: usize, b: &[f32], n: us
 /// kernel). Same tiling/order as [`matmul_f32_f64_accumulate`]; only the accumulator
 /// precision differs. `n`/`m` assumed multiples of `NR32`/`MR`.
 pub fn matmul_f32_f32_accumulate(a: &[f32], m: usize, k: usize, b: &[f32], n: usize) -> Vec<f32> {
-    assert_tiled_matmul_inputs(a, m, k, b, n, NR32);
-    let mut c = vec![0.0_f32; m * n];
+    let output_len = assert_tiled_matmul_inputs(a, m, k, b, n, NR32);
+    let mut c = vec![0.0_f32; output_len];
     let full_rows = m / MR * MR;
     let full_cols = n / NR32 * NR32;
     let mut j = 0;
@@ -189,6 +191,22 @@ mod tests {
         assert!(
             std::panic::catch_unwind(|| matmul_f32_f32_accumulate(&a, m, k, &b, n)).is_err(),
             "f32-accum evidence kernel must reject shapes that would leave zeroed tail cells"
+        );
+    }
+
+    #[test]
+    fn f32accum_evidence_kernels_reject_output_shape_overflow() {
+        let m = usize::MAX - 3;
+        let k = 0usize;
+        let a = Vec::new();
+        let b = Vec::new();
+        assert!(
+            std::panic::catch_unwind(|| matmul_f32_f64_accumulate(&a, m, k, &b, NR64)).is_err(),
+            "f64-accum evidence kernel must reject m*n overflow before allocation"
+        );
+        assert!(
+            std::panic::catch_unwind(|| matmul_f32_f32_accumulate(&a, m, k, &b, NR32)).is_err(),
+            "f32-accum evidence kernel must reject m*n overflow before allocation"
         );
     }
 
