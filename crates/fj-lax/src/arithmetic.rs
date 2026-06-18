@@ -43,6 +43,50 @@ fn dense_unary_threads(elems: usize) -> usize {
 }
 
 #[inline]
+fn is_float_dtype(dtype: DType) -> bool {
+    matches!(
+        dtype,
+        DType::BF16 | DType::F16 | DType::F32 | DType::F64
+    )
+}
+
+#[inline]
+fn is_complex_dtype(dtype: DType) -> bool {
+    matches!(dtype, DType::Complex64 | DType::Complex128)
+}
+
+#[inline]
+fn is_jax_float_only_unary(primitive: Primitive) -> bool {
+    matches!(
+        primitive,
+        Primitive::Cbrt
+            | Primitive::Erf
+            | Primitive::Erfc
+            | Primitive::ErfInv
+            | Primitive::Lgamma
+            | Primitive::Digamma
+            | Primitive::BesselI0e
+            | Primitive::BesselI1e
+    )
+}
+
+#[inline]
+fn ensure_jax_float_unary_operand(
+    primitive: Primitive,
+    input: &Value,
+) -> Result<(), EvalError> {
+    let dtype = input.dtype();
+    if is_float_dtype(dtype) || is_complex_dtype(dtype) {
+        Ok(())
+    } else {
+        Err(EvalError::TypeMismatch {
+            primitive,
+            detail: "expected floating operand",
+        })
+    }
+}
+
+#[inline]
 fn is_expensive_binary(primitive: Primitive) -> bool {
     matches!(
         primitive,
@@ -5121,6 +5165,11 @@ pub(crate) fn eval_unary_elementwise(
             actual: inputs.len(),
         });
     }
+    if is_jax_float_only_unary(primitive) {
+        // Complex operands deliberately fall through to the existing complex
+        // fail-closed path so those diagnostics stay stable.
+        ensure_jax_float_unary_operand(primitive, &inputs[0])?;
+    }
 
     match &inputs[0] {
         Value::Scalar(literal) => {
@@ -8289,13 +8338,6 @@ pub(crate) fn eval_zeta(primitive: Primitive, inputs: &[Value]) -> Result<Value,
 }
 
 fn ensure_float_binary_operands(primitive: Primitive, inputs: &[Value]) -> Result<(), EvalError> {
-    fn is_float_dtype(dtype: DType) -> bool {
-        matches!(
-            dtype,
-            DType::BF16 | DType::F16 | DType::F32 | DType::F64
-        )
-    }
-
     if inputs.iter().all(|value| is_float_dtype(value.dtype())) {
         Ok(())
     } else {
