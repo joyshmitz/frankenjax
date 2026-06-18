@@ -142,6 +142,13 @@ fn oracle_transpose_3d_default() {
     let input = make_i64_tensor(&[2, 3, 4], (1..=24).collect());
     let result = eval_primitive(Primitive::Transpose, &[input], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![4, 3, 2]);
+    assert_eq!(
+        extract_i64_vec(&result),
+        vec![
+            1, 13, 5, 17, 9, 21, 2, 14, 6, 18, 10, 22, 3, 15, 7, 19, 11, 23, 4, 16, 8,
+            20, 12, 24,
+        ]
+    );
 }
 
 #[test]
@@ -156,6 +163,13 @@ fn oracle_transpose_3d_swap_first_two() {
     )
     .unwrap();
     assert_eq!(extract_shape(&result), vec![3, 2, 4]);
+    assert_eq!(
+        extract_i64_vec(&result),
+        vec![
+            1, 2, 3, 4, 13, 14, 15, 16, 5, 6, 7, 8, 17, 18, 19, 20, 9, 10, 11, 12, 21,
+            22, 23, 24,
+        ]
+    );
 }
 
 #[test]
@@ -170,6 +184,13 @@ fn oracle_transpose_3d_swap_last_two() {
     )
     .unwrap();
     assert_eq!(extract_shape(&result), vec![2, 4, 3]);
+    assert_eq!(
+        extract_i64_vec(&result),
+        vec![
+            1, 5, 9, 2, 6, 10, 3, 7, 11, 4, 8, 12, 13, 17, 21, 14, 18, 22, 15, 19, 23,
+            16, 20, 24,
+        ]
+    );
 }
 
 #[test]
