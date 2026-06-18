@@ -584,13 +584,20 @@ fn oracle_pad_complex64_2d() {
     let result = eval_primitive(Primitive::Pad, &[operand, pad_value], &params).unwrap();
     assert_eq!(extract_shape(&result), vec![3, 3]);
     let vals = extract_complex64_vec(&result);
-    // First row and first column should be zeros
-    assert_eq!(vals[0], (0.0, 0.0));
-    assert_eq!(vals[1], (0.0, 0.0));
-    assert_eq!(vals[3], (0.0, 0.0));
-    // Original data at [1,1], [1,2], [2,1], [2,2]
-    assert_eq!(vals[4], (1.0, 0.0));
-    assert_eq!(vals[5], (2.0, 0.0));
+    assert_eq!(
+        vals,
+        vec![
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (4.0, 0.0),
+        ]
+    );
 }
 
 #[test]
