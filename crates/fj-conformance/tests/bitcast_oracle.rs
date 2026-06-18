@@ -350,6 +350,46 @@ fn oracle_bitcast_f32_u32_roundtrip_preserves_special_value_bits() {
     );
 }
 
+#[test]
+fn oracle_bitcast_f64_i64_roundtrip_preserves_special_value_bits() {
+    // Round-trip bitcast f64 -> i64 -> f64 must preserve EXACT bits for NaN/+-inf/-0.0
+    // with no canonicalization on either leg. Sibling of the f32<->u32 round-trip,
+    // distinct width/dtype; compared by bit pattern.
+    let original = [
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -0.0_f64,
+        1.5_f64,
+    ];
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F64,
+            Shape { dims: vec![5] },
+            original.iter().map(|&x| Literal::from_f64(x)).collect(),
+        )
+        .unwrap(),
+    );
+    let as_i64 = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[input],
+        &bitcast_params("i64"),
+    )
+    .unwrap();
+    let back = eval_primitive(
+        Primitive::BitcastConvertType,
+        &[as_i64],
+        &bitcast_params("f64"),
+    )
+    .unwrap();
+    let got: Vec<u64> = extract_f64_vec(&back).iter().map(|v| v.to_bits()).collect();
+    let want: Vec<u64> = original.iter().map(|v| v.to_bits()).collect();
+    assert_eq!(
+        got, want,
+        "f64->i64->f64 round-trip must preserve exact special-value bits"
+    );
+}
+
 // ======================== 2D Tests ========================
 
 #[test]
