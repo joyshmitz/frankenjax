@@ -835,3 +835,52 @@ fn complex_inverse_unary_matches_real_on_real_axis() {
         }
     }
 }
+
+#[test]
+fn complex_remaining_unary_matches_real_on_real_axis() {
+    // Completes the complex-vs-real real-axis family for the remaining reachable
+    // complex unary ops: complex_f(x+0i) == (real_f(x), 0) in each op's real domain.
+    // Reference is the real eval path (non-circular path-consistency).
+    let extract_real = |v: &Value| -> Vec<f64> {
+        v.as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap())
+            .collect()
+    };
+    let moderate: &[f64] = &[-2.0, -0.5, 0.0, 0.7, 2.0]; // expm1/logistic/exp2
+    let gtm1: &[f64] = &[-0.5, 0.0, 0.5, 1.5, 3.0]; // log1p: x > -1
+    let pos: &[f64] = &[0.25, 0.5, 1.0, 2.0, 4.0]; // log2/rsqrt: x > 0
+    let nonzero: &[f64] = &[-2.0, -0.5, 0.5, 1.5, 4.0]; // reciprocal: x != 0
+    let cases: &[(Primitive, &[f64])] = &[
+        (Primitive::Expm1, moderate),
+        (Primitive::Logistic, moderate),
+        (Primitive::Exp2, moderate),
+        (Primitive::Log1p, gtm1),
+        (Primitive::Log2, pos),
+        (Primitive::Rsqrt, pos),
+        (Primitive::Reciprocal, nonzero),
+    ];
+    for &(prim, xs) in cases {
+        let real_in = make_f64_tensor(&[xs.len() as u32], xs.to_vec());
+        let real_out =
+            extract_real(&eval_primitive(prim, std::slice::from_ref(&real_in), &no_params()).unwrap());
+        let cplx_in = complex_from_pairs(&xs.iter().map(|&x| (x, 0.0)).collect::<Vec<_>>());
+        let cplx_out = extract_complex_vec(
+            &eval_primitive(prim, std::slice::from_ref(&cplx_in), &no_params()).unwrap(),
+        );
+        for (i, ((cre, cim), r)) in cplx_out.iter().zip(&real_out).enumerate() {
+            assert!(
+                (cre - r).abs() < 1e-9,
+                "{prim:?} real-axis re mismatch at x={}: complex {cre} vs real {r}",
+                xs[i]
+            );
+            assert!(
+                cim.abs() < 1e-9,
+                "{prim:?} real-axis imag must vanish at x={}: {cim}",
+                xs[i]
+            );
+        }
+    }
+}
