@@ -2687,6 +2687,7 @@ impl TensorValue {
 
         match &slices[0] {
             Value::Scalar(first) => {
+                let axis_dim = checked_axis0_dim(slices.len(), &[])?;
                 let mut elements = Vec::with_capacity(slices.len());
                 elements.push(*first);
                 for value in &slices[1..] {
@@ -2696,10 +2697,14 @@ impl TensorValue {
                     elements.push(*lit);
                 }
                 let dtype = infer_dtype_from_literals(&elements);
-                TensorValue::new(dtype, Shape::vector(slices.len() as u32), elements)
+                TensorValue::new(dtype, Shape::vector(axis_dim), elements)
             }
             Value::Tensor(first) => {
-                let mut elements = Vec::with_capacity(first.elements.len() * slices.len());
+                let axis_dim = checked_axis0_dim(slices.len(), &first.shape.dims)?;
+                let total_len = first.elements.len().checked_mul(slices.len()).ok_or_else(|| {
+                    axis0_shape_overflow(slices.len(), &first.shape.dims)
+                })?;
+                let mut elements = Vec::with_capacity(total_len);
                 elements.extend_from_slice(&first.elements);
                 for value in &slices[1..] {
                     let Value::Tensor(tensor) = value else {
@@ -2721,7 +2726,7 @@ impl TensorValue {
                 }
 
                 let mut dims = Vec::with_capacity(first.shape.rank() + 1);
-                dims.push(slices.len() as u32);
+                dims.push(axis_dim);
                 dims.extend_from_slice(&first.shape.dims);
                 TensorValue::new(first.dtype, Shape { dims }, elements)
             }
@@ -2735,13 +2740,15 @@ impl TensorValue {
 
         match value {
             Value::Scalar(lit) => {
+                let axis_dim = checked_axis0_dim(repeat_count, &[])?;
                 let elements = vec![*lit; repeat_count];
                 let dtype = infer_dtype_from_repeated_literal(*lit);
-                TensorValue::new(dtype, Shape::vector(repeat_count as u32), elements)
+                TensorValue::new(dtype, Shape::vector(axis_dim), elements)
             }
             Value::Tensor(tensor) => {
+                let axis_dim = checked_axis0_dim(repeat_count, &tensor.shape.dims)?;
                 let mut dims = Vec::with_capacity(tensor.shape.rank() + 1);
-                dims.push(repeat_count as u32);
+                dims.push(axis_dim);
                 dims.extend_from_slice(&tensor.shape.dims);
                 let shape = Shape { dims };
 
@@ -2770,6 +2777,19 @@ impl TensorValue {
 
     pub fn to_i64_vec(&self) -> Option<Vec<i64>> {
         self.elements.iter().copied().map(Literal::as_i64).collect()
+    }
+}
+
+fn checked_axis0_dim(axis_len: usize, trailing_dims: &[u32]) -> Result<u32, ValueError> {
+    u32::try_from(axis_len).map_err(|_| axis0_shape_overflow(axis_len, trailing_dims))
+}
+
+fn axis0_shape_overflow(axis_len: usize, trailing_dims: &[u32]) -> ValueError {
+    let mut dims = Vec::with_capacity(trailing_dims.len() + 1);
+    dims.push(u32::try_from(axis_len).unwrap_or(u32::MAX));
+    dims.extend_from_slice(trailing_dims);
+    ValueError::ShapeOverflow {
+        shape: Shape { dims },
     }
 }
 
@@ -5847,6 +5867,42 @@ mod tests {
         let empty_repeat = TensorValue::repeat_axis0(&Value::scalar_i64(0), 0)
             .expect_err("empty repeat should preserve stack's empty-axis error");
         assert!(matches!(empty_repeat, ValueError::EmptyAxisStack));
+    }
+
+    #[test]
+    fn repeat_axis0_rejects_leading_dim_overflow_before_allocation() {
+        let too_many = u32::MAX as usize + 1;
+
+        let scalar_err = TensorValue::repeat_axis0(&Value::scalar_i64(0), too_many)
+            .expect_err("scalar repeat should reject an axis0 length above u32::MAX");
+        assert!(matches!(scalar_err, ValueError::ShapeOverflow { .. }));
+
+        let empty_tensor = Value::Tensor(
+            TensorValue::new(DType::I64, Shape { dims: vec![0] }, vec![])
+                .expect("empty tensor should build"),
+        );
+        let tensor_err = TensorValue::repeat_axis0(&empty_tensor, too_many)
+            .expect_err("empty tensor repeat should reject wrapped leading dimension");
+        match tensor_err {
+            ValueError::ShapeOverflow { shape } => {
+                assert_eq!(shape.dims, vec![u32::MAX, 0]);
+            }
+            other => panic!("expected ShapeOverflow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn checked_axis0_dim_overflow_reports_trailing_shape() {
+        let too_many = u32::MAX as usize + 1;
+        let err = checked_axis0_dim(too_many, &[2, 3])
+            .expect_err("axis0 helper should reject dimensions above u32::MAX");
+
+        match err {
+            ValueError::ShapeOverflow { shape } => {
+                assert_eq!(shape.dims, vec![u32::MAX, 2, 3]);
+            }
+            other => panic!("expected ShapeOverflow, got {other:?}"),
+        }
     }
 
     #[test]
