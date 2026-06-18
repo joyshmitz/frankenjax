@@ -539,6 +539,31 @@ fn oracle_erf_complex64_purely_imaginary() {
 }
 
 #[test]
+fn oracle_erf_complex64_large_real_uses_asymptotic_branch() {
+    // The complex erf tests above use |z| < 4 (Maclaurin series); |z| >= 4 switches to
+    // the asymptotic erfc expansion, which was untested for complex inputs. On the real
+    // axis erf(4) and erf(5) are both ~0.99999998+ (they round toward 1.0 in f32), with
+    // imag ~ 0. The point is to exercise the asymptotic branch and confirm finiteness +
+    // saturation toward 1, not full precision.
+    let input = make_complex64_tensor(&[2], vec![(4.0, 0.0), (5.0, 0.0)]);
+    let result = eval_primitive(Primitive::Erf, &[input], &no_params())
+        .expect("erf complex64 large should succeed");
+    let vals = extract_complex64_vec(&result);
+    assert!(
+        (vals[0].0 as f64 - 0.999_999_984_582_742_1).abs() < 1e-6,
+        "erf(4) ≈ 0.99999998, got {}",
+        vals[0].0
+    );
+    assert!(vals[0].1.abs() < 1e-6, "erf(4) imag ~ 0");
+    assert!(
+        (vals[1].0 as f64 - 0.999_999_999_998_462_5).abs() < 1e-6,
+        "erf(5) ≈ 1.0, got {}",
+        vals[1].0
+    );
+    assert!(vals[1].1.abs() < 1e-6, "erf(5) imag ~ 0");
+}
+
+#[test]
 
 fn oracle_erf_complex128_preserves_dtype() {
     let input = make_complex128_tensor(&[2], vec![(0.0, 0.0), (1.0, 0.0)]);
