@@ -112,6 +112,7 @@ fn oracle_squeeze_auto_3d_last() {
     let input = make_i64_tensor(&[2, 3, 1], (1..=6).collect());
     let result = eval_primitive(Primitive::Squeeze, &[input], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), (1..=6).collect::<Vec<_>>());
 }
 
 #[test]
@@ -120,6 +121,7 @@ fn oracle_squeeze_auto_3d_middle() {
     let input = make_i64_tensor(&[2, 1, 3], (1..=6).collect());
     let result = eval_primitive(Primitive::Squeeze, &[input], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), (1..=6).collect::<Vec<_>>());
 }
 
 #[test]
@@ -128,6 +130,7 @@ fn oracle_squeeze_auto_multiple() {
     let input = make_i64_tensor(&[1, 2, 1, 3, 1], (1..=6).collect());
     let result = eval_primitive(Primitive::Squeeze, &[input], &no_params()).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), (1..=6).collect::<Vec<_>>());
 }
 
 #[test]
