@@ -1267,6 +1267,36 @@ fn oracle_exp_log_reject_integer_operands() {
 }
 
 #[test]
+fn oracle_trig_hyperbolic_reject_integer_operands() {
+    // JAX sin/cos/tan/sinh/cosh/tanh = standard_unop(_float | _complex): integer operands
+    // are rejected at the lax level, not widened to f64. Floats still evaluate. (Part of
+    // the broader transcendental int-accept parity gap.)
+    let int_scalar = Value::scalar_i64(1);
+    for primitive in [
+        Primitive::Sin,
+        Primitive::Cos,
+        Primitive::Tan,
+        Primitive::Sinh,
+        Primitive::Cosh,
+        Primitive::Tanh,
+    ] {
+        let err = eval_primitive(primitive, std::slice::from_ref(&int_scalar), &no_params())
+            .expect_err("trig/hyperbolic unop must reject integer operands");
+        assert!(
+            matches!(
+                &err,
+                EvalError::TypeMismatch { primitive: got, detail }
+                    if *got == primitive && detail.contains("floating")
+            ),
+            "{primitive:?} integer input returned unexpected error: {err:?}"
+        );
+        // Floating operands must still evaluate.
+        eval_primitive(primitive, &[Value::scalar_f64(0.5)], &no_params())
+            .unwrap_or_else(|e| panic!("{primitive:?} float operand should evaluate: {e:?}"));
+    }
+}
+
+#[test]
 fn oracle_atan2() {
     // atan2(0, 1) = 0, atan2(1, 0) = pi/2, atan2(1, 1) = pi/4
     assert_f64_close(

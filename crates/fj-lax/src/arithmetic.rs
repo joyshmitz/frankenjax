@@ -5072,6 +5072,10 @@ pub(crate) fn eval_log(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
 }
 
 pub(crate) fn eval_sin(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX sin_p = standard_unop(_float | _complex): reject integer operands.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
             (a.sin() * b.cosh(), a.cos() * b.sinh())
@@ -5082,6 +5086,10 @@ pub(crate) fn eval_sin(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
 }
 
 pub(crate) fn eval_cos(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX cos_p = standard_unop(_float | _complex): reject integer operands.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
             (a.cos() * b.cosh(), -a.sin() * b.sinh())
@@ -5092,6 +5100,10 @@ pub(crate) fn eval_cos(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
 }
 
 pub(crate) fn eval_tan(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX tan_p = standard_unop(_float | _complex): reject integer operands.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
             // Mirror of tanh: for large |Im|, cosh(2b)/sinh(2b) overflow so the
@@ -5111,6 +5123,10 @@ pub(crate) fn eval_tan(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
 }
 
 pub(crate) fn eval_sinh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX sinh_p = standard_unop(_float | _complex): reject integer operands.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
             (a.sinh() * b.cos(), a.cosh() * b.sin())
@@ -5121,6 +5137,10 @@ pub(crate) fn eval_sinh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
 }
 
 pub(crate) fn eval_cosh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX cosh_p = standard_unop(_float | _complex): reject integer operands.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
             (a.cosh() * b.cos(), a.sinh() * b.sin())
@@ -5131,6 +5151,10 @@ pub(crate) fn eval_cosh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
 }
 
 pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX tanh_p = standard_unop(_float | _complex): reject integer operands.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
             // For large |Re|, cosh(2a) and sinh(2a) both overflow to +inf, so the
