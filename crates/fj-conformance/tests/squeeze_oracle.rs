@@ -158,6 +158,7 @@ fn oracle_squeeze_explicit_first() {
     let input = make_i64_tensor(&[1, 3], vec![1, 2, 3]);
     let result = eval_primitive(Primitive::Squeeze, &[input], &squeeze_params(&[0])).unwrap();
     assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![1, 2, 3]);
 }
 
 #[test]
@@ -166,6 +167,7 @@ fn oracle_squeeze_explicit_last() {
     let input = make_i64_tensor(&[3, 1], vec![1, 2, 3]);
     let result = eval_primitive(Primitive::Squeeze, &[input], &squeeze_params(&[1])).unwrap();
     assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![1, 2, 3]);
 }
 
 #[test]
@@ -174,6 +176,7 @@ fn oracle_squeeze_explicit_middle() {
     let input = make_i64_tensor(&[2, 1, 3], (1..=6).collect());
     let result = eval_primitive(Primitive::Squeeze, &[input], &squeeze_params(&[1])).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), (1..=6).collect::<Vec<_>>());
 }
 
 #[test]
@@ -182,6 +185,7 @@ fn oracle_squeeze_explicit_multiple() {
     let input = make_i64_tensor(&[1, 2, 1, 3], (1..=6).collect());
     let result = eval_primitive(Primitive::Squeeze, &[input], &squeeze_params(&[0, 2])).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 3]);
+    assert_eq!(extract_i64_vec(&result), (1..=6).collect::<Vec<_>>());
 }
 
 #[test]
@@ -190,6 +194,7 @@ fn oracle_squeeze_explicit_partial() {
     let input = make_i64_tensor(&[1, 2, 1], vec![1, 2]);
     let result = eval_primitive(Primitive::Squeeze, &[input], &squeeze_params(&[0])).unwrap();
     assert_eq!(extract_shape(&result), vec![2, 1]);
+    assert_eq!(extract_i64_vec(&result), vec![1, 2]);
 }
 
 // ======================== Negative-axis Dimensions ========================
@@ -209,6 +214,7 @@ fn oracle_squeeze_explicit_negative_first() {
     let input = make_i64_tensor(&[1, 3], vec![1, 2, 3]);
     let result = eval_primitive(Primitive::Squeeze, &[input], &squeeze_params_i64(&[-2])).unwrap();
     assert_eq!(extract_shape(&result), vec![3]);
+    assert_eq!(extract_i64_vec(&result), vec![1, 2, 3]);
 }
 
 #[test]
