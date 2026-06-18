@@ -4176,6 +4176,49 @@ fn bessel_i1e_vjp_at_zero_is_one_half_matching_jax_guard() {
 }
 
 #[test]
+fn integer_pow_vjp_zero_exponent_and_general() {
+    // IntegerPow's gradient was untested (only its forward oracle existed). x^0 is a
+    // constant, so its grad is 0 EVERYWHERE — including x=0, where the generic n*x^(n-1)
+    // rule would be 0*x^(-1) = 0*inf = NaN. frankenjax guards n==0 -> 0, matching JAX's
+    // _integer_pow_jvp. General: grad = g*n*x^(n-1); negative n supported.
+    let vjp_ipow = |x: f64, exp: i64, g: f64| -> f64 {
+        let xv = Value::scalar_f64(x);
+        let gv = Value::scalar_f64(g);
+        let mut params = BTreeMap::new();
+        params.insert("exponent".to_string(), exp.to_string());
+        let out =
+            eval_primitive(Primitive::IntegerPow, std::slice::from_ref(&xv), &params).unwrap();
+        let vjp = fj_ad::vjp(
+            Primitive::IntegerPow,
+            std::slice::from_ref(&xv),
+            std::slice::from_ref(&gv),
+            std::slice::from_ref(&out),
+            &params,
+        )
+        .unwrap();
+        extract_f64_scalar(&vjp[0])
+    };
+    // n == 0: grad is 0 even at x = 0 (the guard avoids NaN).
+    assert_eq!(vjp_ipow(0.0, 0, 1.0), 0.0, "d/dx x^0 = 0 at x=0 (n==0 guard)");
+    assert_eq!(vjp_ipow(5.0, 0, 1.0), 0.0, "d/dx x^0 = 0");
+    // n == 3: grad = 3*x^2; at x=2 -> 12.
+    assert!(
+        (vjp_ipow(2.0, 3, 1.0) - 12.0).abs() < 1e-9,
+        "d/dx x^3 = 3x^2 = 12 at x=2"
+    );
+    // n == -1: grad = -x^-2; at x=2 -> -0.25.
+    assert!(
+        (vjp_ipow(2.0, -1, 1.0) + 0.25).abs() < 1e-9,
+        "d/dx x^-1 = -1/x^2 = -0.25 at x=2"
+    );
+    // cotangent scaling: g=0.5, n=2, x=3 -> 0.5*2*3 = 3.
+    assert!(
+        (vjp_ipow(3.0, 2, 0.5) - 3.0).abs() < 1e-9,
+        "g * d/dx x^2 = 0.5*2*3 = 3 at x=3"
+    );
+}
+
+#[test]
 fn igamma_igammac_vjp_numerical() {
     // igamma(a, x): grad w.r.t. a (igamma_grad_a's dedicated series — the most error-prone)
     // AND x (x^(a-1)·e^{-x}/Gamma(a)). igammac = 1 - igamma, so its grads are negated.
