@@ -337,6 +337,31 @@ fn oracle_det_identity_and_triangular() {
 }
 
 #[test]
+fn oracle_slogdet_positive_sign_and_identity() {
+    // Completes slogdet sign coverage (the reconstruction test uses a negative det,
+    // sign=-1). Positive det -> sign=+1; identity -> (sign=+1, logabsdet=ln(1)=0).
+    let scalar = |v: &Value| -> f64 {
+        match v {
+            Value::Scalar(l) => l.as_f64().unwrap(),
+            Value::Tensor(t) => t.elements[0].as_f64().unwrap(),
+        }
+    };
+    // diagonal, det = 6 > 0
+    let a = make_f64_matrix(2, 2, &[2.0, 0.0, 0.0, 3.0]);
+    let sl = eval_primitive_multi(Primitive::Slogdet, std::slice::from_ref(&a), &no_params()).unwrap();
+    assert!((scalar(&sl[0]) - 1.0).abs() < 1e-12, "positive det -> sign = +1");
+    assert!(
+        (scalar(&sl[1]) - 6.0_f64.ln()).abs() < 1e-10,
+        "logabsdet = ln(6)"
+    );
+    // identity: sign = +1, logabsdet = ln(1) = 0
+    let i2 = make_f64_matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
+    let sli = eval_primitive_multi(Primitive::Slogdet, std::slice::from_ref(&i2), &no_params()).unwrap();
+    assert!((scalar(&sli[0]) - 1.0).abs() < 1e-12, "slogdet(I) sign = +1");
+    assert!(scalar(&sli[1]).abs() < 1e-12, "slogdet(I) logabsdet = 0");
+}
+
+#[test]
 fn oracle_cholesky_2x2_identity() {
     // Cholesky of I₂ = I₂
     let a = make_f64_matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
