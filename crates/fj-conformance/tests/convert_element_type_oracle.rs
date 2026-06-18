@@ -267,6 +267,32 @@ fn convert_element_type_rejects_wrong_arity() {
 }
 
 #[test]
+fn convert_element_type_f16_to_f32_widens_exactly() {
+    // f16 is a strict subset of f32, so widening f16 -> f32 is exact (no rounding).
+    // Use values exactly representable in f16 (1.5, -0.5, 256.0) — they must appear
+    // bit-identically in f32.
+    let input = Value::Tensor(
+        TensorValue::new(
+            DType::F16,
+            Shape { dims: vec![3] },
+            vec![
+                Literal::from_f16_f64(1.5),
+                Literal::from_f16_f64(-0.5),
+                Literal::from_f16_f64(256.0),
+            ],
+        )
+        .unwrap(),
+    );
+    let result = convert(input, "f32").expect("f16 to f32 conversion should succeed");
+    assert_eq!(result.dtype(), DType::F32);
+    assert_eq!(
+        f32_values(&result),
+        vec![Some(1.5), Some(-0.5), Some(256.0)],
+        "f16 -> f32 widening must be exact for representable values"
+    );
+}
+
+#[test]
 fn convert_element_type_f16_to_i32_truncates_toward_zero() {
     // Half-float source -> int truncates toward zero like f64/f32 -> int (negatives
     // toward zero too). The oracle had no f16 convert coverage. f16(2.7) rounds to a
