@@ -5084,10 +5084,16 @@ pub(crate) fn eval_asinh(primitive: Primitive, inputs: &[Value]) -> Result<Value
 pub(crate) fn eval_acosh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
-            let z_sq = (a * a - b * b - 1.0, 2.0 * a * b);
-            let sqrt = complex_sqrt(z_sq);
-            let w = (a + sqrt.0, b + sqrt.1);
-            complex_log(w)
+            // Principal acosh(z) = log(z + sqrt(z+1)·sqrt(z-1)). Using the PRODUCT of
+            // two principal square roots (not sqrt(z²-1)) selects the principal branch
+            // with Re >= 0 (C99 Annex G / numpy / XLA convention). The old
+            // `log(z + sqrt(z²-1))` picked the wrong sign in the left half-plane —
+            // e.g. acosh(-2) gave Re = -1.317 instead of +1.317 — even though
+            // cosh(acosh(z)) == z still held (-w is also a valid inverse).
+            let sp = complex_sqrt((a + 1.0, b)); // sqrt(z + 1)
+            let sm = complex_sqrt((a - 1.0, b)); // sqrt(z - 1)
+            let prod = complex_mul(sp, sm);
+            complex_log((a + prod.0, b + prod.1))
         })
     } else {
         eval_unary_elementwise_parallel(primitive, inputs, f64::acosh)
