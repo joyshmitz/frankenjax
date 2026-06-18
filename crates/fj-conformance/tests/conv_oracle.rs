@@ -92,6 +92,27 @@ fn oracle_conv_1d_valid_stride2() {
 }
 
 #[test]
+fn oracle_conv_1d_lhs_dilation_transposed() {
+    // lhs_dilation (input/operand dilation = transposed / fractionally-strided conv)
+    // inserts (db-1) zeros between input elements: [1,2,3] with lhs_dilation=2 ->
+    // [1,0,2,0,3]. A valid conv with kernel [1,1] (correlation, moving sum of 2)
+    // then gives out[p] = dilated[p] + dilated[p+1] = [1,2,2,3]. Supported in
+    // eval_conv but untested at the conformance/parity layer.
+    //   dilated length = (3-1)*2 + 1 = 5, output length = 5-2+1 = 4
+    let lhs = make_f64_tensor(&[1, 3, 1], vec![1.0, 2.0, 3.0]);
+    let rhs = make_f64_tensor(&[2, 1, 1], vec![1.0, 1.0]);
+    let mut params = conv_params("valid", "1");
+    params.insert("lhs_dilation".to_string(), "2".to_string());
+    let result = eval_primitive(Primitive::Conv, &[lhs, rhs], &params).unwrap();
+    assert_eq!(extract_shape(&result), vec![1, 4, 1]);
+    let vals = extract_f64_vec(&result);
+    assert!((vals[0] - 1.0).abs() < 1e-10, "1+0 = 1");
+    assert!((vals[1] - 2.0).abs() < 1e-10, "0+2 = 2");
+    assert!((vals[2] - 2.0).abs() < 1e-10, "2+0 = 2");
+    assert!((vals[3] - 3.0).abs() < 1e-10, "0+3 = 3");
+}
+
+#[test]
 fn oracle_conv_1d_rhs_dilation_atrous() {
     // Atrous (dilated) convolution: rhs_dilation=2 spaces the 2 kernel taps 2 apart,
     // so the effective kernel is [1,0,1] (span 3). Supported in eval_conv but
