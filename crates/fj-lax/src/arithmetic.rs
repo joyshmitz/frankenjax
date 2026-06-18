@@ -5933,6 +5933,45 @@ pub(crate) fn eval_unary_int_or_float(
                     out,
                 )?));
             }
+            // Dense half (BF16/F16) fast path (bf16 is the dominant ML dtype; sign/
+            // square on bf16 activations, e.g. layernorm variance, hit this). Mirrors
+            // the boxed half arm exactly: decode each bits to f64, apply float_op,
+            // re-encode via from_{bf16,f16}_f64 — straight into dense u16 storage,
+            // skipping the Vec<Literal> build + densify rescan. Bit-identical.
+            if matches!(tensor.dtype, DType::BF16 | DType::F16)
+                && let Some(src) = tensor.elements.as_half_float_slice()
+            {
+                let dt = tensor.dtype;
+                let out: Result<Vec<u16>, EvalError> = src
+                    .iter()
+                    .map(|&bits| {
+                        let lit = if dt == DType::BF16 {
+                            Literal::BF16Bits(bits)
+                        } else {
+                            Literal::F16Bits(bits)
+                        };
+                        let val = lit.as_f64().ok_or(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "expected numeric tensor elements",
+                        })?;
+                        let r = float_op(val);
+                        let out_lit = if dt == DType::BF16 {
+                            Literal::from_bf16_f64(r)
+                        } else {
+                            Literal::from_f16_f64(r)
+                        };
+                        Ok(match out_lit {
+                            Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+                            _ => unreachable!("from_{{bf16,f16}}_f64 yields half bits"),
+                        })
+                    })
+                    .collect();
+                return Ok(Value::Tensor(TensorValue::new_half_float_values(
+                    dt,
+                    tensor.shape.clone(),
+                    out?,
+                )?));
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for literal in tensor.elements.iter().copied() {
                 let out = match literal {
