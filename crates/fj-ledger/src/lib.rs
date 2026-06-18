@@ -296,6 +296,9 @@ impl LogDomainPosterior {
 #[must_use]
 pub fn log_sum_exp(a: f64, b: f64) -> f64 {
     let max = a.max(b);
+    if max == f64::INFINITY {
+        return f64::INFINITY;
+    }
     if max == f64::NEG_INFINITY {
         return f64::NEG_INFINITY;
     }
@@ -758,6 +761,16 @@ mod tests {
     fn log_sum_exp_one_neg_infinity() {
         let result = super::log_sum_exp(f64::NEG_INFINITY, 0.0);
         assert!((result - 0.0).abs() < 1e-10, "log(0 + 1) = 0: got {result}");
+    }
+
+    #[test]
+    fn log_sum_exp_handles_positive_infinity() {
+        assert_eq!(super::log_sum_exp(f64::INFINITY, 0.0), f64::INFINITY);
+        assert_eq!(super::log_sum_exp(0.0, f64::INFINITY), f64::INFINITY);
+        assert_eq!(
+            super::log_sum_exp(f64::INFINITY, f64::INFINITY),
+            f64::INFINITY
+        );
     }
 
     // ── Extended ledger tests (frankenjax-o9j) ──────────────────
