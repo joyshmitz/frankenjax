@@ -1617,6 +1617,25 @@ fn sin_jvp_numerical_complex64() {
     assert_complex64_close(actual, expected, 1e-4, "sin JVP at z=0.5+0.3i");
 }
 
+/// Complex64 Cbrt JVP must FAIL CLOSED (frankenjax-w8u0a, JVP-side).
+///
+/// JAX's `cbrt` is `standard_unop(_float)` — complex rejected (commit eb5ad225) —
+/// and the cbrt JVP rule evaluates the forward Cbrt, so jvp of a cbrt jaxpr on
+/// complex primals must surface the unsupported error rather than a tangent. This
+/// is the forward-mode analog of cbrt_vjp_numerical_complex64.
+#[test]
+fn cbrt_jvp_numerical_complex64_fails_closed() {
+    let z = make_complex64_scalar(2.0, 0.0);
+    let dz = make_complex64_scalar(1.0, 0.0);
+
+    let jaxpr = make_single_op_jaxpr(Primitive::Cbrt);
+    let result = fj_ad::jvp(&jaxpr, &[z], &[dz]);
+    assert!(
+        result.is_err(),
+        "complex cbrt JVP must fail closed (JAX cbrt is float-only); got {result:?}"
+    );
+}
+
 /// Complex64 Cos JVP: d/dz cos(z) = -sin(z), so tangent = -sin(z) * dz
 #[test]
 fn cos_jvp_numerical_complex64() {
