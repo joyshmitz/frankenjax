@@ -133,11 +133,16 @@ impl<B: CacheBackend> CacheBackend for LruCache<B> {
     }
 
     fn evict(&mut self, key: &CacheKey) -> bool {
-        {
+        let evict_failures_before = self.inner.evict_failure_count();
+        let evicted = self.inner.evict(key);
+        let evict_failed = self.inner.evict_failure_count() != evict_failures_before;
+
+        if evicted || !evict_failed {
             let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
             order.retain(|cached_key| cached_key != key);
         }
-        self.inner.evict(key)
+
+        evicted
     }
 
     fn stats(&self) -> CacheStats {
@@ -220,8 +225,13 @@ impl<B: CacheBackend> TtlLruCache<B> {
             .collect();
 
         for key in &expired_keys {
-            self.inner.evict(key);
-            self.insert_times.remove(key);
+            let evict_failures_before = self.inner.evict_failure_count();
+            let evicted = self.inner.evict(key);
+            let evict_failed = self.inner.evict_failure_count() != evict_failures_before;
+
+            if evicted || !evict_failed {
+                self.insert_times.remove(key);
+            }
         }
 
         self.retain_active_insert_times();
@@ -275,8 +285,15 @@ impl<B: CacheBackend> CacheBackend for TtlLruCache<B> {
     }
 
     fn evict(&mut self, key: &CacheKey) -> bool {
-        self.insert_times.remove(key);
-        self.inner.evict(key)
+        let evict_failures_before = self.inner.evict_failure_count();
+        let evicted = self.inner.evict(key);
+        let evict_failed = self.inner.evict_failure_count() != evict_failures_before;
+
+        if evicted || !evict_failed {
+            self.insert_times.remove(key);
+        }
+
+        evicted
     }
 
     fn stats(&self) -> CacheStats {
@@ -419,6 +436,48 @@ mod tests {
 
         fn put_failure_count(&self) -> u64 {
             self.put_failures
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingEvictBackend {
+        entries: HashMap<String, CachedArtifact>,
+        fail_next_evict: bool,
+        evict_failures: u64,
+    }
+
+    impl CacheBackend for FailingEvictBackend {
+        fn get(&self, key: &CacheKey) -> Option<CachedArtifact> {
+            self.entries.get(&key.as_string()).cloned()
+        }
+
+        fn put(&mut self, key: &CacheKey, artifact: CachedArtifact) {
+            self.entries.insert(key.as_string(), artifact);
+        }
+
+        fn evict(&mut self, key: &CacheKey) -> bool {
+            if self.fail_next_evict {
+                self.fail_next_evict = false;
+                self.evict_failures += 1;
+                return false;
+            }
+
+            self.entries.remove(&key.as_string()).is_some()
+        }
+
+        fn stats(&self) -> CacheStats {
+            CacheStats {
+                entry_count: self.entries.len(),
+                total_bytes: self.entries.values().map(|a| a.data.len() as u64).sum(),
+            }
+        }
+
+        fn clear(&mut self) {
+            self.entries.clear();
+        }
+
+        fn evict_failure_count(&self) -> u64 {
+            self.evict_failures
         }
     }
 
@@ -582,6 +641,75 @@ mod tests {
         assert!(cache.evict(&test_key("a")));
         assert!(cache.get(&test_key("a")).is_none());
         assert_eq!(cache.stats().entry_count, 0);
+    }
+
+    #[test]
+    fn ttl_lru_failed_evict_keeps_expiry_metadata_to_block_stale_hit() {
+        let config = TtlLruConfig {
+            lru: LruConfig::default(),
+            ttl_secs: 1,
+        };
+        let mut cache = TtlLruCache::new(FailingEvictBackend::default(), config);
+        let key = test_key("a");
+
+        cache.put(&key, test_artifact(b"stale"));
+        cache.insert_times.insert(
+            key.clone(),
+            std::time::Instant::now() - std::time::Duration::from_secs(2),
+        );
+        cache.inner.inner.fail_next_evict = true;
+
+        assert!(!cache.evict(&key));
+        assert_eq!(cache.evict_failure_count(), 1);
+        assert_eq!(
+            cache.expired_count(),
+            1,
+            "failed eviction must leave TTL metadata in place"
+        );
+        assert!(
+            cache.get(&key).is_none(),
+            "failed eviction must not make expired stale bytes readable again"
+        );
+        assert_eq!(
+            cache.stats().entry_count,
+            1,
+            "backend entry remains present because eviction failed"
+        );
+    }
+
+    #[test]
+    fn ttl_lru_failed_sweep_keeps_expiry_metadata_to_block_stale_hit() {
+        let config = TtlLruConfig {
+            lru: LruConfig::default(),
+            ttl_secs: 1,
+        };
+        let mut cache = TtlLruCache::new(FailingEvictBackend::default(), config);
+        let key = test_key("a");
+
+        cache.put(&key, test_artifact(b"stale"));
+        cache.insert_times.insert(
+            key.clone(),
+            std::time::Instant::now() - std::time::Duration::from_secs(2),
+        );
+        cache.inner.inner.fail_next_evict = true;
+
+        cache.sweep_expired();
+
+        assert_eq!(cache.evict_failure_count(), 1);
+        assert_eq!(
+            cache.expired_count(),
+            1,
+            "failed sweep eviction must leave TTL metadata in place"
+        );
+        assert!(
+            cache.get(&key).is_none(),
+            "failed sweep must not make expired stale bytes readable again"
+        );
+        assert_eq!(
+            cache.stats().entry_count,
+            1,
+            "backend entry remains present because eviction failed"
+        );
     }
 
     #[test]
