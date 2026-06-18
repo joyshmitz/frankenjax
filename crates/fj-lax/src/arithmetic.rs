@@ -11409,6 +11409,29 @@ mod tests {
     }
 
     #[test]
+    fn complex_pow_zero_base_matches_jax_conventions() {
+        // The existing pow test covers only nonzero bases; guard the z==0 branch.
+        // NumPy/JAX convention: 0^0 = 1, and 0^(positive real) = 0. These are exact
+        // literals from the guard (not computed), so a regression that fell through to
+        // exp(w*log(0)) would blow up via log(0) = -inf instead.
+        assert_eq!(
+            apply_complex_pow((0.0, 0.0), (0.0, 0.0)).unwrap(),
+            (1.0, 0.0),
+            "0^0 must be 1"
+        );
+        assert_eq!(
+            apply_complex_pow((0.0, 0.0), (2.0, 0.0)).unwrap(),
+            (0.0, 0.0),
+            "0^2 must be 0"
+        );
+        assert_eq!(
+            apply_complex_pow((0.0, 0.0), (0.5, 0.0)).unwrap(),
+            (0.0, 0.0),
+            "0^0.5 must be 0"
+        );
+    }
+
+    #[test]
     fn complex_tanh_tan_saturate_for_large_argument() {
         // Complex tanh saturates to sign(Re) for large |Re|; the naive
         // sinh(2a)/(cosh(2a)+cos(2b)) was inf/inf = NaN there. tan mirrors it on
