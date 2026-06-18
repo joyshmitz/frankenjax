@@ -222,6 +222,31 @@ fn polygamma_rejects_integer_operands() {
     }
 }
 
+#[test]
+fn polygamma_rejects_complex_operands() {
+    // polygamma is JAX standard_naryop([_float, _float]); complex operands are rejected
+    // too, not just integers (92d5m covered the integer path). ensure_float_operands
+    // accepts only true float dtypes, so a complex order or argument fails closed.
+    let cplx = eval_primitive(
+        Primitive::Complex,
+        &[scalar_f64(1.0), scalar_f64(2.0)],
+        &no_params(),
+    )
+    .expect("complex(1, 2) should construct a complex value");
+
+    for (case, order, x) in [
+        ("complex argument", scalar_f64(1.0), cplx.clone()),
+        ("complex order", cplx.clone(), scalar_f64(2.0)),
+    ] {
+        let err = eval_primitive(Primitive::Polygamma, &[order, x], &no_params())
+            .expect_err("JAX polygamma is float-only and must reject complex operands");
+        assert!(
+            err.to_string().contains("floating operands"),
+            "{case} returned unexpected polygamma error: {err}"
+        );
+    }
+}
+
 // --------------------------------------------------------------------------
 // Broadcast tests: verify NumPy-style broadcasting semantics
 // --------------------------------------------------------------------------
