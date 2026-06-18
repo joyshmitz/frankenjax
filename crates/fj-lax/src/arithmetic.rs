@@ -5410,6 +5410,23 @@ pub(crate) fn eval_unary_elementwise(
 
 /// Threaded variant of [`eval_unary_elementwise`] for the COMPUTE-bound
 /// transcendentals (lgamma, digamma, erf_inv, …) whose per-element cost
+/// `eval_unary_elementwise_parallel` with the JAX `standard_unop(_float | _complex)`
+/// dtype guard prepended: integer/bool operands are rejected (matching lax, which does
+/// not silently widen them to f64) while float and complex operands flow through
+/// unchanged. Used by the transcendental unops dispatched directly to the elementwise
+/// path (sqrt/rsqrt/asin/acos/atan/exp2/log2/expm1/log1p). The guard only adds the
+/// integer rejection; it does not alter the existing float/complex behaviour.
+pub(crate) fn eval_float_complex_unary(
+    primitive: Primitive,
+    inputs: &[Value],
+    op: impl Fn(f64) -> f64 + Sync,
+) -> Result<Value, EvalError> {
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
+    eval_unary_elementwise_parallel(primitive, inputs, op)
+}
+
 /// dominates memory traffic, so threading over elements scales (unlike cheap
 /// memory-bound ops such as neg/abs, which stay on the serial path). Threads
 /// `op` across a large dense-F64 tensor with scoped threads — each element is

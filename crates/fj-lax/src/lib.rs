@@ -34,9 +34,10 @@ use arithmetic::{
     eval_bessel_i1e, eval_betainc, eval_binary_elementwise, eval_clamp, eval_complex, eval_conj,
     eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general, eval_erf_inv, eval_exp,
     eval_fma, eval_igamma, eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf,
-    eval_is_nan, eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_polygamma, eval_real,
-    eval_round, eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
-    eval_unary_elementwise, eval_unary_elementwise_parallel, eval_unary_int_or_float, eval_zeta,
+    eval_float_complex_unary, eval_is_nan, eval_lgamma, eval_log, eval_neg, eval_nextafter,
+    eval_polygamma, eval_real, eval_round, eval_select, eval_select_n, eval_signbit, eval_sin,
+    eval_sinh, eval_tan, eval_tanh, eval_unary_elementwise, eval_unary_elementwise_parallel,
+    eval_unary_int_or_float, eval_zeta,
 };
 
 use comparison::eval_comparison;
@@ -284,8 +285,8 @@ fn eval_primitive_inner(
         Primitive::Abs => eval_abs(primitive, inputs),
         Primitive::Exp => eval_exp(primitive, inputs),
         Primitive::Log => eval_log(primitive, inputs),
-        Primitive::Log2 => eval_unary_elementwise_parallel(primitive, inputs, f64::log2),
-        Primitive::Exp2 => eval_unary_elementwise_parallel(primitive, inputs, f64::exp2),
+        Primitive::Log2 => eval_float_complex_unary(primitive, inputs, f64::log2),
+        Primitive::Exp2 => eval_float_complex_unary(primitive, inputs, f64::exp2),
         // Sinc carries a sin + div per element (compute-bound), so thread it like
         // the other transcendentals instead of the serial path.
         Primitive::Sinc => eval_unary_elementwise_parallel(primitive, inputs, |x| {
@@ -299,8 +300,8 @@ fn eval_primitive_inner(
         // sqrt / rsqrt are div-/sqrt-unit-bound (NOT pipelined like add/mul), so they are
         // compute-bound and thread like the other transcendentals; the parallel path falls
         // back to the identical serial dense map below the threshold (bit-for-bit identical).
-        Primitive::Sqrt => eval_unary_elementwise_parallel(primitive, inputs, f64::sqrt),
-        Primitive::Rsqrt => eval_unary_elementwise_parallel(primitive, inputs, |x| 1.0 / x.sqrt()),
+        Primitive::Sqrt => eval_float_complex_unary(primitive, inputs, f64::sqrt),
+        Primitive::Rsqrt => eval_float_complex_unary(primitive, inputs, |x| 1.0 / x.sqrt()),
         Primitive::Floor => eval_unary_elementwise(primitive, inputs, f64::floor),
         Primitive::Ceil => eval_unary_elementwise(primitive, inputs, f64::ceil),
         Primitive::Round => eval_round(primitive, inputs, params),
@@ -309,9 +310,9 @@ fn eval_primitive_inner(
         Primitive::Sin => eval_sin(primitive, inputs),
         Primitive::Cos => eval_cos(primitive, inputs),
         Primitive::Tan => eval_tan(primitive, inputs),
-        Primitive::Asin => eval_unary_elementwise_parallel(primitive, inputs, f64::asin),
-        Primitive::Acos => eval_unary_elementwise_parallel(primitive, inputs, f64::acos),
-        Primitive::Atan => eval_unary_elementwise_parallel(primitive, inputs, f64::atan),
+        Primitive::Asin => eval_float_complex_unary(primitive, inputs, f64::asin),
+        Primitive::Acos => eval_float_complex_unary(primitive, inputs, f64::acos),
+        Primitive::Atan => eval_float_complex_unary(primitive, inputs, f64::atan),
         Primitive::Deg2Rad => eval_unary_elementwise(primitive, inputs, f64::to_radians),
         Primitive::Rad2Deg => eval_unary_elementwise(primitive, inputs, f64::to_degrees),
         // Hyperbolic
@@ -322,8 +323,8 @@ fn eval_primitive_inner(
         Primitive::Acosh => eval_acosh(primitive, inputs),
         Primitive::Atanh => eval_atanh(primitive, inputs),
         // Additional math
-        Primitive::Expm1 => eval_unary_elementwise_parallel(primitive, inputs, f64::exp_m1),
-        Primitive::Log1p => eval_unary_elementwise_parallel(primitive, inputs, f64::ln_1p),
+        Primitive::Expm1 => eval_float_complex_unary(primitive, inputs, f64::exp_m1),
+        Primitive::Log1p => eval_float_complex_unary(primitive, inputs, f64::ln_1p),
         Primitive::Sign => eval_unary_int_or_float(
             primitive,
             inputs,
@@ -352,7 +353,7 @@ fn eval_primitive_inner(
         Primitive::Logistic => {
             // Sigmoid is compute-bound (an exp per element), so thread it like the
             // other transcendentals (exp/erf/tanh/…) instead of the serial path.
-            eval_unary_elementwise_parallel(primitive, inputs, |x| 1.0 / (1.0 + (-x).exp()))
+            eval_float_complex_unary(primitive, inputs, |x| 1.0 / (1.0 + (-x).exp()))
         }
         Primitive::Erf => eval_unary_elementwise_parallel(primitive, inputs, erf_approx),
         Primitive::Erfc => eval_unary_elementwise_parallel(primitive, inputs, erfc_approx),
