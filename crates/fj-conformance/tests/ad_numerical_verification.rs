@@ -4310,6 +4310,49 @@ fn clamp_vjp_routes_gradient_to_active_branch() {
 }
 
 #[test]
+fn select_vjp_routes_cotangent_per_predicate() {
+    // select(cond, on_true, on_false): the cotangent flows to on_true where cond is true
+    // and to on_false where it is false; the predicate gets zero gradient. Matches JAX's
+    // select transpose. The Select VJP had no AD coverage.
+    let params = BTreeMap::new();
+    // Build a bool predicate [true, false, true] via a comparison.
+    let cond = eval_primitive(
+        Primitive::Gt,
+        &[
+            make_f64_vector(&[3.0, 1.0, 3.0]),
+            make_f64_vector(&[2.0, 2.0, 2.0]),
+        ],
+        &params,
+    )
+    .unwrap();
+    let inputs = [
+        cond,
+        make_f64_vector(&[1.0, 2.0, 3.0]),
+        make_f64_vector(&[10.0, 20.0, 30.0]),
+    ];
+    let out = eval_primitive(Primitive::Select, &inputs, &params).unwrap();
+    let g = make_f64_vector(&[1.0, 1.0, 1.0]);
+    let vjp = fj_ad::vjp(
+        Primitive::Select,
+        &inputs,
+        std::slice::from_ref(&g),
+        std::slice::from_ref(&out),
+        &params,
+    )
+    .unwrap();
+    assert_eq!(
+        extract_f64_vec(&vjp[1]),
+        vec![1.0, 0.0, 1.0],
+        "on_true grad = g where cond is true"
+    );
+    assert_eq!(
+        extract_f64_vec(&vjp[2]),
+        vec![0.0, 1.0, 0.0],
+        "on_false grad = g where cond is false"
+    );
+}
+
+#[test]
 fn igamma_igammac_vjp_numerical() {
     // igamma(a, x): grad w.r.t. a (igamma_grad_a's dedicated series — the most error-prone)
     // AND x (x^(a-1)·e^{-x}/Gamma(a)). igammac = 1 - igamma, so its grads are negated.
