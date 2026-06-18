@@ -5061,10 +5061,13 @@ pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
 pub(crate) fn eval_asinh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
-            let z_sq = (a * a - b * b + 1.0, 2.0 * a * b);
-            let sqrt = complex_sqrt(z_sq);
-            let w = (a + sqrt.0, b + sqrt.1);
-            complex_log(w)
+            // asinh(z) = -i·asin(i·z). Routing through the robust (Hull-Fairgrieve-Tang)
+            // complex_asin avoids forming z² = (a²-b², 2ab), whose real part a*a - b*b
+            // OVERFLOWED to inf for large |z| (e.g. asinh(1e200) gave inf instead of
+            // ~log(2e200) ≈ 461). i·z = (-b, a); the trailing -i rotation maps asin's
+            // (re, im) to (im, -re). Principal branches align (C99 Annex G / numpy).
+            let s = complex_asin((-b, a));
+            (s.1, -s.0)
         })
     } else {
         eval_unary_elementwise_parallel(primitive, inputs, f64::asinh)

@@ -487,6 +487,24 @@ fn oracle_asinh_complex128_pure_imaginary() {
 }
 
 #[test]
+fn oracle_asinh_complex128_large_no_overflow() {
+    // Regression: complex asinh of a large magnitude must NOT overflow to inf. The
+    // old naive log(z + sqrt(z²+1)) formed z² (a*a - b*b) which overflowed for large
+    // |z|; asinh now routes through the robust complex_asin (asinh(z) = -i·asin(iz)).
+    // asinh(1e200) = log(1e200 + sqrt(1e400+1)) ≈ log(2e200) = ln(2) + 200·ln(10).
+    let input = make_complex128_tensor(&[], &[(1e200, 0.0)]);
+    let result = eval_primitive(Primitive::Asinh, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert!(
+        vec[0].0.is_finite() && vec[0].1.is_finite(),
+        "asinh(1e200) must be finite, got {:?}",
+        vec[0]
+    );
+    let expected_re = 2.0_f64.ln() + 200.0 * 10.0_f64.ln();
+    assert_complex_close(vec[0], (expected_re, 0.0), 1e-6, "asinh(1e200) ≈ ln(2e200)");
+}
+
+#[test]
 fn oracle_asinh_complex128_pure_real() {
     let x = 1.0_f64;
     let input = make_complex128_tensor(&[], &[(x, 0.0)]);
