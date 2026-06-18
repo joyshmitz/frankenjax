@@ -1380,6 +1380,39 @@ mod tests {
     }
 
     #[test]
+    fn cache_manager_ttl_file_backed_evict_failure_counter_surfaces_backend_failure() {
+        use super::backend::FileCache;
+        use super::eviction::{TtlLruCache, TtlLruConfig};
+        use super::CacheManager;
+
+        let parent_file =
+            std::env::temp_dir().join(format!("fj-cache-ttl-evict-file-{}", std::process::id()));
+        std::fs::write(&parent_file, b"not a directory").expect("parent marker should write");
+        let missing_dir = parent_file.join("cache");
+        let key = build_cache_key(&baseline_input()).unwrap();
+
+        let mut manager = CacheManager::new(Box::new(TtlLruCache::new(
+            FileCache::new(missing_dir),
+            TtlLruConfig::default(),
+        )));
+        assert_eq!(manager.evict_failure_count(), 0);
+
+        assert!(
+            !manager.evict(&key),
+            "failed TTL evict still reports that no entry was removed"
+        );
+        assert_eq!(
+            manager.evict_failure_count(),
+            1,
+            "CacheManager must expose evict failures through TtlLruCache"
+        );
+        assert_eq!(manager.put_failure_count(), 0);
+        assert_eq!(manager.clear_failure_count(), 0);
+
+        let _ = std::fs::remove_file(&parent_file);
+    }
+
+    #[test]
     fn key_determinism_multiple_calls() {
         let input = baseline_input();
         let keys: Vec<String> = (0..10).map(|_| key_hex(&input)).collect();
