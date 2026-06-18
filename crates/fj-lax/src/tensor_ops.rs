@@ -3838,6 +3838,7 @@ pub(crate) fn eval_dynamic_slice(
                 &slice_sizes,
                 &starts,
                 &in_strides,
+                &tensor.shape.dims,
                 contig_range,
             );
             return Ok(Value::Tensor($ctor(Shape { dims: out_dims }, out)?));
@@ -3918,20 +3919,44 @@ fn dynamic_slice_dense<T: Copy>(
     slice_sizes: &[usize],
     starts: &[usize],
     in_strides: &[usize],
+    in_dims: &[u32],
     contig_range: Option<(usize, usize)>,
 ) -> Vec<T> {
     if let Some((start, end)) = contig_range {
         return src[start..end].to_vec();
     }
-    let mut out = Vec::with_capacity(total);
-    let mut out_coords = vec![0_usize; rank];
-    for _ in 0..total {
-        let mut in_flat = 0_usize;
-        for ax in 0..rank {
-            in_flat += (out_coords[ax] + starts[ax]) * in_strides[ax];
+    // Largest trailing block of axes that copies a CONTIGUOUS source run verbatim:
+    // dynamic_slice steps by 1 per axis, so an axis joins the block iff every axis
+    // already INSIDE it fully spans its input dim (slice_size==in_dim) — the
+    // outermost block axis may be cropped. Such a block is `src[base..base+block_len]`
+    // for a base fixed by the outer axes plus the block axes' own start offsets;
+    // replicate it via extend_from_slice and decode only the outer axes. Common in
+    // scan/KV-cache windowing where inner spatial dims are full. Bit-identical; strict
+    // generalization — block_len==1 reproduces the per-element loop.
+    let mut block_len = 1_usize;
+    let mut block_start = rank;
+    for ax in (0..rank).rev() {
+        if block_start < rank && slice_sizes[block_start] != in_dims[block_start] as usize {
+            break;
         }
-        out.push(src[in_flat]);
-        for ax in (0..rank).rev() {
+        block_len *= slice_sizes[ax];
+        block_start = ax;
+    }
+
+    let block_base: usize = (block_start..rank)
+        .map(|ax| starts[ax] * in_strides[ax])
+        .sum();
+
+    let mut out = Vec::with_capacity(total);
+    let outer_total = total / block_len.max(1);
+    let mut out_coords = vec![0_usize; block_start];
+    for _ in 0..outer_total {
+        let mut base = block_base;
+        for ax in 0..block_start {
+            base += (out_coords[ax] + starts[ax]) * in_strides[ax];
+        }
+        out.extend_from_slice(&src[base..base + block_len]);
+        for ax in (0..block_start).rev() {
             out_coords[ax] += 1;
             if out_coords[ax] < slice_sizes[ax] {
                 break;
