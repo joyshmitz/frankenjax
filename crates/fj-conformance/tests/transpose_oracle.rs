@@ -261,6 +261,26 @@ fn oracle_transpose_4d_swap_middle() {
     assert_eq!(extract_shape(&result), vec![2, 4, 3, 5]);
 }
 
+#[test]
+fn oracle_transpose_4d_swap_middle_preserves_row_major_values() {
+    // Permutation (0, 2, 1, 3): [a, b, c, d] -> [a, c, b, d].
+    let input = make_i64_tensor(&[2, 2, 3, 2], (1..=24).collect());
+    let result = eval_primitive(
+        Primitive::Transpose,
+        &[input],
+        &transpose_params(&[0, 2, 1, 3]),
+    )
+    .unwrap();
+    assert_eq!(extract_shape(&result), vec![2, 3, 2, 2]);
+    assert_eq!(
+        extract_i64_vec(&result),
+        vec![
+            1, 2, 7, 8, 3, 4, 9, 10, 5, 6, 11, 12, 13, 14, 19, 20, 15, 16, 21, 22, 17,
+            18, 23, 24,
+        ]
+    );
+}
+
 // ======================== 1D Tests ========================
 
 #[test]
