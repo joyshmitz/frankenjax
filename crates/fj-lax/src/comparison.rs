@@ -272,6 +272,11 @@ pub(crate) fn eval_comparison(
                 {
                     return Ok(value);
                 }
+                if matches!(lhs.dtype, DType::Complex64 | DType::Complex128)
+                    && let Some(value) = eval_same_shape_complex_compare(primitive, lhs, rhs)?
+                {
+                    return Ok(value);
+                }
 
                 let mut elements = Vec::with_capacity(lhs.elements.len());
                 for (lhs, rhs) in lhs
@@ -526,6 +531,44 @@ fn eval_same_shape_f64_compare(
         ));
     }
 
+    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+        lhs.shape.clone(),
+        out,
+    )?)))
+}
+
+/// Same-shape complex Eq/Ne fast path producing a `DType::Bool` tensor. JAX allows
+/// eq/ne on complex (operands `_any`) but NOT ordered lt/le/gt/ge (`_ordered` excludes
+/// complex); this handles ONLY Eq/Ne and returns `None` otherwise, so ordered
+/// comparisons fall through to `compare_literals`, which raises the
+/// "ordered comparison is not supported for complex operands" error (matching JAX).
+/// Bit-for-bit identical to `compare_literals`' complex arm: component equality
+/// (`re == re && im == im`, negated for Ne — so NaN compares unequal, ±0 compares equal)
+/// over the packed `(re, im)` backing, into a dense `Vec<bool>` (1 byte/elem vs the
+/// 24-byte boxed Literal). Returns `None` if either operand is not dense-complex.
+fn eval_same_shape_complex_compare(
+    primitive: Primitive,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    if !matches!(primitive, Primitive::Eq | Primitive::Ne) {
+        return Ok(None);
+    }
+    let (Some(left), Some(right)) = (
+        lhs.elements.as_complex_slice(),
+        rhs.elements.as_complex_slice(),
+    ) else {
+        return Ok(None);
+    };
+    let is_eq = primitive == Primitive::Eq;
+    let out: Vec<bool> = left
+        .iter()
+        .zip(right)
+        .map(|(&(lre, lim), &(rre, rim))| {
+            let equal = lre == rre && lim == rim;
+            if is_eq { equal } else { !equal }
+        })
+        .collect();
     Ok(Some(Value::Tensor(TensorValue::new_bool_values(
         lhs.shape.clone(),
         out,
@@ -2074,6 +2117,84 @@ mod tests {
             dn * 1e3,
             bx / dn
         );
+    }
+
+    #[test]
+    fn complex_eq_ne_dense_matches_boxed_and_rejects_ordered() {
+        let pairs_a: Vec<(f64, f64)> = (0..32)
+            .map(|i| (i as f64 * 0.5 - 8.0, -(i as f64) * 0.25))
+            .collect();
+        let mut pairs_b = pairs_a.clone();
+        pairs_b[3] = (pairs_a[3].0 + 1.0, pairs_a[3].1); // differ in real
+        pairs_b[7] = (pairs_a[7].0, pairs_a[7].1 - 2.0); // differ in imag
+        pairs_b[10] = (f64::NAN, pairs_a[10].1); // NaN -> never equal (Eq false, Ne true)
+        let shape = Shape::vector(32);
+        let mk = |pairs: &[(f64, f64)], dense: bool| -> Value {
+            if dense {
+                Value::Tensor(
+                    TensorValue::new_complex_values(DType::Complex128, shape.clone(), pairs.to_vec())
+                        .unwrap(),
+                )
+            } else {
+                Value::Tensor(
+                    TensorValue::new_with_literal_buffer(
+                        DType::Complex128,
+                        shape.clone(),
+                        fj_core::LiteralBuffer::new(
+                            pairs
+                                .iter()
+                                .map(|&(re, im)| Literal::from_complex128(re, im))
+                                .collect(),
+                        ),
+                    )
+                    .unwrap(),
+                )
+            }
+        };
+        let bools = |v: &Value| -> Vec<bool> {
+            v.as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    Literal::Bool(x) => *x,
+                    other => panic!("expected Bool, got {other:?}"),
+                })
+                .collect()
+        };
+        for &prim in &[Primitive::Eq, Primitive::Ne] {
+            let int_cmp = move |a: i128, b: i128| if prim == Primitive::Eq { a == b } else { a != b };
+            let float_cmp = move |a: f64, b: f64| if prim == Primitive::Eq { a == b } else { a != b };
+            let d = eval_comparison(
+                prim,
+                &[mk(&pairs_a, true), mk(&pairs_b, true)],
+                int_cmp,
+                float_cmp,
+            )
+            .unwrap();
+            let b = eval_comparison(
+                prim,
+                &[mk(&pairs_a, false), mk(&pairs_b, false)],
+                int_cmp,
+                float_cmp,
+            )
+            .unwrap();
+            assert_eq!(bools(&d), bools(&b), "{prim:?} dense vs boxed");
+            assert!(
+                d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
+                "{prim:?} dense bool output"
+            );
+        }
+        // Ordered comparisons on complex must still error (JAX `_ordered` excludes complex).
+        for &prim in &[Primitive::Lt, Primitive::Le, Primitive::Gt, Primitive::Ge] {
+            let r = eval_comparison(
+                prim,
+                &[mk(&pairs_a, true), mk(&pairs_b, true)],
+                |a: i128, b: i128| a < b,
+                |a: f64, b: f64| a < b,
+            );
+            assert!(r.is_err(), "{prim:?} on complex must error");
+        }
     }
 
     fn half_lit(dt: DType, v: f32) -> Literal {
