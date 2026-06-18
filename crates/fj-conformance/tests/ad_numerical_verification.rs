@@ -1310,7 +1310,9 @@ fn cbrt_vjp_numerical_complex64() {
 fn float_only_complex_vjp_fails_closed() {
     let z = Value::Scalar(Literal::from_complex64(2.0, 0.0));
     let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
-    for prim in [Primitive::Lgamma, Primitive::BesselI0e] {
+    // Lgamma's VJP evaluates Digamma, BesselI0e's evaluates BesselI0e, and ErfInv's
+    // evaluates ErfInv — all float-only forward ops that fail closed on complex.
+    for prim in [Primitive::Lgamma, Primitive::BesselI0e, Primitive::ErfInv] {
         let result = fj_ad::vjp_single(prim, std::slice::from_ref(&z), &g, &BTreeMap::new());
         assert!(
             result.is_err(),
