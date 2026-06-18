@@ -92,6 +92,26 @@ fn oracle_conv_1d_valid_stride2() {
 }
 
 #[test]
+fn oracle_conv_1d_rhs_dilation_atrous() {
+    // Atrous (dilated) convolution: rhs_dilation=2 spaces the 2 kernel taps 2 apart,
+    // so the effective kernel is [1,0,1] (span 3). Supported in eval_conv but
+    // untested at the conformance/parity layer.
+    // input=[1,2,3,4,5], kernel=[1,1], valid: out[p] = in[p] + in[p+2]
+    //   span = (2-1)*2 + 1 = 3, output length = (5-3)/1 + 1 = 3
+    //   p=0: 1+3=4; p=1: 2+4=6; p=2: 3+5=8
+    let lhs = make_f64_tensor(&[1, 5, 1], vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    let rhs = make_f64_tensor(&[2, 1, 1], vec![1.0, 1.0]);
+    let mut params = conv_params("valid", "1");
+    params.insert("rhs_dilation".to_string(), "2".to_string());
+    let result = eval_primitive(Primitive::Conv, &[lhs, rhs], &params).unwrap();
+    assert_eq!(extract_shape(&result), vec![1, 3, 1]);
+    let vals = extract_f64_vec(&result);
+    assert!((vals[0] - 4.0).abs() < 1e-10, "in[0]+in[2] = 4");
+    assert!((vals[1] - 6.0).abs() < 1e-10, "in[1]+in[3] = 6");
+    assert!((vals[2] - 8.0).abs() < 1e-10, "in[2]+in[4] = 8");
+}
+
+#[test]
 fn oracle_conv_1d_f32_preserves_literal_dtype() {
     let lhs = make_f32_tensor(&[1, 3, 1], vec![1.0, 2.0, 3.0]);
     let rhs = make_f32_tensor(&[2, 1, 1], vec![1.0, 1.0]);
