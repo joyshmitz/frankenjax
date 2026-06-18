@@ -167,11 +167,12 @@ impl<B: CacheBackend> CacheBackend for LruCache<B> {
     }
 
     fn clear(&mut self) {
-        {
+        let clear_failures_before = self.inner.clear_failure_count();
+        self.inner.clear();
+        if self.inner.clear_failure_count() == clear_failures_before {
             let mut order = self.order.lock().unwrap_or_else(|e| e.into_inner());
             order.clear();
         }
-        self.inner.clear();
     }
 
     fn put_failure_count(&self) -> u64 {
@@ -323,8 +324,11 @@ impl<B: CacheBackend> CacheBackend for TtlLruCache<B> {
     }
 
     fn clear(&mut self) {
-        self.insert_times.clear();
+        let clear_failures_before = self.inner.clear_failure_count();
         self.inner.clear();
+        if self.inner.clear_failure_count() == clear_failures_before {
+            self.insert_times.clear();
+        }
     }
 
     fn put_failure_count(&self) -> u64 {
@@ -500,6 +504,48 @@ mod tests {
 
         fn evict_failure_count(&self) -> u64 {
             self.evict_failures
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingClearBackend {
+        entries: HashMap<String, CachedArtifact>,
+        fail_next_clear: bool,
+        clear_failures: u64,
+    }
+
+    impl CacheBackend for FailingClearBackend {
+        fn get(&self, key: &CacheKey) -> Option<CachedArtifact> {
+            self.entries.get(&key.as_string()).cloned()
+        }
+
+        fn put(&mut self, key: &CacheKey, artifact: CachedArtifact) {
+            self.entries.insert(key.as_string(), artifact);
+        }
+
+        fn evict(&mut self, key: &CacheKey) -> bool {
+            self.entries.remove(&key.as_string()).is_some()
+        }
+
+        fn stats(&self) -> CacheStats {
+            CacheStats {
+                entry_count: self.entries.len(),
+                total_bytes: self.entries.values().map(|a| a.data.len() as u64).sum(),
+            }
+        }
+
+        fn clear(&mut self) {
+            if self.fail_next_clear {
+                self.fail_next_clear = false;
+                self.clear_failures += 1;
+                return;
+            }
+
+            self.entries.clear();
+        }
+
+        fn clear_failure_count(&self) -> u64 {
+            self.clear_failures
         }
     }
 
@@ -802,6 +848,50 @@ mod tests {
         cache.clear();
         assert_eq!(cache.stats().entry_count, 0);
         assert_eq!(cache.expired_count(), 0);
+    }
+
+    #[test]
+    fn ttl_lru_failed_clear_keeps_expiry_metadata_to_block_stale_hit() {
+        let config = TtlLruConfig {
+            lru: LruConfig::default(),
+            ttl_secs: 1,
+        };
+        let mut cache = TtlLruCache::new(FailingClearBackend::default(), config);
+        let key = test_key("a");
+
+        cache.put(&key, test_artifact(b"stale"));
+        cache.insert_times.insert(
+            key.clone(),
+            std::time::Instant::now() - std::time::Duration::from_secs(2),
+        );
+        cache.inner.inner.fail_next_clear = true;
+
+        cache.clear();
+
+        assert_eq!(cache.clear_failure_count(), 1);
+        assert_eq!(
+            cache.expired_count(),
+            1,
+            "failed clear must leave TTL metadata in place"
+        );
+        {
+            let order = cache.inner.order.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(
+                order.len(),
+                1,
+                "failed clear must leave LRU order metadata in place"
+            );
+            assert_eq!(order.front(), Some(&key));
+        }
+        assert!(
+            cache.get(&key).is_none(),
+            "failed clear must not make expired stale bytes readable again"
+        );
+        assert_eq!(
+            cache.stats().entry_count,
+            1,
+            "backend entry remains present because clear failed"
+        );
     }
 
     #[test]
