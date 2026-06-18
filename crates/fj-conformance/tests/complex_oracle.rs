@@ -480,3 +480,20 @@ fn metamorphic_complex_exp_addition_is_multiplication() {
     let expected = extract_complex_vec(&prod);
     assert_complex_close(&exp_sum, &expected, 1e-9, "exp(a+b) == exp(a)*exp(b)");
 }
+
+#[test]
+fn metamorphic_complex_pythagorean_identity() {
+    // sin(z)^2 + cos(z)^2 == 1 for every complex z. Exercises complex_sin and
+    // complex_cos (eval_sin/eval_cos route complex through eval_unary_complex_map)
+    // which the exp/log/sqrt/reciprocal suite does not touch. Imag parts kept
+    // moderate so the cosh^2 - sinh^2 cancellation stays well-conditioned.
+    let pts = [(1.5, 0.7), (-0.8, 1.2), (2.0, -1.0), (0.3, 0.4)];
+    let z = complex_from_pairs(&pts);
+    let s = unary(Primitive::Sin, &z);
+    let c = unary(Primitive::Cos, &z);
+    let s2 = eval_primitive(Primitive::Mul, &[s.clone(), s], &no_params()).unwrap();
+    let c2 = eval_primitive(Primitive::Mul, &[c.clone(), c], &no_params()).unwrap();
+    let sum = eval_primitive(Primitive::Add, &[s2, c2], &no_params()).unwrap();
+    let ones: Vec<(f64, f64)> = pts.iter().map(|_| (1.0, 0.0)).collect();
+    assert_complex_close(&sum, &ones, 1e-9, "sin(z)^2 + cos(z)^2 == 1");
+}
