@@ -89,7 +89,8 @@ pub fn capture_env() -> TestLogEnv {
 }
 
 pub fn fixture_id_from_json<T: Serialize>(fixture: &T) -> Result<String, serde_json::Error> {
-    let bytes = serde_json::to_vec(fixture)?;
+    let canonical = serde_json::to_value(fixture)?;
+    let bytes = serde_json::to_vec(&canonical)?;
     let digest = Sha256::digest(&bytes);
     Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -156,6 +157,7 @@ mod tests {
         TEST_LOG_SCHEMA_VERSION, TestLogV1, TestMode, TestResult, fixture_id_from_json,
         property_test_case_count, test_id,
     };
+    use serde::ser::SerializeMap;
 
     #[test]
     fn test_fixture_digest_deterministic_json() {
@@ -167,6 +169,31 @@ mod tests {
         let digest_b = fixture_id_from_json(&fixture).expect("digest should build");
         assert_eq!(digest_a, digest_b);
         assert_eq!(digest_a.len(), 64);
+    }
+
+    #[test]
+    fn test_fixture_digest_canonicalizes_object_key_order() {
+        struct OrderedObject(Vec<(&'static str, i64)>);
+
+        impl serde::Serialize for OrderedObject {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                let mut map = serializer.serialize_map(Some(self.0.len()))?;
+                for (key, value) in &self.0 {
+                    map.serialize_entry(key, value)?;
+                }
+                map.end()
+            }
+        }
+
+        let forward = OrderedObject(vec![("a", 1), ("b", 2), ("c", 3)]);
+        let reverse = OrderedObject(vec![("c", 3), ("b", 2), ("a", 1)]);
+
+        let digest_forward = fixture_id_from_json(&forward).expect("digest should build");
+        let digest_reverse = fixture_id_from_json(&reverse).expect("digest should build");
+        assert_eq!(digest_forward, digest_reverse);
     }
 
     #[test]
