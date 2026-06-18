@@ -3624,6 +3624,54 @@ fn bench_select_64k_i64_literal_reference(c: &mut Criterion) {
     });
 }
 
+fn select_64k_bool_inputs(dense: bool) -> [Value; 3] {
+    let dims = vec![LARGE_ELEMENTWISE_LEN as u32];
+    let cond: Vec<bool> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| (i.wrapping_mul(17).wrapping_add(3)) % 11 < 5)
+        .collect();
+    let t: Vec<bool> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| (i ^ (i >> 2)) & 1 == 0)
+        .collect();
+    let f: Vec<bool> = (0..LARGE_ELEMENTWISE_LEN)
+        .map(|i| i.is_multiple_of(3))
+        .collect();
+    let mk = |values: Vec<bool>| {
+        if dense {
+            Value::Tensor(
+                TensorValue::new_bool_values(Shape { dims: dims.clone() }, values).unwrap(),
+            )
+        } else {
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Bool,
+                    Shape { dims: dims.clone() },
+                    fj_core::LiteralBuffer::new(
+                        values.into_iter().map(Literal::Bool).collect(),
+                    ),
+                )
+                .unwrap(),
+            )
+        }
+    };
+    [mk(cond), mk(t), mk(f)]
+}
+
+fn bench_select_64k_bool_vec(c: &mut Criterion) {
+    let inputs = select_64k_bool_inputs(true);
+    let p = no_params();
+    c.bench_function("eval/select_64k_bool_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Select, &inputs, &p))
+    });
+}
+
+fn bench_select_64k_bool_literal_reference(c: &mut Criterion) {
+    let inputs = select_64k_bool_inputs(false);
+    let p = no_params();
+    c.bench_function("eval/select_64k_bool_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Select, &inputs, &p))
+    });
+}
+
 fn select_n_64k_u32_inputs(dense: bool) -> [Value; 4] {
     let dims = vec![LARGE_ELEMENTWISE_LEN as u32];
     let idxv: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64).map(|i| i % 3).collect();
@@ -5811,6 +5859,8 @@ criterion_group!(
     bench_select_1k,
     bench_select_64k_i64_vec,
     bench_select_64k_i64_literal_reference,
+    bench_select_64k_bool_vec,
+    bench_select_64k_bool_literal_reference,
     bench_select_n_64k_u32_vec,
     bench_select_n_64k_u32_literal_reference,
     bench_select_n_64k_u32_boolwords_index_vec,

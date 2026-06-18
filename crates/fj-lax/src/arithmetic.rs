@@ -6290,6 +6290,93 @@ fn select_unsigned_same_shape_fast_path(
     Ok(None)
 }
 
+#[inline]
+fn bool_backing_value(
+    slice: Option<&[bool]>,
+    words: Option<(&[u64], usize)>,
+    index: usize,
+) -> bool {
+    if let Some(values) = slice {
+        values[index]
+    } else if let Some((words, _)) = words {
+        (words[index / 64] >> (index % 64)) & 1 != 0
+    } else {
+        unreachable!("caller checked bool backing")
+    }
+}
+
+/// Dense/packed Bool same-shape `select` fast path: mask algebra such as
+/// `where(mask, lhs_mask, rhs_mask)` is a pure boolean mux. Keep it out of the
+/// boxed `Literal` loop and preserve packed BoolWords when any input is packed.
+fn select_bool_same_shape_fast_path(
+    cond: &TensorValue,
+    on_true: &TensorValue,
+    on_false: &TensorValue,
+) -> Result<Option<Value>, EvalError> {
+    let cond_slice = cond.elements.as_bool_slice();
+    let true_slice = on_true.elements.as_bool_slice();
+    let false_slice = on_false.elements.as_bool_slice();
+    let cond_words = cond.elements.as_bool_words();
+    let true_words = on_true.elements.as_bool_words();
+    let false_words = on_false.elements.as_bool_words();
+    if (cond_slice.is_none() && cond_words.is_none())
+        || (true_slice.is_none() && true_words.is_none())
+        || (false_slice.is_none() && false_words.is_none())
+    {
+        return Ok(None);
+    }
+
+    let len = cond.elements.len();
+    let word_len_matches = |words: Option<(&[u64], usize)>| {
+        words.is_none_or(|(_, word_len)| word_len == len)
+    };
+    if !word_len_matches(cond_words)
+        || !word_len_matches(true_words)
+        || !word_len_matches(false_words)
+    {
+        return Ok(None);
+    }
+
+    if let (Some(conds), Some(true_values), Some(false_values)) =
+        (cond_slice, true_slice, false_slice)
+    {
+        let out: Vec<bool> = conds
+            .iter()
+            .zip(true_values)
+            .zip(false_values)
+            .map(|((&flag, &tv), &fv)| if flag { tv } else { fv })
+            .collect();
+        return Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+            cond.shape.clone(),
+            out,
+        )?)));
+    }
+
+    let mut out_words = vec![0_u64; len.div_ceil(64)];
+    for i in 0..len {
+        let flag = bool_backing_value(cond_slice, cond_words, i);
+        let selected = if flag {
+            bool_backing_value(true_slice, true_words, i)
+        } else {
+            bool_backing_value(false_slice, false_words, i)
+        };
+        if selected {
+            out_words[i / 64] |= 1_u64 << (i % 64);
+        }
+    }
+    let Some(buffer) = fj_core::LiteralBuffer::from_bool_words(out_words, len) else {
+        return Err(EvalError::Unsupported {
+            primitive: Primitive::Select,
+            detail: "internal bool select word length mismatch".to_owned(),
+        });
+    };
+    Ok(Some(Value::Tensor(TensorValue::new_with_literal_buffer(
+        DType::Bool,
+        cond.shape.clone(),
+        buffer,
+    )?)))
+}
+
 /// Dense fast path for `select(tensor_cond, scalar_true, scalar_false)` — the
 /// `jnp.where(mask, a, b)` masking idiom with scalar branches. Reads the dense
 /// Bool cond slice and writes the chosen scalar straight into a dense f64/i64
@@ -6354,6 +6441,12 @@ fn select_scalar_from_bools(
         (Literal::U64(tv), Literal::U64(fv)) => {
             let out: Vec<u64> = bools.map(|c| if c { tv } else { fv }).collect();
             Ok(Some(Value::Tensor(TensorValue::new_u64_values(shape, out)?)))
+        }
+        (Literal::Bool(tv), Literal::Bool(fv)) => {
+            let out: Vec<bool> = bools.map(|c| if c { tv } else { fv }).collect();
+            Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+                shape, out,
+            )?)))
         }
         (Literal::Complex128Bits(tre, tim), Literal::Complex128Bits(fre, fim)) => {
             let t = (f64::from_bits(tre), f64::from_bits(tim));
@@ -6474,6 +6567,13 @@ pub(crate) fn eval_select(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                     primitive,
                     detail: "select requires all inputs to have the same shape".to_owned(),
                 });
+            }
+            if cond.dtype == DType::Bool
+                && on_true.dtype == DType::Bool
+                && on_false.dtype == DType::Bool
+                && let Some(value) = select_bool_same_shape_fast_path(cond, on_true, on_false)?
+            {
+                return Ok(value);
             }
             if cond.dtype == DType::Bool
                 && on_true.dtype == DType::F64
@@ -21982,6 +22082,120 @@ mod tests {
             "u64 select"
         );
         assert_eq!(dense.as_tensor().unwrap().dtype, DType::U64);
+    }
+
+    #[test]
+    fn bool_select_dense_and_boolwords_match_generic() {
+        // Boolean mask algebra should not box every selected bool. Dense bool
+        // inputs stay dense, and packed BoolWords inputs stay packed.
+        let p = std::collections::BTreeMap::new();
+        let n = 130usize;
+        let dims = vec![n as u32];
+        let cond: Vec<bool> = (0..n).map(|i| (i.wrapping_mul(17) + 3) % 11 < 5).collect();
+        let t: Vec<bool> = (0..n).map(|i| (i ^ (i >> 2)) & 1 == 0).collect();
+        let f: Vec<bool> = (0..n).map(|i| i.is_multiple_of(3)).collect();
+        let dense_bool = |data: &[bool]| bool_tensor(&dims, data);
+        let boxed_bool = |data: &[bool]| {
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Bool,
+                    Shape { dims: dims.clone() },
+                    fj_core::LiteralBuffer::new(
+                        data.iter().copied().map(Literal::Bool).collect(),
+                    ),
+                )
+                .unwrap(),
+            )
+        };
+        let words_bool = |data: &[bool]| {
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (i, &flag) in data.iter().enumerate() {
+                if flag {
+                    words[i / 64] |= 1_u64 << (i % 64);
+                }
+            }
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Bool,
+                    Shape { dims: dims.clone() },
+                    fj_core::LiteralBuffer::from_bool_words(words, n).unwrap(),
+                )
+                .unwrap(),
+            )
+        };
+        let bits = |value: &Value| -> Vec<bool> {
+            value
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|literal| match literal {
+                    Literal::Bool(flag) => *flag,
+                    other => panic!("expected bool literal, got {other:?}"),
+                })
+                .collect()
+        };
+
+        let dense = crate::eval_primitive(
+            Primitive::Select,
+            &[dense_bool(&cond), dense_bool(&t), dense_bool(&f)],
+            &p,
+        )
+        .unwrap();
+        let boxed = crate::eval_primitive(
+            Primitive::Select,
+            &[boxed_bool(&cond), boxed_bool(&t), boxed_bool(&f)],
+            &p,
+        )
+        .unwrap();
+        assert_eq!(bits(&dense), bits(&boxed), "dense bool select");
+        assert!(
+            dense.as_tensor().unwrap().elements.as_bool_slice().is_some(),
+            "dense bool select output"
+        );
+
+        let packed = crate::eval_primitive(
+            Primitive::Select,
+            &[words_bool(&cond), words_bool(&t), words_bool(&f)],
+            &p,
+        )
+        .unwrap();
+        assert_eq!(bits(&packed), bits(&boxed), "BoolWords bool select");
+        assert!(
+            packed.as_tensor().unwrap().elements.as_bool_words().is_some(),
+            "BoolWords bool select output"
+        );
+
+        let scalar_dense = crate::eval_primitive(
+            Primitive::Select,
+            &[
+                words_bool(&cond),
+                Value::Scalar(Literal::Bool(true)),
+                Value::Scalar(Literal::Bool(false)),
+            ],
+            &p,
+        )
+        .unwrap();
+        let scalar_boxed = crate::eval_primitive(
+            Primitive::Select,
+            &[
+                boxed_bool(&cond),
+                Value::Scalar(Literal::Bool(true)),
+                Value::Scalar(Literal::Bool(false)),
+            ],
+            &p,
+        )
+        .unwrap();
+        assert_eq!(bits(&scalar_dense), bits(&scalar_boxed), "scalar bool branches");
+        assert!(
+            scalar_dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_bool_slice()
+                .is_some(),
+            "scalar bool branch output"
+        );
     }
 
     #[test]
