@@ -1196,4 +1196,25 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn differential_logsumexp_matches_naive_definition_in_stable_regime() {
+        // logsumexp(x) == ln(sum(exp(x))) for moderate values where the naive sum
+        // doesn't overflow — cross-validates the numerically-stabilized impl against
+        // the raw mathematical definition (non-circular, raw f64).
+        let cases: Vec<Vec<f64>> = vec![
+            vec![0.0, 0.0],
+            vec![1.0, 2.0, 3.0],
+            vec![-2.0, -1.0, 0.5, 1.5],
+            vec![5.0, -3.0, 2.0],
+            vec![-10.0, -10.0, -10.0],
+        ];
+        for x in &cases {
+            let naive = x.iter().map(|&v| v.exp()).sum::<f64>().ln();
+            assert!(
+                approx_eq(logsumexp(x), naive, 1e-10),
+                "logsumexp({x:?}) vs ln(sum(exp(x)))"
+            );
+        }
+    }
 }
