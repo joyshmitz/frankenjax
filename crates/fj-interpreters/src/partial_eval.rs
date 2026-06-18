@@ -1407,7 +1407,7 @@ fn infer_equation_output_avals(
         Eigh => Ok(infer_eigh_output_avals(first_input)),
         Slogdet => Ok(infer_slogdet_output_avals(first_input)),
         Eig => Ok(infer_eig_output_avals(first_input)),
-        TopK => Ok(infer_topk_output_avals(first_input, eqn)),
+        TopK => infer_topk_output_avals(first_input, eqn),
         Solve => Ok(infer_solve_output_avals(input_avals)),
         // Complex is binary — the dtype/shape depend on BOTH inputs, which the
         // single-input infer_equation_output_aval can't see.
@@ -2097,21 +2097,29 @@ fn infer_eig_output_avals(input: &AbstractValue) -> Vec<AbstractValue> {
     ]
 }
 
-fn infer_topk_output_avals(input: &AbstractValue, eqn: &Equation) -> Vec<AbstractValue> {
+fn infer_topk_output_avals(
+    input: &AbstractValue,
+    eqn: &Equation,
+) -> Result<Vec<AbstractValue>, PartialEvalError> {
     // eval_top_k returns (values: same dtype, indices: I64), both with the last
     // axis replaced by k.
     let rank = input.shape.dims.len();
     if rank == 0 {
-        return vec![input.clone(); eqn.outputs.len()];
+        return Ok(vec![input.clone(); eqn.outputs.len()]);
     }
+    // top_k requires `k` (no lax default); the old fallback defaulted a missing/malformed
+    // k to the last-axis size (i.e. "all"), staging a wrong residual shape. Fail closed.
     let k = eqn
         .params
         .get("k")
         .and_then(|s| s.trim().parse::<u32>().ok())
-        .unwrap_or(input.shape.dims[rank - 1]);
+        .ok_or_else(|| PartialEvalError::ShapeInference {
+            primitive: eqn.primitive,
+            detail: "top_k requires a valid 'k' param".to_owned(),
+        })?;
     let mut out_dims = input.shape.dims.clone();
     out_dims[rank - 1] = k;
-    vec![
+    Ok(vec![
         AbstractValue {
             dtype: input.dtype,
             shape: Shape {
@@ -2122,7 +2130,7 @@ fn infer_topk_output_avals(input: &AbstractValue, eqn: &Equation) -> Vec<Abstrac
             dtype: DType::I64,
             shape: Shape { dims: out_dims },
         },
-    ]
+    ])
 }
 
 fn infer_solve_output_avals(input_avals: &[AbstractValue]) -> Vec<AbstractValue> {
