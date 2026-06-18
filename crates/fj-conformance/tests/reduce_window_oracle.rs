@@ -456,6 +456,28 @@ fn oracle_reduce_window_2d_max_basic() {
 }
 
 #[test]
+fn oracle_reduce_window_2d_max_window_dilation_atrous() {
+    // 2D atrous (dilated) max pooling — the realistic CNN dilated-pooling case.
+    // 3x3 input, 2x2 window, window_dilation 2x2 -> effective 3x3 window, so a valid
+    // pool yields a single 1x1 output covering the dilated corners {(0,0),(0,2),
+    // (2,0),(2,2)} = {1,3,7,9}, max = 9.
+    let input = make_f64_tensor(&[3, 3], (1..=9).map(|i| i as f64).collect());
+    let mut params = max_window("2,2", "1,1", "valid");
+    params.insert("window_dilation".to_string(), "2,2".to_string());
+    let result = eval_primitive(Primitive::ReduceWindow, &[input], &params).unwrap();
+    assert_eq!(
+        extract_shape(&result),
+        vec![1, 1],
+        "3x3 input, effective 3x3 dilated window -> 1x1 output"
+    );
+    let vals = extract_f64_vec(&result);
+    assert!(
+        (vals[0] - 9.0).abs() < 1e-10,
+        "max of dilated corners {{1,3,7,9}} = 9"
+    );
+}
+
+#[test]
 fn oracle_reduce_window_2d_max_stride2() {
     // 4x4 input, 2x2 window, stride 2 -> 2x2 output
     let input = make_f64_tensor(&[4, 4], (1..=16).map(|i| i as f64).collect());
