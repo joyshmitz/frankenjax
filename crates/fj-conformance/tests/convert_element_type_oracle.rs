@@ -291,6 +291,30 @@ fn convert_element_type_i64_to_f16_rounds_at_2_pow_11_boundary() {
 }
 
 #[test]
+fn convert_element_type_i64_to_bf16_rounds_at_2_pow_8_boundary() {
+    // bf16 has a 7-bit mantissa, so integers above 2^8 = 256 are not all
+    // representable (the step is 2 there). i64 -> bf16 rounds to nearest-even (IEEE):
+    // 256 is exact, 257 is halfway between 256 and 258 and rounds to the even 256.
+    // Verified by widening the bf16 result back to f64 (exact for these).
+    let input = i64_tensor(&[2], &[256, 257]);
+    let half = convert(input, "bf16").expect("i64 to bf16 conversion should succeed");
+    assert_eq!(half.dtype(), DType::BF16);
+    let back = convert(half, "f64").expect("bf16 to f64 conversion should succeed");
+    let vals: Vec<f64> = back
+        .as_tensor()
+        .expect("expected tensor")
+        .elements
+        .iter()
+        .map(|l| l.as_f64().expect("expected f64"))
+        .collect();
+    assert_eq!(
+        vals,
+        vec![256.0, 256.0],
+        "i64 -> bf16 must round to nearest-even at the 2^8 mantissa boundary"
+    );
+}
+
+#[test]
 fn convert_element_type_bf16_to_f32_widens_exactly() {
     // bf16 is literally the top 16 bits of f32 (same exponent range, 7-bit mantissa),
     // so widening bf16 -> f32 is exact (mantissa zero-extends). Use values exactly
