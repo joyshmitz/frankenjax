@@ -240,6 +240,35 @@ fn sha256_hex(bytes: &[u8]) -> String {
 // ======================== Cholesky ========================
 
 #[test]
+fn oracle_det_value_and_multiplicativity() {
+    // det forward VALUE is only incidentally exercised at the conformance layer (via
+    // the AD VJP/JVP tests); pin a direct 2x2 value plus the multiplicativity identity
+    // det(A@B) == det(A)*det(B) (oracle-free for the latter).
+    let scalar = |v: &Value| -> f64 {
+        match v {
+            Value::Scalar(l) => l.as_f64().unwrap(),
+            Value::Tensor(t) => t.elements[0].as_f64().unwrap(),
+        }
+    };
+    let det = |m: &Value| -> f64 {
+        scalar(&eval_primitive_multi(Primitive::Det, std::slice::from_ref(m), &no_params()).unwrap()[0])
+    };
+    let a = make_f64_matrix(2, 2, &[1.0, 2.0, 3.0, 4.0]);
+    let b = make_f64_matrix(2, 2, &[2.0, 1.0, 0.0, 3.0]);
+    let det_a = det(&a);
+    let det_b = det(&b);
+    assert!((det_a + 2.0).abs() < 1e-10, "det([[1,2],[3,4]]) = -2, got {det_a}");
+    assert!((det_b - 6.0).abs() < 1e-10, "det([[2,1],[0,3]]) = 6, got {det_b}");
+    let ab = eval_primitive_multi(Primitive::Dot, &[a, b], &no_params()).unwrap();
+    let det_ab = det(&ab[0]);
+    assert!(
+        (det_ab - det_a * det_b).abs() < 1e-9,
+        "det(A@B)={det_ab} must equal det(A)*det(B)={}",
+        det_a * det_b
+    );
+}
+
+#[test]
 fn oracle_cholesky_2x2_identity() {
     // Cholesky of I₂ = I₂
     let a = make_f64_matrix(2, 2, &[1.0, 0.0, 0.0, 1.0]);
