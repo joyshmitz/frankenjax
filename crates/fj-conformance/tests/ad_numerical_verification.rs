@@ -4219,6 +4219,49 @@ fn integer_pow_vjp_zero_exponent_and_general() {
 }
 
 #[test]
+fn binary_elementwise_vjps_hypot_logaddexp() {
+    // VJPs for Hypot / LogAddExp / LogAddExp2 were untested. Formulas (matching JAX):
+    //   hypot:      d/dx = x/h,          d/dy = y/h
+    //   logaddexp:  d/dx = sigmoid(x-y), d/dy = sigmoid(y-x)   (grads sum to 1)
+    //   logaddexp2: d/dx = 2^(x-lae2),   d/dy = 2^(y-lae2)
+    let vjp2 = |prim: Primitive, x: f64, y: f64| -> (f64, f64) {
+        let inputs = [Value::scalar_f64(x), Value::scalar_f64(y)];
+        let g = Value::scalar_f64(1.0);
+        let params = BTreeMap::new();
+        let out = eval_primitive(prim, &inputs, &params).unwrap();
+        let vjp = fj_ad::vjp(
+            prim,
+            &inputs,
+            std::slice::from_ref(&g),
+            std::slice::from_ref(&out),
+            &params,
+        )
+        .unwrap();
+        (extract_f64_scalar(&vjp[0]), extract_f64_scalar(&vjp[1]))
+    };
+    // hypot(3,4) = 5 -> grads (3/5, 4/5)
+    let (hx, hy) = vjp2(Primitive::Hypot, 3.0, 4.0);
+    assert!(
+        (hx - 0.6).abs() < 1e-9 && (hy - 0.8).abs() < 1e-9,
+        "hypot grad = (3/5, 4/5), got ({hx}, {hy})"
+    );
+    // logaddexp(1,0) -> grads (sigmoid(1), sigmoid(-1)); they sum to 1
+    let (lx, ly) = vjp2(Primitive::LogAddExp, 1.0, 0.0);
+    let s = 1.0 / (1.0 + (-1.0_f64).exp());
+    assert!(
+        (lx - s).abs() < 1e-9 && (ly - (1.0 - s)).abs() < 1e-9,
+        "logaddexp grad = (sigmoid(1), sigmoid(-1)), got ({lx}, {ly})"
+    );
+    assert!((lx + ly - 1.0).abs() < 1e-9, "logaddexp grads must sum to 1");
+    // logaddexp2(1,0): 2^x/(2^x+2^y) = 2/3, 1/3
+    let (l2x, l2y) = vjp2(Primitive::LogAddExp2, 1.0, 0.0);
+    assert!(
+        (l2x - 2.0 / 3.0).abs() < 1e-9 && (l2y - 1.0 / 3.0).abs() < 1e-9,
+        "logaddexp2 grad = (2/3, 1/3), got ({l2x}, {l2y})"
+    );
+}
+
+#[test]
 fn igamma_igammac_vjp_numerical() {
     // igamma(a, x): grad w.r.t. a (igamma_grad_a's dedicated series — the most error-prone)
     // AND x (x^(a-1)·e^{-x}/Gamma(a)). igammac = 1 - igamma, so its grads are negated.
