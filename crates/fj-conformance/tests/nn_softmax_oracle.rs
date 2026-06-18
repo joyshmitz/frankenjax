@@ -100,6 +100,31 @@ fn test_softmax_sums_to_one() {
     }
 }
 
+// Numerical stability: equal large logits must give a uniform distribution, not
+// NaN from exp overflow. softmax([1000,1000]) = [0.5, 0.5] (max-subtraction). The
+// sums-to-one test exercises large values but not the exact stable values.
+#[test]
+fn test_softmax_large_equal_values_stable() {
+    let result = softmax(&[1000.0, 1000.0]);
+    assert!(
+        vec_approx_eq(&result, &[0.5, 0.5], 1e-12),
+        "softmax of equal large logits must be uniform (stable), got {:?}",
+        result
+    );
+}
+
+// Masked-attention pattern: a -inf logit contributes exp(-inf) = 0, so it is fully
+// masked out and the remaining finite logits share the mass. JAX/numpy parity.
+#[test]
+fn test_softmax_masks_negative_infinity() {
+    let result = softmax(&[0.0, f64::NEG_INFINITY, 0.0]);
+    assert!(
+        vec_approx_eq(&result, &[0.5, 0.0, 0.5], 1e-12),
+        "softmax must mask -inf logits to 0 and split mass over finite ones, got {:?}",
+        result
+    );
+}
+
 // JAX reference: log_softmax([1.0, 2.0, 3.0])
 // Array([-2.4076061, -1.4076061, -0.4076061], dtype=float32)
 #[test]
