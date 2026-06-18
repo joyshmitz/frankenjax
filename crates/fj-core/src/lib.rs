@@ -902,22 +902,25 @@ impl Value {
     }
 
     pub fn vector_i64(values: &[i64]) -> Result<Self, ValueError> {
+        let shape = checked_vector_shape(values.len())?;
         Ok(Self::Tensor(TensorValue::new_i64_values(
-            Shape::vector(values.len() as u32),
+            shape,
             values.to_vec(),
         )?))
     }
 
     pub fn vector_bool(values: &[bool]) -> Result<Self, ValueError> {
+        let shape = checked_vector_shape(values.len())?;
         Ok(Self::Tensor(TensorValue::new_bool_values(
-            Shape::vector(values.len() as u32),
+            shape,
             values.to_vec(),
         )?))
     }
 
     pub fn vector_f64(values: &[f64]) -> Result<Self, ValueError> {
+        let shape = checked_vector_shape(values.len())?;
         Ok(Self::Tensor(TensorValue::new_f64_values(
-            Shape::vector(values.len() as u32),
+            shape,
             values.to_vec(),
         )?))
     }
@@ -986,6 +989,18 @@ impl Value {
             Self::Tensor(tensor) => Some(tensor),
         }
     }
+}
+
+fn checked_vector_shape(len: usize) -> Result<Shape, ValueError> {
+    if len > u32::MAX as usize {
+        return Err(ValueError::ShapeOverflow {
+            shape: Shape {
+                dims: vec![u32::MAX],
+            },
+        });
+    }
+
+    Ok(Shape::vector(len as u32))
 }
 
 pub struct LiteralBuffer {
@@ -6178,6 +6193,18 @@ mod tests {
                 Ok(Vec::new())
             },
         );
+    }
+
+    #[test]
+    fn checked_vector_shape_rejects_len_overflow_before_clone() {
+        let err = checked_vector_shape(u32::MAX as usize + 1)
+            .expect_err("vector helpers should reject lengths above Shape::vector capacity");
+        match err {
+            ValueError::ShapeOverflow { shape } => {
+                assert_eq!(shape.dims, vec![u32::MAX]);
+            }
+            other => panic!("expected ShapeOverflow, got {other:?}"),
+        }
     }
 
     #[test]
