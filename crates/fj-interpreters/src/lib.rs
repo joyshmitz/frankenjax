@@ -16341,6 +16341,78 @@ mod tests {
             &make_binary_jaxpr(Primitive::Add),
             &[t(vec![1.0, 2.0, 3.0]), t(vec![10.0, 20.0, 30.0])],
         );
+
+        // Scalar transcendentals (unary): the compiled dense plan must match eager for
+        // each, not just for add/mul/sub. A divergence here would make jit(exp) != exp.
+        check(
+            "f64_exp",
+            &make_unary_jaxpr(Primitive::Exp),
+            &[Value::scalar_f64(1.5)],
+        );
+        check(
+            "f64_log",
+            &make_unary_jaxpr(Primitive::Log),
+            &[Value::scalar_f64(2.0)],
+        );
+        check(
+            "f64_sqrt",
+            &make_unary_jaxpr(Primitive::Sqrt),
+            &[Value::scalar_f64(4.0)],
+        );
+        check(
+            "f64_sin",
+            &make_unary_jaxpr(Primitive::Sin),
+            &[Value::scalar_f64(0.7)],
+        );
+
+        // More tensor binops (f64).
+        check(
+            "tensor_mul",
+            &make_binary_jaxpr(Primitive::Mul),
+            &[t(vec![1.5, -2.0, 3.0]), t(vec![4.0, 5.0, -6.0])],
+        );
+        check(
+            "tensor_sub",
+            &make_binary_jaxpr(Primitive::Sub),
+            &[t(vec![10.0, 20.0, 30.0]), t(vec![1.0, 2.0, 3.0])],
+        );
+
+        // Non-f64 tensor dtypes through the compiled plan (f32 is JAX's default; bf16
+        // is the dominant training dtype) — exercise dtype-specific dense plan paths.
+        let tf32 = |v: Vec<f32>| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::F32,
+                    Shape {
+                        dims: vec![v.len() as u32],
+                    },
+                    v.into_iter().map(Literal::from_f32).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        check(
+            "tensor_f32_add",
+            &make_binary_jaxpr(Primitive::Add),
+            &[tf32(vec![1.0, 2.0, 3.0]), tf32(vec![0.5, 0.25, -1.0])],
+        );
+        let tbf16 = |v: Vec<f32>| {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::BF16,
+                    Shape {
+                        dims: vec![v.len() as u32],
+                    },
+                    v.into_iter().map(Literal::from_bf16_f32).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        check(
+            "tensor_bf16_mul",
+            &make_binary_jaxpr(Primitive::Mul),
+            &[tbf16(vec![1.5, 2.0, -0.5]), tbf16(vec![2.0, 0.5, 4.0])],
+        );
     }
 
     #[test]
