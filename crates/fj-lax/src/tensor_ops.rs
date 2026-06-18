@@ -1338,19 +1338,52 @@ fn broadcast_replicate<T: Copy>(
     in_strides: &[usize],
     src: &[T],
 ) -> Vec<T> {
+    // Identify the largest trailing block of output axes that copies a CONTIGUOUS
+    // run of the source verbatim. Scanning from the innermost output axis, an axis
+    // extends the block iff it maps to the next-innermost input axis (consecutive,
+    // ending at input axis in_rank-1) with NO size-1 stretch (in_dim==target_dim).
+    // Because `in_strides` is row-major, traversing such a block in row-major order
+    // visits `src[base], src[base+1], ..., src[base+block_len-1]` contiguously — so
+    // it is `src[base..base+block_len]` for a base offset fixed by the OUTER axes,
+    // and can be memcpy-replicated (extend_from_slice) instead of decoding every
+    // output coordinate. Common ML broadcasts (bias [C]->[B,H,W,C], [A,C]->[A,B,C])
+    // hit a large block. Bit-identical: same src flat indices, same row-major order.
+    // Strict generalization — block_len==1 reproduces the original per-element loop.
+    let in_rank = in_dims.len();
+    let mut block_len = 1_usize;
+    let mut block_start = out_rank;
+    let mut expected_in = in_rank;
+    for a in (0..out_rank).rev() {
+        if expected_in == 0 {
+            break;
+        }
+        match out_to_in[a] {
+            Some(in_axis)
+                if in_axis + 1 == expected_in
+                    && in_dims[in_axis] as usize == target_dims[a] as usize =>
+            {
+                block_len *= target_dims[a] as usize;
+                block_start = a;
+                expected_in = in_axis;
+            }
+            _ => break,
+        }
+    }
+
     let mut out = Vec::with_capacity(total);
-    let mut out_coords = vec![0_usize; out_rank];
-    for _ in 0..total {
-        let mut in_flat = 0_usize;
-        for (out_axis, mapping) in out_to_in.iter().enumerate() {
-            if let Some(in_axis) = mapping {
-                let in_dim = in_dims[*in_axis] as usize;
+    let outer_total = total / block_len.max(1);
+    let mut out_coords = vec![0_usize; block_start];
+    for _ in 0..outer_total {
+        let mut base = 0_usize;
+        for out_axis in 0..block_start {
+            if let Some(in_axis) = out_to_in[out_axis] {
+                let in_dim = in_dims[in_axis] as usize;
                 let coord = if in_dim == 1 { 0 } else { out_coords[out_axis] };
-                in_flat += coord * in_strides[*in_axis];
+                base += coord * in_strides[in_axis];
             }
         }
-        out.push(src[in_flat]);
-        for axis in (0..out_rank).rev() {
+        out.extend_from_slice(&src[base..base + block_len]);
+        for axis in (0..block_start).rev() {
             out_coords[axis] += 1;
             if out_coords[axis] < target_dims[axis] as usize {
                 break;
