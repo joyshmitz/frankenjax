@@ -4839,6 +4839,34 @@ fn eval_unary_complex_abs(primitive: Primitive, inputs: &[Value]) -> Result<Valu
         Value::Scalar(lit) => Ok(Value::Scalar(abs_literal(*lit)?)),
         Value::Tensor(tensor) => {
             let out_dtype = real_dtype_from_complex(tensor.dtype);
+            // De-box: |z| over the dense (re,im) backing into dense REAL storage.
+            // The per-Literal path below boxes (TensorValue::new densifies only
+            // I32/I64/U32/U64, not f64/f32). Bit-identical to abs_literal:
+            // Complex128 → f64 hypot; Complex64 → the stored f64 pair is exactly the
+            // f32 value (f32-narrowed on construction), so (re as f32).hypot(im as f32)
+            // == f32::from_bits(re_bits).hypot(f32::from_bits(im_bits)).
+            if let Some(dense) = tensor.elements.as_complex_slice() {
+                match tensor.dtype {
+                    DType::Complex128 => {
+                        let out: Vec<f64> = dense.iter().map(|&(re, im)| re.hypot(im)).collect();
+                        return Ok(Value::Tensor(TensorValue::new_f64_values(
+                            tensor.shape.clone(),
+                            out,
+                        )?));
+                    }
+                    DType::Complex64 => {
+                        let out: Vec<f32> = dense
+                            .iter()
+                            .map(|&(re, im)| (re as f32).hypot(im as f32))
+                            .collect();
+                        return Ok(Value::Tensor(TensorValue::new_f32_values(
+                            tensor.shape.clone(),
+                            out,
+                        )?));
+                    }
+                    _ => {}
+                }
+            }
             let mut elements = Vec::with_capacity(tensor.elements.len());
             for lit in tensor.elements.iter().copied() {
                 elements.push(abs_literal(lit)?);
@@ -20367,6 +20395,52 @@ mod tests {
                     d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
                     "{prim:?} n={n} dense output"
                 );
+            }
+        }
+    }
+
+    /// Complex abs (|z| -> real magnitude) must produce DENSE real storage and be
+    /// bit-for-bit identical to the boxed-input per-Literal path, for both
+    /// Complex128 (-> f64) and Complex64 (-> f32, f32-hypot).
+    #[test]
+    fn complex_abs_dense_matches_boxed_bit_for_bit() {
+        for &(dt, is_c64) in &[(DType::Complex128, false), (DType::Complex64, true)] {
+            let pairs: Vec<(f64, f64)> = (0..48)
+                .map(|i| (i as f64 * 0.31 - 7.0, -(i as f64) * 0.17 + 3.0))
+                .collect();
+            let shape = Shape { dims: vec![6, 8] };
+            let dense = Value::Tensor(
+                TensorValue::new_complex_values(dt, shape.clone(), pairs.clone()).unwrap(),
+            );
+            let boxed = Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    dt,
+                    shape.clone(),
+                    fj_core::LiteralBuffer::new(
+                        pairs
+                            .iter()
+                            .map(|&(re, im)| {
+                                if is_c64 {
+                                    Literal::from_complex64(re as f32, im as f32)
+                                } else {
+                                    Literal::from_complex128(re, im)
+                                }
+                            })
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            );
+            let d = eval_abs(Primitive::Abs, std::slice::from_ref(&dense)).unwrap();
+            let b = eval_abs(Primitive::Abs, std::slice::from_ref(&boxed)).unwrap();
+            let dl: Vec<Literal> = d.as_tensor().unwrap().elements.iter().copied().collect();
+            let bl: Vec<Literal> = b.as_tensor().unwrap().elements.iter().copied().collect();
+            assert_eq!(dl, bl, "{dt:?} complex abs dense vs boxed");
+            let t = d.as_tensor().unwrap();
+            if is_c64 {
+                assert!(t.elements.as_f32_slice().is_some(), "c64 abs -> dense f32");
+            } else {
+                assert!(t.elements.as_f64_slice().is_some(), "c128 abs -> dense f64");
             }
         }
     }
