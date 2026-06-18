@@ -6768,13 +6768,21 @@ pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Va
                 DType::F32 => dense_select_n!(as_f32_slice, TensorValue::new_f32_values),
                 DType::I64 => dense_select_n!(as_i64_slice, TensorValue::new_i64_values),
                 DType::I32 => dense_select_n!(as_i64_slice, TensorValue::new_i32_values),
+                DType::U32 => dense_select_n!(as_u32_slice, TensorValue::new_u32_values),
+                DType::U64 => dense_select_n!(as_u64_slice, TensorValue::new_u64_values),
+                DType::Bool => dense_select_n!(as_bool_slice, TensorValue::new_bool_values),
                 DType::BF16 | DType::F16 => {
                     let dt = first_operand.dtype;
                     dense_select_n!(as_half_float_slice, |sh, out| {
                         TensorValue::new_half_float_values(dt, sh, out)
                     });
                 }
-                _ => {}
+                DType::Complex64 | DType::Complex128 => {
+                    let dt = first_operand.dtype;
+                    dense_select_n!(as_complex_slice, |sh, out| {
+                        TensorValue::new_complex_values(dt, sh, out)
+                    });
+                }
             }
 
             let dtype = first_operand.dtype;
@@ -19402,8 +19410,8 @@ mod tests {
 
     #[test]
     fn dense_select_n_matches_literal_path_and_stays_dense() {
-        // Dense f64/f32/i64/bf16 select_n (3 operands, i64 index) must be BIT-FOR-BIT
-        // identical to the boxed per-`Literal` path AND keep dense output.
+        // Dense select_n (3 operands, i64 index) must be BIT-FOR-BIT identical
+        // to the boxed per-`Literal` path AND keep dense output.
         let n = 257usize;
         let dims = vec![n as u32];
         let idxv: Vec<i64> = (0..n as i64).map(|i| i % 3).collect();
@@ -19534,6 +19542,146 @@ mod tests {
                 .is_some(),
             "bf16 dense out"
         );
+
+        // u32/u64: switch over unsigned table IDs / packed-token streams without
+        // demoting the chosen values to boxed Literals.
+        let mk_u32 = |seed: u32| {
+            let d: Vec<u32> = (0..n)
+                .map(|i| (i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed))
+                .collect();
+            (
+                Value::Tensor(
+                    TensorValue::new_u32_values(Shape { dims: dims.clone() }, d.clone())
+                        .unwrap(),
+                ),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::U32,
+                        Shape { dims: dims.clone() },
+                        d.iter().copied().map(Literal::U32).collect(),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        let (da, ba) = mk_u32(0);
+        let (db, bb) = mk_u32(11);
+        let (dc, bc) = mk_u32(29);
+        let d = eval_select_n(Primitive::SelectN, &[idx.clone(), da, db, dc]).unwrap();
+        let l = eval_select_n(Primitive::SelectN, &[idx.clone(), ba, bb, bc]).unwrap();
+        assert_eq!(lits(&d), lits(&l), "u32 select_n");
+        assert!(
+            d.as_tensor().unwrap().elements.as_u32_slice().is_some(),
+            "u32 dense out"
+        );
+
+        let mk_u64 = |seed: u64| {
+            let d: Vec<u64> = (0..n)
+                .map(|i| (i as u64).wrapping_mul(11_400_714_819_323_198_485).wrapping_add(seed))
+                .collect();
+            (
+                Value::Tensor(
+                    TensorValue::new_u64_values(Shape { dims: dims.clone() }, d.clone())
+                        .unwrap(),
+                ),
+                Value::Tensor(
+                    TensorValue::new(
+                        DType::U64,
+                        Shape { dims: dims.clone() },
+                        d.iter().copied().map(Literal::U64).collect(),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        let (da, ba) = mk_u64(0);
+        let (db, bb) = mk_u64(1 << 40);
+        let (dc, bc) = mk_u64(u64::MAX / 3);
+        let d = eval_select_n(Primitive::SelectN, &[idx.clone(), da, db, dc]).unwrap();
+        let l = eval_select_n(Primitive::SelectN, &[idx.clone(), ba, bb, bc]).unwrap();
+        assert_eq!(lits(&d), lits(&l), "u64 select_n");
+        assert!(
+            d.as_tensor().unwrap().elements.as_u64_slice().is_some(),
+            "u64 dense out"
+        );
+
+        // Bool case tensors: nested where/switch masks should stay dense Bool.
+        let mk_bool = |shift: usize| {
+            let d: Vec<bool> = (0..n).map(|i| ((i + shift) * 7 + 3) % 11 < 5).collect();
+            (
+                Value::Tensor(
+                    TensorValue::new_bool_values(Shape { dims: dims.clone() }, d.clone())
+                        .unwrap(),
+                ),
+                Value::Tensor(
+                    TensorValue::new_with_literal_buffer(
+                        DType::Bool,
+                        Shape { dims: dims.clone() },
+                        fj_core::LiteralBuffer::new(
+                            d.iter().copied().map(Literal::Bool).collect(),
+                        ),
+                    )
+                    .unwrap(),
+                ),
+            )
+        };
+        let (da, ba) = mk_bool(0);
+        let (db, bb) = mk_bool(1);
+        let (dc, bc) = mk_bool(2);
+        let d = eval_select_n(Primitive::SelectN, &[idx.clone(), da, db, dc]).unwrap();
+        let l = eval_select_n(Primitive::SelectN, &[idx.clone(), ba, bb, bc]).unwrap();
+        assert_eq!(lits(&d), lits(&l), "bool select_n");
+        assert!(
+            d.as_tensor().unwrap().elements.as_bool_slice().is_some(),
+            "bool dense out"
+        );
+
+        // Complex64/Complex128: copy the chosen (re, im) pair exactly.
+        for dt in [DType::Complex64, DType::Complex128] {
+            let mk_complex = |seed: f64| {
+                let d: Vec<(f64, f64)> = (0..n)
+                    .map(|i| {
+                        let x = i as f64 + seed;
+                        ((x * 0.25).sin(), (x * 0.125).cos())
+                    })
+                    .collect();
+                let lit = |(re, im): (f64, f64)| {
+                    if dt == DType::Complex64 {
+                        Literal::from_complex64(re as f32, im as f32)
+                    } else {
+                        Literal::from_complex128(re, im)
+                    }
+                };
+                (
+                    Value::Tensor(
+                        TensorValue::new_complex_values(
+                            dt,
+                            Shape { dims: dims.clone() },
+                            d.clone(),
+                        )
+                        .unwrap(),
+                    ),
+                    Value::Tensor(
+                        TensorValue::new(
+                            dt,
+                            Shape { dims: dims.clone() },
+                            d.iter().copied().map(lit).collect(),
+                        )
+                        .unwrap(),
+                    ),
+                )
+            };
+            let (da, ba) = mk_complex(0.0);
+            let (db, bb) = mk_complex(100.0);
+            let (dc, bc) = mk_complex(200.0);
+            let d = eval_select_n(Primitive::SelectN, &[idx.clone(), da, db, dc]).unwrap();
+            let l = eval_select_n(Primitive::SelectN, &[idx.clone(), ba, bb, bc]).unwrap();
+            assert_eq!(lits(&d), lits(&l), "{dt:?} select_n");
+            assert!(
+                d.as_tensor().unwrap().elements.as_complex_slice().is_some(),
+                "{dt:?} dense out"
+            );
+        }
     }
 
     #[test]

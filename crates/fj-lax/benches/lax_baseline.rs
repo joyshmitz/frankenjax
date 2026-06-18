@@ -3624,6 +3624,61 @@ fn bench_select_64k_i64_literal_reference(c: &mut Criterion) {
     });
 }
 
+fn select_n_64k_u32_inputs(dense: bool) -> [Value; 4] {
+    let dims = vec![LARGE_ELEMENTWISE_LEN as u32];
+    let idxv: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64).map(|i| i % 3).collect();
+    let idx = if dense {
+        Value::Tensor(TensorValue::new_i64_values(Shape { dims: dims.clone() }, idxv).unwrap())
+    } else {
+        Value::Tensor(
+            TensorValue::new(
+                DType::I64,
+                Shape { dims: dims.clone() },
+                idxv.into_iter().map(Literal::I64).collect(),
+            )
+            .unwrap(),
+        )
+    };
+    let mk = |seed: u32| {
+        let data: Vec<u32> = (0..LARGE_ELEMENTWISE_LEN)
+            .map(|i| {
+                (i as u32)
+                    .wrapping_mul(2_654_435_761)
+                    .wrapping_add(seed)
+            })
+            .collect();
+        if dense {
+            Value::Tensor(TensorValue::new_u32_values(Shape { dims: dims.clone() }, data).unwrap())
+        } else {
+            Value::Tensor(
+                TensorValue::new(
+                    DType::U32,
+                    Shape { dims: dims.clone() },
+                    data.into_iter().map(Literal::U32).collect(),
+                )
+                .unwrap(),
+            )
+        }
+    };
+    [idx, mk(0), mk(11), mk(29)]
+}
+
+fn bench_select_n_64k_u32_vec(c: &mut Criterion) {
+    let inputs = select_n_64k_u32_inputs(true);
+    let p = no_params();
+    c.bench_function("eval/select_n_64k_u32_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::SelectN, &inputs, &p))
+    });
+}
+
+fn bench_select_n_64k_u32_literal_reference(c: &mut Criterion) {
+    let inputs = select_n_64k_u32_inputs(false);
+    let p = no_params();
+    c.bench_function("eval/select_n_64k_u32_literal_ref", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::SelectN, &inputs, &p))
+    });
+}
+
 fn bench_complex_mul_1k(c: &mut Criterion) {
     let lhs = complex_vector(1000);
     let rhs = complex_vector(1000);
@@ -5684,6 +5739,8 @@ criterion_group!(
     bench_select_1k,
     bench_select_64k_i64_vec,
     bench_select_64k_i64_literal_reference,
+    bench_select_n_64k_u32_vec,
+    bench_select_n_64k_u32_literal_reference,
     bench_complex_mul_1k,
     bench_complex_mul_1m_literal,
     bench_complex_mul_1m_dense,
