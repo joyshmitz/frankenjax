@@ -5047,6 +5047,11 @@ pub(crate) fn eval_abs(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
 }
 
 pub(crate) fn eval_exp(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX exp_p = standard_unop(_float | _complex): integer operands are rejected (not
+    // silently widened to f64 via the generic elementwise path). Complex is allowed.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| complex_exp((a, b)))
     } else {
@@ -5055,6 +5060,10 @@ pub(crate) fn eval_exp(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
 }
 
 pub(crate) fn eval_log(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX log_p = standard_unop(_float | _complex): integer operands are rejected.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| complex_log((a, b)))
     } else {

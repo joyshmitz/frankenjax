@@ -1243,6 +1243,30 @@ fn oracle_rounding_float_only_unary_rejects_complex_operands() {
 }
 
 #[test]
+fn oracle_exp_log_reject_integer_operands() {
+    // JAX exp_p/log_p = standard_unop(_float | _complex): integer operands are rejected
+    // (lax-level), not silently widened to f64 through the generic elementwise path.
+    // Floats and complex still evaluate. (Part of the broader transcendental int-accept
+    // parity gap; the remaining _float|_complex unops are tracked separately.)
+    let int_scalar = Value::scalar_i64(3);
+    for primitive in [Primitive::Exp, Primitive::Log] {
+        let err = eval_primitive(primitive, std::slice::from_ref(&int_scalar), &no_params())
+            .expect_err("JAX exp/log must reject integer operands");
+        assert!(
+            matches!(
+                &err,
+                EvalError::TypeMismatch { primitive: got, detail }
+                    if *got == primitive && detail.contains("floating")
+            ),
+            "{primitive:?} integer input returned unexpected error: {err:?}"
+        );
+    }
+    // Floating operands must still evaluate.
+    eval_primitive(Primitive::Exp, &[Value::scalar_f64(0.0)], &no_params()).expect("exp(0.0)");
+    eval_primitive(Primitive::Log, &[Value::scalar_f64(1.0)], &no_params()).expect("log(1.0)");
+}
+
+#[test]
 fn oracle_atan2() {
     // atan2(0, 1) = 0, atan2(1, 0) = pi/2, atan2(1, 1) = pi/4
     assert_f64_close(
