@@ -11017,16 +11017,9 @@ pub(crate) fn eval_integer_pow(
         })?;
 
     fn complex_powi(z: (f64, f64), n: i32) -> (f64, f64) {
-        if n == 0 {
-            return (1.0, 0.0);
-        }
-        if n < 0 {
-            let inv = complex_powi(z, -n);
-            return complex_div((1.0, 0.0), inv);
-        }
         let mut result = (1.0, 0.0);
         let mut base = z;
-        let mut exp = n as u32;
+        let mut exp = n.unsigned_abs();
         while exp > 0 {
             if exp & 1 == 1 {
                 result = complex_mul(result, base);
@@ -11034,7 +11027,11 @@ pub(crate) fn eval_integer_pow(
             base = complex_mul(base, base);
             exp >>= 1;
         }
-        result
+        if n < 0 {
+            complex_div((1.0, 0.0), result)
+        } else {
+            result
+        }
     }
 
     fn integer_pow_literal(
@@ -18925,6 +18922,16 @@ mod tests {
             eval_integer_pow(Primitive::IntegerPow, &[tensor], &params).is_err(),
             "unsigned integer tensors must also reject negative exponents"
         );
+    }
+
+    #[test]
+    fn integer_pow_complex_min_exponent_does_not_overflow() {
+        let mut params = BTreeMap::new();
+        params.insert("exponent".to_owned(), i32::MIN.to_string());
+
+        let input = Value::Scalar(Literal::from_complex128(1.0, 0.0));
+        let result = eval_integer_pow(Primitive::IntegerPow, &[input], &params).unwrap();
+        assert_eq!(result, Value::Scalar(Literal::from_complex128(1.0, 0.0)));
     }
 
     // ── Nextafter ──
