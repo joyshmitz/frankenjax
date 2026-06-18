@@ -1298,6 +1298,27 @@ fn cbrt_vjp_numerical_complex64() {
     );
 }
 
+/// Complex VJP of float-only lgamma/bessel_i0e must FAIL CLOSED (frankenjax-w8u0a).
+///
+/// Like cbrt, these are `standard_unop(_float)` in JAX (complex rejected). Their VJP
+/// rules evaluate a float-only forward op — lgamma's VJP evaluates Digamma, and
+/// bessel_i0e's VJP evaluates BesselI0e — both of which fail closed on complex
+/// (commit eb5ad225). So grad(lgamma)/grad(bessel_i0e) on complex must surface the
+/// unsupported error rather than return a value, keeping the AD side consistent with
+/// the forward fail-close.
+#[test]
+fn float_only_complex_vjp_fails_closed() {
+    let z = Value::Scalar(Literal::from_complex64(2.0, 0.0));
+    let g = Value::Scalar(Literal::from_complex64(1.0, 0.0));
+    for prim in [Primitive::Lgamma, Primitive::BesselI0e] {
+        let result = fj_ad::vjp_single(prim, std::slice::from_ref(&z), &g, &BTreeMap::new());
+        assert!(
+            result.is_err(),
+            "{prim:?} VJP must fail closed on complex (float-only op); got {result:?}"
+        );
+    }
+}
+
 /// Complex64 scalar Square VJP (frankenjax-t8rl).
 ///
 /// `d/dz z² = 2z` → `g_z = 2 * g * z`. Pick `z = 2 + 3i`, `g = 1 + 0i`:
