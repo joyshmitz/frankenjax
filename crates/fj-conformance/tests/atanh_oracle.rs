@@ -491,6 +491,28 @@ fn oracle_atanh_complex128_real_small() {
 }
 
 #[test]
+fn oracle_atanh_complex128_large_no_overflow() {
+    // Robustness: complex atanh of a large magnitude must stay finite. atanh uses the
+    // log-form 0.5*log((1+z)/(1-z)) (no z²), so it doesn't overflow. As z -> +inf along
+    // the real axis, (1+z)/(1-z) -> -1, so atanh -> 0.5*log(-1) = i*pi/2: real part ~0,
+    // |imag| ~ pi/2. (Sign of imag is branch-dependent, so assert its magnitude.)
+    let input = make_complex128_tensor(&[], &[(1e200, 0.0)]);
+    let result = eval_primitive(Primitive::Atanh, &[input], &no_params()).unwrap();
+    let vec = extract_complex128_vec(&result);
+    assert!(
+        vec[0].0.is_finite() && vec[0].1.is_finite(),
+        "atanh(1e200) must be finite, got {:?}",
+        vec[0]
+    );
+    assert!(vec[0].0.abs() < 1e-9, "atanh(1e200) real part ~ 0, got {}", vec[0].0);
+    assert!(
+        (vec[0].1.abs() - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
+        "|imag(atanh(1e200))| ~ pi/2, got {}",
+        vec[0].1
+    );
+}
+
+#[test]
 fn oracle_atanh_complex64_vector() {
     let data: &[(f32, f32)] = &[(0.0, 0.0), (0.5, 0.0), (0.0, 1.0)];
     let input = make_complex64_tensor(&[3], data);
