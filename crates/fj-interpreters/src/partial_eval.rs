@@ -2733,6 +2733,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pe_all_known_matches_eval_for_diverse_programs() {
+        use crate::eval_jaxpr;
+        // Extends test_pe_staging_equivalence_all_known (Add2 only): with all inputs
+        // known (unknowns = all false), eval(jaxpr_known, args) must equal
+        // eval_jaxpr(jaxpr, args) for diverse ops/dtypes — the all-known partial-eval
+        // path must not diverge from the eager interpreter.
+        let bin = |prim: Primitive| {
+            Jaxpr::new(
+                vec![VarId(1), VarId(2)],
+                vec![],
+                vec![VarId(3)],
+                vec![Equation {
+                    primitive: prim,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                }],
+            )
+        };
+        let un = |prim: Primitive| {
+            Jaxpr::new(
+                vec![VarId(1)],
+                vec![],
+                vec![VarId(2)],
+                vec![Equation {
+                    primitive: prim,
+                    inputs: smallvec![Atom::Var(VarId(1))],
+                    outputs: smallvec![VarId(2)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                }],
+            )
+        };
+        let check = |label: &str, jaxpr: &Jaxpr, args: &[Value], unknowns: &[bool]| {
+            let full = eval_jaxpr(jaxpr, args).expect("eval_jaxpr");
+            let pe = partial_eval_jaxpr(jaxpr, unknowns).expect("partial_eval");
+            let known = eval_jaxpr(&pe.jaxpr_known, args).expect("eval jaxpr_known");
+            assert_eq!(
+                full[0], known[0],
+                "{label}: all-known partial_eval(jaxpr_known) != eval_jaxpr"
+            );
+        };
+        check(
+            "f64_mul",
+            &bin(Primitive::Mul),
+            &[Value::scalar_f64(3.0), Value::scalar_f64(7.0)],
+            &[false, false],
+        );
+        check(
+            "i64_sub",
+            &bin(Primitive::Sub),
+            &[Value::scalar_i64(10), Value::scalar_i64(3)],
+            &[false, false],
+        );
+        check(
+            "f64_exp",
+            &un(Primitive::Exp),
+            &[Value::scalar_f64(1.0)],
+            &[false],
+        );
+        check(
+            "f64_sqrt",
+            &un(Primitive::Sqrt),
+            &[Value::scalar_f64(4.0)],
+            &[false],
+        );
+    }
+
     // ══════════════════════════════════════════════════════════════════
     // Category 5: JIT integration (via staging module)
     // ══════════════════════════════════════════════════════════════════
