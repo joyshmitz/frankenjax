@@ -152,3 +152,24 @@ ends are not rediscovered without new evidence.
   criterion evidence showing comparison remains a top-five fj-core bottleneck.
   Do not revisit FMA/SIMD exp, GEMM, QR, SVD, cumsum, OneHot, SelectN/iota, or
   eager concat without fresh same-worker benchmark evidence and ownership check.
+
+## frankenjax-alc0j - Dense Scalar Broadcast for U32/U64/Complex
+
+- Date: 2026-06-18
+- Agent: cod-b / WildForge
+- Lever: route scalar `BroadcastInDim` fills for U32, U64, Complex64, and
+  Complex128 through `new_u32_values`, `new_u64_values`, and
+  `new_complex_values` instead of allocating a `Vec<Literal>` fill.
+- Status: batch-test pending.
+- Benchmark guard: `eval/broadcast_scalar_u32_1024x1024`,
+  `eval/broadcast_scalar_u64_1024x1024`,
+  `eval/broadcast_scalar_complex128_1024x1024`.
+- Conformance guard: scalar fills materialize to the same repeated literals and
+  expose dense typed storage via `as_u32_slice`, `as_u64_slice`, or
+  `as_complex_slice`.
+- Retry predicate: do not retry scalar `BroadcastInDim` dense-fill storage for
+  these dtypes unless focused criterion evidence shows this path remains a
+  top-five `fj-lax` bottleneck or the dense constructor representation changes.
+  Do not merge it with FMA/SIMD exp, GEMM, QR, SVD, cumsum, OneHot, SelectN/iota,
+  or broader scalar-broadcast arithmetic work without fresh benchmark evidence
+  and ownership check.

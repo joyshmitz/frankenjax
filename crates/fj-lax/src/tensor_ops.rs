@@ -1029,10 +1029,9 @@ pub(crate) fn eval_broadcast_in_dim(
 
     match &inputs[0] {
         Value::Scalar(lit) => {
-            // Broadcast scalar to target shape. Emit DENSE storage for the common
-            // numeric dtypes (a typed fill of the value — `jnp.zeros`/`full`/bias-init
-            // hit this) instead of a `Vec<Literal>` of `total` 24-byte enums. Output
-            // materializes to the same Literals, so it is bit-for-bit identical.
+            // Broadcast scalar to target shape. Emit DENSE storage through typed
+            // fills instead of building `total` 24-byte `Literal` enums. Output
+            // materializes to the same literals, so it is bit-for-bit identical.
             let total = checked_shape_element_count(primitive, "broadcast_in_dim", &target_dims)?;
             let shape = Shape { dims: target_dims };
             match lit {
@@ -1066,27 +1065,31 @@ pub(crate) fn eval_broadcast_in_dim(
                     shape,
                     vec![*v; total],
                 )?)),
-                // U32/U64/Complex have no dense storage variant: boxed fill.
-                Literal::U32(_) => Ok(Value::Tensor(TensorValue::new(
-                    DType::U32,
+                Literal::U32(v) => Ok(Value::Tensor(TensorValue::new_u32_values(
                     shape,
-                    vec![*lit; total],
+                    vec![*v; total],
                 )?)),
-                Literal::U64(_) => Ok(Value::Tensor(TensorValue::new(
-                    DType::U64,
+                Literal::U64(v) => Ok(Value::Tensor(TensorValue::new_u64_values(
                     shape,
-                    vec![*lit; total],
+                    vec![*v; total],
                 )?)),
-                Literal::Complex64Bits(..) => Ok(Value::Tensor(TensorValue::new(
-                    DType::Complex64,
-                    shape,
-                    vec![*lit; total],
-                )?)),
-                Literal::Complex128Bits(..) => Ok(Value::Tensor(TensorValue::new(
-                    DType::Complex128,
-                    shape,
-                    vec![*lit; total],
-                )?)),
+                Literal::Complex64Bits(re, im) => Ok(Value::Tensor(
+                    TensorValue::new_complex_values(
+                        DType::Complex64,
+                        shape,
+                        vec![(
+                            f64::from(f32::from_bits(*re)),
+                            f64::from(f32::from_bits(*im)),
+                        ); total],
+                    )?,
+                )),
+                Literal::Complex128Bits(re, im) => Ok(Value::Tensor(
+                    TensorValue::new_complex_values(
+                        DType::Complex128,
+                        shape,
+                        vec![(f64::from_bits(*re), f64::from_bits(*im)); total],
+                    )?,
+                )),
             }
         }
         Value::Tensor(tensor) => {
@@ -16311,6 +16314,54 @@ mod tests {
                 "{dtype:?} scalar broadcast dense"
             );
         }
+
+        // U32/U64 scalar fills used to box every output literal even though dense
+        // integer storage exists. They must now fill dense typed buffers directly.
+        let u32_scalar = Literal::U32(0xfeed_beef);
+        let u32_out = eval_broadcast_in_dim(&[Value::Scalar(u32_scalar)], &p_scalar).unwrap();
+        assert_eq!(u32_out.as_tensor().unwrap().dtype, DType::U32);
+        assert!(
+            u32_out.as_tensor().unwrap().elements.as_u32_slice().is_some(),
+            "u32 scalar broadcast dense"
+        );
+        assert_eq!(lits(&u32_out), vec![u32_scalar; 30]);
+
+        let u64_scalar = Literal::U64(0x0123_4567_89ab_cdef);
+        let u64_out = eval_broadcast_in_dim(&[Value::Scalar(u64_scalar)], &p_scalar).unwrap();
+        assert_eq!(u64_out.as_tensor().unwrap().dtype, DType::U64);
+        assert!(
+            u64_out.as_tensor().unwrap().elements.as_u64_slice().is_some(),
+            "u64 scalar broadcast dense"
+        );
+        assert_eq!(lits(&u64_out), vec![u64_scalar; 30]);
+
+        let c64_scalar = Literal::Complex64Bits(1.25_f32.to_bits(), (-0.5_f32).to_bits());
+        let c64_out = eval_broadcast_in_dim(&[Value::Scalar(c64_scalar)], &p_scalar).unwrap();
+        assert_eq!(c64_out.as_tensor().unwrap().dtype, DType::Complex64);
+        assert!(
+            c64_out
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_complex_slice()
+                .is_some(),
+            "complex64 scalar broadcast dense"
+        );
+        assert_eq!(lits(&c64_out), vec![c64_scalar; 30]);
+
+        let c128_scalar = Literal::Complex128Bits(1.25_f64.to_bits(), (-0.5_f64).to_bits());
+        let c128_out = eval_broadcast_in_dim(&[Value::Scalar(c128_scalar)], &p_scalar).unwrap();
+        assert_eq!(c128_out.as_tensor().unwrap().dtype, DType::Complex128);
+        assert!(
+            c128_out
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_complex_slice()
+                .is_some(),
+            "complex128 scalar broadcast dense"
+        );
+        assert_eq!(lits(&c128_out), vec![c128_scalar; 30]);
     }
 
     #[test]

@@ -3026,6 +3026,49 @@ fn bench_broadcast_256_to_256x256_f64(c: &mut Criterion) {
     });
 }
 
+// Scalar BroadcastInDim over dense-capable non-float dtypes. These rows pin the
+// direct typed-fill path for U32/U64/Complex instead of a Vec<Literal> fill.
+fn bench_broadcast_scalar_dense_fill(c: &mut Criterion) {
+    let mut p = BTreeMap::new();
+    p.insert("shape".to_owned(), "1024,1024".to_owned());
+
+    let u32_input = Value::Scalar(Literal::U32(0xfeed_beef));
+    c.bench_function("eval/broadcast_scalar_u32_1024x1024", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BroadcastInDim,
+                std::slice::from_ref(&u32_input),
+                &p,
+            )
+        })
+    });
+
+    let u64_input = Value::Scalar(Literal::U64(0x0123_4567_89ab_cdef));
+    c.bench_function("eval/broadcast_scalar_u64_1024x1024", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BroadcastInDim,
+                std::slice::from_ref(&u64_input),
+                &p,
+            )
+        })
+    });
+
+    let complex_input = Value::Scalar(Literal::Complex128Bits(
+        1.25_f64.to_bits(),
+        (-0.5_f64).to_bits(),
+    ));
+    c.bench_function("eval/broadcast_scalar_complex128_1024x1024", |bencher| {
+        bencher.iter(|| {
+            eval_primitive(
+                Primitive::BroadcastInDim,
+                std::slice::from_ref(&complex_input),
+                &p,
+            )
+        })
+    });
+}
+
 // Pad a 256x256 dense f64 tensor with 1 element of edge padding on each side
 // (-> 258x258). Dense fast path (pass105, typed fill + placement into dense
 // storage) vs the generic Literal fill + per-element placement.
@@ -3211,7 +3254,7 @@ fn sort_u64_data() -> Vec<u64> {
                 .rotate_left((i & 63) as u32)
                 ^ ((i as u64) << 32),
         })
-        .collect();
+        .collect()
 }
 
 fn bench_sort_64k_u64(c: &mut Criterion) {
@@ -6291,6 +6334,7 @@ criterion_group!(
     bench_bitcast_f32_bf16_dense_1m,
     bench_bitcast_bf16_f32_dense_1m,
     bench_broadcast_256_to_256x256_f64,
+    bench_broadcast_scalar_dense_fill,
     bench_pad_256x256_to_258x258_f64,
     bench_rev_256x256_f64,
     bench_one_hot_2048x512_f64,
