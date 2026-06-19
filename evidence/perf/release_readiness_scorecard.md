@@ -42,22 +42,34 @@ Additional current clamp gauntlet environment:
 | frankenjax-mcqr.106 | `f16_mixed_scalar_tensor_1m` | 19.859 ms mean | 371.729 us mean | 53.423 | Rust 53.42x slower |
 | frankenjax-mcqr.107 | `bf16_tensor_tensor_tensor_1m` | 15.652 ms mean | 183.707 us mean | 85.200 | Rust 85.20x slower |
 | frankenjax-mcqr.107 | `f16_tensor_tensor_tensor_1m` | 20.951 ms mean | 229.951 us mean | 91.110 | Rust 91.11x slower |
+| frankenjax-e07uw | `fusion_arith8_f64_1m` (jit chain) | 3.320 ms fused | 272.7 us mean | 12.175 | Rust 12.18x slower |
+| frankenjax-bjqfr | `fusion_bf16_broadcast_1m` | 10.776 ms | 146.9 us mean | 73.357 | Rust 73.36x slower (reverted) |
 
 ## Readiness
 
-- JAX domination score for this measured set: 30/100.
-- Basis: 3 of 10 measured realistic workloads beat warmed original JAX CPU.
+- JAX domination score for this measured set: 25/100.
+- Basis: 3 of 12 measured realistic workloads beat warmed original JAX CPU.
+- eval_jaxpr fusion cluster (e07uw/7g72q/rl9ha/bjqfr): Rust-internal win
+  (fused vs unfused per-op: f64 5.06x, f32 6.70x, f32 broadcast 15.75x, i64
+  broadcast 3.21x) but NOT JAX domination — the tree-walking interpreter (even
+  fused) is ~12x slower than XLA-compiled jax.jit on the f64 chain. Closing this
+  needs the compiled-jaxpr arena executor (z6o97/6dfew), not more fusion ops.
 - Release blockers for this set:
   - `complex_f32_tensor_scalar_1m` remains a near-parity JAX loss at Rust/JAX
     1.084.
   - Dense clamp verification is a Rust-internal keep but an external JAX loss
     on all six measured clamp workloads, with the worst gap in half-precision
     tensor clamp.
-- Reverts: none. No measured workload showed that reverting the committed dense
-  path would improve results; the mixed complex constructor cluster keeps the
-  F64 win and routes the F32 loss to deeper representation work, and the clamp
-  cluster keeps because every dense path beat the boxed Rust reference by at
-  least 1.68x.
+  - eval_jaxpr (interpreter) is ~12-72x slower than jax.jit on elementwise
+    chains; the interpreter-vs-compiler gap is the dominant release blocker for
+    jit'd workloads.
+  - 8 fj-interpreters PLAN golden tests are RED (digest drift from earlier
+    untested storage/serialization commits; plan==generic parity intact). Suite
+    is RED until verified golden refresh; behavior correct.
+- Reverts: bf16/f16 broadcast fusion (frankenjax-bjqfr) REVERTED — measured 1.02x
+  (~0 gain); bf16 tensor fusion is bandwidth-bound and the per-lane f64
+  decode/encode cancels the savings. i64 broadcast fusion (rl9ha, 3.21x) and
+  f64/f32 fusion KEPT. (Prior dense clusters: no reverts.)
 - Next measured gate: Complex64/F32 constructor must target packed Complex64
   output construction or a fused real-to-complex path, not another retry of the
   boxed-literal-elision lever.

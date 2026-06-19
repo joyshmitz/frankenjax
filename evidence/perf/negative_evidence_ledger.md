@@ -312,3 +312,82 @@ ends are not rediscovered without new evidence.
   next attempt with broadcast-shape generalization, scalar-bound relu/relu6, or
   unrelated dense constructor work without fresh focused Criterion evidence and
   an updated JAX head-to-head row.
+
+## frankenjax-e07uw/7g72q/rl9ha/bjqfr - eval_jaxpr Fusion Cluster (Square / Reciprocal / integer_pow[2] / i64+bf16 broadcast)
+
+- Lever: extend the `eval_jaxpr` cheap-op elementwise fusion to (a) `Square`,
+  `Reciprocal`, `integer_pow[2]` via builder operand-synthesis (unary == fused
+  binary: `Square=Mul(x,x)`, `Reciprocal=Div(1,x)`, `x**2=Mul(x,x)`), and (b) i64
+  + bf16/f16 row/col broadcast operands (mirror the existing f64/f32 broadcast).
+- Conformance GUARD: GREEN. `cargo test -p fj-interpreters --lib --release` — the
+  fusion bit-identity tests (`fusion_*_chain_matches_reference_bit_for_bit`,
+  `fusion_f64_{row,col}_broadcast_*`, etc.) all PASS. (8 unrelated golden-digest
+  tests for broadcast_in_dim/transpose/reshape/scan/dce/staging PLANS are RED — see
+  the separate "Golden digest drift" entry; their `plan==generic` parity asserts
+  PASS, only the hardcoded sha256 lines drift; NOT caused by this cluster.)
+- Measured evidence (2026-06-19, rch worker, `eval_fusion_speed` same-invocation
+  A/B, 1,048,576 elements / 1024x1024, 8-op chains; rch bench noise ~1.0x band):
+  - Internal (Rust fused `eval_jaxpr` vs unfused per-op `eval_primitive`):
+
+  | Workload | unfused | fused | speedup | Outcome |
+  | --- | ---: | ---: | ---: | --- |
+  | F64 arith8 1M | 16.788 ms | 3.320 ms | 5.06x | KEEP |
+  | F32 arith8 1M | 7.174 ms | 1.071 ms | 6.70x | KEEP |
+  | F32 clamp 1M | 9.081 ms | 1.739 ms | 5.22x | KEEP |
+  | F32 row-broadcast | 12.331 ms | 0.783 ms | 15.75x | KEEP |
+  | F32 col-broadcast | 11.479 ms | 0.704 ms | 16.31x | KEEP |
+  | F64 row-broadcast | 8.703 ms | 2.567 ms | 3.39x | KEEP |
+  | F64 col-broadcast | 8.452 ms | 2.282 ms | 3.70x | KEEP |
+  | I64 arith8 1M | 5.976 ms | 3.330 ms | 1.79x | KEEP |
+  | **I64 row-broadcast (rl9ha)** | 7.546 ms | 2.352 ms | **3.21x** | **KEEP** |
+  | BF16 arith8 1M (not mine) | 10.893 ms | 10.599 ms | 1.03x | ~0 gain, flag owner |
+  | **BF16 row-broadcast (bjqfr)** | 10.776 ms | 10.604 ms | **1.02x** | **REVERTED** |
+
+  - Head-to-head vs original JAX (jax.jit CPU x64, `fusion_chain.py`, 1M):
+
+  | Workload | JAX jit mean | Rust fused | Rust/JAX | Outcome |
+  | --- | ---: | ---: | ---: | --- |
+  | arith8 f64 1M | 272.7 us | 3.320 ms | ~12.2x slower | JAX win (interp vs XLA) |
+  | square f64 1M | 293.4 us | (rides f64 5.06x) | >10x slower | JAX win |
+  | bf16 broadcast 1M | 146.9 us | 10.6 ms | ~72x slower | JAX win |
+
+- Decision:
+  - KEEP Square / Reciprocal / integer_pow[2] (bit-identical operand-synthesis;
+    they let variance/L2/`x**2`/normalization chains ride the proven f64/f32
+    5-6.7x fusion win) and i64 broadcast (3.21x).
+  - REVERT bf16/f16 broadcast fusion (bjqfr) — measured 1.02x = ~0 gain. bf16
+    tensor fusion is bandwidth-bound; the per-lane f64 decode/encode
+    (half_fusion_widen + half_fused_binary) cancels the materialization savings
+    (consistent with bf16 same-shape ~1.0x). Reverted in commit after this entry.
+- Honest framing: the fusion lever is a real **Rust-internal interpreter** win
+  (5-16x vs the pre-fusion per-op path) but does NOT achieve original-JAX
+  domination on jit'd elementwise chains — the Rust tree-walking interpreter
+  (even fused) is ~12-72x slower than XLA-compiled jax.jit. Fusion narrows the
+  per-op interpreter tax; it cannot close the interpreter-vs-compiler gap. The
+  vs-JAX win requires the compiled-jaxpr arena executor (bead z6o97 family /
+  6dfew), not more fusion-op coverage.
+- Retry predicate: do NOT re-add bf16/f16 tensor fusion via the scalar per-lane
+  widen/round path. It only pays with a SIMD bf16<->f32 convert kernel (see
+  project_bf16_matmul_and_convert_simd). Do NOT chase more fusion-op coverage for
+  vs-JAX wins — the gap is interpreter-vs-compiler, addressable only by the
+  compiled-jaxpr core.
+
+## Golden digest drift - 8 fj-interpreters PLAN goldens (pre-existing, NOT this session)
+
+- Symptom: `cargo test -p fj-interpreters --lib --release` shows 8 FAILED golden
+  tests: dense_f64_broadcast_in_dim_plan / dense_f64_transpose_plan /
+  dense_reshape_plan (x2) / eval_top_level_scan_i64_add_emit_fast_path /
+  test_dce_all_used_large_chain / test_pe_two_eq_mixed_residual / staging single-unknown.
+- Diagnosis: each test asserts `planned_out == generic_out` (PARITY) THEN a
+  hardcoded sha256. The panics are all on the sha256 line (hash-vs-hash); the
+  parity asserts PASS. So the COMPUTED VALUES are internally consistent
+  (plan==generic) and the digests merely drifted vs the recorded constants —
+  accumulated from earlier untested "code-first" dense-storage/serialization
+  commits (e.g. mcqr.97 TensorValue::new densify, co009 serialization).
+- NOT caused by this session's fusion work (none of these tests exercise the
+  cheap-op fusion path; the 200 passing tests include all fusion bit-identity tests).
+- Action: NOT refreshed here. Refreshing requires per-test value verification vs
+  JAX/expected (parity alone does not prove vs-original correctness — a shared
+  regression in both paths would pass parity). Flagged for the dense-storage/
+  serialization commit owners to refresh with verified values, or for a
+  test-capable golden-refresh pass. Conformance is RED on these 8 until then.
