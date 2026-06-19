@@ -16,6 +16,28 @@ use crate::type_promotion::{binary_literal_op, promote_dtype};
 /// count than cheap ops.
 const EXPENSIVE_BINARY_PARALLEL_MIN: usize = 1 << 16; // 65_536
 
+/// Minimum element count before a CHEAP same-shape binop (Add/Sub/Mul/Div/Max/Min)
+/// is threaded. Cheap binops are memory-bound, so threading is a NET LOSS while the
+/// working set fits in cache — that is the recorded "memory-bound ops regress when
+/// threaded" finding, which held because it was measured at L3-resident sizes.
+///
+/// Beyond L3, two effects flip the sign:
+///   * A single core cannot saturate a multi-channel DRAM controller, so splitting
+///     the stream across cores raises aggregate bandwidth (~27 -> ~51 GB/s measured
+///     on a Zen3 5975WX at 16M f64, reused-buffer).
+///   * frankenjax allocates a FRESH output Vec per primitive; first-touch page
+///     faults on a large (>~40 MB) allocation are serialized in the single-thread
+///     `collect`, cratering it to ~6 GB/s. Threading first-touches the pages across
+///     cores, recovering ~6x on the real (fresh-alloc) path.
+///
+/// JAX/XLA does NOT thread large elementwise on CPU (~26 GB/s at 16M+), so the
+/// threaded path is ~1.9-2x FASTER than JAX at these sizes — bit-identical, since
+/// elementwise output is lane-independent (chunk boundaries never change which IEEE
+/// op produces which bit). The gate is set well past the measured ~5M-element
+/// fresh-alloc cliff so only clearly DRAM-bound arrays thread; the benchmarked 1M
+/// size stays on the serial fast path (no regression).
+const CHEAP_BINARY_PARALLEL_MIN: usize = 1 << 23; // 8_388_608
+
 /// Right-size a parallel fan-out to the WORK, not the core count. `std::thread::
 /// scope` spawns each OS thread sequentially (~tens of µs apiece), so a flat
 /// all-core fan-out is spawn-overhead-dominated at moderate element counts (an
@@ -459,6 +481,12 @@ pub(crate) fn eval_binary_elementwise(
                 }
                 if lhs.dtype == DType::F64
                     && rhs.dtype == DType::F64
+                    && let Some(value) = eval_same_shape_f64_cheap_parallel(primitive, lhs, rhs)
+                {
+                    return Ok(value);
+                }
+                if lhs.dtype == DType::F64
+                    && rhs.dtype == DType::F64
                     && let Some(value) = eval_same_shape_f64_binop(primitive, lhs, rhs)?
                 {
                     return Ok(value);
@@ -489,6 +517,12 @@ pub(crate) fn eval_binary_elementwise(
                     && rhs.dtype == DType::F32
                     && let Some(value) =
                         eval_same_shape_f32_expensive_parallel(primitive, lhs, rhs, &float_op)
+                {
+                    return Ok(value);
+                }
+                if lhs.dtype == DType::F32
+                    && rhs.dtype == DType::F32
+                    && let Some(value) = eval_same_shape_f32_cheap_parallel(primitive, lhs, rhs)
                 {
                     return Ok(value);
                 }
@@ -696,6 +730,86 @@ fn eval_same_shape_f64_binop(
     }
 }
 
+/// Threaded same-shape dense-f64 elementwise map, the parallel sibling of
+/// [`eval_same_shape_f64_map`]. Splits the output into contiguous chunks and applies
+/// the SAME closure `op` per element across scoped threads. Output is lane-independent,
+/// so the result is bit-for-bit identical to the serial `collect` regardless of how
+/// many chunks the work is split into.
+fn threaded_same_shape_f64_map(
+    shape: &Shape,
+    a: &[f64],
+    b: &[f64],
+    threads: usize,
+    op: impl Fn(f64, f64) -> f64 + Sync,
+) -> Option<Value> {
+    let n = a.len();
+    let mut out = vec![0.0f64; n];
+    let chunk = n.div_ceil(threads);
+    let op_ref = &op;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < n {
+            let len = chunk.min(n - start);
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let s = start;
+            scope.spawn(move || {
+                for (i, o) in blk.iter_mut().enumerate() {
+                    *o = op_ref(a[s + i], b[s + i]);
+                }
+            });
+            start += len;
+        }
+    });
+    TensorValue::new_f64_values(shape.clone(), out)
+        .ok()
+        .map(Value::Tensor)
+}
+
+/// Threads the CHEAP same-shape f64 binops (Add/Sub/Mul/Div/Max/Min) once the array
+/// is large enough to be DRAM-bound (see [`CHEAP_BINARY_PARALLEL_MIN`]). Uses the
+/// EXACT closures from [`eval_same_shape_f64_binop`] — including the NaN-propagating
+/// `jax_max_f64`/`jax_min_f64` — so the threaded output is bit-identical to the serial
+/// fast path. Returns `None` for any other primitive, non-dense storage, or sub-threshold
+/// sizes, falling through to the serial path.
+fn eval_same_shape_f64_cheap_parallel(
+    primitive: Primitive,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Option<Value> {
+    if !matches!(
+        primitive,
+        Primitive::Add
+            | Primitive::Sub
+            | Primitive::Mul
+            | Primitive::Div
+            | Primitive::Max
+            | Primitive::Min
+    ) {
+        return None;
+    }
+    let (a, b) = (lhs.elements.as_f64_slice()?, rhs.elements.as_f64_slice()?);
+    let n = a.len();
+    if n < CHEAP_BINARY_PARALLEL_MIN {
+        return None;
+    }
+    let threads = work_scaled_threads(n);
+    if threads <= 1 {
+        return None;
+    }
+    let shape = &lhs.shape;
+    match primitive {
+        Primitive::Add => threaded_same_shape_f64_map(shape, a, b, threads, |x, y| x + y),
+        Primitive::Sub => threaded_same_shape_f64_map(shape, a, b, threads, |x, y| x - y),
+        Primitive::Mul => threaded_same_shape_f64_map(shape, a, b, threads, |x, y| x * y),
+        Primitive::Div => threaded_same_shape_f64_map(shape, a, b, threads, |x, y| x / y),
+        Primitive::Max => threaded_same_shape_f64_map(shape, a, b, threads, crate::jax_max_f64),
+        Primitive::Min => threaded_same_shape_f64_map(shape, a, b, threads, crate::jax_min_f64),
+        _ => None,
+    }
+}
+
 /// Same-shape F32⊗F32 elementwise fast path — the dense-f32 sibling of
 /// [`eval_same_shape_f64_binop`]. f32 is JAX's DEFAULT float dtype, so once
 /// producers emit dense f32 (see `new_f32_values`), keeping binary ops dense
@@ -751,6 +865,83 @@ fn eval_same_shape_f32_map(
         lhs.shape.clone(),
         values,
     )?)))
+}
+
+/// Threaded same-shape dense-f32 elementwise map (parallel sibling of
+/// [`eval_same_shape_f32_map`]). Promotes each f32->f64 (lossless), applies the SAME
+/// closure in f64, rounds back `as f32` — identical per-element semantics to the serial
+/// path, and lane-independent, so chunking never changes the result.
+fn threaded_same_shape_f32_map(
+    shape: &Shape,
+    a: &[f32],
+    b: &[f32],
+    threads: usize,
+    op: impl Fn(f64, f64) -> f64 + Sync,
+) -> Option<Value> {
+    let n = a.len();
+    let mut out = vec![0.0f32; n];
+    let chunk = n.div_ceil(threads);
+    let op_ref = &op;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f32] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < n {
+            let len = chunk.min(n - start);
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let s = start;
+            scope.spawn(move || {
+                for (i, o) in blk.iter_mut().enumerate() {
+                    *o = op_ref(f64::from(a[s + i]), f64::from(b[s + i])) as f32;
+                }
+            });
+            start += len;
+        }
+    });
+    TensorValue::new_f32_values(shape.clone(), out)
+        .ok()
+        .map(Value::Tensor)
+}
+
+/// f32 sibling of [`eval_same_shape_f64_cheap_parallel`]: threads the cheap same-shape
+/// f32 binops once the array is DRAM-bound. f32 is JAX's default float dtype. Uses the
+/// EXACT f64-widen closures from [`eval_same_shape_f32_binop`], so output is bit-identical
+/// to the serial f32 fast path.
+fn eval_same_shape_f32_cheap_parallel(
+    primitive: Primitive,
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+) -> Option<Value> {
+    if !matches!(
+        primitive,
+        Primitive::Add
+            | Primitive::Sub
+            | Primitive::Mul
+            | Primitive::Div
+            | Primitive::Max
+            | Primitive::Min
+    ) {
+        return None;
+    }
+    let (a, b) = (lhs.elements.as_f32_slice()?, rhs.elements.as_f32_slice()?);
+    let n = a.len();
+    if n < CHEAP_BINARY_PARALLEL_MIN {
+        return None;
+    }
+    let threads = work_scaled_threads(n);
+    if threads <= 1 {
+        return None;
+    }
+    let shape = &lhs.shape;
+    match primitive {
+        Primitive::Add => threaded_same_shape_f32_map(shape, a, b, threads, |x, y| x + y),
+        Primitive::Sub => threaded_same_shape_f32_map(shape, a, b, threads, |x, y| x - y),
+        Primitive::Mul => threaded_same_shape_f32_map(shape, a, b, threads, |x, y| x * y),
+        Primitive::Div => threaded_same_shape_f32_map(shape, a, b, threads, |x, y| x / y),
+        Primitive::Max => threaded_same_shape_f32_map(shape, a, b, threads, crate::jax_max_f64),
+        Primitive::Min => threaded_same_shape_f32_map(shape, a, b, threads, crate::jax_min_f64),
+        _ => None,
+    }
 }
 
 /// Same-shape BF16⊗BF16 / F16⊗F16 elementwise fast path — the dense half-float sibling
@@ -19290,6 +19481,151 @@ mod tests {
             assert_eq!(
                 got, expect,
                 "polygamma n={n} threaded != element-wise reference"
+            );
+        }
+    }
+
+    #[test]
+    fn cheap_binary_parallel_f64_bit_identical_to_serial() {
+        // Exercise the large-array threaded cheap-binop path (n >= CHEAP_BINARY_PARALLEL_MIN)
+        // and prove its output is bit-for-bit identical to the serial fast path's closures,
+        // including the NaN-propagating Max/Min and Div edge cases. The threaded path only
+        // engages above the gate, so a sub-threshold size would silently test the serial path.
+        let len = CHEAP_BINARY_PARALLEL_MIN + 257; // strictly above the gate, non-multiple of chunking
+        let mut a: Vec<f64> = (0..len)
+            .map(|i| ((i % 1000) as f64) * 0.5 - 250.0)
+            .collect();
+        let mut b: Vec<f64> = (0..len)
+            .map(|i| ((i % 777) as f64) * -0.3 + 100.0)
+            .collect();
+        // Seed IEEE special values to exercise NaN propagation / signed-zero / inf division.
+        let specials = [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            -0.0,
+            f64::MAX,
+            f64::MIN_POSITIVE,
+        ];
+        for (k, &s) in specials.iter().enumerate() {
+            a[k] = s;
+            b[len - 1 - k] = s;
+            a[len / 2 + k] = s;
+        }
+        let shape = Shape {
+            dims: vec![len as u32],
+        };
+        let at = Value::Tensor(TensorValue::new_f64_values(shape.clone(), a.clone()).unwrap());
+        let bt = Value::Tensor(TensorValue::new_f64_values(shape.clone(), b.clone()).unwrap());
+
+        let cases: [(Primitive, fn(f64, f64) -> f64); 6] = [
+            (Primitive::Add, |x, y| x + y),
+            (Primitive::Sub, |x, y| x - y),
+            (Primitive::Mul, |x, y| x * y),
+            (Primitive::Div, |x, y| x / y),
+            (Primitive::Max, crate::jax_max_f64),
+            (Primitive::Min, crate::jax_min_f64),
+        ];
+        for (prim, op) in cases {
+            // Confirm the threaded path actually engaged for this input.
+            assert!(
+                eval_same_shape_f64_cheap_parallel(
+                    prim,
+                    at.as_tensor().unwrap(),
+                    bt.as_tensor().unwrap(),
+                )
+                .is_some(),
+                "{prim:?}: expected the threaded cheap-binop path to engage at n={len}"
+            );
+            let got =
+                crate::eval_primitive(prim, &[at.clone(), bt.clone()], &BTreeMap::new()).unwrap();
+            let got_bits: Vec<u64> = got
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            let want_bits: Vec<u64> = a
+                .iter()
+                .zip(&b)
+                .map(|(&x, &y)| op(x, y).to_bits())
+                .collect();
+            assert_eq!(
+                got_bits, want_bits,
+                "{prim:?}: threaded cheap-binop output != serial reference (bitwise)"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf measurement; run with --release --ignored --nocapture"]
+    fn bench_cheap_binary_parallel_vs_serial() {
+        use std::time::Instant;
+        fn best_of<T>(iters: usize, mut f: impl FnMut() -> T) -> f64 {
+            let mut best = f64::MAX;
+            for _ in 0..iters {
+                let t0 = Instant::now();
+                let r = f();
+                let dt = t0.elapsed().as_secs_f64();
+                std::hint::black_box(&r);
+                best = best.min(dt);
+            }
+            best
+        }
+        for &n in &[16_000_000usize, 64_000_000] {
+            let a: Vec<f64> = (0..n).map(|i| (i % 1000) as f64 * 0.5).collect();
+            let b: Vec<f64> = (0..n).map(|i| (i % 777) as f64 * 0.3).collect();
+            let shape = Shape {
+                dims: vec![n as u32],
+            };
+            let at = TensorValue::new_f64_values(shape.clone(), a).unwrap();
+            let bt = TensorValue::new_f64_values(shape.clone(), b).unwrap();
+            let serial = best_of(10, || {
+                eval_same_shape_f64_binop(Primitive::Add, &at, &bt)
+                    .unwrap()
+                    .unwrap()
+            });
+            let par = best_of(10, || {
+                eval_same_shape_f64_cheap_parallel(Primitive::Add, &at, &bt).unwrap()
+            });
+            let gb = n as f64 * 8.0 * 3.0 / 1e9;
+            println!(
+                "add_f64 n={n:>9}: serial {:>9.1}us ({:>5.1} GB/s)  parallel {:>9.1}us ({:>5.1} GB/s)  speedup {:.2}x",
+                serial * 1e6,
+                gb / serial,
+                par * 1e6,
+                gb / par,
+                serial / par
+            );
+        }
+        for &n in &[16_000_000usize, 64_000_000] {
+            let a: Vec<f32> = (0..n).map(|i| (i % 1000) as f32 * 0.5).collect();
+            let b: Vec<f32> = (0..n).map(|i| (i % 777) as f32 * 0.3).collect();
+            let shape = Shape {
+                dims: vec![n as u32],
+            };
+            let at = TensorValue::new_f32_values(shape.clone(), a).unwrap();
+            let bt = TensorValue::new_f32_values(shape.clone(), b).unwrap();
+            let serial = best_of(10, || {
+                eval_same_shape_f32_binop(Primitive::Add, &at, &bt)
+                    .unwrap()
+                    .unwrap()
+            });
+            let par = best_of(10, || {
+                eval_same_shape_f32_cheap_parallel(Primitive::Add, &at, &bt).unwrap()
+            });
+            let gb = n as f64 * 4.0 * 3.0 / 1e9;
+            println!(
+                "add_f32 n={n:>9}: serial {:>9.1}us ({:>5.1} GB/s)  parallel {:>9.1}us ({:>5.1} GB/s)  speedup {:.2}x",
+                serial * 1e6,
+                gb / serial,
+                par * 1e6,
+                gb / par,
+                serial / par
             );
         }
     }

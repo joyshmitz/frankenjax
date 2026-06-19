@@ -296,3 +296,23 @@ Additional cod-a repeat validation environment:
   half-width F32/BF16 need raw packed chunk builders plus output-layout work
   that avoid the current shape-changing construction overhead. Do not retry the
   boxed-literal-elision bitcast family without fresh profiler evidence.
+
+## CobaltForge - Large-array threaded cheap binops: JAX WIN (2026-06-19)
+
+- First measured JAX-DOMINATING elementwise result in this campaign. Threading the
+  cheap same-shape f64/f32 binops (Add/Sub/Mul/Div/Max/Min) above an 8.39M-element
+  gate flips four large-array workloads from JAX losses to wins:
+  add_f64 16M/64M and add_f32 16M/64M now run at Rust/JAX 0.51-0.59 (1.69-1.97x
+  FASTER than `jax.jit` x64, same host), versus 3.6-4.6x slower on the prior serial
+  fresh-alloc path. Internal serial->parallel speedup 6.19-7.69x. Bit-identical
+  (lane-independent), guarded by `cheap_binary_parallel_f64_bit_identical_to_serial`.
+- Correction logged in the ledger: the benchmark host (Zen3 5975WX) has NO AVX-512,
+  so prior "JAX wins via AVX-512 8-wide" attributions for elementwise losses are
+  incorrect on this hardware; XLA also runs AVX2 and does NOT thread large CPU
+  elementwise. The real gaps were the serial fresh-alloc page-fault cliff and
+  single-core DRAM bandwidth.
+- Still NOT release-grade and untouched by this change: the L3-resident regime
+  (n<=~4M, incl. the 1M elementwise rows) where JAX wins on pure L3 streaming
+  bandwidth (~200 vs ~70 GB/s). Threading regresses there and is correctly gated
+  off. Closing the L3-resident gap needs compiled-jaxpr arena buffer reuse, not
+  threading.

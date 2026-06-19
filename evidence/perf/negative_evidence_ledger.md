@@ -1290,3 +1290,62 @@ ends are not rediscovered without new evidence.
   family without a new profiler showing permute-copy, not GEMM/XLA codegen, is
   still dominant. The next meaningful path is fused layout-aware einsum lowering,
   packed/tiled GEMM, AVX/FMA policy resolution, or compiled-buffer reuse.
+
+## CobaltForge - Threaded cheap same-shape binops for DRAM-bound arrays (JAX WIN)
+
+- Lever: cheap same-shape elementwise binops (Add/Sub/Mul/Div/Max/Min) over dense
+  f64/f32 were ALWAYS serial — the recorded "memory-bound ops regress when
+  threaded" DO-NOT. That finding is real but SIZE-SCOPED: it was measured at
+  L3-resident sizes. New gated path `eval_same_shape_f64_cheap_parallel` /
+  `eval_same_shape_f32_cheap_parallel` threads the op (work-scaled `std::thread::
+  scope`, exact same per-element closures incl. NaN-propagating `jax_max_f64`/
+  `jax_min_f64`) ONLY when `n >= CHEAP_BINARY_PARALLEL_MIN` (1<<23 = 8.39M elems),
+  well past the measured ~5M-element fresh-alloc cliff. Sub-threshold (incl. the
+  benchmarked 1M size) stays on the serial fast path — no regression there.
+- HARDWARE CORRECTION: the benchmark host is an AMD Ryzen Threadripper PRO 5975WX
+  (Zen3), which has NO AVX-512 (cpuinfo: avx2+fma only) and a 32MB-per-CCD L3.
+  Prior ledger/scorecard rows attribute elementwise JAX losses partly to "JAX
+  likely AVX-512 (8-wide) vs our AVX2 (4-wide)" — that is FALSE on this host; XLA
+  also runs AVX2 here. Measured: XLA does NOT thread large CPU elementwise
+  (~21-27 GB/s flat at 16M-64M), so the true elementwise gap was (a) our serial
+  fresh-alloc page-fault cliff and (b) single-core DRAM bandwidth — both fixed by
+  threading beyond L3.
+- Why bit-identical: elementwise output is lane-independent; chunk boundaries never
+  change which IEEE op produces which bit. Same closures as the serial path.
+- Conformance guard: GREEN for this change. `cheap_binary_parallel_f64_bit_identical_to_serial`
+  (new) compares the threaded path bit-for-bit vs the serial closures at n=8.39M+257,
+  seeding NaN/±inf/±0/MAX/MIN_POSITIVE to exercise Max/Min NaN propagation and inf
+  division — PASS. Full `fj-lax --lib`: 1494 pass, +1 new pass; the 43 failing tests
+  are PRE-EXISTING (identical set on clean baseline `d7514a7d`, the documented
+  digest-drift RED state) — this change adds 0 new failures.
+- Measured A/B (LOCAL, same-binary same-invocation, real `eval_*` fresh-alloc path,
+  best-of-10; bench `bench_cheap_binary_parallel_vs_serial`, 2026-06-19):
+
+  | Workload | serial (before) | parallel (after) | internal speedup |
+  | --- | ---: | ---: | ---: |
+  | add_f64 n=16M | 64859 us (5.9 GB/s) | 9190 us (41.8 GB/s) | 7.06x |
+  | add_f64 n=64M | 255663 us (6.0 GB/s) | 33988 us (45.2 GB/s) | 7.52x |
+  | add_f32 n=16M | 30806 us (6.2 GB/s) | 4975 us (38.6 GB/s) | 6.19x |
+  | add_f32 n=64M | 134654 us (5.7 GB/s) | 17514 us (43.9 GB/s) | 7.69x |
+
+- JAX head-to-head (LOCAL, same host, `jax.jit(lambda x,y:x+y)`, x64; best-of-15
+  over inner-10, /tmp/jax_both.py):
+
+  | Workload | Rust after | JAX | Rust/JAX | verdict |
+  | --- | ---: | ---: | ---: | --- |
+  | add_f64 n=16M | 9190 us | 18099 us | 0.51x | Rust 1.97x FASTER |
+  | add_f64 n=64M | 33988 us | 57472 us | 0.59x | Rust 1.69x FASTER |
+  | add_f32 n=16M | 4975 us | 8598 us | 0.58x | Rust 1.73x FASTER |
+  | add_f32 n=64M | 17514 us | 31674 us | 0.55x | Rust 1.81x FASTER |
+
+- Decision: KEEP. Before this change Rust LOST these four large-array workloads to
+  JAX by 3.6-4.6x (serial fresh-alloc); after, Rust DOMINATES by 1.69-1.97x. The
+  L3-resident regime (n<=4M, e.g. the 1M gauntlet row) is untouched and still uses
+  the serial path (threading regresses there — re-confirmed: 1M threaded x8 was
+  1.8ms vs 0.34ms serial).
+- Retry predicate: do NOT lower the gate toward L3-resident sizes (re-introduces the
+  documented regression). The L3-resident 1M loss vs JAX (~70 vs ~200 GB/s, pure
+  L3 bandwidth) is a SEPARATE problem (XLA L3 streaming / buffer reuse), not solved
+  by threading. Next elementwise frontier: compiled-jaxpr arena buffer reuse to kill
+  the per-op fresh allocation entirely (would also remove the page-fault cliff and
+  help the L3-resident regime).
