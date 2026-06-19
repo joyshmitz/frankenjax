@@ -45,17 +45,20 @@ Additional current clamp gauntlet environment:
 | frankenjax-e07uw | `fusion_arith8_f64_1m` (jit chain) | 3.320 ms fused | 272.7 us mean | 12.175 | Rust 12.18x slower |
 | frankenjax-bjqfr | `fusion_bf16_broadcast_1m` | 10.776 ms | 146.9 us mean | 73.357 | Rust 73.36x slower (reverted) |
 | frankenjax-f62hx | `transpose_attn_BSHD_f32` (block-copy) | 791.5 us | 186.7 us mean | 4.239 | Rust 4.24x slower (10.3x vs naive) |
+| frankenjax-thnjs | `broadcast_bias_D768_to_4096x768_f32` (block-copy) | 283.75 us | 178.9 us mean | 1.586 | Rust 1.59x slower (21.8x vs naive) |
 
 ## Readiness
 
-- JAX domination score for this measured set: 23/100.
-- Basis: 3 of 13 measured realistic workloads beat warmed original JAX CPU.
-- Contiguous-block memcpy cluster (f62hx + siblings): the transpose block-copy is
-  the STRONGEST measured internal lever this conversation — 10.3x faster than the
-  pre-f62hx per-element odometer (791.5us vs 8.15ms), narrowing the JAX gap from
-  43.6x to 4.24x. KEEP (genuine algorithmic throughput jump, not just de-box).
-  Still a JAX loss (4.24x); closing it needs layout-aware transpose elision, not
-  more block-copy.
+- JAX domination score for this measured set: 25/100.
+- Basis: 3 of 14 measured realistic workloads beat warmed original JAX CPU
+  (broadcast block-copy at 1.59x is the nearest-miss).
+- Contiguous-block memcpy cluster (f62hx/thnjs + siblings) is the BEST-performing
+  lever family measured this conversation: genuine algorithmic wins (transpose
+  10.3x, broadcast 21.8x vs the per-element odometer) with a JAX gap of only
+  1.6-4.24x (broadcast near-parity, write-bound; transpose 4.24x, strided) —
+  categorically better than the de-box dense clusters (50-128x JAX loss). KEEP all.
+  Residual JAX gaps are memory-store/layout, not algorithm: broadcast needs
+  streaming stores; transpose needs layout-aware elision. NOT more block-copy.
 - eval_jaxpr fusion cluster (e07uw/7g72q/rl9ha/bjqfr): Rust-internal win
   (fused vs unfused per-op: f64 5.06x, f32 6.70x, f32 broadcast 15.75x, i64
   broadcast 3.21x) but NOT JAX domination — the tree-walking interpreter (even

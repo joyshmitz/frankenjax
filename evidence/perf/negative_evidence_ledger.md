@@ -436,3 +436,42 @@ ends are not rediscovered without new evidence.
   cache-blocked tiling of the strided (non-identity-suffix) case (REJECTED before
   as a regression — see project_transpose_already_optimal) or avoiding the
   materialized transpose entirely (layout-aware fusion), NOT more block-copy.
+
+## frankenjax-thnjs - Contiguous-Block Memcpy Broadcast (second block-copy data point)
+
+- Lever: broadcast_replicate replicates the contiguous trailing source block via
+  extend_from_slice instead of per-element coordinate decode (sibling of the
+  transpose block-copy f62hx). Bias/feature broadcast [D] -> [rows, D] is in every
+  transformer layer.
+- Workload: bias broadcast [768] -> [4096, 768] f32 (3,145,728 elems), the
+  D=768-model-dim-over-4096-tokens bias replicate. broadcast_dimensions [1].
+- Conformance GUARD: GREEN. `broadcast_gauntlet.rs` asserts block-copy ==
+  pre-thnjs per-element reference at 4 probe indices; broadcast conformance passes.
+- Measured evidence (2026-06-19, rch worker, Criterion sample 30):
+  - Internal A/B (Rust):
+
+  | Arm | median time | vs naive |
+  | --- | ---: | ---: |
+  | block-copy (eval_primitive, committed) | 283.75 us | 21.80x faster |
+  | naive per-element decode (pre-thnjs) | 6.1866 ms | baseline |
+
+  - Head-to-head vs original JAX (`broadcast_gauntlet.py`, jax.jit CPU x64,
+    jnp.broadcast_to+0.0 materialized):
+
+  | Engine | time | Rust/JAX |
+  | --- | ---: | ---: |
+  | JAX jit broadcast | 178.9 us (mean; p50 164.9, cv 48%) | - |
+  | Rust block-copy | 283.75 us | ~1.59x slower |
+  | Rust naive (pre-thnjs) | 6.19 ms | ~34.6x slower |
+
+- Decision: KEEP. 21.8x internal win and only ~1.6x off JAX (NEAR-PARITY) — the
+  closest-to-JAX block-copy lever measured. Broadcast is write-bandwidth-bound, so
+  both engines sit near memory bandwidth (Rust ~44 GB/s vs JAX ~70 GB/s store
+  throughput); the residual gap is store-vectorization, not algorithm.
+- Cluster summary (2 measured): block-copy structural kernels deliver 10-22x
+  internal wins and a 1.6-4.24x JAX gap (broadcast 1.6x write-bound, transpose
+  4.24x strided) -- categorically better than the de-box dense clusters (50-128x
+  JAX loss). The block-copy lever is the right kind of optimization; KEEP all
+  siblings (slice/gather/dynamic_slice/rev) on the same transform + bit-identity tests.
+- Retry predicate: broadcast's residual 1.6x to JAX is store throughput — would
+  need SIMD/streaming-store output (non-temporal writes), not more block-copy.
