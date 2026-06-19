@@ -42,16 +42,18 @@ Additional current scalar broadcast environment:
 - JAX timing protocol: warmed `block_until_ready()` execution, 60 runs x 1000
   inner loops per scalar broadcast workload
 
-Additional current fj-core stack environment:
+Additional current fj-core stack/repeat environment:
 
 - Agent: cod-b / WildForge
 - Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-b`
 - Rust bench command: `cargo bench -p fj-core --bench core_baseline` with the
-  `core/tensor_stack_axis0` filter, local same-host execution.
+  `core/tensor_stack_axis0` and `core/tensor_repeat_axis0` filters, local
+  same-host execution.
 - JAX oracle: `benchmarks/jax_comparison/.venv/bin/python`
 - JAX/JAXLIB: 0.10.1 / 0.10.1, `jax_enable_x64=true`, CPU backend
 - JAX timing protocol: warmed `block_until_ready()` execution, 80 runs x 200
-  inner loops for `jax.jit(jnp.stack)` over 64 x 1024 F64 arrays.
+  inner loops for `jax.jit(jnp.stack)` over 64 x 1024 F64 arrays and
+  `jax.jit(jnp.repeat(v[None, :], 64, axis=0))` over a 1024-element F64 vector.
 
 ## Measured Workloads
 
@@ -65,6 +67,7 @@ Additional current fj-core stack environment:
 | frankenjax-alc0j | `broadcast_scalar_u64_1024x1024` | 104.911 us mean | 124.569 us mean | 0.842 | Rust 1.19x faster (noisy near-tie) |
 | frankenjax-alc0j | `broadcast_scalar_complex128_1024x1024` | 283.150 us mean | 245.381 us mean | 1.154 | Rust 1.15x slower (noisy loss) |
 | frankenjax-cod-b-dense-tensor-stack-axis0-rw4k4 | `stack_axis0_f64_64x1k` | 3.3963 us mean | 41.0467 us mean | 0.083 | Rust 12.09x faster (1.04x vs literal control) |
+| frankenjax-cod-b-dense-tensor-repeat-axis0-jk3ed | `repeat_axis0_f64_1k_x64` | 3.2461 us mean | 11.7639 us mean | 0.276 | Rust 3.62x faster (28.36x vs materializing control) |
 | frankenjax-mcqr.105 | `f32_mixed_scalar_tensor_1m` | 159.383 us mean | 115.540 us mean | 1.379 | Rust 1.38x slower |
 | frankenjax-mcqr.105 | `f64_mixed_scalar_tensor_1m` | 996.940 us mean | 213.651 us mean | 4.666 | Rust 4.67x slower |
 | frankenjax-mcqr.106 | `bf16_mixed_scalar_tensor_1m` | 15.571 ms mean | 121.313 us mean | 128.353 | Rust 128.35x slower |
@@ -106,16 +109,21 @@ Additional current fj-core stack environment:
   same-host estimates FLIP several to wins/ties: slice ~0.72x (Rust FASTER),
   integer_pow2 f32 ~0.97x (~tie/win), broadcast ~1.10x, complex_ctor ~1.08x. Future
   vs-JAX rows MUST run the Rust bench LOCALLY (cargo bench, not rch).
-- JAX domination score (same-host corrected/measured estimate): ~38/100 — stack
-  axis0 (0.083x), slice (corrected ~0.72x), and integer_pow2 f32 (corrected
-  ~0.97x) beat or tie JAX same-host, with broadcast/complex_ctor within ~10%.
-  The 10 bitcast rows add internal wins, one noisy external JAX win, and nine
-  external JAX losses.
+- JAX domination score (same-host corrected/measured estimate): ~40/100 — stack
+  axis0 (0.083x), repeat_axis0 (0.276x), slice (corrected ~0.72x), and
+  integer_pow2 f32 (corrected ~0.97x) beat or tie JAX same-host, with
+  broadcast/complex_ctor within ~10%. The 10 bitcast rows add internal wins,
+  one noisy external JAX win, and nine external JAX losses.
 - The fj-core `stack_axis0` tensor concat-storage row is the strongest external
   Rust/JAX win in this scorecard (12.09x faster), but the actual lever is only a
   narrow 1.04x internal improvement over the literal-backed control. KEEP it for
   realistic vmap/loop-stack construction; do not use it as evidence that the
   whole dense-storage backlog is release-ready.
+- The fj-core `repeat_axis0` tensor concat-storage row is a stronger internal
+  proof than stack: optimized repeat is 28.36x faster than the materializing
+  control and 3.62x faster than JAX on the 1k x64 F64 repeat. The JAX row has
+  CV 10.47%, so treat the external ratio as directional rather than
+  certification-grade; the internal revert/control gap is large enough to KEEP.
 - The de-box category SPLITS: bandwidth-bound de-box (complex ctor, integer_pow
   f32) ties/beats JAX same-host; heavy-per-lane de-box (clamp half 53-128x) does
   not — there per-lane work, not boxing, dominates.

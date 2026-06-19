@@ -41,6 +41,47 @@ ends are not rediscovered without new evidence.
   `to_i64_vec` dense-storage beads still require their own JAX head-to-head rows;
   do not generalize this 12.09x external win to those levers.
 
+## frankenjax-cod-b-dense-tensor-repeat-axis0-jk3ed - Dense Tensor repeat_axis0 Concat Storage
+
+- Date: 2026-06-19
+- Agent: cod-b / WildForge
+- Lever: route `TensorValue::repeat_axis0` for tensor inputs through
+  `LiteralBuffer::from_concat_slices` plus `new_with_literal_buffer`, preserving
+  packed dense storage instead of materializing a repeated `Vec<Literal>`.
+- Status: measured keep. External head-to-head is a Rust win versus original JAX;
+  a temporary materializing-path revert regressed badly, so the optimization was
+  restored and kept. No committed revert.
+- Benchmark guard: `core/tensor_repeat_axis0_dense_f64_1k_x64`. The in-tree
+  `core/tensor_repeat_axis0_literal_f64_1k_x64` row is not a valid
+  pre-optimization control after `TensorValue::new` densification, because its
+  input is also dense by the time `repeat_axis0` runs.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust optimized command:
+    `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-core --bench core_baseline -- core/tensor_repeat_axis0 --sample-size 100 --warm-up-time 1 --measurement-time 10`.
+  - JAX command: warmed inline `jax.jit(lambda v: jnp.repeat(v[None, :], 64, axis=0))`
+    over a 1024-element `float64` vector with `jax_enable_x64=true`, CPU backend,
+    80 runs x 200 inner loops via `/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`
+    (JAX/JAXLIB 0.10.1).
+  - Rust optimized dense mean estimate 3.2461 us (`[3.2053, 3.2855]` us
+    Criterion interval) vs JAX mean 11.7639 us (p50 11.1859 us, CV 10.47%):
+    Rust/JAX 0.276x, Rust 3.62x faster.
+  - Same-code-path dense-input/literal-input rows before the temporary revert:
+    3.2461 us vs 3.2266 us. This apparent neutral result was not a valid
+    pre-optimization comparison because both inputs reached the direct concat
+    path with dense storage.
+  - Temporary materializing-path control, produced by locally reverting only the
+    direct concat hunk and then rerunning the same Criterion filter: 92.057 us
+    (`[90.552, 93.632]` us). Optimized/materializing 0.035x, optimized 28.36x
+    faster. The temporary revert was discarded before commit.
+- Conformance guard: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo test -p fj-core repeat_axis0 --lib`
+  passed 5 tests, 0 failed. Per-crate `cargo check -p fj-core --all-targets`,
+  `cargo clippy -p fj-core --all-targets -- -D warnings`, and
+  `cargo fmt -p fj-core --check` passed.
+- Retry predicate: do not retry tensor `repeat_axis0` literal materialization or
+  direct concat-storage variants without a new profile showing a distinct
+  repeat path. Follow-up should target compiled/buffer-reuse semantics or larger
+  batched repeat workloads, not another `Vec<Literal>` elision for this path.
+
 ## frankenjax-mcqr.97 - TensorValue::new Dense Literal Storage
 
 - Date: 2026-06-18
