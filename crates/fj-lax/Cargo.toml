@@ -38,3 +38,7 @@ harness = false
 [[bench]]
 name = "clamp_gauntlet"
 harness = false
+
+[[bench]]
+name = "transpose_gauntlet"
+harness = false
