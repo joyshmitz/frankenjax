@@ -66,14 +66,33 @@ ends are not rediscovered without new evidence.
 - Agent: cod-a / TopazOrchid
 - Lever: route dense `BitcastConvertType` F32->BF16/F16 and BF16/F16->F32
   through packed f32/u16 slices instead of per-`Literal` byte conversion.
-- Status: batch-test pending.
+- Status: measured keep internally; negative head-to-head result versus JAX on
+  both measured BF16 reinterpret workloads.
+- Evidence artifact:
+  `artifacts/performance/evidence/frankenjax_mcqr_100_101_bitcast_gauntlet_2026-06-19.json`.
 - Benchmark guard: `eval/bitcast_f32_bf16_dense_1m`,
   `eval/bitcast_f32_bf16_literal_ref_1m`,
   `eval/bitcast_bf16_f32_dense_1m`,
   `eval/bitcast_bf16_f32_literal_ref_1m`.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust check: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo check -p fj-lax --bench lax_baseline`.
+  - Rust bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a cargo bench -p fj-lax --bench lax_baseline -- 'eval/bitcast_(f32_i32|i32_f32|f64_u64|u64_f64|f32_bf16|bf16_f32)' --sample-size 10 --warm-up-time 1 --measurement-time 2 --save-baseline frankenjax-mcqr-100-101-bitcast`.
+  - JAX command: `benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/bitcast_gauntlet.py --runs 30 --warmup 5 --inner-loops 50 --output /tmp/frankenjax_mcqr_100_101_bitcast_jax_raw.json`.
+  - `bitcast_f32_bf16_1m`: Rust dense mean 2.710 ms vs Rust literal
+    reference 57.706 ms (21.29x faster internally); JAX mean 138.058 us;
+    Rust/JAX 19.63x slower.
+  - `bitcast_bf16_f32_1m`: Rust dense mean 669.626 us vs Rust literal
+    reference 31.549 ms (47.11x faster internally); JAX mean 139.426 us;
+    Rust/JAX 4.80x slower.
+  - Decision: keep, not revert. Both rows are large internal wins over the
+    original per-Literal path, but they are external JAX losses. The next BF16
+    bitcast attempt must target raw packed output construction throughput, not
+    another boxed-literal-elision pass.
 - Conformance guard: dense and literal-backed half-width bitcasts produce the
   same output shapes, dtypes, raw half chunks, and round-trip f32 bit patterns
   across NaN, infinities, signed zero, normals, and a custom NaN payload.
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo test -p fj-lax bitcast --lib`
+  passed 4 tests, 0 failed.
 - Retry predicate: do not retry this half-width bitcast family unless focused
   criterion evidence shows the dense rows are still slower than the
   literal-backed reference or the original path remains a top-five fj-lax
@@ -88,7 +107,10 @@ ends are not rediscovered without new evidence.
 - Lever: route dense `BitcastConvertType` F32->I32, I32->F32, F64->U64, and
   U64->F64 through packed typed slices instead of per-`Literal` byte
   conversion.
-- Status: batch-test pending.
+- Status: measured keep internally; negative head-to-head result versus JAX on
+  all four measured same-width reinterpret workloads.
+- Evidence artifact:
+  `artifacts/performance/evidence/frankenjax_mcqr_100_101_bitcast_gauntlet_2026-06-19.json`.
 - Benchmark guard: `eval/bitcast_f32_i32_dense_1m`,
   `eval/bitcast_f32_i32_literal_ref_1m`,
   `eval/bitcast_i32_f32_dense_1m`,
@@ -97,10 +119,29 @@ ends are not rediscovered without new evidence.
   `eval/bitcast_f64_u64_literal_ref_1m`,
   `eval/bitcast_u64_f64_dense_1m`,
   `eval/bitcast_u64_f64_literal_ref_1m`.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust/JAX commands match the `frankenjax-mcqr.100` bitcast gauntlet entry.
+  - `bitcast_f32_i32_1m`: Rust dense mean 430.783 us vs Rust literal
+    reference 19.537 ms (45.35x faster internally); JAX mean 133.290 us;
+    Rust/JAX 3.23x slower.
+  - `bitcast_i32_f32_1m`: Rust dense mean 642.693 us vs Rust literal
+    reference 22.677 ms (35.28x faster internally); JAX mean 93.945 us;
+    Rust/JAX 6.84x slower.
+  - `bitcast_f64_u64_1m`: Rust dense mean 270.723 us vs Rust literal
+    reference 24.747 ms (91.41x faster internally); JAX mean 176.611 us;
+    Rust/JAX 1.53x slower.
+  - `bitcast_u64_f64_1m`: Rust dense mean 228.320 us vs Rust literal
+    reference 20.525 ms (89.89x faster internally); JAX mean 175.404 us;
+    Rust/JAX 1.30x slower.
+  - Decision: keep, not revert. Every row is a large internal win and the
+    f64/u64 rows are near the existing memory-bandwidth residual gap, but all
+    rows are still external JAX losses.
 - Conformance guard: dense and literal-backed signed/unsigned same-width
   bitcasts produce the same shapes, dtypes, exact integer bit lanes, packed
   storage, and round-trip float bit patterns across NaN, infinities, signed
   zero, normals, and custom NaN payloads.
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo test -p fj-lax bitcast --lib`
+  passed 4 tests, 0 failed.
 - Retry predicate: do not retry the already committed F32<->U32, F64<->I64,
   F64<->U32, U32<->F64, F32<->BF16/F16, BF16/F16->F32, or these signed/
   unsigned same-width bitcast pairs without focused criterion evidence showing
@@ -181,16 +222,35 @@ ends are not rediscovered without new evidence.
 - Lever: build each `eval_split_multi` output from `LiteralBuffer::from_concat_slices`
   over the original tensor backing instead of copying each section through
   `Vec<Literal>` and re-densifying via `TensorValue::new`.
-- Status: batch-test pending.
+- Status: measured keep against warmed JAX CPU. No revert.
 - Benchmark guard: `eval/split_multi_1024x1024_f32_axis1`.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-lax --bench lax_baseline -- eval/split_multi_1024x1024_f32_axis1 --sample-size 60 --warm-up-time 1 --measurement-time 5`.
+  - Rust Criterion: mean 96.651 us, median 95.038 us, slope 98.875 us
+    (95% CI 97.211-100.534 us), stddev 6.616 us, CV 6.85%.
+  - JAX command: `benchmarks/jax_comparison/.venv/bin/python` inline split
+    harness, JAX/JAXLIB 0.10.1, `jax_enable_x64=true`, CPU backend, 60 runs x
+    1000 warmed inner loops.
+  - `jnp.split(x, [256], axis=1)` bare output: JAX mean 149.082 us, p50
+    148.877 us, CV 12.08%; Rust/JAX mean ratio 0.648, Rust 1.54x faster.
+  - `jnp.split(x, [256], axis=1)` with `+0.0` materialization on both outputs:
+    JAX mean 136.983 us, p50 139.649 us, CV 10.43%; Rust/JAX mean ratio 0.706,
+    Rust 1.42x faster.
+  - Decision: keep. The JAX side remains noisy, but both JAX modes are slower
+    than the Rust lazy-section split by a margin larger than the Rust CI band.
+    This is a measured split-construction win, not a claim about arbitrary
+    downstream consumers after full materialization.
 - Conformance guard: uneven multi-output split materializes the same literals for
-  each section and exposes dense f32 storage through `as_f32_slice`.
-- Retry predicate: do not retry split section materialization unless focused
-  criterion evidence shows `eval_split_multi` remains a top-five shape/data
-  movement bottleneck or `LiteralBuffer::Concat` dense-lane behavior changes.
-  Do not merge with FMA/SIMD exp, GEMM, QR, SVD, cumsum, OneHot, SelectN/iota,
-  or broader reshape/slice/gather work without fresh benchmark evidence and
-  ownership check.
+  each section and exposes dense f32 storage through `as_f32_slice`;
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo test -p fj-lax split_multi --lib`
+  passed 2 tests, 0 failed.
+- Retry predicate: retry only if a profiler attributes a clearly-above-noise
+  share to `eval_split_multi` section construction on a wider multi-output split
+  workload after Criterion and JAX CV are both below 5%, or if
+  `LiteralBuffer::Concat` dense-lane behavior changes. Do not merge with
+  FMA/SIMD exp, GEMM, QR, SVD, cumsum, OneHot, SelectN/iota, or broader
+  reshape/slice/gather work without fresh benchmark evidence and ownership
+  check.
 
 ## frankenjax-19wst - Dense Scalar Tile Fills
 
