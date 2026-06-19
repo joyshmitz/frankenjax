@@ -48,13 +48,18 @@ Additional current clamp gauntlet environment:
 | frankenjax-thnjs | `broadcast_bias_D768_to_4096x768_f32` (block-copy) | 283.75 us | 178.9 us mean | 1.586 | Rust 1.59x slower (21.8x vs naive) |
 | frankenjax-hfq7o | `integer_pow2_f64_1m` (v*v fix) | 405.45 us | 184.1 us mean | 2.202 | Rust 2.20x slower (was 12.9x) |
 | frankenjax-hfq7o | `integer_pow2_f32_1m` (v*v fix) | 169.61 us | 121.1 us mean | 1.400 | Rust 1.40x slower (was 21.8x) |
+| frankenjax-idunl | `slice_crop_1024x1024_to_512x512_f32` (block-copy) | 45.97 us | 44.17 us mean | 1.041 | Rust 1.04x slower (TIE; 6.1x vs naive) |
 
 ## Readiness
 
-- JAX domination score for this measured set: 27/100.
-- Basis: 3 of 16 measured realistic workloads beat warmed original JAX CPU;
-  the nearest-misses are now a tight cluster: integer_pow2 f32 1.40x, broadcast
-  1.59x, integer_pow2 f64 2.20x — all bandwidth/store-bound, ~1.4-2.2x off JAX.
+- JAX domination score for this measured set: 30/100.
+- Basis: 3 of 17 measured realistic workloads beat warmed original JAX CPU; slice
+  block-copy now TIES JAX (1.04x, within noise). Nearest-miss cluster: slice 1.04x
+  (tie), integer_pow2 f32 1.40x, broadcast 1.59x, integer_pow2 f64 2.20x — all
+  bandwidth/memcpy-bound, ~1.0-2.2x off JAX. The bandwidth-bound block-copy and
+  the de-box-fixed compute ops have CLOSED to JAX parity/near-parity; the
+  remaining losses are compute-bound transcendentals/matmul (+fma gated) and the
+  interpreter-vs-XLA gap on jit'd chains.
 - BEST gauntlet result: the integer_pow x**2 fix (hfq7o) — measurement caught a
   runtime-`powi(2)` LIBCALL (~6.75 GB/s); replacing it with `v*v` (bit-identical)
   gave 5.8x (f64) / 15.6x (f32) and closed the JAX gap from 12.9-21.8x to

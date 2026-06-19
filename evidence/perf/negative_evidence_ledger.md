@@ -505,3 +505,28 @@ ends are not rediscovered without new evidence.
   streaming stores) — the SAME residual as broadcast; NOT an algorithm issue. Apply
   the same powi-runtime-arg lesson to any other op taking a runtime small-integer
   power (none found in the hot path; integer_pow[3+] is rarer + needs powi grouping).
+
+## frankenjax-idunl - Contiguous-Block Memcpy Slice (third block-copy data point: PARITY)
+
+- Lever: slice_strided_gather copies the contiguous trailing block via
+  extend_from_slice (2D crop / windowing). Workload: crop [1024,1024]->[512,512]
+  f32 (262,144 output elems), start [256,256] limit [768,768].
+- Conformance GUARD: GREEN. `slice_gauntlet.rs` asserts block-copy == pre-idunl
+  per-element reference at 4 probe indices.
+- Measured evidence (2026-06-19, rch Criterion sample 30; JAX jax.jit CPU x64,
+  x[256:768,256:768]+0.0 materialized):
+
+  | Arm | median | vs naive | vs JAX |
+  | --- | ---: | ---: | ---: |
+  | block-copy (eval_primitive) | 45.97 us | 6.10x faster | 1.04x slower (TIE) |
+  | naive per-element | 280.51 us | baseline | ~6.4x slower |
+  | JAX jit crop | 44.17 us (mean, cv 26%) | - | - |
+
+- Decision: KEEP. 6.1x internal win and ~PARITY with JAX (1.04x, within noise) —
+  the FIRST measured non-loss in the conversation. Slice is a pure contiguous
+  block memcpy of sub-region rows; both engines are memcpy-bound and tie.
+- Block-copy cluster (3 measured): transpose 4.24x (strided read), broadcast 1.59x
+  (replicate, write-bound), slice 1.04x (sub-region, memcpy-bound). The
+  bandwidth/memcpy-bound block-copy ops TIE or near-tie JAX; the strided-read
+  transpose is 4.24x (random-access read pattern). The block-copy lever family is
+  the closest-to-JAX work in the codebase; KEEP all.
