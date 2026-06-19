@@ -428,3 +428,11 @@ Additional cod-a repeat validation environment:
   generic _into helpers): bf16 transpose 13.6-20.2 GB/s, bf16 concat 13.1-17.0 GB/s (serial ~2-2.5
   GB/s cliff -> ~5-8x). Bit-identical (incl. non-square transpose), guarded. bf16 attention
   transpose + KV-cache concat are ubiquitous in LLM training/inference.
+
+## CobaltForge - i64 broadcast/gather WIN + argmax verified + SATURATION (2026-06-19)
+
+- i64 broadcast (~22 GB/s, ~9x) + i64 gather (~16 GB/s, ~7x) threaded (index/id tensors). argmax
+  VERIFIED already 1.36x faster than JAX (no change). With this, all measured large memory-bound
+  ops match/beat JAX across f64/f32/i64/bf16/f16 (fill/copy/reduce patterns). Remaining JAX losses
+  are only the off-limits float non-associative reductions (sum/prod/cumsum) and the L3-resident
+  regime — both need the multi-session compiled-jaxpr work, not threading.

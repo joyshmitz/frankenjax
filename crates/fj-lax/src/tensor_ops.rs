@@ -1333,8 +1333,11 @@ pub(crate) fn eval_broadcast_in_dim(
                 )?));
             }
             if let Some(src) = tensor.elements.as_i64_slice() {
-                let out = broadcast_replicate(
-                    total,
+                // i64/i32 index/id broadcast (position ids, token ids at scale): calloc'd
+                // output + threaded fill above the gate. Bit-identical.
+                let mut out = vec![0i64; total];
+                broadcast_replicate_into(
+                    &mut out,
                     out_rank,
                     &target_dims,
                     &out_to_in,
@@ -3185,6 +3188,16 @@ pub(crate) fn eval_gather(
         if operand.dtype == DType::I64
             && let Some(src) = operand.elements.as_i64_slice()
         {
+            // i64 index/id gather at scale: threaded contiguous copy above the gate.
+            if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+                let mut out = vec![0i64; total];
+                if gather_contiguous_into(&mut out, src, &resolved, i64::MIN, slice_elems) {
+                    return Ok(Value::Tensor(TensorValue::new_i64_values(
+                        Shape { dims: out_dims },
+                        out,
+                    )?));
+                }
+            }
             dense_contiguous_gather!(src, i64::MIN, TensorValue::new_i64_values);
         }
         // I32 (JAX's default int) shares the dense i64 backing; gather is a structural
@@ -12941,6 +12954,65 @@ mod tests {
         let mut out = vec![0.0f32; n];
         threaded_fill_into(&mut out, 1.5f32, crate::arithmetic::work_scaled_threads(n).max(2));
         assert!(out.iter().all(|&x| x.to_bits() == 1.5f32.to_bits()));
+    }
+
+    #[test]
+    fn threaded_i64_broadcast_and_gather_bit_identical() {
+        // i64 broadcast [C] -> [rows, C] at >= gate.
+        let cols = 1024usize;
+        let rows = 16_400usize;
+        let total = rows * cols;
+        assert!(total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
+        let src: Vec<i64> = (0..cols).map(|i| (i as i64) * 7 - 3000).collect();
+        let in_strides =
+            checked_row_major_strides(Primitive::BroadcastInDim, "broadcast_in_dim", &[cols as u32])
+                .unwrap();
+        let target_dims = vec![rows as u32, cols as u32];
+        let out_to_in = vec![None, Some(0usize)];
+        let serial = broadcast_replicate(
+            total,
+            2,
+            &target_dims,
+            &out_to_in,
+            &[cols as u32],
+            &in_strides,
+            &src,
+        );
+        let mut threaded = vec![0i64; total];
+        broadcast_replicate_into(
+            &mut threaded,
+            2,
+            &target_dims,
+            &out_to_in,
+            &[cols as u32],
+            &in_strides,
+            &src,
+        );
+        assert!(serial == threaded, "i64 threaded broadcast != serial");
+
+        // i64 gather.
+        let vocab = 4096usize;
+        let slice_elems = 256usize;
+        let nidx = 33_000usize;
+        let gtotal = nidx * slice_elems;
+        assert!(gtotal >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
+        let table: Vec<i64> = (0..vocab * slice_elems).map(|i| i as i64 - 100).collect();
+        let resolved: Vec<Option<usize>> = (0..nidx)
+            .map(|i| if i % 61 == 0 { None } else { Some((i * 733) % vocab) })
+            .collect();
+        let fill = i64::MIN;
+        let mut want: Vec<i64> = Vec::with_capacity(gtotal);
+        for &r in &resolved {
+            match r {
+                Some(idx) => {
+                    want.extend_from_slice(&table[idx * slice_elems..(idx + 1) * slice_elems])
+                }
+                None => want.extend(std::iter::repeat_n(fill, slice_elems)),
+            }
+        }
+        let mut got = vec![0i64; gtotal];
+        assert!(gather_contiguous_into(&mut got, &table, &resolved, fill, slice_elems));
+        assert!(got == want, "i64 threaded gather != serial");
     }
 
     #[test]

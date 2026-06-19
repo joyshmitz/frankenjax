@@ -1792,3 +1792,38 @@ ends are not rediscovered without new evidence.
   for transpose+concat (matching the bf16 broadcast+gather shipped in 3fe6f23a). Bit-identical.
 - Retry predicate: extend bf16/f16 to convert (half<->f32) and the i64/u32/u64 arms of all threaded
   ops. Mechanical (concrete-zero calloc + existing generic _into helpers).
+
+## CobaltForge - Threaded i64 broadcast + gather (index/id tensors) + argmax verification (JAX WIN)
+
+- Lever: extends the threaded broadcast/gather to i64 (i32 shares the backing) — position-ids /
+  token-ids broadcast and index/id gather at scale, previously on the serial cliff (~2.2-2.5 GB/s).
+  Generic `broadcast_replicate_into` / `gather_contiguous_into` accept i64 (Copy+Send+Sync); wired
+  the i64 arms to calloc'd `vec![0i64; total]`, preserving i32 width on the broadcast result.
+  Bit-identical. Guarded by `threaded_i64_broadcast_and_gather_bit_identical` (broadcast vs serial;
+  gather incl. OOB None/fill vs serial).
+- Conformance: `fj-lax --lib` 1508 pass (+1 new), 43 fail (PRE-EXISTING) — 0 new failures.
+- Measured (LOCAL real eval_primitive path, best-of-15):
+
+  | workload | threaded | (serial ~2.2-2.5 GB/s cliff) internal |
+  | --- | ---: | ---: |
+  | i64 broadcast ->[16384,1024] | 5966 us (22.5 GB/s) | ~9x |
+  | i64 broadcast ->[65536,1024] | 24545 us (21.9 GB/s) | ~9x |
+  | i64 gather nidx=16384 (16.8M) | 8634 us (15.5 GB/s) | ~7x |
+  | i64 gather nidx=65536 (67M)   | 31753 us (16.9 GB/s) | ~7x |
+
+- ARGMAX/ARGMIN — VERIFIED ALREADY WINNING (no change). Measured full f64 argmax (LOCAL,
+  best-of-15) vs `jax.jit(jnp.argmax)` x64:
+
+  | n | Rust | JAX | Rust/JAX |
+  | --- | ---: | ---: | ---: |
+  | 16M | 10131 us (12.6 GB/s) | 13766 us (9.3 GB/s) | 0.74x (1.36x FASTER) |
+  | 64M | 40560 us (12.6 GB/s) | 55010 us (9.3 GB/s) | 0.74x (1.36x FASTER) |
+
+  Rust argmax already beats JAX 1.36x; the delicate NaN/first-index-tie threaded combine is NOT
+  worth the risk since there is no competitive gap. Left as-is.
+- SATURATION NOTE: with this commit, every measured large memory-bound op (binops/scalar-tensor/
+  unary/broadcast/scalar-fill/convert/transpose/gather/concat across f64/f32/i64/bf16/f16, plus
+  max/min-reduce and argmax) now MATCHES or BEATS JAX. The only remaining JAX losses are the
+  documented off-limits/architectural ones: ReduceSum/ReduceProd & cumsum (float non-associative,
+  bit-exact-pinned -> need XLA-order matching) and the L3-resident regime (needs compiled-jaxpr
+  arena buffer reuse). Both are multi-session swings, NOT threading.
