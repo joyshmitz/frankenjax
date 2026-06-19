@@ -75,6 +75,41 @@ ends are not rediscovered without new evidence.
   or a compiled buffer-reuse path with materially different cost. Continue to
   benchmark scalar repeat, slice, and extraction siblings separately.
 
+## frankenjax-cod-b-dense-scalar-repeat-axis0-zb2b7 - Dense Scalar repeat_axis0 Packing
+
+- Date: 2026-06-19
+- Agent: cod-b / WildForge
+- Lever: verify scalar `TensorValue::repeat_axis0` dense-constructor packing for
+  homogeneous scalar repeats, avoiding a materialized `Vec<Literal>` loop before
+  producing the length-64 dense tensor.
+- Status: measured keep. External head-to-head is a decisive Rust win versus
+  original JAX on scalar repeat construction, and the materializing Rust control
+  confirms a real local construction-path win. No revert.
+- Benchmark guard: `core/scalar_repeat_axis0_f64_64`, plus
+  `core/scalar_repeat_axis0_f64_64_materializing_control` in
+  `crates/fj-core/benches/core_baseline.rs`.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust command:
+    `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-core --bench core_baseline -- core/scalar_repeat_axis0 --sample-size 100 --warm-up-time 1 --measurement-time 10 --save-baseline frankenjax-cod-b-scalar-repeat-axis0-control`.
+  - JAX command:
+    `benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/core_repeat_gauntlet.py --runs 100 --warmup 10 --inner-loops 1000 --output /tmp/frankenjax_cod_b_scalar_repeat_axis0_jax_raw.json`.
+  - Rust optimized mean estimate 66.809 ns (`[65.832, 67.860]` ns Criterion
+    interval) vs JAX mean 4.6720 us (p50 4.5007 us, p95 5.6054 us,
+    p99 6.3644 us, CV 9.46%): Rust/JAX 0.0143x, Rust 69.93x faster.
+  - Rust materializing control mean estimate 181.12 ns (`[176.40, 186.55]` ns
+    Criterion interval): optimized/materializing 0.369x, optimized 2.71x
+    faster internally.
+- Conformance guard: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b rch exec -- cargo test -p fj-core repeat_axis0 --lib`
+  passed 5 tests, 0 failed (RCH fell back to local execution). Per-crate
+  `cargo check -p fj-core --bench core_baseline`, `cargo check -p fj-core --all-targets`,
+  `cargo clippy -p fj-core --all-targets -- -D warnings`, and
+  `cargo fmt -p fj-core --check` passed.
+- Retry predicate: do not retry scalar `repeat_axis0` dense-constructor packing
+  unless a new profile shows a non-`f64` scalar dtype, larger repeat count, or a
+  compiled buffer-reuse path with materially different cost. Future scalar repeat
+  work should target compiled output-buffer reuse, not another `Vec<Literal>`
+  elision.
+
 ## frankenjax-cod-b-dense-tensor-repeat-axis0-jk3ed - Dense Tensor repeat_axis0 Concat Storage
 
 - Date: 2026-06-19

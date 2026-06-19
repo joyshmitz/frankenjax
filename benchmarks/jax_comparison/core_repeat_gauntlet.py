@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""JAX CPU head-to-head for fj-core tensor repeat_axis0 construction.
+"""JAX CPU head-to-head for fj-core repeat_axis0 construction.
 
 Mirrors crates/fj-core/benches/core_baseline.rs:
 core/tensor_repeat_axis0_dense_f64_1k_x64 repeats one 1024-element F64 vector
 into a 64x1024 tensor.
+core/scalar_repeat_axis0_f64_64 repeats one scalar F64 into a length-64 tensor.
 
 Run:
   benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/core_repeat_gauntlet.py \
@@ -67,6 +68,10 @@ def repeat_axis0(x):
     return jnp.tile(x[jnp.newaxis, :], (REPEATS, 1)) + jnp.float64(0.0)
 
 
+def scalar_repeat_axis0(x):
+    return jnp.repeat(x[jnp.newaxis], REPEATS, axis=0) + jnp.float64(0.0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=50)
@@ -76,6 +81,7 @@ def main():
     args = ap.parse_args()
 
     x = jnp.arange(WIDTH, dtype=jnp.float64)
+    scalar = jnp.array(3.25, dtype=jnp.float64)
     results = [
         bench(
             "tensor_repeat_axis0_f64_1k_x64",
@@ -84,16 +90,33 @@ def main():
             args.runs,
             args.warmup,
             args.inner_loops,
-        )
+        ),
+        bench(
+            "scalar_repeat_axis0_f64_64",
+            scalar_repeat_axis0,
+            (scalar,),
+            args.runs,
+            args.warmup,
+            args.inner_loops,
+        ),
     ]
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "engine": "jax_jit_cpu",
         "jax_version": jax.__version__,
         "platform": platform.platform(),
-        "shape": [REPEATS, WIDTH],
-        "elements": REPEATS * WIDTH,
-        "workload": "jnp.tile(x[None, :], (64, 1)) + 0.0",
+        "workloads": {
+            "tensor_repeat_axis0_f64_1k_x64": {
+                "shape": [REPEATS, WIDTH],
+                "elements": REPEATS * WIDTH,
+                "expr": "jnp.tile(x[None, :], (64, 1)) + 0.0",
+            },
+            "scalar_repeat_axis0_f64_64": {
+                "shape": [REPEATS],
+                "elements": REPEATS,
+                "expr": "jnp.repeat(x[None], 64, axis=0) + 0.0",
+            },
+        },
         "results": results,
     }
     text = json.dumps(payload, indent=2)

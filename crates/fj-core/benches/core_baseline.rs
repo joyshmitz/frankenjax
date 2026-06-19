@@ -281,6 +281,27 @@ fn bench_scalar_stack_axis0(c: &mut Criterion) {
     });
 }
 
+fn bench_scalar_repeat_axis0(c: &mut Criterion) {
+    let scalar = Value::scalar_f64(3.25);
+    let literal = Literal::from_f64(3.25);
+
+    c.bench_function("core/scalar_repeat_axis0_f64_64", |b| {
+        b.iter(|| TensorValue::repeat_axis0(black_box(&scalar), black_box(64)))
+    });
+    c.bench_function(
+        "core/scalar_repeat_axis0_f64_64_materializing_control",
+        |b| {
+            b.iter(|| {
+                TensorValue::new(
+                    DType::F64,
+                    Shape::vector(black_box(64)),
+                    vec![black_box(literal); 64],
+                )
+            })
+        },
+    );
+}
+
 fn bench_value_scalar_f64(c: &mut Criterion) {
     c.bench_function("core/value_scalar_f64", |b| {
         b.iter(|| Value::scalar_f64(std::f64::consts::PI))
@@ -320,6 +341,7 @@ criterion_group!(
     bench_tensor_repeat_axis0,
     bench_tensor_stack_axis0,
     bench_scalar_stack_axis0,
+    bench_scalar_repeat_axis0,
     bench_value_scalar_f64,
     bench_value_vector_f64,
     bench_shape_element_count,
