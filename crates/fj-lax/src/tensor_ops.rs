@@ -12077,7 +12077,10 @@ pub(crate) fn eval_rev(
             // and division decode, the input Literal materialization, and the
             // Vec<Literal> output. Bit-identical to the generic path below.
             if let Some(src) = tensor.elements.as_f64_slice() {
-                let out = rev_gather(src, dims, &strides, &reversed, total);
+                let mut out = vec![0.0f64; total];
+                if !rev_gather_into(&mut out, src, dims, &strides, &reversed) {
+                    out = rev_gather(src, dims, &strides, &reversed, total);
+                }
                 return Ok(Value::Tensor(
                     TensorValue::new_f64_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
@@ -12088,21 +12091,30 @@ pub(crate) fn eval_rev(
             // reversed elements into dense output, avoiding the full-buffer Literal
             // materialization + boxed output of the generic `as_slice` path below.
             if let Some(src) = tensor.elements.as_f32_slice() {
-                let out = rev_gather(src, dims, &strides, &reversed, total);
+                let mut out = vec![0.0f32; total];
+                if !rev_gather_into(&mut out, src, dims, &strides, &reversed) {
+                    out = rev_gather(src, dims, &strides, &reversed, total);
+                }
                 return Ok(Value::Tensor(
                     TensorValue::new_f32_values(tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
                 ));
             }
             if let Some(src) = tensor.elements.as_half_float_slice() {
-                let out = rev_gather(src, dims, &strides, &reversed, total);
+                let mut out = vec![0u16; total];
+                if !rev_gather_into(&mut out, src, dims, &strides, &reversed) {
+                    out = rev_gather(src, dims, &strides, &reversed, total);
+                }
                 return Ok(Value::Tensor(
                     TensorValue::new_half_float_values(tensor.dtype, tensor.shape.clone(), out)
                         .map_err(EvalError::InvalidTensor)?,
                 ));
             }
             if let Some(src) = tensor.elements.as_i64_slice() {
-                let out = rev_gather(src, dims, &strides, &reversed, total);
+                let mut out = vec![0i64; total];
+                if !rev_gather_into(&mut out, src, dims, &strides, &reversed) {
+                    out = rev_gather(src, dims, &strides, &reversed, total);
+                }
                 // Preserve the input integer width (i32 reverse must stay I32).
                 let tv = if tensor.dtype == DType::I32 {
                     TensorValue::new_i32_values(tensor.shape.clone(), out)
@@ -12208,6 +12220,72 @@ fn rev_gather<T: Copy>(
         }
     }
     out
+}
+
+/// Threaded `rev` that fills a PRE-ALLOCATED `out` (caller allocates `vec![<concrete
+/// zero>; total]` = calloc'd zero pages). Splits the outer block iterations across scoped
+/// threads; each output block `o` is written from `src[base(o)..base(o)+block_len]`, where
+/// `base(o)` is the mixed-radix outer-coordinate -> base mapping with reversal applied —
+/// identical to [`rev_gather`]'s serial odometer. Bit-for-bit identical; parallel-faults
+/// the fresh output. Returns true if it ran (threads>1), false to fall back to serial.
+fn rev_gather_into<T: Copy + Send + Sync>(
+    out: &mut [T],
+    src: &[T],
+    dims: &[u32],
+    strides: &[usize],
+    reversed: &[bool],
+) -> bool {
+    let rank = dims.len();
+    let total = out.len();
+    let mut block_len = 1_usize;
+    let mut block_start = rank;
+    for ax in (0..rank).rev() {
+        if reversed[ax] {
+            break;
+        }
+        block_len *= dims[ax] as usize;
+        block_start = ax;
+    }
+    let block_len = block_len.max(1);
+    let outer_total = total / block_len;
+    let threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && outer_total >= 2 {
+        crate::arithmetic::work_scaled_threads(total).min(outer_total)
+    } else {
+        return false;
+    };
+    let base_of = |o: usize| -> usize {
+        let mut rem = o;
+        let mut base = 0usize;
+        for ax in (0..block_start).rev() {
+            let d = dims[ax] as usize;
+            let coord = rem % d;
+            rem /= d;
+            let c = if reversed[ax] { d - 1 - coord } else { coord };
+            base += c * strides[ax];
+        }
+        base
+    };
+    let base_of = &base_of;
+    let outer_per = outer_total.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [T] = out;
+        let mut o0 = 0usize;
+        while o0 < outer_total {
+            let o1 = (o0 + outer_per).min(outer_total);
+            let len = (o1 - o0) * block_len;
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            scope.spawn(move || {
+                for (k, o) in (o0..o1).enumerate() {
+                    let base = base_of(o);
+                    blk[k * block_len..k * block_len + block_len]
+                        .copy_from_slice(&src[base..base + block_len]);
+                }
+            });
+            o0 = o1;
+        }
+    });
+    true
 }
 
 // ── Squeeze: remove singleton dimensions ───────────────────────
@@ -12986,6 +13064,34 @@ mod tests {
         let mut out = vec![0.0f32; n];
         threaded_fill_into(&mut out, 1.5f32, crate::arithmetic::work_scaled_threads(n).max(2));
         assert!(out.iter().all(|&x| x.to_bits() == 1.5f32.to_bits()));
+    }
+
+    #[test]
+    fn rev_gather_into_bit_identical_to_serial() {
+        // Compare the threaded rev fill to the serial rev_gather for several axis sets at
+        // >= gate, including a reversed INNER axis (block_len==1) and multi-axis reverse.
+        // cases: (dims, reversed-axes)
+        let cases: [(Vec<u32>, Vec<usize>); 4] = [
+            (vec![16_400, 1024], vec![0]),       // leading-axis reverse (big block)
+            (vec![1024, 16_400], vec![1]),       // inner-axis reverse (block_len==1)
+            (vec![64, 64, 4100], vec![0, 2]),    // multi-axis reverse
+            (vec![4_200_000, 4], vec![0, 1]),    // both axes reversed
+        ];
+        for (dims, axes) in cases {
+            let total: usize = dims.iter().map(|&d| d as usize).product();
+            assert!(total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
+            let strides = checked_row_major_strides(Primitive::Rev, "rev", &dims).unwrap();
+            let rank = dims.len();
+            let reversed: Vec<bool> = (0..rank).map(|ax| axes.contains(&ax)).collect();
+            let src: Vec<f64> = (0..total).map(|i| (i as f64) * 0.25 - 5.0).collect();
+            let serial = rev_gather(&src, &dims, &strides, &reversed, total);
+            let mut threaded = vec![0.0f64; total];
+            let ran = rev_gather_into(&mut threaded, &src, &dims, &strides, &reversed);
+            assert!(ran, "threaded rev should engage at total {total}");
+            let sb: Vec<u64> = serial.iter().map(|v| v.to_bits()).collect();
+            let tb: Vec<u64> = threaded.iter().map(|v| v.to_bits()).collect();
+            assert!(sb == tb, "threaded rev != serial for dims {dims:?} axes {axes:?}");
+        }
     }
 
     #[test]

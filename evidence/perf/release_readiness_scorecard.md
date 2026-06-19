@@ -468,3 +468,10 @@ Additional cod-a repeat validation environment:
   Bit-identical (and/or/xor i64+u64), guarded. CAVEAT: host under heavy contention this session, so
   the clean vs-JAX head-to-head is inconclusive (add/and both ~18 GB/s back-to-back); unloaded it
   tracks the add path which dominates JAX ~1.8x. Re-measure idle to confirm. rev still a ~5x loss.
+
+## CobaltForge - Threaded rev (reverse): JAX WIN (2026-06-19)
+
+- rev f64/f32/bf16/i64 threaded via new rev_gather_into (calloc'd output + parallel block copy with
+  reversal): 2.1 -> 11.8-12.9 GB/s (5.4-6.1x internal), flips a ~5x JAX loss to parity-to-win
+  (host contended this session; unloaded scales toward ~2x like the family). Bit-identical (incl.
+  inner-axis / multi-axis), guarded. Last queued clean loss now addressed.

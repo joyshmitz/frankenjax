@@ -1923,3 +1923,24 @@ ends are not rediscovered without new evidence.
   missed; robust ~3.7-4x internal improvement, bit-identical, at-least-parity with JAX even under
   load. Re-measure the clean head-to-head on an idle host to confirm the unloaded ~1.8x domination.
 - Retry predicate: rev (reverse) is the remaining clean loss (~5x); thread its index-map next.
+
+## CobaltForge - Threaded rev (reverse) f64/f32/bf16/i64 for DRAM-bound (JAX WIN)
+
+- Lever: `rev` (sequence/axis flip) built its output via the serial `rev_gather` odometer
+  (page-fault-bound ~2.1-2.2 GB/s). New `rev_gather_into<T>` fills a calloc'd output by splitting
+  the outer block iterations across scoped threads; each block `o` is `src[base(o)..+block_len]`
+  with the reversal applied in base(o) — identical to the serial odometer. Wired f64/f32/bf16/i64
+  arms above CHEAP_BINARY_PARALLEL_MIN. Bit-identical.
+- Guarded by `rev_gather_into_bit_identical_to_serial` (leading-axis / inner-axis block_len==1 /
+  multi-axis / both-axes-reversed), bit-for-bit vs serial rev_gather.
+- Conformance: `fj-lax --lib` 1513 pass (+1 new), 43 fail (PRE-EXISTING) — 0 new failures.
+- Measured (LOCAL real eval_primitive path, best-of-20, host under load this session):
+  rev f64 2.1-2.2 -> 11.8-12.9 GB/s (5.4-6.1x internal). Same-load f64-add baseline = 17.7-18.1
+  GB/s (vs ~38 unloaded), so the host is contended; JAX rev measured 10.8-10.9 (lower load).
+  At equal load rev (~12) trails add (~18) because the reverse block order is less prefetch-
+  friendly; unloaded it scales toward ~25 GB/s (~2x over JAX). Net: flips a ~5x JAX loss into
+  parity-to-win (load-dependent), robust 5.4-6.1x internal improvement, bit-identical.
+- Decision: KEEP. Same calloc+parallel-page-fault lever, now covering rev (the last queued clean
+  loss). Re-measure idle for the precise vs-JAX domination factor.
+- Retry predicate: contained large-op surface now broadly threaded; remaining JAX losses are the
+  documented off-limits/architectural ones (float sum/prod/cumsum order; L3-resident regime).
