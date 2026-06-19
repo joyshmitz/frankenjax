@@ -51,6 +51,8 @@ ends are not rediscovered without new evidence.
 - Status: measured keep. External head-to-head is a Rust win versus original JAX;
   a temporary materializing-path revert regressed badly, so the optimization was
   restored and kept. No committed revert.
+- Evidence artifact:
+  `artifacts/performance/evidence/frankenjax_cod_b_dense_tensor_repeat_axis0_gauntlet_2026-06-19.json`.
 - Benchmark guard: `core/tensor_repeat_axis0_dense_f64_1k_x64`. The in-tree
   `core/tensor_repeat_axis0_literal_f64_1k_x64` row is not a valid
   pre-optimization control after `TensorValue::new` densification, because its
@@ -73,6 +75,11 @@ ends are not rediscovered without new evidence.
     direct concat hunk and then rerunning the same Criterion filter: 92.057 us
     (`[90.552, 93.632]` us). Optimized/materializing 0.035x, optimized 28.36x
     faster. The temporary revert was discarded before commit.
+  - Independent cod-a validation rerun: Rust dense Criterion slope 2.887 us
+    (`[2.853, 2.922]` us) vs a materialized JAX `jnp.tile(x[None, :], (64, 1))`
+    mean 16.606 us (p50 15.721 us, CV 29.61%): Rust/JAX 0.174x, Rust 5.75x
+    faster. Treat this as directional because the JAX CV is high; the keep
+    decision still rests on the 28.36x materializing-control result above.
 - Conformance guard: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo test -p fj-core repeat_axis0 --lib`
   passed 5 tests, 0 failed. Per-crate `cargo check -p fj-core --all-targets`,
   `cargo clippy -p fj-core --all-targets -- -D warnings`, and

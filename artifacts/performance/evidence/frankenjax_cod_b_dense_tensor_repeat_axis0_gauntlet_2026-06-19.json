@@ -1,0 +1,94 @@
+{
+  "artifact": "frankenjax_cod_b_dense_tensor_repeat_axis0_gauntlet_2026-06-19",
+  "generated_at": "2026-06-19T04:11:00Z",
+  "agent": {
+    "beads_actor": "cod-a",
+    "mail_identity": "WildForge"
+  },
+  "subject": {
+    "bead": "frankenjax-cod-b-dense-tensor-repeat-axis0-jk3ed",
+    "optimization": "TensorValue::repeat_axis0 dense tensor concat storage",
+    "decision": "keep",
+    "decision_basis": [
+      "Upstream commit 310d8c5d measured the valid materializing-path control at 92.057 us versus optimized 3.2461 us, a 28.36x internal win.",
+      "This cod-a rerun independently confirms a same-host external Rust/JAX win on a JAX materialized tile-equivalent workload.",
+      "The in-tree literal Criterion row is not a valid pre-optimization control after TensorValue::new densification; it reaches the same dense concat path."
+    ],
+    "upstream_commit": "310d8c5d2702990268ad36f8af3073c8c53b4189"
+  },
+  "environment": {
+    "host": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "logical_cpus": 64,
+    "os": "Linux-6.17.0-35-generic-x86_64-with-glibc2.42",
+    "rustc": "rustc 1.98.0-nightly (f20a92ec0 2026-06-07)",
+    "target_dir": "/data/projects/.rch-targets/frankenjax-cod-a",
+    "jax_version": "0.10.1",
+    "jax_enable_x64": true,
+    "jax_backend": "CPU"
+  },
+  "commands": {
+    "rust_check": "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo check -p fj-core --bench core_baseline",
+    "rust_bench": "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a cargo bench -p fj-core --bench core_baseline -- 'core/tensor_repeat_axis0' --sample-size 100 --warm-up-time 1 --measurement-time 10 --save-baseline frankenjax-cod-a-dense-tensor-repeat-axis0",
+    "jax_smoke": "benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/core_repeat_gauntlet.py --runs 1 --warmup 0 --inner-loops 1 --output /tmp/frankenjax_tensor_repeat_jax_smoke.json",
+    "jax_bench": "benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/core_repeat_gauntlet.py --runs 50 --warmup 10 --inner-loops 500 --output /tmp/frankenjax_cod_b_dense_tensor_repeat_axis0_jax_raw.json",
+    "conformance": "CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo test -p fj-core repeat_axis0 --lib"
+  },
+  "workloads": [
+    {
+      "name": "tensor_repeat_axis0_f64_1k_x64",
+      "rust": {
+        "bench": "core/tensor_repeat_axis0_dense_f64_1k_x64",
+        "criterion_slope_ns": 2887.430065714414,
+        "criterion_slope_ci95_ns": [
+          2853.3712867091513,
+          2921.505336751017
+        ],
+        "criterion_mean_ns": 2928.39585307353,
+        "criterion_mean_ci95_ns": [
+          2882.596926666098,
+          2979.106962276373
+        ]
+      },
+      "rust_same_path_input_control": {
+        "bench": "core/tensor_repeat_axis0_literal_f64_1k_x64",
+        "criterion_slope_ns": 2853.4531410844565,
+        "criterion_slope_ci95_ns": [
+          2811.080914038808,
+          2902.6752197322535
+        ],
+        "criterion_mean_ns": 2848.9001920822398,
+        "criterion_mean_ci95_ns": [
+          2813.6544220175956,
+          2886.270517561082
+        ],
+        "interpretation": "Not a pre-optimization control after TensorValue::new densifies homogeneous F64 input."
+      },
+      "jax": {
+        "name": "tensor_repeat_axis0_f64_1k_x64",
+        "workload": "jnp.tile(x[None, :], (64, 1)) + 0.0",
+        "mean_ns": 16606.26772,
+        "p50_ns": 15720.956,
+        "p95_ns": 24322.565,
+        "p99_ns": 31633.79448,
+        "cv_pct": 29.6054591575716,
+        "shape": [
+          64,
+          1024
+        ],
+        "elements": 65536
+      },
+      "ratios": {
+        "rust_dense_slope_div_jax_mean": 0.173876,
+        "rust_faster_than_jax_x": 5.7512,
+        "rust_dense_slope_div_same_path_input_control_slope": 1.0119
+      },
+      "outcome": "External Rust win; same-path input-control neutral/slightly slower and invalid as pre-optimization evidence. Keep decision relies on the materializing-path control from 310d8c5d."
+    }
+  ],
+  "validation": {
+    "python_compile": "passed",
+    "jax_smoke": "passed",
+    "rust_check": "passed",
+    "conformance": "passed: 5 tests, 0 failed, 0 ignored, 156 filtered out"
+  }
+}

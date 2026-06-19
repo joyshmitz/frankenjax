@@ -55,6 +55,18 @@ Additional current fj-core stack/repeat environment:
   inner loops for `jax.jit(jnp.stack)` over 64 x 1024 F64 arrays and
   `jax.jit(jnp.repeat(v[None, :], 64, axis=0))` over a 1024-element F64 vector.
 
+Additional cod-a repeat validation environment:
+
+- Agent: cod-a / WildForge
+- Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-a`
+- Rust bench command: `cargo bench -p fj-core --bench core_baseline` with the
+  `core/tensor_repeat_axis0` filter, local same-host execution.
+- JAX oracle: `benchmarks/jax_comparison/.venv/bin/python`
+- JAX/JAXLIB: 0.10.1 / 0.10.1, `jax_enable_x64=true`, CPU backend
+- JAX timing protocol: warmed `block_until_ready()` execution, 50 runs x 500
+  inner loops for `jax.jit(jnp.tile(x[None, :], (64, 1)) + 0.0)` over a
+  1024-element F64 vector.
+
 ## Measured Workloads
 
 | Bead | Workload | Rust timing | JAX timing | Rust/JAX | Outcome |
@@ -68,6 +80,7 @@ Additional current fj-core stack/repeat environment:
 | frankenjax-alc0j | `broadcast_scalar_complex128_1024x1024` | 283.150 us mean | 245.381 us mean | 1.154 | Rust 1.15x slower (noisy loss) |
 | frankenjax-cod-b-dense-tensor-stack-axis0-rw4k4 | `stack_axis0_f64_64x1k` | 3.3963 us mean | 41.0467 us mean | 0.083 | Rust 12.09x faster (1.04x vs literal control) |
 | frankenjax-cod-b-dense-tensor-repeat-axis0-jk3ed | `repeat_axis0_f64_1k_x64` | 3.2461 us mean | 11.7639 us mean | 0.276 | Rust 3.62x faster (28.36x vs materializing control) |
+| frankenjax-cod-b-dense-tensor-repeat-axis0-jk3ed | `repeat_axis0_f64_1k_x64` cod-a tile validation | 2.887 us slope | 16.606 us mean | 0.174 | Rust 5.75x faster; JAX CV 29.61%, directional only |
 | frankenjax-mcqr.105 | `f32_mixed_scalar_tensor_1m` | 159.383 us mean | 115.540 us mean | 1.379 | Rust 1.38x slower |
 | frankenjax-mcqr.105 | `f64_mixed_scalar_tensor_1m` | 996.940 us mean | 213.651 us mean | 4.666 | Rust 4.67x slower |
 | frankenjax-mcqr.106 | `bf16_mixed_scalar_tensor_1m` | 15.571 ms mean | 121.313 us mean | 128.353 | Rust 128.35x slower |
@@ -124,6 +137,8 @@ Additional current fj-core stack/repeat environment:
   control and 3.62x faster than JAX on the 1k x64 F64 repeat. The JAX row has
   CV 10.47%, so treat the external ratio as directional rather than
   certification-grade; the internal revert/control gap is large enough to KEEP.
+  A cod-a tile-equivalent validation rerun also wins externally (Rust/JAX
+  0.174x) but has JAX CV 29.61%, so it is corroborating evidence only.
 - The de-box category SPLITS: bandwidth-bound de-box (complex ctor, integer_pow
   f32) ties/beats JAX same-host; heavy-per-lane de-box (clamp half 53-128x) does
   not — there per-lane work, not boxing, dominates.
