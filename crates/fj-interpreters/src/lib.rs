@@ -1622,39 +1622,64 @@ fn try_fuse_elementwise_chain_f64(
         if !eqn.params.is_empty() || !eqn.sub_jaxprs.is_empty() || eqn.outputs.len() != 1 {
             break;
         }
-        let Some(op) = cheap_op(eqn.primitive) else {
-            break;
-        };
-        let needed = if op.is_unary() { 1 } else { 2 };
-        if eqn.inputs.len() != needed {
-            break;
-        }
         let ext_mark = ext.len();
         let vars_mark = ext_vars.len();
-        let a = classify_fusion_operand(
-            &eqn.inputs[0],
-            chain_var,
-            env,
-            &mut ext,
-            &mut ext_vars,
-            &mut shape,
-        );
-        let b = if op.is_unary() {
-            Some(FOperand::Scalar(0.0))
-        } else {
-            classify_fusion_operand(
-                &eqn.inputs[1],
+        // Square(x) is fused as Mul(x, x): eval_square's float_op is `|x| x*x` and its
+        // int_op `wrapping_mul(x, x)` — exactly eval_mul — so duplicating the single
+        // operand into a Mul step is bit-identical and reuses the proven Mul machinery
+        // (no new CheapOp / apply arm). Lets variance/L2/MSE chains (mean((x-mu)^2))
+        // fuse instead of breaking the run on the Square primitive.
+        let (op, a, b) = if eqn.primitive == Primitive::Square {
+            if eqn.inputs.len() != 1 {
+                break;
+            }
+            let Some(a) = classify_fusion_operand(
+                &eqn.inputs[0],
                 chain_var,
                 env,
                 &mut ext,
                 &mut ext_vars,
                 &mut shape,
-            )
-        };
-        let (Some(a), Some(b)) = (a, b) else {
-            ext.truncate(ext_mark);
-            ext_vars.truncate(vars_mark);
-            break;
+            ) else {
+                ext.truncate(ext_mark);
+                ext_vars.truncate(vars_mark);
+                break;
+            };
+            (CheapOp::Mul, a, a)
+        } else {
+            let Some(op) = cheap_op(eqn.primitive) else {
+                break;
+            };
+            let needed = if op.is_unary() { 1 } else { 2 };
+            if eqn.inputs.len() != needed {
+                break;
+            }
+            let a = classify_fusion_operand(
+                &eqn.inputs[0],
+                chain_var,
+                env,
+                &mut ext,
+                &mut ext_vars,
+                &mut shape,
+            );
+            let b = if op.is_unary() {
+                Some(FOperand::Scalar(0.0))
+            } else {
+                classify_fusion_operand(
+                    &eqn.inputs[1],
+                    chain_var,
+                    env,
+                    &mut ext,
+                    &mut ext_vars,
+                    &mut shape,
+                )
+            };
+            let (Some(a), Some(b)) = (a, b) else {
+                ext.truncate(ext_mark);
+                ext_vars.truncate(vars_mark);
+                break;
+            };
+            (op, a, b)
         };
         // Steps after the first MUST thread the chain (one operand == Chain). The
         // last_use==k guarantee ensures eqn k uses chain_var, but stay defensive.
@@ -2132,39 +2157,60 @@ fn try_fuse_elementwise_chain_f32(
         if !eqn.params.is_empty() || !eqn.sub_jaxprs.is_empty() || eqn.outputs.len() != 1 {
             break;
         }
-        let Some(op) = cheap_op(eqn.primitive) else {
-            break;
-        };
-        let needed = if op.is_unary() { 1 } else { 2 };
-        if eqn.inputs.len() != needed {
-            break;
-        }
         let ext_mark = ext.len();
         let vars_mark = ext_vars.len();
-        let a = classify_f32_fusion_operand(
-            &eqn.inputs[0],
-            chain_var,
-            env,
-            &mut ext,
-            &mut ext_vars,
-            &mut shape,
-        );
-        let b = if op.is_unary() {
-            Some(F32Operand::Scalar(0.0))
-        } else {
-            classify_f32_fusion_operand(
-                &eqn.inputs[1],
+        // Square(x) fused as Mul(x, x) — see the f64 builder for the bit-identity proof.
+        let (op, a, b) = if eqn.primitive == Primitive::Square {
+            if eqn.inputs.len() != 1 {
+                break;
+            }
+            let Some(a) = classify_f32_fusion_operand(
+                &eqn.inputs[0],
                 chain_var,
                 env,
                 &mut ext,
                 &mut ext_vars,
                 &mut shape,
-            )
-        };
-        let (Some(a), Some(b)) = (a, b) else {
-            ext.truncate(ext_mark);
-            ext_vars.truncate(vars_mark);
-            break;
+            ) else {
+                ext.truncate(ext_mark);
+                ext_vars.truncate(vars_mark);
+                break;
+            };
+            (CheapOp::Mul, a, a)
+        } else {
+            let Some(op) = cheap_op(eqn.primitive) else {
+                break;
+            };
+            let needed = if op.is_unary() { 1 } else { 2 };
+            if eqn.inputs.len() != needed {
+                break;
+            }
+            let a = classify_f32_fusion_operand(
+                &eqn.inputs[0],
+                chain_var,
+                env,
+                &mut ext,
+                &mut ext_vars,
+                &mut shape,
+            );
+            let b = if op.is_unary() {
+                Some(F32Operand::Scalar(0.0))
+            } else {
+                classify_f32_fusion_operand(
+                    &eqn.inputs[1],
+                    chain_var,
+                    env,
+                    &mut ext,
+                    &mut ext_vars,
+                    &mut shape,
+                )
+            };
+            let (Some(a), Some(b)) = (a, b) else {
+                ext.truncate(ext_mark);
+                ext_vars.truncate(vars_mark);
+                break;
+            };
+            (op, a, b)
         };
         // Steps after the first MUST thread the chain (one operand == Chain). The
         // last_use==k guarantee ensures eqn k uses chain_var, but stay defensive.
@@ -2417,39 +2463,62 @@ fn try_fuse_elementwise_chain_i64(
         if !eqn.params.is_empty() || !eqn.sub_jaxprs.is_empty() || eqn.outputs.len() != 1 {
             break;
         }
-        let Some(op) = cheap_op(eqn.primitive) else {
-            break;
-        };
-        let needed = if op.is_unary() { 1 } else { 2 };
-        if eqn.inputs.len() != needed {
-            break;
-        }
         let ext_mark = ext.len();
         let vars_mark = ext_vars.len();
-        let a = classify_i64_fusion_operand(
-            &eqn.inputs[0],
-            chain_var,
-            env,
-            &mut ext,
-            &mut ext_vars,
-            &mut shape,
-        );
-        let b = if op.is_unary() {
-            Some(I64Operand::Scalar(0))
-        } else {
-            classify_i64_fusion_operand(
-                &eqn.inputs[1],
+        // Square(x) fused as Mul(x, x): eval_square's i64 int_op is `wrapping_mul(x, x)`
+        // and the i64 fusion Mul uses wrapping_mul, so this is bit-identical (see the
+        // f64 builder for the general proof).
+        let (op, a, b) = if eqn.primitive == Primitive::Square {
+            if eqn.inputs.len() != 1 {
+                break;
+            }
+            let Some(a) = classify_i64_fusion_operand(
+                &eqn.inputs[0],
                 chain_var,
                 env,
                 &mut ext,
                 &mut ext_vars,
                 &mut shape,
-            )
-        };
-        let (Some(a), Some(b)) = (a, b) else {
-            ext.truncate(ext_mark);
-            ext_vars.truncate(vars_mark);
-            break;
+            ) else {
+                ext.truncate(ext_mark);
+                ext_vars.truncate(vars_mark);
+                break;
+            };
+            (CheapOp::Mul, a, a)
+        } else {
+            let Some(op) = cheap_op(eqn.primitive) else {
+                break;
+            };
+            let needed = if op.is_unary() { 1 } else { 2 };
+            if eqn.inputs.len() != needed {
+                break;
+            }
+            let a = classify_i64_fusion_operand(
+                &eqn.inputs[0],
+                chain_var,
+                env,
+                &mut ext,
+                &mut ext_vars,
+                &mut shape,
+            );
+            let b = if op.is_unary() {
+                Some(I64Operand::Scalar(0))
+            } else {
+                classify_i64_fusion_operand(
+                    &eqn.inputs[1],
+                    chain_var,
+                    env,
+                    &mut ext,
+                    &mut ext_vars,
+                    &mut shape,
+                )
+            };
+            let (Some(a), Some(b)) = (a, b) else {
+                ext.truncate(ext_mark);
+                ext_vars.truncate(vars_mark);
+                break;
+            };
+            (op, a, b)
         };
         // Steps after the first MUST thread the chain (one operand == Chain).
         if chain_var.is_some() && !matches!(a, I64Operand::Chain) && !matches!(b, I64Operand::Chain)
@@ -2782,44 +2851,69 @@ fn try_fuse_elementwise_chain_half(
         if !eqn.params.is_empty() || !eqn.sub_jaxprs.is_empty() || eqn.outputs.len() != 1 {
             break;
         }
-        let Some(op) = cheap_op(eqn.primitive) else {
-            break;
-        };
-        let needed = if op.is_unary() { 1 } else { 2 };
-        if eqn.inputs.len() != needed {
-            break;
-        }
         let ext_mark = ext.len();
         let vars_mark = ext_vars.len();
         let dt_mark = half_dt;
-        let a = classify_half_fusion_operand(
-            &eqn.inputs[0],
-            chain_var,
-            env,
-            &mut ext,
-            &mut ext_vars,
-            &mut shape,
-            &mut half_dt,
-        );
-        let b = if op.is_unary() {
-            // Unary ops carry no second operand; the chunk driver ignores `b`.
-            Some(HalfOperand::Chain)
-        } else {
-            classify_half_fusion_operand(
-                &eqn.inputs[1],
+        // Square(x) fused as Mul(x, x): eval_square's half arm decodes to f64, computes
+        // x*x, and re-encodes — identical to eval_mul's half arm — so duplicating the
+        // operand into a Mul step is bit-identical (see the f64 builder for the proof).
+        let (op, a, b) = if eqn.primitive == Primitive::Square {
+            if eqn.inputs.len() != 1 {
+                break;
+            }
+            let Some(a) = classify_half_fusion_operand(
+                &eqn.inputs[0],
                 chain_var,
                 env,
                 &mut ext,
                 &mut ext_vars,
                 &mut shape,
                 &mut half_dt,
-            )
-        };
-        let (Some(a), Some(b)) = (a, b) else {
-            ext.truncate(ext_mark);
-            ext_vars.truncate(vars_mark);
-            half_dt = dt_mark;
-            break;
+            ) else {
+                ext.truncate(ext_mark);
+                ext_vars.truncate(vars_mark);
+                half_dt = dt_mark;
+                break;
+            };
+            (CheapOp::Mul, a, a)
+        } else {
+            let Some(op) = cheap_op(eqn.primitive) else {
+                break;
+            };
+            let needed = if op.is_unary() { 1 } else { 2 };
+            if eqn.inputs.len() != needed {
+                break;
+            }
+            let a = classify_half_fusion_operand(
+                &eqn.inputs[0],
+                chain_var,
+                env,
+                &mut ext,
+                &mut ext_vars,
+                &mut shape,
+                &mut half_dt,
+            );
+            let b = if op.is_unary() {
+                // Unary ops carry no second operand; the chunk driver ignores `b`.
+                Some(HalfOperand::Chain)
+            } else {
+                classify_half_fusion_operand(
+                    &eqn.inputs[1],
+                    chain_var,
+                    env,
+                    &mut ext,
+                    &mut ext_vars,
+                    &mut shape,
+                    &mut half_dt,
+                )
+            };
+            let (Some(a), Some(b)) = (a, b) else {
+                ext.truncate(ext_mark);
+                ext_vars.truncate(vars_mark);
+                half_dt = dt_mark;
+                break;
+            };
+            (op, a, b)
         };
         // Steps after the first MUST thread the chain (one operand == Chain).
         if chain_var.is_some()
