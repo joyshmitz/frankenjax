@@ -1430,3 +1430,32 @@ ends are not rediscovered without new evidence.
   DIRECTLY into the final output without a concat/read-out copy (i.e. after a
   buffer-reuse arena exists, at which point the spawn-free pool becomes worthwhile
   for the L3-resident regime). Not before.
+
+## CobaltForge - Threaded same-shape i64 binops for DRAM-bound arrays (JAX WIN)
+
+- Lever: completes the same-shape elementwise threading family (after f64/f32 in
+  7b7924b7) with i64. New `eval_same_shape_i64_parallel` threads the dense i64
+  same-shape binop using the EXACT `int_op` closure the serial path uses (carries
+  per-primitive semantics: `wrapping_add`/`wrapping_sub`/`wrapping_mul`, `i64::max/min`,
+  `checked_div().unwrap_or(0)`), gated at `n >= CHEAP_BINARY_PARALLEL_MIN` (1<<23).
+  Required adding `+ Sync` to `eval_binary_elementwise`'s `int_op` bound — non-breaking,
+  every caller passes a stateless (Sync) closure. Generic over op: cheap ops win via
+  DRAM bandwidth + parallel page-faulting, heavy ones (pow/gcd/lcm) on compute.
+- Bit-identity: i64 results are lane-independent; same `int_op`, same order. Guarded by
+  `same_shape_i64_parallel_bit_identical_to_serial` (i64::MAX/MIN/0/-1 edges + forced
+  div-by-zero lanes across wrapping add/sub/mul, max/min, checked_div) — PASS.
+- Conformance: `fj-lax --lib` 1497 pass (+1 new), 43 fail (PRE-EXISTING, identical set
+  on clean baseline) — 0 new failures.
+- Measured A/B (LOCAL same-binary, real `eval_*` fresh-alloc path, best-of-10) and JAX
+  head-to-head (`jax.jit(lambda x,y:x+y)` int64 x64, /tmp/jax_i64.py):
+
+  | Workload | serial (before) | parallel (after) | internal | JAX | Rust/JAX |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | add_i64 n=16M | 64098 us (6.0 GB/s) | 9913 us (38.7 GB/s) | 6.47x | 17603 us | 0.56x (1.78x FASTER) |
+  | add_i64 n=64M | 266637 us (5.8 GB/s) | 39364 us (39.0 GB/s) | 6.77x | 70136 us | 0.56x (1.78x FASTER) |
+
+- Decision: KEEP. Before: Rust LOST i64 add to JAX by ~3.6-3.8x (serial fresh-alloc
+  cliff). After: DOMINATES by 1.78x. Same gate discipline; L3-resident sizes serial.
+- Family status: same-shape f64/f32/i64 + scalar-tensor f64/f32 cheap binops now all
+  threaded beyond L3 and all FASTER than JAX. Remaining unthreaded large-array cheap
+  paths: i64 scalar-tensor + cheap unary (neg/abs/sign) — same pattern, lower priority.

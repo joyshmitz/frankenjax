@@ -657,7 +657,7 @@ fn eval_f32_scalar_cheap_parallel(
 pub(crate) fn eval_binary_elementwise(
     primitive: Primitive,
     inputs: &[Value],
-    int_op: impl Fn(i64, i64) -> i64,
+    int_op: impl Fn(i64, i64) -> i64 + Sync,
     float_op: impl Fn(f64, f64) -> f64 + Sync,
 ) -> Result<Value, EvalError> {
     if inputs.len() != 2 {
@@ -763,6 +763,12 @@ pub(crate) fn eval_binary_elementwise(
                 if matches!(lhs.dtype, DType::BF16 | DType::F16)
                     && lhs.dtype == rhs.dtype
                     && let Some(value) = eval_same_shape_half_float_binop(primitive, lhs, rhs)?
+                {
+                    return Ok(value);
+                }
+                if lhs.dtype == DType::I64
+                    && rhs.dtype == DType::I64
+                    && let Some(value) = eval_same_shape_i64_parallel(lhs, rhs, &int_op)
                 {
                     return Ok(value);
                 }
@@ -2080,6 +2086,52 @@ fn eval_same_shape_i64_binop(
         lhs.shape.clone(),
         elements,
     )?)))
+}
+
+/// Threads the same-shape dense-i64 binop over scoped threads once the array is
+/// DRAM-bound (see [`CHEAP_BINARY_PARALLEL_MIN`]). Applies the EXACT `int_op` the
+/// serial path uses (carrying per-primitive semantics like `wrapping_add` /
+/// `checked_div().unwrap_or(0)`), so output is bit-for-bit identical regardless of
+/// chunking (i64 results are lane-independent). Returns `None` for non-i64-dense
+/// storage or sub-threshold sizes. Cheap i64 ops (add/sub/mul/max/min) win via DRAM
+/// bandwidth + parallel page-faulting; heavier ones (pow/gcd/lcm) win on compute —
+/// both above the gate.
+fn eval_same_shape_i64_parallel(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    int_op: &(impl Fn(i64, i64) -> i64 + Sync),
+) -> Option<Value> {
+    let (a, b) = (lhs.elements.as_i64_slice()?, rhs.elements.as_i64_slice()?);
+    let n = a.len();
+    if n < CHEAP_BINARY_PARALLEL_MIN {
+        return None;
+    }
+    let threads = work_scaled_threads(n);
+    if threads <= 1 {
+        return None;
+    }
+    let mut out = vec![0i64; n];
+    let chunk = n.div_ceil(threads);
+    let op_ref = int_op;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [i64] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < n {
+            let len = chunk.min(n - start);
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let s = start;
+            scope.spawn(move || {
+                for (i, o) in blk.iter_mut().enumerate() {
+                    *o = op_ref(a[s + i], b[s + i]);
+                }
+            });
+            start += len;
+        }
+    });
+    TensorValue::new_i64_values(lhs.shape.clone(), out)
+        .ok()
+        .map(Value::Tensor)
 }
 
 /// I64 scalar⊗tensor broadcast fast path. `scalar_on_left` distinguishes
@@ -19847,6 +19899,50 @@ mod tests {
     }
 
     #[test]
+    fn same_shape_i64_parallel_bit_identical_to_serial() {
+        // Exercise the large-array threaded i64 path and prove bit-for-bit equality with
+        // the serial map using the SAME int_op closures, incl. wrapping overflow and the
+        // div-by-zero `checked_div().unwrap_or(0)` semantics the dispatcher uses.
+        let len = CHEAP_BINARY_PARALLEL_MIN + 191;
+        let mut a: Vec<i64> = (0..len).map(|i| (i as i64 % 9973) - 4096).collect();
+        let mut b: Vec<i64> = (0..len).map(|i| (i as i64 % 7919) - 3000).collect();
+        let edges = [i64::MAX, i64::MIN, 0, -1, 1];
+        for (k, &e) in edges.iter().enumerate() {
+            a[k] = e;
+            b[len - 1 - k] = e;
+            b[len / 2 + k] = 0; // force div/rem-by-zero lanes
+            a[len / 2 + k] = e;
+        }
+        let shape = Shape {
+            dims: vec![len as u32],
+        };
+        let at = TensorValue::new_i64_values(shape.clone(), a.clone()).unwrap();
+        let bt = TensorValue::new_i64_values(shape.clone(), b.clone()).unwrap();
+
+        let ops: [fn(i64, i64) -> i64; 6] = [
+            |x, y| x.wrapping_add(y),
+            |x, y| x.wrapping_sub(y),
+            |x, y| x.wrapping_mul(y),
+            |x, y| x.max(y),
+            |x, y| x.min(y),
+            |x, y| x.checked_div(y).unwrap_or(0),
+        ];
+        for op in ops {
+            let got = eval_same_shape_i64_parallel(&at, &bt, &op)
+                .expect("threaded i64 path should engage above the gate");
+            let got_vals: Vec<i64> = got
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_i64_slice()
+                .unwrap()
+                .to_vec();
+            let want: Vec<i64> = a.iter().zip(&b).map(|(&x, &y)| op(x, y)).collect();
+            assert_eq!(got_vals, want, "threaded i64 output != serial reference");
+        }
+    }
+
+    #[test]
     #[ignore = "perf measurement; run with --release --ignored --nocapture"]
     fn bench_cheap_binary_parallel_vs_serial() {
         use std::time::Instant;
@@ -19932,6 +20028,29 @@ mod tests {
             let gb = n as f64 * 8.0 * 2.0 / 1e9;
             println!(
                 "biasadd_f64 n={n:>9}: serial {:>9.1}us ({:>5.1} GB/s)  parallel {:>9.1}us ({:>5.1} GB/s)  speedup {:.2}x",
+                serial * 1e6,
+                gb / serial,
+                par * 1e6,
+                gb / par,
+                serial / par
+            );
+        }
+        for &n in &[16_000_000usize, 64_000_000] {
+            let a: Vec<i64> = (0..n).map(|i| i as i64 % 1000).collect();
+            let b: Vec<i64> = (0..n).map(|i| i as i64 % 777).collect();
+            let shape = Shape {
+                dims: vec![n as u32],
+            };
+            let at = TensorValue::new_i64_values(shape.clone(), a).unwrap();
+            let bt = TensorValue::new_i64_values(shape.clone(), b).unwrap();
+            let add = |x: i64, y: i64| x.wrapping_add(y);
+            let serial = best_of(10, || {
+                eval_same_shape_i64_binop(&at, &bt, &add).unwrap().unwrap()
+            });
+            let par = best_of(10, || eval_same_shape_i64_parallel(&at, &bt, &add).unwrap());
+            let gb = n as f64 * 8.0 * 3.0 / 1e9;
+            println!(
+                "add_i64 n={n:>9}: serial {:>9.1}us ({:>5.1} GB/s)  parallel {:>9.1}us ({:>5.1} GB/s)  speedup {:.2}x",
                 serial * 1e6,
                 gb / serial,
                 par * 1e6,

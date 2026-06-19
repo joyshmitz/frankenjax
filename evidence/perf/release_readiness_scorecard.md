@@ -329,3 +329,11 @@ Additional cod-a repeat validation environment:
 - Same gating discipline: L3-resident sizes stay serial (no regression). The
   compiled-jaxpr arena buffer-reuse swing remains the only lever for the
   L3-resident regime where JAX still wins on pure cache bandwidth.
+
+## CobaltForge - i64 same-shape threading: JAX WIN (2026-06-19)
+
+- Completes the same-shape elementwise threading family (f64/f32/i64). add_i64 16M/64M
+  now Rust/JAX 0.56 (1.78x faster than jax.jit int64), internal 6.47-6.77x, vs prior
+  serial ~3.6-3.8x slower. Bit-identical via the exact int_op (wrapping/div-by-zero
+  semantics preserved), guarded by same_shape_i64_parallel_bit_identical_to_serial.
+  Required a non-breaking `+ Sync` on eval_binary_elementwise's int_op bound.
