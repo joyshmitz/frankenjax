@@ -173,3 +173,21 @@ ends are not rediscovered without new evidence.
   Do not merge it with FMA/SIMD exp, GEMM, QR, SVD, cumsum, OneHot, SelectN/iota,
   or broader scalar-broadcast arithmetic work without fresh benchmark evidence
   and ownership check.
+
+## frankenjax-dxqfj - Lazy SplitMulti Section Buffers
+
+- Date: 2026-06-18
+- Agent: cod-b / WildForge
+- Lever: build each `eval_split_multi` output from `LiteralBuffer::from_concat_slices`
+  over the original tensor backing instead of copying each section through
+  `Vec<Literal>` and re-densifying via `TensorValue::new`.
+- Status: batch-test pending.
+- Benchmark guard: `eval/split_multi_1024x1024_f32_axis1`.
+- Conformance guard: uneven multi-output split materializes the same literals for
+  each section and exposes dense f32 storage through `as_f32_slice`.
+- Retry predicate: do not retry split section materialization unless focused
+  criterion evidence shows `eval_split_multi` remains a top-five shape/data
+  movement bottleneck or `LiteralBuffer::Concat` dense-lane behavior changes.
+  Do not merge with FMA/SIMD exp, GEMM, QR, SVD, cumsum, OneHot, SelectN/iota,
+  or broader reshape/slice/gather work without fresh benchmark evidence and
+  ownership check.

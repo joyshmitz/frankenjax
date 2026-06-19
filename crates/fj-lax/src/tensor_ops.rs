@@ -12012,20 +12012,37 @@ pub(crate) fn eval_split_multi(
     let mut out = Vec::with_capacity(sizes.len());
     let mut start = 0usize;
     for &len in &sizes {
-        let mut elements = Vec::with_capacity(outer * len * inner);
+        let block_len = len.checked_mul(inner).ok_or_else(|| EvalError::Unsupported {
+            primitive,
+            detail: "split section block size overflows usize".to_owned(),
+        })?;
+        let section_len = outer.checked_mul(block_len).ok_or_else(|| {
+            EvalError::Unsupported {
+                primitive,
+                detail: "split section element count overflows usize".to_owned(),
+            }
+        })?;
+
+        let mut parts = Vec::with_capacity(outer);
         for o in 0..outer {
             let base = o * axis_size * inner + start * inner;
-            elements.extend_from_slice(&tensor.elements[base..base + len * inner]);
+            parts.push((tensor.elements.clone(), base, block_len));
         }
+        let elements =
+            LiteralBuffer::from_concat_slices(parts).ok_or_else(|| EvalError::Unsupported {
+                primitive,
+                detail: "split section slice spans overflow output bounds".to_owned(),
+            })?;
+        debug_assert_eq!(elements.len(), section_len);
+
         let mut new_dims = dims.clone();
         new_dims[axis] = len as u32;
         out.push(Value::Tensor(
-            TensorValue::new(tensor.dtype, Shape { dims: new_dims }, elements).map_err(|e| {
-                EvalError::Unsupported {
+            TensorValue::new_with_literal_buffer(tensor.dtype, Shape { dims: new_dims }, elements)
+                .map_err(|e| EvalError::Unsupported {
                     primitive,
                     detail: e.to_string(),
-                }
-            })?,
+                })?,
         ));
         start += len;
     }
@@ -14810,6 +14827,43 @@ mod tests {
             "split stays dense"
         );
         assert_eq!(lits(&sp), expect_f32, "split values");
+
+        // multi-output split [4,6] along axis 1 -> [4,2] and [4,4].
+        // The outputs are no longer metadata-only reshapes, but they should still
+        // be lazy slices over the dense source rather than fresh boxed literals.
+        let sp_multi = eval_split_multi(
+            std::slice::from_ref(&f32_src),
+            &params(&[("axis", "1"), ("sizes", "2,4")]),
+        )
+        .unwrap();
+        assert_eq!(sp_multi.len(), 2);
+        let left = sp_multi[0].as_tensor().unwrap();
+        assert_eq!(left.shape.dims, vec![4, 2]);
+        assert!(
+            left.elements.as_f32_slice().is_some(),
+            "split_multi left stays dense"
+        );
+        let expect_left: Vec<Literal> = (0..4)
+            .flat_map(|row| f32d[row * 6..row * 6 + 2].iter().copied())
+            .map(Literal::from_f32)
+            .collect();
+        assert_eq!(lits(&sp_multi[0]), expect_left, "split_multi left values");
+
+        let right = sp_multi[1].as_tensor().unwrap();
+        assert_eq!(right.shape.dims, vec![4, 4]);
+        assert!(
+            right.elements.as_f32_slice().is_some(),
+            "split_multi right stays dense"
+        );
+        let expect_right: Vec<Literal> = (0..4)
+            .flat_map(|row| f32d[row * 6 + 2..row * 6 + 6].iter().copied())
+            .map(Literal::from_f32)
+            .collect();
+        assert_eq!(
+            lits(&sp_multi[1]),
+            expect_right,
+            "split_multi right values"
+        );
     }
 
     #[test]

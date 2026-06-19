@@ -5753,6 +5753,33 @@ fn bench_reshape(c: &mut Criterion) {
     });
 }
 
+// Multi-output split over a dense f32 matrix. This pins the lazy concat-slice
+// path so each output section can preserve dense backing without Vec<Literal>.
+fn bench_split_multi_1024x1024_f32(c: &mut Criterion) {
+    let rows = 1024usize;
+    let cols = 1024usize;
+    let data: Vec<f32> = (0..rows * cols)
+        .map(|i| i as f32 * 0.001 - 100.0)
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let mut params = BTreeMap::new();
+    params.insert("axis".into(), "1".into());
+    params.insert("sizes".into(), "256,768".into());
+    c.bench_function("eval/split_multi_1024x1024_f32_axis1", |bencher| {
+        bencher.iter(|| {
+            eval_primitive_multi(Primitive::Split, std::slice::from_ref(&input), &params)
+        })
+    });
+}
+
 fn bench_gather_128_rows_16_cols(c: &mut Criterion) {
     let elements: Vec<Literal> = (0..(128 * 16)).map(Literal::I64).collect();
     let operand = Value::Tensor(
@@ -6451,6 +6478,7 @@ criterion_group!(
     bench_irfft_256,
     bench_irfft_batch_2048x256,
     bench_reshape,
+    bench_split_multi_1024x1024_f32,
     bench_gather_128_rows_16_cols,
     bench_gather_256x256_f64_vec,
     bench_gather_256x256_f64_literal_reference,
