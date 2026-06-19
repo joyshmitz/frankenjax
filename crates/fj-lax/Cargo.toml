@@ -50,3 +50,7 @@ harness = false
 [[bench]]
 name = "integer_pow_gauntlet"
 harness = false
+
+[[bench]]
+name = "slice_gauntlet"
+harness = false
