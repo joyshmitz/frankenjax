@@ -2602,6 +2602,31 @@ fn bench_cumsum_4096x1024_f64_axis1(c: &mut Criterion) {
     });
 }
 
+// 16384x1024 f32 Cumsum along the last axis (16384 independent lines): JAX's
+// default float dtype. Each line is a sequential f64-accumulate scan rounded to
+// f32; the lines are independent so the scan threads over the outer dimension
+// bit-identically. Head-to-head: benchmarks/jax_comparison/cumsum_f32_axis1_gauntlet.py.
+fn bench_cumsum_16k_x_1k_f32_axis1(c: &mut Criterion) {
+    let (rows, cols) = (16_384usize, 1_024usize);
+    let data: Vec<f32> = (0..rows * cols)
+        .map(|i| ((i % 997) as f32 - 498.0) * 1e-3)
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "1".to_owned());
+    c.bench_function("eval/cumsum_16kx1k_f32_axis1", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cumsum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_cumsum_64k_f64_literal_reference(c: &mut Criterion) {
     let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
         .map(|i| Literal::from_f64(i as f64 * 0.001))
@@ -6543,6 +6568,7 @@ criterion_group!(
     bench_reduce_sum_16k_x_1k_axis0_f64,
     bench_reduce_sum_16k_x_1k_i64_axes,
     bench_argmax_16k_x_1k_axis1_f64,
+    bench_cumsum_16k_x_1k_f32_axis1,
     bench_reduce_sum_64k_i64_literal_reference,
     bench_reduce_sum_64k_f32_dense,
     bench_reduce_sum_64k_f32_literal_reference,

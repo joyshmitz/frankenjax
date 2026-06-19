@@ -3186,6 +3186,87 @@ where
     out
 }
 
+/// Per-block forward/reverse cumulative scan for dense F32 lines, accumulating in
+/// f64 and rounding each running value back to f32 — BIT-IDENTICAL to the serial
+/// `acc = float_op(acc, f64::from(src)); out = acc as f32` loop (same f64
+/// accumulator, never rounded mid-scan; same per-step `as f32`; same per-line
+/// order). Each line is independent, so any contiguous block of whole lines may be
+/// scanned in isolation.
+fn scan_contiguous_f32_lines_from<F>(
+    src: &[f32],
+    out: &mut [f32],
+    axis_dim: usize,
+    reverse: bool,
+    float_init: f64,
+    float_op: &F,
+) where
+    F: Fn(f64, f64) -> f64 + ?Sized,
+{
+    for (src_line, out_line) in src.chunks(axis_dim).zip(out.chunks_mut(axis_dim)) {
+        let mut acc = float_init;
+        if reverse {
+            for (sv, ov) in src_line.iter().zip(out_line.iter_mut()).rev() {
+                acc = float_op(acc, f64::from(*sv));
+                *ov = acc as f32;
+            }
+        } else {
+            for (sv, ov) in src_line.iter().zip(out_line.iter_mut()) {
+                acc = float_op(acc, f64::from(*sv));
+                *ov = acc as f32;
+            }
+        }
+    }
+}
+
+/// Dense F32 cumulative scan over contiguous independent lines, threaded over the
+/// outer (line) dimension once total work crosses `CUMULATIVE_PARALLEL_MIN_ELEMS`.
+/// Mirrors `scan_contiguous_lines_to_vec` but keeps the f64 accumulator (F32 cum
+/// widens per element and rounds back per step, so the generic `T = f32` scanner
+/// can't be reused). Lines are independent and each line's f64-accumulate order is
+/// preserved inside its block, so the result is bit-identical to the serial scan
+/// for ANY partition (incl. reverse and the one-line `threads == 1` case).
+fn scan_contiguous_f32_lines_to_vec<F>(
+    src: &[f32],
+    axis_dim: usize,
+    reverse: bool,
+    float_init: f64,
+    float_op: &F,
+) -> Vec<f32>
+where
+    F: Fn(f64, f64) -> f64 + Sync,
+{
+    let outer = src.len() / axis_dim.max(1);
+    let threads = if src.len() >= CUMULATIVE_PARALLEL_MIN_ELEMS && outer > 1 {
+        crate::arithmetic::work_scaled_threads(src.len()).min(outer)
+    } else {
+        1
+    };
+    let mut out = vec![0.0f32; src.len()];
+    if threads <= 1 {
+        scan_contiguous_f32_lines_from(src, &mut out, axis_dim, reverse, float_init, float_op);
+        return out;
+    }
+    let lines_per = outer.div_ceil(threads);
+    let block = lines_per * axis_dim;
+    std::thread::scope(|scope| {
+        let mut src_rest = src;
+        let mut out_rest: &mut [f32] = out.as_mut_slice();
+        while !src_rest.is_empty() {
+            let take = block.min(src_rest.len());
+            let (src_block, src_tail) = src_rest.split_at(take);
+            let (out_block, out_tail) = out_rest.split_at_mut(take);
+            src_rest = src_tail;
+            out_rest = out_tail;
+            scope.spawn(move || {
+                scan_contiguous_f32_lines_from(
+                    src_block, out_block, axis_dim, reverse, float_init, float_op,
+                );
+            });
+        }
+    });
+    out
+}
+
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn eval_cumulative_dense(
@@ -3278,26 +3359,34 @@ fn eval_cumulative_dense(
         // scan (lib path: `acc = float_op(acc, as_f64()); store reduce_real_literal
         // (F32, acc)`) — same f64 accumulator (never rounded mid-scan), same per-step
         // `as f32` round (`new_f32_values(acc as f32)` == `from_f32(acc as f32)`),
-        // same per-line order. The scan is a sequential dependency (acc feeds the
-        // next step), so it CANNOT reassociate/vectorize — exact incl. NaN.
-        let mut out = vec![0.0f32; total];
-        for outer in 0..outer_count {
-            let base = line_base(outer);
-            let mut acc = float_init;
-            if reverse {
-                for i in (0..axis_dim).rev() {
-                    let fi = base + i * axis_stride;
-                    acc = float_op(acc, f64::from(src[fi]));
-                    out[fi] = acc as f32;
-                }
-            } else {
-                for i in 0..axis_dim {
-                    let fi = base + i * axis_stride;
-                    acc = float_op(acc, f64::from(src[fi]));
-                    out[fi] = acc as f32;
+        // same per-line order. The scan is a sequential dependency WITHIN a line
+        // (acc feeds the next step), so it CANNOT reassociate/vectorize — but the
+        // lines are INDEPENDENT, so contiguous (`axis_stride == 1`) large inputs
+        // thread the scan over the outer/line dimension bit-identically. Strided
+        // inputs keep the serial per-line gather below.
+        let out = if axis_stride == 1 {
+            scan_contiguous_f32_lines_to_vec(src, axis_dim, reverse, float_init, float_op)
+        } else {
+            let mut out = vec![0.0f32; total];
+            for outer in 0..outer_count {
+                let base = line_base(outer);
+                let mut acc = float_init;
+                if reverse {
+                    for i in (0..axis_dim).rev() {
+                        let fi = base + i * axis_stride;
+                        acc = float_op(acc, f64::from(src[fi]));
+                        out[fi] = acc as f32;
+                    }
+                } else {
+                    for i in 0..axis_dim {
+                        let fi = base + i * axis_stride;
+                        acc = float_op(acc, f64::from(src[fi]));
+                        out[fi] = acc as f32;
+                    }
                 }
             }
-        }
+            out
+        };
         return Ok(Some(Value::Tensor(TensorValue::new_f32_values(
             tensor.shape.clone(),
             out,
