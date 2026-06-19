@@ -302,21 +302,53 @@ ends are not rediscovered without new evidence.
 
 ## frankenjax-mcqr.99 - Direct Dense LiteralBuffer to_vec Materialization
 
-- Date: 2026-06-18
+- Date: 2026-06-19
 - Agent: cod-b / WildForge
 - Lever: make `LiteralBuffer::to_vec()` materialize directly from dense storage
   variants instead of forcing `as_slice()` to build/cache a full literal vector
   and then clone it.
-- Status: batch-test pending.
+- Status: measured keep internally; mixed external head-to-head versus JAX.
 - Benchmark guard: `core/literal_buffer_to_vec_dense_f64_64k`,
-  `core/literal_buffer_to_vec_literal_f64_64k`.
+  `core/literal_buffer_to_vec_literal_f64_64k`, plus
+  `benchmarks/jax_comparison/core_literal_buffer_to_vec_gauntlet.py`.
+- Measured evidence:
+  - Rust Criterion, local same-host:
+    `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-core --bench core_baseline -- core/literal_buffer_to_vec --sample-size 100 --warm-up-time 1 --measurement-time 10 --save-baseline frankenjax-cod-b-literal-buffer-to-vec`.
+  - Dense F64 64k direct materialization: 26.644 us mean
+    (`[26.253, 27.043]` us).
+  - Literal F64 64k fallback/control: 33.306 us mean
+    (`[32.779, 33.868]` us).
+  - Internal result: dense direct materialization is 0.800x the literal control,
+    or 1.25x faster.
+  - JAX command:
+    `benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/core_literal_buffer_to_vec_gauntlet.py --runs 100 --warmup 10 --inner-loops 1000 --output /tmp/frankenjax_cod_b_literal_buffer_to_vec_jax_raw.json`.
+  - JAX identity-ready lower bound: 19.5312 us mean, p50 19.2092 us,
+    p95 22.7052 us, p99 24.0948 us, CV 9.07%; Rust/JAX 1.364x, so Rust is
+    1.36x slower than this no-host-copy lower bound.
+  - JAX NumPy host-copy comparator: 32.9368 us mean, p50 32.4829 us,
+    p95 38.4794 us, p99 41.1890 us, CV 8.69%; Rust/JAX 0.809x, so Rust is
+    1.24x faster than this host-copy comparator.
+  - External ratios are directional because both JAX rows have CV above 5%, and
+    the JAX host-copy row copies raw F64 values while Rust materializes
+    `Literal` enum values.
 - Conformance guard: direct `to_vec()` matches `as_slice().to_vec()` bit-for-bit
   across dense F64/F32/I64/U32/U64/Bool/BF16/F16/Complex storage plus lazy
   concat/repeated-patches paths.
-- Retry predicate: do not retry the already committed stack/repeat/slice/to_i64
-  or `TensorValue::new` dense-storage families under this bead. Do not revisit
-  FMA, SIMD exp, GEMM, QR, SVD, cumsum, or eager concat without fresh
-  same-worker benchmark evidence and ownership check.
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b rch exec -- cargo test -p fj-core literal_buffer_to_vec_direct_paths_match_slice_materialization --lib`
+  passed 1 test, 0 failed on `ovh-a`. RCH
+  `cargo check -p fj-core --bench core_baseline` passed on `hz2`, RCH
+  `cargo clippy -p fj-core --bench core_baseline -- -D warnings` passed on
+  `vmi1149989`, `python -m py_compile benchmarks/jax_comparison/core_literal_buffer_to_vec_gauntlet.py`
+  passed, and `ubs --only=python benchmarks/jax_comparison/core_literal_buffer_to_vec_gauntlet.py`
+  returned 0 warnings.
+- Retry predicate: do not retry direct dense `LiteralBuffer::to_vec`
+  materialization for the F64 64k path unless a fresh profile still puts
+  `to_vec` in the top five. The next attempt should target cached literal reuse,
+  consumer-side avoidance of `Vec<Literal>`, or direct typed-consumer APIs rather
+  than another direct dense-to-`Literal` map. Do not retry the already committed
+  stack/repeat/slice/to_i64 or `TensorValue::new` dense-storage families under
+  this bead. Do not revisit FMA, SIMD exp, GEMM, QR, SVD, cumsum, or eager
+  concat without fresh same-worker benchmark evidence and ownership check.
 
 ## frankenjax-q59j4 - Direct Dense LiteralBuffer COW Mutation
 
