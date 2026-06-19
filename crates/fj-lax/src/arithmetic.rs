@@ -9341,9 +9341,21 @@ pub(crate) fn eval_polygamma(primitive: Primitive, inputs: &[Value]) -> Result<V
             actual: inputs.len(),
         });
     }
-    ensure_float_operands(primitive, inputs)?;
     let n_val = &inputs[0];
     let x_val = &inputs[1];
+    // polygamma(n, x): the order `n` (inputs[0]) is an INTEGER; only the argument
+    // `x` (inputs[1]) must be floating (matching digamma's int-rejection). The
+    // integer-rejection sweep (49a751f9) wrongly required BOTH operands to be
+    // float via `ensure_float_operands`, which rejected the integer order and
+    // broke polygamma for every integer `n` (the only valid kind). Validate `x`
+    // only; `polygamma_literal_to_i64` still rejects a non-numeric order, and
+    // `polygamma_literal_to_f64` rejects a non-numeric argument.
+    if !is_float_dtype(x_val.dtype()) {
+        return Err(EvalError::TypeMismatch {
+            primitive,
+            detail: "polygamma argument x must be floating",
+        });
+    }
 
     match (n_val, x_val) {
         (Value::Scalar(n_lit), Value::Scalar(x_lit)) => {
@@ -14196,13 +14208,16 @@ mod tests {
 
         let reps = 6u32; // A/B is an informational sanity print; bit-identity is the gate
         let out_dtype = DType::Complex128;
+        // NOTE: Atan2 (arctan2) is intentionally NOT supported on complex inputs —
+        // it is a real-plane angle function (apply_complex_binary returns Err, matching
+        // JAX, which rejects complex arctan2). It is excluded from this dense-vs-literal
+        // parity sweep; the supported complex binary ops are covered below.
         for op in [
             Primitive::Add,
             Primitive::Sub,
             Primitive::Mul,
             Primitive::Div,
             Primitive::Pow,
-            Primitive::Atan2,
             Primitive::XLogY,
             Primitive::LogAddExp,
         ] {
