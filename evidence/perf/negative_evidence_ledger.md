@@ -3,6 +3,30 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-cc-unary-threading-surface-mined - Cheap Unary Threading Audit (negative)
+
+- Date: 2026-06-19
+- Agent: cc / CobaltForge
+- Investigation (no code change): audited whether cheap single-input "win-class"
+  unary ops (neg/abs/sign/square — 1 read, 1 write, fresh page-faulting output)
+  are threaded above the DRAM gate, since they are NOT named in the prior threaded
+  movement/convert list. Finding: they ALREADY ARE threaded for the hot dtypes.
+  `eval_neg`/`eval_abs`/`eval_unary_int_or_float` route F64 through
+  `eval_unary_f64_tensor_fast_path` and F32 through its sibling, both of which fan
+  out via `threaded_unary_f64_map` (split_at_mut, calloc'd output) above
+  `CHEAP_BINARY_PARALLEL_MIN` — same gate/discipline as the cheap binaries. BF16/F16
+  neg/abs are intercepted earlier by `half_neg_abs_simd`. So Floor/Ceil/Reciprocal/
+  Neg/Abs/Sign/Square over f64/f32/half are all covered.
+- The ONLY unthreaded unary residual is the INTEGER tail (i64/i32/u32/u64 arms of
+  `eval_unary_int_or_float`, serial `.iter().map().collect()`). Left serial on
+  purpose: it is the niche integer-elementwise tail the dtype-matrix guidance warns
+  against grinding (no real ML workload negates/abs's a 16M+ int tensor), and the
+  win would be the generic calloc+parallel-fault one, not a new mechanism.
+- Retry predicate: do NOT re-audit cheap-unary threading — f64/f32/half done. Only
+  revisit the integer-unary tail if a profile shows a real workload bottlenecked on
+  large integer neg/abs/sign; otherwise it stays serial.
+
+
 ## frankenjax-cc-convert-half-downcast-threading - ConvertElementType f64/f32 -> bf16/f16 Threading
 
 - Date: 2026-06-19
