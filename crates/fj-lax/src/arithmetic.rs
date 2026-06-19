@@ -12165,7 +12165,15 @@ pub(crate) fn eval_integer_pow(
             match out_dtype {
                 DType::F64 => {
                     if let Some(xs) = tensor.elements.as_f64_slice() {
-                        let out: Vec<f64> = xs.iter().map(|&v| v.powi(exponent)).collect();
+                        // exponent==2 (the dominant x**2 case: variance/MSE/poly) is
+                        // `v*v`, bit-exactly equal to `powi(2)` (powi(2) = 1.0*(v*v) and
+                        // 1.0*x==x), but avoids the per-element `powi(runtime_n)` libcall
+                        // — measured ~10x (libcall-bound ~6.75 GB/s vs ~bandwidth).
+                        let out: Vec<f64> = if exponent == 2 {
+                            xs.iter().map(|&v| v * v).collect()
+                        } else {
+                            xs.iter().map(|&v| v.powi(exponent)).collect()
+                        };
                         return Ok(Value::Tensor(
                             TensorValue::new_f64_values(shape, out)
                                 .map_err(EvalError::InvalidTensor)?,
@@ -12174,10 +12182,19 @@ pub(crate) fn eval_integer_pow(
                 }
                 DType::F32 => {
                     if let Some(xs) = tensor.elements.as_f32_slice() {
-                        let out: Vec<f32> = xs
-                            .iter()
-                            .map(|&v| (f64::from(v).powi(exponent)) as f32)
-                            .collect();
+                        // exponent==2: (f64::from(v)*f64::from(v)) as f32 == the boxed
+                        // F32 path's `(f64::from(v).powi(2)) as f32` bit-exactly (the f64
+                        // product of two f32s is exact, single-rounded), avoiding the
+                        // runtime-exponent powi libcall.
+                        let out: Vec<f32> = if exponent == 2 {
+                            xs.iter()
+                                .map(|&v| (f64::from(v) * f64::from(v)) as f32)
+                                .collect()
+                        } else {
+                            xs.iter()
+                                .map(|&v| (f64::from(v).powi(exponent)) as f32)
+                                .collect()
+                        };
                         return Ok(Value::Tensor(
                             TensorValue::new_f32_values(shape, out)
                                 .map_err(EvalError::InvalidTensor)?,

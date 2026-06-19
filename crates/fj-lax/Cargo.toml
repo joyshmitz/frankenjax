@@ -46,3 +46,7 @@ harness = false
 [[bench]]
 name = "broadcast_gauntlet"
 harness = false
+
+[[bench]]
+name = "integer_pow_gauntlet"
+harness = false
