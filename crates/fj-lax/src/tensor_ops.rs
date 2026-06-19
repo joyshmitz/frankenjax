@@ -1642,6 +1642,58 @@ fn checked_row_major_strides(
 
 /// Concatenate: join multiple tensors along an axis.
 /// Params: `dimension` (axis index, default 0).
+/// Threaded "copy a sequence of source slices into one PRE-ALLOCATED contiguous output"
+/// (`out = srcs[0] ++ srcs[1] ++ ...`). Caller allocates `vec![<concrete zero>; total]`
+/// (calloc'd zero pages). The output is split into equal contiguous chunks across scoped
+/// threads; each chunk copies from whichever source(s) it overlaps (via the cumulative
+/// offset table), so chunk boundaries may cross source boundaries safely. Parallel
+/// page-faults the fresh output and parallelizes the copies. Bit-for-bit identical to the
+/// serial concatenation.
+fn concat_contiguous_into<T: Copy + Send + Sync>(out: &mut [T], srcs: &[&[T]], threads: usize) {
+    let mut offs = Vec::with_capacity(srcs.len() + 1);
+    let mut c = 0usize;
+    for s in srcs {
+        offs.push(c);
+        c += s.len();
+    }
+    offs.push(c);
+    let n = out.len();
+    if threads <= 1 {
+        let mut pos = 0usize;
+        for s in srcs {
+            out[pos..pos + s.len()].copy_from_slice(s);
+            pos += s.len();
+        }
+        return;
+    }
+    let chunk = n.div_ceil(threads);
+    let offs = &offs;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [T] = out;
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + chunk).min(n);
+            let len = end - start;
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            scope.spawn(move || {
+                let mut pos = start;
+                while pos < end {
+                    // largest k with offs[k] <= pos  => source containing `pos`
+                    let k = offs.partition_point(|&o| o <= pos) - 1;
+                    let src = srcs[k];
+                    let src_off = pos - offs[k];
+                    let take = (src.len() - src_off).min(end - pos);
+                    blk[(pos - start)..(pos - start + take)]
+                        .copy_from_slice(&src[src_off..src_off + take]);
+                    pos += take;
+                }
+            });
+            start = end;
+        }
+    });
+}
+
 pub(crate) fn eval_concatenate(
     inputs: &[Value],
     params: &BTreeMap<String, String>,
@@ -1751,6 +1803,43 @@ pub(crate) fn eval_concatenate(
     // hence bit-for-bit identical, but via bulk `extend_from_slice`.
     let inner = checked_shape_element_count(primitive, "concatenate inner", &out_dims[axis + 1..])?;
     let outer = checked_shape_element_count(primitive, "concatenate outer", &out_dims[..axis])?;
+
+    // Threaded dense fast path for the contiguous case (outer == 1: axis-0 / KV-cache /
+    // batch concat) on f64/f32. Each operand is one contiguous block, so the output is just
+    // the operands concatenated. calloc'd output + parallel copy beats the serial
+    // `from_concat_slices` page-fault cliff (~2 GB/s). Bit-identical (same bytes, same order).
+    if outer == 1
+        && total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN
+        && crate::arithmetic::work_scaled_threads(total) > 1
+    {
+        let threads = crate::arithmetic::work_scaled_threads(total);
+        if expected_dtype == DType::F64
+            && let Some(srcs) = tensors
+                .iter()
+                .map(|t| t.elements.as_f64_slice())
+                .collect::<Option<Vec<_>>>()
+        {
+            let mut out = vec![0.0f64; total];
+            concat_contiguous_into(&mut out, &srcs, threads);
+            return Ok(Value::Tensor(TensorValue::new_f64_values(
+                Shape { dims: out_dims },
+                out,
+            )?));
+        }
+        if expected_dtype == DType::F32
+            && let Some(srcs) = tensors
+                .iter()
+                .map(|t| t.elements.as_f32_slice())
+                .collect::<Option<Vec<_>>>()
+        {
+            let mut out = vec![0.0f32; total];
+            concat_contiguous_into(&mut out, &srcs, threads);
+            return Ok(Value::Tensor(TensorValue::new_f32_values(
+                Shape { dims: out_dims },
+                out,
+            )?));
+        }
+    }
 
     let mut parts = Vec::with_capacity(outer.saturating_mul(tensors.len()));
     for o in 0..outer {
@@ -12742,6 +12831,55 @@ fn tile_recursive(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn concat_contiguous_into_bit_identical_to_serial() {
+        // Uneven source sizes summing to >= gate, so chunk boundaries cross source
+        // boundaries; compare the threaded copy to a serial concatenation.
+        let sizes = [3_000_001usize, 1usize, 5_400_000usize, 7usize, 2_000_500usize];
+        let total: usize = sizes.iter().sum();
+        assert!(total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
+        let bufs: Vec<Vec<f64>> = sizes
+            .iter()
+            .enumerate()
+            .map(|(s, &len)| (0..len).map(|i| (s as f64) * 1e6 + i as f64).collect())
+            .collect();
+        let srcs: Vec<&[f64]> = bufs.iter().map(|b| b.as_slice()).collect();
+        // serial reference
+        let mut want: Vec<f64> = Vec::with_capacity(total);
+        for s in &srcs {
+            want.extend_from_slice(s);
+        }
+        let threads = crate::arithmetic::work_scaled_threads(total);
+        assert!(threads > 1);
+        let mut got = vec![0.0f64; total];
+        concat_contiguous_into(&mut got, &srcs, threads);
+        let gb: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+        let wb: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
+        assert!(gb == wb, "threaded concat != serial");
+        // also exercise eval_concatenate end-to-end (axis 0, 3 operands)
+        let mk = |rows: usize, fill: f64| {
+            Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![rows as u32, 1024],
+                    },
+                    vec![fill; rows * 1024],
+                )
+                .unwrap(),
+            )
+        };
+        let inputs = [mk(5000, 1.0), mk(3000, 2.0), mk(8500, 3.0)];
+        let mut p = BTreeMap::new();
+        p.insert("dimension".to_owned(), "0".to_owned());
+        let out = eval_concatenate(&inputs, &p).unwrap();
+        let ot = out.as_tensor().unwrap();
+        assert_eq!(ot.elements.len(), (5000 + 3000 + 8500) * 1024);
+        let s = ot.elements.as_f64_slice().unwrap();
+        assert_eq!(s[0].to_bits(), 1.0f64.to_bits());
+        assert_eq!(s[5000 * 1024].to_bits(), 2.0f64.to_bits());
+        assert_eq!(s[8000 * 1024].to_bits(), 3.0f64.to_bits());
+    }
 
     #[test]
     fn gather_contiguous_into_bit_identical_to_serial() {

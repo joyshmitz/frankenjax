@@ -392,3 +392,11 @@ Additional cod-a repeat validation environment:
   f32 [16384,1024] nidx 16384/65536 = Rust/JAX 0.57/0.48 (1.74-2.07x faster than jax.jit gather),
   internal 6.5-8.4x (2.2 -> 14-18 GB/s). Bit-identical (incl. OOB fill), guarded. Embedding
   lookup is ubiquitous in NLP. Other dtypes / strided gather are easy follow-ons.
+
+## CobaltForge - Threaded concatenate (axis-0 f64/f32): JAX WIN, was parity (2026-06-19)
+
+- Contiguous axis-0 concat threaded (calloc'd output + parallel chunked copy): ~16M/~64M f64 =
+  Rust/JAX 0.11 (9.2-9.4x faster than jax.jit concatenate), internal 8.1x (2.1 -> 16.7-16.9 GB/s).
+  Was at parity (both ~2 GB/s page-fault bound); now ~9x domination. Bit-identical (incl. uneven
+  sources / chunk-crossing), guarded. Common in KV-cache / batch concat. axis>0 + other dtypes
+  are follow-ons.

@@ -1665,3 +1665,30 @@ ends are not rediscovered without new evidence.
 - Retry predicate: extend `gather_contiguous_into` to i64/i32/u32/u64/half/complex contiguous
   arms (concrete-zero calloc) and to the strided `gather_window_blocks` (per-index independent;
   same index-range split). Same campaign principle.
+
+## CobaltForge - Threaded dense f64/f32 axis-0 concatenate for DRAM-bound (JAX WIN, was parity)
+
+- Lever: contiguous (outer==1: axis-0 / KV-cache / batch) concat built its large output via
+  `LiteralBuffer::from_concat_slices`, page-fault-bound at ~2.1 GB/s. New `concat_contiguous_into<T>`
+  fills a caller-allocated calloc'd output by splitting the output into contiguous chunks across
+  scoped threads; each chunk copies from whichever source(s) it overlaps (cumulative-offset table,
+  so chunk boundaries may cross source boundaries). Wired into the f64/f32 `outer==1` case above
+  `CHEAP_BINARY_PARALLEL_MIN`; axis>0 (interleaved) and other dtypes keep `from_concat_slices`.
+- Bit-identity: out = srcs concatenated in order, exactly `from_concat_slices` for outer==1.
+  Guarded by `concat_contiguous_into_bit_identical_to_serial` (5 uneven sources incl. len-1 and
+  len-7 so chunk boundaries cross sources, + end-to-end 3-operand eval_concatenate).
+- Conformance: `fj-lax --lib` 1503 pass (+1 new), 43 fail (PRE-EXISTING) — 0 new failures.
+- Measured (LOCAL real eval_primitive path WITH checksum to defeat dead-code elision, best-of-15)
+  + JAX (`jax.jit(jnp.concatenate axis=0)` x64, /tmp/jax_cat.py):
+
+  | out elems | serial (before) | threaded (after) | internal | JAX | Rust/JAX |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | ~16M | 63926 us (2.1 GB/s) | 7872 us (16.7 GB/s) | 8.12x | 72226 us (1.8 GB/s) | 0.11x (9.2x FASTER) |
+  | ~64M | ~256000 us (2.1 GB/s) | 30982 us (16.9 GB/s) | ~8x | 290818 us (1.8 GB/s) | 0.11x (9.4x FASTER) |
+
+- Decision: KEEP. Concat was at PARITY with JAX (both ~2 GB/s, page-fault bound) — threading turns
+  it into ~9x DOMINATION. Concat is common (KV-cache append, batch/feature concat). Same gate.
+- MEASUREMENT NOTE: an unconsumed `eval_primitive(Concatenate)` in a bench loop was elided by the
+  optimizer (reported 0.3us / 500000 GB/s); always consume the result (checksum) when timing.
+- Retry predicate: extend to axis>0 (interleaved row blocks; thread the per-row task list) and
+  other dtypes (concrete-zero calloc). Same campaign principle.
