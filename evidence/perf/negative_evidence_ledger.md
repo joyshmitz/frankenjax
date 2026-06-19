@@ -199,9 +199,21 @@ ends are not rediscovered without new evidence.
 - Lever: route scalar `Tile` uniform fills through dense typed `TensorValue`
   constructors instead of filling a `Vec<Literal>` with the recursive boxed
   tiler and then re-densifying.
-- Status: batch-test pending.
+- Status: measured keep against warmed JAX CPU for both guard workloads.
 - Benchmark guard: `eval/tile_scalar_f32_1024x1024`,
   `eval/tile_scalar_complex128_1024x1024`.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-lax --bench lax_baseline -- eval/tile_scalar --sample-size 10 --warm-up-time 1 --measurement-time 3`.
+  - JAX command: `uv run --with 'jax[cpu]' --with numpy python` with
+    `jax_enable_x64=true`, JAX/JAXLIB 0.10.2, CPU backend, 12 batches x 20
+    warmed iterations.
+  - `tile_scalar_f32_1024x1024`: Rust criterion median 51.435 us vs JAX
+    batched median 204.302 us; ratio Rust/JAX 0.252, Rust 3.97x faster.
+  - `tile_scalar_complex128_1024x1024`: Rust criterion median 412.679 us vs
+    JAX batched median 495.802 us; ratio Rust/JAX 0.832, Rust 1.20x faster.
+  - Decision: keep. No revert; both measured workloads beat the original JAX
+    oracle under warmed CPU execution. Complex128 margin is modest enough that
+    future retries must preserve this exact head-to-head guard.
 - Conformance guard: scalar tile materializes to the same repeated literals and
   exposes dense typed storage for f32, u64, and complex128.
 - Retry predicate: do not retry scalar `Tile` dense-fill storage unless focused
@@ -218,15 +230,36 @@ ends are not rediscovered without new evidence.
 - Lever: route matching F64/F32 `eval_complex` tensor-scalar and scalar-tensor
   constructors through dense `new_complex_values` instead of rebuilding every
   element as a boxed `Literal`.
-- Status: batch-test pending.
+- Status: measured mixed; keep the committed dense path, but record a negative
+  JAX head-to-head result for the F32 tensor-scalar workload.
 - Benchmark guard: `eval/complex_f32_tensor_scalar_1m`,
   `eval/complex_f64_tensor_scalar_1m`.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-lax --bench lax_baseline -- eval/complex_f --sample-size 10 --warm-up-time 1 --measurement-time 3`.
+  - JAX command: `uv run --with 'jax[cpu]' --with numpy python` with
+    `jax_enable_x64=true`, JAX/JAXLIB 0.10.2, CPU backend, 12 batches x 20
+    warmed iterations.
+  - `complex_f32_tensor_scalar_1m`: Rust criterion median 1.379 ms vs JAX
+    batched median 1.071 ms; ratio Rust/JAX 1.287, Rust 1.29x slower. This is
+    negative evidence for "dense constructor alone dominates original JAX" on
+    Complex64/F32.
+  - `complex_f64_tensor_scalar_1m`: Rust criterion median 0.914 ms vs JAX
+    batched median 1.855 ms; ratio Rust/JAX 0.493, Rust 2.03x faster.
+  - Decision: keep, not revert. The cluster has one clear JAX win and one clear
+    JAX loss; there is no same-run evidence that reverting the dense constructor
+    improves the F32 result, and reverting would discard the measured F64 win.
+    Route the F32 loss to a deeper primitive-level follow-up instead of retrying
+    the same boxed-literal-elision lever.
 - Conformance guard: dense tensor-scalar and scalar-tensor constructor outputs
   materialize identically to explicit literal-backed references and expose dense
   complex storage.
 - Retry predicate: do not retry tensor-scalar `eval_complex` constructor storage
   unless focused criterion evidence shows this path remains a top-five
   `fj-lax` bottleneck or mixed-dtype promotion becomes the measured hotspot.
+  For Complex64/F32 specifically, do not repeat the same
+  `Vec<(f64, f64)> -> new_complex_values` dense constructor lever; the next
+  attempt must attack representation/construction overhead directly, such as a
+  Complex64-native packed builder or a JAX-comparable fused real-to-complex path.
   Do not merge with same-shape complex constructor, FFT extraction, complex
   binary tensor-scalar ops, or broader complex arithmetic work without fresh
   benchmark evidence and ownership check.
