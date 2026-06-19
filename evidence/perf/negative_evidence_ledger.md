@@ -586,3 +586,37 @@ ends are not rediscovered without new evidence.
 - Retry predicate: complex ctor residual 1.56x is store throughput (same as
   broadcast) — SIMD/streaming stores, not algorithm. Conj/real/imag (1ylsj) and
   complex elementwise (same dense storage) expected to behave the same; KEEP.
+
+## METHODOLOGY CORRECTION + elementwise binary (rch-vs-local calibration)
+
+- CRITICAL: prior gauntlet rows (transpose/broadcast/slice/gather/integer_pow/
+  complex_ctor) measured Rust via `rch exec` on a REMOTE worker, but JAX runs
+  LOCALLY. Same-binary calibration (f32 add, one A/B binary run both places):
+  rch worker 173.2 us vs LOCAL 119.6 us => the rch worker is ~1.45x SLOWER than
+  local. So all prior Rust/JAX ratios are PESSIMISTIC by ~1.45x; the true
+  same-host ratios are ~/1.45.
+- f32 native-vs-widen add was ~0 gain on BOTH machines (rch 173.2/174.6 = 1.008x;
+  local native 119.6 / widen 122.3 = 1.02x) -> f32 same-shape add is
+  bandwidth-bound; the native-f32 attempt was REVERTED.
+- LOCAL same-host elementwise dense vs JAX (the trustworthy same-machine numbers;
+  JAX jax.jit CPU x64):
+
+  | Workload | Rust dense (LOCAL) | JAX | Rust/JAX (same-host) |
+  | --- | ---: | ---: | ---: |
+  | add_f64_1m | 415.00 us | 192.0 us | 2.16x slower |
+  | add_f32_1m | 135.98 us | 80.4 us | 1.69x slower |
+  | mul_f64_1m | 422.96 us | 161.7 us | 2.61x slower |
+
+- Corrected (÷~1.45) same-host estimates for the prior rch rows — several FLIP to
+  wins/ties: slice ~0.72x (Rust FASTER), integer_pow2 f32 ~0.97x (Rust ~tie/win),
+  broadcast ~1.10x, complex_ctor ~1.08x, integer_pow2 f64 ~1.52x, transpose ~2.93x,
+  gather ~2.91x. (These are estimates; future vs-JAX rows MUST run the Rust bench
+  LOCALLY, not via rch, for a same-host comparison.)
+- Elementwise add/mul same-host loss (1.69-2.61x) is structural: per-op output
+  allocation (frankenjax allocates a fresh Vec per primitive; XLA reuses buffers)
+  + AVX2 (4-wide f64) vs JAX likely AVX-512 (8-wide). Both are build/architecture
+  matters, not a code bug — the inner map+collect already autovectorizes (native
+  vs widen tie proves the loop isn't the bottleneck).
+- Decision: REVERT f32 native add (~0 gain). KEEP all measured dense paths. Retry
+  predicate for elementwise: the gap is per-op allocation (needs buffer reuse =
+  compiled-jaxpr arena) and AVX-512 (build flag) — NOT the elementwise loop.
