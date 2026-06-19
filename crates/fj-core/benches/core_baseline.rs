@@ -239,6 +239,48 @@ fn bench_tensor_repeat_axis0(c: &mut Criterion) {
     });
 }
 
+fn bench_tensor_slice_axis0(c: &mut Criterion) {
+    let rows = 64_usize;
+    let cols = 1024_usize;
+    let index = 31_usize;
+    let values: Vec<f64> = (0..rows * cols).map(|i| i as f64 + 0.25).collect();
+    let shape = Shape {
+        dims: vec![rows as u32, cols as u32],
+    };
+    let subshape = Shape::vector(cols as u32);
+    let dense = TensorValue::new_f64_values(shape, values.clone()).expect("valid dense f64 tensor");
+
+    c.bench_function("core/tensor_slice_axis0_dense_f64_64x1k_row31", |b| {
+        b.iter(|| black_box(&dense).slice_axis0(black_box(index)))
+    });
+    c.bench_function(
+        "core/tensor_slice_axis0_dense_f64_64x1k_row31_to_f64_vec",
+        |b| {
+            b.iter(|| {
+                let maybe_slice_values = match black_box(&dense)
+                    .slice_axis0(black_box(index))
+                    .expect("valid slice")
+                {
+                    Value::Tensor(slice) => slice.to_f64_vec(),
+                    Value::Scalar(_) => None,
+                };
+                black_box(maybe_slice_values)
+            })
+        },
+    );
+    c.bench_function(
+        "core/tensor_slice_axis0_materializing_control_f64_64x1k_row31",
+        |b| {
+            b.iter(|| {
+                let start = black_box(index) * cols;
+                let source = black_box(&values[start..start + cols]);
+                let elements = source.iter().copied().map(Literal::from_f64).collect();
+                TensorValue::new(DType::F64, subshape.clone(), elements)
+            })
+        },
+    );
+}
+
 fn bench_tensor_stack_axis0(c: &mut Criterion) {
     let shape = Shape::vector(1024);
     let dense_slices: Vec<Value> = (0..64)
@@ -339,6 +381,7 @@ criterion_group!(
     bench_literal_buffer_eq,
     bench_literal_buffer_index_mut,
     bench_tensor_repeat_axis0,
+    bench_tensor_slice_axis0,
     bench_tensor_stack_axis0,
     bench_scalar_stack_axis0,
     bench_scalar_repeat_axis0,
