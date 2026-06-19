@@ -1335,8 +1335,11 @@ pub(crate) fn eval_broadcast_in_dim(
                 )?));
             }
             if let Some(src) = tensor.elements.as_half_float_slice() {
-                let out = broadcast_replicate(
-                    total,
+                // bf16/f16 is the dominant training dtype; thread the bias/feature broadcast
+                // above the gate (calloc'd u16 output + parallel fill). Bit-identical.
+                let mut out = vec![0u16; total];
+                broadcast_replicate_into(
+                    &mut out,
                     out_rank,
                     &target_dims,
                     &out_to_in,
@@ -3149,6 +3152,18 @@ pub(crate) fn eval_gather(
                 Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
                 _ => 0,
             };
+            // bf16/f16 embedding lookup (dominant training dtype): thread above the gate
+            // (calloc'd u16 output + parallel row memcpy); bit-identical, serial fallback on OOB.
+            if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+                let mut out = vec![0u16; total];
+                if gather_contiguous_into(&mut out, src, &resolved, fill, slice_elems) {
+                    return Ok(Value::Tensor(TensorValue::new_half_float_values(
+                        operand.dtype,
+                        Shape { dims: out_dims },
+                        out,
+                    )?));
+                }
+            }
             let mut out: Vec<u16> = Vec::with_capacity(total);
             for &resolved_idx in &resolved {
                 let Some(idx) = resolved_idx else {
@@ -12831,6 +12846,68 @@ fn tile_recursive(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn threaded_half_float_broadcast_and_gather_bit_identical() {
+        // bf16/f16 (u16-backed) broadcast + gather threaded paths vs the serial kernels.
+        // broadcast [C] -> [rows, C] at >= gate.
+        let cols = 1024usize;
+        let rows = 16_400usize; // rows*cols = 16.79M >= gate
+        let total = rows * cols;
+        assert!(total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
+        let src: Vec<u16> = (0..cols).map(|i| (i as u16).wrapping_mul(37)).collect();
+        let in_strides =
+            checked_row_major_strides(Primitive::BroadcastInDim, "broadcast_in_dim", &[cols as u32])
+                .unwrap();
+        let target_dims = vec![rows as u32, cols as u32];
+        let out_to_in = vec![None, Some(0usize)];
+        let serial = broadcast_replicate(
+            total,
+            2,
+            &target_dims,
+            &out_to_in,
+            &[cols as u32],
+            &in_strides,
+            &src,
+        );
+        let mut threaded = vec![0u16; total];
+        broadcast_replicate_into(
+            &mut threaded,
+            2,
+            &target_dims,
+            &out_to_in,
+            &[cols as u32],
+            &in_strides,
+            &src,
+        );
+        assert!(serial == threaded, "bf16 threaded broadcast != serial");
+
+        // gather: u16 table rows.
+        let vocab = 4096usize;
+        let slice_elems = 256usize;
+        let nidx = 33_000usize;
+        let gtotal = nidx * slice_elems;
+        assert!(gtotal >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
+        let table: Vec<u16> = (0..vocab * slice_elems)
+            .map(|i| (i as u16).wrapping_mul(7))
+            .collect();
+        let resolved: Vec<Option<usize>> = (0..nidx)
+            .map(|i| if i % 53 == 0 { None } else { Some((i * 911) % vocab) })
+            .collect();
+        let fill = 0xffffu16;
+        let mut want: Vec<u16> = Vec::with_capacity(gtotal);
+        for &r in &resolved {
+            match r {
+                Some(idx) => {
+                    want.extend_from_slice(&table[idx * slice_elems..(idx + 1) * slice_elems])
+                }
+                None => want.extend(std::iter::repeat_n(fill, slice_elems)),
+            }
+        }
+        let mut got = vec![0u16; gtotal];
+        assert!(gather_contiguous_into(&mut got, &table, &resolved, fill, slice_elems));
+        assert!(got == want, "bf16 threaded gather != serial");
+    }
 
     #[test]
     fn concat_contiguous_into_bit_identical_to_serial() {

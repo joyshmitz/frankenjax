@@ -400,3 +400,10 @@ Additional cod-a repeat validation environment:
   Was at parity (both ~2 GB/s page-fault bound); now ~9x domination. Bit-identical (incl. uneven
   sources / chunk-crossing), guarded. Common in KV-cache / batch concat. axis>0 + other dtypes
   are follow-ons.
+
+## CobaltForge - Threaded bf16/f16 broadcast + gather (training dtype): JAX WIN (2026-06-19)
+
+- Extended the threaded broadcast/gather to bf16/f16 (dominant training dtype) via the existing
+  generic _into helpers (calloc'd u16 output). bf16 broadcast 4.48-8.38x internal (2.5->11.8-20.9
+  GB/s); bf16 gather ~6x (11-17 GB/s). Bit-identical, guarded. Bias broadcast + embedding gather
+  are ubiquitous in training. Other dtypes (i64/u32/u64) + bf16 transpose/concat are follow-ons.

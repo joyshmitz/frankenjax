@@ -1692,3 +1692,27 @@ ends are not rediscovered without new evidence.
   optimizer (reported 0.3us / 500000 GB/s); always consume the result (checksum) when timing.
 - Retry predicate: extend to axis>0 (interleaved row blocks; thread the per-row task list) and
   other dtypes (concrete-zero calloc). Same campaign principle.
+
+## CobaltForge - Threaded bf16/f16 broadcast + gather (training dtype) for DRAM-bound (JAX WIN)
+
+- Lever: extends the proven threaded broadcast/gather to the bf16/f16 (u16-backed) dtype — the
+  DOMINANT training dtype, previously left on the serial cliff (~2.5 GB/s). The generic
+  `broadcast_replicate_into<T>` / `gather_contiguous_into<T>` already accept `T: Copy+Send+Sync`
+  (u16 qualifies); wired the half-float broadcast arm and contiguous-gather arm to allocate a
+  calloc'd `vec![0u16; total]` and use the threaded fill. Bit-identical (u16 bit copies).
+- Guarded by `threaded_half_float_broadcast_and_gather_bit_identical` (bf16 broadcast vs serial
+  broadcast_replicate; bf16 gather incl. OOB None/fill vs serial reference).
+- Conformance: `fj-lax --lib` 1504 pass (+1 new), 43 fail (PRE-EXISTING) — 0 new failures.
+- Measured (LOCAL real eval_primitive path, best-of-15):
+
+  | workload | serial (before) | threaded (after) | internal |
+  | --- | ---: | ---: | ---: |
+  | bf16 broadcast [1024]->[16384,1024] | 12706 us (2.6 GB/s) | 2838 us (11.8 GB/s) | 4.48x |
+  | bf16 broadcast [1024]->[65536,1024] | 53838 us (2.5 GB/s) | 6421 us (20.9 GB/s) | 8.38x |
+  | bf16 gather nidx=16384 (16.8M) | (~serial cliff) | 3030 us (11.1 GB/s) | ~6x |
+  | bf16 gather nidx=65536 (67M) | (~serial cliff) | 7826 us (17.2 GB/s) | ~6x |
+
+- Decision: KEEP. bf16/f16 is the training-dominant dtype; bias broadcast + embedding gather are
+  ubiquitous there. Same calloc+parallel-page-fault lever, now covering the half-float backings.
+- Retry predicate: extend the same to i64/u32/u64 broadcast/gather/transpose/concat arms (all
+  Copy+Send+Sync, concrete-zero calloc) and to bf16/f16 transpose/concat. Mechanical.
