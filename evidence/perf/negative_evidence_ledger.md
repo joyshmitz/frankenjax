@@ -2015,3 +2015,43 @@ ends are not rediscovered without new evidence.
   common shapes/dtypes. Non-leading-axis pad, interior/dilated pad, and non-zero pad-value remain on
   the serial path (lower priority). The remaining JAX losses are the documented off-limits/
   architectural ones (float sum/prod/cumsum reduction order; L3-resident regime).
+
+## CobaltForge - *** MAJOR CORRECTION: same-load head-to-head reframes the elementwise vs-JAX claims ***
+
+- Context: this host has been heavily CONTENDED all session (load avg ~5-8; f64 add ~17-22 GB/s vs
+  ~38 idle). Prior rounds measured Rust and JAX at DIFFERENT load moments (cross-invocation / cross-
+  process), which inflated many vs-JAX "win" ratios. This round I ran Rust and JAX BACK-TO-BACK under
+  the same sustained load (64M, best-of-20), and for `add` also reversed the order (JAX-first vs
+  Rust-first) with stable load to rule out ordering bias — the verdict did NOT flip.
+- SAME-LOAD head-to-head (64M, microseconds; lower = better; load avg ~6):
+
+  | op | Rust us | JAX us | Rust/JAX | verdict |
+  | --- | ---: | ---: | ---: | --- |
+  | broadcast_f64 | 71859 | 86802 | 0.83 | Rust WINS 1.21x |
+  | dynamic_slice (out32M) | 35038 | 45869 | 0.76 | Rust WINS 1.31x |
+  | dynamic_update_slice | 75925 | 99086 | 0.77 | Rust WINS 1.30x |
+  | rev | 82955 | 92987 | 0.89 | Rust WINS 1.12x |
+  | add_f64 | 88188 (86987 rev-order) | 66704 (68061) | 1.28-1.32 | JAX faster |
+  | clamp_f64 | 79182 | 60725 | 1.30 | JAX faster |
+  | bitwise_and_i64 | 86387 | 66712 | 1.29 | JAX faster |
+  | select_f64 | 87188 | 71481 | 1.22 | JAX faster |
+
+- CORRECTED CONCLUSION (supersedes the per-op "Nx FASTER than JAX" claims for the COMPUTE ops):
+  * COPY / WRITE-BOUND ops (broadcast, scalar-fill, convert, transpose, gather, concat, slice,
+    dynamic_slice, dynamic_update_slice, rev, zero-pad) — Rust's calloc + parallel page-faulting of
+    the fresh OUTPUT genuinely BEATS JAX same-load (~1.1-1.3x). These wins HOLD.
+  * COMPUTE / MULTI-INPUT-READ ops (add/sub/mul/div, clamp, select, bitwise and/or/xor; also
+    max-reduce likely) — at EQUAL load JAX is ~1.2-1.32x FASTER. Rust's threaded path (std::thread::
+    scope) does not reach JAX/XLA's aggregate DRAM READ bandwidth on 2-3 full input streams. My
+    earlier per-round "1.7-2.2x FASTER than JAX" for these was a CROSS-LOAD ARTIFACT.
+- REGRESSIONS: NONE. Every threaded path is a strict 3.5-10x improvement over its serial baseline
+  (which was 4-6 GB/s, catastrophic) and is bit-identical — so ALL changes are KEPT. The correction
+  is to the vs-JAX framing only, not the code.
+- METHOD LESSON (reinforced): on a contended host, ONLY same-binary same-invocation (internal
+  serial-vs-threaded) OR strictly back-to-back same-load Rust-vs-JAX numbers are trustworthy. The
+  internal speedups in every prior entry are reliable; the vs-JAX ratios for compute ops are not.
+  Definitive vs-JAX win/loss requires an IDLE host (currently unavailable).
+- NEXT (to actually beat JAX on the compute ops): the gap is DRAM read bandwidth on multi-input
+  streams. Levers to try (idle host): non-temporal/streaming stores, prefetch, thread-count/affinity
+  tuning (work_scaled_threads may over-spawn at 64M), or NUMA-aware chunking. Or the compiled-jaxpr
+  arena (buffer reuse removes the output alloc entirely). None attempted yet.

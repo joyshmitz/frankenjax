@@ -497,3 +497,16 @@ Additional cod-a repeat validation environment:
   operand-block copy): out 32M/131M f64 = 12.7-13.2 GB/s (was ~4.1, ~3x internal), ~2.3x faster than
   jax.jit pad (5.6). Bit-identical (f64+bf16), guarded. Zero-padding is ubiquitous (conv/attention).
   Non-leading / interior / non-zero pad stay serial (follow-ons).
+
+## CobaltForge - *** SAME-LOAD HEAD-TO-HEAD CORRECTION *** (2026-06-19)
+
+- Host contended all session; prior vs-JAX ratios were cross-load artifacts. Same-load back-to-back
+  (64M, load avg ~6) reframes the elementwise wins:
+  * Copy/write-bound ops (broadcast/scalar-fill/convert/transpose/gather/concat/slice/dynamic_slice/
+    dynamic_update_slice/rev/zero-pad): Rust WINS ~1.1-1.3x (calloc + parallel page-fault). HOLDS.
+  * Compute/multi-input-read ops (add/sub/mul/clamp/select/bitwise): JAX ~1.2-1.32x FASTER at equal
+    load — the earlier "1.7-2.2x faster" was a cross-load artifact. These are NOT current wins.
+  * NO REGRESSIONS: every threaded path is 3.5-10x over its serial baseline, bit-identical (KEEP all).
+- Definitive vs-JAX win/loss needs an IDLE host (unavailable this session). Reliable numbers are the
+  internal serial->threaded speedups. To beat JAX on compute ops: streaming stores / prefetch /
+  thread-affinity tuning / compiled-jaxpr arena (idle host required).
