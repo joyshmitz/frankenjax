@@ -191,3 +191,22 @@ ends are not rediscovered without new evidence.
   Do not merge with FMA/SIMD exp, GEMM, QR, SVD, cumsum, OneHot, SelectN/iota,
   or broader reshape/slice/gather work without fresh benchmark evidence and
   ownership check.
+
+## frankenjax-19wst - Dense Scalar Tile Fills
+
+- Date: 2026-06-19
+- Agent: cod-b / WildForge
+- Lever: route scalar `Tile` uniform fills through dense typed `TensorValue`
+  constructors instead of filling a `Vec<Literal>` with the recursive boxed
+  tiler and then re-densifying.
+- Status: batch-test pending.
+- Benchmark guard: `eval/tile_scalar_f32_1024x1024`,
+  `eval/tile_scalar_complex128_1024x1024`.
+- Conformance guard: scalar tile materializes to the same repeated literals and
+  exposes dense typed storage for f32, u64, and complex128.
+- Retry predicate: do not retry scalar `Tile` dense-fill storage unless focused
+  criterion evidence shows this path remains a top-five `fj-lax` bottleneck or
+  the scalar tile representation changes. Do not merge it with scalar
+  `BroadcastInDim`, dense tensor tile, FMA/SIMD exp, GEMM, QR, SVD, cumsum,
+  OneHot, SelectN/iota, or broader shape/data movement work without fresh
+  benchmark evidence and ownership check.

@@ -12155,29 +12155,66 @@ pub(crate) fn eval_tile(
 
     match &inputs[0] {
         Value::Scalar(lit) => {
-            let dtype = match lit {
-                Literal::I32(_) => DType::I32,
-                Literal::I64(_) => DType::I64,
-                Literal::U32(_) => DType::U32,
-                Literal::U64(_) => DType::U64,
-                Literal::Bool(_) => DType::Bool,
-                Literal::BF16Bits(_) => DType::BF16,
-                Literal::F16Bits(_) => DType::F16,
-                Literal::F32Bits(_) => DType::F32,
-                Literal::F64Bits(_) => DType::F64,
-                Literal::Complex64Bits(..) => DType::Complex64,
-                Literal::Complex128Bits(..) => DType::Complex128,
-            };
-            let (tile_dims, reps, new_dims) =
-                normalize_tile_dims_and_reps(primitive, &[], &reps)?;
+            let (_, _, new_dims) = normalize_tile_dims_and_reps(primitive, &[], &reps)?;
             let new_count = checked_shape_element_count(primitive, "tile", &new_dims)?;
-            let base = [*lit];
-            let mut result = Vec::with_capacity(new_count);
-            tile_recursive(&base, &tile_dims, &reps, 0, &mut result);
-            Ok(Value::Tensor(
-                TensorValue::new(dtype, Shape { dims: new_dims }, result)
-                    .map_err(EvalError::InvalidTensor)?,
-            ))
+            let shape = Shape { dims: new_dims };
+            match lit {
+                Literal::F64Bits(b) => Ok(Value::Tensor(TensorValue::new_f64_values(
+                    shape,
+                    vec![f64::from_bits(*b); new_count],
+                )?)),
+                Literal::F32Bits(b) => Ok(Value::Tensor(TensorValue::new_f32_values(
+                    shape,
+                    vec![f32::from_bits(*b); new_count],
+                )?)),
+                Literal::BF16Bits(b) => Ok(Value::Tensor(TensorValue::new_half_float_values(
+                    DType::BF16,
+                    shape,
+                    vec![*b; new_count],
+                )?)),
+                Literal::F16Bits(b) => Ok(Value::Tensor(TensorValue::new_half_float_values(
+                    DType::F16,
+                    shape,
+                    vec![*b; new_count],
+                )?)),
+                Literal::I64(v) => Ok(Value::Tensor(TensorValue::new_i64_values(
+                    shape,
+                    vec![*v; new_count],
+                )?)),
+                Literal::I32(v) => Ok(Value::Tensor(TensorValue::new_i32_values(
+                    shape,
+                    vec![i64::from(*v); new_count],
+                )?)),
+                Literal::Bool(v) => Ok(Value::Tensor(TensorValue::new_bool_values(
+                    shape,
+                    vec![*v; new_count],
+                )?)),
+                Literal::U32(v) => Ok(Value::Tensor(TensorValue::new_u32_values(
+                    shape,
+                    vec![*v; new_count],
+                )?)),
+                Literal::U64(v) => Ok(Value::Tensor(TensorValue::new_u64_values(
+                    shape,
+                    vec![*v; new_count],
+                )?)),
+                Literal::Complex64Bits(re, im) => Ok(Value::Tensor(
+                    TensorValue::new_complex_values(
+                        DType::Complex64,
+                        shape,
+                        vec![(
+                            f64::from(f32::from_bits(*re)),
+                            f64::from(f32::from_bits(*im)),
+                        ); new_count],
+                    )?,
+                )),
+                Literal::Complex128Bits(re, im) => Ok(Value::Tensor(
+                    TensorValue::new_complex_values(
+                        DType::Complex128,
+                        shape,
+                        vec![(f64::from_bits(*re), f64::from_bits(*im)); new_count],
+                    )?,
+                )),
+            }
         }
         Value::Tensor(tensor) => {
             let (tile_dims, reps, new_dims) =
@@ -21797,6 +21834,54 @@ mod tests {
         let result = eval_tile(&[x], &p).unwrap();
         assert_eq!(extract_shape(&result), vec![1]);
         assert_eq!(extract_f64_vec(&result), vec![5.0]);
+    }
+
+    #[test]
+    fn tile_scalar_dense_fill_matches_literal_repetition() {
+        let lits = |v: &Value| v.as_tensor().unwrap().elements.to_vec();
+        let p = params(&[("reps", "2,3")]);
+
+        let f32_input = Value::Scalar(Literal::from_f32(1.25));
+        let f32_out = eval_tile(&[f32_input], &p).unwrap();
+        assert_eq!(extract_shape(&f32_out), vec![2, 3]);
+        assert_eq!(lits(&f32_out), vec![Literal::from_f32(1.25); 6]);
+        assert!(
+            f32_out
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .is_some(),
+            "scalar f32 tile stays dense"
+        );
+
+        let u64_input = Value::Scalar(Literal::U64(0x0123_4567_89ab_cdef));
+        let u64_out = eval_tile(&[u64_input], &p).unwrap();
+        assert_eq!(extract_shape(&u64_out), vec![2, 3]);
+        assert_eq!(lits(&u64_out), vec![Literal::U64(0x0123_4567_89ab_cdef); 6]);
+        assert!(
+            u64_out
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u64_slice()
+                .is_some(),
+            "scalar u64 tile stays dense"
+        );
+
+        let complex = Literal::from_complex128(1.25, -0.5);
+        let c128_out = eval_tile(&[Value::Scalar(complex)], &p).unwrap();
+        assert_eq!(extract_shape(&c128_out), vec![2, 3]);
+        assert_eq!(lits(&c128_out), vec![complex; 6]);
+        assert!(
+            c128_out
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_complex_slice()
+                .is_some(),
+            "scalar complex128 tile stays dense"
+        );
     }
 
     #[test]

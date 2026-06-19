@@ -3069,6 +3069,27 @@ fn bench_broadcast_scalar_dense_fill(c: &mut Criterion) {
     });
 }
 
+// Scalar Tile is another uniform-fill path: a rank-0 scalar tiled to a large
+// tensor should allocate dense typed storage directly rather than a Vec<Literal>.
+fn bench_tile_scalar_dense_fill(c: &mut Criterion) {
+    let mut p = BTreeMap::new();
+    p.insert("reps".to_owned(), "1024,1024".to_owned());
+
+    let f32_input = Value::Scalar(Literal::from_f32(1.25));
+    c.bench_function("eval/tile_scalar_f32_1024x1024", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Tile, std::slice::from_ref(&f32_input), &p))
+    });
+
+    let complex_input = Value::Scalar(Literal::Complex128Bits(
+        1.25_f64.to_bits(),
+        (-0.5_f64).to_bits(),
+    ));
+    c.bench_function("eval/tile_scalar_complex128_1024x1024", |bencher| {
+        bencher
+            .iter(|| eval_primitive(Primitive::Tile, std::slice::from_ref(&complex_input), &p))
+    });
+}
+
 // Pad a 256x256 dense f64 tensor with 1 element of edge padding on each side
 // (-> 258x258). Dense fast path (pass105, typed fill + placement into dense
 // storage) vs the generic Literal fill + per-element placement.
@@ -6362,6 +6383,7 @@ criterion_group!(
     bench_bitcast_bf16_f32_dense_1m,
     bench_broadcast_256_to_256x256_f64,
     bench_broadcast_scalar_dense_fill,
+    bench_tile_scalar_dense_fill,
     bench_pad_256x256_to_258x258_f64,
     bench_rev_256x256_f64,
     bench_one_hot_2048x512_f64,
