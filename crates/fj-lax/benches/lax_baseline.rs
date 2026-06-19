@@ -2152,6 +2152,23 @@ fn bench_reduce_sum_4096x128_axis1_f64(c: &mut Criterion) {
     });
 }
 
+// Full reduce_sum over a 16M f64 1-D vector -> scalar. The eval is a strict
+// single-accumulator sequential f64 fold (non-associative, bit-exact order), which
+// is LATENCY-bound (each add depends on the previous), unlike JAX's pairwise sum.
+// Measures the vs-JAX gap for the most fundamental reduction.
+fn bench_reduce_sum_16m_f64_full(c: &mut Criterion) {
+    const N: usize = 16_777_216;
+    let data: Vec<f64> = (0..N).map(|i| ((i as f64) * 1.1e-7).sin() * 3.0).collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(Shape { dims: vec![N as u32] }, data).unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axes".to_string(), "0".to_string());
+    c.bench_function("eval/reduce_sum_16m_f64_full", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_reduce_sum_64k_i64_literal_reference(c: &mut Criterion) {
     let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN as i64)
         .map(Literal::I64)
@@ -6451,6 +6468,7 @@ criterion_group!(
     bench_reduce_sum_256_axis1_complex_literal_reference,
     bench_reduce_sum_64k_i64,
     bench_reduce_sum_4096x128_axis1_f64,
+    bench_reduce_sum_16m_f64_full,
     bench_reduce_sum_64k_i64_literal_reference,
     bench_reduce_sum_64k_f32_dense,
     bench_reduce_sum_64k_f32_literal_reference,

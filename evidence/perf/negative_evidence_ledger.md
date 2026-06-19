@@ -3,6 +3,41 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-cc-reduce-sum-jax-loss - reduce_sum LOSES 2.87x to JAX (latency-bound sequential fold; multi-accumulator BLOCKED on maintainer)
+
+- Date: 2026-06-19
+- Agent: cc / CobaltForge
+- GAP WHERE WE LOSE (measured, same-load at load ~6): Rust `eval_primitive(ReduceSum)`
+  over a 16M f64 1-D vector = **13.36 ms** ([13.20,13.51] Criterion) vs JAX
+  `jnp.sum` = **4.65 ms** (mean, CV 5.9%), jax 0.10.1 CPU x64, warmed.
+  **Rust/JAX 2.87 = JAX 2.87x FASTER.** New bench `eval/reduce_sum_16m_f64_full`;
+  reproducer `benchmarks/jax_comparison/sum_gauntlet.py`.
+- Root cause: `eval_reduce`'s float path is a STRICT single-accumulator sequential
+  f64 fold (`acc = float_op(acc, x)`, ascending order) — deliberately non-reassociated
+  to stay bit-exact vs the generic Literal fold. A single accumulator is LATENCY-bound
+  (each add depends on the previous, ~0.8 ns/add = ~13 ms for 16M), whereas JAX sums
+  pairwise/vectorized (throughput-bound).
+- The lever (multi-accumulator / pairwise / threaded partial sums) is **tolerance-legal
+  vs JAX** — `reduce_sum_oracle` compares with `(a-b).abs() < tol`, NOT bit-exact — and
+  is **strictly MORE accurate** (pairwise error grows ~log n vs ~n for sequential, i.e.
+  CLOSER to both the true sum and JAX's own pairwise result). So the standing
+  "DO-NOT-REATTEMPT float-sum SIMD (non-associative)" objection is weaker than it reads:
+  the only hard blocker is that it reassociates, which breaks (a) the internal
+  `dense_*_reduce_sum_*_bit_identical_to_literal_path` guards and (b) the FROZEN bit-exact
+  goldens `artifacts/performance/evidence/fj_lax_dense_f64_reduce_sum_pass60*` — both of
+  which pin the CURRENT sequential bits. Re-baselining those to a fixed multi-accumulator
+  order would make sum both faster AND more accurate, deterministically.
+- Status: NOT implemented. This changes a fundamental op's numerical output library-wide
+  + re-baselines frozen goldens, so it is a MAINTAINER numerical-policy decision (same
+  class as the +fma flag), not a unilateral agent change. RECOMMENDATION for the maintainer:
+  reconsider the DO-NOT — a k-accumulator (k=8) scalar fold (no SIMD/FMA/unsafe needed)
+  should recover ~3-5x on large f64/f32 reductions (sum/mean — ubiquitous in ML) within
+  the existing tolerance, and improve accuracy. If approved, change the shared fold so
+  dense==literal still match, then regenerate the reduce_sum perf goldens.
+- Retry predicate: do not ship a multi-accumulator sum WITHOUT maintainer sign-off on the
+  golden re-baseline; do not attempt a bit-exact speedup (none exists — the sequential
+  dependency chain is inherent to the order).
+
 ## frankenjax-cc-softmax-jax-loss - 2D softmax LOSES 2.2x to JAX (threading is NOT the lever)
 
 - Date: 2026-06-19
