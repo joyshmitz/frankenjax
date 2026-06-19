@@ -54,3 +54,7 @@ harness = false
 [[bench]]
 name = "slice_gauntlet"
 harness = false
+
+[[bench]]
+name = "gather_gauntlet"
+harness = false
