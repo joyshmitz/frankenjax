@@ -774,6 +774,62 @@ fn transpose_2d_blocked<T: Copy>(src: &[T], rows: usize, cols: usize, total: usi
     out
 }
 
+/// Threaded rank-2 transpose into a PRE-ALLOCATED `out` (caller allocates
+/// `vec![<concrete zero>; rows*cols]` = calloc'd zero pages). The output (cols x rows)
+/// is split into contiguous OUTPUT-row ranges (= source-column ranges) across scoped
+/// threads; each thread cache-blocks its sub-transpose. Bit-for-bit identical to
+/// [`transpose_2d_blocked`] — every `out[j*rows + i] = src[i*cols + j]`, just produced
+/// concurrently into disjoint slices. Above the gate this parallel-faults the fresh
+/// output and parallelizes the strided reads (serial is ~2.2 GB/s, page-fault +
+/// strided-read bound). The serial `transpose_2d_blocked` also wastefully fills the
+/// output with `src[0]` first (a serial fault); this path skips that.
+fn transpose_2d_into<T: Copy + Send + Sync>(out: &mut [T], src: &[T], rows: usize, cols: usize) {
+    const BLOCK: usize = 64;
+    let total = rows * cols;
+    let threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && cols >= 2 {
+        crate::arithmetic::work_scaled_threads(total).min(cols)
+    } else {
+        1
+    };
+    let fill = |blk: &mut [T], j0: usize, j1: usize| {
+        // blk holds output rows j0..j1 (each length `rows`): blk[(j-j0)*rows + i].
+        let mut jb = j0;
+        while jb < j1 {
+            let je = (jb + BLOCK).min(j1);
+            let mut ib = 0;
+            while ib < rows {
+                let ie = (ib + BLOCK).min(rows);
+                for j in jb..je {
+                    let base = (j - j0) * rows;
+                    for i in ib..ie {
+                        blk[base + i] = src[i * cols + j];
+                    }
+                }
+                ib += BLOCK;
+            }
+            jb += je - jb;
+        }
+    };
+    if threads <= 1 {
+        fill(out, 0, cols);
+        return;
+    }
+    let cols_per = cols.div_ceil(threads);
+    let fill = &fill;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [T] = out;
+        let mut j0 = 0usize;
+        while j0 < cols {
+            let j1 = (j0 + cols_per).min(cols);
+            let len = (j1 - j0) * rows;
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            scope.spawn(move || fill(blk, j0, j1));
+            j0 = j1;
+        }
+    });
+}
+
 /// General N-D transpose over a typed slice via a row-major odometer that
 /// maintains the source flat index incrementally (`step[axis] =
 /// old_strides[permutation[axis]]`). Generic over the element type; pure data
@@ -961,6 +1017,29 @@ pub(crate) fn eval_transpose(
             if rank == 2 && permutation[0] == 1 && permutation[1] == 0 {
                 let rows = old_dims[0] as usize; // source rows (M)
                 let cols = old_dims[1] as usize; // source cols (N); output is N x M
+                // Threaded f64/f32 rank-2 transpose above the DRAM-bound gate: calloc'd
+                // output + parallel cache-blocked sub-transposes. Bit-identical to
+                // transpose_2d_blocked. Other dtypes / small fall to the serial path.
+                if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN
+                    && crate::arithmetic::work_scaled_threads(total) > 1
+                {
+                    if let Some(s) = tensor.elements.as_f64_slice() {
+                        let mut out = vec![0.0f64; total];
+                        transpose_2d_into(&mut out, s, rows, cols);
+                        return Ok(Value::Tensor(TensorValue::new_f64_values(
+                            Shape { dims: new_dims },
+                            out,
+                        )?));
+                    }
+                    if let Some(s) = tensor.elements.as_f32_slice() {
+                        let mut out = vec![0.0f32; total];
+                        transpose_2d_into(&mut out, s, rows, cols);
+                        return Ok(Value::Tensor(TensorValue::new_f32_values(
+                            Shape { dims: new_dims },
+                            out,
+                        )?));
+                    }
+                }
                 dense_transpose!(transpose_2d_blocked(rows, cols, total));
                 let mut new_elements = vec![tensor.elements[0]; total];
                 const BLOCK: usize = 64;
@@ -12573,6 +12652,25 @@ fn tile_recursive(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn transpose_2d_into_bit_identical_to_serial() {
+        // Non-square dims (catches rows/cols swaps), total >= gate so threading engages.
+        // Compare the threaded fill to the serial transpose_2d_blocked, bit-for-bit.
+        let cases = [(8192usize, 2048usize), (3000, 5600), (4096, 4096)];
+        for (rows, cols) in cases {
+            let total = rows * cols;
+            assert!(total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
+            let src: Vec<f64> = (0..total).map(|i| (i as f64) * 0.25 - 13.0).collect();
+            let serial = transpose_2d_blocked(&src, rows, cols, total);
+            let mut threaded = vec![0.0f64; total];
+            transpose_2d_into(&mut threaded, &src, rows, cols);
+            assert_eq!(serial.len(), threaded.len());
+            let sb: Vec<u64> = serial.iter().map(|v| v.to_bits()).collect();
+            let tb: Vec<u64> = threaded.iter().map(|v| v.to_bits()).collect();
+            assert!(sb == tb, "threaded transpose != serial for {rows}x{cols}");
+        }
+    }
 
     #[test]
     fn threaded_convert_bit_identical_to_serial() {

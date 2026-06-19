@@ -1608,3 +1608,33 @@ ends are not rediscovered without new evidence.
 - Retry predicate: extend the same calloc+threaded fill to the other hot casts (f64->i32/i64
   quantization, f32->i32, half<->f32) — each allocates a concrete-zero output so the same
   helper applies. Confirms the campaign principle across yet another op family.
+
+## CobaltForge - Threaded rank-2 f64/f32 transpose for DRAM-bound arrays (JAX WIN)
+
+- Lever: the rank-2 [1,0] transpose used `transpose_2d_blocked` (cache-blocked but SERIAL,
+  and it pre-fills the output with `vec![src[0]; total]` = a serial fault of the whole output
+  before transposing) — ~2.2 GB/s, page-fault + strided-read bound. New `transpose_2d_into<T>`
+  fills a caller-allocated calloc'd output by splitting the OUTPUT-row range (= source-column
+  range) across scoped threads, each running a cache-blocked sub-transpose. Wired into the
+  f64/f32 arms of the rank-2 branch above `CHEAP_BINARY_PARALLEL_MIN`; other dtypes / small
+  keep `transpose_2d_blocked`.
+- Bit-identity: every `out[j*rows+i] = src[i*cols+j]`, just produced concurrently into disjoint
+  contiguous output-column slices. Guarded by `transpose_2d_into_bit_identical_to_serial`
+  (NON-SQUARE dims 8192x2048, 3000x5600, + square — catches rows/cols swaps), bit-for-bit vs
+  the serial blocked kernel.
+- "Tiling regresses" (recorded) is about CACHE-BLOCKING the strided walk, NOT threading — this
+  KEEPS the existing block tiling and adds thread-level parallelism on top (orthogonal, legal).
+- Conformance: `fj-lax --lib` 1501 pass (+1 new), 43 fail (PRE-EXISTING) — 0 new failures.
+- Measured (LOCAL real eval_primitive path, best-of-15) + JAX (`jax.jit(lambda x: x.T+0.0)` x64,
+  /tmp/jax_t.py):
+
+  | transpose | serial (before) | threaded (after) | internal | JAX | Rust/JAX |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | f64 4096x4096 | 119433 us (2.2 GB/s) | 9716 us (27.6 GB/s) | 12.29x | 28454 us (9.4 GB/s) | 0.34x (2.93x FASTER) |
+  | f64 8192x8192 | 484097 us (2.2 GB/s) | 37217 us (28.9 GB/s) | 13.01x | 111599 us (9.6 GB/s) | 0.33x (3.0x FASTER) |
+
+- Decision: KEEP. Transpose is ubiquitous (attention, matmul prep). Before, Rust LOST to JAX by
+  ~4.3x; after, Rust DOMINATES by ~3x. Same gate; small/other-dtype transposes unchanged.
+- Retry predicate: extend `transpose_2d_into` to i64/u32/u64/half/complex rank-2 arms (concrete
+  zero -> calloc) and thread the N-D `transpose_general` outer odometer the same way (base_of
+  decomposition, like broadcast). Same campaign principle.

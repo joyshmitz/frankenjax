@@ -377,3 +377,11 @@ Additional cod-a repeat validation environment:
   f64->f32 = Rust/JAX 0.47-0.61 (1.64-2.14x faster), f32->f64 = 0.45-0.50 (1.99-2.21x faster);
   internal 6.0-8.5x (5.9/3.4 -> 28-38 GB/s). Bit-identical, guarded. Mixed-precision casts are
   everywhere. Other casts (int/half) are easy follow-ons (same calloc+thread helper).
+
+## CobaltForge - Threaded transpose (rank-2 f64/f32): JAX WIN (2026-06-19)
+
+- rank-2 [1,0] transpose threaded (calloc'd output + column-range cache-blocked sub-transposes):
+  f64 4096x4096 / 8192x8192 = Rust/JAX 0.34/0.33 (2.93-3.0x faster than jax.jit), internal
+  12.3-13.0x (2.2 -> 27.6-28.9 GB/s). Bit-identical (incl. non-square), guarded. "Tiling
+  regresses" was about cache-blocking, not threading — this keeps tiling and adds threads.
+  Other dtypes / N-D transpose are easy follow-ons.
