@@ -1222,3 +1222,71 @@ ends are not rediscovered without new evidence.
 - Decision: REVERT f32 native add (~0 gain). KEEP all measured dense paths. Retry
   predicate for elementwise: the gap is per-op allocation (needs buffer reuse =
   compiled-jaxpr arena) and AVX-512 (build flag) — NOT the elementwise loop.
+
+## frankenjax-k8z8g - Einsum permute-copy trailing-block memcpy (internal keep, external JAX loss)
+
+- Lever: `permute_copy_f64` detects an identity-mapped trailing suffix and copies
+  the contiguous block with `extend_from_slice`, instead of decoding every output
+  coordinate one element at a time. This is used by the general einsum
+  permute+GEMM path for attention-shaped contractions such as
+  `bqhd,bkhd->bhqk`.
+- Canonical graveyard mapping: data-layout/vectorized execution, cache-local
+  block movement, and persistent evidence discipline. This is the measured,
+  low-risk subset of the broader "exotic layout / cache-oblivious / SIMD"
+  idea-space: no unsafe code, one lever, bit-identical output, rollback by
+  restoring the per-element coordinate walk.
+- Conformance guard: GREEN. `rch exec -- cargo test -p fj-lax
+  einsum2_general_matmul_bit_identical_to_naive --lib` passed 1/0, checking
+  general-path output and shape bit-for-bit against the deterministic ascending-K
+  naive reference across attention, multi-K, interleaved-output, and non-adjacent
+  tensordot cases.
+- Internal old-vs-new evidence (2026-06-19, `hz2`, release ignored perf test):
+
+  | Arm | workload | time | result |
+  | --- | --- | ---: | --- |
+  | old odometer reference | `bqhd,bkhd->bhqk` [8,128,8,64/128] | 7664.51 ms | baseline |
+  | general permute+GEMM with trailing-block memcpy | same | 15.64 ms | 489.99x faster |
+
+  Digest matched: `7fec8a7f347cf406`.
+- Focused Criterion evidence (2026-06-19, `hz2`, sample 30, new repeatable bench):
+
+  | Workload | Rust time |
+  | --- | ---: |
+  | `eval/einsum2_general_bqhd_bkhd_bhqk_f64` [4,64,8,64/64] | 1.3123 ms mean `[1.2797, 1.3602]` |
+
+- JAX head-to-head (`einsum_permute_copy_gauntlet.py`, local JAX CPU x64,
+  `jax.jit(lambda lhs,rhs: jnp.einsum("bqhd,bkhd->bhqk", lhs, rhs))`):
+
+  | JAX comparator | mean | p50 | CV | Rust/JAX |
+  | --- | ---: | ---: | ---: | ---: |
+  | device-ready lower bound | 317.774 us | 324.308 us | 13.01% | 4.13x slower |
+  | NumPy host-copy comparator | 278.461 us | 283.367 us | 20.38% | 4.71x slower |
+
+- Decision: KEEP internally, record external loss. The current path removes a
+  catastrophic old Rust algorithmic path (490x faster with digest parity), so
+  reverting would be wrong. It still does not dominate JAX on the moderate
+  attention-shaped workload; the residual gap is now GEMM/codegen/vectorization
+  and allocation/layout, not the permute-copy odometer.
+- Validation:
+  - `benchmarks/jax_comparison/.venv/bin/python -m py_compile
+    benchmarks/jax_comparison/einsum_permute_copy_gauntlet.py`: pass.
+  - `ubs --only=rust,python crates/fj-lax/benches/lax_baseline.rs
+    benchmarks/jax_comparison/einsum_permute_copy_gauntlet.py`: no critical
+    issues; warning-class bench-file inventory only.
+  - `rch exec -- cargo check -p fj-lax --bench lax_baseline`: pass.
+  - `rch exec -- cargo test -p fj-lax
+    einsum2_general_matmul_bit_identical_to_naive --lib`: pass.
+  - `rch exec -- cargo bench -p fj-lax --bench lax_baseline --
+    eval/einsum2_general_bqhd_bkhd_bhqk_f64 ...`: pass.
+  - `rch exec -- cargo test -p fj-lax bench_einsum2_general_vs_odometer --lib
+    --release -- --ignored --nocapture`: pass.
+  - `cargo fmt -p fj-lax --check`: red on pre-existing fj-lax formatting drift
+    outside the touched hunk.
+  - `rch exec -- cargo clippy -p fj-lax --bench lax_baseline -- -D warnings`:
+    red on pre-existing fj-lax lint debt in `tensor_ops.rs` and `tree_util.rs`
+    (`too_many_arguments`, `type_complexity`, `unnecessary_sort_by`), unrelated
+    to this bench/harness closeout.
+- Retry predicate: do not retry the `permute_copy_f64` odometer elimination
+  family without a new profiler showing permute-copy, not GEMM/XLA codegen, is
+  still dominant. The next meaningful path is fused layout-aware einsum lowering,
+  packed/tiled GEMM, AVX/FMA policy resolution, or compiled-buffer reuse.

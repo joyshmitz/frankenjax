@@ -5787,6 +5787,33 @@ fn bench_irfft_batch_2048x256(c: &mut Criterion) {
     });
 }
 
+// Attention-score einsum with the head axis in the middle. This exercises the
+// general einsum permute-copy path (`bqhd,bkhd->bhqk`), including the
+// trailing-suffix memcpy in `permute_copy_f64`, before batched GEMM dominates.
+fn bench_einsum2_general_attention_f64(c: &mut Criterion) {
+    let (bsz, q, h, d, kk) = (4usize, 64usize, 8usize, 64usize, 64usize);
+    let a_shape = [bsz, q, h, d];
+    let b_shape = [bsz, kk, h, d];
+    let a: Vec<f64> = (0..bsz * q * h * d)
+        .map(|i| (i as f64 * 0.0011).sin())
+        .collect();
+    let b: Vec<f64> = (0..bsz * kk * h * d)
+        .map(|i| (i as f64 * 0.0009).cos())
+        .collect();
+
+    c.bench_function("eval/einsum2_general_bqhd_bkhd_bhqk_f64", |bencher| {
+        bencher.iter(|| {
+            fj_lax::einsum::einsum2(
+                "bqhd,bkhd->bhqk",
+                black_box(&a),
+                black_box(&a_shape),
+                black_box(&b),
+                black_box(&b_shape),
+            )
+        })
+    });
+}
+
 fn bench_reshape(c: &mut Criterion) {
     let data: Vec<i64> = (0..1000).collect();
     let input = Value::vector_i64(&data).unwrap();
@@ -6523,6 +6550,7 @@ criterion_group!(
     bench_fft_batch_2048x256_real_dense,
     bench_irfft_256,
     bench_irfft_batch_2048x256,
+    bench_einsum2_general_attention_f64,
     bench_reshape,
     bench_split_multi_1024x1024_f32,
     bench_gather_128_rows_16_cols,

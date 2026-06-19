@@ -137,6 +137,7 @@ Additional cod-a repeat validation environment:
 | frankenjax-e07uw | `fusion_arith8_f64_1m` (jit chain) | 3.320 ms fused | 272.7 us mean | 12.175 | Rust 12.18x slower |
 | frankenjax-bjqfr | `fusion_bf16_broadcast_1m` | 10.776 ms | 146.9 us mean | 73.357 | Rust 73.36x slower (reverted) |
 | frankenjax-f62hx | `transpose_attn_BSHD_f32` (block-copy) | 791.5 us | 186.7 us mean | 4.239 | Rust 4.24x slower (10.3x vs naive) |
+| frankenjax-k8z8g | `einsum2_general_bqhd_bkhd_bhqk_f64` (permute-copy + GEMM) | 1.3123 ms mean | 317.774 us ready / 278.461 us host-copy mean | 4.130 / 4.713 | Rust loses externally; KEEP internally (489.99x vs old odometer, digest match) |
 | frankenjax-thnjs | `broadcast_bias_D768_to_4096x768_f32` (block-copy) | 283.75 us | 178.9 us mean | 1.586 | Rust 1.59x slower (21.8x vs naive) |
 | frankenjax-hfq7o | `integer_pow2_f64_1m` (v*v fix) | 405.45 us | 184.1 us mean | 2.202 | Rust 2.20x slower (was 12.9x) |
 | frankenjax-hfq7o | `integer_pow2_f32_1m` (v*v fix) | 169.61 us | 121.1 us mean | 1.400 | Rust 1.40x slower (was 21.8x) |
@@ -235,6 +236,12 @@ Additional cod-a repeat validation environment:
   categorically better than the de-box dense clusters (50-128x JAX loss). KEEP all.
   Residual JAX gaps are memory-store/layout, not algorithm: broadcast needs
   streaming stores; transpose needs layout-aware elision. NOT more block-copy.
+- Einsum general permute-copy (k8z8g) confirms the same pattern at the contraction
+  boundary: the old odometer path is gone (489.99x faster, digest-identical), but
+  the current Rust path is still 4.13-4.71x slower than JAX on the moderate
+  attention-shaped comparator. This is an internal keep and an external loss;
+  next work must target fused layout-aware einsum lowering, packed/tiled GEMM,
+  AVX/FMA policy, or compiled-buffer reuse rather than another permute-copy retry.
 - SplitMulti lazy section construction (dxqfj) is a measured same-host win against
   both JAX bare split and materialized split (Rust/JAX 0.648-0.706), but the row
   stays noisy (Rust CV 6.85%, JAX CV 10-12%). KEEP as a construction-path win;
