@@ -42,3 +42,7 @@ harness = false
 [[bench]]
 name = "transpose_gauntlet"
 harness = false
+
+[[bench]]
+name = "broadcast_gauntlet"
+harness = false
