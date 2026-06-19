@@ -568,20 +568,54 @@ ends are not rediscovered without new evidence.
 
 ## frankenjax-mcqr.102 - Storage-Direct LiteralBuffer Equality
 
-- Date: 2026-06-18
+- Date: 2026-06-19
 - Agent: cod-b / WildForge
 - Lever: make `LiteralBuffer` equality compare storage-direct typed ranges and
   recursively compare concat slices instead of forcing `as_slice()` on both
   operands and caching full materialized literal vectors for dense packed
   buffers.
-- Status: batch-test pending.
+- Status: measured keep.
 - Benchmark guard: `core/literal_buffer_eq_dense_f64_64k_equal`,
   `core/literal_buffer_eq_dense_f64_64k_mismatch`,
-  `core/literal_buffer_eq_literal_f64_64k_equal`.
+  `core/literal_buffer_eq_literal_f64_64k_equal`, plus
+  `benchmarks/jax_comparison/core_literal_buffer_eq_gauntlet.py`.
+- Measured evidence:
+  - Rust Criterion, local same-host:
+    `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-core --bench core_baseline -- core/literal_buffer_eq --sample-size 100 --warm-up-time 1 --measurement-time 10 --save-baseline frankenjax-cod-b-literal-buffer-eq`.
+  - Dense F64 64k equal: 27.484 us mean (`[27.047, 27.926]` us).
+  - Dense F64 64k tail-mismatch: 27.570 us mean (`[27.226, 27.951]` us).
+  - Literal F64 64k equal control: 53.559 us mean (`[52.696, 54.423]` us).
+  - Internal result: dense equality is 0.513x the literal equality control, or
+    1.95x faster.
+  - JAX command:
+    `benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/core_literal_buffer_eq_gauntlet.py --runs 100 --warmup 10 --inner-loops 1000 --output /tmp/frankenjax_cod_b_literal_buffer_eq_jax_raw.json`.
+  - JAX equal device-ready lower bound: 58.2421 us mean, p50 54.3390 us,
+    p95 76.0146 us, p99 80.4897 us, CV 15.86%; Rust/JAX 0.472x, Rust
+    2.12x faster directionally.
+  - JAX equal host-bool comparator: 66.6275 us mean, p50 63.2482 us,
+    p95 89.2968 us, p99 92.7591 us, CV 17.95%; Rust/JAX 0.413x, Rust
+    2.42x faster directionally.
+  - JAX tail-mismatch device-ready lower bound: 56.2721 us mean, p50 53.4535 us,
+    p95 72.5154 us, p99 75.3971 us, CV 14.40%; Rust/JAX 0.490x, Rust
+    2.04x faster directionally.
+  - JAX tail-mismatch host-bool comparator: 68.9387 us mean, p50 70.1777 us,
+    p95 82.6965 us, p99 85.0570 us, CV 11.61%; Rust/JAX 0.400x, Rust
+    2.50x faster directionally.
+  - External ratios are directional because JAX CV is above 5% for all equality
+    rows. The Rust dense/literal split is the hard keep criterion.
 - Conformance guard: storage-direct equality matches materialized
   `Vec<Literal>` equality across F64/F64OnePlusX/F32/I64/U32/U64/Bool/
   BoolWords/Half/Complex, repeated-patches, concat, mixed dense/literal concat,
   and the `LiteralBuffer`/`Vec<Literal>` cross-`PartialEq` impls.
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b rch exec -- cargo test -p fj-core literal_buffer_storage_direct_equality_matches_materialized_vec --lib`
+  passed 1 test, 0 failed on `hz1`. RCH
+  `cargo check -p fj-core --bench core_baseline` passed on `hz2`, RCH
+  `cargo clippy -p fj-core --bench core_baseline -- -D warnings` passed on
+  `vmi1149989`, `python -m py_compile benchmarks/jax_comparison/core_literal_buffer_eq_gauntlet.py`
+  passed, and `ubs --only=python benchmarks/jax_comparison/core_literal_buffer_eq_gauntlet.py`
+  returned 0 warnings. Workspace `cargo fmt --check` remains red on unrelated
+  pre-existing formatting drift outside the touched files; no Rust code changed
+  in this measured closeout.
 - Retry predicate: do not retry the already committed stack/repeat/slice/to_i64,
   `TensorValue::new`, `LiteralBuffer::to_vec`, dense COW mutation,
   serialization streaming, or this equality family without fresh focused

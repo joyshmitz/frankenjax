@@ -60,8 +60,8 @@ Additional current fj-core stack/repeat/slice/extraction environment:
   scalar-repeat control filter and `core/tensor_slice_axis0` slice filter,
   plus the `core/tensor_to_i64_vec` extraction filter and
   `core/tensor_value_new` constructor/extraction filter, plus the
-  `core/literal_buffer_to_vec` materialization filter, local same-host
-  execution.
+  `core/literal_buffer_to_vec` materialization filter, plus the
+  `core/literal_buffer_eq` equality filter, local same-host execution.
 - JAX oracle: `benchmarks/jax_comparison/.venv/bin/python`
 - JAX/JAXLIB: 0.10.1 / 0.10.1, `jax_enable_x64=true`, CPU backend
 - JAX timing protocol: warmed `block_until_ready()` execution, 80 runs x 200
@@ -77,7 +77,10 @@ Additional current fj-core stack/repeat/slice/extraction environment:
   `jnp.asarray(values, dtype=jnp.float64).block_until_ready()` and NumPy
   host-copy extraction over a 1000-element F64 vector; 100 runs x 1000 inner
   loops for `jax.jit(lambda x: x)(x).block_until_ready()` and NumPy host-copy
-  extraction over a 65536-element F64 vector.
+  extraction over a 65536-element F64 vector; 100 runs x 1000 inner loops for
+  `jax.jit(lambda x, y: jnp.array_equal(x, y))` equal and tail-mismatch checks
+  over 65536-element F64 vectors, measured as both device-ready lower bound and
+  host-bool scalar transfer.
 
 Additional cod-a repeat validation environment:
 
@@ -111,6 +114,7 @@ Additional cod-a repeat validation environment:
 | frankenjax-cod-b-dense-to-i64-vec-7xbu9 | `to_i64_vec_i64_4k` | 552.47 ns mean | 6.5825 us identity / 9.0209 us NumPy copy mean | 0.0839 / 0.0612 | Rust 11.92x faster vs identity lower-bound, 16.33x faster vs host copy (12.05x vs literal fallback; JAX CV 6.6-19.5%) |
 | frankenjax-mcqr.97 | `tensor_value_new_f64_1k` | 1.4152 us construct / 1.4131 us +extract | 48.5634 us ready / 55.9286 us host copy mean | 0.0291 / 0.0253 | External Rust win, internal mixed: 3.27x slower construction-only vs forced literal, 1.68x faster +extract |
 | frankenjax-mcqr.99 | `literal_buffer_to_vec_f64_64k` | 26.644 us dense / 33.306 us literal | 19.5312 us identity / 32.9368 us host copy mean | 1.364 / 0.809 | Rust 1.25x faster internally; 1.36x slower than JAX identity lower-bound, 1.24x faster than JAX host copy; directional JAX CV 8.7-9.1% |
+| frankenjax-mcqr.102 | `literal_buffer_eq_f64_64k` | 27.484 us equal / 27.570 us mismatch / 53.559 us literal equal | 58.2421 us equal ready / 66.6275 us equal host bool / 56.2721 us mismatch ready / 68.9387 us mismatch host bool | 0.472 / 0.413 / 0.490 / 0.400 | Rust 1.95x faster internally; 2.04-2.50x faster than noisy JAX equality comparators |
 | frankenjax-mcqr.105 | `f32_mixed_scalar_tensor_1m` | 159.383 us mean | 115.540 us mean | 1.379 | Rust 1.38x slower |
 | frankenjax-mcqr.105 | `f64_mixed_scalar_tensor_1m` | 996.940 us mean | 213.651 us mean | 4.666 | Rust 4.67x slower |
 | frankenjax-mcqr.108 | `bf16_mixed_scalar_tensor_1m` | 3.616 ms mean | 122.705 us mean | 29.466 | Rust 29.47x slower (8.60x RCH same-worker speedup; 12.47x vs boxed ref) |
@@ -201,6 +205,12 @@ Additional cod-a repeat validation environment:
   host-copy row copies raw F64 values while Rust materializes `Literal` enums,
   keep this as storage-path evidence only; deeper work should avoid
   `Vec<Literal>` at consumer boundaries.
+- The fj-core `LiteralBuffer` equality row is a stronger storage-path keep:
+  dense F64 equality is 27.484 us on equal inputs and 27.570 us on a tail
+  mismatch, versus 53.559 us for literal-backed equality (1.95x faster
+  internally). It also beats JAX `array_equal` directionally by 2.04-2.50x, but
+  the JAX rows have 11.6-18.0% CV, so use the external ratio as directional and
+  the dense/literal split as the keep proof.
 - The de-box category SPLITS: bandwidth-bound de-box (complex ctor, integer_pow
   f32) ties/beats JAX same-host; heavy-per-lane de-box (clamp half 53-128x) does
   not — there per-lane work, not boxing, dominates.
