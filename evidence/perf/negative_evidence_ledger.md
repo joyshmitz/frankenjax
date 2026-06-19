@@ -3,6 +3,44 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-cod-b-dense-tensor-stack-axis0-rw4k4 - Dense Tensor stack_axis0 Concat Storage
+
+- Date: 2026-06-19
+- Agent: cod-b / WildForge
+- Lever: route `TensorValue::stack_axis0` for tensor inputs through
+  `LiteralBuffer::from_concat_slices` plus `new_with_literal_buffer`, preserving
+  packed dense storage instead of materializing a `Vec<Literal>`.
+- Status: measured keep. External head-to-head is a Rust win versus original JAX;
+  internal control is a small but separated Rust win versus the literal-backed
+  stack path. No revert.
+- Benchmark guard: `core/tensor_stack_axis0_dense_f64_64x1k` plus
+  `core/tensor_stack_axis0_literal_f64_64x1k` control.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust command:
+    `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-core --bench core_baseline -- core/tensor_stack_axis0 --sample-size 100 --warm-up-time 1 --measurement-time 10`.
+  - JAX command: warmed inline `jax.jit(lambda *xs: jnp.stack(xs, axis=0))`
+    over 64 x 1024 `float64` arrays with `jax_enable_x64=true`, CPU backend,
+    80 runs x 200 inner loops via `benchmarks/jax_comparison/.venv/bin/python`
+    (JAX/JAXLIB 0.10.1).
+  - Rust dense mean estimate 3.3963 us (`[3.3375, 3.4533]` us Criterion
+    interval) vs JAX mean 41.0467 us (p50 40.4710 us, CV 6.79%):
+    Rust/JAX 0.083x, Rust 12.09x faster.
+  - Rust literal-backed control mean estimate 3.5255 us
+    (`[3.4610, 3.5862]` us Criterion interval): dense/literal 0.963x,
+    dense 1.04x faster internally. This is a narrow construction-path win, not
+    a broad dense-storage breakthrough.
+- Conformance guard: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo test -p fj-core stack_axis0 --lib`
+  passed 6 tests, 0 failed. Per-crate `cargo check -p fj-core --all-targets`,
+  `cargo clippy -p fj-core --all-targets -- -D warnings`, and
+  `cargo fmt -p fj-core --check` also passed after repairing two pre-existing
+  test-gate issues in `crates/fj-core/src/lib.rs` (missing helper imports and a
+  `clone_on_copy` test lint).
+- Retry predicate: do not repeat this `stack_axis0` tensor concat-storage lever
+  unless a new profile shows a distinct stack call path or a larger shape where
+  literal materialization reappears. The sibling scalar-stack, repeat, slice, and
+  `to_i64_vec` dense-storage beads still require their own JAX head-to-head rows;
+  do not generalize this 12.09x external win to those levers.
+
 ## frankenjax-mcqr.97 - TensorValue::new Dense Literal Storage
 
 - Date: 2026-06-18

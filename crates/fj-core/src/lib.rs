@@ -5680,7 +5680,8 @@ mod tests {
     use super::{
         Atom, DType, Equation, Jaxpr, JaxprValidationError, Literal, LiteralBuffer, Primitive,
         ProgramSpec, Shape, TensorValue, TraceTransformLedger, Transform, Value, ValueError, VarId,
-        build_program, verify_transform_composition, verify_transform_composition_parts,
+        build_program, checked_axis0_dim, checked_vector_shape, verify_transform_composition,
+        verify_transform_composition_parts,
     };
     use proptest::prelude::*;
     use proptest::test_runner::{Config as ProptestConfig, TestCaseError, TestRunner};
@@ -9823,7 +9824,7 @@ mod tests {
             let original = buffer.clone();
             let mut literal = LiteralBuffer::new(before.clone());
 
-            buffer[0] = replacement.clone();
+            buffer[0] = replacement;
             literal[0] = replacement;
 
             assert_eq!(original.to_vec(), before);
