@@ -7662,6 +7662,115 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         )?)))
     }
 
+    // Mixed scalar/tensor F64/F32 bounds, same-shape only. These cover
+    // "global floor, per-element ceiling" and "per-element floor, global ceiling"
+    // clipping without the broadcast odometer or boxed Literal output. The scalar
+    // bound must be the same dtype as the tensor operands so mixed-promotion cases
+    // continue through clamp_literal unchanged.
+    fn clamp_f64_scalar_lo_tensor_hi(
+        x: &TensorValue,
+        hi: &TensorValue,
+        lo: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        if x.dtype != DType::F64 || hi.dtype != DType::F64 || x.shape != hi.shape {
+            return Ok(None);
+        }
+        let Literal::F64Bits(lo_bits) = lo else {
+            return Ok(None);
+        };
+        let (Some(xs), Some(his)) = (x.elements.as_f64_slice(), hi.elements.as_f64_slice()) else {
+            return Ok(None);
+        };
+        let lof = f64::from_bits(lo_bits);
+        let out: Vec<f64> = xs
+            .iter()
+            .zip(his)
+            .map(|(&xv, &hiv)| clamp_f64(lof, xv, hiv))
+            .collect();
+        Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+            x.shape.clone(),
+            out,
+        )?)))
+    }
+
+    fn clamp_f64_tensor_lo_scalar_hi(
+        lo: &TensorValue,
+        x: &TensorValue,
+        hi: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        if lo.dtype != DType::F64 || x.dtype != DType::F64 || lo.shape != x.shape {
+            return Ok(None);
+        }
+        let Literal::F64Bits(hi_bits) = hi else {
+            return Ok(None);
+        };
+        let (Some(los), Some(xs)) = (lo.elements.as_f64_slice(), x.elements.as_f64_slice()) else {
+            return Ok(None);
+        };
+        let hif = f64::from_bits(hi_bits);
+        let out: Vec<f64> = los
+            .iter()
+            .zip(xs)
+            .map(|(&lov, &xv)| clamp_f64(lov, xv, hif))
+            .collect();
+        Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+            x.shape.clone(),
+            out,
+        )?)))
+    }
+
+    fn clamp_f32_scalar_lo_tensor_hi(
+        x: &TensorValue,
+        hi: &TensorValue,
+        lo: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        if x.dtype != DType::F32 || hi.dtype != DType::F32 || x.shape != hi.shape {
+            return Ok(None);
+        }
+        let Literal::F32Bits(lo_bits) = lo else {
+            return Ok(None);
+        };
+        let (Some(xs), Some(his)) = (x.elements.as_f32_slice(), hi.elements.as_f32_slice()) else {
+            return Ok(None);
+        };
+        let lof = f32::from_bits(lo_bits);
+        let out: Vec<f32> = xs
+            .iter()
+            .zip(his)
+            .map(|(&xv, &hiv)| clamp_f32(lof, xv, hiv))
+            .collect();
+        Ok(Some(Value::Tensor(TensorValue::new_f32_values(
+            x.shape.clone(),
+            out,
+        )?)))
+    }
+
+    fn clamp_f32_tensor_lo_scalar_hi(
+        lo: &TensorValue,
+        x: &TensorValue,
+        hi: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        if lo.dtype != DType::F32 || x.dtype != DType::F32 || lo.shape != x.shape {
+            return Ok(None);
+        }
+        let Literal::F32Bits(hi_bits) = hi else {
+            return Ok(None);
+        };
+        let (Some(los), Some(xs)) = (lo.elements.as_f32_slice(), x.elements.as_f32_slice()) else {
+            return Ok(None);
+        };
+        let hif = f32::from_bits(hi_bits);
+        let out: Vec<f32> = los
+            .iter()
+            .zip(xs)
+            .map(|(&lov, &xv)| clamp_f32(lov, xv, hif))
+            .collect();
+        Ok(Some(Value::Tensor(TensorValue::new_f32_values(
+            x.shape.clone(),
+            out,
+        )?)))
+    }
+
     match (&inputs[0], &inputs[1], &inputs[2]) {
         (Value::Scalar(lo), Value::Scalar(x), Value::Scalar(hi)) => {
             let result = clamp_literal(*lo, *x, *hi, None)
@@ -7827,6 +7936,12 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         }
         // Scalar lo with tensor x and tensor hi (broadcasts lo)
         (Value::Scalar(lo), Value::Tensor(x), Value::Tensor(hi)) => {
+            if let Some(value) = clamp_f64_scalar_lo_tensor_hi(x, hi, *lo)? {
+                return Ok(value);
+            }
+            if let Some(value) = clamp_f32_scalar_lo_tensor_hi(x, hi, *lo)? {
+                return Ok(value);
+            }
             if let Some(value) = clamp_i64_scalar_lo_tensor_hi(x, hi, *lo)? {
                 return Ok(value);
             }
@@ -7863,6 +7978,12 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         }
         // Tensor lo with tensor x and scalar hi (broadcasts hi)
         (Value::Tensor(lo), Value::Tensor(x), Value::Scalar(hi)) => {
+            if let Some(value) = clamp_f64_tensor_lo_scalar_hi(lo, x, *hi)? {
+                return Ok(value);
+            }
+            if let Some(value) = clamp_f32_tensor_lo_scalar_hi(lo, x, *hi)? {
+                return Ok(value);
+            }
             if let Some(value) = clamp_i64_tensor_lo_scalar_hi(lo, x, *hi)? {
                 return Ok(value);
             }
@@ -22728,6 +22849,32 @@ mod tests {
         );
     }
 
+    fn f64_dense_vec(d: &[f64]) -> Value {
+        Value::Tensor(
+            TensorValue::new_f64_values(Shape::vector(d.len() as u32), d.to_vec()).unwrap(),
+        )
+    }
+    fn f64_boxed_vec(d: &[f64]) -> Value {
+        Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::F64,
+                Shape::vector(d.len() as u32),
+                fj_core::LiteralBuffer::new(d.iter().map(|&v| Literal::from_f64(v)).collect()),
+            )
+            .unwrap(),
+        )
+    }
+    fn f64_bits_vec(v: &Value) -> Vec<u64> {
+        v.as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| match l {
+                Literal::F64Bits(b) => *b,
+                o => panic!("expected f64 literal, got {o:?}"),
+            })
+            .collect()
+    }
     fn f32_dense_vec(d: &[f32]) -> Value {
         Value::Tensor(
             TensorValue::new_f32_values(Shape::vector(d.len() as u32), d.to_vec()).unwrap(),
@@ -22958,6 +23105,148 @@ mod tests {
     }
 
     #[test]
+    fn f32_f64_clamp_mixed_scalar_tensor_bounds_dense_matches_generic() {
+        // Same-shape F32/F64 mixed-bound forms should stay bit-identical to the
+        // boxed generic path, including NaN canonicalization, infinities, and
+        // signed zero behavior, while returning dense typed storage.
+        let p = std::collections::BTreeMap::new();
+
+        let x32 = [
+            -5.0f32,
+            -0.0,
+            0.25,
+            3.5,
+            8.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        let hi32 = [-1.0f32, 0.0, 0.5, 3.0, 6.0, 7.0, -100.0, 2.0];
+        let scalar_lo32 = Value::Scalar(Literal::from_f32(0.0));
+        let dense_scalar_lo32 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[
+                scalar_lo32.clone(),
+                f32_dense_vec(&x32),
+                f32_dense_vec(&hi32),
+            ],
+            &p,
+        )
+        .unwrap();
+        let boxed_scalar_lo32 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[scalar_lo32, f32_boxed_vec(&x32), f32_boxed_vec(&hi32)],
+            &p,
+        )
+        .unwrap();
+        assert!(
+            dense_scalar_lo32
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .is_some()
+        );
+        assert_eq!(
+            f32_bits_vec(&dense_scalar_lo32),
+            f32_bits_vec(&boxed_scalar_lo32),
+            "f32 clamp(min_scalar,x,max_tensor)"
+        );
+
+        let lo32 = [-10.0f32, -0.0, 1.0, -2.0, 6.5, f32::NAN, 4.0, -3.0];
+        let x32b = [-20.0f32, 0.0, 3.0, -5.0, 9.0, 1.0, f32::NAN, f32::INFINITY];
+        let scalar_hi32 = Value::Scalar(Literal::from_f32(6.0));
+        let dense_scalar_hi32 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[
+                f32_dense_vec(&lo32),
+                f32_dense_vec(&x32b),
+                scalar_hi32.clone(),
+            ],
+            &p,
+        )
+        .unwrap();
+        let boxed_scalar_hi32 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[f32_boxed_vec(&lo32), f32_boxed_vec(&x32b), scalar_hi32],
+            &p,
+        )
+        .unwrap();
+        assert_eq!(
+            f32_bits_vec(&dense_scalar_hi32),
+            f32_bits_vec(&boxed_scalar_hi32),
+            "f32 clamp(min_tensor,x,max_scalar)"
+        );
+
+        let x64 = [
+            -5.0f64,
+            -0.0,
+            0.25,
+            3.5,
+            8.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+        ];
+        let hi64 = [-1.0f64, 0.0, 0.5, 3.0, 6.0, 7.0, -100.0, 2.0];
+        let scalar_lo64 = Value::Scalar(Literal::from_f64(0.0));
+        let dense_scalar_lo64 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[
+                scalar_lo64.clone(),
+                f64_dense_vec(&x64),
+                f64_dense_vec(&hi64),
+            ],
+            &p,
+        )
+        .unwrap();
+        let boxed_scalar_lo64 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[scalar_lo64, f64_boxed_vec(&x64), f64_boxed_vec(&hi64)],
+            &p,
+        )
+        .unwrap();
+        assert!(
+            dense_scalar_lo64
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_f64_slice()
+                .is_some()
+        );
+        assert_eq!(
+            f64_bits_vec(&dense_scalar_lo64),
+            f64_bits_vec(&boxed_scalar_lo64),
+            "f64 clamp(min_scalar,x,max_tensor)"
+        );
+
+        let lo64 = [-10.0f64, -0.0, 1.0, -2.0, 6.5, f64::NAN, 4.0, -3.0];
+        let x64b = [-20.0f64, 0.0, 3.0, -5.0, 9.0, 1.0, f64::NAN, f64::INFINITY];
+        let scalar_hi64 = Value::Scalar(Literal::from_f64(6.0));
+        let dense_scalar_hi64 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[
+                f64_dense_vec(&lo64),
+                f64_dense_vec(&x64b),
+                scalar_hi64.clone(),
+            ],
+            &p,
+        )
+        .unwrap();
+        let boxed_scalar_hi64 = crate::eval_primitive(
+            Primitive::Clamp,
+            &[f64_boxed_vec(&lo64), f64_boxed_vec(&x64b), scalar_hi64],
+            &p,
+        )
+        .unwrap();
+        assert_eq!(
+            f64_bits_vec(&dense_scalar_hi64),
+            f64_bits_vec(&boxed_scalar_hi64),
+            "f64 clamp(min_tensor,x,max_scalar)"
+        );
+    }
+
+    #[test]
     #[ignore = "benchmark: run with --ignored --nocapture"]
     fn bench_f32_clamp_dense_vs_boxed() {
         use std::time::Instant;
@@ -22986,6 +23275,67 @@ mod tests {
             bx * 1e3,
             dn * 1e3,
             bx / dn
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_f32_f64_clamp_mixed_scalar_tensor_bounds_dense_vs_boxed() {
+        use std::time::Instant;
+        let n = 1_000_000usize;
+        let p = std::collections::BTreeMap::new();
+        let best = |inputs: &[Value]| {
+            let _ = crate::eval_primitive(Primitive::Clamp, inputs, &p).unwrap();
+            let mut tm = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                let o = crate::eval_primitive(Primitive::Clamp, inputs, &p).unwrap();
+                std::hint::black_box(o.as_tensor().unwrap().elements.len());
+                tm = tm.min(s.elapsed().as_secs_f64());
+            }
+            tm
+        };
+
+        let x32: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 - 500.0).collect();
+        let hi32: Vec<f32> = (0..n).map(|i| 2.0 + (i % 8192) as f32 * 0.0005).collect();
+        let scalar_lo32 = Value::Scalar(Literal::from_f32(0.0));
+        let dense32 = [
+            scalar_lo32.clone(),
+            f32_dense_vec(&x32),
+            f32_dense_vec(&hi32),
+        ];
+        let boxed32 = [
+            scalar_lo32,
+            f32_boxed_vec(&x32),
+            f32_boxed_vec(&hi32),
+        ];
+        let bx32 = best(&boxed32);
+        let dn32 = best(&dense32);
+
+        let x64: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001 - 500.0).collect();
+        let hi64: Vec<f64> = (0..n).map(|i| 2.0 + (i % 8192) as f64 * 0.0005).collect();
+        let scalar_lo64 = Value::Scalar(Literal::from_f64(0.0));
+        let dense64 = [
+            scalar_lo64.clone(),
+            f64_dense_vec(&x64),
+            f64_dense_vec(&hi64),
+        ];
+        let boxed64 = [
+            scalar_lo64,
+            f64_boxed_vec(&x64),
+            f64_boxed_vec(&hi64),
+        ];
+        let bx64 = best(&boxed64);
+        let dn64 = best(&dense64);
+
+        println!(
+            "BENCH f32/f64 clamp mixed bounds [{n}]: f32 boxed={:.2}ms dense={:.2}ms speedup={:.2}x; f64 boxed={:.2}ms dense={:.2}ms speedup={:.2}x",
+            bx32 * 1e3,
+            dn32 * 1e3,
+            bx32 / dn32,
+            bx64 * 1e3,
+            dn64 * 1e3,
+            bx64 / dn64
         );
     }
 
