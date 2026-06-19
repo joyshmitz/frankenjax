@@ -44,11 +44,18 @@ Additional current clamp gauntlet environment:
 | frankenjax-mcqr.107 | `f16_tensor_tensor_tensor_1m` | 20.951 ms mean | 229.951 us mean | 91.110 | Rust 91.11x slower |
 | frankenjax-e07uw | `fusion_arith8_f64_1m` (jit chain) | 3.320 ms fused | 272.7 us mean | 12.175 | Rust 12.18x slower |
 | frankenjax-bjqfr | `fusion_bf16_broadcast_1m` | 10.776 ms | 146.9 us mean | 73.357 | Rust 73.36x slower (reverted) |
+| frankenjax-f62hx | `transpose_attn_BSHD_f32` (block-copy) | 791.5 us | 186.7 us mean | 4.239 | Rust 4.24x slower (10.3x vs naive) |
 
 ## Readiness
 
-- JAX domination score for this measured set: 25/100.
-- Basis: 3 of 12 measured realistic workloads beat warmed original JAX CPU.
+- JAX domination score for this measured set: 23/100.
+- Basis: 3 of 13 measured realistic workloads beat warmed original JAX CPU.
+- Contiguous-block memcpy cluster (f62hx + siblings): the transpose block-copy is
+  the STRONGEST measured internal lever this conversation — 10.3x faster than the
+  pre-f62hx per-element odometer (791.5us vs 8.15ms), narrowing the JAX gap from
+  43.6x to 4.24x. KEEP (genuine algorithmic throughput jump, not just de-box).
+  Still a JAX loss (4.24x); closing it needs layout-aware transpose elision, not
+  more block-copy.
 - eval_jaxpr fusion cluster (e07uw/7g72q/rl9ha/bjqfr): Rust-internal win
   (fused vs unfused per-op: f64 5.06x, f32 6.70x, f32 broadcast 15.75x, i64
   broadcast 3.21x) but NOT JAX domination — the tree-walking interpreter (even

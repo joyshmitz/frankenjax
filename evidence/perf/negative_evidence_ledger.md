@@ -391,3 +391,48 @@ ends are not rediscovered without new evidence.
   regression in both paths would pass parity). Flagged for the dense-storage/
   serialization commit owners to refresh with verified values, or for a
   test-capable golden-refresh pass. Conformance is RED on these 8 until then.
+
+## frankenjax-f62hx (+ thnjs/idunl/rbkn9/02i98/ecffn) - Contiguous-Block Memcpy Transpose/Slice/Gather/Broadcast
+
+- Lever: replace the per-element coordinate-decode odometer in the structural
+  data-movement kernels (transpose_general, slice_strided_gather,
+  dynamic_slice_dense, gather_window_blocks, broadcast_replicate, rev_gather)
+  with `extend_from_slice` block memcpy of the contiguous trailing run. This is an
+  ALGORITHMIC change (memcpy vs odometer), distinct from boxed->dense de-box.
+- Representative measured: TRANSPOSE block-copy (f62hx), the attention transpose
+  [B,S,H,D]->[B,H,S,D] = [8,512,8,64] f32 (2,097,152 elems), perm (0,2,1,3) which
+  keeps the [D]=64 feature vector contiguous (block_len=64).
+- Conformance GUARD: GREEN. `transpose_gauntlet.rs` asserts the block-copy path is
+  bit-identical to the pre-f62hx per-element odometer reference at 4 probe indices;
+  fj-lax transpose conformance tests pass.
+- Measured evidence (2026-06-19, rch worker, Criterion sample 30):
+  - Internal A/B (Rust):
+
+  | Arm | median time | throughput | vs naive |
+  | --- | ---: | ---: | ---: |
+  | block-copy (eval_primitive, committed) | 791.50 us | 2.65 Gelem/s | 10.30x faster |
+  | naive per-element odometer (pre-f62hx) | 8.1525 ms | 257 Melem/s | baseline |
+
+  - Head-to-head vs original JAX (`transpose_gauntlet.py`, jax.jit CPU x64,
+    jnp.transpose+0.0 to force materialization, mean):
+
+  | Engine | time | Rust/JAX |
+  | --- | ---: | ---: |
+  | JAX jit transpose | 186.7 us | - |
+  | Rust block-copy | 791.5 us | 4.24x slower |
+  | Rust naive (pre-f62hx) | 8.15 ms | 43.6x slower |
+
+- Decision: KEEP. The block-copy is a real **10.3x internal** algorithmic win and
+  NARROWS the JAX gap from 43.6x to 4.24x. It is the strongest measured lever in
+  this conversation's backlog (the dense de-box clusters only matched the boxed
+  Rust reference; this one is a genuine throughput jump). Still a JAX loss (4.24x)
+  but directionally the right kind of optimization.
+- Generalization: the sibling block-copy kernels (slice/gather/dynamic_slice/
+  broadcast/rev) use the same memcpy-vs-odometer transform on the same contiguous
+  trailing-block structure, so each is expected to deliver a comparable internal
+  multi-x win on its contiguous regime. Measured here via the transpose
+  representative; the others KEEP on the same proof + the bit-identity tests.
+- Retry predicate: closing the remaining 4.24x to JAX on transpose needs either
+  cache-blocked tiling of the strided (non-identity-suffix) case (REJECTED before
+  as a regression — see project_transpose_already_optimal) or avoiding the
+  materialized transpose entirely (layout-aware fusion), NOT more block-copy.
