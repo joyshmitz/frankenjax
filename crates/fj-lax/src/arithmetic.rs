@@ -44,10 +44,7 @@ fn dense_unary_threads(elems: usize) -> usize {
 
 #[inline]
 fn is_float_dtype(dtype: DType) -> bool {
-    matches!(
-        dtype,
-        DType::BF16 | DType::F16 | DType::F32 | DType::F64
-    )
+    matches!(dtype, DType::BF16 | DType::F16 | DType::F32 | DType::F64)
 }
 
 #[inline]
@@ -74,10 +71,7 @@ fn is_jax_float_only_unary(primitive: Primitive) -> bool {
 }
 
 #[inline]
-fn ensure_jax_float_unary_operand(
-    primitive: Primitive,
-    input: &Value,
-) -> Result<(), EvalError> {
+fn ensure_jax_float_unary_operand(primitive: Primitive, input: &Value) -> Result<(), EvalError> {
     let dtype = input.dtype();
     if is_float_dtype(dtype) || is_complex_dtype(dtype) {
         Ok(())
@@ -2269,10 +2263,7 @@ fn apply_complex_binary(
             let log1p = complex_log(complex_add((1.0, 0.0), exp2_delta));
             let inv_ln2 = 1.0 / std::f64::consts::LN_2;
             let out = complex_add(amax, (log1p.0 * inv_ln2, log1p.1 * inv_ln2));
-            Ok((
-                out.0,
-                wrap_between(out.1, std::f64::consts::PI * inv_ln2),
-            ))
+            Ok((out.0, wrap_between(out.1, std::f64::consts::PI * inv_ln2)))
         }
         _ => Err(EvalError::TypeMismatch {
             primitive,
@@ -4693,10 +4684,8 @@ pub(crate) fn eval_complex(primitive: Primitive, inputs: &[Value]) -> Result<Val
                 && let Some(imag_values) = imag.elements.as_f32_slice()
             {
                 let re = f64::from(f32::from_bits(re_bits));
-                let out: Vec<(f64, f64)> = imag_values
-                    .iter()
-                    .map(|&im| (re, f64::from(im)))
-                    .collect();
+                let out: Vec<(f64, f64)> =
+                    imag_values.iter().map(|&im| (re, f64::from(im))).collect();
                 return Ok(Value::Tensor(TensorValue::new_complex_values(
                     DType::Complex64,
                     imag.shape.clone(),
@@ -4735,10 +4724,8 @@ pub(crate) fn eval_complex(primitive: Primitive, inputs: &[Value]) -> Result<Val
                 && let Literal::F32Bits(im_bits) = *imag
             {
                 let im = f64::from(f32::from_bits(im_bits));
-                let out: Vec<(f64, f64)> = real_values
-                    .iter()
-                    .map(|&re| (f64::from(re), im))
-                    .collect();
+                let out: Vec<(f64, f64)> =
+                    real_values.iter().map(|&re| (f64::from(re), im)).collect();
                 return Ok(Value::Tensor(TensorValue::new_complex_values(
                     DType::Complex64,
                     real.shape.clone(),
@@ -4862,10 +4849,12 @@ pub(crate) fn eval_real(primitive: Primitive, inputs: &[Value]) -> Result<Value,
                         tensor.shape.clone(),
                         src.iter().map(|&(re, _)| re as f32).collect(),
                     ),
-                    _ => return Err(EvalError::TypeMismatch {
-                        primitive,
-                        detail: "real expects complex-valued input",
-                    }),
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "real expects complex-valued input",
+                        });
+                    }
                 };
                 return Ok(Value::Tensor(tv.map_err(EvalError::InvalidTensor)?));
             }
@@ -4918,10 +4907,12 @@ pub(crate) fn eval_imag(primitive: Primitive, inputs: &[Value]) -> Result<Value,
                         tensor.shape.clone(),
                         src.iter().map(|&(_, im)| im as f32).collect(),
                     ),
-                    _ => return Err(EvalError::TypeMismatch {
-                        primitive,
-                        detail: "imag expects complex-valued input",
-                    }),
+                    _ => {
+                        return Err(EvalError::TypeMismatch {
+                            primitive,
+                            detail: "imag expects complex-valued input",
+                        });
+                    }
                 };
                 return Ok(Value::Tensor(tv.map_err(EvalError::InvalidTensor)?));
             }
@@ -5486,8 +5477,11 @@ pub(crate) fn eval_unary_elementwise(
                                             for (i, o) in blk.iter_mut().enumerate() {
                                                 // Probe above guarantees Some for every
                                                 // element; unwrap_or is unreachable.
-                                                *o = complex_unary_elementwise(primitive, dense[s + i])
-                                                    .unwrap_or((f64::NAN, f64::NAN));
+                                                *o = complex_unary_elementwise(
+                                                    primitive,
+                                                    dense[s + i],
+                                                )
+                                                .unwrap_or((f64::NAN, f64::NAN));
                                             }
                                         });
                                         start += len;
@@ -6581,9 +6575,8 @@ fn select_bool_same_shape_fast_path(
     }
 
     let len = cond.elements.len();
-    let word_len_matches = |words: Option<(&[u64], usize)>| {
-        words.is_none_or(|(_, word_len)| word_len == len)
-    };
+    let word_len_matches =
+        |words: Option<(&[u64], usize)>| words.is_none_or(|(_, word_len)| word_len == len);
     if !word_len_matches(cond_words)
         || !word_len_matches(true_words)
         || !word_len_matches(false_words)
@@ -6690,11 +6683,15 @@ fn select_scalar_from_bools(
         }
         (Literal::U32(tv), Literal::U32(fv)) => {
             let out: Vec<u32> = bools.map(|c| if c { tv } else { fv }).collect();
-            Ok(Some(Value::Tensor(TensorValue::new_u32_values(shape, out)?)))
+            Ok(Some(Value::Tensor(TensorValue::new_u32_values(
+                shape, out,
+            )?)))
         }
         (Literal::U64(tv), Literal::U64(fv)) => {
             let out: Vec<u64> = bools.map(|c| if c { tv } else { fv }).collect();
-            Ok(Some(Value::Tensor(TensorValue::new_u64_values(shape, out)?)))
+            Ok(Some(Value::Tensor(TensorValue::new_u64_values(
+                shape, out,
+            )?)))
         }
         (Literal::Bool(tv), Literal::Bool(fv)) => {
             let out: Vec<bool> = bools.map(|c| if c { tv } else { fv }).collect();
@@ -6713,8 +6710,14 @@ fn select_scalar_from_bools(
             )?)))
         }
         (Literal::Complex64Bits(tre, tim), Literal::Complex64Bits(fre, fim)) => {
-            let t = (f64::from(f32::from_bits(tre)), f64::from(f32::from_bits(tim)));
-            let f = (f64::from(f32::from_bits(fre)), f64::from(f32::from_bits(fim)));
+            let t = (
+                f64::from(f32::from_bits(tre)),
+                f64::from(f32::from_bits(tim)),
+            );
+            let f = (
+                f64::from(f32::from_bits(fre)),
+                f64::from(f32::from_bits(fim)),
+            );
             let out: Vec<(f64, f64)> = bools.map(|c| if c { t } else { f }).collect();
             Ok(Some(Value::Tensor(TensorValue::new_complex_values(
                 DType::Complex64,
@@ -7604,46 +7607,6 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         )?)))
     }
 
-    // Half (BF16/F16) sibling — half is the dominant mixed-precision dtype and the
-    // clamp(min, x, max) idiom (activation bounds, relu6) runs on it. The generic
-    // path routes half through clamp_literal's promote-to-f64 branch then boxes the
-    // output (TensorValue::new doesn't densify half). This reuses clamp_literal per
-    // element (so it is BIT-FOR-BIT identical, incl. the f64 widen/clamp/round) but
-    // writes dense half storage. Returns None for non-half x.
-    fn clamp_half_scalar_bounds(
-        primitive: Primitive,
-        x: &TensorValue,
-        lo: Literal,
-        hi: Literal,
-    ) -> Result<Option<Value>, EvalError> {
-        let dt = x.dtype;
-        if !matches!(dt, DType::BF16 | DType::F16) {
-            return Ok(None);
-        }
-        let Some(xs) = x.elements.as_half_float_slice() else {
-            return Ok(None);
-        };
-        let mut out: Vec<u16> = Vec::with_capacity(xs.len());
-        for &bits in xs {
-            let x_lit = if dt == DType::BF16 {
-                Literal::BF16Bits(bits)
-            } else {
-                Literal::F16Bits(bits)
-            };
-            let r = clamp_literal(lo, x_lit, hi, Some(dt))
-                .map_err(|detail| EvalError::TypeMismatch { primitive, detail })?;
-            match r {
-                Literal::BF16Bits(b) | Literal::F16Bits(b) => out.push(b),
-                _ => return Ok(None),
-            }
-        }
-        Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
-            dt,
-            x.shape.clone(),
-            out,
-        )?)))
-    }
-
     // Integer (I64) sibling of clamp_f64/f32_scalar_bounds. For an I64 tensor with
     // I64 bounds, clamp_literal hits the (I64,I64,I64) arm computing
     // `Literal::I64(lov.max(xv).min(hiv))`; replicate that on the dense i64 slice
@@ -7843,6 +7806,15 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         }
     }
 
+    fn half_bits_for_dtype(dtype: DType, literal: Literal) -> Option<u16> {
+        match (dtype, literal) {
+            (DType::BF16, Literal::BF16Bits(bits)) | (DType::F16, Literal::F16Bits(bits)) => {
+                Some(bits)
+            }
+            _ => None,
+        }
+    }
+
     fn clamp_half_scalar_lo_tensor_hi(
         primitive: Primitive,
         x: &TensorValue,
@@ -7859,6 +7831,22 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         ) else {
             return Ok(None);
         };
+        if let Some(lo_bits) = half_bits_for_dtype(dt, lo) {
+            let mut tmp = vec![0u16; xs.len()];
+            let mut out = vec![0u16; xs.len()];
+            if dt == DType::BF16 {
+                bf16_minmax_scalar_into(xs, lo_bits, true, true, &mut tmp);
+                bf16_minmax_into(his, &tmp, false, &mut out);
+            } else {
+                f16_minmax_scalar_into(xs, lo_bits, true, true, &mut tmp);
+                f16_minmax_into(his, &tmp, false, &mut out);
+            }
+            return Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+                dt,
+                x.shape.clone(),
+                out,
+            )?)));
+        }
         let mut out: Vec<u16> = Vec::with_capacity(xs.len());
         for (&xb, &hb) in xs.iter().zip(his) {
             let r = clamp_literal(lo, half_literal(dt, xb), half_literal(dt, hb), Some(dt))
@@ -7891,6 +7879,22 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         ) else {
             return Ok(None);
         };
+        if let Some(hi_bits) = half_bits_for_dtype(dt, hi) {
+            let mut tmp = vec![0u16; xs.len()];
+            let mut out = vec![0u16; xs.len()];
+            if dt == DType::BF16 {
+                bf16_minmax_into(los, xs, true, &mut tmp);
+                bf16_minmax_scalar_into(&tmp, hi_bits, true, false, &mut out);
+            } else {
+                f16_minmax_into(los, xs, true, &mut tmp);
+                f16_minmax_scalar_into(&tmp, hi_bits, true, false, &mut out);
+            }
+            return Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+                dt,
+                x.shape.clone(),
+                out,
+            )?)));
+        }
         let mut out: Vec<u16> = Vec::with_capacity(xs.len());
         for (&lb, &xb) in los.iter().zip(xs) {
             let r = clamp_literal(half_literal(dt, lb), half_literal(dt, xb), hi, Some(dt))
@@ -7908,7 +7912,6 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
     }
 
     fn clamp_half_same_shape_tensor_bounds(
-        primitive: Primitive,
         lo: &TensorValue,
         x: &TensorValue,
         hi: &TensorValue,
@@ -7929,15 +7932,69 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
         ) else {
             return Ok(None);
         };
+        let mut tmp = vec![0u16; xs.len()];
+        let mut out = vec![0u16; xs.len()];
+        if dt == DType::BF16 {
+            bf16_minmax_into(los, xs, true, &mut tmp);
+            bf16_minmax_into(his, &tmp, false, &mut out);
+        } else {
+            f16_minmax_into(los, xs, true, &mut tmp);
+            f16_minmax_into(his, &tmp, false, &mut out);
+        }
+        Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+            dt,
+            x.shape.clone(),
+            out,
+        )?)))
+    }
+
+    fn clamp_half_scalar_bounds_simd(
+        x: &TensorValue,
+        lo_bits: u16,
+        hi_bits: u16,
+    ) -> Result<Option<Value>, EvalError> {
+        let dt = x.dtype;
+        let Some(xs) = x.elements.as_half_float_slice() else {
+            return Ok(None);
+        };
+        let mut tmp = vec![0u16; xs.len()];
+        let mut out = vec![0u16; xs.len()];
+        if dt == DType::BF16 {
+            bf16_minmax_scalar_into(xs, lo_bits, true, true, &mut tmp);
+            bf16_minmax_scalar_into(&tmp, hi_bits, true, false, &mut out);
+        } else {
+            f16_minmax_scalar_into(xs, lo_bits, true, true, &mut tmp);
+            f16_minmax_scalar_into(&tmp, hi_bits, true, false, &mut out);
+        }
+        Ok(Some(Value::Tensor(TensorValue::new_half_float_values(
+            dt,
+            x.shape.clone(),
+            out,
+        )?)))
+    }
+
+    fn clamp_half_scalar_bounds(
+        primitive: Primitive,
+        x: &TensorValue,
+        lo: Literal,
+        hi: Literal,
+    ) -> Result<Option<Value>, EvalError> {
+        let dt = x.dtype;
+        if !matches!(dt, DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if let (Some(lo_bits), Some(hi_bits)) =
+            (half_bits_for_dtype(dt, lo), half_bits_for_dtype(dt, hi))
+        {
+            return clamp_half_scalar_bounds_simd(x, lo_bits, hi_bits);
+        }
+        let Some(xs) = x.elements.as_half_float_slice() else {
+            return Ok(None);
+        };
         let mut out: Vec<u16> = Vec::with_capacity(xs.len());
-        for ((&lb, &xb), &hb) in los.iter().zip(xs).zip(his) {
-            let r = clamp_literal(
-                half_literal(dt, lb),
-                half_literal(dt, xb),
-                half_literal(dt, hb),
-                Some(dt),
-            )
-            .map_err(|detail| EvalError::TypeMismatch { primitive, detail })?;
+        for &bits in xs {
+            let r = clamp_literal(lo, half_literal(dt, bits), hi, Some(dt))
+                .map_err(|detail| EvalError::TypeMismatch { primitive, detail })?;
             match r {
                 Literal::BF16Bits(b) | Literal::F16Bits(b) => out.push(b),
                 _ => return Ok(None),
@@ -8055,7 +8112,7 @@ pub(crate) fn eval_clamp(primitive: Primitive, inputs: &[Value]) -> Result<Value
                         out,
                     )?));
                 }
-                if let Some(value) = clamp_half_same_shape_tensor_bounds(primitive, lo, x, hi)? {
+                if let Some(value) = clamp_half_same_shape_tensor_bounds(lo, x, hi)? {
                     return Ok(value);
                 }
                 if x.dtype == DType::I64
@@ -12346,7 +12403,10 @@ pub(crate) fn eval_nextafter(primitive: Primitive, inputs: &[Value]) -> Result<V
         fn is_float_literal(literal: Literal) -> bool {
             matches!(
                 literal,
-                Literal::BF16Bits(_) | Literal::F16Bits(_) | Literal::F32Bits(_) | Literal::F64Bits(_)
+                Literal::BF16Bits(_)
+                    | Literal::F16Bits(_)
+                    | Literal::F32Bits(_)
+                    | Literal::F64Bits(_)
             )
         }
 
@@ -18380,11 +18440,7 @@ mod tests {
                 })
                 .collect()
         };
-        let prims = [
-            Primitive::Pow,
-            Primitive::XLogY,
-            Primitive::LogAddExp,
-        ];
+        let prims = [Primitive::Pow, Primitive::XLogY, Primitive::LogAddExp];
         for prim in prims {
             let from_lit =
                 crate::eval_primitive(prim, &[la.clone(), lb.clone()], &BTreeMap::new()).unwrap();
@@ -20160,8 +20216,12 @@ mod tests {
         let mut params = BTreeMap::new();
         params.insert("exponent".to_owned(), "2".to_owned());
 
-        let r =
-            eval_integer_pow(Primitive::IntegerPow, &[Value::scalar_i32(100_000)], &params).unwrap();
+        let r = eval_integer_pow(
+            Primitive::IntegerPow,
+            &[Value::scalar_i32(100_000)],
+            &params,
+        )
+        .unwrap();
         assert_eq!(r, Value::scalar_i32(1_410_065_408));
 
         let tensor = Value::Tensor(
@@ -20176,19 +20236,29 @@ mod tests {
         let tensor = r.as_tensor().expect("i32 tensor result");
         assert_eq!(tensor.dtype, DType::I32);
         assert_eq!(
-            tensor.elements.iter().map(|lit| lit.as_i64().unwrap()).collect::<Vec<_>>(),
+            tensor
+                .elements
+                .iter()
+                .map(|lit| lit.as_i64().unwrap())
+                .collect::<Vec<_>>(),
             vec![1_410_065_408, 0],
             "i32 tensor integer_pow must wrap in i32 width"
         );
 
-        let r =
-            eval_integer_pow(Primitive::IntegerPow, &[Value::scalar_u32(u32::MAX)], &params)
-                .unwrap();
+        let r = eval_integer_pow(
+            Primitive::IntegerPow,
+            &[Value::scalar_u32(u32::MAX)],
+            &params,
+        )
+        .unwrap();
         assert_eq!(r, Value::scalar_u32(1));
 
-        let r =
-            eval_integer_pow(Primitive::IntegerPow, &[Value::scalar_u64(u64::MAX)], &params)
-                .unwrap();
+        let r = eval_integer_pow(
+            Primitive::IntegerPow,
+            &[Value::scalar_u64(u64::MAX)],
+            &params,
+        )
+        .unwrap();
         assert_eq!(r, Value::scalar_u64(1));
     }
 
@@ -20325,15 +20395,7 @@ mod tests {
 
     #[test]
     fn nextafter_same_shape_f32_tensor_matches_scalar_bits() {
-        let lhs = [
-            1.0_f32,
-            1.0,
-            0.0,
-            -0.0,
-            5.0,
-            f32::NAN,
-            f32::from_bits(1),
-        ];
+        let lhs = [1.0_f32, 1.0, 0.0, -0.0, 5.0, f32::NAN, f32::from_bits(1)];
         let rhs = [2.0_f32, 0.0, 1.0, -1.0, 5.0, 1.0, 0.0];
         let result = match eval_nextafter(Primitive::Nextafter, &[v_f32(&lhs), v_f32(&rhs)]) {
             Ok(result) => result,
@@ -20590,8 +20652,7 @@ mod tests {
                 .collect();
             (
                 Value::Tensor(
-                    TensorValue::new_u32_values(Shape { dims: dims.clone() }, d.clone())
-                        .unwrap(),
+                    TensorValue::new_u32_values(Shape { dims: dims.clone() }, d.clone()).unwrap(),
                 ),
                 Value::Tensor(
                     TensorValue::new(
@@ -20616,12 +20677,15 @@ mod tests {
 
         let mk_u64 = |seed: u64| {
             let d: Vec<u64> = (0..n)
-                .map(|i| (i as u64).wrapping_mul(11_400_714_819_323_198_485).wrapping_add(seed))
+                .map(|i| {
+                    (i as u64)
+                        .wrapping_mul(11_400_714_819_323_198_485)
+                        .wrapping_add(seed)
+                })
                 .collect();
             (
                 Value::Tensor(
-                    TensorValue::new_u64_values(Shape { dims: dims.clone() }, d.clone())
-                        .unwrap(),
+                    TensorValue::new_u64_values(Shape { dims: dims.clone() }, d.clone()).unwrap(),
                 ),
                 Value::Tensor(
                     TensorValue::new(
@@ -20780,16 +20844,13 @@ mod tests {
             let d: Vec<bool> = (0..n).map(|i| ((i + shift) * 7 + 3) % 11 < 5).collect();
             (
                 Value::Tensor(
-                    TensorValue::new_bool_values(Shape { dims: dims.clone() }, d.clone())
-                        .unwrap(),
+                    TensorValue::new_bool_values(Shape { dims: dims.clone() }, d.clone()).unwrap(),
                 ),
                 Value::Tensor(
                     TensorValue::new_with_literal_buffer(
                         DType::Bool,
                         Shape { dims: dims.clone() },
-                        fj_core::LiteralBuffer::new(
-                            d.iter().copied().map(Literal::Bool).collect(),
-                        ),
+                        fj_core::LiteralBuffer::new(d.iter().copied().map(Literal::Bool).collect()),
                     )
                     .unwrap(),
                 ),
@@ -22327,8 +22388,12 @@ mod tests {
             };
             let mk_dense = || {
                 Value::Tensor(
-                    TensorValue::new_complex_values(DType::Complex128, shape.clone(), pairs.clone())
-                        .unwrap(),
+                    TensorValue::new_complex_values(
+                        DType::Complex128,
+                        shape.clone(),
+                        pairs.clone(),
+                    )
+                    .unwrap(),
                 )
             };
             let mk_boxed = || {
@@ -22387,12 +22452,9 @@ mod tests {
 
         for primitive in primitives {
             for input in [&scalar, &dense] {
-                let err = eval_unary_elementwise_parallel(
-                    primitive,
-                    std::slice::from_ref(input),
-                    |x| x,
-                )
-                .expect_err("JAX float-only unary primitive accepted complex input");
+                let err =
+                    eval_unary_elementwise_parallel(primitive, std::slice::from_ref(input), |x| x)
+                        .expect_err("JAX float-only unary primitive accepted complex input");
                 assert!(
                     matches!(
                         err,
@@ -22496,8 +22558,10 @@ mod tests {
                 .unwrap(),
             );
             let op = |x: f64| x.exp();
-            let d = eval_unary_elementwise(Primitive::Exp, std::slice::from_ref(&dense), op).unwrap();
-            let b = eval_unary_elementwise(Primitive::Exp, std::slice::from_ref(&boxed), op).unwrap();
+            let d =
+                eval_unary_elementwise(Primitive::Exp, std::slice::from_ref(&dense), op).unwrap();
+            let b =
+                eval_unary_elementwise(Primitive::Exp, std::slice::from_ref(&boxed), op).unwrap();
             let dl: Vec<Literal> = d.as_tensor().unwrap().elements.iter().copied().collect();
             let bl: Vec<Literal> = b.as_tensor().unwrap().elements.iter().copied().collect();
             assert_eq!(dl, bl, "{dt:?} half unary dense vs boxed");
@@ -22995,9 +23059,7 @@ mod tests {
                 TensorValue::new_with_literal_buffer(
                     DType::Bool,
                     Shape { dims: dims.clone() },
-                    fj_core::LiteralBuffer::new(
-                        data.iter().copied().map(Literal::Bool).collect(),
-                    ),
+                    fj_core::LiteralBuffer::new(data.iter().copied().map(Literal::Bool).collect()),
                 )
                 .unwrap(),
             )
@@ -23045,7 +23107,12 @@ mod tests {
         .unwrap();
         assert_eq!(bits(&dense), bits(&boxed), "dense bool select");
         assert!(
-            dense.as_tensor().unwrap().elements.as_bool_slice().is_some(),
+            dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_bool_slice()
+                .is_some(),
             "dense bool select output"
         );
 
@@ -23057,7 +23124,12 @@ mod tests {
         .unwrap();
         assert_eq!(bits(&packed), bits(&boxed), "BoolWords bool select");
         assert!(
-            packed.as_tensor().unwrap().elements.as_bool_words().is_some(),
+            packed
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_bool_words()
+                .is_some(),
             "BoolWords bool select output"
         );
 
@@ -23081,7 +23153,11 @@ mod tests {
             &p,
         )
         .unwrap();
-        assert_eq!(bits(&scalar_dense), bits(&scalar_boxed), "scalar bool branches");
+        assert_eq!(
+            bits(&scalar_dense),
+            bits(&scalar_boxed),
+            "scalar bool branches"
+        );
         assert!(
             scalar_dense
                 .as_tensor()
@@ -23313,15 +23389,7 @@ mod tests {
         // Same-shape I64 tensor bounds should now bypass the broadcast odometer
         // and boxed Literal output while matching the old boxed path exactly.
         let p = std::collections::BTreeMap::new();
-        let lo = [
-            -10,
-            0,
-            i64::MIN,
-            5,
-            -2,
-            7,
-            i64::MAX - 10,
-        ];
+        let lo = [-10, 0, i64::MIN, 5, -2, 7, i64::MAX - 10];
         let x = [-20, 3, i64::MAX, 1, -2, 8, i64::MAX];
         let hi = [-5, 2, 42, 6, -1, 7, i64::MAX - 5];
         let expected = vec![-10, 2, 42, 5, -2, 7, i64::MAX - 5];
@@ -23339,14 +23407,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dense.as_tensor().unwrap().dtype, DType::I64);
-        assert!(
-            dense
-                .as_tensor()
-                .unwrap()
-                .elements
-                .as_i64_slice()
-                .is_some()
-        );
+        assert!(dense.as_tensor().unwrap().elements.as_i64_slice().is_some());
         assert!(
             i64_boxed_vec(&x)
                 .as_tensor()
@@ -23371,11 +23432,7 @@ mod tests {
 
         let dense_scalar_lo = crate::eval_primitive(
             Primitive::Clamp,
-            &[
-                scalar_lo.clone(),
-                i64_dense_vec(&x),
-                i64_dense_vec(&hi),
-            ],
+            &[scalar_lo.clone(), i64_dense_vec(&x), i64_dense_vec(&hi)],
             &p,
         )
         .unwrap();
@@ -23402,11 +23459,7 @@ mod tests {
         let scalar_hi = Value::Scalar(Literal::I64(7));
         let dense_scalar_hi = crate::eval_primitive(
             Primitive::Clamp,
-            &[
-                i64_dense_vec(&lo),
-                i64_dense_vec(&x2),
-                scalar_hi.clone(),
-            ],
+            &[i64_dense_vec(&lo), i64_dense_vec(&x2), scalar_hi.clone()],
             &p,
         )
         .unwrap();
@@ -23592,7 +23645,11 @@ mod tests {
         .unwrap();
         let boxed_scalar_lo = crate::eval_primitive(
             Primitive::Clamp,
-            &[scalar_lo, half_boxed_vec(dtype, x), half_boxed_vec(dtype, hi)],
+            &[
+                scalar_lo,
+                half_boxed_vec(dtype, x),
+                half_boxed_vec(dtype, hi),
+            ],
             &p,
         )
         .unwrap();
@@ -23623,7 +23680,11 @@ mod tests {
         .unwrap();
         let boxed_scalar_hi = crate::eval_primitive(
             Primitive::Clamp,
-            &[half_boxed_vec(dtype, lo), half_boxed_vec(dtype, x), scalar_hi],
+            &[
+                half_boxed_vec(dtype, lo),
+                half_boxed_vec(dtype, x),
+                scalar_hi,
+            ],
             &p,
         )
         .unwrap();
@@ -23639,9 +23700,15 @@ mod tests {
         // Edge-bit half guard: ±0, finite values, infinities, NaN, and subnormal
         // bit patterns must remain boxed-fallback-identical while returning dense
         // half storage.
-        let bf16_lo = [0xbc00, 0x8000, 0x3f80, 0xc000, 0x40a0, 0x7fc1, 0x3f00, 0x0001];
-        let bf16_x = [0xc0a0, 0x0000, 0x4020, 0xc080, 0x4110, 0x3f80, 0x7fc1, 0x7f80];
-        let bf16_hi = [0xbf80, 0x0000, 0x4040, 0x4080, 0x40c0, 0x4000, 0xff80, 0x3f80];
+        let bf16_lo = [
+            0xbc00, 0x8000, 0x3f80, 0xc000, 0x40a0, 0x7fc1, 0x3f00, 0x0001,
+        ];
+        let bf16_x = [
+            0xc0a0, 0x0000, 0x4020, 0xc080, 0x4110, 0x3f80, 0x7fc1, 0x7f80,
+        ];
+        let bf16_hi = [
+            0xbf80, 0x0000, 0x4040, 0x4080, 0x40c0, 0x4000, 0xff80, 0x3f80,
+        ];
         assert_half_mixed_clamp_dense_matches_generic(
             DType::BF16,
             0x0000,
@@ -23651,9 +23718,15 @@ mod tests {
             &bf16_hi,
         );
 
-        let f16_lo = [0xbc00, 0x8000, 0x3c00, 0xc000, 0x4600, 0x7e00, 0x3800, 0x0001];
-        let f16_x = [0xc500, 0x0000, 0x4100, 0xc400, 0x4880, 0x3c00, 0x7e00, 0x7c00];
-        let f16_hi = [0xbc00, 0x0000, 0x4200, 0x4400, 0x4600, 0x4000, 0xfc00, 0x3c00];
+        let f16_lo = [
+            0xbc00, 0x8000, 0x3c00, 0xc000, 0x4600, 0x7e00, 0x3800, 0x0001,
+        ];
+        let f16_x = [
+            0xc500, 0x0000, 0x4100, 0xc400, 0x4880, 0x3c00, 0x7e00, 0x7c00,
+        ];
+        let f16_hi = [
+            0xbc00, 0x0000, 0x4200, 0x4400, 0x4600, 0x4000, 0xfc00, 0x3c00,
+        ];
         assert_half_mixed_clamp_dense_matches_generic(
             DType::F16,
             0x0000,
@@ -23710,9 +23783,15 @@ mod tests {
     fn half_clamp_same_shape_tensor_bounds_dense_matches_generic() {
         // Dense same-shape half tensor bounds should skip the broadcast odometer
         // and boxed output while preserving every edge-bit result.
-        let bf16_lo = [0xbc00, 0x8000, 0x3f80, 0xc000, 0x40a0, 0x7fc1, 0x3f00, 0x0001];
-        let bf16_x = [0xc0a0, 0x0000, 0x4020, 0xc080, 0x4110, 0x3f80, 0x7fc1, 0x7f80];
-        let bf16_hi = [0xbf80, 0x0000, 0x4040, 0x4080, 0x40c0, 0x4000, 0xff80, 0x3f80];
+        let bf16_lo = [
+            0xbc00, 0x8000, 0x3f80, 0xc000, 0x40a0, 0x7fc1, 0x3f00, 0x0001,
+        ];
+        let bf16_x = [
+            0xc0a0, 0x0000, 0x4020, 0xc080, 0x4110, 0x3f80, 0x7fc1, 0x7f80,
+        ];
+        let bf16_hi = [
+            0xbf80, 0x0000, 0x4040, 0x4080, 0x40c0, 0x4000, 0xff80, 0x3f80,
+        ];
         assert_half_same_shape_tensor_clamp_dense_matches_generic(
             DType::BF16,
             &bf16_lo,
@@ -23720,15 +23799,100 @@ mod tests {
             &bf16_hi,
         );
 
-        let f16_lo = [0xbc00, 0x8000, 0x3c00, 0xc000, 0x4600, 0x7e00, 0x3800, 0x0001];
-        let f16_x = [0xc500, 0x0000, 0x4100, 0xc400, 0x4880, 0x3c00, 0x7e00, 0x7c00];
-        let f16_hi = [0xbc00, 0x0000, 0x4200, 0x4400, 0x4600, 0x4000, 0xfc00, 0x3c00];
+        let f16_lo = [
+            0xbc00, 0x8000, 0x3c00, 0xc000, 0x4600, 0x7e00, 0x3800, 0x0001,
+        ];
+        let f16_x = [
+            0xc500, 0x0000, 0x4100, 0xc400, 0x4880, 0x3c00, 0x7e00, 0x7c00,
+        ];
+        let f16_hi = [
+            0xbc00, 0x0000, 0x4200, 0x4400, 0x4600, 0x4000, 0xfc00, 0x3c00,
+        ];
         assert_half_same_shape_tensor_clamp_dense_matches_generic(
             DType::F16,
             &f16_lo,
             &f16_x,
             &f16_hi,
         );
+    }
+
+    #[test]
+    fn half_clamp_signed_zero_tie_order_dense_matches_generic() {
+        let p = std::collections::BTreeMap::new();
+        for (dtype, neg_one) in [(DType::BF16, 0xbf80), (DType::F16, 0xbc00)] {
+            let lo = [neg_one, neg_one, neg_one, neg_one];
+            let x = [0x8000, 0x0000, 0x8000, 0x0000];
+            let hi = [0x0000, 0x8000, 0x8000, 0x0000];
+
+            let check = |dense_inputs: &[Value], boxed_inputs: &[Value], label: &str| {
+                let dense = crate::eval_primitive(Primitive::Clamp, dense_inputs, &p).unwrap();
+                let boxed = crate::eval_primitive(Primitive::Clamp, boxed_inputs, &p).unwrap();
+                let dense_bits = half_bits_vec(&dense);
+                assert_eq!(dense_bits, half_bits_vec(&boxed), "{dtype:?} {label}");
+                assert_eq!(
+                    dense_bits[0], 0x8000,
+                    "{dtype:?} {label} must keep x's -0.0 when hi is +0.0"
+                );
+            };
+
+            check(
+                &[
+                    half_dense_vec(dtype, &lo),
+                    half_dense_vec(dtype, &x),
+                    half_dense_vec(dtype, &hi),
+                ],
+                &[
+                    half_boxed_vec(dtype, &lo),
+                    half_boxed_vec(dtype, &x),
+                    half_boxed_vec(dtype, &hi),
+                ],
+                "tensor,tensor,tensor",
+            );
+
+            let scalar_lo = half_lit(dtype, neg_one);
+            check(
+                &[
+                    Value::Scalar(scalar_lo),
+                    half_dense_vec(dtype, &x),
+                    half_dense_vec(dtype, &hi),
+                ],
+                &[
+                    Value::Scalar(scalar_lo),
+                    half_boxed_vec(dtype, &x),
+                    half_boxed_vec(dtype, &hi),
+                ],
+                "scalar,tensor,tensor",
+            );
+
+            let scalar_hi = half_lit(dtype, 0x0000);
+            check(
+                &[
+                    half_dense_vec(dtype, &lo),
+                    half_dense_vec(dtype, &x),
+                    Value::Scalar(scalar_hi),
+                ],
+                &[
+                    half_boxed_vec(dtype, &lo),
+                    half_boxed_vec(dtype, &x),
+                    Value::Scalar(scalar_hi),
+                ],
+                "tensor,tensor,scalar",
+            );
+
+            check(
+                &[
+                    Value::Scalar(scalar_lo),
+                    half_dense_vec(dtype, &x),
+                    Value::Scalar(scalar_hi),
+                ],
+                &[
+                    Value::Scalar(scalar_lo),
+                    half_boxed_vec(dtype, &x),
+                    Value::Scalar(scalar_hi),
+                ],
+                "scalar,tensor,scalar",
+            );
+        }
     }
 
     #[test]
@@ -23789,11 +23953,7 @@ mod tests {
             f32_dense_vec(&x32),
             f32_dense_vec(&hi32),
         ];
-        let boxed32 = [
-            scalar_lo32,
-            f32_boxed_vec(&x32),
-            f32_boxed_vec(&hi32),
-        ];
+        let boxed32 = [scalar_lo32, f32_boxed_vec(&x32), f32_boxed_vec(&hi32)];
         let bx32 = best(&boxed32);
         let dn32 = best(&dense32);
 
@@ -23805,11 +23965,7 @@ mod tests {
             f64_dense_vec(&x64),
             f64_dense_vec(&hi64),
         ];
-        let boxed64 = [
-            scalar_lo64,
-            f64_boxed_vec(&x64),
-            f64_boxed_vec(&hi64),
-        ];
+        let boxed64 = [scalar_lo64, f64_boxed_vec(&x64), f64_boxed_vec(&hi64)];
         let bx64 = best(&boxed64);
         let dn64 = best(&dense64);
 

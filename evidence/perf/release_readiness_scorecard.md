@@ -30,6 +30,11 @@ Additional current clamp and bitcast gauntlet environment:
 - JAX timing protocol: warmed `block_until_ready()` execution, 50 runs x 100
   inner loops per clamp workload; current `.96/.98` bitcast rows use 50 runs x
   500 inner loops
+- `frankenjax-mcqr.108` half clamp rows additionally ran RCH same-worker
+  before/after Criterion on `ovh-a` with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`; the
+  scorecard's Rust/JAX ratios use the local same-host Criterion pass
+  `frankenjax-mcqr-108-local-after`.
 
 Additional current scalar broadcast environment:
 
@@ -48,9 +53,9 @@ Additional current fj-core stack/repeat environment:
 - Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-b`
 - Rust bench command: `cargo bench -p fj-core --bench core_baseline` with the
   `core/tensor_stack_axis0`, `core/scalar_stack_axis0`, and
-  `core/tensor_repeat_axis0` filters, plus the
-  `core/scalar_repeat_axis0` scalar-repeat control filter, local same-host
-  execution.
+  `core/tensor_repeat_axis0` filters, plus the `core/scalar_repeat_axis0`
+  scalar-repeat control filter and `core/tensor_slice_axis0` slice filter,
+  local same-host execution.
 - JAX oracle: `benchmarks/jax_comparison/.venv/bin/python`
 - JAX/JAXLIB: 0.10.1 / 0.10.1, `jax_enable_x64=true`, CPU backend
 - JAX timing protocol: warmed `block_until_ready()` execution, 80 runs x 200
@@ -58,7 +63,9 @@ Additional current fj-core stack/repeat environment:
   `jax.jit(jnp.repeat(v[None, :], 64, axis=0))` over a 1024-element F64 vector;
   200 runs x 1000 inner loops for `jax.jit(jnp.stack)` over 64 scalar F64
   inputs; 100 runs x 1000 inner loops for `jax.jit(jnp.repeat(x[None], 64,
-  axis=0))` over one scalar F64 input.
+  axis=0))` over one scalar F64 input; 100 runs x 1000 inner loops for
+  `jax.jit(lambda x: x[31, :])` and `jax.jit(lambda x: x[31, :] + 0.0)` over a
+  64 x 1024 F64 matrix.
 
 Additional cod-a repeat validation environment:
 
@@ -88,12 +95,13 @@ Additional cod-a repeat validation environment:
 | frankenjax-cod-b-dense-scalar-repeat-axis0-zb2b7 | `scalar_repeat_axis0_f64_64` | 66.809 ns mean | 4.6720 us mean | 0.0143 | Rust 69.93x faster (2.71x vs materializing control; JAX CV 9.46%) |
 | frankenjax-cod-b-dense-tensor-repeat-axis0-jk3ed | `repeat_axis0_f64_1k_x64` | 3.2461 us mean | 11.7639 us mean | 0.276 | Rust 3.62x faster (28.36x vs materializing control) |
 | frankenjax-cod-b-dense-tensor-repeat-axis0-jk3ed | `repeat_axis0_f64_1k_x64` cod-a tile validation | 2.887 us slope | 16.606 us mean | 0.174 | Rust 5.75x faster; JAX CV 29.61%, directional only |
+| frankenjax-cod-b-dense-slice-axis0-4bnj5 | `slice_axis0_f64_64x1k_row31` | 238.18 ns lazy / 513.73 ns +extract | 5.1409 us bare / 5.0677 us +0 mean | 0.0463 / 0.101 | Rust 21.58x faster lazy, 9.86x faster +extract (5.98x vs materializing control; JAX CV 7-11%) |
 | frankenjax-mcqr.105 | `f32_mixed_scalar_tensor_1m` | 159.383 us mean | 115.540 us mean | 1.379 | Rust 1.38x slower |
 | frankenjax-mcqr.105 | `f64_mixed_scalar_tensor_1m` | 996.940 us mean | 213.651 us mean | 4.666 | Rust 4.67x slower |
-| frankenjax-mcqr.106 | `bf16_mixed_scalar_tensor_1m` | 15.571 ms mean | 121.313 us mean | 128.353 | Rust 128.35x slower |
-| frankenjax-mcqr.106 | `f16_mixed_scalar_tensor_1m` | 19.859 ms mean | 371.729 us mean | 53.423 | Rust 53.42x slower |
-| frankenjax-mcqr.107 | `bf16_tensor_tensor_tensor_1m` | 15.652 ms mean | 183.707 us mean | 85.200 | Rust 85.20x slower |
-| frankenjax-mcqr.107 | `f16_tensor_tensor_tensor_1m` | 20.951 ms mean | 229.951 us mean | 91.110 | Rust 91.11x slower |
+| frankenjax-mcqr.108 | `bf16_mixed_scalar_tensor_1m` | 3.616 ms mean | 122.705 us mean | 29.466 | Rust 29.47x slower (8.60x RCH same-worker speedup; 12.47x vs boxed ref) |
+| frankenjax-mcqr.108 | `f16_mixed_scalar_tensor_1m` | 3.521 ms mean | 319.088 us mean | 11.034 | Rust 11.03x slower (8.41x RCH same-worker speedup; 10.64x vs boxed ref) |
+| frankenjax-mcqr.108 | `bf16_tensor_tensor_tensor_1m` | 2.993 ms mean | 148.870 us mean | 20.102 | Rust 20.10x slower (7.64x RCH same-worker speedup; 10.73x vs boxed ref) |
+| frankenjax-mcqr.108 | `f16_tensor_tensor_tensor_1m` | 3.653 ms mean | 196.938 us mean | 18.549 | Rust 18.55x slower (7.37x RCH same-worker speedup; 8.81x vs boxed ref) |
 | frankenjax-mcqr.104 | `i64_mixed_scalar_lo_tensor_hi_1m` | 689.991 us mean | 200.558 us mean | 3.440 | Rust 3.44x slower (34.28x vs boxed ref) |
 | frankenjax-mcqr.104 | `i64_mixed_tensor_lo_scalar_hi_1m` | 611.377 us mean | 197.536 us mean | 3.095 | Rust 3.10x slower (42.12x vs boxed ref) |
 | frankenjax-mcqr.103 | `i64_tensor_tensor_tensor_1m` | 1.046 ms mean | 287.593 us mean | 3.636 | Rust 3.64x slower (23.59x vs boxed ref) |

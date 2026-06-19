@@ -158,6 +158,50 @@ ends are not rediscovered without new evidence.
   repeat path. Follow-up should target compiled/buffer-reuse semantics or larger
   batched repeat workloads, not another `Vec<Literal>` elision for this path.
 
+## frankenjax-cod-b-dense-slice-axis0-4bnj5 - Dense Tensor slice_axis0 Storage Preservation
+
+- Date: 2026-06-19
+- Agent: cod-b / WildForge
+- Lever: verify dense `TensorValue::slice_axis0` rank-2 row extraction as a
+  storage-preserving view-like construction instead of rematerializing the row
+  through `Vec<Literal>`.
+- Status: measured keep. External head-to-head is a Rust win versus original
+  JAX CPU; local materializing control confirms a real construction-path win.
+  No revert.
+- Benchmark guard: `core/tensor_slice_axis0_dense_f64_64x1k_row31`,
+  `core/tensor_slice_axis0_dense_f64_64x1k_row31_to_f64_vec`, and
+  `core/tensor_slice_axis0_materializing_control_f64_64x1k_row31`.
+- Measured evidence (2026-06-19, same-host CPU):
+  - Rust command:
+    `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b cargo bench -p fj-core --bench core_baseline -- core/tensor_slice_axis0 --sample-size 100 --warm-up-time 1 --measurement-time 10 --save-baseline frankenjax-cod-b-slice-axis0-control`.
+  - JAX command:
+    `benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/core_slice_gauntlet.py --runs 100 --warmup 10 --inner-loops 1000 --output /tmp/frankenjax_cod_b_slice_axis0_jax_raw.json`.
+  - Rust lazy slice construction mean estimate 238.18 ns
+    (`[235.10, 241.48]` ns Criterion interval).
+  - Rust slice plus `to_f64_vec` mean estimate 513.73 ns
+    (`[507.65, 520.11]` ns Criterion interval).
+  - Rust materializing control mean estimate 1.4253 us
+    (`[1.4056, 1.4456]` us Criterion interval): lazy/control 0.167x
+    (5.98x faster) and extract/control 0.360x (2.77x faster).
+  - JAX bare row slice mean 5.1409 us (p50 4.8466 us, p95 6.5725 us,
+    p99 6.9790 us, CV 11.35%).
+  - JAX row slice plus `+0.0` mean 5.0677 us (p50 4.9258 us, p95
+    6.0064 us, p99 6.3937 us, CV 7.40%).
+  - Rust/JAX ratios: lazy vs bare 0.0463 (Rust 21.58x faster);
+    extract vs `+0.0` 0.101 (Rust 9.86x faster). Treat the exact external
+    ratios as directional because JAX CV exceeded 5%.
+- Conformance guard: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b rch exec -- cargo test -p fj-core slice_axis0 --lib`
+  passed 2 tests, 0 failed. Per-crate `cargo check -p fj-core --bench core_baseline`,
+  `cargo check -p fj-core --all-targets`, `cargo clippy -p fj-core --all-targets -- -D warnings`,
+  `cargo clippy -p fj-core --bench core_baseline -- -D warnings`, `cargo fmt -p fj-core --check`,
+  and `ubs --only=rust --skip-rust=12,13,14 crates/fj-core/benches/core_baseline.rs`
+  passed for this lane.
+- Retry predicate: do not retry `slice_axis0` row construction or another
+  `Vec<Literal>`-elision variant without a new profile showing slice
+  construction, not downstream arithmetic, is again a top-five fj-core cost.
+  Future work should target compiled consumer fusion or direct output-buffer
+  reuse, not another row-slice storage repack.
+
 ## frankenjax-mcqr.97 - TensorValue::new Dense Literal Storage
 
 - Date: 2026-06-18
@@ -641,6 +685,49 @@ ends are not rediscovered without new evidence.
   next attempt with broadcast-shape generalization, scalar-bound relu/relu6, or
   unrelated dense constructor work without fresh focused Criterion evidence and
   an updated JAX head-to-head row.
+
+## frankenjax-mcqr.108 - Raw Half-Bits BF16/F16 Clamp
+
+- Date: 2026-06-19
+- Agent: cod-a / WildForge
+- Lever: replace dense same-half BF16/F16 clamp loops that call
+  `clamp_literal` per lane with a raw `u16` two-pass composition of the existing
+  bit-proven half Max/Min kernels. Mixed scalar dtypes still fall back to
+  `clamp_literal`.
+- Status: measured keep internally; still negative head-to-head versus original
+  JAX CPU for all four half clamp workloads.
+- Evidence artifact:
+  `artifacts/performance/evidence/frankenjax-cod-a-half-clamp-raw-bits-2026-06-19.md`.
+- Benchmark guard: `crates/fj-lax/benches/clamp_gauntlet.rs`, 1,048,576
+  element vectors, Criterion sample size 20, warmed JAX CPU venv with 50 runs x
+  100 inner loops.
+- Measured evidence:
+  - RCH check: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo check -p fj-lax --bench clamp_gauntlet`.
+  - RCH before bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo bench -p fj-lax --bench clamp_gauntlet -- 'bf16_mixed_scalar_tensor_1m|f16_mixed_scalar_tensor_1m|bf16_tensor_tensor_tensor_1m|f16_tensor_tensor_tensor_1m' --sample-size 20 --warm-up-time 1 --measurement-time 3 --save-baseline frankenjax-mcqr-108-before`.
+  - RCH after bench: `RCH_WORKER=ovh-a CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo bench -p fj-lax --bench clamp_gauntlet -- 'bf16_mixed_scalar_tensor_1m|f16_mixed_scalar_tensor_1m|bf16_tensor_tensor_tensor_1m|f16_tensor_tensor_tensor_1m' --sample-size 20 --warm-up-time 1 --measurement-time 3 --save-baseline frankenjax-mcqr-108-after`.
+  - Same-host Rust bench: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a cargo bench -p fj-lax --bench clamp_gauntlet -- 'bf16_mixed_scalar_tensor_1m|f16_mixed_scalar_tensor_1m|bf16_tensor_tensor_tensor_1m|f16_tensor_tensor_tensor_1m' --sample-size 20 --warm-up-time 1 --measurement-time 3 --save-baseline frankenjax-mcqr-108-local-after`.
+  - JAX command: `benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/clamp_gauntlet.py --runs 50 --warmup 10 --inner-loops 100 --output /tmp/frankenjax_mcqr_108_half_clamp_jax_raw.json`.
+  - JAX/JAXLIB: 0.10.1, CPU backend, `jax_enable_x64=true`.
+
+| Workload | RCH before dense | RCH after dense | RCH speedup | Local Rust dense | Local boxed | Dense/boxed | JAX mean | Local Rust/JAX | Outcome |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `bf16_mixed_scalar_tensor_1m` | 21.783 ms | 2.534 ms | 8.60x | 3.616 ms | 45.091 ms | 12.47x faster | 122.705 us | 29.47x slower | Keep internal win; JAX loss |
+| `f16_mixed_scalar_tensor_1m` | 28.986 ms | 3.448 ms | 8.41x | 3.521 ms | 37.471 ms | 10.64x faster | 319.088 us | 11.03x slower | Keep internal win; JAX loss |
+| `bf16_tensor_tensor_tensor_1m` | 22.412 ms | 2.934 ms | 7.64x | 2.993 ms | 32.126 ms | 10.73x faster | 148.870 us | 20.10x slower | Keep internal win; JAX loss |
+| `f16_tensor_tensor_tensor_1m` | 29.748 ms | 4.038 ms | 7.37x | 3.653 ms | 32.192 ms | 8.81x faster | 196.938 us | 18.55x slower | Keep internal win; JAX loss |
+
+- Conformance guard: `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo test -p fj-lax half_clamp --lib`
+  passed 3 tests, 0 failed, 2 ignored benchmark tests. The passing set includes
+  `half_clamp_mixed_scalar_tensor_bounds_dense_matches_generic`,
+  `half_clamp_same_shape_tensor_bounds_dense_matches_generic`, and
+  `half_clamp_signed_zero_tie_order_dense_matches_generic`.
+- Decision: keep, not revert. Same-worker RCH dense speedups are 7.37x-8.60x
+  versus the pre-change raw half clamp baseline, and same-host local runs beat
+  the Rust boxed reference by 8.81x-12.47x.
+- Retry predicate: do not retry boxed literal elision or this exact two-pass
+  max/min composition. The next half-clamp attempt must attack the remaining
+  JAX gap directly, such as one-pass raw half clamp with the same signed-zero
+  and NaN proof, temp allocation elimination, or fused producer/consumer clamp.
 
 ## frankenjax-e07uw/7g72q/rl9ha/bjqfr - eval_jaxpr Fusion Cluster (Square / Reciprocal / integer_pow[2] / i64+bf16 broadcast)
 
