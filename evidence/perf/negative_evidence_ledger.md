@@ -3,6 +3,68 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-murmw - radix-4 power-of-four FFT no-ship
+
+- Date: 2026-06-20
+- Agent: cod-b / WildForge
+- Target gap: current `fj-lax` FFT losses to warmed JAX CPU after the earlier
+  smooth-composite mixed-radix and batched pow2 plan-cache keeps.
+- Profiling/hypothesis route used: alien-graveyard vectorized execution and
+  FFT/NTT-butterfly material suggested fewer passes and higher-radix kernels;
+  profiling discipline split the scenario into full eval rows plus a
+  same-binary kernel A/B. Hypothesis was partially supported at kernel level and
+  rejected at full eval level.
+- Lever rejected and reverted: a safe recursive `Radix4Plan` for power-of-four
+  lengths, routed through `BatchFftPlan` for pow4 rows. It matched DFT/IDFT
+  tolerance but regressed end-to-end `eval_primitive(FFT)` rows, so the source
+  change and its temporary tests/bench were removed before commit.
+
+Baseline command:
+
+```text
+AGENT_NAME=WildForge RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/fft_(1000|1009_prime|batch_128x1000|batch_2048x256_complex128|batch_2048x256_complex128_dense_input)' \
+  --sample-size 15 --warm-up-time 1 --measurement-time 3 --noplot \
+  --save-baseline frankenjax-cod-b-fft-head-baseline
+```
+
+Candidate command:
+
+```text
+AGENT_NAME=WildForge RCH_FORCE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/fft_(256_complex128|batch_2048x256_complex128|batch_2048x256_complex128_dense_input|rfft_batch_2048x256_f64_dense_input|irfft_batch_2048x256_complex128)' \
+  --sample-size 15 --warm-up-time 1 --measurement-time 3 --noplot
+```
+
+JAX comparator used `/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`
+with JAX/JAXLIB 0.10.1, CPU, x64 enabled, warmed `jax.jit`.
+
+| workload | HEAD Rust midpoint | candidate Rust midpoint | JAX mean | candidate/JAX | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `eval/fft_1000_complex128` | 70.525 us | unchanged | 31.204 us | 2.260 | Existing JAX loss |
+| `eval/fft_1009_prime_complex128` | 243.86 us | unchanged | 63.710 us | 3.828 | Existing JAX loss |
+| `eval/fft_batch_128x1000_complex128` | 5.9966 ms | unchanged | 197.438 us | 30.372 | Existing JAX loss |
+| `eval/fft_batch_2048x256_complex128` | 30.983 ms | 42.532 ms | 284.224 us | 149.64 | REVERT: full eval regression |
+| `eval/fft_batch_2048x256_complex128_dense_input` | 13.033 ms | 33.199 ms | 284.224 us | 116.80 | REVERT: full eval regression |
+
+- Contradictory microbench that was not sufficient to ship: the temporary
+  ignored same-binary A/B on RCH worker `hz2` measured `Radix2Plan` 80.976 ms
+  vs `Radix4Plan` 38.024 ms for 2048 rows of length 256 (2.13x faster) and
+  passed a DFT tolerance check. The full eval rows on `vmi1153651` overrode the
+  microbench because the real workload regressed after input/output and batch
+  plumbing were included.
+- Ratio scorecard for this pass: **0 wins / 7 losses / 0 neutral vs JAX**.
+  Production score: **0 kept wins / 0 shipped regressions** because the source
+  was reverted before commit.
+- Retry predicate: do not retry naive recursive radix-4 `BatchFftPlan` routing
+  from an inner-kernel win alone. Future attempts need an iterative in-place
+  radix-4/8 kernel, SoA/SIMD complex layout, or cache-blocked batched FFT that
+  proves full eval improvement head-to-head; measure end-to-end before keeping.
+
 ## frankenjax-mcqr - f64->u32 packed width-changing bitcast keep; u32->f64 prezero/thread revert
 
 - Date: 2026-06-20

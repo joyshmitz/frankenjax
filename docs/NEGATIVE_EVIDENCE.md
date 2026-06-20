@@ -2,6 +2,36 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-murmw radix-4 power-of-four FFT no-ship
+
+The BOLD-VERIFY pass retargeted the current FFT losses after the earlier
+mixed-radix and plan-cache keeps. HEAD still loses hard to warmed JAX CPU on
+the full `fj-lax` eval path, but the attempted safe radix-4 plan was reverted:
+it won a narrow same-binary inner-kernel A/B and lost the full end-to-end gate.
+
+Fresh baseline on RCH worker `vmi1153651` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b`:
+
+| Row | HEAD Rust | JAX mean | Rust/JAX | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| `fft_1000_complex128` | 70.525 us | 31.204 us | 2.260 | Existing loss |
+| `fft_1009_prime_complex128` | 243.86 us | 63.710 us | 3.828 | Existing loss |
+| `fft_batch_128x1000_complex128` | 5.9966 ms | 197.438 us | 30.372 | Existing loss |
+| `fft_batch_2048x256_complex128` | 30.983 ms | 284.224 us | 109.01 | Existing loss |
+| `fft_batch_2048x256_complex128_dense_input` | 13.033 ms | 284.224 us | 45.85 | Existing loss |
+
+Rejected lever: a safe recursive `Radix4Plan` for power-of-four lengths
+matched DFT/IDFT tolerance and measured 2.13x faster than `Radix2Plan` in a
+same-binary inner-kernel A/B on RCH worker `hz2` (`80.976 ms -> 38.024 ms` for
+2048 rows of length 256). The full eval path on the same baseline worker
+regressed: boxed batched FFT `30.983 ms -> 42.532 ms`; dense-input batched FFT
+`13.033 ms -> 33.199 ms`. Source was reverted before commit.
+
+Ratio scorecard for this pass: 0 wins / 7 losses / 0 neutral vs JAX. Production
+decision: no source change. Retry only with an iterative in-place radix-4/8,
+SoA/SIMD, or cache-blocked batched kernel that proves an end-to-end win; do not
+retry naive recursive radix-4 routing from an inner-kernel microbench alone.
+
 ## 2026-06-20 - frankenjax-mcqr f64->u32 packed bitcast keep, u32->f64 revert
 
 The BOLD-VERIFY pass targeted the remaining `f64<->u32` width-changing bitcast

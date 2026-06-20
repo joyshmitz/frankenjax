@@ -206,6 +206,21 @@ Additional cod-b width-changing bitcast presized-fill environment:
   `vmi1149989`. `fj-lax --all-targets` clippy is blocked by unrelated test
   lint debt filed as `frankenjax-98eoz`.
 
+Additional cod-b FFT radix-4 no-ship environment:
+
+- Agent: cod-b / WildForge
+- Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-b`
+- Rust bench command: `rch exec -- cargo bench -p fj-lax --bench lax_baseline`
+  with FFT filters, sample size 15, 1s warm-up, 3s measurement.
+- Baseline/candidate full-eval worker for comparable pow2 rows: RCH worker
+  `vmi1153651`.
+- JAX oracle: `/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`
+  inline warmed `jax.jit` comparator.
+- JAX/JAXLIB: 0.10.1 / 0.10.1, `jax_enable_x64=true`, CPU backend.
+- Candidate caveat: a temporary same-binary kernel A/B on RCH worker `hz2`
+  showed radix-4 plan 2.13x faster than radix-2 plan, but full `eval_primitive`
+  rows on `vmi1153651` regressed; source was reverted before commit.
+
 Additional cod-a fj-dispatch vmap gather environment:
 
 - Agent: cod-a / WildForge
@@ -323,6 +338,11 @@ Additional cod-a fj-interpreters unary-chain environment:
 | frankenjax-cntiy | `fma_f64_1m` local `+fma` probe | 925.02 us mean | 273.448 us mean | 3.383 | NO-SHIP policy probe: 2.82x faster than default, still JAX loss |
 | frankenjax-cntiy | `fma_f32_1m` default dense | 2.7622 ms mean | 111.281 us mean | 24.822 | JAX 24.82x faster; dense path is still 9.47x faster than boxed control |
 | frankenjax-cntiy | `fma_f32_1m` local `+fma` probe | 207.98 us mean | 111.281 us mean | 1.869 | NO-SHIP policy probe: 13.28x faster than default, still JAX loss |
+| frankenjax-murmw | `fft_1000_complex128` HEAD | 70.525 us midpoint | 31.204 us mean | 2.260 | Existing smooth-composite FFT loss after mixed-radix keeps |
+| frankenjax-murmw | `fft_1009_prime_complex128` HEAD | 243.86 us midpoint | 63.710 us mean | 3.828 | Existing large-prime Bluestein FFT loss |
+| frankenjax-murmw | `fft_batch_128x1000_complex128` HEAD | 5.9966 ms midpoint | 197.438 us mean | 30.372 | Existing batched smooth-composite FFT loss |
+| frankenjax-murmw | `fft_batch_2048x256_complex128` radix-4 probe | 42.532 ms candidate vs 30.983 ms HEAD | 284.224 us mean | 149.64 | NO-SHIP: full eval regressed; source reverted |
+| frankenjax-murmw | `fft_batch_2048x256_complex128_dense_input` radix-4 probe | 33.199 ms candidate vs 13.033 ms HEAD | 284.224 us mean | 116.80 | NO-SHIP: full eval regressed despite 2.13x inner-kernel A/B |
 | elementwise | `add_f64_1m` (LOCAL same-host) | 415.00 us | 192.0 us mean | 2.162 | Rust 2.16x slower (alloc+AVX2) |
 | elementwise | `add_f32_1m` (LOCAL same-host) | 135.98 us | 80.4 us mean | 1.691 | Rust 1.69x slower |
 | elementwise | `mul_f64_1m` (LOCAL same-host) | 422.96 us | 161.7 us mean | 2.615 | Rust 2.61x slower |
@@ -341,6 +361,14 @@ Additional cod-a fj-interpreters unary-chain environment:
   same-host estimates FLIP several to wins/ties: slice ~0.72x (Rust FASTER),
   integer_pow2 f32 ~0.97x (~tie/win), broadcast ~1.10x, complex_ctor ~1.08x. Future
   vs-JAX rows MUST run the Rust bench LOCALLY (cargo bench, not rch).
+- murmw FFT radix-4 is a measured no-ship. A temporary safe recursive
+  `Radix4Plan` passed DFT tolerance and won a same-binary inner-kernel A/B
+  (`Radix2Plan` 80.976 ms vs `Radix4Plan` 38.024 ms, 2.13x) on `hz2`, but the
+  full `eval_primitive` rows on the comparable RCH worker `vmi1153651` regressed:
+  boxed batched 2048x256 FFT 30.983 ms -> 42.532 ms, dense-input 13.033 ms ->
+  33.199 ms. Source was reverted. Current FFT scorecard remains 0 wins / 7
+  losses / 0 neutral vs JAX; next valid route is an iterative in-place radix-4/8,
+  SoA/SIMD, or cache-blocked batched FFT proven end-to-end.
 - cod-b width-changing bitcast presized-fill flips two active release losses to
   wins. Same-worker RCH `vmi1227854` improved `bitcast_f32_bf16_1m` from
   978.58 us to 125.40 us (7.80x) and `bitcast_bf16_f32_1m` from 533.82 us to
