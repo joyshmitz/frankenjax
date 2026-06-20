@@ -7715,6 +7715,91 @@ fn parallel_arg_extreme_axis0<T: Copy + Sync>(
     out
 }
 
+/// Contiguous i64 argmin/argmax over one row: strict integer compare with
+/// first-occurrence tie-break (no NaN for integers). Matches the serial i64 scan.
+fn arg_extreme_i64_contiguous(values: &[i64], find_max: bool) -> usize {
+    let mut best_idx = 0usize;
+    let mut best = values[0];
+    for (i, &v) in values.iter().enumerate().skip(1) {
+        if (find_max && v > best) || (!find_max && v < best) {
+            best_idx = i;
+            best = v;
+        }
+    }
+    best_idx
+}
+
+/// Streaming leading-axis (`axis == 0`) i64 argmin/argmax over the column block
+/// `[c0, c0 + best_idx.len())` of a dense row-major `rows × cols` matrix. Loops
+/// k-outer / column-inner (contiguous reads, per-column running value/index in the
+/// block's local cache) instead of the strided per-column gather. Each column folds
+/// k ascending = same order as the serial scan → BIT-IDENTICAL (strict integer
+/// compare, first-occurrence tie). Integers widen lossily to f64 above 2^53, so this
+/// keeps the EXACT i64 compare rather than reusing the f64 `arg_extreme_axis0_block`.
+fn arg_extreme_i64_axis0_block(
+    values: &[i64],
+    rows: usize,
+    cols: usize,
+    c0: usize,
+    find_max: bool,
+    best_idx: &mut [i64],
+) {
+    let w = best_idx.len();
+    let mut best_val = vec![0i64; w];
+    best_val.copy_from_slice(&values[c0..c0 + w]);
+    for slot in best_idx.iter_mut() {
+        *slot = 0;
+    }
+    for k in 1..rows {
+        let base = k * cols + c0;
+        let row = &values[base..base + w];
+        for ((bv, bi), &v) in best_val.iter_mut().zip(best_idx.iter_mut()).zip(row.iter()) {
+            if (find_max && v > *bv) || (!find_max && v < *bv) {
+                *bi = k as i64;
+                *bv = v;
+            }
+        }
+    }
+}
+
+/// Threaded leading-axis (`axis == 0`) i64 argmin/argmax: fan the independent output
+/// columns across threads once the work is DRAM-bound, each thread streaming its
+/// disjoint column block. Bit-identical to the serial strided reducer.
+fn parallel_arg_extreme_i64_axis0(
+    values: &[i64],
+    rows: usize,
+    cols: usize,
+    find_max: bool,
+) -> Vec<i64> {
+    let total = values.len();
+    let threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && cols > 1 {
+        crate::arithmetic::work_scaled_threads(total).min(cols).min(16)
+    } else {
+        1
+    };
+    let mut out = vec![0i64; cols];
+    if threads <= 1 {
+        arg_extreme_i64_axis0_block(values, rows, cols, 0, find_max, &mut out);
+        return out;
+    }
+    let cols_per = cols.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [i64] = out.as_mut_slice();
+        let mut c0 = 0usize;
+        while c0 < cols {
+            let w = cols_per.min(cols - c0);
+            let (blk, tail) = rest.split_at_mut(w);
+            rest = tail;
+            let cstart = c0;
+            c0 += w;
+            scope.spawn(move || {
+                arg_extreme_i64_axis0_block(values, rows, cols, cstart, find_max, blk);
+            });
+        }
+    });
+    out
+}
+
 fn extremum_along_axis(
     primitive: Primitive,
     tensor: &TensorValue,
@@ -7827,6 +7912,28 @@ fn extremum_along_axis(
             result_elements.push(Literal::I64(best_idx as i64));
         }
     } else if let Some(values) = tensor.elements.as_i64_slice() {
+        if axis_stride == 1 {
+            // Contiguous i64 argmax (innermost axis): thread over the independent
+            // output rows, each scanning a contiguous i64 block. Bit-identical.
+            let idx = parallel_argmax_fill(outer_count, total, |outer| {
+                let base = outer * axis_dim;
+                arg_extreme_i64_contiguous(&values[base..base + axis_dim], find_max) as i64
+            });
+            if result_shape.dims.is_empty() {
+                return Ok(Value::Scalar(Literal::I64(idx[0])));
+            }
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
+            ));
+        }
+        if axis == 0 && outer_count > 1 {
+            // Leading-axis i64 (argmax over axis 0): stream + thread the independent
+            // columns with EXACT integer compare. Bit-identical.
+            let idx = parallel_arg_extreme_i64_axis0(values, axis_dim, outer_count, find_max);
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
+            ));
+        }
         for outer in 0..outer_count {
             let base = base_of(outer)?;
             let mut best_idx = 0_usize;
@@ -22264,6 +22371,62 @@ mod tests {
                 *slot = best_idx as i64;
             }
             assert_eq!(got, want, "find_max={find_max}");
+        }
+    }
+
+    #[test]
+    fn argmax_argmin_i64_threaded_matches_serial_reference_large() {
+        // Crosses CHEAP_BINARY_PARALLEL_MIN (1<<23) so the threaded i64 contiguous
+        // (axis 1) and stream+thread leading-axis (axis 0) paths run; the modulo
+        // pattern produces many exact integer ties to pin first-occurrence tie-break.
+        let rows = 8200usize;
+        let cols = 1024usize;
+        let data: Vec<i64> = (0..rows * cols)
+            .map(|i| ((i as i64 * 2_654_435_761) % 9973) - 4986)
+            .collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let x = Value::Tensor(TensorValue::new_i64_values(shape, data.clone()).unwrap());
+
+        for (axis, oc, dim, stride) in [(1usize, rows, cols, 1usize), (0usize, cols, rows, cols)] {
+            let p = params(&[("axis", &axis.to_string()[..])]);
+            for find_max in [true, false] {
+                let prim = if find_max {
+                    Primitive::Argmax
+                } else {
+                    Primitive::Argmin
+                };
+                let got: Vec<i64> = if find_max {
+                    eval_argmax(prim, std::slice::from_ref(&x), &p)
+                } else {
+                    eval_argmin(prim, std::slice::from_ref(&x), &p)
+                }
+                .unwrap()
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| l.as_i64().unwrap())
+                .collect();
+
+                // Canonical serial reference: for each output o, scan its `dim` taps.
+                let mut want = vec![0i64; oc];
+                for (o, slot) in want.iter_mut().enumerate() {
+                    let base = if axis == 1 { o * cols } else { o };
+                    let mut best = data[base];
+                    let mut best_idx = 0i64;
+                    for i in 1..dim {
+                        let v = data[base + i * stride];
+                        if (find_max && v > best) || (!find_max && v < best) {
+                            best = v;
+                            best_idx = i as i64;
+                        }
+                    }
+                    *slot = best_idx;
+                }
+                assert_eq!(got, want, "axis={axis} find_max={find_max}");
+            }
         }
     }
 

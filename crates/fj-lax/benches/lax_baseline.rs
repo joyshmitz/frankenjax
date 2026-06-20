@@ -2239,6 +2239,34 @@ fn bench_argmax_16k_x_1k_axis1_f64(c: &mut Criterion) {
     });
 }
 
+// i64 argmax over axis 1 (contiguous) and axis 0 (strided/leading) of a
+// [16384, 1024] i64 tensor. Measures the serial integer paths (no fast path) vs JAX.
+fn bench_argmax_16k_x_1k_axis1_i64(c: &mut Criterion) {
+    let (rows, cols) = (16_384usize, 1_024usize);
+    let data: Vec<i64> = (0..rows * cols).map(|i| (i as i64 % 8191) - 4095).collect();
+    let input = Value::Tensor(
+        TensorValue::new_i64_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_string(), "1".to_string());
+    c.bench_function("eval/argmax_16kx1k_axis1_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Argmax, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_argmax_16k_x_1k_axis0_i64(c: &mut Criterion) {
+    let (rows, cols) = (16_384usize, 1_024usize);
+    let data: Vec<i64> = (0..rows * cols).map(|i| (i as i64 % 8191) - 4095).collect();
+    let input = Value::Tensor(
+        TensorValue::new_i64_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_string(), "0".to_string());
+    c.bench_function("eval/argmax_16kx1k_axis0_i64", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Argmax, std::slice::from_ref(&input), &p))
+    });
+}
+
 // argmax over axis 0 (leading/strided) of a [16384, 1024] f64 tensor -> [1024].
 // Each output column scans 16384 rows at stride 1024 (cache-hostile); measures the
 // CURRENT serial strided path vs JAX to scope a possible column-block threaded lever.
@@ -6610,6 +6638,8 @@ criterion_group!(
     bench_reduce_sum_16k_x_1k_i64_axes,
     bench_argmax_16k_x_1k_axis1_f64,
     bench_argmax_16k_x_1k_axis0_f64,
+    bench_argmax_16k_x_1k_axis1_i64,
+    bench_argmax_16k_x_1k_axis0_i64,
     bench_cumsum_16k_x_1k_f32_axis1,
     bench_cumsum_16k_x_1k_f64_axis0,
     bench_reduce_sum_64k_i64_literal_reference,
