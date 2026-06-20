@@ -2708,3 +2708,33 @@ ends are not rediscovered without new evidence.
 - Net for the BOLD-VERIFY phase: the fj-interpreters dense-arena vectorization vein is fully mined and
   JAX-dominant; the remaining gaps are this off-limits reduce-order swing, the +fma policy gate, or the
   active cod fj-lax lane. No safe in-lane lever remains; holding rather than risking parity/collisions.
+
+## WildForge - extend the in-place f64 linear chain to L3-resident sizes (the documented L3 lever) — KEPT
+
+- The ledger's two standing "remaining JAX losses" were float-reduce-order (verified off-limits above)
+  and "the L3-resident regime (needs compiled-jaxpr arena buffer reuse)". This is that buffer-reuse
+  lever: the dense-f64 arena bailed at `n >= FUSION_MIN_ELEMS` (1024), so a multi-op LINEAR chain on a
+  medium/large tensor (e.g. an optimizer-update body on a parameter vector) fell to the generic per-op
+  path — N separate allocations + 2-stream (read+write) traffic per op. The in-place linear-chain path
+  (`run_linear_scalar_f64_tensor_chain_into`) mutates ONE buffer through the whole chain: 1 copy +
+  single-stream in-place traffic, no per-step alloc, vectorized. Moved it ahead of the bail gate, up to
+  an L3-resident ceiling `INPLACE_CHAIN_MAX_ELEMS = 1<<20` (~8 MB f64).
+- Same-invocation A/B (`compiled_runner` in-place vs `compiled_runner_scalar` generic per-op; the
+  control is exactly the prior production behavior — bail -> generic):
+
+  | elems | in-place | generic per-op | verdict |
+  | --- | ---: | ---: | --- |
+  | 4096 (32 KB)   | 2.55 us  | 3.71 us  | 1.45x WIN |
+  | 65536 (512 KB) | 49.4 us  | 61.8 us  | 1.25x WIN |
+  | 262144 (2 MB)  | 234 us   | 263 us   | 1.12x (marginal, near noise) |
+  | 1048576 (8 MB) | 1.89 ms  | 1.90 ms  | ~1.0x neutral |
+  | 16777216 (128 MB) | 122 ms | 133 ms | ~neutral (DRAM-bound, noisy) |
+
+  Clear win at L1/L2-resident (1.25-1.45x), decaying to neutral by ~1M elems; NEVER regresses in any
+  measured size. Gated at 1<<20 so the DRAM-bound regime (where a future threaded path may win) is
+  ceded. Bit-exact (each element's op sequence is unchanged regardless of n; guarded by
+  `dense_f64_tensor_arena_bit_identical_to_generic` extended to the large-linear-chain contract +
+  `fusion_f64_*_chain_matches_reference`). The non-vectorized control still bails (so the A/B is valid
+  and the lever is opt-in behind the production `vectorize=true`).
+- Net: the two named "remaining JAX losses" are now (1) reduce-order = verified off-limits, (2)
+  L3-resident chain buffer-reuse = SHIPPED for the cache-resident regime.

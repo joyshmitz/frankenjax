@@ -119,6 +119,15 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
         let jaxpr = build_chain_jaxpr(4, Literal::from_f64(1.0));
         bench_one(&mut group, &format!("tensorE{elems}/n=4"), &jaxpr, &args);
     }
+    // L3-resident f64 chains (>= FUSION_MIN_ELEMS): in-place chain (one buffer, 1-stream
+    // traffic, no per-step alloc) vs the generic per-op path (N allocs, 2-stream). A/B is
+    // compiled_runner (in-place, vectorize on) vs compiled_runner_scalar (generic per-op).
+    for &elems in &[4096usize, 65536, 262144, 1048576, 16777216] {
+        let arg = vec![1.0_f64; elems];
+        let args = [Value::vector_f64(&arg).expect("vector_f64")];
+        let jaxpr = build_chain_jaxpr(8, Literal::from_f64(1.0));
+        bench_one(&mut group, &format!("bigchain{elems}/n=8"), &jaxpr, &args);
+    }
     // f32 (JAX's DEFAULT tensor dtype): native-f32 vectorization (vaddps, 8-wide), bit-
     // exact vs eager's widen→f64→narrow for +/-/*/÷ (Figueroa). 256-lane chains.
     let f32_tensor = Value::Tensor(

@@ -1342,6 +1342,12 @@ struct FusedRun {
 const FUSION_MIN_RUN: usize = 3;
 const FUSION_MIN_ELEMS: usize = 1024;
 const FUSION_CHUNK: usize = 8192;
+/// Upper size for the in-place dense-f64 linear-chain path. Below this, mutating one
+/// buffer through the chain (single-stream, no per-step alloc) beats the generic per-op
+/// path (measured 1.25-1.45x at L2-resident, win shrinking to neutral by ~1M elems). At
+/// L3-overflow / DRAM-bound sizes the win is gone and the (potentially threaded) generic
+/// path may own it, so we cede those. 1<<20 ≈ 8 MB of f64 keeps the chain cache-resident.
+const INPLACE_CHAIN_MAX_ELEMS: usize = 1 << 20;
 
 /// Classify one operand atom. Pushes external dense-f64 tensors into `ext`/`ext_vars`
 /// and sets/checks the run shape `S`. Returns `None` (bail) for anything not
@@ -6771,13 +6777,24 @@ fn run_scalar_f64_plan_as_tensor_into(
     }
 
     let shape = shape?;
-    // Large tensors are owned by the chunked/threaded fusion; only small bodies here.
+    // The in-place linear-chain path mutates ONE buffer through the chain — no per-step
+    // alloc and single-stream (in-place) memory traffic, vs the generic per-op path's N
+    // allocations and 2-stream (read+write) traffic per op. For an L3-resident chain
+    // (e.g. an Adam-style optimizer body on a large parameter vector) that buffer reuse
+    // is the documented compiled-jaxpr lever the per-op path lacks. It handles any size;
+    // at large n it is gated behind `vectorize` so a bench can A/B it same-invocation
+    // against the generic per-op path (which the per-step arena below bails to for
+    // n >= FUSION_MIN_ELEMS). Bit-identical regardless of n.
+    if (n < FUSION_MIN_ELEMS || (vectorize && n < INPLACE_CHAIN_MAX_ELEMS))
+        && let Some(result) =
+            run_linear_scalar_f64_tensor_chain_into(plan, &shape, out, cells, vectorize)
+    {
+        return Some(result);
+    }
+    // Large non-linear tensors (and DRAM-bound linear chains) are owned by the
+    // chunked/threaded fusion.
     if n >= FUSION_MIN_ELEMS {
         return None;
-    }
-
-    if let Some(result) = run_linear_scalar_f64_tensor_chain_into(plan, &shape, out, cells, vectorize) {
-        return Some(result);
     }
 
     for step in &plan.steps {
@@ -12154,7 +12171,9 @@ mod tests {
             );
         }
 
-        // A LARGE tensor (>= FUSION_MIN_ELEMS) must BAIL (None) so the fusion owns it.
+        // A LARGE LINEAR chain (>= FUSION_MIN_ELEMS, below the in-place ceiling) is now
+        // HANDLED in place — one buffer mutated through the chain — and must stay bit-
+        // identical to the generic per-op path (the L3-resident buffer-reuse lever).
         let big = vec![1.0f64; super::FUSION_MIN_ELEMS];
         let (xb, mb, ob) = (VarId(0), VarId(1), VarId(2));
         let big_body = Jaxpr::new(
@@ -12168,19 +12187,50 @@ mod tests {
         );
         let plan = super::build_dense_plan(&big_body).expect("plan");
         let p = plan.scalar_f64_plan.as_ref().unwrap();
+
+        let mut genv: Vec<Option<Value>> = vec![None; plan.slots];
+        let mut gscr: Vec<Value> = Vec::new();
+        let mut gout: Vec<Value> = Vec::new();
+        super::run_dense_env_into(
+            &big_body,
+            &[],
+            &[tensor(&big)],
+            &mut genv,
+            &plan.last_use,
+            &mut gscr,
+            &mut gout,
+        )
+        .expect("generic large");
+
         let mut tout: Vec<Value> = Vec::new();
         let mut cells: Vec<super::DenseF64Cell> = Vec::new();
+        super::run_scalar_f64_plan_as_tensor_into(
+            p,
+            &[],
+            &[tensor(&big)],
+            &mut tout,
+            &mut cells,
+            true,
+        )
+        .expect("large linear chain handled in place")
+        .expect("ok");
+        assert_eq!(bits(&tout[0]), bits(&gout[0]), "large in-place chain vs generic");
+
+        // The non-vectorized control path (and any non-linear large body) still BAILS so
+        // the chunked/threaded fusion owns it.
+        let mut tout2: Vec<Value> = Vec::new();
+        let mut cells2: Vec<super::DenseF64Cell> = Vec::new();
         assert!(
             super::run_scalar_f64_plan_as_tensor_into(
                 p,
                 &[],
                 &[tensor(&big)],
-                &mut tout,
-                &mut cells,
-                true
+                &mut tout2,
+                &mut cells2,
+                false,
             )
             .is_none(),
-            "large tensor must bail to the fusion"
+            "large chain bails when vectorization (in-place lever) is disabled"
         );
     }
 
