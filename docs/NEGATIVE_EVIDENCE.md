@@ -2,6 +2,55 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-cntiy FMA primitive policy no-ship
+
+`frankenjax-cntiy` tested the direct ternary FMA primitive row that the softmax
+`+fma` probe could not isolate. The benchmark harness now records `fma_f64_1m`
+and `fma_f32_1m` with dense and boxed controls, but no production compiler flag
+or target-feature policy was shipped.
+
+JAX comparator caveat: JAX 0.10.1 in the local oracle environment does not
+expose a public `jax.lax.fma`, so the comparator is warmed
+`jax.jit(lambda a, b, c: a * b + c)`.
+
+| Probe | Rust mean | JAX mean | Rust/JAX | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| default dense `fma_f64_1m` | 2.6124 ms | 273.448 us | 9.553 | Loss: JAX 9.55x faster |
+| default dense `fma_f32_1m` | 2.7622 ms | 111.281 us | 24.822 | Loss: JAX 24.82x faster |
+| local `RUSTFLAGS="-C target-feature=+fma"` f64 | 925.02 us | 273.448 us | 3.383 | Improved but still JAX loss; no policy ship |
+| local `RUSTFLAGS="-C target-feature=+fma"` f32 | 207.98 us | 111.281 us | 1.869 | Improved but still JAX loss; no policy ship |
+
+RCH build guard passed for `cargo build --release -p fj-lax --benches` on
+`vmi1227854`. RCH timing on `hz1` showed the dense primitive path is still a
+real internal de-box win over boxed controls: f64 3.5198 ms vs 29.267 ms
+(8.31x), f32 3.7757 ms vs 30.825 ms (8.16x). Local same-host default rows were
+2.6124 ms vs 24.592 ms boxed (9.41x) and 2.7622 ms vs 26.151 ms boxed (9.47x).
+
+Decision: keep the benchmark coverage, but do not ship a global `+fma` policy.
+Ratio scorecard: 0 wins / 4 losses / 0 neutral vs JAX. Retry only with a
+semantics-approved per-kernel target feature, generated/vectorized code path, or
+output-reuse strategy that can be tested against this row directly.
+
+## 2026-06-20 - frankenjax-xljoh.1 f64 large-chain register/tile no-ships
+
+`frankenjax-xljoh.1` tested two deeper f64 compiled-dispatch levers against
+the remaining large-chain JAX losses. Both were reverted before commit.
+
+Baseline on RCH worker `vmi1227854` for the unchanged runner:
+65K 46.896 us, 262K 214.91 us, 1M 1.3315 ms, 16M 116.11 ms.
+JAX comparator means are from the existing
+`../artifacts/performance/evidence/frankenjax-xljoh-jax-comparator-20260620T0550Z.json`.
+
+| Probe | Worker | Best relevant rows | Rust/JAX | Verdict |
+| --- | --- | --- | ---: | --- |
+| ordered register pass for 8 scalar adds | `vmi1153651` | 65K 52.746 us; 1M 3.5382 ms; 16M 142.56 ms | 1.55 / 42.48 / 5.16 | Reject: failed to vectorize; worse than existing runner and still JAX loss |
+| `FUSION_CHUNK` 8K -> 64K | `vmi1149989` | 65K 52.828 us; 1M 1.9764 ms; 16M 128.78 ms | 1.55 / 23.73 / 4.66 | Reject: Criterion reported regressions (+7.33%, +21.35%, +4.66%) |
+
+Retry predicate: do not retry per-element register scalar-add fusion or larger
+fusion tiles without disassembly/profile evidence showing SIMD vectorization and
+a same-worker before/after win. The remaining f64 chain gap is not a simple
+chunk-size or step-order loop issue.
+
 ## 2026-06-20 - frankenjax-cntiy softmax +fma/devirtualization no-ship
 
 `frankenjax-cntiy` remains maintainer-gated, but this pass rejects two narrower

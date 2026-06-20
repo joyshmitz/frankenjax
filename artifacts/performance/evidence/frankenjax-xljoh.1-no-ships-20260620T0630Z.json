@@ -1,0 +1,108 @@
+{
+  "generated_at": "2026-06-20T06:30:00Z",
+  "bead": "frankenjax-xljoh.1",
+  "agent": "cod-a / WildForge",
+  "cargo_target_dir": "/data/projects/.rch-targets/frankenjax-cod-a",
+  "command": "rch exec -- cargo bench -p fj-interpreters --bench compiled_dispatch_speed -- 'compiled_dispatch/(compiled_runner|compiled_runner_scalar)/(bigchain65536|bigchain262144|bigchain1048576|bigchain16777216)' --warm-up-time 1 --measurement-time 5",
+  "jax_source_artifact": "artifacts/performance/evidence/frankenjax-xljoh-jax-comparator-20260620T0550Z.json",
+  "jax_means_ns": {
+    "bigchain65536_n8": 34033.0,
+    "bigchain262144_n8": 76827.0,
+    "bigchain1048576_n8": 83299.0,
+    "bigchain16777216_n8": 27610000.0
+  },
+  "baseline_unchanged": {
+    "worker": "vmi1227854",
+    "results": {
+      "bigchain65536_n8": {
+        "compiled_runner_mean_ns": 46896.0,
+        "compiled_runner_scalar_mean_ns": 59727.0,
+        "rust_jax_ratio": 1.3779561014303764
+      },
+      "bigchain262144_n8": {
+        "compiled_runner_mean_ns": 214910.0,
+        "compiled_runner_scalar_mean_ns": 244780.0,
+        "rust_jax_ratio": 2.7973225558722886
+      },
+      "bigchain1048576_n8": {
+        "compiled_runner_mean_ns": 1331500.0,
+        "compiled_runner_scalar_mean_ns": 2817600.0,
+        "rust_jax_ratio": 15.984585649287506
+      },
+      "bigchain16777216_n8": {
+        "compiled_runner_mean_ns": 116110000.0,
+        "compiled_runner_scalar_mean_ns": 127360000.0,
+        "rust_jax_ratio": 4.205360376675118
+      }
+    }
+  },
+  "probes": [
+    {
+      "name": "ordered_register_add_chain",
+      "worker": "vmi1153651",
+      "decision": "rejected_reverted",
+      "results": {
+        "bigchain65536_n8": {
+          "candidate_mean_ns": 52746.0,
+          "scalar_control_mean_ns": 181800.0,
+          "rust_jax_ratio": 1.5498498516146094,
+          "verdict": "loss_vs_jax_and_slower_than_unchanged"
+        },
+        "bigchain262144_n8": {
+          "candidate_mean_ns": 351510.0,
+          "scalar_control_mean_ns": 1458600.0,
+          "rust_jax_ratio": 4.575347209315734,
+          "verdict": "regression"
+        },
+        "bigchain1048576_n8": {
+          "candidate_mean_ns": 3538200.0,
+          "scalar_control_mean_ns": 6246600.0,
+          "rust_jax_ratio": 42.47650031813107,
+          "verdict": "regression"
+        },
+        "bigchain16777216_n8": {
+          "candidate_mean_ns": 142560000.0,
+          "scalar_control_mean_ns": 279870000.0,
+          "rust_jax_ratio": 5.163346613545817,
+          "verdict": "regression"
+        }
+      }
+    },
+    {
+      "name": "fusion_chunk_65536",
+      "worker": "vmi1149989",
+      "decision": "rejected_reverted",
+      "results": {
+        "bigchain65536_n8": {
+          "candidate_mean_ns": 52828.0,
+          "criterion_change_pct": 7.3285,
+          "criterion_p": 0.0,
+          "rust_jax_ratio": 1.552259865424153,
+          "verdict": "regression"
+        },
+        "bigchain262144_n8": {
+          "candidate_mean_ns": 256430.0,
+          "criterion_change_pct": 2.78,
+          "criterion_p": 0.08,
+          "rust_jax_ratio": 3.3377549604974384,
+          "verdict": "neutral_no_win"
+        },
+        "bigchain1048576_n8": {
+          "candidate_mean_ns": 1976400.0,
+          "criterion_change_pct": 21.345,
+          "criterion_p": 0.0,
+          "rust_jax_ratio": 23.72657534844356,
+          "verdict": "regression"
+        },
+        "bigchain16777216_n8": {
+          "candidate_mean_ns": 128780000.0,
+          "criterion_change_pct": 4.6639,
+          "criterion_p": 0.0,
+          "rust_jax_ratio": 4.664252082578776,
+          "verdict": "regression"
+        }
+      }
+    }
+  ],
+  "retry_predicate": "Do not retry ordered per-element scalar-add register fusion or larger f64 fusion tiles without SIMD disassembly/profile proof and same-worker before/after wins."
+}

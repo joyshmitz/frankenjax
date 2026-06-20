@@ -151,6 +151,9 @@ Additional cod-a fj-interpreters compiled-dispatch environment:
 | frankenjax-xljoh | `compiled_dispatch_f64_chain_16m_x8` | 125.556 ms mean | 27.610 ms mean | 4.55 | JAX 4.55x faster; no safe win in this lever |
 | frankenjax-xljoh | `compiled_dispatch_f32_chain_4k_x8` | 1.352 us mean | 8.278 us mean | 0.163 | Rust 6.12x faster; JAX CV 46%, noisy |
 | frankenjax-xljoh | `compiled_dispatch_f32_chain_65k_x8` | 21.486 us mean | 33.742 us mean | 0.637 | Rust 1.57x faster |
+| frankenjax-xljoh.1 | `ordered_register_add_chain_f64_1m_x8` | 3.5382 ms mean | 83.299 us mean | 42.48 | REJECTED/REVERTED: failed to vectorize; 2.66x slower than unchanged runner |
+| frankenjax-xljoh.1 | `fusion_chunk_64k_f64_1m_x8` | 1.9764 ms mean | 83.299 us mean | 23.73 | REJECTED/REVERTED: Criterion +21.35%, p=0.00 |
+| frankenjax-xljoh.1 | `fusion_chunk_64k_f64_16m_x8` | 128.78 ms mean | 27.610 ms mean | 4.66 | REJECTED/REVERTED: Criterion +4.66%, p=0.00 |
 | frankenjax-19wst | `tile_scalar_f32_1024x1024` | 51.435 us | 317.753 us | 0.162 | Rust 6.18x faster |
 | frankenjax-19wst | `tile_scalar_complex128_1024x1024` | 412.679 us | 579.030 us | 0.713 | Rust 1.40x faster |
 | frankenjax-1z7k9 | `complex_f32_tensor_scalar_1m` | 1.379 ms | 1.272 ms | 1.084 | Rust 1.08x slower |
@@ -240,6 +243,11 @@ Additional cod-a fj-interpreters compiled-dispatch environment:
   specialization. Conformance is green for this closeout (`cargo test -p
   fj-conformance` pass), while full `fj-interpreters --lib` and all-target clippy
   remain blocked by filed follow-ups `frankenjax-fo1zg` and `frankenjax-gwa56`.
+- xljoh.1 rejects two obvious deeper variants: a strict ordered per-element
+  register pass for the repeated scalar-add chain and a larger 64K fusion tile.
+  Both stayed JAX losses and regressed the current Rust runner; no source code was
+  kept. The retry predicate is now stronger: do not revisit these loop shapes
+  without SIMD disassembly/profile proof and same-worker before/after data.
 - JAX domination score (same-host corrected/measured estimate): ~43/100 — scalar
   stack_axis0 (0.0055x), scalar repeat_axis0 (0.0143x), tensor stack_axis0
   (0.083x), tensor repeat_axis0 (0.276x), dense to_i64_vec host extraction
