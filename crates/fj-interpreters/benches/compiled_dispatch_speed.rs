@@ -39,6 +39,29 @@ fn build_chain_jaxpr(n: usize, lit: Literal) -> Jaxpr {
     )
 }
 
+/// A rank-2 broadcast chain: `m -> m+v -> (m+v)+v -> ...` where `m` is [R,C] and `v` is
+/// a [C] row-broadcast vector (the bias-add pattern). Exercises the arena's broadcast path.
+fn build_bcast_chain_jaxpr(n: usize) -> Jaxpr {
+    let mut equations = Vec::with_capacity(n);
+    for i in 0..n {
+        let lhs = if i == 0 { VarId(1) } else { VarId((i + 2) as u32) };
+        equations.push(Equation {
+            primitive: Primitive::Add,
+            inputs: smallvec::smallvec![Atom::Var(lhs), Atom::Var(VarId(2))],
+            outputs: smallvec::smallvec![VarId((i + 3) as u32)],
+            params: BTreeMap::new(),
+            effects: vec![],
+            sub_jaxprs: vec![],
+        });
+    }
+    Jaxpr::new(
+        vec![VarId(1), VarId(2)],
+        vec![],
+        vec![VarId((n + 2) as u32)],
+        equations,
+    )
+}
+
 fn bench_one(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     tag: &str,
@@ -116,6 +139,23 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
     for &n in &[8usize, 32] {
         let jaxpr = build_chain_jaxpr(n, Literal::I64(1));
         bench_one(&mut group, &format!("i64E256/n={n}"), &jaxpr, &i64_args);
+    }
+    // f64 rank-2 ROW-BROADCAST bias-add chain: [16,16] matrix + [16] vector (the per-row
+    // decomposition reuses the no-broadcast vectorized helper).
+    let bcast_args = [
+        Value::Tensor(
+            fj_core::TensorValue::new(
+                fj_core::DType::F64,
+                fj_core::Shape { dims: vec![16, 16] },
+                (0..256).map(|_| Literal::from_f64(1.0)).collect(),
+            )
+            .expect("matrix"),
+        ),
+        Value::vector_f64(&[0.5_f64; 16]).expect("row vector"),
+    ];
+    for &n in &[8usize, 32] {
+        let jaxpr = build_bcast_chain_jaxpr(n);
+        bench_one(&mut group, &format!("bcast16x16/n={n}"), &jaxpr, &bcast_args);
     }
     group.finish();
 }

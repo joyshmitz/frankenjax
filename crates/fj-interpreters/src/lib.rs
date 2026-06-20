@@ -6551,6 +6551,35 @@ fn fill_dense_f64_nobcast<F: Fn(f64, f64) -> f64>(a: DenseRef, b: DenseRef, o: &
     }
 }
 
+/// Vectorize the rank-2 broadcast case by decomposing each row into a NO-broadcast
+/// subproblem and reusing [`fill_dense_f64_nobcast`]. A `RowBcast` ([C] vector) is the
+/// same `Tensor` slice every row; a `ColBcast` ([R,1] vector) is a per-row `Scalar`; a
+/// full tensor is its row slice. The op closure is monomorphized once, so each row's
+/// inner loop auto-vectorizes. Bit-identical to the per-element `at_rc` broadcast loop:
+/// element `row*cols+col` gets exactly the operand value `at_rc` would read.
+#[inline]
+fn fill_dense_f64_bcast<F: Fn(f64, f64) -> f64 + Copy>(
+    a: DenseRef,
+    b: DenseRef,
+    o: &mut [f64],
+    cols: usize,
+    f: F,
+) {
+    fn row_ref(operand: DenseRef, row: usize, cols: usize) -> DenseRef {
+        match operand {
+            DenseRef::Scalar(v) => DenseRef::Scalar(v),
+            DenseRef::Tensor(t) => DenseRef::Tensor(&t[row * cols..row * cols + cols]),
+            // [C] row vector: same slice for every row.
+            DenseRef::RowBcast(t, _) => DenseRef::Tensor(&t[..cols]),
+            // [R,1] column vector: a constant for this whole row.
+            DenseRef::ColBcast(t, _) => DenseRef::Scalar(t[row]),
+        }
+    }
+    for (row, orow) in o.chunks_mut(cols).enumerate() {
+        fill_dense_f64_nobcast(row_ref(a, row, cols), row_ref(b, row, cols), orow, f);
+    }
+}
+
 fn run_scalar_f64_plan_as_tensor_into(
     plan: &ScalarF64Plan,
     const_values: &[Value],
@@ -6638,18 +6667,36 @@ fn run_scalar_f64_plan_as_tensor_into(
                 if a.is_bcast() || b.is_bcast() {
                     // Row-chunked so RowBcast/ColBcast index by col/row (no per-elem div).
                     let cols = *shape.dims.last().expect("rank>=1") as usize;
-                    let mut i = 0usize;
-                    let mut row = 0usize;
-                    while i < n {
-                        for col in 0..cols {
-                            o[i] = apply_scalar_f64_binary(
-                                step.op,
-                                a.at_rc(row, col, i),
-                                b.at_rc(row, col, i),
-                            );
-                            i += 1;
+                    // Hoist the op once and vectorize each row (decomposed to a
+                    // no-broadcast subproblem); other ops keep the per-element loop.
+                    match step.op {
+                        ScalarF64BinaryOp::Add if vectorize => {
+                            fill_dense_f64_bcast(a, b, &mut o, cols, |x, y| x + y)
                         }
-                        row += 1;
+                        ScalarF64BinaryOp::Sub if vectorize => {
+                            fill_dense_f64_bcast(a, b, &mut o, cols, |x, y| x - y)
+                        }
+                        ScalarF64BinaryOp::Mul if vectorize => {
+                            fill_dense_f64_bcast(a, b, &mut o, cols, |x, y| x * y)
+                        }
+                        ScalarF64BinaryOp::Div if vectorize => {
+                            fill_dense_f64_bcast(a, b, &mut o, cols, |x, y| x / y)
+                        }
+                        _ => {
+                            let mut i = 0usize;
+                            let mut row = 0usize;
+                            while i < n {
+                                for col in 0..cols {
+                                    o[i] = apply_scalar_f64_binary(
+                                        step.op,
+                                        a.at_rc(row, col, i),
+                                        b.at_rc(row, col, i),
+                                    );
+                                    i += 1;
+                                }
+                                row += 1;
+                            }
+                        }
                     }
                 } else {
                     // Hoist the op + operand-kind matches out of the element loop so the

@@ -2642,5 +2642,12 @@ ends are not rediscovered without new evidence.
   Same-invocation A/B: i64E256/n=8 = 935ns vs 3610ns (3.9x); i64E256/n=32 = 3217ns vs 13637ns (4.2x).
   (Lower than f32's 9.6x: 4-wide i64 SIMD vs 8-wide f32, and Div/Max/Min stay generic.)
 - DTYPE FAMILY COMPLETE for the cheap-op vectorization lever: f64 (10.5x vs JAX), f32 (9.6x), i64
-  (4.2x). Half (bf16/f16) needs decode and won't vectorize cleanly — DO NOT. NEXT: hunt OTHER
-  interpreter inner loops calling per-element `apply_scalar_*`/`eval_primitive` dispatch.
+  (4.2x). Half (bf16/f16) needs decode and won't vectorize cleanly — DO NOT.
+- FOLLOW-UP SHIPPED — f64 rank-2 BROADCAST (bias-add: matrix + [C] row vector / [R,1] col vector):
+  `fill_dense_f64_bcast` decomposes each row into a no-broadcast subproblem and REUSES
+  `fill_dense_f64_nobcast`, so each row's inner loop vectorizes (RowBcast → same [C] slice every row;
+  ColBcast → per-row scalar; full tensor → row slice). Bit-identical to the per-element `at_rc` loop
+  (confirmed `dense_f64_tensor_arena_broadcast_bit_identical` + row/col chain tests). Same-invocation
+  A/B: bcast16x16/n=8 = 1.76us vs 9.55us (5.4x); bcast16x16/n=32 = 6.74us vs 41.69us (6.2x).
+- NEXT: hunt OTHER interpreter inner loops calling per-element `apply_scalar_*`/`eval_primitive`
+  dispatch (same hoist-the-match-out-of-the-loop pattern).
