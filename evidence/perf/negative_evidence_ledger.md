@@ -3,6 +3,80 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-4ryym - f64 GEMM SIMD load-codegen no-ship
+
+- Date: 2026-06-20
+- Agent: cod-b / CrimsonOtter
+- Target gap: follow-up to `frankenjax-ifou2` after generic Rayon/global-pool
+  row scheduling was rejected. Fresh `hz1` production `matmul_2d` rows still
+  lose hard to warmed local CPU JAX 0.10.1 x64: 256^3 4.090x slower, 512^3
+  11.169x slower, and 1024^3 14.996x slower by midpoint/median.
+- Alien-graveyard/extreme-optimization route used: target-feature/codegen and
+  microkernel load expression, not another pool/scheduler retry. Hypothesis:
+  replacing manual eight-scalar `Simd::from_array([brow[0]..brow[7]])` loads
+  with `Simd::from_slice` could give LLVM a cleaner vector-load idiom in the
+  f64 `MR x NR` microkernel while preserving the exact ascending-`l`
+  accumulation order.
+- Lever rejected and reverted: `f64xnr_from_slice` was changed to
+  `F64xN::from_slice(values)` and the flat row-block hot loop reused that
+  helper. Focused release matmul tests passed while the candidate existed, but
+  same-worker timing failed the keep gate; source was restored before commit.
+- Profiling limit: `perf stat -e cycles,instructions,cache-misses true` failed
+  on the host because `perf_event_paranoid=4`, so no hardware counter claims
+  are made.
+
+Fresh production baseline command on RCH worker `hz1`:
+
+```text
+AGENT_NAME=CrimsonOtter BR_AGENT_NAME=cod-b \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+  rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+  cargo bench -p fj-lax --bench lax_baseline -- \
+  'linalg/(matmul_2d_256x256x256_f64|matmul_2d_512x512x512_f64|matmul_2d_1024x1024x1024_f64|strassen_ab_1024_(matmul2d|strassen))' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 15 --noplot
+```
+
+JAX comparator used
+`/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`, JAX
+0.10.1, CPU backend, `jax_enable_x64=true`, warmed `jax.jit(lambda a, b: a @ b)`
+with medians: 256^3 0.3006295 ms, 512^3 0.621733 ms, 1024^3 2.7191275 ms.
+
+| workload / result | Rust midpoint | same-worker delta | JAX median | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `hz1` production `matmul_2d_256x256x256_f64` | 1.2296 ms | baseline | 0.3006295 ms | 4.090 | Active JAX loss |
+| `hz1` production `matmul_2d_512x512x512_f64` | 6.9439 ms | baseline | 0.621733 ms | 11.169 | Active JAX loss |
+| `hz1` production `matmul_2d_1024x1024x1024_f64` | 40.776 ms | baseline | 2.7191275 ms | 14.996 | Active JAX loss |
+| `hz1` `strassen_ab_1024_matmul2d` control | 39.758 ms | baseline | 2.7191275 ms | 14.622 | Active JAX loss |
+| `hz1` `strassen_ab_1024_strassen` control | 97.337 ms | baseline | 2.7191275 ms | 35.797 | Existing no-ship remains |
+| Accidental routing baseline on `vmi1293453`, `matmul_2d_256x256x256_f64` | 2.7308 ms | cross-worker only | 0.3006295 ms | 9.084 | Routing evidence only |
+| Accidental routing baseline on `vmi1293453`, `matmul_2d_512x512x512_f64` | 9.0670 ms | cross-worker only | 0.621733 ms | 14.583 | Routing evidence only |
+| Accidental routing baseline on `vmi1293453`, `matmul_2d_1024x1024x1024_f64` | 33.046 ms | cross-worker only | 2.7191275 ms | 12.153 | Routing evidence only |
+| `Simd::from_slice` candidate A on `vmi1153651`, `matmul_2d_256x256x256_f64` | 8.9680 ms | cross-worker/noisy | 0.3006295 ms | 29.831 | REVERT/no proof |
+| `Simd::from_slice` candidate A on `vmi1153651`, `matmul_2d_512x512x512_f64` | 21.088 ms | cross-worker/noisy | 0.621733 ms | 33.918 | REVERT/no proof |
+| `Simd::from_slice` candidate A on `vmi1153651`, `matmul_2d_1024x1024x1024_f64` | 79.742 ms | cross-worker/noisy | 2.7191275 ms | 29.326 | REVERT/no proof |
+| `Simd::from_slice` candidate B on `vmi1153651`, `matmul_2d_256x256x256_f64` | 8.2187 ms | neutral/no change, p=0.68 | 0.3006295 ms | 27.338 | REVERT/no gain |
+| `Simd::from_slice` candidate B on `vmi1153651`, `matmul_2d_512x512x512_f64` | 40.519 ms | +108.32%, p=0.00 | 0.621733 ms | 65.171 | REVERT/regression |
+| `Simd::from_slice` candidate B on `vmi1153651`, `matmul_2d_1024x1024x1024_f64` | 90.284 ms | neutral/no change, p=0.34 | 2.7191275 ms | 33.203 | REVERT/no gain |
+
+- Ratio scorecard for retained production matmul rows: **0 wins / 3 losses / 0
+  neutral vs JAX**. If the Strassen A/B controls are included, the measured
+  rowset is **0 wins / 5 losses / 0 neutral**.
+- Rejected candidate score for accepted same-worker `vmi1153651` rows: **0
+  wins / 3 losses / 0 neutral vs JAX**; internally it was one significant
+  regression and two neutral/no-gain rows. Candidate A and the accidental
+  `vmi1293453` baseline are logged as routing evidence only because worker
+  selection drift made them non-comparable to `hz1`.
+- Validation while the candidate existed: `cargo check -p fj-lax --benches`
+  passed on RCH `vmi1152480`; `cargo test -p fj-lax matmul_2d --lib --release
+  -- --nocapture` passed 23 tests with 2 ignored microbenches on RCH `ovh-a`.
+- Retry predicate: do not retry `Simd::from_slice`/manual-load spelling changes
+  in the f64 `MR x NR` microkernel without assembly-level proof that LLVM is
+  currently scalarizing the load. The next credible `frankenjax-4ryym` route is
+  still a real backend/codegen lever: target-feature-specialized FMA kernel,
+  BLAS-class packed microkernel, owned arena handoff, or a safe scoped-pool
+  design with same-worker 256/512/1024 proof. Generic Rayon/global-pool row
+  scheduling remains banned by `frankenjax-ifou2`.
+
 ## frankenjax-ifou2 - Rayon persistent-pool matmul_2d no-ship
 
 - Date: 2026-06-20

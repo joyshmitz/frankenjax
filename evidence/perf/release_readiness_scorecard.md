@@ -246,6 +246,30 @@ Additional cod-b matmul/GEMM persistent-pool no-ship environment:
   `cargo fmt -p fj-lax --check` remains blocked by pre-existing unrelated
   formatting drift.
 
+Additional cod-b `frankenjax-4ryym` GEMM SIMD load-codegen no-ship environment:
+
+- Agent: cod-b / CrimsonOtter
+- Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-b`
+- Rust bench command: `cargo bench -p fj-lax --bench lax_baseline` with the
+  `linalg/(matmul_2d_256x256x256_f64|matmul_2d_512x512x512_f64|matmul_2d_1024x1024x1024_f64|strassen_ab_1024_(matmul2d|strassen))`
+  filter, sample size 15, 1s warm-up, 3s measurement for the production
+  baseline; follow-up candidate reruns used the three production `matmul_2d`
+  rows only.
+- Production baseline worker: RCH `hz1`. Candidate worker: RCH `vmi1153651`
+  after RCH ignored the attempted `hz1` route; therefore candidate A is routing
+  evidence only, while candidate B is same-worker candidate-history evidence
+  that rejects the lever.
+- JAX oracle: `/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`
+  inline warmed `jax.jit(lambda a, b: a @ b)` comparator.
+- JAX/JAXLIB: 0.10.1 / 0.10.1, `jax_enable_x64=true`, CPU backend.
+- Candidate caveat: `perf` hardware counters are blocked by
+  `perf_event_paranoid=4`. The rejected source hunk was only `Simd::from_slice`
+  versus manual `Simd::from_array` load spelling in the f64 GEMM microkernel;
+  source was reverted before commit.
+- Gates while the candidate existed: `cargo check -p fj-lax --benches` passed
+  on RCH `vmi1152480`; `cargo test -p fj-lax matmul_2d --lib --release --
+  --nocapture` passed 23 tests with 2 ignored microbenches on RCH `ovh-a`.
+
 Additional cod-a fj-dispatch vmap gather environment:
 
 - Agent: cod-a / WildForge
@@ -349,6 +373,12 @@ Additional cod-a FFT SoA gate recheck environment:
 | frankenjax-ifou2 | `<=512` Rayon gate `matmul_2d_256x256x256_f64` | 3.0695 ms midpoint | 0.264947 ms mean | 11.585 | REJECTED/REVERTED: final gate regressed |
 | frankenjax-ifou2 | `<=512` Rayon gate `matmul_2d_512x512x512_f64` | 12.894 ms midpoint | 0.576574 ms mean | 22.363 | REJECTED/REVERTED: final gate regressed |
 | frankenjax-ifou2 | `<=512` Rayon gate `strassen_ab_1024_matmul2d` | 94.836 ms midpoint | 2.665036 ms mean | 35.585 | REJECTED/REVERTED: final gate regressed |
+| frankenjax-4ryym | `matmul_2d_256x256x256_f64` fresh production | 1.2296 ms midpoint | 0.3006295 ms median | 4.090 | Active JAX loss; SIMD load-codegen no-ship |
+| frankenjax-4ryym | `matmul_2d_512x512x512_f64` fresh production | 6.9439 ms midpoint | 0.621733 ms median | 11.169 | Active JAX loss; SIMD load-codegen no-ship |
+| frankenjax-4ryym | `matmul_2d_1024x1024x1024_f64` fresh production | 40.776 ms midpoint | 2.7191275 ms median | 14.996 | Active JAX loss; SIMD load-codegen no-ship |
+| frankenjax-4ryym | `Simd::from_slice` candidate B `matmul_2d_256x256x256_f64` | 8.2187 ms midpoint | 0.3006295 ms median | 27.338 | REJECTED/REVERTED: neutral/no gain on same candidate worker |
+| frankenjax-4ryym | `Simd::from_slice` candidate B `matmul_2d_512x512x512_f64` | 40.519 ms midpoint | 0.621733 ms median | 65.171 | REJECTED/REVERTED: +108.32%, p=0.00 same-worker regression |
+| frankenjax-4ryym | `Simd::from_slice` candidate B `matmul_2d_1024x1024x1024_f64` | 90.284 ms midpoint | 2.7191275 ms median | 33.203 | REJECTED/REVERTED: neutral/no gain on same candidate worker |
 | frankenjax-xjbvr | `floor_f64_1m_add_unary_chain/n=4` | 2.5597 ms midpoint | 199.892 us mean | 12.805 | Same-worker Rust 8.29x faster than baseline; still JAX loss |
 | frankenjax-xjbvr | `round_f64_1m_add_unary_chain/n=4` | 1.8803 ms midpoint | 186.162 us mean | 10.100 | Same-worker Rust 10.91x faster than baseline; still JAX loss |
 | frankenjax-xjbvr | `sign_f64_1m_add_unary_chain/n=4` | 2.7290 ms midpoint | 342.029 us mean | 7.979 | Same-worker Rust 4.01x faster than baseline; still JAX loss |
@@ -479,6 +509,14 @@ Additional cod-a FFT SoA gate recheck environment:
   production losses / 0 neutral vs JAX, and 0 candidate wins / 12 candidate
   losses / 0 neutral vs JAX. Next route must be quiet-host profile plus real
   GEMM backend/codegen/target-feature work, not generic Rayon row scheduling.
+- `frankenjax-4ryym` SIMD load-codegen GEMM follow-up is also a measured
+  no-ship. Fresh `hz1` production rows remain 4.090x / 11.169x / 14.996x
+  slower than warmed JAX for 256/512/1024. The `Simd::from_slice` load-spelling
+  candidate preserved behavior but failed performance: on the accepted same
+  candidate worker it was neutral at 256 and 1024 and significantly regressed
+  512 (+108.32%, p=0.00), with rejected Rust/JAX ratios 27.338 / 65.171 /
+  33.203. Source was reverted. Next GEMM work needs assembly/codegen proof or a
+  true backend lever, not another safe spelling tweak.
 - cod-b width-changing bitcast presized-fill flips two active release losses to
   wins. Same-worker RCH `vmi1227854` improved `bitcast_f32_bf16_1m` from
   978.58 us to 125.40 us (7.80x) and `bitcast_bf16_f32_1m` from 533.82 us to

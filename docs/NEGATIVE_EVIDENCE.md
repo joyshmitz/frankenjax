@@ -2,6 +2,49 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-4ryym f64 GEMM SIMD load-codegen no-ship
+
+Follow-up after `frankenjax-ifou2`: generic Rayon/global-pool row scheduling is
+already banned for this GEMM lane, so this pass tried a narrower backend/codegen
+lever. The candidate rewrote the f64 `MR x NR` microkernel B-vector load from
+manual eight-scalar `Simd::from_array([brow[0]..brow[7]])` construction to
+`Simd::from_slice`, preserving the exact ascending-`l` accumulation order. The
+source hunk was reverted before commit.
+
+Fresh `hz1` production baseline, using
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b` and
+`cargo bench -p fj-lax --bench lax_baseline`:
+
+| Row | Production Rust | JAX median | Production/JAX | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| `matmul_2d_256x256x256_f64` | 1.2296 ms | 0.3006295 ms | 4.090 | Active JAX loss |
+| `matmul_2d_512x512x512_f64` | 6.9439 ms | 0.621733 ms | 11.169 | Active JAX loss |
+| `matmul_2d_1024x1024x1024_f64` | 40.776 ms | 2.7191275 ms | 14.996 | Active JAX loss |
+| `strassen_ab_1024_matmul2d` | 39.758 ms | 2.7191275 ms | 14.622 | Control loss |
+| `strassen_ab_1024_strassen` | 97.337 ms | 2.7191275 ms | 35.797 | Existing no-ship remains |
+
+Rejected candidate evidence: RCH would not route the candidate back to `hz1` and
+selected `vmi1153651`, so cross-worker rows were not accepted as production
+proof. The same-worker candidate rerun on `vmi1153651` still failed the keep
+gate: 256 was neutral/no change (8.2187 ms, Rust/JAX 27.338, p=0.68), 512
+regressed significantly (40.519 ms, Rust/JAX 65.171, +108.32%, p=0.00), and
+1024 was neutral/no change (90.284 ms, Rust/JAX 33.203, p=0.34). Candidate A on
+the same worker also stayed severe JAX loss territory: 8.9680 ms / 21.088 ms /
+79.742 ms for 256/512/1024.
+
+Validation while the candidate existed: `cargo check -p fj-lax --benches` passed
+on RCH `vmi1152480`; `cargo test -p fj-lax matmul_2d --lib --release --
+--nocapture` passed 23 tests with 2 ignored microbenches on RCH `ovh-a`.
+`perf` hardware counters were unavailable (`perf_event_paranoid=4`), so no
+cycle/cache claims are made. Ratio scorecard: retained production 0 wins / 3
+losses / 0 neutral vs JAX; rejected candidate 0 wins / 3 losses / 0 neutral.
+
+Retry predicate: do not retry `Simd::from_slice`/manual-load spelling changes in
+the f64 microkernel without assembly-level proof. The valid next route remains a
+real backend/codegen lever: target-feature-specialized FMA, BLAS-class packed
+microkernel, owned arena handoff, or a safe scoped-pool design with same-worker
+256/512/1024 proof.
+
 ## 2026-06-20 - frankenjax-murmw threaded SoA FFT A/B is contention-fragile (corroboration, no new code)
 
 An independent BOLD-VERIFY pass (CrimsonOtter) reconstructed the vectorized SoA
