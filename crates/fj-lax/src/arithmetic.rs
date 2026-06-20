@@ -13042,6 +13042,11 @@ pub(crate) fn eval_nextafter(primitive: Primitive, inputs: &[Value]) -> Result<V
             actual: inputs.len(),
         });
     }
+    // JAX `lax.nextafter` = `standard_naryop([_float, _float])`: integer/bool/complex
+    // operands are rejected (the generic numeric-promotion path would otherwise widen
+    // ints via `Literal::as_f64` and silently return an F64). Float-only guard matching
+    // igamma/igammac/zeta. Closes liqzs.
+    ensure_float_operands(primitive, inputs)?;
 
     fn next_after_f64(x: f64, y: f64) -> f64 {
         if x.is_nan() || y.is_nan() {
@@ -21731,6 +21736,36 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(result_bits, expected_bits);
+    }
+
+    #[test]
+    fn nextafter_rejects_non_floating_operands() {
+        // JAX `lax.nextafter` = `standard_naryop([_float, _float])`: integer/bool/complex
+        // operands fail closed (the old generic path silently widened ints via as_f64 to an
+        // F64 result). Covers int/int, mixed int+float, and complex. Closes liqzs.
+        let i = s_i64(1);
+        let f = s_f64(1.0);
+        let c = Value::Scalar(Literal::from_complex128(1.0, 0.0));
+        for inputs in [
+            [i.clone(), i.clone()],
+            [i.clone(), f.clone()],
+            [f.clone(), i.clone()],
+            [c.clone(), f.clone()],
+            [f.clone(), c.clone()],
+        ] {
+            let err = eval_nextafter(Primitive::Nextafter, &inputs)
+                .expect_err("nextafter accepted non-floating operand");
+            assert!(
+                matches!(
+                    err,
+                    EvalError::TypeMismatch {
+                        primitive: Primitive::Nextafter,
+                        detail: "expected floating operands"
+                    }
+                ),
+                "unexpected nextafter error: {err:?}"
+            );
+        }
     }
 
     // ── SelectN ──
