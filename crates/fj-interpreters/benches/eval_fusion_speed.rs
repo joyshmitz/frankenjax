@@ -1442,10 +1442,110 @@ fn run_f64_thread_ab(n: usize) {
     );
 }
 
+/// bf16 same-invocation serial-vs-threaded A/B. bf16 elementwise is COMPUTE-bound
+/// (every op decodes u16->f32, computes, re-rounds), so the fused chain is ~13x
+/// slower than f64 and far from bandwidth-limited — threading should scale better
+/// than the f64 chain. Mirrors `run_bf16`'s 8-op chain.
+fn run_bf16_thread_ab(n: usize) {
+    use std::sync::atomic::Ordering;
+    let x: Vec<u16> = (0..n)
+        .map(|i| bf16_bits_of(i as f64 * 1e-6 - 0.5))
+        .collect();
+    let y: Vec<u16> = (0..n)
+        .map(|i| bf16_bits_of((i as f64 * 3e-7).cos() + 1.2))
+        .collect();
+    let xv = VarId(0);
+    let yv = VarId(1);
+    let v: Vec<VarId> = (2..=9).map(VarId).collect();
+    let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+        primitive: p,
+        inputs: ins,
+        outputs: smallvec![o],
+        params: BTreeMap::new(),
+        sub_jaxprs: vec![],
+        effects: vec![],
+    };
+    let lit = |c: f64| Atom::Lit(Literal::from_bf16_f64(c));
+    let eqns = vec![
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(xv), Atom::Var(xv)],
+            v[0],
+        ),
+        mk(Primitive::Add, smallvec![Atom::Var(v[0]), lit(0.5)], v[1]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[1]), Atom::Var(xv)],
+            v[2],
+        ),
+        mk(
+            Primitive::Mul,
+            smallvec![Atom::Var(v[2]), Atom::Var(yv)],
+            v[3],
+        ),
+        mk(Primitive::Add, smallvec![Atom::Var(v[3]), lit(1.0)], v[4]),
+        mk(
+            Primitive::Sub,
+            smallvec![Atom::Var(v[4]), Atom::Var(yv)],
+            v[5],
+        ),
+        mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2.0)], v[6]),
+        mk(
+            Primitive::Add,
+            smallvec![Atom::Var(v[6]), Atom::Var(xv)],
+            v[7],
+        ),
+    ];
+    let jaxpr = Jaxpr::new(vec![xv, yv], vec![], vec![v[7]], eqns);
+    let args = [bf16_tensor(x), bf16_tensor(y)];
+
+    FUSION_THREAD_CAP_OVERRIDE.store(1, Ordering::Relaxed);
+    let serial_out = eval_jaxpr(&jaxpr, &args).unwrap();
+    FUSION_THREAD_CAP_OVERRIDE.store(0, Ordering::Relaxed);
+    let threaded_out = eval_jaxpr(&jaxpr, &args).unwrap();
+    if let (Value::Tensor(s), Value::Tensor(t)) = (&serial_out[0], &threaded_out[0]) {
+        for idx in [0, n / 2, n - 1] {
+            assert_eq!(
+                half_bits_at(s, idx),
+                half_bits_at(t, idx),
+                "serial != threaded bf16 at {idx}"
+            );
+        }
+    }
+
+    let iters = if n >= (1 << 23) { 30 } else { 80 };
+
+    FUSION_THREAD_CAP_OVERRIDE.store(1, Ordering::Relaxed);
+    let _ = eval_jaxpr(&jaxpr, &args).unwrap();
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap());
+    }
+    let serial = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+    FUSION_THREAD_CAP_OVERRIDE.store(0, Ordering::Relaxed);
+    let _ = eval_jaxpr(&jaxpr, &args).unwrap();
+    let t1 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(eval_jaxpr(&jaxpr, &args).unwrap());
+    }
+    let threaded = t1.elapsed().as_nanos() as f64 / iters as f64;
+    FUSION_THREAD_CAP_OVERRIDE.store(0, Ordering::Relaxed);
+
+    println!(
+        "EVAL_FUSION_THREAD_AB_BF16 n={n} ops=8 serial={:.3}ms threaded={:.3}ms speedup={:.2}x",
+        serial / 1e6,
+        threaded / 1e6,
+        serial / threaded,
+    );
+}
+
 fn main() {
     run_f64_thread_ab(1usize << 20); // 1M  - L3-resident on the bench host
     run_f64_thread_ab(1usize << 22); // 4M  - L3 boundary
     run_f64_thread_ab(1usize << 24); // 16M - DRAM-bound, beyond L3
+    run_bf16_thread_ab(1usize << 20); // 1M  - compute-bound (decode/encode)
+    run_bf16_thread_ab(1usize << 22); // 4M
     run_f64();
     run_f32();
     run_f32_clamp();
