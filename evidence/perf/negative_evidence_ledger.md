@@ -3913,3 +3913,24 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   (a) FMA-policy-gated (cntiy), (b) a multi-session kernel/algorithm rewrite (FFT murmw, SVD bidiag+QR,
   eigh symmetric reduction), or (c) the forbid-unsafe-constrained persistent pool (ifou2). Pass delta:
   scorecard — sort WIN confirmed + loss set fully characterized / 1 win documented / 0 losses.
+
+## AzureLynx - CAVEAT: matmul/ifou2 threading numbers are HOST-CONTENTION-confounded (don't over-invest)
+
+- Profiled the threaded matmul path (matmul_2d_with_threads_into): the per-call overhead is purely
+  `std::thread::scope` spawn/join — NO per-thread alloc, and pack_b is OFF at 256³ (k·n=65536 <
+  PACK_B_MIN_KN). The measured ~125 µs/thread "overhead" is HIGHER than raw OS thread spawn (~10-30µs
+  idle), which means a large part of it is HOST CONTENTION: this 32-core box is saturated by the agent
+  swarm + concurrent rch builds, so (1) OS thread creation contends and (2) the spawned workers fight
+  the swarm for cores. 
+- CONSEQUENCE for the ifou2 case: the same-binary serial-vs-threaded RATIO is itself load-sensitive —
+  threaded perf degrades MORE than serial under load (serial spawns nothing), so the measured 256³
+  threading speedup (~1.1-1.9x) is DEFLATED vs an idle host. The "matmul 256³ 9.3x off JAX" is
+  therefore partly host-inflated; the true idle-host gap is unknown and likely smaller. ifou2 should
+  NOT be scoped/prioritized off these numbers — it needs a re-measure on a QUIET host first (the
+  project's own rule: "definitive vs-JAX win/loss requires an IDLE host, currently unavailable").
+- This also retro-qualifies the conv 1.8x and matmul 9.3x (pass 13): real losses, but their MAGNITUDE
+  is upper-bounded by host load. The DIRECTIONAL conclusion (FMA-gate + threading-scaling are the
+  matmul/conv levers) holds; the exact ratios do not. The eigh/FFT wins are UNAFFECTED (same-binary
+  A/B + scaling-class normalization are contention-robust; the host-sensitive part is absolute spawn
+  cost, not the bit-exact kernel ratios). Pass delta: methodology caveat (matmul/ifou2 host-confounded)
+  / 0 wins / 0 losses.
