@@ -1708,7 +1708,100 @@ fn run_i64_thread_ab(n: usize) {
     );
 }
 
+/// Probe: does an ELEMENT-MAJOR single fused pass (register-resident accumulator,
+/// one store per element — what XLA emits) beat the current STEP-MAJOR chunk apply
+/// (8 separate autovectorized passes, accumulator round-tripped to memory between
+/// ops)? Both are single-threaded scalar loops the compiler autovectorizes, so the
+/// in-process ratio is contention-robust. BIT-IDENTICAL (same per-element op order).
+/// Decides whether a lib.rs element-major rewrite of apply_fusion_chunk is worth it.
+fn run_fusion_strategy_probe(n: usize) {
+    let x: Vec<f64> = (0..n).map(|i| i as f64 * 1e-6 - 0.5).collect();
+    let y: Vec<f64> = (0..n).map(|i| (i as f64 * 3e-7).cos() + 1.2).collect();
+
+    // STEP-MAJOR: mirrors apply_fusion_chunk — seed, then one pass per op.
+    let step_major = || {
+        let mut out = x.clone();
+        for i in 0..n {
+            out[i] = out[i] * x[i];
+        }
+        for o in out.iter_mut() {
+            *o += 0.5;
+        }
+        for i in 0..n {
+            out[i] -= x[i];
+        }
+        for i in 0..n {
+            out[i] *= y[i];
+        }
+        for o in out.iter_mut() {
+            *o += 1.0;
+        }
+        for i in 0..n {
+            out[i] -= y[i];
+        }
+        for o in out.iter_mut() {
+            *o *= 2.0;
+        }
+        for i in 0..n {
+            out[i] += x[i];
+        }
+        out
+    };
+
+    // ELEMENT-MAJOR: one fused pass, accumulator stays in a register.
+    let elem_major = || {
+        let mut out = vec![0.0_f64; n];
+        for i in 0..n {
+            let xi = x[i];
+            let yi = y[i];
+            let mut a = xi * xi;
+            a += 0.5;
+            a -= xi;
+            a *= yi;
+            a += 1.0;
+            a -= yi;
+            a *= 2.0;
+            a += xi;
+            out[i] = a;
+        }
+        out
+    };
+
+    // Bit-exactness: identical per-element op order => identical bits.
+    let a = step_major();
+    let b = elem_major();
+    for idx in [0, n / 2, n - 1] {
+        assert_eq!(
+            a[idx].to_bits(),
+            b[idx].to_bits(),
+            "step-major != element-major at {idx}"
+        );
+    }
+
+    let iters = if n >= (1 << 23) { 30 } else { 80 };
+    let _ = std::hint::black_box(step_major());
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(step_major());
+    }
+    let sm = t0.elapsed().as_nanos() as f64 / iters as f64;
+    let _ = std::hint::black_box(elem_major());
+    let t1 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(elem_major());
+    }
+    let em = t1.elapsed().as_nanos() as f64 / iters as f64;
+    println!(
+        "FUSION_STRATEGY_PROBE n={n} ops=8 step_major={:.3}ms elem_major={:.3}ms elem_speedup={:.2}x",
+        sm / 1e6,
+        em / 1e6,
+        sm / em,
+    );
+}
+
 fn main() {
+    run_fusion_strategy_probe(1usize << 20); // 1M  - L3-resident
+    run_fusion_strategy_probe(1usize << 24); // 16M - DRAM-bound
     run_f64_thread_ab(1usize << 20); // 1M  - L3-resident on the bench host
     run_f64_thread_ab(1usize << 22); // 4M  - L3 boundary
     run_f64_thread_ab(1usize << 24); // 16M - DRAM-bound, beyond L3
