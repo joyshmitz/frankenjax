@@ -3310,3 +3310,27 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
     AND the raw parallel sibling — a primitive can be in the float-only SET yet route around the
     guard. ENV NOTE: shared CARGO_TARGET_DIR ppv-lite86 artifact was poisoned (E0433
     `u32x4x2_avx2` / E0514) on some rch workers; `cargo clean -p ppv-lite86` cleared it.
+
+## CrimsonForge - fresh fusion A/B re-measurement (2026-06-20): all documented levers HOLD, no regression
+
+- `rch cargo bench -p fj-interpreters --bench eval_fusion_speed` (same-invocation probe suite),
+  run on current main (incl. WildForge's `3d997ddd` "specialize f64 scalar add chains").
+  Win/loss/neutral verification — ALL documented findings reproduce:
+  | probe | result | verdict |
+  | --- | ---: | --- |
+  | EVAL_FUSION_SPEED_F64 1M (fused vs unfused) | **4.37x** | fusion lever holds |
+  | EVAL_FUSION_SPEED_F32 1M | 2.72x | holds |
+  | EVAL_FUSION_SPEED_I64 1M | 2.36x | holds |
+  | F32/F64 ROW/COL_BROADCAST fused | 2.20-5.02x | broadcast fusion holds |
+  | EVAL_FUSION_SPEED_BF16 1M | 0.93x | half floor (documented neutral/loss) |
+  | THREAD_AB_F64 16M | 1.24x | threading wins past L3->DRAM (8.4M gate correct) |
+  | THREAD_AB_F32 16M | 1.18x | holds |
+  | THREAD_AB_I64 16M | 1.12x | holds |
+  | THREAD_AB_{F64,F32,I64} 1M-4M | 0.96-1.00x | neutral below gate (correct — no regression) |
+  | FUSION_DYNAMIC_PROBE 1M/16M (dynamic-tape element-major) | **0.74x / 0.69x** | the REJECT holds (step-major correct) |
+  | FUSION_STRATEGY_PROBE 1M/16M (STATIC monomorphized element-major) | **4.02x / 2.43x** | the codegen ceiling — reachable ONLY via per-chain JIT (bead n75xr) |
+- CONCLUSION: no perf regression from the session's guard/golden-hash commits or `3d997ddd`.
+  The static-vs-dynamic element-major gap (2.4-4x) re-confirms with CURRENT numbers that the sole
+  remaining large-chain lever is per-chain codegen (n75xr, WildForge actively working it).
+  CAVEAT: thread-A/B ratios are contention-sensitive (see the gate-raise correction above); the
+  16M wins reproducing here means they survive even current load — a robust positive signal.
