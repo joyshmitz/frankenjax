@@ -1355,6 +1355,82 @@ const RUNNER_F64_OWNED_EVAL_MAX_ELEMS: usize = 1 << 18;
 /// path may own it, so we cede those. 1<<20 ≈ 8 MB of f64 keeps the chain cache-resident.
 const INPLACE_CHAIN_MAX_ELEMS: usize = 1 << 20;
 
+/// Minimum element count before the chunked fusion driver fans out across OS
+/// threads. A fused elementwise chain is arithmetic-dense — it does several ops
+/// per loaded byte and writes only the final output — so it crosses the
+/// thread-spawn break-even at far smaller `n` than the single-op cheap-elementwise
+/// gate (which lives at ~8.4M because one cheap binop is pure bandwidth and the
+/// `thread::scope` spawn dwarfs it below that). Measured: a single f64 8-op chain
+/// over 1M elems runs at ~6 GB/s on ONE core (well under DRAM saturation), so it
+/// scales with cores; XLA already uses all of them. Below this gate the serial
+/// loop wins.
+const FUSION_THREAD_MIN_ELEMS: usize = 1 << 19; // 512 Ki
+/// Work-scaled worker count: roughly one worker per this many elements, clamped to
+/// the hardware thread count. Keeps each worker's contiguous run large enough to
+/// amortize the spawn while still using every core on big tensors.
+const FUSION_ELEMS_PER_THREAD: usize = 1 << 18; // 256 Ki / worker
+
+#[inline]
+fn fusion_thread_count(n: usize) -> usize {
+    if n < FUSION_THREAD_MIN_ELEMS {
+        return 1;
+    }
+    let hw = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    (n / FUSION_ELEMS_PER_THREAD).clamp(1, hw)
+}
+
+/// Drive a per-chunk fused `apply` over `values` in `FUSION_CHUNK`-sized chunks.
+///
+/// For large `n` the work fans out across a `std::thread::scope` over disjoint,
+/// `FUSION_CHUNK`-aligned contiguous segments. This is **bit-identical** to the
+/// serial loop: every element is still produced by the SAME ordered sequence of
+/// scalar ops — only *which worker owns which contiguous run* changes, and there
+/// is no cross-chunk reduction or reassociation. `apply` receives
+/// `(chunk, global_base)`; the global base preserves broadcast row/col indexing
+/// across the split (each chunk maps to the same absolute element offsets it had
+/// in the serial walk).
+#[inline]
+fn drive_fusion_chunks<T, F>(values: &mut [T], apply: F)
+where
+    T: Send,
+    F: Fn(&mut [T], usize) + Sync,
+{
+    let n = values.len();
+    let threads = fusion_thread_count(n);
+    if threads <= 1 {
+        let mut s = 0;
+        while s < n {
+            let e = (s + FUSION_CHUNK).min(n);
+            apply(&mut values[s..e], s);
+            s = e;
+        }
+        return;
+    }
+    // Contiguous, chunk-aligned segment per worker (ceil so we never drop a tail).
+    let seg = n.div_ceil(threads).next_multiple_of(FUSION_CHUNK);
+    let apply = &apply;
+    std::thread::scope(|scope| {
+        let mut base = 0usize;
+        let mut rest: &mut [T] = values;
+        while !rest.is_empty() {
+            let take = seg.min(rest.len());
+            let (head, tail) = rest.split_at_mut(take);
+            rest = tail;
+            scope.spawn(move || {
+                let mut s = 0;
+                while s < head.len() {
+                    let e = (s + FUSION_CHUNK).min(head.len());
+                    apply(&mut head[s..e], base + s);
+                    s = e;
+                }
+            });
+            base += take;
+        }
+    });
+}
+
 /// Classify one operand atom. Pushes external dense-f64 tensors into `ext`/`ext_vars`
 /// and sets/checks the run shape `S`. Returns `None` (bail) for anything not
 /// fuse-eligible (non-f64 literal, non-dense or wrong-shape tensor, scalar non-f64).
@@ -1762,12 +1838,9 @@ fn try_fuse_elementwise_chain_f64(
     let out_var = run_out?;
 
     let mut values = vec![0.0_f64; n];
-    let mut s = 0;
-    while s < n {
-        let e = (s + FUSION_CHUNK).min(n);
-        apply_fusion_chunk(&mut values[s..e], &tape, &ext, s);
-        s = e;
-    }
+    drive_fusion_chunks(&mut values, |chunk, base| {
+        apply_fusion_chunk(chunk, &tape, &ext, base)
+    });
     Some(FusedRun {
         out_var,
         values: FusedValues::F64(values),
@@ -2319,12 +2392,9 @@ fn try_fuse_elementwise_chain_f32(
     let out_var = run_out?;
 
     let mut values = vec![0.0_f32; n];
-    let mut s = 0;
-    while s < n {
-        let e = (s + FUSION_CHUNK).min(n);
-        apply_f32_fusion_chunk(&mut values[s..e], &tape, &ext, s);
-        s = e;
-    }
+    drive_fusion_chunks(&mut values, |chunk, base| {
+        apply_f32_fusion_chunk(chunk, &tape, &ext, base)
+    });
     Some(FusedRun {
         out_var,
         values: FusedValues::F32(values),
@@ -2767,12 +2837,9 @@ fn try_fuse_elementwise_chain_i64(
     let out_var = run_out?;
 
     let mut values = vec![0_i64; n];
-    let mut s = 0;
-    while s < n {
-        let e = (s + FUSION_CHUNK).min(n);
-        apply_i64_fusion_chunk(&mut values[s..e], &tape, &ext, s);
-        s = e;
-    }
+    drive_fusion_chunks(&mut values, |chunk, base| {
+        apply_i64_fusion_chunk(chunk, &tape, &ext, base)
+    });
     Some(FusedRun {
         out_var,
         values: FusedValues::I64(values),
@@ -3171,12 +3238,9 @@ fn try_fuse_elementwise_chain_half(
     let out_var = run_out?;
 
     let mut values = vec![0_u16; n];
-    let mut s = 0;
-    while s < n {
-        let e = (s + FUSION_CHUNK).min(n);
-        apply_half_fusion_chunk(dt, &mut values[s..e], &tape, &ext, s);
-        s = e;
-    }
+    drive_fusion_chunks(&mut values, |chunk, base| {
+        apply_half_fusion_chunk(dt, chunk, &tape, &ext, base)
+    });
     Some(FusedRun {
         out_var,
         values: FusedValues::Half { dtype: dt, values },
@@ -9267,6 +9331,151 @@ mod tests {
                 got[i].to_bits(),
                 want[i].to_bits(),
                 "fused chain mismatch at {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn fusion_threaded_f64_chain_matches_reference_bit_for_bit() {
+        // Force the THREADED chunk driver: n >= FUSION_THREAD_MIN_ELEMS with a
+        // non-chunk-aligned tail, so segment partitioning and the per-worker
+        // global-base offsets must reproduce the serial walk exactly. Same 6-op
+        // chain as `fusion_chain_matches_reference_bit_for_bit`, just larger.
+        let n = (1usize << 19) + 1234; // > FUSION_THREAD_MIN_ELEMS, unaligned tail
+        let xv: Vec<f64> = (0..n).map(|i| i as f64 * 0.013 - 9.0).collect();
+        let yv: Vec<f64> = (0..n).map(|i| (i as f64 * 0.007).sin() + 1.5).collect();
+        let x = VarId(0);
+        let y = VarId(1);
+        let (v1, v2, v3, v4, v5, out) =
+            (VarId(2), VarId(3), VarId(4), VarId(5), VarId(6), VarId(7));
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(Primitive::Mul, smallvec![Atom::Var(x), Atom::Var(x)], v1),
+            mk(Primitive::Add, smallvec![Atom::Var(v1), lit(2.5)], v2),
+            mk(Primitive::Sub, smallvec![lit(7.0), Atom::Var(v2)], v3),
+            mk(Primitive::Div, smallvec![Atom::Var(v3), Atom::Var(y)], v4),
+            mk(Primitive::Neg, smallvec![Atom::Var(v4)], v5),
+            mk(Primitive::Mul, smallvec![Atom::Var(v5), Atom::Var(x)], out),
+        ];
+        let jaxpr = Jaxpr::new(vec![x, y], vec![], vec![out], eqns);
+        let got = f64_vec(
+            &eval_jaxpr(
+                &jaxpr,
+                &[f64_tensor(n, |i| xv[i]), f64_tensor(n, |i| yv[i])],
+            )
+            .unwrap()[0],
+        );
+        let want: Vec<f64> = (0..n)
+            .map(|i| {
+                let v1 = xv[i] * xv[i];
+                let v2 = v1 + 2.5;
+                let v3 = 7.0 - v2;
+                let v4 = v3 / yv[i];
+                let v5 = -v4;
+                v5 * xv[i]
+            })
+            .collect();
+        assert_eq!(got.len(), n);
+        for i in 0..n {
+            assert_eq!(
+                got[i].to_bits(),
+                want[i].to_bits(),
+                "threaded fused chain mismatch at {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
+    #[test]
+    fn fusion_threaded_f64_row_broadcast_matches_reference_bit_for_bit() {
+        // Threaded driver + row broadcast: cols (257) divides neither FUSION_CHUNK
+        // nor the per-worker segment, so chunk AND thread boundaries fall mid-row.
+        // Element (r, c) must still map to bias[c] from the absolute base offset.
+        let cols = 257usize;
+        let rows = 2048usize;
+        let n = rows * cols; // 526_336 > FUSION_THREAD_MIN_ELEMS
+        let x: Vec<f64> = (0..n).map(|i| i as f64 * 0.003 - 7.0).collect();
+        let y: Vec<f64> = (0..n).map(|i| (i as f64 * 0.011).cos() + 1.25).collect();
+        let bias: Vec<f64> = (0..cols).map(|i| i as f64 * 0.02 - 0.7).collect();
+        let xv = VarId(0);
+        let bv = VarId(1);
+        let yv = VarId(2);
+        let v: Vec<VarId> = (3..=10).map(VarId).collect();
+        let mk = |p: Primitive, ins: smallvec::SmallVec<[Atom; 4]>, o: VarId| Equation {
+            primitive: p,
+            inputs: ins,
+            outputs: smallvec![o],
+            params: BTreeMap::new(),
+            sub_jaxprs: vec![],
+            effects: vec![],
+        };
+        let eqns = vec![
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(xv), Atom::Var(bv)],
+                v[0],
+            ),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[0]), lit(1.25)], v[1]),
+            mk(
+                Primitive::Sub,
+                smallvec![Atom::Var(v[1]), Atom::Var(bv)],
+                v[2],
+            ),
+            mk(
+                Primitive::Mul,
+                smallvec![Atom::Var(v[2]), Atom::Var(yv)],
+                v[3],
+            ),
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(v[3]), Atom::Var(bv)],
+                v[4],
+            ),
+            mk(Primitive::Sub, smallvec![Atom::Var(v[4]), lit(0.5)], v[5]),
+            mk(Primitive::Mul, smallvec![Atom::Var(v[5]), lit(2.0)], v[6]),
+            mk(
+                Primitive::Add,
+                smallvec![Atom::Var(v[6]), Atom::Var(bv)],
+                v[7],
+            ),
+        ];
+        let jaxpr = Jaxpr::new(vec![xv, bv, yv], vec![], vec![v[7]], eqns);
+        let dims = vec![rows as u32, cols as u32];
+        let args = [
+            f64_tensor_values(dims.clone(), x.clone()),
+            f64_tensor_values(vec![cols as u32], bias.clone()),
+            f64_tensor_values(dims, y.clone()),
+        ];
+        let got = f64_vec(&eval_jaxpr(&jaxpr, &args).unwrap()[0]);
+        let want: Vec<f64> = (0..n)
+            .map(|i| {
+                let c = i % cols;
+                let v0 = x[i] + bias[c];
+                let v1 = v0 * 1.25;
+                let v2 = v1 - bias[c];
+                let v3 = v2 * y[i];
+                let v4 = v3 + bias[c];
+                let v5 = v4 - 0.5;
+                let v6 = v5 * 2.0;
+                v6 + bias[c]
+            })
+            .collect();
+        assert_eq!(got.len(), n);
+        for i in 0..n {
+            assert_eq!(
+                got[i].to_bits(),
+                want[i].to_bits(),
+                "threaded row-broadcast mismatch at {i}: {} vs {}",
                 got[i],
                 want[i]
             );
