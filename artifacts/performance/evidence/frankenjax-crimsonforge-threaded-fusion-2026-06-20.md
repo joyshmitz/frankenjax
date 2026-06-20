@@ -78,3 +78,24 @@ established single-op gate. The lever is KEPT but narrowed to >= 8.4M-element
 f64/f32/i64 elementwise chains (robust 1.07-1.33x across idle + contended); half
 stays serial (measured neutral 0.86-1.01x). Below 8.4M = serial, no regression.
 Per-dtype A/B harnesses: `run_{f64,f32,i64,bf16}_thread_ab` in eval_fusion_speed.
+
+## Same-host head-to-head vs JAX/XLA (gauntlet completion)
+
+Both Rust (local release bench, NOT rch) and JAX 0.10.1 x64 run on the SAME host,
+so the ratio is honest (no rch-worker ~1.45x penalty). 8-op cheap chain.
+
+| workload | Rust serial | Rust threaded | JAX (XLA) | threaded vs JAX |
+| --- | ---: | ---: | ---: | --- |
+| f64 16M | 268.4 ms | 194.5 ms | 25.1 ms | **JAX 7.75x faster** |
+| f32 16M | 134.5 ms | 103.6 ms | 13.6 ms | **JAX 7.6x faster** |
+
+VERDICT: a LARGE remaining JAX loss. Threading recovered ~1.3-1.4x (f64 16M loss
+10.7x -> 7.75x) but XLA still wins ~7-8x. Root cause is NOT parallelism anymore —
+it is per-element interpreter inefficiency: (1) step-major chunk apply reloads the
+64KB chunk from L2 once PER op (8 passes) instead of XLA's single load-compute-store
+in registers; (2) per-call eval_jaxpr overhead (arg clone, TensorValue construction,
+liveness); vs XLA's one fused all-core SIMD kernel. The next levers (SIMD single-pass
+register-resident chunk eval; cut per-call construction) are larger and partly
+blocked: single-pass register fusion was REJECTED in the compiled path (stash@{2},
+f32 1.74x/i64 1.34x REGRESS) and SIMD-poly needs the policy-gated +fma flag. The 1M
+ratios were local-contention-noisy (concurrent processes) and are omitted.
