@@ -6743,12 +6743,41 @@ fn resolve_dense_f32_operand<'a>(
     }
 }
 
+/// f32 sibling of [`fill_dense_f64_nobcast`]. The op closure is monomorphized and the
+/// operand kind matched ONCE, so Add/Sub/Mul/Div become a native-f32 `o[i]=a[i] OP b[i]`
+/// loop that auto-vectorizes to `vaddps` (8-wide under `+avx2`). BIT-EXACT vs eager's
+/// widen→f64-op→narrow: for a single +/-/*/÷, f64 (53-bit mantissa) carries ≥ 2·24+2 bits
+/// so `(f64(a) OP f64(b)) as f32 == a OP b` in native f32 (Figueroa: no double rounding).
+#[inline]
+fn fill_dense_f32_nobcast<F: Fn(f32, f32) -> f32>(a: DenseF32Ref, b: DenseF32Ref, o: &mut [f32], f: F) {
+    match (a, b) {
+        (DenseF32Ref::Tensor(ta), DenseF32Ref::Scalar(sb)) => {
+            for (o, &x) in o.iter_mut().zip(ta) {
+                *o = f(x, sb);
+            }
+        }
+        (DenseF32Ref::Scalar(sa), DenseF32Ref::Tensor(tb)) => {
+            for (o, &y) in o.iter_mut().zip(tb) {
+                *o = f(sa, y);
+            }
+        }
+        (DenseF32Ref::Tensor(ta), DenseF32Ref::Tensor(tb)) => {
+            for ((o, &x), &y) in o.iter_mut().zip(ta).zip(tb) {
+                *o = f(x, y);
+            }
+        }
+        // (Scalar,Scalar) is handled by the caller before this is reached.
+        (DenseF32Ref::Scalar(sa), DenseF32Ref::Scalar(sb)) => o.iter_mut().for_each(|o| *o = f(sa, sb)),
+    }
+}
+
 fn run_scalar_f32_plan_as_tensor_into(
     plan: &ScalarF32Plan,
     const_values: &[Value],
     args: &[Value],
     out: &mut Vec<Value>,
     cells: &mut Vec<DenseF32Cell>,
+    vectorize: bool,
 ) -> Option<Result<(), InterpreterError>> {
     if const_values.len() != plan.const_slots.len() {
         return Some(Err(InterpreterError::ConstArity {
@@ -6811,16 +6840,35 @@ fn run_scalar_f32_plan_as_tensor_into(
             }
             _ => {
                 let mut o = vec![0.0_f32; n];
-                for (i, slot) in o.iter_mut().enumerate() {
-                    let av = match a {
-                        DenseF32Ref::Scalar(v) => v,
-                        DenseF32Ref::Tensor(t) => t[i],
-                    };
-                    let bv = match b {
-                        DenseF32Ref::Scalar(v) => v,
-                        DenseF32Ref::Tensor(t) => t[i],
-                    };
-                    *slot = apply_scalar_f32_binary(step.op, av, bv);
+                // Hoist the op match so the cheap ops vectorize (native f32 == eager's
+                // widen→f64→narrow for +/-/*/÷; see fill_dense_f32_nobcast). `vectorize`
+                // is the benchmark A/B control; other ops keep the generic widen path.
+                match step.op {
+                    ScalarF64BinaryOp::Add if vectorize => {
+                        fill_dense_f32_nobcast(a, b, &mut o, |x, y| x + y)
+                    }
+                    ScalarF64BinaryOp::Sub if vectorize => {
+                        fill_dense_f32_nobcast(a, b, &mut o, |x, y| x - y)
+                    }
+                    ScalarF64BinaryOp::Mul if vectorize => {
+                        fill_dense_f32_nobcast(a, b, &mut o, |x, y| x * y)
+                    }
+                    ScalarF64BinaryOp::Div if vectorize => {
+                        fill_dense_f32_nobcast(a, b, &mut o, |x, y| x / y)
+                    }
+                    _ => {
+                        for (i, slot) in o.iter_mut().enumerate() {
+                            let av = match a {
+                                DenseF32Ref::Scalar(v) => v,
+                                DenseF32Ref::Tensor(t) => t[i],
+                            };
+                            let bv = match b {
+                                DenseF32Ref::Scalar(v) => v,
+                                DenseF32Ref::Tensor(t) => t[i],
+                            };
+                            *slot = apply_scalar_f32_binary(step.op, av, bv);
+                        }
+                    }
                 }
                 DenseF32Cell::Tensor(o)
             }
@@ -8341,6 +8389,7 @@ fn run_dense_plan_into_core(
             args,
             out,
             &mut scalar_buffers.dense_f32,
+            vectorize,
         )
     {
         return result;
@@ -11600,7 +11649,7 @@ mod tests {
             let mut tout: Vec<Value> = Vec::new();
             let mut cells: Vec<super::DenseF32Cell> = Vec::new();
             let handled =
-                super::run_scalar_f32_plan_as_tensor_into(p, &[], args, &mut tout, &mut cells)
+                super::run_scalar_f32_plan_as_tensor_into(p, &[], args, &mut tout, &mut cells, true)
                     .unwrap_or_else(|| panic!("{name}: f32 tensor arena bailed (None)"));
             handled.expect("f32 tensor arena ok");
             assert_eq!(
@@ -11632,7 +11681,8 @@ mod tests {
                 &[],
                 &[tensor(&big)],
                 &mut tout,
-                &mut cells
+                &mut cells,
+                true
             )
             .is_none(),
             "large f32 tensor must bail to the fusion"
@@ -13012,7 +13062,7 @@ mod tests {
             let mut cells: Vec<super::DenseF32Cell> = Vec::new();
             let mut acc = 0.0f32;
             for _ in 0..n {
-                super::run_scalar_f32_plan_as_tensor_into(p, &[], &args, &mut o, &mut cells)
+                super::run_scalar_f32_plan_as_tensor_into(p, &[], &args, &mut o, &mut cells, true)
                     .expect("handled")
                     .expect("ok");
                 if let Value::Tensor(t) = &o[0] {

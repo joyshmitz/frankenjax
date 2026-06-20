@@ -96,6 +96,21 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
         let jaxpr = build_chain_jaxpr(4, Literal::from_f64(1.0));
         bench_one(&mut group, &format!("tensorE{elems}/n=4"), &jaxpr, &args);
     }
+    // f32 (JAX's DEFAULT tensor dtype): native-f32 vectorization (vaddps, 8-wide), bit-
+    // exact vs eager's widen→f64→narrow for +/-/*/÷ (Figueroa). 256-lane chains.
+    let f32_tensor = Value::Tensor(
+        fj_core::TensorValue::new(
+            fj_core::DType::F32,
+            fj_core::Shape { dims: vec![256] },
+            (0..256).map(|_| Literal::from_f32(1.0)).collect(),
+        )
+        .expect("f32 tensor"),
+    );
+    let f32_args = [f32_tensor];
+    for &n in &[8usize, 32] {
+        let jaxpr = build_chain_jaxpr(n, Literal::from_f32(1.0));
+        bench_one(&mut group, &format!("f32E256/n={n}"), &jaxpr, &f32_args);
+    }
     group.finish();
 }
 

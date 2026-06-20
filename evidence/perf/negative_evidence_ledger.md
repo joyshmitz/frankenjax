@@ -2623,6 +2623,18 @@ ends are not rediscovered without new evidence.
   ~10.5x on the very workload that was the documented loss.**
 - DECISION: KEEP. 6-13x same-invocation, bit-exact, no regression, flips the headline JAX loss hard.
   Scope: f64 no-broadcast Add/Sub/Mul/Div (both the in-place linear-chain path and the per-step path).
-  NEXT: the same hoist for f32 (JAX's default dtype) is the obvious follow-up but its per-element
-  widen->f64-op->narrow needs a vectorizable f32-native form for the cheap ops; measure before
-  shipping.
+
+- FOLLOW-UP SHIPPED — f32 (JAX's DEFAULT tensor dtype): same hoist in the f32 per-step arena
+  (`fill_dense_f32_nobcast`) using NATIVE f32 ops (`vaddps`, 8-wide). The widen-blocks-SIMD worry was
+  unfounded: for a single +/-/*/÷, f64 (53-bit mantissa) carries >= 2*24+2 bits so
+  `(f64(a) OP f64(b)) as f32 == a OP b` in native f32 (Figueroa — no double rounding), i.e. native ==
+  eager's widen->f64->narrow, BIT-EXACT. Empirically confirmed by `dense_f32_tensor_arena_bit_
+  identical_to_generic`. Same-invocation A/B:
+
+  | workload | vectorized | generic widen (`eval_scalar_inner`) | speedup |
+  | --- | ---: | ---: | ---: |
+  | f32E256/n=8  | 546 ns | 5234 ns | 9.6x |
+  | f32E256/n=32 | 2252 ns | 21857 ns | 9.7x |
+
+  i64 likely also wins (integer SIMD) — not yet done. Half (bf16/f16) needs decode and won't vectorize
+  cleanly. NEXT: i64 cheap-op hoist; hunt other interpreter inner loops calling per-element dispatch.
