@@ -2643,6 +2643,31 @@ fn bench_cumsum_16k_x_1k_f32_axis1(c: &mut Criterion) {
     });
 }
 
+// 16384x1024 f64 Cumsum along axis 0 (leading/strided): 1024 independent columns,
+// each a 16384-deep scan read at stride 1024 by the current serial strided path.
+// Measures the leading-axis cumulative gap vs JAX (head-to-head:
+// benchmarks/jax_comparison/cumsum_axis0_gauntlet.py).
+fn bench_cumsum_16k_x_1k_f64_axis0(c: &mut Criterion) {
+    let (rows, cols) = (16_384usize, 1_024usize);
+    let data: Vec<f64> = (0..rows * cols)
+        .map(|i| ((i % 997) as f64 - 498.0) * 1e-3)
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cumsum_16kx1k_f64_axis0", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cumsum, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_cumsum_64k_f64_literal_reference(c: &mut Criterion) {
     let elements: Vec<Literal> = (0..LARGE_ELEMENTWISE_LEN)
         .map(|i| Literal::from_f64(i as f64 * 0.001))
@@ -6586,6 +6611,7 @@ criterion_group!(
     bench_argmax_16k_x_1k_axis1_f64,
     bench_argmax_16k_x_1k_axis0_f64,
     bench_cumsum_16k_x_1k_f32_axis1,
+    bench_cumsum_16k_x_1k_f64_axis0,
     bench_reduce_sum_64k_i64_literal_reference,
     bench_reduce_sum_64k_f32_dense,
     bench_reduce_sum_64k_f32_literal_reference,

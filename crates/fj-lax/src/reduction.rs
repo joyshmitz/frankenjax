@@ -3267,6 +3267,50 @@ where
     out
 }
 
+/// Streaming leading-axis (`axis == 0`) cumulative scan of a `rows × cols` row-major
+/// tensor: scan DOWN each column (the leading axis) keeping a per-column f64
+/// accumulator (cols-wide, L1-resident) while reading/writing k-outer / column-inner
+/// so every access is CONTIGUOUS. The serial strided path instead re-reads each
+/// column at stride `cols` (cache-hostile — 3-4x off bandwidth). Each column folds
+/// `k` in the SAME ascending (or reverse) order as that serial scan, so the result is
+/// BIT-IDENTICAL. The f64 accumulator + per-step `narrow` matches both the F64
+/// (`narrow` = identity) and F32 (`narrow` = `as f32`, never rounded mid-scan) serial
+/// contracts.
+#[allow(clippy::too_many_arguments)]
+fn scan_leading_axis_to_vec<S: Copy, T: Copy>(
+    src: &[S],
+    rows: usize,
+    cols: usize,
+    reverse: bool,
+    init: f64,
+    widen: impl Fn(S) -> f64,
+    narrow: impl Fn(f64) -> T,
+    fill: T,
+    op: impl Fn(f64, f64) -> f64,
+) -> Vec<T> {
+    let mut out = vec![fill; rows * cols];
+    let mut acc = vec![init; cols];
+    let scan_row = |k: usize, out: &mut [T], acc: &mut [f64]| {
+        let base = k * cols;
+        let srow = &src[base..base + cols];
+        let orow = &mut out[base..base + cols];
+        for c in 0..cols {
+            acc[c] = op(acc[c], widen(srow[c]));
+            orow[c] = narrow(acc[c]);
+        }
+    };
+    if reverse {
+        for k in (0..rows).rev() {
+            scan_row(k, &mut out, &mut acc);
+        }
+    } else {
+        for k in 0..rows {
+            scan_row(k, &mut out, &mut acc);
+        }
+    }
+    out
+}
+
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn eval_cumulative_dense(
@@ -3322,6 +3366,22 @@ fn eval_cumulative_dense(
             let mut out = src.to_vec();
             scan_contiguous_lines_in_place(&mut out, axis_dim, reverse, float_init, float_op);
             out
+        } else if axis == 0 && outer_count > 1 {
+            // Leading-axis (cumsum/cumprod/... DOWN the columns): the serial branch
+            // below re-reads each column at stride `axis_stride == outer_count`
+            // (cache-hostile). Stream k-outer/column-inner instead (contiguous
+            // reads+writes, per-column f64 acc in L1) — bit-identical.
+            scan_leading_axis_to_vec(
+                src,
+                axis_dim,
+                outer_count,
+                reverse,
+                float_init,
+                |x| x,
+                |a| a,
+                float_init,
+                float_op,
+            )
         } else {
             let mut out = src.to_vec();
             for outer in 0..outer_count {
@@ -3366,6 +3426,21 @@ fn eval_cumulative_dense(
         // inputs keep the serial per-line gather below.
         let out = if axis_stride == 1 {
             scan_contiguous_f32_lines_to_vec(src, axis_dim, reverse, float_init, float_op)
+        } else if axis == 0 && outer_count > 1 {
+            // Leading-axis f32 (cumsum DOWN the columns): stream k-outer/column-inner
+            // (contiguous), f64 acc rounded to f32 per step — bit-identical to the
+            // serial strided scan below.
+            scan_leading_axis_to_vec(
+                src,
+                axis_dim,
+                outer_count,
+                reverse,
+                float_init,
+                f64::from,
+                |a| a as f32,
+                0.0f32,
+                float_op,
+            )
         } else {
             let mut out = vec![0.0f32; total];
             for outer in 0..outer_count {
@@ -8698,6 +8773,97 @@ mod tests {
                     expect.extend(row.iter().map(|v| v.to_bits()));
                 }
                 assert_eq!(got, expect, "{prim:?} rev={rev} threaded != serial");
+            }
+        }
+    }
+
+    #[test]
+    fn leading_axis_cumulative_matches_serial_reference() {
+        // Exercises the streaming leading-axis (axis 0) path (scan_leading_axis_to_vec)
+        // for F64 and F32 against an independent per-column serial reference, all four
+        // ops + reverse, with special values (-0.0/NaN/±inf) to pin tie/NaN behavior.
+        let rows = 512usize;
+        let cols = 384usize;
+        let raw: Vec<f64> = (0..rows * cols)
+            .map(|i| match i % 263 {
+                0 => -0.0,
+                1 => f64::NAN,
+                2 => f64::INFINITY,
+                3 => f64::NEG_INFINITY,
+                _ => ((i % 13) as f64) - 6.0 + 0.5 * ((i % 4) as f64),
+            })
+            .collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let dense_f64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), raw.clone()).unwrap());
+        let f32_raw: Vec<f32> = raw.iter().map(|&v| v as f32).collect();
+        let dense_f32 = Value::Tensor(TensorValue::new_f32_values(shape, f32_raw.clone()).unwrap());
+
+        let ops: [(Primitive, fn(f64, f64) -> f64, f64); 4] = [
+            (Primitive::Cumsum, |a, b| a + b, 0.0),
+            (Primitive::Cumprod, |a, b| a * b, 1.0),
+            (Primitive::Cummax, crate::jax_max_f64, f64::NEG_INFINITY),
+            (Primitive::Cummin, crate::jax_min_f64, f64::INFINITY),
+        ];
+        for (prim, op, init) in ops {
+            for &rev in &[false, true] {
+                let mut p = BTreeMap::new();
+                p.insert("axis".to_owned(), "0".to_owned());
+                p.insert("reverse".to_owned(), rev.to_string());
+
+                // F64
+                let got64: Vec<u64> = crate::eval_primitive(prim, std::slice::from_ref(&dense_f64), &p)
+                    .unwrap()
+                    .as_tensor()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(|l| l.as_f64().unwrap().to_bits())
+                    .collect();
+                // F32 — read the RAW stored f32 bits (not via as_f64, which would
+                // re-canonicalize NaN payloads through an f32->f64->f32 round-trip).
+                let res32 = crate::eval_primitive(prim, std::slice::from_ref(&dense_f32), &p).unwrap();
+                let res32_t = res32.as_tensor().unwrap();
+                let got32: Vec<u32> = res32_t
+                    .elements
+                    .as_f32_slice()
+                    .expect("dense f32 cumulative output")
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect();
+
+                // Independent per-column serial reference (down the leading axis).
+                let mut exp64 = vec![0u64; rows * cols];
+                let mut exp32 = vec![0u32; rows * cols];
+                for c in 0..cols {
+                    let order: Vec<usize> = if rev {
+                        (0..rows).rev().collect()
+                    } else {
+                        (0..rows).collect()
+                    };
+                    let mut acc = init;
+                    let mut acc32 = init;
+                    for &k in &order {
+                        let idx = k * cols + c;
+                        acc = op(acc, raw[idx]);
+                        exp64[idx] = acc.to_bits();
+                        acc32 = op(acc32, f64::from(f32_raw[idx]));
+                        exp32[idx] = (acc32 as f32).to_bits();
+                    }
+                }
+                // Canonicalize NaN before the bit comparison: NaN payload/sign is not
+                // contractual (the production scan and this hand-rolled reference can
+                // pick different NaN signs for the same value), so compare NaNs as
+                // equal while keeping every finite/±inf result bit-exact.
+                let canon64 = |b: u64| if f64::from_bits(b).is_nan() { 0x7ff8_0000_0000_0000 } else { b };
+                let canon32 = |b: u32| if f32::from_bits(b).is_nan() { 0x7fc0_0000 } else { b };
+                let got64: Vec<u64> = got64.iter().map(|&b| canon64(b)).collect();
+                let exp64: Vec<u64> = exp64.iter().map(|&b| canon64(b)).collect();
+                let got32: Vec<u32> = got32.iter().map(|&b| canon32(b)).collect();
+                let exp32: Vec<u32> = exp32.iter().map(|&b| canon32(b)).collect();
+                assert_eq!(got64, exp64, "{prim:?} rev={rev} f64 leading-axis");
+                assert_eq!(got32, exp32, "{prim:?} rev={rev} f32 leading-axis");
             }
         }
     }
