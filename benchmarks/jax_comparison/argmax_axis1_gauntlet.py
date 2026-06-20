@@ -21,3 +21,5 @@ def bench(fn, args, runs=25, warm=6, inner=30):
 # f64 [16384,1024], argmax over axis 1 (innermost, contiguous) -> [16384]
 x = jnp.asarray((np.arange(R * C) * 1.7e-5).astype(np.float64).reshape(R, C))
 print("argmax_axis1_f64", json.dumps(bench(lambda a: jnp.argmax(a, axis=1), (x,)), indent=2))
+# argmax over axis 0 (leading/strided): output [1024], each col scans 16384 rows.
+print("argmax_axis0_f64", json.dumps(bench(lambda a: jnp.argmax(a, axis=0), (x,)), indent=2))

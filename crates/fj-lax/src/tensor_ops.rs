@@ -7628,6 +7628,93 @@ fn parallel_argmax_fill(
     result
 }
 
+/// Streaming leading-axis (`axis == 0`) argmin/argmax over the column block
+/// `[c0, c0 + best_idx.len())` of a dense row-major `rows × cols` float matrix:
+/// `out[c] = arg-extreme over column c` (elements `values[k*cols + c]`, k ascending).
+/// Loops k-outer / column-inner so each step reads the CONTIGUOUS row slice
+/// `values[k*cols + c0 ..][..w]` (no stride-`cols` gather), keeping per-column
+/// running value/index/NaN state in the block's local cache. Each column folds k in
+/// the SAME ascending order as the serial `arg_extreme_float`, so this is
+/// BIT-IDENTICAL: first-occurrence strict `>`/`<` tie-break, and a sticky
+/// sign-agnostic first-NaN (once a column is NaN, later taps cannot displace it).
+fn arg_extreme_axis0_block<T: Copy>(
+    values: &[T],
+    rows: usize,
+    cols: usize,
+    c0: usize,
+    find_max: bool,
+    widen: impl Fn(T) -> f64,
+    best_idx: &mut [i64],
+) {
+    let w = best_idx.len();
+    let mut best_val = vec![0.0f64; w];
+    let mut best_nan = vec![false; w];
+    // Initialise from row 0 (index 0), matching `arg_extreme_float`'s `best = get(0)`.
+    for j in 0..w {
+        let v = widen(values[c0 + j]);
+        best_val[j] = v;
+        best_nan[j] = v.is_nan();
+        best_idx[j] = 0;
+    }
+    for k in 1..rows {
+        let base = k * cols + c0;
+        let row = &values[base..base + w];
+        for j in 0..w {
+            if best_nan[j] {
+                continue;
+            }
+            let v = widen(row[j]);
+            if v.is_nan() {
+                best_idx[j] = k as i64;
+                best_nan[j] = true;
+            } else if (find_max && v > best_val[j]) || (!find_max && v < best_val[j]) {
+                best_idx[j] = k as i64;
+                best_val[j] = v;
+            }
+        }
+    }
+}
+
+/// Threaded leading-axis (`axis == 0`) argmin/argmax: fan the independent output
+/// columns across threads once the total work is DRAM-bound, each thread streaming
+/// its disjoint column block via `arg_extreme_axis0_block`. Bit-identical to the
+/// serial strided reducer for any partition (columns are independent).
+fn parallel_arg_extreme_axis0<T: Copy + Sync>(
+    values: &[T],
+    rows: usize,
+    cols: usize,
+    find_max: bool,
+    widen: impl Fn(T) -> f64 + Copy + Sync + Send,
+) -> Vec<i64> {
+    let total = values.len();
+    let threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && cols > 1 {
+        crate::arithmetic::work_scaled_threads(total).min(cols).min(16)
+    } else {
+        1
+    };
+    let mut out = vec![0i64; cols];
+    if threads <= 1 {
+        arg_extreme_axis0_block(values, rows, cols, 0, find_max, widen, &mut out);
+        return out;
+    }
+    let cols_per = cols.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [i64] = out.as_mut_slice();
+        let mut c0 = 0usize;
+        while c0 < cols {
+            let w = cols_per.min(cols - c0);
+            let (blk, tail) = rest.split_at_mut(w);
+            rest = tail;
+            let cstart = c0;
+            c0 += w;
+            scope.spawn(move || {
+                arg_extreme_axis0_block(values, rows, cols, cstart, find_max, widen, blk);
+            });
+        }
+    });
+    out
+}
+
 fn extremum_along_axis(
     primitive: Primitive,
     tensor: &TensorValue,
@@ -7722,6 +7809,17 @@ fn extremum_along_axis(
                 TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
             ));
         }
+        if axis == 0 && outer_count > 1 {
+            // Leading-axis (argmax over axis 0 — the batch/strided case): the serial
+            // path scans each output column at stride `axis_stride == outer_count`
+            // (cache-hostile) one column at a time. Stream k-outer/column-inner and
+            // thread over the independent columns instead — bit-identical.
+            let idx =
+                parallel_arg_extreme_axis0(values, axis_dim, outer_count, find_max, |x| x);
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
+            ));
+        }
         for outer in 0..outer_count {
             let base = base_of(outer)?;
             let best_idx =
@@ -7762,6 +7860,15 @@ fn extremum_along_axis(
             if result_shape.dims.is_empty() {
                 return Ok(Value::Scalar(Literal::I64(idx[0])));
             }
+            return Ok(Value::Tensor(
+                TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
+            ));
+        }
+        if axis == 0 && outer_count > 1 {
+            // Leading-axis f32 (argmax over axis 0): stream + thread the independent
+            // columns, widening each tap f32->f64 exactly. Bit-identical.
+            let idx =
+                parallel_arg_extreme_axis0(values, axis_dim, outer_count, find_max, f64::from);
             return Ok(Value::Tensor(
                 TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
             ));
@@ -22091,6 +22198,73 @@ mod tests {
             .map(|l| l.as_i64().expect("expected integer index"))
             .collect();
         assert_eq!(indices, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn argmax_argmin_axis0_threaded_matches_serial_reference_large() {
+        // Large enough to cross CHEAP_BINARY_PARALLEL_MIN (1<<23) so the threaded
+        // leading-axis (axis 0) path runs; NaNs + exact ties exercise the
+        // first-occurrence / sticky-sign-agnostic-first-NaN semantics under
+        // arbitrary column partitioning.
+        let rows = 8200usize;
+        let cols = 1024usize;
+        let mut data = vec![0.0f64; rows * cols];
+        for k in 0..rows {
+            for c in 0..cols {
+                let mut v = (((k * 131 + c * 17) % 1000) as f64) * 0.5 - 250.0;
+                if (k + c) % 521 == 7 {
+                    v = f64::NAN;
+                }
+                data[k * cols + c] = v;
+            }
+        }
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let x = Value::Tensor(TensorValue::new_f64_values(shape, data.clone()).unwrap());
+        let p = params(&[("axis", "0")]);
+
+        for find_max in [true, false] {
+            let prim = if find_max {
+                Primitive::Argmax
+            } else {
+                Primitive::Argmin
+            };
+            let got: Vec<i64> = if find_max {
+                eval_argmax(prim, std::slice::from_ref(&x), &p)
+            } else {
+                eval_argmin(prim, std::slice::from_ref(&x), &p)
+            }
+            .unwrap()
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+
+            // Canonical per-column reference = `arg_extreme_float` semantics.
+            let mut want = vec![0i64; cols];
+            for (c, slot) in want.iter_mut().enumerate() {
+                let mut best = data[c];
+                let mut best_idx = 0usize;
+                let mut best_nan = best.is_nan();
+                let mut k = 1;
+                while k < rows && !best_nan {
+                    let v = data[k * cols + c];
+                    if v.is_nan() {
+                        best_idx = k;
+                        best_nan = true;
+                    } else if (find_max && v > best) || (!find_max && v < best) {
+                        best_idx = k;
+                        best = v;
+                    }
+                    k += 1;
+                }
+                *slot = best_idx as i64;
+            }
+            assert_eq!(got, want, "find_max={find_max}");
+        }
     }
 
     #[test]
