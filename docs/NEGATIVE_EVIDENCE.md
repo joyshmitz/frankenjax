@@ -2,6 +2,34 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-murmw SoA mixed-radix (composite) batch FFT — no-ship (0.50-0.69x regression)
+
+After the pow2 fft/ifft/rfft/irfft SoA wins, the natural extension was to SoA-vectorize
+the **smooth-composite** path (`mixed_radix_into`, e.g. `fft_batch_128x1000` ~30x). Built
+`mixed_radix_ping_soa` (a lane-wide sibling of the recursive `mixed_radix_ping`: every
+scalar radix-2/3/5 and general-p=7/11/13 butterfly op replicated across `w` row lanes with
+shared scalar twiddles) + a tiled driver, gated into `transform_batches_dense`.
+
+**Bit-identical** to per-row `mixed_radix_into` — proven by
+`vectorized_mixed_radix_bit_identical_to_per_row` (n ∈ {6,10,12,14,15,21,30,35,77,143,700,
+1000} covering all radix paths, both directions, 47/47 fft tests). The code is correct.
+
+But it **regresses** end-to-end. Same-binary interleaved min-of-9 single-thread A/B
+(128×1000): tile=4 → **0.69x** (1.891ms → 2.751ms); tile=2 → **0.50x** (→ 3.737ms). Root
+cause is architectural, not a tuning miss: unlike the flat 2-buffer iterative radix-2 path,
+the recursive mixed-radix needs **three** SoA buffers (input + out + scratch that ping-pong),
+so for large composite n=1000 the working set is ~96-192 KiB (L2/L3) versus the per-row
+path's L1-resident 2×16 KiB. Smaller tiles only lose SIMD width while staying memory-bound
+(hence tile=2 is *worse*). The recursion's strided sub-DFT access and the general-p combine
+also vectorize worse than flat radix-2 stages. Source reverted before commit; no source kept.
+
+Retry predicate: do NOT retry a straight SoA transpose of the recursive mixed-radix — it is
+memory-bound for the composite sizes that matter. A real win needs a different structure:
+an iterative (non-recursive) mixed-radix with in-place stages over a single buffer pair
+(so only 2 SoA buffers, L1-resident), or native batched radix kernels that never materialize
+the full per-row scratch. The pow2 SoA family (fft/ifft/rfft/irfft) stays the only shipped
+SoA FFT win.
+
 ## 2026-06-20 - frankenjax-murmw SoA real-FFT (rfft/irfft) batch kernel — SHIPPED win (1.58-1.79x)
 
 Follow-on to the shipped full-complex SoA pow2 kernel (`73645de8`): that win was wired
