@@ -3848,3 +3848,23 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   ratio this run) — a real, modest, BLAS-microkernel-bound gap (consistent with the documented
   matmul_2d ~XLA/2 FMA ceiling). NOT chasing further (FMA-gated). Pass delta: verification — eigh win
   CONFIRMED + corrected the vs-LAPACK framing (0 wins / 0 losses; methodology fix).
+
+## AzureLynx - MEASURED: conv2d 1.8x + mid-size f64 matmul 9.3x JAX losses (FMA + spawn-overhead gated)
+
+- New head-to-head measurements (jax 0.10.2 x64 jit, block_until_ready, vs fj-lax eval_primitive,
+  rch release; host = Zen3 5975WX, NO AVX512 so that is NOT a factor):
+  - **conv2d** [4,64,64,32]*[3,3,32,64] SAME: JAX 11.25 ms vs fj-lax 20.25 ms = **1.80x LOSS**. fj-lax
+    is im2col + threaded matmul_2d (the GEMM is 16384×288×64 = 3e8 ops → threads), so this is the
+    GEMM ceiling cascading to conv. Moderate, FMA-gated.
+  - **matmul 256³ f64**: JAX 0.186 ms (≈180 GFLOP/s) vs fj-lax 1.727 ms (≈19 GFLOP/s) = **9.3x LOSS** —
+    much worse than the documented large-n "~XLA/2". 256³ DOES cross the threading threshold (16.7M >
+    8M, gets ~8 threads) but per the standing finding only scales ~2.68x over single-core due to
+    per-call OS-thread SPAWN overhead. So the gap = no-FMA (~2x, cntiy-gated) × spawn-limited threading
+    (~4-5x: JAX scales to the full 32-core box, fj-lax to ~2.5x). 
+- BOTH levers are known and NOT clean single-pass wins: (1) FMA = cntiy maintainer decision; (2) the
+  matmul threading scaling = persistent worker pool to kill per-call spawn (bead eqwqb), explicitly a
+  DEDICATED multi-session effort per the GEMM notes — and matmul_2d is codex/shared territory, so I am
+  NOT quick-swinging it. Recorded as characterized gaps. The persistent-pool lever is arguably the
+  single highest-EV remaining non-gated perf swing (it cascades to matmul/conv/linalg-trailing-updates
+  across the whole mid-size regime) — worth a dedicated owner. Pass delta: 2 MEASURED losses
+  (conv 1.8x, matmul-256 9.3x) characterized / 0 wins.
