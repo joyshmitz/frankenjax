@@ -6375,11 +6375,49 @@ fn operand_is_slot(operand: ScalarF64Operand, slot: usize) -> bool {
     matches!(operand, ScalarF64Operand::Slot(s) if s == slot)
 }
 
+/// Apply one in-place linear-chain step: `v[i] = v[i] OP scalar` (or `scalar OP v[i]`
+/// when `scalar_on_left`). The op is matched ONCE so the cheap arithmetic ops lower to a
+/// straight in-place loop that auto-vectorizes under `+avx2` (vaddpd/…); other ops keep
+/// the generic per-element apply. Bit-identical to `apply_scalar_f64_binary` per element:
+/// elementwise, no reassociation, no FMA (`+avx2` only, not `+fma`).
+#[inline]
+fn apply_dense_f64_chain_step(
+    values: &mut [f64],
+    op: ScalarF64BinaryOp,
+    scalar: f64,
+    scalar_on_left: bool,
+    vectorize: bool,
+) {
+    match (op, scalar_on_left) {
+        (ScalarF64BinaryOp::Add, _) if vectorize => values.iter_mut().for_each(|v| *v += scalar),
+        (ScalarF64BinaryOp::Mul, _) if vectorize => values.iter_mut().for_each(|v| *v *= scalar),
+        (ScalarF64BinaryOp::Sub, false) if vectorize => {
+            values.iter_mut().for_each(|v| *v -= scalar)
+        }
+        (ScalarF64BinaryOp::Sub, true) if vectorize => {
+            values.iter_mut().for_each(|v| *v = scalar - *v)
+        }
+        (ScalarF64BinaryOp::Div, false) if vectorize => {
+            values.iter_mut().for_each(|v| *v /= scalar)
+        }
+        (ScalarF64BinaryOp::Div, true) if vectorize => {
+            values.iter_mut().for_each(|v| *v = scalar / *v)
+        }
+        (op, false) => values
+            .iter_mut()
+            .for_each(|v| *v = apply_scalar_f64_binary(op, *v, scalar)),
+        (op, true) => values
+            .iter_mut()
+            .for_each(|v| *v = apply_scalar_f64_binary(op, scalar, *v)),
+    }
+}
+
 fn run_linear_scalar_f64_tensor_chain_into(
     plan: &ScalarF64Plan,
     shape: &Shape,
     out: &mut Vec<Value>,
     cells: &mut [DenseF64Cell],
+    vectorize: bool,
 ) -> Option<Result<(), InterpreterError>> {
     if plan.out_slots.len() != 1 || plan.steps.is_empty() {
         return None;
@@ -6446,15 +6484,11 @@ fn run_linear_scalar_f64_tensor_chain_into(
                     }
                     (true, false) => {
                         let rhs_scalar = scalar_dense_f64_operand(cells, rhs)?;
-                        for value in &mut values {
-                            *value = apply_scalar_f64_binary(step.op, *value, rhs_scalar);
-                        }
+                        apply_dense_f64_chain_step(&mut values, step.op, rhs_scalar, false, vectorize);
                     }
                     (false, true) => {
                         let lhs_scalar = scalar_dense_f64_operand(cells, step.lhs)?;
-                        for value in &mut values {
-                            *value = apply_scalar_f64_binary(step.op, lhs_scalar, *value);
-                        }
+                        apply_dense_f64_chain_step(&mut values, step.op, lhs_scalar, true, vectorize);
                     }
                     (false, false) => unreachable!("validated linear tensor chain"),
                 }
@@ -6482,12 +6516,48 @@ fn run_linear_scalar_f64_tensor_chain_into(
     Some(Ok(()))
 }
 
+/// Fill `o[i] = f(a[i], b[i])` for the NO-BROADCAST case (operands are scalar or
+/// same-shape dense tensors). The op closure `f` is monomorphized and the operand kind
+/// is matched ONCE outside the element loop, so for a pure arithmetic `f` the body is a
+/// straight-line `o[i] = a[i] OP b[i]` that auto-vectorizes (vaddpd/… under `+avx2`) —
+/// unlike the generic `apply_scalar_f64_binary(step.op, a.at(i), b.at(i))` loop whose
+/// per-element op-match (40+ arms) and 4-way `DenseRef::at` match block vectorization.
+/// Bit-identical: SIMD f64 add/sub/mul/div are elementwise, no reassociation, and we
+/// never introduce FMA (`+avx2` only, not `+fma`).
+#[inline]
+fn fill_dense_f64_nobcast<F: Fn(f64, f64) -> f64>(a: DenseRef, b: DenseRef, o: &mut [f64], f: F) {
+    match (a, b) {
+        (DenseRef::Tensor(ta), DenseRef::Scalar(sb)) => {
+            for (o, &x) in o.iter_mut().zip(ta) {
+                *o = f(x, sb);
+            }
+        }
+        (DenseRef::Scalar(sa), DenseRef::Tensor(tb)) => {
+            for (o, &y) in o.iter_mut().zip(tb) {
+                *o = f(sa, y);
+            }
+        }
+        (DenseRef::Tensor(ta), DenseRef::Tensor(tb)) => {
+            for ((o, &x), &y) in o.iter_mut().zip(ta).zip(tb) {
+                *o = f(x, y);
+            }
+        }
+        // (Scalar,Scalar) is handled by the caller; broadcast operands never reach here.
+        _ => {
+            for (i, o) in o.iter_mut().enumerate() {
+                *o = f(a.at(i), b.at(i));
+            }
+        }
+    }
+}
+
 fn run_scalar_f64_plan_as_tensor_into(
     plan: &ScalarF64Plan,
     const_values: &[Value],
     args: &[Value],
     out: &mut Vec<Value>,
     cells: &mut Vec<DenseF64Cell>,
+    vectorize: bool,
 ) -> Option<Result<(), InterpreterError>> {
     if const_values.len() != plan.const_slots.len() {
         return Some(Err(InterpreterError::ConstArity {
@@ -6549,7 +6619,7 @@ fn run_scalar_f64_plan_as_tensor_into(
         return None;
     }
 
-    if let Some(result) = run_linear_scalar_f64_tensor_chain_into(plan, &shape, out, cells) {
+    if let Some(result) = run_linear_scalar_f64_tensor_chain_into(plan, &shape, out, cells, vectorize) {
         return Some(result);
     }
 
@@ -6582,8 +6652,27 @@ fn run_scalar_f64_plan_as_tensor_into(
                         row += 1;
                     }
                 } else {
-                    for (i, slot) in o.iter_mut().enumerate() {
-                        *slot = apply_scalar_f64_binary(step.op, a.at(i), b.at(i));
+                    // Hoist the op + operand-kind matches out of the element loop so the
+                    // common arithmetic ops auto-vectorize; other ops keep the generic
+                    // per-element path. `vectorize` is the benchmark A/B control.
+                    match step.op {
+                        ScalarF64BinaryOp::Add if vectorize => {
+                            fill_dense_f64_nobcast(a, b, &mut o, |x, y| x + y)
+                        }
+                        ScalarF64BinaryOp::Sub if vectorize => {
+                            fill_dense_f64_nobcast(a, b, &mut o, |x, y| x - y)
+                        }
+                        ScalarF64BinaryOp::Mul if vectorize => {
+                            fill_dense_f64_nobcast(a, b, &mut o, |x, y| x * y)
+                        }
+                        ScalarF64BinaryOp::Div if vectorize => {
+                            fill_dense_f64_nobcast(a, b, &mut o, |x, y| x / y)
+                        }
+                        _ => {
+                            for (i, slot) in o.iter_mut().enumerate() {
+                                *slot = apply_scalar_f64_binary(step.op, a.at(i), b.at(i));
+                            }
+                        }
                     }
                 }
                 DenseF64Cell::Tensor(o)
@@ -7033,6 +7122,33 @@ impl<'a> CompiledJaxprRunner<'a> {
     pub fn eval_owned(&mut self, args: &[Value]) -> Result<Vec<Value>, InterpreterError> {
         self.eval(args)?;
         Ok(self.out.clone())
+    }
+
+    /// Benchmark-only control: evaluate with the dense-f64 inner-loop vectorization
+    /// DISABLED (generic per-element `apply_scalar_f64_binary` loop), so a bench can A/B
+    /// the vectorized path against it in the same binary. Behaviourally identical to
+    /// [`eval`](Self::eval); use [`eval`](Self::eval) in production.
+    #[doc(hidden)]
+    pub fn eval_scalar_inner(&mut self, args: &[Value]) -> Result<&[Value], InterpreterError> {
+        if args.len() != self.compiled.jaxpr.invars.len() {
+            return Err(InterpreterError::InputArity {
+                expected: self.compiled.jaxpr.invars.len(),
+                actual: args.len(),
+            });
+        }
+
+        run_dense_plan_into_core(
+            &self.compiled.jaxpr,
+            &[],
+            args,
+            &mut self.env,
+            &self.compiled.plan,
+            &mut self.scratch,
+            &mut self.out,
+            &mut self.scalar_buffers,
+            false,
+        )?;
+        Ok(&self.out)
     }
 }
 
@@ -8019,6 +8135,7 @@ fn run_dense_reshape_plan_into(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_dense_plan_into(
     jaxpr: &Jaxpr,
     const_values: &[Value],
@@ -8028,6 +8145,37 @@ fn run_dense_plan_into(
     scratch: &mut Vec<Value>,
     out: &mut Vec<Value>,
     scalar_buffers: &mut ScalarPlanBuffers,
+) -> Result<(), InterpreterError> {
+    run_dense_plan_into_core(
+        jaxpr,
+        const_values,
+        args,
+        env,
+        plan,
+        scratch,
+        out,
+        scalar_buffers,
+        true,
+    )
+}
+
+/// Core of [`run_dense_plan_into`]. `vectorize` selects the auto-vectorizable
+/// hoisted-op inner loop for the dense-f64 small-tensor arena (the production default);
+/// `false` keeps the generic per-element loop. It is a benchmark A/B knob (see
+/// `CompiledJaxprRunner::eval_scalar_inner`) so the vectorized path can be measured
+/// against the per-element path in the SAME binary — the only worker-variance-immune
+/// signal on the contended bench host. Both modes are bit-for-bit identical.
+#[allow(clippy::too_many_arguments)]
+fn run_dense_plan_into_core(
+    jaxpr: &Jaxpr,
+    const_values: &[Value],
+    args: &[Value],
+    env: &mut [Option<Value>],
+    plan: &DenseEvalPlan,
+    scratch: &mut Vec<Value>,
+    out: &mut Vec<Value>,
+    scalar_buffers: &mut ScalarPlanBuffers,
+    vectorize: bool,
 ) -> Result<(), InterpreterError> {
     // Try each monomorphic scalar-arith executor; each bails (returns None) on the
     // first operand that is not its dtype at runtime, so for a given call at most
@@ -8180,6 +8328,7 @@ fn run_dense_plan_into(
             args,
             out,
             &mut scalar_buffers.dense_f64,
+            vectorize,
         )
     {
         return result;
@@ -11582,7 +11731,7 @@ mod tests {
             let mut tout: Vec<Value> = Vec::new();
             let mut cells: Vec<super::DenseF64Cell> = Vec::new();
             let handled =
-                super::run_scalar_f64_plan_as_tensor_into(p, &[], args, &mut tout, &mut cells)
+                super::run_scalar_f64_plan_as_tensor_into(p, &[], args, &mut tout, &mut cells, true)
                     .unwrap_or_else(|| panic!("{name}: broadcast body bailed (None)"));
             handled.expect("ok");
             assert_eq!(
@@ -11720,7 +11869,7 @@ mod tests {
             let mut tout: Vec<Value> = Vec::new();
             let mut cells: Vec<super::DenseF64Cell> = Vec::new();
             let handled =
-                super::run_scalar_f64_plan_as_tensor_into(p, &[], args, &mut tout, &mut cells)
+                super::run_scalar_f64_plan_as_tensor_into(p, &[], args, &mut tout, &mut cells, true)
                     .unwrap_or_else(|| {
                         panic!("{name}: tensor arena bailed (None) — should handle it")
                     });
@@ -11754,7 +11903,8 @@ mod tests {
                 &[],
                 &[tensor(&big)],
                 &mut tout,
-                &mut cells
+                &mut cells,
+                true
             )
             .is_none(),
             "large tensor must bail to the fusion"
@@ -12963,7 +13113,7 @@ mod tests {
             let mut cells: Vec<super::DenseF64Cell> = Vec::new();
             let mut acc = 0.0f64;
             for _ in 0..n {
-                super::run_scalar_f64_plan_as_tensor_into(p, &[], &args, &mut o, &mut cells)
+                super::run_scalar_f64_plan_as_tensor_into(p, &[], &args, &mut o, &mut cells, true)
                     .expect("handled")
                     .expect("ok");
                 if let Value::Tensor(t) = &o[0] {
@@ -13051,7 +13201,7 @@ mod tests {
             let mut cells: Vec<super::DenseF64Cell> = Vec::new();
             let mut acc = 0.0f64;
             for _ in 0..n {
-                super::run_scalar_f64_plan_as_tensor_into(p, &[], &args, &mut o, &mut cells)
+                super::run_scalar_f64_plan_as_tensor_into(p, &[], &args, &mut o, &mut cells, true)
                     .expect("handled")
                     .expect("ok");
                 if let Value::Tensor(t) = &o[0] {
@@ -16771,6 +16921,15 @@ mod tests {
             assert_eq!(
                 runner, eager,
                 "{label}: compiled runner != eager eval_jaxpr"
+            );
+            // The vectorized dense-f64 inner loop must be bit-identical to the generic
+            // per-element loop it replaces — assert directly, not only via eager.
+            let mut r = compiled_jaxpr.runner();
+            let vectorized = r.eval(args).expect("vectorized eval").to_vec();
+            let scalar_inner = r.eval_scalar_inner(args).expect("scalar-inner eval").to_vec();
+            assert_eq!(
+                vectorized, scalar_inner,
+                "{label}: vectorized != scalar-inner dense-f64 loop"
             );
         };
 

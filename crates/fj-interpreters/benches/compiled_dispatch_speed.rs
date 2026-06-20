@@ -60,6 +60,16 @@ fn bench_one(
                 black_box(out);
             })
         });
+        // Same-invocation A/B control: identical runner with the dense-f64 inner-loop
+        // vectorization DISABLED (generic per-element loop). Vectorized vs per-element in
+        // ONE binary is the only worker-variance-immune signal on the contended host.
+        let mut runner_scalar = compiled.runner();
+        group.bench_function(format!("compiled_runner_scalar/{tag}"), |b| {
+            b.iter(|| {
+                let out = runner_scalar.eval_scalar_inner(black_box(args)).unwrap();
+                black_box(out);
+            })
+        });
     }
 }
 
@@ -77,6 +87,14 @@ fn bench_compiled_dispatch(c: &mut Criterion) {
     for &n in &[8usize, 32] {
         let jaxpr = build_chain_jaxpr(n, Literal::from_f64(1.0));
         bench_one(&mut group, &format!("tensor64/n={n}"), &jaxpr, &tensor_args);
+    }
+    // Element-count sweep at a fixed short chain (n=4): confirms the vectorized inner
+    // loop wins (or at worst ties) across sizes, never regresses.
+    for &elems in &[8usize, 256, 1023] {
+        let arg = vec![1.0_f64; elems];
+        let args = [Value::vector_f64(&arg).expect("vector_f64")];
+        let jaxpr = build_chain_jaxpr(4, Literal::from_f64(1.0));
+        bench_one(&mut group, &format!("tensorE{elems}/n=4"), &jaxpr, &args);
     }
     group.finish();
 }

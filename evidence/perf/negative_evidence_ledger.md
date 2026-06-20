@@ -2583,3 +2583,46 @@ ends are not rediscovered without new evidence.
   -> vaddpd) — attacks the f64 overhead directly without fusion; (b) the `tensor64/n=32` JAX loss
   (5.87us vs JAX 4.52us) is SIMD-throughput + Value-boxing bound, NOT allocation/pass bound — needs
   vectorized per-step kernels for the cheap ops (Add/Sub/Mul/Div) + less boxing, not chain fusion.
+
+## WildForge - vectorize the dense-f64 per-step inner loop (LEVER (a)) — KEPT, FLIPS THE JAX LOSS
+
+- This is REAL LEVER (a) from the rejected-fusion entry directly above, and it WINS decisively.
+  Instead of fusing the chain, keep the step-outer structure (which vectorizes ACROSS the independent
+  elements within a step) and remove what blocked the compiler: the generic dense-f64 per-step inner
+  loop called `apply_scalar_f64_binary(step.op, a.at(i), b.at(i))` per element, whose 40+-arm op
+  match and 4-way `DenseRef::at` match defeat auto-vectorization. Fix: for the no-broadcast case,
+  hoist the op + operand-kind match ONCE outside the element loop into `fill_dense_f64_nobcast<F>`
+  (monomorphized closure), so Add/Sub/Mul/Div become a straight `o[i] = a[i] OP b[i]` loop that
+  lowers to `vaddpd`/etc. under `+avx2`. Max/Min/transcendentals keep the generic loop.
+- BIT-EXACT: SIMD f64 add/sub/mul/div are elementwise, no reassociation, and we never introduce FMA
+  (`+avx2` only, not `+fma`). Asserted directly: `eval` (vectorized) == `eval_scalar_inner`
+  (generic) == eager, across every dtype/op case in `compiled_jaxpr_eval_matches_eager_eval_jaxpr`.
+- CONVERGENCE with mcqr.111: a concurrent agent landed `run_linear_scalar_f64_tensor_chain_into` —
+  for a single-output linear tensor chain it moves the input buffer out of the arena and mutates it
+  IN PLACE through the chain (no per-step `Vec`). That path runs BEFORE the per-step loop, so it owns
+  the common chain workload. On rebase I applied the SAME op-hoisting vectorization to its in-place
+  loops (`apply_dense_f64_chain_step`), so the two levers COMPOSE: in-place buffer reuse (no alloc) +
+  SIMD arithmetic. Both the in-place and per-step paths take the `vectorize` A/B flag.
+- METHOD: same-binary same-invocation A/B via the bench control `eval_scalar_inner` (vectorization
+  OFF, but in-place reuse still ON) vs `eval` (ON), arm `compiled_runner_scalar` vs `compiled_runner`.
+  Worker-variance-immune. Final MERGED numbers (in-place + vectorized):
+
+  | workload | vectorized (`eval`) | in-place only (`eval_scalar_inner`) | speedup |
+  | --- | ---: | ---: | ---: |
+  | tensor64/n=8  | 195 ns | 1179 ns | 6.1x |
+  | tensor64/n=32 | 432 ns | 4308 ns | 10.0x |
+  | E8/n=4   | 140 ns | 196 ns | 1.40x |
+  | E256/n=4 | 255 ns | 2195 ns | 8.6x |
+  | E1023/n=4 | 649 ns | 8610 ns | 13.3x |
+
+  Speedup GROWS with element count (more lanes amortize overhead + SIMD throughput); never regresses.
+  (The control is itself ~1.65x faster than the pre-mcqr.111 7.1us per-step path because in-place
+  reuse stays on; the 10x is purely the vectorization on top.)
+- vs JAX (warmed `jax.jit` CPU, x64, from the mcqr.110 entry above): `tensor64/n=32` was a 1.55x JAX
+  WIN at 4.52us vs our old 7.0us path. Merged in-place+vectorized is 0.432us -> **we now BEAT JAX
+  ~10.5x on the very workload that was the documented loss.**
+- DECISION: KEEP. 6-13x same-invocation, bit-exact, no regression, flips the headline JAX loss hard.
+  Scope: f64 no-broadcast Add/Sub/Mul/Div (both the in-place linear-chain path and the per-step path).
+  NEXT: the same hoist for f32 (JAX's default dtype) is the obvious follow-up but its per-element
+  widen->f64-op->narrow needs a vectorizable f32-native form for the cheap ops; measure before
+  shipping.
