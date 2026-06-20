@@ -2485,6 +2485,7 @@ fn pad_fill_place<T: Copy>(
 /// i64) and `Literal` paths share identical index math — bit-for-bit identical.
 /// No per-element overflow checks: for a valid input tensor every `in_flat` is
 /// `< src.len() <= usize::MAX`, so the arithmetic cannot overflow.
+#[allow(clippy::too_many_arguments)]
 fn slice_strided_gather<T: Copy>(
     src: &[T],
     rank: usize,
@@ -3016,6 +3017,7 @@ fn gather_contiguous_into<T: Copy + Send + Sync>(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gather_window_blocks<T: Copy>(
     src: &[T],
     resolved: &[Option<usize>],
@@ -4494,6 +4496,7 @@ pub(crate) fn eval_dynamic_slice(
 /// contiguous typed backing into dense output. `contig_range` Some is a single
 /// contiguous run (memcpy); None walks the output with an odometer. Identical
 /// index math/order to the `Literal` path -> bit-for-bit identical.
+#[allow(clippy::too_many_arguments)]
 fn dynamic_slice_dense<T: Copy>(
     src: &[T],
     rank: usize,
@@ -13332,6 +13335,7 @@ pub(crate) fn eval_tile(
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn normalize_tile_dims_and_reps(
     primitive: Primitive,
     input_dims: &[u32],

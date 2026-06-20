@@ -51,6 +51,7 @@ fn flatten_recursive(node: &TreeNode, leaves: &mut Vec<f64>) -> TreeDef {
         }
         TreeNode::Dict(map) => {
             let mut entries: Vec<(&String, &TreeNode)> = map.iter().collect();
+            #[allow(clippy::unnecessary_sort_by)]
             entries.sort_by(|(a, _), (b, _)| a.cmp(b));
             let items: Vec<(String, TreeDef)> = entries
                 .into_iter()

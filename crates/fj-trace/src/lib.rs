@@ -2906,7 +2906,7 @@ fn parse_conv_padding_param(
             .map(str::parse::<isize>)
             .collect::<Result<_, _>>()
             .map_err(|_| invalid())?;
-        if numbers.is_empty() || numbers.len() % 2 != 0 {
+        if numbers.is_empty() || !numbers.len().is_multiple_of(2) {
             return Err(invalid());
         }
         let mut pairs = Vec::with_capacity(numbers.len() / 2);
@@ -2971,7 +2971,7 @@ fn parse_reduce_window_padding_param(
             .map(str::parse::<isize>)
             .collect::<Result<_, _>>()
             .map_err(|_| invalid())?;
-        if numbers.is_empty() || numbers.len() % 2 != 0 {
+        if numbers.is_empty() || !numbers.len().is_multiple_of(2) {
             return Err(invalid());
         }
         let mut pairs = Vec::with_capacity(numbers.len() / 2);

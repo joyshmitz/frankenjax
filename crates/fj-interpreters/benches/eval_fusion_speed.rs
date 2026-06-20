@@ -1722,7 +1722,7 @@ fn run_fusion_strategy_probe(n: usize) {
     let step_major = || {
         let mut out = x.clone();
         for i in 0..n {
-            out[i] = out[i] * x[i];
+            out[i] *= x[i];
         }
         for o in out.iter_mut() {
             *o += 0.5;
