@@ -637,3 +637,19 @@ Additional cod-a repeat validation environment:
   slower.
 - Scorecard: keep current f62hx block-copy internal win; record threaded N-D copy as LOSS and route
   remaining gap to layout-aware transpose elision/fusion or a different cache-oblivious schedule.
+
+## WildForge / cod-a - oneqh allocator decision closed no-ship (2026-06-20)
+
+- Scope: `frankenjax-oneqh`, the proposed workspace default mimalloc allocator plus cheap-binop gate
+  retune.
+- Result: REJECT/no production code. The original bead is stale after the CobaltForge correction:
+  mimalloc does not supersede the existing threaded large cheap-binop path, and the
+  `CHEAP_BINARY_PARALLEL_MIN` gate must remain.
+- Fresh RCH routing check on `vmi1167313` (`elementwise_gauntlet`, sample size 10) recorded
+  `add_f64_16m/dense` 49.750 ms, `mul_f64_16m/dense` 63.001 ms, and same-binary thread-policy helper
+  rows 65.166/54.053 ms. Host load makes these routing-only, but they provide no basis for global
+  allocator adoption or gate removal.
+- Scorecard stays 0 wins / 1 loss / 2 neutral for the existing 16M Rust/JAX comparator rows. The
+  remaining target is still the multi-input DRAM row family; valid next levers are output/arena reuse,
+  non-temporal stores/prefetch/NUMA affinity, or specific unowned typed-path gaps with same-worker
+  proof. Default allocator policy is maintainer-gated and should not be reopened by agents alone.

@@ -2499,3 +2499,37 @@ ends are not rediscovered without new evidence.
   needs a different class of lever: layout-aware transpose elision/fusion, a source-contiguous
   cache-oblivious schedule with measured proof, or avoiding the materialized transpose in consumers
   such as attention/einsum.
+
+## WildForge / cod-a - oneqh mimalloc default-global-allocator closeout: reject production adoption as stale-gated (2026-06-20)
+
+- Bead: `frankenjax-oneqh`.
+- Decision: CLOSE as rejected/no-ship. Do not add a workspace default `#[global_allocator]`, and do
+  not raise/remove `CHEAP_BINARY_PARALLEL_MIN` from this bead. The bead's original work list depended
+  on the now-corrected premise that mimalloc supersedes the shipped threaded cheap-binop path. The
+  current ledger correction says the opposite for the real `eval_primitive` memory-bound rows:
+  threading and allocator reuse are complementary, and the threading gate must remain.
+- Fresh routing check, RCH worker `vmi1167313`, command:
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo bench -p fj-lax --bench elementwise_gauntlet -- 'add_f64_16m|mul_f64_16m|thread_policy_f64_add_16m' --sample-size 10 --warm-up-time 1 --measurement-time 2 --save-baseline cod-a-zipchunks-before`
+
+  | row | mean | note |
+  | --- | ---: | --- |
+  | `thread_policy_f64_add_16m/all_core_64k_threads_6` | 65.166 ms | loaded worker; same-binary helper |
+  | `thread_policy_f64_add_16m/cap8_1m_threads_6` | 54.053 ms | same 6-worker cap on this host; not a production row |
+  | `add_f64_16m/dense` | 49.750 ms | current production `eval_primitive` row |
+  | `mul_f64_16m/dense` | 63.001 ms | current production `eval_primitive` row |
+
+- Interpretation: these rows are routing evidence only (loaded host, low effective parallelism), but
+  they do not rescue the oneqh implementation plan. They reinforce the documented load sensitivity of
+  large multi-input DRAM rows and provide no safe basis for a global allocator policy change. A
+  library-level global allocator still conflicts with allocator-observing benches such as
+  `crates/fj-interpreters/benches/eval_chain_memory.rs`, and changing allocator policy is not a
+  crate-local fj-lax performance lever.
+- Current Rust/JAX scorecard for the relevant 16M row set remains the prior recorded comparator:
+  0 wins / 1 loss / 2 neutral (`add_f64_16m` narrow loss, `add_f32_16m` neutral, `mul_f64_16m`
+  neutral, 5% neutral band). This is a target lane, but not via oneqh's global allocator/gate-removal
+  plan.
+- Correct retry predicate: compiled-jaxpr output/arena reuse, non-temporal stores/prefetch/NUMA
+  affinity for the remaining multi-input DRAM rows, or a specific unowned typed-path gap with
+  same-worker before/after proof. Do not re-open default mimalloc adoption unless a maintainer first
+  chooses workspace allocator policy and the proof includes the allocator-conflict resolution plus
+  head-to-head production rows with the existing threading gate kept.
