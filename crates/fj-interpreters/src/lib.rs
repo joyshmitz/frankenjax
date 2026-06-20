@@ -1362,9 +1362,12 @@ const INPLACE_CHAIN_MAX_ELEMS: usize = 1 << 20;
 /// gate (which lives at ~8.4M because one cheap binop is pure bandwidth and the
 /// `thread::scope` spawn dwarfs it below that). Measured: a single f64 8-op chain
 /// over 1M elems runs at ~6 GB/s on ONE core (well under DRAM saturation), so it
-/// scales with cores; XLA already uses all of them. Below this gate the serial
-/// loop wins.
-const FUSION_THREAD_MIN_ELEMS: usize = 1 << 19; // 512 Ki
+/// scales with cores; XLA already uses all of them. Gated at the lowest size with
+/// a MEASURED same-invocation win (1M: 1.22x, 4M: 1.27x, 16M: 1.32x; serial vs
+/// threaded in one process — see `run_f64_thread_ab` in eval_fusion_speed). Below
+/// this the serial loop owns it; sizes between this and the single-op 8.4M gate
+/// are unmeasured for single ops but proven for the arithmetic-dense fused chain.
+const FUSION_THREAD_MIN_ELEMS: usize = 1 << 20; // 1 Mi (lowest measured-win size)
 /// Work-scaled worker count: roughly one worker per this many elements, clamped to
 /// the hardware thread count. Keeps each worker's contiguous run large enough to
 /// amortize the spawn while still using every core on big tensors.
@@ -9354,7 +9357,7 @@ mod tests {
         // non-chunk-aligned tail, so segment partitioning and the per-worker
         // global-base offsets must reproduce the serial walk exactly. Same 6-op
         // chain as `fusion_chain_matches_reference_bit_for_bit`, just larger.
-        let n = (1usize << 19) + 1234; // > FUSION_THREAD_MIN_ELEMS, unaligned tail
+        let n = (1usize << 20) + 1234; // > FUSION_THREAD_MIN_ELEMS, unaligned tail
         let xv: Vec<f64> = (0..n).map(|i| i as f64 * 0.013 - 9.0).collect();
         let yv: Vec<f64> = (0..n).map(|i| (i as f64 * 0.007).sin() + 1.5).collect();
         let x = VarId(0);
@@ -9413,8 +9416,8 @@ mod tests {
         // nor the per-worker segment, so chunk AND thread boundaries fall mid-row.
         // Element (r, c) must still map to bias[c] from the absolute base offset.
         let cols = 257usize;
-        let rows = 2048usize;
-        let n = rows * cols; // 526_336 > FUSION_THREAD_MIN_ELEMS
+        let rows = 4096usize;
+        let n = rows * cols; // 1_052_672 > FUSION_THREAD_MIN_ELEMS
         let x: Vec<f64> = (0..n).map(|i| i as f64 * 0.003 - 7.0).collect();
         let y: Vec<f64> = (0..n).map(|i| (i as f64 * 0.011).cos() + 1.25).collect();
         let bias: Vec<f64> = (0..cols).map(|i| i as f64 * 0.02 - 0.7).collect();
