@@ -1799,7 +1799,123 @@ fn run_fusion_strategy_probe(n: usize) {
     );
 }
 
+/// Faithful probe: BOTH strategies interpret a RUNTIME tape (as lib.rs must — the
+/// op sequence is dynamic, so neither autovectorizes the way the static probe did).
+/// step-major = one pass per tape op over the whole buffer (current lib.rs); element
+/// -major = per-element loop over the tape with a register accumulator (proposed).
+/// Tells us whether the SCALAR element-major rewrite wins WITHOUT manual SIMD.
+fn run_fusion_dynamic_probe(n: usize) {
+    let x: Vec<f64> = (0..n).map(|i| i as f64 * 1e-6 - 0.5).collect();
+    let y: Vec<f64> = (0..n).map(|i| (i as f64 * 3e-7).cos() + 1.2).collect();
+    // Runtime tape of (opcode, scalar): 0=mul x,1=add s,2=sub x,3=mul y,4=sub y,5=add x,6=mul s
+    let prog: Vec<(u8, f64)> = vec![
+        (0, 0.0),
+        (1, 0.5),
+        (2, 0.0),
+        (3, 0.0),
+        (1, 1.0),
+        (4, 0.0),
+        (6, 2.0),
+        (5, 0.0),
+    ];
+
+    let step_major = || {
+        let mut out = x.clone(); // seed = x
+        for &(op, s) in &prog {
+            match op {
+                0 => {
+                    for i in 0..n {
+                        out[i] *= x[i];
+                    }
+                }
+                1 => {
+                    for o in out.iter_mut() {
+                        *o += s;
+                    }
+                }
+                2 => {
+                    for i in 0..n {
+                        out[i] -= x[i];
+                    }
+                }
+                3 => {
+                    for i in 0..n {
+                        out[i] *= y[i];
+                    }
+                }
+                4 => {
+                    for i in 0..n {
+                        out[i] -= y[i];
+                    }
+                }
+                5 => {
+                    for i in 0..n {
+                        out[i] += x[i];
+                    }
+                }
+                6 => {
+                    for o in out.iter_mut() {
+                        *o *= s;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    };
+
+    let elem_major = || {
+        let mut out = vec![0.0_f64; n];
+        for i in 0..n {
+            let xi = x[i];
+            let yi = y[i];
+            let mut a = xi; // seed
+            for &(op, s) in &prog {
+                a = match op {
+                    0 => a * xi,
+                    1 => a + s,
+                    2 => a - xi,
+                    3 => a * yi,
+                    4 => a - yi,
+                    5 => a + xi,
+                    6 => a * s,
+                    _ => a,
+                };
+            }
+            out[i] = a;
+        }
+        out
+    };
+
+    let a = step_major();
+    let b = elem_major();
+    for idx in [0, n / 2, n - 1] {
+        assert_eq!(a[idx].to_bits(), b[idx].to_bits(), "dyn step != elem at {idx}");
+    }
+    let iters = if n >= (1 << 23) { 30 } else { 80 };
+    let _ = std::hint::black_box(step_major());
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(step_major());
+    }
+    let sm = t0.elapsed().as_nanos() as f64 / iters as f64;
+    let _ = std::hint::black_box(elem_major());
+    let t1 = Instant::now();
+    for _ in 0..iters {
+        std::hint::black_box(elem_major());
+    }
+    let em = t1.elapsed().as_nanos() as f64 / iters as f64;
+    println!(
+        "FUSION_DYNAMIC_PROBE n={n} ops=8 step_major={:.3}ms elem_major={:.3}ms elem_speedup={:.2}x",
+        sm / 1e6,
+        em / 1e6,
+        sm / em,
+    );
+}
+
 fn main() {
+    run_fusion_dynamic_probe(1usize << 20); // 1M  - L3-resident
+    run_fusion_dynamic_probe(1usize << 24); // 16M - DRAM-bound
     run_fusion_strategy_probe(1usize << 20); // 1M  - L3-resident
     run_fusion_strategy_probe(1usize << 24); // 16M - DRAM-bound
     run_f64_thread_ab(1usize << 20); // 1M  - L3-resident on the bench host
