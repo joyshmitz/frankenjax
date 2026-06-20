@@ -3,6 +3,83 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-n75xr - f64 scalar-add chain generated SIMD medium-band keep; upper-band no-ship
+
+- Date: 2026-06-20
+- Agent: cod-b / WildForge
+- Target gap: the remaining `compiled_dispatch` f64 large-chain JAX losses, with
+  emphasis on the 1,048,576-element row where Rust still lost by more than an
+  order of magnitude.
+- Lever kept: a narrow exact-pattern specialization for
+  `tensor + scalar + scalar + ...` f64 add chains in
+  `1,048,576 <= n < FUSION_THREAD_MIN_ELEMS`. The route uses a generated-style
+  `std::simd::Simd<f64, 8>` register loop over the copied input and keeps the
+  original scalar-add order per lane. It deliberately rejects operand-reversed
+  first adds so NaN payload/sign-order edge cases stay on the generic fusion
+  path.
+- Behavioral proof: focused unit
+  `f64_scalar_add_chain_simd_matches_ordered_scalar_reference` passed via RCH on
+  `vmi1227854` and checks bitwise equality against ordered scalar reference,
+  including signed zero, infinities, and a NaN payload.
+- Build guard: `AGENT_NAME=cod-b
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b rch exec --
+  cargo build --release -p fj-interpreters --benches`, worker `vmi1227854`,
+  passed before the timing pass.
+- Validation guard after the final gate: `cargo check -p fj-interpreters
+  --benches`, same target dir through RCH, passed on `vmi1152480`.
+- Final post-clippy-fix guards: `cargo clippy -p fj-interpreters --lib
+  --no-deps -- -D warnings` passed on `vmi1293453`;
+  `cargo test -p fj-interpreters
+  f64_scalar_add_chain_simd_matches_ordered_scalar_reference --lib` passed on
+  `vmi1227854`; `cargo test -p fj-conformance --lib` passed 45/0 on
+  `vmi1152480`.
+- Non-blocking hygiene debt: `cargo fmt --check -p fj-interpreters` remains red
+  on pre-existing formatting in `compiled_dispatch_speed.rs`,
+  `eval_fusion_speed.rs`, and older `src/lib.rs` regions; `cargo clippy -p
+  fj-interpreters --benches --no-deps -- -D warnings` reaches an unrelated
+  pre-existing bench lint in `eval_fusion_speed.rs`. UBS on `src/lib.rs`
+  remains nonzero on the existing whole-file panic/assert/index inventory while
+  its internal build/check/clippy/fmt sections are clean.
+- Supporting disassembly sanity check on the retrieved
+  `compiled_dispatch_speed` binary found vector add instructions (`vaddpd` /
+  `vaddsd`). This is recorded only as supporting evidence because the binary is
+  LTO/stripped and the keep decision is based on timing plus bitwise tests.
+
+Same-worker RCH timing, worker `vmi1227854`, target
+`/data/projects/.rch-targets/frankenjax-cod-b`, command family
+`cargo bench -p fj-interpreters --bench compiled_dispatch_speed --
+'compiled_dispatch/(compiled_runner|compiled_runner_scalar)/(bigchain65536|bigchain262144|bigchain1048576|bigchain16777216)'
+--warm-up-time 1 --measurement-time 5`. JAX means are from
+`artifacts/performance/evidence/frankenjax-xljoh-jax-comparator-20260620T0550Z.json`
+(`jax.jit` CPU 0.10.1, x64):
+
+| workload | baseline Rust | candidate Rust | JAX mean | candidate/JAX | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| f64 65K x8 | 47.427 us | 43.324 us | 34.033 us | 1.273 | No claim: specialization gate is off for this row; routing/noise only |
+| f64 262K x8 | 226.80 us | 226.18 us | 76.827 us | 2.944 | No claim: specialization gate is off; effectively neutral and still JAX loss |
+| f64 1M x8 | 1.3412 ms | 821.23 us | 83.299 us | 9.859 | KEEP: 1.63x internal win, still JAX loss |
+| f64 16M x8 | 78.933 ms | 104.63 ms | 27.610 ms | 3.790 | REJECT: +32.56% regression, branch gated off before commit |
+
+- Negative evidence inside the keep: the first ungated candidate routed the
+  16M row through the new one-pass SIMD copy loop and regressed from 78.933 ms
+  to 104.63 ms. That branch was reverted by tightening the gate to stay below
+  `FUSION_THREAD_MIN_ELEMS`, preserving the existing threaded fusion path for
+  huge arrays.
+- Cross-worker reruns after the gate are not used as keep/reject proof. RCH
+  selected `ovh-a` for the follow-up and ignored `RCH_WORKER=vmi1227854`; those
+  rows varied widely (for example, 1M 1.6850 ms then 2.2376 ms on `ovh-a`) and
+  are recorded only as worker-selection instability.
+- Ratio scorecard after the kept gate: 0 wins / 4 losses / 0 neutral vs JAX for
+  the f64 65K, 262K, 1M, and 16M production row set. The lever is still worth
+  keeping because it cuts the 1M JAX gap from 16.10x slower to 9.86x slower
+  without changing the other production gates.
+- Retry predicate: do not extend this exact scalar-add SIMD route into the
+  threaded upper band without a same-worker win over the current threaded path.
+  The next credible JAX-dominating lever needs output reuse/arena writeback,
+  legal relaxed-FP folding (`x + 8`) under an explicit contract, or generated
+  backend kernels that can reduce memory traffic rather than only replacing the
+  generic per-step loop.
+
 ## frankenjax-cntiy - FMA primitive dense path and `+fma` policy no-ship
 
 - Date: 2026-06-20

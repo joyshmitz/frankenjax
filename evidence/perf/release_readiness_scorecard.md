@@ -50,6 +50,23 @@ Additional current scalar broadcast environment:
 - JAX timing protocol: warmed `block_until_ready()` execution, 60 runs x 1000
   inner loops per scalar broadcast workload
 
+Additional current compiled-dispatch large-chain environment:
+
+- Agent: cod-b / WildForge
+- Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-b`
+- Rust build/check commands: `cargo build --release -p fj-interpreters
+  --benches` and `cargo check -p fj-interpreters --benches` through RCH.
+- Rust bench command: `cargo bench -p fj-interpreters --bench
+  compiled_dispatch_speed --
+  'compiled_dispatch/(compiled_runner|compiled_runner_scalar)/(bigchain65536|bigchain262144|bigchain1048576|bigchain16777216)'
+  --warm-up-time 1 --measurement-time 5`.
+- Same-worker timing proof for `frankenjax-n75xr`: RCH worker `vmi1227854`.
+  Follow-up validation used `vmi1152480`; post-gate timing reruns on `ovh-a`
+  are recorded as non-comparable because worker pinning was unavailable.
+- JAX oracle rows: existing
+  `artifacts/performance/evidence/frankenjax-xljoh-jax-comparator-20260620T0550Z.json`
+  (`jax.jit` CPU 0.10.1, x64).
+
 Additional current fj-core stack/repeat/slice/extraction environment:
 
 - Agent: cod-b / WildForge
@@ -699,6 +716,35 @@ Additional cod-b FMA primitive policy probe environment:
   `git diff --check` is clean.
 - Risk note: this is an allocation/liveness specialization, not algebraic folding. It keeps original
   per-step `apply_scalar_f64_binary` order; non-linear or multi-tensor bodies fall back.
+
+## WildForge / cod-b - f64 large-chain scalar-add SIMD medium band (frankenjax-n75xr, 2026-06-20)
+
+- Scope: `fj-interpreters` compiled-dispatch f64 `tensor + scalar + ...` chain,
+  exact-pattern route for `1,048,576 <= n < FUSION_THREAD_MIN_ELEMS`.
+- Result: KEEP for the medium band only. Same-worker RCH (`vmi1227854`)
+  improved `compiled_dispatch/compiled_runner/bigchain1048576/n=8` from
+  1.3412 ms to 821.23 us (1.63x internal win).
+- JAX head-to-head remains a loss: same JAX comparator row is 83.299 us, so the
+  kept candidate is 9.86x slower than JAX. The previous baseline was 16.10x
+  slower, so this reduces but does not close the gap.
+- Negative proof: the first ungated candidate regressed
+  `bigchain16777216/n=8` from 78.933 ms to 104.63 ms (+32.56%), worsening the
+  JAX ratio from 2.86x slower to 3.79x slower. That branch was gated off before
+  commit, preserving the existing threaded upper-band path.
+- Current production ratio scorecard for f64 65K/262K/1M/16M: 0 wins / 4
+  losses / 0 neutral vs JAX. `n75xr` is a measured gap reducer, not a dominance
+  claim.
+- Gate status: focused bitwise SIMD-order unit passed via RCH on `vmi1227854`;
+  `cargo check -p fj-interpreters --benches` passed via RCH on `vmi1152480`;
+  `cargo clippy -p fj-interpreters --lib --no-deps -- -D warnings` passed via
+  RCH on `vmi1293453`; final `cargo test -p fj-conformance --lib` passed 45/0
+  via RCH on `vmi1152480`.
+- Hygiene limits: `cargo fmt --check -p fj-interpreters` is still red on
+  pre-existing bench and older interpreter formatting; `cargo clippy -p
+  fj-interpreters --benches --no-deps -- -D warnings` is still blocked by an
+  unrelated pre-existing `eval_fusion_speed.rs` bench lint; UBS on
+  `src/lib.rs` remains nonzero on existing whole-file panic/assert/index
+  inventory while its internal build/check/clippy/fmt sections are clean.
 
 ## CobaltForge - Conformance: cbea72b3 densify cleanup COMPLETE across workspace (2026-06-19, commit 672edfe8)
 

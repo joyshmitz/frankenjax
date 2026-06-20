@@ -1,3 +1,4 @@
+#![feature(portable_simd)]
 #![forbid(unsafe_code)]
 
 pub mod partial_eval;
@@ -1717,6 +1718,57 @@ fn apply_fusion_chunk(out: &mut [f64], tape: &[FStep], ext: &[&[f64]], base: usi
     }
 }
 
+fn f64_scalar_add_chain_input_and_literals<'a>(
+    tape: &[FStep],
+    ext: &[&'a [f64]],
+) -> Option<(&'a [f64], Vec<f64>)> {
+    let first = tape.first()?;
+    let (CheapOp::Add, FOperand::Ext(ext_idx), FOperand::Scalar(first_add)) =
+        (first.op, first.a, first.b)
+    else {
+        return None;
+    };
+    let input = ext.get(ext_idx).copied()?;
+    let mut adds = Vec::with_capacity(tape.len());
+    adds.push(first_add);
+    for step in &tape[1..] {
+        let (CheapOp::Add, FOperand::Chain, FOperand::Scalar(add)) = (step.op, step.a, step.b)
+        else {
+            return None;
+        };
+        adds.push(add);
+    }
+    Some((input, adds))
+}
+
+#[inline]
+fn apply_f64_scalar_adds_simd(values: &mut [f64], adds: &[f64]) {
+    use std::simd::Simd;
+
+    const LANES: usize = 8;
+    let mut chunks = values.chunks_exact_mut(LANES);
+    for chunk in &mut chunks {
+        let mut lanes = Simd::<f64, LANES>::from_slice(chunk);
+        for &add in adds {
+            lanes += Simd::splat(add);
+        }
+        chunk.copy_from_slice(lanes.as_array());
+    }
+    for value in chunks.into_remainder() {
+        for &add in adds {
+            *value += add;
+        }
+    }
+}
+
+fn run_f64_scalar_add_chain_simd(input: &[f64], adds: &[f64]) -> Vec<f64> {
+    let mut values = input.to_vec();
+    drive_fusion_chunks(&mut values, |chunk, _base| {
+        apply_f64_scalar_adds_simd(chunk, adds);
+    });
+    values
+}
+
 /// Try to fuse a maximal cheap-elementwise run starting at `start`. Returns the
 /// owned fused result (no borrow of `env`) or `None` to fall through to the normal
 /// per-equation path. Opt-in: any non-matching condition bails with zero effect.
@@ -1855,6 +1907,20 @@ fn try_fuse_elementwise_chain_f64(
         return None;
     }
     let out_var = run_out?;
+
+    // The single-pass register kernel wins in the medium band, but loses once
+    // the existing chunk driver starts threading, so keep the gate below that.
+    if (INPLACE_CHAIN_MAX_ELEMS..FUSION_THREAD_MIN_ELEMS).contains(&n)
+        && let Some((input, adds)) = f64_scalar_add_chain_input_and_literals(&tape, &ext)
+    {
+        return Some(FusedRun {
+            out_var,
+            values: FusedValues::F64(run_f64_scalar_add_chain_simd(input, &adds)),
+            shape,
+            ext_vars,
+            run_end,
+        });
+    }
 
     let mut values = vec![0.0_f64; n];
     drive_fusion_chunks(&mut values, |chunk, base| {
@@ -9362,6 +9428,68 @@ mod tests {
                 want[i]
             );
         }
+    }
+
+    #[test]
+    fn f64_scalar_add_chain_simd_matches_ordered_scalar_reference() {
+        let input = vec![
+            -0.0,
+            0.0,
+            1.0,
+            -2.5,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            8192.25,
+            -8192.25,
+            f64::MIN_POSITIVE,
+        ];
+        let adds = [1.0, -0.0, 2.25, -3.5, f64::from_bits(0x3ff0_0000_0000_0001)];
+        let mut tape = Vec::with_capacity(adds.len());
+        tape.push(super::FStep {
+            op: super::CheapOp::Add,
+            a: super::FOperand::Ext(0),
+            b: super::FOperand::Scalar(adds[0]),
+        });
+        for &add in &adds[1..] {
+            tape.push(super::FStep {
+                op: super::CheapOp::Add,
+                a: super::FOperand::Chain,
+                b: super::FOperand::Scalar(add),
+            });
+        }
+        let ext = vec![input.as_slice()];
+        let (detected_input, detected_adds) =
+            super::f64_scalar_add_chain_input_and_literals(&tape, &ext)
+                .expect("plain tensor + scalar add chain should specialize");
+        assert_eq!(detected_input.as_ptr(), input.as_ptr());
+        assert_eq!(detected_adds, adds);
+
+        let got = super::run_f64_scalar_add_chain_simd(detected_input, &detected_adds);
+        let want: Vec<f64> = input
+            .iter()
+            .map(|&value| {
+                let mut ordered = value;
+                for &add in &adds {
+                    ordered += add;
+                }
+                ordered
+            })
+            .collect();
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+
+        let reversed_first = [super::FStep {
+            op: super::CheapOp::Add,
+            a: super::FOperand::Scalar(adds[0]),
+            b: super::FOperand::Ext(0),
+        }];
+        assert!(
+            super::f64_scalar_add_chain_input_and_literals(&reversed_first, &ext).is_none(),
+            "operand-reversed first add stays on generic fusion to preserve NaN-payload order"
+        );
     }
 
     #[test]

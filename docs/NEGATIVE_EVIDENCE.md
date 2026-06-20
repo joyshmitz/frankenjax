@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-n75xr f64 scalar-add SIMD medium-band keep
+
+`frankenjax-n75xr` kept a narrow exact-pattern `std::simd` specialization for
+f64 `tensor + scalar + ...` compiled-dispatch chains only in the medium band
+`1,048,576 <= n < FUSION_THREAD_MIN_ELEMS`. It preserves the scalar-add order per
+lane and rejects operand-reversed first adds so edge-case bit semantics remain on
+the generic fusion path.
+
+Same-worker RCH proof on `vmi1227854`:
+
+| Row | Baseline Rust | Candidate Rust | JAX mean | Candidate/JAX | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| f64 1M x8 | 1.3412 ms | 821.23 us | 83.299 us | 9.859 | Keep: 1.63x internal win, still JAX loss |
+| f64 16M x8, ungated branch | 78.933 ms | 104.63 ms | 27.610 ms | 3.790 | Reject: +32.56% regression, gated off before commit |
+
+Small rows were not claimed: 65K and 262K are outside the kept gate and remain
+JAX losses. Follow-up reruns after the final gate landed on `ovh-a`; `RCH_WORKER`
+did not pin back to `vmi1227854`, so those rows are non-comparable worker noise.
+Ratio scorecard after the kept gate: 0 wins / 4 losses / 0 neutral vs JAX for
+the f64 large-chain production row set.
+
 ## 2026-06-20 - frankenjax-cntiy FMA primitive policy no-ship
 
 `frankenjax-cntiy` tested the direct ternary FMA primitive row that the softmax
