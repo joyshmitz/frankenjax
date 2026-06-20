@@ -1040,6 +1040,16 @@ impl BatchFftPlan {
         }
     }
 
+    /// The cached radix-2 plan for power-of-two lengths (else `None`). Lets the
+    /// real-inverse-FFT path reuse the already-built bit-reversal + twiddles for the
+    /// SoA kernel instead of rebuilding them.
+    fn as_pow2(&self) -> Option<&Radix2Plan> {
+        match self {
+            BatchFftPlan::Pow2(plan) => Some(plan),
+            _ => None,
+        }
+    }
+
     fn apply_into(
         &self,
         input: &[(f64, f64)],
@@ -1843,6 +1853,111 @@ fn rfft_rows_into(
 ///
 /// Reconstructs the full spectrum from Hermitian symmetry, computes IDFT,
 /// and takes the real part.
+/// Vectorized SoA inverse real FFT for a block of `batch` rows (pow2 `fft_length`).
+/// Fuses the Hermitian-spectrum reconstruction into the SoA transpose-in (so no
+/// extra full-spectrum buffer is needed — only the `re`/`im` scratch, kept
+/// L1-resident), runs the inverse radix-2 butterflies vertically over the batch,
+/// then extracts the real part with the `1/n` scale. Bit-identical to the per-row
+/// `irfft_rows_f64_into` path: same reconstruction, same `Radix2Plan(n, true)`
+/// butterfly order, same `1/n` scaling, same real extraction.
+#[allow(clippy::too_many_arguments)]
+fn vectorized_irfft_pow2_block(
+    plan: &Radix2Plan,
+    elements: &[(f64, f64)],
+    batch: usize,
+    fft_length: usize,
+    input_last: usize,
+    copy_len: usize,
+    re: &mut [f64],
+    im: &mut [f64],
+    out_blk: &mut [f64],
+) {
+    let w = batch;
+    let n = fft_length;
+    debug_assert_eq!(re.len(), batch * n);
+    debug_assert_eq!(im.len(), batch * n);
+    debug_assert_eq!(out_blk.len(), batch * n);
+
+    // Transpose into SoA with the radix-2 bit-reversal, reconstructing the full
+    // Hermitian spectrum value at source index `j` on the fly:
+    //   j < copy_len                                  -> half_spectrum[j]
+    //   j >= input_last and (n-j) < input_last        -> conj(half_spectrum[n-j])
+    //   otherwise                                     -> 0
+    // (identical to `irfft_rows_f64_into`'s full-spectrum fill, where
+    //  full[..copy_len] = hs, the tail is zero-filled, and the upper half mirrors
+    //  the conjugate.)
+    let bitrev = &plan.bit_reversed;
+    for b in 0..batch {
+        let hs = &elements[b * input_last..b * input_last + input_last];
+        for (i, &j) in bitrev.iter().enumerate() {
+            let (vr, vi) = if j < copy_len {
+                hs[j]
+            } else if j >= input_last {
+                let m = n - j;
+                if m < input_last {
+                    let (r, im2) = hs[m];
+                    (r, -im2)
+                } else {
+                    (0.0, 0.0)
+                }
+            } else {
+                (0.0, 0.0)
+            };
+            re[i * w + b] = vr;
+            im[i * w + b] = vi;
+        }
+    }
+
+    soa_radix2_butterfly_stages(plan, w, n, re, im);
+
+    // Real part with the inverse 1/n scale (matches `Radix2Plan::apply_into`'s
+    // post-loop `value.* *= inv_n`, then irfft taking `.re`).
+    let inv_n = 1.0 / (n as f64);
+    for b in 0..batch {
+        let dst = &mut out_blk[b * n..b * n + n];
+        for (k, slot) in dst.iter_mut().enumerate() {
+            *slot = re[k * w + b] * inv_n;
+        }
+    }
+}
+
+/// Run the SoA inverse real-FFT kernel over `batch` rows in L1-resident tiles of
+/// `POW2_TILE_ROWS` rows, reusing one scratch pair. `elements` is the half-spectrum
+/// slice for exactly these `batch` rows; `out` holds `batch * fft_length` reals.
+#[allow(clippy::too_many_arguments)]
+fn vectorized_irfft_pow2_tiled(
+    plan: &Radix2Plan,
+    elements: &[(f64, f64)],
+    batch: usize,
+    fft_length: usize,
+    input_last: usize,
+    copy_len: usize,
+    out: &mut [f64],
+) {
+    let n = fft_length;
+    let cap = POW2_TILE_ROWS * n;
+    let mut re = vec![0.0f64; cap];
+    let mut im = vec![0.0f64; cap];
+    let mut row0 = 0usize;
+    while row0 < batch {
+        let rows = POW2_TILE_ROWS.min(batch - row0);
+        let in_s = row0 * input_last;
+        let out_s = row0 * n;
+        vectorized_irfft_pow2_block(
+            plan,
+            &elements[in_s..in_s + rows * input_last],
+            rows,
+            fft_length,
+            input_last,
+            copy_len,
+            &mut re[..rows * n],
+            &mut im[..rows * n],
+            &mut out[out_s..out_s + rows * n],
+        );
+        row0 += rows;
+    }
+}
+
 /// Reconstruct the Hermitian-symmetric full spectrum and inverse-transform each
 /// of `rows` half-spectra (starting at `row_start`) into the dense real (`f64`)
 /// output block. Each row is independent and computed in the exact same order as
@@ -1859,6 +1974,27 @@ fn irfft_rows_f64_into(
     rows: usize,
     out_blk: &mut [f64],
 ) {
+    // Above a minimum row count, pow2 inverse real FFT runs the cache-blocked SoA
+    // kernel (Hermitian reconstruct + inverse FFT + real extract, vectorized
+    // vertically over rows) — bit-identical to the per-row path, same stable
+    // single-thread win as the forward SoA paths. Reuses the cached pow2 plan.
+    const IRFFT_VECTORIZED_MIN_ROWS: usize = 8;
+    if rows >= IRFFT_VECTORIZED_MIN_ROWS
+        && let Some(r2) = plan.and_then(|p| p.as_pow2())
+    {
+        let base = row_start * input_last;
+        vectorized_irfft_pow2_tiled(
+            r2,
+            &elements[base..base + rows * input_last],
+            rows,
+            fft_length,
+            input_last,
+            copy_len,
+            out_blk,
+        );
+        return;
+    }
+
     let mut full = vec![(0.0, 0.0); fft_length];
     let mut transformed = Vec::with_capacity(fft_length);
     let mut scratch = BluesteinScratch::default();
@@ -2319,6 +2455,116 @@ mod tests {
         std::hint::black_box(chk);
         eprintln!(
             "[rfft SoA {rows}x{fft_len}] 1T per-row={:.3}ms soa={:.3}ms ratio={:.2}x (min of 9 interleaved)",
+            old_min as f64 / 1e6,
+            new_min as f64 / 1e6,
+            old_min as f64 / new_min as f64,
+        );
+    }
+
+    /// The vectorized SoA inverse-real-FFT kernel must be bit-for-bit identical to
+    /// the per-row `irfft_rows_f64_into`, across pow2 lengths, batch counts, and the
+    /// exact / oversized / undersized half-spectrum regimes.
+    #[test]
+    fn vectorized_irfft_pow2_bit_identical_to_per_row() {
+        for &fft_len in &[2usize, 4, 8, 16, 64, 256] {
+            let plan_batch = BatchFftPlan::new(fft_len, true);
+            let r2 = plan_batch.as_pow2().expect("pow2 plan");
+            let input_lasts = [fft_len / 2 + 1, fft_len / 2 + 3, (fft_len / 4).max(1)];
+            for &input_last in &input_lasts {
+                let copy_len = fft_len.min(input_last);
+                for &batch in &[1usize, 3, 8, 17, 40] {
+                    let elements: Vec<(f64, f64)> = (0..batch * input_last)
+                        .map(|i| {
+                            let f = i as f64;
+                            ((f * 0.013).sin() - 0.2, (f * 0.021).cos() * 0.5)
+                        })
+                        .collect();
+                    // Reference: per-row production path (rows=1 -> below the SoA floor).
+                    let mut reference = vec![0.0f64; batch * fft_len];
+                    for b in 0..batch {
+                        irfft_rows_f64_into(
+                            &elements,
+                            Some(&plan_batch),
+                            fft_len,
+                            input_last,
+                            copy_len,
+                            b,
+                            1,
+                            &mut reference[b * fft_len..b * fft_len + fft_len],
+                        );
+                    }
+                    let mut got = vec![0.0f64; batch * fft_len];
+                    vectorized_irfft_pow2_tiled(
+                        r2, &elements, batch, fft_len, input_last, copy_len, &mut got,
+                    );
+                    let rb: Vec<u64> = reference.iter().map(|x| x.to_bits()).collect();
+                    let gb: Vec<u64> = got.iter().map(|x| x.to_bits()).collect();
+                    assert_eq!(
+                        rb, gb,
+                        "irfft SoA != per-row (fft_len={fft_len} input_last={input_last} batch={batch})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Same-binary A/B for the SoA inverse-real-FFT batch kernel (frankenjax-murmw):
+    /// OLD = per-row `irfft_rows_f64_into`; NEW = cache-blocked SoA tiled. Run with
+    /// `--ignored --nocapture`; interleaved min-of-9 single-thread ratio.
+    #[test]
+    #[ignore = "informational micro-bench; run with --ignored --nocapture"]
+    fn bench_vectorized_irfft_soa_vs_per_row_plan() {
+        let fft_len = 256usize;
+        let rows = 2048usize;
+        let input_last = fft_len / 2 + 1;
+        let copy_len = fft_len.min(input_last);
+        let plan_batch = BatchFftPlan::new(fft_len, true);
+        let r2 = plan_batch.as_pow2().expect("pow2 plan");
+        let elements: Vec<(f64, f64)> = (0..rows * input_last)
+            .map(|i| {
+                let f = i as f64;
+                ((f * 0.013).sin(), (f * 0.021).cos())
+            })
+            .collect();
+
+        let run_old = || -> (u64, u64) {
+            let mut out = vec![0.0f64; rows * fft_len];
+            let t0 = std::time::Instant::now();
+            // rows=1 per call forces the per-row path (below the SoA floor).
+            for b in 0..rows {
+                irfft_rows_f64_into(
+                    &elements,
+                    Some(&plan_batch),
+                    fft_len,
+                    input_last,
+                    copy_len,
+                    b,
+                    1,
+                    &mut out[b * fft_len..b * fft_len + fft_len],
+                );
+            }
+            let dt = t0.elapsed().as_nanos() as u64;
+            (dt, out[0].to_bits() ^ out[rows * fft_len / 2].to_bits())
+        };
+        let run_new = || -> (u64, u64) {
+            let mut out = vec![0.0f64; rows * fft_len];
+            let t0 = std::time::Instant::now();
+            vectorized_irfft_pow2_tiled(r2, &elements, rows, fft_len, input_last, copy_len, &mut out);
+            let dt = t0.elapsed().as_nanos() as u64;
+            (dt, out[0].to_bits() ^ out[rows * fft_len / 2].to_bits())
+        };
+        let (mut old_min, mut new_min) = (u64::MAX, u64::MAX);
+        let mut chk = 0u64;
+        for _ in 0..9 {
+            let (o, co) = run_old();
+            let (n, cn) = run_new();
+            chk ^= co ^ cn;
+            old_min = old_min.min(o);
+            new_min = new_min.min(n);
+        }
+        std::hint::black_box(chk);
+        eprintln!(
+            "[irfft SoA {rows}x{fft_len}] 1T per-row={:.3}ms soa={:.3}ms ratio={:.2}x (min of 9 interleaved)",
             old_min as f64 / 1e6,
             new_min as f64 / 1e6,
             old_min as f64 / new_min as f64,

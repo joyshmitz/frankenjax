@@ -2,7 +2,7 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
-## 2026-06-20 - frankenjax-murmw SoA real-FFT (rfft/irfft) batch kernel — SHIPPED win (1.66-1.79x)
+## 2026-06-20 - frankenjax-murmw SoA real-FFT (rfft/irfft) batch kernel — SHIPPED win (1.58-1.79x)
 
 Follow-on to the shipped full-complex SoA pow2 kernel (`73645de8`): that win was wired
 only into `transform_batches_dense` (fft/ifft). The pow2 **rfft** batch path still ran
@@ -18,16 +18,24 @@ butterfly order, same recombination arithmetic) — proven by
 `vectorized_rfft_pow2_bit_identical_to_per_row` (exact/padded/truncated × batch 1..40)
 and the unchanged `fft_oracle` (27/27) + pow2 rfft golden digests.
 
-Measured single-thread same-binary A/B (`bench_vectorized_rfft_soa_vs_per_row_plan`,
-2048×256, **interleaved min-of-9** to cancel cross-run worker drift): **1.79x** and
-**1.66x** on two runs (per-row → SoA). Note: naive *sequential* old-then-new sampling
-read 1.09-1.36x because the shared-swarm worker speed drifted mid-measurement (per-row
-abs time swung 1.9-5.4ms run-to-run) — the interleaved measurement is the trustworthy
-one, consistent with the [[#2026-06-20 - frankenjax-murmw threaded SoA FFT A/B is
-contention-fragile]] caveat. Gates: `fj-lax` fft 49/49, clippy clean, oracle 27/27.
+**irfft** got the same treatment in the same pass: pow2 `irfft_rows_f64_into` ran a full
+per-row inverse complex FFT on the reconstructed Hermitian spectrum, so it reuses
+`soa_radix2_butterfly_stages` directly — `vectorized_irfft_pow2_block` fuses the Hermitian
+reconstruction into the SoA transpose-in (no extra spectrum buffer, stays L1) and extracts
+the real part with the 1/n scale; `BatchFftPlan::as_pow2` reuses the cached plan. Bit-identical
+(`vectorized_irfft_pow2_bit_identical_to_per_row`, exact/oversized/undersized half-spectrum).
 
-Remaining FFT frontier (still murmw): irfft pow2 batch (`irfft_rows_f64_into`, same lever)
-and the mixed-radix/composite path (`fft_batch_128x1000` ~30x).
+Measured single-thread same-binary A/B (2048×256, **interleaved min-of-9** to cancel
+cross-run worker drift): rfft **1.79x / 1.66x**, irfft **1.71x / 1.58x** (per-row → SoA).
+Note: naive *sequential* old-then-new sampling read rfft as low as 1.09x because the
+shared-swarm worker speed drifted mid-measurement (per-row abs time swung 1.9-5.4ms
+run-to-run) — the interleaved measurement is the trustworthy one, consistent with the
+[[#2026-06-20 - frankenjax-murmw threaded SoA FFT A/B is contention-fragile]] caveat.
+Gates: `fj-lax` fft 46/46 (+ bit-identity tests), clippy clean, `fft_oracle` 27/27.
+
+Remaining FFT frontier (still murmw): the mixed-radix/composite path
+(`fft_batch_128x1000` ~30x), still per-row. All pow2 batch paths (fft/ifft/rfft/irfft) are
+now SoA-vectorized.
 
 ## 2026-06-20 - frankenjax-4ryym f64 GEMM SIMD load-codegen no-ship
 
