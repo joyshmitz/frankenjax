@@ -3827,3 +3827,24 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   close the eigh gap. REMAINING: exploit symmetry in the reduction (dsytrd vs general hessenberg) for
   the last ~2x, and SVD (one_sided_jacobi, still untouched, ~15x). Pass delta: 1 BIG win (47.8x
   same-binary; eigh ~19x end-to-end, bit-exact) / 0 / 0.
+
+## AzureLynx - VERIFY eigh win vs LAPACK + IMPORTANT baseline caveat (2026-06-20)
+
+- Confirmed the eigh win holds: fresh harness fj-lax eigh 512 = **165.5 ms** (consistent with the
+  172ms from the win pass; ~19.6x over the original 3249ms). Same-host-state numpy/LAPACK:
+  cholesky 512 = 4.04 ms (sanity anchor — sane, host is quiet), **eigh 512 = 1024.9 ms**.
+- **fj-lax eigh (165ms) now BEATS this environment's numpy/LAPACK eigh (1025ms) by 6.2x.** But that
+  numpy eigh number is absurd for an OPTIMIZED LAPACK dsyevd (~10-30ms): cholesky@512=4ms proves the
+  BLAS is optimized, so it's specifically the EIGENSOLVER that's unoptimized reference LAPACK in this
+  venv (numpy 2.4.6, bundled). 
+- **METHODOLOGY CAVEAT (applies to the whole campaign's vs-LAPACK linalg claims):** in THIS
+  environment, only BLAS-bound LAPACK ops (cholesky, matmul, qr's GEMM) give a trustworthy LAPACK
+  baseline; the LAPACK EIGENSOLVER/SVD drivers (dsyevd/dgesdd) run unoptimized here, so a clean
+  fj-lax-vs-optimized-LAPACK ratio for eigh/SVD is NOT measurable. My pass-9/11 "~6-17x / ~100-300x
+  off LAPACK" for eigh were EXTRAPOLATIONS from "optimized dsyevd ~10-30ms", NOT measured — correcting
+  that here. What IS solid: the ~19x SELF-improvement (same-binary A/B + super-cubic→cubic scaling
+  normalization) and that fj-lax eigh now beats the available numpy eigh.
+- fj-lax CHOLESKY 512 = 15.9ms vs numpy 4ms = ~4x off optimized BLAS (the one trustworthy linalg
+  ratio this run) — a real, modest, BLAS-microkernel-bound gap (consistent with the documented
+  matmul_2d ~XLA/2 FMA ceiling). NOT chasing further (FMA-gated). Pass delta: verification — eigh win
+  CONFIRMED + corrected the vs-LAPACK framing (0 wins / 0 losses; methodology fix).
