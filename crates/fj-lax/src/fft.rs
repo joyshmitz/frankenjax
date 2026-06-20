@@ -1189,6 +1189,43 @@ fn batch_butterfly_block(
     }
 }
 
+/// Run the radix-2 butterfly stages of a length-`n` FFT vertically over `w` rows
+/// laid out as SoA `re[index*w + row]` / `im[...]` (already bit-reversed). For each
+/// `(start, offset)` the two butterfly halves are the disjoint contiguous row-blocks
+/// `[i_even, i_even+w)` and `[i_odd, i_odd+w)` (`i_odd > i_even` always, so
+/// `split_at_mut` yields both). Op-for-op identical to `Radix2Plan::apply_into`'s
+/// butterfly loop, so the result is bit-identical to the per-row path. Shared by the
+/// full-complex (`vectorized_pow2_block`) and real (`vectorized_rfft_pow2_block`) SoA
+/// kernels.
+fn soa_radix2_butterfly_stages(plan: &Radix2Plan, w: usize, n: usize, re: &mut [f64], im: &mut [f64]) {
+    let mut twiddle_base = 0usize;
+    let mut len = 2usize;
+    while len <= n {
+        let half = len / 2;
+        let stage_tw = &plan.twiddles[twiddle_base..twiddle_base + half];
+        let mut start = 0usize;
+        while start < n {
+            for (offset, &(tw_re, tw_im)) in stage_tw.iter().enumerate() {
+                let i_even = (start + offset) * w;
+                let i_odd = (start + offset + half) * w;
+                let (re_lo, re_hi) = re.split_at_mut(i_odd);
+                let (im_lo, im_hi) = im.split_at_mut(i_odd);
+                batch_butterfly_block(
+                    &mut re_lo[i_even..i_even + w],
+                    &mut im_lo[i_even..i_even + w],
+                    &mut re_hi[..w],
+                    &mut im_hi[..w],
+                    tw_re,
+                    tw_im,
+                );
+            }
+            start += len;
+        }
+        twiddle_base += half;
+        len *= 2;
+    }
+}
+
 /// Vectorized radix-2 FFT over a block of `batch` length-`n` rows using a
 /// structure-of-arrays layout. `elements`/`out` are the AoS `(re, im)` input and
 /// output for this block (`batch * n` each, row-major). Scratch `re`/`im` hold the
@@ -1197,6 +1234,7 @@ fn batch_butterfly_block(
 /// Bit-identical to running `plan.apply_into` on each row independently: same
 /// bit-reversal, same precomputed twiddle table, same per-stage `start`/`offset`
 /// traversal, same butterfly arithmetic, same `1/n` inverse scale.
+#[allow(clippy::too_many_arguments)]
 fn vectorized_pow2_block(
     plan: &Radix2Plan,
     elements: &[(f64, f64)],
@@ -1225,35 +1263,8 @@ fn vectorized_pow2_block(
         }
     }
 
-    // Butterfly stages, vertical over the batch. For each (start, offset) the two
-    // halves are the disjoint contiguous row-blocks [i_even, i_even+w) and
-    // [i_odd, i_odd+w); i_odd > i_even always, so split_at_mut gives both.
-    let mut twiddle_base = 0usize;
-    let mut len = 2usize;
-    while len <= n {
-        let half = len / 2;
-        let stage_tw = &plan.twiddles[twiddle_base..twiddle_base + half];
-        let mut start = 0usize;
-        while start < n {
-            for (offset, &(tw_re, tw_im)) in stage_tw.iter().enumerate() {
-                let i_even = (start + offset) * w;
-                let i_odd = (start + offset + half) * w;
-                let (re_lo, re_hi) = re.split_at_mut(i_odd);
-                let (im_lo, im_hi) = im.split_at_mut(i_odd);
-                batch_butterfly_block(
-                    &mut re_lo[i_even..i_even + w],
-                    &mut im_lo[i_even..i_even + w],
-                    &mut re_hi[..w],
-                    &mut im_hi[..w],
-                    tw_re,
-                    tw_im,
-                );
-            }
-            start += len;
-        }
-        twiddle_base += half;
-        len *= 2;
-    }
+    // Butterfly stages, vertical over the batch.
+    soa_radix2_butterfly_stages(plan, w, n, re, im);
 
     // Transpose back to AoS row-major, folding in the 1/n inverse scale (matches
     // `Radix2Plan::apply_into`'s post-loop `value.* *= inv_n`).
@@ -1591,6 +1602,115 @@ pub(crate) fn eval_rfft(
     Ok(Value::Tensor(tensor))
 }
 
+/// Vectorized SoA real FFT for a block of `batch` rows (pow2 `fft_length`). Mirrors
+/// `RealRfftPower2Plan::apply_into` op-for-op but runs all three stages — pack,
+/// half-length complex FFT, Hermitian recombination — vertically over the batch, so
+/// it is bit-identical to the per-row path. `re`/`im` are SoA scratch of length
+/// `batch * half_len`; `out_blk` holds `batch * out_last` complex outputs row-major.
+#[allow(clippy::too_many_arguments)]
+fn vectorized_rfft_pow2_block(
+    real_plan: &RealRfftPower2Plan,
+    elements: &[(f64, f64)],
+    batch: usize,
+    input_last: usize,
+    copy_len: usize,
+    out_last: usize,
+    re: &mut [f64],
+    im: &mut [f64],
+    out_blk: &mut [(f64, f64)],
+) {
+    let half_len = real_plan.half_len;
+    let w = batch;
+    debug_assert_eq!(out_last, half_len + 1);
+    debug_assert_eq!(re.len(), batch * half_len);
+    debug_assert_eq!(im.len(), batch * half_len);
+    debug_assert_eq!(out_blk.len(), batch * out_last);
+
+    // Pack each row's real samples (even -> re, odd -> im of the half-length complex
+    // signal) into SoA while applying the half FFT's bit-reversal to the index axis.
+    let bitrev = &real_plan.half_fft.bit_reversed;
+    for b in 0..batch {
+        let row = &elements[b * input_last..b * input_last + input_last];
+        for (i, &idx) in bitrev.iter().enumerate() {
+            let even = 2 * idx;
+            let odd = even + 1;
+            let even_re = if even < copy_len { row[even].0 } else { 0.0 };
+            let odd_re = if odd < copy_len { row[odd].0 } else { 0.0 };
+            re[i * w + b] = even_re;
+            im[i * w + b] = odd_re;
+        }
+    }
+
+    // Half-length complex FFT, vertical over the batch. Now re/im hold `transformed`
+    // in SoA [k][row] layout (k in 0..half_len).
+    soa_radix2_butterfly_stages(&real_plan.half_fft, w, half_len, re, im);
+
+    // Hermitian recombination — identical arithmetic to the per-row path. DC/Nyquist
+    // come from transformed[0]; the rest from the conjugate-symmetric pair (k, N/2-k).
+    for b in 0..batch {
+        let z0_re = re[b];
+        let z0_im = im[b];
+        out_blk[b * out_last] = (z0_re + z0_im, 0.0);
+        out_blk[b * out_last + half_len] = (z0_re - z0_im, 0.0);
+    }
+    for k in 1..half_len {
+        let (cos_a, sin_a) = real_plan.twiddles[k - 1];
+        let kb = k * w;
+        let mkb = (half_len - k) * w;
+        for b in 0..batch {
+            let a_re = re[kb + b];
+            let a_im = im[kb + b];
+            let b_re = re[mkb + b];
+            let b_im = im[mkb + b];
+            let avg_re = 0.5 * (a_re + b_re);
+            let avg_im = 0.5 * (a_im - b_im);
+            let diff_re = 0.5 * (a_re - b_re);
+            let diff_im = 0.5 * (a_im + b_im);
+            let rotated_re = diff_re * cos_a - diff_im * sin_a;
+            let rotated_im = diff_re * sin_a + diff_im * cos_a;
+            out_blk[b * out_last + k] = (avg_re + rotated_im, avg_im - rotated_re);
+        }
+    }
+}
+
+/// Run the SoA real-FFT kernel over `batch` rows in L1-resident tiles of
+/// `POW2_TILE_ROWS` rows, reusing one scratch pair. `elements` is the real-input
+/// slice for exactly these `batch` rows; `out` holds `batch * out_last` outputs.
+/// Bit-identical to per-row `RealRfftPower2Plan` (each tile/row is independent).
+#[allow(clippy::too_many_arguments)]
+fn vectorized_rfft_pow2_tiled(
+    real_plan: &RealRfftPower2Plan,
+    elements: &[(f64, f64)],
+    batch: usize,
+    input_last: usize,
+    copy_len: usize,
+    out_last: usize,
+    out: &mut [(f64, f64)],
+) {
+    let half_len = real_plan.half_len;
+    let cap = POW2_TILE_ROWS * half_len;
+    let mut re = vec![0.0f64; cap];
+    let mut im = vec![0.0f64; cap];
+    let mut row0 = 0usize;
+    while row0 < batch {
+        let rows = POW2_TILE_ROWS.min(batch - row0);
+        let in_s = row0 * input_last;
+        let out_s = row0 * out_last;
+        vectorized_rfft_pow2_block(
+            real_plan,
+            &elements[in_s..in_s + rows * input_last],
+            rows,
+            input_last,
+            copy_len,
+            out_last,
+            &mut re[..rows * half_len],
+            &mut im[..rows * half_len],
+            &mut out[out_s..out_s + rows * out_last],
+        );
+        row0 += rows;
+    }
+}
+
 /// Transform `rows` real-input rows (starting at `row_start`) into the dense
 /// complex `out_blk` for RFFT: zero-pad/truncate each length-`input_last` row to
 /// `fft_length`, run the forward transform, and keep the first `out_last`
@@ -1611,6 +1731,24 @@ fn rfft_rows_into(
 ) {
     if let Some(real_plan) = real_plan {
         debug_assert_eq!(real_plan.fft_length, fft_length);
+        // Above a minimum row count, run the cache-blocked SoA real-FFT kernel
+        // (pack + half-length FFT + recombine vectorized vertically over rows) —
+        // bit-identical to the per-row path, same stable single-thread win as the
+        // full-complex SoA path. Tiny blocks keep the cheap per-row scratch loop.
+        const RFFT_VECTORIZED_MIN_ROWS: usize = 8;
+        if rows >= RFFT_VECTORIZED_MIN_ROWS {
+            let base = row_start * input_last;
+            vectorized_rfft_pow2_tiled(
+                real_plan,
+                &elements[base..base + rows * input_last],
+                rows,
+                input_last,
+                copy_len,
+                out_last,
+                out_blk,
+            );
+            return;
+        }
         let mut packed = Vec::with_capacity(real_plan.half_len);
         let mut transformed = Vec::with_capacity(real_plan.half_len);
         for r in 0..rows {
@@ -2072,6 +2210,118 @@ mod tests {
             old_inv as f64 / 1e6,
             new_inv as f64 / 1e6,
             old_inv as f64 / new_inv as f64,
+        );
+    }
+
+    /// The vectorized SoA real-FFT kernel must be bit-for-bit identical to the
+    /// per-row `RealRfftPower2Plan`, across pow2 lengths, batch counts, and the
+    /// exact / zero-padded / truncated input regimes.
+    #[test]
+    fn vectorized_rfft_pow2_bit_identical_to_per_row() {
+        let bits = |v: &[(f64, f64)]| -> Vec<(u64, u64)> {
+            v.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect()
+        };
+        for &fft_len in &[2usize, 4, 8, 16, 64, 256] {
+            let half = fft_len / 2;
+            let out_last = half + 1;
+            let real_plan = RealRfftPower2Plan::new(fft_len);
+            // exact (= fft_len), truncated (> fft_len), padded (< fft_len, >=1)
+            let input_lasts = [fft_len, fft_len + 5, (fft_len / 2).max(1)];
+            for &input_last in &input_lasts {
+                let copy_len = fft_len.min(input_last);
+                for &batch in &[1usize, 3, 8, 17, 40] {
+                    let elements: Vec<(f64, f64)> = (0..batch * input_last)
+                        .map(|i| {
+                            let f = i as f64;
+                            ((f * 0.017).sin() - 0.3 * (f * 0.005).cos(), 0.0)
+                        })
+                        .collect();
+                    let mut reference = vec![(0.0, 0.0); batch * out_last];
+                    let mut packed = Vec::new();
+                    let mut transformed = Vec::new();
+                    for b in 0..batch {
+                        real_plan.apply_into(
+                            &elements[b * input_last..b * input_last + input_last],
+                            copy_len,
+                            &mut packed,
+                            &mut transformed,
+                            &mut reference[b * out_last..b * out_last + out_last],
+                        );
+                    }
+                    let mut got = vec![(0.0, 0.0); batch * out_last];
+                    vectorized_rfft_pow2_tiled(
+                        &real_plan, &elements, batch, input_last, copy_len, out_last, &mut got,
+                    );
+                    assert_eq!(
+                        bits(&reference),
+                        bits(&got),
+                        "rfft SoA != per-row (fft_len={fft_len} input_last={input_last} batch={batch})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Same-binary A/B for the SoA real-FFT batch kernel (frankenjax-murmw): OLD =
+    /// per-row `RealRfftPower2Plan`; NEW = cache-blocked SoA tiled. Bit-identical
+    /// (asserted); run with `--ignored --nocapture` for the single-thread ratio
+    /// (the trustworthy signal; threaded FFT A/B is contention-fragile).
+    #[test]
+    #[ignore = "informational micro-bench; run with --ignored --nocapture"]
+    fn bench_vectorized_rfft_soa_vs_per_row_plan() {
+        let fft_len = 256usize;
+        let rows = 2048usize;
+        let input_last = fft_len;
+        let copy_len = fft_len;
+        let out_last = fft_len / 2 + 1;
+        let real_plan = RealRfftPower2Plan::new(fft_len);
+        let elements: Vec<(f64, f64)> = (0..rows * input_last)
+            .map(|i| ((i as f64 * 0.017).sin(), 0.0))
+            .collect();
+
+        // Interleave OLD and NEW per iteration so slow cross-run worker drift cancels
+        // in the ratio, then take the min of each (least-contended iteration).
+        let run_old = || -> (u64, u64) {
+            let mut out = vec![(0.0, 0.0); rows * out_last];
+            let mut packed = Vec::new();
+            let mut transformed = Vec::new();
+            let t0 = std::time::Instant::now();
+            for r in 0..rows {
+                real_plan.apply_into(
+                    &elements[r * input_last..r * input_last + input_last],
+                    copy_len,
+                    &mut packed,
+                    &mut transformed,
+                    &mut out[r * out_last..r * out_last + out_last],
+                );
+            }
+            let dt = t0.elapsed().as_nanos() as u64;
+            (dt, out[0].0.to_bits() ^ out[rows * out_last / 2].1.to_bits())
+        };
+        let run_new = || -> (u64, u64) {
+            let mut out = vec![(0.0, 0.0); rows * out_last];
+            let t0 = std::time::Instant::now();
+            vectorized_rfft_pow2_tiled(
+                &real_plan, &elements, rows, input_last, copy_len, out_last, &mut out,
+            );
+            let dt = t0.elapsed().as_nanos() as u64;
+            (dt, out[0].0.to_bits() ^ out[rows * out_last / 2].1.to_bits())
+        };
+        let (mut old_min, mut new_min) = (u64::MAX, u64::MAX);
+        let mut chk = 0u64;
+        for _ in 0..9 {
+            let (o, co) = run_old();
+            let (n, cn) = run_new();
+            chk ^= co ^ cn;
+            old_min = old_min.min(o);
+            new_min = new_min.min(n);
+        }
+        std::hint::black_box(chk);
+        eprintln!(
+            "[rfft SoA {rows}x{fft_len}] 1T per-row={:.3}ms soa={:.3}ms ratio={:.2}x (min of 9 interleaved)",
+            old_min as f64 / 1e6,
+            new_min as f64 / 1e6,
+            old_min as f64 / new_min as f64,
         );
     }
 

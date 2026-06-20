@@ -2,6 +2,33 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-murmw SoA real-FFT (rfft/irfft) batch kernel — SHIPPED win (1.66-1.79x)
+
+Follow-on to the shipped full-complex SoA pow2 kernel (`73645de8`): that win was wired
+only into `transform_batches_dense` (fft/ifft). The pow2 **rfft** batch path still ran
+per-row scalar via `RealRfftPower2Plan::apply_into`. This pass extended the same proven
+SoA lever to it (CrimsonOtter): factored the butterfly stages into
+`soa_radix2_butterfly_stages`, added `vectorized_rfft_pow2_block` (pack + half-length FFT
++ Hermitian recombination, all vertical over a row tile) and the cache-blocked
+`vectorized_rfft_pow2_tiled`, and routed `rfft_rows_into`'s real-plan branch through it
+above an 8-row floor.
+
+**Bit-identical** to the per-row path (same pack, same `RealRfftPower2Plan.half_fft`
+butterfly order, same recombination arithmetic) — proven by
+`vectorized_rfft_pow2_bit_identical_to_per_row` (exact/padded/truncated × batch 1..40)
+and the unchanged `fft_oracle` (27/27) + pow2 rfft golden digests.
+
+Measured single-thread same-binary A/B (`bench_vectorized_rfft_soa_vs_per_row_plan`,
+2048×256, **interleaved min-of-9** to cancel cross-run worker drift): **1.79x** and
+**1.66x** on two runs (per-row → SoA). Note: naive *sequential* old-then-new sampling
+read 1.09-1.36x because the shared-swarm worker speed drifted mid-measurement (per-row
+abs time swung 1.9-5.4ms run-to-run) — the interleaved measurement is the trustworthy
+one, consistent with the [[#2026-06-20 - frankenjax-murmw threaded SoA FFT A/B is
+contention-fragile]] caveat. Gates: `fj-lax` fft 49/49, clippy clean, oracle 27/27.
+
+Remaining FFT frontier (still murmw): irfft pow2 batch (`irfft_rows_f64_into`, same lever)
+and the mixed-radix/composite path (`fft_batch_128x1000` ~30x).
+
 ## 2026-06-20 - frankenjax-4ryym f64 GEMM SIMD load-codegen no-ship
 
 Follow-up after `frankenjax-ifou2`: generic Rayon/global-pool row scheduling is
