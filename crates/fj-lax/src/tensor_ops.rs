@@ -520,6 +520,32 @@ fn dense_same_width_bitcast_tensor(
     }
 }
 
+const BITCAST_WIDTH_CHANGE_PARALLEL_MIN: usize = 1 << 20;
+
+fn threaded_f64_to_u32_bitcast_into(out: &mut [u32], values: &[f64], threads: usize) {
+    let n = values.len();
+    let chunk = n.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [u32] = out;
+        let mut start = 0usize;
+        while start < n {
+            let len = chunk.min(n - start);
+            let (blk, tail) = rest.split_at_mut(len * 2);
+            rest = tail;
+            let src = &values[start..start + len];
+            scope.spawn(move || {
+                for (i, &value) in src.iter().enumerate() {
+                    let bits = value.to_bits();
+                    let out_i = i * 2;
+                    blk[out_i] = bits as u32;
+                    blk[out_i + 1] = (bits >> 32) as u32;
+                }
+            });
+            start += len;
+        }
+    });
+}
+
 fn dense_width_changing_bitcast_tensor(
     primitive: Primitive,
     tensor: &TensorValue,
@@ -534,11 +560,26 @@ fn dense_width_changing_bitcast_tensor(
                 primitive,
                 detail: "bitcast narrowing output size overflow".to_owned(),
             })?;
-            let mut out = Vec::with_capacity(out_len);
-            for value in values {
-                let bytes = value.to_bits().to_le_bytes();
-                out.push(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
-                out.push(u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]));
+            let mut out = vec![0u32; out_len];
+            if values.len() >= BITCAST_WIDTH_CHANGE_PARALLEL_MIN {
+                let threads = crate::arithmetic::work_scaled_threads(out_len);
+                if threads > 1 {
+                    threaded_f64_to_u32_bitcast_into(&mut out, values, threads);
+                } else {
+                    for (i, &value) in values.iter().enumerate() {
+                        let bits = value.to_bits();
+                        let out_i = i * 2;
+                        out[out_i] = bits as u32;
+                        out[out_i + 1] = (bits >> 32) as u32;
+                    }
+                }
+            } else {
+                for (i, &value) in values.iter().enumerate() {
+                    let bits = value.to_bits();
+                    let out_i = i * 2;
+                    out[out_i] = bits as u32;
+                    out[out_i + 1] = (bits >> 32) as u32;
+                }
             }
             let mut dims = tensor.shape.dims.clone();
             dims.push(2);

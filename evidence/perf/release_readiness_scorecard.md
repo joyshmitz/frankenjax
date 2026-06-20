@@ -38,6 +38,11 @@ Additional current clamp and bitcast gauntlet environment:
 - `frankenjax-mcqr.109` one-pass half clamp was a rejected candidate, measured
   only as RCH same-worker before/after on `ovh-a`; it changed no shipped
   scorecard rows.
+- `frankenjax-mcqr` cod-a `f64->u32` packed bitcast used RCH same-worker
+  baseline/candidate timing on `hz1` with the cod-a target dir. The fresh local
+  JAX comparator used JAX/JAXLIB 0.10.1 with 20 runs x 200 inner loops and high
+  CV (31.97-34.45%), so the Rust/JAX ratios are routing evidence; the keep
+  criterion is the same-worker Rust delta.
 
 Additional current scalar broadcast environment:
 
@@ -302,6 +307,7 @@ Additional cod-a fj-interpreters unary-chain environment:
 | frankenjax-mcqr.96 | `bitcast_f64_i64_1m` | 270.586 us mean | 183.715 us mean | 1.473 | Rust 1.47x slower (82.27x vs literal ref) |
 | frankenjax-mcqr.98 | `bitcast_f64_u32_1m` | 1.272 ms mean | 186.831 us mean | 6.809 | Rust 6.81x slower (47.76x vs literal ref) |
 | frankenjax-mcqr.98 | `bitcast_u32_f64_1m` | 919.708 us mean | 189.478 us mean | 4.854 | Rust 4.85x slower (43.99x vs literal ref) |
+| cod-a packed f64->u32 bitcast | `bitcast_f64_u32_1m` | 1.1781 ms midpoint | 163.747 us mean | 7.195 | Same-worker RCH `hz1` 1.35x internal win vs 1.5904 ms baseline; still JAX loss; `u32->f64` prezero/thread candidate regressed +28.5% and was reverted |
 | frankenjax-e07uw | `fusion_arith8_f64_1m` (jit chain) | 3.320 ms fused | 272.7 us mean | 12.175 | Rust 12.18x slower |
 | frankenjax-bjqfr | `fusion_bf16_broadcast_1m` | 10.776 ms | 146.9 us mean | 73.357 | Rust 73.36x slower (reverted) |
 | frankenjax-f62hx | `transpose_attn_BSHD_f32` (block-copy) | 791.5 us | 186.7 us mean | 4.239 | Rust 4.24x slower (10.3x vs naive) |
@@ -342,6 +348,14 @@ Additional cod-a fj-interpreters unary-chain environment:
   0.892 and 0.816. The local same-target Rust bench attempt is invalid due to
   mixed-nightly RCH artifacts, so these rows use conservative remote-Rust/local-
   JAX ratios.
+- cod-a packed `f64->u32` bitcast is a measured internal keep but not a release
+  domination row. Same-worker RCH `hz1` improved the dense row from 1.5904 ms to
+  1.1781 ms (1.35x faster, Criterion -29.249%), but fresh local JAX was
+  163.747 us, so Rust still loses by 7.195x. The attempted symmetric
+  `u32->f64` prezero/thread path regressed the dense row by +28.5% and was
+  reverted; production `u32->f64` remains unchanged and still a JAX loss. The
+  f64/u32 pass score is 0 JAX wins / 4 losses / 0 neutral across dense/control
+  measured rows.
 - xjbvr unary-chain fusion is a measured `fj-interpreters` internal keep, not a
   JAX domination row. Same-worker RCH `hz1` improved f64 floor/round/sign
   add-unary chains by 8.29x/10.91x/4.01x and f32 floor/round/sign by

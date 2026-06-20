@@ -2,6 +2,40 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-mcqr f64->u32 packed bitcast keep, u32->f64 revert
+
+The BOLD-VERIFY pass targeted the remaining `f64<->u32` width-changing bitcast
+losses after the earlier half-width presized-fill keep. The kept lever replaces
+the dense `f64 -> u32` byte-array/push materializer with a presized packed
+little-endian low/high `u32` fill and a scoped threaded path for 1M+ source
+lanes. The attempted symmetric `u32 -> f64` presized/threaded path regressed and
+was reverted before commit.
+
+Same-worker Rust proof on RCH worker `hz1` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`:
+
+| Row | Baseline Rust | Candidate Rust | Internal delta | JAX mean | Candidate/JAX | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `bitcast_f64_u32_dense_1m` | 1.5904 ms | 1.1781 ms | 1.35x faster | 163.747 us | 7.195 | Keep internally; still JAX loss |
+| `bitcast_f64_u32_literal_ref_1m` | 74.361 ms | 69.507 ms | 1.07x faster | 163.747 us | 424.48 | Control improved, still JAX loss |
+| `bitcast_u32_f64_dense_1m` rejected candidate | 989.96 us | 1.2378 ms | 1.25x slower midpoint; Criterion +28.5% | 123.933 us | 9.988 | Revert |
+| `bitcast_u32_f64_literal_ref_1m` rejected candidate | 51.321 ms | 49.209 ms | Neutral/no keep | 123.933 us | 397.06 | No production claim |
+
+JAX timing used local CPU JAX/JAXLIB 0.10.1 via
+`benchmarks/jax_comparison/bitcast_gauntlet.py --runs 20 --warmup 5
+--inner-loops 200`. JAX CV was high (`f64->u32` 34.45%, `u32->f64` 31.97%),
+so Rust/JAX ratios are routing evidence; the keep decision uses the same-worker
+Rust delta. Ratio scorecard for the measured `f64/u32` rowset: 0 JAX wins / 4
+losses / 0 neutral. Production delta after revert: 1 internal win / 0 shipped
+regressions, with `u32->f64` unchanged and still a JAX loss.
+
+Validation: `cargo test -p fj-lax bitcast --lib` passed 4/4; `cargo test -p
+fj-conformance --test bitcast_oracle` passed 36/36; full `cargo test -p
+fj-conformance` passed; `cargo check -p fj-lax --benches` passed; production
+`cargo clippy -p fj-lax --lib -- -D warnings` passed. `cargo fmt --check -p
+fj-lax` remains red on pre-existing unrelated formatting drift and did not show
+a diff in the new packed-bitcast hunk.
+
 ## 2026-06-20 - frankenjax-xjbvr unary-chain fusion keep, JAX gap remains
 
 The BOLD-VERIFY pass targeted `fj-interpreters` compiled-dispatch chains where

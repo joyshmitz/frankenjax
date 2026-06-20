@@ -3,6 +3,87 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-mcqr - f64->u32 packed width-changing bitcast keep; u32->f64 prezero/thread revert
+
+- Date: 2026-06-20
+- Agent: cod-a / WildForge
+- Target gap: remaining `bitcast_f64_u32_1m` and `bitcast_u32_f64_1m`
+  release losses after the previous presized-fill pass flipped the
+  `f32<->bf16` rows to JAX wins.
+- Lever kept: dense `f64 -> u32` width-changing `bitcast_convert_type` now
+  presizes the output and writes the little-endian low/high `u32` words directly
+  from `f64::to_bits()`. For 1M+ source values it uses scoped threads over
+  disjoint output chunks. Shape expansion and dtype construction are unchanged.
+- Lever rejected and reverted: the symmetric `u32 -> f64` prezero/threaded
+  candidate assembled values with indexed low/high chunks and regressed the
+  dense 1M row, so that direction was restored to the original byte-array/push
+  implementation before commit.
+- Alien-graveyard route used: vectorized execution/artifact-layout thinking
+  rather than algorithmic complexity. The useful part was turning an append
+  stream into a fixed packed output layout; the failed part was applying the
+  same layout idea to a widening direction where prezero/write traffic cost more
+  than the old push path.
+
+Baseline command:
+
+```text
+AGENT_NAME=cod-a \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/bitcast_(f64_u32|u32_f64)_(dense|literal_ref)_1m' \
+  --sample-size 20 --warm-up-time 1 --measurement-time 3 \
+  --save-baseline frankenjax-cod-a-bitcast-f64-u32-baseline
+```
+
+Post-change command:
+
+```text
+AGENT_NAME=cod-a \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/bitcast_(f64_u32|u32_f64)_(dense|literal_ref)_1m' \
+  --sample-size 20 --warm-up-time 1 --measurement-time 3 \
+  --baseline frankenjax-cod-a-bitcast-f64-u32-baseline
+```
+
+RCH selected worker `hz1` for both accepted baseline and candidate timing.
+
+| workload | baseline Rust midpoint | candidate Rust midpoint | same-worker delta | JAX mean | candidate/JAX | verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `eval/bitcast_f64_u32_dense_1m` | 1.5904 ms | 1.1781 ms | 1.35x faster, Criterion -29.249% | 163.747 us | 7.195 | KEEP internally; still JAX loss |
+| `eval/bitcast_f64_u32_literal_ref_1m` | 74.361 ms | 69.507 ms | 1.07x faster, Criterion -6.528% | 163.747 us | 424.48 | Control row improved; no JAX win |
+| `eval/bitcast_u32_f64_dense_1m` rejected candidate | 989.96 us | 1.2378 ms | 1.25x slower midpoint, Criterion +28.518% | 123.933 us | 9.988 | REVERT |
+| `eval/bitcast_u32_f64_literal_ref_1m` rejected candidate | 51.321 ms | 49.209 ms | neutral, Criterion p=0.07 | 123.933 us | 397.06 | No production claim |
+
+- JAX comparator:
+  `benchmarks/jax_comparison/bitcast_gauntlet.py --runs 20 --warmup 5
+  --inner-loops 200 --output /tmp/frankenjax-cod-a-bitcast-jax-20260620T1448Z.json`,
+  JAX 0.10.1 / jaxlib 0.10.1, CPU, x64 enabled. `bitcast_f64_u32_1m`
+  mean was 163.746649 us (p50 185.050925 us, CV 34.45%);
+  `bitcast_u32_f64_1m` mean was 123.932654 us (p50 109.489063 us, CV
+  31.97%). These high-CV local JAX rows are routing evidence, not the hard keep
+  proof.
+- Ratio scorecard for all four measured rows: **0 wins / 4 losses / 0 neutral
+  vs JAX**. Production score for this pass after reverting the regressed
+  direction: **1 internal win / 0 shipped regressions**, but `f64->u32` remains
+  7.20x slower than fresh JAX and `u32->f64` remains unchanged and still a JAX
+  loss.
+- Validation: `cargo test -p fj-lax bitcast --lib` passed 4/4 through RCH;
+  `cargo test -p fj-conformance --test bitcast_oracle` passed 36/36 through
+  RCH; full `cargo test -p fj-conformance` passed through RCH/local fallback;
+  `cargo check -p fj-lax --benches` passed on RCH `vmi1149989`;
+  `cargo clippy -p fj-lax --lib -- -D warnings` passed on RCH `vmi1227854`.
+- Non-blocking hygiene debt: `cargo fmt --check -p fj-lax` is still red on
+  pre-existing unrelated formatting drift in benches/tests and older
+  `tensor_ops.rs` test blocks; the new packed-bitcast hunk was not reported in
+  the rustfmt diff.
+- Retry predicate: do not retry symmetric prezero/threaded `u32 -> f64`
+  widening without fresh evidence that the extra initialization traffic is gone.
+  The remaining credible width-changing route is a deeper packed-chunk/vector
+  kernel or output-reuse design that avoids both `Vec::push` checks and
+  whole-buffer zeroing, with same-worker before/after proof and a fresh JAX
+  comparator.
+
 ## frankenjax-xjbvr - Floor/Round/Sign unary-chain fusion keep; JAX still dominates
 
 - Date: 2026-06-20
