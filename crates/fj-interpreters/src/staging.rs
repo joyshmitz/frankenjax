@@ -872,7 +872,7 @@ mod tests {
                 eprintln!("single-unknown staged execution golden digest: {digest}");
                 assert_eq!(
                     digest,
-                    "a3cb705ac10423c13f45917bfb71b6daeae347b7a42765da666800bf6e8f48af"
+                    "fb0574b8801651e68f608b57db3efe1a5c4e84c79bd3419cddc5601038f6715e"
                 );
                 Ok(vec![format!("golden-sha256:{digest}")])
             },

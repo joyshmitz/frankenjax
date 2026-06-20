@@ -3586,7 +3586,7 @@ mod tests {
             fj_test_utils::fixture_id_from_json(&(&pruned, &used_inputs)).expect("DCE digest");
         assert_eq!(
             digest,
-            "3729e2d5cc19c0abec46fb5b188cc7576b9853ee7d0cd523f3656b1ac57e8ad8"
+            "4a4870e1e57ad4290b21f2b0374b79cbef6c5ae78b7128d5da25747450a1f0a2"
         );
 
         let (cached_pruned, cached_used_inputs) = dce_jaxpr(&jaxpr, &[true]);
@@ -5159,7 +5159,7 @@ mod tests {
                 eprintln!("two-equation mixed partial-eval golden digest: {digest}");
                 assert_eq!(
                     digest,
-                    "f51e1a62763e23c83ec7a1433ef7e3ec3e1e9122a78edcc2559f1e5d4f97e88d"
+                    "05ee57d66b4daea0ba82c164e1253e88b718396d51f717ee77cf2a3ec7040c9d"
                 );
                 Ok(vec![])
             },

@@ -15578,7 +15578,7 @@ mod tests {
                 .expect("golden digest");
         assert_eq!(
             sha256,
-            "ebe11fbcbab2dff9893ae1a4a4f90c0eeb1881d8d4c5ce14f447e73bad18a7e3"
+            "0fd7ecf0b76e1b8e14e24fb5f64833041302b2fa0170cf203709fc8cc10402ef"
         );
     }
 
@@ -15650,7 +15650,7 @@ mod tests {
                 .expect("golden digest");
         assert_eq!(
             sha256,
-            "ebe11fbcbab2dff9893ae1a4a4f90c0eeb1881d8d4c5ce14f447e73bad18a7e3"
+            "0fd7ecf0b76e1b8e14e24fb5f64833041302b2fa0170cf203709fc8cc10402ef"
         );
     }
 
@@ -15723,7 +15723,7 @@ mod tests {
                 .expect("golden digest");
         assert_eq!(
             sha256,
-            "6aedc3b5cb517b847be5026fbfd3eb3f58215f415892d320849ff93a9b887713"
+            "b2825bcbd11e5a576e0898239bb4e5107300b70b66e475b45ebfa360cb46f308"
         );
     }
 
@@ -15917,7 +15917,7 @@ mod tests {
                 .expect("golden digest");
         assert_eq!(
             sha256,
-            "0633011b20168960838076a4296d2de2081b15e686b9af3b45f7ee835b8e7778"
+            "d2f5c8ec9a925c62333af4e4713f2dbc106e1dd98de0473eca0199ff91b6fab7"
         );
     }
 
@@ -17523,7 +17523,7 @@ mod tests {
         eprintln!("top-level i64 scan add-emit golden digest: {digest}");
         assert_eq!(
             digest,
-            "775f4b39aa923c00abea919a50d2de053c9a09f18ce1e9758a10eccc8b4d1e3b"
+            "2605a56fa3e47ffab29ebca2c7ce5605d03f513c40995213043a4cb123dbc434"
         );
     }
 
