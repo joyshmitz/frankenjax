@@ -3070,3 +3070,31 @@ established single-op cheap-elementwise gate). Net verdict: KEPT but NARROWED �
 modest (1.07-1.33x) bit-exact win confined to >=8.4M-element elementwise chains
 (f64/f32/i64); half stays serial (measured neutral). Below 8.4M = serial (no
 regression). Honest framing: does NOT flip the absolute JAX loss on large chains.
+
+## CrimsonForge - element-major fusion-chunk rewrite REJECTED (dynamic-tape dispatch defeats it)
+
+- Date: 2026-06-20. Probes in eval_fusion_speed.rs (run_fusion_strategy_probe, run_fusion_dynamic_probe).
+- Hypothesis: rewrite step-major `apply_fusion_chunk` (8 passes, accumulator round-tripped
+  to memory between ops) as element-major single-pass (register-resident accumulator, one
+  store/elem — what XLA emits) to attack the measured ~7.6-7.75x large-chain JAX loss.
+- STATIC element-major (fixed unrolled chain): **2.87x @ 1M, 2.12x @ 16M faster** — the win is real.
+- DYNAMIC-tape element-major (faithful to lib.rs: per-element loop over a runtime tape with a
+  match dispatch): **0.27x @ 1M, 0.60x @ 16M — 1.7-3.7x SLOWER.**
+
+| n | step-major | static elem | dyn-scalar elem | verdict |
+| --- | ---: | ---: | ---: | --- |
+| 1M  | 4.06 ms (probe) | 1.41 ms (2.87x) | 13.46 ms (0.27x) | dynamic LOSES |
+| 16M | 194.3 ms | 91.8 ms (2.12x) | 295.7 ms (0.60x) | dynamic LOSES |
+
+- ROOT CAUSE (= the hoist-op-match lesson): step-major HOISTS the op-match OUT of the element
+  loop, so each op is a tight autovectorized pass. Element-major puts the dynamic-tape match
+  INSIDE the per-element loop → kills autovec + a branch per element per step. The static win
+  exists only because the compiler UNROLLS the fixed chain (eliminating dispatch) = codegen,
+  which is exactly what XLA does (it monomorphizes each chain) and what our interpreter cannot.
+- RETRY PREDICATE: do NOT rewrite apply_fusion_chunk element-major for the dynamic tape. The
+  current step-major (op-match hoisted, autovec per op) is the CORRECT design for a dynamic
+  interpreter tape. SIMD element-major would still carry per-(group)step dispatch and likely
+  shares the penalty; not worth the portable_simd/mask risk. The 2-2.9x element-major win is
+  reachable ONLY via per-chain codegen/JIT (compile the jaxpr chain to a monomorphic kernel) —
+  a major architectural lever, the same class as bead compiled-jaxpr-dispatch. This is the
+  fundamental interpreter-vs-compiler ceiling; it is WHY large chains lose ~7-8x to XLA.
