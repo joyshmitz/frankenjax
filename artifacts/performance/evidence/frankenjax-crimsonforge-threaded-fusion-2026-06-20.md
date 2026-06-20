@@ -64,3 +64,17 @@ bit-exact, downside-free internal speedup on the fastest existing chain path
   `fusion_threaded_f64_row_broadcast_matches_reference_bit_for_bit` (cols=257
   splitting rows across thread/chunk seams) assert serial==threaded==reference.
 - Target dir: `/data/projects/.rch-targets/frankenjax-cc`; JAX 0.10.1 x64 CPU.
+
+## CORRECTION (same day): contention re-measurement → gate raised to 8.4Mi
+
+The A/B table above was on idle workers. A run on a CONTENDED shared rch worker
+showed the SAME code regressing at L3-resident sizes (f64 1M 0.42x, f32 1M 0.79x,
+i64 1M 0.42x) while >= 16M stayed positive (f64 1.21x, f32 1.33x, i64 1.07x).
+Same-invocation A/B is NOT contention-immune for a THREADING lever (the threaded
+arm oversubscribes under load while serial is robust; the ratio swings with load).
+
+FINAL: `FUSION_THREAD_MIN_ELEMS` raised 1Mi -> 8.4Mi (commit c23c5a0c), matching the
+established single-op gate. The lever is KEPT but narrowed to >= 8.4M-element
+f64/f32/i64 elementwise chains (robust 1.07-1.33x across idle + contended); half
+stays serial (measured neutral 0.86-1.01x). Below 8.4M = serial, no regression.
+Per-dtype A/B harnesses: `run_{f64,f32,i64,bf16}_thread_ab` in eval_fusion_speed.

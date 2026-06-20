@@ -3040,3 +3040,33 @@ ends are not rediscovered without new evidence.
 - Conformance: bit-exact (serial==threaded==reference guards). The 8 `fj-interpreters`
   golden-hash failures are pre-existing serialization drift (identical on baseline
   aff2ee5d), not from this change.
+
+### CORRECTION (same day, CrimsonForge): contention re-measurement → gate raised 1Mi -> 8.4Mi
+
+The 1.22-1.32x table above was measured on IDLE/lightly-loaded rch workers. A third
+run landed on a CONTENDED shared worker and the SAME code (commit c5ce4988) measured:
+
+| n | serial | threaded | speedup | note |
+| --- | ---: | ---: | ---: | --- |
+| f64 1M  | 20.595 ms | 48.484 ms | **0.42x** | REGRESSION (L3-resident, contended) |
+| f64 4M  | 108.687 ms | 101.918 ms | 1.07x | marginal |
+| f64 16M | 390.867 ms | 322.653 ms | 1.21x | win (DRAM-bound) |
+| f32 1M  | 5.542 ms | 7.006 ms | **0.79x** | REGRESSION |
+| f32 16M | 209.219 ms | 157.046 ms | 1.33x | win |
+| i64 1M  | 8.732 ms | 20.629 ms | **0.42x** | REGRESSION |
+| i64 16M | 407.139 ms | 380.176 ms | 1.07x | marginal win |
+| bf16 1M | 21.621 ms | 25.244 ms | 0.86x | (half already reverted to serial) |
+
+KEY RETRY PREDICATE: a same-invocation A/B ratio is contention-immune ONLY when both
+arms scale identically with load. A THREADING lever breaks that — under shared-worker
+oversubscription the threaded arm thrashes (oversubscribed cores) while the serial arm
+is robust, so the *ratio itself* swings from 1.28x (idle) to 0.42x (contended) at the
+same size. Threading is only a ROBUST win PAST the L3->DRAM transition (>= 8.4M here:
+working set > the 128MB L3, so threads use independent memory channels) — confirmed
+positive across BOTH idle and contended workers (f64/f32 16M 1.21-1.33x, i64 1.07x).
+
+ACTION (commit c23c5a0c): `FUSION_THREAD_MIN_ELEMS` raised 1Mi -> 8.4Mi (matches the
+established single-op cheap-elementwise gate). Net verdict: KEPT but NARROWED — a
+modest (1.07-1.33x) bit-exact win confined to >=8.4M-element elementwise chains
+(f64/f32/i64); half stays serial (measured neutral). Below 8.4M = serial (no
+regression). Honest framing: does NOT flip the absolute JAX loss on large chains.
