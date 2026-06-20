@@ -7647,6 +7647,57 @@ mod tests {
         Value::Tensor(TensorValue::new(DType::F64, shape, elements).unwrap())
     }
 
+    /// Informational head-to-head timing of fj-lax dense f64 linalg vs JAX/LAPACK
+    /// (compare against /data/projects/.scratch/jax_linalg_headtohead.py). Run with
+    /// `--ignored --nocapture`. Pure measurement — no asserts on timing.
+    #[test]
+    #[ignore = "informational head-to-head timing; run with --ignored --nocapture"]
+    fn bench_linalg_vs_jax_sizes() {
+        use std::collections::BTreeMap;
+        use std::time::Instant;
+        let p = BTreeMap::new();
+        let best = |f: &dyn Fn()| -> f64 {
+            let mut b = f64::MAX;
+            for _ in 0..3 {
+                let t0 = Instant::now();
+                f();
+                b = b.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            b
+        };
+        for &n in &[128usize, 256, 512] {
+            // Deterministic pseudo-random A, symmetric S = A+Aᵀ, SPD = S + 4n·I.
+            let a: Vec<f64> = (0..n * n)
+                .map(|i| (i as f64 * 0.123).sin() + (i as f64 * 0.0457).cos())
+                .collect();
+            let mut sym = vec![0.0f64; n * n];
+            for r in 0..n {
+                for c in 0..n {
+                    sym[r * n + c] = a[r * n + c] + a[c * n + r];
+                }
+            }
+            let mut spd = sym.clone();
+            for d in 0..n {
+                spd[d * n + d] += 4.0 * n as f64;
+            }
+            let am = make_matrix(n, n, &a);
+            let symm = make_matrix(n, n, &sym);
+            let spdm = make_matrix(n, n, &spd);
+            let run = |prim: Primitive, m: &Value| -> f64 {
+                best(&|| {
+                    let _ = crate::eval_primitive(prim, std::slice::from_ref(m), &p).unwrap();
+                })
+            };
+            eprintln!(
+                "[linalg n={n}] svd={:.2}ms eigh={:.2}ms qr={:.2}ms cholesky={:.2}ms",
+                run(Primitive::Svd, &am),
+                run(Primitive::Eigh, &symm),
+                run(Primitive::Qr, &am),
+                run(Primitive::Cholesky, &spdm),
+            );
+        }
+    }
+
     fn extract_f64_elements(v: &Value) -> Vec<f64> {
         match v {
             Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap()).collect(),

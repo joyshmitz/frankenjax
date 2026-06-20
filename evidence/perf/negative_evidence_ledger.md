@@ -3759,3 +3759,30 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   this change.) fj-lax --lib 1567/0, clippy --all-targets clean.
 - FFT/IFFT/RFFT/IRFFT batched pow2 paths are now ALL plan-cached. Remaining murmw lever stays the
   multi-session SIMD mixed-radix kernel. Pass delta: 1 win (1.39x bit-exact) / 0 losses / 0 neutral.
+
+## AzureLynx - MEASURED: eigh/SVD are catastrophic losses (eigh 512=3.2s, super-cubic) [bead ur4h3]
+
+- Used the jax venv to hunt the NEXT gap after FFT: linalg. Added a reusable #[ignore] harness
+  (`linalg.rs::bench_linalg_vs_jax_sizes`). fj-lax eval_primitive f64, rch release:
+
+  | n   | svd      | eigh       | qr     | cholesky |
+  | 128 | 2.48 ms  | 17.06 ms   | 0.23ms | 0.31ms   |
+  | 256 | 21.79 ms | 259.59 ms  | 1.28ms | 2.12ms   |
+  | 512 | 287.98ms | 3248.97 ms | 7.71ms | 10.73ms  |
+
+- eigh scales 15.2x then 12.5x per doubling = SUPER-CUBIC (O(n³) is 8x); svd 8.8x/13.2x. QR + Cholesky
+  scale ~cubic and are FAST (already blocked/GEMM-routed). **eigh 512 = 3.2 SECONDS.**
+- LAPACK baseline NOT trustworthy right now: the shared host is so loaded that numpy read svd_128=136ms
+  (absurd — LAPACK does <1ms), so no clean ratio. BUT eigh's super-cubic SCALING is contention-robust
+  (relative, measured back-to-back under one load) and 3.2s@512 is self-evidently algorithmic. Ref:
+  LAPACK dsyevd/dgesdd on 512 ≈ 10-30ms → fj-lax eigh is ~100-300x off.
+- ROOT CAUSE: eigh/SVD never got the blocked-GEMM treatment QR/Cholesky/LU/solve received. eval_eigh →
+  `tridiag_ql_eigendecomposition` (Householder tridiag + QL) but the reduction/eigvec-accumulation are
+  cache-hostile scalar strided ops (super-cubic wall-clock past L2, not O(n³)-blocked). SVD =
+  `one_sided_jacobi_svd_real` (O(n³·sweeps), max_sweeps=60), not a blocked bidiag+QR. NOTE memory
+  claimed eigh tred2/tql2 (2.2-3.0x) + SVD bidiag+QR (4.2x) were "done" — tridiag IS wired but UNBLOCKED;
+  SVD is still Jacobi (the bidiag+QR may have been reverted/unwired — flagged in ur4h3 to verify).
+- Filed frankenjax-ur4h3 (P1). Levers (multi-session, linalg.rs = codex zone, parity is TOLERANCE so
+  blocking is LEGAL): blocked Householder tridiagonalization (dsytrd-style panel + GEMM trailing
+  update) and blocked bidiag+implicit-QR SVD. This is a BIGGER gap than FFT — eigh ~100-300x vs FFT's
+  7-43x. Pass delta: 2 MEASURED losses (eigh ~100-300x, svd ~15x) characterized.
