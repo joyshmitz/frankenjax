@@ -1,6 +1,6 @@
 # FrankenJAX Perf Release Readiness Scorecard
 
-Updated: 2026-06-19
+Updated: 2026-06-20
 
 Scope: verify recent code-first `fj-lax`/`fj-core` perf backlog against original JAX on
 realistic warmed CPU workloads. This scorecard records measured readiness only;
@@ -94,6 +94,21 @@ Additional cod-a repeat validation environment:
   inner loops for `jax.jit(jnp.tile(x[None, :], (64, 1)) + 0.0)` over a
   1024-element F64 vector.
 
+Additional cod-b allocator preload verification environment:
+
+- Agent: cod-b / WildForge
+- Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-b-local-20260620`
+- Rust bench command: local same-host `cargo bench -p fj-lax --bench elementwise_gauntlet`
+  with the `add_f64_16m/dense`, `add_f32_16m/dense`, and `mul_f64_16m/dense`
+  filters; jemalloc rows used `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.2`.
+- RCH build guard: `rch exec -- cargo bench -p fj-lax --bench elementwise_gauntlet --no-run`
+  passed on worker `vmi1153651`; remote timing was not used for JAX ratios.
+- JAX oracle: `benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/elementwise_gauntlet.py --runs 12 --warmup 3 --inner-loops 20`
+- JAX/JAXLIB: 0.10.1 / 0.10.1, `jax_enable_x64=true`, CPU backend
+- Note: mimalloc was not installed on this host, so the measurable allocator-class
+  preload was jemalloc. The result is a no-ship allocator-policy check, not a
+  production code change.
+
 ## Measured Workloads
 
 | Bead | Workload | Rust timing | JAX timing | Rust/JAX | Outcome |
@@ -148,6 +163,12 @@ Additional cod-a repeat validation environment:
 | elementwise | `add_f64_1m` (LOCAL same-host) | 415.00 us | 192.0 us mean | 2.162 | Rust 2.16x slower (alloc+AVX2) |
 | elementwise | `add_f32_1m` (LOCAL same-host) | 135.98 us | 80.4 us mean | 1.691 | Rust 1.69x slower |
 | elementwise | `mul_f64_1m` (LOCAL same-host) | 422.96 us | 161.7 us mean | 2.615 | Rust 2.61x slower |
+| frankenjax-oneqh | `add_f64_16m` glibc allocator | 24.502 ms mean | 28.179 ms mean | 0.870 | Rust 1.15x faster; baseline allocator row |
+| frankenjax-oneqh | `add_f64_16m` jemalloc preload | 33.095 ms mean | 28.179 ms mean | 1.174 | JAX 1.17x faster; allocator preload regresses |
+| frankenjax-oneqh | `add_f32_16m` glibc allocator | 15.945 ms mean | 14.130 ms mean | 1.128 | Rust 1.13x slower |
+| frankenjax-oneqh | `add_f32_16m` jemalloc preload | 16.784 ms mean | 14.130 ms mean | 1.188 | Rust 1.19x slower; no allocator win |
+| frankenjax-oneqh | `mul_f64_16m` glibc allocator | 29.210 ms mean | 28.525 ms mean | 1.024 | Neutral/slight JAX win |
+| frankenjax-oneqh | `mul_f64_16m` jemalloc preload | 27.790 ms mean | 28.525 ms mean | 0.974 | Neutral/slight Rust win; not enough for global allocator |
 
 ## Readiness
 
@@ -157,6 +178,13 @@ Additional cod-a repeat validation environment:
   same-host estimates FLIP several to wins/ties: slice ~0.72x (Rust FASTER),
   integer_pow2 f32 ~0.97x (~tie/win), broadcast ~1.10x, complex_ctor ~1.08x. Future
   vs-JAX rows MUST run the Rust bench LOCALLY (cargo bench, not rch).
+- oneqh allocator preload verification closes as no-ship. Jemalloc produced one
+  stable win/tie-class row (`mul_f64_16m`, Rust/JAX 0.974) but regressed
+  `add_f64_16m` badly (33.095 ms vs 24.502 ms glibc; Rust/JAX 1.174) and did
+  not improve `add_f32_16m`. The production decision remains no global allocator
+  adoption and no cheap-binop gate removal; the next real lever is output/arena
+  reuse, non-temporal stores/prefetch/NUMA, or a specific typed-path gap with
+  same-host proof.
 - JAX domination score (same-host corrected/measured estimate): ~43/100 — scalar
   stack_axis0 (0.0055x), scalar repeat_axis0 (0.0143x), tensor stack_axis0
   (0.083x), tensor repeat_axis0 (0.276x), dense to_i64_vec host extraction

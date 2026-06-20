@@ -2533,6 +2533,37 @@ ends are not rediscovered without new evidence.
   same-worker before/after proof. Do not re-open default mimalloc adoption unless a maintainer first
   chooses workspace allocator policy and the proof includes the allocator-conflict resolution plus
   head-to-head production rows with the existing threading gate kept.
+
+## WildForge / cod-b - oneqh allocator preload verification: jemalloc mixed/no-ship (2026-06-20)
+
+- Bead: `frankenjax-oneqh`.
+- Scope: follow-up verification of the allocator-class hypothesis after the CobaltForge correction
+  that allocator reuse does not supersede the shipped threaded cheap-binop path. No production source
+  change was made.
+- Environment: local same-host Criterion with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b-local-20260620`, Rust
+  `fj-lax` `elementwise_gauntlet`, JAX 0.10.1 CPU x64 comparator via
+  `benchmarks/jax_comparison/.venv/bin/python benchmarks/jax_comparison/elementwise_gauntlet.py
+  --runs 12 --warmup 3 --inner-loops 20`. RCH build-only guard
+  `rch exec -- cargo bench -p fj-lax --bench elementwise_gauntlet --no-run` passed on
+  worker `vmi1153651`. Mimalloc was not installed on this host, so the measured preload was
+  `/usr/lib/x86_64-linux-gnu/libjemalloc.so.2`.
+
+  | row | glibc Rust | jemalloc Rust | JAX | verdict |
+  | --- | ---: | ---: | ---: | --- |
+  | `add_f64_16m/dense` | 24.502 ms, Rust/JAX 0.870 | 33.095 ms, Rust/JAX 1.174 | 28.179 ms | REJECT: jemalloc is 1.35x slower than glibc and loses to JAX |
+  | `add_f32_16m/dense` | 15.945 ms, Rust/JAX 1.128 | 16.784 ms, Rust/JAX 1.188 | 14.130 ms | REJECT/neutral: Criterion p=0.82 for preload change, both lose to JAX |
+  | `mul_f64_16m/dense` | 29.210 ms, Rust/JAX 1.024 | 27.790 ms, Rust/JAX 0.974 | 28.525 ms | Neutral/slight win only; not a global allocator justification |
+
+- Decision: NO-SHIP. Do not add a workspace default allocator and do not retune or remove
+  `CHEAP_BINARY_PARALLEL_MIN` from this bead. The allocator-class evidence is mixed: one clear
+  regression, one no-change/loss, and one small neutral-band improvement.
+- Retry predicate: do not reopen default allocator adoption unless mimalloc is available and measured
+  same-host against the current threaded `eval_primitive` path, every stable 16M row is non-regressing,
+  and the existing `PeakAlloc`/`#[global_allocator]` conflict in
+  `crates/fj-interpreters/benches/eval_chain_memory.rs` has a concrete maintainer-approved resolution.
+  Better next levers are compiled-jaxpr output/arena reuse, non-temporal stores/prefetch/NUMA for the
+  remaining DRAM rows, or a specific unowned typed-path gap with same-worker before/after proof.
 ## WildForge - dense small-tensor single-pass fusion + buffer pool (REJECTED, dtype-fragile)
 
 - Follow-up to the retry predicate directly above (mcqr.110): "target dense elementwise-chain fusion /
