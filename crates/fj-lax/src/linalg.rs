@@ -5081,14 +5081,32 @@ fn apply_householder_left(
     v: &[f64],
     beta: f64,
 ) {
-    for col in col_start..n {
-        let mut dot = 0.0;
-        for (offset, &v_i) in v.iter().enumerate() {
-            dot += v_i * matrix[(row_start + offset) * n + col];
+    // H ← (I − β v vᵀ) H over rows [row_start, row_start+v.len()) × cols [col_start, n).
+    // The previous form iterated columns-outer / rows-inner, reading `matrix[row*n+col]`
+    // with the row (hence flat index) striding by `n` for a fixed `col` — a cache cliff
+    // once the matrix exceeds L2 (the cause of eigh's super-cubic wall-clock, ur4h3).
+    // Reordered to rows-outer / cols-inner so every access streams a CONTIGUOUS row slice
+    // (cache-friendly + autovectorizable). BIT-IDENTICAL: `scaled[col]` accumulates over
+    // offset in the SAME ascending order as the old per-column `dot`, then each element is
+    // updated exactly once with the identically-grouped `(β·dot)·v_i`.
+    let width = n - col_start;
+    if width == 0 {
+        return;
+    }
+    let mut scaled = vec![0.0_f64; width]; // dot products, then β·dot
+    for (offset, &v_i) in v.iter().enumerate() {
+        let base = (row_start + offset) * n + col_start;
+        for (s, &m) in scaled.iter_mut().zip(&matrix[base..base + width]) {
+            *s += v_i * m;
         }
-        let scale = beta * dot;
-        for (offset, &v_i) in v.iter().enumerate() {
-            matrix[(row_start + offset) * n + col] -= scale * v_i;
+    }
+    for s in scaled.iter_mut() {
+        *s *= beta; // β·dot, matching the old `scale = beta * dot` before `* v_i`
+    }
+    for (offset, &v_i) in v.iter().enumerate() {
+        let base = (row_start + offset) * n + col_start;
+        for (m, &s) in matrix[base..base + width].iter_mut().zip(&scaled) {
+            *m -= s * v_i;
         }
     }
 }
@@ -7696,6 +7714,122 @@ mod tests {
                 run(Primitive::Cholesky, &spdm),
             );
         }
+    }
+
+    /// Same-binary A/B for the apply_householder_left cache-layout fix (ur4h3): the OLD
+    /// column-strided left-apply vs the NEW row-contiguous one, inside a full 512×512
+    /// Hessenberg reduction. Asserts H and Q are bit-identical. Run `--ignored --nocapture`.
+    #[test]
+    #[ignore = "informational same-binary A/B; run with --ignored --nocapture"]
+    fn bench_householder_left_cache_layout_ab() {
+        // The pre-fix column-strided left-apply, kept here as the A/B baseline only.
+        fn apply_left_strided(
+            matrix: &mut [f64],
+            n: usize,
+            row_start: usize,
+            col_start: usize,
+            v: &[f64],
+            beta: f64,
+        ) {
+            for col in col_start..n {
+                let mut dot = 0.0;
+                for (offset, &v_i) in v.iter().enumerate() {
+                    dot += v_i * matrix[(row_start + offset) * n + col];
+                }
+                let scale = beta * dot;
+                for (offset, &v_i) in v.iter().enumerate() {
+                    matrix[(row_start + offset) * n + col] -= scale * v_i;
+                }
+            }
+        }
+        // Full Hessenberg reduction with a selectable left-apply (right-applies unchanged).
+        fn reduce(a: &[f64], n: usize, strided: bool) -> (Vec<f64>, Vec<f64>) {
+            let mut h = a.to_vec();
+            let mut q = vec![0.0_f64; n * n];
+            for i in 0..n {
+                q[i * n + i] = 1.0;
+            }
+            if n < 3 {
+                return (h, q);
+            }
+            for k in 0..n - 2 {
+                let start = k + 1;
+                let len = n - start;
+                let mut norm = 0.0;
+                for row in start..n {
+                    let val = h[row * n + k];
+                    norm += val * val;
+                }
+                norm = norm.sqrt();
+                if norm <= 1e-15 {
+                    continue;
+                }
+                let mut v = vec![0.0; len];
+                for row in start..n {
+                    v[row - start] = h[row * n + k];
+                }
+                if v[0] >= 0.0 {
+                    v[0] += norm;
+                } else {
+                    v[0] -= norm;
+                }
+                let mut vnsq = 0.0;
+                for x in &v {
+                    vnsq += x * x;
+                }
+                if vnsq <= 1e-30 {
+                    continue;
+                }
+                let beta = 2.0 / vnsq;
+                if strided {
+                    apply_left_strided(&mut h, n, start, k, &v, beta);
+                } else {
+                    apply_householder_left(&mut h, n, start, k, &v, beta);
+                }
+                apply_householder_right(&mut h, n, 0, start, &v, beta);
+                apply_householder_right(&mut q, n, 0, start, &v, beta);
+                for row in start + 1..n {
+                    h[row * n + k] = 0.0;
+                }
+            }
+            (h, q)
+        }
+        let n = 512usize;
+        let a: Vec<f64> = (0..n * n)
+            .map(|i| (i as f64 * 0.123).sin() + (i as f64 * 0.0457).cos())
+            .collect();
+        let mut sym = vec![0.0; n * n];
+        for r in 0..n {
+            for c in 0..n {
+                sym[r * n + c] = a[r * n + c] + a[c * n + r];
+            }
+        }
+        let best = |strided: bool| -> f64 {
+            let mut b = f64::MAX;
+            for _ in 0..3 {
+                let t0 = std::time::Instant::now();
+                let r = reduce(&sym, n, strided);
+                std::hint::black_box(&r);
+                b = b.min(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            b
+        };
+        let old = best(true);
+        let new = best(false);
+        let (ho, qo) = reduce(&sym, n, true);
+        let (hn, qn) = reduce(&sym, n, false);
+        assert!(
+            ho.iter().zip(&hn).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "H must be bit-identical between strided and contiguous left-apply"
+        );
+        assert!(
+            qo.iter().zip(&qn).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "Q must be bit-identical between strided and contiguous left-apply"
+        );
+        eprintln!(
+            "[hessenberg {n}x{n}] strided-left={old:.1}ms contiguous-left={new:.1}ms ratio={:.2}x",
+            old / new
+        );
     }
 
     fn extract_f64_elements(v: &Value) -> Vec<f64> {

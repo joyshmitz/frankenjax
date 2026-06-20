@@ -3786,3 +3786,23 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   blocking is LEGAL): blocked Householder tridiagonalization (dsytrd-style panel + GEMM trailing
   update) and blocked bidiag+implicit-QR SVD. This is a BIGGER gap than FFT — eigh ~100-300x vs FFT's
   7-43x. Pass delta: 2 MEASURED losses (eigh ~100-300x, svd ~15x) characterized.
+
+## AzureLynx - WIN: row-contiguous Householder left-apply — 4.24x bit-exact on Hessenberg reduction [ur4h3 step 1]
+
+- Profiled eigh's super-cubic scaling to its cause: `apply_householder_left` (linalg.rs) iterated
+  columns-outer/rows-inner, reading `matrix[(row_start+offset)*n + col]` with the flat index striding
+  by `n` for a fixed `col` — a CACHE CLIFF once the matrix exceeds L2 (right-apply was already
+  row-contiguous). Reordered to rows-outer/cols-inner so every access streams a CONTIGUOUS row slice.
+- BIT-EXACT: `scaled[col]` accumulates over offset in the SAME ascending order as the old per-column
+  `dot`, and each element is updated once with the identically-grouped `(β·dot)·v_i`. eigh tests 13/0,
+  hessenberg 4/0, fj-lax --lib 1567/0, clippy --all-targets clean — all unchanged (golden/recon pass).
+- MEASURED same-binary A/B (the trustworthy kind — `bench_householder_left_cache_layout_ab`, full
+  512×512 Hessenberg reduction, old strided vs new contiguous left-apply in ONE binary, H+Q asserted
+  bit-identical, rch release): **strided 500.2 ms -> contiguous 117.9 ms = 4.24x**.
+- HONEST SCOPE: this is the REDUCTION component. Full eigh@512 ≈ 2.3s, so the reduction (~118ms now)
+  is only ~5-15% of eigh — the QL eigenvector accumulation (`symmetric_tridiagonal_ql` rotating z) and
+  the per-element plane rotations DOMINATE and are the next lever (ur4h3 step 2). So this does NOT
+  flip the eigh JAX loss, but it is a real bit-exact 4.24x on a hot kernel that ALSO speeds the
+  general-eig (nonsymmetric Schur) path (reduction-heavy). The cross-invocation harness eigh numbers
+  (3249->2285) are CONFOUNDED (untouched svd drifted 288->422 same run = host ~1.4x slower); trust the
+  same-binary 4.24x, not the cross-run delta. Pass delta: 1 win (4.24x bit-exact, reduction) / 0 / 0.
