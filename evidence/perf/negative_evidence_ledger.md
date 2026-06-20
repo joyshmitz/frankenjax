@@ -77,6 +77,78 @@ filter/settings.
   microkernel, target-feature-specialized/FMA codegen, owned arena handoff, or a
   carefully designed safe scoped pool with 256/512/1024 same-worker proof.
 
+## frankenjax-murmw - power-of-two FFT tile-height and packed-input guard no-ship
+
+- Date: 2026-06-20
+- Agent: cod-a / CrimsonOtter
+- Target gap: `fj-lax` 2048x256 power-of-two batched FFT rows remain large JAX
+  losses after the earlier SoA gate, direct-output, persistent pool, and radix-4
+  no-ships.
+- Alien-graveyard route used: cache-shape specialization and layout-aware kernel
+  selection. Two variants were tested: force the existing SoA tile height from 8
+  rows to 4 rows, then guard that 4-row tile for packed dense inputs only while
+  preserving the old 8-row tile for boxed/literal inputs.
+- Production code changed: none. Both `crates/fj-lax/src/fft.rs` variants were
+  reverted before commit because full release Criterion did not show a clean
+  target-row win.
+
+Baseline and candidate command family:
+
+```text
+AGENT_NAME=CrimsonOtter \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  RCH_WORKER=vmi1152480 \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
+  fft_batch_2048x256 -- --warm-up-time 1 --measurement-time 3
+```
+
+Comparable Rust proof used RCH worker `vmi1152480` for baseline and both
+candidates. JAX comparator rows were refreshed locally with
+`benchmarks/jax_comparison/.venv/bin/python` and JAX/JAXLIB 0.10.1 x64:
+complex FFT 249.3358 us, RFFT 183.5284 us, real-input FFT 2.2802276 ms, IRFFT
+220.4353 us. The JAX ratios below route the remaining gap; same-worker Rust
+deltas decide keep/reject.
+
+| workload / lever | Rust midpoint | same-worker result | JAX mean | Rust/JAX | verdict |
+| --- | ---: | --- | ---: | ---: | --- |
+| baseline `fft_batch_2048x256_complex128` | 7.1002 ms | baseline | 249.3358 us | 28.48 | Active JAX loss |
+| baseline `fft_batch_2048x256_complex128_dense_input` | 4.7948 ms | baseline | 249.3358 us | 19.23 | Active JAX loss |
+| baseline `rfft_batch_2048x256_f64` | 5.7007 ms | baseline | 183.5284 us | 31.06 | Active JAX loss |
+| baseline `rfft_batch_2048x256_f64_dense_input` | 3.2996 ms | baseline | 183.5284 us | 17.98 | Active JAX loss |
+| baseline `fft_batch_2048x256_real_dense_input` | 4.4143 ms | baseline | 2.2802276 ms | 1.94 | Active JAX loss |
+| baseline `irfft_batch_2048x256_complex128` | 6.9618 ms | baseline | 220.4353 us | 31.58 | Active JAX loss |
+| tile4 `fft_batch_2048x256_complex128` | 8.3863 ms | +18.114% regression | 249.3358 us | 33.64 | REVERT |
+| tile4 `fft_batch_2048x256_complex128_dense_input` | 3.4137 ms | -28.805% faster | 249.3358 us | 13.69 | No ship: paired target regression |
+| tile4 `rfft_batch_2048x256_f64` | 5.5569 ms | neutral, p=0.50 | 183.5284 us | 30.28 | Control only |
+| tile4 `rfft_batch_2048x256_f64_dense_input` | 2.7705 ms | -16.036% faster | 183.5284 us | 15.10 | Control only |
+| tile4 `fft_batch_2048x256_real_dense_input` | 4.1814 ms | neutral, p=0.18 | 2.2802276 ms | 1.83 | Control only |
+| tile4 `irfft_batch_2048x256_complex128` | 3.2352 ms | -53.529% faster | 220.4353 us | 14.68 | Control only |
+| guarded tile4 `fft_batch_2048x256_complex128` | 7.1895 ms | neutral | 249.3358 us | 28.83 | No gain |
+| guarded tile4 `fft_batch_2048x256_complex128_dense_input` | 5.4350 ms | regression | 249.3358 us | 21.80 | REVERT |
+| guarded tile4 `rfft_batch_2048x256_f64` | 11.993 ms | regression/noise, not touched path | 183.5284 us | 65.35 | Control only |
+| guarded tile4 `rfft_batch_2048x256_f64_dense_input` | 3.5889 ms | regression | 183.5284 us | 19.56 | Control only |
+| guarded tile4 `fft_batch_2048x256_real_dense_input` | 4.8481 ms | regression | 2.2802276 ms | 2.13 | Control only |
+| guarded tile4 `irfft_batch_2048x256_complex128` | 3.6708 ms | apparent non-target win | 220.4353 us | 16.65 | Control only |
+
+- Ratio scorecard for retained production rows in this pass: **0 wins / 6
+  losses / 0 neutral vs JAX**. Rejected candidates score **0 kept wins / 0
+  shipped regressions** because the source was reverted before commit.
+- Root-cause read from the failed levers: tile height alone is not the dominant
+  bottleneck. The 4-row tile can help packed dense complex FFT in isolation, but
+  the boxed path regresses; adding a packed-input guard erased the dense gain and
+  added branch/dispatch noise. This is layout-selection churn, not the needed
+  kernel-family change.
+- Validation after revert: `cargo test -p fj-lax fft --lib` passed 44/44 with 3
+  ignored microbenches; `cargo test -p fj-conformance --test fft_oracle` passed
+  27/27; `cargo test -p fj-conformance --test linalg_fft_oracle_parity` passed
+  1/1; `cargo build --release -p fj-lax --benches` passed on RCH
+  `vmi1153651`.
+- Retry predicate: do not retry tile-height or representation-only SoA tweaks
+  without hardware-counter evidence. The next credible `murmw` route is a real
+  kernel rewrite: generated length-specialized kernels, iterative in-place
+  radix-4/8 SoA, portable SIMD butterflies, or cache-blocked multi-row
+  transforms.
+
 ## frankenjax-murmw - FFT batch final-buffer writes and persistent row pool no-ships
 
 - Date: 2026-06-20

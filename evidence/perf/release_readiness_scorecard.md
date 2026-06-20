@@ -1098,3 +1098,30 @@ Additional cod-a FFT SoA gate recheck environment:
   Production decision: no source change. Remaining `eigh` release gap should
   route to symmetry-specialized tridiagonal reduction or blocked/panel
   Householder work, not small-Jacobi routing.
+
+## CrimsonOtter / cod-a - murmw power-of-two FFT tile-size no-ship (2026-06-20)
+
+- Scope: `frankenjax-murmw`, current 2048x256 power-of-two batched FFT gap after
+  prior SoA gate-disable, direct-output, persistent-pool, and radix-4 no-ships.
+- Production decision: no code change. Temporary `POW2_TILE_ROWS=4` and guarded
+  packed-input tile-height variants in `crates/fj-lax/src/fft.rs` were measured
+  and reverted.
+- Same-worker RCH proof on `vmi1152480` with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`:
+  - Baseline `fft_batch_2048x256_complex128`: 7.1002 ms; tile4: 8.3863 ms
+    (+18.114% regression); guarded: 7.1895 ms (neutral/no gain).
+  - Baseline `fft_batch_2048x256_complex128_dense_input`: 4.7948 ms; tile4:
+    3.4137 ms (-28.805% faster) but paired with the boxed regression; guarded:
+    5.4350 ms (regression).
+- Fresh JAX/JAXLIB 0.10.1 x64 comparator means: complex FFT 249.3358 us, RFFT
+  183.5284 us, real-input FFT 2.2802276 ms, IRFFT 220.4353 us. Current retained
+  production score for the measured row set: 0 wins / 6 losses / 0 neutral vs
+  JAX. Rejected candidates score: 0 kept wins / 0 shipped regressions.
+- Gate status: `cargo test -p fj-lax fft --lib` passed 44/44 with 3 ignored
+  microbenches; `cargo test -p fj-conformance --test fft_oracle` passed 27/27;
+  `cargo test -p fj-conformance --test linalg_fft_oracle_parity` passed 1/1;
+  `cargo build --release -p fj-lax --benches` passed on RCH `vmi1153651`.
+- Route next: stop retesting tile-height/representation-only SoA tweaks without
+  perf-counter evidence. The remaining credible `murmw` path is a real kernel
+  rewrite: generated length-specialized kernels, iterative in-place SoA
+  radix-4/8, portable SIMD butterflies, or cache-blocked multi-row transforms.

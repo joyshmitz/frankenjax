@@ -83,6 +83,67 @@ BLAS-class microkernel, target-feature-specialized FMA kernel, owned arena
 handoff, or an approved safe scoped-pool design with same-worker 256/512/1024
 proof and JAX ratios.
 
+## 2026-06-20 - frankenjax-murmw power-of-two FFT tile-size no-ship
+
+The BOLD-VERIFY pass retargeted `frankenjax-murmw` after the SoA gate-disable,
+direct-output, pool, and radix-4 attempts still left 2048x256 batched FFT rows
+far behind warmed JAX CPU. The radical but narrow lever was cache-shape
+specialization for the existing power-of-two SoA kernel: first force the tile
+height from 8 rows to 4 rows, then try a guarded 4-row path only for packed dense
+input while leaving boxed/literal paths on the old 8-row tile. Both source
+variants were reverted because the full release gate did not produce a clean
+target-row win.
+
+Rust timing used RCH with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a` and the
+per-crate command:
+
+```bash
+rch exec -- cargo bench -p fj-lax --bench lax_baseline fft_batch_2048x256 -- --warm-up-time 1 --measurement-time 3
+```
+
+Baseline and both candidates ran on RCH worker `vmi1152480`. JAX ratios use a
+fresh local CPU JAX/JAXLIB 0.10.1 x64 comparator
+(`benchmarks/jax_comparison/.venv/bin/python`): complex FFT 249.3358 us, RFFT
+183.5284 us, real-input FFT 2.2802276 ms, and IRFFT 220.4353 us. Those Rust/JAX
+ratios are routing evidence because the Rust rows ran through RCH; keep/reject
+uses the same-worker Rust deltas.
+
+| Row | Baseline Rust | Tile4 Rust | Tile4 delta | JAX mean | Tile4/JAX | Verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `fft_batch_2048x256_complex128` | 7.1002 ms | 8.3863 ms | +18.114% regression | 249.3358 us | 33.64 | REVERT |
+| `fft_batch_2048x256_complex128_dense_input` | 4.7948 ms | 3.4137 ms | -28.805% faster | 249.3358 us | 13.69 | No ship: paired boxed regression |
+| `rfft_batch_2048x256_f64` | 5.7007 ms | 5.5569 ms | neutral, p=0.50 | 183.5284 us | 30.28 | Control only |
+| `rfft_batch_2048x256_f64_dense_input` | 3.2996 ms | 2.7705 ms | -16.036% faster | 183.5284 us | 15.10 | Control only |
+| `fft_batch_2048x256_real_dense_input` | 4.4143 ms | 4.1814 ms | neutral, p=0.18 | 2.2802276 ms | 1.83 | Control only |
+| `irfft_batch_2048x256_complex128` | 6.9618 ms | 3.2352 ms | -53.529% faster | 220.4353 us | 14.68 | Control only |
+
+The guarded packed-input tile tried to preserve the boxed baseline while keeping
+the dense-input improvement. It failed the target dense-input row and introduced
+additional regressions/noise in adjacent FFT rows:
+
+| Row | Baseline Rust | Guarded Rust | Internal result | JAX mean | Guarded/JAX | Verdict |
+| --- | ---: | ---: | --- | ---: | ---: | --- |
+| `fft_batch_2048x256_complex128` | 7.1002 ms | 7.1895 ms | neutral | 249.3358 us | 28.83 | No gain |
+| `fft_batch_2048x256_complex128_dense_input` | 4.7948 ms | 5.4350 ms | regression | 249.3358 us | 21.80 | REVERT |
+| `rfft_batch_2048x256_f64` | 5.7007 ms | 11.993 ms | regression/noise, not touched path | 183.5284 us | 65.35 | Control only |
+| `rfft_batch_2048x256_f64_dense_input` | 3.2996 ms | 3.5889 ms | regression | 183.5284 us | 19.56 | Control only |
+| `fft_batch_2048x256_real_dense_input` | 4.4143 ms | 4.8481 ms | regression | 2.2802276 ms | 2.13 | Control only |
+| `irfft_batch_2048x256_complex128` | 6.9618 ms | 3.6708 ms | apparent non-target win | 220.4353 us | 16.65 | Control only |
+
+Ratio scorecard for retained production rows in this pass: **0 wins / 6 losses
+/ 0 neutral vs JAX**. Rejected tile-size candidates: **0 kept wins / 0 shipped
+regressions**; all source hunks in `crates/fj-lax/src/fft.rs` were reverted
+before commit. Validation after revert: `cargo test -p fj-lax fft --lib` passed
+44/44 with 3 ignored microbenches; `cargo test -p fj-conformance --test
+fft_oracle` passed 27/27; `cargo test -p fj-conformance --test
+linalg_fft_oracle_parity` passed 1/1; and `cargo build --release -p fj-lax
+--benches` passed. Retry only with a real kernel-family change: generated
+length-specialized kernels, iterative in-place SoA radix-4/8, portable SIMD
+butterflies, or cache-blocked multi-row transforms. Do not retry
+representation- or tile-height-only SoA tweaks without hardware-counter
+evidence.
+
 ## 2026-06-20 - frankenjax-murmw SoA gate-disable no-ship
 
 The BOLD-VERIFY pass retested the current power-of-two batched FFT dispatcher
