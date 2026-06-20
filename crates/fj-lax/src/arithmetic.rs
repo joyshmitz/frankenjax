@@ -6058,6 +6058,20 @@ pub(crate) fn eval_unary_elementwise_parallel(
     inputs: &[Value],
     op: impl Fn(f64) -> f64 + Sync,
 ) -> Result<Value, EvalError> {
+    // JAX `standard_unop(_float)` dtype guard for the float-only unops dispatched
+    // DIRECTLY here (erf/erfc/cbrt and the dedicated lgamma/digamma/erf_inv/
+    // bessel_i*e eval fns): integer/bool operands are rejected — lax does not
+    // silently widen them to f64. Mirrors the identical guard in
+    // `eval_unary_elementwise`; fires ONLY for `is_jax_float_only_unary` members,
+    // so float/complex operands and every other unop (incl. the my0yj
+    // transcendentals, already pre-guarded by `eval_float_complex_unary`) are
+    // unaffected. Closes the hwm1v parity gap (was: integers silently accepted).
+    if is_jax_float_only_unary(primitive)
+        && let Some(input) = inputs.first()
+    {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
+
     if let [Value::Tensor(tensor)] = inputs
         && tensor.dtype == DType::F64
         && let Some(src) = tensor.elements.as_f64_slice()
@@ -23739,6 +23753,53 @@ mod tests {
                         } if got == primitive
                     ),
                     "{primitive:?} complex input returned unexpected error: {err:?}"
+                );
+            }
+        }
+    }
+
+    /// JAX `standard_unop(_float)` parity: the float-only unary primitives reject
+    /// INTEGER/bool operands (lax does not silently widen them to f64), for BOTH the
+    /// `eval_unary_elementwise` group (floor/ceil/round) and the group dispatched
+    /// DIRECTLY to `eval_unary_elementwise_parallel` (cbrt/erf/erfc/erf_inv/lgamma/
+    /// digamma/bessel_i*e). Closes hwm1v: the parallel-dispatched group silently
+    /// accepted integers (missed by the my0yj transcendental int-rejection sweep).
+    #[test]
+    fn integer_float_only_unary_primitives_reject_like_jax() {
+        let primitives = [
+            Primitive::Floor,
+            Primitive::Ceil,
+            Primitive::Round,
+            Primitive::Cbrt,
+            Primitive::Erf,
+            Primitive::Erfc,
+            Primitive::ErfInv,
+            Primitive::Lgamma,
+            Primitive::Digamma,
+            Primitive::BesselI0e,
+            Primitive::BesselI1e,
+        ];
+        let scalar = Value::scalar_i64(3);
+        let dense = Value::Tensor(
+            TensorValue::new_i64_values(Shape { dims: vec![3] }, vec![1, 2, 3]).unwrap(),
+        );
+        for primitive in primitives {
+            for input in [&scalar, &dense] {
+                let err = crate::eval_primitive(
+                    primitive,
+                    std::slice::from_ref(input),
+                    &BTreeMap::new(),
+                )
+                .expect_err("JAX float-only unary primitive accepted integer input");
+                assert!(
+                    matches!(
+                        err,
+                        EvalError::TypeMismatch {
+                            primitive: got,
+                            detail: "expected floating operand"
+                        } if got == primitive
+                    ),
+                    "{primitive:?} integer input returned unexpected error: {err:?}"
                 );
             }
         }
