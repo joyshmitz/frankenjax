@@ -6361,16 +6361,6 @@ fn resolve_dense_operand<'a>(
     }
 }
 
-fn scalar_dense_f64_operand(cells: &[DenseF64Cell], operand: ScalarF64Operand) -> Option<f64> {
-    match operand {
-        ScalarF64Operand::Literal(v) => Some(v),
-        ScalarF64Operand::Slot(s) => match cells.get(s)? {
-            DenseF64Cell::Scalar(v) => Some(*v),
-            _ => None,
-        },
-    }
-}
-
 fn operand_is_slot(operand: ScalarF64Operand, slot: usize) -> bool {
     matches!(operand, ScalarF64Operand::Slot(s) if s == slot)
 }
@@ -6412,6 +6402,125 @@ fn apply_dense_f64_chain_step(
     }
 }
 
+/// The non-`current` operand of an in-place linear-chain step: a scalar/literal, or a
+/// rank-2 broadcast vector ([C] row vector or [R] column vector). A full same-shape
+/// tensor never appears here — that would be a second tensor slot, which the chain
+/// validator rejects.
+enum ChainOperand<'a> {
+    Scalar(f64),
+    Row(&'a [f64]),
+    Col(&'a [f64]),
+}
+
+fn dense_f64_chain_operand(cells: &[DenseF64Cell], operand: ScalarF64Operand) -> Option<ChainOperand<'_>> {
+    match operand {
+        ScalarF64Operand::Literal(v) => Some(ChainOperand::Scalar(v)),
+        ScalarF64Operand::Slot(s) => match cells.get(s)? {
+            DenseF64Cell::Scalar(v) => Some(ChainOperand::Scalar(*v)),
+            DenseF64Cell::RowBcast(t, _) => Some(ChainOperand::Row(t)),
+            DenseF64Cell::ColBcast(t, _) => Some(ChainOperand::Col(t)),
+            _ => None,
+        },
+    }
+}
+
+/// Resolve a chain step's non-current operand, admitting broadcast vecs only for a
+/// rank-2 body (so the in-place row walk is well-defined).
+fn resolve_chain_operand(
+    cells: &[DenseF64Cell],
+    operand: ScalarF64Operand,
+    rank2: bool,
+) -> Option<ChainOperand<'_>> {
+    let op = dense_f64_chain_operand(cells, operand)?;
+    match op {
+        ChainOperand::Scalar(_) => Some(op),
+        ChainOperand::Row(_) | ChainOperand::Col(_) if rank2 => Some(op),
+        _ => None,
+    }
+}
+
+/// In-place `row[c] = f(row[c], vec[c])` for every row of a row-major [R,C] buffer — the
+/// row-broadcast step. The op closure is monomorphized, so each row vectorizes.
+#[inline]
+fn apply_inplace_row_bcast_f64<F: Fn(f64, f64) -> f64 + Copy>(
+    values: &mut [f64],
+    vec: &[f64],
+    cols: usize,
+    f: F,
+) {
+    for row in values.chunks_mut(cols) {
+        for (v, &s) in row.iter_mut().zip(vec) {
+            *v = f(*v, s);
+        }
+    }
+}
+
+/// Apply one in-place linear-chain step where the other operand is a [C] row-broadcast
+/// vector. Hoists op+side once; cheap ops vectorize. Bit-identical per element to the
+/// per-element `at_rc` broadcast loop.
+fn apply_dense_f64_chain_step_row(
+    values: &mut [f64],
+    op: ScalarF64BinaryOp,
+    vec: &[f64],
+    cols: usize,
+    scalar_on_left: bool,
+    vectorize: bool,
+) {
+    match (op, scalar_on_left) {
+        (ScalarF64BinaryOp::Add, _) if vectorize => {
+            apply_inplace_row_bcast_f64(values, vec, cols, |x, s| x + s)
+        }
+        (ScalarF64BinaryOp::Mul, _) if vectorize => {
+            apply_inplace_row_bcast_f64(values, vec, cols, |x, s| x * s)
+        }
+        (ScalarF64BinaryOp::Sub, false) if vectorize => {
+            apply_inplace_row_bcast_f64(values, vec, cols, |x, s| x - s)
+        }
+        (ScalarF64BinaryOp::Sub, true) if vectorize => {
+            apply_inplace_row_bcast_f64(values, vec, cols, |x, s| s - x)
+        }
+        (ScalarF64BinaryOp::Div, false) if vectorize => {
+            apply_inplace_row_bcast_f64(values, vec, cols, |x, s| x / s)
+        }
+        (ScalarF64BinaryOp::Div, true) if vectorize => {
+            apply_inplace_row_bcast_f64(values, vec, cols, |x, s| s / x)
+        }
+        (op, false) => {
+            apply_inplace_row_bcast_f64(values, vec, cols, move |x, s| {
+                apply_scalar_f64_binary(op, x, s)
+            })
+        }
+        (op, true) => apply_inplace_row_bcast_f64(values, vec, cols, move |x, s| {
+            apply_scalar_f64_binary(op, s, x)
+        }),
+    }
+}
+
+/// Apply one in-place linear-chain step for a scalar OR rank-2 broadcast operand.
+/// `ColBcast` is a constant per row, so it reuses the scalar step per row.
+fn apply_dense_f64_chain_step_bcast(
+    values: &mut [f64],
+    op: ScalarF64BinaryOp,
+    operand: ChainOperand,
+    cols: usize,
+    scalar_on_left: bool,
+    vectorize: bool,
+) {
+    match operand {
+        ChainOperand::Scalar(s) => {
+            apply_dense_f64_chain_step(values, op, s, scalar_on_left, vectorize)
+        }
+        ChainOperand::Row(vec) => {
+            apply_dense_f64_chain_step_row(values, op, vec, cols, scalar_on_left, vectorize)
+        }
+        ChainOperand::Col(vec) => {
+            for (row, chunk) in values.chunks_mut(cols).enumerate() {
+                apply_dense_f64_chain_step(chunk, op, vec[row], scalar_on_left, vectorize);
+            }
+        }
+    }
+}
+
 fn run_linear_scalar_f64_tensor_chain_into(
     plan: &ScalarF64Plan,
     shape: &Shape,
@@ -6434,6 +6543,11 @@ fn run_linear_scalar_f64_tensor_chain_into(
     }
 
     let tensor_slot = tensor_slot?;
+    // Broadcast (Row/Col) operands are only meaningful against a rank-2 [R,C] body; a
+    // chain whose other operand is a broadcast vec is accepted only then. `cols` is the
+    // trailing dim used to walk rows in the in-place mutation.
+    let cols = *shape.dims.last()? as usize;
+    let rank2 = shape.dims.len() == 2;
     let mut current_slot = tensor_slot;
     for step in &plan.steps {
         let lhs_is_current = operand_is_slot(step.lhs, current_slot);
@@ -6443,10 +6557,10 @@ fn run_linear_scalar_f64_tensor_chain_into(
                 match (lhs_is_current, rhs_is_current) {
                     (true, true) => {}
                     (true, false) => {
-                        scalar_dense_f64_operand(cells, rhs)?;
+                        resolve_chain_operand(cells, rhs, rank2)?;
                     }
                     (false, true) => {
-                        scalar_dense_f64_operand(cells, step.lhs)?;
+                        resolve_chain_operand(cells, step.lhs, rank2)?;
                     }
                     (false, false) => return None,
                 }
@@ -6483,12 +6597,26 @@ fn run_linear_scalar_f64_tensor_chain_into(
                         }
                     }
                     (true, false) => {
-                        let rhs_scalar = scalar_dense_f64_operand(cells, rhs)?;
-                        apply_dense_f64_chain_step(&mut values, step.op, rhs_scalar, false, vectorize);
+                        let rhs_op = resolve_chain_operand(cells, rhs, rank2)?;
+                        apply_dense_f64_chain_step_bcast(
+                            &mut values,
+                            step.op,
+                            rhs_op,
+                            cols,
+                            false,
+                            vectorize,
+                        );
                     }
                     (false, true) => {
-                        let lhs_scalar = scalar_dense_f64_operand(cells, step.lhs)?;
-                        apply_dense_f64_chain_step(&mut values, step.op, lhs_scalar, true, vectorize);
+                        let lhs_op = resolve_chain_operand(cells, step.lhs, rank2)?;
+                        apply_dense_f64_chain_step_bcast(
+                            &mut values,
+                            step.op,
+                            lhs_op,
+                            cols,
+                            true,
+                            vectorize,
+                        );
                     }
                     (false, false) => unreachable!("validated linear tensor chain"),
                 }

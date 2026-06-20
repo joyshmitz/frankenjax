@@ -2662,13 +2662,23 @@ ends are not rediscovered without new evidence.
   | bcast16x16/n=8  | 1764 ns | 5996 ns | Rust wins 3.4x |
   | bcast16x16/n=32 | 6741 ns | 6074 ns | **JAX wins 1.10x (narrow LOSS)** |
 
-  f32 vectorization is confirmed a JAX WIN (2-8x), not just vs the internal control. NEW MEASURED GAP:
-  the 32-step broadcast (bias-add) chain narrowly loses (1.10x). CAUSE: the broadcast path runs the
-  per-step arena, which allocates a fresh `vec![0.0; n]` (2 KB here) PER STEP — 32 allocs of churn
-  that XLA's fusion avoids. mcqr.111's in-place linear-chain path (which removes per-step allocs)
-  BAILS on broadcast operands (`scalar_dense_f64_operand` only accepts Scalar cells, not RowBcast/
-  ColBcast). LEVER (next, focused): extend `run_linear_scalar_f64_tensor_chain_into` to accept a
-  broadcast vec operand and mutate the single matrix buffer in place per row (composes in-place +
-  the `fill_dense_f64_bcast` vectorization) — est. removes ~1.6us of alloc churn, flipping the loss.
-  Deferred here: niche (only long broadcast chains; n=8 already wins 3.4x) vs. a substantial edit to
-  a validated cross-agent function — not worth rushing against absolute-parity. Bead-worthy.
+  f32 vectorization is confirmed a JAX WIN (2-8x), not just vs the internal control. The 32-step
+  broadcast (bias-add) chain initially LOST narrowly (1.10x) — CAUSE: the broadcast path ran the
+  per-step arena allocating a fresh `vec![0.0; n]` PER STEP; the in-place linear-chain path bailed on
+  broadcast operands.
+
+- FOLLOW-UP SHIPPED — in-place BROADCAST linear chain (flips the loss above): extended
+  `run_linear_scalar_f64_tensor_chain_into` to accept a rank-2 broadcast vec operand (`ChainOperand`
+  Row/Col + `resolve_chain_operand`) and mutate the single matrix buffer IN PLACE per row
+  (`apply_dense_f64_chain_step_bcast` → vectorized `apply_dense_f64_chain_step_row` for RowBcast,
+  per-row scalar reuse for ColBcast). Composes in-place reuse (no per-step alloc) + vectorization.
+  Bit-exact (`fusion_f64_row/col_broadcast_chain_matches_reference_bit_for_bit` pass; rank-3 guarded
+  to the per-step path). RESULT:
+
+  | workload | before (per-step) | after (in-place) | JAX p50 | verdict |
+  | --- | ---: | ---: | ---: | --- |
+  | bcast16x16/n=8  | 1764 ns | 544 ns | 5996 ns | Rust wins 11x |
+  | bcast16x16/n=32 | 6741 ns | 1701 ns | 6074 ns | **Rust wins 3.57x** (was 1.10x LOSS) |
+
+  Within-invocation A/B (both in-place now): vectorized 1701ns vs in-place-non-vectorized 15552ns =
+  9.1x from the vectorization. The documented gap is CLOSED — broadcast bias-add now dominates JAX.
