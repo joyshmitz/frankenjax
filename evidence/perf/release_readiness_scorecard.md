@@ -261,10 +261,35 @@ Additional cod-a fj-interpreters unary-chain environment:
   --benches -- -D warnings` passed through RCH; full `cargo test -p
   fj-conformance` passed on RCH `hz2`.
 
+Additional cod-a FFT batch no-ship environment:
+
+- Agent: cod-a / WildForge
+- Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-a`
+- Rust bench command: `rch exec -- cargo bench -p fj-lax --bench lax_baseline`
+  with the
+  `eval/(fft_batch_2048x256_complex128_dense_input|fft_batch_2048x256_complex128|fft_256_complex128|ifft_256_complex128)`
+  filter, sample size 20, 1s warm-up, 3s measurement.
+- Same-worker timing proof for `frankenjax-murmw` no-ships: RCH worker
+  `vmi1227854`, Criterion baseline
+  `frankenjax-cod-a-fft-direct-out-baseline`.
+- JAX oracle rows: AzureLynx `frankenjax-murmw` JAX 0.10.2 x64 measurements:
+  `fft_256` 5.90 us, `ifft_256` 5.72 us, and `fft_batch_2048x256` 236 us.
+- Gates: `cargo test -p fj-lax fft --lib` passed 43/43 through RCH;
+  `cargo test -p fj-conformance --test fft_oracle` passed 27/27; `cargo test -p
+  fj-conformance --test linalg_fft_oracle_parity` passed 1/1. Both source
+  candidates regressed target rows and were reverted, so the scorecard records
+  evidence only plus an `.rchignore` transfer-hygiene fix.
+
 ## Measured Workloads
 
 | Bead | Workload | Rust timing | JAX timing | Rust/JAX | Outcome |
 | --- | --- | ---: | ---: | ---: | --- |
+| frankenjax-murmw | `fft_256_complex128` current baseline | 5.4692 us midpoint | 5.90 us | 0.927 | Rust near-parity/win control; no code change |
+| frankenjax-murmw | `ifft_256_complex128` current baseline | 5.8726 us midpoint | 5.72 us | 1.027 | Neutral/narrow JAX loss control; no code change |
+| frankenjax-murmw | `fft_batch_2048x256_complex128` current baseline | 6.0686 ms midpoint | 236 us | 25.71 | Active JAX loss; kernel gap remains |
+| frankenjax-murmw | `fft_batch_2048x256_complex128_dense_input` current baseline | 1.8895 ms midpoint | 236 us | 8.01 | Active JAX loss; kernel gap remains |
+| frankenjax-murmw | direct final output-slice `fft_batch_2048x256_complex128_dense_input` | 2.2349 ms midpoint | 236 us | 9.47 | REJECTED/REVERTED: +12.542% same-worker regression |
+| frankenjax-murmw | persistent row-pool `fft_batch_2048x256_complex128_dense_input` | 2.8739 ms midpoint | 236 us | 12.18 | REJECTED/REVERTED: +48.632% same-worker regression |
 | frankenjax-xjbvr | `floor_f64_1m_add_unary_chain/n=4` | 2.5597 ms midpoint | 199.892 us mean | 12.805 | Same-worker Rust 8.29x faster than baseline; still JAX loss |
 | frankenjax-xjbvr | `round_f64_1m_add_unary_chain/n=4` | 1.8803 ms midpoint | 186.162 us mean | 10.100 | Same-worker Rust 10.91x faster than baseline; still JAX loss |
 | frankenjax-xjbvr | `sign_f64_1m_add_unary_chain/n=4` | 2.7290 ms midpoint | 342.029 us mean | 7.979 | Same-worker Rust 4.01x faster than baseline; still JAX loss |
@@ -361,6 +386,14 @@ Additional cod-a fj-interpreters unary-chain environment:
   same-host estimates FLIP several to wins/ties: slice ~0.72x (Rust FASTER),
   integer_pow2 f32 ~0.97x (~tie/win), broadcast ~1.10x, complex_ctor ~1.08x. Future
   vs-JAX rows MUST run the Rust bench LOCALLY (cargo bench, not rch).
+- frankenjax-murmw FFT batch remains a release blocker after this pass. Current
+  same-worker baseline is near parity for single 256-point FFT/IFFT (Rust/JAX
+  0.927 and 1.027), but 2048x256 complex batch rows still lose by 25.71x boxed
+  and 8.01x dense. Direct final-buffer writes and a persistent row thread pool
+  both regressed the target dense row (+12.542% and +48.632%) and were reverted.
+  The scorecard does not improve; the next credible route is SIMD radix-4/8,
+  native mixed-radix, cache-blocked batches, or generated length-specialized FFT
+  kernels.
 - murmw FFT radix-4 is a measured no-ship. A temporary safe recursive
   `Radix4Plan` passed DFT tolerance and won a same-binary inner-kernel A/B
   (`Radix2Plan` 80.976 ms vs `Radix4Plan` 38.024 ms, 2.13x) on `hz2`, but the

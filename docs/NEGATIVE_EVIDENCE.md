@@ -2,6 +2,44 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-murmw FFT batch direct-output and thread-pool rejects
+
+The BOLD-VERIFY pass targeted the documented FFT batch gap after the pow2 plan-cache
+keeps. Two radical but contained levers were tested against the same saved
+Criterion baseline on RCH worker `vmi1227854` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`; both were
+reverted before commit.
+
+JAX ratios use the `frankenjax-murmw` JAX 0.10.2 x64 rows captured by AzureLynx:
+`fft_256` 5.90 us, `ifft_256` 5.72 us, and `fft_batch_2048x256` 236 us.
+
+| Lever | Key row | Candidate Rust | Same-worker delta | Candidate/JAX | Verdict |
+| --- | --- | ---: | ---: | ---: | --- |
+| Current baseline | `fft_batch_2048x256_complex128_dense_input` | 1.8895 ms | baseline | 8.01 | Active JAX loss |
+| Current baseline | `fft_batch_2048x256_complex128` | 6.0686 ms | baseline | 25.71 | Active JAX loss |
+| Direct output-slice radix2 | `fft_batch_2048x256_complex128_dense_input` | 2.2349 ms | +12.542% regression | 9.47 | Reverted |
+| Direct output-slice radix2 | `fft_batch_2048x256_complex128` | 6.4767 ms | neutral +3.4346%, p=0.23 | 27.44 | Reverted |
+| Persistent thread-pool row chunks | `fft_batch_2048x256_complex128_dense_input` | 2.8739 ms | +48.632% regression | 12.18 | Reverted |
+| Persistent thread-pool row chunks | `fft_batch_2048x256_complex128` | 6.7331 ms | +10.245% regression | 28.53 | Reverted |
+
+Control rows stayed near-parity: final pool candidate `fft_256` was 5.5501 us
+(Rust/JAX 0.94, no significant change) and `ifft_256` was 6.0925 us
+(Rust/JAX 1.065, no significant change). The direct-output candidate made small
+single-FFT rows look slightly faster, but the target batch rows regressed, so no
+code was kept.
+
+Validation: focused `cargo test -p fj-lax fft --lib` passed 43/43 through RCH;
+`cargo test -p fj-conformance --test fft_oracle` passed 27/27; and
+`cargo test -p fj-conformance --test linalg_fft_oracle_parity` passed 1/1. The
+only shipped non-source change from this pass is `.rchignore` excluding
+`artifacts/`, which fixed RCH transfer churn from unrelated generated files.
+
+Retry predicate: do not retry final-buffer writes or persistent chunk pooling for
+batched pow2 complex FFT without fresh cache-miss evidence. The remaining
+credible route is a real kernel rewrite: SIMD radix-4/8 butterflies, native
+mixed-radix factors for non-pow2 lengths, cache-blocked row batches, or generated
+specialized kernels with same-worker before/after proof.
+
 ## 2026-06-20 - frankenjax-murmw radix-4 power-of-four FFT no-ship
 
 The BOLD-VERIFY pass retargeted the current FFT losses after the earlier

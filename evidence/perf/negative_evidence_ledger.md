@@ -3,6 +3,86 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-murmw - FFT batch final-buffer writes and persistent row pool no-ships
+
+- Date: 2026-06-20
+- Agent: cod-a / WildForge
+- Target gap: `fj-lax` complex128 FFT batch rows from `frankenjax-murmw`, especially
+  `fft_batch_2048x256` where JAX/pocketfft remains 8-26x faster than the current
+  Rust path depending on dense-vs-boxed harness shape.
+- Alien-graveyard route used: exotic output layout and runtime scheduling rather
+  than another plan-cache tweak. The tested ideas were (1) write radix-2 batch
+  rows directly into the final output slice to avoid a row-local temp/copy and
+  (2) reuse a process-lifetime worker pool for row chunks to remove repeated
+  scoped thread spawn overhead.
+- Production code changed: none. Both source candidates were reverted after
+  same-worker measurement. The only kept file change is `.rchignore` adding
+  `artifacts/`, which prevents unrelated generated reports from bloating RCH
+  transfers and does not affect runtime behavior.
+
+Baseline command:
+
+```text
+AGENT_NAME=cod-a \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/(fft_batch_2048x256_complex128_dense_input|fft_batch_2048x256_complex128|fft_256_complex128|ifft_256_complex128)' \
+  --sample-size 20 --warm-up-time 1 --measurement-time 3 \
+  --save-baseline frankenjax-cod-a-fft-direct-out-baseline
+```
+
+Post-change command:
+
+```text
+AGENT_NAME=cod-a \
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  RCH_WORKERS=vmi1227854 RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/(fft_batch_2048x256_complex128_dense_input|fft_batch_2048x256_complex128|fft_256_complex128|ifft_256_complex128)' \
+  --sample-size 20 --warm-up-time 1 --measurement-time 3 \
+  --baseline frankenjax-cod-a-fft-direct-out-baseline
+```
+
+Accepted same-worker proof uses RCH worker `vmi1227854`. JAX comparator rows are
+the `frankenjax-murmw` JAX 0.10.2 x64 measurements from AzureLynx: `fft_256`
+5.90 us, `ifft_256` 5.72 us, and `fft_batch_2048x256` 236 us.
+
+| workload / lever | Rust midpoint | same-worker delta | JAX mean | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| baseline `fft_256_complex128` | 5.4692 us | baseline | 5.90 us | 0.927 | Current Rust near-parity/win control |
+| baseline `ifft_256_complex128` | 5.8726 us | baseline | 5.72 us | 1.027 | Current near-parity control |
+| baseline `fft_batch_2048x256_complex128` | 6.0686 ms | baseline | 236 us | 25.71 | Active JAX loss |
+| baseline `fft_batch_2048x256_complex128_dense_input` | 1.8895 ms | baseline | 236 us | 8.01 | Active JAX loss |
+| direct final output-slice, `fft_256_complex128` | 5.4826 us | -8.677% by Criterion | 5.90 us | 0.929 | Control only; target rows reject |
+| direct final output-slice, `ifft_256_complex128` | 5.4758 us | -5.307% by Criterion | 5.72 us | 0.957 | Control only; target rows reject |
+| direct final output-slice, `fft_batch_2048x256_complex128` | 6.4767 ms | neutral +3.4346%, p=0.23 | 236 us | 27.44 | REVERT |
+| direct final output-slice, `fft_batch_2048x256_complex128_dense_input` | 2.2349 ms | +12.542% regression, p<0.05 | 236 us | 9.47 | REVERT |
+| persistent row thread pool, `fft_256_complex128` | 5.5501 us | neutral +2.2041%, p=0.42 | 5.90 us | 0.940 | Control only |
+| persistent row thread pool, `ifft_256_complex128` | 6.0925 us | neutral +0.7862%, p=0.74 | 5.72 us | 1.065 | Control only |
+| persistent row thread pool, `fft_batch_2048x256_complex128` | 6.7331 ms | +10.245% regression, p<0.05 | 236 us | 28.53 | REVERT |
+| persistent row thread pool, `fft_batch_2048x256_complex128_dense_input` | 2.8739 ms | +48.632% regression, p<0.05 | 236 us | 12.18 | REVERT |
+
+- Ratio scorecard for the current baseline row set: **1 win / 2 losses / 1
+  neutral vs JAX** if a 5% neutral band is used (`fft_256` win, `ifft_256`
+  neutral, both 2048x256 batch rows losses). The target batch gap remains open.
+- Ratio scorecard for the two rejected levers on their target batch rows: **0
+  wins / 4 losses / 0 neutral vs JAX**, plus same-worker Rust regressions on
+  three of four target batch measurements and one no-gain row.
+- Root-cause read from the failed levers: the existing row-local scratch plus
+  sequential copy is cheaper than striding final-row writes directly, and the
+  current scoped row threading cost is not the dominant batch-row bottleneck.
+  Persistent pooling adds extra allocation/channel/copy overhead without changing
+  the scalar radix-2 butterfly throughput.
+- Validation: `cargo test -p fj-lax fft --lib` passed 43/43 through RCH;
+  `cargo test -p fj-conformance --test fft_oracle` passed 27/27; `cargo test -p
+  fj-conformance --test linalg_fft_oracle_parity` passed 1/1.
+- Retry predicate: do not retry final-buffer writes, chunk-pool scheduling, or
+  thread-spawn shaving for these batched pow2 complex rows without new cache-miss
+  or scheduler evidence. The next credible `murmw` attempt needs a real kernel:
+  SIMD radix-4/8 butterflies, native mixed-radix factorization for non-pow2 sizes,
+  cache-blocked multi-row transforms, or generated length-specialized kernels,
+  all gated by same-worker before/after plus the JAX ratio ledger.
+
 ## frankenjax-murmw - radix-4 power-of-four FFT no-ship
 
 - Date: 2026-06-20
