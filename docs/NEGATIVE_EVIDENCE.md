@@ -2,6 +2,36 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - cod-b width-changing bitcast presized-fill keep
+
+The BOLD-VERIFY pass targeted current scorecard losses rather than another
+blocked FMA-policy retry. The kept lever presizes dense width-changing bitcast
+outputs and fills by index for `f32 -> bf16/f16 chunks` and `bf16/f16 chunks ->
+f32`, preserving the same little-endian chunk order and shape rules.
+
+Same-worker RCH proof on `vmi1227854`:
+
+| Row | Baseline Rust | Candidate Rust | JAX mean | Candidate/JAX | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `bitcast_f32_bf16_1m` | 978.58 us | 125.40 us | 140.512 us | 0.892 | Keep: 7.80x internal win; Rust 1.12x faster than JAX |
+| `bitcast_bf16_f32_1m` | 533.82 us | 123.49 us | 151.382 us | 0.816 | Keep: 4.32x internal win; Rust 1.23x faster than JAX |
+
+Controls: literal-reference rows remained orders of magnitude slower
+(`38.853 ms` and `27.965 ms` in the candidate run). JAX timing used
+`benchmarks/jax_comparison/bitcast_gauntlet.py` with JAX 0.10.1 CPU x64,
+20 runs, 5 warmups, and 200 inner loops. A local same-target Rust bench attempt
+was rejected as invalid before measurement because the shared RCH target dir
+contained artifacts built by a different nightly; the accepted Rust timing is
+same-worker RCH baseline/candidate, conservatively compared with local JAX.
+
+Validation: `cargo test -p fj-lax bitcast --lib` passed 4/4 on RCH
+`vmi1293453`; `cargo test -p fj-conformance --test bitcast_oracle` passed
+36/36 on RCH `hz2`; `cargo check -p fj-lax --all-targets` passed on RCH `hz1`;
+production `cargo clippy -p fj-lax --lib -- -D warnings` passed on RCH
+`vmi1149989`. Repo-wide `cargo fmt --check` and `fj-lax --all-targets` clippy
+are blocked by pre-existing unrelated formatting/test lint debt; follow-up
+`frankenjax-98eoz` tracks the clippy side.
+
 ## 2026-06-20 - frankenjax-ligu5 vmap gather dense-float no-ship
 
 `frankenjax-ligu5` was reopened against the dispatch-layer batched gather/scatter

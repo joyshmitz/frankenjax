@@ -177,6 +177,30 @@ Additional cod-b FMA primitive policy probe environment:
 - JAX caveat: this environment exposes no public `jax.lax.fma`, so the JAX row
   is warmed `jax.jit(lambda a, b, c: a * b + c)`.
 
+Additional cod-b width-changing bitcast presized-fill environment:
+
+- Agent: cod-b / WildForge
+- Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-b`
+- Rust bench command: `rch exec -- cargo bench -p fj-lax --bench lax_baseline
+  'eval/bitcast_(f32_bf16|bf16_f32)_(dense|literal_ref)_1m' -- --quiet`.
+- Same-worker timing proof: RCH worker `vmi1227854` for both baseline and
+  candidate.
+- JAX oracle: `benchmarks/jax_comparison/.venv/bin/python
+  benchmarks/jax_comparison/bitcast_gauntlet.py --runs 20 --warmup 5
+  --inner-loops 200 --output /tmp/frankenjax-cod-b-bitcast-jax-20260620T1327Z.json`.
+- JAX/JAXLIB: 0.10.1 / 0.10.1, `jax_enable_x64=true`, CPU backend.
+- Caveat: an attempted local Rust bench using the shared RCH target directory
+  failed before measurement with rustc `E0514` because remote artifacts were
+  built by a different nightly. No cleanup was performed. The accepted ratio is
+  remote Rust vs local JAX, which is conservative relative to prior same-host
+  calibration.
+- Gates: `cargo test -p fj-lax bitcast --lib` passed 4/4 on RCH `vmi1293453`;
+  `cargo test -p fj-conformance --test bitcast_oracle` passed 36/36 on RCH
+  `hz2`; `cargo check -p fj-lax --all-targets` passed on RCH `hz1`;
+  production `cargo clippy -p fj-lax --lib -- -D warnings` passed on RCH
+  `vmi1149989`. `fj-lax --all-targets` clippy is blocked by unrelated test
+  lint debt filed as `frankenjax-98eoz`.
+
 ## Measured Workloads
 
 | Bead | Workload | Rust timing | JAX timing | Rust/JAX | Outcome |
@@ -223,8 +247,8 @@ Additional cod-b FMA primitive policy probe environment:
 | frankenjax-mcqr.101 | `bitcast_i32_f32_1m` | 642.693 us mean | 93.945 us mean | 6.841 | Rust 6.84x slower (35.28x vs literal ref) |
 | frankenjax-mcqr.101 | `bitcast_f64_u64_1m` | 270.723 us mean | 176.611 us mean | 1.533 | Rust 1.53x slower (91.41x vs literal ref) |
 | frankenjax-mcqr.101 | `bitcast_u64_f64_1m` | 228.320 us mean | 175.404 us mean | 1.302 | Rust 1.30x slower (89.89x vs literal ref) |
-| frankenjax-mcqr.100 | `bitcast_f32_bf16_1m` | 2.710 ms mean | 138.058 us mean | 19.630 | Rust 19.63x slower (21.29x vs literal ref) |
-| frankenjax-mcqr.100 | `bitcast_bf16_f32_1m` | 669.626 us mean | 139.426 us mean | 4.803 | Rust 4.80x slower (47.11x vs literal ref) |
+| cod-b bitcast presized-fill | `bitcast_f32_bf16_1m` | 125.40 us mean | 140.512 us mean | 0.892 | Rust 1.12x faster; 7.80x same-worker speedup vs old dense path |
+| cod-b bitcast presized-fill | `bitcast_bf16_f32_1m` | 123.49 us mean | 151.382 us mean | 0.816 | Rust 1.23x faster; 4.32x same-worker speedup vs old dense path |
 | frankenjax-mcqr.96 | `bitcast_f32_u32_1m` | 97.423 us mean | 113.430 us mean | 0.859 | Rust 1.16x faster, noisy CV (201.42x vs literal ref) |
 | frankenjax-mcqr.96 | `bitcast_f64_i64_1m` | 270.586 us mean | 183.715 us mean | 1.473 | Rust 1.47x slower (82.27x vs literal ref) |
 | frankenjax-mcqr.98 | `bitcast_f64_u32_1m` | 1.272 ms mean | 186.831 us mean | 6.809 | Rust 6.81x slower (47.76x vs literal ref) |
@@ -262,6 +286,13 @@ Additional cod-b FMA primitive policy probe environment:
   same-host estimates FLIP several to wins/ties: slice ~0.72x (Rust FASTER),
   integer_pow2 f32 ~0.97x (~tie/win), broadcast ~1.10x, complex_ctor ~1.08x. Future
   vs-JAX rows MUST run the Rust bench LOCALLY (cargo bench, not rch).
+- cod-b width-changing bitcast presized-fill flips two active release losses to
+  wins. Same-worker RCH `vmi1227854` improved `bitcast_f32_bf16_1m` from
+  978.58 us to 125.40 us (7.80x) and `bitcast_bf16_f32_1m` from 533.82 us to
+  123.49 us (4.32x). Against the current local JAX comparator, Rust/JAX is
+  0.892 and 0.816. The local same-target Rust bench attempt is invalid due to
+  mixed-nightly RCH artifacts, so these rows use conservative remote-Rust/local-
+  JAX ratios.
 - cntiy FMA primitive coverage is now measured directly. The dense FMA rows are
   strong internal de-box wins (8-9x over boxed controls), and `+fma` improves the
   primitive itself by 2.82x for f64 and 13.28x for f32, but same-host Rust/JAX
@@ -295,14 +326,15 @@ Additional cod-b FMA primitive policy probe environment:
   Both stayed JAX losses and regressed the current Rust runner; no source code was
   kept. The retry predicate is now stronger: do not revisit these loop shapes
   without SIMD disassembly/profile proof and same-worker before/after data.
-- JAX domination score (same-host corrected/measured estimate): ~43/100 — scalar
+- JAX domination score (same-host corrected/measured estimate): ~45/100 — scalar
   stack_axis0 (0.0055x), scalar repeat_axis0 (0.0143x), tensor stack_axis0
   (0.083x), tensor repeat_axis0 (0.276x), dense to_i64_vec host extraction
   (0.061x-0.084x), TensorValue::new host construction/extraction
   (0.025x-0.029x external but mixed internally), slice (corrected ~0.72x), and
   integer_pow2 f32 (corrected ~0.97x) beat or tie JAX same-host, with
-  broadcast/complex_ctor within ~10%. The 10 bitcast rows add internal wins,
-  one noisy external JAX win, and nine external JAX losses.
+  broadcast/complex_ctor within ~10%. The 10 bitcast rows now add internal wins,
+  three external JAX wins (`f32->u32`, `f32->bf16`, `bf16->f32`) and seven
+  external JAX losses.
 - The fj-core `stack_axis0` tensor concat-storage row is a strong external
   Rust/JAX win (12.09x faster), but the actual lever is only a narrow 1.04x
   internal improvement over the literal-backed control. KEEP it for realistic

@@ -3,6 +3,67 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## cod-b - width-changing bitcast presized-fill keep; local same-target bench invalid (2026-06-20)
+
+- Date: 2026-06-20
+- Agent: cod-b / WildForge
+- Claimed tracker context: `frankenjax-cntiy` was the open cod-b ready bead, but
+  the FMA-policy surface already had fresh no-ship evidence. This pass followed
+  the scorecard instead and targeted the still-measured `bitcast_f32_bf16_1m`
+  and `bitcast_bf16_f32_1m` losses.
+- Lever kept: dense width-changing `bitcast_convert_type` now pre-sizes the
+  output buffer and fills by index for `f32 -> bf16/f16 chunks` and
+  `bf16/f16 chunks -> f32`. Byte order, trailing-dimension handling, and dtype
+  construction are unchanged; the change removes repeated `Vec::push` growth
+  checks and exposes a fixed-size fill loop.
+- Alien-graveyard route used: vectorized/artifact-layout thinking rather than
+  a new algorithm. The key observation was that the slow path was not the
+  bit reinterpretation itself but the materialization layout of the output
+  artifact.
+
+Same-worker RCH timing on `vmi1227854` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b`:
+
+| workload | baseline Rust midpoint | candidate Rust midpoint | same-worker speedup | JAX mean | candidate/JAX | verdict |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `eval/bitcast_f32_bf16_dense_1m` | 978.58 us | 125.40 us | 7.80x | 140.512 us | 0.892 | KEEP: Rust 1.12x faster than JAX |
+| `eval/bitcast_bf16_f32_dense_1m` | 533.82 us | 123.49 us | 4.32x | 151.382 us | 0.816 | KEEP: Rust 1.23x faster than JAX |
+
+- Candidate literal controls: `eval/bitcast_f32_bf16_literal_ref_1m` 38.853 ms
+  and `eval/bitcast_bf16_f32_literal_ref_1m` 27.965 ms. They prove the dense
+  route is still the path under test; their worker-to-worker noise is not used
+  for the keep decision.
+- JAX comparator:
+  `benchmarks/jax_comparison/bitcast_gauntlet.py --runs 20 --warmup 5
+  --inner-loops 200 --output /tmp/frankenjax-cod-b-bitcast-jax-20260620T1327Z.json`,
+  JAX 0.10.1, CPU, x64 enabled. The accepted Rust/JAX ratio compares remote
+  RCH Rust with local JAX, which is conservative relative to the scorecard note
+  that RCH workers are often slower than local.
+- Invalid measurement recorded: a local Rust bench against
+  `/data/projects/.rch-targets/frankenjax-cod-b` failed before measurement with
+  rustc `E0514` because the RCH target directory contained artifacts compiled
+  by a different nightly (`beae78130`) than the local toolchain (`f20a92ec0`).
+  No cleanup was attempted.
+- Validation: `cargo test -p fj-lax bitcast --lib` passed 4/4 on RCH
+  `vmi1293453`; `cargo test -p fj-conformance --test bitcast_oracle` passed
+  36/36 on RCH `hz2`; `cargo check -p fj-lax --all-targets` passed on RCH
+  `hz1`; production `cargo clippy -p fj-lax --lib -- -D warnings` passed on
+  RCH `vmi1149989`; `git diff --check` passed for the touched docs/code/bead
+  files.
+- Non-blocking hygiene debt: `cargo fmt --check` is red on pre-existing
+  repo-wide formatting drift, and `cargo clippy -p fj-lax --all-targets --
+  -D warnings` is red on unrelated test lint debt (`arithmetic.rs` unnecessary
+  casts, `nn.rs` manual clamps, and older `tensor_ops.rs` test type/clone
+  lints). Filed follow-up `frankenjax-98eoz`; no unrelated lint cleanup was
+  folded into this perf commit.
+- Ratio scorecard for these two rows after the keep: 2 wins / 0 losses / 0
+  neutral vs JAX. This removes two prior bitcast release losses from the active
+  scorecard.
+- Retry predicate: do not retry the old push-based width-changing bitcast
+  materialization. Future bitcast work should focus on the remaining same-width
+  signed reinterpret losses (`f32<->i32`, `f64<->i64`) or `f64<->u32`
+  width-changing rows with fresh same-worker proof.
+
 ## frankenjax-ligu5 - dense f64/f32 batched-operand gather is not a JAX loss
 
 - Date: 2026-06-20
