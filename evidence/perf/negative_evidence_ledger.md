@@ -2651,3 +2651,24 @@ ends are not rediscovered without new evidence.
   A/B: bcast16x16/n=8 = 1.76us vs 9.55us (5.4x); bcast16x16/n=32 = 6.74us vs 41.69us (6.2x).
 - NEXT: hunt OTHER interpreter inner loops calling per-element `apply_scalar_*`/`eval_primitive`
   dispatch (same hoist-the-match-out-of-the-loop pattern).
+
+- HEAD-TO-HEAD vs JAX (warmed `jax.jit` CPU, x64, jax 0.10.1, call+block_until_ready latency; local
+  venv since RCH workers lack JAX). Rust = in-process `CompiledJaxprRunner::eval` (vectorized):
+
+  | workload | Rust | JAX p50 | verdict |
+  | --- | ---: | ---: | --- |
+  | f32E256/n=8  | 546 ns | 4558 ns | Rust wins 8.4x |
+  | f32E256/n=32 | 2252 ns | 4512 ns | Rust wins 2.0x |
+  | bcast16x16/n=8  | 1764 ns | 5996 ns | Rust wins 3.4x |
+  | bcast16x16/n=32 | 6741 ns | 6074 ns | **JAX wins 1.10x (narrow LOSS)** |
+
+  f32 vectorization is confirmed a JAX WIN (2-8x), not just vs the internal control. NEW MEASURED GAP:
+  the 32-step broadcast (bias-add) chain narrowly loses (1.10x). CAUSE: the broadcast path runs the
+  per-step arena, which allocates a fresh `vec![0.0; n]` (2 KB here) PER STEP — 32 allocs of churn
+  that XLA's fusion avoids. mcqr.111's in-place linear-chain path (which removes per-step allocs)
+  BAILS on broadcast operands (`scalar_dense_f64_operand` only accepts Scalar cells, not RowBcast/
+  ColBcast). LEVER (next, focused): extend `run_linear_scalar_f64_tensor_chain_into` to accept a
+  broadcast vec operand and mutate the single matrix buffer in place per row (composes in-place +
+  the `fill_dense_f64_bcast` vectorization) — est. removes ~1.6us of alloc churn, flipping the loss.
+  Deferred here: niche (only long broadcast chains; n=8 already wins 3.4x) vs. a substantial edit to
+  a validated cross-agent function — not worth rushing against absolute-parity. Bead-worthy.
