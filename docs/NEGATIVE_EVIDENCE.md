@@ -2,6 +2,30 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-xljoh compiled-dispatch f64 mid-cache keep
+
+`frankenjax-xljoh` shipped only the measured narrow fallback: reusable
+`CompiledJaxprRunner` routes one-tensor f64 linear chains in the
+65,536..=262,144 element band through owned compiled eval. It did not ship a
+broad f32 route or an upper-band f64 route.
+
+Directional candidate Rust/JAX ratios from the new comparator artifact
+`../artifacts/performance/evidence/frankenjax-xljoh-jax-comparator-20260620T0550Z.json`:
+
+| Row | Rust/JAX | Verdict |
+| --- | ---: | --- |
+| f64 4K x8 | 0.541 | Rust faster; guard off |
+| f64 65K x8 | 1.516 | JAX faster; kept internal mid-cache fallback |
+| f64 262K x8 | 3.195 | JAX faster; remaining gap |
+| f64 1M x8 | 20.36 | JAX faster; fallback correctly off |
+| f64 16M x8 | 4.55 | JAX faster; no safe win in this lever |
+| f32 4K x8 | 0.163 | Rust faster; no f32 route |
+| f32 65K x8 | 0.637 | Rust faster; no f32 route |
+
+Retry predicate: do not reattempt broad f32 routing or f64 fallback expansion
+without same-host or same-worker proof. The remaining f64 large-chain loss needs
+deeper output reuse, vector codegen, or backend specialization.
+
 ## 2026-06-20 - frankenjax-q59j4/co009 LiteralBuffer internal keeps
 
 `frankenjax-q59j4` and `frankenjax-co009` were closed as measured internal

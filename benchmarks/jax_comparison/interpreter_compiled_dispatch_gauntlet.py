@@ -4,6 +4,8 @@
 Mirrors crates/fj-interpreters/benches/compiled_dispatch_speed.rs:
 - scalar_i64_chain_n{8,32,128}: x -> x + 1 repeated n times.
 - tensor64_chain_n{8,32}: x[64] -> x + 1.0 repeated n times.
+- bigchain{4096,65536,262144,1048576,16777216}_n8: f64 vector chain.
+- f32big{4096,65536}_n8: f32 vector chain.
 
 The Rust Criterion rows compare eager eval_jaxpr vs CompiledJaxpr in-process.
 The JAX rows measure jax.jit CPU call+ready latency for the same logical chain.
@@ -68,14 +70,28 @@ def scalar_chain_fn(n):
     return jax.jit(inner)
 
 
-def tensor64_chain_fn(n):
+def tensor_chain_fn(n, dtype):
+    lit = jnp.asarray(1.0, dtype=dtype)
+
     def inner(x):
         y = x
         for _ in range(n):
-            y = y + 1.0
+            y = y + lit
         return y
 
     return jax.jit(inner)
+
+
+def inner_loops_for_size(base_inner_loops, elems):
+    if elems >= 16_777_216:
+        return max(1, base_inner_loops // 200)
+    if elems >= 1_048_576:
+        return max(1, base_inner_loops // 50)
+    if elems >= 262_144:
+        return max(1, base_inner_loops // 10)
+    if elems >= 65_536:
+        return max(1, base_inner_loops // 4)
+    return base_inner_loops
 
 
 def main():
@@ -104,7 +120,7 @@ def main():
         )
 
     for n in (8, 32):
-        compiled = tensor64_chain_fn(n)
+        compiled = tensor_chain_fn(n, jnp.float64)
         compiled(tensor_arg).block_until_ready()
         results.append(
             bench(
@@ -116,6 +132,36 @@ def main():
             )
         )
 
+    for elems in (4096, 65536, 262144, 1048576, 16777216):
+        tensor = jnp.ones((elems,), dtype=jnp.float64)
+        compiled = tensor_chain_fn(8, jnp.float64)
+        compiled(tensor).block_until_ready()
+        loops = inner_loops_for_size(args.inner_loops, elems)
+        results.append(
+            bench(
+                f"compiled_dispatch_jax_bigchain{elems}_n=8",
+                lambda compiled=compiled, tensor=tensor: compiled(tensor).block_until_ready(),
+                args.runs,
+                args.warmup,
+                loops,
+            )
+        )
+
+    for elems in (4096, 65536):
+        tensor = jnp.ones((elems,), dtype=jnp.float32)
+        compiled = tensor_chain_fn(8, jnp.float32)
+        compiled(tensor).block_until_ready()
+        loops = inner_loops_for_size(args.inner_loops, elems)
+        results.append(
+            bench(
+                f"compiled_dispatch_jax_f32big{elems}_n=8",
+                lambda compiled=compiled, tensor=tensor: compiled(tensor).block_until_ready(),
+                args.runs,
+                args.warmup,
+                loops,
+            )
+        )
+
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "engine": "jax_jit_cpu",
@@ -124,6 +170,8 @@ def main():
         "workloads": {
             "scalar": "x -> x + 1 repeated n times, dtype=int64",
             "tensor64": "x[64] -> x + 1.0 repeated n times, dtype=float64",
+            "bigchain": "x[N] -> x + 1.0 repeated 8 times, dtype=float64",
+            "f32big": "x[N] -> x + 1.0 repeated 8 times, dtype=float32",
         },
         "results": results,
     }

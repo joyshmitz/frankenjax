@@ -124,10 +124,33 @@ Additional cod-b LiteralBuffer internal closeout environment:
   LiteralBuffer tests passed on `vmi1149989`; `rch exec -- cargo test -p
   fj-conformance --lib` passed 45 tests, 0 failed on `hz2`.
 
+Additional cod-a fj-interpreters compiled-dispatch environment:
+
+- Agent: cod-a / WildForge
+- Cargo target dir: `/data/projects/.rch-targets/frankenjax-cod-a`
+- Rust bench command: `rch exec -- cargo bench -p fj-interpreters --bench
+  compiled_dispatch_speed` with the `compiled_dispatch` large-chain filters.
+- Baseline worker: `vmi1149989`; candidate worker: `vmi1152480` despite the
+  requested pin, so before/after deltas are not same-worker certification.
+- JAX oracle: `benchmarks/jax_comparison/.venv/bin/python
+  benchmarks/jax_comparison/interpreter_compiled_dispatch_gauntlet.py --runs 20
+  --warmup 5 --inner-loops 200`
+- JAX/JAXLIB: 0.10.1 / not reported by the comparator payload,
+  `jax_enable_x64=true`, CPU backend.
+- Ratio caveat: rows below use candidate remote Rust means versus local JAX means;
+  use them for routing the JAX gap, not for absolute release certification.
+
 ## Measured Workloads
 
 | Bead | Workload | Rust timing | JAX timing | Rust/JAX | Outcome |
 | --- | --- | ---: | ---: | ---: | --- |
+| frankenjax-xljoh | `compiled_dispatch_f64_chain_4k_x8` | 3.319 us mean | 6.136 us mean | 0.541 | Rust 1.85x faster; guard off |
+| frankenjax-xljoh | `compiled_dispatch_f64_chain_65k_x8` | 51.601 us mean | 34.033 us mean | 1.516 | JAX 1.52x faster; kept mid-cache internal fallback |
+| frankenjax-xljoh | `compiled_dispatch_f64_chain_262k_x8` | 245.474 us mean | 76.827 us mean | 3.195 | JAX 3.19x faster; remaining codegen/backend gap |
+| frankenjax-xljoh | `compiled_dispatch_f64_chain_1m_x8` | 1.696 ms mean | 83.299 us mean | 20.36 | JAX 20.36x faster; fallback deliberately off |
+| frankenjax-xljoh | `compiled_dispatch_f64_chain_16m_x8` | 125.556 ms mean | 27.610 ms mean | 4.55 | JAX 4.55x faster; no safe win in this lever |
+| frankenjax-xljoh | `compiled_dispatch_f32_chain_4k_x8` | 1.352 us mean | 8.278 us mean | 0.163 | Rust 6.12x faster; JAX CV 46%, noisy |
+| frankenjax-xljoh | `compiled_dispatch_f32_chain_65k_x8` | 21.486 us mean | 33.742 us mean | 0.637 | Rust 1.57x faster |
 | frankenjax-19wst | `tile_scalar_f32_1024x1024` | 51.435 us | 317.753 us | 0.162 | Rust 6.18x faster |
 | frankenjax-19wst | `tile_scalar_complex128_1024x1024` | 412.679 us | 579.030 us | 0.713 | Rust 1.40x faster |
 | frankenjax-1z7k9 | `complex_f32_tensor_scalar_1m` | 1.379 ms | 1.272 ms | 1.084 | Rust 1.08x slower |
@@ -208,6 +231,15 @@ Additional cod-b LiteralBuffer internal closeout environment:
   materialized literal serialization. These rows reduce conformance/fixture host
   overhead but do not move the JAX domination score because there is no direct
   JAX workload comparator.
+- xljoh ships a narrow `fj-interpreters` internal keep for f64 65K..=262K
+  compiled linear chains, but the JAX score stays constrained by large-chain f64
+  losses: 65K is 1.52x slower than JAX, 262K is 3.19x slower, 1M is 20.36x
+  slower, and 16M is 4.55x slower in the remote-Rust/local-JAX routing pass.
+  f32 compiled-dispatch rows are already Rust wins, so the next high-value work is
+  not a broad f32 route; it is deeper f64 output reuse, vector codegen, or backend
+  specialization. Conformance is green for this closeout (`cargo test -p
+  fj-conformance` pass), while full `fj-interpreters --lib` and all-target clippy
+  remain blocked by filed follow-ups `frankenjax-fo1zg` and `frankenjax-gwa56`.
 - JAX domination score (same-host corrected/measured estimate): ~43/100 — scalar
   stack_axis0 (0.0055x), scalar repeat_axis0 (0.0143x), tensor stack_axis0
   (0.083x), tensor repeat_axis0 (0.276x), dense to_i64_vec host extraction

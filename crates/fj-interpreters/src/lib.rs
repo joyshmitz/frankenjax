@@ -1342,6 +1342,12 @@ struct FusedRun {
 const FUSION_MIN_RUN: usize = 3;
 const FUSION_MIN_ELEMS: usize = 1024;
 const FUSION_CHUNK: usize = 8192;
+/// Reusable compiled runners are not universally faster for f64 linear chains:
+/// the retained output/scratch path can lose to the owned compiled plan in the
+/// mid-cache band. Keep the escape hatch narrow and measured; 4K still favors
+/// the reusable in-place path, while 1M already falls through to chunked fusion.
+const RUNNER_F64_OWNED_EVAL_MIN_ELEMS: usize = 1 << 16;
+const RUNNER_F64_OWNED_EVAL_MAX_ELEMS: usize = 1 << 18;
 /// Upper size for the in-place dense-f64 linear-chain path. Below this, mutating one
 /// buffer through the chain (single-stream, no per-step alloc) beats the generic per-op
 /// path (measured 1.25-1.45x at L2-resident, win shrinking to neutral by ~1M elems). At
@@ -3398,6 +3404,62 @@ struct ScalarF64Plan {
     input_slots: Vec<usize>,
     out_slots: Vec<usize>,
     steps: Vec<ScalarF64Step>,
+}
+
+fn scalar_f64_plan_single_tensor_linear_chain_elems(
+    plan: &ScalarF64Plan,
+    args: &[Value],
+) -> Option<usize> {
+    if !plan.const_slots.is_empty()
+        || plan.input_slots.len() != args.len()
+        || plan.out_slots.len() != 1
+        || plan.steps.is_empty()
+    {
+        return None;
+    }
+
+    let mut tensor_slot = None;
+    let mut elems = None;
+    let mut scalar_slots = Vec::new();
+    for (&slot, arg) in plan.input_slots.iter().zip(args) {
+        match arg {
+            Value::Scalar(Literal::F64Bits(_)) => scalar_slots.push(slot),
+            Value::Tensor(tensor) => {
+                let values = tensor.elements.as_f64_slice()?;
+                if tensor_slot.replace(slot).is_some() {
+                    return None;
+                }
+                elems = Some(values.len());
+            }
+            _ => return None,
+        }
+    }
+
+    let mut current_slot = tensor_slot?;
+    for step in &plan.steps {
+        let lhs_is_current = operand_is_slot(step.lhs, current_slot);
+        match step.rhs {
+            Some(rhs) => {
+                let rhs_is_current = operand_is_slot(rhs, current_slot);
+                let other = match (lhs_is_current, rhs_is_current) {
+                    (true, true) => None,
+                    (true, false) => Some(rhs),
+                    (false, true) => Some(step.lhs),
+                    (false, false) => return None,
+                };
+                if let Some(ScalarF64Operand::Slot(slot)) = other
+                    && !scalar_slots.contains(&slot)
+                {
+                    return None;
+                }
+            }
+            None if !lhs_is_current => return None,
+            None => {}
+        }
+        current_slot = step.out_slot;
+    }
+
+    (plan.out_slots[0] == current_slot).then_some(elems?)
 }
 
 /// The four real full-reduction ops the dense plan covers. Each maps to a
@@ -7554,6 +7616,15 @@ impl<'a> CompiledJaxprRunner<'a> {
             });
         }
 
+        if let Some(plan) = &self.compiled.plan.scalar_f64_plan
+            && let Some(elems) = scalar_f64_plan_single_tensor_linear_chain_elems(plan, args)
+            && (RUNNER_F64_OWNED_EVAL_MIN_ELEMS..=RUNNER_F64_OWNED_EVAL_MAX_ELEMS)
+                .contains(&elems)
+        {
+            self.out = self.compiled.eval(args)?;
+            return Ok(&self.out);
+        }
+
         run_dense_plan_into(
             &self.compiled.jaxpr,
             &[],
@@ -8582,7 +8653,6 @@ fn run_dense_reshape_plan_into(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn run_dense_plan_into(
     jaxpr: &Jaxpr,

@@ -3,6 +3,99 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-xljoh - compiled-dispatch f64 mid-cache owned-eval fallback
+
+- Date: 2026-06-20
+- Agent: cod-a / WildForge
+- Lever kept: narrow `CompiledJaxprRunner` fallback from the reusable dense f64
+  scalar plan to the owned `CompiledJaxpr::eval` path for one-tensor f64 linear
+  chains in the 65,536..=262,144 element band. This is a branchless hot-path
+  shape/class specialization, not a broad dtype or allocator policy change.
+- Why this was not the original broad CheapOp fusion route: the baseline showed
+  the reusable runner already wins at 4K and 1M, f32 already wins on the tested
+  rows, and the only measured internal loss was the f64 mid-cache band where
+  owned compiled eval beat the reusable runner. The kept guard is deliberately
+  the smallest measured escape hatch.
+- Rust baseline, RCH worker `vmi1149989`, target
+  `/data/projects/.rch-targets/frankenjax-cod-a`, command
+  `cargo bench -p fj-interpreters --bench compiled_dispatch_speed -- compiled_dispatch --warm-up-time 1 --measurement-time 5`:
+  - f64 4K: eager 3.280 us, compiled_runner 2.673 us. Verdict: keep runner; do
+    not route small rows through owned eval.
+  - f64 65K: eager 39.998 us, compiled 38.941 us, compiled_runner 47.105 us,
+    scalar 59.558 us. Verdict: runner loses; candidate route justified.
+  - f64 262K: eager 237.173 us, compiled_runner 247.034 us, scalar 255.254 us.
+    Verdict: runner loses; candidate route justified.
+  - f64 1M: eager 7.205 ms, compiled_runner 1.629 ms, scalar 1.778 ms. Verdict:
+    keep runner/fusion path; do not expand fallback upward.
+  - f64 16M: eager 118.539 ms, compiled_runner 123.040 ms, scalar 123.660 ms.
+    Verdict: no safe same-worker win; leave untouched.
+  - f32 4K: eager 1.952 us, compiled_runner 1.938 us, scalar 1.876 us. Verdict:
+    neutral/noisy, no f32 route.
+  - f32 65K: eager 24.989 us, compiled_runner 26.384 us, scalar 28.661 us by
+    mean, but median runner was 24.356 us vs eager 25.214 us. Verdict: no f32
+    route without a cleaner same-host row.
+- Candidate bench, RCH selected `vmi1152480` despite the pinned-worker request,
+  same target dir and filtered Criterion command:
+  - f64 4K: compiled_runner 3.319 us. Guard did not fire; directionally no
+    claimed before/after win because worker changed.
+  - f64 65K: compiled_runner 51.601 us vs compiled 56.910 us vs eager 59.825 us
+    vs scalar 64.532 us. Verdict: keep; 1.10x faster than owned compiled in the
+    same candidate run, 1.16x faster than eager, 1.25x faster than scalar.
+  - f64 262K: compiled_runner 245.474 us vs compiled 245.607 us vs eager
+    253.769 us vs scalar 280.130 us. Verdict: keep; matches owned compiled and
+    stays 1.03x faster than eager, 1.14x faster than scalar.
+  - f64 1M: compiled_runner 1.696 ms vs compiled 7.159 ms vs eager 6.507 ms.
+    Verdict: fallback correctly did not fire; expanding it would regress.
+  - f64 16M: compiled_runner 125.556 ms vs JAX 27.610 ms. Verdict: still a
+    major JAX loss, but this lever does not fix it; needs deeper backend/vector
+    codegen or output reuse work.
+  - f32 4K: compiled_runner 1.352 us. Verdict: f32 remains a Rust win; no change.
+  - f32 65K: compiled_runner 21.486 us. Verdict: f32 remains a Rust win; no
+    change.
+- JAX comparator: `benchmarks/jax_comparison/interpreter_compiled_dispatch_gauntlet.py`
+  extended to the large f64/f32 chain rows. Artifact:
+  `artifacts/performance/evidence/frankenjax-xljoh-jax-comparator-20260620T0550Z.json`.
+  JAX 0.10.1 CPU x64, warmed `block_until_ready`, local host. Ratios below use
+  candidate Rust mean / JAX mean, so they are routing-grade directional because
+  Rust was remote and JAX was local:
+
+| Workload | Rust mean | JAX mean | Rust/JAX | Verdict |
+| --- | ---: | ---: | ---: | --- |
+| f64 chain 4K x8 | 3.319 us | 6.136 us | 0.541 | Rust 1.85x faster; guard off |
+| f64 chain 65K x8 | 51.601 us | 34.033 us | 1.516 | JAX 1.52x faster; kept internal mid-cache improvement |
+| f64 chain 262K x8 | 245.474 us | 76.827 us | 3.195 | JAX 3.19x faster; still a gap |
+| f64 chain 1M x8 | 1.696 ms | 83.299 us | 20.36 | JAX 20.36x faster; fallback off by design |
+| f64 chain 16M x8 | 125.556 ms | 27.610 ms | 4.55 | JAX 4.55x faster; no safe win found |
+| f32 chain 4K x8 | 1.352 us | 8.278 us | 0.163 | Rust 6.12x faster; JAX CV 46%, noisy |
+| f32 chain 65K x8 | 21.486 us | 33.742 us | 0.637 | Rust 1.57x faster |
+
+- Rejected/no-ship ideas:
+  - Broad f32 fallback or fusion route: rejected because f32 rows already beat JAX
+    on the measured large-chain comparator and the internal rows were noisy rather
+    than a clean loss.
+  - Expanding the f64 fallback above 262K: rejected because the 1M row is a strong
+    reusable-runner win and would regress by about 4x if routed to owned eval.
+  - Chasing the 16M loss with this lever: rejected because both owned eval and
+    reusable runner remain memory/codegen limited versus JAX; route to deeper
+    output reuse, vector codegen, or cache-aware backend work.
+- Validation:
+  - `cargo check -p fj-interpreters --all-targets`: pass via RCH.
+  - `cargo clippy -p fj-interpreters --lib --no-deps -- -D warnings`: pass via
+    RCH worker `vmi1149989`.
+  - `cargo test -p fj-interpreters compiled_jaxpr_eval_matches_eager_eval_jaxpr --lib`:
+    pass via RCH.
+  - `cargo test -p fj-conformance`: pass, 45 lib tests plus oracle/gate suites
+    green using `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`;
+    RCH had no admissible worker slot, so this ran under the local fallback.
+  - `cargo test -p fj-interpreters --lib`: blocked by pre-existing golden-hash
+    drift in 8 unrelated tests; the targeted compiled-jaxpr semantic test passes.
+  - Workspace/all-target clippy is blocked before this crate by existing `fj-trace`
+    and `fj-lax` lints; recorded as release-readiness debt, not absorbed into this
+    perf lever.
+- Retry predicate: do not reattempt broad f32 or upper-band f64 routing without a
+  same-host or same-worker row showing a new loss. The remaining f64 large-chain
+  gap is not a dispatch-guard problem.
+
 ## frankenjax-cc-threaded-integer-axis-reduce - Threaded INTEGER axis-reduce: trailing JAX WIN, leading 2.13x (bit-exact)
 
 - Date: 2026-06-19
