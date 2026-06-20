@@ -3442,3 +3442,33 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   remaining large-chain lever is per-chain codegen (n75xr, WildForge actively working it).
   CAVEAT: thread-A/B ratios are contention-sensitive (see the gate-raise correction above); the
   16M wins reproducing here means they survive even current load — a robust positive signal.
+
+## AzureLynx - VERIFY pass + lever-space audit (2026-06-20)
+
+- Scope: independent BOLD-VERIFY pass deliberately OFF the hot fj-interpreters CheapOp work
+  (WildForge owns bead xjbvr / n75xr, uncommitted lib.rs WIP) to avoid a convergent-commit
+  collision. No source changed this pass.
+- Baseline health (rch hz1, release): `cargo build --release -p fj-lax` GREEN;
+  `cargo test --release -p fj-lax --lib` = **1567 passed / 0 failed / 145 ignored**. No regression
+  from the swarm's recent guard/golden-hash/densify churn. (First full-suite run tripped E0514
+  ppv-lite86/cfg_if drift — transient mixed-toolchain race in the SHARED CARGO_TARGET_DIR from
+  concurrent agent builds; it self-cleared on retry. Infra, not a code regression — do NOT
+  `cargo clean` the shared dir while peers build.)
+- Parity gap audited: `frankenjax-wzg91` (complex atan2 too-permissive). VERIFIED RESOLVED — the
+  `complex_atan2` dispatch is gone; arithmetic.rs:14232 documents intentional float-only rejection;
+  `fj-lax --lib atan2` passes 4/4 incl. `test_complex_atan2_reports_unsupported_dtype`;
+  conformance `atan2_oracle.rs:731+` asserts complex64/128 scalar+tensor + mixed-complex rejection.
+  Closing the bead (bookkeeping; no behavior change needed).
+- Lever-space audit (bv --robot-triage): 2004/2009 beads closed (99.7%); 5 open. Every open item is
+  policy-gated (cntiy = +fma maintainer decision; oneqh = allocator, closed no-ship), the umbrella
+  directive (mcqr), hot/owned (xjbvr fj-interpreters → WildForge), or bookkeeping (wzg91). The
+  standing JAX losses are all off-limits or non-contained: float reduce-order (bit-exact pinned),
+  N-D transpose ~3.87x (tiling + threading both REJECTED in-ledger; only lever is arch-level
+  layout-aware elision/fusion = multi-session), 16M multi-input DRAM elementwise (memory-bound;
+  XLA's edge is non-temporal stores, blocked by `#![forbid(unsafe_code)]`), softmax/attention ~2.1x
+  (FMA/SIMD-exp gated). Honest conclusion: no contained single-session perf lever remains that does
+  not re-mine a DO-NOT vein, hit a maintainer gate, or rush a parity-absolute arch swing.
+- Host caveat: non-idle (WildForge + peers active). Per project rule, only same-binary before/after
+  ratios are trustworthy here; with no source change there is no A/B to claim — absolute fresh
+  win/loss numbers withheld as unreliable. Scorecard delta this pass: 0 wins / 0 losses / 0 neutral
+  (verification-only).
