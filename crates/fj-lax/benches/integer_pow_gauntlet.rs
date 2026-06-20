@@ -8,7 +8,7 @@
 //! Arm B: boxed input -> per-Literal integer_pow_literal path (pre-hfq7o).
 //! JAX head-to-head: benchmarks/jax_comparison/integer_pow_gauntlet.py.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fj_core::{DType, Literal, LiteralBuffer, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;
@@ -57,10 +57,7 @@ fn bench_one(label: &str, dense: Value, boxed: Value, c: &mut Criterion) {
     let b = eval_primitive(Primitive::IntegerPow, std::slice::from_ref(&boxed), &params).unwrap();
     if let (Value::Tensor(dt), Value::Tensor(bt)) = (&d, &b) {
         for i in [0usize, N / 2, N - 1] {
-            assert_eq!(
-                dt.elements[i], bt.elements[i],
-                "dense != boxed integer_pow"
-            );
+            assert_eq!(dt.elements[i], bt.elements[i], "dense != boxed integer_pow");
         }
     }
 

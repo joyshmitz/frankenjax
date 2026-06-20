@@ -7,7 +7,7 @@
 //! Arm B: naive_broadcast_f32 — the pre-thnjs per-element coordinate-decode replicate.
 //! JAX head-to-head: benchmarks/jax_comparison/broadcast_gauntlet.py.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fj_core::{Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;
@@ -20,7 +20,15 @@ const D: usize = 768;
 
 fn bias_input() -> Value {
     let data: Vec<f32> = (0..D).map(|i| (i as f32) * 1e-3 - 0.25).collect();
-    Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![D as u32] }, data).unwrap())
+    Value::Tensor(
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![D as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    )
 }
 
 // Pre-thnjs reference: per-element row-major coordinate-decode replicate.
@@ -40,8 +48,12 @@ fn bench_broadcast(c: &mut Criterion) {
     params.insert("shape".to_owned(), format!("{ROWS},{D}"));
     params.insert("broadcast_dimensions".to_owned(), "1".to_owned());
 
-    let opt =
-        eval_primitive(Primitive::BroadcastInDim, std::slice::from_ref(&input), &params).unwrap();
+    let opt = eval_primitive(
+        Primitive::BroadcastInDim,
+        std::slice::from_ref(&input),
+        &params,
+    )
+    .unwrap();
     let raw: Vec<f32> = match &input {
         Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
         _ => unreachable!(),

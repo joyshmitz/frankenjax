@@ -1076,6 +1076,20 @@ fn transform_batches_dense(
     batch_size: usize,
     inverse: bool,
 ) -> Vec<(f64, f64)> {
+    // Power-of-two batches go through the vectorized structure-of-arrays kernel:
+    // transpose a row-block to `[index][row]` SoA, run the SAME radix-2 butterfly
+    // schedule vertically over the batch (one scalar twiddle broadcast across all
+    // rows -> the inner loop autovectorizes over contiguous rows), then transpose
+    // back. This is bit-identical to the per-row `Radix2Plan` path (identical
+    // twiddle recurrence + butterfly op order) but turns the log2(n) butterfly
+    // passes into wide contiguous SIMD over the batch dimension. Gated on a
+    // minimum batch so small/single FFTs (already near JAX parity) keep the cheap
+    // per-row path and avoid the transpose round-trip.
+    const POW2_VECTORIZED_MIN_BATCH: usize = 8; // A/B TOGGLE: MAX=HEAD baseline, 8=vectorized
+    if n > 1 && n.is_power_of_two() && batch_size >= POW2_VECTORIZED_MIN_BATCH {
+        return transform_batches_pow2_vectorized(elements, n, batch_size, inverse);
+    }
+
     // Shared, immutable per-row plan (built once): radix-2 / mixed-radix / Bluestein.
     let plan = BatchFftPlan::new(n, inverse);
     let total = batch_size * n;
@@ -1132,6 +1146,218 @@ fn transform_batches_dense(
                     plan_ref.apply_into(src, &mut scratch, &mut mixed_scratch, inverse, &mut buf);
                     blk[r * n..r * n + n].copy_from_slice(&buf);
                 }
+            });
+            row0 += rows;
+        }
+    });
+    out
+}
+
+/// One radix-2 butterfly stage applied across a contiguous block of `batch`
+/// rows that share the same twiddle factor. `even_*`/`odd_*` are the real and
+/// imaginary lanes of the two butterfly halves (each `batch` elements long, all
+/// four disjoint and contiguous). The arithmetic is identical, op-for-op, to the
+/// scalar `Radix2Plan::apply_into` butterfly, so the SoA result is bit-for-bit
+/// equal to the per-row path. The four-way zip over equal-length slices with the
+/// scalar twiddle broadcast is what the autovectorizer turns into wide FMA-free
+/// SIMD over the batch dimension.
+#[inline]
+fn batch_butterfly_block(
+    even_re: &mut [f64],
+    even_im: &mut [f64],
+    odd_re: &mut [f64],
+    odd_im: &mut [f64],
+    tw_re: f64,
+    tw_im: f64,
+) {
+    for (((er, ei), or_), oi) in even_re
+        .iter_mut()
+        .zip(even_im.iter_mut())
+        .zip(odd_re.iter_mut())
+        .zip(odd_im.iter_mut())
+    {
+        let o_re = *or_;
+        let o_im = *oi;
+        let rot_re = o_re * tw_re - o_im * tw_im;
+        let rot_im = o_re * tw_im + o_im * tw_re;
+        let e_re = *er;
+        let e_im = *ei;
+        *er = e_re + rot_re;
+        *ei = e_im + rot_im;
+        *or_ = e_re - rot_re;
+        *oi = e_im - rot_im;
+    }
+}
+
+/// Vectorized radix-2 FFT over a block of `batch` length-`n` rows using a
+/// structure-of-arrays layout. `elements`/`out` are the AoS `(re, im)` input and
+/// output for this block (`batch * n` each, row-major). Scratch `re`/`im` hold the
+/// transposed SoA data (`re[index * batch + row]`).
+///
+/// Bit-identical to running `plan.apply_into` on each row independently: same
+/// bit-reversal, same precomputed twiddle table, same per-stage `start`/`offset`
+/// traversal, same butterfly arithmetic, same `1/n` inverse scale.
+fn vectorized_pow2_block(
+    plan: &Radix2Plan,
+    elements: &[(f64, f64)],
+    batch: usize,
+    n: usize,
+    inverse: bool,
+    re: &mut [f64],
+    im: &mut [f64],
+    out: &mut [(f64, f64)],
+) {
+    debug_assert_eq!(elements.len(), batch * n);
+    debug_assert_eq!(out.len(), batch * n);
+    debug_assert_eq!(re.len(), batch * n);
+    debug_assert_eq!(im.len(), batch * n);
+    let w = batch;
+
+    // Transpose into SoA while applying the radix-2 bit-reversal to the index
+    // axis: re[i*w + b] = elements[b*n + bit_reversed[i]].re (likewise im).
+    let bitrev = &plan.bit_reversed;
+    for b in 0..batch {
+        let row = &elements[b * n..b * n + n];
+        for (i, &src_idx) in bitrev.iter().enumerate() {
+            let (sr, si) = row[src_idx];
+            re[i * w + b] = sr;
+            im[i * w + b] = si;
+        }
+    }
+
+    // Butterfly stages, vertical over the batch. For each (start, offset) the two
+    // halves are the disjoint contiguous row-blocks [i_even, i_even+w) and
+    // [i_odd, i_odd+w); i_odd > i_even always, so split_at_mut gives both.
+    let mut twiddle_base = 0usize;
+    let mut len = 2usize;
+    while len <= n {
+        let half = len / 2;
+        let stage_tw = &plan.twiddles[twiddle_base..twiddle_base + half];
+        let mut start = 0usize;
+        while start < n {
+            for (offset, &(tw_re, tw_im)) in stage_tw.iter().enumerate() {
+                let i_even = (start + offset) * w;
+                let i_odd = (start + offset + half) * w;
+                let (re_lo, re_hi) = re.split_at_mut(i_odd);
+                let (im_lo, im_hi) = im.split_at_mut(i_odd);
+                batch_butterfly_block(
+                    &mut re_lo[i_even..i_even + w],
+                    &mut im_lo[i_even..i_even + w],
+                    &mut re_hi[..w],
+                    &mut im_hi[..w],
+                    tw_re,
+                    tw_im,
+                );
+            }
+            start += len;
+        }
+        twiddle_base += half;
+        len *= 2;
+    }
+
+    // Transpose back to AoS row-major, folding in the 1/n inverse scale (matches
+    // `Radix2Plan::apply_into`'s post-loop `value.* *= inv_n`).
+    if inverse {
+        let inv_n = 1.0 / (n as f64);
+        for b in 0..batch {
+            let dst = &mut out[b * n..b * n + n];
+            for (k, slot) in dst.iter_mut().enumerate() {
+                *slot = (re[k * w + b] * inv_n, im[k * w + b] * inv_n);
+            }
+        }
+    } else {
+        for b in 0..batch {
+            let dst = &mut out[b * n..b * n + n];
+            for (k, slot) in dst.iter_mut().enumerate() {
+                *slot = (re[k * w + b], im[k * w + b]);
+            }
+        }
+    }
+}
+
+/// Cache-blocked tile width (rows processed together in one SoA pass). Kept small
+/// so the SoA scratch (`TILE * n` complex split into re/im) stays L1-resident:
+/// a full-batch transpose would make every butterfly stage stream the entire
+/// batch from RAM (memory-bound, ~2x slower than the L1-resident per-row path),
+/// whereas an 8-row tile of length 256 is 8*256*8*2 = 32 KiB — the butterflies
+/// run vertically over the tile (SIMD across rows) while staying in cache.
+const POW2_TILE_ROWS: usize = 8;
+
+/// Run the vectorized SoA kernel over `batch` rows in L1-resident tiles of
+/// `POW2_TILE_ROWS` rows, reusing one scratch pair. Bit-identical to per-row
+/// `Radix2Plan` (each tile is independent and each row's op order is unchanged).
+fn vectorized_pow2_tiled(
+    plan: &Radix2Plan,
+    elements: &[(f64, f64)],
+    batch: usize,
+    n: usize,
+    inverse: bool,
+    out: &mut [(f64, f64)],
+) {
+    let cap = POW2_TILE_ROWS * n;
+    let mut re = vec![0.0f64; cap];
+    let mut im = vec![0.0f64; cap];
+    let mut row0 = 0usize;
+    while row0 < batch {
+        let rows = POW2_TILE_ROWS.min(batch - row0);
+        let s = row0 * n;
+        let e = s + rows * n;
+        vectorized_pow2_block(
+            plan,
+            &elements[s..e],
+            rows,
+            n,
+            inverse,
+            &mut re[..rows * n],
+            &mut im[..rows * n],
+            &mut out[s..e],
+        );
+        row0 += rows;
+    }
+}
+
+/// Batched power-of-two FFT/IFFT via the cache-blocked vectorized SoA kernel.
+/// Builds one shared `Radix2Plan`, then fans row-chunks across threads for large
+/// batches; each thread tiles its chunk. Bit-identical to `transform_batches_dense`'s
+/// per-row `Radix2Plan` path.
+fn transform_batches_pow2_vectorized(
+    elements: &[(f64, f64)],
+    n: usize,
+    batch_size: usize,
+    inverse: bool,
+) -> Vec<(f64, f64)> {
+    let plan = Radix2Plan::new(n, inverse);
+    let total = batch_size * n;
+    let mut out: Vec<(f64, f64)> = vec![(0.0, 0.0); total];
+
+    const PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144
+    let threads = if total >= PARALLEL_MIN_ELEMS && batch_size > 1 {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(batch_size)
+    } else {
+        1
+    };
+
+    if threads <= 1 {
+        vectorized_pow2_tiled(&plan, elements, batch_size, n, inverse, &mut out);
+        return out;
+    }
+
+    let rows_per = batch_size.div_ceil(threads);
+    let plan_ref = &plan;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [(f64, f64)] = out.as_mut_slice();
+        let mut row0 = 0usize;
+        while row0 < batch_size {
+            let rows = rows_per.min(batch_size - row0);
+            let (blk, tail) = rest.split_at_mut(rows * n);
+            rest = tail;
+            let base = row0 * n;
+            let src = &elements[base..base + rows * n];
+            scope.spawn(move || {
+                vectorized_pow2_tiled(plan_ref, src, rows, n, inverse, blk);
             });
             row0 += rows;
         }
@@ -1847,6 +2073,110 @@ mod tests {
             new_inv as f64 / 1e6,
             old_inv as f64 / new_inv as f64,
         );
+    }
+
+    /// The vectorized SoA batch kernel must be bit-for-bit identical to applying
+    /// the scalar `Radix2Plan` per row, for both FFT and IFFT, across sizes and
+    /// batch counts (incl. signed zeros / negatives in the data).
+    #[test]
+    fn vectorized_pow2_batch_bit_identical_to_per_row() {
+        for &n in &[2usize, 4, 8, 16, 64, 256] {
+            for &batch in &[1usize, 3, 8, 17, 64] {
+                let elements: Vec<(f64, f64)> = (0..batch * n)
+                    .map(|i| {
+                        let f = i as f64;
+                        ((f * 0.013).sin() - 0.5, (f * 0.027).cos() * (if i % 3 == 0 { -1.0 } else { 1.0 }))
+                    })
+                    .collect();
+                for inverse in [false, true] {
+                    let plan = Radix2Plan::new(n, inverse);
+                    // Reference: independent per-row Radix2Plan apply.
+                    let mut reference: Vec<(f64, f64)> = vec![(0.0, 0.0); batch * n];
+                    let mut buf = Vec::with_capacity(n);
+                    for b in 0..batch {
+                        plan.apply_into(&elements[b * n..b * n + n], &mut buf);
+                        reference[b * n..b * n + n].copy_from_slice(&buf);
+                    }
+                    // Candidate: vectorized SoA block.
+                    let mut re = vec![0.0f64; batch * n];
+                    let mut im = vec![0.0f64; batch * n];
+                    let mut got: Vec<(f64, f64)> = vec![(0.0, 0.0); batch * n];
+                    vectorized_pow2_block(
+                        &plan, &elements, batch, n, inverse, &mut re, &mut im, &mut got,
+                    );
+                    let rbits: Vec<(u64, u64)> =
+                        reference.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
+                    let gbits: Vec<(u64, u64)> =
+                        got.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
+                    assert_eq!(
+                        rbits, gbits,
+                        "vectorized SoA batch FFT must be bit-identical to per-row Radix2Plan (n={n}, batch={batch}, inverse={inverse})"
+                    );
+                    // And the dense batch dispatcher (which routes to the vectorized
+                    // path above the gate) must agree too.
+                    let dispatched = transform_batches_dense(&elements, n, batch, inverse);
+                    let dbits: Vec<(u64, u64)> =
+                        dispatched.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
+                    assert_eq!(
+                        rbits, dbits,
+                        "transform_batches_dense must be bit-identical to per-row Radix2Plan (n={n}, batch={batch}, inverse={inverse})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Same-binary A/B for the vectorized SoA batch kernel (frankenjax-murmw): the
+    /// OLD path runs the cached `Radix2Plan` per row into a row buffer + copy; the
+    /// NEW path transposes a row-block to SoA and runs the butterflies vertically
+    /// over the batch. Output is bit-identical (asserted); run with
+    /// `--ignored --nocapture` for the ratio.
+    #[test]
+    #[ignore = "informational micro-bench; run with --ignored --nocapture"]
+    fn bench_vectorized_soa_batch_vs_per_row_plan() {
+        let n = 256usize;
+        let rows = 2048usize;
+        let elements: Vec<(f64, f64)> = (0..rows * n)
+            .map(|i| ((i as f64 * 0.013).sin(), (i as f64 * 0.027).cos()))
+            .collect();
+
+        let best = |f: &dyn Fn() -> u64| {
+            let mut b = u64::MAX;
+            for _ in 0..5 {
+                let t0 = std::time::Instant::now();
+                let acc = f();
+                let dt = t0.elapsed().as_nanos() as u64;
+                std::hint::black_box(acc);
+                b = b.min(dt);
+            }
+            b
+        };
+
+        for (label, inverse) in [("FWD", false), ("INV", true)] {
+            let plan = Radix2Plan::new(n, inverse);
+            // OLD: cached plan applied per row + copy into a full dense output.
+            let old = best(&|| {
+                let mut out: Vec<(f64, f64)> = vec![(0.0, 0.0); rows * n];
+                let mut buf = Vec::with_capacity(n);
+                for b in 0..rows {
+                    plan.apply_into(&elements[b * n..b * n + n], &mut buf);
+                    out[b * n..b * n + n].copy_from_slice(&buf);
+                }
+                out[0].0.to_bits() ^ out[rows * n / 2].1.to_bits()
+            });
+            // NEW: cache-blocked vectorized SoA batch (single-thread, tiled).
+            let new = best(&|| {
+                let mut out: Vec<(f64, f64)> = vec![(0.0, 0.0); rows * n];
+                vectorized_pow2_tiled(&plan, &elements, rows, n, inverse, &mut out);
+                out[0].0.to_bits() ^ out[rows * n / 2].1.to_bits()
+            });
+            eprintln!(
+                "[vectorized SoA {label} {rows}x{n}] per-row-plan={:.3}ms soa-batch={:.3}ms ratio={:.2}x",
+                old as f64 / 1e6,
+                new as f64 / 1e6,
+                old as f64 / new as f64,
+            );
+        }
     }
 
     #[test]

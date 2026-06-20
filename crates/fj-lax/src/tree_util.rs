@@ -354,11 +354,7 @@ mod tests {
         left.insert("a".to_string(), TreeNode::Leaf(1.0));
         let mut right = HashMap::new();
         right.insert("b".to_string(), TreeNode::Leaf(2.0));
-        let _ = tree_map2(
-            |a, b| a + b,
-            &TreeNode::Dict(left),
-            &TreeNode::Dict(right),
-        );
+        let _ = tree_map2(|a, b| a + b, &TreeNode::Dict(left), &TreeNode::Dict(right));
     }
 
     #[test]

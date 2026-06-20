@@ -122,12 +122,8 @@ fn real_matrix(rows: usize, cols: usize) -> Value {
 
 fn literal_backed_tensor(dtype: DType, shape: Shape, elements: Vec<Literal>) -> Value {
     Value::Tensor(
-        TensorValue::new_with_literal_buffer(
-            dtype,
-            shape,
-            fj_core::LiteralBuffer::new(elements),
-        )
-        .unwrap(),
+        TensorValue::new_with_literal_buffer(dtype, shape, fj_core::LiteralBuffer::new(elements))
+            .unwrap(),
     )
 }
 
@@ -2160,7 +2156,13 @@ fn bench_reduce_sum_16m_f64_full(c: &mut Criterion) {
     const N: usize = 16_777_216;
     let data: Vec<f64> = (0..N).map(|i| ((i as f64) * 1.1e-7).sin() * 3.0).collect();
     let input = Value::Tensor(
-        TensorValue::new_f64_values(Shape { dims: vec![N as u32] }, data).unwrap(),
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![N as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let mut p = BTreeMap::new();
     p.insert("axes".to_string(), "0".to_string());
@@ -2177,7 +2179,13 @@ fn bench_reduce_sum_16m_i64_full(c: &mut Criterion) {
     const N: usize = 16_777_216;
     let data: Vec<i64> = (0..N as i64).map(|i| (i % 1000) - 500).collect();
     let input = Value::Tensor(
-        TensorValue::new_i64_values(Shape { dims: vec![N as u32] }, data).unwrap(),
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![N as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let mut p = BTreeMap::new();
     p.insert("axes".to_string(), "0".to_string());
@@ -2192,9 +2200,17 @@ fn bench_reduce_sum_16m_i64_full(c: &mut Criterion) {
 // in ascending order — column-stripe threading preserves that order bit-exactly.
 fn bench_reduce_sum_16k_x_1k_axis0_f64(c: &mut Criterion) {
     let (rows, cols) = (16_384usize, 1_024usize);
-    let data: Vec<f64> = (0..rows * cols).map(|i| ((i as f64) * 1.3e-6).sin()).collect();
+    let data: Vec<f64> = (0..rows * cols)
+        .map(|i| ((i as f64) * 1.3e-6).sin())
+        .collect();
     let input = Value::Tensor(
-        TensorValue::new_f64_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let mut p = BTreeMap::new();
     p.insert("axes".to_string(), "0".to_string());
@@ -2210,7 +2226,13 @@ fn bench_reduce_sum_16k_x_1k_i64_axes(c: &mut Criterion) {
     let (rows, cols) = (16_384usize, 1_024usize);
     let data: Vec<i64> = (0..(rows * cols) as i64).map(|i| (i % 977) - 488).collect();
     let input = Value::Tensor(
-        TensorValue::new_i64_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let mut p0 = BTreeMap::new();
     p0.insert("axes".to_string(), "0".to_string());
@@ -2228,9 +2250,17 @@ fn bench_reduce_sum_16k_x_1k_i64_axes(c: &mut Criterion) {
 // argmax is INDEPENDENT, so the along-axis scan can thread over output rows bit-exactly.
 fn bench_argmax_16k_x_1k_axis1_f64(c: &mut Criterion) {
     let (rows, cols) = (16_384usize, 1_024usize);
-    let data: Vec<f64> = (0..rows * cols).map(|i| ((i as f64) * 1.7e-5).sin()).collect();
+    let data: Vec<f64> = (0..rows * cols)
+        .map(|i| ((i as f64) * 1.7e-5).sin())
+        .collect();
     let input = Value::Tensor(
-        TensorValue::new_f64_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let mut p = BTreeMap::new();
     p.insert("axis".to_string(), "1".to_string());
@@ -2245,7 +2275,13 @@ fn bench_argmax_16k_x_1k_axis1_i64(c: &mut Criterion) {
     let (rows, cols) = (16_384usize, 1_024usize);
     let data: Vec<i64> = (0..rows * cols).map(|i| (i as i64 % 8191) - 4095).collect();
     let input = Value::Tensor(
-        TensorValue::new_i64_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let mut p = BTreeMap::new();
     p.insert("axis".to_string(), "1".to_string());
@@ -2258,7 +2294,13 @@ fn bench_argmax_16k_x_1k_axis0_i64(c: &mut Criterion) {
     let (rows, cols) = (16_384usize, 1_024usize);
     let data: Vec<i64> = (0..rows * cols).map(|i| (i as i64 % 8191) - 4095).collect();
     let input = Value::Tensor(
-        TensorValue::new_i64_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let mut p = BTreeMap::new();
     p.insert("axis".to_string(), "0".to_string());
@@ -2272,9 +2314,17 @@ fn bench_argmax_16k_x_1k_axis0_i64(c: &mut Criterion) {
 // CURRENT serial strided path vs JAX to scope a possible column-block threaded lever.
 fn bench_argmax_16k_x_1k_axis0_f64(c: &mut Criterion) {
     let (rows, cols) = (16_384usize, 1_024usize);
-    let data: Vec<f64> = (0..rows * cols).map(|i| ((i as f64) * 1.7e-5).sin()).collect();
+    let data: Vec<f64> = (0..rows * cols)
+        .map(|i| ((i as f64) * 1.7e-5).sin())
+        .collect();
     let input = Value::Tensor(
-        TensorValue::new_f64_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let mut p = BTreeMap::new();
     p.insert("axis".to_string(), "0".to_string());
@@ -3052,10 +3102,8 @@ fn bench_bitcast_u64_f64_dense_1m(c: &mut Criterion) {
         )
         .unwrap(),
     );
-    let literal = literal_backed_vector(
-        DType::U64,
-        data.iter().copied().map(Literal::U64).collect(),
-    );
+    let literal =
+        literal_backed_vector(DType::U64, data.iter().copied().map(Literal::U64).collect());
     let mut p = BTreeMap::new();
     p.insert("new_dtype".to_owned(), "f64".to_owned());
 
@@ -3318,8 +3366,7 @@ fn bench_tile_scalar_dense_fill(c: &mut Criterion) {
         (-0.5_f64).to_bits(),
     ));
     c.bench_function("eval/tile_scalar_complex128_1024x1024", |bencher| {
-        bencher
-            .iter(|| eval_primitive(Primitive::Tile, std::slice::from_ref(&complex_input), &p))
+        bencher.iter(|| eval_primitive(Primitive::Tile, std::slice::from_ref(&complex_input), &p))
     });
 }
 
@@ -3455,10 +3502,12 @@ fn sort_u32_data() -> Vec<u32> {
             1 => 0,
             2 => 1 << 31,
             3 | 4 => 19_999,
-            _ => (i as u32)
-                .wrapping_mul(2_654_435_761)
-                .rotate_left((i & 31) as u32)
-                ^ ((i as u32) >> 3),
+            _ => {
+                (i as u32)
+                    .wrapping_mul(2_654_435_761)
+                    .rotate_left((i & 31) as u32)
+                    ^ ((i as u32) >> 3)
+            }
         })
         .collect()
 }
@@ -3503,10 +3552,12 @@ fn sort_u64_data() -> Vec<u64> {
             1 => 0,
             2 => 1 << 63,
             3 | 4 => 9_223_372_036_854_775_900,
-            _ => (i as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .rotate_left((i & 63) as u32)
-                ^ ((i as u64) << 32),
+            _ => {
+                (i as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .rotate_left((i & 63) as u32)
+                    ^ ((i as u64) << 32)
+            }
         })
         .collect()
 }
@@ -3646,10 +3697,12 @@ fn topk_u32_data() -> Vec<u32> {
             1 => 0,
             2 => 1 << 31,
             3 | 4 => 19_999,
-            _ => (i as u32)
-                .wrapping_mul(2_654_435_761)
-                .rotate_left((i & 31) as u32)
-                ^ ((i as u32) >> 3),
+            _ => {
+                (i as u32)
+                    .wrapping_mul(2_654_435_761)
+                    .rotate_left((i & 31) as u32)
+                    ^ ((i as u32) >> 3)
+            }
         })
         .collect()
 }
@@ -3688,10 +3741,12 @@ fn topk_u64_data() -> Vec<u64> {
             1 => 0,
             2 => 1 << 63,
             3 | 4 => 9_223_372_036_854_775_900,
-            _ => (i as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                .rotate_left((i & 63) as u32)
-                ^ ((i as u64) << 32),
+            _ => {
+                (i as u64)
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .rotate_left((i & 63) as u32)
+                    ^ ((i as u64) << 32)
+            }
         })
         .collect()
 }
@@ -4402,9 +4457,7 @@ fn select_64k_bool_inputs(dense: bool) -> [Value; 3] {
                 TensorValue::new_with_literal_buffer(
                     DType::Bool,
                     Shape { dims: dims.clone() },
-                    fj_core::LiteralBuffer::new(
-                        values.into_iter().map(Literal::Bool).collect(),
-                    ),
+                    fj_core::LiteralBuffer::new(values.into_iter().map(Literal::Bool).collect()),
                 )
                 .unwrap(),
             )
@@ -4446,11 +4499,7 @@ fn select_n_64k_u32_inputs(dense: bool) -> [Value; 4] {
     };
     let mk = |seed: u32| {
         let data: Vec<u32> = (0..LARGE_ELEMENTWISE_LEN)
-            .map(|i| {
-                (i as u32)
-                    .wrapping_mul(2_654_435_761)
-                    .wrapping_add(seed)
-            })
+            .map(|i| (i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed))
             .collect();
         if dense {
             Value::Tensor(TensorValue::new_u32_values(Shape { dims: dims.clone() }, data).unwrap())
@@ -4502,11 +4551,7 @@ fn select_n_64k_u32_bool_index_inputs(dense: bool) -> [Value; 3] {
     };
     let mk = |seed: u32| {
         let data: Vec<u32> = (0..LARGE_ELEMENTWISE_LEN)
-            .map(|i| {
-                (i as u32)
-                    .wrapping_mul(2_654_435_761)
-                    .wrapping_add(seed)
-            })
+            .map(|i| (i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed))
             .collect();
         if dense {
             Value::Tensor(TensorValue::new_u32_values(Shape { dims: dims.clone() }, data).unwrap())
@@ -4601,18 +4646,16 @@ fn bench_complex_tensor_scalar_dense_fill(c: &mut Criterion) {
     let n = 1usize << 20;
 
     let f32_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 - 500.0).collect();
-    let f32_real = Value::Tensor(
-        TensorValue::new_f32_values(Shape::vector(n as u32), f32_data).unwrap(),
-    );
+    let f32_real =
+        Value::Tensor(TensorValue::new_f32_values(Shape::vector(n as u32), f32_data).unwrap());
     let f32_inputs = [f32_real, Value::Scalar(Literal::from_f32(0.0))];
     c.bench_function("eval/complex_f32_tensor_scalar_1m", |bencher| {
         bencher.iter(|| eval_primitive(Primitive::Complex, &f32_inputs, &p))
     });
 
     let f64_data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.001 - 500.0).collect();
-    let f64_real = Value::Tensor(
-        TensorValue::new_f64_values(Shape::vector(n as u32), f64_data).unwrap(),
-    );
+    let f64_real =
+        Value::Tensor(TensorValue::new_f64_values(Shape::vector(n as u32), f64_data).unwrap());
     let f64_inputs = [f64_real, Value::Scalar(Literal::from_f64(0.0))];
     c.bench_function("eval/complex_f64_tensor_scalar_1m", |bencher| {
         bencher.iter(|| eval_primitive(Primitive::Complex, &f64_inputs, &p))
@@ -6062,9 +6105,7 @@ fn bench_reshape(c: &mut Criterion) {
 fn bench_split_multi_1024x1024_f32(c: &mut Criterion) {
     let rows = 1024usize;
     let cols = 1024usize;
-    let data: Vec<f32> = (0..rows * cols)
-        .map(|i| i as f32 * 0.001 - 100.0)
-        .collect();
+    let data: Vec<f32> = (0..rows * cols).map(|i| i as f32 * 0.001 - 100.0).collect();
     let input = Value::Tensor(
         TensorValue::new_f32_values(
             Shape {
@@ -6078,9 +6119,8 @@ fn bench_split_multi_1024x1024_f32(c: &mut Criterion) {
     params.insert("axis".into(), "1".into());
     params.insert("sizes".into(), "256,768".into());
     c.bench_function("eval/split_multi_1024x1024_f32_axis1", |bencher| {
-        bencher.iter(|| {
-            eval_primitive_multi(Primitive::Split, std::slice::from_ref(&input), &params)
-        })
+        bencher
+            .iter(|| eval_primitive_multi(Primitive::Split, std::slice::from_ref(&input), &params))
     });
 }
 

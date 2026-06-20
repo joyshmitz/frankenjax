@@ -9,7 +9,7 @@
 //! The A/B ratio isolates the block-copy win; the JAX head-to-head lives in
 //! benchmarks/jax_comparison/transpose_gauntlet.py.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fj_core::{Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;
@@ -107,7 +107,13 @@ fn bench_transpose(c: &mut Criterion) {
     });
 
     group.bench_function("naive_per_element_odometer", |bencher| {
-        bencher.iter(|| black_box(naive_transpose_f32(black_box(&raw), &[B, S, H, D], &[0, 2, 1, 3])));
+        bencher.iter(|| {
+            black_box(naive_transpose_f32(
+                black_box(&raw),
+                &[B, S, H, D],
+                &[0, 2, 1, 3],
+            ))
+        });
     });
 
     group.finish();

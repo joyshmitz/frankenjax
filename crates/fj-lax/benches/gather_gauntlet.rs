@@ -8,7 +8,7 @@
 //! Arm B: naive_gather_f32 — per-element gather reference.
 //! JAX head-to-head: benchmarks/jax_comparison/gather_gauntlet.py.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fj_core::{Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;
@@ -27,13 +27,27 @@ fn idx_at(i: usize) -> i64 {
 fn table_f32() -> Value {
     let data: Vec<f32> = (0..VOCAB * DIM).map(|i| (i as f32) * 1e-7 - 0.5).collect();
     Value::Tensor(
-        TensorValue::new_f32_values(Shape { dims: vec![VOCAB as u32, DIM as u32] }, data).unwrap(),
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![VOCAB as u32, DIM as u32],
+            },
+            data,
+        )
+        .unwrap(),
     )
 }
 
 fn indices() -> Value {
     let data: Vec<i64> = (0..NIDX).map(idx_at).collect();
-    Value::Tensor(TensorValue::new_i64_values(Shape { dims: vec![NIDX as u32] }, data).unwrap())
+    Value::Tensor(
+        TensorValue::new_i64_values(
+            Shape {
+                dims: vec![NIDX as u32],
+            },
+            data,
+        )
+        .unwrap(),
+    )
 }
 
 fn naive_gather_f32(table: &[f32], idx: &[i64]) -> Vec<f32> {
@@ -76,7 +90,9 @@ fn bench_gather(c: &mut Criterion) {
     group.throughput(Throughput::Elements((NIDX * DIM) as u64));
     group.bench_function("dense_eval_primitive", |bencher| {
         bencher.iter(|| {
-            black_box(eval_primitive(Primitive::Gather, black_box(&inputs), black_box(&params)).unwrap())
+            black_box(
+                eval_primitive(Primitive::Gather, black_box(&inputs), black_box(&params)).unwrap(),
+            )
         });
     });
     group.bench_function("naive_per_element", |bencher| {

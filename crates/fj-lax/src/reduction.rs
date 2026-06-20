@@ -1594,7 +1594,9 @@ fn dense_f64_axis_reduce<T: Copy + Sync>(
         // for non-associative float (we never reassociate a single column's sum; we
         // only assign different columns to different threads). A read-bound pass; one
         // core can't saturate multi-channel DRAM, so cap at ~8 cores (more REGRESS).
-        let threads = crate::arithmetic::work_scaled_threads(values.len()).min(block).min(8);
+        let threads = crate::arithmetic::work_scaled_threads(values.len())
+            .min(block)
+            .min(8);
         if threads > 1 {
             let cols_per = block.div_ceil(threads);
             let op_ref = float_op;
@@ -2300,8 +2302,9 @@ pub(crate) fn eval_reduce_axes(
                         // its ascending fold). A read-bound pass saturates DRAM at ~8 cores.
                         let outer_n = result.len();
                         if par && outer_n > 1 {
-                            let threads =
-                                crate::arithmetic::work_scaled_threads(values.len()).min(outer_n).min(8);
+                            let threads = crate::arithmetic::work_scaled_threads(values.len())
+                                .min(outer_n)
+                                .min(8);
                             let rows_per = outer_n.div_ceil(threads);
                             let op_ref = &int_op;
                             std::thread::scope(|scope| {
@@ -2342,8 +2345,9 @@ pub(crate) fn eval_reduce_axes(
                         // a local `inner`-wide partial, then combine partials in chunk order
                         // (== ascending). Bit-identical (associativity); contiguous beats the
                         // strided column threading the float path is limited to.
-                        let threads =
-                            crate::arithmetic::work_scaled_threads(values.len()).min(reduce).min(8);
+                        let threads = crate::arithmetic::work_scaled_threads(values.len())
+                            .min(reduce)
+                            .min(8);
                         let rows_per = reduce.div_ceil(threads);
                         let op_ref = &int_op;
                         let partials: Vec<Vec<i64>> = std::thread::scope(|scope| {
@@ -3973,7 +3977,11 @@ mod tests {
         let got =
             crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p).unwrap();
         let got: Vec<u64> = match got {
-            Value::Tensor(t) => t.elements.iter().map(|l| l.as_f64().unwrap().to_bits()).collect(),
+            Value::Tensor(t) => t
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect(),
             other => panic!("expected tensor, got {other:?}"),
         };
         // Serial reference: each column folded over rows in ascending order.
@@ -3984,7 +3992,10 @@ mod tests {
             }
         }
         let want: Vec<u64> = want.iter().map(|v| v.to_bits()).collect();
-        assert_eq!(got, want, "threaded leading-axis reduce != serial column fold");
+        assert_eq!(
+            got, want,
+            "threaded leading-axis reduce != serial column fold"
+        );
     }
 
     #[test]
@@ -4009,8 +4020,8 @@ mod tests {
         // axis 0 (leading): out[c] = sum_r data[r*cols + c]
         let mut p0 = BTreeMap::new();
         p0.insert("axes".to_string(), "0".to_string());
-        let got0 = crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p0)
-            .unwrap();
+        let got0 =
+            crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p0).unwrap();
         let got0: Vec<i64> = match got0 {
             Value::Tensor(t) => t.elements.iter().map(|l| l.as_i64().unwrap()).collect(),
             _ => panic!(),
@@ -4025,8 +4036,8 @@ mod tests {
         // axis 1 (trailing): out[r] = sum_c data[r*cols + c]
         let mut p1 = BTreeMap::new();
         p1.insert("axes".to_string(), "1".to_string());
-        let got1 = crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p1)
-            .unwrap();
+        let got1 =
+            crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &p1).unwrap();
         let got1: Vec<i64> = match got1 {
             Value::Tensor(t) => t.elements.iter().map(|l| l.as_i64().unwrap()).collect(),
             _ => panic!(),
@@ -4052,7 +4063,13 @@ mod tests {
             .map(|i| i.wrapping_mul(2_654_435_761) ^ (i << 11))
             .collect();
         let input = Value::Tensor(
-            TensorValue::new_i64_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
         );
         let mut p = BTreeMap::new();
         p.insert("axes".to_string(), "0".to_string());
@@ -4066,8 +4083,8 @@ mod tests {
             (Primitive::ReduceXor, 0, |a, b| a ^ b),
         ];
         for (prim, init, op) in cases {
-            let got = eval_reduce(prim, std::slice::from_ref(&input), init, 0.0, op, |a, _| a)
-                .unwrap();
+            let got =
+                eval_reduce(prim, std::slice::from_ref(&input), init, 0.0, op, |a, _| a).unwrap();
             let got = match got {
                 Value::Scalar(l) => l.as_i64().expect("i64 scalar"),
                 other => panic!("expected scalar, got {other:?}"),
@@ -8798,7 +8815,8 @@ mod tests {
         let shape = Shape {
             dims: vec![rows as u32, cols as u32],
         };
-        let dense_f64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), raw.clone()).unwrap());
+        let dense_f64 =
+            Value::Tensor(TensorValue::new_f64_values(shape.clone(), raw.clone()).unwrap());
         let f32_raw: Vec<f32> = raw.iter().map(|&v| v as f32).collect();
         let dense_f32 = Value::Tensor(TensorValue::new_f32_values(shape, f32_raw.clone()).unwrap());
 
@@ -8815,17 +8833,19 @@ mod tests {
                 p.insert("reverse".to_owned(), rev.to_string());
 
                 // F64
-                let got64: Vec<u64> = crate::eval_primitive(prim, std::slice::from_ref(&dense_f64), &p)
-                    .unwrap()
-                    .as_tensor()
-                    .unwrap()
-                    .elements
-                    .iter()
-                    .map(|l| l.as_f64().unwrap().to_bits())
-                    .collect();
+                let got64: Vec<u64> =
+                    crate::eval_primitive(prim, std::slice::from_ref(&dense_f64), &p)
+                        .unwrap()
+                        .as_tensor()
+                        .unwrap()
+                        .elements
+                        .iter()
+                        .map(|l| l.as_f64().unwrap().to_bits())
+                        .collect();
                 // F32 — read the RAW stored f32 bits (not via as_f64, which would
                 // re-canonicalize NaN payloads through an f32->f64->f32 round-trip).
-                let res32 = crate::eval_primitive(prim, std::slice::from_ref(&dense_f32), &p).unwrap();
+                let res32 =
+                    crate::eval_primitive(prim, std::slice::from_ref(&dense_f32), &p).unwrap();
                 let res32_t = res32.as_tensor().unwrap();
                 let got32: Vec<u32> = res32_t
                     .elements
@@ -8858,8 +8878,20 @@ mod tests {
                 // contractual (the production scan and this hand-rolled reference can
                 // pick different NaN signs for the same value), so compare NaNs as
                 // equal while keeping every finite/±inf result bit-exact.
-                let canon64 = |b: u64| if f64::from_bits(b).is_nan() { 0x7ff8_0000_0000_0000 } else { b };
-                let canon32 = |b: u32| if f32::from_bits(b).is_nan() { 0x7fc0_0000 } else { b };
+                let canon64 = |b: u64| {
+                    if f64::from_bits(b).is_nan() {
+                        0x7ff8_0000_0000_0000
+                    } else {
+                        b
+                    }
+                };
+                let canon32 = |b: u32| {
+                    if f32::from_bits(b).is_nan() {
+                        0x7fc0_0000
+                    } else {
+                        b
+                    }
+                };
                 let got64: Vec<u64> = got64.iter().map(|&b| canon64(b)).collect();
                 let exp64: Vec<u64> = exp64.iter().map(|&b| canon64(b)).collect();
                 let got32: Vec<u32> = got32.iter().map(|&b| canon32(b)).collect();

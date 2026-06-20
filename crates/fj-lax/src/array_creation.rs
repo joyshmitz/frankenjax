@@ -174,9 +174,11 @@ pub fn eye(n: u32, m: Option<u32>, k: i32, dtype: DType) -> Result<Value, ValueE
         DType::U32 => build!(0_u32, 1_u32, |v| TensorValue::new_u32_values(shape, v)),
         DType::U64 => build!(0_u64, 1_u64, |v| TensorValue::new_u64_values(shape, v)),
         DType::Bool => build!(false, true, |v| TensorValue::new_bool_values(shape, v)),
-        DType::Complex64 | DType::Complex128 => build!((0.0_f64, 0.0_f64), (1.0_f64, 0.0_f64), |v| {
-            TensorValue::new_complex_values(dtype, shape, v)
-        }),
+        DType::Complex64 | DType::Complex128 => {
+            build!((0.0_f64, 0.0_f64), (1.0_f64, 0.0_f64), |v| {
+                TensorValue::new_complex_values(dtype, shape, v)
+            })
+        }
         DType::F16 => build!(0_u16, half_one(DType::F16), |v| {
             TensorValue::new_half_float_values(DType::F16, shape, v)
         }),
@@ -275,11 +277,13 @@ pub fn diag(v: &[f64], k: i32) -> Result<Value, ValueError> {
         },
     })?;
     let offset = k.unsigned_abs();
-    let size = n.checked_add(offset).ok_or_else(|| ValueError::ShapeOverflow {
-        shape: Shape {
-            dims: vec![n, offset],
-        },
-    })?;
+    let size = n
+        .checked_add(offset)
+        .ok_or_else(|| ValueError::ShapeOverflow {
+            shape: Shape {
+                dims: vec![n, offset],
+            },
+        })?;
     let (shape, mat_size) = checked_shape_and_size(&[size, size])?;
     let size_usize = usize::try_from(size).map_err(|_| ValueError::ShapeOverflow {
         shape: shape.clone(),

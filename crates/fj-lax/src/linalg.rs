@@ -601,6 +601,9 @@ fn cholesky_schur_dot4(
 
 /// Block size for the right-looking Cholesky panel.
 const CHOLESKY_BLOCK_SIZE: usize = 128;
+/// Smaller panel for mid-size matrices where the 128-wide trailing update spills
+/// enough cache to lose, while 512+ still prefers the wider panel.
+const CHOLESKY_MIDSIZE_BLOCK_SIZE: usize = 64;
 /// Matrices at least this large use the blocked Cholesky; below it the scalar
 /// kernel runs (keeping the small-n bit-identical invariant).
 const CHOLESKY_BLOCK_THRESHOLD: usize = 256;
@@ -614,7 +617,11 @@ const CHOLESKY_BLOCK_THRESHOLD: usize = 256;
 /// but numerically equivalent — verified by reconstruction + scalar parity.
 fn cholesky_real_blocked(n: usize, a_in: &[f64]) -> Vec<f64> {
     let mut a = a_in.to_vec(); // lower triangle becomes L in place
-    let nb = CHOLESKY_BLOCK_SIZE;
+    let nb = if n < 512 {
+        CHOLESKY_MIDSIZE_BLOCK_SIZE
+    } else {
+        CHOLESKY_BLOCK_SIZE
+    };
 
     let mut j = 0;
     while j < n {

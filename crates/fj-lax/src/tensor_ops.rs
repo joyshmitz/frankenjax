@@ -556,10 +556,13 @@ fn dense_width_changing_bitcast_tensor(
             let Some(values) = tensor.elements.as_f64_slice() else {
                 return Ok(None);
             };
-            let out_len = values.len().checked_mul(2).ok_or_else(|| EvalError::Unsupported {
-                primitive,
-                detail: "bitcast narrowing output size overflow".to_owned(),
-            })?;
+            let out_len = values
+                .len()
+                .checked_mul(2)
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "bitcast narrowing output size overflow".to_owned(),
+                })?;
             let mut out = vec![0u32; out_len];
             if values.len() >= BITCAST_WIDTH_CHANGE_PARALLEL_MIN {
                 let threads = crate::arithmetic::work_scaled_threads(out_len);
@@ -592,10 +595,13 @@ fn dense_width_changing_bitcast_tensor(
             let Some(values) = tensor.elements.as_f32_slice() else {
                 return Ok(None);
             };
-            let out_len = values.len().checked_mul(2).ok_or_else(|| EvalError::Unsupported {
-                primitive,
-                detail: "bitcast narrowing output size overflow".to_owned(),
-            })?;
+            let out_len = values
+                .len()
+                .checked_mul(2)
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "bitcast narrowing output size overflow".to_owned(),
+                })?;
             let mut out = vec![0u16; out_len];
             for (i, value) in values.iter().enumerate() {
                 let bytes = value.to_bits().to_le_bytes();
@@ -651,9 +657,7 @@ fn dense_width_changing_bitcast_tensor(
             for (i, chunk) in values.chunks_exact(2).enumerate() {
                 let low = chunk[0].to_le_bytes();
                 let high = chunk[1].to_le_bytes();
-                out[i] = f32::from_bits(u32::from_le_bytes([
-                    low[0], low[1], high[0], high[1],
-                ]));
+                out[i] = f32::from_bits(u32::from_le_bytes([low[0], low[1], high[0], high[1]]));
             }
             Ok(Some(Value::Tensor(TensorValue::new_f32_values(
                 Shape { dims },
@@ -1247,23 +1251,26 @@ pub(crate) fn eval_broadcast_in_dim(
                     shape,
                     vec![*v; total],
                 )?)),
-                Literal::Complex64Bits(re, im) => Ok(Value::Tensor(
-                    TensorValue::new_complex_values(
+                Literal::Complex64Bits(re, im) => {
+                    Ok(Value::Tensor(TensorValue::new_complex_values(
                         DType::Complex64,
                         shape,
-                        vec![(
-                            f64::from(f32::from_bits(*re)),
-                            f64::from(f32::from_bits(*im)),
-                        ); total],
-                    )?,
-                )),
-                Literal::Complex128Bits(re, im) => Ok(Value::Tensor(
-                    TensorValue::new_complex_values(
+                        vec![
+                            (
+                                f64::from(f32::from_bits(*re)),
+                                f64::from(f32::from_bits(*im)),
+                            );
+                            total
+                        ],
+                    )?))
+                }
+                Literal::Complex128Bits(re, im) => {
+                    Ok(Value::Tensor(TensorValue::new_complex_values(
                         DType::Complex128,
                         shape,
                         vec![(f64::from_bits(*re), f64::from_bits(*im)); total],
-                    )?,
-                )),
+                    )?))
+                }
             }
         }
         Value::Tensor(tensor) => {
@@ -4921,7 +4928,15 @@ fn dynamic_update_slice_dense<T: Copy>(
     contig_start: Option<usize>,
 ) -> Vec<T> {
     let mut out = op_src.to_vec();
-    dynamic_update_apply(&mut out, upd, rank, update_dims, starts, op_strides, contig_start);
+    dynamic_update_apply(
+        &mut out,
+        upd,
+        rank,
+        update_dims,
+        starts,
+        op_strides,
+        contig_start,
+    );
     out
 }
 
@@ -5746,102 +5761,100 @@ pub(crate) fn eval_bitcast_convert_type(
                 }),
             }
         }
-        Value::Tensor(tensor) => {
-            match source_bytes.cmp(&target_bytes) {
-                std::cmp::Ordering::Equal => {
-                    if let Some(dense) =
-                        dense_same_width_bitcast_tensor(primitive, tensor, target_dtype)?
-                    {
-                        return Ok(Value::Tensor(dense));
-                    }
-
-                    let mut out = Vec::with_capacity(tensor.elements.len());
-                    for literal in &tensor.elements {
-                        let raw = literal_to_bytes(primitive, source_dtype, *literal)?;
-                        out.push(bytes_to_literal(primitive, target_dtype, &raw)?);
-                    }
-                    Ok(Value::Tensor(TensorValue::new(
-                        target_dtype,
-                        tensor.shape.clone(),
-                        out,
-                    )?))
+        Value::Tensor(tensor) => match source_bytes.cmp(&target_bytes) {
+            std::cmp::Ordering::Equal => {
+                if let Some(dense) =
+                    dense_same_width_bitcast_tensor(primitive, tensor, target_dtype)?
+                {
+                    return Ok(Value::Tensor(dense));
                 }
-                std::cmp::Ordering::Greater => {
-                    if let Some(dense) =
-                        dense_width_changing_bitcast_tensor(primitive, tensor, target_dtype)?
-                    {
-                        return Ok(dense);
-                    }
 
-                    let ratio = source_bytes / target_bytes;
-                    let out_len = tensor.elements.len().checked_mul(ratio).ok_or_else(|| {
-                        EvalError::Unsupported {
-                            primitive,
-                            detail: "bitcast narrowing output size overflow".to_owned(),
-                        }
-                    })?;
-                    let mut out = Vec::with_capacity(out_len);
-                    for literal in &tensor.elements {
-                        let raw = literal_to_bytes(primitive, source_dtype, *literal)?;
-                        for chunk in raw.chunks_exact(target_bytes) {
-                            out.push(bytes_to_literal(primitive, target_dtype, chunk)?);
-                        }
-                    }
-                    let mut dims = tensor.shape.dims.clone();
-                    dims.push(ratio as u32);
-                    Ok(Value::Tensor(TensorValue::new(
-                        target_dtype,
-                        Shape { dims },
-                        out,
-                    )?))
+                let mut out = Vec::with_capacity(tensor.elements.len());
+                for literal in &tensor.elements {
+                    let raw = literal_to_bytes(primitive, source_dtype, *literal)?;
+                    out.push(bytes_to_literal(primitive, target_dtype, &raw)?);
                 }
-                std::cmp::Ordering::Less => {
-                    if let Some(dense) =
-                        dense_width_changing_bitcast_tensor(primitive, tensor, target_dtype)?
-                    {
-                        return Ok(dense);
-                    }
-
-                    let ratio = target_bytes / source_bytes;
-                    let mut dims = tensor.shape.dims.clone();
-                    let Some(last_dim) = dims.pop() else {
-                        return Err(EvalError::Unsupported {
-                            primitive,
-                            detail: format!(
-                                "bitcast widening requires trailing dimension size {ratio}"
-                            ),
-                        });
-                    };
-                    if last_dim as usize != ratio {
-                        return Err(EvalError::Unsupported {
-                            primitive,
-                            detail: format!(
-                                "bitcast widening requires trailing dimension size {ratio}, got {last_dim}"
-                            ),
-                        });
-                    }
-
-                    let mut out = Vec::with_capacity(tensor.elements.len() / ratio);
-                    let mut group = Vec::with_capacity(target_bytes);
-                    for chunk in tensor.elements.as_slice().chunks_exact(ratio) {
-                        group.clear();
-                        for literal in chunk {
-                            group.extend_from_slice(&literal_to_bytes(
-                                primitive,
-                                source_dtype,
-                                *literal,
-                            )?);
-                        }
-                        out.push(bytes_to_literal(primitive, target_dtype, &group)?);
-                    }
-                    Ok(Value::Tensor(TensorValue::new(
-                        target_dtype,
-                        Shape { dims },
-                        out,
-                    )?))
-                }
+                Ok(Value::Tensor(TensorValue::new(
+                    target_dtype,
+                    tensor.shape.clone(),
+                    out,
+                )?))
             }
-        }
+            std::cmp::Ordering::Greater => {
+                if let Some(dense) =
+                    dense_width_changing_bitcast_tensor(primitive, tensor, target_dtype)?
+                {
+                    return Ok(dense);
+                }
+
+                let ratio = source_bytes / target_bytes;
+                let out_len = tensor.elements.len().checked_mul(ratio).ok_or_else(|| {
+                    EvalError::Unsupported {
+                        primitive,
+                        detail: "bitcast narrowing output size overflow".to_owned(),
+                    }
+                })?;
+                let mut out = Vec::with_capacity(out_len);
+                for literal in &tensor.elements {
+                    let raw = literal_to_bytes(primitive, source_dtype, *literal)?;
+                    for chunk in raw.chunks_exact(target_bytes) {
+                        out.push(bytes_to_literal(primitive, target_dtype, chunk)?);
+                    }
+                }
+                let mut dims = tensor.shape.dims.clone();
+                dims.push(ratio as u32);
+                Ok(Value::Tensor(TensorValue::new(
+                    target_dtype,
+                    Shape { dims },
+                    out,
+                )?))
+            }
+            std::cmp::Ordering::Less => {
+                if let Some(dense) =
+                    dense_width_changing_bitcast_tensor(primitive, tensor, target_dtype)?
+                {
+                    return Ok(dense);
+                }
+
+                let ratio = target_bytes / source_bytes;
+                let mut dims = tensor.shape.dims.clone();
+                let Some(last_dim) = dims.pop() else {
+                    return Err(EvalError::Unsupported {
+                        primitive,
+                        detail: format!(
+                            "bitcast widening requires trailing dimension size {ratio}"
+                        ),
+                    });
+                };
+                if last_dim as usize != ratio {
+                    return Err(EvalError::Unsupported {
+                        primitive,
+                        detail: format!(
+                            "bitcast widening requires trailing dimension size {ratio}, got {last_dim}"
+                        ),
+                    });
+                }
+
+                let mut out = Vec::with_capacity(tensor.elements.len() / ratio);
+                let mut group = Vec::with_capacity(target_bytes);
+                for chunk in tensor.elements.as_slice().chunks_exact(ratio) {
+                    group.clear();
+                    for literal in chunk {
+                        group.extend_from_slice(&literal_to_bytes(
+                            primitive,
+                            source_dtype,
+                            *literal,
+                        )?);
+                    }
+                    out.push(bytes_to_literal(primitive, target_dtype, &group)?);
+                }
+                Ok(Value::Tensor(TensorValue::new(
+                    target_dtype,
+                    Shape { dims },
+                    out,
+                )?))
+            }
+        },
     }
 }
 
@@ -7642,8 +7655,11 @@ fn parallel_argmax_fill(
     row_best: impl Fn(usize) -> i64 + Sync,
 ) -> Vec<i64> {
     let mut result = vec![0i64; outer_count];
-    let threads = if total_elems >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && outer_count > 1 {
-        crate::arithmetic::work_scaled_threads(total_elems).min(outer_count).min(16)
+    let threads = if total_elems >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && outer_count > 1
+    {
+        crate::arithmetic::work_scaled_threads(total_elems)
+            .min(outer_count)
+            .min(16)
     } else {
         1
     };
@@ -7734,7 +7750,9 @@ fn parallel_arg_extreme_axis0<T: Copy + Sync>(
 ) -> Vec<i64> {
     let total = values.len();
     let threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && cols > 1 {
-        crate::arithmetic::work_scaled_threads(total).min(cols).min(16)
+        crate::arithmetic::work_scaled_threads(total)
+            .min(cols)
+            .min(16)
     } else {
         1
     };
@@ -7819,7 +7837,9 @@ fn parallel_arg_extreme_i64_axis0(
 ) -> Vec<i64> {
     let total = values.len();
     let threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN && cols > 1 {
-        crate::arithmetic::work_scaled_threads(total).min(cols).min(16)
+        crate::arithmetic::work_scaled_threads(total)
+            .min(cols)
+            .min(16)
     } else {
         1
     };
@@ -7945,8 +7965,7 @@ fn extremum_along_axis(
             // path scans each output column at stride `axis_stride == outer_count`
             // (cache-hostile) one column at a time. Stream k-outer/column-inner and
             // thread over the independent columns instead — bit-identical.
-            let idx =
-                parallel_arg_extreme_axis0(values, axis_dim, outer_count, find_max, |x| x);
+            let idx = parallel_arg_extreme_axis0(values, axis_dim, outer_count, find_max, |x| x);
             return Ok(Value::Tensor(
                 TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
             ));
@@ -8028,8 +8047,9 @@ fn extremum_along_axis(
         }
         for outer in 0..outer_count {
             let base = base_of(outer)?;
-            let best_idx =
-                arg_extreme_float(axis_dim, find_max, |i| f64::from(values[base + i * axis_stride]));
+            let best_idx = arg_extreme_float(axis_dim, find_max, |i| {
+                f64::from(values[base + i * axis_stride])
+            });
             result_elements.push(Literal::I64(best_idx as i64));
         }
     } else if let Some(values) = tensor.elements.as_half_float_slice() {
@@ -12428,12 +12448,13 @@ fn compute_output_and_pad(
 ) -> Result<(usize, usize), EvalError> {
     match padding {
         ConvPadding::Explicit(pairs) => {
-            let &(pad_low, pad_high) = pairs.get(spatial_axis).ok_or_else(|| {
-                EvalError::Unsupported {
-                    primitive,
-                    detail: format!("conv explicit padding missing axis {spatial_axis}"),
-                }
-            })?;
+            let &(pad_low, pad_high) =
+                pairs
+                    .get(spatial_axis)
+                    .ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: format!("conv explicit padding missing axis {spatial_axis}"),
+                    })?;
             let padded = input_size
                 .checked_add(pad_low)
                 .and_then(|value| value.checked_add(pad_high))
@@ -13105,16 +13126,18 @@ pub(crate) fn eval_split_multi(
     let mut out = Vec::with_capacity(sizes.len());
     let mut start = 0usize;
     for &len in &sizes {
-        let block_len = len.checked_mul(inner).ok_or_else(|| EvalError::Unsupported {
-            primitive,
-            detail: "split section block size overflows usize".to_owned(),
-        })?;
-        let section_len = outer.checked_mul(block_len).ok_or_else(|| {
-            EvalError::Unsupported {
+        let block_len = len
+            .checked_mul(inner)
+            .ok_or_else(|| EvalError::Unsupported {
+                primitive,
+                detail: "split section block size overflows usize".to_owned(),
+            })?;
+        let section_len = outer
+            .checked_mul(block_len)
+            .ok_or_else(|| EvalError::Unsupported {
                 primitive,
                 detail: "split section element count overflows usize".to_owned(),
-            }
-        })?;
+            })?;
 
         let mut parts = Vec::with_capacity(outer);
         for o in 0..outer {
@@ -13290,23 +13313,26 @@ pub(crate) fn eval_tile(
                     shape,
                     vec![*v; new_count],
                 )?)),
-                Literal::Complex64Bits(re, im) => Ok(Value::Tensor(
-                    TensorValue::new_complex_values(
+                Literal::Complex64Bits(re, im) => {
+                    Ok(Value::Tensor(TensorValue::new_complex_values(
                         DType::Complex64,
                         shape,
-                        vec![(
-                            f64::from(f32::from_bits(*re)),
-                            f64::from(f32::from_bits(*im)),
-                        ); new_count],
-                    )?,
-                )),
-                Literal::Complex128Bits(re, im) => Ok(Value::Tensor(
-                    TensorValue::new_complex_values(
+                        vec![
+                            (
+                                f64::from(f32::from_bits(*re)),
+                                f64::from(f32::from_bits(*im)),
+                            );
+                            new_count
+                        ],
+                    )?))
+                }
+                Literal::Complex128Bits(re, im) => {
+                    Ok(Value::Tensor(TensorValue::new_complex_values(
                         DType::Complex128,
                         shape,
                         vec![(f64::from_bits(*re), f64::from_bits(*im)); new_count],
-                    )?,
-                )),
+                    )?))
+                }
             }
         }
         Value::Tensor(tensor) => {
@@ -13528,7 +13554,11 @@ mod tests {
         }
         // direct helper check on f32
         let mut out = vec![0.0f32; n];
-        threaded_fill_into(&mut out, 1.5f32, crate::arithmetic::work_scaled_threads(n).max(2));
+        threaded_fill_into(
+            &mut out,
+            1.5f32,
+            crate::arithmetic::work_scaled_threads(n).max(2),
+        );
         assert!(out.iter().all(|&x| x.to_bits() == 1.5f32.to_bits()));
     }
 
@@ -13550,8 +13580,13 @@ mod tests {
         // f64
         let dataf: Vec<f64> = (0..in_total).map(|i| (i as f64) * 0.5 - 3.0).collect();
         let opf = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![rows as u32, cols as u32] }, dataf.clone())
-                .unwrap(),
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                dataf.clone(),
+            )
+            .unwrap(),
         );
         let got = eval_pad(&[opf, Value::Scalar(Literal::from_f64(0.0))], &params).unwrap();
         let mut wantf = vec![0.0f64; out_total];
@@ -13572,7 +13607,9 @@ mod tests {
         let oph = Value::Tensor(
             TensorValue::new_half_float_values(
                 DType::BF16,
-                Shape { dims: vec![rows as u32, cols as u32] },
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
                 datah.clone(),
             )
             .unwrap(),
@@ -13581,7 +13618,12 @@ mod tests {
         let mut wanth = vec![0u16; out_total];
         wanth[low * cols..low * cols + in_total].copy_from_slice(&datah);
         assert!(
-            goth.as_tensor().unwrap().elements.as_half_float_slice().unwrap() == wanth.as_slice(),
+            goth.as_tensor()
+                .unwrap()
+                .elements
+                .as_half_float_slice()
+                .unwrap()
+                == wanth.as_slice(),
             "threaded bf16 zero-pad != serial"
         );
     }
@@ -13595,15 +13637,17 @@ mod tests {
         let start = 17usize;
         let xf: Vec<f64> = (0..big).map(|i| (i as f64) * 0.25 - 9.0).collect();
         let t = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![big as u32] }, xf.clone()).unwrap(),
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![big as u32],
+                },
+                xf.clone(),
+            )
+            .unwrap(),
         );
         let mut p = BTreeMap::new();
         p.insert("slice_sizes".to_owned(), format!("{n}"));
-        let got = eval_dynamic_slice(
-            &[t, Value::Scalar(Literal::I64(start as i64))],
-            &p,
-        )
-        .unwrap();
+        let got = eval_dynamic_slice(&[t, Value::Scalar(Literal::I64(start as i64))], &p).unwrap();
         let gb: Vec<u64> = got
             .as_tensor()
             .unwrap()
@@ -13618,13 +13662,16 @@ mod tests {
         // i64
         let xi: Vec<i64> = (0..big).map(|i| i as i64 - 3).collect();
         let ti = Value::Tensor(
-            TensorValue::new_i64_values(Shape { dims: vec![big as u32] }, xi.clone()).unwrap(),
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![big as u32],
+                },
+                xi.clone(),
+            )
+            .unwrap(),
         );
-        let goti = eval_dynamic_slice(
-            &[ti, Value::Scalar(Literal::I64(start as i64))],
-            &p,
-        )
-        .unwrap();
+        let goti =
+            eval_dynamic_slice(&[ti, Value::Scalar(Literal::I64(start as i64))], &p).unwrap();
         let gi = goti
             .as_tensor()
             .unwrap()
@@ -13632,7 +13679,10 @@ mod tests {
             .as_i64_slice()
             .unwrap()
             .to_vec();
-        assert!(gi == xi[start..start + n], "threaded i64 dynamic_slice != serial");
+        assert!(
+            gi == xi[start..start + n],
+            "threaded i64 dynamic_slice != serial"
+        );
     }
 
     #[test]
@@ -13645,7 +13695,13 @@ mod tests {
         let upd: Vec<f64> = (0..4096).map(|i| 1000.0 + i as f64).collect();
         let start = 12345usize;
         let opt = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![n as u32] }, op.clone()).unwrap(),
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                op.clone(),
+            )
+            .unwrap(),
         );
         let updt = Value::Tensor(
             TensorValue::new_f64_values(Shape { dims: vec![4096] }, upd.clone()).unwrap(),
@@ -13680,14 +13736,18 @@ mod tests {
         let updi: Vec<i64> = (0..rows * uc).map(|i| -1 - i as i64).collect();
         let opit = Value::Tensor(
             TensorValue::new_i64_values(
-                Shape { dims: vec![rows as u32, cols as u32] },
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
                 opi.clone(),
             )
             .unwrap(),
         );
         let updit = Value::Tensor(
             TensorValue::new_i64_values(
-                Shape { dims: vec![rows as u32, uc as u32] },
+                Shape {
+                    dims: vec![rows as u32, uc as u32],
+                },
                 updi.clone(),
             )
             .unwrap(),
@@ -13718,10 +13778,10 @@ mod tests {
         // >= gate, including a reversed INNER axis (block_len==1) and multi-axis reverse.
         // cases: (dims, reversed-axes)
         let cases: [(Vec<u32>, Vec<usize>); 4] = [
-            (vec![16_400, 1024], vec![0]),       // leading-axis reverse (big block)
-            (vec![1024, 16_400], vec![1]),       // inner-axis reverse (block_len==1)
-            (vec![64, 64, 4100], vec![0, 2]),    // multi-axis reverse
-            (vec![4_200_000, 4], vec![0, 1]),    // both axes reversed
+            (vec![16_400, 1024], vec![0]),    // leading-axis reverse (big block)
+            (vec![1024, 16_400], vec![1]),    // inner-axis reverse (block_len==1)
+            (vec![64, 64, 4100], vec![0, 2]), // multi-axis reverse
+            (vec![4_200_000, 4], vec![0, 1]), // both axes reversed
         ];
         for (dims, axes) in cases {
             let total: usize = dims.iter().map(|&d| d as usize).product();
@@ -13736,7 +13796,10 @@ mod tests {
             assert!(ran, "threaded rev should engage at total {total}");
             let sb: Vec<u64> = serial.iter().map(|v| v.to_bits()).collect();
             let tb: Vec<u64> = threaded.iter().map(|v| v.to_bits()).collect();
-            assert!(sb == tb, "threaded rev != serial for dims {dims:?} axes {axes:?}");
+            assert!(
+                sb == tb,
+                "threaded rev != serial for dims {dims:?} axes {axes:?}"
+            );
         }
     }
 
@@ -13838,7 +13901,13 @@ mod tests {
         assert!(gtotal >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
         let table: Vec<i64> = (0..vocab * slice_elems).map(|i| i as i64 - 100).collect();
         let resolved: Vec<Option<usize>> = (0..nidx)
-            .map(|i| if i % 61 == 0 { None } else { Some((i * 733) % vocab) })
+            .map(|i| {
+                if i % 61 == 0 {
+                    None
+                } else {
+                    Some((i * 733) % vocab)
+                }
+            })
             .collect();
         let fill = i64::MIN;
         let mut want: Vec<i64> = Vec::with_capacity(gtotal);
@@ -13851,7 +13920,13 @@ mod tests {
             }
         }
         let mut got = vec![0i64; gtotal];
-        assert!(gather_contiguous_into(&mut got, &table, &resolved, fill, slice_elems));
+        assert!(gather_contiguous_into(
+            &mut got,
+            &table,
+            &resolved,
+            fill,
+            slice_elems
+        ));
         assert!(got == want, "i64 threaded gather != serial");
     }
 
@@ -13883,7 +13958,12 @@ mod tests {
         tp.insert("permutation".to_owned(), "1,0".to_owned());
         let tout = eval_transpose(std::slice::from_ref(&tin), &tp).unwrap();
         assert!(
-            tout.as_tensor().unwrap().elements.as_half_float_slice().unwrap() == serial.as_slice()
+            tout.as_tensor()
+                .unwrap()
+                .elements
+                .as_half_float_slice()
+                .unwrap()
+                == serial.as_slice()
         );
 
         // concat axis 0 of two bf16 tensors at >= gate.
@@ -13894,7 +13974,11 @@ mod tests {
         want.extend_from_slice(&b);
         let srcs: Vec<&[u16]> = vec![&a, &b];
         let mut got = vec![0u16; total * 2];
-        concat_contiguous_into(&mut got, &srcs, crate::arithmetic::work_scaled_threads(total * 2));
+        concat_contiguous_into(
+            &mut got,
+            &srcs,
+            crate::arithmetic::work_scaled_threads(total * 2),
+        );
         assert!(got == want, "bf16 threaded concat != serial");
     }
 
@@ -13946,7 +14030,13 @@ mod tests {
             .map(|i| (i as u16).wrapping_mul(7))
             .collect();
         let resolved: Vec<Option<usize>> = (0..nidx)
-            .map(|i| if i % 53 == 0 { None } else { Some((i * 911) % vocab) })
+            .map(|i| {
+                if i % 53 == 0 {
+                    None
+                } else {
+                    Some((i * 911) % vocab)
+                }
+            })
             .collect();
         let fill = 0xffffu16;
         let mut want: Vec<u16> = Vec::with_capacity(gtotal);
@@ -13959,7 +14049,13 @@ mod tests {
             }
         }
         let mut got = vec![0u16; gtotal];
-        assert!(gather_contiguous_into(&mut got, &table, &resolved, fill, slice_elems));
+        assert!(gather_contiguous_into(
+            &mut got,
+            &table,
+            &resolved,
+            fill,
+            slice_elems
+        ));
         assert!(got == want, "bf16 threaded gather != serial");
     }
 
@@ -13967,7 +14063,13 @@ mod tests {
     fn concat_contiguous_into_bit_identical_to_serial() {
         // Uneven source sizes summing to >= gate, so chunk boundaries cross source
         // boundaries; compare the threaded copy to a serial concatenation.
-        let sizes = [3_000_001usize, 1usize, 5_400_000usize, 7usize, 2_000_500usize];
+        let sizes = [
+            3_000_001usize,
+            1usize,
+            5_400_000usize,
+            7usize,
+            2_000_500usize,
+        ];
         let total: usize = sizes.iter().sum();
         assert!(total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN);
         let bufs: Vec<Vec<f64>> = sizes
@@ -14038,12 +14140,20 @@ mod tests {
         let mut want: Vec<f32> = Vec::with_capacity(total);
         for &r in &resolved {
             match r {
-                Some(idx) => want.extend_from_slice(&src[idx * slice_elems..(idx + 1) * slice_elems]),
+                Some(idx) => {
+                    want.extend_from_slice(&src[idx * slice_elems..(idx + 1) * slice_elems])
+                }
                 None => want.extend(std::iter::repeat_n(fill, slice_elems)),
             }
         }
         let mut got = vec![0.0f32; total];
-        assert!(gather_contiguous_into(&mut got, &src, &resolved, fill, slice_elems));
+        assert!(gather_contiguous_into(
+            &mut got,
+            &src,
+            &resolved,
+            fill,
+            slice_elems
+        ));
         let gb: Vec<u32> = got.iter().map(|v| v.to_bits()).collect();
         let wb: Vec<u32> = want.iter().map(|v| v.to_bits()).collect();
         assert!(gb == wb, "threaded gather != serial");
@@ -14079,7 +14189,9 @@ mod tests {
             xf64[k] = s;
             xf64[n / 2 + k] = s;
         }
-        let shape = Shape { dims: vec![n as u32] };
+        let shape = Shape {
+            dims: vec![n as u32],
+        };
         // f64 -> f32
         let inp = Value::Tensor(TensorValue::new_f64_values(shape.clone(), xf64.clone()).unwrap());
         let mut p = BTreeMap::new();
@@ -15662,12 +15774,22 @@ mod tests {
     #[test]
     fn conv_1d_explicit_padding_asymmetric() {
         let lhs = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![1, 3, 1] }, vec![1.0, 2.0, 3.0])
-                .unwrap(),
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![1, 3, 1],
+                },
+                vec![1.0, 2.0, 3.0],
+            )
+            .unwrap(),
         );
         let rhs = Value::Tensor(
-            TensorValue::new_f64_values(Shape { dims: vec![2, 1, 1] }, vec![1.0, 1.0])
-                .unwrap(),
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![2, 1, 1],
+                },
+                vec![1.0, 1.0],
+            )
+            .unwrap(),
         );
 
         let out = eval_conv(
@@ -16663,11 +16785,7 @@ mod tests {
             .flat_map(|row| f32d[row * 6 + 2..row * 6 + 6].iter().copied())
             .map(Literal::from_f32)
             .collect();
-        assert_eq!(
-            lits(&sp_multi[1]),
-            expect_right,
-            "split_multi right values"
-        );
+        assert_eq!(lits(&sp_multi[1]), expect_right, "split_multi right values");
     }
 
     #[test]
@@ -18179,7 +18297,12 @@ mod tests {
         let u32_out = eval_broadcast_in_dim(&[Value::Scalar(u32_scalar)], &p_scalar).unwrap();
         assert_eq!(u32_out.as_tensor().unwrap().dtype, DType::U32);
         assert!(
-            u32_out.as_tensor().unwrap().elements.as_u32_slice().is_some(),
+            u32_out
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u32_slice()
+                .is_some(),
             "u32 scalar broadcast dense"
         );
         assert_eq!(lits(&u32_out), vec![u32_scalar; 30]);
@@ -18188,7 +18311,12 @@ mod tests {
         let u64_out = eval_broadcast_in_dim(&[Value::Scalar(u64_scalar)], &p_scalar).unwrap();
         assert_eq!(u64_out.as_tensor().unwrap().dtype, DType::U64);
         assert!(
-            u64_out.as_tensor().unwrap().elements.as_u64_slice().is_some(),
+            u64_out
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_u64_slice()
+                .is_some(),
             "u64 scalar broadcast dense"
         );
         assert_eq!(lits(&u64_out), vec![u64_scalar; 30]);
@@ -19939,8 +20067,8 @@ mod tests {
         let values = Value::vector_i64(&[12, 11, 2, 1]).unwrap();
         let p = params(&[("axis", "0"), ("num_keys", "2")]);
 
-        let outputs = crate::eval_primitive_multi(Primitive::Sort, &[key0, key1, values], &p)
-            .unwrap();
+        let outputs =
+            crate::eval_primitive_multi(Primitive::Sort, &[key0, key1, values], &p).unwrap();
 
         assert_eq!(outputs.len(), 3);
         assert_eq!(extract_i64_vec(&outputs[0]), vec![0, 0, 1, 1]);
@@ -21538,10 +21666,12 @@ mod tests {
                 1 => u32::MAX,
                 2 => 1 << 31,
                 3 | 4 => 123,
-                _ => (i as u32)
-                    .wrapping_mul(2_654_435_761)
-                    .rotate_left((i & 31) as u32)
-                    ^ ((i as u32) >> 5),
+                _ => {
+                    (i as u32)
+                        .wrapping_mul(2_654_435_761)
+                        .rotate_left((i & 31) as u32)
+                        ^ ((i as u32) >> 5)
+                }
             })
             .collect();
         let dense_u32 = Value::Tensor(
@@ -21568,9 +21698,7 @@ mod tests {
                 Shape {
                     dims: vec![n as u32],
                 },
-                fj_core::LiteralBuffer::new(
-                    u32_data.iter().copied().map(Literal::U32).collect(),
-                ),
+                fj_core::LiteralBuffer::new(u32_data.iter().copied().map(Literal::U32).collect()),
             )
             .unwrap(),
         );
@@ -21630,10 +21758,12 @@ mod tests {
                 1 => u64::MAX,
                 2 => 1 << 63,
                 3 | 4 => 9_223_372_036_854_775_900,
-                _ => (i as u64)
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    .rotate_left((i & 63) as u32)
-                    ^ ((i as u64) << 31),
+                _ => {
+                    (i as u64)
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .rotate_left((i & 63) as u32)
+                        ^ ((i as u64) << 31)
+                }
             })
             .collect();
         let dense_u64 = Value::Tensor(
@@ -21660,9 +21790,7 @@ mod tests {
                 Shape {
                     dims: vec![n as u32],
                 },
-                fj_core::LiteralBuffer::new(
-                    u64_data.iter().copied().map(Literal::U64).collect(),
-                ),
+                fj_core::LiteralBuffer::new(u64_data.iter().copied().map(Literal::U64).collect()),
             )
             .unwrap(),
         );
@@ -23780,7 +23908,10 @@ mod tests {
         let p = params(&[("reps", "2")]);
         let result = eval_tile(&[x], &p).unwrap();
         assert_eq!(extract_shape(&result), vec![2, 4]);
-        assert_eq!(extract_f64_vec(&result), vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]);
+        assert_eq!(
+            extract_f64_vec(&result),
+            vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]
+        );
     }
 
     #[test]
@@ -26369,10 +26500,12 @@ mod tests {
                 2 => 1,
                 3 => 1 << 31,
                 4 | 5 => 77,
-                _ => (i as u32)
-                    .wrapping_mul(2_654_435_761)
-                    .rotate_left((i & 31) as u32)
-                    ^ ((i as u32) >> 3),
+                _ => {
+                    (i as u32)
+                        .wrapping_mul(2_654_435_761)
+                        .rotate_left((i & 31) as u32)
+                        ^ ((i as u32) >> 3)
+                }
             })
             .collect();
         let dense_u32 = Value::Tensor(
@@ -26399,9 +26532,7 @@ mod tests {
                 Shape {
                     dims: vec![n as u32],
                 },
-                fj_core::LiteralBuffer::new(
-                    u32_data.iter().copied().map(Literal::U32).collect(),
-                ),
+                fj_core::LiteralBuffer::new(u32_data.iter().copied().map(Literal::U32).collect()),
             )
             .unwrap(),
         );
@@ -26454,10 +26585,12 @@ mod tests {
                 2 => 1,
                 3 => 1 << 63,
                 4 | 5 => 9_223_372_036_854_775_900,
-                _ => (i as u64)
-                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                    .rotate_left((i & 63) as u32)
-                    ^ ((i as u64) << 32),
+                _ => {
+                    (i as u64)
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .rotate_left((i & 63) as u32)
+                        ^ ((i as u64) << 32)
+                }
             })
             .collect();
         let dense_u64 = Value::Tensor(
@@ -26484,9 +26617,7 @@ mod tests {
                 Shape {
                     dims: vec![n as u32],
                 },
-                fj_core::LiteralBuffer::new(
-                    u64_data.iter().copied().map(Literal::U64).collect(),
-                ),
+                fj_core::LiteralBuffer::new(u64_data.iter().copied().map(Literal::U64).collect()),
             )
             .unwrap(),
         );

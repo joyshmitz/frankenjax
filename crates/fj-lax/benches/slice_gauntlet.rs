@@ -6,7 +6,7 @@
 //! Arm B: naive_slice_f32 — per-element strided gather reference (pre-idunl).
 //! JAX head-to-head: benchmarks/jax_comparison/slice_gauntlet.py.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fj_core::{Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;
@@ -22,7 +22,13 @@ const OUT: usize = HI - LO;
 fn input_f32() -> Value {
     let data: Vec<f32> = (0..ROWS * COLS).map(|i| (i as f32) * 1e-6 - 0.5).collect();
     Value::Tensor(
-        TensorValue::new_f32_values(Shape { dims: vec![ROWS as u32, COLS as u32] }, data).unwrap(),
+        TensorValue::new_f32_values(
+            Shape {
+                dims: vec![ROWS as u32, COLS as u32],
+            },
+            data,
+        )
+        .unwrap(),
     )
 }
 

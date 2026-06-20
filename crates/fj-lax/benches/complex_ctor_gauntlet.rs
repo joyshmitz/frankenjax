@@ -7,7 +7,7 @@
 //! Arm B: boxed inputs -> per-Literal path (pre-7eqrs).
 //! JAX head-to-head: benchmarks/jax_comparison/complex_ctor_gauntlet.py.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fj_core::{DType, Literal, LiteralBuffer, Primitive, Shape, TensorValue, Value};
 use fj_lax::eval_primitive;
 use std::collections::BTreeMap;
@@ -45,17 +45,28 @@ fn bench_complex_ctor(c: &mut Criterion) {
     let b = eval_primitive(Primitive::Complex, &boxed, &params).unwrap();
     if let (Value::Tensor(dt), Value::Tensor(bt)) = (&d, &b) {
         for i in [0usize, N / 2, N - 1] {
-            assert_eq!(dt.elements[i], bt.elements[i], "dense != boxed complex ctor");
+            assert_eq!(
+                dt.elements[i], bt.elements[i],
+                "dense != boxed complex ctor"
+            );
         }
     }
 
     let mut group = c.benchmark_group("complex_ctor_re_im_to_c128_1m");
     group.throughput(Throughput::Elements(N as u64));
     group.bench_function("dense", |bn| {
-        bn.iter(|| black_box(eval_primitive(Primitive::Complex, black_box(&dense), black_box(&params)).unwrap()));
+        bn.iter(|| {
+            black_box(
+                eval_primitive(Primitive::Complex, black_box(&dense), black_box(&params)).unwrap(),
+            )
+        });
     });
     group.bench_function("boxed", |bn| {
-        bn.iter(|| black_box(eval_primitive(Primitive::Complex, black_box(&boxed), black_box(&params)).unwrap()));
+        bn.iter(|| {
+            black_box(
+                eval_primitive(Primitive::Complex, black_box(&boxed), black_box(&params)).unwrap(),
+            )
+        });
     });
     group.finish();
 }

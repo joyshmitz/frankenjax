@@ -2161,8 +2161,12 @@ mod tests {
         let mk = |pairs: &[(f64, f64)], dense: bool| -> Value {
             if dense {
                 Value::Tensor(
-                    TensorValue::new_complex_values(DType::Complex128, shape.clone(), pairs.to_vec())
-                        .unwrap(),
+                    TensorValue::new_complex_values(
+                        DType::Complex128,
+                        shape.clone(),
+                        pairs.to_vec(),
+                    )
+                    .unwrap(),
                 )
             } else {
                 Value::Tensor(
@@ -2192,8 +2196,20 @@ mod tests {
                 .collect()
         };
         for &prim in &[Primitive::Eq, Primitive::Ne] {
-            let int_cmp = move |a: i128, b: i128| if prim == Primitive::Eq { a == b } else { a != b };
-            let float_cmp = move |a: f64, b: f64| if prim == Primitive::Eq { a == b } else { a != b };
+            let int_cmp = move |a: i128, b: i128| {
+                if prim == Primitive::Eq {
+                    a == b
+                } else {
+                    a != b
+                }
+            };
+            let float_cmp = move |a: f64, b: f64| {
+                if prim == Primitive::Eq {
+                    a == b
+                } else {
+                    a != b
+                }
+            };
             let d = eval_comparison(
                 prim,
                 &[mk(&pairs_a, true), mk(&pairs_b, true)],
@@ -2233,15 +2249,17 @@ mod tests {
             .map(|i| ((i % 4) as f64 - 1.0, (i / 4) as f64))
             .collect();
         let b: Vec<(f64, f64)> = (0..4).map(|i| (i as f64 - 1.0, 0.0)).collect();
-        let sa = Shape {
-            dims: vec![3, 4],
-        };
+        let sa = Shape { dims: vec![3, 4] };
         let sb = Shape::vector(4);
         let mk = |pairs: &[(f64, f64)], shape: &Shape, dense: bool| -> Value {
             if dense {
                 Value::Tensor(
-                    TensorValue::new_complex_values(DType::Complex128, shape.clone(), pairs.to_vec())
-                        .unwrap(),
+                    TensorValue::new_complex_values(
+                        DType::Complex128,
+                        shape.clone(),
+                        pairs.to_vec(),
+                    )
+                    .unwrap(),
                 )
             } else {
                 Value::Tensor(
@@ -2271,8 +2289,20 @@ mod tests {
                 .collect()
         };
         for &prim in &[Primitive::Eq, Primitive::Ne] {
-            let int_cmp = move |x: i128, y: i128| if prim == Primitive::Eq { x == y } else { x != y };
-            let float_cmp = move |x: f64, y: f64| if prim == Primitive::Eq { x == y } else { x != y };
+            let int_cmp = move |x: i128, y: i128| {
+                if prim == Primitive::Eq {
+                    x == y
+                } else {
+                    x != y
+                }
+            };
+            let float_cmp = move |x: f64, y: f64| {
+                if prim == Primitive::Eq {
+                    x == y
+                } else {
+                    x != y
+                }
+            };
             let d = eval_comparison(
                 prim,
                 &[mk(&a, &sa, true), mk(&b, &sb, true)],

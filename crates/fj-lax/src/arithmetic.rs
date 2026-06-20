@@ -23820,12 +23820,9 @@ mod tests {
         );
         for primitive in primitives {
             for input in [&scalar, &dense] {
-                let err = crate::eval_primitive(
-                    primitive,
-                    std::slice::from_ref(input),
-                    &BTreeMap::new(),
-                )
-                .expect_err("JAX float-only unary primitive accepted integer input");
+                let err =
+                    crate::eval_primitive(primitive, std::slice::from_ref(input), &BTreeMap::new())
+                        .expect_err("JAX float-only unary primitive accepted integer input");
                 assert!(
                     matches!(
                         err,
