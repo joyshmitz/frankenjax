@@ -3159,6 +3159,75 @@ mod tests {
         );
     }
 
+    /// PROFILE the three phases of the SoA pow2 kernel (transpose-in / butterfly stages /
+    /// transpose-out) for one L1-resident tile. DECIDES whether a radix-4 SoA is worth
+    /// building: radix-4 only HALVES the butterfly passes (log2->log4 stages), so it pays
+    /// off only if the butterfly stages dominate the per-tile cost. If the transposes
+    /// dominate, radix-4 cannot help (same transpose either way) and is a no-go.
+    #[test]
+    #[ignore = "informational profile; run with --ignored --nocapture"]
+    fn profile_soa_pow2_phases() {
+        let n = 256usize;
+        let w = POW2_TILE_ROWS; // one tile
+        let plan = Radix2Plan::new(n, false);
+        let elements: Vec<(f64, f64)> = (0..w * n)
+            .map(|i| ((i as f64 * 0.01).sin(), (i as f64 * 0.02).cos()))
+            .collect();
+        let mut re = vec![0.0f64; w * n];
+        let mut im = vec![0.0f64; w * n];
+        let mut out = vec![(0.0f64, 0.0f64); w * n];
+        let iters = 50_000usize;
+
+        let mut t_in = u64::MAX;
+        let mut t_bf = u64::MAX;
+        let mut t_out = u64::MAX;
+        for _ in 0..9 {
+            // transpose-in (AoS -> SoA with bit-reversal)
+            let s0 = std::time::Instant::now();
+            for _ in 0..iters {
+                for b in 0..w {
+                    let row = &elements[b * n..b * n + n];
+                    for (i, &src) in plan.bit_reversed.iter().enumerate() {
+                        let (sr, si) = row[src];
+                        re[i * w + b] = sr;
+                        im[i * w + b] = si;
+                    }
+                }
+                std::hint::black_box(&re);
+            }
+            t_in = t_in.min(s0.elapsed().as_nanos() as u64);
+            // butterfly stages (the only phase radix-4 would change)
+            let s1 = std::time::Instant::now();
+            for _ in 0..iters {
+                soa_radix2_butterfly_stages(&plan, w, n, &mut re, &mut im);
+                std::hint::black_box(&re);
+            }
+            t_bf = t_bf.min(s1.elapsed().as_nanos() as u64);
+            // transpose-out (SoA -> AoS)
+            let s2 = std::time::Instant::now();
+            for _ in 0..iters {
+                for b in 0..w {
+                    let dst = &mut out[b * n..b * n + n];
+                    for (k, slot) in dst.iter_mut().enumerate() {
+                        *slot = (re[k * w + b], im[k * w + b]);
+                    }
+                }
+                std::hint::black_box(&out);
+            }
+            t_out = t_out.min(s2.elapsed().as_nanos() as u64);
+        }
+        let total = t_in + t_bf + t_out;
+        eprintln!(
+            "[SoA pow2 phases {w}x{n}, min-of-9 x{iters}] transpose-in={:.2}ms ({:.0}%) butterflies={:.2}ms ({:.0}%) transpose-out={:.2}ms ({:.0}%)",
+            t_in as f64 / 1e6,
+            100.0 * t_in as f64 / total as f64,
+            t_bf as f64 / 1e6,
+            100.0 * t_bf as f64 / total as f64,
+            t_out as f64 / 1e6,
+            100.0 * t_out as f64 / total as f64,
+        );
+    }
+
     /// PROTOTYPE (test-only, pending build/bench validation — disk-low pause): the
     /// SPECIALIZED-BUTTERFLY iterative SoA mixed-radix kernel. Identical to
     /// `mixed_radix_iterative_soa_batch` except the per-stage r-point DFT uses the
