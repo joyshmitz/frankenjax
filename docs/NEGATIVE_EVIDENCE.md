@@ -25,6 +25,12 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     vs JAX 13.29ms = ~26.7x**, **argsort 64k = fj-lax 1.17ms vs JAX 15.07ms = ~12.9x**, **sort 64k =
     fj-lax 1.25ms vs JAX 12.51ms = ~10x** (fj-lax partial-selects / real sort; XLA full-sorts via
     bitonic network). This is fj-lax's single biggest domination zone — JAX-CPU's worst surface.
+  - OPPORTUNITY (feature gap, not a perf lever for fj-lax): **median/percentile/quantile** are
+    sort-based and JAX-CPU-slow (median 1M = **226ms**, argsort-backed), but frankenjax has NO
+    user-facing median/percentile (only internal `median_ms` timing helpers in linalg/tensor_contraction
+    + a `percentile(u128)` stats helper). If the fj-api/fj-py layer ever adds them, compose from
+    fj-lax's ~10x-faster sort (or a quickselect O(n)) for a large, easy JAX domination. Flagging for
+    the user-API owner — out of the fj-lax perf-lever lane.
   - matmul 1024²: JAX 2.91ms (fj-lax loses, `cntiy` +fma-gated). exp 1M: JAX 0.437ms (fj-lax loses,
     cntiy/sweep). sum 1M: JAX 0.111ms (parity-class). Consistent with the gate table below.
   - maxpool/reduce_window 256x256 15x15 SAME: JAX 0.5498ms — **PARITY, NOT a domination zone**
