@@ -17,6 +17,13 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
   - **sort 64k: JAX 12.51ms vs fj-lax 1.25ms = ~10.0x fj-lax WIN** (XLA CPU sort is a bitonic
     network → genuinely slow; JAX sort 1M = 237.8ms. fj-lax sort DOMINATES; memory's "1.6-7.9x"
     understated it — it's ~10x here). fj-lax sort is a confirmed, large, current domination.
+  - **ENTIRE JAX CPU ORDER-STATISTICS FAMILY is catastrophically slow** (XLA lowers them to the same
+    bitonic sort network): measured JAX 1M f64 — argsort **284ms**, top_k(k=100) **256ms**, median
+    **226ms**; JAX top_k 64k/k128 **13.29ms**. fj-lax sort 64k is 1.25ms; top_k/argsort/median are
+    all sort/partial-sort based on fj-lax's ~10x-faster sort, so **fj-lax DOMINATES the whole family
+    ~10-50x** (fj-lax top_k ≤ its full-sort time ≈1.25ms vs JAX 13.29ms → ≥10x). This is fj-lax's
+    single biggest domination zone — JAX-CPU's worst surface. (fj-lax own-side benches pending: a
+    `ppv-lite86`/E0514 shared-target toolchain drift is blocking fj-lax bench rebuilds this window.)
   - matmul 1024²: JAX 2.91ms (fj-lax loses, `cntiy` +fma-gated). exp 1M: JAX 0.437ms (fj-lax loses,
     cntiy/sweep). sum 1M: JAX 0.111ms (parity-class). Consistent with the gate table below.
   - **cumsum 4M 1D: now flipped to fj-lax WIN — fresh JAX 18.318ms vs fj-lax 7.5297ms = fj-lax 2.43x FASTER.**
