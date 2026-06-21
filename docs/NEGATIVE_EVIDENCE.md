@@ -37,6 +37,17 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     the user-API owner — out of the fj-lax perf-lever lane.
   - matmul 1024²: JAX 2.91ms (fj-lax loses, `cntiy` +fma-gated). exp 1M: JAX 0.437ms (fj-lax loses,
     cntiy/sweep). sum 1M: JAX 0.111ms (parity-class). Consistent with the gate table below.
+  - **softmax row16 relaxed-exp no-ship (cod-b, 2026-06-21):** tried a finite-16-column fast path
+    using the existing `simd_poly_exp_into` helper in `softmax_2d`/`log_softmax_2d`, then reverted it.
+    RCH `hz2` baseline `nn/softmax_2d_65536x16_fused` was **2.6515ms** midpoint; candidate bench
+    landed on `vmi1149989` despite the `RCH_WORKER=hz2` hint and measured **2.5922ms**, only **2.2%**
+    better and still a **2.37x Rust/JAX loss** against fresh JAX mean **1.091807ms** (p50
+    **1.101048ms**). The same routing run showed `log_softmax_2d` at **2.4909ms** versus the noisy
+    prior **6.0083ms** baseline, but that is not the claimed JAX softmax target and was not
+    same-worker proof. Scorecard: **0 wins / 1 loss / 0 neutral; 0 kept / 1 reverted**. Retry
+    predicate: do not retry stack-copy row16 polynomial-exp softmax; next credible route needs
+    approved target-feature/FMA SIMD exp or an attention-level fused kernel that first beats the
+    **2.65ms** Rust baseline by a large margin and closes JAX's **1.09ms** comparator.
   - **tan 1M f64 small-angle: now flipped to fj-lax WIN — fresh JAX/JAXLIB 0.10.2 CPU x64 mean
     1.412564ms vs fj-lax 1.1134ms = fj-lax 1.27x FASTER.** The retained path is intentionally
     scoped: large dense F64 tensors with every element in `[-pi/4, pi/4]` use a Cephes/Remez-style

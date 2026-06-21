@@ -74,6 +74,98 @@ parallel direct-write proof or a lower-overhead duplicate-index specialization
 that beats the retained **9.9667 ms** historical same-worker row and then the
 fresh JAX **3.639273 ms** p50.
 
+## frankenjax-cntiy - softmax relaxed-exp16 fast path no-ship
+
+- Date: 2026-06-21
+- Agent: cod-b / CrimsonOtter
+- Status: REJECTED / REVERTED. No production source change remains.
+- Target gap: `nn/softmax_2d_65536x16_fused`, the current fused softmax row
+  compared head-to-head against `jax.nn.softmax(..., axis=-1)` on the exact
+  65,536 x 16 f64 fixture.
+- Alien-graveyard/extreme-optimization route:
+  - Candidate family: replace per-row libm `exp` with the existing
+    `simd_poly_exp_into` approximation for finite 16-column softmax rows.
+  - Candidate details: stack-copy each shifted 16-value row, evaluate polynomial
+    exp into a stack array, sum, and normalize; non-finite rows and all other
+    column counts stayed on the old path.
+  - EV decision: revert. The exact JAX comparator target barely moved and still
+    lost hard; the unrelated log-softmax timing improved in a routing run, but
+    that was not the claimed JAX comparator and did not justify shipping a
+    relaxed-exp semantic surface.
+
+Remote correctness proof before revert:
+
+```text
+AGENT_NAME=CrimsonOtter RCH_WORKER=hz2 \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY,RCH_WORKER \
+  rch exec -- cargo test -p fj-lax softmax_2d --release -- --nocapture
+```
+
+- RCH worker: `hz2`; result: 10 focused `fj-lax` softmax/log-softmax tests
+  passed. The command compiled remotely and retrieved only small artifacts.
+
+Remote bench proof:
+
+```text
+AGENT_NAME=CrimsonOtter \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
+  softmax_2d_65536x16_fused -- --warm-up-time 1 --measurement-time 3 \
+  --sample-size 15 --noplot
+```
+
+- Baseline RCH worker: `hz2`.
+- Baseline production `nn/softmax_2d_65536x16_fused`: **2.6515 ms** midpoint
+  (`2.4187..2.8259 ms`).
+- Baseline production `nn/log_softmax_2d_65536x16_fused`: **6.0083 ms**
+  midpoint (`4.3410..7.9548 ms`), noisy/outlier-heavy.
+
+```text
+AGENT_NAME=CrimsonOtter RCH_WORKER=hz2 \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY,RCH_WORKER \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
+  softmax_2d_65536x16_fused -- --warm-up-time 1 --measurement-time 3 \
+  --sample-size 15 --noplot
+```
+
+- Candidate RCH worker: `vmi1149989`; `RCH_WORKER=hz2` was ignored for this
+  bench, so this is routing evidence, not strict same-worker keep proof.
+- Candidate `nn/softmax_2d_65536x16_fused`: **2.5922 ms** midpoint
+  (`1.9908..3.1984 ms`), only **2.2%** better than the hz2 baseline midpoint
+  and well inside cross-worker/noise ambiguity.
+- Candidate `nn/log_softmax_2d_65536x16_fused`: **2.4909 ms** midpoint
+  (`2.2375..2.7020 ms`). This is a useful future log-softmax routing signal,
+  but it was not the claimed JAX softmax target and was not same-worker.
+
+Fresh JAX comparator:
+
+- Command: `benchmarks/jax_comparison/.venv/bin/python
+  benchmarks/jax_comparison/softmax_gauntlet.py`
+- JAX/JAXLIB: repo venv CPU backend with x64 enabled by the comparator script.
+- Fixture: exact 65,536 x 16 f64 softmax row used by
+  `nn/softmax_2d_65536x16_fused`.
+- JAX mean: **1.091807 ms**; p50 **1.101048 ms**.
+
+Ratio-vs-JAX ledger:
+
+| workload / variant | Rust midpoint | JAX mean | Rust/JAX mean | verdict |
+| --- | ---: | ---: | ---: | --- |
+| production softmax baseline | 2.6515 ms | 1.091807 ms | 2.43 | JAX loss |
+| relaxed-exp16 candidate | 2.5922 ms | 1.091807 ms | 2.37 | REVERT; ~0-gain, still JAX loss |
+
+Scorecard: **0 wins / 1 loss / 0 neutral** for the JAX softmax target, with
+**0 kept / 1 rejected**. Retry predicate: do not retry a stack-copy
+`simd_poly_exp_into` row16 softmax path. The next credible softmax/attention
+route needs same-binary or same-worker proof that first beats **2.65 ms** by a
+large margin and then closes the fresh JAX **1.09 ms** comparator; likely route
+remains approved target-feature/FMA SIMD exp or a fused attention-level kernel.
+
 ## frankenjax-mcqr - bucketed f64 scatter-add narrows but does not close JAX gap
 
 - Date: 2026-06-21

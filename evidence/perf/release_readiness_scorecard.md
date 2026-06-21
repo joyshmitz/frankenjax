@@ -8,6 +8,32 @@ unmeasured `code-first batch-test pending` entries remain outside the score.
 
 ## Current BOLD-VERIFY Notes
 
+### cod-b - cntiy softmax relaxed-exp16 no-ship (2026-06-21)
+
+- Status: no production source change remains. Tested a finite 16-column
+  `softmax_2d`/`log_softmax_2d` fast path using the existing
+  `simd_poly_exp_into` helper, then reverted it because the claimed JAX softmax
+  target stayed a large loss.
+- RCH focused correctness before revert: `cargo test -p fj-lax softmax_2d
+  --release` passed 10/10 softmax/log-softmax tests on `hz2`.
+- Fresh exact JAX/JAXLIB CPU x64 comparator from
+  `benchmarks/jax_comparison/softmax_gauntlet.py`: `jax.nn.softmax` mean
+  **1.091807 ms**, p50 **1.101048 ms** on the 65,536 x 16 f64 fixture.
+- RCH baseline on `hz2`: production `nn/softmax_2d_65536x16_fused`
+  **2.6515 ms** midpoint (`2.4187..2.8259 ms`); production
+  `nn/log_softmax_2d_65536x16_fused` **6.0083 ms** midpoint with high noise.
+- RCH candidate bench selected `vmi1149989` despite the `RCH_WORKER=hz2` hint:
+  `softmax_2d` **2.5922 ms** midpoint (`1.9908..3.1984 ms`) and
+  `log_softmax_2d` **2.4909 ms** midpoint (`2.2375..2.7020 ms`). The
+  log-softmax row is routing evidence only; the exact softmax target improved
+  by only **2.2%** and still lost JAX by **2.37x**.
+- Scorecard for this pass: **0 wins / 1 loss / 0 neutral; 0 kept / 1
+  reverted**. Retry predicate: do not retry the stack-copy row16
+  polynomial-exp softmax path. Next softmax route needs same-worker or
+  same-binary proof that first beats the current **2.65 ms** Rust baseline by a
+  large margin and then closes the fresh JAX **1.09 ms** comparator, likely via
+  approved target-feature/FMA SIMD exp or a larger fused attention kernel.
+
 ### cod-a - murmw Bluestein-prime FFT no-ships (2026-06-21)
 
 - Status: no production source change remains. Fresh BOLD-VERIFY retargeted
