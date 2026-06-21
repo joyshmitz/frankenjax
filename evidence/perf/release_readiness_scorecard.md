@@ -1543,6 +1543,17 @@ Additional cod-a FFT SoA gate recheck environment:
   compiled-dispatch frontier (t22rd/so4wo), NOT the unary kernel. Keep stands on
   the bit-identical same-binary 4.63x (same disposition as the atan2/pow keeps),
   not on JAX domination.
+- JIT-vs-JIT fairness check (same local host): the amortized `CompiledJaxprRunner`
+  (cached plan + reused env/scratch) measured **p50 641.05 us** — essentially
+  equal to eager (**p50 515.14 us** on the same run; local run-to-run variance),
+  NOT faster. So the ~4.5x JAX-jit loss is genuine and not an eager-vs-jit
+  artifact. ROOT CAUSE pinpointed: the runner does NOT amortize the FUSED path —
+  `try_fuse_elementwise_chain_f32` allocates a fresh `vec![0.0_f32; n]` (4 MB)
+  output every call regardless of the runner's buffer reuse, so the per-call
+  output alloc + zero-fill + multi-pass step-outer fusion dominate. The concrete
+  contained lever for the residual is "amortize/reuse the fused-output buffer
+  across runner calls" — but that is so4wo (compiled-dispatch runner arena),
+  actively owned; left for that lane.
 - Scorecard delta: **0 wins / 1 loss / 0 neutral** vs JAX (floor_f32 chain);
   candidate disposition **1 kept / 0 reverted**.
 - Gates: RCH `fj-interpreters` fusion tests **15/15** incl.
