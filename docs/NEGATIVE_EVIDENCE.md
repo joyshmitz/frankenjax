@@ -2,6 +2,31 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## FRONTIER SCORECARD (2026-06-21, CrimsonOtter) — what still loses to JAX and why
+
+Consolidated from this session's measurements + the per-op entries below. The contained,
+measurable-on-this-host, non-`+fma`, unowned perf levers are EXHAUSTED; every remaining loss
+routes to one of three gates.
+
+| Op family | vs JAX (measured) | Gate on the remaining gap |
+| --- | --- | --- |
+| cheap elementwise (add/mul/sub), broadcast, select, comparison | WIN (threaded past L3, 1.7-2x) | none — done |
+| batched gather/scatter (I64/F64/F32) | WIN (1.15-3.6x) | none — suspected loss disproven |
+| sort, reductions, RNG, conv, einsum, dot_general | WIN / parity | none — done |
+| **matmul / GEMM** (256-1024 f64) | **LOSS 4-15x** | **`cntiy` +fma** (already blocked-GEMM + threaded + register microkernel; microkernel is FMA-bound, capped ~XLA/2; pure-safe-Rust, no BLAS) |
+| **transcendental** (exp/erf/atan2/pow SIMD-poly) | **LOSS** | **`cntiy` +fma** (SIMD-poly exp = 2.20x WITH fma / 0.79x WITHOUT — cz0g0) + golden-digest bit-exactness |
+| softmax / attention (fused) | LOSS (feature gap) | **`cntiy` +fma** (built on GEMM+exp) |
+| **FFT pow2 / real / Bluestein-prime** | WIN (1.7-3x SoA) | none — shipped, near safe-Rust ceiling |
+| **FFT smooth-composite batch** (128x1000) | **LOSS 12.5x** | generated length-specialized kernels (big effort) OR a **quiesced host** (threading is a 0.4x no-ship under swarm contention; SoA-iterative 0.15x, Bluestein 0.39x all no-ship; butterflies already specialized) |
+| FFT pow2 batch dense (2048x256) | LOSS 3.83x | near safe-Rust ceiling (pocketfft SIMD-within-FFT needs AVX-512 + complex shuffles) |
+| eigh / SVD | (owned: `ur4h3`, WildForge) | — |
+
+**Single highest-leverage unlock: the `cntiy` +fma maintainer decision** — it gates matmul,
+all transcendentals, softmax, and attention simultaneously. Tradeoff: +fma changes f64
+rounding, which breaks the non-fma golden digests (would need a parity-policy decision: match
+JAX's actual fma'd numerics vs keep the current non-fma goldens). Second unlock: a quiesced
+host to measure FFT/threading wins JAX gets from idle cores. Both are outside code-only reach.
+
 ## 2026-06-21 - frankenjax-ur4h3 fresh BOLD-VERIFY closes small-eigh lane
 
 Fresh re-authenticated BOLD-VERIFY reran the cod-b per-crate Criterion gate and
