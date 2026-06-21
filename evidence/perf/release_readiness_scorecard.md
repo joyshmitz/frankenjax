@@ -6,6 +6,23 @@ Scope: verify recent code-first `fj-lax`/`fj-core` perf backlog against original
 realistic warmed CPU workloads. This scorecard records measured readiness only;
 unmeasured `code-first batch-test pending` entries remain outside the score.
 
+## Pending Code-Only Entries
+
+### CrimsonOtter / cod-a - murmw flat iterative SoA mixed-radix FFT (2026-06-21)
+
+- Status: code committed under disk-low no-build/no-bench instruction; outside
+  release-readiness score until next-turn RCH validation.
+- Target row: `eval/fft_batch_128x1000_complex128`, last retained measurement
+  **2.930 ms** Rust vs **0.233 ms** JAX/JAXLIB 0.10.1 x64, Rust/JAX **12.55x**.
+- Lever: dense smooth-composite batches with `batch >= 8`, `n <= 1024`, and
+  `batch*n <= 2^18` route through a flat iterative mixed-radix SoA candidate.
+  Larger batches keep the existing threaded per-row recursive mixed-radix route.
+- Required before scoring: focused production helper bit-identity-to-scalar-
+  iterative test, iterative-vs-recursive tolerance test, `fft_oracle`, then RCH
+  Criterion on `eval/fft_batch_128x1000_complex128`.
+- Keep/revert rule: keep only if direct evidence shows a real 128x1000 win with
+  green FFT parity; otherwise revert the route and move it to no-ship evidence.
+
 ## Environment
 
 - Agent: cod-b / WildForge

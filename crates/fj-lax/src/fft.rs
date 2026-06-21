@@ -1006,6 +1006,166 @@ fn mixed_radix_into(
     }
 }
 
+fn mixed_radix_factors(n: usize) -> Vec<usize> {
+    let mut factors = Vec::new();
+    let mut nn = n;
+    while nn > 1 {
+        let p = smallest_prime_factor(nn);
+        factors.push(p);
+        nn /= p;
+    }
+    factors
+}
+
+/// Largest smooth-composite length routed through the code-only flat iterative
+/// SoA mixed-radix candidate. This targets the measured `128x1000` gap while
+/// leaving larger/threaded production batches on the proven recursive path until
+/// next-turn RCH evidence exists.
+const MIXED_RADIX_ITERATIVE_SOA_MAX_N: usize = 1024;
+const MIXED_RADIX_ITERATIVE_SOA_MAX_ELEMS: usize = 1 << 18;
+const MIXED_RADIX_ITERATIVE_SOA_TILE_ROWS: usize = 4;
+
+/// Flat-stage mixed-radix SoA candidate for smooth-composite batched FFT/IFFT.
+///
+/// This is the production lift of the test-only disk-low prototype: digit-reverse
+/// each row into `index x row` SoA, then run iterative mixed-radix stages over
+/// contiguous row lanes. It intentionally changes floating-point op order versus
+/// the recursive `mixed_radix_into` path, so it is tolerance-equivalent rather
+/// than bit-identical; FFT oracle parity is tolerance-based for these composite
+/// lengths. Bench/proof remains pending because this was committed under a
+/// disk-low no-build/no-bench instruction.
+fn transform_batches_mixed_radix_iterative_soa(
+    elements: &[(f64, f64)],
+    n: usize,
+    batch_size: usize,
+    inverse: bool,
+    roots: &[(f64, f64)],
+) -> Vec<(f64, f64)> {
+    let total = batch_size * n;
+    let mut out = vec![(0.0, 0.0); total];
+    if n <= 1 {
+        out.copy_from_slice(&elements[..total]);
+        return out;
+    }
+
+    let factors = mixed_radix_factors(n);
+    let max_r = factors.iter().copied().max().unwrap_or(1);
+    let rows_cap = MIXED_RADIX_ITERATIVE_SOA_TILE_ROWS;
+    let mut re = vec![0.0f64; rows_cap * n];
+    let mut im = vec![0.0f64; rows_cap * n];
+    let mut y_re = vec![0.0f64; rows_cap * max_r];
+    let mut y_im = vec![0.0f64; rows_cap * max_r];
+
+    let mut row0 = 0usize;
+    while row0 < batch_size {
+        let rows = rows_cap.min(batch_size - row0);
+        let s = row0 * n;
+        let e = s + rows * n;
+        mixed_radix_iterative_soa_block(
+            &elements[s..e],
+            n,
+            rows,
+            inverse,
+            roots,
+            &factors,
+            &mut re[..rows * n],
+            &mut im[..rows * n],
+            &mut y_re[..rows * max_r],
+            &mut y_im[..rows * max_r],
+            &mut out[s..e],
+        );
+        row0 += rows;
+    }
+
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mixed_radix_iterative_soa_block(
+    elements: &[(f64, f64)],
+    n: usize,
+    rows: usize,
+    inverse: bool,
+    roots: &[(f64, f64)],
+    factors: &[usize],
+    re: &mut [f64],
+    im: &mut [f64],
+    y_re: &mut [f64],
+    y_im: &mut [f64],
+    out: &mut [(f64, f64)],
+) {
+    debug_assert_eq!(elements.len(), rows * n);
+    debug_assert_eq!(out.len(), rows * n);
+    debug_assert_eq!(re.len(), rows * n);
+    debug_assert_eq!(im.len(), rows * n);
+    let w = rows;
+
+    for i in 0..n {
+        let mut x = i;
+        let mut rev = 0usize;
+        for &f in factors {
+            rev = rev * f + (x % f);
+            x /= f;
+        }
+        for row in 0..w {
+            let (vr, vi) = elements[row * n + rev];
+            re[i * w + row] = vr;
+            im[i * w + row] = vi;
+        }
+    }
+
+    let mut len = 1usize;
+    for &r in factors {
+        let next = len * r;
+        let input_twiddle_stride = n / next;
+        let dft_twiddle_stride = n / r;
+        let mut start = 0usize;
+        while start < n {
+            for j in 0..len {
+                for t in 0..r {
+                    let (twr, twi) = roots[(input_twiddle_stride * j * t) % n];
+                    let base = (start + j + t * len) * w;
+                    let ybase = t * w;
+                    for row in 0..w {
+                        let vr = re[base + row];
+                        let vi = im[base + row];
+                        y_re[ybase + row] = vr * twr - vi * twi;
+                        y_im[ybase + row] = vr * twi + vi * twr;
+                    }
+                }
+
+                for s in 0..r {
+                    let out_base = (start + j + s * len) * w;
+                    for row in 0..w {
+                        let mut acc_re = 0.0f64;
+                        let mut acc_im = 0.0f64;
+                        for t in 0..r {
+                            let (wr, wi) = roots[(dft_twiddle_stride * s * t) % n];
+                            let ybase = t * w + row;
+                            let yr = y_re[ybase];
+                            let yi = y_im[ybase];
+                            acc_re += yr * wr - yi * wi;
+                            acc_im += yr * wi + yi * wr;
+                        }
+                        re[out_base + row] = acc_re;
+                        im[out_base + row] = acc_im;
+                    }
+                }
+            }
+            start += next;
+        }
+        len = next;
+    }
+
+    let inv_n = if inverse { 1.0 / (n as f64) } else { 1.0 };
+    for row in 0..w {
+        let dst = &mut out[row * n..row * n + n];
+        for (k, slot) in dst.iter_mut().enumerate() {
+            *slot = (re[k * w + row] * inv_n, im[k * w + row] * inv_n);
+        }
+    }
+}
+
 /// Convolution-length ceiling for the SoA Bluestein path. The two internal pow2
 /// FFTs are the proven flat radix-2 kernel (`vectorized_pow2_block`); the win is
 /// robust ~3x across the whole measured range (m=256..16384, see
@@ -1240,6 +1400,25 @@ fn transform_batches_dense(
     {
         let bplan = BluesteinPlan::new(n, inverse);
         return transform_batches_bluestein_vectorized(&bplan, elements, n, batch_size);
+    }
+
+    // Smooth-composite batches (e.g. 1000 = 2^3*5^3) are the remaining FFT gap:
+    // Bluestein is avoided, but the current recursive mixed-radix path is row-wise
+    // and hard to vectorize. Route only the measured 128x1000-class footprint to
+    // the flat iterative SoA candidate during this disk-low code-only pass. Larger
+    // batches keep the proven threaded per-row path until RCH benchmarks validate
+    // the candidate.
+    const MIXED_RADIX_ITERATIVE_SOA_MIN_BATCH: usize = 8;
+    if n > 1
+        && batch_size >= MIXED_RADIX_ITERATIVE_SOA_MIN_BATCH
+        && is_mixed_radix_smooth(n)
+        && n <= MIXED_RADIX_ITERATIVE_SOA_MAX_N
+        && batch_size.saturating_mul(n) <= MIXED_RADIX_ITERATIVE_SOA_MAX_ELEMS
+    {
+        let roots = precompute_twiddles(n, inverse);
+        return transform_batches_mixed_radix_iterative_soa(
+            elements, n, batch_size, inverse, &roots,
+        );
     }
 
     // Shared, immutable per-row plan (built once): radix-2 / mixed-radix / Bluestein.
@@ -2628,6 +2807,48 @@ mod tests {
                         bits(&reference),
                         bits(&got),
                         "SoA iterative != scalar iterative (n={n} batch={batch} inverse={inverse})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Production smooth-composite SoA routing should preserve the scalar iterative
+    /// op order within each row. This is the focused validation gate for the
+    /// disk-low code-only lift into `transform_batches_dense`.
+    #[test]
+    fn production_mixed_radix_soa_matches_scalar_iterative_by_bits() {
+        let bits = |v: &[(f64, f64)]| -> Vec<(u64, u64)> {
+            v.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect()
+        };
+        for &n in &[6usize, 10, 12, 15, 30, 35, 77, 1000] {
+            for inverse in [false, true] {
+                let roots = precompute_twiddles(n, inverse);
+                for &batch in &[1usize, 3, 4, 8] {
+                    let elements: Vec<(f64, f64)> = (0..batch * n)
+                        .map(|i| {
+                            let f = i as f64;
+                            ((f * 0.017).cos() * 0.7, (f * 0.023).sin() - 0.1)
+                        })
+                        .collect();
+                    let mut reference = vec![(0.0, 0.0); batch * n];
+                    for b in 0..batch {
+                        let mut row = Vec::new();
+                        mixed_radix_iterative_scalar(
+                            &elements[b * n..b * n + n],
+                            &roots,
+                            inverse,
+                            &mut row,
+                        );
+                        reference[b * n..b * n + n].copy_from_slice(&row);
+                    }
+                    let got = transform_batches_mixed_radix_iterative_soa(
+                        &elements, n, batch, inverse, &roots,
+                    );
+                    assert_eq!(
+                        bits(&reference),
+                        bits(&got),
+                        "production SoA route != scalar iterative (n={n} batch={batch} inverse={inverse})"
                     );
                 }
             }

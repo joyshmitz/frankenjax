@@ -33,6 +33,58 @@ CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
   revert this in-place transpose plus the two pending Householder scratch
   commits and record the failed stack here.
 
+## frankenjax-murmw - flat iterative SoA mixed-radix FFT pending-bench
+
+- Date: 2026-06-21
+- Agent: cod-a / CrimsonOtter
+- Status: CODE-ONLY COMMITTED, PENDING BENCH. Disk-low instruction explicitly
+  prohibited starting a new `cargo bench` or `cargo build` this turn.
+- Target gap: smooth-composite batched complex FFT, especially
+  `eval/fft_batch_128x1000_complex128`, which remained a JAX loss in the last
+  measured row set: Rust **2.930 ms** vs JAX/JAXLIB 0.10.1 x64 **0.233 ms**,
+  Rust/JAX **12.55x**.
+- Lever: lift the flat iterative mixed-radix SoA prototype into production behind
+  a conservative gate for dense smooth-composite batches:
+  `batch >= 8`, `n <= 1024`, and `batch*n <= 2^18`. This targets the existing
+  128x1000 row while leaving larger already-threaded batches on the proven
+  recursive per-row path until direct RCH evidence exists.
+- Correctness argument before build: the candidate uses the same root table,
+  generalized digit-reversal, stage order, per-lane arithmetic, and inverse
+  `1/n` scaling as the scalar iterative prototype. It is bit-identical to scalar
+  iterative per row, but only tolerance-equivalent to the recursive production
+  mixed-radix path because op order differs. Smooth-composite FFT parity is
+  tolerance-based, so this is a legal candidate if the focused tests pass.
+- Added next-turn gate:
+  `production_mixed_radix_soa_matches_scalar_iterative_by_bits`, covering
+  n={6,10,12,15,30,35,77,1000}, forward/inverse, and batch={1,3,4,8}.
+
+Required next-turn validation, only after disk pressure is handled:
+
+```text
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  rch exec -- cargo test -p fj-lax \
+  production_mixed_radix_soa_matches_scalar_iterative_by_bits \
+  --lib --release -- --nocapture
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  rch exec -- cargo test -p fj-lax \
+  iterative_mixed_radix_matches_recursive_to_tolerance \
+  --lib --release -- --nocapture
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  rch exec -- cargo test -p fj-conformance --test fft_oracle -- --nocapture
+
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/fft_batch_128x1000_complex128' \
+  --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+```
+
+- Keep/revert rule: keep only if same-worker or directly comparable evidence
+  shows a real `fft_batch_128x1000_complex128` improvement without FFT oracle
+  fallout. If neutral/regressing or correctness fails, revert this smooth-
+  composite SoA routing and record the result here.
+
 ## frankenjax-ur4h3 - Householder left-update scratch reuse pending-bench
 
 - Date: 2026-06-21

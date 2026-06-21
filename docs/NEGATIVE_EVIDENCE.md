@@ -16,6 +16,23 @@ handled, measuring this with the two pending Householder scratch-reuse commits.
 Keep only with same-worker/directly comparable improvement; otherwise revert the
 allocator/copy-reduction stack and record as negative evidence.
 
+## 2026-06-21 - frankenjax-murmw flat iterative SoA mixed-radix FFT pending-bench
+
+DISK-LOW code-only pass: smooth-composite dense FFT batches now have a
+conservative production candidate that routes `batch >= 8`, `n <= 1024`, and
+`batch*n <= 2^18` through a flat iterative mixed-radix SoA kernel. This targets
+the still-losing `eval/fft_batch_128x1000_complex128` row (last measured Rust
+**2.930 ms** vs JAX **0.233 ms**, Rust/JAX **12.55x**) while leaving larger
+already-threaded batches on the existing recursive per-row path.
+
+No new `cargo bench` or `cargo build` was started in this turn by instruction.
+Pending validation: run the new
+`production_mixed_radix_soa_matches_scalar_iterative_by_bits` gate, the existing
+iterative-vs-recursive/oracle gates, `fft_oracle`, then RCH Criterion for
+`eval/fft_batch_128x1000_complex128`. Keep only with same-worker/directly
+comparable improvement and green FFT oracle parity; otherwise revert the
+smooth-composite SoA route and record the no-ship result.
+
 ## 2026-06-21 - frankenjax-ur4h3 Householder left-update scratch reuse pending-bench
 
 DISK-LOW code-only pass: `hessenberg_reduction` now reuses the dot-product
