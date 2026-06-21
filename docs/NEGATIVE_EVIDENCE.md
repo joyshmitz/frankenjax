@@ -1314,3 +1314,17 @@ only `random_normal` (535/559) + `truncated_normal` (1098/1107) call `crate::ari
 (tolerance oracle). cauchy/gumbel/exponential/rayleigh/laplace/poisson/geometric all use libm
 `f64::tan/ln/exp/ln_1p` DIRECTLY → SAFE from primitive opts. So upcoming tanh/tan/ln/exp PRIMITIVE
 opts do NOT threaten the RNG distribution goldens (only fj-lax-internal-erf sites do, both handled).
+
+## 2026-06-21 - cholesky_blocked digest: VERIFIED STALE (safe re-baseline) — owner's one-line fix (CrimsonOtter-Claude)
+
+The lone remaining fj-lax RED, `linalg::tests::cholesky_blocked_path_golden_output_digest`, is a
+SELF-golden (hardcoded SHA of `eval_cholesky`'s 256x256 output) — NOT a JAX-parity test. Diagnosed:
+the sibling `cholesky_blocked_matches_scalar_and_reconstructs` (linalg.rs:8271) PASSES, proving the
+blocked-path output is CORRECT (matches the scalar/naive Cholesky AND reconstructs L·Lᵀ≈A within
+tolerance). So shbyh's blocked-Cholesky FP-reassoc restructuring legally changed the exact bits and
+the digest is simply STALE — a safe re-baseline, not a bug.
+FIX (linalg owner's one-liner, I'm not editing their collision-zone file): at linalg.rs:8338 replace
+  "cae3c6a0fcc965880d1379765d0b7886deb1ca3d1c9dc1036ca705e60306ff0a"
+with the current verified-correct output digest
+  "4ed70745461cf775a4ea667bf87bae3c6fbc5326c5095cad6435d0069d1c7540"
+That restores fj-lax to fully GREEN (it's the only non-cholesky-digest failure). Flagged WildForge.
