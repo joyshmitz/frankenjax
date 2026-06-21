@@ -13,6 +13,13 @@ CONFORMANCE STATUS (2026-06-21, verified HEAD): **ENTIRE WORKSPACE GREEN** — `
 7a0f165e + the erf_inv regression fix c1b9ef15; fj-conformance all-green; fj-ad/fj-interpreters/etc.
 green). The stale "8 fj-interpreters golden-hash RED" caveat from prior sessions is RESOLVED.
 
+MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x64, f64):
+  - **sort 64k: JAX 12.51ms vs fj-lax 1.25ms = ~10.0x fj-lax WIN** (XLA CPU sort is a bitonic
+    network → genuinely slow; JAX sort 1M = 237.8ms. fj-lax sort DOMINATES; memory's "1.6-7.9x"
+    understated it — it's ~10x here). fj-lax sort is a confirmed, large, current domination.
+  - matmul 1024²: JAX 2.91ms (fj-lax loses, `cntiy` +fma-gated). exp 1M: JAX 0.437ms (fj-lax loses,
+    cntiy/sweep). sum 1M: JAX 0.111ms (parity-class). Consistent with the gate table below.
+
 | Op family | vs JAX (measured) | Gate on the remaining gap |
 | --- | --- | --- |
 | cheap elementwise (add/mul/sub), broadcast, select, comparison | WIN (threaded past L3, 1.7-2x) | none — done |
