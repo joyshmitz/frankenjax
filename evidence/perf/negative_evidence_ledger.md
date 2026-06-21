@@ -3,6 +3,75 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-cntiy - cbrt scalar Halley fast path narrows but does not close JAX gap
+
+- Date: 2026-06-21
+- Agent: cod-b / CrimsonOtter
+- Status: MEASURED KEEP / STILL JAX LOSS. Production `Primitive::Cbrt` now uses
+  a guarded f64 bit-hack initial estimate plus two Halley refinements for normal
+  finite magnitudes, falling back to `f64::cbrt` for zero, non-finite, and
+  extreme-range inputs.
+- Claimed tracker context: `frankenjax-cntiy` remains the open maintainer-gated
+  FMA/softmax bead. This cbrt sub-gap is tolerance-only and does not resolve the
+  parent gate, but it clears the peer compile blocker and gives a real retained
+  production speedup.
+- Alien-graveyard/extreme-optimization route:
+  - Candidate family: libm/fenv replacement via a bounded approximation kernel,
+    with vectorized execution as the deeper route.
+  - Implemented lever: scalar approximation first, because cbrt has no
+    bit-golden digest and the local oracle tolerance is 1e-10. This avoids the
+    `+fma` golden-policy gate while still attacking the libm-call tax.
+  - EV decision: keep the scalar lever, then route any further cbrt work to a
+    true SIMD/vector polynomial kernel. Do not repeat another scalar micro-tweak
+    unless it beats this fast path in a same-binary A/B.
+
+Remote correctness proof:
+
+```text
+AGENT_NAME=CrimsonOtter \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+RCH_REQUIRE_REMOTE=1 \
+  rch exec -- cargo test -p fj-lax cbrt --lib --release -- --nocapture
+```
+
+- RCH worker: `vmi1149989`; no local cargo build and no new `.scratch` or
+  worktree.
+- Result: 8 focused cbrt/lib tests passed.
+- Accuracy probe: `validate_fast_cbrt_accuracy` printed
+  `max_rel_err=6.455e-15`, well below the 1e-10 oracle bar.
+- Full conformance: `cargo test -p fj-conformance --release` passed remotely
+  on RCH worker `hz2` after the focused oracle run.
+
+Remote same-binary bench proof:
+
+```text
+AGENT_NAME=CrimsonOtter \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+RCH_REQUIRE_REMOTE=1 \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
+  'eval/cbrt_1m_f64_vec' -- \
+  --warm-up-time 1 --measurement-time 3 --sample-size 15 --noplot
+```
+
+- RCH worker: `vmi1149989`; per-crate, warm target request, no new `.scratch`.
+- Same-binary Rust control:
+  - `eval/cbrt_1m_f64_vec_libm_reference`: **11.876 ms** midpoint
+    (`9.7168..13.975 ms`).
+  - `eval/cbrt_1m_f64_vec`: **3.2973 ms** midpoint (`3.1680..3.4991 ms`).
+  - Rust-side speedup: **3.60x** versus the threaded libm reference.
+- Fresh JAX/JAXLIB 0.10.1 CPU x64 comparator on the exact bench fixture:
+  **2.157837 ms** mean, 30 runs x 50 inner loops.
+
+| workload | Rust midpoint | JAX mean | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | --- |
+| `eval/cbrt_1m_f64_vec_libm_reference` | 11.876 ms | 2.157837 ms | 5.50 | old libm path was a large JAX loss |
+| `eval/cbrt_1m_f64_vec` | 3.2973 ms | 2.157837 ms | 1.53 | kept narrowing lever; still a JAX loss |
+
+Retry predicate: the next cbrt route must be a SIMD/vectorized polynomial or
+range-reduced kernel that preserves the 1e-10 tolerance oracle and beats the
+current scalar fast path in a same-binary A/B. The broader `cntiy` FMA/softmax
+decision is not resolved by this cbrt keep.
+
 ## frankenjax-ur4h3 - fresh BOLD-VERIFY closes small-eigh lane
 
 - Date: 2026-06-21

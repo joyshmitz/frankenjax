@@ -579,7 +579,9 @@ fn eval_primitive_inner(
         Primitive::ExpandDims => eval_expand_dims(inputs, params),
         Primitive::Tile => eval_tile(inputs, params),
         // Special math
-        Primitive::Cbrt => eval_unary_elementwise_parallel(primitive, inputs, f64::cbrt),
+        Primitive::Cbrt => {
+            eval_unary_elementwise_parallel(primitive, inputs, arithmetic::fast_cbrt_f64)
+        }
         Primitive::IsFinite => eval_is_finite(primitive, inputs),
         Primitive::IsNan => eval_is_nan(primitive, inputs),
         Primitive::IsInf => eval_is_inf(primitive, inputs),

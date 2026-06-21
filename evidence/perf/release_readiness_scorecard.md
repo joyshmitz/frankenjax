@@ -8,6 +8,25 @@ unmeasured `code-first batch-test pending` entries remain outside the score.
 
 ## Current BOLD-VERIFY Notes
 
+### cod-b - cntiy cbrt scalar fast path (2026-06-21)
+
+- Status: retained production narrowing lever, but not a JAX win. `Primitive::Cbrt`
+  now routes dense f64 execution through a guarded bit-hack initial estimate plus
+  two Halley refinements, with fallback to `f64::cbrt` for zero, non-finite, and
+  extreme-range inputs.
+- RCH `fj-lax` focused release tests on `vmi1149989` passed 8 cbrt/lib tests;
+  `validate_fast_cbrt_accuracy` printed max relative error **6.455e-15** against
+  the 1e-10 oracle bar. Full `fj-conformance --release` passed remotely on RCH
+  worker `hz2`.
+- Same-binary RCH `fj-lax` Criterion on `vmi1149989`: old threaded libm
+  reference **11.876 ms** (`9.7168..13.975 ms`) versus new fast path
+  **3.2973 ms** (`3.1680..3.4991 ms`) for `eval/cbrt_1m_f64_vec`, a **3.60x**
+  Rust-side speedup.
+- Fresh exact JAX/JAXLIB 0.10.1 CPU x64 comparator on the same 1M f64 fixture:
+  mean **2.157837 ms**. Scorecard: **0 wins / 1 loss / 0 neutral** for this row;
+  retained Rust/JAX ratio **1.53x**. Next route is true SIMD/vector polynomial
+  cbrt, not another scalar tweak.
+
 ### cod-a - murmw smooth-composite FFT (2026-06-21)
 
 - Status: pending code-only flat iterative mixed-radix SoA route is resolved as

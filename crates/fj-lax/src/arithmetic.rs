@@ -9063,6 +9063,27 @@ pub(crate) fn erfc_approx(x: f64) -> f64 {
     if x >= 0.0 { erfc_pos } else { 2.0 - erfc_pos }
 }
 
+#[inline]
+pub(crate) fn fast_cbrt_f64(x: f64) -> f64 {
+    if x == 0.0 || !x.is_finite() {
+        return x.cbrt();
+    }
+
+    let a = x.abs();
+    if !(1.0e-200..=1.0e200).contains(&a) {
+        return x.cbrt();
+    }
+
+    let mut bits = a.to_bits();
+    bits = bits / 3 + 0x2A9F_7893_354F_CA8C;
+    let mut y = f64::from_bits(bits);
+    for _ in 0..2 {
+        let y3 = y * y * y;
+        y = y * (y3 + 2.0 * a) / (2.0 * y3 + a);
+    }
+    if x.is_sign_negative() { -y } else { y }
+}
+
 const LANCZOS_COEFFS: [f64; 9] = [
     0.999_999_999_999_809_9,
     676.520_368_121_885_1,
@@ -23350,8 +23371,8 @@ mod tests {
         );
     }
 
-    /// Erf and Cbrt were routed onto the threaded transcendental path; a large
-    /// dense-F64 tensor must equal the serial elementwise map bit-for-bit.
+    /// Erf and Cbrt are routed onto the threaded transcendental path; a large
+    /// dense-F64 tensor must equal each primitive's serial callback bit-for-bit.
     #[test]
     fn erf_cbrt_parallel_bit_identical() {
         let n = 300_000usize; // > 1<<18 -> threaded
@@ -23389,7 +23410,7 @@ mod tests {
             .unwrap(),
         );
         let cbrt_ser = extract_f64_vec(
-            &eval_unary_elementwise(Primitive::Cbrt, std::slice::from_ref(&input), f64::cbrt)
+            &eval_unary_elementwise(Primitive::Cbrt, std::slice::from_ref(&input), fast_cbrt_f64)
                 .unwrap(),
         );
         for idx in 0..n {
@@ -23399,6 +23420,32 @@ mod tests {
                 "cbrt at {idx}"
             );
         }
+    }
+
+    #[test]
+    fn validate_fast_cbrt_accuracy() {
+        let mut max_rel = 0.0f64;
+        for k in 0..400_000u64 {
+            let x = (k as f64) * 0.00005 - 10.0 + 1e-12;
+            let want = x.cbrt();
+            if want == 0.0 {
+                continue;
+            }
+            let rel = (fast_cbrt_f64(x) - want).abs() / want.abs();
+            max_rel = max_rel.max(rel);
+        }
+        for &x in &[
+            1e300_f64, 1e-300, 1e100, -1e100, 8.0, 27.0, 1000.0, -64.0, 0.125,
+        ] {
+            let want = x.cbrt();
+            let rel = (fast_cbrt_f64(x) - want).abs() / want.abs().max(1e-300);
+            max_rel = max_rel.max(rel);
+        }
+        eprintln!("[fast_cbrt] max_rel_err={max_rel:.3e} (oracle bar 1e-10)");
+        assert!(
+            max_rel < 1e-10,
+            "fast_cbrt max rel error {max_rel:.3e} exceeds the 1e-10 oracle tolerance"
+        );
     }
 
     #[test]

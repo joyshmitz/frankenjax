@@ -302,6 +302,30 @@ fn bench_cbrt_1m_f64_vec(c: &mut Criterion) {
     let a: Vec<f64> = (0..1 << 20).map(|i| (i as f64) * 0.0007 - 300.0).collect();
     let input = Value::vector_f64(&a).unwrap();
     let p = no_params();
+    c.bench_function("eval/cbrt_1m_f64_vec_libm_reference", |bencher| {
+        bencher.iter(|| {
+            let tensor = input.as_tensor().unwrap();
+            let src = tensor.elements.as_f64_slice().unwrap();
+            let mut out = vec![0.0; src.len()];
+            let threads = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1)
+                .min(2);
+            let chunk = src.len().div_ceil(threads);
+            std::thread::scope(|scope| {
+                for (dst, src) in out.chunks_mut(chunk).zip(src.chunks(chunk)) {
+                    scope.spawn(move || {
+                        for (d, &v) in dst.iter_mut().zip(src.iter()) {
+                            *d = v.cbrt();
+                        }
+                    });
+                }
+            });
+            black_box(Value::Tensor(
+                TensorValue::new_f64_values(tensor.shape.clone(), out).unwrap(),
+            ))
+        })
+    });
     c.bench_function("eval/cbrt_1m_f64_vec", |bencher| {
         bencher.iter(|| eval_primitive(Primitive::Cbrt, std::slice::from_ref(&input), &p))
     });
