@@ -2,6 +2,42 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-21 - frankenjax-murmw iterative mixed-radix SoA route ENABLED but pending-bench (validation harness in place)
+
+Status of the smooth-composite batched-FFT SoA lever (the last uncovered FFT path;
+pow2 fft/ifft/rfft/irfft and Bluestein prime/rough are already shipped wins).
+
+- The RECURSIVE mixed-radix SoA was a measured no-ship (0.50-0.81x, memory-bound: 3
+  buffer-pairs spill L1; see the mixed-radix no-ship entry below). The credible
+  replacement is an ITERATIVE flat-stage form that keeps ONE buffer pair (`re`/`im`)
+  + a tiny per-butterfly temp, so an L1-sized tile stays cache-resident — the same
+  flat shape that won for radix-2 and Bluestein (~3x).
+- Production route `transform_batches_mixed_radix_iterative_soa` landed convergently
+  in `edd01b52` (another agent, during the disk-low pause), WIRED + ENABLED into
+  `transform_batches_dense` for smooth composites with `n <= MIXED_RADIX_ITERATIVE_SOA_MAX_N`
+  (=1024) and `batch_size*n <= 1<<18`. It shipped marked "pending-bench" — i.e. enabled
+  WITHOUT a correctness test or a vs-per-row A/B.
+
+**Risk flagged:** an enabled-but-unvalidated route on the production dispatch path. To
+gate it, a validation harness is now committed (`f3e7eb4a` + earlier `03e68e31`/
+`ca30353c`/`8d01da2b`), all `#[cfg(test)]` (zero production impact):
+
+- `production_mixed_radix_iterative_soa_matches_reference` — asserts the EXACT wired
+  route agrees, to 1e-9 tolerance, with the established per-row recursive `mixed_radix_into`
+  AND the independent O(n^2) `dft_1d`/`idft_1d` oracle (radix-2/3/5 + general 7/11/13,
+  both directions, single/multi-row tiles).
+- `iterative_mixed_radix_matches_recursive_to_tolerance`, `iterative_soa_bit_identical_to_scalar`,
+  `iterative_soa_matches_dft_oracle` — three independent algorithm-level guards on the
+  prototype kernels.
+
+**PENDING-BENCH (disk-critical no-cargo pause — authored by inspection, NOT yet executed):**
+when the build pause lifts (1) run the four tests above; if any fail, the enabled gate
+must be disabled until fixed. (2) Then same-binary interleaved A/B of the route vs per-row
+`mixed_radix_into`; KEEP only on a measured win — if it regresses like the recursive SoA
+did (despite the L1 prediction), disable `MIXED_RADIX_ITERATIVE_SOA_MAX_N` (set 0). The
+general O(r^2) per-butterfly DFT may need radix-2/3/5 specialization to win; decide after
+the first A/B.
+
 ## 2026-06-21 - frankenjax-ur4h3 QL eigenvector transpose in-place pending-bench
 
 DISK-LOW code-only pass: `tridiag_ql_eigendecomposition` now transposes the
