@@ -2788,6 +2788,36 @@ fn bench_cumsum_4m_f64_1d_tight(c: &mut Criterion) {
     });
 }
 
+fn bench_cummax_1m_f64_1d(c: &mut Criterion) {
+    let data: Vec<f64> = (0_usize..(1_usize << 20))
+        .map(|i| {
+            let x = ((i.wrapping_mul(1_103_515_245_usize).wrapping_add(12_345)) & 0xffff) as f64;
+            x - 32_768.0
+        })
+        .collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cummax_1m_f64_1d", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cummax, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_cummin_1m_f64_1d(c: &mut Criterion) {
+    let data: Vec<f64> = (0_usize..(1_usize << 20))
+        .map(|i| {
+            let x = ((i.wrapping_mul(1_103_515_245_usize).wrapping_add(12_345)) & 0xffff) as f64;
+            x - 32_768.0
+        })
+        .collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cummin_1m_f64_1d", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cummin, std::slice::from_ref(&input), &p))
+    });
+}
+
 // 4096x1024 f64 Cumsum along the last axis (4096 independent lines): exercises
 // line-parallel scan over the outer dimension.
 fn bench_cumsum_4096x1024_f64_axis1(c: &mut Criterion) {
@@ -6839,6 +6869,8 @@ criterion_group!(
     bench_cumsum_64k_f64_vec,
     bench_cumsum_4m_f64_1d,
     bench_cumsum_4m_f64_1d_tight,
+    bench_cummax_1m_f64_1d,
+    bench_cummin_1m_f64_1d,
     bench_cumsum_4096x1024_f64_axis1,
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,

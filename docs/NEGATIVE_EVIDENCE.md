@@ -47,8 +47,12 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     p50 **18.290179ms**. Scorecard: **1 win / 0 loss / 0 neutral** for this row. Diagnostic
     bench kept as the sequential-floor ref.
   - JAX CPU is broadly SLOW on order-dependent ops (exploitable): searchsorted 1M=48.8ms (fj-lax has
-    no searchsorted primitive — out of scope), cummax 1M=4.16ms, scatter-add 1M=4.50ms, gather 0.469ms,
-    argmax 0.917ms. cummax/scatter-add worth a fj-lax head-to-head next.
+    no searchsorted primitive — out of scope), scatter-add 1M=4.50ms, gather 0.469ms, argmax 0.917ms.
+    **cummax/cummin 1M now measured head-to-head:** cummax **fj-lax 2.0374ms vs JAX p50
+    3.458314ms = 1.70x fj-lax WIN**; cummin **fj-lax 3.4187ms vs JAX p50 3.602727ms =
+    1.05x near-parity fj-lax WIN** (upper Criterion bound crosses the JAX p50, so classify
+    cummin as neutral/slight win, not closed). Scorecard: **1 win / 0 loss / 1 neutral-slight-win**.
+    Scatter-add remains worth the next head-to-head.
 
 | Op family | vs JAX (measured) | Gate on the remaining gap |
 | --- | --- | --- |
@@ -182,6 +186,56 @@ bound + relax the exp/sin/log self-goldens + commit the flag + implement the SIM
 a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
+
+## 2026-06-21 - frankenjax-mcqr cummax/cummin head-to-head measured
+
+BOLD-VERIFY targeted the order-dependent cumulative-extrema gap after the cumsum
+prefix-scan keep. The radical lever was evidence-driven rather than a source
+rewrite: add exact fj-lax Criterion rows for the same 1M deterministic fixture
+used by the JAX comparator, then keep/reject from measured Rust/JAX ratios.
+
+No production source was changed in this pass.
+
+Remote fj-lax bench command:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/cum(max|min)_1m_f64_1d' --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot
+```
+
+Correctness proof:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo test -p fj-conformance --test cummax_cummin_oracle --release -- --nocapture
+```
+
+- RCH worker: `ovh-a`; result: 28 `cummax_cummin_oracle` tests passed.
+- JAX comparator: local `benchmarks/jax_comparison/.venv`, JAX/JAXLIB 0.10.1,
+  CPU backend, `jax_enable_x64=true`, same deterministic 1M f64 fixture.
+- fj-lax bench worker: `hz2`; per-crate Criterion, no new `.scratch`.
+
+Ratio-vs-JAX ledger:
+
+| workload | fj-lax Criterion midpoint | JAX p50 | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | --- |
+| `eval/cummax_1m_f64_1d` | 2.0374 ms | 3.458314 ms | 0.589 | **fj-lax wins; JAX/Rust 1.70x** |
+| `eval/cummin_1m_f64_1d` | 3.4187 ms | 3.602727 ms | 0.949 | near-parity / slight fj-lax win |
+
+JAX means were 3.833558 ms for `cummax` and 3.623474 ms for `cummin`; fj-lax
+therefore wins cummax by 1.88x on mean and is effectively parity/slightly ahead
+on cummin. Because `cummin` had a mild high outlier and its Criterion interval
+upper bound exceeded the JAX p50, keep the scorecard conservative: **1 win /
+0 loss / 1 neutral-slight-win**. Retry predicate: do not spend a production
+rewrite on cummax before lower-scoring JAX losses; cummin only deserves a new
+lever if fresh same-worker evidence shows a real regression rather than noise.
 
 ## 2026-06-21 - frankenjax-murmw Bluestein-prime FFT tile/thread no-ships
 

@@ -3,6 +3,62 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-mcqr - cummax/cummin head-to-head closes one order-dependent gap
+
+- Date: 2026-06-21
+- Agent: cod-a / CrimsonOtter
+- Status: MEASURED / BENCH COVERAGE ADDED. No production source changed.
+- Target gap: the order-dependent cumulative extrema rows called out by the
+  `frankenjax-mcqr` no-gaps scorecard after the cumsum prefix-scan keep.
+- Alien-graveyard/extreme-optimization route:
+  - Candidate family: measurement-first cumulative-extrema triage. JAX CPU's
+    order-dependent ops were broadly slow, but fj-lax had no exact cummax/cummin
+    rows to prove whether this was a real remaining loss.
+  - Implemented lever: add exact fj-lax Criterion rows for a deterministic 1M
+    f64 1D fixture matching the JAX comparator shape and dtype.
+  - EV decision: no production rewrite. `cummax` is a real fj-lax win; `cummin`
+    is near parity / slight fj-lax win, with enough noise to keep it out of the
+    "closed forever" bucket.
+
+Remote bench command:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/cum(max|min)_1m_f64_1d' --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot
+```
+
+Correctness proof:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo test -p fj-conformance --test cummax_cummin_oracle --release -- --nocapture
+```
+
+- RCH worker: `ovh-a`; result: 28 `cummax_cummin_oracle` tests passed.
+- JAX comparator: local `benchmarks/jax_comparison/.venv`, JAX/JAXLIB 0.10.1,
+  CPU backend, `jax_enable_x64=true`, same deterministic 1M f64 fixture.
+- fj-lax bench worker: `hz2`; per-crate Criterion, no new `.scratch`.
+
+Ratio-vs-JAX ledger:
+
+| workload | fj-lax Criterion midpoint | JAX mean | JAX p50 | Rust/JAX p50 | verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `eval/cummax_1m_f64_1d` | 2.0374 ms | 3.833558 ms | 3.458314 ms | 0.589 | **fj-lax wins; JAX/Rust 1.70x** |
+| `eval/cummin_1m_f64_1d` | 3.4187 ms | 3.623474 ms | 3.602727 ms | 0.949 | near-parity / slight fj-lax win |
+
+Scorecard: **1 win / 0 loss / 1 neutral-slight-win**. Retry predicate: do not
+spend a production rewrite on `cummax` before lower-scoring JAX losses; revisit
+`cummin` only if fresh same-worker evidence shows a real loss beyond Criterion
+noise. Next `frankenjax-mcqr` target remains a measured JAX loss such as
+scatter-add, not another cumulative-extrema micro-probe.
+
 ## frankenjax-murmw - Bluestein-prime FFT tile/thread no-ships
 
 - Date: 2026-06-21
