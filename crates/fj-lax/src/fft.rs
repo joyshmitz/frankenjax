@@ -2974,6 +2974,65 @@ mod tests {
         }
     }
 
+    /// A/B HARNESS for the keep-or-disable decision on the enabled iterative SoA route
+    /// (the bench the convergent `edd01b52` shipped WITHOUT — see the murmw pending-bench
+    /// ledger entry). OLD = per-row recursive `mixed_radix_into`; NEW = the wired
+    /// production route. Interleaved min-of-9 single-thread ratio (the only trustworthy
+    /// FFT A/B — threaded/sequential drift, see the threaded-FFT contention caveat).
+    /// Targets `fft_batch_128x1000` (n=1000, batch=128; batch*n=128000 < 1<<18, in the
+    /// gate) — last measured 12.55x off JAX. Run with `--ignored --nocapture` once the
+    /// disk pressure clears. DECISION: keep the gate only if NEW < OLD (a real win); if
+    /// it regresses like the recursive SoA no-ship did, set `MIXED_RADIX_ITERATIVE_SOA_MAX_N
+    /// = 0`. (Authored under the disk-critical no-cargo pause; executes when cargo returns.)
+    #[test]
+    #[ignore = "informational micro-bench; run with --ignored --nocapture"]
+    fn bench_mixed_radix_iterative_soa_vs_per_row() {
+        let n = 1000usize;
+        let rows = 128usize;
+        let roots = precompute_twiddles(n, false);
+        let elements: Vec<(f64, f64)> = (0..rows * n)
+            .map(|i| {
+                let f = i as f64;
+                ((f * 0.011).sin(), (f * 0.019).cos())
+            })
+            .collect();
+
+        let run_old = || -> (u64, u64) {
+            let mut out = vec![(0.0, 0.0); rows * n];
+            let mut ob = Vec::new();
+            let mut scr = Vec::new();
+            let t0 = std::time::Instant::now();
+            for b in 0..rows {
+                mixed_radix_into(&elements[b * n..b * n + n], &roots, false, &mut ob, &mut scr);
+                out[b * n..b * n + n].copy_from_slice(&ob);
+            }
+            let dt = t0.elapsed().as_nanos() as u64;
+            (dt, out[0].0.to_bits() ^ out[rows * n / 2].1.to_bits())
+        };
+        let run_new = || -> (u64, u64) {
+            let t0 = std::time::Instant::now();
+            let out = transform_batches_mixed_radix_iterative_soa(&elements, n, rows, false, &roots);
+            let dt = t0.elapsed().as_nanos() as u64;
+            (dt, out[0].0.to_bits() ^ out[rows * n / 2].1.to_bits())
+        };
+        let (mut old_min, mut new_min) = (u64::MAX, u64::MAX);
+        let mut chk = 0u64;
+        for _ in 0..9 {
+            let (o, co) = run_old();
+            let (nn, cn) = run_new();
+            chk ^= co ^ cn;
+            old_min = old_min.min(o);
+            new_min = new_min.min(nn);
+        }
+        std::hint::black_box(chk);
+        eprintln!(
+            "[mixed-radix iterative SoA {rows}x{n}] 1T per-row={:.3}ms iter={:.3}ms ratio={:.2}x (min of 9 interleaved)",
+            old_min as f64 / 1e6,
+            new_min as f64 / 1e6,
+            old_min as f64 / new_min as f64,
+        );
+    }
+
     /// Old inline-recurrence radix-2 (pre-frankenjax-* twiddle-hoist), kept only as the
     /// bench baseline. Bit-identical to the production `radix2_fft_1d_into`.
     #[cfg(test)]
