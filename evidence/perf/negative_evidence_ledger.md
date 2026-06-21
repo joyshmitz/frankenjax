@@ -140,6 +140,92 @@ large f64 cumsum; the accepted route is reassociation-tolerant and conformance
 green. Future work should target other remaining JAX losses unless a regression
 shows this row falling behind a fresh same-fixture JAX comparator.
 
+## frankenjax-cntiy - tanh SIMD-exp fast path narrows but does not close JAX gap
+
+- Date: 2026-06-21
+- Agent: cod-b / CrimsonOtter
+- Status: MEASURED KEEP / STILL JAX LOSS. Production `Primitive::Tanh` now routes
+  large dense f64 tensors through the existing SIMD polynomial `exp` helper and
+  the stable identity `tanh(x) = sign(x) * (1 - exp(-2|x|)) / (1 + exp(-2|x|))`.
+- Claimed tracker context: `frankenjax-cntiy` remains the open maintainer-gated
+  FMA/softmax bead. This `tanh` sub-gap is tolerance-only and does not resolve
+  the parent gate.
+- Alien-graveyard/extreme-optimization route:
+  - Candidate family: libm/fenv replacement with a vectorized kernel and a
+    certified tolerance envelope, targeted only at a dense tensor size where the
+    current threaded libm route is measured expensive.
+  - Implemented lever: dense-f64, >=1M-element fast path using `simd_poly_exp_into`;
+    scalar, small tensor, f32, half, boxed, and complex behavior remains on the
+    existing path.
+  - EV decision: keep as a narrowing lever. It is not a JAX win and does not close
+    `cntiy`; the next route needs lower-allocation SIMD/FMA polynomial work or an
+    approved target-feature specialization.
+
+Remote correctness proof:
+
+```text
+AGENT_NAME=CrimsonOtter \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+RCH_REQUIRE_REMOTE=1 \
+  rch exec -- cargo test -p fj-lax \
+  simd_poly_tanh_large_dense_f64_matches_libm_tolerance \
+  --release --lib -- --nocapture
+```
+
+- RCH worker: `vmi1149989`; result: 1 focused `fj-lax` test passed.
+- Accuracy print: `[simd_poly_tanh] max_abs_err=2.220e-16 (oracle bar 1e-10)`.
+
+```text
+AGENT_NAME=CrimsonOtter \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+RCH_REQUIRE_REMOTE=1 \
+  rch exec -- cargo test -p fj-conformance --test tanh_oracle \
+  --release -- --nocapture
+```
+
+- RCH worker: `vmi1149989`; result: 36 `tanh_oracle` tests passed.
+- Note: a direct local warm-target conformance attempt failed before tests with
+  rustc metadata drift (`b30f3df3b` remote artifacts vs local `f20a92ec0`), so
+  conformance was rerun through RCH without cleaning the shared target dir.
+
+Remote bench proof:
+
+```text
+AGENT_NAME=CrimsonOtter \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+RCH_REQUIRE_REMOTE=1 \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
+  'eval/tanh_1m_f64_vec' -- \
+  --warm-up-time 1 --measurement-time 3 --sample-size 15 --noplot
+```
+
+- RCH worker: `ovh-a`; per-crate Criterion, same invocation.
+- Old libm-reference row: **6.1998 ms** midpoint (`6.1748..6.2341 ms`).
+- Retained production row: **4.2741 ms** midpoint (`3.7186..5.1672 ms`).
+- Raw SIMD-exp probe row: **3.7810 ms** midpoint (`3.7327..3.8450 ms`).
+- Internal Rust speedup: **1.45x** retained production versus old libm-reference.
+
+Fresh JAX comparator:
+
+- Command environment: `benchmarks/jax_comparison/.venv/bin/python`, JAX/JAXLIB
+  0.10.1 / 0.10.1, CPU backend, `jax_enable_x64=true`.
+- Fixture: exact `eval/tanh_1m_f64_vec` sequence from
+  `crates/fj-lax/benches/lax_baseline.rs`: `((i % 4001) - 2000) * 0.001`.
+- JAX mean: **0.293181 ms**; median **0.277430 ms**; min **0.230216 ms**.
+
+Ratio-vs-JAX ledger:
+
+| workload | Rust midpoint | JAX mean | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | --- |
+| old threaded libm-reference `tanh` | 6.1998 ms | 0.293181 ms | 21.15 | large JAX loss |
+| retained SIMD-exp production `tanh` | 4.2741 ms | 0.293181 ms | 14.58 | kept narrowing lever; still a JAX loss |
+| raw SIMD-exp probe | 3.7810 ms | 0.293181 ms | 12.90 | upper-bound routing signal only |
+
+Retry predicate: do not retry another allocation-equivalent `exp(-2|x|)`
+rewrite. The next tanh route must reduce the two-pass allocation floor or use
+approved target-feature/FMA SIMD polynomial work, and it must beat the retained
+production path in a same-binary A/B before dispatch.
+
 ## frankenjax-cntiy - erf rational approximation narrows but does not close JAX gap
 
 - Date: 2026-06-21

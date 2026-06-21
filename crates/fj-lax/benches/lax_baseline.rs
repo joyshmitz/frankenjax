@@ -1,8 +1,8 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 // [cc-temp] foreign WIP stub: use fj_lax::linalg::svd_jacobi_profile_counters;
 use fj_lax::threefry::{random_key, random_normal, random_uniform};
-use fj_lax::{eval_primitive, eval_primitive_multi};
+use fj_lax::{eval_primitive, eval_primitive_multi, simd_exp::simd_poly_exp_into};
 use std::collections::BTreeMap;
 use std::hint::black_box;
 
@@ -328,6 +328,62 @@ fn bench_cbrt_1m_f64_vec(c: &mut Criterion) {
     });
     c.bench_function("eval/cbrt_1m_f64_vec", |bencher| {
         bencher.iter(|| eval_primitive(Primitive::Cbrt, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn simd_poly_tanh_probe(src: &[f64]) -> Vec<f64> {
+    let exponents: Vec<f64> = src.iter().map(|&x| -2.0 * x.abs()).collect();
+    let mut out = vec![0.0; src.len()];
+    simd_poly_exp_into(&exponents, &mut out);
+    for (dst, &x) in out.iter_mut().zip(src) {
+        let e = *dst;
+        *dst = if x == 0.0 || x.is_nan() {
+            x
+        } else if x.is_infinite() || x.abs() > 20.0 {
+            x.signum()
+        } else {
+            let y = (1.0 - e) / (1.0 + e);
+            if x.is_sign_negative() { -y } else { y }
+        };
+    }
+    out
+}
+
+fn bench_tanh_1m_f64_vec(c: &mut Criterion) {
+    let a: Vec<f64> = (0..1 << 20)
+        .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+        .collect();
+    let input = Value::vector_f64(&a).unwrap();
+    let p = no_params();
+    c.bench_function("eval/tanh_1m_f64_vec_libm_reference", |bencher| {
+        bencher.iter(|| {
+            let tensor = input.as_tensor().unwrap();
+            let src = tensor.elements.as_f64_slice().unwrap();
+            let mut out = vec![0.0; src.len()];
+            let threads = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1)
+                .min(2);
+            let chunk = src.len().div_ceil(threads);
+            std::thread::scope(|scope| {
+                for (dst, src) in out.chunks_mut(chunk).zip(src.chunks(chunk)) {
+                    scope.spawn(move || {
+                        for (d, &v) in dst.iter_mut().zip(src.iter()) {
+                            *d = v.tanh();
+                        }
+                    });
+                }
+            });
+            black_box(Value::Tensor(
+                TensorValue::new_f64_values(tensor.shape.clone(), out).unwrap(),
+            ))
+        })
+    });
+    c.bench_function("eval/tanh_1m_f64_vec_simd_poly_probe", |bencher| {
+        bencher.iter(|| black_box(simd_poly_tanh_probe(&a)))
+    });
+    c.bench_function("eval/tanh_1m_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Tanh, std::slice::from_ref(&input), &p))
     });
 }
 
@@ -6631,6 +6687,7 @@ criterion_group!(
     bench_polygamma_n2_256k_f64,
     bench_igamma_256k_f64,
     bench_cbrt_1m_f64_vec,
+    bench_tanh_1m_f64_vec,
     bench_sqrt_1m_f64_vec,
     bench_atan2_scalar_1m_f64_vec,
     bench_atan2_scalar_1m_f64_literal_reference,

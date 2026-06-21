@@ -30,6 +30,28 @@ unmeasured `code-first batch-test pending` entries remain outside the score.
   evidence; next credible route must change the internal convolution FFT kernel
   or prove an idle-host threading regime in a same-worker A/B.
 
+### cod-b - cntiy tanh SIMD-exp fast path (2026-06-21)
+
+- Status: retained production narrowing lever, but not a JAX win. Large dense
+  f64 `Primitive::Tanh` now uses the existing SIMD polynomial exp helper through
+  `sign(x) * (1 - exp(-2|x|)) / (1 + exp(-2|x|))` at the measured 1M-element
+  threshold; scalar/small/f32/half/complex paths stay on the existing route.
+- RCH focused correctness passed `fj-lax`
+  `simd_poly_tanh_large_dense_f64_matches_libm_tolerance` on `vmi1149989`
+  with max absolute error **2.220e-16** against the 1e-10 oracle bar.
+  `cargo test -p fj-conformance --test tanh_oracle --release` passed
+  **36/36** on `vmi1149989`.
+- Same-invocation RCH `fj-lax` Criterion on `ovh-a`: old libm-reference
+  `eval/tanh_1m_f64_vec_libm_reference` **6.1998 ms** midpoint
+  (`6.1748..6.2341 ms`) versus retained production `eval/tanh_1m_f64_vec`
+  **4.2741 ms** midpoint (`3.7186..5.1672 ms`), a **1.45x** Rust-side
+  speedup. Raw SIMD-exp probe measured **3.7810 ms**.
+- Fresh exact JAX/JAXLIB 0.10.1 CPU x64 comparator on the same 1M f64 fixture:
+  mean **0.293181 ms**, median **0.277430 ms**. Scorecard:
+  **0 wins / 1 loss / 0 neutral** for this row; retained Rust/JAX ratio
+  **14.58x**. Next route must reduce the two-pass allocation floor or use
+  approved target-feature/FMA SIMD polynomial work.
+
 ### cod-b - mcqr cumsum blocked-prefix keep (2026-06-21)
 
 - Status: retained production win. The single-line f64 blocked prefix-scan

@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::EvalError;
+use crate::simd_exp::simd_poly_exp_into;
 use crate::tensor_contraction::{
     batched_matmul_2d, batched_matmul_2d_bf16_in, batched_matmul_2d_f16_in,
     batched_matmul_2d_f32_in, batched_rank2_complex_matmul, batched_rank2_i64_matmul, matmul_2d,
@@ -63,6 +64,8 @@ fn dense_unary_threads(elems: usize) -> usize {
         .unwrap_or(1);
     (elems / ELEMS_PER_THREAD).max(2).min(cores)
 }
+
+const SIMD_POLY_TANH_F64_MIN: usize = 1 << 20;
 
 #[inline]
 fn is_float_dtype(dtype: DType) -> bool {
@@ -5775,8 +5778,44 @@ pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
             }
         })
     } else {
+        if let [Value::Tensor(tensor)] = inputs
+            && let Some(value) = simd_poly_tanh_f64_tensor(tensor)
+        {
+            return Ok(value);
+        }
         eval_unary_elementwise_parallel(primitive, inputs, f64::tanh)
     }
+}
+
+fn simd_poly_tanh_f64_tensor(tensor: &TensorValue) -> Option<Value> {
+    if tensor.dtype != DType::F64 {
+        return None;
+    }
+    let src = tensor.elements.as_f64_slice()?;
+    if src.len() < SIMD_POLY_TANH_F64_MIN {
+        return None;
+    }
+    Some(Value::Tensor(
+        TensorValue::new_f64_values(tensor.shape.clone(), simd_poly_tanh_f64_values(src)).ok()?,
+    ))
+}
+
+fn simd_poly_tanh_f64_values(src: &[f64]) -> Vec<f64> {
+    let exponents: Vec<f64> = src.iter().map(|&x| -2.0 * x.abs()).collect();
+    let mut out = vec![0.0; src.len()];
+    simd_poly_exp_into(&exponents, &mut out);
+    for (dst, &x) in out.iter_mut().zip(src) {
+        let e = *dst;
+        *dst = if x == 0.0 || x.is_nan() {
+            x
+        } else if x.is_infinite() || x.abs() > 20.0 {
+            x.signum()
+        } else {
+            let y = (1.0 - e) / (1.0 + e);
+            if x.is_sign_negative() { -y } else { y }
+        };
+    }
+    out
 }
 
 pub(crate) fn eval_asinh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
@@ -23550,6 +23589,29 @@ mod tests {
                 "cbrt at {idx}"
             );
         }
+    }
+
+    #[test]
+    fn simd_poly_tanh_large_dense_f64_matches_libm_tolerance() {
+        let n = SIMD_POLY_TANH_F64_MIN;
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i % 40_001) as f64 - 20_000.0) * 0.001)
+            .collect();
+        let input = tensor_f64(vec![n as u32], &data);
+        let got = extract_f64_vec(
+            &crate::eval_primitive(Primitive::Tanh, &[input], &BTreeMap::new()).unwrap(),
+        );
+        let mut max_abs = 0.0f64;
+        for (&x, &g) in data.iter().zip(&got) {
+            let want = x.tanh();
+            let abs = (g - want).abs();
+            max_abs = max_abs.max(abs);
+        }
+        eprintln!("[simd_poly_tanh] max_abs_err={max_abs:.3e} (oracle bar 1e-10)");
+        assert!(
+            max_abs < 1e-10,
+            "simd_poly_tanh max abs error {max_abs:.3e} exceeds the 1e-10 oracle tolerance"
+        );
     }
 
     #[test]
