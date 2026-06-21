@@ -5158,7 +5158,7 @@ fn apply_householder_left_with_scratch(
     }
     for (offset, &v_i) in v.iter().enumerate() {
         let base = (row_start + offset) * n + col_start;
-        for (m, &s) in matrix[base..base + width].iter_mut().zip(&scaled) {
+        for (m, &s) in matrix[base..base + width].iter_mut().zip(scaled.iter()) {
             *m -= s * v_i;
         }
     }
