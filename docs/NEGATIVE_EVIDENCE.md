@@ -17,7 +17,7 @@ routes to one of three gates.
 | **transcendental** (exp/erf/atan2/pow SIMD-poly) | **LOSS** | **`cntiy` +fma** (SIMD-poly exp = 2.20x WITH fma / 0.79x WITHOUT — cz0g0) + golden-digest bit-exactness |
 | softmax / attention (fused) | LOSS (feature gap) | **`cntiy` +fma** (built on GEMM+exp) |
 | **FFT pow2 / real / Bluestein-prime** | WIN (1.7-3x SoA) | none — shipped, near safe-Rust ceiling |
-| **FFT smooth-composite batch** (128x1000) | **LOSS 12.5x** | generated length-specialized kernels (big effort) OR a **quiesced host** (threading is a 0.4x no-ship under swarm contention; SoA-iterative 0.15x, Bluestein 0.39x all no-ship; butterflies already specialized) |
+| **FFT smooth-composite batch** (128x1000) | **LOSS 15.2x** | generated length-specialized kernels (big effort) OR a **quiesced host** (threading is a 0.4x no-ship under swarm contention; SoA-iterative 0.15x, specialized SoA 0.57x, Bluestein 0.39x all no-ship; butterflies already specialized) |
 | FFT pow2 batch dense (2048x256) | LOSS 3.83x | near safe-Rust ceiling (pocketfft SIMD-within-FFT needs AVX-512 + complex shuffles) |
 | eigh / SVD | (owned: `ur4h3`, WildForge) | — |
 
@@ -80,7 +80,64 @@ self-golden (the thing that forces a parity-relaxation decision) vs only a toler
   range-reduced kernel that first beats this scalar fast path in a same-binary A/B and keeps
   the 1e-10 oracle gate green.
 
+**FULL-WORKSPACE +fma VERIFICATION (2026-06-21, CrimsonOtter = cod-b, cntiy's assignee).**
+Built the WHOLE workspace with `+avx2,+fma` (local config edit, isolated dir, reverted — NOT
+committed; the shared-config flip of a deliberately-set flag affecting all agents is the
+explicit `[maintainer-decision]`, and the automated loop can't authorize it). Result:
+  - fj-lax: 1581 pass / 1 fail (the pre-existing cholesky_blocked drift — not +fma). GREEN.
+  - fj-conformance: 38 + 24 pass. GREEN.
+  - **fj-ad: `tests::proptest_tests::prop_jvp_matches_vjp_single` FAILED** under +fma (panic at
+    lib.rs:17604) — BUT it's a proptest (random inputs) and PASSED in a separate +fma fj-ad run
+    (403/0), so it's input-dependent: +fma makes forward-mode jvp and reverse-mode vjp (different
+    op orders) diverge enough to trip the assertion for SOME inputs.
+CONCLUSION: **+fma is NOT a clean drop-in.** Golden-safe for fj-lax/conformance, but the
+swarm-wide flip ALSO perturbs the AD jvp==vjp consistency invariant (on top of the exp/sin/log
+self-goldens). cntiy's true cost includes making the AD mode-equality property fma-consistent
+(or tolerance-loosened), not just the transcendental goldens. This is exactly why the flip is a
+maintainer decision and shouldn't be done blindly — my earlier fj-lax-ONLY +fma test missed it.
+Retry predicate before committing +fma: A/B the fj-ad jvp/vjp proptest with/without fma across
+many seeds to confirm it's a tolerance issue, not a real AD bug.
+
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
+
+## 2026-06-21 - frankenjax-murmw specialized iterative SoA FFT no-ship
+
+BOLD-VERIFY retried the requested generated-kernel direction as a narrow
+radical proxy: keep the flat iterative SoA mixed-radix schedule for
+`1000 = 2^3 * 5^3`, but replace each small O(r^2) stage DFT with the specialized
+radix-2/3/5 butterflies already proven in the recursive production kernel.
+
+Fresh production Rust baseline, per-crate through RCH with the cod-a target dir:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  eval/fft_batch_128x1000_complex128 \
+  --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot
+```
+
+RCH selected `ovh-a`; no local cargo build and no new `.scratch` worktree were
+created. Current Rust midpoint: **3.4978 ms** (`3.2761..3.6825 ms`). Fresh local
+JAX/JAXLIB 0.10.1 CPU x64 comparator using the exact `complex_matrix(128,1000)`
+fixture measured mean **0.230078 ms** and p50 **0.233834 ms** (30 runs x 100
+inner loops, `block_until_ready()`). Scorecard: **0 wins / 1 loss / 0 neutral**,
+Rust/JAX **15.20x** by mean.
+
+Same-binary RCH `hz2` A/B for the specialized iterative SoA candidate:
+
+```text
+[specialized mixed-radix iterative SoA 128x1000] 1T per-row=1.511ms specialized=2.668ms ratio=0.57x (min of 9 interleaved)
+```
+
+The candidate is **43% slower** than recursive mixed-radix and would still be
+**11.60x** the JAX mean even before full eval overhead. The temporary ignored
+bench harness was removed; no production source change remains. Retry predicate:
+do not repeat flat iterative SoA for `n=1000` without eliminating transpose /
+digit-reversal overhead. The next credible route is a truly generated
+length-specialized in-place/recursive `1000 = 2^3 * 5^3` kernel, or a
+quiesced-host threading proof.
 
 ## 2026-06-21 - frankenjax-ur4h3 fresh BOLD-VERIFY closes small-eigh lane
 
