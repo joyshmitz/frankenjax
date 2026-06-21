@@ -5763,3 +5763,16 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   hoist there would be unproven, measured-neutral scope creep, so left untouched.
   The fusion-chunk unary-dispatch family is exhausted: f32 shipped (294c836f,
   4.63x), f64 neutral-kept, i64/half no-action, sign dead-end.
+- DEAD-END 5 — f32 register-resident scalar-add-chain SIMD (the missing sibling
+  of f64's `apply_f64_scalar_adds_simd` / bead n75xr). Hypothesis: f64 fixed an
+  order-of-magnitude 1M-add-chain loss with a register-resident `Simd<f64,8>`
+  pass (all adds in registers, 1 memory round-trip vs N); f32 has no such path,
+  so its [1M,8M) add chains pay N passes in `apply_f32_fusion_chunk`. Same-binary
+  RCH A/B over 1M f32, `(+scalar)x8`, bit-identical to the per-step
+  `(f64(v)+c) as f32` reference: per_pass **1.2345 ms** vs register_simd
+  **2.8475 ms** = **0.43x (2.3x SLOWER)**. ROOT CAUSE: f32's widen-per-step
+  contract forces a `Simd<f32,8>`→`Simd<f64,8>`→add→`Simd<f32,8>` cast pair
+  (`vcvtps2pd`/`vcvtpd2ps`) on EVERY add of EVERY lane; those casts dominate and
+  negate the memory-pass savings. f64 wins precisely because its native contract
+  needs NO cast (`lanes += splat`). This is why n75xr was f64-only — the f32
+  "gap" is not a gap. Do not add an f32 scalar-add-chain SIMD path.
