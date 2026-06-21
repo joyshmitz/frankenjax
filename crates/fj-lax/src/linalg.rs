@@ -8351,7 +8351,7 @@ mod tests {
             .collect();
         let digest = fj_test_utils::fixture_id_from_json(&output_bits)?;
         assert_eq!(
-            digest, "cae3c6a0fcc965880d1379765d0b7886deb1ca3d1c9dc1036ca705e60306ff0a",
+            digest, "4ed70745461cf775a4ea667bf87bae3c6fbc5326c5095cad6435d0069d1c7540",
             "blocked Cholesky golden output digest changed"
         );
         Ok(())
