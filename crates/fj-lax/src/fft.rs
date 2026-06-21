@@ -1427,19 +1427,10 @@ fn transform_batches_dense(
     // radix-2 kernel. Capped at `BLUESTEIN_SOA_MAX_M` so the tile buffers stay
     // cache-warm. Bit-identical to per-row `BluesteinPlan::apply_into`.
     const BLUESTEIN_VECTORIZED_MIN_BATCH: usize = 8;
-    // Smooth composites are normally avoided here (per-row recursive mixed-radix is fewer
-    // flops for a single FFT), BUT for LARGE batched smooth composites the Bluestein SoA —
-    // whose two internal convolution FFTs are the flat radix-2 kernel that vectorizes across
-    // rows — beats the scalar per-row recursive path despite ~4x the flops. MEASURED
-    // 128x1000 (interleaved min-of-9): per-row 1.751ms vs Bluestein SoA 1.306ms = 1.34x
-    // kernel (correctness verified to tolerance); end-to-end eval/fft_batch_128x1000
-    // 2.465ms -> 2.216ms. Below the threshold, small smooth composites are already near JAX
-    // parity and keep the cheaper per-row path. See `bench_bluestein_soa_vs_per_row_smooth`.
-    const BLUESTEIN_SMOOTH_MIN_N: usize = 512;
     if n > 1
         && batch_size >= BLUESTEIN_VECTORIZED_MIN_BATCH
         && !n.is_power_of_two()
-        && (!is_mixed_radix_smooth(n) || n >= BLUESTEIN_SMOOTH_MIN_N)
+        && !is_mixed_radix_smooth(n)
         && (2 * n - 1).next_power_of_two() <= BLUESTEIN_SOA_MAX_M
     {
         let bplan = BluesteinPlan::new(n, inverse);
@@ -3103,11 +3094,17 @@ mod tests {
             })
             .collect();
 
+        // Both closures build their plan INSIDE the timed region — production
+        // `transform_batches_dense` builds the per-row mixed-radix roots / the `BluesteinPlan`
+        // ONCE per batch call, and the Bluestein plan (chirp + an m=2048 kernel FFT for n=1000)
+        // is far more expensive to build than the recursive roots. Excluding it (as an earlier
+        // pass did) wrongly favored Bluestein; including it is the production-realistic A/B.
         let run_old = || -> (u64, u64) {
             let mut out = vec![(0.0, 0.0); rows * n];
             let mut ob = Vec::new();
             let mut scr = Vec::new();
             let t0 = std::time::Instant::now();
+            let roots = precompute_twiddles(n, false);
             for b in 0..rows {
                 mixed_radix_into(&elements[b * n..b * n + n], &roots, false, &mut ob, &mut scr);
                 out[b * n..b * n + n].copy_from_slice(&ob);
@@ -3117,6 +3114,7 @@ mod tests {
         };
         let run_new = || -> (u64, u64) {
             let t0 = std::time::Instant::now();
+            let bplan = BluesteinPlan::new(n, false);
             let out = transform_batches_bluestein_vectorized(&bplan, &elements, n, rows);
             let dt = t0.elapsed().as_nanos() as u64;
             (dt, out[0].0.to_bits() ^ out[rows * n / 2].1.to_bits())
