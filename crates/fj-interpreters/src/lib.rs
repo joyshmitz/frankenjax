@@ -1782,6 +1782,31 @@ fn apply_fusion_other(
     }
 }
 
+/// Apply a unary `CheapOp` across `out` with the op-match hoisted ABOVE the element
+/// loop, so each arm is a monomorphic, vectorizable pass. Bit-identical to
+/// `out.iter_mut().for_each(|o| *o = f64_fused_unary(op, *o))`: same per-element op,
+/// same order. The in-loop form leaves the enum branch inside the loop body, which
+/// blocks autovectorization of the rounding ops (floor/ceil/trunc/round/sign) — the
+/// dominant cost of a fused unary chain (measured ~6-12x slower per pass than the
+/// statically-typed kernel). Hoisting recovers the SIMD `roundpd` form per arm.
+#[inline]
+fn apply_f64_unary_chunk(out: &mut [f64], op: CheapOp) {
+    match op {
+        CheapOp::Neg => out.iter_mut().for_each(|o| *o = -*o),
+        CheapOp::Abs => out.iter_mut().for_each(|o| *o = o.abs()),
+        CheapOp::Floor => out.iter_mut().for_each(|o| *o = o.floor()),
+        CheapOp::Ceil => out.iter_mut().for_each(|o| *o = o.ceil()),
+        CheapOp::Trunc => out.iter_mut().for_each(|o| *o = o.trunc()),
+        CheapOp::RoundAway => out.iter_mut().for_each(|o| *o = o.round()),
+        CheapOp::RoundNearest => out.iter_mut().for_each(|o| *o = o.round_ties_even()),
+        CheapOp::Sign => out.iter_mut().for_each(|o| *o = scalar_f64_sign(*o)),
+        // Binary ops never reach the unary path (callers guard on op.is_unary());
+        // mirror f64_fused_unary's binary arm (identity no-op) for exhaustiveness.
+        CheapOp::Add | CheapOp::Sub | CheapOp::Mul | CheapOp::Div | CheapOp::Max | CheapOp::Min => {
+        }
+    }
+}
+
 /// Evaluate the fused run over one chunk `out` (already sized to the chunk length).
 #[allow(clippy::eq_op)] // Chain/Chain must execute x-x and x/x to preserve NaN behavior.
 fn apply_fusion_chunk(out: &mut [f64], tape: &[FStep], ext: &[&[f64]], base: usize) {
@@ -1795,13 +1820,13 @@ fn apply_fusion_chunk(out: &mut [f64], tape: &[FStep], ext: &[&[f64]], base: usi
         FOperand::Chain => {}
     }
     match s0.op {
-        op if op.is_unary() => out.iter_mut().for_each(|o| *o = f64_fused_unary(op, *o)),
+        op if op.is_unary() => apply_f64_unary_chunk(out, op),
         _ => apply_fusion_other(out, s0.op, true, s0.b, ext, base),
     }
     for step in &tape[1..] {
         match step.op {
             op if op.is_unary() => {
-                out.iter_mut().for_each(|o| *o = f64_fused_unary(op, *o));
+                apply_f64_unary_chunk(out, op);
                 continue;
             }
             _ => {}
@@ -2154,13 +2179,6 @@ fn col_broadcast_cols(full: &Shape, candidate: &Shape) -> Option<usize> {
 }
 
 #[inline]
-fn f32_fused_unary(op: CheapOp, value: f32) -> f32 {
-    // Mirrors fj-lax dense f32 unary arithmetic: widen to f64, apply the op,
-    // then round back to f32 at every step.
-    f64_fused_unary(op, f64::from(value)) as f32
-}
-
-#[inline]
 fn seed_f32_row_broadcast(out: &mut [f32], row: &[f32], base: usize) {
     if out.is_empty() {
         return;
@@ -2426,6 +2444,40 @@ fn apply_f32_fusion_other(
     }
 }
 
+/// f32 sibling of [`apply_f64_unary_chunk`]: hoists the unary op-match above the
+/// element loop. Preserves the production widen-to-f64 contract
+/// (`f64_fused_unary(op, f64::from(v)) as f32`), so it is bit-identical to
+/// `out.iter_mut().for_each(|o| *o = f32_fused_unary(op, *o))` while letting each arm
+/// vectorize (widen → `roundpd` → narrow) instead of branching per element.
+#[inline]
+fn apply_f32_unary_chunk(out: &mut [f32], op: CheapOp) {
+    match op {
+        CheapOp::Neg => out.iter_mut().for_each(|o| *o = (-f64::from(*o)) as f32),
+        CheapOp::Abs => out.iter_mut().for_each(|o| *o = f64::from(*o).abs() as f32),
+        CheapOp::Floor => out
+            .iter_mut()
+            .for_each(|o| *o = f64::from(*o).floor() as f32),
+        CheapOp::Ceil => out
+            .iter_mut()
+            .for_each(|o| *o = f64::from(*o).ceil() as f32),
+        CheapOp::Trunc => out
+            .iter_mut()
+            .for_each(|o| *o = f64::from(*o).trunc() as f32),
+        CheapOp::RoundAway => out
+            .iter_mut()
+            .for_each(|o| *o = f64::from(*o).round() as f32),
+        CheapOp::RoundNearest => out
+            .iter_mut()
+            .for_each(|o| *o = f64::from(*o).round_ties_even() as f32),
+        CheapOp::Sign => out
+            .iter_mut()
+            .for_each(|o| *o = scalar_f64_sign(f64::from(*o)) as f32),
+        // Binary ops never reach the unary path (callers guard on op.is_unary()).
+        CheapOp::Add | CheapOp::Sub | CheapOp::Mul | CheapOp::Div | CheapOp::Max | CheapOp::Min => {
+        }
+    }
+}
+
 /// Evaluate the fused f32 run over one chunk `out` (already sized to the chunk length).
 #[allow(clippy::eq_op)] // Chain/Chain must execute x-x and x/x to preserve NaN behavior.
 fn apply_f32_fusion_chunk(out: &mut [f32], tape: &[F32Step], ext: &[&[f32]], base: usize) {
@@ -2445,13 +2497,13 @@ fn apply_f32_fusion_chunk(out: &mut [f32], tape: &[F32Step], ext: &[&[f32]], bas
         F32Operand::Chain => {}
     }
     match s0.op {
-        op if op.is_unary() => out.iter_mut().for_each(|o| *o = f32_fused_unary(op, *o)),
+        op if op.is_unary() => apply_f32_unary_chunk(out, op),
         _ => apply_f32_fusion_other(out, s0.op, true, s0.b, ext, base),
     }
     for step in &tape[1..] {
         match step.op {
             op if op.is_unary() => {
-                out.iter_mut().for_each(|o| *o = f32_fused_unary(op, *o));
+                apply_f32_unary_chunk(out, op);
                 continue;
             }
             _ => {}

@@ -5705,3 +5705,33 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   still a JAX loss. Retry predicate: stop boxed-literal fan-out work; next
   credible route needs vector range-reduced pow/atan2 or the broader `cntiy`
   target-feature/codegen lane.
+
+## CobaltForge / cc - f32 rounding-unary dead-ends behind the fusion-chunk win (2026-06-21)
+
+- Context: while landing the `apply_f32_fusion_chunk` op-match hoist (see the
+  release scorecard keep, floor/round/sign f32 chains +4.63x), two adjacent
+  hypotheses were measured and REJECTED. Recorded so they are not re-attempted.
+- DEAD-END 1 — direct-f32 `roundps` kernel for the single op. Hypothesis: the
+  serial f32 unary path widens `f32->f64->f64::floor->f32` (4-lane), so a native
+  `f32::floor` (`roundps`, 8-lane) should win and is bit-identical for the exact
+  integer-rounding ops. Same-binary RCH `ovh-a` A/B over 1M f32:
+  `floor_widen_single` **74.07 us** vs `floor_direct_single` **76.51 us**
+  (**1.03x SLOWER**); hot 4-chain `floor_widen_chain4` **223.8 us** vs
+  `floor_direct_chain4` **229.0 us** (**1.02x slower**). The widen path already
+  autovectorizes and is bandwidth-bound; the single-op kernel was NEVER the
+  bottleneck (74 us already beats JAX's ~104 us). The bottleneck is purely the
+  FUSED-chain dispatch, not the per-op kernel. Do not re-chase native-f32
+  rounding kernels.
+- DEAD-END 2 — hoisting the f64 fusion-chunk unary match. Same-binary RCH
+  `ovh-a` faithful 14-arm-match proxy, `(add,floor)x4` over 1M f64: in-loop
+  **1.8596 ms** vs hoisted **1.8639 ms** = **1.00x** (neutral). LLVM already
+  loop-unswitches the non-widening f64 path, so the f64 hoist yields nothing
+  (the f32 hoist wins only because the per-element `f64::from` widen + 14-arm
+  match together defeat vectorization). The f64 `apply_f64_unary_chunk` was kept
+  anyway for sibling symmetry + robustness against nightly unswitch drift; it is
+  bit-identical and measured-neutral, NOT a perf claim.
+- Also noted: f64 `floor`/`sign` 1M `_add_unary_chain` stay ~10.6/11.0 ms
+  because they route through the specialized
+  `f64_scalar_add_chain_input_and_literals` path, NOT `apply_fusion_chunk`, so
+  this hoist does not touch them. That is the next contained lever, not a
+  regression.

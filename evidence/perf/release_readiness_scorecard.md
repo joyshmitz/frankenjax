@@ -1506,3 +1506,46 @@ Additional cod-a FFT SoA gate recheck environment:
 - Next route: stop boxed-literal fan-out work. JAX-closing work needs vector
   range-reduced pow/atan2 or the broader `cntiy` target-feature/codegen policy
   path.
+
+## CobaltForge / cc - hoist unary op-match in f32 fusion chunk → 4.63x, closes floor/round/sign f32 chain gap (2026-06-21)
+
+- Kept a bit-identical hot-loop restructure in `fj-interpreters`: the fused
+  unary step in `apply_f32_fusion_chunk` / `apply_fusion_chunk` no longer calls
+  `f{32,64}_fused_unary(op, *o)` (a 14-arm `CheapOp` match) inside the
+  per-element closure. The op-match is hoisted ABOVE the element loop
+  (`apply_f{32,64}_unary_chunk`), so each arm is a monomorphic, vectorizable
+  pass. Same per-element op, same order, same widen-to-f64 f32 contract → proven
+  bit-identical.
+- Root cause: the in-loop 14-arm match (plus the f32 `f64::from` widen) blocks
+  LLVM autovectorization of the rounding ops (floor/ceil/trunc/round/sign), so
+  each fused unary pass ran scalar. The dense single-op f32 floor already
+  vectorizes (74 us/1M, faster than JAX); only the FUSED chain regressed.
+- Same-binary A/B (immune to cross-worker variance; faithful 14-arm-match proxy,
+  `(add,floor)x4` over 1M f32, RCH `ovh-a`):
+  - f32 in_loop_match **4.8228 ms** vs hoisted_match **1.0415 ms** = **4.63x**.
+  - f64 in_loop_match **1.8596 ms** vs hoisted_match **1.8639 ms** = **1.00x**
+    (LLVM already unswitches the non-widening f64 path; the f64 hoist is kept for
+    symmetry/robustness against nightly drift, measured-neutral, bit-identical).
+- Production RCH Criterion `compiled_dispatch_speed -- _add_unary_chain`
+  (candidate, eager): `floor_f32` **901.85 us**, `round_f32` **663.33 us**,
+  `sign_f32` **1.5529 ms** — vs the prior recorded baselines `floor_f32`
+  **8.0347 ms** (later 4.17 ms), `round_f32` **4.6730 ms**, `sign_f32`
+  **5.5279 ms**. floor_f32 cut ~4.6x, consistent with the same-binary ratio.
+- JAX comparator (recorded `frankenjax-xjbvr` profiling): `floor_f32_1m`
+  **103.966 us** mean. Retained Rust/JAX for the floor_f32 chain improves from
+  **~40x loss to ~8.7x loss** — still a JAX loss, kept because the same-binary
+  Rust speedup is large and bit-identical (same disposition as the atan2/pow
+  threading keeps), not because the row dominates JAX.
+- Scorecard delta: **0 wins / 1 loss / 0 neutral** vs JAX (floor_f32 chain);
+  candidate disposition **1 kept / 0 reverted**.
+- Gates: RCH `fj-interpreters` fusion tests **15/15** incl.
+  `fusion_floor_ceil_trunc_round_sign_chains_match_unfused_reference`; full
+  `fj-interpreters --lib` **211 passed** (the lone failure
+  `scalar_arena_transcendentals_bit_identical_to_generic` / `Cbrt(-5)` is
+  PRE-EXISTING on clean HEAD, unrelated to fusion); `fj-conformance --lib`
+  **45/45**; `rustfmt --check` on `lib.rs` clean; `cargo clippy -p
+  fj-interpreters` clean.
+- Next route: the f64 floor/sign chains stay ~10 ms because they take the
+  specialized `f64_scalar_add_chain_input_and_literals` path (NOT
+  `apply_fusion_chunk`); applying the same hoist there is the next contained
+  lever. Half (bf16/f16) unary chunk is decode-bound and untouched.
