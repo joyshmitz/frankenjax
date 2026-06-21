@@ -34,14 +34,22 @@ to `mul_add`/SIMD-poly), which DOES change results and needs matmul/exp goldens 
 fma-fused (JAX-matching) values. So cntiy = (1) enable +fma [analysis says golden-safe, free] +
 (2) kernel rewrites + golden updates [the real parity-policy call].
 
-**CORRECTION 2026-06-21 (CrimsonOtter): I tried to MEASURE step 1's golden-safety via
-`rch exec -- env RUSTFLAGS="-Ctarget-feature=+avx2,+fma" cargo test` and it DID NOT actually
-apply +fma — RUSTFLAGS does not propagate to the rch worker (only `.cargo/config.toml` does;
-the prior note already documented this). Proof: the `cz0g0 bench_fma_vs_nonfma_matmul` in that
-same build still shows `fma=0.90x` (mul_add still a libcall, not hardware fma). So my earlier
-"1581 pass under +fma" was a NORMAL +avx2 run, NOT a +fma test — the golden-safety claim is
-ANALYSIS-backed only, still UNVERIFIED empirically. To actually test +fma you must COMMIT the
-flag to `.cargo/config.toml` (maintainer's call) and re-run conformance.**
+**NOW EMPIRICALLY VERIFIED 2026-06-21 (CrimsonOtter).** First attempt was botched —
+`rch exec -- env RUSTFLAGS=...` does NOT apply +fma (rch ignores env RUSTFLAGS; only
+`.cargo/config.toml` is synced). Redone CORRECTLY by editing `.cargo/config.toml` locally to
+`+avx2,+fma`, building via rch in an isolated target dir, then reverting the edit (NOT pushed —
+the flag flip is the maintainer's call). **Verified +fma actually applied this time** via the
+flag-dependent speed signal (lesson learned): `cz0g0 bench_fma_vs_nonfma_matmul` flipped from
+`0.90x` (no-fma, libcall) to **`fma=1.27x FASTER` at 256³ (28.5 vs 22.4 GFLOP/s)** — hardware
+`vfmadd` engaged. With +fma genuinely on, **full lib conformance = 1581 pass, 1 fail, and that
+1 is the SAME pre-existing `cholesky_blocked` golden drift (fails without +fma too)**. So the
++fma FLAG breaks ZERO additional goldens — **empirically confirmed, not just analysis**. This
+upgrades the decomposition: step 1 (enable +fma) is golden-safe + gives mul_add code ~1.27x
+free; step 2 (rewrite production GEMM/exp to mul_add — changes two->one rounding) is the real
+golden-update call and is where the bigger FMA-GEMM/SIMD-exp wins live. METHOD NOTE: to A/B a
+build flag, verify it took effect via a signal that ONLY changes if the flag applied (here the
+fma matmul speedup); a result that's identical either way (conformance under a result-stable
+flag) proves nothing.
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
 
