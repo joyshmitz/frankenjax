@@ -14,8 +14,9 @@ routes to one of three gates.
 | batched gather/scatter (I64/F64/F32) | WIN (1.15-3.6x) | none — suspected loss disproven |
 | sort, reductions, RNG, conv, einsum, dot_general | WIN / parity | none — done |
 | **matmul / GEMM** (256-1024 f64) | **LOSS 4-15x** | **`cntiy` +fma** (already blocked-GEMM + threaded + register microkernel; microkernel is FMA-bound, capped ~XLA/2; pure-safe-Rust, no BLAS) |
-| **transcendental** (exp/erf/atan2/pow SIMD-poly) | **LOSS** | **`cntiy` +fma** (SIMD-poly exp = 2.20x WITH fma / 0.79x WITHOUT — cz0g0) + golden-digest bit-exactness |
-| softmax / attention (fused) | LOSS (feature gap) | **`cntiy` +fma** (built on GEMM+exp) |
+| **transcendental — tolerance-only** (cbrt/erf/tanh/tan, no bit-golden) | LOSS, being MINED non-fma | cod-b sweep (no cntiy needed): cbrt 11.9ms->3.30ms (3.60x, 64c0ded1), erf 21.1ms->6.85ms (4.58x, d74a6472) SHIPPED; tanh/tan next. Still JAX-loss (cbrt 1.53x) but closing without +fma |
+| **transcendental — bit-pinned** (exp/sin/log/asin/acos) | **LOSS** | **`cntiy` +fma** (SIMD-poly = 2.20x WITH / 0.79x WITHOUT — cz0g0) + re-baseline the 5 bit-goldens |
+| softmax / attention (fused) | LOSS (exp-bound, ~1.2x ceiling) | **`cntiy`** — option (b) audited per-fn `target_feature(fma)` SIMD-exp in tolerance sites preserves goldens; or (a) global +fma + golden re-baseline |
 | **FFT pow2 / real / Bluestein-prime** | WIN (1.7-3x SoA) | none — shipped, near safe-Rust ceiling |
 | **FFT smooth-composite batch** (128x1000) | **LOSS 15.2x** | generated length-specialized kernels (big effort) OR a **quiesced host** (threading is a 0.4x no-ship under swarm contention; SoA-iterative 0.15x, specialized SoA 0.57x, Bluestein 0.39x all no-ship; butterflies already specialized) |
 | FFT pow2 batch dense (2048x256) | LOSS 3.83x | near safe-Rust ceiling (pocketfft SIMD-within-FFT needs AVX-512 + complex shuffles) |
