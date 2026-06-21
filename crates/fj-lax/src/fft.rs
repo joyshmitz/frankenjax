@@ -1007,9 +1007,12 @@ fn mixed_radix_into(
 }
 
 /// Convolution-length ceiling for the SoA Bluestein path. The two internal pow2
-/// FFTs are the proven flat radix-2 kernel (`vectorized_pow2_block`), but the
-/// Bluestein tile needs several `tile*m` buffers; cap `m` so they stay cache-warm.
-const BLUESTEIN_SOA_MAX_M: usize = 4096;
+/// FFTs are the proven flat radix-2 kernel (`vectorized_pow2_block`); the win is
+/// robust ~3x across the whole measured range (m=256..16384, see
+/// `bench_vectorized_bluestein_vs_per_row`) because flat radix-2 vectorizes
+/// regardless of size. Capped at the largest measured-winning `m`; raising further
+/// is plausible but unverified.
+const BLUESTEIN_SOA_MAX_M: usize = 16384;
 const BLUESTEIN_TILE_ROWS: usize = 4;
 
 /// Cache-blocked batched Bluestein FFT/IFFT via the SoA kernel: the chirp pre/post
@@ -2608,7 +2611,7 @@ mod tests {
         let bits = |v: &[(f64, f64)]| -> Vec<(u64, u64)> {
             v.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect()
         };
-        for &n in &[3usize, 7, 11, 13, 17, 23, 127, 257, 1009] {
+        for &n in &[3usize, 7, 11, 13, 17, 23, 127, 257, 1009, 4099] {
             for inverse in [false, true] {
                 let plan = BluesteinPlan::new(n, inverse);
                 for &batch in &[1usize, 3, 4, 8, 11] {
@@ -2643,7 +2646,7 @@ mod tests {
     #[test]
     #[ignore = "informational micro-bench; run with --ignored --nocapture"]
     fn bench_vectorized_bluestein_vs_per_row() {
-        for &(n, rows) in &[(127usize, 2048usize), (1009usize, 256usize)] {
+        for &(n, rows) in &[(127usize, 2048usize), (1009usize, 256usize), (4099usize, 128usize)] {
             let plan = BluesteinPlan::new(n, false);
             let elements: Vec<(f64, f64)> = (0..rows * n)
                 .map(|i| {
