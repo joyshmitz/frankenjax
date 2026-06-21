@@ -5743,3 +5743,14 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   already go through `apply_fusion_chunk`; there is NO separate slow f64 path and
   NO f64 fusion-chunk lever. `sign` is the slowest unary (branchy
   `scalar_f64_sign` doesn't SIMD) — low-EV branchless-copysign micro-lever only.
+- DEAD-END 4 — vectorize `sign` in the fusion-chunk unary step. Hypothesis: a
+  branchless `(v==0 || v!=v) ? v : 1.0.copysign(v)` would SIMD where the branchy
+  `scalar_f64_sign` (is_nan + 2 compares) does not. Same-binary RCH A/B over 1M
+  f64 (bit-identical to `scalar_f64_sign` on NaN/±0/±inf/normal, asserted):
+  branchy **0.9683 ms** vs branchless-scalar **0.9733 ms** = **0.99x** (the `if`
+  keeps it scalar — NO win). The only vectorizing form is explicit `std::simd`
+  masks, which hit the documented nightly trait-location drift
+  (`StdFloat::copysign` / `Mask::select` unresolved on the current toolchain) —
+  exactly the fragility that has put main RED before. REJECTED: a fragile SIMD
+  mask kernel for a RARE op (sign chains; xjbvr noted only quantization/bucketing
+  use them) already sub-ms is poor EV. Do not re-chase sign vectorization.
