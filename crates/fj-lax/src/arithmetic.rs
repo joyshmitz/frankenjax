@@ -9402,6 +9402,61 @@ pub(crate) fn trigamma_approx(x: f64) -> f64 {
         + 5.0 * inv11 / 66.0
 }
 
+/// Stable erf used ONLY inside `erf_inv_approx`'s Newton refinement. It is pinned to the
+/// pre-`d74a6472` series so `erf_inv` (and thus `random_normal`'s bit-exact RNG golden) stay
+/// independent of the production `erf_approx`, whose last-bit-changing fast-path optimizations
+/// otherwise propagate through the 3 Newton iterations and break `random_normal_threaded_golden_sha256`
+/// (regression caught 2026-06-21; see NEGATIVE_EVIDENCE.md). Keep this decoupled from `erf_approx`.
+fn erf_for_erfinv(x: f64) -> f64 {
+    use std::f64::consts::FRAC_2_SQRT_PI; // 2/√π
+    if x == 0.0 {
+        return x;
+    }
+    if x.is_nan() {
+        return f64::NAN;
+    }
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+    if ax < 3.5 {
+        let x2 = ax * ax;
+        let mut term = ax;
+        let mut sum = ax;
+        let mut n = 1.0_f64;
+        loop {
+            term *= -x2 / n * (2.0 * n - 1.0) / (2.0 * n + 1.0);
+            sum += term;
+            if term.abs() <= sum.abs() * f64::EPSILON || n > 200.0 {
+                break;
+            }
+            n += 1.0;
+        }
+        sign * FRAC_2_SQRT_PI * sum
+    } else if ax < 6.0 {
+        let x2 = ax * ax;
+        let mut term = 1.0_f64;
+        let mut sum = 1.0_f64;
+        let mut prev_abs = f64::INFINITY;
+        let mut n = 1.0_f64;
+        loop {
+            term *= -(2.0 * n - 1.0) / (2.0 * x2);
+            let mag = term.abs();
+            if mag > prev_abs {
+                break;
+            }
+            sum += term;
+            prev_abs = mag;
+            if mag <= f64::EPSILON || n > 100.0 {
+                break;
+            }
+            n += 1.0;
+        }
+        let erfc = (-x2).exp() / (ax * std::f64::consts::PI.sqrt()) * sum;
+        sign * (1.0 - erfc)
+    } else {
+        sign
+    }
+}
+
 pub(crate) fn erf_inv_approx(x: f64) -> f64 {
     if x.is_nan() {
         return f64::NAN;
@@ -9428,7 +9483,7 @@ pub(crate) fn erf_inv_approx(x: f64) -> f64 {
 
     let coeff = 2.0 / std::f64::consts::PI.sqrt();
     for _ in 0..3 {
-        let err = erf_approx(y) - x;
+        let err = erf_for_erfinv(y) - x;
         let deriv = coeff * (-y * y).exp();
         y -= err / deriv;
     }
