@@ -269,6 +269,15 @@ symmetry (X_a[k]=(Z[k]+conj(Z[N-k]))/2, X_b[k]=(Z[k]-conj(Z[N-k]))/(2i)). That h
 transforms — cost-equivalent to the n/2 single-signal packing. So BOTH rfft paths are mined. The
 ONLY residual is a LONE non-pow2 row (rows=1, can't pair → transformed full-length); the n/2 packing
 would halve just that, a niche single-row case. Do not re-attempt rfft packing (pow2 or batched).
+ASSESSED DEEPER (2026-06-21): generalizing `RealRfftPower2Plan`'s `half_fft` from `Radix2Plan` to a
+non-pow2 n/2 FFT is clean (the `apply_into` pack at fft.rs:499-505 + unpack at 509-525 are already
+n-generic; only the half-FFT is pow2-bound). BUT the win is narrow AND plan-build-hazard-prone: the
+single-row path would need a per-CALL half-length plan, and for prime-ish n/2 that's a Bluestein
+setup that DOMINATES the transform (cf. the smooth-Bluestein no-ship above — per-call plan build eats
+the win). So ~2x only materializes for SMOOTH non-pow2-even n where the n/2 FFT (not the plan) is the
+cost — a minority(single-row) × minority(non-pow2) × smooth corner. DEFER: low EV, real plan-build
+hazard, intricate FFT code (subtle-bug risk) for a corner case. The pow2 + batched paths cover the
+common rfft usage and are already packed.
 
 **THREADING smooth-composite batch = NO-SHIP under contention (2026-06-21, CrimsonOtter,
 823bba8b).** `fft_batch_128x1000` (128_000 elems) runs single-thread — below the per-row
