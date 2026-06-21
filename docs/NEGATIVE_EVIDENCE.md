@@ -107,7 +107,7 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
 | scatter-add 1M f64 1D | **LOSS 2.74x vs JAX** after 3.07x Rust-side keep | next needs lower-allocation bucket build or safe parallel direct writes; unique atomic branch regressed |
 | sort, reductions, RNG, conv, einsum, dot_general | WIN / parity | none — done |
 | **matmul / GEMM** (256-1024 f64) | **LOSS 4-15x** | **`cntiy` +fma** (already blocked-GEMM + threaded + register microkernel; microkernel is FMA-bound, capped ~XLA/2; pure-safe-Rust, no BLAS) |
-| **transcendental — tolerance-only** (cbrt/erf/tanh/tan, no bit-golden) | MIXED: cbrt/erf/tanh still LOSS; guarded small-angle tan now WIN | cod-b sweep (no cntiy needed): cbrt 11.9ms->3.30ms (3.60x, 64c0ded1), erf 21.1ms->6.85ms (4.58x, d74a6472), tanh 6.20ms->4.27ms (1.45x), small-angle tan 4.69ms->1.11ms (4.21x; 1.27x faster than JAX) SHIPPED. General-range tan still falls back to `libm`; remaining losses are exp/FMA-gated or need true SIMD-polynomial range reduction |
+| **transcendental — tolerance-only** (cbrt/erf/tanh/tan/atan2, no bit-golden) | MIXED: cbrt/erf/tanh/atan2 still LOSS; guarded small-angle tan now WIN | cod-b sweep (no cntiy needed): cbrt 11.9ms->3.30ms (3.60x, 64c0ded1), erf 21.1ms->6.85ms (4.58x, d74a6472), tanh 6.20ms->4.27ms (1.45x), small-angle tan 4.69ms->1.11ms (4.21x; 1.27x faster than JAX), scalar atan2 30.35ms->14.00ms (2.17x internal, still 120x slower than JAX) SHIPPED. General-range tan still falls back to `libm`; remaining losses are exp/FMA-gated or need true SIMD-polynomial range reduction |
 | **transcendental — bit-pinned** (exp/sin/log/asin/acos) | **LOSS** | **`cntiy` +fma** (SIMD-poly = 2.20x WITH / 0.79x WITHOUT — cz0g0) + re-baseline the 5 bit-goldens |
 | softmax / attention (fused) | LOSS (exp-bound, ~1.2x ceiling) | **`cntiy`** — option (b) audited per-fn `target_feature(fma)` SIMD-exp in tolerance sites preserves goldens; or (a) global +fma + golden re-baseline |
 | **FFT pow2 / real** | WIN (1.7-3x SoA) | none — shipped, near safe-Rust ceiling |
@@ -1614,3 +1614,43 @@ FIX (linalg owner's one-liner, I'm not editing their collision-zone file): at li
 with the current verified-correct output digest
   "4ed70745461cf775a4ea667bf87bae3c6fbc5326c5095cad6435d0069d1c7540"
 That restores fj-lax to fully GREEN (it's the only non-cholesky-digest failure). Flagged WildForge.
+
+## 2026-06-21 - frankenjax-cntiy scalar atan2 threading keep, but JAX still dominates
+
+`frankenjax-cntiy` was probed for a non-FMA sub-gap after the small-angle tan
+win. The radical route from `/alien-graveyard` and `/extreme-software-optimization`
+is to stop paying scalar `libm` cost per element; the first legal lever was to
+remove the stale f64 scalar-Atan2 exclusion from the existing expensive
+scalar-broadcast threaded path. This preserves the exact lane operation
+(`f64::atan2`) and operand order, so bits do not change.
+
+Same-worker RCH `vmi1293453`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b`,
+Criterion filter `atan2_scalar_1m_f64_vec`:
+
+| Row | Midpoint | Ratio |
+| --- | ---: | ---: |
+| Baseline `eval/atan2_scalar_1m_f64_vec` | 30.351 ms | 1.00 |
+| Kept threaded route, full `atan2` filter | 12.769 ms | 0.421 |
+| Kept threaded route, scalar-only confirm | 13.998 ms | 0.461 |
+
+Fresh JAX/JAXLIB 0.10.2 CPU x64 comparator for the same 1M f64 fixture
+(`jnp.atan2(a, 3.25)`) measured mean **0.116833 ms**, p50 **0.096482 ms**,
+p95 **0.175232 ms**. The kept Rust route is therefore still **119.8x** slower
+than JAX by confirmed midpoint/mean, even though it is **2.17x** faster than
+the old Rust route.
+
+Correctness/conformance:
+- RCH `vmi1149989` `cargo test -p fj-lax atan2 --release -- --nocapture`
+  passed **4/4**.
+- RCH `vmi1152480` `cargo test -p fj-conformance --test atan2_oracle
+  --release -- --nocapture` passed **40/40**.
+- RCH `vmi1152480` full `cargo test -p fj-conformance --release --
+  --nocapture` passed the full crate and doc-test suite.
+
+Decision: keep the bit-identical scalar-broadcast threading because it is a
+measured 2.17x internal win. Scorecard versus JAX for this row remains
+**0 wins / 1 loss / 0 neutral**. Retry predicate: do not spend another pass on
+thread-count tuning for scalar Atan2; JAX is using a vectorized kernel. The next
+credible route is a safe portable-SIMD/range-reduced atan2 approximation with
+`atan2_oracle` tolerance proof, or the broader `cntiy` target-feature/codegen
+policy lane.

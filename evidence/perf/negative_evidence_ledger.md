@@ -5584,3 +5584,39 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
 - Retry predicate: do not widen the guard without a real SIMD/range-reduction
   proof. The remaining transcendental route is true vector polynomial range
   reduction or the still-open `cntiy` target-feature/FMA policy decision.
+
+## CrimsonOtter / cod-b - cntiy scalar atan2 threading keep, still JAX loss (2026-06-21)
+
+- Scope: `frankenjax-cntiy`, non-FMA transcendental sub-gap after the guarded
+  tan win. This does not resolve the parent +fma/target-feature decision.
+- Alien-graveyard/artifact/optimization hypothesis: stop serializing a
+  million independent scalar `libm` calls when operand order is lane-local.
+  The kept lever removes the f64 scalar `Atan2` exclusion from the existing
+  expensive scalar-broadcast threaded path. It preserves the exact per-lane
+  `f64::atan2` operation and operand order, so output bits are unchanged.
+- Same-worker RCH `vmi1293453`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b`,
+  per-crate Criterion:
+  - Baseline `eval/atan2_scalar_1m_f64_vec`: **30.351 ms** midpoint.
+  - Kept route in full `atan2` filter: **12.769 ms** midpoint
+    (`11.636..13.661 ms`), **2.38x** faster than baseline.
+  - Scalar-only confirmation: **13.998 ms** midpoint (`12.129..15.295 ms`),
+    **2.17x** faster than baseline.
+- Fresh JAX/JAXLIB 0.10.2 CPU x64 comparator, exact fixture
+  `jnp.atan2(a, 3.25)` over 1M f64 with 20 warmups + 200 timed `jax.jit`
+  calls: mean **0.116833 ms**, p50 **0.096482 ms**, p95 **0.175232 ms**.
+  Confirmed Rust/JAX ratio is **119.8x**. The old Rust route was **259.8x**,
+  so this narrows the loss but does not approach domination.
+- Correctness gates:
+  - RCH `vmi1149989` `cargo test -p fj-lax atan2 --release -- --nocapture`
+    passed **4/4**.
+  - RCH `vmi1152480` `cargo test -p fj-conformance --test atan2_oracle
+    --release -- --nocapture` passed **40/40**.
+  - RCH `vmi1152480` full `cargo test -p fj-conformance --release --
+    --nocapture` passed the full crate suite and doc-tests.
+- Scorecard: **0 wins / 1 loss / 0 neutral** versus JAX for this row;
+  candidate disposition **1 kept / 0 reverted** because the same-worker Rust
+  improvement is large and bit-identical.
+- Retry predicate: do not repeat scalar Atan2 thread-count tuning. The next
+  credible radical route is a safe portable-SIMD/range-reduced atan2
+  approximation with an `atan2_oracle` tolerance proof, or the broader `cntiy`
+  target-feature/codegen policy work.

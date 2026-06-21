@@ -1451,3 +1451,29 @@ Additional cod-a FFT SoA gate recheck environment:
   **1 kept / 0 reverted**. Parent `frankenjax-cntiy` remains open because the
   +fma/target-feature policy still gates exp, softmax/attention, GEMM, and
   general SIMD transcendental range reduction.
+
+## CrimsonOtter / cod-b - cntiy scalar atan2 threads, but remains JAX loss (2026-06-21)
+
+- Kept a bit-identical route change: dense F64 `tensor atan2 scalar` and
+  `scalar atan2 tensor` now use the existing expensive scalar-broadcast
+  threaded path instead of the stale serial exception. Per-lane operation and
+  operand order remain `f64::atan2`.
+- Same-worker RCH `vmi1293453`, per-crate Criterion, exact
+  `eval/atan2_scalar_1m_f64_vec` fixture:
+  - Baseline midpoint **30.351 ms**.
+  - Kept route midpoint **12.769 ms** in the full `atan2` filter.
+  - Scalar-only confirmation midpoint **13.998 ms** (`12.129..15.295 ms`).
+  - Confirmed Rust-side speedup: **2.17x**.
+- Fresh JAX/JAXLIB 0.10.2 CPU x64 comparator for `jnp.atan2(a, 3.25)` over the
+  same 1M f64 fixture: mean **0.116833 ms**, p50 **0.096482 ms**, p95
+  **0.175232 ms**.
+- Scorecard delta: **0 wins / 1 loss / 0 neutral** vs JAX for this row. The
+  confirmed retained Rust/JAX ratio is **119.8x**; before this lever it was
+  **259.8x**. Candidate disposition **1 kept / 0 reverted** because the Rust
+  speedup is large and bit-identical, not because it dominates JAX.
+- Gates: RCH `fj-lax atan2` passed **4/4**, RCH `atan2_oracle` passed
+  **40/40**, and full RCH `fj-conformance --release` passed the full crate
+  suite and doc-tests.
+- Next route: stop scalar fan-out tuning. The credible JAX-closing lever is a
+  safe portable-SIMD/range-reduced atan2 kernel with tolerance proof, or the
+  broader `cntiy` target-feature/codegen policy path.

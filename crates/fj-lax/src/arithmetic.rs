@@ -173,12 +173,6 @@ fn eval_f64_scalar_expensive_parallel(
     if !is_expensive_binary(primitive) {
         return None;
     }
-    // Scalar Atan2 is libm-call dominated but does not amortize scoped thread
-    // fan-out on current workers; keep it on the dense serial map below while
-    // preserving the same per-lane f64::atan2 operation and operand order.
-    if primitive == Primitive::Atan2 {
-        return None;
-    }
     let Literal::F64Bits(scalar_bits) = scalar else {
         return None;
     };
@@ -18207,7 +18201,9 @@ mod tests {
     /// reference (same float op, same operand order). Covers `x ** 2.5`.
     #[test]
     fn threaded_expensive_binary_scalar_bit_identical_to_reference() {
-        let n = 1usize << 16;
+        // Above 1 chunk so `work_scaled_threads` actually fans out and proves
+        // the scalar-broadcast threaded route, including Atan2.
+        let n = EXPENSIVE_BINARY_PARALLEL_MIN * 2 + 17;
         let t: Vec<f64> = (0..n).map(|i| 1.0 + (i % 97) as f64 * 0.01).collect();
         let vt = v_f64(&t);
         let s = 2.5f64;
@@ -18251,7 +18247,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_f64_scalar_atan2_serial_route_preserves_bits_and_golden() {
+    fn dense_f64_scalar_atan2_route_preserves_bits_and_golden() {
         let n = EXPENSIVE_BINARY_PARALLEL_MIN + 17;
         let mut data: Vec<f64> = (0..n)
             .map(|i| ((i as f64) * 0.0078125 - 257.0).sin() * 32.0)
