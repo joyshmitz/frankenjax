@@ -51,6 +51,23 @@ build flag, verify it took effect via a signal that ONLY changes if the flag app
 fma matmul speedup); a result that's identical either way (conformance under a result-stable
 flag) proves nothing.
 
+**THE TRANSCENDENTAL GOLDEN-GATE IS OP-SPECIFIC (2026-06-21, CrimsonOtter) — +fma unlocks
+MORE than thought, with LESS parity risk.** Audited which transcendentals carry a bit-exact
+self-golden (the thing that forces a parity-relaxation decision) vs only a tolerance oracle:
+  - **BIT-PINNED (need golden relaxation):** `exp`, `sin`, `log`, `asin`, `acos`
+    (`expected_*_bits` self-golden digest, arithmetic.rs ~19651).
+  - **TOLERANCE-ONLY (NO bit-golden — only `*_oracle.rs` tolerance + special-value exactness):**
+    `erf`, `tanh`, `tan`, `cbrt`, `cos` (each: 0 bit-golden refs).
+  Consequence: once `+fma` is committed (proven golden-safe above), a SIMD-poly version of the
+  TOLERANCE-ONLY transcendentals can ship with NO golden-relaxation decision at all — and `erf`
+  is HOT (12 nn.rs refs; it's the gelu kernel), `tanh` is a common activation. So step-1 (+fma)
+  alone unlocks a meaningful, parity-clean chunk (erf/tanh/tan/cbrt SIMD), deferring the harder
+  golden-relaxation to just exp/sin/log/asin/acos. Strengthens the +fma-commit case: the upside
+  half (erf/gelu, tanh) needs no parity-policy call. REMAINING WORK on that half = implement the
+  SIMD-poly kernels (only simd_exp exists today); measured: these are scalar libm libcalls today
+  (cbrt 9.4ms/1M vs sqrt's autovectorized 0.54ms), so the SIMD win is real but fma-gated (the
+  poly is fma-bound like exp's 2.2x/0.79x).
+
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
 
 ## 2026-06-21 - frankenjax-ur4h3 fresh BOLD-VERIFY closes small-eigh lane
