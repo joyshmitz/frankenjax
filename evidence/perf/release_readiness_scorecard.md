@@ -8,6 +8,26 @@ unmeasured `code-first batch-test pending` entries remain outside the score.
 
 ## Current BOLD-VERIFY Notes
 
+### cod-a - mcqr cumsum blocked-prefix no-ship (2026-06-21)
+
+- Status: rejected and reverted before perf admission. The attempted single-line
+  f64 blocked prefix-scan split one 4M cumsum line into thread-local scans and
+  applied exclusive block offsets, but exceeded the large-input tolerance gate.
+- Failed RCH proof: `cargo test -p fj-lax
+  blocked_dense_f64_single_line_cumulative_matches_serial_reference --release`
+  on `ovh-a` failed with **cumsum drift 9.313225746154785e-10 > 1e-10**.
+- Revert proof: `cargo test -p fj-lax
+  large_dense_f64_cumsum_single_line_matches_literal_path --release` passed 1/1
+  on `ovh-a`; `cargo test -p fj-conformance --test cumulative_oracle --release`
+  passed **45/45** on `vmi1152480`.
+- Scorecard for this row: **0 wins / 1 loss / 0 neutral**. Current production
+  cumsum row remains **JAX 14.1 ms vs fj-lax 30.3 ms = 2.15x Rust loss**; the
+  blocked-prefix candidate has no admitted speed ratio because it failed
+  correctness.
+- Next route must be an accuracy-bounded/compensated blocked prefix or
+  JAX-like associative scan, with the large 1D f64 accuracy gate passed before
+  timing.
+
 ### cod-b - cntiy erf rational fast path (2026-06-21)
 
 - Status: retained production narrowing lever, but not a JAX win. `Primitive::Erf`

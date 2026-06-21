@@ -3,6 +3,77 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-mcqr - blocked f64 cumsum prefix-scan no-ship
+
+- Date: 2026-06-21
+- Agent: cod-a / CrimsonOtter
+- Status: CORRECTNESS REJECT / REVERTED. The blocked single-line f64 cumulative
+  path was removed from `crates/fj-lax/src/reduction.rs`; no production source
+  change remains after the revert commit.
+- Target gap: `eval/cumsum_4m_f64_1d`, the new 4M 1D cumsum loss in the umbrella
+  `frankenjax-mcqr` no-gaps bead.
+- Alien-graveyard/extreme-optimization route:
+  - Candidate family: parallel prefix/scan scheduling to break the scalar f64
+    dependency chain that keeps the current dense scan at about 30ms while JAX
+    uses a reassociated scan around 14ms.
+  - Implemented lever: split one long f64 line into thread-local scans, compute
+    exclusive block offsets, then apply offsets in parallel.
+  - EV decision: reject before perf admission. The candidate's reassociation
+    exceeded the documented large-input cumsum tolerance, so no benchmark ratio
+    is accepted for this code.
+
+Failed candidate proof:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 \
+RCH_QUEUE_WHEN_BUSY=1 \
+  rch exec -- cargo test -p fj-lax \
+  blocked_dense_f64_single_line_cumulative_matches_serial_reference \
+  --release -- --nocapture
+```
+
+- RCH worker: `ovh-a`; result: **failed**.
+- Failure: `Cumsum blocked single-line scan drift 9.313225746154785e-10 > 1e-10`.
+
+Revert proof:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 \
+RCH_QUEUE_WHEN_BUSY=1 \
+  rch exec -- cargo test -p fj-lax \
+  large_dense_f64_cumsum_single_line_matches_literal_path \
+  --release -- --nocapture
+```
+
+- RCH worker: `ovh-a`; result: 1 focused `fj-lax` test passed.
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 \
+RCH_QUEUE_WHEN_BUSY=1 \
+  rch exec -- cargo test -p fj-conformance --test cumulative_oracle \
+  --release -- --nocapture
+```
+
+- RCH worker: `vmi1152480`; result: 45 `cumulative_oracle` tests passed.
+
+Ratio-vs-JAX ledger:
+
+| workload | Rust current | JAX comparator | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | --- |
+| `eval/cumsum_4m_f64_1d`, production dense scan | 30.3 ms | 14.1 ms | 2.15 | current JAX loss remains |
+| blocked prefix-scan candidate | not admitted | 14.1 ms | n/a | rejected on correctness |
+
+Retry predicate: the next cumsum route must prove the large 1D f64 accuracy gate
+before timing. Likely routes are a compensated blocked prefix, an error-bounded
+pairwise prefix tree, or a JAX-like associative scan with explicit tolerance
+proof; do not repeat the naive block-offset scan.
+
 ## frankenjax-cntiy - erf rational approximation narrows but does not close JAX gap
 
 - Date: 2026-06-21

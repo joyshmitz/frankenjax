@@ -29,9 +29,16 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     oracle is TOLERANCE (`abs()<1e-10`, cumulative_oracle.rs:118), NOT bit-exact — and JAX itself
     reassociates, so a SIMD-blocked/threaded prefix-sum is BOTH faster AND more JAX-faithful. The
     `f64 cumsum FP-non-associative DO-NOT` note was over-conservative (it preserved sequential bits
-    the oracle doesn't require). NEXT LEVER (substantial): blocked prefix-sum (per-block SIMD partial
-    sums + carry propagation, thread the blocks) — validate the large-4M accuracy stays within the
-    distribution's tolerance. Target: beat JAX's 14ms. Diagnostic bench kept as the sequential-floor ref.
+    the oracle doesn't require). **BOLD-VERIFY UPDATE (cod-a, 2026-06-21):** the first naive blocked
+    prefix-sum candidate (per-block local scan + block-offset application) is a NO-SHIP and was
+    reverted before perf admission: RCH `ovh-a`
+    `blocked_dense_f64_single_line_cumulative_matches_serial_reference` failed with cumsum drift
+    **9.313225746154785e-10 > 1e-10**. Revert proof is green: RCH `ovh-a`
+    `large_dense_f64_cumsum_single_line_matches_literal_path` passed 1/1; RCH `vmi1152480`
+    `fj-conformance --test cumulative_oracle --release` passed 45/45. The row therefore remains
+    **JAX 14.1ms vs fj-lax 30.3ms = fj-lax 2.15x SLOWER**. NEXT LEVER (substantial): an
+    accuracy-bounded/compensated blocked prefix-sum or JAX-like associative scan, first proven under
+    the large-input `1e-10` gate, then timed against JAX. Diagnostic bench kept as the sequential-floor ref.
   - JAX CPU is broadly SLOW on order-dependent ops (exploitable): searchsorted 1M=48.8ms (fj-lax has
     no searchsorted primitive — out of scope), cummax 1M=4.16ms, scatter-add 1M=4.50ms, gather 0.469ms,
     argmax 0.917ms. cummax/scatter-add worth a fj-lax head-to-head next.
