@@ -2359,6 +2359,133 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    /// PROTOTYPE (test-only, pending build/bench validation — committed under a disk-low
+    /// build pause): an ITERATIVE flat-stage mixed-radix DIT FFT. The recursive SoA
+    /// mixed-radix was a no-ship (memory-bound; the recursion's strided per-lane access
+    /// won't vectorize). This flat iterative form keeps the data in ONE buffer with
+    /// contiguous per-stage butterflies — the structure that DID vectorize for radix-2
+    /// and Bluestein — so it is the credible path to a smooth-composite SoA win.
+    ///
+    /// Tolerance-equal (NOT bit-identical) to `mixed_radix_into`: different op order, same
+    /// `roots`/sign convention and `1/n` inverse scale. Validated by
+    /// `iterative_mixed_radix_matches_recursive_to_tolerance`. NEXT (disk recovered):
+    /// confirm this test passes, then port to a SoA (`w`-lane) production kernel and A/B it.
+    ///
+    /// Algorithm: factor `n` smallest-prime-first into `factors`; permute the input by the
+    /// generalized digit-reversal (`r = r*f + (i%f)` over factors in order); then one stage
+    /// per factor `r` with butterfly span `next = len*r`. Within a group, each of the `r`
+    /// inputs at `start+j+t*len` is twiddled by `W_next^{j t} = roots[j*t*(n/next)]`, then an
+    /// `r`-point DFT (`W_r^{s t} = roots[s*t*(n/r)]`) scatters the outputs.
+    #[cfg(test)]
+    fn mixed_radix_iterative_scalar(
+        input: &[(f64, f64)],
+        roots: &[(f64, f64)],
+        inverse: bool,
+        output: &mut Vec<(f64, f64)>,
+    ) {
+        let n = input.len();
+        output.clear();
+        output.resize(n, (0.0, 0.0));
+        if n <= 1 {
+            if n == 1 {
+                output[0] = input[0];
+            }
+            return;
+        }
+
+        let mut factors: Vec<usize> = Vec::new();
+        let mut nn = n;
+        while nn > 1 {
+            let p = smallest_prime_factor(nn);
+            factors.push(p);
+            nn /= p;
+        }
+
+        // Generalized digit-reversal permutation of the input.
+        for (i, slot) in output.iter_mut().enumerate() {
+            let mut x = i;
+            let mut r = 0usize;
+            for &f in &factors {
+                r = r * f + (x % f);
+                x /= f;
+            }
+            *slot = input[r];
+        }
+
+        let max_r = *factors.iter().max().unwrap();
+        let mut y: Vec<(f64, f64)> = vec![(0.0, 0.0); max_r];
+
+        let mut len = 1usize;
+        for &r in &factors {
+            let next = len * r;
+            let ts = n / next; // input twiddle stride: W_next^{j t} = roots[j*t*ts]
+            let ds = n / r; //    DFT twiddle stride:   W_r^{s t}   = roots[s*t*ds]
+            let mut start = 0usize;
+            while start < n {
+                for j in 0..len {
+                    // Gather + input-twiddle the r elements.
+                    for t in 0..r {
+                        let (vr, vi) = output[start + j + t * len];
+                        let (twr, twi) = roots[(ts * j * t) % n];
+                        y[t] = (vr * twr - vi * twi, vr * twi + vi * twr);
+                    }
+                    // r-point DFT scatter.
+                    for s in 0..r {
+                        let mut acc_r = 0.0f64;
+                        let mut acc_i = 0.0f64;
+                        for t in 0..r {
+                            let (yr, yi) = y[t];
+                            let (wr, wi) = roots[(ds * s * t) % n];
+                            acc_r += yr * wr - yi * wi;
+                            acc_i += yr * wi + yi * wr;
+                        }
+                        output[start + j + s * len] = (acc_r, acc_i);
+                    }
+                }
+                start += next;
+            }
+            len = next;
+        }
+
+        if inverse {
+            let inv_n = 1.0 / (n as f64);
+            for v in output.iter_mut() {
+                v.0 *= inv_n;
+                v.1 *= inv_n;
+            }
+        }
+    }
+
+    /// Validates the iterative-DIT prototype against the production recursive
+    /// `mixed_radix_into` to floating tolerance (both compute the same DFT). Covers
+    /// radix-2/3/5 and general-factor (7/11/13) smooth composites, both directions.
+    #[test]
+    fn iterative_mixed_radix_matches_recursive_to_tolerance() {
+        for &n in &[6usize, 10, 12, 14, 15, 21, 30, 35, 77, 143, 700, 1000] {
+            assert!(is_mixed_radix_smooth(n));
+            for inverse in [false, true] {
+                let roots = precompute_twiddles(n, inverse);
+                let input: Vec<(f64, f64)> = (0..n)
+                    .map(|i| {
+                        let f = i as f64;
+                        ((f * 0.011).sin() - 0.4, (f * 0.019).cos() * 0.6)
+                    })
+                    .collect();
+                let mut rec = Vec::new();
+                let mut scr = Vec::new();
+                mixed_radix_into(&input, &roots, inverse, &mut rec, &mut scr);
+                let mut iter = Vec::new();
+                mixed_radix_iterative_scalar(&input, &roots, inverse, &mut iter);
+                for (k, (a, b)) in rec.iter().zip(iter.iter()).enumerate() {
+                    assert!(
+                        (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9,
+                        "iterative != recursive at n={n} inverse={inverse} k={k}: {a:?} vs {b:?}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Old inline-recurrence radix-2 (pre-frankenjax-* twiddle-hoist), kept only as the
     /// bench baseline. Bit-identical to the production `radix2_fft_1d_into`.
     #[cfg(test)]
