@@ -5730,8 +5730,16 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   match together defeat vectorization). The f64 `apply_f64_unary_chunk` was kept
   anyway for sibling symmetry + robustness against nightly unswitch drift; it is
   bit-identical and measured-neutral, NOT a perf claim.
-- Also noted: f64 `floor`/`sign` 1M `_add_unary_chain` stay ~10.6/11.0 ms
-  because they route through the specialized
-  `f64_scalar_add_chain_input_and_literals` path, NOT `apply_fusion_chunk`, so
-  this hoist does not touch them. That is the next contained lever, not a
-  regression.
+- DEAD-END 3 (CORRECTION of an earlier draft) — "f64 floor/sign chains stay
+  ~10.6 ms, a follow-up lever." FALSE: that was a slow-worker artifact. Clean
+  re-measurement on a normal worker: `floor_f64` **773 us**, `round_f64`
+  **223 us**, `sign_f64` **1.15 ms**; and on `hz2` `floor_f32` **33.9 us**,
+  `round_f32` **42.3 us**, `sign_f32` **467 us**. The same identical-code chain
+  spanned ~25x across workers (e.g. `floor_f32` 901 us → 33.9 us). LESSON: every
+  cross-invocation rch bench lands on a different worker (no `--worker` pin), so
+  ALL absolute production numbers in this family are noise — trust ONLY the
+  same-binary A/B (4.63x). The `f64_scalar_add_chain_input_and_literals` path
+  only matches PURE add-scalar chains (a floor step bails it), so floor/sign f64
+  already go through `apply_fusion_chunk`; there is NO separate slow f64 path and
+  NO f64 fusion-chunk lever. `sign` is the slowest unary (branchy
+  `scalar_f64_sign` doesn't SIMD) — low-EV branchless-copysign micro-lever only.

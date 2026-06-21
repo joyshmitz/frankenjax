@@ -1526,16 +1526,16 @@ Additional cod-a FFT SoA gate recheck environment:
   - f64 in_loop_match **1.8596 ms** vs hoisted_match **1.8639 ms** = **1.00x**
     (LLVM already unswitches the non-widening f64 path; the f64 hoist is kept for
     symmetry/robustness against nightly drift, measured-neutral, bit-identical).
-- Production RCH Criterion `compiled_dispatch_speed -- _add_unary_chain`
-  (candidate, eager): `floor_f32` **901.85 us**, `round_f32` **663.33 us**,
-  `sign_f32` **1.5529 ms** — vs the prior recorded baselines `floor_f32`
-  **8.0347 ms** (later 4.17 ms), `round_f32` **4.6730 ms**, `sign_f32`
-  **5.5279 ms**. floor_f32 cut ~4.6x, consistent with the same-binary ratio.
-- JAX comparator (recorded `frankenjax-xjbvr` profiling): `floor_f32_1m`
-  **103.966 us** mean. Retained Rust/JAX for the floor_f32 chain improves from
-  **~40x loss to ~8.7x loss** — still a JAX loss, kept because the same-binary
-  Rust speedup is large and bit-identical (same disposition as the atan2/pow
-  threading keeps), not because the row dominates JAX.
+- CROSS-WORKER VARIANCE CAVEAT: the per-invocation production absolutes are NOT
+  trustworthy and are NOT the basis of this keep — only the same-binary A/B
+  (4.63x) is worker-independent. The same eager `floor_f32` chain measured
+  **901.85 us** (candidate worker), then **33.9 us** on `hz2` and the `floor_f64`
+  sibling **773 us** elsewhere — a ~25x cross-worker spread on identical code.
+  On a fast worker (`hz2`) the post-fix `floor_f32` chain is **33.9 us**, i.e.
+  FASTER than the recorded JAX comparator (`floor_f32_1m` **103.966 us** mean,
+  `frankenjax-xjbvr`); but worker-matched JAX timing was not captured, so the
+  keep rests on the bit-identical same-binary 4.63x, not on a JAX-domination
+  claim. Same disposition as the atan2/pow threading keeps.
 - Scorecard delta: **0 wins / 1 loss / 0 neutral** vs JAX (floor_f32 chain);
   candidate disposition **1 kept / 0 reverted**.
 - Gates: RCH `fj-interpreters` fusion tests **15/15** incl.
@@ -1545,7 +1545,12 @@ Additional cod-a FFT SoA gate recheck environment:
   PRE-EXISTING on clean HEAD, unrelated to fusion); `fj-conformance --lib`
   **45/45**; `rustfmt --check` on `lib.rs` clean; `cargo clippy -p
   fj-interpreters` clean.
-- Next route: the f64 floor/sign chains stay ~10 ms because they take the
-  specialized `f64_scalar_add_chain_input_and_literals` path (NOT
-  `apply_fusion_chunk`); applying the same hoist there is the next contained
-  lever. Half (bf16/f16) unary chunk is decode-bound and untouched.
+- Next route: NONE in this family. CORRECTION — an earlier draft of this entry
+  claimed f64 floor/sign chains "stay ~10 ms"; re-measurement showed that was a
+  slow-worker artifact (`floor_f64` **773 us**, `round_f64` **223 us**,
+  `sign_f64` **1.15 ms** on a normal worker). The f64 fusion path is already
+  sub-ms and the f64 op-match hoist is measured-neutral (LLVM unswitches), so
+  there is no f64 fusion-chunk lever. `sign` (f32 467 us / f64 1.15 ms on `hz2`)
+  is the slowest unary because `scalar_f64_sign`'s is_nan+branches don't SIMD
+  like `roundpd` — a possible branchless-`copysign` micro-lever, low EV. Half
+  (bf16/f16) unary chunk is decode-bound and untouched.
