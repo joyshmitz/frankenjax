@@ -8,6 +8,11 @@ Consolidated from this session's measurements + the per-op entries below. The co
 measurable-on-this-host, non-`+fma`, unowned perf levers are EXHAUSTED; every remaining loss
 routes to one of three gates.
 
+CONFORMANCE STATUS (2026-06-21, verified HEAD): **ENTIRE WORKSPACE GREEN** — `cargo test --workspace
+--release` = 0 failures across all crates (fj-lax 1583/0 after the cholesky digest re-baseline
+7a0f165e + the erf_inv regression fix c1b9ef15; fj-conformance all-green; fj-ad/fj-interpreters/etc.
+green). The stale "8 fj-interpreters golden-hash RED" caveat from prior sessions is RESOLVED.
+
 | Op family | vs JAX (measured) | Gate on the remaining gap |
 | --- | --- | --- |
 | cheap elementwise (add/mul/sub), broadcast, select, comparison | WIN (threaded past L3, 1.7-2x) | none — done |
