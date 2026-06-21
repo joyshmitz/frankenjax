@@ -2,6 +2,40 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-20 - frankenjax-ur4h3 symmetry-specialized tridiagonal reduction no-ship
+
+The BOLD-VERIFY pass retargeted the remaining `eigh_48x48_f64` loss after the
+small-Jacobi route was rejected. Fresh production baseline on RCH `hz1`:
+`eigh_48x48_f64` **267.84 us** mean and `svd_48x48_f64` **176.93 us** mean.
+Fresh local warmed JAX/JAXLIB 0.10.1 x64 comparator (60 runs x 100 inner loops)
+measured `eigh_48x48_f64` **201.429 us** mean / **192.507 us** p50 and
+`svd_48x48_f64` **955.544 us** mean. Production status: SVD is already a Rust
+win (Rust/JAX mean ratio **0.185**); `eigh` remains the only target loss
+(Rust/JAX mean ratio **1.330**).
+
+Rejected lever: replaced real-`eigh`'s general Hessenberg reduction setup with
+a symmetry-specialized Householder tridiagonal reduction that updated only the
+trailing symmetric block plus Q. Correctness was green while the candidate
+existed: `tridiag_ql_eigh_matches_jacobi_and_reconstructs` passed on RCH `hz1`;
+broader `cargo test -p fj-lax eigh --lib -- --nocapture` passed 13/0 with 1
+ignored benchmark on RCH `vmi1293453`. But the timing gate failed. Candidate
+Criterion on RCH `vmi1153651` measured `eigh_48x48_f64` **375.37 us** mean
+(Rust/JAX mean ratio **1.863**) and `svd_48x48_f64` **244.01 us** mean. Worker
+drift prevents accepting the candidate-vs-`hz1` delta as a same-worker
+regression proof, but the candidate is still a worse absolute JAX loss than
+production, so the source was reverted before commit.
+
+Scorecard for retained production 48x48 linalg rows: **1 win / 1 loss / 0
+neutral** vs JAX. Rejected candidate score: **0 wins / 1 loss / 0 neutral** for
+the target `eigh` row, with no source kept.
+
+Retry predicate: do not retry this naive symmetric rank-2 tridiagonal reduction
+shape (`w = beta * A_sub * v`, `A_sub -= v*w^T + w*v^T`, row-major Q update)
+without a same-binary component A/B showing the reducer itself beats the current
+general-Hessenberg setup. The next credible `eigh` route needs a blocked/panel
+Householder design with packed/streaming Q updates, or a different end-to-end
+eigenvector accumulation strategy with same-worker production proof.
+
 ## 2026-06-20 - frankenjax-murmw SoA Bluestein (prime / rough length) batch FFT — SHIPPED win (2.85-3.19x)
 
 The mixed-radix SoA no-ship (below) does NOT generalize to Bluestein, because Bluestein's

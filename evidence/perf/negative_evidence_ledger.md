@@ -3,6 +3,70 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-ur4h3 - symmetric tridiagonal reduction no-ship
+
+- Date: 2026-06-20
+- Agent: cod-b / CrimsonOtter
+- Target gap: after the large-n `eigh` cache fixes and the small-Jacobi
+  rejection, the live `fj-lax` linalg gap is the 48x48 real symmetric `eigh`
+  row. Fresh production baseline on RCH worker `hz1`:
+  `linalg/eigh_48x48_f64` 267.84 us mean and `linalg/svd_48x48_f64` 176.93 us
+  mean. Fresh local warmed JAX/JAXLIB 0.10.1 x64 comparator:
+  `eigh_48x48_f64` 201.429 us mean / 192.507 us p50 (CV 12.6%) and
+  `svd_48x48_f64` 955.544 us mean. Production ratios: `eigh` Rust/JAX mean
+  1.330 (loss); `svd` Rust/JAX mean 0.185 (existing Rust win).
+- Alien-graveyard/extreme-optimization route used: numerical-kernel
+  specialization and vectorized/cache-local execution, not a new eigensolver.
+  Hypothesis: a real-symmetric Householder tridiagonal reduction could avoid
+  doing a general Hessenberg similarity transform on symmetric input by updating
+  only the trailing symmetric block plus Q.
+- Lever rejected and reverted: `tridiag_ql_eigendecomposition` was routed
+  through a candidate `symmetric_tridiagonal_reduction` using the rank-2 update
+  `A_sub -= v*w^T + w*v^T` with the existing row-major Q right-apply. Focused
+  correctness passed while the candidate existed, but the production timing gate
+  did not.
+
+Fresh production baseline command:
+
+```text
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
+  'linalg/(eigh_48x48_f64|svd_48x48_f64)' -- \
+  --warm-up-time 1 --measurement-time 3 --sample-size 15 --noplot
+```
+
+JAX comparator used `/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`,
+JAX/JAXLIB 0.10.1, `jax_enable_x64=true`, warmed `jax.jit(jnp.linalg.eigh)`
+and `jax.jit(lambda a: jnp.linalg.svd(a, full_matrices=False))`, 60 runs x 100
+inner loops over the same deterministic 48x48 symmetric input.
+
+| workload / result | Rust mean | JAX mean | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | --- |
+| `hz1` production `linalg/eigh_48x48_f64` | 267.84 us | 201.429 us | 1.330 | Active JAX loss |
+| `hz1` production `linalg/svd_48x48_f64` | 176.93 us | 955.544 us | 0.185 | Existing Rust win |
+| `vmi1153651` symmetric-reduction candidate `eigh_48x48_f64` | 375.37 us | 201.429 us | 1.863 | REVERT/no proof |
+| `vmi1153651` candidate `svd_48x48_f64` control | 244.01 us | 955.544 us | 0.255 | Control remains Rust win |
+
+- Validation while the candidate existed:
+  `cargo test -p fj-lax tridiag_ql_eigh_matches_jacobi_and_reconstructs --lib
+  -- --nocapture` passed on RCH `hz1`; `cargo test -p fj-lax eigh --lib --
+  --nocapture` passed 13 tests with 1 ignored benchmark on RCH `vmi1293453`.
+- Measurement caveat: candidate timing landed on RCH `vmi1153651` while the
+  production baseline landed on `hz1`, so the cross-worker delta is routing
+  evidence, not same-worker regression proof. The reject decision is still
+  justified because the candidate remained a worse absolute JAX loss than the
+  retained production row.
+- Ratio scorecard for retained production 48x48 linalg rows: **1 win / 1 loss /
+  0 neutral vs JAX**. Rejected target candidate score: **0 wins / 1 loss / 0
+  neutral**; no source was kept.
+- Retry predicate: do not retry this naive symmetric rank-2 tridiagonal
+  reduction shape (`w = beta * A_sub * v`, `A_sub -= v*w^T + w*v^T`, row-major
+  Q update) without a same-binary component A/B proving the reducer itself beats
+  the current general-Hessenberg setup. The next credible `frankenjax-ur4h3`
+  route is a blocked/panel Householder reducer with packed/streaming Q updates,
+  or a different end-to-end eigenvector accumulation strategy, both requiring
+  same-worker production proof.
+
 ## frankenjax-4ryym - f64 GEMM SIMD load-codegen no-ship
 
 - Date: 2026-06-20

@@ -1137,6 +1137,30 @@ Additional cod-a FFT SoA gate recheck environment:
   route to symmetry-specialized tridiagonal reduction or blocked/panel
   Householder work, not small-Jacobi routing.
 
+## CrimsonOtter / cod-b - ur4h3 symmetric tridiagonal reduction no-ship (2026-06-20)
+
+- Scope: `frankenjax-ur4h3`, follow-up on the remaining 48x48 real symmetric
+  `eigh` row after the small-Jacobi no-ship.
+- Fresh production/JAX status:
+  - `linalg/eigh_48x48_f64`: RCH `hz1` production 267.84 us mean vs JAX 0.10.1
+    CPU x64 201.429 us mean, Rust/JAX 1.330 (LOSS).
+  - `linalg/svd_48x48_f64`: RCH `hz1` production 176.93 us mean vs JAX 955.544
+    us mean, Rust/JAX 0.185 (WIN; control only).
+- Rejected lever: route real `eigh` through a symmetry-specialized Householder
+  tridiagonal reduction using a trailing symmetric rank-2 update instead of the
+  existing general Hessenberg reduction. Correctness passed while the candidate
+  existed (`tridiag_ql_eigh_matches_jacobi_and_reconstructs` on RCH `hz1`; broad
+  `cargo test -p fj-lax eigh --lib -- --nocapture` 13/0 on RCH `vmi1293453`).
+- Timing gate: candidate RCH `vmi1153651` measured `eigh_48x48_f64` 375.37 us
+  mean, Rust/JAX 1.863. Worker mismatch makes the candidate-vs-production delta
+  routing-only, but the candidate is still a worse absolute JAX loss than the
+  retained production row. Source reverted before commit.
+- Scorecard remains 1 win / 1 loss / 0 neutral for retained 48x48 linalg rows.
+  Rejected candidate score: 0 wins / 1 loss / 0 neutral for target `eigh`.
+  Route next: do not retry this naive symmetric rank-2 reduction shape without
+  a same-binary component A/B; the credible route is blocked/panel Householder
+  with packed/streaming Q updates or a different eigenvector accumulation plan.
+
 ## CrimsonOtter / cod-a - murmw power-of-two FFT tile-size no-ship (2026-06-20)
 
 - Scope: `frankenjax-murmw`, current 2048x256 power-of-two batched FFT gap after
