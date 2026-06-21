@@ -1838,3 +1838,29 @@ losses. Retry predicate: before claiming any "DOMINATE JAX" win, verify it
 same-machine vs an actual JAX run — do not infer domination from an internal
 speedup ratio. (Same boxing caveat: Rust numbers are via `eval_primitive`, which
 boxes the output; a dense path may narrow but is unlikely to flip these.)
+
+## 2026-06-21 - scan-family domination is NOT general; JAX cumsum has a SIZE CLIFF (CobaltForge/cc)
+
+Refines (and partly refutes) my own "scan-family dominates JAX" prediction from
+the cumsum-4M result. Same-machine (local Zen3 host), 1M f64 1D:
+
+| op (1M f64) | Rust p50 | JAX p50 | verdict |
+| --- | ---: | ---: | --- |
+| `cumprod` | 1636 us | 1499 us | **1.09x LOSS** (near-parity) |
+| `cummax` (lax.cummax) | 1746 us | 1904 us | **1.09x win** (near-parity) |
+
+So cumprod/cummax are NEAR-PARITY at 1M, NOT 4x dominations. The "scan-family
+dominates" generalization was too broad.
+
+ROOT of the cumsum domination — a JAX SIZE CLIFF, not a general scan weakness.
+JAX `jnp.cumsum` scales SUPERLINEARLY on CPU: **1M p50 1356 us -> 4M p50 18397 us**
+(13x time for 4x data). Rust cumsum is linear (~1ms@1M, ~4ms@4M). So:
+- At 1M, cumsum is near-parity (Rust ~1ms vs JAX 1.36ms).
+- At 4M+, Rust dominates ~4.3x because JAX cumsum hits a pathological large-n scan
+  lowering (cache/algorithm cliff between 1M and 4M).
+
+CORRECTED MAP: the only SIZE-INDEPENDENT Rust-over-JAX domination verified so far
+is `sort` (XLA-CPU bitonic). `cumsum` dominates ONLY at large n (JAX size cliff);
+cumprod/cummax/scatter/maxpool/floor are parity-or-loss. Retry predicate: a "scan
+dominates" claim must specify the size — verify at the target n, and check JAX's
+size-scaling (its cumsum cliff means small-n cumsum is NOT a domination).

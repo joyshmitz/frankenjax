@@ -1598,6 +1598,12 @@ Additional cod-a FFT SoA gate recheck environment:
 
 ## CobaltForge / cc - VERIFIED JAX domination #2: Rust cumsum 4.33x faster than XLA CPU scan (2026-06-21)
 
+- SIZE-SPECIFIC (refined 2026-06-21, see NEGATIVE_EVIDENCE): the 4.33x holds at
+  4M because JAX `jnp.cumsum` has a superlinear CPU size cliff (1M p50 1356us ->
+  4M p50 18397us, 13x for 4x data). At 1M cumsum is near-parity, and the sibling
+  scan ops cumprod/cummax are near-parity at 1M (1.09x). So this is a JAX
+  large-n cumsum cliff, NOT a general scan-family domination — only `sort` is a
+  size-independent domination so far.
 - Second same-machine Rust-over-JAX domination (after sort), and non-order-statistics
   (a scan, not cod-b's sort/argsort/top_k family), so fully owned here.
 - SAME-MACHINE (local Zen3 host), 4M f64 1D cumsum (setup copied from
