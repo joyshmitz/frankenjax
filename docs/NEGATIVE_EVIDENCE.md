@@ -52,7 +52,7 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
 | **transcendental — bit-pinned** (exp/sin/log/asin/acos) | **LOSS** | **`cntiy` +fma** (SIMD-poly = 2.20x WITH / 0.79x WITHOUT — cz0g0) + re-baseline the 5 bit-goldens |
 | softmax / attention (fused) | LOSS (exp-bound, ~1.2x ceiling) | **`cntiy`** — option (b) audited per-fn `target_feature(fma)` SIMD-exp in tolerance sites preserves goldens; or (a) global +fma + golden re-baseline |
 | **FFT pow2 / real / Bluestein-prime** | WIN (1.7-3x SoA) | none — shipped, near safe-Rust ceiling |
-| **FFT smooth-composite batch** (128x1000) | **LOSS 15.2x** | generated length-specialized kernels (big effort) OR a **quiesced host** (threading is a 0.4x no-ship under swarm contention; SoA-iterative 0.15x, specialized SoA 0.57x, Bluestein 0.39x all no-ship; butterflies already specialized) |
+| **FFT smooth-composite batch** (128x1000) | **LOSS 15.2x** | generated length-specialized kernels (big effort) OR a **quiesced host** (threading is a 0.4x no-ship under swarm contention; SoA-iterative 0.15x, specialized SoA 0.57x, scalar-specialized stage kernel 0.46x, Bluestein 0.39x all no-ship; butterflies already specialized) |
 | FFT pow2 batch dense (2048x256) | LOSS 3.83x | near safe-Rust ceiling (pocketfft SIMD-within-FFT needs AVX-512 + complex shuffles) |
 | eigh / SVD | (owned: `ur4h3`, WildForge) | — |
 
@@ -158,6 +158,70 @@ bound + relax the exp/sin/log self-goldens + commit the flag + implement the SIM
 a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
+
+## 2026-06-21 - frankenjax-murmw scalar-specialized mixed-radix FFT no-ship
+
+BOLD-VERIFY tested a narrower generated-kernel proxy after the SoA variants
+lost: keep the transform row-local, but replace the recursive mixed-radix call
+tree with a contiguous stage-iterative scalar kernel using specialized radix
+2/3/5 butterflies. This attacks the recursive per-row floor directly without
+another cross-row transpose.
+
+Correctness gate, per-crate through RCH:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo test -p fj-lax \
+  iterative_scalar_specialized_matches_recursive_to_tolerance \
+  --release --lib -- --nocapture
+```
+
+RCH selected `hz2`; result **1/1 passed**. The worker rewrote the target dir to
+its pool path and rehydrated dependencies remotely, so this is not a warm-cache
+timing proof, but it stayed off local disk and inside the per-crate rule.
+
+Same-binary A/B gate:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo test -p fj-lax \
+  bench_mixed_radix_iterative_scalar_specialized_vs_per_row \
+  --release --lib -- --ignored --nocapture
+```
+
+Printed result on `hz2`:
+
+```text
+[mixed-radix iterative scalar-specialized 128x1000] recursive=1.500ms specialized=3.242ms ratio=0.46x (min of 9 interleaved)
+```
+
+The candidate is **54% slower** than recursive mixed-radix, so it was removed
+before production. Current production ratio stays at the fresh target scorecard:
+Rust **3.4978 ms** vs JAX **0.230078 ms**, Rust/JAX **15.20x**. Scorecard:
+**0 wins / 1 loss / 0 neutral** for the row; lever scorecard for the smooth
+composite accelerator family is now **0 kept / 4 rejected / 0 validation-blocked**.
+Retry predicate: do not retry stage-iterative scalar kernels for `n=1000`
+unless the design eliminates digit-reversal/stage-copy overhead and first beats
+recursive mixed-radix in the same-binary A/B.
+
+Focused conformance gate after reverting the candidate:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo test -p fj-conformance --test fft_oracle \
+  --release -- --nocapture
+```
+
+RCH selected `vmi1152480`; result **27/27 passed**.
 
 ## 2026-06-21 - frankenjax-murmw specialized iterative SoA FFT no-ship
 

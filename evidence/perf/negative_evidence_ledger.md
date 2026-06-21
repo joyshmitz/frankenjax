@@ -177,6 +177,85 @@ or target-feature/FMA specialization that preserves `erf_oracle` and beats the
 current rational path in a same-binary A/B. The broader `cntiy` FMA/softmax
 decision is not resolved by this keep.
 
+## frankenjax-murmw - scalar-specialized mixed-radix FFT no-ship
+
+- Date: 2026-06-21
+- Agent: cod-a / CrimsonOtter
+- Status: MEASURED NO-SHIP / REVERTED. No production source change remains; the
+  temporary focused correctness test and ignored A/B harness were removed.
+- Target gap: `eval/fft_batch_128x1000_complex128`, the remaining smooth-
+  composite batched FFT loss.
+- Alien-graveyard/extreme-optimization route:
+  - Candidate family: generated length-specialized FFT kernels. This pass used
+    a scalar stage-iterative radix-2/3/5-specialized proxy for
+    `1000 = 2^3 * 5^3`, keeping the row-local memory layout and avoiding the
+    previously rejected cross-row SoA transpose.
+  - EV decision: reject. The contiguous stage schedule removed recursion but
+    introduced enough digit-reversal/stage-copy overhead that it was slower than
+    the recursive per-row mixed-radix baseline.
+
+Remote correctness proof:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo test -p fj-lax \
+  iterative_scalar_specialized_matches_recursive_to_tolerance \
+  --release --lib -- --nocapture
+```
+
+- RCH worker: `hz2`; result: 1 focused `fj-lax` test passed.
+- Note: `rch` rewrote `CARGO_TARGET_DIR` to a worker pool path and rehydrated
+  dependencies remotely; this was acceptable for correctness and same-binary
+  A/B triage, but not a warm-target Criterion proof.
+
+Remote same-binary A/B:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo test -p fj-lax \
+  bench_mixed_radix_iterative_scalar_specialized_vs_per_row \
+  --release --lib -- --ignored --nocapture
+```
+
+- RCH worker: `hz2`.
+- Printed result:
+
+```text
+[mixed-radix iterative scalar-specialized 128x1000] recursive=1.500ms specialized=3.242ms ratio=0.46x (min of 9 interleaved)
+```
+
+Ratio-vs-JAX ledger:
+
+| workload | Rust current | JAX comparator | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | --- |
+| `eval/fft_batch_128x1000_complex128`, retained production | 3.4978 ms | 0.230078 ms | 15.20 | current JAX loss remains |
+| scalar-specialized stage-iterative candidate | 3.242 ms microbench | 0.230078 ms | 14.09 | rejected: 0.46x recursive floor before full eval |
+
+Focused conformance after reverting the candidate:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo test -p fj-conformance --test fft_oracle \
+  --release -- --nocapture
+```
+
+- RCH worker: `vmi1152480`; result: 27/27 `fft_oracle` tests passed.
+
+Retry predicate: do not retry stage-iterative scalar kernels for `n=1000`
+unless the design eliminates digit-reversal/stage-copy overhead and first beats
+recursive mixed-radix in the same-binary A/B. The remaining credible routes are
+a true generated in-place/recursive `1000 = 2^3 * 5^3` kernel or a quiesced-host
+threading proof.
+
 ## frankenjax-murmw - specialized iterative SoA mixed-radix FFT no-ship
 
 - Date: 2026-06-21

@@ -79,23 +79,28 @@ unmeasured `code-first batch-test pending` entries remain outside the score.
 - Status: pending code-only flat iterative mixed-radix SoA route is resolved as
   measured no-ship and disabled. Fresh BOLD-VERIFY also rejected the smooth-
   composite Bluestein SoA detour and the length-specialized radix-2/5 iterative
-  SoA proxy; no production source change remains.
+  SoA proxy. This pass rejected a scalar stage-iterative radix-2/3/5 proxy too;
+  no production source change remains.
 - Current target row: `eval/fft_batch_128x1000_complex128`, RCH `ovh-a`
   Criterion midpoint **3.4978 ms** (`3.2761..3.6825 ms`) versus fresh local
   JAX/JAXLIB 0.10.1 x64 mean **0.230078 ms** on the exact
   `complex_matrix(128,1000)` fixture. Rust/JAX **15.20x**.
 - Latest lever proof: same-binary RCH `hz2` A/B for recursive mixed-radix versus
-  specialized iterative SoA printed **per-row=1.511ms**,
-  **specialized=2.668ms**, **ratio=0.57x**; the temporary harness was removed
-  and no source gate was kept. Earlier same-binary RCH `hz1` Bluestein detour
-  proof printed **mixed=1.975ms**, **bluestein=2.690ms**, **ratio=0.73x** and
-  was also reverted.
+  the scalar-specialized stage-iterative radix-2/3/5 proxy printed
+  **recursive=1.500ms**, **specialized=3.242ms**, **ratio=0.46x**. The
+  temporary harness was removed and no source gate was kept. Earlier same-binary
+  RCH `hz2` specialized iterative SoA printed **per-row=1.511ms**,
+  **specialized=2.668ms**, **ratio=0.57x**; RCH `hz1` Bluestein detour proof
+  printed **mixed=1.975ms**, **bluestein=2.690ms**, **ratio=0.73x**.
 - Scorecard for this row: **0 wins / 1 loss / 0 neutral**. Lever scorecard:
-  **0 kept / 3 rejected / 0 validation-blocked** for the current smooth-
+  **0 kept / 4 rejected / 0 validation-blocked** for the current smooth-
   composite accelerator family. Next route must be a genuinely generated
   length-specialized `1000 = 2^3 * 5^3` in-place/recursive kernel, or a
   quiesced-host threading proof; any production gate needs a completed
   same-binary A/B before dispatch.
+- Focused conformance after candidate removal: RCH `vmi1152480`
+  `cargo test -p fj-conformance --test fft_oracle --release -- --nocapture`
+  passed **27/27**.
 
 ## Environment
 
