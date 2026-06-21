@@ -3,6 +3,36 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-ur4h3 - QL eigenvector transpose in-place pending-bench
+
+- Date: 2026-06-21
+- Agent: cod-b / CrimsonOtter
+- Status: CODE-ONLY COMMITTED, PENDING BENCH. Disk-low instruction explicitly
+  prohibited starting a new `cargo bench` or `cargo build` this turn.
+- Lever: `tridiag_ql_eigendecomposition` now reuses the accumulated `Q` buffer
+  for the row-major/column-major layout conversion around
+  `symmetric_tridiagonal_ql`. The old code allocated a second `n*n` buffer and
+  copied every element into it, then copied every element back out. The new code
+  transposes the square buffer in place before QL and transposes it back after
+  QL. The QL arithmetic and eigenvector storage contract are unchanged.
+- Target row for next turn: `linalg/eigh_48x48_f64` first. Measure this
+  together with the pending Householder reflector and left-update scratch reuse
+  commits already on this branch.
+- Required next-turn bench command, only after disk pressure is handled:
+
+```text
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
+  'linalg/eigh_48x48_f64' -- \
+  --warm-up-time 1 --measurement-time 3 --sample-size 15 --noplot
+```
+
+- Keep/revert rule: keep the allocator/copy-reduction stack only if
+  same-worker or directly comparable evidence shows a real `eigh_48x48_f64`
+  improvement without correctness fallout. If the delta is neutral or regresses,
+  revert this in-place transpose plus the two pending Householder scratch
+  commits and record the failed stack here.
+
 ## frankenjax-ur4h3 - Householder left-update scratch reuse pending-bench
 
 - Date: 2026-06-21

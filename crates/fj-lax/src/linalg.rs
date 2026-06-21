@@ -2355,24 +2355,22 @@ fn tridiag_ql_eigendecomposition(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     }
     // `symmetric_tridiagonal_ql` accumulates the eigenvectors COLUMN-MAJOR so its hot
     // plane-rotation loop streams contiguous columns instead of striding by `n` per row
-    // (the dominant eigh cache cliff, ur4h3). Transpose Q in, run QL, transpose back —
-    // both O(n²) vs the QL's O(n³), and bit-identical (the rotation arithmetic and order
-    // are unchanged; only the storage layout differs).
-    let q_row_major = q;
-    let mut z = vec![0.0_f64; n * n];
-    for row in 0..n {
-        for col in 0..n {
-            z[col * n + row] = q_row_major[row * n + col];
-        }
-    }
+    // (the dominant eigh cache cliff, ur4h3). Transpose Q in place, run QL, transpose back
+    // in place. This preserves the same QL arithmetic while avoiding the extra n²
+    // allocation and two full copy loops used by the out-of-place transpose.
+    let mut z = q;
+    transpose_square_in_place(&mut z, n);
     symmetric_tridiagonal_ql(&mut d, &mut e, &mut z, n);
-    let mut z_row_major = q_row_major;
+    transpose_square_in_place(&mut z, n);
+    (d, z)
+}
+
+fn transpose_square_in_place(matrix: &mut [f64], n: usize) {
     for row in 0..n {
-        for col in 0..n {
-            z_row_major[row * n + col] = z[col * n + row];
+        for col in row + 1..n {
+            matrix.swap(row * n + col, col * n + row);
         }
     }
-    (d, z_row_major)
 }
 
 /// Implicit-shift symmetric tridiagonal QL with eigenvector accumulation (EISPACK

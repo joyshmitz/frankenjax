@@ -1137,6 +1137,22 @@ Additional cod-a FFT SoA gate recheck environment:
   route to symmetry-specialized tridiagonal reduction or blocked/panel
   Householder work, not small-Jacobi routing.
 
+## CrimsonOtter / cod-b - ur4h3 QL transpose in-place pending-bench (2026-06-21)
+
+- Scope: `frankenjax-ur4h3`, DISK-LOW code-only lever.
+- Code change: `tridiag_ql_eigendecomposition` now transposes the accumulated
+  eigenvector buffer in place before and after the column-major QL sweep instead
+  of allocating a second `n*n` buffer and copying every element into and out of
+  it. The QL arithmetic and row-major output contract are intended to stay
+  unchanged.
+- Measurement status: pending. No new `cargo bench` or `cargo build` was run in
+  this turn by instruction. No win/loss/neutral ratio is claimed for this
+  commit.
+- Resume gate: measure `linalg/eigh_48x48_f64` after disk pressure is handled,
+  with this commit plus the two pending Householder scratch-reuse commits. Keep
+  only with same-worker/directly comparable improvement; otherwise revert the
+  allocator/copy-reduction stack.
+
 ## CrimsonOtter / cod-b - ur4h3 Householder left-update scratch reuse pending-bench (2026-06-21)
 
 - Scope: `frankenjax-ur4h3`, DISK-LOW code-only lever.

@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-21 - frankenjax-ur4h3 QL eigenvector transpose in-place pending-bench
+
+DISK-LOW code-only pass: `tridiag_ql_eigendecomposition` now transposes the
+accumulated eigenvector buffer in place before and after the column-major QL
+sweep. This removes the extra `n*n` temporary allocation and the two full
+out-of-place transpose copy loops. The QL arithmetic and row-major output
+contract are intended to remain unchanged.
+
+No new `cargo bench` or `cargo build` was started in this turn by instruction.
+Pending bench: re-run `linalg/eigh_48x48_f64` via RCH once disk pressure is
+handled, measuring this with the two pending Householder scratch-reuse commits.
+Keep only with same-worker/directly comparable improvement; otherwise revert the
+allocator/copy-reduction stack and record as negative evidence.
+
 ## 2026-06-21 - frankenjax-ur4h3 Householder left-update scratch reuse pending-bench
 
 DISK-LOW code-only pass: `hessenberg_reduction` now reuses the dot-product
