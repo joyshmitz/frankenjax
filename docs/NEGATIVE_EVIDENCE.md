@@ -25,8 +25,12 @@ step below runs. If it fails to compile, fix the test before proceeding.
 WORKSPACE STRUCTURAL AUDIT (2026-06-21): brace-depth check of ALL 85 `crates/**/src/*.rs`
 files — every one balances to final depth 0 (line-comments stripped; format-string braces
 balance). So after the `fft.rs` fix, NO build-breaking structural (brace) break remains
-anywhere in the workspace, including other agents' no-cargo eigh/linalg edits. The pause's
-remaining build risk is therefore type/lint-level only (cargo-gated), not structural.
+anywhere in the workspace, including other agents' no-cargo eigh/linalg edits. Paren/bracket
+balance was also checked: the only 6 non-zero files were all last modified 2026-05-02..06-18
+(BEFORE the 06-21 pause), so their counts are pre-existing string/char-literal noise in
+already-compiled commits — i.e. NO file edited during the pause has a delimiter imbalance of
+any class. The pause's remaining build risk is therefore type/lint-level only (cargo-gated),
+not structural.
 
 The MOMENT cargo returns (after STEP 0), validate + A/B these (each links to its detailed
 entry below):
