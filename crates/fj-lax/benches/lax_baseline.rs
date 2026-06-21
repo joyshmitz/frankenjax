@@ -307,6 +307,19 @@ fn bench_cbrt_1m_f64_vec(c: &mut Criterion) {
     });
 }
 
+// 1M sqrt: f64::sqrt is a hardware intrinsic (vsqrtpd) — UNLIKE cbrt/exp which are libm
+// libcalls. If the dense unary fast path autovectorizes the monomorphized f64::sqrt, sqrt
+// should be MUCH faster than cbrt (same loop shape); if they're similar, sqrt is stuck
+// scalar and an explicit std::simd sqrt (bit-identical, no fma) would be a free win.
+fn bench_sqrt_1m_f64_vec(c: &mut Criterion) {
+    let a: Vec<f64> = (0..1 << 20).map(|i| (i as f64) * 0.0007 + 1.0).collect();
+    let input = Value::vector_f64(&a).unwrap();
+    let p = no_params();
+    c.bench_function("eval/sqrt_1m_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Sqrt, std::slice::from_ref(&input), &p))
+    });
+}
+
 // 1M tensor ** scalar (x ** 2.5): the ubiquitous scalar-power broadcast,
 // compute-bound on powf — exercises the threaded scalar-broadcast expensive path.
 fn bench_pow_scalar_1m_f64_vec(c: &mut Criterion) {
@@ -6575,6 +6588,7 @@ criterion_group!(
     bench_polygamma_n2_256k_f64,
     bench_igamma_256k_f64,
     bench_cbrt_1m_f64_vec,
+    bench_sqrt_1m_f64_vec,
     bench_atan2_scalar_1m_f64_vec,
     bench_atan2_scalar_1m_f64_literal_reference,
     bench_div_1k_f64_vector,
