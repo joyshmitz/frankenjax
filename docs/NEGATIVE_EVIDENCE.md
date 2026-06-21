@@ -6,8 +6,19 @@ Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
 The disk-low/critical pause has accumulated several production perf routes that shipped
 ENABLED but were never validated or A/B'd (no `cargo` allowed). They are correctness-
-preserving by design; production currently carries them unvalidated. The MOMENT cargo
-returns, validate + A/B these (each links to its detailed entry below):
+preserving by design; production currently carries them unvalidated.
+
+**STEP 0 — MANDATORY FIRST when cargo returns: `cargo test -p fj-lax --lib --release --no-run`**
+(just compile the tests). Many `#[cfg(test)]` tests were authored during the no-cargo pause
+and could NOT be compiled; one such edit silently dropped 6 closing braces in `fft.rs`
+(fixed in `66127ce1`, verified by brace-depth analysis), and other no-compile additions are
+audited-by-inspection but NOT compile-verified (symbols/signatures/braces check out; types,
+borrows, and `-D warnings` lints do not until compiled). Release builds are unaffected (all
+in `#[cfg(test)]`), but the validation harness itself must be confirmed to build before any
+of the steps below can run. If it fails to compile, fix the test before proceeding.
+
+The MOMENT cargo returns (after STEP 0), validate + A/B these (each links to its detailed
+entry below):
 
 1. **[murmw] iterative mixed-radix SoA FFT route** (smooth composites n<=1024, ENABLED) —
    FULLY INSTRUMENTED, deterministic resume (no investigation needed):
