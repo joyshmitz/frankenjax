@@ -262,9 +262,13 @@ across calls) could change this — out of scope for a single batched FFT.
 Checked whether real-input FFT could win ~2x via the standard pack-n-real-into-n/2-complex trick.
 fj-lax ALREADY implements it for power-of-2: `RealRfftPower2Plan` (fft.rs:459) does pack -> half-size
 FFT -> unpack (`vectorized_rfft_pow2_block` fft.rs:2161), with the symmetric irfft path
-(`vectorized_irfft_pow2_block` fft.rs:2409). So rfft pow2 is NOT a free 2x — it's mined. The only
-residual is non-pow2-even rfft packing (would need a non-pow2 complex FFT under the pack, which is
-already the slower mixed-radix path → smaller, niche win). Do not re-attempt rfft pow2 packing.
+(`vectorized_irfft_pow2_block` fft.rs:2409). So rfft pow2 is NOT a free 2x — it's mined. CORRECTION (deeper read): non-pow2 BATCHED rfft is
+ALSO already optimized — fft.rs:2323 PAIR-PACKS two real rows into one complex signal
+`z = x_a + i·x_b`, runs ONE full-length FFT per pair, and recovers each spectrum via conjugate
+symmetry (X_a[k]=(Z[k]+conj(Z[N-k]))/2, X_b[k]=(Z[k]-conj(Z[N-k]))/(2i)). That halves the dominant
+transforms — cost-equivalent to the n/2 single-signal packing. So BOTH rfft paths are mined. The
+ONLY residual is a LONE non-pow2 row (rows=1, can't pair → transformed full-length); the n/2 packing
+would halve just that, a niche single-row case. Do not re-attempt rfft packing (pow2 or batched).
 
 **THREADING smooth-composite batch = NO-SHIP under contention (2026-06-21, CrimsonOtter,
 823bba8b).** `fft_batch_128x1000` (128_000 elems) runs single-thread — below the per-row
