@@ -3,6 +3,61 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
+## frankenjax-murmw - Bluestein-prime FFT tile/thread no-ships
+
+- Date: 2026-06-21
+- Agent: cod-a / CrimsonOtter
+- Status: REJECTED / REVERTED. No production source change remains.
+- Target gap: `eval/fft_batch_256x1009_prime_complex128_dense_input`, the
+  rough/prime-length batch row where `1009` routes through the shipped SoA
+  Bluestein path and still trails JAX.
+- Alien-graveyard/extreme-optimization route:
+  - Candidate family: cache/task-granularity control around the existing
+    communication-avoiding SoA Bluestein kernel.
+  - Rejected lever 1: widen `BLUESTEIN_TILE_ROWS` from 4 to 8 rows to reduce
+    per-tile overhead and increase vertical lane width.
+  - Rejected lever 2: cap the vectorized Bluestein scheduler at 8 threads so
+    each task owns more convolution FFT work instead of fanning `256x1009` into
+    tiny two-tile jobs under swarm contention.
+  - EV decision: revert both. The first lever regressed on the same worker; the
+    second produced a tempting but non-comparable `ovh-a` routing signal, then
+    regressed hard when rerun on the same `hz2` worker as production.
+
+Remote bench command shape:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/fft_batch_256x1009_prime_complex128_dense_input' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot
+```
+
+Ratio-vs-JAX ledger:
+
+| workload | worker | Rust production | Rust candidate | JAX comparator | Rust/JAX candidate | verdict |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| `BLUESTEIN_TILE_ROWS=8` | `hz2` | 3.8919 ms | 4.5907 ms | 0.478 ms | 9.60 | REVERT: +20.635% Criterion regression |
+| `PARALLEL_MAX_THREADS=8` | `hz2` | 4.3750 ms | 6.3681 ms | 0.478 ms | 13.32 | REVERT: +37.004% Criterion regression |
+
+Notes:
+
+- The JAX comparator is the existing fresh JAX/JAXLIB 0.10.1 x64 mean for the
+  exact `256x1009` fixture: **0.478 ms**.
+- A capped-thread run on `ovh-a` measured **1.7611 ms** (Rust/JAX **3.68x**),
+  but `RCH_WORKER=ovh-a` was ignored by the follow-up proof command, so this is
+  routing evidence only, not an accepted keep.
+- Current production after reverts: fresh same-worker `hz2` production midpoint
+  **4.3750 ms**, Rust/JAX **9.15x**.
+
+Retry predicate: do not retry Bluestein tile-height, representation-only, or
+coarse thread-count probes without hardware-counter evidence. The next credible
+prime/rough FFT route must change the internal convolution kernel itself
+(SIMD-within-FFT/pocketfft-class complex shuffles) or prove a quiesced-host
+threading regime with a completed same-worker production/candidate A/B.
+
 ## frankenjax-mcqr - blocked f64 cumsum prefix-scan flips 4M 1D row to JAX win
 
 - Date: 2026-06-21

@@ -8,6 +8,28 @@ unmeasured `code-first batch-test pending` entries remain outside the score.
 
 ## Current BOLD-VERIFY Notes
 
+### cod-a - murmw Bluestein-prime FFT no-ships (2026-06-21)
+
+- Status: no production source change remains. Fresh BOLD-VERIFY retargeted
+  the shipped SoA Bluestein path for
+  `eval/fft_batch_256x1009_prime_complex128_dense_input`, where Rust still
+  trails the existing fresh JAX/JAXLIB 0.10.1 x64 comparator (**0.478 ms**).
+- Rejected lever 1: widen `BLUESTEIN_TILE_ROWS` from 4 to 8. Same-worker RCH
+  `hz2` Criterion: production **3.8919 ms** midpoint, candidate
+  **4.5907 ms**, **+20.635%** significant regression. Candidate Rust/JAX
+  ratio **9.60x**. Reverted.
+- Rejected lever 2: cap vectorized Bluestein scheduling at 8 threads. A
+  non-comparable `ovh-a` run measured **1.7611 ms** (routing signal only);
+  accepted same-worker proof on `hz2` measured production **4.3750 ms**,
+  candidate **6.3681 ms**, **+37.004%** significant regression. Candidate
+  Rust/JAX ratio **13.32x**. Reverted.
+- Current production after reverts: freshest same-worker `hz2` midpoint
+  **4.3750 ms**, Rust/JAX **9.15x**. Scorecard for this pass:
+  **0 wins / 2 losses / 0 neutral**. Retry predicate: stop tile-height,
+  representation-only, and coarse thread-count probes without hardware-counter
+  evidence; next credible route must change the internal convolution FFT kernel
+  or prove an idle-host threading regime in a same-worker A/B.
+
 ### cod-b - mcqr cumsum blocked-prefix keep (2026-06-21)
 
 - Status: retained production win. The single-line f64 blocked prefix-scan
