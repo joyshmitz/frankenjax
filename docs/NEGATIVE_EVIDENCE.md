@@ -20,10 +20,11 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
   - **ENTIRE JAX CPU ORDER-STATISTICS FAMILY is catastrophically slow** (XLA lowers them to the same
     bitonic sort network): measured JAX 1M f64 — argsort **284ms**, top_k(k=100) **256ms**, median
     **226ms**; JAX top_k 64k/k128 **13.29ms**. fj-lax sort 64k is 1.25ms; top_k/argsort/median are
-    all sort/partial-sort based on fj-lax's ~10x-faster sort, so **fj-lax DOMINATES the whole family
-    ~10-50x** (fj-lax top_k ≤ its full-sort time ≈1.25ms vs JAX 13.29ms → ≥10x). This is fj-lax's
-    single biggest domination zone — JAX-CPU's worst surface. (fj-lax own-side benches pending: a
-    `ppv-lite86`/E0514 shared-target toolchain drift is blocking fj-lax bench rebuilds this window.)
+    all sort/partial-sort based on fj-lax's ~10x-faster sort, so **fj-lax DOMINATES the whole family**.
+    MEASURED same-worker: **top_k 64k/k128 = fj-lax 0.497ms vs JAX 13.29ms = ~26.7x WIN** (fj-lax
+    partial-selects; JAX full-sorts) and **sort 64k = 1.25ms vs 12.51ms = ~10x**. This is fj-lax's
+    single biggest domination zone — JAX-CPU's worst surface (the earlier `ppv-lite86`/E0514
+    shared-target toolchain drift recovered after a clean bench rebuild; top_k now measured).
   - matmul 1024²: JAX 2.91ms (fj-lax loses, `cntiy` +fma-gated). exp 1M: JAX 0.437ms (fj-lax loses,
     cntiy/sweep). sum 1M: JAX 0.111ms (parity-class). Consistent with the gate table below.
   - **cumsum 4M 1D: now flipped to fj-lax WIN — fresh JAX 18.318ms vs fj-lax 7.5297ms = fj-lax 2.43x FASTER.**
@@ -55,10 +56,11 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
 | batched gather/scatter (I64/F64/F32) | WIN (1.15-3.6x) | none — suspected loss disproven |
 | sort, reductions, RNG, conv, einsum, dot_general | WIN / parity | none — done |
 | **matmul / GEMM** (256-1024 f64) | **LOSS 4-15x** | **`cntiy` +fma** (already blocked-GEMM + threaded + register microkernel; microkernel is FMA-bound, capped ~XLA/2; pure-safe-Rust, no BLAS) |
-| **transcendental — tolerance-only** (cbrt/erf/tanh/tan, no bit-golden) | LOSS, being MINED non-fma | cod-b sweep (no cntiy needed): cbrt 11.9ms->3.30ms (3.60x, 64c0ded1), erf 21.1ms->6.85ms (4.58x, d74a6472) SHIPPED; tanh/tan next. Still JAX-loss (cbrt 1.53x) but closing without +fma |
+| **transcendental — tolerance-only** (cbrt/erf/tanh/tan, no bit-golden) | LOSS, being MINED non-fma | cod-b sweep (no cntiy needed): cbrt 11.9ms->3.30ms (3.60x, 64c0ded1), erf 21.1ms->6.85ms (4.58x, d74a6472), tanh 6.20ms->4.27ms (1.45x) SHIPPED; tan next. Still JAX-loss (tanh 14.58x, cbrt 1.53x) but closing without +fma |
 | **transcendental — bit-pinned** (exp/sin/log/asin/acos) | **LOSS** | **`cntiy` +fma** (SIMD-poly = 2.20x WITH / 0.79x WITHOUT — cz0g0) + re-baseline the 5 bit-goldens |
 | softmax / attention (fused) | LOSS (exp-bound, ~1.2x ceiling) | **`cntiy`** — option (b) audited per-fn `target_feature(fma)` SIMD-exp in tolerance sites preserves goldens; or (a) global +fma + golden re-baseline |
-| **FFT pow2 / real / Bluestein-prime** | WIN (1.7-3x SoA) | none — shipped, near safe-Rust ceiling |
+| **FFT pow2 / real** | WIN (1.7-3x SoA) | none — shipped, near safe-Rust ceiling |
+| **FFT Bluestein-prime batch** (256x1009) | **LOSS 9.15x** | near safe-Rust ceiling on this path; tile-height and thread-cap probes are no-ships; next route needs a real SIMD-within-convolution kernel or quiesced-host proof |
 | **FFT smooth-composite batch** (128x1000) | **LOSS 15.2x** | generated length-specialized kernels (big effort) OR a **quiesced host** (threading is a 0.4x no-ship under swarm contention; SoA-iterative 0.15x, specialized SoA 0.57x, scalar-specialized stage kernel 0.46x, Bluestein 0.39x all no-ship; butterflies already specialized) |
 | FFT pow2 batch dense (2048x256) | LOSS 3.83x | near safe-Rust ceiling (pocketfft SIMD-within-FFT needs AVX-512 + complex shuffles) |
 | eigh / SVD | (owned: `ur4h3`, WildForge) | — |
@@ -136,6 +138,21 @@ self-golden (the thing that forces a parity-relaxation decision) vs only a toler
   rational candidate signal. Verdict: KEEP the rational path as a material non-`+fma`
   narrowing lever; `erf` still loses JAX and routes next to true SIMD/vector polynomial or
   approved target-feature/FMA work.
+  TANH BOLD-VERIFY KEEP (2026-06-21, CrimsonOtter): the large dense-f64 `tanh` path now
+  uses the existing SIMD polynomial `exp` helper to compute
+  `sign(x) * (1 - exp(-2|x|)) / (1 + exp(-2|x|))` for tensors at the measured 1M-element
+  threshold, leaving scalar/small/f32/half/complex paths on the existing libm route. Focused
+  RCH release test `simd_poly_tanh_large_dense_f64_matches_libm_tolerance` passed on
+  `vmi1149989` with max absolute error **2.220e-16** versus the 1e-10 oracle bar; RCH
+  `fj-conformance --test tanh_oracle --release` passed **36/36**. Same-invocation RCH
+  `ovh-a` Criterion measured old libm-reference `eval/tanh_1m_f64_vec_libm_reference`
+  **6.1998 ms** and retained production `eval/tanh_1m_f64_vec` **4.2741 ms** (raw
+  probe **3.7810 ms**), a **1.45x** Rust-side speedup. Fresh local JAX/JAXLIB 0.10.1 CPU
+  x64 on the exact fixture measured **0.293181 ms** mean, so the retained row is still a
+  **14.58x Rust/JAX loss**. Verdict: KEEP because it removes a material chunk of the libm
+  tanh tax under the tolerance-only contract; do not call tanh closed. Next route needs
+  true lower-allocation SIMD/FMA polynomial or target-feature work that first beats this
+  production path in a same-binary A/B.
 
 **FULL-WORKSPACE +fma VERIFICATION (2026-06-21, CrimsonOtter = cod-b, cntiy's assignee).**
 Built the WHOLE workspace with `+avx2,+fma` (local config edit, isolated dir, reverted — NOT
@@ -165,6 +182,48 @@ bound + relax the exp/sin/log self-goldens + commit the flag + implement the SIM
 a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
+
+## 2026-06-21 - frankenjax-murmw Bluestein-prime FFT tile/thread no-ships
+
+BOLD-VERIFY revisited the rough/prime Bluestein batch lane after the earlier
+SoA keep, targeting the still-losing production row
+`eval/fft_batch_256x1009_prime_complex128_dense_input`. The radical lever from
+the alien-graveyard/profiling pass was cache/task-granularity control: widen the
+Bluestein row tile from 4 to 8 rows, then separately cap the vectorized
+Bluestein scheduler at 8 threads so each task owns more convolution work.
+
+Both source changes were reverted before commit.
+
+Same-worker RCH per-crate measurements:
+
+```text
+AGENT_NAME=cod-a \
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_REQUIRE_REMOTE,RCH_QUEUE_WHEN_BUSY \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/fft_batch_256x1009_prime_complex128_dense_input' \
+  --warm-up-time 1 --measurement-time 3 --sample-size 10 --noplot
+```
+
+| candidate | worker | production baseline | candidate | Rust/JAX ratio | verdict |
+| --- | --- | ---: | ---: | ---: | --- |
+| `BLUESTEIN_TILE_ROWS=8` | `hz2` | 3.8919 ms | 4.5907 ms | 9.60x | REVERT: +20.635% Criterion regression |
+| `PARALLEL_MAX_THREADS=8` | `hz2` | 4.3750 ms | 6.3681 ms | 13.32x | REVERT: +37.004% Criterion regression |
+
+The JAX comparator is the existing fresh JAX/JAXLIB 0.10.1 x64 row for the
+same fixture, **0.478 ms**. A non-comparable capped-thread routing signal on
+`ovh-a` measured **1.7611 ms** (3.68x JAX loss), but `RCH_WORKER=ovh-a` was
+ignored on the follow-up rerun, so it is explicitly not accepted as proof.
+
+Current production score after reverts: freshest same-worker `hz2` production
+midpoint **4.3750 ms** versus JAX **0.478 ms**, Rust/JAX **9.15x**. Scorecard
+for this pass: **0 wins / 2 losses / 0 neutral**. Retry predicate: do not retry
+tile-height, representation-only, or coarse thread-count probes for Bluestein
+without hardware-counter evidence. The next credible prime/rough FFT route must
+change the internal convolution kernel itself, e.g. SIMD-within-FFT/pocketfft-
+class complex shuffles, or prove an idle-host threading regime where the same
+source beats production in a same-worker A/B.
 
 ## 2026-06-21 - frankenjax-murmw scalar-specialized mixed-radix FFT no-ship
 
