@@ -1595,3 +1595,23 @@ Additional cod-a FFT SoA gate recheck environment:
   output path would widen the lead further. The domination stands regardless.
 - No source change — this is a verification, not a perf edit. Scorecard delta:
   **1 win / 0 loss / 0 neutral** vs JAX for this row.
+
+## CobaltForge / cc - VERIFIED JAX domination #2: Rust cumsum 4.33x faster than XLA CPU scan (2026-06-21)
+
+- Second same-machine Rust-over-JAX domination (after sort), and non-order-statistics
+  (a scan, not cod-b's sort/argsort/top_k family), so fully owned here.
+- SAME-MACHINE (local Zen3 host), 4M f64 1D cumsum (setup copied from
+  `bench_cumsum_4m_f64_1d`):
+  - Rust `eval_primitive(Cumsum)` (serial, FP-order-preserving): **p50 4.20 ms /
+    mean 4.29 ms / min 3.50 ms**.
+  - JAX 0.10.1 `jnp.cumsum` (jit, x64, block_until_ready): **p50 18.20 ms / mean
+    18.17 ms / min 15.49 ms**.
+  - **Rust/JAX = 0.231x -> Rust 4.33x FASTER** (4.4x at min), low variance.
+- ROOT CAUSE: XLA's CPU scan/`cumsum` lowering is poorly optimized (like its
+  bitonic `Sort`); a simple serial Rust scan streams 32 MB in ~4 ms and wins.
+- REFINED META-MAP (this + the sort/scatter/maxpool head-to-heads): XLA-CPU is
+  WEAK on poorly-CPU-lowered ops (**sort, scan/cumsum** -> Rust dominates 4x), and
+  STRONG on vectorizable ops (elementwise, reduce_window, scatter -> Rust loses
+  1-4.5x). The genuine Rust-over-JAX domination surface is the "bad-CPU-lowering"
+  cluster, NOT the broad set the internal-speedup ratios imply.
+- No source change (verification). Scorecard delta: **1 win / 0 loss** vs JAX.
