@@ -4886,3 +4886,38 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   timing / 1 validation-blocked**. Retry predicate: wait for the cbrt WIP to be
   landed/reverted and for RCH to reuse a warm target, then rerun the same-binary
   A/B before any production dispatch change.
+
+## CrimsonOtter / cod-a - mcqr f64 add-chain SIMD splat-hoist no-ship (2026-06-21)
+
+- Scope: `frankenjax-mcqr`, non-overlapping `fj-interpreters` residual loss after
+  the retained `frankenjax-n75xr` scalar-add SIMD medium-band keep. Target row:
+  `compiled_dispatch/compiled_runner/bigchain1048576/n=8`.
+- Alien-graveyard/artifact/optimization hypothesis: remove invariant work from
+  the vector loop by pre-splatting the eight scalar literals once per call, while
+  still applying the adds in original Jaxpr order for exact floating-point
+  behavior.
+- Baseline proof: RCH remote-only per-crate Criterion on `vmi1227854` with
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a` and filter
+  `bigchain1048576/n=8`.
+  - `compiled_runner`: **855.91 us** midpoint (`769.98..934.79 us`).
+  - `compiled_runner_scalar`: **812.35 us** midpoint (`791.22..845.20 us`).
+  - Same-binary production/scalar ratio: **1.054x**; the retained production
+    path did not beat the scalar control on this worker.
+- Candidate proof: RCH selected `ovh-a`, so the absolute before/after is routing
+  evidence only, not same-worker proof.
+  - `compiled_runner`: **1.1269 ms** midpoint (`1.0932..1.1649 ms`).
+  - `compiled_runner_scalar`: **1.1934 ms** midpoint (`1.1271..1.2339 ms`).
+  - Same-binary production/scalar ratio: **0.944x**, but absolute runtime is
+    still far above the inherited `frankenjax-n75xr` JAX comparator
+    (~**83.3 us**, from the 821.23 us / 9.86x row), giving an approximate
+    **13.5x Rust/JAX loss** for this run.
+- Verdict: reverted before commit. This is not a JAX-closing lever, and the
+  worker switch prevents a credible keep claim. Candidate score: **0 wins / 1
+  loss / 0 neutral** versus JAX, **0 kept / 1 reverted**.
+- Conformance gate after revert: RCH `vmi1149989`
+  `cargo test -p fj-conformance --lib --release -- --nocapture` passed
+  **45/45**.
+- Retry predicate: do not retest splat-hoisting for the n=8 add-chain. The next
+  credible route needs a generated straight-line/vector kernel, a parity-proofed
+  algebraic contraction, or disassembly/perf-counter proof that the current loop
+  is leaving real instruction-level parallelism on the table.

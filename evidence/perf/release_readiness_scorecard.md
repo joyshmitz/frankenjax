@@ -1306,3 +1306,30 @@ Additional cod-a FFT SoA gate recheck environment:
   `vmi1149989`.
 - Route next: keep chasing FFT kernel generation/SIMD/higher-radix work. This
   keep is a real Rust win, not a JAX domination row.
+
+## CrimsonOtter / cod-a - mcqr f64 add-chain splat-hoist no-ship (2026-06-21)
+
+- Scope: `frankenjax-mcqr`; target row
+  `compiled_dispatch/compiled_runner/bigchain1048576/n=8` in `fj-interpreters`.
+  The source experiment pre-splatted the exact eight scalar literals once per
+  call and preserved original add order, then was reverted before commit.
+- Baseline RCH `vmi1227854`, per-crate filtered Criterion:
+  `compiled_runner` **855.91 us** (`769.98..934.79 us`) and
+  `compiled_runner_scalar` **812.35 us** (`791.22..845.20 us`), so the retained
+  production path measured **1.054x** slower than its same-binary scalar control
+  on that worker.
+- Candidate RCH `ovh-a` compiled and ran, but the worker changed, so the
+  candidate is routing evidence rather than keep proof: `compiled_runner`
+  **1.1269 ms** (`1.0932..1.1649 ms`) and `compiled_runner_scalar`
+  **1.1934 ms** (`1.1271..1.2339 ms`). Normalized same-binary ratio was
+  **0.944x**, but absolute timing remained far from JAX.
+- Inherited JAX comparator from the retained `frankenjax-n75xr` row is about
+  **83.3 us** for this workload (821.23 us / 9.86x). Candidate absolute ratio is
+  approximately **13.5x Rust/JAX loss**; baseline absolute ratio is approximately
+  **10.3x Rust/JAX loss** on its worker.
+- Scorecard: **0 wins / 1 loss / 0 neutral**, **0 kept / 1 reverted**. Next
+  route should be a real generated straight-line/vector kernel or a
+  parity-proofed algebraic contraction, not another splat-hoist micro-tweak.
+- Conformance gate after source revert: RCH `vmi1149989`
+  `cargo test -p fj-conformance --lib --release -- --nocapture` passed
+  **45/45**.
