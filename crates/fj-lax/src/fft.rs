@@ -1051,6 +1051,13 @@ fn mixed_radix_factors(n: usize) -> Vec<usize> {
 /// rewrite beats per-row in this same A/B. See the murmw FFT ledger entry.
 const MIXED_RADIX_ITERATIVE_SOA_MAX_N: usize = 0;
 const MIXED_RADIX_ITERATIVE_SOA_MAX_ELEMS: usize = 1 << 18;
+
+fn mixed_radix_iterative_soa_gate_allows_n(n: usize) -> bool {
+    match MIXED_RADIX_ITERATIVE_SOA_MAX_N {
+        0 => false,
+        max_n => n <= max_n,
+    }
+}
 const MIXED_RADIX_ITERATIVE_SOA_TILE_ROWS: usize = 4;
 
 /// Flat-stage mixed-radix SoA candidate for smooth-composite batched FFT/IFFT.
@@ -1440,7 +1447,7 @@ fn transform_batches_dense(
     if n > 1
         && batch_size >= MIXED_RADIX_ITERATIVE_SOA_MIN_BATCH
         && is_mixed_radix_smooth(n)
-        && n <= MIXED_RADIX_ITERATIVE_SOA_MAX_N
+        && mixed_radix_iterative_soa_gate_allows_n(n)
         && batch_size.saturating_mul(n) <= MIXED_RADIX_ITERATIVE_SOA_MAX_ELEMS
     {
         let roots = precompute_twiddles(n, inverse);
@@ -3281,7 +3288,7 @@ mod tests {
     ///   - smooth composite n>1024 (1080=2^3*3^3*5)     -> per-row `BatchFftPlan::Mixed`
     ///   - prime (13, 127)                -> Bluestein SoA
     ///   - non-smooth composite (46=2*23, 187=11*17)    -> Bluestein SoA
-    /// Magnitude-relative tolerance (robust for the larger n's FFT-vs-O(n^2)-DFT rounding).
+    ///     Magnitude-relative tolerance (robust for the larger n's FFT-vs-O(n^2)-DFT rounding).
     #[test]
     fn transform_batches_dense_dispatch_matches_dft_oracle() {
         for &n in &[16usize, 256, 12, 30, 49, 1000, 1080, 13, 127, 46, 187] {

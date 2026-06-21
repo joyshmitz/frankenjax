@@ -3,48 +3,87 @@
 This ledger records code-first performance attempts and retry predicates so dead
 ends are not rediscovered without new evidence.
 
-## frankenjax-ur4h3 - QL eigenvector transpose in-place pending-bench
+## frankenjax-ur4h3 - eigh allocator/copy-reduction stack KEEP
 
 - Date: 2026-06-21
 - Agent: cod-b / CrimsonOtter
-- Status: CODE-ONLY COMMITTED, PENDING BENCH. Disk-low instruction explicitly
-  prohibited starting a new `cargo bench` or `cargo build` this turn.
-- Lever: `tridiag_ql_eigendecomposition` now reuses the accumulated `Q` buffer
-  for the row-major/column-major layout conversion around
-  `symmetric_tridiagonal_ql`. The old code allocated a second `n*n` buffer and
-  copied every element into it, then copied every element back out. The new code
-  transposes the square buffer in place before QL and transposes it back after
-  QL. The QL arithmetic and eigenvector storage contract are unchanged.
-- Target row for next turn: `linalg/eigh_48x48_f64` first. Measure this
-  together with the pending Householder reflector and left-update scratch reuse
-  commits already on this branch.
-- Required next-turn bench command, only after disk pressure is handled:
+- Status: MEASURED KEEP. This resolves the three earlier disk-low pending-bench
+  entries for QL in-place transpose, Householder left-update scratch reuse, and
+  Householder reflector scratch reuse.
+- Lever stack:
+  - `815ad85a` reuses the Householder reflector buffer in
+    `hessenberg_reduction`.
+  - `b240d41d` reuses the left Householder update dot-product scratch buffer.
+  - `0dd28aad` transposes the QL eigenvector buffer in place around
+    `symmetric_tridiagonal_ql`.
+  - Current cleanup gates the old non-scratch `apply_householder_left` wrapper
+    to `#[cfg(test)]`; production uses `apply_householder_left_with_scratch`.
+- Alien-graveyard/extreme-optimization route used: constants/cache wall (§16.7)
+  plus communication-avoiding dense-kernel discipline (§9.7/CA-QR family),
+  implemented as a conservative allocation/copy-reduction lever rather than a
+  new eigensolver.
+
+RCH `fj-lax` Criterion command:
 
 ```text
+AGENT_NAME=CrimsonOtter \
 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
   rch exec -- cargo bench -p fj-lax --bench lax_baseline \
-  'linalg/eigh_48x48_f64' -- \
+  'linalg/(eigh_48x48_f64|svd_48x48_f64)' -- \
   --warm-up-time 1 --measurement-time 3 --sample-size 15 --noplot
 ```
 
-- Keep/revert rule: keep the allocator/copy-reduction stack only if
-  same-worker or directly comparable evidence shows a real `eigh_48x48_f64`
-  improvement without correctness fallout. If the delta is neutral or regresses,
-  revert this in-place transpose plus the two pending Householder scratch
-  commits and record the failed stack here.
+- The Cargo version in this checkout rejects `cargo bench --release`; `cargo
+  bench` was used because Criterion already builds the bench profile.
+- RCH selected `vmi1227854` and rewrote the target dir to a worker-scoped pool.
+  This was still remote and per-crate; no local full workspace build was run.
+- Old saved Criterion row in the cod-b target tree:
+  `linalg/eigh_48x48_f64` **566.12 us** mean.
+- Current RCH stdout:
+  `linalg/eigh_48x48_f64` **203.18 us** midpoint (`197.59..211.62 us`) and
+  `linalg/svd_48x48_f64` **98.678 us** midpoint (`95.111..103.32 us`).
+- Retrieved Criterion estimate file:
+  `eigh` **215.99 us** mean, `svd` **98.764 us** mean, with Criterion's stored
+  relative `eigh` delta about **-73%** versus the saved row.
 
-## frankenjax-murmw - flat iterative SoA mixed-radix FFT pending-bench
+Fresh exact JAX/JAXLIB 0.10.1 x64 comparator:
+
+- Fixture: exact `crates/fj-lax/benches/lax_baseline.rs` inputs
+  (`bench_eigh_48` and `real_matrix(48,48)`), 60 runs x 100 inner loops, CPU
+  backend, `jax_enable_x64=true`.
+- `eigh_48x48_f64` JAX mean **210.721 us**; Rust/JAX is **0.964** using RCH
+  stdout midpoint and **1.025** using the retrieved Criterion estimate.
+- `svd_48x48_f64` JAX mean **571.848 us**; Rust/JAX is **0.173** by either Rust
+  estimate. SVD remains a Rust win.
+
+Isomorphism proof:
+
+- Householder reflector entries are fully overwritten before use.
+- The left scratch buffer is cleared before dot accumulation.
+- Dot accumulation order and matrix update order are unchanged.
+- QL arithmetic and rotation order are unchanged.
+- The in-place transpose changes only storage for the layout conversion and
+  preserves row-major eigenvector output.
+
+Retry predicate: do not rerun allocator/copy micro-levers for this row unless a
+new profile shows allocation/copy back on top. If `eigh_48x48_f64` remains a
+true JAX loss under a same-host comparator, route to blocked/panel Householder
+with packed or streaming Q updates, or a different eigenvector accumulation
+strategy with same-worker production proof.
+
+## frankenjax-murmw - flat iterative SoA mixed-radix FFT DISABLED no-ship
 
 - Date: 2026-06-21
 - Agent: cod-a / CrimsonOtter
-- Status: CODE-ONLY COMMITTED, PENDING BENCH. Disk-low instruction explicitly
-  prohibited starting a new `cargo bench` or `cargo build` this turn.
+- Status: MEASURED NO-SHIP. The smooth-composite iterative SoA gate is disabled
+  in production via `MIXED_RADIX_ITERATIVE_SOA_MAX_N = 0`; the kernel and tests
+  remain as a documented rejection artifact.
 - Target gap: smooth-composite batched complex FFT, especially
   `eval/fft_batch_128x1000_complex128`, which remained a JAX loss in the last
   measured row set: Rust **2.930 ms** vs JAX/JAXLIB 0.10.1 x64 **0.233 ms**,
   Rust/JAX **12.55x**.
-- Lever: lift the flat iterative mixed-radix SoA prototype into production behind
-  a conservative gate for dense smooth-composite batches:
+- Lever tested: lift the flat iterative mixed-radix SoA prototype into production
+  behind a conservative gate for dense smooth-composite batches:
   `batch >= 8`, `n <= 1024`, and `batch*n <= 2^18`. This targets the existing
   128x1000 row while leaving larger already-threaded batches on the proven
   recursive per-row path until direct RCH evidence exists.
@@ -54,93 +93,81 @@ CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
   iterative per row, but only tolerance-equivalent to the recursive production
   mixed-radix path because op order differs. Smooth-composite FFT parity is
   tolerance-based, so this is a legal candidate if the focused tests pass.
-- Added next-turn gate:
-  `production_mixed_radix_soa_matches_scalar_iterative_by_bits`, covering
-  n={6,10,12,15,30,35,77,1000}, forward/inverse, and batch={1,3,4,8}.
+- Correctness gates:
+  - `cargo test -p fj-lax --lib --release --no-run` passed remotely on RCH
+    `vmi1152480`.
+  - `production_mixed_radix_soa_matches_scalar_iterative_by_bits` passed on
+    RCH `vmi1152480`.
+  - `cargo test -p fj-lax --lib --release mixed_radix -- --nocapture` passed
+    5 runnable tests on RCH `vmi1152480`; the A/B microbench remained ignored.
+  - `cargo test -j 1 -p fj-conformance --test fft_oracle -- --nocapture`
+    passed 27/27 on RCH `vmi1149989`.
 
-Required next-turn validation, only after disk pressure is handled:
+Performance evidence:
 
 ```text
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 RCH_WORKER=vmi1152480 \
 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
-  rch exec -- cargo test -p fj-lax \
-  production_mixed_radix_soa_matches_scalar_iterative_by_bits \
-  --lib --release -- --nocapture
+  rch exec -- cargo test -p fj-lax --lib --release \
+  bench_mixed_radix_iterative_soa_vs_per_row -- --ignored --nocapture
+```
 
-CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
-  rch exec -- cargo test -p fj-lax \
-  iterative_mixed_radix_matches_recursive_to_tolerance \
-  --lib --release -- --nocapture
+- Same-binary A/B on RCH `vmi1152480`: **per-row=1.798ms**, **iter=5.911ms**,
+  **ratio=0.30x**. The iterative SoA path is **3.29x slower** than the per-row
+  recursive path. An earlier disabling run recorded an even worse
+  **per-row=2.947ms**, **iter=19.096ms**, **ratio=0.15x**.
+- Production Criterion with the gate disabled:
 
+```text
+RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 \
 CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
-  rch exec -- cargo test -p fj-conformance --test fft_oracle -- --nocapture
-
-CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
-  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
-  'eval/fft_batch_128x1000_complex128' \
+  rch exec -- cargo bench -j 1 --profile release -p fj-lax \
+  --bench lax_baseline 'eval/fft_batch_128x1000_complex128' -- \
   --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
 ```
 
-- Keep/revert rule: keep only if same-worker or directly comparable evidence
-  shows a real `fft_batch_128x1000_complex128` improvement without FFT oracle
-  fallout. If neutral/regressing or correctness fails, revert this smooth-
-  composite SoA routing and record the result here.
+- RCH `hz2` result: **2.7829ms** midpoint (`2.7035..2.8831ms`).
+- JAX comparator: recorded local CPU JAX/JAXLIB 0.10.1 x64 row **0.233ms**.
+  The current environment did not have `jax` installed, so this pass reused
+  the recorded comparator rather than installing new packages under disk
+  pressure.
+- Current production Rust/JAX: **11.94x** slower; the rejected iterative SoA
+  microbench would be **25.37x** JAX.
 
-## frankenjax-ur4h3 - Householder left-update scratch reuse pending-bench
+Retry predicate: do not retry straight SoA transposes of recursive or iterative
+mixed-radix. The next credible smooth-composite route must change the kernel
+family: specialized radix-3/5 butterflies with direct vectorization, generated
+length-specialized kernels, or another design that beats the per-row recursive
+path in the same `bench_mixed_radix_iterative_soa_vs_per_row` A/B before it is
+allowed onto the production dispatch path.
+
+## frankenjax-ur4h3 - Householder left-update scratch reuse resolved by stack keep
 
 - Date: 2026-06-21
 - Agent: cod-b / CrimsonOtter
-- Status: CODE-ONLY COMMITTED, PENDING BENCH. Disk-low instruction explicitly
-  prohibited starting a new `cargo bench` or `cargo build` this turn.
+- Status: RESOLVED by the measured 2026-06-21 `frankenjax-ur4h3` stack keep
+  above.
 - Lever: `hessenberg_reduction` now reuses the left Householder update's
   dot-product buffer across panels. The existing `apply_householder_left` API
   remains intact for other call sites, while the production reduction path calls
   a scratch-backed helper. The helper zeroes the active scratch prefix before
   use, preserving the same dot accumulation order and matrix update order.
-- Target row for next turn: `linalg/eigh_48x48_f64` first. This should be
-  measured together with the prior pending reflector-buffer reuse from commit
-  `815ad85a`, then reverted as a pair if the combined allocator-pressure
-  reduction is neutral or regresses.
-- Required next-turn bench command, only after disk pressure is handled:
+- Do not evaluate this helper in isolation unless a fresh profile asks for
+  component-level attribution.
 
-```text
-CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
-  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
-  'linalg/eigh_48x48_f64' -- \
-  --warm-up-time 1 --measurement-time 3 --sample-size 15 --noplot
-```
-
-- Keep/revert rule: keep only if same-worker or directly comparable evidence
-  shows a real `eigh_48x48_f64` improvement without correctness fallout. If the
-  delta is neutral or regresses, revert this helper and the previous reflector
-  scratch commit, then record the failed allocator-pressure pair here.
-
-## frankenjax-ur4h3 - Householder reflector scratch reuse pending-bench
+## frankenjax-ur4h3 - Householder reflector scratch reuse resolved by stack keep
 
 - Date: 2026-06-20
 - Agent: cod-b / CrimsonOtter
-- Status: CODE-ONLY COMMITTED, PENDING BENCH. Disk-low instruction explicitly
-  prohibited starting a new `cargo bench` or `cargo build` this turn.
+- Status: RESOLVED by the measured 2026-06-21 `frankenjax-ur4h3` stack keep
+  above.
 - Lever: `hessenberg_reduction` now reuses one Householder reflector scratch
   buffer across all panels instead of heap-allocating `Vec<f64>` once per
   reduction step. Each panel writes the full active reflector slice before use,
   so the reflector arithmetic, update order, and output contract are unchanged.
-- Target row for next turn: `linalg/eigh_48x48_f64` first, then larger
-  `eigh` rows if disk pressure is resolved. Existing measured baseline before
-  this code-only lever was RCH `hz1` production `eigh_48x48_f64` 267.84 us vs
-  JAX/JAXLIB 0.10.1 x64 201.429 us, Rust/JAX 1.330.
-- Required next-turn bench command, only after disk pressure is handled:
-
-```text
-CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
-  rch exec -- cargo bench -p fj-lax --bench lax_baseline \
-  'linalg/eigh_48x48_f64' -- \
-  --warm-up-time 1 --measurement-time 3 --sample-size 15 --noplot
-```
-
-- Keep/revert rule: keep only if same-worker or directly comparable evidence
-  shows a real `eigh_48x48_f64` improvement without worsening correctness or
-  larger `eigh` rows. If the delta is neutral or regresses, revert this scratch
-  reuse and record the result here.
+- The earlier RCH `hz1` production row remains historical context; the BOLD-
+  VERIFY pass refreshed the exact JAX fixture comparator and kept the combined
+  allocator/copy-reduction stack.
 ## frankenjax-murmw - SoA Bluestein batch FFT keep
 
 - Date: 2026-06-20

@@ -5,9 +5,10 @@ Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 ## PENDING-BENCH RESUME INDEX (open as of 2026-06-21, disk-critical no-cargo pause)
 
 The disk-low/critical pause accumulated production perf routes that shipped
-ENABLED but were not immediately validated or A/B'd. As of this pass,
-`frankenjax-ur4h3` is resolved by measured keep; `frankenjax-murmw` remains the
-one enabled route in this index that still needs cargo-backed validation.
+ENABLED but were not immediately validated or A/B'd. As of this pass, the
+pause-era routes in this index have now been cargo-backed: `frankenjax-ur4h3`
+is resolved by measured keep, and `frankenjax-murmw` is resolved by measured
+no-ship with the smooth-composite iterative SoA gate disabled.
 
 **STEP 0 — MANDATORY FIRST when cargo returns: `cargo test -p fj-lax --lib --release --no-run`**
 (just compile the tests). Many `#[cfg(test)]` tests were authored during the no-cargo pause
@@ -59,19 +60,27 @@ RESOLVED 2026-06-21 (disk recovered, warm cargo): all resume items below are now
    memory-bound at n=1000; mixed-radix butterflies don't autovectorize like flat radix-2 /
    Bluestein). Disabled via `MIXED_RADIX_ITERATIVE_SOA_MAX_N = 0` (e3069f5f); smooth composites
    keep the proven recursive per-row path; kernel + tests retained as documented no-ship (11/11
-   green post-disable). **The FFT SoA frontier is now COMPLETE**: pow2/real/Bluestein = shipped
-   wins; smooth-composite SoA = measured no-ship; per-row is the mixed-radix floor.
+   green post-disable). cod-a re-verified this on 2026-06-21 after restart: RCH `vmi1152480`
+   same-binary A/B was **per-row=1.798ms vs iter=5.911ms = 0.30x (3.29x SLOWER)**; RCH `hz2`
+   production Criterion with the disabled gate was **2.7829ms** (`2.7035..2.8831ms`). Using the
+   recorded JAX/JAXLIB 0.10.1 x64 comparator **0.233ms**, current production remains **11.94x**
+   slower than JAX; the rejected iterative SoA microbench would be **25.37x** JAX. `fft_oracle`
+   passed **27/27** remotely on RCH `vmi1149989`. **The FFT SoA frontier is now COMPLETE**:
+   pow2/real/Bluestein = shipped wins; smooth-composite SoA = measured no-ship; per-row is the
+   mixed-radix floor.
 2. **[ur4h3] eigh allocator/copy-reduction stack** — RESOLVED 2026-06-21 by
    RCH `fj-lax` Criterion + exact JAX fixture comparator; see the measured keep
-   entry below. The remaining open pending item in this index is `murmw`.
+   entry below.
 
-Until the remaining `murmw` gate is run, treat that route as unvalidated;
-keep-vs-revert is decided by its A/B.
-
-## 2026-06-21 - frankenjax-murmw iterative mixed-radix SoA route ENABLED but pending-bench (validation harness in place)
+## 2026-06-21 - frankenjax-murmw iterative mixed-radix SoA route DISABLED no-ship (validation harness green)
 
 Status of the smooth-composite batched-FFT SoA lever (the last uncovered FFT path;
 pow2 fft/ifft/rfft/irfft and Bluestein prime/rough are already shipped wins).
+
+Resolution: the production gate is disabled via `MIXED_RADIX_ITERATIVE_SOA_MAX_N = 0`.
+The kernel remains in the file as a correctness-validated no-ship artifact and a target
+for a future fundamentally different radix-3/5 butterfly implementation, but it is not
+on the production dispatch path.
 
 - The RECURSIVE mixed-radix SoA was a measured no-ship (0.50-0.81x, memory-bound: 3
   buffer-pairs spill L1; see the mixed-radix no-ship entry below). The credible
@@ -118,12 +127,16 @@ Bluestein — its `!is_mixed_radix_smooth(n)` is mutually exclusive with (3) non
 `BatchFftPlan`. No length is double-routed and none is unrouted, so enabling the iterative
 gate cannot have stolen or dropped any case from the Bluestein/per-row paths.
 
-**PENDING-BENCH (disk-critical no-cargo pause — authored by inspection, NOT yet executed):**
-when the build pause lifts (1) run the four tests above (now covering mixed + pure
-odd-prime-power lengths, both directions, multi-tile); if any fail, the enabled gate
-must be disabled until fixed. (2) Then same-binary interleaved A/B of the route vs per-row
-`mixed_radix_into`; KEEP only on a measured win — if it regresses like the recursive SoA
-did (despite the L1 prediction), disable `MIXED_RADIX_ITERATIVE_SOA_MAX_N` (set 0).
+**BOLD-VERIFY result (2026-06-21):** correctness is green and performance rejects the
+route. RCH `fj-lax --lib --release mixed_radix` passed all 5 runnable mixed-radix tests
+with only the informational A/B microbench ignored; exact
+`production_mixed_radix_soa_matches_scalar_iterative_by_bits` also passed. RCH
+`fj-conformance --test fft_oracle` passed 27/27. The same-binary A/B on RCH `vmi1152480`
+printed `per-row=1.798ms iter=5.911ms ratio=0.30x`; the earlier disabling run recorded
+an even worse `per-row=2.947ms iter=19.096ms ratio=0.15x`. RCH `hz2` production Criterion
+with the disabled gate printed `eval/fft_batch_128x1000_complex128` **2.7829ms**
+(`2.7035..2.8831ms`). Against the recorded JAX/JAXLIB 0.10.1 x64 comparator **0.233ms**,
+production is **11.94x** JAX, while the rejected iterative SoA microbench is **25.37x** JAX.
 
 (3) CONDITIONAL OPTIMIZATION (already staged): the enabled production kernel uses the
 general O(r^2) per-butterfly DFT, which is wasteful on radix-3/5-heavy composites (n=1000

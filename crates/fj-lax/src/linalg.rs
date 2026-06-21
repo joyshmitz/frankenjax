@@ -5108,6 +5108,7 @@ fn hessenberg_reduction(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     (h, q)
 }
 
+#[cfg(test)]
 fn apply_householder_left(
     matrix: &mut [f64],
     n: usize,
