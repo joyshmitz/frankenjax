@@ -2713,6 +2713,25 @@ fn bench_cumsum_4m_f64_1d(c: &mut Criterion) {
     });
 }
 
+// DIAGNOSTIC (CrimsonOtter 2026-06-21): tight direct-add f64 cumsum on the raw slice, no dispatch
+// / no closure / no per-line chunk machinery. Isolates how much of eval/cumsum_4m_f64_1d's ~30ms
+// is removable overhead vs the sequential dependency-chain floor (~3ms). If this is ~floor, the
+// production scan path has ~10x overhead to reclaim (would beat JAX's 14.1ms).
+fn bench_cumsum_4m_f64_1d_tight(c: &mut Criterion) {
+    let data: Vec<f64> = (0..1 << 22).map(|i| (i as f64) * 0.001).collect();
+    c.bench_function("eval/cumsum_4m_f64_1d_tight", |bencher| {
+        bencher.iter(|| {
+            let mut out = Vec::with_capacity(data.len());
+            let mut acc = 0.0_f64;
+            for &v in &data {
+                acc += v;
+                out.push(acc);
+            }
+            out
+        })
+    });
+}
+
 // 4096x1024 f64 Cumsum along the last axis (4096 independent lines): exercises
 // line-parallel scan over the outer dimension.
 fn bench_cumsum_4096x1024_f64_axis1(c: &mut Criterion) {
@@ -6747,6 +6766,7 @@ criterion_group!(
     bench_reduce_and_256_axis1_bool_literal_reference,
     bench_cumsum_64k_f64_vec,
     bench_cumsum_4m_f64_1d,
+    bench_cumsum_4m_f64_1d_tight,
     bench_cumsum_4096x1024_f64_axis1,
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
