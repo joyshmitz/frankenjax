@@ -2486,6 +2486,154 @@ mod tests {
         }
     }
 
+    /// PROTOTYPE (test-only, pending build/bench validation — disk-low pause): the SoA
+    /// (`w`-lane) sibling of `mixed_radix_iterative_scalar`. Computes `batch` independent
+    /// length-`n` mixed-radix DFTs at once with each element occupying `w=batch`
+    /// contiguous lanes; the digit-reversal, stage structure, twiddle indices, and
+    /// per-butterfly arithmetic are IDENTICAL to the scalar version (every scalar op
+    /// replicated across `w` lanes with a shared scalar twiddle), so it is bit-for-bit
+    /// equal to running the scalar iterative per row. This is the FLAT, single-buffer,
+    /// contiguous-stage shape that vectorized for radix-2/Bluestein — the candidate
+    /// production kernel for the smooth-composite SoA win.
+    ///
+    /// NEXT (disk recovered): confirm `iterative_soa_bit_identical_to_scalar`, then lift to
+    /// module scope, tile for L1, and same-binary A/B vs per-row `mixed_radix_into`.
+    #[cfg(test)]
+    fn mixed_radix_iterative_soa_batch(
+        elements: &[(f64, f64)],
+        n: usize,
+        batch: usize,
+        inverse: bool,
+        roots: &[(f64, f64)],
+    ) -> Vec<(f64, f64)> {
+        let w = batch;
+        let mut out: Vec<(f64, f64)> = vec![(0.0, 0.0); batch * n];
+        if n <= 1 {
+            if n == 1 {
+                out.copy_from_slice(&elements[..batch]);
+            }
+            return out;
+        }
+
+        let mut factors: Vec<usize> = Vec::new();
+        let mut nn = n;
+        while nn > 1 {
+            let p = smallest_prime_factor(nn);
+            factors.push(p);
+            nn /= p;
+        }
+
+        // SoA work buffers (re[idx*w + lane]); digit-reversal happens during transpose-in.
+        let mut re = vec![0.0f64; batch * n];
+        let mut im = vec![0.0f64; batch * n];
+        for i in 0..n {
+            let mut x = i;
+            let mut rev = 0usize;
+            for &f in &factors {
+                rev = rev * f + (x % f);
+                x /= f;
+            }
+            for b in 0..batch {
+                let (vr, vi) = elements[b * n + rev];
+                re[i * w + b] = vr;
+                im[i * w + b] = vi;
+            }
+        }
+
+        let max_r = *factors.iter().max().unwrap();
+        let mut y_re = vec![0.0f64; max_r * w];
+        let mut y_im = vec![0.0f64; max_r * w];
+
+        let mut len = 1usize;
+        for &r in &factors {
+            let next = len * r;
+            let ts = n / next;
+            let ds = n / r;
+            let mut start = 0usize;
+            while start < n {
+                for j in 0..len {
+                    for t in 0..r {
+                        let (twr, twi) = roots[(ts * j * t) % n];
+                        let base = (start + j + t * len) * w;
+                        for b in 0..w {
+                            let vr = re[base + b];
+                            let vi = im[base + b];
+                            y_re[t * w + b] = vr * twr - vi * twi;
+                            y_im[t * w + b] = vr * twi + vi * twr;
+                        }
+                    }
+                    for s in 0..r {
+                        let obase = (start + j + s * len) * w;
+                        for b in 0..w {
+                            let mut ar = 0.0f64;
+                            let mut ai = 0.0f64;
+                            for t in 0..r {
+                                let (wr, wi) = roots[(ds * s * t) % n];
+                                let yr = y_re[t * w + b];
+                                let yi = y_im[t * w + b];
+                                ar += yr * wr - yi * wi;
+                                ai += yr * wi + yi * wr;
+                            }
+                            re[obase + b] = ar;
+                            im[obase + b] = ai;
+                        }
+                    }
+                }
+                start += next;
+            }
+            len = next;
+        }
+
+        let inv_n = if inverse { 1.0 / (n as f64) } else { 1.0 };
+        for b in 0..batch {
+            let dst = &mut out[b * n..b * n + n];
+            for (k, slot) in dst.iter_mut().enumerate() {
+                *slot = (re[k * w + b] * inv_n, im[k * w + b] * inv_n);
+            }
+        }
+        out
+    }
+
+    /// The SoA iterative prototype must be bit-for-bit identical to running the scalar
+    /// iterative per row (same op order; lanes don't change FP). If both match the
+    /// recursive reference to tolerance (see the other test), the SoA kernel is correct.
+    #[test]
+    fn iterative_soa_bit_identical_to_scalar() {
+        let bits = |v: &[(f64, f64)]| -> Vec<(u64, u64)> {
+            v.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect()
+        };
+        for &n in &[6usize, 10, 12, 15, 30, 35, 77, 1000] {
+            for inverse in [false, true] {
+                let roots = precompute_twiddles(n, inverse);
+                for &batch in &[1usize, 3, 4, 8] {
+                    let elements: Vec<(f64, f64)> = (0..batch * n)
+                        .map(|i| {
+                            let f = i as f64;
+                            ((f * 0.011).sin() - 0.4, (f * 0.019).cos() * 0.6)
+                        })
+                        .collect();
+                    let mut reference = vec![(0.0, 0.0); batch * n];
+                    for b in 0..batch {
+                        let mut row = Vec::new();
+                        mixed_radix_iterative_scalar(
+                            &elements[b * n..b * n + n],
+                            &roots,
+                            inverse,
+                            &mut row,
+                        );
+                        reference[b * n..b * n + n].copy_from_slice(&row);
+                    }
+                    let got = mixed_radix_iterative_soa_batch(&elements, n, batch, inverse, &roots);
+                    assert_eq!(
+                        bits(&reference),
+                        bits(&got),
+                        "SoA iterative != scalar iterative (n={n} batch={batch} inverse={inverse})"
+                    );
+                }
+            }
+        }
+    }
+
     /// Old inline-recurrence radix-2 (pre-frankenjax-* twiddle-hoist), kept only as the
     /// bench baseline. Bit-identical to the production `radix2_fft_1d_into`.
     #[cfg(test)]
