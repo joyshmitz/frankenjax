@@ -29,8 +29,16 @@ anywhere in the workspace, including other agents' no-cargo eigh/linalg edits. P
 balance was also checked: the only 6 non-zero files were all last modified 2026-05-02..06-18
 (BEFORE the 06-21 pause), so their counts are pre-existing string/char-literal noise in
 already-compiled commits — i.e. NO file edited during the pause has a delimiter imbalance of
-any class. The pause's remaining build risk is therefore type/lint-level only (cargo-gated),
-not structural.
+any class. Duplicate-definition check (fft.rs) is also clean — apparent dups (`fn apply_into`,
+`fn new`, `const PARALLEL_MIN_ELEMS`) are methods on distinct structs / scoped local consts,
+all legal. So ALL inspection-checkable compile-error classes (delimiters + duplicate
+definitions) are verified clean for the pause-era edits; the only residual build risk is
+type-inference + `-D warnings` lints (genuinely cargo-gated).
+
+BACKLOG (2026-06-21): `br ready` = 2 — `mcqr` (umbrella; FFT work feeds it, no code-only
+sub-gap) and `cntiy` (+fma, doubly blocked: maintainer decision AND `#![forbid(unsafe_code)]`
+blocks per-fn `target_feature`). `murmw`/`ur4h3` left "ready" (progressed). So no NEW
+code-only-actionable perf bead exists; all remaining value is cargo-gated or maintainer-gated.
 
 The MOMENT cargo returns (after STEP 0), validate + A/B these (each links to its detailed
 entry below):
