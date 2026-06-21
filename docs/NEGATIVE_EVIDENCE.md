@@ -1300,3 +1300,10 @@ random_normal's bits are erf-primitive-independent; OR re-baseline `random_norma
 ONLY after confirming the new erf_inv still matches JAX's `random.normal` bit-for-bit (RNG parity is
 fixed-to-JAX). Reverting d74a6472 also restores GREEN but loses the erf win. Flagged to codex cod-b;
 conformance is RED until resolved.
+**RESOLVED `c1b9ef15`** (win-preserving): added `fn erf_for_erfinv` (pinned pre-d74a6472 series)
+used ONLY by `erf_inv_approx`'s Newton, so random_normal is erf-primitive-independent; the
+PRIMITIVE keeps the fast fdlibm erf (4.58x win kept). VERIFIED workspace-wide: fj-lax lib back to
+1582/1 (only pre-existing cholesky_blocked, shbyh's, RED), AND fj-conformance ALL-GREEN (RNG
+distribution oracles + erf_oracle + cbrt_oracle, every binary 0-failed). The transcendental sweep
+is conformance-clean. Only remaining RED workspace-wide = the shbyh cholesky_blocked golden
+(linalg owner's domain).
