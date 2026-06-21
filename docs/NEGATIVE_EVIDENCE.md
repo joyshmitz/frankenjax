@@ -11,11 +11,16 @@ preserving by design; production currently carries them unvalidated.
 **STEP 0 — MANDATORY FIRST when cargo returns: `cargo test -p fj-lax --lib --release --no-run`**
 (just compile the tests). Many `#[cfg(test)]` tests were authored during the no-cargo pause
 and could NOT be compiled; one such edit silently dropped 6 closing braces in `fft.rs`
-(fixed in `66127ce1`, verified by brace-depth analysis), and other no-compile additions are
-audited-by-inspection but NOT compile-verified (symbols/signatures/braces check out; types,
-borrows, and `-D warnings` lints do not until compiled). Release builds are unaffected (all
-in `#[cfg(test)]`), but the validation harness itself must be confirmed to build before any
-of the steps below can run. If it fails to compile, fix the test before proceeding.
+(fixed in `66127ce1`, verified by brace-depth analysis). The no-compile additions have now
+had a full inspection-audit (2026-06-21): every referenced fn/type/const exists with the
+arg-count called; whole-file brace balance is 0 (matches the last cargo-validated baseline
+`cb98244b`); every test fn sits at the correct module depth; and the only non-trivial borrow
+(the specialized kernel's twiddle closure) captures just `start/j/len/w`, not the mutated
+`re/im`, and drops before `start += next`. None of my additions use `thread::scope` (the only
+threaded iterative kernel is the production one). So the RESIDUAL compile risk is narrowed to
+TYPE inference and `-D warnings` clippy lints only — which still require cargo. Release builds
+are unaffected (all in `#[cfg(test)]`), but the harness must be confirmed to build before any
+step below runs. If it fails to compile, fix the test before proceeding.
 
 The MOMENT cargo returns (after STEP 0), validate + A/B these (each links to its detailed
 entry below):
