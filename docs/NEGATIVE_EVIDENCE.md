@@ -50,7 +50,7 @@ general-Hessenberg setup. The next credible `eigh` route needs a blocked/panel
 Householder design with packed/streaming Q updates, or a different end-to-end
 eigenvector accumulation strategy with same-worker production proof.
 
-## 2026-06-20 - frankenjax-murmw SoA Bluestein (prime / rough length) batch FFT — SHIPPED win (2.85-3.19x)
+## 2026-06-20 - frankenjax-murmw SoA Bluestein (prime / rough length) batch FFT — SHIPPED Rust win (2.49x full-eval; still 9.31x JAX loss)
 
 The mixed-radix SoA no-ship (below) does NOT generalize to Bluestein, because Bluestein's
 two internal convolution FFTs are the **flat radix-2** kernel (`radix2_forward`/`_inverse`),
@@ -61,16 +61,29 @@ vertically over rows, and the forward + inverse pow2 convolution FFTs run as SoA
 Gated into `transform_batches_dense` for non-pow2 non-smooth lengths (batch≥8, conv length
 `m ≤ BLUESTEIN_SOA_MAX_M`).
 
-**Bit-identical** to per-row `BluesteinPlan::apply_into` (same chirp arithmetic, same radix-2
-plans, same kernel `fb`, same `1/m` and `1/n` scales) — proven by
-`vectorized_bluestein_bit_identical_to_per_row` (n ∈ {3,7,11,13,17,23,127,257,1009}, both
-directions, batch 1..11), `fft_oracle` 27/27, 47/47 fft tests, clippy clean.
+**Bit-identical** to per-row `BluesteinPlan::apply_into` (same chirp arithmetic,
+same radix-2 plans, same kernel `fb`, same `1/m` and `1/n` scales) — proven by
+`vectorized_bluestein_bit_identical_to_per_row` (n in
+{3,7,11,13,17,23,127,257,1009,4099}, both directions, batch 1..11), `fft_oracle`
+27/27, `linalg_fft_oracle_parity` 1/1, filtered `fj-lax fft` 47/0 with 6
+ignored microbenches, `cargo clippy -p fj-lax --all-targets -- -D warnings`,
+and `cargo build --release -p fj-lax --benches`.
 
-Measured single-thread same-binary A/B (interleaved min-of-9): n=127 (m=256) **3.19x / 3.10x**;
-n=1009 (m=2048) **3.07x / 2.85x**. The win is ~2x the rfft/irfft ratio because Bluestein does
-far more work per element (two FFTs + chirp + kernel), so vectorizing all of it compounds —
-and it holds at *large* m (unlike mixed-radix) precisely because the kernel is flat radix-2.
-This roughly halves the `fft_1009_prime` JAX gap (was 3.83x slower) toward parity.
+Measured single-thread same-binary A/B on RCH `hz2` (interleaved min-of-9):
+n=127 (m=256) **2.98x**; n=1009 (m=2048) **4.40x**; n=4099 (m=16384)
+**3.60x**. Same-worker full-eval Criterion on RCH `hz2` for the new production
+row `eval/fft_batch_256x1009_prime_complex128_dense_input`: baseline **11.096 ms**,
+candidate **4.453 ms**, **2.49x** faster. Controls stayed within noise/slight
+loss: `fft_batch_128x1000_complex128` **2.826 -> 2.930 ms** (+3.7%, not routed
+through this gate) and `fft_batch_2048x256_complex128_dense_input` **5.858 ->
+5.979 ms** (+2.1%, power-of-two control).
+
+Fresh local JAX/JAXLIB 0.10.1 x64 comparator for the same rows: `256x1009`
+**0.478 ms**, `128x1000` **0.233 ms**, `2048x256` **0.313 ms**. Ratio scorecard
+after the keep: **0 wins / 3 losses / 0 neutral vs JAX** for these full-eval
+FFT rows; the kept target improves from **23.20x** to **9.31x** Rust/JAX, but it
+is still a JAX loss. `BLUESTEIN_SOA_MAX_M=16384` is retained because the largest
+covered row has both bit-identity proof (`n=4099`) and a 3.60x same-binary win.
 
 ## 2026-06-20 - frankenjax-murmw SoA mixed-radix (composite) batch FFT — no-ship (0.50-0.81x regression, large AND small n)
 

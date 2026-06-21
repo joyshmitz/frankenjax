@@ -1,4 +1,4 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value};
 // [cc-temp] foreign WIP stub: use fj_lax::linalg::svd_jacobi_profile_counters;
 use fj_lax::threefry::{random_key, random_normal, random_uniform};
@@ -5859,6 +5859,18 @@ fn bench_fft_1009_prime(c: &mut Criterion) {
     });
 }
 
+// Batched prime-length FFT with dense-complex input. 1009 forces the Bluestein
+// path; 256 rows crosses the threaded full-eval threshold and isolates the
+// batched rough-length kernel family missing from the existing FFT bench set.
+fn bench_fft_batch_256x1009_prime_dense_input(c: &mut Criterion) {
+    let input = complex_matrix_dense(256, 1009);
+    let p = no_params();
+    c.bench_function(
+        "eval/fft_batch_256x1009_prime_complex128_dense_input",
+        |bencher| bencher.iter(|| eval_primitive(Primitive::Fft, std::slice::from_ref(&input), &p)),
+    );
+}
+
 // Batched non-power-of-two FFT along the last axis: 128 rows of length 1000.
 // Exercises the shared Bluestein plan (chirp table + kernel FFT built once and
 // reused across all 128 rows) vs the per-row rebuild.
@@ -6820,6 +6832,7 @@ criterion_group!(
     bench_ifft_256,
     bench_fft_1000,
     bench_fft_1009_prime,
+    bench_fft_batch_256x1009_prime_dense_input,
     bench_fft_batch_128x1000,
     bench_fft_batch_2048x256,
     bench_fft_batch_2048x256_dense_input,

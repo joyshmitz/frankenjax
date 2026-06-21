@@ -30,7 +30,68 @@ CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b \
   shows a real `eigh_48x48_f64` improvement without worsening correctness or
   larger `eigh` rows. If the delta is neutral or regresses, revert this scratch
   reuse and record the result here.
+## frankenjax-murmw - SoA Bluestein batch FFT keep
 
+- Date: 2026-06-20
+- Agent: cod-a / CrimsonOtter
+- Target gap: `frankenjax-murmw`, the rough/prime-length batched complex FFT
+  lane after mixed-radix SoA was rejected. The target production row added here
+  is `eval/fft_batch_256x1009_prime_complex128_dense_input`, where `1009` forces
+  Bluestein and the batch crosses the existing threaded full-eval threshold.
+- Alien-graveyard/extreme-optimization route used: data-layout specialization
+  and cache-blocked row-vertical SIMD-friendly execution. `transform_batches_bluestein_vectorized`
+  transposes a small row tile to SoA, vectorizes chirp pre/post multiply and
+  kernel pointwise multiply across rows, and uses the already-proven flat radix-2
+  `vectorized_pow2_block` for Bluestein's two convolution FFTs.
+- Source kept: route non-power-of-two, non-smooth dense complex batches through
+  the SoA Bluestein path when `batch >= 8` and convolution length
+  `m <= BLUESTEIN_SOA_MAX_M`; retain `BLUESTEIN_SOA_MAX_M=16384` because the
+  largest covered row was measured and proved bit-identical.
+
+Same-worker Rust proof on RCH `hz2`:
+
+```text
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a \
+  rch exec -- cargo bench -p fj-lax --bench lax_baseline -- \
+  'eval/(fft_batch_256x1009_prime_complex128_dense_input|fft_batch_128x1000_complex128|fft_batch_2048x256_complex128_dense_input)' \
+  --sample-size 10 --measurement-time 3 --warm-up-time 1 --noplot
+```
+
+Fresh local JAX comparator used `benchmarks/jax_comparison/.venv/bin/python`,
+JAX/JAXLIB 0.10.1, `jax_enable_x64=true`, CPU backend, warmed
+`jax.jit(lambda a: jnp.fft.fft(a, axis=-1))`, 30 runs over the same
+`sin(i*0.125) + 1j*cos(i*0.25)` dense complex inputs.
+
+| workload / result | Rust mean | JAX mean | Rust/JAX | verdict |
+| --- | ---: | ---: | ---: | --- |
+| `hz2` baseline `fft_batch_256x1009_prime_complex128_dense_input` | 11.096 ms | 0.478 ms | 23.20 | Target baseline loss |
+| `hz2` kept SoA Bluestein candidate `fft_batch_256x1009_prime_complex128_dense_input` | 4.453 ms | 0.478 ms | 9.31 | KEEP; 2.49x Rust-side win, still JAX loss |
+| `hz2` composite control `fft_batch_128x1000_complex128` | 2.930 ms | 0.233 ms | 12.55 | Loss; not routed through this gate |
+| `hz2` power-of-two dense control `fft_batch_2048x256_complex128_dense_input` | 5.979 ms | 0.313 ms | 19.13 | Loss; unchanged route |
+
+- Same-binary microbench on RCH `hz2`, interleaved min-of-9: n=127/m=256
+  `8.940 ms -> 3.000 ms` (**2.98x**), n=1009/m=2048
+  `10.666 ms -> 2.423 ms` (**4.40x**), n=4099/m=16384
+  `53.256 ms -> 14.803 ms` (**3.60x**).
+- Validation: `cargo test -p fj-lax vectorized_bluestein_bit_identical_to_per_row
+  --lib --release -- --nocapture` passed on RCH `hz2`, now covering n in
+  {3,7,11,13,17,23,127,257,1009,4099}, both directions and batch 1..11.
+  `cargo test -p fj-conformance --test fft_oracle -- --nocapture` passed 27/27
+  on RCH `vmi1152480`; `cargo test -p fj-conformance --test
+  linalg_fft_oracle_parity -- --nocapture` passed 1/1 on RCH `vmi1227854`.
+  `cargo test -p fj-lax fft --lib --release -- --nocapture` passed 47/0 with
+  6 ignored microbenches on RCH `vmi1152480`; `cargo clippy -p fj-lax
+  --all-targets -- -D warnings` passed on RCH `hz1`; `cargo build --release
+  -p fj-lax --benches` passed on RCH `vmi1149989`.
+- Ratio scorecard after the keep: **0 wins / 3 losses / 0 neutral vs JAX** for
+  the full-eval FFT row set above. Production score for this pass: **1 kept
+  Rust-side win / 0 shipped regressions**.
+- Retry predicate: do not treat this as closing `frankenjax-murmw`; it narrows
+  the prime/rough Bluestein lane but leaves JAX 9.31x ahead on the target. The
+  next credible route must attack the kernel class directly: generated
+  length-specialized FFTs, portable-SIMD radix-4/8 butterflies, native composite
+  radices, or fused output materialization that removes the remaining scalar
+  butterfly/output gap.
 ## frankenjax-ur4h3 - symmetric tridiagonal reduction no-ship
 
 - Date: 2026-06-20

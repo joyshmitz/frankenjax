@@ -1,6 +1,6 @@
 # FrankenJAX Perf Release Readiness Scorecard
 
-Updated: 2026-06-20
+Updated: 2026-06-21
 
 Scope: verify recent code-first `fj-lax`/`fj-core` perf backlog against original JAX on
 realistic warmed CPU workloads. This scorecard records measured readiness only;
@@ -1202,3 +1202,31 @@ Additional cod-a FFT SoA gate recheck environment:
   perf-counter evidence. The remaining credible `murmw` path is a real kernel
   rewrite: generated length-specialized kernels, iterative in-place SoA
   radix-4/8, portable SIMD butterflies, or cache-blocked multi-row transforms.
+
+## CrimsonOtter / cod-a - murmw SoA Bluestein batch FFT keep (2026-06-20)
+
+- Scope: `frankenjax-murmw`, rough/prime-length batched complex FFT. Added
+  `eval/fft_batch_256x1009_prime_complex128_dense_input` to cover the missing
+  dense-complex production row where `1009` forces Bluestein.
+- Production decision: keep `transform_batches_bluestein_vectorized` and the
+  `m <= 16384` gate. Same-worker RCH `hz2` full-eval Criterion improved the
+  target from **11.096 ms** baseline to **4.453 ms** candidate, a **2.49x**
+  Rust-side win.
+- Controls: `fft_batch_128x1000_complex128` measured **2.826 -> 2.930 ms**
+  (+3.7%, not routed through this gate); `fft_batch_2048x256_complex128_dense_input`
+  measured **5.858 -> 5.979 ms** (+2.1%, unchanged power-of-two route).
+- Fresh JAX/JAXLIB 0.10.1 x64 comparator means: `256x1009` **0.478 ms**,
+  `128x1000` **0.233 ms**, `2048x256` **0.313 ms**. Current row-set score:
+  **0 wins / 3 losses / 0 neutral vs JAX**; the target moves from **23.20x**
+  to **9.31x** Rust/JAX but remains a release-readiness loss.
+- Component proof: RCH `hz2` same-binary microbench showed `n=127,m=256`
+  **2.98x**, `n=1009,m=2048` **4.40x**, and `n=4099,m=16384` **3.60x**.
+- Gate status: `vectorized_bluestein_bit_identical_to_per_row` passed on RCH
+  `hz2` with n={3,7,11,13,17,23,127,257,1009,4099}; `fft_oracle` passed 27/27
+  on RCH `vmi1152480`; `linalg_fft_oracle_parity` passed 1/1 on RCH
+  `vmi1227854`; `fj-lax fft` passed 47/0 with 6 ignored microbenches on RCH
+  `vmi1152480`; `cargo clippy -p fj-lax --all-targets -- -D warnings` passed
+  on RCH `hz1`; `cargo build --release -p fj-lax --benches` passed on RCH
+  `vmi1149989`.
+- Route next: keep chasing FFT kernel generation/SIMD/higher-radix work. This
+  keep is a real Rust win, not a JAX domination row.
