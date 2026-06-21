@@ -67,6 +67,14 @@ self-golden (the thing that forces a parity-relaxation decision) vs only a toler
   SIMD-poly kernels (only simd_exp exists today); measured: these are scalar libm libcalls today
   (cbrt 9.4ms/1M vs sqrt's autovectorized 0.54ms), so the SIMD win is real but fma-gated (the
   poly is fma-bound like exp's 2.2x/0.79x).
+  CBRT ATTEMPT (2026-06-21, CrimsonOtter — deferred): cbrt is the one tolerance-only op whose
+  SIMD form (bit-hack + Halley, mostly muls) could ship NON-fma + NO golden. Oracle bar is 1e-10
+  (achievable). But the naive bit-hack magic constant (`i/3 + 0x2A9F7893354FCA8C`) gave 1.0 rel
+  error — the f64 initial guess needs careful tuning, not a one-shot constant. Cut: cbrt is a
+  RARE op (low real-world impact) so the careful-numerics EV is poor, AND a `pub(crate) fn
+  fast_cbrt_f64` WIP was already present in the working tree (apparently convergent — another
+  agent on it). Stood down. Retry predicate: only with a VERIFIED-accurate (<1e-10 across the
+  full range incl. denormal/huge) bit-hack+Halley, and confirm no live owner first.
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
 
