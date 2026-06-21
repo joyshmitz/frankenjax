@@ -1575,6 +1575,11 @@ Additional cod-a FFT SoA gate recheck environment:
 
 ## CobaltForge / cc - VERIFIED JAX domination: Rust radix sort 4x faster than XLA CPU sort (2026-06-21)
 
+- ROBUST ACROSS SIZES (validated 2026-06-21): unlike cumsum's size cliff, JAX
+  `jnp.sort` is uniformly slow — p50 **41.8ms @256K / 183.5ms @1M / 806.0ms @4M**
+  (0.159 -> 0.175 -> 0.192 us/elem, only mild superlinear creep). So the ~4x sort
+  domination holds at every size, not a 1M cherry-pick — this is the only
+  size-INDEPENDENT Rust-over-JAX domination verified.
 - Positive BOLD-VERIFY data point (not a loss): a same-machine head-to-head where
   the Rust port DOMINATES JAX. Sort is compute-dominated (the single output alloc
   is negligible vs the sort), so this is a fair algorithm-vs-algorithm test.
