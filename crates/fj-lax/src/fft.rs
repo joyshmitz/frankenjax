@@ -3414,6 +3414,40 @@ mod tests {
         }
     }
 
+    /// INDEPENDENT (oracle-free) property check on the SoA batch dispatch: Parseval's
+    /// theorem. For the unnormalized forward transform, energy is conserved as
+    /// `sum_k |X[k]|^2 == n * sum_j |x[j]|^2` for every row. This holds for ANY correct
+    /// DFT and uses ONLY the dispatch's input/output — it does not compare to `dft_1d`,
+    /// so it catches a scaling/missing-term error even in the (unlikely) case such a bug
+    /// were shared with the reference. Covers every routing branch (pow2 / iterative
+    /// smooth / Bluestein prime+non-smooth) at batch >= 8.
+    #[test]
+    fn soa_dispatch_satisfies_parseval() {
+        for &n in &[16usize, 256, 12, 30, 1000, 13, 127, 46] {
+            let batch = 8usize;
+            let elements: Vec<(f64, f64)> = (0..batch * n)
+                .map(|i| {
+                    let f = (i % (5 * n)) as f64;
+                    ((f * 0.017).sin() - 0.2, (f * 0.029).cos() * 0.6)
+                })
+                .collect();
+            let got = transform_batches_dense(&elements, n, batch, false); // forward
+            for b in 0..batch {
+                let energy_in: f64 = elements[b * n..b * n + n]
+                    .iter()
+                    .map(|&(r, i)| r * r + i * i)
+                    .sum();
+                let energy_out: f64 =
+                    got[b * n..b * n + n].iter().map(|&(r, i)| r * r + i * i).sum();
+                let expected = n as f64 * energy_in;
+                assert!(
+                    (energy_out - expected).abs() <= 1e-7 * expected.max(1.0),
+                    "Parseval violated (n={n} row={b}): out-energy {energy_out} vs n*in-energy {expected}"
+                );
+            }
+        }
+    }
+
     /// Old inline-recurrence radix-2 (pre-frankenjax-* twiddle-hoist), kept only as the
     /// bench baseline. Bit-identical to the production `radix2_fft_1d_into`.
     #[cfg(test)]
