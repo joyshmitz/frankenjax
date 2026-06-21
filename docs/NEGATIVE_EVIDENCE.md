@@ -20,10 +20,18 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
   - matmul 1024²: JAX 2.91ms (fj-lax loses, `cntiy` +fma-gated). exp 1M: JAX 0.437ms (fj-lax loses,
     cntiy/sweep). sum 1M: JAX 0.111ms (parity-class). Consistent with the gate table below.
   - **cumsum 4M 1D: JAX 14.1ms vs fj-lax 30.3ms = fj-lax 2.15x SLOWER — a NEW non-fma LOSS / LEVER.**
-    Sequential f64 cumsum is latency-bound (~2.7ms dependency-chain floor for 4M), so 30ms is ~11x
-    overhead. Path = `scan_contiguous_lines_to_vec` single-line `op(acc,value)` + `out.push(acc)` loop
-    (reduction.rs ~3133). HYPOTHESIS: the per-element overhead (closure call / push) dominates;
-    tightening toward the floor could hit ~3-8ms and BEAT JAX's 14ms. UNDER INVESTIGATION (CrimsonOtter).
+    Path = `scan_contiguous_lines_to_vec` single-line `op(acc,value)` + `out.push(acc)` loop
+    (reduction.rs ~3133). DIAGNOSED (A/B, bench `cumsum_4m_f64_1d_tight`): a TIGHT raw direct-add
+    `acc+=v; push` loop is ALSO ~30ms — so the loss is NOT removable dispatch/closure/push overhead;
+    it is the FUNDAMENTAL sequential f64 dependency chain (my ~2.7ms floor estimate was wrong — the
+    scalar add chain + 64MB R/W traffic is genuinely ~30ms here). JAX's 14ms uses a reassociated
+    SIMD-blocked / parallel-prefix cumsum (breaks the dependency chain). **FIX IS LEGAL:** the cumsum
+    oracle is TOLERANCE (`abs()<1e-10`, cumulative_oracle.rs:118), NOT bit-exact — and JAX itself
+    reassociates, so a SIMD-blocked/threaded prefix-sum is BOTH faster AND more JAX-faithful. The
+    `f64 cumsum FP-non-associative DO-NOT` note was over-conservative (it preserved sequential bits
+    the oracle doesn't require). NEXT LEVER (substantial): blocked prefix-sum (per-block SIMD partial
+    sums + carry propagation, thread the blocks) — validate the large-4M accuracy stays within the
+    distribution's tolerance. Target: beat JAX's 14ms. Diagnostic bench kept as the sequential-floor ref.
   - JAX CPU is broadly SLOW on order-dependent ops (exploitable): searchsorted 1M=48.8ms (fj-lax has
     no searchsorted primitive — out of scope), cummax 1M=4.16ms, scatter-add 1M=4.50ms, gather 0.469ms,
     argmax 0.917ms. cummax/scatter-add worth a fj-lax head-to-head next.
