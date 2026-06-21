@@ -52,6 +52,13 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     butterflies changes the bits → breaks the golden. So **~2x of the FFT gap is the SAME `cntiy`
     +fma gate as matmul/exp** (golden-gated); the rest is algorithmic (mixed/split-radix op-count) +
     cache (the SoA transpose). FFT is thus part-cntiy-gated, part-intra-SIMD-hard — not purely either.
+  - DISPATCH / small-op jit regime (the last unmeasured category): **JAX jit(x+1) scalar = 5.87us/call**
+    — for tiny ops the Python->XLA dispatch boundary dominates. fj-lax is PURE RUST (no Python boundary)
+    + the so4wo compiled-jaxpr cache (records ~1.6-5.4us). So **small-op-dispatch-bound workloads are a
+    fj-lax non-loss / likely WIN** — JAX's Python boundary costs it ~6us/call that fj-lax doesn't pay;
+    large ops are kernel-bound (cntiy). Caveat: this is a Rust-vs-Python comparison, and the fj-lax
+    exact is uncaptured this window (persistent rch bench-time capture flake). Dispatch is NOT a fj-lax
+    loss lever — the interpreter "tax" (compiled away by so4wo) is ≤ JAX's Python dispatch.
   - **cumsum 4M 1D: now flipped to fj-lax WIN — fresh JAX 18.318ms vs fj-lax 7.5297ms = fj-lax 2.43x FASTER.**
     Path = `scan_contiguous_lines_to_vec` single-line `op(acc,value)` + `out.push(acc)` loop
     (reduction.rs ~3133). DIAGNOSED (A/B, bench `cumsum_4m_f64_1d_tight`): a TIGHT raw direct-add
