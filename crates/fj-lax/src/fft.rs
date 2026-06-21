@@ -1464,6 +1464,12 @@ fn transform_batches_dense(
     // Only fan out when there is enough work to amortize thread spawn; dense
     // storage makes the extract/output trivial, so the per-row transform is the
     // dominant cost and parallelizes cleanly across rows.
+    // NO-SHIP (2026-06-21, CrimsonOtter): lowering this to 1<<16 so fft_batch_128x1000
+    // (128_000 elems) threads measured 5.82ms (32 threads) / 7.40ms (work-capped ~7
+    // threads) vs 2.46ms single-thread — a 2.4-3x REGRESSION under swarm contention. The
+    // ~40us per-row 1000-pt FFT is too short to amortize thread overhead when cores are
+    // contended. JAX threads this on idle cores; that win is unmeasurable on this shared
+    // host. Retry only on a quiesced host. See the murmw ledger entry.
     const PARALLEL_MIN_ELEMS: usize = 1 << 18; // 262_144
     let threads = if total >= PARALLEL_MIN_ELEMS && batch_size > 1 {
         std::thread::available_parallelism()
