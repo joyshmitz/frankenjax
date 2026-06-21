@@ -79,6 +79,21 @@ self-golden (the thing that forces a parity-relaxation decision) vs only a toler
   relaxation, but do not call cbrt closed. Retry predicate: true SIMD/vectorized polynomial or
   range-reduced kernel that first beats this scalar fast path in a same-binary A/B and keeps
   the 1e-10 oracle gate green.
+  ERF BOLD-VERIFY KEEP (2026-06-21, CrimsonOtter): the `erf` common-range Maclaurin loop was
+  replaced with fdlibm-derived minimax rational bands, leaving the existing 2.857..3.5 bridge
+  and high-tail behavior intact. Focused RCH release tests passed
+  `erf_high_accuracy_and_seam_continuity` and `fj-conformance --test erf_oracle` (31/31).
+  Fresh JAX/JAXLIB 0.10.1 CPU x64 on the exact `eval/erf_1m_f64_vec` fixture measured
+  **1.495718 ms**. The old Rust series baseline on RCH `ovh-a` was **21.110 ms**
+  (**14.11x** JAX loss). The retained rational candidate measured **6.8485 ms** on
+  `vmi1149989` (**4.58x** JAX loss, best observed current-code row) and **12.515 ms** on
+  `hz2` (**8.37x** JAX loss); worker pinning was unavailable, so only the ratio-vs-JAX and
+  repeated direction are used as proof, not a strict same-worker delta. A more radical
+  degree-20 Chebyshev `[0,2]` layer was tested and reverted: same-worker `ovh-a` timing
+  improved the old series to **10.596 ms** (**7.08x** JAX loss) but was slower than the
+  rational candidate signal. Verdict: KEEP the rational path as a material non-`+fma`
+  narrowing lever; `erf` still loses JAX and routes next to true SIMD/vector polynomial or
+  approved target-feature/FMA work.
 
 **FULL-WORKSPACE +fma VERIFICATION (2026-06-21, CrimsonOtter = cod-b, cntiy's assignee).**
 Built the WHOLE workspace with `+avx2,+fma` (local config edit, isolated dir, reverted — NOT
@@ -97,6 +112,15 @@ self-goldens). cntiy's true cost includes making the AD mode-equality property f
 maintainer decision and shouldn't be done blindly — my earlier fj-lax-ONLY +fma test missed it.
 Retry predicate before committing +fma: A/B the fj-ad jvp/vjp proptest with/without fma across
 many seeds to confirm it's a tolerance issue, not a real AD bug.
+CLASSIFICATION (2026-06-21, partial): the assertion is `(fwd - rev).abs() < 1e-8` (tolerance,
+not bit-exact). WITHOUT +fma, `prop_jvp_matches_vjp_single` showed 0 failures in 5 runs; it
+failed once UNDER +fma — tentatively `+fma`-caused (rch output capture was flaky so not
+definitive). Given the AD is mathematically correct and the bound is a moderate 1e-8, this is
+almost certainly +fma's extra rounding tipping ILL-CONDITIONED inputs (large x / cancellation)
+over the tight tolerance — i.e. a TOLERANCE-LOOSENING need (loosen to ~1e-6, or make the bound
+condition-number-aware), NOT an AD bug. So cntiy's +fma cost is: loosen this one fj-ad proptest
+bound + relax the exp/sin/log self-goldens + commit the flag + implement the SIMD kernels —
+a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
 
