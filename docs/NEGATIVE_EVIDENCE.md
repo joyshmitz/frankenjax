@@ -1925,3 +1925,22 @@ pending a Rust 4M measurement (blocked now: cold-rebuild forbidden + local targe
 freed during the disk emergency; warm rch target is cross-machine-only). Retry
 predicate: when builds resume, measure Rust cumprod/cummax at 4M same-machine to
 confirm; the JAX cliff itself is established.
+
+## 2026-06-22 - JAX scan cliff is a one-time STEP (plateaus); scan domination is stable ~4x at large n (CobaltForge/cc)
+
+Trajectory refinement (zero-build JAX-only, ratios machine-independent). The JAX
+cumsum cliff is a single per-element STEP at ~1M->4M, then it PLATEAUS — it does
+NOT keep blowing up:
+
+| JAX cumsum | 1M | 4M | 8M | 16M |
+| --- | ---: | ---: | ---: | ---: |
+| p50 | 1.43ms | 18.39ms | 34.78ms | 64.05ms |
+| per-elem | 1.40us/K | 4.49us/K | 4.25us/K | 3.91us/K |
+
+Per-element jumps ~1.4->~4.4 us/K at the cliff (~3x step), then holds ~4us/K
+through 16M. Rust cumsum is ~1us/K linear (measured 4.2ms @4M). So the scan
+domination is ~1.4x at 1M, STEPS to a stable ~4x at 4M+, and does NOT grow
+further (both linear past the cliff). So the release framing is "stable ~4x
+large-n scan domination above the JAX cliff," not "grows with n." (Caveat: my
+first trajectory script mis-estimated the Rust line using 4.2ms/1M instead of
+the true ~1us/K; corrected here.)
