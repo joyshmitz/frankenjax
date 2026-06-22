@@ -2227,3 +2227,24 @@ i64-matmul dominations.
   contiguous-block memcpy vein is the contiguous case; this is the scattered case.)
 - Corrected domination set: sort, large-n cumsum, CONTIGUOUS gather only, i64/u32
   matmul. (gather general = loss.)
+
+## 2026-06-22 - f64 matmul (DotGeneral) is ~3.35x JAX loss same-machine — better than cited; DotGeneral != matmul_2d (CobaltForge/cc)
+
+Authoritative same-machine measurement of THE headline loss (f64 matmul, the
+common ML case, crux of the +fma decision). Local Zen3, warm target/:
+eval_primitive(DotGeneral) f64 1024x1024 = **8.93ms** (min 7.70, ~240 GFLOP/s) vs
+fresh local JAX f64 `a@b` 1024^3 = **2.665ms** (~806 GFLOP/s BLAS) = **~3.35x Rust
+LOSS**.
+- This is BETTER than the 5-15x I'd cited in the consolidated map (from cod-b/
+  4ryym `matmul_2d_1024 = 40.776ms`). DISCREPANCY: Rust DotGeneral (8.93ms) is
+  ~4.5x faster than the cited `matmul_2d` (40.776ms) for the same 1024^3 f64 work.
+  So `DotGeneral` and `matmul_2d` use DIFFERENT kernels — DotGeneral is the
+  fast/production path (and the one JAX's @ maps to), matmul_2d is slower (may be a
+  reference path, a different routing, or the 40ms was a cross-machine/regression
+  number). The authoritative Rust-vs-JAX f64 matmul gap is ~3.35x (DotGeneral),
+  not 5-15x.
+- Mechanism unchanged: JAX dgemm BLAS (806 GFLOP/s) vs Rust blocked GEMM without
+  fma/BLAS (~240 GFLOP/s = ~XLA/3.4). So +fma + better microkernel is the lever
+  (cntiy) — but the gap is 3.35x, more closeable than the cited 15x suggested.
+- FLAG for cod-b: the matmul_2d-vs-DotGeneral 4.5x gap is worth investigating (is
+  matmul_2d a stale/slow path? should @ never route to it?).
