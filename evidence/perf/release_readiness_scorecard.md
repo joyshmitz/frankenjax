@@ -1635,11 +1635,20 @@ Additional cod-a FFT SoA gate recheck environment:
 ## CobaltForge / cc - VERIFIED JAX domination #2: Rust cumsum 4.33x faster than XLA CPU scan (2026-06-21)
 
 - SIZE-SPECIFIC (refined 2026-06-21, see NEGATIVE_EVIDENCE): the 4.33x holds at
-  4M because JAX `jnp.cumsum` has a superlinear CPU size cliff (1M p50 1356us ->
-  4M p50 18397us, 13x for 4x data). At 1M cumsum is near-parity, and the sibling
-  scan ops cumprod/cummax are near-parity at 1M (1.09x). So this is a JAX
-  large-n cumsum cliff, NOT a general scan-family domination — only `sort` is a
-  size-independent domination so far.
+  4M because JAX `jnp.cumsum` has a superlinear CPU size cliff. Cliff localized to
+  1M->2M: JAX cumsum p50 ~1.4ms@1M (stable, 3-run 1472/1516/1582us, min ~1270us)
+  -> ~13.6ms@2M -> ~15-18ms@4M (~10x jump for 2x data). At 1M cumsum is near-
+  parity; cumprod/cummax are near-parity at 1M (1.09x). So this is a JAX large-n
+  cumsum cliff above ~1M, NOT a general scan-family domination — only `sort` is a
+  size-INDEPENDENT domination.
+- MEASUREMENT-QUALITY CAVEAT (2026-06-21): the local host is shared with the
+  active agent cluster (concurrent builds) and shows TRANSIENT LOAD SPIKES — a
+  one-off JAX cumsum 1M outlier of 6675us was observed mid-sweep, vs the stable
+  ~1.4ms across dedicated 3-run re-checks. So trust MIN times and LARGE margins;
+  the dominations here (sort 4-5.5x, cumsum 2M+ ~10x) are robust to this noise,
+  but the near-parity rows (cumprod/cummax 1.09x) sit WITHIN it and should be
+  read as "parity, within measurement noise," not precise ratios. A quiesced-host
+  re-measurement would tighten the marginal rows (not the dominations).
 - Second same-machine Rust-over-JAX domination (after sort), and non-order-statistics
   (a scan, not cod-b's sort/argsort/top_k family), so fully owned here.
 - SAME-MACHINE (local Zen3 host), 4M f64 1D cumsum (setup copied from
