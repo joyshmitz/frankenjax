@@ -19,6 +19,28 @@ halving the gather JAX gap ~28x->~15x. The residual is the Zen3 safe-Rust ceilin
 true un-mined vein was **interpreter/eval per-element overhead in random-access ops**, not the
 kernels — audit other ops for per-element call/branch in hot loops before declaring exhaustion.
 
+UPDATE 2026-06-22 (SlateHarrier) — SESSION CAPSTONE, frontier now fully mapped. Confirming the
+above lesson, a rich SECOND vein was found+shipped this session: **dtype-sibling gaps** (secondary
+dtypes lagging the optimizations their f64/i64 siblings got) + **naive-loop→GEMM** in derived code.
+Shipped (each same-binary A/B, bit-identical, GREEN):
+  • scatter-add f64 parallel range-partition 2.78x + u64-pack ~1.06x (JAX loss 2.74x→~1.25x)
+  • fj-ad VJP `matmul_2d`+`matmul_f64` (18 callers) → fj-lax GEMM **22-119x** (grad thru QR/LU/SVD/eigh)
+  • fj-dispatch vmap(Dot) → batched GEMM: float **38-66x**, integer **17.35x**
+  • complex128 matmul 4-row register-block (non-batched + batched) — **flipped 1.95x loss → parity/WIN**
+  • complex128 gather de-box ~2.6x; complex128 scatter-add partition ~1.39x; SIMD cbrt ~1.25x
+  • NEW DOMINATION: integer matmul **21-32x** (XLA has no integer BLAS — joins sort/order-stats)
+Measured NO-SHIPS / ceilings (do-not-retry): scatter f32/i64 partition (regresses); gather index
+pre-sort (0.39x, Zen3 vgather ceiling); cbrt division-free flip (0.85x, fma-gated).
+MAP CORRECTIONS: matmul dtype matrix is COMPLETE (i64/u64/complex all blocked — stale "i32/u32/u64
+gap" note retired); **conv2d ~11.8x loss is 84% fma-bound GEMM + 16% (already-threaded) im2col → folds
+into `cntiy` +fma**, NOT a structural lever. CONVERGENCE: the contained, unowned, non-gated, non-niche
+frontier is now EXHAUSTIVELY mined (matmul/gather/scatter all-dtype-done, structural ops dense, nn
+fused, interpreter dense-env+fused+fast-paths). **The single highest-leverage remaining unlock is the
+`cntiy` +fma maintainer decision — now MEASURED to gate the two biggest float ML ops (matmul AND
+conv2d) plus exp/softmax/transcendentals/cholesky-GEMM simultaneously.** Other remainders: `murmw` FFT,
+`ur4h3` eigh/SVD, linalg (codex zone), filed P3 complex-conv, and multi-session swings (compiled-jaxpr
+dispatch / fused attention).
+
 UPDATE 2026-06-22 (CrimsonOtter, `frankenjax-murmw` FFT BOLD-VERIFY): the radical FFT route from
 alien-graveyard/extreme-optimization was generated/vectorized radix-4 family specialization for the
 power-of-two batched kernel. Fresh same-binary A/B rejected the lever: radix-4 SoA butterflies were
