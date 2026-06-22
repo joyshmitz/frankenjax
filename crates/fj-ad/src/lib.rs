@@ -9679,17 +9679,11 @@ fn safe_eigen_gap_reciprocal(lhs: f64, rhs: f64) -> f64 {
 
 /// Multiply two row-major matrices: C = A @ B (m×k, k×n → m×n).
 fn matmul_f64(m: usize, k: usize, n: usize, a: &[f64], b: &[f64]) -> Vec<f64> {
-    let mut c = vec![0.0_f64; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            let mut sum = 0.0;
-            for p in 0..k {
-                sum += a[i * k + p] * b[p * n + j];
-            }
-            c[i * n + j] = sum;
-        }
-    }
-    c
+    // Same lever as `matmul_2d`: route the 18 SVD/eigh/linalg-VJP call sites through
+    // fj-lax's blocked/threaded/register-microkernel GEMM instead of this naive
+    // cache-hostile i-j-p triple loop. Tolerance-legal (VJP/grad parity is not bit-exact);
+    // measured 22-119x at 256-1024 (same kernel swap as `matmul_2d_gemm_routed_vs_naive`).
+    fj_lax::tensor_contraction::matmul_2d(a, m, k, b, n)
 }
 
 /// Transpose a row-major matrix: (m×n) → (n×m).

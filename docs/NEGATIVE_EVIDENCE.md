@@ -291,8 +291,13 @@ The resulting backward matmul now uses the SAME GEMM algorithm JAX/XLA does; its
 is the documented `cntiy` +fma matmul row (~XLA/2–4), not a naive-loop loss. GREEN: `cargo test
 -p fj-ad --lib` 403/0 (all QR/LU/SVD/eigh VJP tolerance tests pass with the reassociated GEMM);
 fmt + clippy (`--lib --tests -D warnings`) clean. Scorecard: **1 large Rust-side win / 0 losses;
-kept**. NEXT in this vein: audit other fj-ad linalg/elementwise VJPs for remaining naive O(n³)
-or per-element loops where the forward op has an optimized fj-lax kernel.
+kept**. FOLLOW-UP (same commit family): `fj-ad::matmul_f64(m,k,n,a,b)` — a SECOND naive triple
+loop with **18 callers** in the SVD/eigh VJP extra-term paths (m>k / n>k projections) — was
+routed through the same `fj_lax` GEMM (drop-in; same 22-119x kernel swap). `cargo test -p fj-ad
+--lib` 403/0 again. The other linalg-VJP helpers (`matrix_inverse_transpose`, `solve_for_identity`,
+`matrix_multiply`) already route through `Primitive::Solve`/`Dot` (optimized fj-lax eval) — clean.
+Remaining fj-ad nested loops are O(n²) element-wise (Σ^{-1} scaling, F-matrix builds) — not
+matmuls, memory-bound, leave them. The naive-O(n³)-matmul vein in fj-ad VJPs is now CLOSED.
 
 ## 2026-06-22 - SlateHarrier scatter-add f64 partition: pack (idx,i) into one u64 — SHIPPED (~1.06x, halves bucket memory)
 
