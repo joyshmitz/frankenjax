@@ -5183,48 +5183,42 @@ fn reduce_window_new_extreme_dominates(old: f64, new: f64, is_max: bool) -> bool
 /// windows that miss the separable-deque gate `win_total > 2·win_sum`), turning a ~6-9x JAX loss
 /// into a win. Bit-identical to the odometer: max/min is order-independent, NaN propagates to the
 /// same canonical NaN, OOB taps contribute the init (∓∞, a no-op). No base/window dilation.
-fn reduce_window_simd_channel_maxmin_f64(
+/// One contiguous range of output positions [b_start, b_start + out_chunk.len()/c) for the f64
+/// SIMD-channel maxpool: decodes each flat position to its pooled coords, maxes/mins over the
+/// window taps (f64x8 across C, NaN→canonical), writing into the thread-local `out_chunk` (already
+/// init-filled). Self-contained (no cross-position state) so it runs on an independent output slice.
+#[allow(clippy::too_many_arguments)]
+fn simd_channel_block_f64(
     src: &[f64],
-    input_dims: &[usize],
+    in_strides: &[usize],
     window_dims: &[usize],
     strides: &[usize],
     pad_lows: &[usize],
     out_dims: &[usize],
+    input_dims: &[usize],
+    c: usize,
+    win_total: usize,
     is_max: bool,
-) -> Vec<f64> {
+    b_start: usize,
+    out_chunk: &mut [f64],
+) {
     use std::simd::cmp::SimdPartialEq;
     use std::simd::num::SimdFloat;
     use std::simd::{Mask, Select, Simd};
     type F = Simd<f64, 8>;
-    let rank = input_dims.len();
-    let pooled = rank - 1; // axes 0..pooled are pooled; the last axis is the channel
-    let c = input_dims[pooled];
-    let init = if is_max {
-        f64::NEG_INFINITY
-    } else {
-        f64::INFINITY
-    };
-    let out_total: usize = out_dims.iter().product();
-    let mut out = vec![init; out_total];
+    let pooled = out_dims.len() - 1;
     let c8 = c - c % 8;
-    let mut in_strides = vec![1usize; rank];
-    for d in (0..rank - 1).rev() {
-        in_strides[d] = in_strides[d + 1] * input_dims[d + 1];
-    }
-    let out_spatial: usize = out_dims[..pooled].iter().product();
-    let win_total: usize = window_dims[..pooled].iter().product();
+    let n_blocks = out_chunk.len() / c;
     let mut out_coord = vec![0usize; pooled];
-    for osp in 0..out_spatial {
-        let _ = osp;
-        let ob = {
-            // flat output base (channel-major contiguous): osp * c
-            let mut b = 0usize;
-            for d in 0..pooled {
-                b = b * out_dims[d] + out_coord[d];
-            }
-            b * c
-        };
-        let mut tap = vec![0usize; pooled];
+    let mut tap = vec![0usize; pooled];
+    for bi in 0..n_blocks {
+        let mut rem = b_start + bi;
+        for d in (0..pooled).rev() {
+            out_coord[d] = rem % out_dims[d];
+            rem /= out_dims[d];
+        }
+        let ob = bi * c;
+        tap.iter_mut().for_each(|t| *t = 0);
         for _ in 0..win_total {
             let mut in_base = 0usize;
             let mut oob = false;
@@ -5244,18 +5238,18 @@ fn reduce_window_simd_channel_maxmin_f64(
             if !oob {
                 let mut ci = 0;
                 while ci < c8 {
-                    let a = F::from_slice(&out[ob + ci..ob + ci + 8]);
+                    let a = F::from_slice(&out_chunk[ob + ci..ob + ci + 8]);
                     let t = F::from_slice(&src[in_base + ci..in_base + ci + 8]);
                     let m = if is_max { a.simd_max(t) } else { a.simd_min(t) };
                     let nanm: Mask<i64, 8> = a.simd_ne(a) | t.simd_ne(t);
                     let res = nanm.select(F::splat(f64::NAN), m);
-                    res.copy_to_slice(&mut out[ob + ci..ob + ci + 8]);
+                    res.copy_to_slice(&mut out_chunk[ob + ci..ob + ci + 8]);
                     ci += 8;
                 }
                 while ci < c {
-                    let a = out[ob + ci];
+                    let a = out_chunk[ob + ci];
                     let t = src[in_base + ci];
-                    out[ob + ci] = if a.is_nan() || t.is_nan() {
+                    out_chunk[ob + ci] = if a.is_nan() || t.is_nan() {
                         f64::NAN
                     } else if is_max {
                         a.max(t)
@@ -5273,60 +5267,122 @@ fn reduce_window_simd_channel_maxmin_f64(
                 tap[d] = 0;
             }
         }
-        for d in (0..pooled).rev() {
-            out_coord[d] += 1;
-            if out_coord[d] < out_dims[d] {
-                break;
-            }
-            out_coord[d] = 0;
-        }
     }
-    out
 }
 
-/// f32 sibling of [`reduce_window_simd_channel_maxmin_f64`] — JAX's DEFAULT CNN dtype. Same
-/// channel-last SIMD reduction, f32x16 across the contiguous feature axis (2× the f64 width).
-/// NaN-propagating to canonical `f32::NAN`; signed-zero matches `f32::max`/`f32::min`.
-fn reduce_window_simd_channel_maxmin_f32(
-    src: &[f32],
+fn reduce_window_simd_channel_maxmin_f64(
+    src: &[f64],
     input_dims: &[usize],
     window_dims: &[usize],
     strides: &[usize],
     pad_lows: &[usize],
     out_dims: &[usize],
     is_max: bool,
-) -> Vec<f32> {
-    use std::simd::cmp::SimdPartialEq;
-    use std::simd::num::SimdFloat;
-    use std::simd::{Mask, Select, Simd};
-    type F = Simd<f32, 16>;
+) -> Vec<f64> {
     let rank = input_dims.len();
-    let pooled = rank - 1;
+    let pooled = rank - 1; // axes 0..pooled are pooled; the last axis is the channel
     let c = input_dims[pooled];
     let init = if is_max {
-        f32::NEG_INFINITY
+        f64::NEG_INFINITY
     } else {
-        f32::INFINITY
+        f64::INFINITY
     };
     let out_total: usize = out_dims.iter().product();
     let mut out = vec![init; out_total];
-    let c16 = c - c % 16;
     let mut in_strides = vec![1usize; rank];
     for d in (0..rank - 1).rev() {
         in_strides[d] = in_strides[d + 1] * input_dims[d + 1];
     }
     let out_spatial: usize = out_dims[..pooled].iter().product();
     let win_total: usize = window_dims[..pooled].iter().product();
+    // The output positions are independent (disjoint contiguous c-blocks) → thread across them.
+    // The per-position work (win_total taps × c/8 SIMD ops) is substantial, so unlike the deque
+    // this amortizes thread-spawn for the large CNN feature maps. work_scaled_threads → 1 for small.
+    let threads = crate::arithmetic::work_scaled_threads(out_total).min(out_spatial.max(1));
+    if threads <= 1 {
+        simd_channel_block_f64(
+            src,
+            &in_strides,
+            window_dims,
+            strides,
+            pad_lows,
+            out_dims,
+            input_dims,
+            c,
+            win_total,
+            is_max,
+            0,
+            &mut out,
+        );
+        return out;
+    }
+    let in_strides: &[usize] = &in_strides;
+    let per = out_spatial.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut b0 = 0usize;
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        while b0 < out_spatial {
+            let cnt = per.min(out_spatial - b0);
+            let (chunk, tail) = rest.split_at_mut(cnt * c);
+            rest = tail;
+            scope.spawn(move || {
+                simd_channel_block_f64(
+                    src,
+                    in_strides,
+                    window_dims,
+                    strides,
+                    pad_lows,
+                    out_dims,
+                    input_dims,
+                    c,
+                    win_total,
+                    is_max,
+                    b0,
+                    chunk,
+                );
+            });
+            b0 += cnt;
+        }
+    });
+    out
+}
+
+/// f32 sibling of [`reduce_window_simd_channel_maxmin_f64`] — JAX's DEFAULT CNN dtype. Same
+/// channel-last SIMD reduction, f32x16 across the contiguous feature axis (2× the f64 width).
+/// NaN-propagating to canonical `f32::NAN`; signed-zero matches `f32::max`/`f32::min`.
+/// f32 sibling of [`simd_channel_block_f64`] (f32x16). One independent output range.
+#[allow(clippy::too_many_arguments)]
+fn simd_channel_block_f32(
+    src: &[f32],
+    in_strides: &[usize],
+    window_dims: &[usize],
+    strides: &[usize],
+    pad_lows: &[usize],
+    out_dims: &[usize],
+    input_dims: &[usize],
+    c: usize,
+    win_total: usize,
+    is_max: bool,
+    b_start: usize,
+    out_chunk: &mut [f32],
+) {
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::num::SimdFloat;
+    use std::simd::{Mask, Select, Simd};
+    type F = Simd<f32, 16>;
+    let pooled = out_dims.len() - 1;
+    let c16 = c - c % 16;
+    let n_blocks = out_chunk.len() / c;
     let mut out_coord = vec![0usize; pooled];
-    for _ in 0..out_spatial {
-        let ob = {
-            let mut b = 0usize;
-            for d in 0..pooled {
-                b = b * out_dims[d] + out_coord[d];
-            }
-            b * c
-        };
-        let mut tap = vec![0usize; pooled];
+    let mut tap = vec![0usize; pooled];
+    for bi in 0..n_blocks {
+        let mut rem = b_start + bi;
+        for d in (0..pooled).rev() {
+            out_coord[d] = rem % out_dims[d];
+            rem /= out_dims[d];
+        }
+        let ob = bi * c;
+        tap.iter_mut().for_each(|t| *t = 0);
         for _ in 0..win_total {
             let mut in_base = 0usize;
             let mut oob = false;
@@ -5346,18 +5402,18 @@ fn reduce_window_simd_channel_maxmin_f32(
             if !oob {
                 let mut ci = 0;
                 while ci < c16 {
-                    let a = F::from_slice(&out[ob + ci..ob + ci + 16]);
+                    let a = F::from_slice(&out_chunk[ob + ci..ob + ci + 16]);
                     let t = F::from_slice(&src[in_base + ci..in_base + ci + 16]);
                     let m = if is_max { a.simd_max(t) } else { a.simd_min(t) };
                     let nanm: Mask<i32, 16> = a.simd_ne(a) | t.simd_ne(t);
                     let res = nanm.select(F::splat(f32::NAN), m);
-                    res.copy_to_slice(&mut out[ob + ci..ob + ci + 16]);
+                    res.copy_to_slice(&mut out_chunk[ob + ci..ob + ci + 16]);
                     ci += 16;
                 }
                 while ci < c {
-                    let a = out[ob + ci];
+                    let a = out_chunk[ob + ci];
                     let t = src[in_base + ci];
-                    out[ob + ci] = if a.is_nan() || t.is_nan() {
+                    out_chunk[ob + ci] = if a.is_nan() || t.is_nan() {
                         f32::NAN
                     } else if is_max {
                         a.max(t)
@@ -5375,14 +5431,80 @@ fn reduce_window_simd_channel_maxmin_f32(
                 tap[d] = 0;
             }
         }
-        for d in (0..pooled).rev() {
-            out_coord[d] += 1;
-            if out_coord[d] < out_dims[d] {
-                break;
-            }
-            out_coord[d] = 0;
-        }
     }
+}
+
+fn reduce_window_simd_channel_maxmin_f32(
+    src: &[f32],
+    input_dims: &[usize],
+    window_dims: &[usize],
+    strides: &[usize],
+    pad_lows: &[usize],
+    out_dims: &[usize],
+    is_max: bool,
+) -> Vec<f32> {
+    let rank = input_dims.len();
+    let pooled = rank - 1;
+    let c = input_dims[pooled];
+    let init = if is_max {
+        f32::NEG_INFINITY
+    } else {
+        f32::INFINITY
+    };
+    let out_total: usize = out_dims.iter().product();
+    let mut out = vec![init; out_total];
+    let mut in_strides = vec![1usize; rank];
+    for d in (0..rank - 1).rev() {
+        in_strides[d] = in_strides[d + 1] * input_dims[d + 1];
+    }
+    let out_spatial: usize = out_dims[..pooled].iter().product();
+    let win_total: usize = window_dims[..pooled].iter().product();
+    let threads = crate::arithmetic::work_scaled_threads(out_total).min(out_spatial.max(1));
+    if threads <= 1 {
+        simd_channel_block_f32(
+            src,
+            &in_strides,
+            window_dims,
+            strides,
+            pad_lows,
+            out_dims,
+            input_dims,
+            c,
+            win_total,
+            is_max,
+            0,
+            &mut out,
+        );
+        return out;
+    }
+    let in_strides: &[usize] = &in_strides;
+    let per = out_spatial.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut b0 = 0usize;
+        let mut rest: &mut [f32] = out.as_mut_slice();
+        while b0 < out_spatial {
+            let cnt = per.min(out_spatial - b0);
+            let (chunk, tail) = rest.split_at_mut(cnt * c);
+            rest = tail;
+            scope.spawn(move || {
+                simd_channel_block_f32(
+                    src,
+                    in_strides,
+                    window_dims,
+                    strides,
+                    pad_lows,
+                    out_dims,
+                    input_dims,
+                    c,
+                    win_total,
+                    is_max,
+                    b0,
+                    chunk,
+                );
+            });
+            b0 += cnt;
+        }
+    });
     out
 }
 
@@ -6473,6 +6595,13 @@ mod tests {
                 vec![0, 0, 0, 0],
             ),
             (vec![4, 32, 9], vec![1, 3, 1], vec![1, 2, 1], vec![0, 0, 0]),
+            // Large enough (out_total > 2^17) to exercise the THREADED partition vs the scalar naive.
+            (
+                vec![8, 56, 56, 64],
+                vec![1, 3, 3, 1],
+                vec![1, 2, 2, 1],
+                vec![0, 0, 0, 0],
+            ),
         ];
         for (dims, win, strides, pad) in configs {
             let rank = dims.len();
@@ -6591,36 +6720,39 @@ mod tests {
             }
             out
         }
-        let dims = [2usize, 15, 13, 20];
-        let win = [1usize, 3, 3, 1];
-        let strides = [1usize, 2, 2, 1];
-        let pad = [0usize, 1, 1, 0];
-        let out_dims: Vec<usize> = (0..4)
-            .map(|d| (dims[d] + 2 * pad[d] - win[d]) / strides[d] + 1)
-            .collect();
-        let total: usize = dims.iter().product();
-        for is_max in [true, false] {
-            for variant in 0..3 {
-                let mut src: Vec<f32> = (0..total)
-                    .map(|i| ((i % 103) as f32) * 0.41 - 21.0)
-                    .collect();
-                if variant == 1 {
-                    src[total / 3] = f32::NAN;
-                    src[total / 2] = f32::NAN;
-                } else if variant == 2 {
-                    for (i, v) in src.iter_mut().enumerate() {
-                        *v = if i % 2 == 0 { 0.0 } else { -0.0 };
+        // Small (edge-case heavy, single-thread) + large (exercises the THREADED partition).
+        let configs: &[([usize; 4], [usize; 4], [usize; 4], [usize; 4])] = &[
+            ([2, 15, 13, 20], [1, 3, 3, 1], [1, 2, 2, 1], [0, 1, 1, 0]),
+            ([8, 56, 56, 64], [1, 3, 3, 1], [1, 2, 2, 1], [0, 0, 0, 0]),
+        ];
+        for (dims, win, strides, pad) in configs {
+            let out_dims: Vec<usize> = (0..4)
+                .map(|d| (dims[d] + 2 * pad[d] - win[d]) / strides[d] + 1)
+                .collect();
+            let total: usize = dims.iter().product();
+            for is_max in [true, false] {
+                for variant in 0..3 {
+                    let mut src: Vec<f32> = (0..total)
+                        .map(|i| ((i % 103) as f32) * 0.41 - 21.0)
+                        .collect();
+                    if variant == 1 {
+                        src[total / 3] = f32::NAN;
+                        src[total / 2] = f32::NAN;
+                    } else if variant == 2 {
+                        for (i, v) in src.iter_mut().enumerate() {
+                            *v = if i % 2 == 0 { 0.0 } else { -0.0 };
+                        }
                     }
+                    let got = super::reduce_window_simd_channel_maxmin_f32(
+                        &src, dims, win, strides, pad, &out_dims, is_max,
+                    );
+                    let want = naive_f32(&src, dims, win, strides, pad, &out_dims, is_max);
+                    assert_eq!(
+                        got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "f32 SIMD-channel maxpool mismatch (dims={dims:?} is_max={is_max} variant={variant})"
+                    );
                 }
-                let got = super::reduce_window_simd_channel_maxmin_f32(
-                    &src, &dims, &win, &strides, &pad, &out_dims, is_max,
-                );
-                let want = naive_f32(&src, &dims, &win, &strides, &pad, &out_dims, is_max);
-                assert_eq!(
-                    got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                    want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                    "f32 SIMD-channel maxpool mismatch (is_max={is_max} variant={variant})"
-                );
             }
         }
     }
@@ -6629,6 +6761,118 @@ mod tests {
     // (win_total <= 2*win_sum) — rank-4 [N,H,W,C] routes to the scalar dense_float odometer.
     // Measure it vs JAX (3x3/s2 = 9.34ms, 2x2/s2 = 2.11ms) — the contiguous channel axis (C) is
     // a clean SIMD target. Production eval_primitive head-to-head.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_maxpool_simd_thread_ab() {
+        // Same-binary A/B: single-thread block fn vs the threaded wrapper, per CNN shape/dtype.
+        use std::time::Instant;
+        let cases = [
+            (8usize, 112usize, 64usize, 3usize, 2usize),
+            (8, 56, 128, 2, 2),
+        ];
+        for (nb, hw, c, win, stride) in cases {
+            let dims = [nb, hw, hw, c];
+            let wd = [1usize, win, win, 1];
+            let st = [1usize, stride, stride, 1];
+            let pad = [0usize, 0, 0, 0];
+            let out_dims: Vec<usize> = (0..4).map(|d| (dims[d] - wd[d]) / st[d] + 1).collect();
+            let mut in_strides = [1usize; 4];
+            for d in (0..3).rev() {
+                in_strides[d] = in_strides[d + 1] * dims[d + 1];
+            }
+            let win_total = win * win;
+            let total = nb * hw * hw * c;
+            let s64: Vec<f64> = (0..total)
+                .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+                .collect();
+            let s32: Vec<f32> = (0..total)
+                .map(|i| ((i % 9973) as f32) * 0.013 - 50.0)
+                .collect();
+            let ot: usize = out_dims.iter().product();
+            let serial64 = || {
+                let mut o = vec![f64::NEG_INFINITY; ot];
+                super::simd_channel_block_f64(
+                    &s64,
+                    &in_strides,
+                    &wd,
+                    &st,
+                    &pad,
+                    &out_dims,
+                    &dims,
+                    c,
+                    win_total,
+                    true,
+                    0,
+                    &mut o,
+                );
+                o
+            };
+            let thr64 = || {
+                super::reduce_window_simd_channel_maxmin_f64(
+                    &s64, &dims, &wd, &st, &pad, &out_dims, true,
+                )
+            };
+            let serial32 = || {
+                let mut o = vec![f32::NEG_INFINITY; ot];
+                super::simd_channel_block_f32(
+                    &s32,
+                    &in_strides,
+                    &wd,
+                    &st,
+                    &pad,
+                    &out_dims,
+                    &dims,
+                    c,
+                    win_total,
+                    true,
+                    0,
+                    &mut o,
+                );
+                o
+            };
+            let thr32 = || {
+                super::reduce_window_simd_channel_maxmin_f32(
+                    &s32, &dims, &wd, &st, &pad, &out_dims, true,
+                )
+            };
+            assert_eq!(
+                serial64().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                thr64().iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                serial32().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                thr32().iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+            let bench = |f: &dyn Fn()| {
+                f();
+                let mut b = f64::MAX;
+                for _ in 0..20 {
+                    let t = Instant::now();
+                    f();
+                    b = b.min(t.elapsed().as_secs_f64());
+                }
+                b * 1e3
+            };
+            let s64b = bench(&|| {
+                std::hint::black_box(serial64());
+            });
+            let t64b = bench(&|| {
+                std::hint::black_box(thr64());
+            });
+            let s32b = bench(&|| {
+                std::hint::black_box(serial32());
+            });
+            let t32b = bench(&|| {
+                std::hint::black_box(thr32());
+            });
+            println!(
+                "AB maxpool N{nb} {hw}x{hw}x{c} {win}x{win}/s{stride}: f64 serial={s64b:.4} thr={t64b:.4} ({:.2}x) | f32 serial={s32b:.4} thr={t32b:.4} ({:.2}x)",
+                s64b / t64b,
+                s32b / t32b
+            );
+        }
+    }
+
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_maxpool_cnn_small_window() {

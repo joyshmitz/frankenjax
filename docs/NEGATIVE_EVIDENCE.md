@@ -2469,6 +2469,23 @@ so threading it (filed, od11p) should flip 3x3 too. Both f64+f32 channel-last CN
 near-parity vs the original 6-57x losses. (clippy blocked this commit by the ovh-b zerocopy SIGILL
 infra flake; verified via ovh-a build + 1589/0 + guards; f32 mirrors the clippy-clean f64 code.)
 
+THREADED (2026-06-22, SlateHarrier) — flipped the 3x3 f32 residual to a WIN. Threaded the SIMD-channel
+outer spatial loop (`std::thread::scope` + `split_at_mut` over disjoint per-position output blocks;
+`simd_channel_block_f{32,64}` workers decode-per-position, no cross-state; `work_scaled_threads(out_total)`
+gate → 1 for small pools). SAME-BINARY A/B (`bench_maxpool_simd_thread_ab`, trustworthy — an earlier
+CROSS-invocation run falsely showed a 2x2 regression that was pure contention noise):
+
+| shape | f64 serial→thr | f32 serial→thr |
+| --- | --- | --- |
+| [8,112,112,64] 3x3/s2 | 4.55→1.91 ms (**2.38x**) | 2.64→0.75 ms (**3.54x**) |
+| [8,56,56,128] 2x2/s2 | 1.11→0.49 ms (**2.28x**) | 0.48→0.36 ms (**1.35x**) |
+
+vs JAX: f32 3x3 **0.75ms vs 1.48ms = ~2x WIN** (was ~1.8x LOSS); f32 2x2 0.36 vs 0.59 = ~1.6x WIN; f64
+3x3 1.91 vs 9.34 = **~4.9x WIN**. Threading wins ALL cases same-binary (1.35-3.54x), bit-identical
+(threaded-partition guard configs [8,56,56,64] vs naive + the A/B serial==threaded assert). The common
+CNN maxpool (f64+f32) is now a DOMINATION across the board. METHOD LESSON: only the same-binary A/B is
+trustworthy — cross-invocation maxpool timings swing 2-3x with host contention (do not revert on them).
+
 ## 2026-06-22 - floor-chain JAX LOSS confirmed cross-machine; cross-machine map validation COMPLETE (CobaltForge/cc)
 
 Final completeness cross-confirm. Warm-target rch bench of committed
