@@ -1753,6 +1753,7 @@ DOMINATIONS (Rust faster) — Rust has a specialized path AND XLA-CPU lacks one:
 | gather, CONTIGUOUS rows only | ~3.7x | Rust memcpy vs XLA gather. NB NON-contiguous/scattered gather is an 18x LOSS (Rust boxed eval-path vs XLA vectorized; see NEGATIVE_EVIDENCE) — domination is memcpy-specific |
 | i64 matmul | ~80x (grows w/ n; 1024^3 JAX ~4s) | no integer BLAS; Rust blocked GEMM |
 | u32 matmul | ~8.9x | no u32 SIMD; Rust generic u64-wrap (lever: native u32 kernel) |
+| QR decomposition | ~18-30x | XLA-CPU QR is a slow NON-LAPACK native Householder path; Rust blocked QR. (NB linalg is inconsistent: cholesky->LAPACK loses 6.8x; eig/svd ~parity; QR->slow-native wins) |
 
 PARITY (bandwidth-bound, both at memory bw): argmax/argmin/reduce over large arrays.
 
