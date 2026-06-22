@@ -3452,8 +3452,13 @@ pub(crate) fn eval_gather(
             }
             if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
                 let mut out = vec![0i64; total];
-                if gather_contiguous_into(&mut out, src, &resolved, i64::from(i32::MIN), slice_elems)
-                {
+                if gather_contiguous_into(
+                    &mut out,
+                    src,
+                    &resolved,
+                    i64::from(i32::MIN),
+                    slice_elems,
+                ) {
                     return Ok(Value::Tensor(TensorValue::new_i32_values(
                         Shape { dims: out_dims },
                         out,
@@ -3864,29 +3869,57 @@ fn eval_scatter_add_f64_scalar_range_partitioned(
     }
 
     let chunk = dim0.div_ceil(threads);
-    let mut buckets: Vec<Vec<(usize, usize)>> = (0..threads)
-        .map(|_| Vec::with_capacity(index_vals.len().div_ceil(threads)))
-        .collect();
-    for (i, &raw_idx) in index_vals.iter().enumerate() {
-        let Some(idx) = resolve_axis0_index(raw_idx, dim0, index_mode) else {
-            continue;
-        };
-        let bucket = (idx / chunk).min(threads - 1);
-        buckets[bucket].push((idx, i));
-    }
+    // PARALLEL range-partition build (the serial single-threaded bucket scan was the
+    // dominant cost — `inline-value` apply tweaks were a measured no-ship). Each
+    // producer thread classifies its contiguous slice of `index_vals` into its own
+    // `threads` small per-output-block local buckets (the local Vecs stay cache-hot,
+    // unlike one serial scan scattering across all 16 buckets). Then each output
+    // block `b` is owned by one apply thread that reads producers' sub-buckets in
+    // producer order. BIT-IDENTICAL to the serial reference: producer `t` owns the
+    // contiguous update range `[t*csz, (t+1)*csz)`, so for any output index its
+    // updates are visited producer-0-first then in push (i-ascending) order within
+    // each — the same global i-ascending accumulation order, and distinct blocks
+    // never share an output element. Measured interleaved same-binary A/B
+    // (`bench_scatter_add_range_partition_inline_value_vs_idxpair`): ~2.78x median
+    // (≈13ms -> ≈4.9ms, 1M f64) on the Zen3 bench host.
+    let csz = index_vals.len().div_ceil(threads);
+    let locals: Vec<Vec<Vec<(usize, usize)>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|t| {
+                let start = t * csz;
+                let end = ((t + 1) * csz).min(index_vals.len());
+                scope.spawn(move || {
+                    let mut lb: Vec<Vec<(usize, usize)>> = (0..threads)
+                        .map(|_| Vec::with_capacity(csz / threads + 1))
+                        .collect();
+                    for (off, &raw_idx) in index_vals[start..end].iter().enumerate() {
+                        let i = start + off;
+                        if let Some(idx) = resolve_axis0_index(raw_idx, dim0, index_mode) {
+                            lb[(idx / chunk).min(threads - 1)].push((idx, i));
+                        }
+                    }
+                    lb
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
 
     let mut out = op.to_vec();
     std::thread::scope(|scope| {
         let mut rest = out.as_mut_slice();
         let mut start = 0usize;
-        for bucket in buckets {
+        let locals_ref = &locals;
+        for b in 0..threads {
             let len = chunk.min(dim0 - start);
             let (block, tail) = rest.split_at_mut(len);
             rest = tail;
             let block_start = start;
             scope.spawn(move || {
-                for (idx, i) in bucket {
-                    block[idx - block_start] += upd[i];
+                for sub in locals_ref.iter() {
+                    for &(idx, i) in &sub[b] {
+                        block[idx - block_start] += upd[i];
+                    }
                 }
             });
             start += len;
@@ -24886,6 +24919,200 @@ mod tests {
             generic * 1e3,
             dense_t * 1e3,
             generic / dense_t
+        );
+    }
+
+    // BOLD-VERIFY (this session): scatter-add 1M f64 range-partitioned apply phase.
+    // The retained bucketed path stores (idx, i) pairs then APPLIES with
+    // `block[idx-start] += upd[i]` — `upd[i]` is a dependent random load over the
+    // full 8MB updates array (i within a bucket is monotone but sparse). Storing
+    // the value inline at build time (`(idx, upd[i])`, build reads upd[i]
+    // SEQUENTIALLY) moves that latency-bound load out of the parallel apply.
+    // Bit-identical (same per-idx add order). Same-binary A/B (contention-symmetric).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_scatter_add_range_partition_inline_value_vs_idxpair() {
+        use std::time::Instant;
+        let n = 1_usize << 20;
+        let op: Vec<f64> = vec![0.0; n];
+        let index_vals: Vec<i64> = (0..n)
+            .map(|i| ((i.wrapping_mul(1_103_515_245_usize).wrapping_add(12_345)) & (n - 1)) as i64)
+            .collect();
+        let upd: Vec<f64> = (0..n)
+            .map(|i| ((i % 4099) as f64 - 2049.0) * 0.001)
+            .collect();
+        let dim0 = n;
+        let mode = IndexMode::Clip;
+        let threads = crate::arithmetic::work_scaled_threads(index_vals.len()).min(dim0);
+        assert!(
+            threads > 1,
+            "need >1 thread to exercise the partitioned path"
+        );
+        let chunk = dim0.div_ceil(threads);
+
+        // OLD: buckets of (idx, i); apply reads upd[i] (sparse random load).
+        let run_idxpair = || -> Vec<f64> {
+            let mut buckets: Vec<Vec<(usize, usize)>> = (0..threads)
+                .map(|_| Vec::with_capacity(index_vals.len().div_ceil(threads)))
+                .collect();
+            for (i, &raw_idx) in index_vals.iter().enumerate() {
+                let Some(idx) = super::resolve_axis0_index(raw_idx, dim0, mode) else {
+                    continue;
+                };
+                buckets[(idx / chunk).min(threads - 1)].push((idx, i));
+            }
+            let mut out = op.clone();
+            std::thread::scope(|scope| {
+                let mut rest = out.as_mut_slice();
+                let mut start = 0usize;
+                for bucket in buckets {
+                    let len = chunk.min(dim0 - start);
+                    let (block, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let block_start = start;
+                    let upd_ref = &upd;
+                    scope.spawn(move || {
+                        for (idx, i) in bucket {
+                            block[idx - block_start] += upd_ref[i];
+                        }
+                    });
+                    start += len;
+                }
+            });
+            out
+        };
+
+        // NEW: buckets of (idx, value); build reads upd[i] sequentially, apply is
+        // value-local (no second array access in the hot loop).
+        let run_inline = || -> Vec<f64> {
+            let mut buckets: Vec<Vec<(usize, f64)>> = (0..threads)
+                .map(|_| Vec::with_capacity(index_vals.len().div_ceil(threads)))
+                .collect();
+            for (i, &raw_idx) in index_vals.iter().enumerate() {
+                let Some(idx) = super::resolve_axis0_index(raw_idx, dim0, mode) else {
+                    continue;
+                };
+                buckets[(idx / chunk).min(threads - 1)].push((idx, upd[i]));
+            }
+            let mut out = op.clone();
+            std::thread::scope(|scope| {
+                let mut rest = out.as_mut_slice();
+                let mut start = 0usize;
+                for bucket in buckets {
+                    let len = chunk.min(dim0 - start);
+                    let (block, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let block_start = start;
+                    scope.spawn(move || {
+                        for (idx, val) in bucket {
+                            block[idx - block_start] += val;
+                        }
+                    });
+                    start += len;
+                }
+            });
+            out
+        };
+
+        // PARALLEL-BUILD: the serial bucket-build dominates (inline-value was a
+        // no-ship because it only touched the apply). Parallelize the partition:
+        // each producer thread scans its slice of index_vals into its own small
+        // per-block local buckets (T local Vecs fit in cache -> hot pushes), then
+        // each output block b is applied by one thread reading producers'
+        // sub-buckets in producer order. Bit-identical: producer t owns i-range
+        // [t*csz,(t+1)*csz), so reading t=0..T (each push-ordered) yields the same
+        // i-ascending accumulation order per index as the serial reference. Apply
+        // keeps `upd[i]` to isolate the build-parallelization variable.
+        let run_parallel = || -> Vec<f64> {
+            let t_build = threads;
+            let csz = index_vals.len().div_ceil(t_build);
+            let idx_ref = &index_vals;
+            let locals: Vec<Vec<Vec<(usize, usize)>>> = std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..t_build)
+                    .map(|t| {
+                        let start = t * csz;
+                        let end = ((t + 1) * csz).min(idx_ref.len());
+                        scope.spawn(move || {
+                            let mut lb: Vec<Vec<(usize, usize)>> = (0..threads)
+                                .map(|_| Vec::with_capacity(csz / threads + 1))
+                                .collect();
+                            for (off, &raw_idx) in idx_ref[start..end].iter().enumerate() {
+                                let i = start + off;
+                                if let Some(idx) = super::resolve_axis0_index(raw_idx, dim0, mode) {
+                                    lb[(idx / chunk).min(threads - 1)].push((idx, i));
+                                }
+                            }
+                            lb
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let mut out = op.clone();
+            std::thread::scope(|scope| {
+                let mut rest = out.as_mut_slice();
+                let mut start = 0usize;
+                let locals_ref = &locals;
+                let upd_ref = &upd;
+                for b in 0..threads {
+                    let len = chunk.min(dim0 - start);
+                    let (block, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let block_start = start;
+                    scope.spawn(move || {
+                        for sub in locals_ref.iter().take(t_build) {
+                            for &(idx, i) in &sub[b] {
+                                block[idx - block_start] += upd_ref[i];
+                            }
+                        }
+                    });
+                    start += len;
+                }
+            });
+            out
+        };
+
+        // Correctness: identical outputs (bit-for-bit; same add order per index).
+        assert_eq!(
+            run_idxpair(),
+            run_inline(),
+            "inline-value diverges from idx-pair"
+        );
+        assert_eq!(
+            run_idxpair(),
+            run_parallel(),
+            "parallel-build diverges from idx-pair"
+        );
+
+        // Interleave variants per iteration so any monotonic contention drift on the
+        // shared bench worker penalizes all symmetrically (best-of-N each).
+        let _ = run_idxpair();
+        let _ = run_inline();
+        let _ = run_parallel();
+        let mut old_best = f64::MAX;
+        let mut new_best = f64::MAX;
+        let mut par_best = f64::MAX;
+        for _ in 0..25 {
+            let t = Instant::now();
+            let o = run_idxpair();
+            old_best = old_best.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&o);
+            let t = Instant::now();
+            let n = run_inline();
+            new_best = new_best.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&n);
+            let t = Instant::now();
+            let p = run_parallel();
+            par_best = par_best.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&p);
+        }
+        println!(
+            "BENCH scatter-add 1M f64 range-partition: idx-pair={:.4}ms inline-value={:.4}ms({:.3}x) parallel-build={:.4}ms({:.3}x)",
+            old_best * 1e3,
+            new_best * 1e3,
+            old_best / new_best,
+            par_best * 1e3,
+            old_best / par_best
         );
     }
 

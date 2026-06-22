@@ -138,7 +138,7 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
 | --- | --- | --- |
 | cheap elementwise (add/mul/sub), broadcast, select, comparison | WIN (threaded past L3, 1.7-2x) | none — done |
 | batched gather/scatter (I64/F64/F32) | WIN (1.15-3.6x) | none — suspected batched loss disproven |
-| scatter-add 1M f64 1D | **LOSS 2.74x vs JAX** after 3.07x Rust-side keep | next needs a fundamentally different safe parallel direct-write proof; unique atomic and histogram/prefix bucket-build branches regressed |
+| scatter-add 1M f64 1D | **was LOSS 2.74x; now ~1.3x** after PARALLEL-build keep (2026-06-22) — the serial bucket-build, not the apply, was the bottleneck; per-thread local-block partition is ~2.78x Rust-side (criterion 5.76ms vs fresh JAX p50 4.35ms / mean 4.59ms) | gap now ~1.3x: residual is the random-write apply latency + eval dispatch/extraction overhead. The earlier "fundamentally different parallel direct-write" framing was answered by parallelizing the PARTITION (not the writes); unique-atomic and histogram/prefix branches stay rejected; inline-value apply tweak measured a no-ship (median 0.948x) |
 | scattered single-element gather (1M←4M, f64/f32/i64/i32/u32/u64/bf16/f16) | LOSS ~15x vs JAX, **halved from ~28x** — branchless-MLP ~2x SHIPPED (2026-06-22: d551956b f64/f32/i64; a4c5118a i32 2.13x) | residual is the safe-Rust/**Zen3 ceiling**: SIMD `Simd::gather_or` is **+5.2% no-win** (vgather microcoded, olm4p closed 95ee73c1); closing needs AVX-512 gather (absent) or index pre-sort (out of scope) |
 | scatter-overwrite 1M f64 (slice_elems=1) | branchless **1.24x SHIPPED** (2026-06-22 b4e74e2d) | near ceiling — scattered stores less latency-bound than gather loads (store buffer hides latency), so the same lever yields 1.24x vs gather's 2x |
 | contiguous ROW gather (slice_elems>1, embedding/row lookup) | WIN — f64/f32/i64/bf16 already threaded (~3.7x); **i32/u32/u64 threaded this session 1.40x SHIPPED** (2026-06-22 63b74dec, was serial-only) | none — gather dtype coverage COMPLETE (every dense dtype has both slice_elems==1 branchless + slice_elems>1 threaded). Row memcpy is memory-BW-bound so threading scales sub-linearly (1.40x) |
@@ -270,6 +270,38 @@ bound + relax the exp/sin/log self-goldens + commit the flag + implement the SIM
 a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
+
+## 2026-06-22 - SlateHarrier scatter-add parallel range-partition build — SHIPPED (~2.78x Rust-side; JAX loss 2.74x->~1.3x)
+
+BOLD-VERIFY targeted the scatter-add 1M f64 1D row — the biggest unowned, non-`+fma`-gated,
+non-FFT JAX loss (was 2.74x). The retained range-partitioned path
+(`eval_scatter_add_f64_scalar_range_partitioned`) bucketed `(idx, i)` pairs in a SINGLE
+SERIAL scan, then applied them across threads. Two same-binary interleaved A/B candidates
+(`bench_scatter_add_range_partition_inline_value_vs_idxpair`, contention-symmetric best-of-25,
+worker `hz2`):
+  - **inline-value (NO-SHIP, median 0.948x):** storing `(idx, upd[i])` instead of `(idx, i)`
+    to move the apply's sparse `upd[i]` dependent load into the sequential build. Neutral —
+    proving the apply was NOT the bottleneck (3 runs: 1.005x / 1.199x / 0.898x). First
+    non-interleaved run misleadingly showed 1.409x (ordering/contention artifact — the later
+    variant was penalized; interleaving fixed it). LESSON: a one-shot A/B that runs old-then-new
+    can be ordering-biased by monotonic worker contention; interleave per-iteration.
+  - **parallel-build (SHIPPED, median ~2.78x):** the SERIAL bucket scan dominated. Each producer
+    thread classifies its contiguous `index_vals` slice into its own `threads` per-output-block
+    local Vecs (cache-hot, vs one serial scan scattering across all 16 buckets); each output
+    block is then applied by one thread reading producers' sub-buckets in producer order.
+    3 runs idx-pair vs parallel: 2.781x / 3.012x / 2.527x. BIT-IDENTICAL: producer `t` owns the
+    contiguous i-range `[t*csz,(t+1)*csz)`, so per output index the updates are visited in the
+    same global i-ascending order as the serial reference; distinct blocks never share output.
+HEAD-TO-HEAD: production criterion `eval/scatter_add_1m_f64_1d` = **5.76ms** midpoint
+(5.49..6.04ms, includes full eval dispatch/extraction) vs fresh `JAX_ENABLE_X64=1` jaxlib CPU
+x64 `o.at[i].add(u, mode='clip')` on the identical fixture = **p50 4.35ms / mean 4.59ms /
+min 3.31ms**. So the documented 2.74x loss narrows to **~1.3x**. GREEN: `cargo test -p fj-lax
+--lib` 1587/0, `cargo test -p fj-conformance --test gather_scatter_oracle` 59/0, scatter
+subset 31/0; fmt + clippy (`--lib --tests -D warnings`) clean on the touched file. Residual
+gap = the random-write apply latency + the ~0.86ms eval dispatch/index-extraction overhead.
+The "fundamentally different safe parallel direct-write" retry predicate was answered by
+parallelizing the PARTITION rather than the writes; unique-atomic / histogram-prefix branches
+stay rejected. Reusable 3-way A/B harness kept as the diagnostic ref.
 
 ## 2026-06-21 - frankenjax-mcqr cummax/cummin head-to-head measured
 
