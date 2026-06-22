@@ -2691,6 +2691,14 @@ NHWC/HWIO/SAME) = **0.957ms** (min 0.819, ~314 GFLOP/s) = **~11.8x Rust LOSS**.
   would save only ~16% — NOT worth it. CONCLUSION: conv2d is essentially `cntiy` +fma-gated (folds
   into that bucket, one more op the +fma decision unlocks), NOT a separate structural/im2col/threading
   lever. Do NOT chase "faster im2col" or "thread the conv" — both are already done; it's the GEMM.
+- **f32 confirmation (2026-06-22, SlateHarrier) — the REAL CNN dtype shows the SAME profile.** f32
+  conv2d uses a different GEMM (`batched_matmul_2d_f32_in`, 16-lane f32-accum, batch=1) than f64's
+  `matmul_2d`. Same-binary split (`bench_conv2d_f32_im2col_vs_gemm_split`, same shape): **im2col =
+  0.31-0.41ms (~15%), GEMM = 1.96-2.35ms (~85%) at 257-308 GFLOP/s** (≈2.2x the f64 conv GEMM's
+  115-138, as expected from 16- vs 8-lane). vs JAX sgemm (~1568 GFLOP/s) that's the ~5x f32-matmul
+  fma+microkernel gap. So f32 conv2d — the actual hot CNN op — is ALSO ~85% fma-gated GEMM + 15%
+  already-threaded im2col. conv2d (both f64 and f32) folds cleanly into `cntiy` +fma; there is no
+  contained structural conv lever for either dtype.
 
 ## 2026-06-22 - cholesky ~6.8x JAX loss (LAPACK gap) — fills the linalg category (CobaltForge/cc)
 
