@@ -2995,3 +2995,5 @@ Conclusion: no code lever shipped. The plausible radical levers collapse to "alr
 or require a quiesced perf-counter pass on a rebuildable warm toolchain. Reopened retry predicate:
 only resume t1pb0-style code work after a fresh same-binary Rust A/B can be run from a matching
 warm target and perf counters identify a concrete stall source in the blocked scan's local pass.
+Scorecard mirror: targeted cumprod/cummax remains **0 wins / 2 losses / 0 neutral**; the broader
+4M cumulative rowset is **1 win / 2 losses / 0 neutral** because the earlier cumsum keep still wins.
