@@ -1774,3 +1774,18 @@ gather) and Rust has a specialized one; ties on bandwidth-bound ops; loses where
 XLA has BLAS/SIMD. The big "Nx faster" ledger numbers are mostly Rust-INTERNAL
 (vs naive), NOT vs JAX. Open Rust-side confirmations (build-blocked): cumprod/
 cummax-4M, non-contiguous gather, i64-matmul-1024.
+
+## CobaltForge / cc - i64 matmul domination confirmed SAME-MACHINE at 1024^3 = 176x (2026-06-22)
+
+Same-machine (local Zen3, warm target/) confirmation of the headline integer-matmul
+domination at scale. eval_primitive(DotGeneral) i64 1024x1024 = **22.48ms** (min
+20.67) vs fresh local JAX int64 `a@b` 1024^3 = **3963.8ms** = **176x Rust FASTER**.
+- Even larger than the ~107x predicted (Rust's blocked i64 GEMM scales better than
+  linear-from-512: 4.64ms@512 -> 22.5ms@1024 is ~4.8x for 8x work). So the i64
+  domination GROWS with size: ~80x@512 (cross-machine) -> 176x@1024 (same-machine),
+  Rust 22ms vs JAX ~4 SECONDS.
+- Compute-bound (no bandwidth/artifact), same-machine (no cross-machine caveat) —
+  the strongest, most-robust, size-growing Rust-over-JAX domination, rooted in XLA
+  having no integer BLAS and no i64 SIMD (vpmullq is AVX512-only).
+- Method: same-machine confirmation now possible via the re-warmed default target/
+  (incremental example builds).
