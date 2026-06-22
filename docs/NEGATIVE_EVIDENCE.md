@@ -2637,3 +2637,25 @@ MEASURED same-binary A/B (Zen3, eval/scatter_overwrite_1m_f64, 1M random writes 
 - KEPT (1.24x > ~0-gain, low-risk, bit-identical). The branchless lesson generalizes across
   gather (2x) and scatter-overwrite (1.24x); the asymmetry quantifies that loads benefit
   ~2-3x more from MLP than stores on Zen3. scatter-ADD stays on its own optimized path.
+
+## 2026-06-22 - SIMD gather (Simd::gather_or) is a NO-WIN on Zen3 — branchless scalar IS the safe-Rust gather ceiling (olm4p stage c REJECTED) (CrimsonOtter/cc)
+
+Tested olm4p's last lever: replaced the scalar branchless f64 scattered gather with a
+portable `std::simd::Simd::<f64,8>::gather_or` variant (8 gathers/instruction, threaded),
+to probe whether wider memory-level parallelism beats the scalar OoO loop.
+
+MEASURED same-binary A/B (Zen3, eval/gather_scatter_1m_f64 vs the committed scalar baseline):
+- scalar branchless = 27.5ms; **SIMD gather = 28.95ms = +5.2% REGRESSION** (Criterion
+  change +0.3%..+10.1%, p=0.04). REVERTED.
+- ROOT CAUSE: Zen3's `vgatherqpd` is MICROCODED (decodes to ~8 sequential µ-ops internally),
+  so it issues no more concurrent loads than the scalar OoO loop already does — and adds
+  setup overhead. SIMD gather only wins on µarchs with a hardware gather unit (Intel
+  Skylake-X+/AVX-512), which this host lacks.
+- CONCLUSION: the **scalar branchless gather (the committed ~2x win) IS the safe-Rust
+  gather ceiling on Zen3**. The residual ~15x vs JAX `jnp.take` (1.786ms) is NOT closable by
+  contained safe-Rust SIMD here. JAX's edge must come from AVX-512 gather (absent on Zen3) or
+  index pre-sorting for cache locality (algorithmic; changes nothing semantically but a
+  sort+gather+unsort is a different, heavier design). olm4p stage c is closed as no-win;
+  stages a/b (branchless scalar) already shipped (d551956b/a4c5118a, ~2x).
+- METHOD note: this is why olm4p flagged "measure before assuming" — the BOLD-VERIFY ethos
+  caught a plausible-but-wrong SIMD lever with one A/B instead of shipping a regression.
