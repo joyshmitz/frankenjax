@@ -296,8 +296,16 @@ BIT-IDENTICAL to scalar `fast_cbrt_f64` (same ops, no FMA → one rounding each)
 (median ~1.25x). The `u64/3` partially scalarizes on AVX2 (no 64-bit vector mul-high), capping the
 gain — but it is real, bit-identical, and zero parity risk. vs JAX cbrt ~2.16ms: loss narrows
 **1.53x → ~1.2x** (does NOT flip — still a small loss). GREEN: `fj-lax --lib cbrt` 8/0, `cbrt_oracle`
-34/0, clippy clean. Scorecard: **0 JAX wins / 1 narrowed loss / 0 neutral; 1 kept**. Retry to FLIP it
-needs avoiding the u64/3 scalarization (exponent-shift initial guess) or +fma — deferred.
+34/0, clippy clean. Scorecard: **0 JAX wins / 1 narrowed loss / 0 neutral; 1 kept**.
+
+FLIP ATTEMPT — division-free inverse-cbrt Newton, NO-SHIP (`bench_cbrt_rcbrt_newton_probe`):
+hypothesized that removing the Halley path's 4 `vdivpd`/elem via a mul-only inverse-cbrt iteration
+(`r = r*(4 - a·r³)/3`, no σ-correction magic `6_142_909_891_733_356_544`; `cbrt = a·r²`) would reach
+memory-bound and beat JAX. MEASURED: it needs **4 iterations** for the 1e-10 oracle (3 iters =
+6.18e-7 FAIL; 4 iters = 3.83e-13 PASS), and at 4 iters it is **3.12ms — 0.85x SLOWER than the shipped
+Halley SIMD (2.65ms)**: the extra iteration count for accuracy outweighs the per-iter division savings.
+So the shipped bit-identical Halley SIMD remains the safe-Rust cbrt optimum; FLIPPING cbrt to a JAX
+win is not achievable without +fma (the SIMD-poly fma-gate). Probe bench kept. Retry: deferred to +fma.
 
 ## 2026-06-22 - SlateHarrier vmap(Dot) INTEGER batched-matmul → fj-lax i64 batched GEMM — SHIPPED (17.35x), closes the vein
 

@@ -23903,11 +23903,113 @@ mod tests {
         );
     }
 
-    // BOLD-VERIFY: cbrt 1M f64 is ~1.53x JAX loss (compute-bound scalar bit-hack+Halley,
-    // tolerance-only / no bit-golden). Probe an 8-wide SIMD cbrt: bit-hack (u64x8 bits/3 +
-    // magic) + 2 Halley (f64x8), with a scalar fixup for the rare 0/non-finite/out-of-range
-    // lanes — BIT-IDENTICAL to scalar fast_cbrt_f64 in range. The crux risk is whether the
-    // u64/3 vectorizes (AVX2 has no 64-bit vector mulhi) or scalarizes (killing the win).
+    // BOLD-VERIFY: try to FLIP cbrt to a JAX win via a DIVISION-FREE inverse-cbrt Newton
+    // (r ≈ a^-1/3 via r = r*(4 - a*r³)/3, mul-only; cbrt = a*r²) — removes the 4 vdivpd/elem
+    // of the Halley path. Validates max-rel-err vs libm AND A/Bs vs scalar + the shipped
+    // Halley-SIMD. Tolerance-only (no bit-golden), so a non-bit-identical kernel is legal IFF
+    // it clears 1e-10.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cbrt_rcbrt_newton_probe() {
+        use std::simd::Simd;
+        use std::simd::num::SimdFloat;
+        use std::time::Instant;
+        type F = Simd<f64, 8>;
+        type U = Simd<u64, 8>;
+        // (4/3)*bias_bits, no σ-correction: r0 = from_bits(MAGIC - bits/3) ≈ a^(-1/3).
+        const RCBRT_MAGIC: u64 = 6_142_909_891_733_356_544;
+        let rcbrt_into = |out: &mut [f64], src: &[f64], iters: usize| {
+            let n = src.len();
+            let chunks = n / 8;
+            let third = F::splat(1.0 / 3.0);
+            let four = F::splat(4.0);
+            for c in 0..chunks {
+                let base = c * 8;
+                let xc = F::from_slice(&src[base..base + 8]);
+                let a = xc.abs();
+                let mut r = F::from_bits(U::splat(RCBRT_MAGIC) - a.to_bits() / U::splat(3));
+                for _ in 0..iters {
+                    let ar3 = a * r * r * r;
+                    r = r * (four - ar3) * third;
+                }
+                let y = a * r * r; // a^(1/3)
+                y.copysign(xc).copy_to_slice(&mut out[base..base + 8]);
+            }
+            for (i, (o, &v)) in out.iter_mut().zip(src.iter()).enumerate() {
+                let a = v.abs();
+                if i >= chunks * 8
+                    || v == 0.0
+                    || !v.is_finite()
+                    || !(1.0e-200..=1.0e200).contains(&a)
+                {
+                    *o = super::fast_cbrt_f64(v);
+                }
+            }
+        };
+        // Accuracy sweep across many magnitudes.
+        for &iters in &[3usize, 4] {
+            let xs: Vec<f64> = (0..8192)
+                .map(|i| {
+                    let e = (i % 41) as i32 - 20;
+                    let m = 1.0 + ((i % 997) as f64) / 997.0;
+                    m * 2f64.powi(e * 5)
+                })
+                .collect();
+            let mut got = vec![0.0; xs.len()];
+            rcbrt_into(&mut got, &xs, iters);
+            let mut maxrel = 0.0f64;
+            for (g, &x) in got.iter().zip(xs.iter()) {
+                let want = x.cbrt();
+                maxrel = maxrel.max((g - want).abs() / want.abs().max(1e-300));
+            }
+            println!("CBRT rcbrt-newton iters={iters}: max_rel_err={maxrel:e}");
+        }
+        // Speed A/B vs scalar + shipped Halley SIMD.
+        let n = 1usize << 20;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 100_000) as f64) * 0.01 + 0.001)
+            .collect();
+        let timeit = |f: &dyn Fn() -> Vec<f64>| {
+            let _ = f();
+            let mut b = f64::MAX;
+            for _ in 0..25 {
+                let t = Instant::now();
+                let o = f();
+                b = b.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&o);
+            }
+            b * 1e3
+        };
+        let scalar = || {
+            let mut o = vec![0.0; n];
+            for (s, &v) in o.iter_mut().zip(x.iter()) {
+                *s = super::fast_cbrt_f64(v);
+            }
+            o
+        };
+        let halley = || {
+            let mut o = vec![0.0; n];
+            super::fast_cbrt_slice_into(&mut o, &x);
+            o
+        };
+        let rcbrt = || {
+            let mut o = vec![0.0; n];
+            rcbrt_into(&mut o, &x, 4);
+            o
+        };
+        let (mut sb, mut hb, mut rb) = (f64::MAX, f64::MAX, f64::MAX);
+        for _ in 0..4 {
+            sb = sb.min(timeit(&scalar));
+            hb = hb.min(timeit(&halley));
+            rb = rb.min(timeit(&rcbrt));
+        }
+        println!(
+            "BENCH cbrt 1M f64: scalar={sb:.4}ms halley-simd={hb:.4}ms rcbrt-newton(4it)={rb:.4}ms  rcbrt-vs-scalar={:.2}x rcbrt-vs-halley={:.2}x",
+            sb / rb,
+            hb / rb
+        );
+    }
+
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_cbrt_simd_vs_scalar() {
