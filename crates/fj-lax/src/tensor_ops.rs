@@ -4288,6 +4288,21 @@ fn eval_scatter_dense(
             ScatterCombine::Max => |a, b| if complex_lex_ge_scatter(a, b) { a } else { b },
             ScatterCombine::Min => |a, b| if complex_lex_ge_scatter(a, b) { b } else { a },
         };
+        // Complex scatter-ADD (slice_elems==1) routes through the parallel range-partition like
+        // f64-Add: complex is 16B + 2 f64 adds/elem, so the serial scatter_typed loop is slow
+        // enough that the partition pays (measured ~1.39x median, unlike f32/i64 which regressed).
+        // BIT-IDENTICAL: complex add is componentwise f64 add and each index folds i-ascending.
+        if combine == ScatterCombine::Add
+            && slice_elems == 1
+            && let Some(out) =
+                scatter_reduce_range_partitioned(op, upd, index_vals, dim0, index_mode, cf)
+        {
+            return Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+                dt,
+                operand.shape.clone(),
+                out,
+            )?)));
+        }
         scatter_typed!(
             op,
             upd,
@@ -25316,6 +25331,63 @@ mod tests {
             "BENCH gather 1M<-4M f64: direct={db:.4}ms ideal-monotonic={mb:.4}ms bucketed(shippable)={bb:.4}ms  mono-speedup={:.2}x bucket-speedup={:.2}x",
             db / mb,
             db / bb
+        );
+    }
+
+    // BOLD-VERIFY: complex128 scatter-ADD uses the serial scatter_typed cf loop (the parallel
+    // range-partition is f64-Add-only). Complex is 16B + 2 f64 adds/elem (serial slower than the
+    // f32/i64 that regressed), so the partition may pay. Same-binary A/B: serial complex scatter-add
+    // vs the generic scatter_reduce_range_partitioned<(f64,f64)>. Bit-identical (per-index ascending
+    // order; complex add is componentwise f64 add).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_scatter_add_complex_partition_vs_serial() {
+        use std::time::Instant;
+        let n = 1_usize << 20;
+        let op: Vec<(f64, f64)> = vec![(0.0, 0.0); n];
+        let index_vals: Vec<i64> = (0..n)
+            .map(|i| ((i.wrapping_mul(1_103_515_245_usize).wrapping_add(12_345)) & (n - 1)) as i64)
+            .collect();
+        let upd: Vec<(f64, f64)> = (0..n)
+            .map(|i| ((i % 4099) as f64 - 2049.0, (i % 911) as f64 - 455.0))
+            .collect();
+        let mode = IndexMode::Clip;
+        let cadd = |a: (f64, f64), b: (f64, f64)| (a.0 + b.0, a.1 + b.1);
+        let serial = || -> Vec<(f64, f64)> {
+            let mut out = op.clone();
+            for (i, &raw) in index_vals.iter().enumerate() {
+                if let Some(id) = super::resolve_axis0_index(raw, n, mode) {
+                    out[id] = cadd(out[id], upd[i]);
+                }
+            }
+            out
+        };
+        let partition = || {
+            super::scatter_reduce_range_partitioned(&op, &upd, &index_vals, n, mode, cadd).unwrap()
+        };
+        assert_eq!(
+            serial(),
+            partition(),
+            "complex partition scatter-add diverges from serial"
+        );
+        let _ = serial();
+        let _ = partition();
+        let (mut ss, mut ps) = (f64::MAX, f64::MAX);
+        for _ in 0..25 {
+            let t = Instant::now();
+            let s = serial();
+            ss = ss.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&s);
+            let t = Instant::now();
+            let p = partition();
+            ps = ps.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&p);
+        }
+        println!(
+            "BENCH scatter-add 1M c128: serial={:.4}ms partition={:.4}ms speedup={:.3}x",
+            ss * 1e3,
+            ps * 1e3,
+            ss / ps
         );
     }
 

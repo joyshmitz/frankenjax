@@ -52,6 +52,17 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     (sort ≤ its f64 1.25ms) still wins ≥10x in the dtype JAX users actually run. **(fj-lax f32 exact
     now MEASURED, gap closed — see the 2026-06-22 f32-sort entry below: fj-lax f32 64k = ~0.77ms,
     FASTER than its own f64, ~10x over JAX f32.)**
+  - **COMPLEX128 SCATTER-ADD parallel range-partition SHIPPED (2026-06-22, SlateHarrier) — ~1.39x.**
+    Complex scatter is already de-boxed (`eval_scatter_dense` complex branch via `scatter_typed!` +
+    lexicographic min/max — verified, NOT a gap), but complex scatter-ADD (slice_elems==1) used the
+    serial `scatter_typed` cf loop, not the parallel range-partition (which was f64-Add-only because
+    f32/i64 REGRESSED — their serial was already fast). Complex is 16B + 2 f64 adds/elem, so its serial
+    is slow enough that the partition PAYS: routed complex scatter-add through the generic
+    `scatter_reduce_range_partitioned<(f64,f64)>`. BIT-IDENTICAL (complex add is componentwise f64 add,
+    each index folds i-ascending): scatter lib 31/0, `gather_scatter_oracle` 59/0. Same-binary A/B
+    `bench_scatter_add_complex_partition_vs_serial` (1M c128): serial 4.87-5.48ms → partition **1.15-1.50x**
+    (median ~1.39x). NOTE: this is the dtype where the partition generalization (rejected for f32/i64,
+    [[project below]]) actually wins — gate it per-dtype, not blanket.
   - **COMPLEX128 GATHER de-box + threading SHIPPED (2026-06-22, SlateHarrier) — ~2.6x.** Complex gather
     was serial-only (per-element `extend_from_slice` + Option-match), missing BOTH the branchless
     `gather_single_dense` (slice_elems==1) and the threaded `gather_contiguous_into` (rows) that the real
