@@ -1298,6 +1298,16 @@ JAX/JAXLIB 0.10.1, CPU backend, `jax_enable_x64=true`, warmed
   approach pocketfft's higher-radix/SIMD kernel class. Do not retry a plain
   radix-4 SoA butterfly promotion without a same-binary A/B exceeding the
   retained radix-2 path by at least 1.15x.
+
+- Validation after the no-ship decision: no source code changed, and the
+  existing warm-target focused conformance binary
+  `/data/projects/.rch-targets/frankenjax-cod-a/debug/deps/fft_oracle-4c019ebc487d9fe0`
+  run with `--nocapture` passed **27/27** FFT oracle tests locally. Remote
+  `cargo test -p fj-conformance --test fft_oracle --release` attempts were
+  cancelled with code 143 before test execution, so this pass used the
+  already-built shared-target oracle binary to avoid a cold local rebuild under
+  low disk.
+
 ## frankenjax-ur4h3 - symmetric tridiagonal reduction no-ship
 
 - Date: 2026-06-20
