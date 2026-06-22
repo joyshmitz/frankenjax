@@ -283,6 +283,21 @@ a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
 
+## 2026-06-22 - SlateHarrier atan2/pow dense-f64 VERIFIED already-threaded (residual is fma-gated, NOT a threading lever)
+
+Checked whether the documented atan2 (5.41x) / pow (8.40x) JAX losses were an un-threaded scalar-libm
+gap (a cheap threading win, like the unary transcendentals). They are NOT: `Primitive::Atan2` and
+`Primitive::Pow` are both in `is_expensive_binary`, so `eval_binary_elementwise` routes their same-shape
+dense f64 path through `eval_same_shape_f64_expensive_parallel` (work-scaled `thread::scope` fan-out) —
+already threaded. The retained ledger numbers (atan2 ~12ms, pow ~15ms at 1M) ARE the threaded-dense
+times; libm `pow` alone is ~240ns/elem (15ms threaded over 16 cores). So the residual vs JAX (which
+SIMD-vectorizes exp/log with FMA) is the **fma-gated SIMD-transcendental gap**, identical to exp/cbrt —
+NOT a missing-threading lever. DO-NOT re-attempt threading atan2/pow. The flip requires `cntiy` +fma
+(SIMD-poly exp = 2.2x WITH / 0.79x WITHOUT; cbrt division-free flip also no-ship at 0.85x, prior entry).
+Consolidation: the unowned, non-gated, contained transcendental levers are exhausted — every remaining
+transcendental/matmul/softmax loss routes to the existing P1 bead `frankenjax-cntiy` (+fma maintainer
+decision). No code change; verification only.
+
 ## 2026-06-22 - SlateHarrier cbrt dense-f64 8-wide SIMD — SHIPPED (~1.25x, bit-identical, narrows JAX 1.53x→~1.2x)
 
 cbrt 1M f64 was the closest-to-flipping non-gated, tolerance-only (no bit-golden) loss (~1.53x JAX;
