@@ -1944,3 +1944,30 @@ further (both linear past the cliff). So the release framing is "stable ~4x
 large-n scan domination above the JAX cliff," not "grows with n." (Caveat: my
 first trajectory script mis-estimated the Rust line using 4.2ms/1M instead of
 the true ~1us/K; corrected here.)
+
+## 2026-06-22 - cumsum-4M domination CONFIRMED on independent machine; cross-machine ratio understates same-machine (CobaltForge/cc)
+
+Warm-target rch bench (`frankenjax-cc`, no cold rebuild) of the committed
+`eval/cumsum_4m_f64_1d`, to cross-validate the cumsum large-n domination on a
+DIFFERENT machine and quantify the cross- vs same-machine ratio gap:
+
+| measurement | value |
+| --- | ---: |
+| Rust cumsum-4M, rch worker `ovh-a` (this run) | 7.45 ms |
+| Rust cumsum-4M, ovh-a (cod-b independently) | 7.53 ms |
+| Rust cumsum-4M, local host (earlier) | 4.20 ms |
+| JAX cumsum-4M, local (fresh) | 18.52 ms (min 15.36) |
+
+- **Same-machine domination = 4.4x** (local Rust 4.20 / local JAX 18.52) — the
+  accurate figure.
+- **Cross-machine ratio = 2.49x** (ovh-a Rust 7.45 / local JAX 18.52) — matches
+  cod-b's recorded 2.43x, but UNDERSTATES the domination because ovh-a is ~1.8x
+  slower than the local host for this Rust workload.
+- My ovh-a number (7.45ms) matching cod-b's (7.53ms) independently confirms the
+  Rust cumsum-4M workload is real (not a local-host artifact), and the domination
+  holds in BOTH framings (2.49x cross / 4.4x same).
+- METHOD NOTE: rch-Rust-vs-local-JAX ratios (the repo's common convention) are a
+  conservative LOWER BOUND on the true same-machine domination when the rch worker
+  is slower than local; the same-machine head-to-head is the accurate one. JAX
+  cannot run on rch workers, so a clean cross-machine ratio is impossible — report
+  both and label which host each side ran on.
