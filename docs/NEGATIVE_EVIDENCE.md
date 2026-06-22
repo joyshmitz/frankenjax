@@ -2000,3 +2000,30 @@ well-vectorized; the memory "deque 20x" is Rust-internal, not vs JAX). Net: the
 cross-machine validation now covers sort (win), cumsum (win), scatter (loss),
 maxpool (loss) — all hold in the correct direction across machines, with the
 ratio magnitude shifting by worker CPU speed (always report the host).
+
+## 2026-06-22 - floor-chain JAX LOSS confirmed cross-machine; cross-machine map validation COMPLETE (CobaltForge/cc)
+
+Final completeness cross-confirm. Warm-target rch bench of committed
+`compiled_dispatch/eager/floor_f32_1m_add_unary_chain/n=4` on `hz2` = **595us** vs
+fresh local JAX f32 floor (add+floor)x4 jit = **91.8us** (min 74) = **~6.5x Rust
+LOSS** cross-machine (4.5-7x same-machine). My shipped fix 294c836f gave a real
+4.63x bit-identical Rust-side win, but the chain stays a JAX loss due to the
+per-call interpreter tax (env build + 4MB fused-output alloc vs XLA single fused
+pass) — confirmed on hz2, not a local artifact. The residual amortization lever
+is so4wo (owned).
+
+CROSS-MACHINE MAP VALIDATION COMPLETE — all 5 characterized ops confirmed in the
+correct direction across local + rch worker:
+
+| op | same-machine | cross-machine | verdict |
+| --- | --- | --- | --- |
+| sort | 4-5.5x | 6.53x (hz2) | DOMINATION |
+| cumsum-4M | 4.4x | 2.49x (ovh-a) | DOMINATION |
+| scatter | 3.2x loss | 4.6x (ovh-a) | JAX loss |
+| maxpool | 2.3x loss | 1.77x (hz2) | JAX loss |
+| floor-chain | 4.5x loss | 6.5x (hz2) | JAX loss |
+
+Verified Rust-over-JAX domination surface (robust across dtype/size/machine):
+`sort` + large-n scan family (cumsum confirmed; cumprod/cummax JAX-cliff confirmed,
+Rust-4M pending build). Everything else measured is JAX-parity-or-loss; the broad
+ledger "Nx faster" numbers are Rust-internal, not vs JAX.
