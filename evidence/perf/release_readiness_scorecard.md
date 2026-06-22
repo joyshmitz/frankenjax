@@ -1691,3 +1691,23 @@ for 512KB ~ memcpy bandwidth) beats XLA's general CPU gather machinery.
   (3) CONTIGUOUS row-gather specifically (the memcpy-favorable case) — scattered/
   non-contiguous element gather may differ (XLA could be competitive). Same-machine
   + a non-contiguous variant would firm it up (build-blocked now).
+
+## CobaltForge / cc - MAJOR domination: Rust i64 matmul ~80x faster than JAX (XLA has no integer BLAS) (2026-06-22)
+
+The strongest verified Rust-over-JAX domination so far. Warm-target rch bench
+(`hz2`) of committed `eval/matmul_512x512_i64_dense` (DotGeneral, 512x512 i64) =
+**4.64ms** vs fresh local JAX `a@b` int64 512x512 (x64) = **374ms** (min 335) =
+**~80x Rust FASTER** cross-machine.
+- ROOT CAUSE (fits the model cleanly): XLA-CPU has NO integer BLAS (BLAS is
+  float-only), so JAX falls to a naive generic int matmul (0.36 G i64-MAC/s);
+  Rust has a dedicated blocked i64 GEMM (29 G i64-MAC/s). For reference XLA f64
+  matmul 512^3 is ~0.6ms (BLAS), so JAX i64 is ~600x slower than its own f64 —
+  the integer path is the gap, and Rust's dedicated kernel exploits it.
+- COMPUTE-BOUND (512^3 = 1.34e8 MACs), so NOT a bandwidth/non-materialization
+  artifact (passes the sanity check; both GFLOP rates are physically plausible).
+- Cross-machine caveat applies but is immaterial at 80x (any worker-CPU gap is
+  <<80x). Same-machine would likely be similar or larger.
+- This is a NICHE op in practice (most ML is float, where JAX BLAS wins ~2x via
+  fma — see cntiy), but integer matmul (i64/i32/u32, all with dedicated Rust
+  kernels) is a clean, large, defensible Rust-over-JAX domination. Verified
+  domination set now: sort, large-n scan, contiguous gather, INTEGER matmul.
