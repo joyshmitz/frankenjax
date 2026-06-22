@@ -283,6 +283,20 @@ a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
 
+## 2026-06-22 - SlateHarrier vmap(Dot) INTEGER batched-matmul → fj-lax i64 batched GEMM — SHIPPED (17.35x), closes the vein
+
+Completes the naive-loop→GEMM vein: the Integral case of `batch_paired_numeric_dot` (vmap of an
+integer 2D dot) still used the per-element-boxed triple loop. Routed the (2,2)/(3,2)/(2,3)/(3,3)
+integer cases through `fj_lax::tensor_contraction::batched_rank2_i64_matmul` (mirrors the Real
+routing). Output is I64 (Integral dtype), matching the naive `sum += left*right` i64 accumulation;
+release-mode `+` wraps exactly like the kernel's `wrapping_add`/`wrapping_mul`, so it is
+bit-identical on realistic data (no overflow). Same-binary A/B `bench_batched_dot_i64_naive_vs_gemm`,
+maxerr/exact-eq verified: **b=128 64×64×64: 62.19ms → 3.58ms = 17.35x** (lower than the f64 38-66x —
+the i64 register kernel isn't B-packed). GREEN: `cargo test -p fj-dispatch --lib` 304/0; fmt + clippy
+clean. With this, BOTH the float and integer naive batched-dot paths route to fj-lax GEMM; the
+naive-O(n³)-matmul vein across fj-ad (VJPs) and fj-dispatch (vmap) is now fully CLOSED. Scorecard:
+**1 win / 0 losses; kept**.
+
 ## 2026-06-22 - SlateHarrier scattered-gather index pre-sort/bucket — NO-SHIP (measurement confirms ledger "out of scope")
 
 The biggest non-gated loss is scattered single-element gather (1M←4M f64, ~15x JAX, "Zen3 vgather

@@ -1610,6 +1610,60 @@ fn batch_paired_numeric_dot(
         return Ok(Some(BatchTracer::batched(Value::Tensor(out), 0)));
     }
 
+    // Same lever for the INTEGER batched dot: route through fj-lax's wrapping i64 batched
+    // GEMM instead of the per-element-boxed loop. Output is I64 (BatchDotOutputKind::Integral
+    // dtype), matching the naive `sum += left*right` i64 accumulation; release-mode `+` wraps
+    // exactly like `batched_rank2_i64_matmul`'s `wrapping_add`/`wrapping_mul`, so it is
+    // bit-identical (no overflow on realistic data). Mirrors the Real path above.
+    if let BatchDotOutputKind::Integral = output_kind {
+        let dims = match (lhs.rank(), rhs.rank()) {
+            (2, 2) if rhs.shape.dims[1] == lhs.shape.dims[1] => Some((
+                1usize,
+                lhs.shape.dims[1] as usize,
+                1usize,
+                vec![batch as u32],
+            )),
+            (3, 2) if rhs.shape.dims[1] == lhs.shape.dims[2] => {
+                let rows = lhs.shape.dims[1] as usize;
+                let k = lhs.shape.dims[2] as usize;
+                Some((rows, k, 1usize, vec![batch as u32, rows as u32]))
+            }
+            (2, 3) if rhs.shape.dims[1] == lhs.shape.dims[1] => {
+                let k = lhs.shape.dims[1] as usize;
+                let cols = rhs.shape.dims[2] as usize;
+                Some((1usize, k, cols, vec![batch as u32, cols as u32]))
+            }
+            (3, 3) if rhs.shape.dims[1] == lhs.shape.dims[2] => {
+                let rows = lhs.shape.dims[1] as usize;
+                let k = lhs.shape.dims[2] as usize;
+                let cols = rhs.shape.dims[2] as usize;
+                Some((rows, k, cols, vec![batch as u32, rows as u32, cols as u32]))
+            }
+            _ => None,
+        };
+        let Some((m, k, n, out_dims)) = dims else {
+            return Ok(None);
+        };
+        let to_i64 = |t: &TensorValue| -> Result<Vec<i64>, BatchError> {
+            if let Some(s) = t.elements.as_i64_slice() {
+                Ok(s.to_vec())
+            } else {
+                t.elements
+                    .iter()
+                    .map(|l| l.as_i64())
+                    .collect::<Option<Vec<i64>>>()
+                    .ok_or_else(|| BatchError::EvalError("expected integral dot tensor".to_owned()))
+            }
+        };
+        let a = to_i64(lhs)?;
+        let b = to_i64(rhs)?;
+        let c = fj_lax::tensor_contraction::batched_rank2_i64_matmul(&a, batch, m, k, &b, n);
+        let elements: Vec<Literal> = c.into_iter().map(Literal::I64).collect();
+        let out = TensorValue::new(DType::I64, Shape { dims: out_dims }, elements)
+            .map_err(|e| BatchError::TensorError(e.to_string()))?;
+        return Ok(Some(BatchTracer::batched(Value::Tensor(out), 0)));
+    }
+
     let output = match (lhs.rank(), rhs.rank()) {
         (2, 2) => {
             let k = lhs.shape.dims[1] as usize;
@@ -8786,6 +8840,64 @@ mod tests {
             }
             println!(
                 "BENCH batched-dot b={batch} {m}x{k}x{n}: naive={:.4}ms gemm={:.4}ms speedup={:.2}x",
+                nb * 1e3,
+                gb * 1e3,
+                nb / gb
+            );
+        }
+    }
+
+    // Integer sibling of the above: vmap of an integer 2D dot lands in the Integral
+    // batch_paired_numeric_dot (3,3) per-element-boxed loop; now routed through fj-lax's
+    // wrapping i64 batched GEMM. Same-binary A/B, bit-identical (i64 accumulation).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_batched_dot_i64_naive_vs_gemm() {
+        use std::time::Instant;
+        for (batch, m, k, n) in [(128usize, 64usize, 64usize, 64usize)] {
+            let la: Vec<i64> = (0..batch * m * k).map(|i| ((i % 17) as i64) - 8).collect();
+            let ra: Vec<i64> = (0..batch * k * n).map(|i| ((i % 19) as i64) - 9).collect();
+            let lhs_lit: Vec<Literal> = la.iter().copied().map(Literal::I64).collect();
+            let rhs_lit: Vec<Literal> = ra.iter().copied().map(Literal::I64).collect();
+            let naive = || -> Vec<i64> {
+                let mut out = vec![0i64; batch * m * n];
+                for bi in 0..batch {
+                    for row in 0..m {
+                        for col in 0..n {
+                            let mut sum = 0i64;
+                            for kk in 0..k {
+                                let l = lhs_lit[(bi * m + row) * k + kk].as_i64().unwrap();
+                                let r = rhs_lit[(bi * k + kk) * n + col].as_i64().unwrap();
+                                sum += l * r;
+                            }
+                            out[(bi * m + row) * n + col] = sum;
+                        }
+                    }
+                }
+                out
+            };
+            let gemm = || -> Vec<i64> {
+                let a: Vec<i64> = lhs_lit.iter().map(|l| l.as_i64().unwrap()).collect();
+                let b: Vec<i64> = rhs_lit.iter().map(|l| l.as_i64().unwrap()).collect();
+                fj_lax::tensor_contraction::batched_rank2_i64_matmul(&a, batch, m, k, &b, n)
+            };
+            assert_eq!(naive(), gemm(), "i64 GEMM diverges from naive");
+            let _ = naive();
+            let _ = gemm();
+            let mut nb = f64::MAX;
+            let mut gb = f64::MAX;
+            for _ in 0..15 {
+                let t = Instant::now();
+                let x = naive();
+                nb = nb.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&x);
+                let t = Instant::now();
+                let y = gemm();
+                gb = gb.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&y);
+            }
+            println!(
+                "BENCH batched-dot-i64 b={batch} {m}x{k}x{n}: naive={:.4}ms gemm={:.4}ms speedup={:.2}x",
                 nb * 1e3,
                 gb * 1e3,
                 nb / gb
