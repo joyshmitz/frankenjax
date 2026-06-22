@@ -2248,3 +2248,26 @@ LOSS**.
   (cntiy) — but the gap is 3.35x, more closeable than the cited 15x suggested.
 - (No action for cod-b: matmul_2d is the single-threaded kernel microbench, working
   as intended; the production path threads.)
+
+## 2026-06-22 - f32 matmul (default ML dtype) is ~4.0x JAX loss same-machine — completes matmul map (CobaltForge/cc)
+
+Same-machine authoritative number for JAX's DEFAULT ML dtype. Local Zen3, warm
+target/: eval_primitive(DotGeneral) f32 1024^3 = **5.51ms** (min 4.86, ~390
+GFLOP/s) vs fresh local JAX f32 `a@b` 1024^3 = **1.369ms** (~1568 GFLOP/s sgemm)
+= **~4.02x Rust LOSS**. Slightly worse than f64 (3.35x) because JAX's f32 sgemm is
+relatively faster (1568 vs 806 GFLOP/s) while Rust f32 (390) lacks fma + f32-SIMD-
+peak.
+
+COMPLETE production matmul map (threaded DotGeneral, same-machine vs JAX):
+| dtype | Rust GFLOP/s | JAX GFLOP/s | verdict |
+| --- | ---: | ---: | --- |
+| i64 | (no BLAS in JAX) | ~0.5 | Rust WINS 176x @1024 |
+| u32 | (slow both) | (slow) | Rust WINS ~8.9x |
+| f64 | 240 | 806 (dgemm) | Rust loses 3.35x |
+| f32 | 390 | 1568 (sgemm) | Rust loses 4.02x |
+| i32 | (no f32-SIMD in Rust) | (vpmulld) | Rust loses 7.8x |
+| complex128 | - | (zgemm) | Rust loses 3.7x |
+- The float-matmul gaps (~3-4x) are the most release-relevant losses (common ML),
+  and are CLOSEABLE via +fma + a tuned microkernel (cntiy) — not the 5-15x the
+  single-threaded matmul_2d microbench implied. Rust wins matmul iff XLA lacks a
+  BLAS/SIMD path (i64/u32).
