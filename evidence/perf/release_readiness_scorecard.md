@@ -1708,6 +1708,10 @@ The strongest verified Rust-over-JAX domination so far. Warm-target rch bench
 - Cross-machine caveat applies but is immaterial at 80x (any worker-CPU gap is
   <<80x). Same-machine would likely be similar or larger.
 - This is a NICHE op in practice (most ML is float, where JAX BLAS wins ~2x via
-  fma — see cntiy), but integer matmul (i64/i32/u32, all with dedicated Rust
-  kernels) is a clean, large, defensible Rust-over-JAX domination. Verified
-  domination set now: sort, large-n scan, contiguous gather, INTEGER matmul.
+  fma — see cntiy). CORRECTION (2026-06-22, see NEGATIVE_EVIDENCE): the domination
+  is **i64-ONLY**, NOT integer-family. i32 matmul is a ~7.8x JAX LOSS (rch hz2
+  4.84ms vs JAX 0.62ms) because AVX2 `vpmulld` vectorizes i32 (JAX fast) while
+  64-bit SIMD mul `vpmullq` is AVX512-only (JAX i64 scalar -> 374ms). Rust stores
+  i32 as i64 so its kernel is non-SIMD ~4.8ms for both. So Rust wins i64 (~80x) but
+  loses i32 (~7.8x). Verified domination set: sort, large-n scan, contiguous
+  gather, **i64 matmul** (not i32/u32).
