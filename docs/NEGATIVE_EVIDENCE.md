@@ -283,6 +283,23 @@ a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
 
+## 2026-06-22 - SlateHarrier scattered-gather index pre-sort/bucket — NO-SHIP (measurement confirms ledger "out of scope")
+
+The biggest non-gated loss is scattered single-element gather (1M←4M f64, ~15x JAX, "Zen3 vgather
+ceiling"). The ledger listed "index pre-sort" as un-tried/out-of-scope; this measured it. Bit-identity
+is trivial (gather = independent copies; any order yields out[i]=src[idx[i]]). Same-binary ceiling
+probe `bench_gather_sorted_vs_direct_ceiling` (1M←4M f64, worker `hz2`):
+  - **direct random gather (shipped path): 5.46ms**
+  - **IDEAL monotonic (indices pre-sorted OUTSIDE timing): 1.61ms = 3.39x** — confirms monotonic
+    source reads prefetch where random reads stall; the read-pattern ceiling.
+  - **bucketed/shippable (radix-bucket build INCLUDED, 64K-elem buckets): 13.98ms = 0.39x REGRESSION**
+The 3.39x read ceiling does NOT cover the cost of GETTING monotonic: the bucket-build (1M u64 pushes
+into growing Vecs) + scattered output writes overwhelm the read savings (0.39x). A full radix sort of
+1M indices (~3-5ms) + monotonic gather (1.6ms) + scattered writes (~2ms) ≈ 6.6-8.6ms > direct 5.46ms —
+same regression. So index pre-sort/bucket is a confirmed NO-SHIP; the shipped branchless direct gather
+is at the safe-Rust/Zen3 ceiling (closing further needs AVX-512 gather, absent). No production change;
+diagnostic bench kept. Scorecard: **0 wins / 1 loss (vs the ideal, unreachable) / 0 neutral; 0 kept code**.
+
 ## 2026-06-22 - SlateHarrier vmap(Dot) batched-matmul naive-loop → fj-lax batched GEMM — SHIPPED (38-66x)
 
 Extending the naive-loop→GEMM vein from fj-ad into fj-dispatch (vmap). `batch_dot_general`

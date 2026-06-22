@@ -25152,6 +25152,97 @@ mod tests {
         );
     }
 
+    // BOLD-VERIFY: scattered gather (1M←4M f64) is ~15x JAX (random-read latency, Zen3
+    // vgather ceiling). Probe the un-tried "index pre-sort" idea: monotonic source reads
+    // prefetch where random reads stall. This measures the CEILING — direct random gather
+    // vs IDEAL monotonic gather (indices pre-sorted outside timing) vs a partition/bucket
+    // gather (radix-bucket indices so reads are cache-local). If monotonic/bucketed is
+    // much faster, a real index sort/bucket within budget is worth shipping. Bit-identity
+    // is trivial (gather is independent copies; any order yields out[i]=src[idx[i]]).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_gather_sorted_vs_direct_ceiling() {
+        use std::time::Instant;
+        let n_src = 1usize << 22; // 4M
+        let k = 1usize << 20; // 1M gathers
+        let src: Vec<f64> = (0..n_src).map(|i| (i as f64) * 0.5 - 1.0).collect();
+        let idx: Vec<usize> = (0..k)
+            .map(|i| (i.wrapping_mul(2_654_435_761) ^ (i >> 3)) % n_src)
+            .collect();
+
+        // DIRECT: out[i] = src[idx[i]] — random reads, sequential writes (the shipped path).
+        let direct = || -> Vec<f64> {
+            let mut out = vec![0.0; k];
+            for (o, &j) in out.iter_mut().zip(idx.iter()) {
+                *o = src[j];
+            }
+            out
+        };
+        // IDEAL monotonic: indices pre-sorted OUTSIDE timing — the best the sort approach
+        // could reach (monotonic reads, sequential writes). Output order differs but proves
+        // the read-pattern ceiling.
+        let mut sorted_idx = idx.clone();
+        sorted_idx.sort_unstable();
+        let mono = || -> Vec<f64> {
+            let mut out = vec![0.0; k];
+            for (o, &j) in out.iter_mut().zip(sorted_idx.iter()) {
+                *o = src[j];
+            }
+            out
+        };
+        // BUCKETED (radix by high bits): partition src index space into B cache-sized
+        // buckets, gather per bucket so reads stay L2-resident. Includes the bucket-build
+        // cost (this is a SHIPPABLE shape, unlike `mono`). Writes out[orig] scattered.
+        let bucketed = || -> Vec<f64> {
+            const SHIFT: u32 = 16; // 64K-element (512KB f64) buckets
+            let nb = (n_src >> SHIFT) + 1;
+            let mut buckets: Vec<Vec<u64>> = vec![Vec::new(); nb];
+            for (i, &j) in idx.iter().enumerate() {
+                buckets[j >> SHIFT].push(((j as u64) << 20) | i as u64);
+            }
+            let mut out = vec![0.0; k];
+            for b in &buckets {
+                for &packed in b {
+                    let j = (packed >> 20) as usize;
+                    let i = (packed & 0xF_FFFF) as usize;
+                    out[i] = src[j];
+                }
+            }
+            out
+        };
+
+        let d = direct();
+        assert_eq!(d, bucketed(), "bucketed gather diverges");
+        // mono has a different output order by construction; verify as a multiset via sum.
+        let dsum: f64 = d.iter().sum();
+        let msum: f64 = mono().iter().sum();
+        assert!((dsum - msum).abs() < 1e-3, "mono multiset diverges");
+
+        let timeit = |f: &dyn Fn() -> Vec<f64>| {
+            let _ = f();
+            let mut best = f64::MAX;
+            for _ in 0..20 {
+                let t = Instant::now();
+                let o = f();
+                best = best.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&o);
+            }
+            best * 1e3
+        };
+        // Interleave to share contention.
+        let (mut db, mut mb, mut bb) = (f64::MAX, f64::MAX, f64::MAX);
+        for _ in 0..6 {
+            db = db.min(timeit(&direct));
+            mb = mb.min(timeit(&mono));
+            bb = bb.min(timeit(&bucketed));
+        }
+        println!(
+            "BENCH gather 1M<-4M f64: direct={db:.4}ms ideal-monotonic={mb:.4}ms bucketed(shippable)={bb:.4}ms  mono-speedup={:.2}x bucket-speedup={:.2}x",
+            db / mb,
+            db / bb
+        );
+    }
+
     // BOLD-VERIFY: the shipped f64 parallel partition materializes (usize,usize) pairs
     // = 16MB for 1M updates. Packing (idx<<32)|i into a single u64 halves that to 8MB,
     // cutting memory traffic in the (memory-bound) build AND the latency-bound apply.
