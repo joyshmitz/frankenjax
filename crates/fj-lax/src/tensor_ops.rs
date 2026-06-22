@@ -2996,6 +2996,44 @@ fn gather_fill_literal(dtype: DType) -> Literal {
 /// patch/sliding-window gathers ([P,P,C] with full C). `None` signals an offset
 /// overflow / out-of-bounds read (caller maps to an error). Bit-identical to the
 /// per-element odometer: same flat indices, same row-major order, same OOB fill.
+/// MLP-friendly scattered single-element gather (`slice_sizes == [1, ..]`): a tight,
+/// branchless `out[i] = src[idx[i]]` loop, threaded over the output. The generic
+/// `gather_contiguous_into` does a per-element `match Option` + `copy_from_slice(len 1)`
+/// (a function call) which serializes the dependent random loads — the out-of-order engine
+/// can't look past the call/branch to issue the next load, so each load pays full DRAM
+/// latency (no memory-level parallelism). Indexing a flat slice with a pre-resolved `usize`
+/// has only the (perfectly-predicted, in-bounds) bounds-check branch, so the CPU issues many
+/// independent loads concurrently. Caller pre-resolves indices to `usize` (only valid when
+/// the index mode produced no `None` — Clip/PromiseInBounds; FillOrDrop keeps the generic
+/// path). Bit-identical: same `src[idx]` value, same order. `idx.len() == out.len()`.
+fn gather_single_dense<T: Copy + Send + Sync>(out: &mut [T], src: &[T], idx: &[usize]) {
+    debug_assert_eq!(out.len(), idx.len());
+    let threads = crate::arithmetic::work_scaled_threads(out.len()).min(idx.len().max(1));
+    if threads <= 1 {
+        for (o, &i) in out.iter_mut().zip(idx) {
+            *o = src[i];
+        }
+        return;
+    }
+    let per = out.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut o_rest: &mut [T] = out;
+        let mut i_rest: &[usize] = idx;
+        while !o_rest.is_empty() {
+            let take = per.min(o_rest.len());
+            let (ob, ot) = o_rest.split_at_mut(take);
+            let (ib, it) = i_rest.split_at(take);
+            o_rest = ot;
+            i_rest = it;
+            scope.spawn(move || {
+                for (o, &i) in ob.iter_mut().zip(ib) {
+                    *o = src[i];
+                }
+            });
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Threaded contiguous-row gather (embedding lookup) into a PRE-ALLOCATED `out` (caller
 /// allocates `vec![<concrete zero>; total]` = calloc'd zero pages; every element is then
@@ -3232,6 +3270,18 @@ pub(crate) fn eval_gather(
         .map(|&idx| resolve_axis0_index(idx, dim0, index_mode))
         .collect();
 
+    // Branchless single-element gather indices (`slice_elems == 1`): when the index mode
+    // never yields `None` (Clip / PromiseInBounds resolve every index to an in-bounds
+    // `Some`), each output is a pure `out[i] = src[idx[i]]`. Resolve to `usize` once so the
+    // hot path runs the MLP-friendly `gather_single_dense` (a tight branchless gather that
+    // lets the OoO engine overlap the random loads) instead of the per-element
+    // Option-match + `copy_from_slice` that serializes them. FillOrDrop (can yield None ->
+    // fill) keeps the generic `gather_contiguous_into` path. Every resolved index is
+    // `< dim0 <= src.len()`, so `src[idx]` never panics for these modes.
+    let single_idx: Option<Vec<usize>> = (slice_elems == 1
+        && index_mode != IndexMode::FillOrDrop)
+        .then(|| resolved.iter().map(|r| r.unwrap_or(0)).collect());
+
     if total == 0 {
         return Ok(Value::Tensor(TensorValue::new(
             operand.dtype,
@@ -3289,6 +3339,15 @@ pub(crate) fn eval_gather(
         if operand.dtype == DType::F64
             && let Some(src) = operand.elements.as_f64_slice()
         {
+            // Scattered single-element gather (MLP-friendly branchless path).
+            if let Some(ref sidx) = single_idx {
+                let mut out = vec![0.0f64; total];
+                gather_single_dense(&mut out, src, sidx);
+                return Ok(Value::Tensor(TensorValue::new_f64_values(
+                    Shape { dims: out_dims },
+                    out,
+                )?));
+            }
             // Threaded contiguous gather above the DRAM-bound gate (calloc'd output +
             // parallel row memcpy); bit-identical, falls through to serial on OOB/small.
             if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
@@ -3310,6 +3369,14 @@ pub(crate) fn eval_gather(
         if operand.dtype == DType::F32
             && let Some(src) = operand.elements.as_f32_slice()
         {
+            if let Some(ref sidx) = single_idx {
+                let mut out = vec![0.0f32; total];
+                gather_single_dense(&mut out, src, sidx);
+                return Ok(Value::Tensor(TensorValue::new_f32_values(
+                    Shape { dims: out_dims },
+                    out,
+                )?));
+            }
             if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
                 let mut out = vec![0.0f32; total];
                 if gather_contiguous_into(&mut out, src, &resolved, f32::NAN, slice_elems) {
@@ -3324,6 +3391,14 @@ pub(crate) fn eval_gather(
         if operand.dtype == DType::I64
             && let Some(src) = operand.elements.as_i64_slice()
         {
+            if let Some(ref sidx) = single_idx {
+                let mut out = vec![0i64; total];
+                gather_single_dense(&mut out, src, sidx);
+                return Ok(Value::Tensor(TensorValue::new_i64_values(
+                    Shape { dims: out_dims },
+                    out,
+                )?));
+            }
             // i64 index/id gather at scale: threaded contiguous copy above the gate.
             if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
                 let mut out = vec![0i64; total];

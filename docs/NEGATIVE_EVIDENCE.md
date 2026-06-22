@@ -2569,3 +2569,27 @@ f64) per thread to issue many outstanding loads (MLP), matching XLA's vectorized
 but carries std::simd gather/select nightly-drift risk (see [[project_simd_poly_exp_fma_finding]]).
 NOT attempted inline this pass: eval_gather index-mode/OOB/fill surgery + SIMD gather + gather
 parity verification is a focused multi-step task, high bug-risk to rush under fleet contention.
+
+## 2026-06-22 - SHIPPED: scattered gather ~2x faster (branchless MLP) — JAX loss halved 28x->15x (CrimsonOtter/cc)
+
+Implemented the olm4p lever's MLP fix and it WORKS. Added `gather_single_dense<T>`: a tight,
+branchless `out[i] = src[idx[i]]` threaded gather for the `slice_elems == 1` case, wired into
+the F64/F32/I64 eval_gather paths when the index mode never yields None (Clip /
+PromiseInBounds — resolve to a `usize` index vector once). The generic path's per-element
+`match Option` + `copy_from_slice(len 1)` (a function call) serialized the dependent random
+loads; removing both lets the out-of-order engine overlap many independent loads (MLP).
+
+MEASURED same-session Zen3, eval/gather_scatter_1m_f64 (1M random single-element from 4M f64):
+- **56.8ms -> 27.5ms = ~2.06x Rust speedup** (Criterion -51.59% vs stored baseline, p<0.05).
+  Both old and new paths are threaded, so the delta is purely the branchless inner loop.
+- vs JAX `jnp.take` 1.786ms: the loss **halves from ~28-32x to ~15x**. Still a loss (JAX's
+  vectorized gather hides more latency), but a large, real, bit-identical Rust win.
+- GREEN: full `cargo test -p fj-lax --lib` = **1587 passed / 0 failed** (gather oracle,
+  OOB-clip, dense-vs-literal bit-identity all pass — `gather_single_dense` is bit-identical:
+  same `src[idx]`, same order; every Clip/PromiseInBounds index is `< dim0 <= src.len()`).
+- FillOrDrop (can produce None->fill) keeps the generic `gather_contiguous_into` path.
+
+REMAINING (olm4p stage c): the last ~15x to JAX is memory-LATENCY — a per-thread
+`std::simd::Simd::gather_or` (f64x8) would issue more outstanding loads (more MLP). Deferred
+(std::simd gather nightly-drift risk; needs same-binary A/B + scalar fallback). The branchless
+scalar path already captured the cheap ~2x; SIMD gather is the next, harder increment.
