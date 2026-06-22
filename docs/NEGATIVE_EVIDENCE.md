@@ -2100,3 +2100,24 @@ so neither side can beat memory bw and they tie.
   and no loss; the internal "Nx faster" numbers for these are vs Rust baselines,
   not JAX. The Rust-over-JAX domination surface stays compute/algorithm-bound:
   sort, large-n scan, contiguous gather, i64 matmul.
+
+## 2026-06-22 - u32 matmul IS a domination (~8.9x); integer-matmul story: only i32 loses (CobaltForge/cc)
+
+Tested u32 (principle predicted a loss like i32 — WRONG again, which is why we
+test). Warm-target rch `eval/matmul_512x512_u32_canonical_fast` on `hz2` =
+**30.2ms** vs fresh local JAX uint32 `a@b` 512x512 = **270ms** (min 249) =
+**~8.9x Rust WIN**. So u32 matmul IS a Rust domination.
+
+COMPLETE + surprising integer-matmul story (only signed i32 is JAX-fast):
+| matmul | Rust | JAX | ratio | why JAX is fast/slow |
+| --- | ---: | ---: | --- | --- |
+| i64 | 4.64ms | 374ms | Rust 80x WIN | JAX scalar (vpmullq AVX512-only); Rust fast blocked kernel |
+| i32 | 4.84ms | 0.62ms | Rust 7.8x LOSS | JAX vpmulld SIMD (signed 32-bit) |
+| u32 | 30.2ms | 270ms | Rust 8.9x WIN | JAX slow (no u32 SIMD path); Rust slow generic u64-wrap |
+
+So XLA-CPU only vectorizes SIGNED i32 matmul; i64 and u32 hit slow scalar paths
+-> Rust wins both. The u32 win (8.9x) is SMALLER than i64 (80x) only because Rust's
+u32 matmul uses the generic u64-wrap path (30ms), not the fast i64 blocked kernel
+(4.6ms) -- a Rust lever (fast native u32 kernel would push u32 toward i64's 80x).
+Domination set: sort, large-n scan, contiguous gather, i64 matmul, u32 matmul
+(NOT i32 matmul).
