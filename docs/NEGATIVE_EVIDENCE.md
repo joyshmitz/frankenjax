@@ -52,6 +52,18 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     (sort ≤ its f64 1.25ms) still wins ≥10x in the dtype JAX users actually run. **(fj-lax f32 exact
     now MEASURED, gap closed — see the 2026-06-22 f32-sort entry below: fj-lax f32 64k = ~0.77ms,
     FASTER than its own f64, ~10x over JAX f32.)**
+  - **DTYPE-SIBLING + nn-FUSION VEINS EXHAUSTED (2026-06-22, SlateHarrier) — verification, DO-NOT re-audit.**
+    After the complex matmul/gather/scatter-add wins, swept the rest of the indexing/structural/nn families
+    for secondary-dtype kernels lagging their real siblings. ALL verified already-covered (no gap): bf16/f16
+    scatter (half-float branch in `eval_scatter_dense`); complex scatter (complex branch, scatter_typed! +
+    lexicographic min/max); dynamic_slice + dynamic_update_slice (both have complex `as_complex_slice` + half
+    `as_half_float_slice` dense branches); take_along_axis (no separate primitive — composes to Gather, now
+    dtype-complete); one_hot (complex/u32/u64 dense per test). nn-FUSION: `softmax_2d`/`log_softmax_2d` are
+    already single-pass fused (bit-identical tests); `standardize` (layernorm core) is a numerically-careful
+    TWO-pass (mean, then E[(x-mean)²]) — a one-pass `E[x²]-mean²` fuse would lose accuracy (catastrophic
+    cancellation) and is NOT bit-identical, so it's a parity-risk no-go, not a clean win. CONCLUSION: the
+    dtype-sibling vein (this session's richest, ~4 wins) is mined out; remaining frontier = `cntiy` +fma
+    (f64 matmul/exp/softmax/transcendentals), filed niche complex-conv bead, `murmw` FFT / `ur4h3` eigh.
   - **COMPLEX128 SCATTER-ADD parallel range-partition SHIPPED (2026-06-22, SlateHarrier) — ~1.39x.**
     Complex scatter is already de-boxed (`eval_scatter_dense` complex branch via `scatter_typed!` +
     lexicographic min/max — verified, NOT a gap), but complex scatter-ADD (slice_elems==1) used the
