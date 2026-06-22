@@ -283,6 +283,22 @@ a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
 
+## 2026-06-22 - SlateHarrier cbrt dense-f64 8-wide SIMD — SHIPPED (~1.25x, bit-identical, narrows JAX 1.53x→~1.2x)
+
+cbrt 1M f64 was the closest-to-flipping non-gated, tolerance-only (no bit-golden) loss (~1.53x JAX;
+compute-bound scalar bit-hack+Halley ~3.3ms vs ~0.8ms memory floor → SIMD headroom). Added an 8-wide
+`fast_cbrt_slice_into` (bit-hack `bits/3 + magic` via u64x8 + 2 Halley iters via f64x8 + scalar fixup
+for the rare 0/non-finite/out-of-range lanes & tail) and a dense-f64 threaded path
+(`cbrt_dense_f64_parallel`), wired into `Primitive::Cbrt` (other dtypes keep the guarded scalar path).
+BIT-IDENTICAL to scalar `fast_cbrt_f64` (same ops, no FMA → one rounding each), proven by
+`assert_eq!` in `bench_cbrt_simd_vs_scalar` + `validate_fast_cbrt_accuracy` + `erf_cbrt_parallel_bit_identical`
++ `cbrt_oracle` 34/0. Same-binary A/B: scalar 3.04-3.68ms → simd8 2.57-2.80ms = **1.19-1.40x**
+(median ~1.25x). The `u64/3` partially scalarizes on AVX2 (no 64-bit vector mul-high), capping the
+gain — but it is real, bit-identical, and zero parity risk. vs JAX cbrt ~2.16ms: loss narrows
+**1.53x → ~1.2x** (does NOT flip — still a small loss). GREEN: `fj-lax --lib cbrt` 8/0, `cbrt_oracle`
+34/0, clippy clean. Scorecard: **0 JAX wins / 1 narrowed loss / 0 neutral; 1 kept**. Retry to FLIP it
+needs avoiding the u64/3 scalarization (exponent-shift initial guess) or +fma — deferred.
+
 ## 2026-06-22 - SlateHarrier vmap(Dot) INTEGER batched-matmul → fj-lax i64 batched GEMM — SHIPPED (17.35x), closes the vein
 
 Completes the naive-loop→GEMM vein: the Integral case of `batch_paired_numeric_dot` (vmap of an

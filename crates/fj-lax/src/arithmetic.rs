@@ -9332,6 +9332,75 @@ pub(crate) fn fast_cbrt_f64(x: f64) -> f64 {
     if x.is_sign_negative() { -y } else { y }
 }
 
+/// 8-wide SIMD `fast_cbrt_f64` over a contiguous block, BIT-IDENTICAL to the scalar
+/// `fast_cbrt_f64` for every element: the in-range lanes run the same bit-hack guess
+/// (`bits/3 + magic`) + 2 Halley iterations in f64 (no FMA → one rounding per op, matching
+/// scalar), and the rare 0 / non-finite / out-of-`[1e-200,1e200]` lanes plus the < 8 tail
+/// are overwritten by the scalar `fast_cbrt_f64` (which routes those to `x.cbrt()`). Measured
+/// same-binary A/B (`bench_cbrt_simd_vs_scalar`): ~1.12-1.40x over the scalar loop; the
+/// `u64/3` partially scalarizes on AVX2 (no 64-bit vector mul-high) which caps the gain.
+fn fast_cbrt_slice_into(out: &mut [f64], src: &[f64]) {
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f64, 8>;
+    type U = Simd<u64, 8>;
+    const MAGIC: u64 = 0x2A9F_7893_354F_CA8C;
+    let n = src.len();
+    let chunks = n / 8;
+    for c in 0..chunks {
+        let base = c * 8;
+        let xc = F::from_slice(&src[base..base + 8]);
+        let a = xc.abs();
+        let bits = a.to_bits() / U::splat(3) + U::splat(MAGIC);
+        let mut y = F::from_bits(bits);
+        for _ in 0..2 {
+            let y3 = y * y * y;
+            y = y * (y3 + F::splat(2.0) * a) / (F::splat(2.0) * y3 + a);
+        }
+        y.copysign(xc).copy_to_slice(&mut out[base..base + 8]);
+    }
+    // Tail + rare edge-lane fixup (0/non-finite/out-of-range): scalar exact, bit-identical.
+    for (i, (o, &v)) in out.iter_mut().zip(src.iter()).enumerate() {
+        let a = v.abs();
+        if i >= chunks * 8 || v == 0.0 || !v.is_finite() || !(1.0e-200..=1.0e200).contains(&a) {
+            *o = fast_cbrt_f64(v);
+        }
+    }
+}
+
+/// Dense-f64 cbrt fast path: block-thread the input (mirroring
+/// `eval_unary_elementwise_parallel`) and run the 8-wide SIMD kernel within each block.
+/// Returns `None` for non-dense-f64 (caller falls back to the generic scalar-parallel path).
+/// Bit-identical to the scalar path (`fast_cbrt_slice_into` matches `fast_cbrt_f64`).
+pub(crate) fn cbrt_dense_f64_parallel(tensor: &TensorValue) -> Option<Result<Value, EvalError>> {
+    let src = tensor.elements.as_f64_slice()?;
+    let n = src.len();
+    let mut out = vec![0.0f64; n];
+    let threads = dense_unary_threads(n);
+    if threads <= 1 {
+        fast_cbrt_slice_into(&mut out, src);
+    } else {
+        let chunk = n.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [f64] = out.as_mut_slice();
+            let mut start = 0usize;
+            while start < n {
+                let len = chunk.min(n - start);
+                let (blk, tail) = rest.split_at_mut(len);
+                rest = tail;
+                let s = start;
+                scope.spawn(move || fast_cbrt_slice_into(blk, &src[s..s + len]));
+                start += len;
+            }
+        });
+    }
+    Some(
+        TensorValue::new_f64_values(tensor.shape.clone(), out)
+            .map(Value::Tensor)
+            .map_err(EvalError::from),
+    )
+}
+
 const LANCZOS_COEFFS: [f64; 9] = [
     0.999_999_999_999_809_9,
     676.520_368_121_885_1,
@@ -23831,6 +23900,61 @@ mod tests {
         assert!(
             max_rel < 1e-10,
             "fast_cbrt max rel error {max_rel:.3e} exceeds the 1e-10 oracle tolerance"
+        );
+    }
+
+    // BOLD-VERIFY: cbrt 1M f64 is ~1.53x JAX loss (compute-bound scalar bit-hack+Halley,
+    // tolerance-only / no bit-golden). Probe an 8-wide SIMD cbrt: bit-hack (u64x8 bits/3 +
+    // magic) + 2 Halley (f64x8), with a scalar fixup for the rare 0/non-finite/out-of-range
+    // lanes — BIT-IDENTICAL to scalar fast_cbrt_f64 in range. The crux risk is whether the
+    // u64/3 vectorizes (AVX2 has no 64-bit vector mulhi) or scalarizes (killing the win).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cbrt_simd_vs_scalar() {
+        use std::time::Instant;
+        let n = 1usize << 20;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 100_000) as f64) * 0.01 + 0.001)
+            .collect();
+
+        let scalar = || -> Vec<f64> {
+            let mut out = vec![0.0; n];
+            for (o, &v) in out.iter_mut().zip(x.iter()) {
+                *o = super::fast_cbrt_f64(v);
+            }
+            out
+        };
+        // Production SIMD slice kernel (single-thread, isolates the per-block kernel speedup).
+        let simd = || -> Vec<f64> {
+            let mut out = vec![0.0; n];
+            super::fast_cbrt_slice_into(&mut out, &x);
+            out
+        };
+
+        assert_eq!(
+            scalar(),
+            simd(),
+            "SIMD cbrt diverges from scalar (must be bit-identical)"
+        );
+        let _ = scalar();
+        let _ = simd();
+        let mut sb = f64::MAX;
+        let mut vb = f64::MAX;
+        for _ in 0..30 {
+            let t = Instant::now();
+            let s = scalar();
+            sb = sb.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&s);
+            let t = Instant::now();
+            let v = simd();
+            vb = vb.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&v);
+        }
+        println!(
+            "BENCH cbrt 1M f64: scalar={:.4}ms simd8={:.4}ms speedup={:.2}x",
+            sb * 1e3,
+            vb * 1e3,
+            sb / vb
         );
     }
 

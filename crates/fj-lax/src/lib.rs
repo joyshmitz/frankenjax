@@ -47,15 +47,14 @@ pub(crate) fn new_boxed(
 }
 
 use arithmetic::{
-    erf_approx, erfc_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh, eval_bessel_i0e,
-    eval_bessel_i1e, eval_betainc, eval_binary_elementwise, eval_clamp, eval_complex, eval_conj,
-    eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general, eval_erf_inv, eval_exp,
-    eval_fma, eval_igamma, eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf,
-    ensure_float_or_complex_operands,
-    eval_float_complex_unary, eval_is_nan, eval_lgamma, eval_log, eval_neg, eval_nextafter,
-    eval_polygamma, eval_real, eval_round, eval_select, eval_select_n, eval_signbit, eval_sin,
-    eval_sinh, eval_tan, eval_tanh, eval_unary_elementwise, eval_unary_elementwise_parallel,
-    eval_unary_int_or_float, eval_zeta,
+    ensure_float_or_complex_operands, erf_approx, erfc_approx, eval_abs, eval_acosh, eval_asinh,
+    eval_atanh, eval_bessel_i0e, eval_bessel_i1e, eval_betainc, eval_binary_elementwise,
+    eval_clamp, eval_complex, eval_conj, eval_cos, eval_cosh, eval_digamma, eval_dot,
+    eval_dot_general, eval_erf_inv, eval_exp, eval_float_complex_unary, eval_fma, eval_igamma,
+    eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf, eval_is_nan,
+    eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_polygamma, eval_real, eval_round,
+    eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
+    eval_unary_elementwise, eval_unary_elementwise_parallel, eval_unary_int_or_float, eval_zeta,
 };
 
 use comparison::eval_comparison;
@@ -580,7 +579,16 @@ fn eval_primitive_inner(
         Primitive::Tile => eval_tile(inputs, params),
         // Special math
         Primitive::Cbrt => {
-            eval_unary_elementwise_parallel(primitive, inputs, arithmetic::fast_cbrt_f64)
+            // Dense f64 uses the 8-wide SIMD cbrt (bit-identical to the scalar fast path,
+            // ~1.12-1.40x); every other dtype/shape falls to the guarded scalar-parallel path.
+            if let [Value::Tensor(t)] = inputs
+                && t.dtype == fj_core::DType::F64
+                && let Some(result) = arithmetic::cbrt_dense_f64_parallel(t)
+            {
+                result
+            } else {
+                eval_unary_elementwise_parallel(primitive, inputs, arithmetic::fast_cbrt_f64)
+            }
         }
         Primitive::IsFinite => eval_is_finite(primitive, inputs),
         Primitive::IsNan => eval_is_nan(primitive, inputs),
@@ -17957,12 +17965,12 @@ mod tests {
         assert_eq!(
             tensor.elements,
             vec![
-                Literal::U32(u32::from_le_bytes([
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                ])),
-                Literal::U32(u32::from_le_bytes([
-                    bytes[4], bytes[5], bytes[6], bytes[7],
-                ])),
+                Literal::U32(u32::from_le_bytes(
+                    [bytes[0], bytes[1], bytes[2], bytes[3],]
+                )),
+                Literal::U32(u32::from_le_bytes(
+                    [bytes[4], bytes[5], bytes[6], bytes[7],]
+                )),
             ]
         );
     }
