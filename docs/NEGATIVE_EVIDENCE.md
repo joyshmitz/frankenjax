@@ -2406,6 +2406,15 @@ loss is the safe-Rust **scalar deque vs XLA's SIMD-vectorized window reduction**
 (the deque is inherently sequential/pointer-chasing; SIMD-direct loses for large windows since deque
 is O(n) vs O(n·k)), NOT a contained fix. Do NOT chase the maxpool dispatch — it's correct.
 
+THREADING NO-SHIP (2026-06-22, SlateHarrier): tried threading the production deque
+(`reduce_window_separable_maxmin`, 5185) across its independent outer blocks. REGRESSES **0.62-0.75x**
+(prod-threaded 1.2-1.9ms vs serial 0.9-1.2ms): the per-pass work (~58k elems / ~0.9ms for 256x256/15x15)
+is too small to amortize 16-thread spawn, AND the leading axis has outer==1 (no outer parallelism).
+Reverted to serial. ALSO measured (less-contended run): serial 5185 = **0.68ms** vs JAX 0.48ms = **~1.4x**
+(the prior 2.3x was a contended host) — so maxpool is closer than thought, and the residual is SIMD
+(single-thread vectorized window reduction), not parallelism. Do NOT thread maxpool; SIMD is the only
+lever and it's hard (the deque is sequential; SIMD-direct loses for large windows). Bench kept as guard.
+
 ## 2026-06-22 - floor-chain JAX LOSS confirmed cross-machine; cross-machine map validation COMPLETE (CobaltForge/cc)
 
 Final completeness cross-confirm. Warm-target rch bench of committed

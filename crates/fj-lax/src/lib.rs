@@ -5211,6 +5211,11 @@ fn reduce_window_separable_maxmin(
         let outer: usize = cur_dims[..d].iter().product();
         let (wd, sd, pd) = (window_dims[d], strides[d], pad_lows[d]);
         let mut next = vec![init; outer * out_l * inner];
+        // NOTE: threading the outer blocks here was a measured NO-SHIP (0.62-0.75x regression,
+        // `bench_maxpool_rank2_direct_vs_deque`): the per-pass work (~58k elems / ~0.9ms for a
+        // 256x256/15x15 pool) is too small to amortize thread-spawn, and the leading axis has
+        // outer==1 (no parallelism). The real ~2x JAX gap is SIMD-vectorization of the window
+        // reduction, not parallelism — left serial.
         for o in 0..outer {
             let cur_o = o * l * inner;
             let next_o = o * out_l * inner;
@@ -6132,6 +6137,19 @@ mod tests {
             )
             .unwrap()
         };
+        // Production dispatch path (reduce_window_separable_maxmin, serial — threading it was a
+        // measured no-ship). Verified bit-identical to the direct loop + timed as a guard.
+        let prod = || {
+            super::reduce_window_separable_maxmin(
+                &src,
+                &[n, n],
+                &[win, win],
+                &[1, 1],
+                &[0, 0],
+                &[out, out],
+                true,
+            )
+        };
         let dv = match direct() {
             Value::Tensor(t) => t.elements.as_f64_slice().unwrap().to_vec(),
             _ => panic!(),
@@ -6141,9 +6159,15 @@ mod tests {
             _ => panic!(),
         };
         assert_eq!(dv, qv, "separable deque maxpool diverges from direct loop");
+        assert_eq!(
+            dv,
+            prod(),
+            "production separable maxpool diverges from direct loop"
+        );
         let _ = direct();
         let _ = deque();
-        let (mut db, mut qb) = (f64::MAX, f64::MAX);
+        let _ = prod();
+        let (mut db, mut qb, mut pb) = (f64::MAX, f64::MAX, f64::MAX);
         for _ in 0..30 {
             let t = Instant::now();
             let a = direct();
@@ -6153,11 +6177,16 @@ mod tests {
             let b = deque();
             qb = qb.min(t.elapsed().as_secs_f64());
             std::hint::black_box(&b);
+            let t = Instant::now();
+            let c = prod();
+            pb = pb.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&c);
         }
         println!(
-            "BENCH maxpool 256x256 15x15 VALID: direct(current)={:.4}ms deque={:.4}ms speedup={:.2}x",
+            "BENCH maxpool 256x256 15x15 VALID: direct={:.4}ms deque(4256)={:.4}ms prod-separable(5185)={:.4}ms  deque-vs-direct={:.2}x",
             db * 1e3,
             qb * 1e3,
+            pb * 1e3,
             db / qb
         );
     }
