@@ -6012,3 +6012,44 @@ regression). Honest framing: does NOT flip the absolute JAX loss on large chains
   negate the memory-pass savings. f64 wins precisely because its native contract
   needs NO cast (`lanes += splat`). This is why n75xr was f64-only — the f32
   "gap" is not a gap. Do not add an f32 scalar-add-chain SIMD path.
+
+## CrimsonOtter / cod-b - t1pb0 cumulative scan radical-lever no-ship under disk gate (2026-06-22)
+
+- Scope: `frankenjax-t1pb0`, the cumprod/cummax 4M f64 1D scan gap. The open,
+  unowned actionable bead was claimed after `bv --robot-triage` / `br ready
+  --json`; adjacent `murmw` and `mcqr` work was already owned by cod-a.
+- Alien-graveyard / extreme-optimization audit: the credible radical routes
+  were Blelloch/NESL segmented scan, vectorized morsel-driven execution, and a
+  manual SIMD prefix-product / NaN-propagating prefix-max kernel. The first two
+  are already structurally represented by the current blocked two-pass scan for
+  a single long line. The SIMD/inline hypothesis was rejected before editing
+  because prior no-build disassembly showed packed `vmulpd`, `vmaxpd`,
+  `vcmpunordpd`, and `vblendvpd`, with the local scan closures already inlined.
+- Fresh JAX comparator: `benchmarks/jax_comparison/.venv/bin/python`, JAX
+  0.10.1, JAXLIB 0.10.1, CPU, `JAX_ENABLE_X64=1`, 8 warmed runs after compile:
+
+  | op 4M f64 1D | fresh JAX best | fresh JAX p50 | fresh JAX mean | Rust reference | Rust/JAX p50 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | `cumsum` | 15.903 ms | 17.197 ms | 17.038 ms | 7.55 ms prior same-session | 0.44x, Rust wins 2.28x |
+  | `cumprod` | 17.055 ms | 17.932 ms | 18.219 ms | 20.9 ms prior same-session | 1.17x loss |
+  | `cummax` | 17.337 ms | 18.514 ms | 19.028 ms | 20.9 ms prior same-session | 1.13x loss |
+
+- Disk/toolchain gate: no fresh bench was accepted. The allowed warm target was
+  `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b`; the existing
+  warm `lax_baseline` binary listed `eval/cumsum_4m_f64_1d` but not the
+  committed `cumprod`/`cummax` 4M rows. A filtered RCH bench first used an
+  invalid `cargo bench --release` form, then selected a cold worker and began
+  compiling dependencies, so it was interrupted to honor the no-cold-build disk
+  rule. A local filtered bench failed with E0514 incompatible-crate errors
+  because the target was built by a different nightly than the active toolchain.
+- Conformance stayed green without compiling new artifacts: the direct prebuilt
+  release oracle
+  `/data/projects/.rch-targets/frankenjax-cod-b/release/deps/cumulative_oracle-9464b19459022a37
+  --nocapture` passed **45/45**.
+- Decision: NO-SHIP. No code lever was kept and no unbenchmarked source edit
+  remains. Targeted cumprod/cummax scorecard: **0 wins / 2 losses / 0 neutral**;
+  broader current 4M cumulative rowset: **1 win / 2 losses / 0 neutral** due to
+  the earlier cumsum keep. Retry predicate: do not retry SIMD-prefix or
+  force-inline scan changes; resume only after a matching warm target can run a
+  same-binary Rust A/B and perf counters identify a concrete stall source in the
+  blocked scan's local pass.

@@ -1,12 +1,41 @@
 # FrankenJAX Perf Release Readiness Scorecard
 
-Updated: 2026-06-21
+Updated: 2026-06-22
 
 Scope: verify recent code-first `fj-lax`/`fj-core` perf backlog against original JAX on
 realistic warmed CPU workloads. This scorecard records measured readiness only;
 unmeasured `code-first batch-test pending` entries remain outside the score.
 
 ## Current BOLD-VERIFY Notes
+
+### cod-b - t1pb0 cumprod/cummax blocked-scan no-ship (2026-06-22)
+
+- Status: no production source change remains. Claimed the open
+  `frankenjax-t1pb0` cumulative-scan gap under the disk-critical gate and
+  rejected the plausible radical levers before editing: the current blocked
+  scan already uses the Blelloch-style two-pass structure, and prior disassembly
+  showed packed `vmulpd`/`vmaxpd` plus inlined closures for the cumprod/cummax
+  local scans.
+- Fresh exact JAX/JAXLIB 0.10.1 CPU x64 comparator from
+  `benchmarks/jax_comparison/.venv/bin/python`, `JAX_ENABLE_X64=1`, 8 warmed
+  runs after compile on the 4M f64 1D fixtures:
+  - `cumsum`: best **15.903 ms**, p50 **17.197 ms**, mean **17.038 ms**.
+  - `cumprod`: best **17.055 ms**, p50 **17.932 ms**, mean **18.219 ms**.
+  - `cummax`: best **17.337 ms**, p50 **18.514 ms**, mean **19.028 ms**.
+- Rust reference rows were the existing same-session measurements, not a fresh
+  bench under disk pressure: `cumsum` **7.55 ms** (Rust/JAX p50 **0.44x**,
+  Rust wins **2.28x**), `cumprod` **20.9 ms** (Rust/JAX p50 **1.17x** loss),
+  and `cummax` **20.9 ms** (Rust/JAX p50 **1.13x** loss).
+- Conformance stayed green without compiling: direct prebuilt release oracle
+  `/data/projects/.rch-targets/frankenjax-cod-b/release/deps/cumulative_oracle-9464b19459022a37
+  --nocapture` passed **45/45**.
+- Scorecard for the targeted cumprod/cummax rows: **0 wins / 2 losses / 0
+  neutral; 0 kept / 0 reverted**. The broader current 4M cumulative rowset is
+  **1 win / 2 losses / 0 neutral** because the earlier `cumsum` blocked-prefix
+  keep still wins. Retry predicate: do not attempt SIMD-prefix or force-inline
+  scan changes; resume only after a matching warm target can run a same-binary
+  A/B and perf counters identify a concrete stall source in the local blocked
+  pass.
 
 ### cod-b - cntiy softmax relaxed-exp16 no-ship (2026-06-21)
 
