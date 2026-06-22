@@ -2182,3 +2182,28 @@ that win; a Rust median (radix-sort or O(n) quickselect) would likely beat JAX's
   (warm target freed, cold rebuild forbidden) anyway.
 - Consistent with the unifying principle: derived order-statistics ride the sort
   domination because XLA-CPU's sort lowering is the weakness.
+
+## 2026-06-22 - CORRECTION: cumprod/cummax-4M are LOSSES, not dominations — scan domination is cumsum-ONLY (CobaltForge/cc)
+
+Same-machine confirmation (warm local target/ re-established) of the predicted
+cumprod/cummax-4M scan dominations — they are FALSE. Local Zen3, 4M f64:
+| op | Rust | JAX | verdict |
+| --- | ---: | ---: | --- |
+| cumsum | 4.2ms | 18.4ms | Rust WINS 4.4x |
+| cumprod | 19.6ms | 12.0ms | Rust LOSS 1.6x |
+| cummax | 19.8ms | 16.1ms | Rust LOSS 1.2x |
+
+ROOT CAUSE: the scan domination is CUMSUM-SPECIFIC, not scan-family. Rust cumsum
+has an OPTIMIZED blocked prefix-scan kernel (4.2ms); cumprod/cummax are GENERIC
+SERIAL scans (~20ms, ~5x slower than Rust cumsum). So despite JAX's scan size-cliff
+at 4M, Rust's unoptimized cumprod/cummax LOSE (JAX cumprod 12ms / cummax 16ms beat
+Rust's ~20ms). My earlier "scan family dominates at large n (cumprod/cummax
+predicted)" was WRONG — it assumed Rust cumprod/cummax are as fast as cumsum; they
+are not (no prefix-scan optimization).
+- This is why the same-machine Rust-side confirmation was essential — the JAX-cliff
+  prediction needed the Rust number, which only cumsum makes fast.
+- NEW LEVER: port cumsum's blocked prefix-scan to cumprod/cummax (would flip both to
+  dominations at large n). cumprod is FP-non-associative like cumsum, so it needs
+  the same order-preserving blocked approach. Build path now warm (target/).
+- Corrected domination set: sort, large-n CUMSUM (not cumprod/cummax), contiguous
+  gather, i64/u32 matmul.
