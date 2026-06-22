@@ -139,6 +139,7 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
 | cheap elementwise (add/mul/sub), broadcast, select, comparison | WIN (threaded past L3, 1.7-2x) | none — done |
 | batched gather/scatter (I64/F64/F32) | WIN (1.15-3.6x) | none — suspected batched loss disproven |
 | scatter-add 1M f64 1D | **was LOSS 2.74x; now ~1.3x** after PARALLEL-build keep (2026-06-22) — the serial bucket-build, not the apply, was the bottleneck; per-thread local-block partition is ~2.78x Rust-side (criterion 5.76ms vs fresh JAX p50 4.35ms / mean 4.59ms) | gap now ~1.3x: residual is the random-write apply latency + eval dispatch/extraction overhead. The earlier "fundamentally different parallel direct-write" framing was answered by parallelizing the PARTITION (not the writes); unique-atomic and histogram/prefix branches stay rejected; inline-value apply tweak measured a no-ship (median 0.948x) |
+| scatter-add 1M **f32** 1D (+ i64 / mul / min / max) | **PARITY — not a loss** (serial loop ~2.5ms ≈ JAX f32 p50 2.88ms) | partition-generalization REGRESSES these (~0.70x, 2026-06-22) — pure-serial baseline + 16MB pair-build overhead; do NOT route through `scatter_reduce_range_partitioned` (only f64-ADD's already-partitioned baseline benefits) |
 | scattered single-element gather (1M←4M, f64/f32/i64/i32/u32/u64/bf16/f16) | LOSS ~15x vs JAX, **halved from ~28x** — branchless-MLP ~2x SHIPPED (2026-06-22: d551956b f64/f32/i64; a4c5118a i32 2.13x) | residual is the safe-Rust/**Zen3 ceiling**: SIMD `Simd::gather_or` is **+5.2% no-win** (vgather microcoded, olm4p closed 95ee73c1); closing needs AVX-512 gather (absent) or index pre-sort (out of scope) |
 | scatter-overwrite 1M f64 (slice_elems=1) | branchless **1.24x SHIPPED** (2026-06-22 b4e74e2d) | near ceiling — scattered stores less latency-bound than gather loads (store buffer hides latency), so the same lever yields 1.24x vs gather's 2x |
 | contiguous ROW gather (slice_elems>1, embedding/row lookup) | WIN — f64/f32/i64/bf16 already threaded (~3.7x); **i32/u32/u64 threaded this session 1.40x SHIPPED** (2026-06-22 63b74dec, was serial-only) | none — gather dtype coverage COMPLETE (every dense dtype has both slice_elems==1 branchless + slice_elems>1 threaded). Row memcpy is memory-BW-bound so threading scales sub-linearly (1.40x) |
@@ -270,6 +271,30 @@ bound + relax the exp/sin/log self-goldens + commit the flag + implement the SIM
 a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
+
+## 2026-06-22 - SlateHarrier scatter-REDUCE partition generalization to f32/i64/mul/min/max — NO-SHIP (regresses; serial already JAX-competitive)
+
+Follow-up to the f64-add parallel range-partition win below: generalized the kernel into
+`scatter_reduce_range_partitioned<T, F>` (any `Copy` dtype + combine closure) and tried routing
+f32/i64 scatter-add and the f64/f32/i64 mul/min/max combiners through it (slice_elems==1). All
+bit-identical (ordered apply; conformance `gather_scatter_oracle` 59/0, scatter subset 31/0).
+But it REGRESSES and was reverted to f64-ADD-only routing:
+  - **f32 scatter-add 1M, pure-algorithm same-binary A/B** (`bench_scatter_add_1m_f32_production_vs_serial`,
+    serial loop vs `scatter_reduce_range_partitioned` directly, interleaved best-of-25, worker `hz2`):
+    serial-loop **2.18–3.02ms** vs parallel-partition **3.14–3.76ms** = **0.70x median REGRESSION**
+    (0.695 / 0.695 / 0.802x).
+  - **f32 was never a JAX loss:** the serial loop is **~2.5ms**, already ≈ fresh `JAX_ENABLE_X64`
+    jaxlib CPU x64 f32 `o.at[i].add(u,mode='clip')` = **p50 2.88ms / mean 2.93ms / min 1.87ms**.
+    (JAX f32 is ~1.5x faster than its f64 4.35ms — half the bandwidth.)
+  - **Why f64-add wins but f32/i64 don't:** the partition materializes ~16MB of `(usize,usize)`
+    pairs (1M × 16B) + 2× `thread::scope` spawn/join + 256 local Vecs. f64-add's baseline was
+    ALREADY a (serial-build) partition paying that 16MB, so parallelizing the BUILD is free upside
+    (2.78x). f32/i64/mul/min/max's baseline is a PURE serial loop with NO pair materialization, and
+    for narrow/fast dtypes (f32 = 4MB data) the pair overhead exceeds the actual data movement →
+    net loss. RULE: the range-partition pays only when the existing path already pays the pair-build
+    cost; do not route pure-serial-loop scatter paths through it. KEPT: the generic fn (f64-add now
+    routes through it, behavior-identical to the prior f64-specific fn) + the diagnostic bench.
+    Scorecard: **0 JAX wins / 0 losses / 1 neutral-disproven (f32 already parity); 1 reverted route**.
 
 ## 2026-06-22 - SlateHarrier scatter-add parallel range-partition build — SHIPPED (~2.78x Rust-side; JAX loss 2.74x->~1.3x)
 

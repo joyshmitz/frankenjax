@@ -3849,39 +3849,50 @@ fn complex_lex_ge_scatter(lhs: (f64, f64), rhs: (f64, f64)) -> bool {
 
 const SCATTER_ADD_F64_RANGE_PARTITION_MIN_UPDATES: usize = 1 << 18;
 
-fn eval_scatter_add_f64_scalar_range_partitioned(
-    operand: &TensorValue,
-    op: &[f64],
-    upd: &[f64],
+/// Parallel range-partitioned scalar (`slice_elems == 1`) scatter-REDUCE for any
+/// `Copy` dtype and combine closure `cf`. Returns `Some(out)` when the partitioned
+/// path applies, `None` (caller falls back to the serial `scatter_typed` loop) below
+/// the work threshold / shape mismatch / single core.
+///
+/// The serial single-threaded bucket scan was the dominant cost (`inline-value` apply
+/// tweaks were a measured no-ship — see
+/// `bench_scatter_add_range_partition_inline_value_vs_idxpair`). Each producer thread
+/// classifies its contiguous slice of `index_vals` into its own `threads` small
+/// per-output-block local buckets (the local Vecs stay cache-hot, unlike one serial
+/// scan scattering across all 16 buckets). Then each output block `b` is owned by one
+/// apply thread that reads producers' sub-buckets in producer order, folding with `cf`.
+///
+/// BIT-IDENTICAL to the serial `out[idx] = cf(out[idx], upd[i])` reference for EVERY
+/// combiner: producer `t` owns the contiguous update range `[t*csz, (t+1)*csz)`, so for
+/// any output index its updates are visited producer-0-first then in push (i-ascending)
+/// order within each — the same global i-ascending fold order (which matters for the
+/// order-sensitive fp Add/Mul; Min/Max are order-free anyway), and distinct blocks never
+/// share an output element. Measured (f64 Add) interleaved same-binary A/B: ~2.78x median
+/// (≈13ms -> ≈4.9ms, 1M) on the Zen3 bench host.
+fn scatter_reduce_range_partitioned<T, F>(
+    op: &[T],
+    upd: &[T],
     index_vals: &[i64],
     dim0: usize,
     index_mode: IndexMode,
-) -> Result<Option<Value>, EvalError> {
+    cf: F,
+) -> Option<Vec<T>>
+where
+    T: Copy + Send + Sync,
+    F: Fn(T, T) -> T + Sync,
+{
     if index_vals.len() < SCATTER_ADD_F64_RANGE_PARTITION_MIN_UPDATES
         || op.len() != dim0
         || upd.len() != index_vals.len()
     {
-        return Ok(None);
+        return None;
     }
     let threads = crate::arithmetic::work_scaled_threads(index_vals.len()).min(dim0);
     if threads <= 1 {
-        return Ok(None);
+        return None;
     }
 
     let chunk = dim0.div_ceil(threads);
-    // PARALLEL range-partition build (the serial single-threaded bucket scan was the
-    // dominant cost — `inline-value` apply tweaks were a measured no-ship). Each
-    // producer thread classifies its contiguous slice of `index_vals` into its own
-    // `threads` small per-output-block local buckets (the local Vecs stay cache-hot,
-    // unlike one serial scan scattering across all 16 buckets). Then each output
-    // block `b` is owned by one apply thread that reads producers' sub-buckets in
-    // producer order. BIT-IDENTICAL to the serial reference: producer `t` owns the
-    // contiguous update range `[t*csz, (t+1)*csz)`, so for any output index its
-    // updates are visited producer-0-first then in push (i-ascending) order within
-    // each — the same global i-ascending accumulation order, and distinct blocks
-    // never share an output element. Measured interleaved same-binary A/B
-    // (`bench_scatter_add_range_partition_inline_value_vs_idxpair`): ~2.78x median
-    // (≈13ms -> ≈4.9ms, 1M f64) on the Zen3 bench host.
     let csz = index_vals.len().div_ceil(threads);
     let locals: Vec<Vec<Vec<(usize, usize)>>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
@@ -3906,6 +3917,7 @@ fn eval_scatter_add_f64_scalar_range_partitioned(
     });
 
     let mut out = op.to_vec();
+    let cf = &cf;
     std::thread::scope(|scope| {
         let mut rest = out.as_mut_slice();
         let mut start = 0usize;
@@ -3918,7 +3930,8 @@ fn eval_scatter_add_f64_scalar_range_partitioned(
             scope.spawn(move || {
                 for sub in locals_ref.iter() {
                     for &(idx, i) in &sub[b] {
-                        block[idx - block_start] += upd[i];
+                        let p = idx - block_start;
+                        block[p] = cf(block[p], upd[i]);
                     }
                 }
             });
@@ -3926,10 +3939,7 @@ fn eval_scatter_add_f64_scalar_range_partitioned(
         }
     });
 
-    Ok(Some(Value::Tensor(TensorValue::new_f64_values(
-        operand.shape.clone(),
-        out,
-    )?)))
+    Some(out)
 }
 
 #[allow(clippy::type_complexity)]
@@ -4036,13 +4046,22 @@ fn eval_scatter_dense(
             ScatterCombine::Max => crate::jax_max_f64,
             ScatterCombine::Overwrite => |_, b| b,
         };
+        // Only f64 ADD routes through the parallel partition: it's the one case whose
+        // serial baseline was ALREADY a (serial-build) partition paying the (idx,i)-pair
+        // materialization, so parallelizing the build is a net 2.78x win. For the other
+        // combiners — and for f32/i64 (see `bench_scatter_add_1m_f32_production_vs_serial`)
+        // — the prior path is a pure serial loop that is already JAX-competitive, and the
+        // partition's pair-materialization + thread overhead REGRESSES it (~0.70x), so they
+        // stay on `scatter_typed`.
         if combine == ScatterCombine::Add
             && slice_elems == 1
-            && let Some(value) = eval_scatter_add_f64_scalar_range_partitioned(
-                operand, op, upd, index_vals, dim0, index_mode,
-            )?
+            && let Some(out) =
+                scatter_reduce_range_partitioned(op, upd, index_vals, dim0, index_mode, cf)
         {
-            return Ok(Some(value));
+            return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+                operand.shape.clone(),
+                out,
+            )?)));
         }
         scatter_typed!(op, upd, TensorValue::new_f64_values, cf);
     }
@@ -4066,6 +4085,9 @@ fn eval_scatter_dense(
             ScatterCombine::Max => |a, b| crate::jax_max_f64(f64::from(a), f64::from(b)) as f32,
             ScatterCombine::Overwrite => |_, b| b,
         };
+        // f32 stays on the serial loop — the parallel partition REGRESSES it (~0.70x):
+        // f32's serial scatter-add is only ~2.5ms (already ≈ JAX f32 2.88ms), so the
+        // partition's ~16MB (idx,i)-pair build exceeds the 4MB f32 data movement.
         scatter_typed!(op, upd, TensorValue::new_f32_values, cf);
     }
     if operand.dtype == DType::I64
@@ -4082,6 +4104,8 @@ fn eval_scatter_dense(
             ScatterCombine::Max => |a, b| a.max(b),
             ScatterCombine::Overwrite => |_, b| b,
         };
+        // i64 stays on the serial loop (same reasoning as f32 — pure serial baseline,
+        // partition overhead does not pay).
         scatter_typed!(op, upd, TensorValue::new_i64_values, cf);
     }
     // I32 (JAX's default int) shares the dense i64 backing; an i32 value is sign-extended
@@ -25113,6 +25137,70 @@ mod tests {
             old_best / new_best,
             par_best * 1e3,
             old_best / par_best
+        );
+    }
+
+    // f32 is JAX's DEFAULT dtype; scatter-add 1M f32 now routes through the generic
+    // parallel range-partition (same kernel proven for f64). This times the full
+    // production `eval_scatter` (for the JAX head-to-head) and a serial reference loop
+    // (matching the prior `scatter_typed` path) interleaved in the same binary.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_scatter_add_1m_f32_production_vs_serial() {
+        use std::time::Instant;
+        let n = 1_usize << 20;
+        let idx: Vec<i64> = (0..n)
+            .map(|i| ((i.wrapping_mul(1_103_515_245_usize).wrapping_add(12_345)) & (n - 1)) as i64)
+            .collect();
+        let upd: Vec<f32> = (0..n)
+            .map(|i| ((i % 4099) as f32 - 2049.0) * 0.001)
+            .collect();
+        let op0 = vec![0.0_f32; n];
+        let mode = IndexMode::Clip;
+        // cf matches scatter_typed's f32 add (promote->f64->round).
+        let cf = |a: f32, b: f32| (f64::from(a) + f64::from(b)) as f32;
+
+        // SERIAL: the prior `scatter_typed` scalar-add path (per-element resolve + cf),
+        // no partition, no threads — exactly what f32 used before this change.
+        let run_serial = || -> Vec<f32> {
+            let mut out = op0.clone();
+            for (i, &raw) in idx.iter().enumerate() {
+                if let Some(id) = super::resolve_axis0_index(raw, n, mode) {
+                    out[id] = cf(out[id], upd[i]);
+                }
+            }
+            out
+        };
+        // PARALLEL: the generic range-partition algorithm directly (no eval dispatch),
+        // isolating the partition-vs-serial-loop decision for f32.
+        let run_parallel =
+            || super::scatter_reduce_range_partitioned(&op0, &upd, &idx, n, mode, cf).unwrap();
+
+        assert_eq!(
+            run_parallel(),
+            run_serial(),
+            "f32 parallel scatter-add diverges from serial"
+        );
+
+        let _ = run_serial();
+        let _ = run_parallel();
+        let mut ser_best = f64::MAX;
+        let mut par_best = f64::MAX;
+        for _ in 0..25 {
+            let t = Instant::now();
+            let s = run_serial();
+            ser_best = ser_best.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&s);
+            let t = Instant::now();
+            let pr = run_parallel();
+            par_best = par_best.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&pr);
+        }
+        println!(
+            "BENCH scatter-add 1M f32 (pure algorithm): serial-loop={:.4}ms parallel-partition={:.4}ms speedup={:.3}x",
+            ser_best * 1e3,
+            par_best * 1e3,
+            ser_best / par_best
         );
     }
 
