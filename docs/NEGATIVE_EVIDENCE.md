@@ -2027,3 +2027,21 @@ Verified Rust-over-JAX domination surface (robust across dtype/size/machine):
 `sort` + large-n scan family (cumsum confirmed; cumprod/cummax JAX-cliff confirmed,
 Rust-4M pending build). Everything else measured is JAX-parity-or-loss; the broad
 ledger "Nx faster" numbers are Rust-internal, not vs JAX.
+
+## 2026-06-22 - one_hot "17x" is NOT a valid domination (bandwidth-implausible Rust number) (CobaltForge/cc)
+
+Caught a likely-invalid head-to-head via a bandwidth sanity check before recording
+it. Warm-target rch `eval/one_hot_2048x512_f64` on `ovh-a` = **12.4us** vs fresh
+local JAX `jax.nn.one_hot(...,512,f64)` = **212us** — an apparent 17x. REJECTED as
+a domination claim: the Rust output is 2048x512 f64 = **8MB**, so 12.4us implies
+**~677 GB/s**, far above DRAM bandwidth (~50 GB/s). A real dense 8MB write cannot
+finish that fast, so Rust's `eval_primitive(OneHot)` is NOT materializing the
+dense output that JAX produces (likely boxed/lazy/structural, or the bench doesn't
+force full materialization). The comparison is apples-to-oranges and the "17x" is
+an artifact, NOT a Rust-over-JAX win.
+- LESSON: always sanity-check a head-to-head against memory bandwidth — output
+  bytes / time > ~50 GB/s means one side isn't doing the work the other is.
+- Retry predicate: only revisit one_hot if it's confirmed Rust produces a dense
+  materialized output comparable to JAX's (check `eval_primitive(OneHot)` storage);
+  do not list one_hot as a domination until then. The verified domination set
+  stays sort + large-n scan + contiguous gather.
