@@ -3881,9 +3881,19 @@ where
     T: Copy + Send + Sync,
     F: Fn(T, T) -> T + Sync,
 {
+    // The (output index, update index) pair is packed into ONE u64 — `idx << 32 | i`
+    // — instead of a `(usize, usize)` tuple, HALVING the partition's per-element bucket
+    // footprint (16MB -> 8MB for 1M updates) and the memory traffic of the memory-bound
+    // build + the latency-bound apply. Requires both `idx (< dim0)` and `i (< len)` to
+    // fit in 32 bits; the >2^32 case (>4 billion rows/updates — pathological) falls back
+    // to the serial `scatter_typed` path. Measured (f64 add, same-binary interleaved A/B
+    // `bench_scatter_add_f64_packed_u64_vs_pair`): median ~1.06x over the (usize,usize)
+    // version (up to 1.36x in the least-contended run), bit-identical.
     if index_vals.len() < SCATTER_ADD_F64_RANGE_PARTITION_MIN_UPDATES
         || op.len() != dim0
         || upd.len() != index_vals.len()
+        || dim0 > (1usize << 32)
+        || index_vals.len() > (1usize << 32)
     {
         return None;
     }
@@ -3894,19 +3904,19 @@ where
 
     let chunk = dim0.div_ceil(threads);
     let csz = index_vals.len().div_ceil(threads);
-    let locals: Vec<Vec<Vec<(usize, usize)>>> = std::thread::scope(|scope| {
+    let locals: Vec<Vec<Vec<u64>>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 let start = t * csz;
                 let end = ((t + 1) * csz).min(index_vals.len());
                 scope.spawn(move || {
-                    let mut lb: Vec<Vec<(usize, usize)>> = (0..threads)
+                    let mut lb: Vec<Vec<u64>> = (0..threads)
                         .map(|_| Vec::with_capacity(csz / threads + 1))
                         .collect();
                     for (off, &raw_idx) in index_vals[start..end].iter().enumerate() {
-                        let i = start + off;
                         if let Some(idx) = resolve_axis0_index(raw_idx, dim0, index_mode) {
-                            lb[(idx / chunk).min(threads - 1)].push((idx, i));
+                            let packed = ((idx as u64) << 32) | (start + off) as u64;
+                            lb[(idx / chunk).min(threads - 1)].push(packed);
                         }
                     }
                     lb
@@ -3929,7 +3939,9 @@ where
             let block_start = start;
             scope.spawn(move || {
                 for sub in locals_ref.iter() {
-                    for &(idx, i) in &sub[b] {
+                    for &packed in &sub[b] {
+                        let idx = (packed >> 32) as usize;
+                        let i = (packed & 0xFFFF_FFFF) as usize;
                         let p = idx - block_start;
                         block[p] = cf(block[p], upd[i]);
                     }
@@ -25140,10 +25152,149 @@ mod tests {
         );
     }
 
-    // f32 is JAX's DEFAULT dtype; scatter-add 1M f32 now routes through the generic
-    // parallel range-partition (same kernel proven for f64). This times the full
-    // production `eval_scatter` (for the JAX head-to-head) and a serial reference loop
-    // (matching the prior `scatter_typed` path) interleaved in the same binary.
+    // BOLD-VERIFY: the shipped f64 parallel partition materializes (usize,usize) pairs
+    // = 16MB for 1M updates. Packing (idx<<32)|i into a single u64 halves that to 8MB,
+    // cutting memory traffic in the (memory-bound) build AND the latency-bound apply.
+    // Bit-identical (same idx/i, same order); gated to dim0,len < 2^32. Same-binary A/B.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_scatter_add_f64_packed_u64_vs_pair() {
+        use std::time::Instant;
+        let n = 1_usize << 20;
+        let op: Vec<f64> = vec![0.0; n];
+        let index_vals: Vec<i64> = (0..n)
+            .map(|i| ((i.wrapping_mul(1_103_515_245_usize).wrapping_add(12_345)) & (n - 1)) as i64)
+            .collect();
+        let upd: Vec<f64> = (0..n)
+            .map(|i| ((i % 4099) as f64 - 2049.0) * 0.001)
+            .collect();
+        let dim0 = n;
+        let mode = IndexMode::Clip;
+        let threads = crate::arithmetic::work_scaled_threads(index_vals.len()).min(dim0);
+        assert!(threads > 1);
+        let chunk = dim0.div_ceil(threads);
+        let csz = index_vals.len().div_ceil(threads);
+
+        // PAIR: the shipped (usize, usize) parallel partition.
+        let run_pair = || -> Vec<f64> {
+            let idx_ref = &index_vals;
+            let upd_ref = &upd;
+            let locals: Vec<Vec<Vec<(usize, usize)>>> = std::thread::scope(|scope| {
+                let hs: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let (start, end) = (t * csz, ((t + 1) * csz).min(idx_ref.len()));
+                        scope.spawn(move || {
+                            let mut lb: Vec<Vec<(usize, usize)>> = (0..threads)
+                                .map(|_| Vec::with_capacity(csz / threads + 1))
+                                .collect();
+                            for (off, &raw) in idx_ref[start..end].iter().enumerate() {
+                                if let Some(idx) = super::resolve_axis0_index(raw, dim0, mode) {
+                                    lb[(idx / chunk).min(threads - 1)].push((idx, start + off));
+                                }
+                            }
+                            lb
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let mut out = op.clone();
+            std::thread::scope(|scope| {
+                let mut rest = out.as_mut_slice();
+                let (mut start, locals_ref) = (0usize, &locals);
+                for b in 0..threads {
+                    let len = chunk.min(dim0 - start);
+                    let (block, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let bstart = start;
+                    scope.spawn(move || {
+                        for sub in locals_ref.iter() {
+                            for &(idx, i) in &sub[b] {
+                                block[idx - bstart] += upd_ref[i];
+                            }
+                        }
+                    });
+                    start += len;
+                }
+            });
+            out
+        };
+
+        // PACKED: u64 = (idx << 32) | i. Half the per-pair bytes.
+        let run_packed = || -> Vec<f64> {
+            let idx_ref = &index_vals;
+            let upd_ref = &upd;
+            let locals: Vec<Vec<Vec<u64>>> = std::thread::scope(|scope| {
+                let hs: Vec<_> = (0..threads)
+                    .map(|t| {
+                        let (start, end) = (t * csz, ((t + 1) * csz).min(idx_ref.len()));
+                        scope.spawn(move || {
+                            let mut lb: Vec<Vec<u64>> = (0..threads)
+                                .map(|_| Vec::with_capacity(csz / threads + 1))
+                                .collect();
+                            for (off, &raw) in idx_ref[start..end].iter().enumerate() {
+                                if let Some(idx) = super::resolve_axis0_index(raw, dim0, mode) {
+                                    let packed = ((idx as u64) << 32) | (start + off) as u64;
+                                    lb[(idx / chunk).min(threads - 1)].push(packed);
+                                }
+                            }
+                            lb
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let mut out = op.clone();
+            std::thread::scope(|scope| {
+                let mut rest = out.as_mut_slice();
+                let (mut start, locals_ref) = (0usize, &locals);
+                for b in 0..threads {
+                    let len = chunk.min(dim0 - start);
+                    let (block, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let bstart = start;
+                    scope.spawn(move || {
+                        for sub in locals_ref.iter() {
+                            for &packed in &sub[b] {
+                                let idx = (packed >> 32) as usize;
+                                let i = (packed & 0xFFFF_FFFF) as usize;
+                                block[idx - bstart] += upd_ref[i];
+                            }
+                        }
+                    });
+                    start += len;
+                }
+            });
+            out
+        };
+
+        assert_eq!(run_pair(), run_packed(), "packed-u64 diverges from pair");
+
+        let _ = run_pair();
+        let _ = run_packed();
+        let mut pair_best = f64::MAX;
+        let mut packed_best = f64::MAX;
+        for _ in 0..25 {
+            let t = Instant::now();
+            let a = run_pair();
+            pair_best = pair_best.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&a);
+            let t = Instant::now();
+            let b = run_packed();
+            packed_best = packed_best.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&b);
+        }
+        println!(
+            "BENCH scatter-add 1M f64 partition: pair(usize,usize)={:.4}ms packed-u64={:.4}ms speedup={:.3}x",
+            pair_best * 1e3,
+            packed_best * 1e3,
+            pair_best / packed_best
+        );
+    }
+
+    // f32 scatter-add: the parallel range-partition REGRESSES vs the serial loop (the
+    // serial path is already JAX-competitive ~2.5ms); this isolates that decision via a
+    // pure-algorithm same-binary A/B (serial loop vs the generic partition directly).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_scatter_add_1m_f32_production_vs_serial() {

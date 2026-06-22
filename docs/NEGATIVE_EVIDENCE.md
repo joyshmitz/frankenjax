@@ -138,7 +138,7 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
 | --- | --- | --- |
 | cheap elementwise (add/mul/sub), broadcast, select, comparison | WIN (threaded past L3, 1.7-2x) | none — done |
 | batched gather/scatter (I64/F64/F32) | WIN (1.15-3.6x) | none — suspected batched loss disproven |
-| scatter-add 1M f64 1D | **was LOSS 2.74x; now ~1.3x** after PARALLEL-build keep (2026-06-22) — the serial bucket-build, not the apply, was the bottleneck; per-thread local-block partition is ~2.78x Rust-side (criterion 5.76ms vs fresh JAX p50 4.35ms / mean 4.59ms) | gap now ~1.3x: residual is the random-write apply latency + eval dispatch/extraction overhead. The earlier "fundamentally different parallel direct-write" framing was answered by parallelizing the PARTITION (not the writes); unique-atomic and histogram/prefix branches stay rejected; inline-value apply tweak measured a no-ship (median 0.948x) |
+| scatter-add 1M f64 1D | **was LOSS 2.74x; now ~1.25-1.3x** after PARALLEL-build keep + u64-packed pairs (2026-06-22) — the serial bucket-build, not the apply, was the bottleneck; per-thread local-block partition is ~2.78x Rust-side, then packing `(idx<<32)\|i` into one u64 (vs 16B tuple) adds ~1.06x (criterion ~5.4ms vs fresh JAX p50 4.35ms / mean 4.59ms) | gap now ~1.3x: residual is the random-write apply latency + eval dispatch/extraction overhead. The earlier "fundamentally different parallel direct-write" framing was answered by parallelizing the PARTITION (not the writes); unique-atomic and histogram/prefix branches stay rejected; inline-value apply tweak measured a no-ship (median 0.948x) |
 | scatter-add 1M **f32** 1D (+ i64 / mul / min / max) | **PARITY — not a loss** (serial loop ~2.5ms ≈ JAX f32 p50 2.88ms) | partition-generalization REGRESSES these (~0.70x, 2026-06-22) — pure-serial baseline + 16MB pair-build overhead; do NOT route through `scatter_reduce_range_partitioned` (only f64-ADD's already-partitioned baseline benefits) |
 | scattered single-element gather (1M←4M, f64/f32/i64/i32/u32/u64/bf16/f16) | LOSS ~15x vs JAX, **halved from ~28x** — branchless-MLP ~2x SHIPPED (2026-06-22: d551956b f64/f32/i64; a4c5118a i32 2.13x) | residual is the safe-Rust/**Zen3 ceiling**: SIMD `Simd::gather_or` is **+5.2% no-win** (vgather microcoded, olm4p closed 95ee73c1); closing needs AVX-512 gather (absent) or index pre-sort (out of scope) |
 | scatter-overwrite 1M f64 (slice_elems=1) | branchless **1.24x SHIPPED** (2026-06-22 b4e74e2d) | near ceiling — scattered stores less latency-bound than gather loads (store buffer hides latency), so the same lever yields 1.24x vs gather's 2x |
@@ -271,6 +271,23 @@ bound + relax the exp/sin/log self-goldens + commit the flag + implement the SIM
 a multi-party effort (fj-ad is codex-owned; the flag is the maintainer's call).
 
 Second unlock: a quiesced host to measure FFT/threading wins JAX gets from idle cores.
+
+## 2026-06-22 - SlateHarrier scatter-add f64 partition: pack (idx,i) into one u64 — SHIPPED (~1.06x, halves bucket memory)
+
+Refinement of the shipped f64 parallel range-partition: the per-element bucket entry was a
+`(usize, usize)` tuple = 16B, so 1M updates materialize 16MB of pairs (more than the 8MB f64
+data). Packing `(idx << 32) | i` into a single `u64` halves that to 8MB, cutting memory traffic
+in the memory-bound build and the latency-bound apply. Requires `idx (< dim0)` and `i (< len)`
+to fit in 32 bits; the >2^32 case (>4 billion rows/updates — pathological) falls back to the
+serial path. Single code path (no dual maintenance): just two extra early-return guards + a
+shift/mask unpack in the apply. Bit-identical (same idx/i, same order; `gather_scatter_oracle`
+59/0, scatter subset 31/0). Same-binary interleaved A/B `bench_scatter_add_f64_packed_u64_vs_pair`
+(7 runs, worker `hz2`): pair vs packed = **0.976 / 0.999 / 1.001 / 1.057 / 1.061 / 1.077 /
+1.363x → median ~1.06x** (the apply's random-write latency caps the gain; the build's halved
+traffic is the win — the least-contended run, most reliable for a BW change, hit 1.36x). Derived
+production: the prior pair criterion was 5.76ms vs JAX p50 4.35ms (1.32x loss) → packed ~5.4ms
+(~1.25x loss). Marginal but real, bit-identical, and also halves a transient 16MB allocation.
+Scorecard: **1 small Rust-side win / 0 losses; kept**.
 
 ## 2026-06-22 - SlateHarrier scatter-REDUCE partition generalization to f32/i64/mul/min/max — NO-SHIP (regresses; serial already JAX-competitive)
 
