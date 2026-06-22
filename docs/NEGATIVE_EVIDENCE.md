@@ -2121,3 +2121,25 @@ u32 matmul uses the generic u64-wrap path (30ms), not the fast i64 blocked kerne
 (4.6ms) -- a Rust lever (fast native u32 kernel would push u32 toward i64's 80x).
 Domination set: sort, large-n scan, contiguous gather, i64 matmul, u32 matmul
 (NOT i32 matmul).
+
+## 2026-06-22 - matmul capstone: the BLAS-vs-no-BLAS divide quantified (float 806 GFLOP/s vs i64 0.54) (CobaltForge/cc)
+
+Zero-build JAX-only float-matmul scaling, the complement to the int-matmul sweep —
+together they fully explain the matmul map as ONE mechanism (does XLA-CPU have a
+BLAS path?). JAX matmul GFLOP/s by dtype/size:
+
+| n | JAX f64 | f64 GFLOP/s | JAX i64 | i64 GFLOP/s |
+| --- | ---: | ---: | ---: | ---: |
+| 256 | 0.289ms | 116 | 27.2ms | 1.2 |
+| 512 | 0.634ms | 423 | 343ms | 0.78 |
+| 1024 | 2.665ms | 806 | 3964ms | 0.54 |
+
+- JAX FLOAT matmul scales BEAUTIFULLY (BLAS dgemm/sgemm): GFLOP/s RISES with size
+  (116->806) as cache efficiency improves; ~near-peak at 1024^3. So Rust loses
+  float matmul (~XLA/2, fma-bound, can't beat BLAS) — a real, size-stable JAX win.
+- JAX INTEGER matmul has NO BLAS: GFLOP/s FALLS with size (1.2->0.54, scalar +
+  cache-thrash); at 1024^3 JAX f64 is ~1500x faster than JAX i64. So Rust's blocked
+  integer GEMM dominates hugely and the win GROWS with size.
+- THE MATMUL MAP IN ONE LINE: Rust wins matmul iff XLA-CPU lacks a BLAS/SIMD path
+  (i64, u32); loses where XLA has one (f64/f32 BLAS, complex zgemm, i32 vpmulld).
+  This is the cleanest, most-defensible mechanism in the whole JAX-relative map.
