@@ -2084,3 +2084,19 @@ NEW LEVER (recorded, not pursued -- build-blocked): a native-i32 SIMD matmul
 (vpmulld, i32 storage instead of i64) would close the ~7.8x i32 gap. Likely also
 applies to u32. Touches the matmul kernel (cod/codex linalg zone) -- needs an
 owner + same-binary A/B when builds resume.
+
+## 2026-06-22 - argmax is PARITY vs JAX (bandwidth-bound); the "10x" was internal (CobaltForge/cc)
+
+Warm-target rch `eval/argmax_16kx1k_axis1_f64` on `ovh-a` = **3.52ms** vs fresh
+local JAX `jnp.argmax(a,axis=1)` 16384x1024 f64 = **3.46ms** = **~parity** (Rust
+1.02x slower cross-machine; ovh-a is ~1.2x slower than local, so same-machine Rust
+is likely a touch faster — call it parity). Both are BANDWIDTH-BOUND: input is
+128MB, 128MB/3.5ms = ~37 GB/s = memory bandwidth; argmax must read every element,
+so neither side can beat memory bw and they tie.
+- Corrects the memory "argmax/argmin over axis 10x win" — that was INTERNAL
+  (Rust-fixed-strided-gather vs Rust-naive), NOT vs JAX. vs JAX it's parity.
+- GENERAL: bandwidth-bound reductions (argmax/argmin/reduce_sum/max over a large
+  array) are JAX-PARITY — both read the data at memory bw, so there's no domination
+  and no loss; the internal "Nx faster" numbers for these are vs Rust baselines,
+  not JAX. The Rust-over-JAX domination surface stays compute/algorithm-bound:
+  sort, large-n scan, contiguous gather, i64 matmul.
