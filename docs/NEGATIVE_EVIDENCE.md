@@ -2235,16 +2235,16 @@ common ML case, crux of the +fma decision). Local Zen3, warm target/:
 eval_primitive(DotGeneral) f64 1024x1024 = **8.93ms** (min 7.70, ~240 GFLOP/s) vs
 fresh local JAX f64 `a@b` 1024^3 = **2.665ms** (~806 GFLOP/s BLAS) = **~3.35x Rust
 LOSS**.
-- This is BETTER than the 5-15x I'd cited in the consolidated map (from cod-b/
-  4ryym `matmul_2d_1024 = 40.776ms`). DISCREPANCY: Rust DotGeneral (8.93ms) is
-  ~4.5x faster than the cited `matmul_2d` (40.776ms) for the same 1024^3 f64 work.
-  So `DotGeneral` and `matmul_2d` use DIFFERENT kernels — DotGeneral is the
-  fast/production path (and the one JAX's @ maps to), matmul_2d is slower (may be a
-  reference path, a different routing, or the 40ms was a cross-machine/regression
-  number). The authoritative Rust-vs-JAX f64 matmul gap is ~3.35x (DotGeneral),
-  not 5-15x.
+- This is BETTER than the 5-15x I'd cited (from `matmul_2d_1024 = 40.776ms`).
+  RESOLVED (not a bug): `bench_matmul_2d_1024` calls the RAW SINGLE-THREADED kernel
+  `tensor_contraction::matmul_2d` directly (40ms = ~53 GFLOP/s, single-core), a
+  microbench of the kernel. eval_primitive(DotGeneral) — the production @ path —
+  THREADS (8.93ms = ~240 GFLOP/s, multi-core; cf. dot_general_parallel test). So
+  the ~4.5x is the THREADING factor, NOT a mis-route or worker artifact. The
+  authoritative PRODUCTION Rust-vs-JAX f64 matmul gap is ~3.35x (threaded DotGeneral
+  vs threaded JAX dgemm), not the 5-15x the single-threaded kernel microbench implied.
 - Mechanism unchanged: JAX dgemm BLAS (806 GFLOP/s) vs Rust blocked GEMM without
   fma/BLAS (~240 GFLOP/s = ~XLA/3.4). So +fma + better microkernel is the lever
   (cntiy) — but the gap is 3.35x, more closeable than the cited 15x suggested.
-- FLAG for cod-b: the matmul_2d-vs-DotGeneral 4.5x gap is worth investigating (is
-  matmul_2d a stale/slow path? should @ never route to it?).
+- (No action for cod-b: matmul_2d is the single-threaded kernel microbench, working
+  as intended; the production path threads.)
