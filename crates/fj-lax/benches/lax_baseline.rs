@@ -2823,6 +2823,37 @@ fn bench_cumsum_4m_f64_1d_tight(c: &mut Criterion) {
     });
 }
 
+// CrimsonOtter 2026-06-22: cumprod/cummax at 4M-1D to verify the ledger's stale
+// "cumprod/cummax = generic-serial LOSS" claim. Both route through the SAME generic
+// `blocked_prefix_scan_to_vec` as cumsum_4m (op closure differs only), so they should be
+// ~cumsum_4m, not ~20ms. Data kept near 1.0 so the cumprod stays finite.
+fn bench_cumprod_4m_f64_1d(c: &mut Criterion) {
+    let data: Vec<f64> = (0..1 << 22)
+        .map(|i| 0.999_999_9 + ((i % 3) as f64) * 1e-7)
+        .collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cumprod_4m_f64_1d", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cumprod, std::slice::from_ref(&input), &p))
+    });
+}
+
+fn bench_cummax_4m_f64_1d(c: &mut Criterion) {
+    let data: Vec<f64> = (0_usize..(1_usize << 22))
+        .map(|i| {
+            let x = ((i.wrapping_mul(1_103_515_245_usize).wrapping_add(12_345)) & 0xffff) as f64;
+            x - 32_768.0
+        })
+        .collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let mut p = BTreeMap::new();
+    p.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/cummax_4m_f64_1d", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Cummax, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_cummax_1m_f64_1d(c: &mut Criterion) {
     let data: Vec<f64> = (0_usize..(1_usize << 20))
         .map(|i| {
@@ -6925,6 +6956,8 @@ criterion_group!(
     bench_cumsum_64k_f64_vec,
     bench_cumsum_4m_f64_1d,
     bench_cumsum_4m_f64_1d_tight,
+    bench_cumprod_4m_f64_1d,
+    bench_cummax_4m_f64_1d,
     bench_cummax_1m_f64_1d,
     bench_cummin_1m_f64_1d,
     bench_cumsum_4096x1024_f64_axis1,

@@ -2475,3 +2475,34 @@ current fleet load (30–84, concurrent franken* builds). Conclusion — all blo
 NET: the contained, benchable frontier is genuinely closed under current constraints. The
 next real FFT win is murmw.1 (needs an idle host + golden re-baseline); the next broad win
 is the cntiy +fma maintainer decision. No code lever was shippable+benchable this pass.
+
+## 2026-06-22 - cumprod/cummax-4M losses CONFIRMED + ROOT-CAUSE NARROWED: generic blocked scan underperforms for mul/max (not a routing miss) — lever = ~2.4x win (CrimsonOtter/cc)
+
+Added reproducible 4M-1D benches `eval/cumprod_4m_f64_1d` + `eval/cummax_4m_f64_1d`
+(mirroring `cumsum_4m_f64_1d`; cumprod had NO bench before). Same-binary same-session,
+Zen3, load ~8-18, best/median of Criterion:
+| op 4M-1D f64 | fj-lax | JAX 0.10.1 (best-of-6) | verdict |
+| --- | ---: | ---: | --- |
+| cumsum  | **7.55ms** | 17.97ms | fj-lax WINS **2.4x** |
+| cumprod | **20.9ms** | 16.99ms | fj-lax **LOSS 1.25x** |
+| cummax  | **20.9ms** | 18.83ms | fj-lax **LOSS 1.13x** |
+
+Confirms the earlier CobaltForge correction (cumprod/cummax ARE losses) with same-session
+numbers (magnitudes a touch smaller: JAX measured ~17-19ms here vs 12-16ms earlier).
+
+ROOT CAUSE NARROWED (the useful new bit): cumprod/cummax are NOT missing the fast route.
+Verified by code read — `eval_cumulative_dense` (reduction.rs ~3442) calls the SAME generic
+`blocked_prefix_scan_to_vec(src, float_init, float_op)` for ALL of cumsum/cumprod/cummax
+(no `primitive == Cumsum` guard). Yet cumsum threads/streams to 7.5ms (≈memory-bound for
+64MB R+W) while the mul/max monomorphizations run at **~21 cyc/element** — far above
+memory-bound, i.e. the per-thread serial scan is the bottleneck for mul/max but NOT for add.
+Ruled out: load (reproducible at load 8), data (finite/normal, no denormals), routing
+(generic, confirmed). So the gap is a RUNTIME/CODEGEN asymmetry of the generic blocked scan
+under the add vs mul/max closures — needs a profiler/disassembly pass to pin (why does the
+add closure stream while mul/max don't, through identical thread::scope code?).
+
+LEVER (filed `frankenjax-murmw`-sibling bead): close cumprod/cummax to cumsum's 7.5ms →
+flips BOTH losses to ~2.4x / ~2.5x JAX WINS (extends the cumsum scan domination to the whole
+cheap-combiner scan family). Single-threaded-or-blocked, bit/tolerance-legal (cumsum already
+uses the tolerance-legal blocked reassociation). NOT fma-gated. Reproduce: the two new
+benches vs JAX cumprod/cummax 4M. Benches kept as measurement infra (cf cumsum_4m_1d_tight).
