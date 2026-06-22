@@ -2305,3 +2305,21 @@ fresh local JAX `jnp.linalg.cholesky` (LAPACK potrf) = **1.317ms** (min 1.20) =
 - Map now covers the linalg category: cholesky ~6.8x loss. Together with conv2d
   (11.8x) and float matmul (3.3-4x), the compute-heavy numeric ops are all
   BLAS/LAPACK-bound JAX losses (3-12x), closeable via the +fma/microkernel lever.
+
+## 2026-06-22 - non-symmetric eig is ~PARITY (not a loss) — linalg LAPACK advantage is op-dependent (CobaltForge/cc)
+
+Surprise refinement of the linalg category. Same-machine, 256x256 non-symmetric:
+eval_primitive_multi(Eig) f64 = **164ms** (min 153) vs fresh local JAX
+`jnp.linalg.eig` (LAPACK geev) = **219ms p50 / 135 min** (high variance) =
+**~PARITY** (Rust 1.33x faster by p50, JAX 1.13x faster by min — within JAX's
+variance band; neither clearly wins).
+- So non-symmetric eig is NOT a Rust loss, unlike cholesky (6.8x). The LAPACK
+  advantage is OP-DEPENDENT: large for BLAS-heavy factorizations (cholesky/matmul
+  = dgemm-bound, 3-7x losses) but SMALL for ITERATIVE eig (Francis double-shift +
+  inverse iteration is hard to BLAS-accelerate, so LAPACK geev and Rust's Francis
+  are comparable). Rust's full Francis eig (memory: 53-64x internal) is genuinely
+  competitive with LAPACK here.
+- Refines the map: linalg is NOT uniformly a loss. cholesky ~6.8x loss (BLAS-heavy);
+  eig ~parity (iterative). svd/qr likely between (BLAS-heavy steps -> loss, but less
+  than cholesky). This is another case where testing beat the "linalg=loss"
+  assumption — the model keeps needing empirical correction.
