@@ -8,6 +8,17 @@ Consolidated from this session's measurements + the per-op entries below. The co
 measurable-on-this-host, non-`+fma`, unowned perf levers are EXHAUSTED; every remaining loss
 routes to one of three gates.
 
+UPDATE 2026-06-22 (CrimsonOtter): the "EXHAUSTED" claim above was PREMATURE — a contained,
+non-`+fma`, measurable lever was found and SHIPPED this day: **branchless-MLP scattered
+gather/scatter**. The scattered single-element gather/scatter inner loops paid a per-element
+`match Option` + `copy_from_slice(len 1)` CALL that serialized the random loads/stores (zero
+MLP); replacing it with a tight `out[i]=src[idx[i]]` loop yielded **gather ~2x** (d551956b
+f64/f32/i64; a4c5118a i32 2.13x + u32/u64/bf16/f16) and **scatter-overwrite 1.24x** (b4e74e2d),
+halving the gather JAX gap ~28x->~15x. The residual is the Zen3 safe-Rust ceiling (SIMD
+`Simd::gather_or` is +5.2% no-win — vgather microcoded; olm4p closed 95ee73c1). LESSON: the
+true un-mined vein was **interpreter/eval per-element overhead in random-access ops**, not the
+kernels — audit other ops for per-element call/branch in hot loops before declaring exhaustion.
+
 CONFORMANCE STATUS (2026-06-21, verified HEAD): **ENTIRE WORKSPACE GREEN** — `cargo test --workspace
 --release` = 0 failures across all crates (fj-lax 1583/0 after the cholesky digest re-baseline
 7a0f165e + the erf_inv regression fix c1b9ef15; fj-conformance all-green; fj-ad/fj-interpreters/etc.
