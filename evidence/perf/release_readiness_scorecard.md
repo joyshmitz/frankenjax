@@ -1738,3 +1738,39 @@ integer-matmul domination. JAX int matmul p50 by size:
   kernel is known-fast/measured at 512.)
 - Confirms i64/u32 matmul as the strongest, most-defensible, size-growing
   Rust-over-JAX domination (XLA-CPU has no integer BLAS and no i64/u32 SIMD).
+
+## CobaltForge / cc - CONSOLIDATED JAX-relative map (same-machine + cross-machine measured) (2026-06-22)
+
+Single-place summary of this session's measured Rust-vs-JAX head-to-heads (all
+same-machine local Zen3 unless noted "rch"; ratios cross-checked cross-machine).
+Complements cod-b's internal-speedup domination map — these are vs-ACTUAL-JAX.
+
+DOMINATIONS (Rust faster) — Rust has a specialized path AND XLA-CPU lacks one:
+| op | ratio | mechanism |
+| --- | ---: | --- |
+| sort (f64/f32, 64K-4M) | 4-6.5x | Rust LSD radix vs XLA bitonic (XLA uniformly slow) |
+| cumsum/cumprod/cummax, large-n (>=2M) | ~4x (grows) | XLA scan size cliff; Rust linear scan |
+| gather, contiguous rows | ~3.7x | Rust memcpy vs XLA general gather (small-op/cross-machine caveat) |
+| i64 matmul | ~80x (grows w/ n; 1024^3 JAX ~4s) | no integer BLAS; Rust blocked GEMM |
+| u32 matmul | ~8.9x | no u32 SIMD; Rust generic u64-wrap (lever: native u32 kernel) |
+
+PARITY (bandwidth-bound, both at memory bw): argmax/argmin/reduce over large arrays.
+
+LOSSES (Rust slower) — XLA has BLAS/SIMD, or Rust hits boxed/per-call path:
+| op | ratio | mechanism |
+| --- | ---: | --- |
+| f64/f32 matmul | 5-11x | XLA dgemm/sgemm BLAS (806 GFLOP/s @1024); Rust fma-bound |
+| complex128 matmul | ~3.7x | XLA zgemm BLAS |
+| i32 matmul | ~7.8x | XLA vpmulld SIMD (only signed-32 vectorizes) |
+| scatter-add | ~3-4.6x | XLA OK; Rust eval_primitive boxed path |
+| maxpool/reduce_window | ~2.3x | XLA vectorized; "deque 20x" is internal not vs-JAX |
+| floor/round/sign fused chain | ~4.5-6.5x | per-call interpreter tax vs XLA single fused pass (so4wo lever) |
+| transcendentals, cumlogsumexp | (loss) | XLA SIMD exp/log; Rust fma-gated (cntiy) |
+
+REJECTED artifact: one_hot apparent 17x — bandwidth-implausible (677 GB/s), Rust
+not materializing dense output. UNIFYING PRINCIPLE: Rust beats JAX exactly where
+XLA-CPU has a weak/absent path (bitonic sort, scan cliff, no integer BLAS, general
+gather) and Rust has a specialized one; ties on bandwidth-bound ops; loses where
+XLA has BLAS/SIMD. The big "Nx faster" ledger numbers are mostly Rust-INTERNAL
+(vs naive), NOT vs JAX. Open Rust-side confirmations (build-blocked): cumprod/
+cummax-4M, non-contiguous gather, i64-matmul-1024.
