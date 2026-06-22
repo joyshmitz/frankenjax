@@ -2672,3 +2672,23 @@ MEASURED same-binary A/B (Zen3, eval/gather_scatter_1m_f64 vs the committed scal
   stages a/b (branchless scalar) already shipped (d551956b/a4c5118a, ~2x).
 - METHOD note: this is why olm4p flagged "measure before assuming" — the BOLD-VERIFY ethos
   caught a plausible-but-wrong SIMD lever with one A/B instead of shipping a regression.
+
+## 2026-06-22 - cumprod/cummax 2.8x mystery: disasm RULES OUT the SIMD-prefix/inlining fix — it's a µarch effect needing perf-counters (t1pb0 re-scoped) (CrimsonOtter/cc)
+
+Free disasm check (no build) of the `blocked_prefix_scan_to_vec` monomorphizations to test
+t1pb0's fix hypotheses BEFORE spending a build:
+- cumsum (add): `vaddpd` packed. cumprod (mul): `vmulpd` packed. cummax (jax_max_f64):
+  `vmaxpd` + `vcmpunordpd` + `vblendvpd` (NaN-propagating max, fully INLINED + vectorized).
+- So all three local scans are ALREADY SIMD-vectorized and the op closures are inlined —
+  yet cumprod/cummax measure ~21ms (4M-1D) vs cumsum ~7.5ms, a 2.8x gap with structurally
+  identical code and same-latency/throughput ops (`vaddpd`==`vmulpd`==`vmaxpd` on Zen3).
+- THEREFORE the two fix hypotheses in t1pb0 are WRONG: (a) "mul/max not vectorized" — false
+  (vmulpd/vmaxpd present); (b) "closure not inlined / per-element call" — false (inlined).
+  Data is also ruled out (no denormals; cummax random vs cumprod near-1.0 give the SAME 21ms).
+- The residual 2.8x is a DEEPER microarchitectural effect (load/store-queue, write-combining,
+  or the multi-pass blocked scan's `out` re-read interacting with the op) that needs
+  `perf stat` counters (cache-misses / stalls / uops) to diagnose — NOT a contained code
+  lever. t1pb0 re-scoped accordingly: do NOT attempt a SIMD-prefix or force-inline fix
+  (disasm proves they're already done); next step is a profiling pass on a quiesced host.
+  Net: cumprod/cummax (~1.13-1.25x JAX loss) is NOT a quick contained win. Frees future
+  build budget by killing two wrong hypotheses with a free disasm read.
