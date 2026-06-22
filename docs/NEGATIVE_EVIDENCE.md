@@ -2143,3 +2143,22 @@ BLAS path?). JAX matmul GFLOP/s by dtype/size:
 - THE MATMUL MAP IN ONE LINE: Rust wins matmul iff XLA-CPU lacks a BLAS/SIMD path
   (i64, u32); loses where XLA has one (f64/f32 BLAS, complex zgemm, i32 vpmulld).
   This is the cleanest, most-defensible mechanism in the whole JAX-relative map.
+
+## 2026-06-22 - scan domination is CHEAP-COMBINER-only; cumlogsumexp is transcendental-bound (not a lead) (CobaltForge/cc)
+
+Zero-build JAX-only lead-hunt bounding the scan-family domination. JAX
+`lax.cumlogsumexp` scaling: 1M **12.5ms** / 2M **22.4ms** / 4M **52.7ms** =
+~**uniform 12 us/K** (12.2 -> 10.9 -> 12.9), i.e. NO memory cliff like cumsum
+(which steps 1.4 -> 4 us/K at ~4M). Reason: cumlogsumexp's combiner is
+transcendental (exp/log per step) -> COMPUTE-bound, ~9x slower per element than
+cumsum's cheap-add scan.
+- So cumlogsumexp is NOT a scan-domination lead. Transcendental-combiner scans
+  land in Rust-LOSS territory: XLA vectorizes exp/log (SIMD), Rust uses scalar
+  libm (fma-gated, ~XLA/2 at best per cntiy), so Rust would LOSE here, not win.
+- BOUNDS the scan domination cleanly: it applies to CHEAP-ARITHMETIC-combiner
+  scans (cumsum/cumprod/cummax -> memory-bound, hits JAX's scan size cliff ->
+  Rust wins at large n). It does NOT extend to transcendental-combiner scans
+  (cumlogsumexp/softmax-scan -> compute-bound by exp/log -> JAX SIMD wins).
+- (Rust side not measured: warm target freed in disk emergency, cold rebuild
+  forbidden; the reasoning follows directly from the established transcendental
+  loss + the uniform-not-cliff JAX scaling.)
