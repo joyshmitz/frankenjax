@@ -2045,3 +2045,22 @@ an artifact, NOT a Rust-over-JAX win.
   materialized output comparable to JAX's (check `eval_primitive(OneHot)` storage);
   do not list one_hot as a domination until then. The verified domination set
   stays sort + large-n scan + contiguous gather.
+
+## 2026-06-22 - complex matmul is a JAX LOSS (zgemm BLAS) — matmul domination is INTEGER-SPECIFIC (CobaltForge/cc)
+
+Boundary test completing the matmul story. Warm-target rch
+`eval/matmul_256x256_complex128_dense` on `ovh-a` = **2.04ms** vs fresh local JAX
+complex128 `a@b` 256x256 (x64) = **0.547ms** (min 0.447) = **~3.7x Rust LOSS**
+cross-machine (ovh-a ~1.2x slower than local, so same-machine ~2-3x). Confirms:
+complex matmul LOSES because JAX/XLA has a complex BLAS (`zgemm`).
+
+COMPLETE matmul characterization — the domination is entirely about the BLAS gap:
+| dtype | JAX backend | verdict |
+| --- | --- | --- |
+| i64/i32/u32 | none (no integer BLAS) -> naive | Rust DOMINATES ~80x |
+| f64/f32 | dgemm/sgemm BLAS | Rust loses ~5-11x (fma-bound) |
+| complex128 | zgemm BLAS | Rust loses ~3.7x |
+
+So Rust-over-JAX matmul domination is INTEGER-ONLY: Rust wins exactly where JAX
+lacks a BLAS path; wherever JAX has BLAS (float/complex) Rust loses (no fma + no
+BLAS-grade kernel). Clean, defensible, and explains the whole matmul row set.
