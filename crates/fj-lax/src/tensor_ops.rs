@@ -3595,6 +3595,31 @@ pub(crate) fn eval_gather(
                 Literal::Complex128Bits(re, im) => (f64::from_bits(re), f64::from_bits(im)),
                 _ => (0.0, 0.0),
             };
+            // Complex sibling of the real-dtype gather fast paths (was serial-only): scattered
+            // single-element (slice_elems==1, MLP-friendly) uses the branchless `gather_single_dense`,
+            // and contiguous-row gather (embedding lookup) threads via `gather_contiguous_into`. Both
+            // are generic over `T: Copy + Send + Sync` and `(f64,f64)` qualifies; bit-identical to the
+            // serial `out[i]=src[idx[i]]` / `extend_from_slice` below (same resolved idx, same order,
+            // same OOB `fill`).
+            if let Some(ref sidx) = single_idx {
+                let mut out = vec![(0.0f64, 0.0f64); total];
+                gather_single_dense(&mut out, src, sidx);
+                return Ok(Value::Tensor(TensorValue::new_complex_values(
+                    operand.dtype,
+                    Shape { dims: out_dims },
+                    out,
+                )?));
+            }
+            if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+                let mut out = vec![(0.0f64, 0.0f64); total];
+                if gather_contiguous_into(&mut out, src, &resolved, fill, slice_elems) {
+                    return Ok(Value::Tensor(TensorValue::new_complex_values(
+                        operand.dtype,
+                        Shape { dims: out_dims },
+                        out,
+                    )?));
+                }
+            }
             let mut out: Vec<(f64, f64)> = Vec::with_capacity(total);
             for &resolved_idx in &resolved {
                 let Some(idx) = resolved_idx else {
@@ -25149,6 +25174,57 @@ mod tests {
             old_best / new_best,
             par_best * 1e3,
             old_best / par_best
+        );
+    }
+
+    // BOLD-VERIFY: complex128 scattered gather (slice_elems==1) was serial-only (no branchless
+    // fast path, unlike the real dtypes). gather_single_dense<(f64,f64)> is the complex sibling.
+    // Same-binary A/B vs the prior serial per-element loop; bit-identical.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_gather_complex_branchless_vs_serial() {
+        use std::time::Instant;
+        let n_src = 1usize << 22; // 4M complex128
+        let k = 1usize << 20; // 1M gathers
+        let src: Vec<(f64, f64)> = (0..n_src)
+            .map(|i| (i as f64 * 0.5 - 1.0, i as f64 * -0.25 + 2.0))
+            .collect();
+        let idx: Vec<usize> = (0..k)
+            .map(|i| (i.wrapping_mul(2_654_435_761) ^ (i >> 3)) % n_src)
+            .collect();
+        // SERIAL: the prior complex gather inner loop (per-element extend_from_slice, slice_elems==1).
+        let serial = || -> Vec<(f64, f64)> {
+            let mut out: Vec<(f64, f64)> = Vec::with_capacity(k);
+            for &j in &idx {
+                out.extend_from_slice(&src[j..j + 1]);
+            }
+            out
+        };
+        // BRANCHLESS: gather_single_dense (the shipped complex path).
+        let branchless = || -> Vec<(f64, f64)> {
+            let mut out = vec![(0.0f64, 0.0f64); k];
+            super::gather_single_dense(&mut out, &src, &idx);
+            out
+        };
+        assert_eq!(serial(), branchless(), "complex branchless gather diverges");
+        let _ = serial();
+        let _ = branchless();
+        let (mut sb, mut bb) = (f64::MAX, f64::MAX);
+        for _ in 0..20 {
+            let t = Instant::now();
+            let s = serial();
+            sb = sb.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&s);
+            let t = Instant::now();
+            let b = branchless();
+            bb = bb.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&b);
+        }
+        println!(
+            "BENCH gather c128 1M<-4M: serial={:.4}ms branchless={:.4}ms speedup={:.2}x",
+            sb * 1e3,
+            bb * 1e3,
+            sb / bb
         );
     }
 

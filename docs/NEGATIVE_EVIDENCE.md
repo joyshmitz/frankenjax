@@ -52,6 +52,15 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     (sort ≤ its f64 1.25ms) still wins ≥10x in the dtype JAX users actually run. **(fj-lax f32 exact
     now MEASURED, gap closed — see the 2026-06-22 f32-sort entry below: fj-lax f32 64k = ~0.77ms,
     FASTER than its own f64, ~10x over JAX f32.)**
+  - **COMPLEX128 GATHER de-box + threading SHIPPED (2026-06-22, SlateHarrier) — ~2.6x.** Complex gather
+    was serial-only (per-element `extend_from_slice` + Option-match), missing BOTH the branchless
+    `gather_single_dense` (slice_elems==1) and the threaded `gather_contiguous_into` (rows) that the real
+    dtypes (f64/f32/i64/i32/u32/u64/bf16/f16) got. Routed complex through both (generic `T: Copy+Send+Sync`,
+    `(f64,f64)` qualifies). BIT-IDENTICAL (`out[i]=src[idx[i]]`, same order/OOB-fill): gather lib 23/0,
+    `gather_scatter_oracle` 59/0. Same-binary A/B `bench_gather_complex_branchless_vs_serial` (1M←4M c128):
+    serial 7.26-7.69ms → branchless **2.56-2.68x** (higher than f64's ~2x — c128 is 16B/elem so the
+    per-element extend overhead was relatively larger). Plus contiguous-row complex gather now threads.
+    (Follow-up: complex SCATTER is still generic-boxed — a remaining sibling, lower-EV.)
   - **DTYPE-SIBLING-GAP AUDIT (2026-06-22, SlateHarrier) — matmul family now complete; complex conv
     filed.** After flipping complex matmul (below), swept the matmul/conv family for kernels lagging
     their f64/i64 siblings: bf16/f16 matmul VERIFIED already optimized (f16 decodes→f32 GEMM; bf16 has

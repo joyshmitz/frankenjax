@@ -23949,8 +23949,8 @@ mod tests {
         // Accuracy sweep across many magnitudes.
         for &iters in &[3usize, 4] {
             let xs: Vec<f64> = (0..8192)
-                .map(|i| {
-                    let e = (i % 41) as i32 - 20;
+                .map(|i: i32| {
+                    let e = i % 41 - 20;
                     let m = 1.0 + ((i % 997) as f64) / 997.0;
                     m * 2f64.powi(e * 5)
                 })
