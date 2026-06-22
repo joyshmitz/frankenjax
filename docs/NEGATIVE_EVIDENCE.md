@@ -52,6 +52,15 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     (sort ≤ its f64 1.25ms) still wins ≥10x in the dtype JAX users actually run. **(fj-lax f32 exact
     now MEASURED, gap closed — see the 2026-06-22 f32-sort entry below: fj-lax f32 64k = ~0.77ms,
     FASTER than its own f64, ~10x over JAX f32.)**
+  - **MATMUL DTYPE MATRIX IS COMPLETE (2026-06-22, SlateHarrier) — corrects a STALE "i32/u32/u64 gap" note.**
+    The memory/index line claiming "ONLY matmul gap = i32/u32/u64 (odometer)" is STALE and cost a wasted
+    probe this turn: `rank2_u64_matmul` is ALREADY 4-row register-blocked (commit 69e37c68, mirrors the i64
+    kernel, with `rank2_u64_matmul_4row_block_matches_single_row_reference`), with `rank2_u64_any_orientation_matmul`
+    + `batched_rank2_u64_matmul`; u32 routes through it (widen→u64→narrow `as u32`, mod-2³² wrap preserved), i32
+    through the i64 kernel (narrow_i32). So EVERY matmul dtype now has a blocked/optimized kernel: f64 (B-pack
+    +microkernel), f32 (register microkernel), i64/u64 (4-row blocked), i32/u32 (route+narrow), complex64/128
+    (4-row blocked — SHIPPED this session), bf16/f16 (f32-accum). The matmul dtype-sibling frontier is fully
+    closed; do NOT re-chase the integer/unsigned tail.
   - **DTYPE-SIBLING + nn-FUSION VEINS EXHAUSTED (2026-06-22, SlateHarrier) — verification, DO-NOT re-audit.**
     After the complex matmul/gather/scatter-add wins, swept the rest of the indexing/structural/nn families
     for secondary-dtype kernels lagging their real siblings. ALL verified already-covered (no gap): bf16/f16
