@@ -2446,3 +2446,32 @@ So the domination set grows: sort/argsort/top_k, cumsum, contiguous gather, i64/
 QR, **and now the LU family (lu/solve/det/inv)**. Release-relevant: solve/det/inv are
 extremely common (linear systems, determinants, matrix inversion) — a large, broad
 Rust-over-JAX-CPU win wherever XLA falls off LAPACK onto its native factorization path.
+
+## 2026-06-22 - Frontier re-audit: no contained BENCHABLE perf lever remains; biggest legal gap (FFT pow2) filed as split-radix bead murmw.1 (CrimsonOtter/cc)
+
+Walked every documented loss looking for a lever I could implement AND validate under the
+current fleet load (30–84, concurrent franken* builds). Conclusion — all blocked:
+- **+fma-policy-gated (cntiy, maintainer call):** matmul/GEMM, exp/sin/log (bit-pinned),
+  conv, cholesky (dgemm-bound), softmax/attention, SIMD-poly transcendentals (2.2x WITH fma
+  / 0.79x WITHOUT). Cannot touch without the global-`+fma` or per-fn `target_feature`
+  decision.
+- **already dominated:** sort/argsort/top_k, cumsum (cheap-combiner scan), contiguous
+  gather, i64/u32 matmul, QR, lu/solve/det/inv (this cycle).
+- **einsum CLOSED:** verified `try_einsum2_matmul_general` (einsum.rs ~line 197) already
+  permutes interleaved batch/free/contracted multi-axis contractions into `[batch,M,K]·
+  [batch,K,N]` GEMM. The old 7r0ck "non-pre-aligned residual" is gone; only niche
+  diagonal/trace/single-operand-reduction (non-GEMM-shaped) odometer remains — not a lever.
+- **scatter-add:** parallel direct-write / atomic / histogram-prefix branches all regressed
+  (serial is optimal); needs a fundamentally different safe-parallel proof.
+- **FFT (biggest legal loss, ~19.4x on pow2 2048x256 c128):** intra-FFT SIMD is safe-Rust-
+  blocked (no shuffle/gather in std::simd); batch-level threading is UN-BENCHABLE under
+  fleet load (threading wins reverse under contention, [[project_threaded_eager_fusion]]);
+  the only single-thread, non-fma, algorithmic lever left is a lower-op-count radix
+  (split-radix/radix-4), but pow2 FFT digests are BIT-FROZEN goldens so it needs a
+  re-baseline. **Filed as `frankenjax-murmw.1`** with full spec (split-radix-4 pow2,
+  ~1.3-1.5x single-thread target, tolerance-verify-vs-DFT then re-baseline pow2 goldens,
+  idle-machine same-binary A/B, REVERT if <1.15x — Winograd-F(2,3) fragmentation risk).
+
+NET: the contained, benchable frontier is genuinely closed under current constraints. The
+next real FFT win is murmw.1 (needs an idle host + golden re-baseline); the next broad win
+is the cntiy +fma maintainer decision. No code lever was shippable+benchable this pass.
