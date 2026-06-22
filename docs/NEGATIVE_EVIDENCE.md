@@ -1901,3 +1901,27 @@ Rust-OVER-JAX domination surface remains narrow: only `sort` (4-5.5x, robust acr
 dtype/size) and large-n `cumsum` (JAX size cliff). Retry predicate / release note:
 do NOT present any "Nx faster" internal ratio as a JAX domination; the GEMM-routed
 ops (einsum, dot_general, conv-via-im2col) inherit matmul's fma-bound JAX loss.
+
+## 2026-06-22 - JAX scan SIZE CLIFF is family-wide (cumsum/cumprod/cummax) — corrects "cumprod/cummax near-parity" (CobaltForge/cc)
+
+Zero-build JAX-only scaling sweep (local venv, JAX 0.10.1 x64; ratios are
+machine-independent). The cumsum CPU size cliff GENERALIZES across the whole scan
+family — all three are ~linear to 2M then cliff ~8-10x at 4M:
+
+| op (JAX p50) | 1M | 2M | 4M | 2M/1M | 4M/1M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cumsum  | 1440us | 2929us | 14700us | 2.0x | 10.2x |
+| cumprod | 1405us | 2979us | 12003us | 2.1x | 8.5x |
+| cummax  | 1712us | 3731us | 16101us | 2.2x | 9.4x |
+
+CORRECTION: my earlier entry called cumprod/cummax "near-parity, NOT dominations"
+— that was SIZE-LIMITED (measured only at 1M, where JAX scan is still fine). At
+4M JAX's scan lowering cliffs for ALL of them, so cumprod/cummax are LIKELY
+large-n Rust dominations too (Rust scan is linear; cumsum-4M already confirmed
+Rust ~3.5-4.3x faster, eval 4.2ms vs JAX 14.7ms). The verified Rust-over-JAX
+domination set thus EXPANDS: `sort` (size-independent) + the entire SCAN family
+at large n (>=4M, JAX size cliff) — cumsum confirmed, cumprod/cummax predicted
+pending a Rust 4M measurement (blocked now: cold-rebuild forbidden + local target
+freed during the disk emergency; warm rch target is cross-machine-only). Retry
+predicate: when builds resume, measure Rust cumprod/cummax at 4M same-machine to
+confirm; the JAX cliff itself is established.
