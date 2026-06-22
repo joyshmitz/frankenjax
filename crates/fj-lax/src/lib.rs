@@ -6085,6 +6085,49 @@ mod tests {
     use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value, ValueError};
     use std::collections::BTreeMap;
 
+    // BOLD-VERIFY: split the maxpool deque cost by axis to decide if a "transpose the strided
+    // axis to contiguous" lever is worth it. Axis-0 reads down columns (stride = inner = 256,
+    // L2-bound); axis-1 reads contiguous. Window [15,1] isolates the axis-0 pass, [1,15] the axis-1.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_maxpool_axis_split() {
+        use std::time::Instant;
+        let (n, win) = (256usize, 15usize);
+        let out = n - win + 1;
+        let src: Vec<f64> = (0..n * n)
+            .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+            .collect();
+        let timeit = |wd: [usize; 2], od: [usize; 2]| {
+            let f = || {
+                super::reduce_window_separable_maxmin(
+                    &src,
+                    &[n, n],
+                    &wd,
+                    &[1, 1],
+                    &[0, 0],
+                    &od,
+                    true,
+                )
+            };
+            let _ = f();
+            let mut b = f64::MAX;
+            for _ in 0..30 {
+                let t = Instant::now();
+                let r = f();
+                b = b.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&r);
+            }
+            b * 1e3
+        };
+        let ax0 = timeit([win, 1], [out, n]); // strided axis-0 only
+        let ax1 = timeit([1, win], [n, out]); // contiguous axis-1 only
+        let both = timeit([win, win], [out, out]);
+        println!(
+            "BENCH maxpool axis-split 256x256/15: axis0-strided={ax0:.4}ms axis1-contig={ax1:.4}ms both={both:.4}ms  ax0/ax1={:.2}x",
+            ax0 / ax1
+        );
+    }
+
     // BOLD-VERIFY (HYPOTHESIS DISPROVEN, kept as routing guard): I suspected the rank-2 f64
     // maxpool dispatch hit the DIRECT O(out·window) loop for 15x15. It does NOT — the separable
     // deque check (`win_total > 2·win_sum`, lib.rs ~5531) precedes the rank-2 direct path, and

@@ -2415,6 +2415,15 @@ Reverted to serial. ALSO measured (less-contended run): serial 5185 = **0.68ms**
 (single-thread vectorized window reduction), not parallelism. Do NOT thread maxpool; SIMD is the only
 lever and it's hard (the deque is sequential; SIMD-direct loses for large windows). Bench kept as guard.
 
+TRANSPOSE LEVER RULED OUT (2026-06-22, SlateHarrier): hypothesized the strided axis-0 deque pass
+(reads down columns, stride=inner=256) was the bottleneck, fixable by transposing it to contiguous.
+MEASURED the per-axis split (`bench_maxpool_axis_split`, [15,1] vs [1,15]): axis0-strided **0.31-0.69ms**
+vs axis1-contig **0.24-0.66ms** = only **1.04-1.28x** — the strided axis is NOT dominant (256x256=512KB
+fits L2, so strided reads hit L2 not DRAM; modest penalty). A transpose-to-contiguous would save only
+~5-12% — not worth the transpose overhead. So the maxpool gap is the scalar deque's branchy per-element
+push/pop overhead vs XLA's SIMD, UNIFORM across both axes — confirming no contained lever (only the hard
+SIMD-windowed-max rewrite). maxpool is fully characterized: ~1.4x JAX, SIMD-gated, do not re-probe.
+
 ## 2026-06-22 - floor-chain JAX LOSS confirmed cross-machine; cross-machine map validation COMPLETE (CobaltForge/cc)
 
 Final completeness cross-confirm. Warm-target rch bench of committed
