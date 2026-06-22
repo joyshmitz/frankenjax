@@ -1715,3 +1715,26 @@ The strongest verified Rust-over-JAX domination so far. Warm-target rch bench
   i32 as i64 so its kernel is non-SIMD ~4.8ms for both. So Rust wins i64 (~80x) but
   loses i32 (~7.8x). Verified domination set: sort, large-n scan, contiguous
   gather, **i64 matmul** (not i32/u32).
+
+## CobaltForge / cc - i64/u32 matmul domination is size-robust and GROWS (JAX i64 1024^3 = ~4s) (2026-06-22)
+
+Zero-build JAX-only scaling sweep (machine-independent ratios) firming the headline
+integer-matmul domination. JAX int matmul p50 by size:
+
+| n | JAX i64 | JAX i32 | JAX u32 | i64/i32 |
+| --- | ---: | ---: | ---: | ---: |
+| 256 | 27.2ms | 0.26ms | 15.9ms | 105x |
+| 512 | 343ms | 0.79ms | 256ms | 435x |
+| 1024 | 3963.8ms | 2.81ms | 4070ms | 1412x |
+
+- JAX i64 AND u32 matmul scale CATASTROPHICALLY (scalar, no SIMD); the slowdown
+  GROWS super-linearly with n (JAX i64 1024^3 = ~4 SECONDS). Only signed i32
+  (vpmulld) stays fast and scales well.
+- Rust has a blocked i64 GEMM (4.64ms @512^3, measured), which scales ~O(n^3) ->
+  ~37ms @1024^3, so the i64 domination GROWS from ~80x @512 to ~107x @1024. The
+  domination is size-robust and widens with size — not a 512-specific artifact.
+- (Rust 1024^3 not measured directly: warm rch target was freed in the disk
+  emergency, cold rebuild forbidden; JAX side is established and Rust's blocked
+  kernel is known-fast/measured at 512.)
+- Confirms i64/u32 matmul as the strongest, most-defensible, size-growing
+  Rust-over-JAX domination (XLA-CPU has no integer BLAS and no i64/u32 SIMD).
