@@ -1985,3 +1985,18 @@ So scatter-add is a confirmed JAX loss on BOTH machines (3.2x same / 4.6x cross)
 not a local quirk — XLA's CPU scatter is genuinely well-optimized; the Rust
 eval_primitive boxing path loses regardless of host. (The dense-path lever to
 narrow it remains cod-a's scatter-bucketing work; see prior scatter entries.)
+
+## 2026-06-22 - maxpool/reduce_window JAX LOSS confirmed cross-machine (CobaltForge/cc)
+
+Completeness cross-confirm of the maxpool loss on an independent machine.
+Warm-target rch bench of committed `eval/maxpool_256x256_15x15_separable` on
+worker `hz2` = **847us** vs fresh local JAX `lax.reduce_window(max,VALID)`
+256x256/15x15 = **478us** = **~1.77x Rust LOSS** cross-machine. Same-machine was
+~2.3x (local Rust 1.13ms / local JAX 484us). Here the rch worker (847us) was
+FASTER than the local host (1.13ms) — opposite of the ovh-a cumsum/scatter runs —
+so the cross-machine ratio (1.77x) is SMALLER than same-machine (2.3x). Either
+way maxpool is a confirmed JAX loss on both hosts (XLA's CPU reduce_window is
+well-vectorized; the memory "deque 20x" is Rust-internal, not vs JAX). Net: the
+cross-machine validation now covers sort (win), cumsum (win), scatter (loss),
+maxpool (loss) — all hold in the correct direction across machines, with the
+ratio magnitude shifting by worker CPU speed (always report the host).
