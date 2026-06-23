@@ -1427,6 +1427,27 @@ pub(crate) fn f16_widen8(
     Simd::<f32, BF16_SIMD_L>::from_bits(is_zero.select(sign, normal_bits)).cast()
 }
 
+/// Like [`f16_widen8`] but returns the exact f32 (no widen to f64) — for f32-native half-float
+/// max/min reduce, where the extra f32→f64 cast is wasted (max/min of f16 is exact in f32). Same
+/// NORMAL/±0-only contract (caller filters inf/NaN/subnormal via [`f16_input_needs_scalar`]).
+#[inline]
+pub(crate) fn f16_widen8_f32(
+    h: std::simd::Simd<u16, BF16_SIMD_L>,
+) -> std::simd::Simd<f32, BF16_SIMD_L> {
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::num::{SimdFloat, SimdUint};
+    use std::simd::{Select, Simd};
+    type U32s = Simd<u32, BF16_SIMD_L>;
+    let h32 = h.cast::<u32>();
+    let sign = (h32 & U32s::splat(0x8000)) << U32s::splat(16);
+    let half_exp = (h32 & U32s::splat(0x7C00)) >> U32s::splat(10);
+    let f32_exp = (half_exp + U32s::splat(112)) << U32s::splat(23);
+    let f32_man = (h32 & U32s::splat(0x03FF)) << U32s::splat(13);
+    let normal_bits = sign | f32_exp | f32_man;
+    let is_zero = (h32 & U32s::splat(0x7FFF)).simd_eq(U32s::splat(0));
+    Simd::<f32, BF16_SIMD_L>::from_bits(is_zero.select(sign, normal_bits))
+}
+
 /// SIMD-widen a dense F16 bit slice to exact f64 (8-wide [`f16_widen8`] for normal/±0 chunks,
 /// scalar `Literal::F16Bits(_).as_f64()` for chunks with inf/NaN/subnormal — flagged by
 /// [`f16_input_needs_scalar`]). Bit-identical to the scalar widen per lane. Replaces the

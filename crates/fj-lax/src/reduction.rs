@@ -953,36 +953,60 @@ fn simd_minmax_inner_axis_reduce_bf16(
     acc.iter().map(|&v| f64::from(v)).collect()
 }
 
-/// F16 row-accumulate — like the bf16 one, but f16 decode (`f16_widen8`) only handles
-/// normals/zero, so chunks with subnormal/inf/NaN bits (`f16_input_needs_scalar`) and
-/// the tail fall back to the scalar `F16Bits.as_f64()` decode + `jax_minmax_scalar`,
-/// exactly as `fold_f16_axis_block` does — bit-identical, NaN propagated.
+/// F16 row-accumulate into an f32 running min/max — like the bf16 one, but f16 decode
+/// (`f16_widen8_f32`) only handles normals/zero, so chunks with subnormal/inf/NaN bits
+/// (`f16_input_needs_scalar`) and the tail fall back to a scalar `F16Bits.as_f64() as f32` decode
+/// (exact: f16 ⊂ f32). f16 max/min is exact in f32, so bit-identical to a f64-widening accumulate;
+/// f32x8 + no f64 cast replaces the prior f64x4-equivalent path.
 #[inline]
-fn simd_minmax_row_acc_f16(out: &mut [f64], inp: &[u16], is_max: bool) {
+fn simd_minmax_row_acc_f16_f32(out: &mut [f32], inp: &[u16], is_max: bool) {
     use std::simd::{Select, Simd, num::SimdFloat};
-    const L: usize = 8; // matches f16_widen8 / f16_input_needs_scalar lane count
+    const L: usize = 8; // matches f16_widen8_f32 / f16_input_needs_scalar lane count
+    let scalar_one = |cur: f32, bits: u16| -> f32 {
+        let bv = Literal::F16Bits(bits).as_f64().unwrap_or(0.0) as f32;
+        if cur.is_nan() || bv.is_nan() {
+            f32::NAN
+        } else if is_max {
+            cur.max(bv)
+        } else {
+            cur.min(bv)
+        }
+    };
     let mut oc = out.chunks_exact_mut(L);
     let mut ic = inp.chunks_exact(L);
     for (o, i) in oc.by_ref().zip(ic.by_ref()) {
         let u = Simd::<u16, L>::from_slice(i);
         if crate::arithmetic::f16_input_needs_scalar(u) {
             for (slot, &bits) in o.iter_mut().zip(i) {
-                *slot = jax_minmax_scalar(
-                    *slot,
-                    Literal::F16Bits(bits).as_f64().unwrap_or(0.0),
-                    is_max,
-                );
+                *slot = scalar_one(*slot, bits);
             }
         } else {
-            let b = crate::arithmetic::f16_widen8(u);
-            let a = Simd::<f64, L>::from_slice(o);
+            let b = crate::arithmetic::f16_widen8_f32(u);
+            let a = Simd::<f32, L>::from_slice(o);
             let m = if is_max { a.simd_max(b) } else { a.simd_min(b) };
             let nan = a.is_nan() | b.is_nan();
-            o.copy_from_slice(&nan.select(Simd::splat(f64::NAN), m).to_array());
+            o.copy_from_slice(&nan.select(Simd::splat(f32::NAN), m).to_array());
         }
     }
     for (o, &v) in oc.into_remainder().iter_mut().zip(ic.remainder()) {
-        *o = jax_minmax_scalar(*o, Literal::F16Bits(v).as_f64().unwrap_or(0.0), is_max);
+        *o = scalar_one(*o, v);
+    }
+}
+
+#[inline]
+fn simd_minmax_f16_accumulate_block(
+    out: &mut [f32],
+    values: &[u16],
+    base: usize,
+    reduce: usize,
+    inner: usize,
+    col0: usize,
+    is_max: bool,
+) {
+    let w = out.len();
+    for r in 0..reduce {
+        let start = base + r * inner + col0;
+        simd_minmax_row_acc_f16_f32(out, &values[start..start + w], is_max);
     }
 }
 
@@ -994,23 +1018,79 @@ fn simd_minmax_inner_axis_reduce_f16(
     inner: usize,
 ) -> Vec<f64> {
     let init = if is_max {
-        f64::NEG_INFINITY
+        f32::NEG_INFINITY
     } else {
-        f64::INFINITY
+        f32::INFINITY
     };
-    let mut result = vec![init; outer * inner];
-    for o in 0..outer {
-        let out_row = &mut result[o * inner..(o + 1) * inner];
-        let base = o * reduce * inner;
-        for r in 0..reduce {
-            simd_minmax_row_acc_f16(
+    // f32 accumulator (no f64 widen) + threaded — mirrors simd_minmax_inner_axis_reduce_bf16.
+    let mut acc = vec![init; outer * inner];
+    let total = values.len();
+    let want_threads = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+        crate::arithmetic::work_scaled_threads(total).min(16)
+    } else {
+        1
+    };
+    if want_threads <= 1 {
+        for o in 0..outer {
+            let out_row = &mut acc[o * inner..(o + 1) * inner];
+            simd_minmax_f16_accumulate_block(
                 out_row,
-                &values[base + r * inner..base + r * inner + inner],
+                values,
+                o * reduce * inner,
+                reduce,
+                inner,
+                0,
                 is_max,
             );
         }
+    } else if outer >= 2 {
+        let threads = want_threads.min(outer);
+        let per = outer.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [f32] = acc.as_mut_slice();
+            let mut o0 = 0usize;
+            while o0 < outer {
+                let cnt = per.min(outer - o0);
+                let (blk, tail) = rest.split_at_mut(cnt * inner);
+                rest = tail;
+                let base0 = o0;
+                o0 += cnt;
+                scope.spawn(move || {
+                    for oi in 0..cnt {
+                        let o = base0 + oi;
+                        let out_row = &mut blk[oi * inner..(oi + 1) * inner];
+                        simd_minmax_f16_accumulate_block(
+                            out_row,
+                            values,
+                            o * reduce * inner,
+                            reduce,
+                            inner,
+                            0,
+                            is_max,
+                        );
+                    }
+                });
+            }
+        });
+    } else {
+        let threads = want_threads.min(inner.max(1));
+        let per = inner.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [f32] = acc.as_mut_slice();
+            let mut c0 = 0usize;
+            while c0 < inner {
+                let w = per.min(inner - c0);
+                let (blk, tail) = rest.split_at_mut(w);
+                rest = tail;
+                let col0 = c0;
+                c0 += w;
+                scope.spawn(move || {
+                    simd_minmax_f16_accumulate_block(blk, values, 0, reduce, inner, col0, is_max);
+                });
+            }
+        });
     }
-    result
+    acc.iter().map(|&v| f64::from(v)).collect()
 }
 
 // ── inner>1 (leading/middle-axis) SUM/PROD for half floats ──────────────────
@@ -4302,15 +4382,29 @@ mod tests {
                 _ => 0,
             })
             .collect();
+        let f16_bits: Vec<u16> = d64
+            .iter()
+            .map(|&v| match Literal::from_f16_f64(v) {
+                Literal::F16Bits(b) => b,
+                _ => 0,
+            })
+            .collect();
         let shape = Shape {
             dims: vec![rows as u32, cols as u32],
         };
         let t64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), d64).unwrap());
         let t32 = Value::Tensor(TensorValue::new_f32_values(shape.clone(), d32).unwrap());
         let tbf16 = Value::Tensor(
-            TensorValue::new_half_float_values(DType::BF16, shape, bf16_bits).unwrap(),
+            TensorValue::new_half_float_values(DType::BF16, shape.clone(), bf16_bits).unwrap(),
         );
-        for (name, t) in [("f64", &t64), ("f32", &t32), ("bf16", &tbf16)] {
+        let tf16 =
+            Value::Tensor(TensorValue::new_half_float_values(DType::F16, shape, f16_bits).unwrap());
+        for (name, t) in [
+            ("f64", &t64),
+            ("f32", &t32),
+            ("bf16", &tbf16),
+            ("f16", &tf16),
+        ] {
             for ax in [0usize, 1usize] {
                 let p = BTreeMap::from([("axes".to_owned(), ax.to_string())]);
                 let run = || {

@@ -2604,9 +2604,17 @@ result is one of the bf16 inputs). FIX (mirror the f32 fix): widen bf16→f32 vi
 (`simd_minmax_row_acc_bf16_f32`, f32x8) + f32 accumulate + thread (outer≥2 by outer, outer==1 by inner
 column blocks), widen result to f64 once. **ax0 10.27→1.02ms = 10x faster** (now 2.7x vs JAX 0.378; remaining
 is BW — bf16 reads 32MB, JAX ~85 vs fj-lax ~31 GB/s). Bit-identical (bf16-max-in-f32 exact; output bf16 NaN
-canonical): reduce 137/0 + full lib 1592/0 + clippy clean. f16 is the SAME f64x4-widen pattern (bead
-`frankenjax-1jcys`, trickier IEEE widen). LESSON: half-float (bf16/f16) max/min reduce must widen to f32
-(16-bit-shift, exact) NOT f64 — the f64 path is 4-wide AND doubles read-less work for no precision benefit.
+canonical): reduce 137/0 + full lib 1592/0 + clippy clean. LESSON: half-float (bf16/f16) max/min reduce
+must widen to f32 (16-bit-shift, exact) NOT f64 — the f64 path is 4-wide AND doubles read-less work for no
+precision benefit.
+
+f16 sibling SHIPPED same turn (2026-06-23, `frankenjax-1jcys` closed): added `f16_widen8_f32` (returns the
+exact f32 before f16_widen8's `.cast()` to f64) + `simd_minmax_row_acc_f16_f32` (f32x8, subnormal/inf/NaN
+chunks + tail fall back to scalar `F16Bits.as_f64() as f32`, exact since f16⊂f32) + threaded inner reduce.
+**f16 max-reduce ax0 now 1.40ms** (3.6x vs JAX 0.387; was the identical f64x4 path bf16 measured at 27x→2.7x,
+so ~7x improvement — f16 before-number inferred from the bf16 sibling on the same shape, not separately
+captured). Slightly above bf16's 2.7x due to the per-chunk `f16_input_needs_scalar` branch. Bit-identical
+(reduce 137/0 + lib 1592/0). Half-float max/min reduce family now COMPLETE (f32+bf16+f16, ax0 native+threaded).
 
 ## 2026-06-23 - f32 leading-axis MAX/MIN-reduce 2.42x loss → near-parity (f32-native + threaded) (SlateHarrier)
 
