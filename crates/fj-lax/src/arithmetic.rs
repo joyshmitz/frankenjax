@@ -1268,6 +1268,29 @@ fn bf16_widen8(u: std::simd::Simd<u16, BF16_SIMD_L>) -> std::simd::Simd<f64, BF1
     Simd::<f32, BF16_SIMD_L>::from_bits(u.cast::<u32>() << Simd::splat(16u32)).cast()
 }
 
+/// SIMD-widen a dense BF16 bit slice to exact f64 (8-wide [`bf16_widen8`] + scalar tail).
+/// Bit-identical to `Literal::BF16Bits(_).as_f64()` per lane (the bitcast `(bits<<16)` and
+/// `f32→f64` are exact for all BF16 inputs incl inf/NaN/subnormal). Replaces a per-element
+/// scalar widen on the dense reduce_window/pooling f64 path (the ~30x-of-runtime bottleneck for
+/// bf16 pooling).
+pub(crate) fn widen_bf16_slice_to_f64(bits: &[u16]) -> Vec<f64> {
+    use std::simd::Simd;
+    let mut out = vec![0.0f64; bits.len()];
+    let n8 = bits.len() - bits.len() % BF16_SIMD_L;
+    let mut i = 0;
+    while i < n8 {
+        bf16_widen8(Simd::<u16, BF16_SIMD_L>::from_slice(
+            &bits[i..i + BF16_SIMD_L],
+        ))
+        .copy_to_slice(&mut out[i..i + BF16_SIMD_L]);
+        i += BF16_SIMD_L;
+    }
+    for (j, slot) in out.iter_mut().enumerate().skip(i) {
+        *slot = Literal::BF16Bits(bits[j]).as_f64().unwrap_or(0.0);
+    }
+    out
+}
+
 /// Round 8 f64 values to BF16 bits, replicating `Literal::from_bf16_f64` lane-wise:
 /// round-to-odd f64 -> f32 (`Literal::f64_to_f32_round_to_odd`) then RNE f32 -> BF16
 /// (`half::bf16::from_f32`). Callers must handle NaN-result chunks separately (the
@@ -1303,6 +1326,37 @@ fn bf16_round8(x: std::simd::Simd<f64, BF16_SIMD_L>) -> std::simd::Simd<u16, BF1
     let round_up = (rb_set & sticky).select(U32s::splat(1), U32s::splat(0));
     let normal = (b >> U32s::splat(16)) + round_up;
     nan.select(nan_res, normal).cast::<u16>()
+}
+
+/// SIMD-round a dense f64 slice to BF16 bits (8-wide [`bf16_round8`] + scalar tail). Bit-identical
+/// to `Literal::from_bf16_f64(_)` per lane; NaN chunks fall back to the scalar path (bf16_round8's
+/// SIMD NaN payload is IEEE-unspecified). Replaces the per-element scalar round on the bf16 pooling
+/// output (the bottleneck once the widen is SIMD'd).
+pub(crate) fn round_f64_slice_to_bf16(vals: &[f64]) -> Vec<u16> {
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+    let scalar = |v: f64| match Literal::from_bf16_f64(v) {
+        Literal::BF16Bits(b) => b,
+        _ => 0,
+    };
+    let mut out = vec![0u16; vals.len()];
+    let n8 = vals.len() - vals.len() % BF16_SIMD_L;
+    let mut i = 0;
+    while i < n8 {
+        let x = Simd::<f64, BF16_SIMD_L>::from_slice(&vals[i..i + BF16_SIMD_L]);
+        if x.is_nan().any() {
+            for (j, slot) in out[i..i + BF16_SIMD_L].iter_mut().enumerate() {
+                *slot = scalar(vals[i + j]);
+            }
+        } else {
+            bf16_round8(x).copy_to_slice(&mut out[i..i + BF16_SIMD_L]);
+        }
+        i += BF16_SIMD_L;
+    }
+    for (j, slot) in out.iter_mut().enumerate().skip(i) {
+        *slot = scalar(vals[j]);
+    }
+    out
 }
 
 #[inline]

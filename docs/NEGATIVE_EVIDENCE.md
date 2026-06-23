@@ -2521,6 +2521,17 @@ only a MODEST 2.4x win: bf16 maxpool 84→**34.6ms**, sumpool →**34.2ms** (vs 
 pool. Real parity needs SIMD bf16→f32 widening (a bit-shift `(bits as u32)<<16`, vectorizable) inline in
 a dedicated half kernel + f32/f64 accum — FILED as a bead. Kept the 2.4x (bit-identical, real) meanwhile.
 
+bf16 widen+round SIMD (2026-06-22, SlateHarrier): SIMD'd the bf16 widen (`widen_bf16_slice_to_f64` via
+`bf16_widen8`, in `reduce_window_dense_f64_view` — helps ALL bf16 reduce/pool callers) AND the output
+round (`round_f64_slice_to_bf16` via `bf16_round8`, NaN-chunk scalar fallback). Bit-identical (half_pool
+guard + lib 1591/0). bf16 pooling 34→**26ms** (~1.3x); the round SIMD gave ~0. ROOT BOTTLENECK is now the
+**51MB intermediate f64 materialization** (widen writes it, pool re-reads it) — JAX fuses with no
+intermediate, so even SIMD widen+round can't reach parity through a separate-pass widen. PARITY needs a
+DEDICATED bf16 kernel that widens bf16→f32 PER TAP inline (no f64 intermediate) — `qvkxp` updated. LESSON:
+"widen-to-f64 + reuse the f64 kernel" is bounded by the intermediate's memory traffic; fused per-tap
+widening is required to match XLA on narrow dtypes. Shipped the reusable SIMD widen/round helpers (real
+bit-identical general bf16-reduce speedup) meanwhile.
+
 ## 2026-06-22 - global avg/sum pooling (axis-reduce, NOT reduce_window) 4-7x JAX loss; threaded 1.51x (SlateHarrier)
 
 Global average pooling done as `jnp.mean/sum(x, axis=(1,2))` on NHWC is the Reduce primitive (not

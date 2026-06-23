@@ -3941,22 +3941,20 @@ fn reduce_window_dense_f64_view(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> 
         // path is bit-identical: same widen, same f64 accumulate order, same final
         // round (`reduce_window_literal_from_f64`). Half pooling (bf16/f16) is JAX's
         // common ML dtype and otherwise ran the slow generic path.
-        dt @ (fj_core::DType::BF16 | fj_core::DType::F16) => {
-            tensor.elements.as_half_float_slice().map(|s| {
-                Cow::Owned(
-                    s.iter()
-                        .map(|&u| {
-                            match dt {
-                                fj_core::DType::BF16 => fj_core::Literal::BF16Bits(u),
-                                _ => fj_core::Literal::F16Bits(u),
-                            }
-                            .as_f64()
-                            .unwrap_or(0.0)
-                        })
-                        .collect(),
-                )
-            })
-        }
+        // BF16 widens via SIMD (`widen_bf16_slice_to_f64`, bit-identical to the scalar
+        // `as_f64` lane-wise) — the scalar per-element widen was the ~30x bottleneck for bf16
+        // pooling. F16 stays scalar (its widen needs per-lane special-case handling).
+        fj_core::DType::BF16 => tensor
+            .elements
+            .as_half_float_slice()
+            .map(|s| Cow::Owned(crate::arithmetic::widen_bf16_slice_to_f64(s))),
+        fj_core::DType::F16 => tensor.elements.as_half_float_slice().map(|s| {
+            Cow::Owned(
+                s.iter()
+                    .map(|&u| fj_core::Literal::F16Bits(u).as_f64().unwrap_or(0.0))
+                    .collect(),
+            )
+        }),
         _ => None,
     }
 }
@@ -6365,13 +6363,19 @@ fn eval_reduce_window(
                 &out_dims_usize,
             )
         };
-        let bits: Vec<u16> = values
-            .iter()
-            .map(|&v| match reduce_window_literal_from_f64(output_dtype, v) {
-                fj_core::Literal::BF16Bits(b) | fj_core::Literal::F16Bits(b) => b,
-                _ => 0,
-            })
-            .collect();
+        // BF16 rounds via SIMD (`round_f64_slice_to_bf16`, bit-identical to from_bf16_f64); F16
+        // stays scalar. With the SIMD widen above, this removes the round bottleneck for bf16.
+        let bits: Vec<u16> = if output_dtype == fj_core::DType::BF16 {
+            crate::arithmetic::round_f64_slice_to_bf16(&values)
+        } else {
+            values
+                .iter()
+                .map(|&v| match reduce_window_literal_from_f64(output_dtype, v) {
+                    fj_core::Literal::BF16Bits(b) | fj_core::Literal::F16Bits(b) => b,
+                    _ => 0,
+                })
+                .collect()
+        };
         let shape = Shape {
             dims: out_dims.clone(),
         };
