@@ -2594,6 +2594,20 @@ GB/s). A *fast* gemv would have to SIMD across K — but a SIMD K-reduction REOR
 TOLERANCE + relaxing the internal bit-exact matmul guard for the gemv path — a maintainer/scope call.
 Downgraded `dedicated-gemv-h36uj` to very-low. LESSON: matmul's N-SIMD strategy makes N=1 (gemv) inherently
 scalar-K under bit-exactness; the gap is structural, not an oversight.
+
+## 2026-06-23 - bf16 MAX/MIN-reduce 27x loss → 2.7x (f64x4-widen → f32-native + threaded), 10x faster (SlateHarrier)
+
+bf16 max-reduce [4096,4096] was CATASTROPHIC: ax0 **10.27ms vs JAX 0.378 = 27x**, ax1 2.17 vs 0.167 = 13x.
+Root cause: `simd_minmax_inner_axis_reduce_bf16` accumulated via `simd_minmax_row_acc_bf16` which widened
+bf16→**f64** (f64x4, 4-wide) AND was single-threaded for outer=1 — but bf16 max/min is EXACT in f32 (the
+result is one of the bf16 inputs). FIX (mirror the f32 fix): widen bf16→f32 via the top-16-bit shift
+(`simd_minmax_row_acc_bf16_f32`, f32x8) + f32 accumulate + thread (outer≥2 by outer, outer==1 by inner
+column blocks), widen result to f64 once. **ax0 10.27→1.02ms = 10x faster** (now 2.7x vs JAX 0.378; remaining
+is BW — bf16 reads 32MB, JAX ~85 vs fj-lax ~31 GB/s). Bit-identical (bf16-max-in-f32 exact; output bf16 NaN
+canonical): reduce 137/0 + full lib 1592/0 + clippy clean. f16 is the SAME f64x4-widen pattern (bead
+`frankenjax-1jcys`, trickier IEEE widen). LESSON: half-float (bf16/f16) max/min reduce must widen to f32
+(16-bit-shift, exact) NOT f64 — the f64 path is 4-wide AND doubles read-less work for no precision benefit.
+
 ## 2026-06-23 - f32 leading-axis MAX/MIN-reduce 2.42x loss → near-parity (f32-native + threaded) (SlateHarrier)
 
 Probed max-reduce [4096,4096] (`bench_maxreduce2d`): f64 ax0 5.56 vs JAX 10.36 (**1.86x WIN**), f64 ax1
