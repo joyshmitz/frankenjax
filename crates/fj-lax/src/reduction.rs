@@ -4066,6 +4066,44 @@ mod tests {
     use fj_core::LiteralBuffer;
     use std::collections::BTreeMap;
 
+    // BOLD-VERIFY: cumsum [4096,1024] vs JAX (slow: f32 ax0 6.93 ax1 2.96ms; f64 ax0 20.85 ax1 18.28ms).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cumsum2d() {
+        use std::time::Instant;
+        let (rows, cols) = (4096usize, 1024usize);
+        let total = rows * cols;
+        let d64: Vec<f64> = (0..total)
+            .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+            .collect();
+        let d32: Vec<f32> = d64.iter().map(|&v| v as f32).collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let t64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), d64).unwrap());
+        let t32 = Value::Tensor(TensorValue::new_f32_values(shape, d32).unwrap());
+        for (name, t) in [("f64", &t64), ("f32", &t32)] {
+            for ax in [0usize, 1usize] {
+                let p = BTreeMap::from([("axis".to_owned(), ax.to_string())]);
+                let run = || {
+                    crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(t), &p).unwrap()
+                };
+                let _ = run();
+                let mut best = f64::MAX;
+                for _ in 0..15 {
+                    let s = Instant::now();
+                    let r = run();
+                    best = best.min(s.elapsed().as_secs_f64());
+                    std::hint::black_box(&r);
+                }
+                println!(
+                    "BENCH cumsum [4096,1024] {name} axis={ax}: fj-lax={:.4}ms",
+                    best * 1e3
+                );
+            }
+        }
+    }
+
     // BOLD-VERIFY: global-avg-pool = sum over spatial axes {1,2} of NHWC, keeping the contiguous
     // channel C (inner!=1 reduce path). Currently a scalar out_row[c]+=in_row[c] loop (reduction.rs
     // ~1656). Measure vs JAX (f32 0.14ms, f64 0.42ms).

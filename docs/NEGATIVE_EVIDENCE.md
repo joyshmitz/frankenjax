@@ -2547,6 +2547,26 @@ contiguous inner, bypassing the closure) is FILED as `simd-inner-axis-reduce-5y9
 bit-identical 1.51x (also speeds larger-batch middle-axis reduces) meanwhile. NOTE: threading the
 REDUCE DIM would break float-sum bit-identity (non-associative) — only `outer` is safe to split.
 
+## 2026-06-22 - 2D cumsum DOMINATES JAX 1.48-5.87x (XLA size-cliff extends to 2D both-axes) (SlateHarrier)
+
+Extended the known 1D-4M cumsum win to 2D. JAX CPU cumsum is genuinely slow (the size-cliff). Measured
+[4096,1024] (`bench_cumsum2d`, eval_primitive Cumsum vs fresh JAX 0.10.1):
+
+| shape/dtype | fj-lax | JAX | verdict |
+| --- | ---: | ---: | --- |
+| f64 axis=1 (trailing) | 3.11ms | 18.28ms | **5.87x WIN** |
+| f64 axis=0 (leading)  | 13-14ms | 20.85ms | **1.48x WIN** |
+| f32 axis=0 | ~1-3ms | 6.93ms | **2.0x WIN** |
+| f32 axis=1 | ~1-1.6ms | 2.96ms | **1.9x WIN** |
+
+fj-lax cumsum DOMINATES JAX on all 4 (contiguous-line blocked-prefix scan + leading-axis streaming;
+already threaded/optimized). The weakest is f64 axis=0 (1.48x, ~13ms). NO-SHIP: tried an explicit-SIMD
+f64 leading-cumsum (`scan_leading_axis_cumsum_f64_simd`) — SAME-BINARY A/B simd 15.11 vs generic 15.10ms
+= **1.00x** (the f64 leading scan is MEMORY-WRITE/dependency-bound, 33MB output, NOT closure-bound; the
+generic already autovectorizes). Reverted. The apparent "4x f64-vs-f32" was cross-invocation contention
+noise (f32 swings 0.97-3.38ms across runs). cumsum is a confirmed domination — do NOT re-probe for a
+fix; only the f64 leading case is near-parity-ish (1.48x) and it's BW-bound, not improvable on-host.
+
 ## 2026-06-22 - floor-chain JAX LOSS confirmed cross-machine; cross-machine map validation COMPLETE (CobaltForge/cc)
 
 Final completeness cross-confirm. Warm-target rch bench of committed
