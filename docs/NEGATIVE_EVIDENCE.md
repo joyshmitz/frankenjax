@@ -2584,6 +2584,16 @@ achievable. A dedicated gemv (SIMD row·x dot, threaded, contiguous A stream) co
 ascending-k dot would break the matmul goldens (must match the order OR confirm dot parity is tolerance).
 LOW priority (modest 1.27x, BW-bound, matmul-internals-fragile). Did not attempt (risk > 1.27x gain).
 
+ROOT-CAUSE (2026-06-22, SlateHarrier) — the 1.27x is the BIT-EXACT scalar-K cost at N=1, NOT a missing
+optimization. matmul_2d SIMDs across N (the NR columns) with ASCENDING-K scalar accumulation per output
+→ bit-identical to naive ijk (`matmul_2d_ikj_bit_identical_to_ijk`, and the packed+KC-blocked path is
+"BIT-FOR-BIT identical"). At N=1 (gemv) there is NO N axis to vectorize, so it runs scalar-K (the 38
+GB/s). A *fast* gemv would have to SIMD across K — but a SIMD K-reduction REORDERS the sum (lane-interleaved
+≠ ascending) and would break matmul's bit-exact `matches_generic` guards. So gemv is **bit-identity-blocked**
+(same class as the cummax-scan `jax_max` hazard): a clean fast gemv requires dot_general parity to be
+TOLERANCE + relaxing the internal bit-exact matmul guard for the gemv path — a maintainer/scope call.
+Downgraded `dedicated-gemv-h36uj` to very-low. LESSON: matmul's N-SIMD strategy makes N=1 (gemv) inherently
+scalar-K under bit-exactness; the gap is structural, not an oversight.
 ## 2026-06-22 - 2D batched sort DOMINATES JAX 43-74x (XLA bitonic catastrophe extends to per-row sort) (SlateHarrier)
 
 Extended the 1D-sort domination to 2D per-row sort (common: sorting logits/scores per batch row, beam
