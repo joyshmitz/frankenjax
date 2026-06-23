@@ -1654,14 +1654,51 @@ fn dense_f64_axis_reduce<T: Copy + Sync>(
                 *slot = acc;
             }
         } else {
-            for o in 0..outer {
-                let out_row = &mut result[o * inner..(o + 1) * inner];
-                for r in 0..reduce {
-                    let in_row = &values[(o * reduce + r) * inner..][..inner];
-                    for (slot, &v) in out_row.iter_mut().zip(in_row) {
-                        *slot = float_op(*slot, widen(v));
+            // Reduce over a MIDDLE block keeping a contiguous trailing `inner` (e.g. global
+            // avg/sum pool: sum H*W keeping channel C). Each `outer` slice is independent and
+            // its `reduce` rows are folded in ascending order, so threading across `outer` is
+            // bit-identical (per-outer order preserved; max/min order-independent). The inner
+            // `out_row[c] op= widen(in_row[c])` loop autovectorizes per monomorphization.
+            let work = outer.saturating_mul(reduce).saturating_mul(inner);
+            let threads = if outer >= 2 && work >= (1 << 18) {
+                std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(1)
+                    .min(16)
+                    .min(outer)
+            } else {
+                1
+            };
+            let fold_outer = |base: usize, chunk: &mut [f64]| {
+                let cnt = chunk.len() / inner;
+                for oi in 0..cnt {
+                    let o = base + oi;
+                    let out_row = &mut chunk[oi * inner..(oi + 1) * inner];
+                    for r in 0..reduce {
+                        let in_row = &values[(o * reduce + r) * inner..][..inner];
+                        for (slot, &v) in out_row.iter_mut().zip(in_row) {
+                            *slot = float_op(*slot, widen(v));
+                        }
                     }
                 }
+            };
+            if threads <= 1 {
+                fold_outer(0, result.as_mut_slice());
+            } else {
+                let per = outer.div_ceil(threads);
+                std::thread::scope(|scope| {
+                    let mut o0 = 0usize;
+                    let mut rest: &mut [f64] = result.as_mut_slice();
+                    while o0 < outer {
+                        let cnt = per.min(outer - o0);
+                        let (chunk, tail) = rest.split_at_mut(cnt * inner);
+                        rest = tail;
+                        let base = o0;
+                        let fold_ref = &fold_outer;
+                        scope.spawn(move || fold_ref(base, chunk));
+                        o0 += cnt;
+                    }
+                });
             }
         }
         return Some(result);
@@ -4028,6 +4065,76 @@ mod tests {
     use super::*;
     use fj_core::LiteralBuffer;
     use std::collections::BTreeMap;
+
+    // BOLD-VERIFY: global-avg-pool = sum over spatial axes {1,2} of NHWC, keeping the contiguous
+    // channel C (inner!=1 reduce path). Currently a scalar out_row[c]+=in_row[c] loop (reduction.rs
+    // ~1656). Measure vs JAX (f32 0.14ms, f64 0.42ms).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_global_avg_pool_reduce() {
+        use std::time::Instant;
+        let (nb, hw, c) = (8usize, 112usize, 64usize);
+        let total = nb * hw * hw * c;
+        let d64: Vec<f64> = (0..total)
+            .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+            .collect();
+        let d32: Vec<f32> = d64.iter().map(|&v| v as f32).collect();
+        let shape = Shape {
+            dims: vec![nb as u32, hw as u32, hw as u32, c as u32],
+        };
+        let t64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), d64).unwrap());
+        let t32 = Value::Tensor(TensorValue::new_f32_values(shape, d32).unwrap());
+        let mut p = BTreeMap::new();
+        p.insert("axes".to_string(), "1,2".to_string());
+        // Serial reference (the exact inner!=1 fold, single-thread) for a SAME-BINARY A/B vs the
+        // now-threaded eval_primitive path.
+        let (outer, reduce, inner) = (nb, hw * hw, c);
+        let vals64: Vec<f64> = (0..total)
+            .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+            .collect();
+        let serial_f64 = |v: &[f64]| {
+            let mut out = vec![0.0f64; outer * inner];
+            for o in 0..outer {
+                let out_row = &mut out[o * inner..(o + 1) * inner];
+                for r in 0..reduce {
+                    let in_row = &v[(o * reduce + r) * inner..][..inner];
+                    for (slot, &x) in out_row.iter_mut().zip(in_row) {
+                        *slot += x;
+                    }
+                }
+            }
+            out
+        };
+        let bench = |f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..20 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            b * 1e3
+        };
+        let sref = bench(&|| {
+            std::hint::black_box(serial_f64(&vals64));
+        });
+        let thr = bench(&|| {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&t64), &p)
+                    .unwrap(),
+            );
+        });
+        let thr32 = bench(&|| {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&t32), &p)
+                    .unwrap(),
+            );
+        });
+        println!(
+            "AB global-avg-pool axes12 [8,112,112,64]: f64 serial={sref:.4} threaded={thr:.4} ({:.2}x) | f32 threaded={thr32:.4} (JAX f64 0.42 f32 0.14)",
+            sref / thr
+        );
+    }
 
     #[test]
     fn threaded_leading_axis_reduce_bit_identical_to_serial() {

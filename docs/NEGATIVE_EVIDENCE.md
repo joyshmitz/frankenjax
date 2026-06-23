@@ -2521,6 +2521,21 @@ only a MODEST 2.4x win: bf16 maxpool 84→**34.6ms**, sumpool →**34.2ms** (vs 
 pool. Real parity needs SIMD bf16→f32 widening (a bit-shift `(bits as u32)<<16`, vectorizable) inline in
 a dedicated half kernel + f32/f64 accum — FILED as a bead. Kept the 2.4x (bit-identical, real) meanwhile.
 
+## 2026-06-22 - global avg/sum pooling (axis-reduce, NOT reduce_window) 4-7x JAX loss; threaded 1.51x (SlateHarrier)
+
+Global average pooling done as `jnp.mean/sum(x, axis=(1,2))` on NHWC is the Reduce primitive (not
+ReduceWindow): reduce middle axes {1,2} keeping the contiguous channel C — the `inner != 1`
+`contiguous_reduce_block` path (reduction.rs ~1656), which folded `out_row[c] op= widen(in_row[c])`
+SERIAL. Measured [8,112,112,64] sum axes{1,2}: fj-lax f64 1.70ms / f32 0.93ms vs JAX 0.42 / 0.14ms =
+~4x / ~6.7x LOSS. THREADED across `outer` (each outer slice independent, per-outer ascending-reduce
+order preserved → bit-identical for sum AND max/min; reduce tests 137/0 + full lib 1591/0). SAME-BINARY
+A/B: f64 serial 1.94 → threaded 1.29ms = **1.51x** (real, not contention noise). Residual: still ~3x
+(f64) / ~7x (f32) vs JAX — fj-lax ~40 GB/s vs JAX ~120-178 GB/s; the GENERIC closure inner loop
+(`&impl Fn float_op`) doesn't autovectorize. The gap-closer (explicit dtype-specialized SIMD across the
+contiguous inner, bypassing the closure) is FILED as `simd-inner-axis-reduce-5y9jg`. Shipped the
+bit-identical 1.51x (also speeds larger-batch middle-axis reduces) meanwhile. NOTE: threading the
+REDUCE DIM would break float-sum bit-identity (non-associative) — only `outer` is safe to split.
+
 ## 2026-06-22 - floor-chain JAX LOSS confirmed cross-machine; cross-machine map validation COMPLETE (CobaltForge/cc)
 
 Final completeness cross-confirm. Warm-target rch bench of committed
