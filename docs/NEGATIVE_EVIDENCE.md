@@ -2543,6 +2543,15 @@ Bit-identical (`half_pool_simd_channel_bit_identical` vs the real odometer, max+
 needs fused per-tap widening, not a materialized widen. f16 stays on the widen→f64 path (rarer). The whole
 common CNN pooling surface (max+avg, f64+f32+bf16, channel-last) now WINS/dominates JAX.
 
+f16 widen-SIMD (2026-06-22, SlateHarrier): SIMD'd the f16 widen too (`widen_f16_slice_to_f64` via
+`f16_widen8` + `f16_input_needs_scalar` scalar fallback for inf/NaN/subnormal; bit-identical, reduce_window
+44/0 + half_pool guard). But only **~1.13x** (f16 pooling 34→**30ms**, still ~10x JAX): f16 pooling is
+round/intermediate-bound and the f16 ROUND is still scalar (only bf16 got `round_f64_slice_to_bf16` SIMD).
+The real f16 win needs the FUSED kernel — filed `fused-f16-pool-pthzx` — which is HARDER than bf16: f16
+widen/round are IEEE (not bit-shifts), and the MAX bit-select hits a ±0 parity wall (max(-0,+0): JAX→+0,
+bit-select keeps -0) + NaN canonicalization. Shipped the clean widen helper (modest but bit-identical)
+meanwhile. LESSON: the bf16 fused win does NOT transfer cheaply to f16 — IEEE half's special-case parity
+(±0/NaN/subnormal) makes the fused kernel substantially more intricate; deferred as LOW priority (f16 rare).
 ## 2026-06-22 - global avg/sum pooling (axis-reduce, NOT reduce_window) 4-7x JAX loss; threaded 1.51x (SlateHarrier)
 
 Global average pooling done as `jnp.mean/sum(x, axis=(1,2))` on NHWC is the Reduce primitive (not

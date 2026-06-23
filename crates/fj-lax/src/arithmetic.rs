@@ -1427,6 +1427,32 @@ pub(crate) fn f16_widen8(
     Simd::<f32, BF16_SIMD_L>::from_bits(is_zero.select(sign, normal_bits)).cast()
 }
 
+/// SIMD-widen a dense F16 bit slice to exact f64 (8-wide [`f16_widen8`] for normal/±0 chunks,
+/// scalar `Literal::F16Bits(_).as_f64()` for chunks with inf/NaN/subnormal — flagged by
+/// [`f16_input_needs_scalar`]). Bit-identical to the scalar widen per lane. Replaces the
+/// per-element scalar f16 widen on the dense reduce_window/pooling f64 path.
+pub(crate) fn widen_f16_slice_to_f64(bits: &[u16]) -> Vec<f64> {
+    use std::simd::Simd;
+    let mut out = vec![0.0f64; bits.len()];
+    let n8 = bits.len() - bits.len() % BF16_SIMD_L;
+    let mut i = 0;
+    while i < n8 {
+        let h = Simd::<u16, BF16_SIMD_L>::from_slice(&bits[i..i + BF16_SIMD_L]);
+        if f16_input_needs_scalar(h) {
+            for (j, slot) in out[i..i + BF16_SIMD_L].iter_mut().enumerate() {
+                *slot = Literal::F16Bits(bits[i + j]).as_f64().unwrap_or(0.0);
+            }
+        } else {
+            f16_widen8(h).copy_to_slice(&mut out[i..i + BF16_SIMD_L]);
+        }
+        i += BF16_SIMD_L;
+    }
+    for (j, slot) in out.iter_mut().enumerate().skip(i) {
+        *slot = Literal::F16Bits(bits[j]).as_f64().unwrap_or(0.0);
+    }
+    out
+}
+
 /// Per-lane mask of f32 results whose `f32 → f16` round needs the SCALAR path (overflow to
 /// inf, partial-underflow to f16-subnormal, or NaN). Normal-range + exact-zero results round
 /// in SIMD. F16 max normal = 65504, min normal = 2^-14 ≈ 6.10352e-5.

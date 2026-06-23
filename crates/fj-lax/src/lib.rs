@@ -3948,13 +3948,10 @@ fn reduce_window_dense_f64_view(tensor: &TensorValue) -> Option<Cow<'_, [f64]>> 
             .elements
             .as_half_float_slice()
             .map(|s| Cow::Owned(crate::arithmetic::widen_bf16_slice_to_f64(s))),
-        fj_core::DType::F16 => tensor.elements.as_half_float_slice().map(|s| {
-            Cow::Owned(
-                s.iter()
-                    .map(|&u| fj_core::Literal::F16Bits(u).as_f64().unwrap_or(0.0))
-                    .collect(),
-            )
-        }),
+        fj_core::DType::F16 => tensor
+            .elements
+            .as_half_float_slice()
+            .map(|s| Cow::Owned(crate::arithmetic::widen_f16_slice_to_f64(s))),
         _ => None,
     }
 }
@@ -7835,6 +7832,46 @@ mod tests {
             }
             println!(
                 "BENCH bf16 {op}pool 112x112x64 3x3/s2: fj-lax={:.4}ms",
+                best * 1e3
+            );
+        }
+        // f16 (widen→f64 path with the SIMD f16 widen)
+        let f16_bits: Vec<u16> = (0..total)
+            .map(
+                |i| match Literal::from_f16_f64(((i % 9973) as f64) * 0.013 - 50.0) {
+                    Literal::F16Bits(b) => b,
+                    _ => 0,
+                },
+            )
+            .collect();
+        let t16 = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::F16,
+                Shape {
+                    dims: vec![nb as u32, hw as u32, hw as u32, c as u32],
+                },
+                f16_bits,
+            )
+            .unwrap(),
+        );
+        for op in ["max", "sum"] {
+            let p = rw_params(
+                op,
+                &format!("1,{win},{win},1"),
+                &format!("1,{stride},{stride},1"),
+            );
+            let run =
+                || eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&t16), &p).unwrap();
+            let _ = run();
+            let mut best = f64::MAX;
+            for _ in 0..15 {
+                let t = Instant::now();
+                let r = run();
+                best = best.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&r);
+            }
+            println!(
+                "BENCH f16 {op}pool 112x112x64 3x3/s2: fj-lax={:.4}ms",
                 best * 1e3
             );
         }
