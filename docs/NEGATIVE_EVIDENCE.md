@@ -2532,6 +2532,17 @@ DEDICATED bf16 kernel that widens bf16→f32 PER TAP inline (no f64 intermediate
 widening is required to match XLA on narrow dtypes. Shipped the reusable SIMD widen/round helpers (real
 bit-identical general bf16-reduce speedup) meanwhile.
 
+FUSED bf16 kernel SHIPPED → DOMINATION (2026-06-22, SlateHarrier, closes qvkxp): `reduce_window_simd_channel_bf16`
+widens bf16→f32 (max/min) / →f64 (sum) INLINE per tap (running max/min kept AS bf16 bits — exact since
+max/min of bf16 is bf16; sum accumulates f64, rounds once via `round_f64_slice_to_bf16`), threaded across
+output blocks. NO intermediate (reads only the half-size bf16 input). bf16 maxpool **26→0.70ms**, sumpool
+**26→0.93ms** vs JAX bf16 2.80/2.96ms = **~4.0x / ~3.2x WIN** (flipped from ~12x LOSS; ~30-37x Rust-side).
+Bit-identical (`half_pool_simd_channel_bit_identical` vs the real odometer, max+sum, finite+NaN; +
+`bench_fused_bf16_maxpool_proto` NaN check; full lib 1591/0). The 2 prior bf16 turns (widen/round helpers
++ the guard) were the foundation; the fused kernel is the payoff. CONFIRMS the lesson: narrow-dtype parity
+needs fused per-tap widening, not a materialized widen. f16 stays on the widen→f64 path (rarer). The whole
+common CNN pooling surface (max+avg, f64+f32+bf16, channel-last) now WINS/dominates JAX.
+
 ## 2026-06-22 - global avg/sum pooling (axis-reduce, NOT reduce_window) 4-7x JAX loss; threaded 1.51x (SlateHarrier)
 
 Global average pooling done as `jnp.mean/sum(x, axis=(1,2))` on NHWC is the Reduce primitive (not
