@@ -13891,6 +13891,42 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    // BOLD-VERIFY: 2D argmax along axis vs JAX (f32 ax0 3.0 ax1 1.09ms; f64 ax0 6.08 ax1 2.76ms).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_argmax2d() {
+        use std::time::Instant;
+        let (rows, cols) = (8192usize, 2048usize);
+        let total = rows * cols;
+        let d64: Vec<f64> = (0..total)
+            .map(|i| ((i % 99991) as f64) * 0.001 - 50.0)
+            .collect();
+        let d32: Vec<f32> = d64.iter().map(|&v| v as f32).collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let t64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), d64).unwrap());
+        let t32 = Value::Tensor(TensorValue::new_f32_values(shape, d32).unwrap());
+        for (name, t) in [("f64", &t64), ("f32", &t32)] {
+            for ax in [0usize, 1usize] {
+                let p = BTreeMap::from([("axis".to_owned(), ax.to_string())]);
+                let run = || eval_argmax(Primitive::Argmax, std::slice::from_ref(t), &p).unwrap();
+                let _ = run();
+                let mut best = f64::MAX;
+                for _ in 0..15 {
+                    let s = Instant::now();
+                    let r = run();
+                    best = best.min(s.elapsed().as_secs_f64());
+                    std::hint::black_box(&r);
+                }
+                println!(
+                    "BENCH argmax [8192,2048] {name} axis={ax}: fj-lax={:.4}ms",
+                    best * 1e3
+                );
+            }
+        }
+    }
+
     #[test]
     fn threaded_scalar_fill_bit_identical_to_serial() {
         // scalar broadcast / full at >= gate uses the threaded fill; compare to vec![v; n].

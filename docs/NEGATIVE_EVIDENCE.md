@@ -2558,6 +2558,18 @@ contiguous inner, bypassing the closure) is FILED as `simd-inner-axis-reduce-5y9
 bit-identical 1.51x (also speeds larger-batch middle-axis reduces) meanwhile. NOTE: threading the
 REDUCE DIM would break float-sum bit-identity (non-associative) — only `outer` is safe to split.
 
+## 2026-06-22 - 2D argmax is near-parity / mostly-optimized (1.04-1.67x); only f32-axis0 fixable (SlateHarrier)
+
+Probed 2D argmax [8192,2048] (`bench_argmax2d`): f64 ax0 6.34 vs JAX 6.08 (**1.04x ~parity**), f64 ax1
+3.69 vs 2.76 (**1.34x**), f32 ax0 4.46 vs 3.01 (**1.48x**), f32 ax1 1.82 vs 1.09 (**1.67x**). NOT a clean
+fixable loss: the TRAILING axis (ax1) already uses `arg_extreme_f{64,32}_contiguous_simd` (bead 43tr8)
++ threading, so its ~1.3-1.67x is INHERENT (JAX's argmax is just slightly faster). The LEADING axis
+(ax0) `arg_extreme_axis0_block` (~8063) is threaded but SCALAR per column (branchy sticky-NaN + is_nan +
+compare + conditional idx update — no SIMD across columns); f32 ax0 (1.48x) is the one fixable sub-case
+(f64 ax0 already ~parity). Filed `simd-argmax-axis0-9yw7e` (SIMD the column-inner loop with masked
+index+sticky-NaN tracking — intricate; argmax-SIMD is 43tr8's collision area; LOW priority). Did NOT
+attempt the intricate index+NaN SIMD this turn (modest gap, collision risk). Recorded for the map.
+
 ## 2026-06-22 - 2D cumsum DOMINATES JAX 1.48-5.87x (XLA size-cliff extends to 2D both-axes) (SlateHarrier)
 
 Extended the known 1D-4M cumsum win to 2D. JAX CPU cumsum is genuinely slow (the size-cliff). Measured
