@@ -4082,7 +4082,11 @@ mod tests {
         };
         let t64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), d64).unwrap());
         let t32 = Value::Tensor(TensorValue::new_f32_values(shape, d32).unwrap());
-        for (prim, pname) in [(Primitive::Cumsum, "cumsum"), (Primitive::Cummax, "cummax")] {
+        for (prim, pname) in [
+            (Primitive::Cumsum, "cumsum"),
+            (Primitive::Cummax, "cummax"),
+            (Primitive::Cumprod, "cumprod"),
+        ] {
             for (name, t) in [("f64", &t64), ("f32", &t32)] {
                 for ax in [0usize, 1usize] {
                     let p = BTreeMap::from([("axis".to_owned(), ax.to_string())]);

@@ -2618,6 +2618,12 @@ prefix scan. Filed `cummax-scan-max-cost-rekyb` (faster NaN-propagating max in t
 matching the total_cmp-fixed parity) — LOW priority (only f32-trailing is ~parity; jax_max is a parity
 hazard). Scan family (cumsum + cummax/cummin) is otherwise a confirmed XLA-size-cliff DOMINATION.
 
+cumprod 2D (SlateHarrier): JAX size-cliff-slow too (f64 ax0 20.93 ax1 15.69ms, f32 ax0 6.96 ax1 2.65ms).
+fj-lax cumprod [4096,1024]: f64 ax0 8.73 (**2.4x**), ax1 9.10 (**1.72x**), f32 ax0 1.22 (**5.7x**), ax1
+1.27ms (**2.08x**) — DOMINATES all. The FULL scan family (cumsum/cummax/cummin/cumprod, 1D+2D) dominates
+XLA-CPU (bitonic-free, threaded + blocked-prefix). NOTE: cumprod f64 ax1 (9.10ms) is ~3x slower than
+cumsum f64 ax1 (2.9ms) on the same path — a possible `*`-vs-`+` autovec/closure difference, still a
+1.72x WIN; not chased (already dominates). Scan family is fully mapped: all dominate, do NOT re-probe.
 ## 2026-06-22 - floor-chain JAX LOSS confirmed cross-machine; cross-machine map validation COMPLETE (CobaltForge/cc)
 
 Final completeness cross-confirm. Warm-target rch bench of committed
