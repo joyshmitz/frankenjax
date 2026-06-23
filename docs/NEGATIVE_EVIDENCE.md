@@ -2622,9 +2622,15 @@ detected `bv!=bv` — no mask array; masked index update). f32 ax0 argmax **4.46
 3.01 (was 1.48x loss; ~1.45x Rust-side). Bit-identical: `argmax_axis0_f32_simd_matches_scalar` guard
 (NaN/ties/±0/single+threaded, max+min) + full lib 1592/0. KEY STRUCTURAL LESSON: the SIMD MUST be
 rows-OUTER/cols-inner — a cols-OUTER block (re-reads every row per 8-col block) measured **0.57x SLOWER**;
-the rows-outer/cols-SIMD (best arrays cache-resident) is **1.77x** faster than the scalar block. f64 axis0
-(already ~parity) + the trailing-axis (already 43tr8-SIMD'd, inherent) remain lower-priority on 9yw7e.
+the rows-outer/cols-SIMD (best arrays cache-resident) is **1.77x** faster than the scalar block.
 
+f64 axis0 SIMD NO-SHIP (2026-06-23, SlateHarrier): tried the f64 sibling (f64x8/i64x8). SAME-BINARY A/B:
+f64 scalar 8.63ms vs SIMD **17.46ms = 0.49x** (2x SLOWER). Unlike f32 (f32x8/i32x8 = 256-bit lanes, 1.78x
+faster), f64 needs f64x8 (512-bit) + i64x8 (512-bit) = double the register pressure → spills → slower than
+the autovectorized scalar. REVERTED; f64 ax0 stays scalar (already ~parity 1.04x vs JAX). LESSON: the
+index+value+mask SIMD argmax pays off at 32-bit lane width (f32/i32) but REGRESSES at 64-bit (f64/i64) —
+register pressure flips it. 9yw7e effectively DONE: f32-ax0 fixed→parity, f64-ax0 SIMD-regresses (scalar
+kept), ax1 inherent (43tr8). Do NOT re-attempt f64 axis0 SIMD.
 ## 2026-06-22 - 2D cumsum DOMINATES JAX 1.48-5.87x (XLA size-cliff extends to 2D both-axes) (SlateHarrier)
 
 Extended the known 1D-4M cumsum win to 2D. JAX CPU cumsum is genuinely slow (the size-cliff). Measured

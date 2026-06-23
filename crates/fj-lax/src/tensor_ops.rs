@@ -8426,10 +8426,9 @@ fn extremum_along_axis(
             ));
         }
         if axis == 0 && outer_count > 1 {
-            // Leading-axis (argmax over axis 0 — the batch/strided case): the serial
-            // path scans each output column at stride `axis_stride == outer_count`
-            // (cache-hostile) one column at a time. Stream k-outer/column-inner and
-            // thread over the independent columns instead — bit-identical.
+            // Leading-axis (argmax over axis 0): stream k-outer/column-inner, threaded over
+            // independent columns — bit-identical. f64 stays SCALAR (autovectorized): a SIMD
+            // f64x8/i64x8 axis0 measured 0.49x (register pressure) and f64 ax0 is already ~parity.
             let idx = parallel_arg_extreme_axis0(values, axis_dim, outer_count, find_max, |x| x);
             return Ok(Value::Tensor(
                 TensorValue::new_i64_values(result_shape, idx).map_err(EvalError::InvalidTensor)?,
@@ -14056,9 +14055,7 @@ mod tests {
                 }
                 for find_max in [true, false] {
                     let scalar =
-                        super::parallel_arg_extreme_axis0(&v, rows, cols, find_max, |x: f32| {
-                            f64::from(x)
-                        });
+                        super::parallel_arg_extreme_axis0(&v, rows, cols, find_max, f64::from);
                     let simd = super::parallel_arg_extreme_axis0_f32_simd(&v, rows, cols, find_max);
                     assert_eq!(
                         scalar, simd,
@@ -14183,6 +14180,8 @@ mod tests {
             "AB argmax-axis0 f32 [8192,2048] (1 col-block, single-thread): scalar={scal:.4}ms simd={simd:.4}ms ({:.2}x)",
             scal / simd
         );
+        // NOTE: an f64x8/i64x8 axis0 SIMD was measured 0.49x (register pressure) — REVERTED;
+        // f64 leading-axis argmax stays on the autovectorized scalar (already ~parity with JAX).
     }
 
     // BOLD-VERIFY: 2D argmax along axis vs JAX (f32 ax0 3.0 ax1 1.09ms; f64 ax0 6.08 ax1 2.76ms).
