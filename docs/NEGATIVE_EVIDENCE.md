@@ -2567,6 +2567,16 @@ contiguous inner, bypassing the closure) is FILED as `simd-inner-axis-reduce-5y9
 bit-identical 1.51x (also speeds larger-batch middle-axis reduces) meanwhile. NOTE: threading the
 REDUCE DIM would break float-sum bit-identity (non-associative) — only `outer` is safe to split.
 
+## 2026-06-22 - 2D batched sort DOMINATES JAX 43-74x (XLA bitonic catastrophe extends to per-row sort) (SlateHarrier)
+
+Extended the 1D-sort domination to 2D per-row sort (common: sorting logits/scores per batch row, beam
+search, top-k prep). JAX CPU `jnp.sort(axis=1)` on [4096,4096] is CATASTROPHIC: **f32 2195ms, f64 2223ms**
+(2.2 SECONDS — XLA's bitonic sort network is O(n log²n) per row × 4096 rows). fj-lax (`bench_sort2d`,
+radix/pdqsort threaded across rows via `for_each_contiguous_sort_slice`): **f64 51.78ms (42.9x WIN),
+f32 29.77ms (73.7x WIN)**. Already a domination (threaded + fast per-row sort) — NO fix needed; recorded
+for the competitive map. The sort family (1D + 2D, sort/argsort/top_k/median) is fj-lax's strongest,
+largest, most consistent domination over XLA-CPU.
+
 ## 2026-06-22 - 2D argmax is near-parity / mostly-optimized (1.04-1.67x); only f32-axis0 fixable (SlateHarrier)
 
 Probed 2D argmax [8192,2048] (`bench_argmax2d`): f64 ax0 6.34 vs JAX 6.08 (**1.04x ~parity**), f64 ax1

@@ -13891,6 +13891,41 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    // BOLD-VERIFY: 2D per-row sort vs JAX (CATASTROPHICALLY slow: f32/f64 [4096,4096] ax1 ~2200ms,
+    // XLA bitonic network). fj-lax radix/pdqsort threaded across rows should DOMINATE hugely.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_sort2d() {
+        use std::time::Instant;
+        let (rows, cols) = (4096usize, 4096usize);
+        let total = rows * cols;
+        let d64: Vec<f64> = (0..total)
+            .map(|i| ((i * 2_654_435_761usize) % 1_000_003) as f64)
+            .collect();
+        let d32: Vec<f32> = d64.iter().map(|&v| v as f32).collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let t64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), d64).unwrap());
+        let t32 = Value::Tensor(TensorValue::new_f32_values(shape, d32).unwrap());
+        for (name, t) in [("f64", &t64), ("f32", &t32)] {
+            let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+            let run = || eval_sort(Primitive::Sort, std::slice::from_ref(t), &p).unwrap();
+            let _ = run();
+            let mut best = f64::MAX;
+            for _ in 0..6 {
+                let s = Instant::now();
+                let r = run();
+                best = best.min(s.elapsed().as_secs_f64());
+                std::hint::black_box(&r);
+            }
+            println!(
+                "BENCH sort [4096,4096] {name} axis=1: fj-lax={:.4}ms (JAX ~2200ms)",
+                best * 1e3
+            );
+        }
+    }
+
     // BOLD-VERIFY: 2D argmax along axis vs JAX (f32 ax0 3.0 ax1 1.09ms; f64 ax0 6.08 ax1 2.76ms).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
