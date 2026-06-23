@@ -2679,6 +2679,32 @@ pub fn kron(a: &[f64], a_m: usize, a_n: usize, b: &[f64], b_m: usize, b_n: usize
 mod tests {
     use super::*;
 
+    // BOLD-VERIFY: gemv (matrix-vector, NR=1) vs JAX (BW-bound: f32 1.20ms, f64 2.63ms ~50GB/s).
+    // matmul_2d's microkernel is tuned for matrix-matrix; at N=1 it may be underutilized.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_gemv() {
+        use std::time::Instant;
+        let (m, k) = (4096usize, 4096usize);
+        let a: Vec<f64> = (0..m * k)
+            .map(|i| ((i % 9973) as f64) * 0.001 - 5.0)
+            .collect();
+        let x: Vec<f64> = (0..k).map(|i| ((i % 997) as f64) * 0.01 - 5.0).collect();
+        let run = || matmul_2d(&a, m, k, &x, 1);
+        let _ = run();
+        let mut best = f64::MAX;
+        for _ in 0..20 {
+            let s = Instant::now();
+            let r = run();
+            best = best.min(s.elapsed().as_secs_f64());
+            std::hint::black_box(&r);
+        }
+        println!(
+            "BENCH gemv [4096,4096]@[4096] f64: fj-lax matmul_2d={:.4}ms (JAX 2.63ms)",
+            best * 1e3
+        );
+    }
+
     #[test]
     fn tensordot_matrix_mul() {
         // 2x3 @ 3x2 = 2x2 via tensordot

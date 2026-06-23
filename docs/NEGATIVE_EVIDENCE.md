@@ -2573,6 +2573,17 @@ the sum to use more BW. Not improvable on-host while bit-identical. Lesson (rein
 finding): these contiguous `out[c] op= in[c]` reduce/scan loops DO autovectorize — explicit SIMD ≈ 1.0x;
 don't re-attempt SIMD on them (the gap, if any, is BW/parallelism, not vectorization).
 
+## 2026-06-22 - gemv (matrix-vector) near-parity ~1.27x; BW-bound, NOT fma-gated (SlateHarrier)
+
+Probed gemv [4096,4096]@[4096] (`bench_gemv`): fj-lax `matmul_2d(A,m,k,x,1)` = **3.35ms (38 GB/s)** vs
+JAX **2.63ms (49 GB/s)** = ~1.27x loss. BOTH BW-bound (read A=128MB once). Notable: gemv is NOT fma-gated
+(unlike matmul — it's bandwidth-limited, fma throughput is irrelevant), so it's a legit non-`cntiy` lever.
+matmul_2d handles N=1 reasonably (38 GB/s, not catastrophic), but JAX's 49 GB/s shows ~parity is
+achievable. A dedicated gemv (SIMD row·x dot, threaded, contiguous A stream) could close it — filed
+`dedicated-gemv-h36uj` — but HAZARD: matmul_2d accumulates each k-sum in KC-blocked order; a simple
+ascending-k dot would break the matmul goldens (must match the order OR confirm dot parity is tolerance).
+LOW priority (modest 1.27x, BW-bound, matmul-internals-fragile). Did not attempt (risk > 1.27x gain).
+
 ## 2026-06-22 - 2D batched sort DOMINATES JAX 43-74x (XLA bitonic catastrophe extends to per-row sort) (SlateHarrier)
 
 Extended the 1D-sort domination to 2D per-row sort (common: sorting logits/scores per batch row, beam
