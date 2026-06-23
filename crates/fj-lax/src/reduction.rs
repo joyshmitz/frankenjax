@@ -4082,24 +4082,24 @@ mod tests {
         };
         let t64 = Value::Tensor(TensorValue::new_f64_values(shape.clone(), d64).unwrap());
         let t32 = Value::Tensor(TensorValue::new_f32_values(shape, d32).unwrap());
-        for (name, t) in [("f64", &t64), ("f32", &t32)] {
-            for ax in [0usize, 1usize] {
-                let p = BTreeMap::from([("axis".to_owned(), ax.to_string())]);
-                let run = || {
-                    crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(t), &p).unwrap()
-                };
-                let _ = run();
-                let mut best = f64::MAX;
-                for _ in 0..15 {
-                    let s = Instant::now();
-                    let r = run();
-                    best = best.min(s.elapsed().as_secs_f64());
-                    std::hint::black_box(&r);
+        for (prim, pname) in [(Primitive::Cumsum, "cumsum"), (Primitive::Cummax, "cummax")] {
+            for (name, t) in [("f64", &t64), ("f32", &t32)] {
+                for ax in [0usize, 1usize] {
+                    let p = BTreeMap::from([("axis".to_owned(), ax.to_string())]);
+                    let run = || crate::eval_primitive(prim, std::slice::from_ref(t), &p).unwrap();
+                    let _ = run();
+                    let mut best = f64::MAX;
+                    for _ in 0..15 {
+                        let s = Instant::now();
+                        let r = run();
+                        best = best.min(s.elapsed().as_secs_f64());
+                        std::hint::black_box(&r);
+                    }
+                    println!(
+                        "BENCH {pname} [4096,1024] {name} axis={ax}: fj-lax={:.4}ms",
+                        best * 1e3
+                    );
                 }
-                println!(
-                    "BENCH cumsum [4096,1024] {name} axis={ax}: fj-lax={:.4}ms",
-                    best * 1e3
-                );
             }
         }
     }

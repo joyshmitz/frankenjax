@@ -2567,6 +2567,15 @@ generic already autovectorizes). Reverted. The apparent "4x f64-vs-f32" was cros
 noise (f32 swings 0.97-3.38ms across runs). cumsum is a confirmed domination — do NOT re-probe for a
 fix; only the f64 leading case is near-parity-ish (1.48x) and it's BW-bound, not improvable on-host.
 
+cummax 2D (SlateHarrier): JAX also slow (size-cliff): f64 ax0 22.22 ax1 17.06ms, f32 ax0 6.42 ax1 3.18ms.
+fj-lax cummax [4096,1024]: f64 ax0 11.12 (**2.0x WIN**), f64 ax1 10.78 (**1.58x**), f32 ax0 1.33 (**4.8x**),
+f32 ax1 3.24ms (**~PARITY 0.98x** — the ONE scan-family non-win). cummax TRAILING is ~3.7x slower than
+cumsum trailing on the SAME threaded `scan_contiguous_lines` path — the gap is the per-element float_op:
+cumsum `+` (cheap/autovec) vs `jax_max_f64` (NaN-aware ordering ~40ns/op) in the sequential per-line
+prefix scan. Filed `cummax-scan-max-cost-rekyb` (faster NaN-propagating max in the cummax/cummin scan,
+matching the total_cmp-fixed parity) — LOW priority (only f32-trailing is ~parity; jax_max is a parity
+hazard). Scan family (cumsum + cummax/cummin) is otherwise a confirmed XLA-size-cliff DOMINATION.
+
 ## 2026-06-22 - floor-chain JAX LOSS confirmed cross-machine; cross-machine map validation COMPLETE (CobaltForge/cc)
 
 Final completeness cross-confirm. Warm-target rch bench of committed
