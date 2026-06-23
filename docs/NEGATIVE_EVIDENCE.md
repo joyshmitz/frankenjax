@@ -2609,6 +2609,14 @@ clean. Also speeds min + the outer≥2 (global-pool-style max) case. NOTE: f64 a
 agent, NOT a regression — f64 path untouched, tests pass). LESSON (3rd instance): max/min reduce/pool on
 f32 must accumulate NATIVE f32 — f64-widening halves SIMD width for no precision benefit.
 
+ax1 (TRAILING) max-reduce is BW-bound — NOT the NaN check (2026-06-23, SlateHarrier): the per-row reducer
+`simd_reduce_minmax_f{32,64}` is already f32-native + threaded; f32 ax1 ~1.3ms vs JAX 0.65 (~2x). Hypothesis:
+the per-chunk horizontal `v.is_nan().any()` (~256/row) was the overhead. Changed it to a SIMD nan-MASK
+accumulate (one `.any()` at the end — strictly fewer ops, bit-identical, reduce 137/0 + lib 1592/0). MEASURED
+~0 gain (1.31→1.23ms, within contended noise): ax1 is MEMORY-BW-bound (49 vs JAX 98 GB/s), not `.any()`-bound.
+Kept the cleaner never-worse micro-opt but it is NOT a win. ax1 ~2x is BW-utilization (XLA gets 2x the
+bandwidth on the per-row reduce) — not fixable on-host while bit-identical. Do NOT re-chase ax1 max-reduce.
+
 ## 2026-06-22 - 2D batched sort DOMINATES JAX 43-74x (XLA bitonic catastrophe extends to per-row sort) (SlateHarrier)
 
 Extended the 1D-sort domination to 2D per-row sort (common: sorting logits/scores per batch row, beam

@@ -134,12 +134,13 @@ fn simd_reduce_minmax_f64(values: &[f64], is_max: bool) -> f64 {
     };
 
     let mut vacc = Simd::<f64, LANES>::splat(init);
-    let mut any_nan = false;
+    // SIMD-mask NaN accumulate (one `.any()` at the end) — see simd_reduce_minmax_f32. Bit-identical.
+    let mut nan_acc = vacc.is_nan();
     let chunks = values.chunks_exact(LANES);
     let tail = chunks.remainder();
     for chunk in chunks {
         let v = Simd::<f64, LANES>::from_slice(chunk);
-        any_nan |= v.is_nan().any();
+        nan_acc |= v.is_nan();
         vacc = if is_max {
             vacc.simd_max(v)
         } else {
@@ -148,6 +149,7 @@ fn simd_reduce_minmax_f64(values: &[f64], is_max: bool) -> f64 {
     }
     // Horizontal combine with scalar f64::max/min (vacc holds no NaN: simd_max/min
     // ignore them).
+    let mut any_nan = nan_acc.any();
     let mut m = init;
     for &lane in vacc.to_array().iter() {
         m = if is_max { m.max(lane) } else { m.min(lane) };
@@ -189,18 +191,21 @@ fn simd_reduce_minmax_f32(values: &[f32], is_max: bool) -> f32 {
     };
 
     let mut vacc = Simd::<f32, LANES>::splat(init);
-    let mut any_nan = false;
+    // Accumulate NaN detection as a SIMD MASK (one `.any()` at the end) instead of a horizontal
+    // `.any()` per chunk — the per-chunk reduction was ~half the per-row cost. Bit-identical.
+    let mut nan_acc = vacc.is_nan(); // all-false (init is finite)
     let chunks = values.chunks_exact(LANES);
     let tail = chunks.remainder();
     for chunk in chunks {
         let v = Simd::<f32, LANES>::from_slice(chunk);
-        any_nan |= v.is_nan().any();
+        nan_acc |= v.is_nan();
         vacc = if is_max {
             vacc.simd_max(v)
         } else {
             vacc.simd_min(v)
         };
     }
+    let mut any_nan = nan_acc.any();
     let mut m = init;
     for &lane in vacc.to_array().iter() {
         m = if is_max { m.max(lane) } else { m.min(lane) };
