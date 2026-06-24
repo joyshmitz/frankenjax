@@ -1569,7 +1569,13 @@ fn batch_butterfly_block(
 /// butterfly loop, so the result is bit-identical to the per-row path. Shared by the
 /// full-complex (`vectorized_pow2_block`) and real (`vectorized_rfft_pow2_block`) SoA
 /// kernels.
-fn soa_radix2_butterfly_stages(plan: &Radix2Plan, w: usize, n: usize, re: &mut [f64], im: &mut [f64]) {
+fn soa_radix2_butterfly_stages(
+    plan: &Radix2Plan,
+    w: usize,
+    n: usize,
+    re: &mut [f64],
+    im: &mut [f64],
+) {
     let mut twiddle_base = 0usize;
     let mut len = 2usize;
     while len <= n {
@@ -1661,7 +1667,7 @@ fn vectorized_pow2_block(
 /// True for n = 4^k (k >= 1): a pure power of four, eligible for the radix-4 SoA kernel.
 #[cfg(test)]
 fn is_power_of_four(n: usize) -> bool {
-    n.is_power_of_two() && n.trailing_zeros() % 2 == 0
+    n.is_power_of_two() && n.trailing_zeros().is_multiple_of(2)
 }
 
 /// Base-4 digit-reversal permutation for n = 4^k (the radix-4 analogue of bit-reversal).
@@ -1730,7 +1736,13 @@ impl Radix4Plan {
 /// cost per the `profile_soa_pow2_phases` measurement (butterflies were 57% of the kernel).
 /// Tolerance-equal (not bit-identical) to the radix-2 path: a different, fewer-op schedule.
 #[cfg(test)]
-fn soa_radix4_butterfly_stages(plan: &Radix4Plan, w: usize, n: usize, re: &mut [f64], im: &mut [f64]) {
+fn soa_radix4_butterfly_stages(
+    plan: &Radix4Plan,
+    w: usize,
+    n: usize,
+    re: &mut [f64],
+    im: &mut [f64],
+) {
     let inv = plan.inverse;
     let mut tw_base = 0usize;
     let mut len = 4usize;
@@ -3229,7 +3241,13 @@ mod tests {
             let mut scr = Vec::new();
             let t0 = std::time::Instant::now();
             for b in 0..rows {
-                mixed_radix_into(&elements[b * n..b * n + n], &roots, false, &mut ob, &mut scr);
+                mixed_radix_into(
+                    &elements[b * n..b * n + n],
+                    &roots,
+                    false,
+                    &mut ob,
+                    &mut scr,
+                );
                 out[b * n..b * n + n].copy_from_slice(&ob);
             }
             let dt = t0.elapsed().as_nanos() as u64;
@@ -3237,7 +3255,8 @@ mod tests {
         };
         let run_new = || -> (u64, u64) {
             let t0 = std::time::Instant::now();
-            let out = transform_batches_mixed_radix_iterative_soa(&elements, n, rows, false, &roots);
+            let out =
+                transform_batches_mixed_radix_iterative_soa(&elements, n, rows, false, &roots);
             let dt = t0.elapsed().as_nanos() as u64;
             (dt, out[0].0.to_bits() ^ out[rows * n / 2].1.to_bits())
         };
@@ -3295,7 +3314,13 @@ mod tests {
             let t0 = std::time::Instant::now();
             let roots = precompute_twiddles(n, false);
             for b in 0..rows {
-                mixed_radix_into(&elements[b * n..b * n + n], &roots, false, &mut ob, &mut scr);
+                mixed_radix_into(
+                    &elements[b * n..b * n + n],
+                    &roots,
+                    false,
+                    &mut ob,
+                    &mut scr,
+                );
                 out[b * n..b * n + n].copy_from_slice(&ob);
             }
             let dt = t0.elapsed().as_nanos() as u64;
@@ -3314,7 +3339,13 @@ mod tests {
             let mut scr = Vec::new();
             let bl = transform_batches_bluestein_vectorized(&bplan, &elements, n, rows);
             for b in [0usize, 1, rows / 2, rows - 1] {
-                mixed_radix_into(&elements[b * n..b * n + n], &roots, false, &mut ob, &mut scr);
+                mixed_radix_into(
+                    &elements[b * n..b * n + n],
+                    &roots,
+                    false,
+                    &mut ob,
+                    &mut scr,
+                );
                 for k in 0..n {
                     let (a, c) = (ob[k], bl[b * n + k]);
                     assert!(
@@ -3421,7 +3452,12 @@ mod tests {
                 let plan = Radix4Plan::new(n, inverse);
                 let w = 8usize;
                 let elements: Vec<(f64, f64)> = (0..w * n)
-                    .map(|i| ((i as f64 * 0.017).sin() - 0.2, (i as f64 * 0.029).cos() * 0.6))
+                    .map(|i| {
+                        (
+                            (i as f64 * 0.017).sin() - 0.2,
+                            (i as f64 * 0.029).cos() * 0.6,
+                        )
+                    })
                     .collect();
                 let mut re = vec![0.0f64; w * n];
                 let mut im = vec![0.0f64; w * n];
@@ -3671,7 +3707,9 @@ mod tests {
     /// (7/11/13) factors and pure odd-prime-powers, both directions.
     #[test]
     fn iterative_soa_specialized_matches_dft_oracle() {
-        for &n in &[6usize, 10, 12, 14, 15, 21, 27, 30, 35, 49, 77, 121, 125, 143] {
+        for &n in &[
+            6usize, 10, 12, 14, 15, 21, 27, 30, 35, 49, 77, 121, 125, 143,
+        ] {
             assert!(is_mixed_radix_smooth(n));
             let input: Vec<(f64, f64)> = (0..n)
                 .map(|i| {
@@ -3724,7 +3762,10 @@ mod tests {
                 for b in 0..batch {
                     let row = &elements[b * n..b * n + n];
                     let reference = if inverse { idft_1d(row) } else { dft_1d(row) };
-                    for (k, (a, c)) in reference.iter().zip(got[b * n..b * n + n].iter()).enumerate()
+                    for (k, (a, c)) in reference
+                        .iter()
+                        .zip(got[b * n..b * n + n].iter())
+                        .enumerate()
                     {
                         let tol = 1e-9 * a.0.abs().max(a.1.abs()).max(1.0);
                         assert!(
@@ -3809,21 +3850,49 @@ mod tests {
                 .collect();
             let mut whole = vec![(0.0, 0.0); batch * out_last];
             rfft_rows_into(
-                &elements, None, Some(&real_plan), fft_length, input_last, copy_len, out_last, 0,
-                batch, &mut whole,
+                &elements,
+                None,
+                Some(&real_plan),
+                fft_length,
+                input_last,
+                copy_len,
+                out_last,
+                0,
+                batch,
+                &mut whole,
             );
             let mut split = vec![(0.0, 0.0); batch * out_last];
             let half = batch / 2;
             let (s0, s1) = split.split_at_mut(half * out_last);
             rfft_rows_into(
-                &elements, None, Some(&real_plan), fft_length, input_last, copy_len, out_last, 0,
-                half, s0,
+                &elements,
+                None,
+                Some(&real_plan),
+                fft_length,
+                input_last,
+                copy_len,
+                out_last,
+                0,
+                half,
+                s0,
             );
             rfft_rows_into(
-                &elements, None, Some(&real_plan), fft_length, input_last, copy_len, out_last,
-                half, batch - half, s1,
+                &elements,
+                None,
+                Some(&real_plan),
+                fft_length,
+                input_last,
+                copy_len,
+                out_last,
+                half,
+                batch - half,
+                s1,
             );
-            assert_eq!(bits(&whole), bits(&split), "rfft block-offset != single-block");
+            assert_eq!(
+                bits(&whole),
+                bits(&split),
+                "rfft block-offset != single-block"
+            );
         }
 
         // IRFFT: Hermitian-half complex input -> real output.
@@ -3839,16 +3908,37 @@ mod tests {
                 .collect();
             let mut whole = vec![0.0f64; batch * fft_length];
             irfft_rows_f64_into(
-                &elements, Some(&plan), fft_length, input_last, copy_len, 0, batch, &mut whole,
+                &elements,
+                Some(&plan),
+                fft_length,
+                input_last,
+                copy_len,
+                0,
+                batch,
+                &mut whole,
             );
             let mut split = vec![0.0f64; batch * fft_length];
             let half = batch / 2;
             let (s0, s1) = split.split_at_mut(half * fft_length);
             irfft_rows_f64_into(
-                &elements, Some(&plan), fft_length, input_last, copy_len, 0, half, s0,
+                &elements,
+                Some(&plan),
+                fft_length,
+                input_last,
+                copy_len,
+                0,
+                half,
+                s0,
             );
             irfft_rows_f64_into(
-                &elements, Some(&plan), fft_length, input_last, copy_len, half, batch - half, s1,
+                &elements,
+                Some(&plan),
+                fft_length,
+                input_last,
+                copy_len,
+                half,
+                batch - half,
+                s1,
             );
             let wb: Vec<u64> = whole.iter().map(|x| x.to_bits()).collect();
             let sb: Vec<u64> = split.iter().map(|x| x.to_bits()).collect();
@@ -3879,8 +3969,10 @@ mod tests {
                     .iter()
                     .map(|&(r, i)| r * r + i * i)
                     .sum();
-                let energy_out: f64 =
-                    got[b * n..b * n + n].iter().map(|&(r, i)| r * r + i * i).sum();
+                let energy_out: f64 = got[b * n..b * n + n]
+                    .iter()
+                    .map(|&(r, i)| r * r + i * i)
+                    .sum();
                 let expected = n as f64 * energy_in;
                 assert!(
                     (energy_out - expected).abs() <= 1e-7 * expected.max(1.0),
@@ -4002,14 +4094,26 @@ mod tests {
         plan.apply_into(&row, &mut b);
         let abits: Vec<(u64, u64)> = a.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
         let bbits: Vec<(u64, u64)> = b.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
-        assert_eq!(abits, bbits, "cached-plan FFT must be bit-identical to per-row rebuild");
+        assert_eq!(
+            abits, bbits,
+            "cached-plan FFT must be bit-identical to per-row rebuild"
+        );
         let mut ai = Vec::new();
         let mut bi = Vec::new();
         ifft_1d_into(&row, &mut ai);
         inv_plan.apply_into(&row, &mut bi);
-        let aibits: Vec<(u64, u64)> = ai.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
-        let bibits: Vec<(u64, u64)> = bi.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
-        assert_eq!(aibits, bibits, "cached-plan IFFT must be bit-identical to per-row rebuild");
+        let aibits: Vec<(u64, u64)> = ai
+            .iter()
+            .map(|&(r, i)| (r.to_bits(), i.to_bits()))
+            .collect();
+        let bibits: Vec<(u64, u64)> = bi
+            .iter()
+            .map(|&(r, i)| (r.to_bits(), i.to_bits()))
+            .collect();
+        assert_eq!(
+            aibits, bibits,
+            "cached-plan IFFT must be bit-identical to per-row rebuild"
+        );
 
         eprintln!(
             "[batched pow2 {rows}x{n}] FWD per-row-rebuild={:.3}ms shared-plan={:.3}ms ratio={:.2}x | INV {:.3}ms->{:.3}ms ratio={:.2}x",
@@ -4105,7 +4209,10 @@ mod tests {
                 );
             }
             let dt = t0.elapsed().as_nanos() as u64;
-            (dt, out[0].0.to_bits() ^ out[rows * out_last / 2].1.to_bits())
+            (
+                dt,
+                out[0].0.to_bits() ^ out[rows * out_last / 2].1.to_bits(),
+            )
         };
         let run_new = || -> (u64, u64) {
             let mut out = vec![(0.0, 0.0); rows * out_last];
@@ -4114,7 +4221,10 @@ mod tests {
                 &real_plan, &elements, rows, input_last, copy_len, out_last, &mut out,
             );
             let dt = t0.elapsed().as_nanos() as u64;
-            (dt, out[0].0.to_bits() ^ out[rows * out_last / 2].1.to_bits())
+            (
+                dt,
+                out[0].0.to_bits() ^ out[rows * out_last / 2].1.to_bits(),
+            )
         };
         let (mut old_min, mut new_min) = (u64::MAX, u64::MAX);
         let mut chk = 0u64;
@@ -4177,7 +4287,11 @@ mod tests {
     #[test]
     #[ignore = "informational micro-bench; run with --ignored --nocapture"]
     fn bench_vectorized_bluestein_vs_per_row() {
-        for &(n, rows) in &[(127usize, 2048usize), (1009usize, 256usize), (4099usize, 128usize)] {
+        for &(n, rows) in &[
+            (127usize, 2048usize),
+            (1009usize, 256usize),
+            (4099usize, 128usize),
+        ] {
             let plan = BluesteinPlan::new(n, false);
             let elements: Vec<(f64, f64)> = (0..rows * n)
                 .map(|i| {
@@ -4311,7 +4425,9 @@ mod tests {
         let run_new = || -> (u64, u64) {
             let mut out = vec![0.0f64; rows * fft_len];
             let t0 = std::time::Instant::now();
-            vectorized_irfft_pow2_tiled(r2, &elements, rows, fft_len, input_last, copy_len, &mut out);
+            vectorized_irfft_pow2_tiled(
+                r2, &elements, rows, fft_len, input_last, copy_len, &mut out,
+            );
             let dt = t0.elapsed().as_nanos() as u64;
             (dt, out[0].to_bits() ^ out[rows * fft_len / 2].to_bits())
         };
@@ -4343,7 +4459,10 @@ mod tests {
                 let elements: Vec<(f64, f64)> = (0..batch * n)
                     .map(|i| {
                         let f = i as f64;
-                        ((f * 0.013).sin() - 0.5, (f * 0.027).cos() * (if i % 3 == 0 { -1.0 } else { 1.0 }))
+                        (
+                            (f * 0.013).sin() - 0.5,
+                            (f * 0.027).cos() * (if i % 3 == 0 { -1.0 } else { 1.0 }),
+                        )
                     })
                     .collect();
                 for inverse in [false, true] {
@@ -4362,10 +4481,14 @@ mod tests {
                     vectorized_pow2_block(
                         &plan, &elements, batch, n, inverse, &mut re, &mut im, &mut got,
                     );
-                    let rbits: Vec<(u64, u64)> =
-                        reference.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
-                    let gbits: Vec<(u64, u64)> =
-                        got.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
+                    let rbits: Vec<(u64, u64)> = reference
+                        .iter()
+                        .map(|&(r, i)| (r.to_bits(), i.to_bits()))
+                        .collect();
+                    let gbits: Vec<(u64, u64)> = got
+                        .iter()
+                        .map(|&(r, i)| (r.to_bits(), i.to_bits()))
+                        .collect();
                     assert_eq!(
                         rbits, gbits,
                         "vectorized SoA batch FFT must be bit-identical to per-row Radix2Plan (n={n}, batch={batch}, inverse={inverse})"
@@ -4373,8 +4496,10 @@ mod tests {
                     // And the dense batch dispatcher (which routes to the vectorized
                     // path above the gate) must agree too.
                     let dispatched = transform_batches_dense(&elements, n, batch, inverse);
-                    let dbits: Vec<(u64, u64)> =
-                        dispatched.iter().map(|&(r, i)| (r.to_bits(), i.to_bits())).collect();
+                    let dbits: Vec<(u64, u64)> = dispatched
+                        .iter()
+                        .map(|&(r, i)| (r.to_bits(), i.to_bits()))
+                        .collect();
                     assert_eq!(
                         rbits, dbits,
                         "transform_batches_dense must be bit-identical to per-row Radix2Plan (n={n}, batch={batch}, inverse={inverse})"

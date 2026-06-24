@@ -6425,7 +6425,13 @@ fn bench_gather_scatter_1m_f64(c: &mut Criterion) {
     let n = 1usize << 22; // 4M operand
     let data: Vec<f64> = (0..n).map(|i| i as f64 * 0.001).collect();
     let operand = Value::Tensor(
-        TensorValue::new_f64_values(Shape { dims: vec![n as u32] }, data).unwrap(),
+        TensorValue::new_f64_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let k = 1usize << 20; // 1M gathers
     let idx: Vec<i64> = (0..k)
@@ -6449,7 +6455,13 @@ fn bench_gather_scatter_1m_i32(c: &mut Criterion) {
     let n = 1usize << 22;
     let data: Vec<i64> = (0..n as i64).map(|i| i % 1000).collect();
     let operand = Value::Tensor(
-        TensorValue::new_i32_values(Shape { dims: vec![n as u32] }, data).unwrap(),
+        TensorValue::new_i32_values(
+            Shape {
+                dims: vec![n as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let k = 1usize << 20;
     let idx: Vec<i64> = (0..k)
@@ -6472,7 +6484,13 @@ fn bench_gather_rows_1m_i32(c: &mut Criterion) {
     let (rows, cols) = (1usize << 14, 256usize);
     let data: Vec<i64> = (0..(rows * cols) as i64).map(|i| i % 4096).collect();
     let operand = Value::Tensor(
-        TensorValue::new_i32_values(Shape { dims: vec![rows as u32, cols as u32] }, data).unwrap(),
+        TensorValue::new_i32_values(
+            Shape {
+                dims: vec![rows as u32, cols as u32],
+            },
+            data,
+        )
+        .unwrap(),
     );
     let k = 4096usize;
     let idx: Vec<i64> = (0..k)

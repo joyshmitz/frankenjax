@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::EvalError;
-use crate::tensor_contraction::{batched_matmul_2d_f32_in, matmul_2d};
+use crate::tensor_contraction::{batched_matmul_2d_f32_in, matmul_2d, rank2_complex_matmul};
 use crate::type_promotion::{binary_literal_op, promote_dtype};
 
 /// Parse a comma-separated list of i64 values from a param string.
@@ -11522,6 +11522,55 @@ fn eval_conv_1d(
 
     let is_complex = matches!(out_dtype, DType::Complex64 | DType::Complex128);
 
+    if is_complex
+        && let (Some(lhs_src), Some(rhs_src)) = (
+            lhs.elements.as_complex_slice(),
+            rhs.elements.as_complex_slice(),
+        )
+    {
+        let kdim = kernel_w
+            .checked_mul(c_in)
+            .ok_or_else(|| EvalError::Unsupported {
+                primitive,
+                detail: "conv1d complex im2col kdim overflow".into(),
+            })?;
+        let conv_ops = total.saturating_mul(kdim).saturating_mul(4);
+        if conv_ops >= CONV_IM2COL_MIN_OPS && kdim > 0 {
+            let num_rows = total.checked_div(c_out).unwrap_or(0);
+            let col_len = num_rows
+                .checked_mul(kdim)
+                .ok_or_else(|| EvalError::Unsupported {
+                    primitive,
+                    detail: "conv1d complex im2col size overflow".into(),
+                })?;
+            let mut col = vec![(0.0_f64, 0.0_f64); col_len];
+            for n in 0..batch {
+                let n_offset = n * width_c_in;
+                for w in 0..out_w {
+                    let row_base = (n * out_w + w) * kdim;
+                    for k in 0..kernel_w {
+                        let in_pos = (w * stride + k * dil) as isize - pad_left as isize;
+                        if in_pos < 0 || (in_pos as usize) >= width {
+                            continue;
+                        }
+                        let src_base = n_offset + (in_pos as usize) * c_in;
+                        let col_base = row_base + k * c_in;
+                        col[col_base..col_base + c_in]
+                            .copy_from_slice(&lhs_src[src_base..src_base + c_in]);
+                    }
+                }
+            }
+            let out = rank2_complex_matmul(&col, num_rows, kdim, rhs_src, c_out);
+            return Ok(Value::Tensor(TensorValue::new_complex_values(
+                out_dtype,
+                Shape {
+                    dims: vec![batch as u32, out_w as u32, c_out as u32],
+                },
+                out,
+            )?));
+        }
+    }
+
     // NATIVE f32-accum 1D conv path (XLA parity, the conv1d sibling of eval_conv_2d's
     // native path): XLA accumulates f32/bf16/f16 conv in f32, NOT f64 — fj's f64-promote
     // path was MORE precise than the reference. When the output is f32/bf16/f16 and both
@@ -12446,6 +12495,58 @@ fn eval_conv_2d(
         })?;
 
     let is_complex = matches!(out_dtype, DType::Complex64 | DType::Complex128);
+
+    if is_complex
+        && let (Some(lhs_src), Some(rhs_src)) = (
+            lhs.elements.as_complex_slice(),
+            rhs.elements.as_complex_slice(),
+        )
+    {
+        let kdim = kernel_h
+            .checked_mul(kernel_w)
+            .and_then(|v| v.checked_mul(c_in))
+            .ok_or_else(|| EvalError::Unsupported {
+                primitive,
+                detail: "conv2d complex im2col kdim overflow".into(),
+            })?;
+        let conv_ops = total.saturating_mul(kdim).saturating_mul(4);
+        if conv_ops >= CONV_IM2COL_MIN_OPS && kdim > 0 {
+            let kw_c_in = kernel_w * c_in;
+            let num_rows = total / c_out;
+            let mut col = vec![(0.0_f64, 0.0_f64); num_rows * kdim];
+            fill_conv2d_im2col(
+                &mut col,
+                lhs_src,
+                batch,
+                height,
+                width,
+                c_in,
+                out_h,
+                out_w,
+                kernel_h,
+                kernel_w,
+                stride_h,
+                stride_w,
+                dil_h,
+                dil_w,
+                pad_top,
+                pad_left,
+                height_width_c_in,
+                width_c_in,
+                kdim,
+                kw_c_in,
+                conv_morsel_threads(num_rows, conv_ops),
+            );
+            let out = rank2_complex_matmul(&col, num_rows, kdim, rhs_src, c_out);
+            return Ok(Value::Tensor(TensorValue::new_complex_values(
+                out_dtype,
+                Shape {
+                    dims: vec![batch as u32, out_h as u32, out_w as u32, c_out as u32],
+                },
+                out,
+            )?));
+        }
+    }
 
     // NATIVE f32-accum conv path (XLA parity: XLA accumulates f32/bf16/f16 convolution
     // in f32, NOT f64 — fj's f64-promote path was MORE precise than the reference, the
@@ -17252,6 +17353,261 @@ mod tests {
                 "conv2d im2col vs direct bits for {padding}/{stride}"
             );
         }
+    }
+
+    fn complex128_bits(value: &Value) -> Vec<(u64, u64)> {
+        value
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|literal| match literal {
+                Literal::Complex128Bits(re, im) => (*re, *im),
+                other => panic!("expected Complex128 literal, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn conv1d_complex_im2col_gemm_matches_boxed_reference() {
+        // Dense complex inputs now take im2col + rank2_complex_matmul above the
+        // same threshold as real conv. The boxed literal buffer forces the old
+        // direct loop, giving a same-file semantic reference.
+        let (width, c_in, c_out, kw) = (256usize, 8usize, 16usize, 5usize);
+        let out_w = width - kw + 1;
+        assert!(
+            out_w * c_out * kw * c_in * 4 >= CONV_IM2COL_MIN_OPS,
+            "test must exercise the complex im2col path"
+        );
+        let lhs_data: Vec<(f64, f64)> = (0..width * c_in)
+            .map(|i| {
+                let x = i as f64;
+                ((x * 0.011).sin() * 0.75, (x * 0.017).cos() * -0.5)
+            })
+            .collect();
+        let rhs_data: Vec<(f64, f64)> = (0..kw * c_in * c_out)
+            .map(|i| {
+                let x = i as f64;
+                ((x * 0.019).cos() * 0.4, (x * 0.023).sin() * 0.3)
+            })
+            .collect();
+
+        let mk_dense = |dims: Vec<u32>, data: &[(f64, f64)]| {
+            Value::Tensor(
+                TensorValue::new_complex_values(DType::Complex128, Shape { dims }, data.to_vec())
+                    .unwrap(),
+            )
+        };
+        let mk_boxed = |dims: Vec<u32>, data: &[(f64, f64)]| {
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Complex128,
+                    Shape { dims },
+                    LiteralBuffer::new(
+                        data.iter()
+                            .map(|&(re, im)| Literal::from_complex128(re, im))
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            )
+        };
+        let p = params(&[("padding", "valid"), ("strides", "1")]);
+        let dense = eval_conv(
+            Primitive::Conv,
+            &[
+                mk_dense(vec![1, width as u32, c_in as u32], &lhs_data),
+                mk_dense(vec![kw as u32, c_in as u32, c_out as u32], &rhs_data),
+            ],
+            &p,
+        )
+        .unwrap();
+        let boxed = eval_conv(
+            Primitive::Conv,
+            &[
+                mk_boxed(vec![1, width as u32, c_in as u32], &lhs_data),
+                mk_boxed(vec![kw as u32, c_in as u32, c_out as u32], &rhs_data),
+            ],
+            &p,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dense.as_tensor().unwrap().shape.dims,
+            boxed.as_tensor().unwrap().shape.dims
+        );
+        assert!(
+            dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_complex_slice()
+                .is_some(),
+            "complex conv1d fast-path output should remain dense-complex-backed"
+        );
+        assert_eq!(
+            complex128_bits(&dense),
+            complex128_bits(&boxed),
+            "complex conv1d im2col GEMM must match boxed direct conv bit-for-bit"
+        );
+    }
+
+    #[test]
+    fn conv2d_complex_im2col_gemm_matches_boxed_reference() {
+        let (batch, height, width, c_in) = (2usize, 16usize, 16usize, 8usize);
+        let (kernel_h, kernel_w, c_out) = (3usize, 3usize, 16usize);
+        let out_h = height - kernel_h + 1;
+        let out_w = width - kernel_w + 1;
+        assert!(
+            batch * out_h * out_w * c_out * kernel_h * kernel_w * c_in * 4 >= CONV_IM2COL_MIN_OPS,
+            "test must exercise the complex im2col path"
+        );
+
+        let lhs_data: Vec<(f64, f64)> = (0..batch * height * width * c_in)
+            .map(|i| {
+                let x = i as f64;
+                ((x * 0.007).sin() * 0.6, (x * 0.013).cos() * -0.45)
+            })
+            .collect();
+        let rhs_data: Vec<(f64, f64)> = (0..kernel_h * kernel_w * c_in * c_out)
+            .map(|i| {
+                let x = i as f64;
+                ((x * 0.017).cos() * 0.35, (x * 0.021).sin() * 0.25)
+            })
+            .collect();
+
+        let mk_dense = |dims: Vec<u32>, data: &[(f64, f64)]| {
+            Value::Tensor(
+                TensorValue::new_complex_values(DType::Complex128, Shape { dims }, data.to_vec())
+                    .unwrap(),
+            )
+        };
+        let mk_boxed = |dims: Vec<u32>, data: &[(f64, f64)]| {
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Complex128,
+                    Shape { dims },
+                    LiteralBuffer::new(
+                        data.iter()
+                            .map(|&(re, im)| Literal::from_complex128(re, im))
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            )
+        };
+        let lhs_dims = vec![batch as u32, height as u32, width as u32, c_in as u32];
+        let rhs_dims = vec![kernel_h as u32, kernel_w as u32, c_in as u32, c_out as u32];
+        let p = params(&[("padding", "valid"), ("strides", "1")]);
+        let dense = eval_conv(
+            Primitive::Conv,
+            &[
+                mk_dense(lhs_dims.clone(), &lhs_data),
+                mk_dense(rhs_dims.clone(), &rhs_data),
+            ],
+            &p,
+        )
+        .unwrap();
+        let boxed = eval_conv(
+            Primitive::Conv,
+            &[mk_boxed(lhs_dims, &lhs_data), mk_boxed(rhs_dims, &rhs_data)],
+            &p,
+        )
+        .unwrap();
+
+        assert_eq!(
+            dense.as_tensor().unwrap().shape.dims,
+            boxed.as_tensor().unwrap().shape.dims
+        );
+        assert!(
+            dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_complex_slice()
+                .is_some(),
+            "complex conv2d fast-path output should remain dense-complex-backed"
+        );
+        assert_eq!(
+            complex128_bits(&dense),
+            complex128_bits(&boxed),
+            "complex conv2d im2col GEMM must match boxed direct conv bit-for-bit"
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn bench_complex_conv2d_im2col_gemm_vs_boxed_direct() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn best_ms(mut f: impl FnMut()) -> f64 {
+            f();
+            let mut best = f64::MAX;
+            for _ in 0..9 {
+                let start = Instant::now();
+                f();
+                best = best.min(start.elapsed().as_secs_f64());
+            }
+            best * 1e3
+        }
+
+        let (batch, height, width, c_in) = (2usize, 32usize, 32usize, 8usize);
+        let (kernel_h, kernel_w, c_out) = (3usize, 3usize, 16usize);
+        let lhs_data: Vec<(f64, f64)> = (0..batch * height * width * c_in)
+            .map(|i| {
+                let x = i as f64;
+                ((x * 0.007).sin() * 0.6, (x * 0.013).cos() * -0.45)
+            })
+            .collect();
+        let rhs_data: Vec<(f64, f64)> = (0..kernel_h * kernel_w * c_in * c_out)
+            .map(|i| {
+                let x = i as f64;
+                ((x * 0.017).cos() * 0.35, (x * 0.021).sin() * 0.25)
+            })
+            .collect();
+
+        let dense = |dims: Vec<u32>, data: &[(f64, f64)]| {
+            Value::Tensor(
+                TensorValue::new_complex_values(DType::Complex128, Shape { dims }, data.to_vec())
+                    .unwrap(),
+            )
+        };
+        let boxed = |dims: Vec<u32>, data: &[(f64, f64)]| {
+            Value::Tensor(
+                TensorValue::new_with_literal_buffer(
+                    DType::Complex128,
+                    Shape { dims },
+                    LiteralBuffer::new(
+                        data.iter()
+                            .map(|&(re, im)| Literal::from_complex128(re, im))
+                            .collect(),
+                    ),
+                )
+                .unwrap(),
+            )
+        };
+        let lhs_dims = vec![batch as u32, height as u32, width as u32, c_in as u32];
+        let rhs_dims = vec![kernel_h as u32, kernel_w as u32, c_in as u32, c_out as u32];
+        let dense_inputs = [
+            dense(lhs_dims.clone(), &lhs_data),
+            dense(rhs_dims.clone(), &rhs_data),
+        ];
+        let boxed_inputs = [boxed(lhs_dims, &lhs_data), boxed(rhs_dims, &rhs_data)];
+        let p = params(&[("padding", "valid"), ("strides", "1")]);
+
+        let dense_ms = best_ms(|| {
+            let out = eval_conv(Primitive::Conv, &dense_inputs, &p).unwrap();
+            black_box(out);
+        });
+        let boxed_ms = best_ms(|| {
+            let out = eval_conv(Primitive::Conv, &boxed_inputs, &p).unwrap();
+            black_box(out);
+        });
+        println!(
+            "BENCH complex conv2d c128 dense_im2col_gemm {dense_ms:.4}ms boxed_direct {boxed_ms:.4}ms ratio_boxed_over_dense {:.3}x",
+            boxed_ms / dense_ms
+        );
     }
 
     #[test]

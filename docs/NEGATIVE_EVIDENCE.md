@@ -127,6 +127,15 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     25.3ms min, fj-lax ~30x+ slower. Niche op (signal/quantum) + multi-path (conv1d/2d/grouped) → filed
     bead `frankenjax-complex-conv-gemm-5xdr7` (P3) with the f32-template approach rather than risking the
     intricate conv code inline. The matmul-family dtype-sibling gap is otherwise CLOSED.
+    UPDATE 2026-06-24 (BlackThrush, `frankenjax-complex-conv-gemm-5xdr7`): dense complex ungrouped
+    conv1d/conv2d now routes through im2col + `rank2_complex_matmul` when operands expose dense
+    complex storage; boxed/non-dense complex keeps the old direct loop as the reference fallback.
+    Same-binary RCH release A/B on c128 conv2d VALID `[2,32,32,8] * [3,3,8,16]`: dense im2col/GEMM
+    **2.3419ms** vs boxed direct **10.1233ms** = **4.323x Rust-side win**. Fresh JAX/JAXLIB 0.10.1
+    CPU x64 on the exact shape measured mean **0.622643ms** (p50 **0.615015ms**), so the retained row
+    is still a **3.76x Rust/JAX loss** (old boxed path would be **16.26x** loss). Conformance: dense
+    vs boxed complex conv1d/conv2d bit-for-bit tests passed; `fj-conformance --test conv_oracle complex`
+    4/4 passed.
   - **COMPLEX128 MATMUL 4-row register-blocking SHIPPED (2026-06-22, SlateHarrier) — narrows JAX
     loss 1.95x→1.31x.** Unlike integer, XLA DOES have fast complex GEMM (zgemm): fresh JAX c128
     matmul 512³ **11.97ms**, 1024³ **58.7ms**. fj-lax `rank2_complex_row_block` was a NAIVE single-row

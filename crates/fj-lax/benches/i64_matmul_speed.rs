@@ -242,7 +242,8 @@ fn main() {
 
     // BATCHED complex128 matmul: 1-thread naive-single-row vs 1-thread batch-aware-4row-blocked
     // (same-binary, isolates the per-batch register blocking now shipped in batched_complex_row_block).
-    for (batch, msz) in [(32usize, 128usize)] {
+    {
+        let (batch, msz) = (32usize, 128usize);
         let (k, n) = (msz, msz);
         let a: Vec<(f64, f64)> = (0..batch * msz * k)
             .map(|i| ((i % 13) as f64 - 6.0, (i % 7) as f64 - 3.0))
