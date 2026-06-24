@@ -2616,6 +2616,15 @@ so ~7x improvement — f16 before-number inferred from the bf16 sibling on the s
 captured). Slightly above bf16's 2.7x due to the per-chunk `f16_input_needs_scalar` branch. Bit-identical
 (reduce 137/0 + lib 1592/0). Half-float max/min reduce family now COMPLETE (f32+bf16+f16, ax0 native+threaded).
 
+f16 TRAILING (ax1) per-row reducer f64x8 → f32x8 (2026-06-24, SlateHarrier): `simd_reduce_minmax_f16` still
+widened f16→f64 (f64x8 = TWO AVX2 registers) for the per-row horizontal reduce; bf16's trailing reducer was
+already f32x16. Switched to `f16_widen8_f32` (f32x8 = ONE register; needs_scalar/tail fall back to scalar
+`as_f64() as f32`). SAME-BINARY A/B (the trustworthy method): OLD f64x8 6.70ms vs NEW f32x8 **3.49ms = 1.92x**
+on the per-row reduce. Production threaded f16 ax1 **1.26→0.89ms** (6.8x→4.8x vs JAX 0.185; threading already
+amortized part of it). Bit-identical (f16⊂f32; reduce 137/0 + lib 1592/0 + clippy clean). REMAINING f16 ax1
+4.8x is overhead-bound — the per-chunk `f16_input_needs_scalar` routing (JAX uses hardware F16C `vcvtph2ps`
+with no per-chunk branch); closing it needs a FULL SIMD f16→f32 (subnormal/inf/NaN in SIMD), a bigger lever.
+
 ## 2026-06-23 - f32 leading-axis MAX/MIN-reduce 2.42x loss → near-parity (f32-native + threaded) (SlateHarrier)
 
 Probed max-reduce [4096,4096] (`bench_maxreduce2d`): f64 ax0 5.56 vs JAX 10.36 (**1.86x WIN**), f64 ax1

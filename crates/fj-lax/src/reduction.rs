@@ -556,15 +556,17 @@ fn simd_minmax_axis_reduce_f16(
 /// [`simd_reduce_minmax_bf16`].
 fn simd_reduce_minmax_f16(values: &[u16], is_max: bool) -> f64 {
     use std::simd::{Simd, num::SimdFloat};
-    const L: usize = 8; // matches f16_widen8's lane count
+    const L: usize = 8; // matches f16_widen8_f32 / f16_input_needs_scalar lane count
+    // f32-native (f16 max/min is exact in f32): f32x8 (one AVX2 register) replaces the prior f64x8
+    // (two registers) — ~2x the per-row reduce. f16 ⊂ f32, so the decode `as f32` is exact.
     let init = if is_max {
-        f64::NEG_INFINITY
+        f32::NEG_INFINITY
     } else {
-        f64::INFINITY
+        f32::INFINITY
     };
-    let decode = |b: u16| Literal::F16Bits(b).as_f64().unwrap_or(0.0);
+    let decode = |b: u16| Literal::F16Bits(b).as_f64().unwrap_or(0.0) as f32;
 
-    let mut vacc = Simd::<f64, L>::splat(init);
+    let mut vacc = Simd::<f32, L>::splat(init);
     let mut acc = init; // scalar accumulator for needs-scalar chunks + tail
     let mut any_nan = false;
     let mut used_simd = false;
@@ -582,7 +584,7 @@ fn simd_reduce_minmax_f16(values: &[u16], is_max: bool) -> f64 {
                 }
             }
         } else {
-            let f = crate::arithmetic::f16_widen8(u);
+            let f = crate::arithmetic::f16_widen8_f32(u);
             vacc = if is_max {
                 vacc.simd_max(f)
             } else {
@@ -616,9 +618,9 @@ fn simd_reduce_minmax_f16(values: &[u16], is_max: bool) -> f64 {
             let v = decode(b);
             s = if is_max { s.max(v) } else { s.min(v) };
         }
-        return s;
+        return f64::from(s);
     }
-    m
+    f64::from(m)
 }
 
 /// One row-wise max/min accumulate step `out[i] = jax_max/min(out[i], inp[i])`, SIMD
@@ -4362,6 +4364,103 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Same-binary A/B: f16 per-row trailing reduce, OLD f64x8 widen vs NEW f32x8 (production).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f16_trailing_reduce_ab() {
+        use std::time::Instant;
+        // OLD path: f64x8 (f16_widen8 → f64), the pre-fix version.
+        fn old_f16_reduce_f64x8(values: &[u16], is_max: bool) -> f64 {
+            use std::simd::{Simd, num::SimdFloat};
+            const L: usize = 8;
+            let init = if is_max {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            };
+            let decode = |b: u16| Literal::F16Bits(b).as_f64().unwrap_or(0.0);
+            let mut vacc = Simd::<f64, L>::splat(init);
+            let mut acc = init;
+            let mut any_nan = false;
+            let mut used = false;
+            let chunks = values.chunks_exact(L);
+            let tail = chunks.remainder();
+            for chunk in chunks {
+                let u = Simd::<u16, L>::from_slice(chunk);
+                if crate::arithmetic::f16_input_needs_scalar(u) {
+                    for &b in chunk {
+                        let v = decode(b);
+                        if v.is_nan() {
+                            any_nan = true;
+                        } else {
+                            acc = if is_max { acc.max(v) } else { acc.min(v) };
+                        }
+                    }
+                } else {
+                    let f = crate::arithmetic::f16_widen8(u);
+                    vacc = if is_max {
+                        vacc.simd_max(f)
+                    } else {
+                        vacc.simd_min(f)
+                    };
+                    used = true;
+                }
+            }
+            for &b in tail {
+                let v = decode(b);
+                if v.is_nan() {
+                    any_nan = true;
+                } else {
+                    acc = if is_max { acc.max(v) } else { acc.min(v) };
+                }
+            }
+            if any_nan {
+                return f64::NAN;
+            }
+            let mut m = acc;
+            if used {
+                for &lane in vacc.to_array().iter() {
+                    m = if is_max { m.max(lane) } else { m.min(lane) };
+                }
+            }
+            m
+        }
+        let (rows, cols) = (4096usize, 4096usize);
+        let f16_bits: Vec<u16> = (0..rows * cols)
+            .map(
+                |i| match Literal::from_f16_f64(((i % 9973) as f64) * 0.01 - 40.0) {
+                    Literal::F16Bits(b) => b,
+                    _ => 0,
+                },
+            )
+            .collect();
+        let ab = |old: bool| {
+            let mut b = f64::MAX;
+            for _ in 0..20 {
+                let s = Instant::now();
+                let mut acc = 0.0f64;
+                for r in 0..rows {
+                    let row = &f16_bits[r * cols..r * cols + cols];
+                    let m = if old {
+                        old_f16_reduce_f64x8(row, true)
+                    } else {
+                        super::simd_reduce_minmax_f16(row, true)
+                    };
+                    acc += m;
+                }
+                std::hint::black_box(acc);
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            b * 1e3
+        };
+        let old_ms = ab(true);
+        let new_ms = ab(false);
+        println!(
+            "AB f16 trailing reduce [4096,4096] single-thread: OLD(f64x8)={old_ms:.4}ms NEW(f32x8)={new_ms:.4}ms ({:.2}x)",
+            old_ms / new_ms
+        );
     }
 
     // BOLD-VERIFY: max-reduce 2D vs JAX (f32 ax0 1.67 ax1 0.65ms; f64 ax0 10.36 ax1 3.13ms).
