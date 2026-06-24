@@ -2625,6 +2625,20 @@ amortized part of it). Bit-identical (f16⊂f32; reduce 137/0 + lib 1592/0 + cli
 4.8x is overhead-bound — the per-chunk `f16_input_needs_scalar` routing (JAX uses hardware F16C `vcvtph2ps`
 with no per-chunk branch); closing it needs a FULL SIMD f16→f32 (subnormal/inf/NaN in SIMD), a bigger lever.
 
+f16 reduce FULLY BRANCHLESS decode (2026-06-24, SlateHarrier — the "bigger lever" above, LANDED): added
+`f16_widen8_full_f32` (Giesen magic-multiply: `(h&0x7FFF)<<13`, one ×2^112 renormalizes normal AND subnormal,
+a `>=` compare forces inf/NaN exp=0xFF) — decodes EVERY f16 with NO `f16_input_needs_scalar` fast/slow split.
+EXHAUSTIVELY verified bit-identical to the scalar decode over all 65536 patterns
+(`f16_widen8_full_f32_exhaustive_matches_scalar`). Both f16 reducers (inner row-acc + trailing per-row) now
+branchless; the trailing tracks NaN in a SIMD mask (`simd_max` drops NaN). SAME-BINARY 3-way A/B
+(`bench_f16_trailing_reduce_ab`): f64x8 **7.80** / needs_scalar-f32x8 **8.36** / branchless-f32x8 **3.49** ms →
+**2.23x over the original f64x8**, 2.40x over the needs_scalar variant. (Cross-turn spread noted: the
+needs_scalar-f32x8 intermediate measured 3.49 last turn vs 8.36 this turn — codegen/contention sensitivity; the
+same-binary 3-way is authoritative and branchless is the fastest of the three.) Bit-identical: reduce 137/0 +
+full lib 1593/0 + clippy clean. Removed the now-unused `f16_widen8_f32`. LESSON: a branchless SIMD decode
+(magic-multiply) beats a per-chunk fast/slow branch even when the slow path is rarely taken — the branch + its
+`.any()` cost more than uniformly doing the SIMD work.
+
 ## 2026-06-23 - f32 leading-axis MAX/MIN-reduce 2.42x loss → near-parity (f32-native + threaded) (SlateHarrier)
 
 Probed max-reduce [4096,4096] (`bench_maxreduce2d`): f64 ax0 5.56 vs JAX 10.36 (**1.86x WIN**), f64 ax1

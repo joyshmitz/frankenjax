@@ -555,10 +555,11 @@ fn simd_minmax_axis_reduce_f16(
 /// triggers a scalar re-scan for the order-dependent ±0 sign — same recipe as
 /// [`simd_reduce_minmax_bf16`].
 fn simd_reduce_minmax_f16(values: &[u16], is_max: bool) -> f64 {
-    use std::simd::{Simd, num::SimdFloat};
-    const L: usize = 8; // matches f16_widen8_f32 / f16_input_needs_scalar lane count
-    // f32-native (f16 max/min is exact in f32): f32x8 (one AVX2 register) replaces the prior f64x8
-    // (two registers) — ~2x the per-row reduce. f16 ⊂ f32, so the decode `as f32` is exact.
+    use std::simd::{Mask, Simd, num::SimdFloat};
+    const L: usize = 8; // matches f16_widen8_full_f32 lane count
+    // FULLY BRANCHLESS f32x8: f16_widen8_full_f32 decodes every f16 (normal/subnormal/±0/inf/NaN)
+    // with no per-chunk fast/slow split. simd_max/min drops NaN, so NaN is tracked in a SIMD mask
+    // (one `.any()` at the end). f16 max/min is exact in f32; bit-identical to the scalar fold.
     let init = if is_max {
         f32::NEG_INFINITY
     } else {
@@ -567,49 +568,34 @@ fn simd_reduce_minmax_f16(values: &[u16], is_max: bool) -> f64 {
     let decode = |b: u16| Literal::F16Bits(b).as_f64().unwrap_or(0.0) as f32;
 
     let mut vacc = Simd::<f32, L>::splat(init);
-    let mut acc = init; // scalar accumulator for needs-scalar chunks + tail
-    let mut any_nan = false;
-    let mut used_simd = false;
+    let mut nan_acc = Mask::<i32, L>::splat(false);
     let chunks = values.chunks_exact(L);
     let tail = chunks.remainder();
     for chunk in chunks {
-        let u = Simd::<u16, L>::from_slice(chunk);
-        if crate::arithmetic::f16_input_needs_scalar(u) {
-            for &b in chunk {
-                let v = decode(b);
-                if v.is_nan() {
-                    any_nan = true;
-                } else {
-                    acc = if is_max { acc.max(v) } else { acc.min(v) };
-                }
-            }
+        let f = crate::arithmetic::f16_widen8_full_f32(Simd::<u16, L>::from_slice(chunk));
+        nan_acc |= f.is_nan();
+        vacc = if is_max {
+            vacc.simd_max(f)
         } else {
-            let f = crate::arithmetic::f16_widen8_f32(u);
-            vacc = if is_max {
-                vacc.simd_max(f)
-            } else {
-                vacc.simd_min(f)
-            };
-            used_simd = true;
-        }
+            vacc.simd_min(f)
+        };
     }
+    let mut m = init;
+    for &lane in vacc.to_array().iter() {
+        m = if is_max { m.max(lane) } else { m.min(lane) };
+    }
+    let mut any_nan = nan_acc.any();
     for &b in tail {
         let v = decode(b);
         if v.is_nan() {
             any_nan = true;
         } else {
-            acc = if is_max { acc.max(v) } else { acc.min(v) };
+            m = if is_max { m.max(v) } else { m.min(v) };
         }
     }
 
     if any_nan {
         return f64::NAN;
-    }
-    let mut m = acc;
-    if used_simd {
-        for &lane in vacc.to_array().iter() {
-            m = if is_max { m.max(lane) } else { m.min(lane) };
-        }
     }
     if m == 0.0 {
         // ±0 sign is order-dependent under simd reduce — re-fold scalar (no NaN here).
@@ -955,43 +941,33 @@ fn simd_minmax_inner_axis_reduce_bf16(
     acc.iter().map(|&v| f64::from(v)).collect()
 }
 
-/// F16 row-accumulate into an f32 running min/max — like the bf16 one, but f16 decode
-/// (`f16_widen8_f32`) only handles normals/zero, so chunks with subnormal/inf/NaN bits
-/// (`f16_input_needs_scalar`) and the tail fall back to a scalar `F16Bits.as_f64() as f32` decode
-/// (exact: f16 ⊂ f32). f16 max/min is exact in f32, so bit-identical to a f64-widening accumulate;
-/// f32x8 + no f64 cast replaces the prior f64x4-equivalent path.
+/// F16 row-accumulate into an f32 running min/max — FULLY BRANCHLESS via `f16_widen8_full_f32`
+/// (decodes normal/subnormal/±0/inf/NaN with no per-chunk fast/slow split), then the same
+/// NaN-propagating `select`. f16 max/min is exact in f32. Bit-identical to the prior
+/// `f16_input_needs_scalar`-gated path (verified: the branchless decode matches the scalar decode
+/// for all 65536 patterns, and the `nan` select propagates NaN that `simd_max` would otherwise drop).
 #[inline]
 fn simd_minmax_row_acc_f16_f32(out: &mut [f32], inp: &[u16], is_max: bool) {
     use std::simd::{Select, Simd, num::SimdFloat};
-    const L: usize = 8; // matches f16_widen8_f32 / f16_input_needs_scalar lane count
-    let scalar_one = |cur: f32, bits: u16| -> f32 {
-        let bv = Literal::F16Bits(bits).as_f64().unwrap_or(0.0) as f32;
-        if cur.is_nan() || bv.is_nan() {
-            f32::NAN
-        } else if is_max {
-            cur.max(bv)
-        } else {
-            cur.min(bv)
-        }
-    };
+    const L: usize = 8; // matches f16_widen8_full_f32 lane count
     let mut oc = out.chunks_exact_mut(L);
     let mut ic = inp.chunks_exact(L);
     for (o, i) in oc.by_ref().zip(ic.by_ref()) {
-        let u = Simd::<u16, L>::from_slice(i);
-        if crate::arithmetic::f16_input_needs_scalar(u) {
-            for (slot, &bits) in o.iter_mut().zip(i) {
-                *slot = scalar_one(*slot, bits);
-            }
-        } else {
-            let b = crate::arithmetic::f16_widen8_f32(u);
-            let a = Simd::<f32, L>::from_slice(o);
-            let m = if is_max { a.simd_max(b) } else { a.simd_min(b) };
-            let nan = a.is_nan() | b.is_nan();
-            o.copy_from_slice(&nan.select(Simd::splat(f32::NAN), m).to_array());
-        }
+        let b = crate::arithmetic::f16_widen8_full_f32(Simd::<u16, L>::from_slice(i));
+        let a = Simd::<f32, L>::from_slice(o);
+        let m = if is_max { a.simd_max(b) } else { a.simd_min(b) };
+        let nan = a.is_nan() | b.is_nan();
+        o.copy_from_slice(&nan.select(Simd::splat(f32::NAN), m).to_array());
     }
     for (o, &v) in oc.into_remainder().iter_mut().zip(ic.remainder()) {
-        *o = scalar_one(*o, v);
+        let bv = Literal::F16Bits(v).as_f64().unwrap_or(0.0) as f32;
+        *o = if o.is_nan() || bv.is_nan() {
+            f32::NAN
+        } else if is_max {
+            o.max(bv)
+        } else {
+            o.min(bv)
+        };
     }
 }
 
@@ -4436,17 +4412,83 @@ mod tests {
                 },
             )
             .collect();
-        let ab = |old: bool| {
+        // PRIOR version: f32x8 with the per-chunk f16_input_needs_scalar fast/slow split.
+        fn ns_f16_reduce_f32x8(values: &[u16], is_max: bool) -> f64 {
+            use std::simd::{Simd, num::SimdFloat};
+            const L: usize = 8;
+            let init = if is_max {
+                f32::NEG_INFINITY
+            } else {
+                f32::INFINITY
+            };
+            let decode = |b: u16| Literal::F16Bits(b).as_f64().unwrap_or(0.0) as f32;
+            let mut vacc = Simd::<f32, L>::splat(init);
+            let mut acc = init;
+            let mut any_nan = false;
+            let mut used = false;
+            let chunks = values.chunks_exact(L);
+            let tail = chunks.remainder();
+            for chunk in chunks {
+                let u = Simd::<u16, L>::from_slice(chunk);
+                if crate::arithmetic::f16_input_needs_scalar(u) {
+                    for &b in chunk {
+                        let v = decode(b);
+                        if v.is_nan() {
+                            any_nan = true;
+                        } else {
+                            acc = if is_max { acc.max(v) } else { acc.min(v) };
+                        }
+                    }
+                } else {
+                    // mimic the old normal-only widen (shift+select) then f32 max
+                    let h32 = u.cast::<u32>();
+                    use std::simd::cmp::SimdPartialEq;
+                    use std::simd::{Select, num::SimdUint};
+                    let sign = (h32 & Simd::splat(0x8000u32)) << Simd::splat(16u32);
+                    let he = (h32 & Simd::splat(0x7C00u32)) >> Simd::splat(10u32);
+                    let fe = (he + Simd::splat(112u32)) << Simd::splat(23u32);
+                    let fm = (h32 & Simd::splat(0x03FFu32)) << Simd::splat(13u32);
+                    let nb = sign | fe | fm;
+                    let iz = (h32 & Simd::splat(0x7FFFu32)).simd_eq(Simd::splat(0u32));
+                    let f = Simd::<f32, L>::from_bits(iz.select(sign, nb));
+                    vacc = if is_max {
+                        vacc.simd_max(f)
+                    } else {
+                        vacc.simd_min(f)
+                    };
+                    used = true;
+                }
+            }
+            for &b in tail {
+                let v = decode(b);
+                if v.is_nan() {
+                    any_nan = true;
+                } else {
+                    acc = if is_max { acc.max(v) } else { acc.min(v) };
+                }
+            }
+            if any_nan {
+                return f64::NAN;
+            }
+            let mut m = acc;
+            if used {
+                for &lane in vacc.to_array().iter() {
+                    m = if is_max { m.max(lane) } else { m.min(lane) };
+                }
+            }
+            f64::from(m)
+        }
+        let ab = |mode: u8| {
             let mut b = f64::MAX;
             for _ in 0..20 {
                 let s = Instant::now();
                 let mut acc = 0.0f64;
                 for r in 0..rows {
                     let row = &f16_bits[r * cols..r * cols + cols];
-                    let m = if old {
-                        old_f16_reduce_f64x8(row, true)
-                    } else {
-                        super::simd_reduce_minmax_f16(row, true)
+                    let m = match mode {
+                        0 => old_f16_reduce_f64x8(row, true),
+                        1 => ns_f16_reduce_f32x8(row, true),
+                        _ => super::simd_reduce_minmax_f16(row, true),
                     };
                     acc += m;
                 }
@@ -4455,11 +4497,12 @@ mod tests {
             }
             b * 1e3
         };
-        let old_ms = ab(true);
-        let new_ms = ab(false);
+        let f64x8 = ab(0);
+        let ns = ab(1);
+        let branchless = ab(2);
         println!(
-            "AB f16 trailing reduce [4096,4096] single-thread: OLD(f64x8)={old_ms:.4}ms NEW(f32x8)={new_ms:.4}ms ({:.2}x)",
-            old_ms / new_ms
+            "AB f16 trailing reduce [4096,4096] single-thread: f64x8={f64x8:.4}ms needs_scalar-f32x8={ns:.4}ms branchless-f32x8={branchless:.4}ms | branchless vs ns = {:.2}x",
+            ns / branchless
         );
     }
 

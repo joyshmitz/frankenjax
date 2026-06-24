@@ -1427,25 +1427,32 @@ pub(crate) fn f16_widen8(
     Simd::<f32, BF16_SIMD_L>::from_bits(is_zero.select(sign, normal_bits)).cast()
 }
 
-/// Like [`f16_widen8`] but returns the exact f32 (no widen to f64) — for f32-native half-float
-/// max/min reduce, where the extra f32→f64 cast is wasted (max/min of f16 is exact in f32). Same
-/// NORMAL/±0-only contract (caller filters inf/NaN/subnormal via [`f16_input_needs_scalar`]).
+/// FULLY BRANCHLESS f16→f32 (Giesen "magic-multiply" decode) — handles normal, subnormal, ±0, inf
+/// AND NaN in straight-line SIMD, so callers need NO per-chunk `f16_input_needs_scalar` fast/slow
+/// split. `(h & 0x7FFF) << 13` lands exp+mantissa in f32 position; one multiply by 2^(254-15-127)
+/// renormalizes BOTH normals and subnormals; a `>=` compare detects inf/NaN and forces exp=0xFF
+/// (so inf→inf, NaN→a NaN — exact mantissa irrelevant for ordering/NaN-propagation). EXACT for every
+/// finite f16 (verified exhaustively over all 65536 patterns in tests); the sign is OR'd back last.
 #[inline]
-pub(crate) fn f16_widen8_f32(
+pub(crate) fn f16_widen8_full_f32(
     h: std::simd::Simd<u16, BF16_SIMD_L>,
 ) -> std::simd::Simd<f32, BF16_SIMD_L> {
-    use std::simd::cmp::SimdPartialEq;
+    use std::simd::cmp::SimdPartialOrd;
     use std::simd::num::{SimdFloat, SimdUint};
     use std::simd::{Select, Simd};
     type U32s = Simd<u32, BF16_SIMD_L>;
+    type F32s = Simd<f32, BF16_SIMD_L>;
     let h32 = h.cast::<u32>();
     let sign = (h32 & U32s::splat(0x8000)) << U32s::splat(16);
-    let half_exp = (h32 & U32s::splat(0x7C00)) >> U32s::splat(10);
-    let f32_exp = (half_exp + U32s::splat(112)) << U32s::splat(23);
-    let f32_man = (h32 & U32s::splat(0x03FF)) << U32s::splat(13);
-    let normal_bits = sign | f32_exp | f32_man;
-    let is_zero = (h32 & U32s::splat(0x7FFF)).simd_eq(U32s::splat(0));
-    Simd::<f32, BF16_SIMD_L>::from_bits(is_zero.select(sign, normal_bits))
+    let exp_mant = (h32 & U32s::splat(0x7FFF)) << U32s::splat(13);
+    let magic = F32s::splat(f32::from_bits((254 - 15) << 23)); // 0x7780_0000 = 2^112
+    let scaled = F32s::from_bits(exp_mant) * magic;
+    // inf/NaN ⇔ scaled >= 2^16 (the value a half-inf maps to); force f32 exp to 0xFF.
+    let was_infnan = F32s::splat(f32::from_bits((127 + 16) << 23)); // 0x4780_0000 = 2^16
+    let infnan_exp = scaled
+        .simd_ge(was_infnan)
+        .select(U32s::splat(0xFF << 23), U32s::splat(0));
+    F32s::from_bits((scaled.to_bits() | infnan_exp) | sign)
 }
 
 /// SIMD-widen a dense F16 bit slice to exact f64 (8-wide [`f16_widen8`] for normal/±0 chunks,
@@ -19112,6 +19119,42 @@ mod tests {
     }
 
     /// SIMD f16 Max/Min (same-shape + scalar-broadcast incl. relu `max(x,0)`) must be
+    /// EXHAUSTIVE: the branchless `f16_widen8_full_f32` must equal the scalar f16→f32 decode for
+    /// ALL 65536 f16 bit patterns — exact f32 bits for every finite value (incl. subnormals + ±0
+    /// sign), and NaN↦NaN / inf↦inf for the rest. This is what lets the f16 reducers drop the
+    /// per-chunk `f16_input_needs_scalar` fast/slow split and run fully branchless.
+    #[test]
+    fn f16_widen8_full_f32_exhaustive_matches_scalar() {
+        use std::simd::Simd;
+        for base in (0u32..=0xFFFF).step_by(BF16_SIMD_L) {
+            let mut arr = [0u16; BF16_SIMD_L];
+            for (k, slot) in arr.iter_mut().enumerate() {
+                *slot = ((base as usize + k).min(0xFFFF)) as u16;
+            }
+            let got = f16_widen8_full_f32(Simd::from_array(arr)).to_array();
+            for (k, &bits) in arr.iter().enumerate() {
+                let want = Literal::F16Bits(bits).as_f64().unwrap_or(0.0) as f32;
+                if want.is_nan() {
+                    assert!(
+                        got[k].is_nan(),
+                        "f16 {bits:#06x}: scalar NaN but got {}",
+                        got[k]
+                    );
+                } else {
+                    assert_eq!(
+                        got[k].to_bits(),
+                        want.to_bits(),
+                        "f16 {bits:#06x}: branchless={} ({:#010x}) scalar={} ({:#010x})",
+                        got[k],
+                        got[k].to_bits(),
+                        want,
+                        want.to_bits()
+                    );
+                }
+            }
+        }
+    }
+
     /// BIT-IDENTICAL to the scalar `jax_max_f64`/`jax_min_f64` half map over the f16 edge
     /// patterns (incl. ±0 ties, subnormal/inf/NaN input fallback), crossing 8-lane+remainder.
     #[test]
