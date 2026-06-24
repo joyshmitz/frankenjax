@@ -2665,8 +2665,17 @@ deferred it are now handled in straight-line SIMD). Added `reduce_window_simd_ch
 materialized-widen-to-f64 odometer. SAME-BINARY A/B [112×112×64, 3×3/s2]: odometer(widen-f64) **47.64ms** →
 fused-f32x8 **2.27ms = 20.99x**; production f16 maxpool **2.61ms** (~parity vs JAX bf16 2.80ms). Bit-identical:
 `half_pool_simd_channel_bit_identical` extended to C=20 (SIMD body + scalar tail, max+sum, vs the odometer) +
-full lib 1593/0 + clippy clean. f16 SUMpool still on the f64-view path (25ms; needs the f64-accum-order fused
-kernel — bead stays OPEN for it). The bf16 fused-pool lesson now generalized to f16 via the branchless decode.
+full lib 1593/0 + clippy clean. The bf16 fused-pool lesson now generalized to f16 via the branchless decode.
+
+f16 fused SUMpool — 29x, family COMPLETE (2026-06-24, SlateHarrier, bead `pthzx` CLOSED): added
+`simd_channel_block_f16_sum` (widen each tap f16→f64 via the branchless `f16_widen8_full_f32` then `f32→f64`
+exact, accumulate f64 in the odometer's row-major tap order, round f64→f16 ONCE per output via
+`Literal::from_f16_f64` — exactly the odometer's widen+accumulate+round) + a unified
+`reduce_window_simd_channel_f16(reduce_op)`. SAME-BINARY A/B [112×112×64, 3×3/s2]: sumpool odometer 54.74ms →
+fused **1.88ms = 29.12x** (maxpool re-measured 28.68x same run). Production f16 sumpool **1.96ms** (was ~25ms on
+the f64-view) / maxpool 1.98ms — both ~parity vs JAX bf16. Bit-identical: `half_pool_simd_channel_bit_identical`
+C=20 (SIMD body + scalar tail, max+SUM, vs the odometer) + full lib 1595/0 + clippy clean. The f16 fused
+channel-last pooling family (max/min/sum) is now COMPLETE, mirroring bf16.
 
 BOLD-VERIFY vs JAX follow-up (2026-06-24, ProudSalmon/codex, commit `c9d80489` already on `main` and
 `origin/master`): independent same-worker RCH check on `vmi1149989` kept the branchless lever. Same-binary
