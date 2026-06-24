@@ -208,6 +208,14 @@ MEASURED HEAD-TO-HEAD (2026-06-21, CrimsonOtter, SAME-WORKER vs JAX 0.10.2 CPU x
     butterflies changes the bits → breaks the golden. So **~2x of the FFT gap is the SAME `cntiy`
     +fma gate as matmul/exp** (golden-gated); the rest is algorithmic (mixed/split-radix op-count) +
     cache (the SoA transpose). FFT is thus part-cntiy-gated, part-intra-SIMD-hard — not purely either.
+    BATCH-AXIS SIMD RULED OUT (2026-06-24, SlateHarrier): prototyped an explicit-`Simd<f64,4>`-across-batch
+    radix-2 (bit-identical to per-row, verified all n×batch×fwd/inv) and A/B'd it vs the production path
+    same-binary [2048×256-pt c128, single-thread]: per-row 5.24ms / **prod scalar-SoA `batch_butterfly_block`
+    2.63ms** / explicit-f64x4 **2.78ms = 0.95x** (explicit is SLIGHTLY SLOWER). The production pow2 batched
+    FFT (`vectorized_pow2_block`→`batch_butterfly_block`, TILE=8) ALREADY vectorizes the batch axis — LLVM
+    autovectorizes the SoA row-loop, and explicit SIMD adds nothing. So the batch axis is DONE; the residual
+    19.4x is purely the fma-gate (butterfly `a*b±c*d`) + intra-FFT radix algorithm (both pow2-golden-locked).
+    Prototype REVERTED (~0-gain). Do NOT re-attempt batch-axis SIMD for pow2 FFT.
   - DISPATCH / small-op jit regime (the last unmeasured category): **JAX jit(x+1) scalar = 5.87us/call**
     — for tiny ops the Python->XLA dispatch boundary dominates. fj-lax is PURE RUST (no Python boundary)
     + the so4wo compiled-jaxpr cache (records ~1.6-5.4us). So **small-op-dispatch-bound workloads are a
