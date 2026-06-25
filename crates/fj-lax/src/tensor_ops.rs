@@ -14423,7 +14423,8 @@ mod tests {
             let mut b = f64::MAX;
             for _ in 0..5 {
                 let s = Instant::now();
-                std::hint::black_box(f());
+                f();
+                std::hint::black_box(());
                 b = b.min(s.elapsed().as_secs_f64());
             }
             b * 1e3
