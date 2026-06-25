@@ -4182,61 +4182,90 @@ fn reduce_window_extremum_1d_axis_f64(
         f64::INFINITY
     };
     let mut out = vec![0.0_f64; outer * spec.out_ax * inner];
-    let mut dq: std::collections::VecDeque<(f64, usize)> = std::collections::VecDeque::new();
-    for o in 0..outer {
-        for ii in 0..inner {
-            let line_base = o * axis_len * inner + ii;
-            let get = |k: usize| cur[line_base + k * inner];
-            dq.clear();
-            let mut nan_count = 0usize;
-            let mut added = 0usize; // indices [0, added) entered
-            let mut left = 0usize; // indices [0, left) removed
-            let out_base = o * spec.out_ax * inner + ii;
-            for oa in 0..spec.out_ax {
-                let start = oa * spec.stride;
-                let lo = start.saturating_sub(spec.pad_low);
-                let hi = (start + spec.window)
-                    .saturating_sub(spec.pad_low)
-                    .min(axis_len);
-                // Enter all indices below `hi` (monotonic: hi non-decreasing in oa).
-                while added < hi {
-                    let v = get(added);
-                    if v.is_nan() {
-                        nan_count += 1;
-                    } else {
-                        while let Some(&(bv, _)) = dq.back() {
-                            let dominated = if spec.is_max { bv <= v } else { bv >= v };
-                            if dominated {
-                                dq.pop_back();
-                            } else {
-                                break;
+    // One line (o, ii)'s deque scan: WINDOW-INDEPENDENT, writes the line's `out_ax` outputs at
+    // stride `inner` within this `o`-block. Pure-scratch deque, no cross-line state.
+    let scan_o_block = |o_lo: usize, blk: &mut [f64]| {
+        let mut dq: std::collections::VecDeque<(f64, usize)> = std::collections::VecDeque::new();
+        for (bo, o) in (o_lo..).take(blk.len() / (spec.out_ax * inner)).enumerate() {
+            let o_out_base = bo * spec.out_ax * inner;
+            for ii in 0..inner {
+                let line_base = o * axis_len * inner + ii;
+                let get = |k: usize| cur[line_base + k * inner];
+                dq.clear();
+                let mut nan_count = 0usize;
+                let mut added = 0usize; // indices [0, added) entered
+                let mut left = 0usize; // indices [0, left) removed
+                let out_base = o_out_base + ii;
+                for oa in 0..spec.out_ax {
+                    let start = oa * spec.stride;
+                    let lo = start.saturating_sub(spec.pad_low);
+                    let hi = (start + spec.window)
+                        .saturating_sub(spec.pad_low)
+                        .min(axis_len);
+                    while added < hi {
+                        let v = get(added);
+                        if v.is_nan() {
+                            nan_count += 1;
+                        } else {
+                            while let Some(&(bv, _)) = dq.back() {
+                                let dominated = if spec.is_max { bv <= v } else { bv >= v };
+                                if dominated {
+                                    dq.pop_back();
+                                } else {
+                                    break;
+                                }
                             }
+                            dq.push_back((v, added));
                         }
-                        dq.push_back((v, added));
+                        added += 1;
                     }
-                    added += 1;
+                    while left < lo {
+                        if get(left).is_nan() {
+                            nan_count -= 1;
+                        }
+                        if dq.front().map(|&(_, i)| i) == Some(left) {
+                            dq.pop_front();
+                        }
+                        left += 1;
+                    }
+                    let val = if hi <= lo {
+                        ident
+                    } else if nan_count > 0 {
+                        f64::NAN
+                    } else {
+                        dq.front().map(|&(v, _)| v).unwrap_or(ident)
+                    };
+                    blk[out_base + oa * inner] = val;
                 }
-                // Evict indices below `lo` (monotonic: lo non-decreasing).
-                while left < lo {
-                    if get(left).is_nan() {
-                        nan_count -= 1;
-                    }
-                    if dq.front().map(|&(_, i)| i) == Some(left) {
-                        dq.pop_front();
-                    }
-                    left += 1;
-                }
-                let val = if hi <= lo {
-                    ident // window entirely in padding → all-identity
-                } else if nan_count > 0 {
-                    f64::NAN
-                } else {
-                    dq.front().map(|&(v, _)| v).unwrap_or(ident)
-                };
-                out[out_base + oa * inner] = val;
             }
         }
+    };
+    // Thread over the independent OUTER blocks (each `o`-block of `out_ax*inner` outputs is a
+    // contiguous, disjoint slice — no strided cross-thread writes). Bit-identical to the serial scan.
+    let work = outer * axis_len * inner;
+    let threads = if work >= (1 << 18) && outer >= 2 {
+        crate::arithmetic::work_scaled_threads(work).min(outer)
+    } else {
+        1
+    };
+    if threads <= 1 {
+        scan_o_block(0, &mut out);
+        return out;
     }
+    let per = outer.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut o0 = 0usize;
+        while o0 < outer {
+            let cnt = per.min(outer - o0);
+            let (blk, tail) = rest.split_at_mut(cnt * spec.out_ax * inner);
+            rest = tail;
+            let start = o0;
+            o0 += cnt;
+            let f = &scan_o_block;
+            scope.spawn(move || f(start, blk));
+        }
+    });
     out
 }
 
@@ -7460,6 +7489,153 @@ mod tests {
     };
     use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value, ValueError};
     use std::collections::BTreeMap;
+
+    // The THREADED separable monotonic-deque 1-D sliding max/min (reduce_window_extremum_1d_axis_f64,
+    // threaded over the independent outer blocks) must be bit-identical to a naive O(out·window) tap
+    // reference. Sized to cross the threading threshold (outer=128 ≥ 2, work ≥ 1<<18).
+    #[test]
+    fn reduce_window_deque_threaded_matches_naive() {
+        let (outer, axis_len) = (128usize, 2048usize); // [outer, axis_len], window on the last axis
+        let src: Vec<f64> = (0..outer * axis_len)
+            .map(|i| {
+                let v = ((i % 4099) as f64) * 0.031 - 60.0;
+                if i % 911 == 0 { f64::NAN } else { v }
+            })
+            .collect();
+        for is_max in [true, false] {
+            for (window, stride, pad_low) in [(17usize, 1usize, 0usize), (33, 3, 5), (64, 7, 0)] {
+                let out_ax = {
+                    let padded = axis_len + pad_low; // pad_high handled by min(axis_len) in the deque
+                    (padded.saturating_sub(window)) / stride + 1
+                };
+                let got = super::reduce_window_extremum_1d_axis_f64(
+                    &src,
+                    &[outer, axis_len],
+                    super::ReduceWindowExtremumAxis {
+                        axis: 1,
+                        window,
+                        stride,
+                        pad_low,
+                        out_ax,
+                        is_max,
+                    },
+                );
+                // Naive reference: per line, per output, scan the window (OOB padded taps skipped;
+                // NaN in window → canonical NaN), bit-for-bit.
+                let mut want = vec![0.0f64; outer * out_ax];
+                for o in 0..outer {
+                    for oa in 0..out_ax {
+                        let start = oa * stride;
+                        let lo = start.saturating_sub(pad_low);
+                        let hi = (start + window).saturating_sub(pad_low).min(axis_len);
+                        let mut acc = if is_max {
+                            f64::NEG_INFINITY
+                        } else {
+                            f64::INFINITY
+                        };
+                        let mut any_nan = false;
+                        for k in lo..hi {
+                            let v = src[o * axis_len + k];
+                            if v.is_nan() {
+                                any_nan = true;
+                            } else if is_max {
+                                acc = acc.max(v);
+                            } else {
+                                acc = acc.min(v);
+                            }
+                        }
+                        want[o * out_ax + oa] = if any_nan { f64::NAN } else { acc };
+                    }
+                }
+                assert_eq!(got.len(), want.len());
+                for i in 0..want.len() {
+                    assert_eq!(
+                        got[i].to_bits(),
+                        want[i].to_bits(),
+                        "deque vs naive mismatch is_max={is_max} w={window} s={stride} p={pad_low} i={i}"
+                    );
+                }
+            }
+        }
+    }
+
+    // A/B: threaded deque (large, crosses threshold) vs the naive O(out·window) odometer it replaces.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_reduce_window_deque_threaded_ab() {
+        use std::time::Instant;
+        let (outer, axis_len, window, stride) = (256usize, 4096usize, 65usize, 1usize);
+        let src: Vec<f64> = (0..outer * axis_len)
+            .map(|i| ((i % 4099) as f64) * 0.031 - 60.0)
+            .collect();
+        let out_ax = (axis_len - window) / stride + 1;
+        let deque = || {
+            let r = super::reduce_window_extremum_1d_axis_f64(
+                &src,
+                &[outer, axis_len],
+                super::ReduceWindowExtremumAxis {
+                    axis: 1,
+                    window,
+                    stride,
+                    pad_low: 0,
+                    out_ax,
+                    is_max: true,
+                },
+            );
+            std::hint::black_box(&r);
+        };
+        // SERIAL monotonic deque (single-thread) — the pre-threading baseline; isolates the threading win.
+        let serial_deque = || {
+            let mut out = vec![0.0f64; outer * out_ax];
+            let mut dq: std::collections::VecDeque<(f64, usize)> =
+                std::collections::VecDeque::new();
+            for o in 0..outer {
+                dq.clear();
+                let mut added = 0usize;
+                let mut left = 0usize;
+                for oa in 0..out_ax {
+                    let start = oa * stride;
+                    let hi = (start + window).min(axis_len);
+                    while added < hi {
+                        let v = src[o * axis_len + added];
+                        while let Some(&(bv, _)) = dq.back() {
+                            if bv <= v {
+                                dq.pop_back();
+                            } else {
+                                break;
+                            }
+                        }
+                        dq.push_back((v, added));
+                        added += 1;
+                    }
+                    while left < start {
+                        if dq.front().map(|&(_, i)| i) == Some(left) {
+                            dq.pop_front();
+                        }
+                        left += 1;
+                    }
+                    out[o * out_ax + oa] = dq.front().map(|&(v, _)| v).unwrap_or(f64::NEG_INFINITY);
+                }
+            }
+            std::hint::black_box(&out);
+        };
+        let bench = |f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..10 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b * 1e3
+        };
+        let s = bench(&serial_deque);
+        let d = bench(&deque);
+        println!(
+            "AB reduce_window max [256,4096] w=65 s=1: serial-deque={s:.4}ms threaded-deque={d:.4}ms ({:.2}x)",
+            s / d
+        );
+    }
 
     // SIMD-over-channel maxpool/minpool bit-identity guard: the production
     // reduce_window_simd_channel_maxmin_f64 (f64x8 across channels, NaN-propagating) must match a

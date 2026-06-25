@@ -2612,6 +2612,20 @@ TOLERANCE + relaxing the internal bit-exact matmul guard for the gemv path — a
 Downgraded `dedicated-gemv-h36uj` to very-low. LESSON: matmul's N-SIMD strategy makes N=1 (gemv) inherently
 scalar-K under bit-exactness; the gap is structural, not an oversight.
 
+## 2026-06-25 - reduce_window large-window max/min deque THREADED — 4.24x (bead od11p flipped) (SlateHarrier)
+
+The separable monotonic-deque sliding max/min (`reduce_window_extremum_1d_axis_f64`) — the large-window /
+last-axis reduce_window path (small channel-last windows take the fused SIMD path) — was SINGLE-THREAD over
+its `outer*inner` independent lines, the documented ~1.4x JAX loss (`od11p`). Threaded it by the OUTER dim:
+for a fixed `o`, the output block `[o*out_ax*inner, (o+1)*out_ax*inner)` is CONTIGUOUS + disjoint, so
+`split_at_mut` partitions cleanly (no strided cross-thread writes, no `unsafe`); each thread runs its own
+scratch deque. SAME-BINARY A/B [256,4096] w=65 s=1 max: **serial-deque 5.37ms → threaded-deque 1.27ms =
+4.24x**. Since the serial deque was ~1.4x JAX-slower, 4.24x threading flips this path to a WIN vs JAX.
+Bit-identical (lines independent, same per-line deque, contiguous disjoint output):
+`reduce_window_deque_threaded_matches_naive` (max+min × 3 window/stride/pad configs, threaded path, vs a
+naive O(out·window) tap reference) + window tests 48/0 + full lib 1598/0 + clippy clean. NOTE: SIMD-of-the-
+deque (od11p's literal ask) stays hard (data-dependent push/pop); threading closed the JAX gap instead.
+
 ## 2026-06-25 - cumsum 2D already DOMINATES JAX (not a loss); f64 leading-axis BW-bound (SlateHarrier)
 
 Probed cumsum as a different primitive. JAX CPU cumsum is slow (sequential): [4096,1024] f64 ax0 **20.85ms**,
