@@ -23079,6 +23079,42 @@ mod tests {
         );
     }
 
+    // Throughput of the threaded special-function paths vs JAX (16M f64, measured):
+    // JAX gammaln 19.9ms / digamma 17.3ms / i0e 21.7ms. Decides whether fj-lax over-computes.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_special_fns_throughput() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let data: Vec<f64> = (0..n).map(|i| 0.1 + (i % 9973) as f64 * 0.002).collect();
+        let input = tensor_f64(vec![n as u32], &data);
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("fj-lax {label} f64 16M: {:.3}ms", b * 1e3);
+        };
+        bench("lgamma", &|| {
+            std::hint::black_box(
+                eval_lgamma(Primitive::Lgamma, std::slice::from_ref(&input)).unwrap(),
+            );
+        });
+        bench("digamma", &|| {
+            std::hint::black_box(
+                eval_digamma(Primitive::Digamma, std::slice::from_ref(&input)).unwrap(),
+            );
+        });
+        bench("i0e", &|| {
+            std::hint::black_box(
+                eval_bessel_i0e(Primitive::BesselI0e, std::slice::from_ref(&input)).unwrap(),
+            );
+        });
+    }
+
     #[test]
     fn lgamma_parallel_bit_identical() {
         // A large dense-F64 tensor (>65_536) engages the threaded transcendental

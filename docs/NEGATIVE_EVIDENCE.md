@@ -2705,6 +2705,26 @@ TOLERANCE + relaxing the internal bit-exact matmul guard for the gemv path — a
 Downgraded `dedicated-gemv-h36uj` to very-low. LESSON: matmul's N-SIMD strategy makes N=1 (gemv) inherently
 scalar-K under bit-exactness; the gap is structural, not an oversight.
 
+## 2026-06-25 - SPECIAL FUNCTIONS are a real non-fma JAX LOSS (2.0–2.5x) — NEW LEVER, surfaced (SlateHarrier)
+
+First genuine contained, non-fma, non-owned JAX loss found in many turns. MEASURED 16M f64 (JAX 0.10.2 CPU,
+restored venv vs `bench_special_fns_throughput`):
+  • lgamma  fj-lax **41.7ms** vs JAX 19.9ms = **2.1x slower**
+  • digamma fj-lax **34.4ms** vs JAX 17.3ms = **2.0x slower**
+  • i0e     fj-lax **55.3ms** vs JAX 21.7ms = **2.5x slower**
+(Aside: JAX `gammainc`/igamma is 23.9 SECONDS for 16M — fj-lax dominates that one hugely; not a lever.)
+ROOT CAUSE (read the impls): `lgamma_approx` evaluates the Lanczos series as PARTIAL FRACTIONS — ~15
+DIVISIONS per element (`coeff / (z + idx)` in a loop) + 2 `ln`s; `digamma_approx` runs a per-element
+RECURRENCE LOOP (`while shifted < 8.0 { result -= 1/shifted; ... }`) — up to ~8 divisions. JAX uses
+division-free rational (Horner P(z)/Q(z), ONE division) minimax forms, fully SIMD-vectorized. These paths are
+COMPUTE-bound, NOT fma-gated (the polynomial is plain mul/add/div), NOT memory-bound — so this is a legitimate
+contained lever. ATTACK PLAN (deferred — accuracy-critical, must hold the goldens' ~1e-13 vs in-repo
+references, so NOT to be rushed): (1) replace the partial-fraction Lanczos with a rational Horner form (Cephes/
+Boost coefficients) → ~15 div → ~30 mul/add + 1 div; (2) or SIMD-8-wide the division-heavy path for x≥0.5
+(vdivpd is NOT fma-gated; the `ln` stays scalar or needs the fma-gated SIMD-poly log). Filed as bead
+`frankenjax-special-fn-rational-3gsc5`. Bench `bench_special_fns_throughput` left in as the A/B baseline.
+NOTE: erf is cross-crate (excluded here).
+
 ## 2026-06-26 - scatter-add binning lever CONFIRMED ALREADY DONE; non-fma surface empirically exhausted (SlateHarrier)
 
 Code-verified `scatter_reduce_range_partitioned` (the scatter-add ~1.25x-JAX path): it ALREADY does the
