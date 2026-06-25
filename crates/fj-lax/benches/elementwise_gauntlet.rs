@@ -47,6 +47,27 @@ fn f32_boxed(v: &[f32]) -> Value {
         .unwrap(),
     )
 }
+fn complex128_dense(v: &[(f64, f64)]) -> Value {
+    Value::Tensor(
+        TensorValue::new_complex_values(DType::Complex128, vshape(v.len()), v.to_vec()).unwrap(),
+    )
+}
+fn boolwords_cond(len: usize, flag: impl Fn(usize) -> bool) -> Value {
+    let mut words = vec![0u64; len.div_ceil(64)];
+    for i in 0..len {
+        if flag(i) {
+            words[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+    Value::Tensor(
+        TensorValue::new_with_literal_buffer(
+            DType::Bool,
+            vshape(len),
+            LiteralBuffer::from_bool_words(words, len).unwrap(),
+        )
+        .unwrap(),
+    )
+}
 
 fn bench_op(
     label: &str,
@@ -235,6 +256,80 @@ fn bench_f32_add_impl_ab(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_complex_select_boolwords(c: &mut Criterion) {
+    let a: Vec<(f64, f64)> = (0..N)
+        .map(|i| {
+            (
+                (i as f64 * 0.013 - 5.0).sin(),
+                (i as f64 * 0.007 + 0.5).cos(),
+            )
+        })
+        .collect();
+    let b: Vec<(f64, f64)> = (0..N)
+        .map(|i| {
+            (
+                (i as f64 * -0.011 + 3.0).cos(),
+                (i as f64 * 0.017 - 0.25).sin(),
+            )
+        })
+        .collect();
+    let cond = boolwords_cond(N, |i| i.wrapping_mul(2_654_435_761) & 0x80 != 0);
+    let lhs = complex128_dense(&a);
+    let rhs = complex128_dense(&b);
+    let inputs = [cond.clone(), lhs.clone(), rhs.clone()];
+    let params = BTreeMap::new();
+    let result = eval_primitive(Primitive::Select, &inputs, &params).unwrap();
+    assert!(
+        result
+            .as_tensor()
+            .unwrap()
+            .elements
+            .as_complex_slice()
+            .is_some(),
+        "complex BoolWords select must stay dense"
+    );
+
+    let old_materialize_boxed = || {
+        let mut elements = Vec::with_capacity(N);
+        let cond_t = cond.as_tensor().unwrap();
+        let lhs_t = lhs.as_tensor().unwrap();
+        let rhs_t = rhs.as_tensor().unwrap();
+        for ((c, t), f) in cond_t
+            .elements
+            .iter()
+            .zip(lhs_t.elements.iter())
+            .zip(rhs_t.elements.iter())
+        {
+            let flag = matches!(*c, Literal::Bool(true));
+            let selected = if flag { *t } else { *f };
+            elements.push(selected);
+        }
+        TensorValue::new(DType::Complex128, vshape(N), elements).unwrap()
+    };
+    let old = old_materialize_boxed();
+    for i in [0usize, N / 2, N - 1] {
+        assert_eq!(
+            result.as_tensor().unwrap().elements.get(i),
+            old.elements.get(i),
+            "complex BoolWords select changed value bits"
+        );
+    }
+
+    let mut group = c.benchmark_group("complex_select_boolwords_1m");
+    group.throughput(Throughput::Elements(N as u64));
+    group.bench_function("dense_bit_test", |bn| {
+        bn.iter(|| {
+            black_box(
+                eval_primitive(Primitive::Select, black_box(&inputs), black_box(&params)).unwrap(),
+            )
+        });
+    });
+    group.bench_function("old_materialize_boxed", |bn| {
+        bn.iter(|| black_box(old_materialize_boxed()));
+    });
+    group.finish();
+}
+
 fn bench_elementwise(c: &mut Criterion) {
     let a64: Vec<f64> = (0..N).map(|i| (i as f64) * 1e-6 - 0.5).collect();
     let b64: Vec<f64> = (0..N).map(|i| (i as f64) * 2e-6 + 0.25).collect();
@@ -313,6 +408,6 @@ criterion_group! {
         .sample_size(30)
         .warm_up_time(Duration::from_millis(500))
         .measurement_time(Duration::from_secs(2));
-    targets = bench_f32_add_impl_ab, bench_thread_policy_ab, bench_elementwise
+    targets = bench_f32_add_impl_ab, bench_thread_policy_ab, bench_complex_select_boolwords, bench_elementwise
 }
 criterion_main!(benches);

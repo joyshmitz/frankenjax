@@ -7699,19 +7699,61 @@ fn select_complex_same_shape_fast_path(
     on_true: &TensorValue,
     on_false: &TensorValue,
 ) -> Result<Option<Value>, EvalError> {
-    let (Some(c), Some(t), Some(f)) = (
-        cond.elements.as_bool_slice(),
+    let (Some(t), Some(f)) = (
         on_true.elements.as_complex_slice(),
         on_false.elements.as_complex_slice(),
     ) else {
         return Ok(None);
     };
-    let out: Vec<(f64, f64)> = c
-        .iter()
-        .zip(t)
-        .zip(f)
-        .map(|((&flag, &tv), &fv)| if flag { tv } else { fv })
-        .collect();
+    let out: Vec<(f64, f64)> = if let Some(c) = cond.elements.as_bool_slice() {
+        let len = c.len();
+        if len >= CHEAP_BINARY_PARALLEL_MIN && work_scaled_threads(len) > 1 {
+            let mut out = vec![(0.0, 0.0); len];
+            threaded_index_fill_into(&mut out, work_scaled_threads(len), |i| {
+                if c[i] { t[i] } else { f[i] }
+            });
+            return Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+                on_true.dtype,
+                cond.shape.clone(),
+                out,
+            )?)));
+        }
+        c.iter()
+            .zip(t)
+            .zip(f)
+            .map(|((&flag, &tv), &fv)| if flag { tv } else { fv })
+            .collect()
+    } else if let Some((words, len)) = cond.elements.as_bool_words() {
+        if len != t.len() {
+            return Ok(None);
+        }
+        if len >= CHEAP_BINARY_PARALLEL_MIN && work_scaled_threads(len) > 1 {
+            let mut out = vec![(0.0, 0.0); len];
+            threaded_index_fill_into(&mut out, work_scaled_threads(len), |i| {
+                if (words[i / 64] >> (i % 64)) & 1 != 0 {
+                    t[i]
+                } else {
+                    f[i]
+                }
+            });
+            return Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+                on_true.dtype,
+                cond.shape.clone(),
+                out,
+            )?)));
+        }
+        (0..len)
+            .map(|i| {
+                if (words[i / 64] >> (i % 64)) & 1 != 0 {
+                    t[i]
+                } else {
+                    f[i]
+                }
+            })
+            .collect()
+    } else {
+        return Ok(None);
+    };
     Ok(Some(Value::Tensor(TensorValue::new_complex_values(
         on_true.dtype,
         cond.shape.clone(),
@@ -26641,6 +26683,88 @@ mod tests {
                 "scalar-branch BoolWords select bit-identical"
             );
         }
+    }
+
+    #[test]
+    fn select_complex_boolwords_predicate_bit_identical() {
+        // A comparison-generated BoolWords predicate feeding
+        // jnp.where(mask, complex_a, complex_b) must match the old boxed
+        // per-Literal path bit-for-bit and emit dense complex output.
+        let n = 97usize;
+        let flag = |i: usize| (i.wrapping_mul(2_654_435_761) & 0x80) != 0;
+        let mut words = vec![0u64; n.div_ceil(64)];
+        for i in 0..n {
+            if flag(i) {
+                words[i / 64] |= 1u64 << (i % 64);
+            }
+        }
+        let shape = Shape::vector(n as u32);
+        let cond_words = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::Bool,
+                shape.clone(),
+                fj_core::LiteralBuffer::from_bool_words(words, n).unwrap(),
+            )
+            .unwrap(),
+        );
+        let cond_boxed = Value::Tensor(
+            TensorValue::new_with_literal_buffer(
+                DType::Bool,
+                shape.clone(),
+                fj_core::LiteralBuffer::new((0..n).map(|i| Literal::Bool(flag(i))).collect()),
+            )
+            .unwrap(),
+        );
+        let left: Vec<(f64, f64)> = (0..n)
+            .map(|i| (i as f64 * 0.125 - 3.0, (i as f64 * 0.25).sin()))
+            .collect();
+        let right: Vec<(f64, f64)> = (0..n)
+            .map(|i| (i as f64 * -0.5 + 7.0, (i as f64 * 0.5).cos()))
+            .collect();
+        let dense_left = Value::Tensor(
+            TensorValue::new_complex_values(DType::Complex128, shape.clone(), left.clone())
+                .unwrap(),
+        );
+        let dense_right = Value::Tensor(
+            TensorValue::new_complex_values(DType::Complex128, shape, right.clone()).unwrap(),
+        );
+        let p = BTreeMap::new();
+        let dense = crate::eval_primitive(
+            Primitive::Select,
+            &[cond_words, dense_left.clone(), dense_right.clone()],
+            &p,
+        )
+        .unwrap();
+        let boxed = crate::eval_primitive(
+            Primitive::Select,
+            &[cond_boxed, dense_left, dense_right],
+            &p,
+        )
+        .unwrap();
+        assert!(
+            dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .as_complex_slice()
+                .is_some(),
+            "BoolWords complex select must produce dense complex output"
+        );
+        assert_eq!(
+            dense
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .collect::<Vec<_>>(),
+            boxed
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .collect::<Vec<_>>(),
+            "BoolWords complex select bit-identical"
+        );
     }
 
     #[test]

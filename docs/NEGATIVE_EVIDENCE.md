@@ -41,6 +41,27 @@ conv2d) plus exp/softmax/transcendentals/cholesky-GEMM simultaneously.** Other r
 `ur4h3` eigh/SVD, linalg (codex zone), filed P3 complex-conv, and multi-session swings (compiled-jaxpr
 dispatch / fused attention).
 
+UPDATE 2026-06-25 (ProudSalmon, complex `select`/`where` BOLD-VERIFY): a contained
+non-`+fma` dtype-sibling gap remained in `jnp.where(mask, complex_a, complex_b)`.
+The real/float/int/half/unsigned select fast paths already consumed packed
+BoolWords predicates directly; complex select only accepted dense Bool slices,
+so a comparison-generated packed mask fell back to materializing the predicate
+and boxed complex output. Shipped the analogous complex BoolWords path plus
+threaded dense fill. Proof: RCH `hz2`
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a cargo test -p fj-lax --lib select_complex_boolwords_predicate_bit_identical --release -- --nocapture`
+passed 1/1. Bench: `cargo bench --release` is not accepted by this Cargo
+(`unexpected argument '--release'`), so the valid optimized equivalent was
+`cargo bench -p fj-lax --profile release --bench elementwise_gauntlet -- complex_select_boolwords_1m --noplot`
+on RCH `vmi1227854`: new dense bit-test/threaded path **1.5325ms** midpoint vs
+old materialize+boxed **4.7203ms** midpoint = **3.08x Rust-side speedup**.
+Fresh JAX/JAXLIB 0.10.1 CPU x64 comparator from the existing
+`benchmarks/jax_comparison/.venv` on the exact 1M complex128 fixture measured
+**1.166893ms p50 / 1.168015ms mean**, so the production row narrows a
+**4.05x Rust/JAX loss to 1.31x**. Verdict: KEEP as a material loss-narrowing
+primitive lever; not a Rust-over-JAX flip. Next retry must beat ~1.17ms with a
+lower-overhead thread policy or vectorized complex mux, not another boxed-mask
+avoidance pass.
+
 UPDATE 2026-06-22 (CrimsonOtter, `frankenjax-murmw` FFT BOLD-VERIFY): the radical FFT route from
 alien-graveyard/extreme-optimization was generated/vectorized radix-4 family specialization for the
 power-of-two batched kernel. Fresh same-binary A/B rejected the lever: radix-4 SoA butterflies were
