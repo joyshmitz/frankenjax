@@ -4401,6 +4401,106 @@ mod tests {
     use fj_core::LiteralBuffer;
     use std::collections::BTreeMap;
 
+    // PROFILE the cummax 29<->73 puzzle (bead frankenjax-parallel-cummax-scan): time the 2-pass parallel
+    // associative scan DIRECTLY on the tensor's f64 slice vs the full eval_primitive(Cummax) path, on the
+    // SAME 16M data, to localize the ~44ms overhead (scan itself vs eval pipeline).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cummax_profile_scan_vs_eval() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i.wrapping_mul(2654435761) % 100003) as f64) * 0.01 - 500.0)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let slice: &[f64] = match &x {
+            Value::Tensor(t) => t.elements.as_f64_slice().unwrap(),
+            _ => unreachable!(),
+        };
+        let init = f64::NEG_INFINITY;
+        let par = |src: &[f64]| -> Vec<f64> {
+            let cores = std::thread::available_parallelism()
+                .map(|c| c.get())
+                .unwrap_or(8);
+            let threads = (src.len() / (1 << 18)).clamp(2, cores);
+            let block = src.len().div_ceil(threads);
+            let mut out = vec![0.0f64; src.len()];
+            let ext: Vec<f64> = std::thread::scope(|s| {
+                let mut hs = Vec::new();
+                let mut sr = src;
+                let mut orr: &mut [f64] = out.as_mut_slice();
+                while !sr.is_empty() {
+                    let take = block.min(sr.len());
+                    let (sc, st) = sr.split_at(take);
+                    let (oc, ot) = orr.split_at_mut(take);
+                    sr = st;
+                    orr = ot;
+                    hs.push(s.spawn(move || {
+                        let mut acc = init;
+                        for (o, &v) in oc.iter_mut().zip(sc) {
+                            acc = super::jax_minmax_scalar(acc, v, true);
+                            *o = acc;
+                        }
+                        acc
+                    }));
+                }
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            let mut carries = vec![init; ext.len()];
+            let mut acc = init;
+            for (k, &e) in ext.iter().enumerate() {
+                carries[k] = acc;
+                acc = super::jax_minmax_scalar(acc, e, true);
+            }
+            std::thread::scope(|s| {
+                let mut orr: &mut [f64] = out.as_mut_slice();
+                let mut k = 0usize;
+                while !orr.is_empty() {
+                    let take = block.min(orr.len());
+                    let (oc, ot) = orr.split_at_mut(take);
+                    orr = ot;
+                    let carry = carries[k];
+                    if k > 0 {
+                        s.spawn(move || {
+                            for o in oc.iter_mut() {
+                                *o = super::jax_minmax_scalar(carry, *o, true);
+                            }
+                        });
+                    }
+                    k += 1;
+                }
+            });
+            out
+        };
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..6 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            println!("cummax-profile {label}: {:.3}ms", b * 1e3);
+        };
+        bench("par-scan-direct-on-tensor-slice", &|| {
+            std::hint::black_box(par(slice));
+        });
+        let p = BTreeMap::from([("axis".to_owned(), "0".to_owned())]);
+        bench("eval_primitive(Cummax)", &|| {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Cummax, std::slice::from_ref(&x), &p).unwrap(),
+            );
+        });
+    }
+
     // BOLD-VERIFY: 1-D cummax/cummin vs JAX (16M f64, measured JAX lax.cummax 68.1ms / cummin 72.1ms).
     // max/min are associative (a parallel scan would be bit-identical) — but JAX doesn't fast-scan them
     // on CPU, so fj-lax's sequential fold should still win.

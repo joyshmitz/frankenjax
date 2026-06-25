@@ -2946,6 +2946,17 @@ the real eval path doesn't deliver. cummax stays a ~1.21x loss; the parallel-sca
 through the current eval path. Bead `frankenjax-parallel-cummax-scan` downgraded (needs the 29↔73 root-cause
 first, not just the algorithm).
 
+ROOT-CAUSE PROFILED (2026-06-25, `bench_cummax_profile_scan_vs_eval`): the 2-pass parallel scan run DIRECTLY
+on the tensor's f64 slice = **29.9–37ms** (matches the standalone — it is genuinely fast + bit_identical),
+but `eval_primitive(Cummax)` on the SAME data = **74.6ms**. So the scan is NOT the bottleneck — there's a
+~37–44ms overhead in the cummax EVAL PATH itself. Wiring a dedicated `parallel_cummax_f64` into
+`eval_cumulative_dense`'s dense-f64 single-chain branch + `#[inline(always)]` on `jax_minmax_scalar` did NOT
+help — `eval_primitive(Cummax)` stayed 74ms (the dense-branch result isn't what 1-D cummax returns; 1-D
+cummax routes through a DIFFERENT eval path that the dense-branch wiring doesn't reach). REVERTED (reduction.rs
+production == HEAD; kept the profiling bench as evidence; cum 48/0). The real lever is now precisely located:
+find the 1-D cummax eval path (NOT `eval_cumulative_dense`'s dense branch) and route it to the fast direct
+scan — a structural eval-routing fix, bead'd. cummax stays ~1.21x loss meanwhile.
+
 ## 2026-06-25 - argsort is a ~35x fj-lax WIN vs JAX (SlateHarrier)
 
 `bench_argsort2d_vs_jax`: argsort f64 [2048,2048] axis1 — fj-lax **17.4ms vs JAX 616.8ms = ~35x WIN**.
