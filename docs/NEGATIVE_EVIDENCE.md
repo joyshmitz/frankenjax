@@ -2787,6 +2787,18 @@ pure-BW op pays fj-lax's per-call alloc/fault that JAX amortizes. That is an eva
 in-place dispatch — architectural, akin to so4wo), NOT a contained per-op kernel lever. NOT pursued. (Good
 news: on compute-bearing unary ops fj-lax already MATCHES/BEATS XLA.)
 
+EXTENDED SWEEP (2026-06-25, SlateHarrier — closes the binary/intpow class): measured more JAX 0.10.2 16M f64:
+intpow x³ 17.4ms / x⁸ 13.1ms, maximum 14.2ms, clip 11.6ms (all BW-bound → same eval-model alloc gap),
+remainder JAX 30.7ms vs fj-lax **37.2ms (~1.2x)** — scalar `fmod` (NO SIMD fmod on x86, both scalar) + the
+per-call alloc, so no algorithm lever, floor_divide is a composite (not a fj-lax primitive). CONSOLIDATED
+vs-JAX characterization (this arc, venv-restored, ~9 op classes measured): EVERY fj-lax op class is now
+classified — (a) PARITY/WIN: sqrt/rsqrt, sort/scan/top_k (dominate), scalar-bound fmod/idiv, compute-bound
+SIMD-no-fma; (b) FMA-GATED (`cntiy`): exp/log/sin/cos/tan/pow/erf/lgamma-digamma-lns/matmul/conv/softmax/FFT-
+butterflies; (c) EVAL-MODEL-bound (so4wo-class buffer reuse): the pure-BW cheap ops (reciprocal/maximum/clip/
+add/mul — fj-lax allocs+faults a fresh output per eval, JAX reuses). The TWO remaining levers are both
+ARCHITECTURAL/gated: **+fma (`cntiy`)** and an **output-buffer-reuse eval model**. No contained per-op kernel
+lever remains on this host.
+
 ## 2026-06-26 - scatter-add binning lever CONFIRMED ALREADY DONE; non-fma surface empirically exhausted (SlateHarrier)
 
 Code-verified `scatter_reduce_range_partitioned` (the scatter-add ~1.25x-JAX path): it ALREADY does the

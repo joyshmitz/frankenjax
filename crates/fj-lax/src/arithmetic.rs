@@ -23079,6 +23079,33 @@ mod tests {
         );
     }
 
+    // Remainder vs JAX (16M f64, measured): JAX remainder 30.7ms. Scalar fmod (no SIMD fmod on x86),
+    // so fj-lax (threaded) is expected to be ~parity — confirms no algorithm lever here.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_remainder_throughput() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let xd: Vec<f64> = (0..n).map(|i| 0.1 + (i % 9973) as f64 * 0.01).collect();
+        let yd: Vec<f64> = (0..n).map(|i| 0.3 + (i % 7919) as f64 * 0.02).collect();
+        let x = tensor_f64(vec![n as u32], &xd);
+        let y = tensor_f64(vec![n as u32], &yd);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Rem, &[x.clone(), y.clone()], &BTreeMap::new())
+                    .unwrap(),
+            );
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!("fj-lax remainder f64 16M: {:.3}ms | JAX=30.7ms", b * 1e3);
+    }
+
     // Hardware-math ops vs JAX (16M f64, measured): JAX sqrt 23.8ms / rsqrt 28.4ms / reciprocal 14.0ms.
     // These are ~memory-bandwidth-bound (256MB traffic); confirms fj-lax (threaded past L3) is parity.
     #[test]
