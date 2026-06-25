@@ -2771,6 +2771,22 @@ fma-gated (cf. SIMD-poly exp: 2.2x WITH fma / 0.79x WITHOUT). So the special-fn 
 (+fma), like matmul/conv/exp; the rational-Horner reform (8 div→1) is also `ln`-capped and won't reach parity
 alone. REVERTED to scalar (arithmetic.rs unchanged). Bead downgraded: needs +fma SIMD-ln, not a quick win.
 
+## 2026-06-25 - hardware-math ops: sqrt/rsqrt BEAT JAX; reciprocal gap is eval-model, not a kernel lever (SlateHarrier)
+
+Measured the hardware-math class vs JAX 0.10.2 (16M f64, `bench_hardware_math_throughput`):
+  • sqrt   fj-lax **21.7ms** vs JAX 23.8ms — fj-lax WINS ~1.1x
+  • rsqrt  fj-lax **21.7ms** vs JAX 28.4ms — fj-lax WINS ~1.3x
+  • reciprocal fj-lax **20–25ms** vs JAX **14.0ms** — fj-lax LOSES ~1.5x
+fj-lax sits at a ~20–22ms floor for all three (compute-bound on sqrt/rsqrt where it beats JAX; but for the
+pure-BW reciprocal, JAX hits 14ms = raw bandwidth and fj-lax does not). Probed the cause: reciprocal routes
+through `eval_unary_elementwise` (lib.rs) — A/B vs the threaded `eval_unary_elementwise_parallel` path was
+**23.4 vs 24.9ms = 1.06x (~0-gain)**, so it is ALREADY effectively threaded; rerouting is not the lever
+(reverted the probe). The residual reciprocal gap is STRUCTURAL: every fj-lax eval ALLOCATES a fresh output
+`Vec` per call (`vec![0.0; n]` + first-touch page faults), while JAX's jit REUSES output buffers — so a
+pure-BW op pays fj-lax's per-call alloc/fault that JAX amortizes. That is an eval-MODEL gap (buffer-pool /
+in-place dispatch — architectural, akin to so4wo), NOT a contained per-op kernel lever. NOT pursued. (Good
+news: on compute-bearing unary ops fj-lax already MATCHES/BEATS XLA.)
+
 ## 2026-06-26 - scatter-add binning lever CONFIRMED ALREADY DONE; non-fma surface empirically exhausted (SlateHarrier)
 
 Code-verified `scatter_reduce_range_partitioned` (the scatter-add ~1.25x-JAX path): it ALREADY does the
