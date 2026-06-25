@@ -2628,9 +2628,18 @@ are now mined; scatter-add binned, gather HW-optimal. The non-fma/on-host/unowne
 remaining JAX LOSS routes to `cntiy` (+fma maintainer decision) or owned multi-session (eigh/SVD LAPACK-gap,
 so4wo compiled-jaxpr). sort/cumsum/einsum DOMINATE JAX (CPU-sort/scan catastrophe). UPDATE: even COMPLEX
 sort is a domination — `bench_complex_sort_single_thread` measures fj-lax single-thread complex128 sort
-[2048,2048] axis1 = **280ms vs JAX 602ms = 2.15x WIN** (single-thread, before any threading). So threading the
-generic/complex sort fallback (the last remaining clean compute-bound code lever) would only EXTEND a
-domination (280→~50ms internally), not close a JAX loss — declined as domination-extending niche churn.
+[2048,2048] axis1 = **280ms vs JAX 602ms = 2.15x WIN** (single-thread, before any threading). SHIPPED threading the
+generic/complex sort fallback (the last remaining clean compute-bound code lever): the generic single-tensor
+sort path (`sort_along_axis`, sort_key + compare_sort_keys_nan_last — the complex / non-radix dtypes) was
+single-thread; added inter-slice threading of the contiguous (last-axis) case (lines independent, per-thread
+reused `indexed` scratch, per-thread Result for the `?`, gated `total >= SORT_PARALLEL_MIN_TOTAL_ELEMS`).
+SAME-BINARY A/B `bench_complex_sort_threaded_ab` complex128 [2048,2048] axis1: serial-ref 361ms vs threaded
+**137ms = 2.63x** (~2.0x vs the prior serial eval_primitive 280ms). Bit-identical (sort tests 27/0 + full lib
+1599/0 + clippy clean). vs JAX 602ms the domination went 2.15x→4.4x. PITFALLS hit + fixed: (1) gated on
+`use_parallel_radix` first (that's INTRA-slice, outer_count==1 only) so threading never engaged — use the
+inter-slice `SORT_PARALLEL_MIN_TOTAL_ELEMS` gate; (2) allocating `indexed` per-line made it a net loss — reuse
+per-thread. The sort-threading family is now COMPLETE (radix dtypes + generic/complex, all axes via the
+transpose wrapper). This is the last contained compute-bound lever; remaining = `cntiy` +fma / owned.
 
 ## 2026-06-26 - gather sort-gather-scatter EMPIRICALLY REJECTED — 0.07x (random gather is HW-optimal) (SlateHarrier)
 

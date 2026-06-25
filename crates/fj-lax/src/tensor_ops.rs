@@ -9999,113 +9999,183 @@ fn sort_along_axis(
         tensor.elements.to_vec()
     };
 
-    let mut indexed = Vec::with_capacity(axis_dim);
-    for outer in 0..outer_count {
-        let base = {
-            let mut idx = outer;
-            let mut flat = 0_usize;
-            for ax in (0..rank).rev() {
-                if ax == axis {
-                    continue;
-                }
-                let dim = tensor.shape.dims[ax] as usize;
-                if dim == 0 {
-                    return Err(EvalError::Unsupported {
-                        primitive,
-                        detail: "sort encountered zero non-axis dimension in non-empty tensor"
-                            .to_owned(),
-                    });
-                }
-                let offset =
-                    (idx % dim)
-                        .checked_mul(strides[ax])
-                        .ok_or_else(|| EvalError::Unsupported {
-                            primitive,
-                            detail: "sort flat offset multiplication overflowed usize".to_owned(),
-                        })?;
-                flat = flat
-                    .checked_add(offset)
-                    .ok_or_else(|| EvalError::Unsupported {
-                        primitive,
-                        detail: "sort flat offset addition overflowed usize".to_owned(),
-                    })?;
-                idx /= dim;
-            }
-            flat
-        };
-
+    // Threaded fast-path for the contiguous (last-axis) generic sort (complex / non-radix dtypes):
+    // each line is result_elements[outer*axis_dim..]; lines are independent and the per-line sort is
+    // compute-bound (key extraction + stable comparison sort), so fan disjoint line-blocks across
+    // threads. Bit-identical (same per-line sort_by order); the strided/small case stays serial below.
+    // (Non-last axes are already transposed to last by the sort_along_axis wrapper, so axis_stride==1
+    // is the common case here.)
+    // `indexed` is reused across all lines a thread owns (NOT re-allocated per line — that per-line
+    // alloc made an earlier version of this path a net LOSS), mirroring the serial loop's reuse.
+    let line_sort = |indexed: &mut Vec<(usize, SortKey)>,
+                     base: usize,
+                     out_line: &mut [Literal]|
+     -> Result<(), EvalError> {
         indexed.clear();
         for i in 0..axis_dim {
-            let flat_idx = i
-                .checked_mul(axis_stride)
-                .and_then(|offset| base.checked_add(offset))
-                .ok_or_else(|| EvalError::Unsupported {
-                    primitive,
-                    detail: "sort axis offset overflowed usize".to_owned(),
-                })?;
-            let literal = *tensor
-                .elements
-                .get(flat_idx)
-                .ok_or_else(|| EvalError::Unsupported {
-                    primitive,
-                    detail: format!(
-                        "sort flat index {flat_idx} out of bounds for {total} elements"
-                    ),
-                })?;
+            let literal = tensor.elements[base + i];
             let key =
                 sort_key(literal).map_err(|detail| EvalError::Unsupported { primitive, detail })?;
             indexed.push((i, key));
         }
-
         if descending {
             indexed.sort_by(|a, b| compare_sort_keys_nan_last(b.1, a.1));
         } else {
             indexed.sort_by(|a, b| compare_sort_keys_nan_last(a.1, b.1));
         }
-
         for (out_pos, &(orig_idx, _)) in indexed.iter().enumerate() {
-            let flat_idx = out_pos
-                .checked_mul(axis_stride)
-                .and_then(|offset| base.checked_add(offset))
-                .ok_or_else(|| EvalError::Unsupported {
-                    primitive,
-                    detail: "sort output offset overflowed usize".to_owned(),
-                })?;
-            if return_indices {
-                *result_elements
-                    .get_mut(flat_idx)
-                    .ok_or_else(|| EvalError::Unsupported {
-                        primitive,
-                        detail: format!(
-                            "sort output index {flat_idx} out of bounds for {total} elements"
-                        ),
-                    })? = Literal::I64(orig_idx as i64);
+            out_line[out_pos] = if return_indices {
+                Literal::I64(orig_idx as i64)
             } else {
-                let source_idx = orig_idx
+                tensor.elements[base + orig_idx]
+            };
+        }
+        Ok(())
+    };
+    let sort_threads = {
+        let hardware = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1);
+        if total >= SORT_PARALLEL_MIN_TOTAL_ELEMS {
+            hardware.min(total / SORT_PARALLEL_MIN_TOTAL_ELEMS).max(1)
+        } else {
+            1
+        }
+    };
+    if axis_stride == 1 && outer_count > 1 && sort_threads > 1 {
+        let threads = sort_threads.min(outer_count);
+        let per = outer_count.div_ceil(threads);
+        let line_sort = &line_sort;
+        let results: Vec<Result<(), EvalError>> = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            let mut rest = result_elements.as_mut_slice();
+            let mut o0 = 0usize;
+            while o0 < outer_count {
+                let cnt = per.min(outer_count - o0);
+                let (blk, tail) = rest.split_at_mut(cnt * axis_dim);
+                rest = tail;
+                let start = o0;
+                o0 += cnt;
+                handles.push(scope.spawn(move || -> Result<(), EvalError> {
+                    let mut indexed: Vec<(usize, SortKey)> = Vec::with_capacity(axis_dim);
+                    for (j, out_line) in blk.chunks_exact_mut(axis_dim).enumerate() {
+                        line_sort(&mut indexed, (start + j) * axis_dim, out_line)?;
+                    }
+                    Ok(())
+                }));
+            }
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in results {
+            r?;
+        }
+    } else {
+        let mut indexed = Vec::with_capacity(axis_dim);
+        for outer in 0..outer_count {
+            let base = {
+                let mut idx = outer;
+                let mut flat = 0_usize;
+                for ax in (0..rank).rev() {
+                    if ax == axis {
+                        continue;
+                    }
+                    let dim = tensor.shape.dims[ax] as usize;
+                    if dim == 0 {
+                        return Err(EvalError::Unsupported {
+                            primitive,
+                            detail: "sort encountered zero non-axis dimension in non-empty tensor"
+                                .to_owned(),
+                        });
+                    }
+                    let offset = (idx % dim).checked_mul(strides[ax]).ok_or_else(|| {
+                        EvalError::Unsupported {
+                            primitive,
+                            detail: "sort flat offset multiplication overflowed usize".to_owned(),
+                        }
+                    })?;
+                    flat = flat
+                        .checked_add(offset)
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: "sort flat offset addition overflowed usize".to_owned(),
+                        })?;
+                    idx /= dim;
+                }
+                flat
+            };
+
+            indexed.clear();
+            for i in 0..axis_dim {
+                let flat_idx = i
                     .checked_mul(axis_stride)
                     .and_then(|offset| base.checked_add(offset))
                     .ok_or_else(|| EvalError::Unsupported {
                         primitive,
-                        detail: "sort source offset overflowed usize".to_owned(),
+                        detail: "sort axis offset overflowed usize".to_owned(),
                     })?;
-                let source =
+                let literal =
                     *tensor
                         .elements
-                        .get(source_idx)
+                        .get(flat_idx)
                         .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: format!(
+                                "sort flat index {flat_idx} out of bounds for {total} elements"
+                            ),
+                        })?;
+                let key = sort_key(literal)
+                    .map_err(|detail| EvalError::Unsupported { primitive, detail })?;
+                indexed.push((i, key));
+            }
+
+            if descending {
+                indexed.sort_by(|a, b| compare_sort_keys_nan_last(b.1, a.1));
+            } else {
+                indexed.sort_by(|a, b| compare_sort_keys_nan_last(a.1, b.1));
+            }
+
+            for (out_pos, &(orig_idx, _)) in indexed.iter().enumerate() {
+                let flat_idx = out_pos
+                    .checked_mul(axis_stride)
+                    .and_then(|offset| base.checked_add(offset))
+                    .ok_or_else(|| EvalError::Unsupported {
+                        primitive,
+                        detail: "sort output offset overflowed usize".to_owned(),
+                    })?;
+                if return_indices {
+                    *result_elements
+                        .get_mut(flat_idx)
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: format!(
+                                "sort output index {flat_idx} out of bounds for {total} elements"
+                            ),
+                        })? = Literal::I64(orig_idx as i64);
+                } else {
+                    let source_idx = orig_idx
+                        .checked_mul(axis_stride)
+                        .and_then(|offset| base.checked_add(offset))
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: "sort source offset overflowed usize".to_owned(),
+                        })?;
+                    let source = *tensor.elements.get(source_idx).ok_or_else(|| {
+                        EvalError::Unsupported {
                             primitive,
                             detail: format!(
                                 "sort source index {source_idx} out of bounds for {total} elements"
                             ),
-                        })?;
-                *result_elements
-                    .get_mut(flat_idx)
-                    .ok_or_else(|| EvalError::Unsupported {
-                        primitive,
-                        detail: format!(
-                            "sort output index {flat_idx} out of bounds for {total} elements"
-                        ),
-                    })? = source;
+                        }
+                    })?;
+                    *result_elements
+                        .get_mut(flat_idx)
+                        .ok_or_else(|| EvalError::Unsupported {
+                            primitive,
+                            detail: format!(
+                                "sort output index {flat_idx} out of bounds for {total} elements"
+                            ),
+                        })? = source;
+                }
             }
         }
     }
@@ -14304,7 +14374,7 @@ mod tests {
     // (tuple-key) complex sort for the same shape.
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
-    fn bench_complex_sort_single_thread() {
+    fn bench_complex_sort_threaded_ab() {
         use std::time::Instant;
         let (rows, cols) = (2048usize, 2048usize);
         let data: Vec<(f64, f64)> = (0..rows * cols)
@@ -14326,17 +14396,43 @@ mod tests {
             .unwrap(),
         );
         let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
-        let run = || crate::eval_primitive(Primitive::Sort, std::slice::from_ref(&t), &p).unwrap();
-        run();
-        let mut best = f64::MAX;
-        for _ in 0..5 {
-            let s = Instant::now();
-            std::hint::black_box(run());
-            best = best.min(s.elapsed().as_secs_f64());
-        }
+        let data_for_serial: Vec<(f64, f64)> = match &t {
+            Value::Tensor(tt) => tt.elements.as_complex_slice().unwrap().to_vec(),
+            _ => unreachable!(),
+        };
+        // Serial reference: per-row lexicographic (re,im) comparison sort — the work the generic
+        // fallback did single-thread before this commit.
+        let serial = || {
+            let mut out = data_for_serial.clone();
+            for row in out.chunks_mut(cols) {
+                row.sort_by(|a: &(f64, f64), b: &(f64, f64)| {
+                    a.0.partial_cmp(&b.0)
+                        .unwrap()
+                        .then(a.1.partial_cmp(&b.1).unwrap())
+                });
+            }
+            std::hint::black_box(&out);
+        };
+        let threaded = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Sort, std::slice::from_ref(&t), &p).unwrap(),
+            );
+        };
+        let bench = |f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            b * 1e3
+        };
+        let sref = bench(&serial);
+        let thr = bench(&threaded);
         println!(
-            "BENCH complex128 sort [2048,2048] axis1 single-thread: fj-lax={:.4}ms | JAX=602ms",
-            best * 1e3
+            "AB complex128 sort [2048,2048] axis1: serial-ref={sref:.4}ms threaded={thr:.4}ms ({:.2}x) | JAX=602ms",
+            sref / thr
         );
     }
 
