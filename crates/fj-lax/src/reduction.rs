@@ -3896,20 +3896,74 @@ fn eval_cumulative_dense(
             }
         };
         let mut out = vec![0u16; total];
-        for outer in 0..outer_count {
-            let base = line_base(outer);
+        // One contiguous line's scan (sequential acc dependency WITHIN the line; lines independent).
+        let scan_line = |src_line: &[u16], out_line: &mut [u16]| {
             let mut acc = float_init;
             if reverse {
                 for i in (0..axis_dim).rev() {
-                    let fi = base + i * axis_stride;
-                    acc = float_op(acc, widen(src[fi]));
-                    out[fi] = round(acc);
+                    acc = float_op(acc, widen(src_line[i]));
+                    out_line[i] = round(acc);
                 }
             } else {
                 for i in 0..axis_dim {
-                    let fi = base + i * axis_stride;
-                    acc = float_op(acc, widen(src[fi]));
-                    out[fi] = round(acc);
+                    acc = float_op(acc, widen(src_line[i]));
+                    out_line[i] = round(acc);
+                }
+            }
+        };
+        if axis_stride == 1 {
+            // Trailing/contiguous axis: lines are out[outer*axis_dim..]; thread over the independent
+            // lines (bit-identical — each line's scan order is unchanged). Matches the f64/i64 path.
+            let threads = if total >= CUMULATIVE_PARALLEL_MIN_ELEMS && outer_count > 1 {
+                crate::arithmetic::work_scaled_threads(total).min(outer_count)
+            } else {
+                1
+            };
+            if threads <= 1 {
+                for (sl, ol) in src
+                    .chunks_exact(axis_dim)
+                    .zip(out.chunks_exact_mut(axis_dim))
+                {
+                    scan_line(sl, ol);
+                }
+            } else {
+                let per = outer_count.div_ceil(threads);
+                std::thread::scope(|scope| {
+                    let mut rest: &mut [u16] = out.as_mut_slice();
+                    let mut o0 = 0usize;
+                    while o0 < outer_count {
+                        let cnt = per.min(outer_count - o0);
+                        let (blk, tail) = rest.split_at_mut(cnt * axis_dim);
+                        rest = tail;
+                        let s = &src[o0 * axis_dim..(o0 + cnt) * axis_dim];
+                        let f = &scan_line;
+                        o0 += cnt;
+                        scope.spawn(move || {
+                            for (sl, ol) in
+                                s.chunks_exact(axis_dim).zip(blk.chunks_exact_mut(axis_dim))
+                            {
+                                f(sl, ol);
+                            }
+                        });
+                    }
+                });
+            }
+        } else {
+            for outer in 0..outer_count {
+                let base = line_base(outer);
+                let mut acc = float_init;
+                if reverse {
+                    for i in (0..axis_dim).rev() {
+                        let fi = base + i * axis_stride;
+                        acc = float_op(acc, widen(src[fi]));
+                        out[fi] = round(acc);
+                    }
+                } else {
+                    for i in 0..axis_dim {
+                        let fi = base + i * axis_stride;
+                        acc = float_op(acc, widen(src[fi]));
+                        out[fi] = round(acc);
+                    }
                 }
             }
         }
@@ -9414,6 +9468,70 @@ mod tests {
             generic * 1e3,
             dense_t * 1e3,
             generic / dense_t
+        );
+    }
+
+    // A/B: bf16 trailing-axis cumsum — single-thread per-line scan vs the THREADED dense path
+    // (eval_primitive). Isolates the threading win (both compute the same per-line scan).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_half_cumsum_threaded_ab() {
+        use std::time::Instant;
+        let (rows, cols) = (512usize, 4096usize);
+        let bits: Vec<u16> = (0..rows * cols)
+            .map(|i| match Literal::from_bf16_f64(((i % 97) as f64) * 0.01) {
+                Literal::BF16Bits(b) => b,
+                _ => 0,
+            })
+            .collect();
+        let t = Value::Tensor(
+            TensorValue::new_half_float_values(
+                DType::BF16,
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                bits.clone(),
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+        let threaded = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(&t), &p).unwrap(),
+            );
+        };
+        // Single-thread reference: same per-line widen→f64-accumulate→round-to-bf16 scan.
+        let serial = || {
+            let mut out = vec![0u16; rows * cols];
+            for r in 0..rows {
+                let mut acc = 0.0f64;
+                for c in 0..cols {
+                    acc += Literal::BF16Bits(bits[r * cols + c])
+                        .as_f64()
+                        .unwrap_or(0.0);
+                    out[r * cols + c] = match reduce_real_literal(DType::BF16, acc) {
+                        Literal::BF16Bits(b) | Literal::F16Bits(b) => b,
+                        _ => 0,
+                    };
+                }
+            }
+            std::hint::black_box(&out);
+        };
+        let bench = |f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..12 {
+                let ti = Instant::now();
+                f();
+                b = b.min(ti.elapsed().as_secs_f64());
+            }
+            b * 1e3
+        };
+        let s = bench(&serial);
+        let d = bench(&threaded);
+        println!(
+            "AB bf16 cumsum [512,4096] axis1: serial={s:.4}ms threaded={d:.4}ms ({:.2}x)",
+            s / d
         );
     }
 

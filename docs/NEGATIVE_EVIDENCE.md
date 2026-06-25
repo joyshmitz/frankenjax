@@ -2612,6 +2612,18 @@ TOLERANCE + relaxing the internal bit-exact matmul guard for the gemv path — a
 Downgraded `dedicated-gemv-h36uj` to very-low. LESSON: matmul's N-SIMD strategy makes N=1 (gemv) inherently
 scalar-K under bit-exactness; the gap is structural, not an oversight.
 
+## 2026-06-25 - half (bf16/f16) trailing cumsum/cumprod/cummax THREADED — 4.47x (dtype-threading gap) (SlateHarrier)
+
+The cumulative scan was threaded for F64/F32/I64 (scan_contiguous_lines) but the BF16/F16 branch of
+`eval_cumulative_dense` was SINGLE-THREAD over its independent lines — a dtype-threading gap. Threaded the
+contiguous (trailing-axis, `axis_stride==1`) case: extracted the per-line widen→f64-accumulate→round-to-half
+scan into a closure and threaded over the independent lines (each line `out[outer*axis_dim..]` is a contiguous
+disjoint block → safe `split_at_mut`, no `unsafe`). Bit-identical (sequential acc dependency WITHIN a line is
+preserved; lines independent). SAME-BINARY A/B bf16 [512,4096] axis1: **serial 7.14ms → threaded 1.60ms =
+4.47x**. Bit-identical: cumulative tests 48/0 + full lib 1599/0 + clippy clean. The cumulative-scan threading
+is now complete across dtypes for the trailing axis (f64/f32/i64/bf16/f16). NOTE: the COMPLEX cumulative
+branch is still single-thread (same pattern, sibling follow-up); leading-axis scans stay strided-output-blocked.
+
 ## 2026-06-25 - generic dense_float reduce_window THREADED — 3.21x (sum + dilated max/min path) (SlateHarrier)
 
 Sibling of the deque-threading: the GENERIC `eval_reduce_window_dense_float` (the fallback for SUM, dilated
