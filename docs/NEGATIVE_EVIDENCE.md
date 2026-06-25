@@ -2957,6 +2957,21 @@ production == HEAD; kept the profiling bench as evidence; cum 48/0). The real le
 find the 1-D cummax eval path (NOT `eval_cumulative_dense`'s dense branch) and route it to the fast direct
 scan — a structural eval-routing fix, bead'd. cummax stays ~1.21x loss meanwhile.
 
+3rd ATTEMPT (2026-06-25) — BLOCKED, needs a profiler. Re-wired `parallel_cummax_f64` (now `#[inline(never)]`
+to defeat the suspected inlining-budget exhaustion when absorbed into the huge `eval_cumulative_dense`) into
+the f64 single-chain branch (3820). `eval_primitive(Cummax)` STILL = 70.6ms (scan direct on same slice =
+28.6ms). Static reading says the gate (axis_stride==1, total≥CUMULATIVE_PARALLEL_MIN_ELEMS, !reverse,
+outer_count==1) is satisfied → my branch runs `parallel_cummax_f64` → `eval_cumulative_dense` returns
+`Ok(Some(...))` at 3874 → `eval_cumulative` returns it immediately at 4301 (NO post-pass). So eval SHOULD be
+~29ms — yet it measures 70ms across all 3 wirings (plain / all-cores / inline(never)). The 28↔70 gap on the
+SAME function called from two sites is now a hard contradiction between code-path analysis and measurement
+that I cannot resolve with the available tooling (no flamegraph/perf in this env). Reverted (reduction.rs ==
+HEAD; profiling bench kept). VERDICT: cummax parallel-scan is BLOCKED — needs `perf`/flamegraph to see where
+the eval path actually spends the 42ms (is the dense branch truly reached? is the codegen 2.5x slower in
+context?). Bead held at P3, status BLOCKED-needs-profiler. Not a safe-Rust ceiling — a tooling-gated
+diagnosis. Stopping cummax after 3 measured attempts; the loss is small (1.21x) and the contained surface
+elsewhere is exhausted.
+
 ## 2026-06-25 - argsort is a ~35x fj-lax WIN vs JAX (SlateHarrier)
 
 `bench_argsort2d_vs_jax`: argsort f64 [2048,2048] axis1 — fj-lax **17.4ms vs JAX 616.8ms = ~35x WIN**.
