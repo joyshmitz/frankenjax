@@ -2612,6 +2612,19 @@ TOLERANCE + relaxing the internal bit-exact matmul guard for the gemv path — a
 Downgraded `dedicated-gemv-h36uj` to very-low. LESSON: matmul's N-SIMD strategy makes N=1 (gemv) inherently
 scalar-K under bit-exactness; the gap is structural, not an oversight.
 
+## 2026-06-25 - generic dense_float reduce_window THREADED — 3.21x (sum + dilated max/min path) (SlateHarrier)
+
+Sibling of the deque-threading: the GENERIC `eval_reduce_window_dense_float` (the fallback for SUM, dilated
+max/min, and non-channel-last/non-separable reduce_window) was single-thread over `total_output` independent
+output cells. Refactored the per-cell window reduction into a `cell(out_idx)` closure and threaded the fill
+across contiguous output ranges (each thread recovers its starting odometer coords from the flat start;
+ranges are disjoint → safe `split_at_mut`, no `unsafe`). Each cell scans its window in the SAME fixed tap
+order, so bit-identical. SAME-BINARY A/B sum [512,4096] w=17: **naive-1thread 16.21ms → threaded 5.05ms =
+3.21x**. Bit-identical: `reduce_window_dense_float_threaded_matches_naive` (threaded path vs naive per-cell
+sum) + window tests 49/0 + full lib 1599/0 + clippy clean. With the deque threading (prior entry), the whole
+reduce_window family is now threaded: fused channel-last (small window), separable deque (max/min large
+window), and generic dense_float (sum + dilated + the rest).
+
 ## 2026-06-25 - reduce_window large-window max/min deque THREADED — 4.24x (bead od11p flipped) (SlateHarrier)
 
 The separable monotonic-deque sliding max/min (`reduce_window_extremum_1d_axis_f64`) — the large-window /

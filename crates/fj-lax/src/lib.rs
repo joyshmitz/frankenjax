@@ -4034,10 +4034,10 @@ fn eval_reduce_window_dense_float(
     };
 
     let out_dims_usize: Vec<usize> = out_dims.iter().map(|&d| d as usize).collect();
-    let mut out_idx = vec![0usize; rank];
-    let mut values: Vec<f64> = Vec::with_capacity(total_output);
-
-    for _ in 0..total_output {
+    // Per-output-cell window reduction; cells are independent and each scans its window in the
+    // SAME fixed tap order, so this threads bit-identically across the output (sum + dilated max/min;
+    // the non-dilated max/min large-window case takes the separable deque path before reaching here).
+    let cell = |out_idx: &[usize]| -> f64 {
         // Window's input top-left corner per dim (may be negative under padding).
         // Interior iff every tap lands in bounds: corner >= 0 and
         // corner + (win-1) < input_dim for all dims.
@@ -4100,19 +4100,56 @@ fn eval_reduce_window_dense_float(
                 }
             }
         }
-        values.push(acc);
-
-        let mut carry = true;
+        acc
+    };
+    let mut values: Vec<f64> = vec![0.0; total_output];
+    // Fill a contiguous output range [start, start+slots.len()), recovering the starting odometer
+    // coords from the flat `start`. Each range is disjoint → safe split_at_mut, no cross-thread races.
+    let fill = |start: usize, slots: &mut [f64]| {
+        let mut out_idx = vec![0usize; rank];
+        let mut rem = start;
         for d in (0..rank).rev() {
-            if carry {
-                out_idx[d] += 1;
-                if out_idx[d] >= out_dims_usize[d] {
-                    out_idx[d] = 0;
-                } else {
-                    carry = false;
+            out_idx[d] = rem % out_dims_usize[d];
+            rem /= out_dims_usize[d];
+        }
+        for slot in slots.iter_mut() {
+            *slot = cell(&out_idx);
+            let mut carry = true;
+            for d in (0..rank).rev() {
+                if carry {
+                    out_idx[d] += 1;
+                    if out_idx[d] >= out_dims_usize[d] {
+                        out_idx[d] = 0;
+                    } else {
+                        carry = false;
+                    }
                 }
             }
         }
+    };
+    let work = total_output.saturating_mul(win_total);
+    let threads = if work >= (1 << 18) && total_output >= 2 {
+        crate::arithmetic::work_scaled_threads(work).min(total_output)
+    } else {
+        1
+    };
+    if threads <= 1 {
+        fill(0, &mut values);
+    } else {
+        let per = total_output.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [f64] = values.as_mut_slice();
+            let mut s = 0usize;
+            while s < total_output {
+                let cnt = per.min(total_output - s);
+                let (blk, tail) = rest.split_at_mut(cnt);
+                rest = tail;
+                let start = s;
+                s += cnt;
+                let f = &fill;
+                scope.spawn(move || f(start, blk));
+            }
+        });
     }
 
     let shape = Shape {
@@ -7489,6 +7526,112 @@ mod tests {
     };
     use fj_core::{DType, Literal, Primitive, Shape, TensorValue, Value, ValueError};
     use std::collections::BTreeMap;
+
+    // The THREADED generic dense-float reduce_window (eval_reduce_window_dense_float, threaded over
+    // independent output cells) must be bit-identical to a naive single-thread per-cell window sum.
+    // Sized to cross the threading threshold (total_output·win_total ≥ 1<<18).
+    #[test]
+    fn reduce_window_dense_float_threaded_matches_naive() {
+        let (rows, cols, win) = (256usize, 4096usize, 9usize);
+        let src: Vec<f64> = (0..rows * cols)
+            .map(|i| ((i % 4099) as f64) * 0.017 - 30.0)
+            .collect();
+        let out_cols = cols - win + 1;
+        let got = super::eval_reduce_window_dense_float(
+            fj_core::DType::F64,
+            "sum",
+            &src,
+            &[1, win],
+            &[1, 1],
+            &[1, 1],
+            &[rows as u32, out_cols as u32],
+            &[0, 0],
+            &[rows, cols],
+            &[cols, 1],
+            rows * out_cols,
+        )
+        .unwrap();
+        let gv = match &got {
+            Value::Tensor(t) => t.elements.as_f64_slice().unwrap().to_vec(),
+            _ => panic!(),
+        };
+        let mut want = vec![0.0f64; rows * out_cols];
+        for r in 0..rows {
+            for oc in 0..out_cols {
+                let mut acc = 0.0;
+                for k in 0..win {
+                    acc += src[r * cols + oc + k];
+                }
+                want[r * out_cols + oc] = acc;
+            }
+        }
+        assert_eq!(gv.len(), want.len());
+        for i in 0..want.len() {
+            assert_eq!(
+                gv[i].to_bits(),
+                want[i].to_bits(),
+                "dense_float threaded sum mismatch i={i}"
+            );
+        }
+    }
+
+    // A/B: naive single-thread per-cell sum vs the THREADED eval_reduce_window_dense_float.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_reduce_window_dense_float_threaded_ab() {
+        use std::time::Instant;
+        let (rows, cols, win) = (512usize, 4096usize, 17usize);
+        let src: Vec<f64> = (0..rows * cols)
+            .map(|i| ((i % 4099) as f64) * 0.017 - 30.0)
+            .collect();
+        let out_cols = cols - win + 1;
+        let threaded = || {
+            let r = super::eval_reduce_window_dense_float(
+                fj_core::DType::F64,
+                "sum",
+                &src,
+                &[1, win],
+                &[1, 1],
+                &[1, 1],
+                &[rows as u32, out_cols as u32],
+                &[0, 0],
+                &[rows, cols],
+                &[cols, 1],
+                rows * out_cols,
+            )
+            .unwrap();
+            std::hint::black_box(&r);
+        };
+        let naive = || {
+            let mut out = vec![0.0f64; rows * out_cols];
+            for r in 0..rows {
+                for oc in 0..out_cols {
+                    let mut acc = 0.0;
+                    for k in 0..win {
+                        acc += src[r * cols + oc + k];
+                    }
+                    out[r * out_cols + oc] = acc;
+                }
+            }
+            std::hint::black_box(&out);
+        };
+        let bench = |f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..10 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b * 1e3
+        };
+        let n = bench(&naive);
+        let t = bench(&threaded);
+        println!(
+            "AB reduce_window dense_float sum [512,4096] w=17: naive-1thread={n:.4}ms threaded={t:.4}ms ({:.2}x)",
+            n / t
+        );
+    }
 
     // The THREADED separable monotonic-deque 1-D sliding max/min (reduce_window_extremum_1d_axis_f64,
     // threaded over the independent outer blocks) must be bit-identical to a naive O(out·window) tap
