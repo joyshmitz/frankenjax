@@ -2934,6 +2934,18 @@ in a while — distinct from cumsum's tolerance-lock and select's eval-model BW)
 (parallel-scan + jax_max-associativity accuracy verification — not to rush at depth). Recorded measured loss +
 the lever; kept `bench_cummax1d_vs_jax`. Bead-worthy follow-up: parallel associative scan for cummax/cummin.
 
+UPDATE (2026-06-25) — IMPLEMENTED + production-FAILED + REVERTED. Built `parallel_cummax_f64` (the 2-pass
+chunked associative scan, direct `jax_minmax_scalar`, all-cores). STANDALONE it validated **bit-identical +
+29ms** (vs sequential 64ms; would beat JAX 68ms 2.3x). But routed through the PRODUCTION eval path
+(`eval_primitive` → `eval_cumulative_dense`), cummax measured **73.6ms** and cummin **89ms (REGRESSED from
+75ms)** — the standalone 29ms did NOT reproduce. The discrepancy (standalone 29 vs production 73-89) is
+unexplained (eval-pipeline overhead, or the standalone bench was cache-optimistic) — but production is the
+truth (gather lesson), and it's a regression, so REVERTED (reduction.rs == HEAD; cum tests 48/0). LESSON
+(again): validate the lever in the PRODUCTION op, not a standalone proxy — a standalone bench can show a win
+the real eval path doesn't deliver. cummax stays a ~1.21x loss; the parallel-scan lever is NOT realized
+through the current eval path. Bead `frankenjax-parallel-cummax-scan` downgraded (needs the 29↔73 root-cause
+first, not just the algorithm).
+
 ## 2026-06-25 - RNG (random_uniform) is a ~3x fj-lax WIN vs JAX (SlateHarrier)
 
 `bench_random_uniform_vs_jax` (16M): fj-lax random_uniform **36.84ms (f64)** vs JAX random.uniform **112.0ms
