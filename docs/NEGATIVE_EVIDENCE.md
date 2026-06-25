@@ -2921,6 +2921,14 @@ add/mul — fj-lax allocs+faults a fresh output per eval, JAX reuses). The TWO r
 ARCHITECTURAL/gated: **+fma (`cntiy`)** and an **output-buffer-reuse eval model**. No contained per-op kernel
 lever remains on this host.
 
+## 2026-06-25 - RNG (random_uniform) is a ~3x fj-lax WIN vs JAX (SlateHarrier)
+
+`bench_random_uniform_vs_jax` (16M): fj-lax random_uniform **36.84ms (f64)** vs JAX random.uniform **112.0ms
+(f32)** / normal 109.7ms = fj-lax **WINS ~3x** — and that's DESPITE fj-lax producing f64 (more output bytes)
+vs JAX's f32. XLA's CPU threefry is slow (like its sort/scan/cumsum); fj-lax's 8-wide SIMD + threaded threefry
+dominates. No lever (win); recorded + kept the bench. Confirms the broad pattern: fj-lax WINS the contained
+compute-bound CPU surface (sort/scan/cumsum/RNG/reductions all dominate JAX-on-CPU).
+
 ## 2026-06-25 - select/where 1.90x JAX LOSS — two levers REJECTED (cap regresses, branchless ~0) (SlateHarrier)
 
 `bench_select_vs_jax` (16M f64, mask from x>0): fj-lax select **28.05ms vs JAX 14.78ms = 1.90x slower**.

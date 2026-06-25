@@ -1318,6 +1318,29 @@ mod tests {
     #![allow(clippy::type_complexity)]
     use super::*;
 
+    // RNG vs JAX (16M, measured JAX random.uniform 112.0ms / normal 109.7ms — XLA CPU threefry is slow).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_random_uniform_vs_jax() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let key = random_key(0);
+        let f = || {
+            std::hint::black_box(random_uniform(key, n, 0.0, 1.0));
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax random_uniform f64 16M: {:.3}ms | JAX(f32)=112.0ms",
+            b * 1e3
+        );
+    }
+
     #[test]
     fn test_threefry_deterministic() {
         let key = [0u32, 0u32];
