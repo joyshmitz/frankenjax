@@ -520,7 +520,10 @@ fn dense_same_width_bitcast_tensor(
     }
 }
 
-const BITCAST_WIDTH_CHANGE_PARALLEL_MIN: usize = 1 << 20;
+// Width-changing bitcast is cheap copy/shuffle traffic. Keep cache-resident
+// cases serial like other memory-bound ops; reserve thread fanout for DRAM-scale
+// first-touch allocations.
+const BITCAST_WIDTH_CHANGE_PARALLEL_MIN: usize = crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN;
 
 fn threaded_f64_to_u32_bitcast_into(out: &mut [u32], values: &[f64], threads: usize) {
     let n = values.len();

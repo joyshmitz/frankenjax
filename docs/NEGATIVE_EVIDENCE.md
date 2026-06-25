@@ -88,6 +88,49 @@ primitive lever; not a Rust-over-JAX flip. Next retry must beat ~1.17ms with a
 lower-overhead thread policy or vectorized complex mux, not another boxed-mask
 avoidance pass.
 
+UPDATE 2026-06-25 (ProudSalmon, AGENT_NAME=ProudSalmon, dense `bitcast_convert_type`
+f64->u32 BOLD-VERIFY): no unlanded measured worktree win was found for this lane
+(`/data/projects/.scratch/frankenjax-proudsalmon-boldverify-20260625` was already
+patch-equivalent to main; `/data/projects/frankenjax_poyvi1_pass188` was a stale
+QR/SVD WIP with no ledgered win), so the next different primitive was width-changing
+bitcast. The production path split each f64 into two u32 lanes, but its 1M-row gate
+spawned worker threads for cheap copy/shuffle traffic, paying scheduling and first-touch
+cost instead of letting the tight serial fill run. Shipped the same DRAM-scale gate used
+by other cheap memory-bound ops: `BITCAST_WIDTH_CHANGE_PARALLEL_MIN =
+crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN`.
+
+Evidence discipline:
+  - Baseline Rust local fallback through `rch exec` with the requested warm target and
+    crate scope:
+    `AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a cargo bench -p fj-lax --profile release --bench lax_baseline -- 'bitcast_.*_1m' --noplot`.
+    Current-main `eval/bitcast_f64_u32_dense_1m` midpoint: **2.8848ms**.
+  - Same-worker RCH A/B on `vmi1264463` (`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`,
+    `cargo bench -p fj-lax --profile release --bench lax_baseline -- bitcast_f64_u32_dense_1m --noplot`):
+    old threshold **14.334ms** midpoint (`12.374..16.465ms`) vs candidate **4.9227ms**
+    midpoint (`3.6131..6.8078ms`), Criterion **-65.658%**, p=0.00, **2.91x Rust-side
+    speedup**. This worker was heavily contended and is used only for same-host A/B.
+  - Auxiliary local patched ratio row, same warm target, direct crate-scoped `cargo bench`
+    because RCH has no honored force-local mode: candidate **407.91us** midpoint
+    (`394.89..420.94us`), Criterion **-91.916%**, p=0.00 against the stored local
+    Criterion baseline.
+  - Fresh local JAX comparator: `benchmarks/jax_comparison/.venv/bin/python
+    benchmarks/jax_comparison/bitcast_gauntlet.py --runs 20 --warmup 5 --inner-loops 50`,
+    JAX/JAXLIB 0.10.1 CPU x64 on the exact 1M f64->u32 fixture:
+    **176.627us mean / 183.613us p50**.
+
+Ratio-vs-JAX ledger:
+
+| workload | fj-lax row | JAX mean | Rust/JAX | verdict |
+|---|---:|---:|---:|---|
+| `eval/bitcast_f64_u32_dense_1m` current main, local fallback | 2.8848 ms | 176.627 us | 16.33x loss | baseline |
+| `eval/bitcast_f64_u32_dense_1m` candidate, local auxiliary | 407.91 us | 176.627 us | 2.31x loss | KEEP: material loss-narrowing, not a JAX flip |
+| `eval/bitcast_f64_u32_dense_1m` RCH same-worker `vmi1264463` | 14.334 ms -> 4.9227 ms | 176.627 us | 81.15x -> 27.87x loss | KEEP as same-host A/B proof only; host is noisy |
+
+Scorecard: **0 JAX wins / 1 JAX loss narrowed / 1 kept / 0 reverted**. Do not retry
+by lowering the width-changing bitcast thread gate; the next credible lever is
+allocation/fill removal or vectorized packing that beats the retained **407.91us**
+local row and closes JAX's **176.627us** comparator.
+
 UPDATE 2026-06-25 (ProudSalmon, AGENT_NAME=ProudSalmon, cumprod/cummax SIMD-prefix
 BOLD-VERIFY NO-SHIP): no unlanded measured worktree win was found for this lane, so
 the next radical lever was the previously scoped Blelloch/Hillis-Steele primitive:
