@@ -23136,6 +23136,38 @@ mod tests {
         bench("reciprocal", Primitive::Reciprocal);
     }
 
+    // select/where vs JAX (16M f64, measured JAX 14.78ms). select_f64 fast path is threaded but uses
+    // work_scaled_threads (all cores) on a fresh output — sequential-access, so the over-subscription
+    // cap may apply (unlike the latency-bound gather). Measures the PRODUCTION op.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_select_vs_jax() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let xd: Vec<f64> = (0..n).map(|i| (i % 9973) as f64 * 0.01 - 50.0).collect();
+        let yd: Vec<f64> = (0..n).map(|i| -((i % 7919) as f64) * 0.02).collect();
+        let x = tensor_f64(vec![n as u32], &xd);
+        let y = tensor_f64(vec![n as u32], &yd);
+        let mask = crate::eval_primitive(
+            Primitive::Gt,
+            &[x.clone(), Value::Scalar(Literal::F64Bits(0.0f64.to_bits()))],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let inputs = vec![mask, x, y];
+        let f = || {
+            std::hint::black_box(eval_select(Primitive::Select, &inputs).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..8 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!("fj-lax select f64 16M: {:.3}ms | JAX=14.78ms", b * 1e3);
+    }
+
     // Throughput of the threaded special-function paths vs JAX (16M f64, measured):
     // JAX gammaln 19.9ms / digamma 17.3ms / i0e 21.7ms. Decides whether fj-lax over-computes.
     #[test]

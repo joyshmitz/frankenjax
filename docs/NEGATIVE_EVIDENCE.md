@@ -2921,6 +2921,19 @@ add/mul — fj-lax allocs+faults a fresh output per eval, JAX reuses). The TWO r
 ARCHITECTURAL/gated: **+fma (`cntiy`)** and an **output-buffer-reuse eval model**. No contained per-op kernel
 lever remains on this host.
 
+## 2026-06-25 - select/where 1.90x JAX LOSS — two levers REJECTED (cap regresses, branchless ~0) (SlateHarrier)
+
+`bench_select_vs_jax` (16M f64, mask from x>0): fj-lax select **28.05ms vs JAX 14.78ms = 1.90x slower**.
+select_f64 reads 3 arrays (cond/t/f) + writes 1 fresh output (~386MB). Two levers tried + REJECTED:
+(1) cores/2 over-subscription cap → **REGRESSED 28→35ms**: select reads 3 arrays so it wants all-cores BW
+(unlike the 2-array convert/data-movement copies where the cap won) — reverted.
+(2) branchless bit-blend (`(c as u64).wrapping_neg()` mask instead of `if c {t} else {f}`) → **~0-gain
+28→31ms** (LLVM already cmov's the branch; the bit-ops add work) — reverted, select tests 38/0.
+The residual 1.90x is the threaded **index-closure not vectorizing** (per-element bounds-checked
+`conds[i]/t[i]/f[i]` + `threaded_index_fill_into`'s `|i|` form) vs JAX's vectorized SIMD blend. The real fix is
+a zip-based threaded SIMD-blend loop (no bounds checks) — a refactor of the select fast path, deferred (and
+std::simd masks DRIFT across nightlies, raising the risk). Kept `bench_select_vs_jax` as evidence. PIVOT.
+
 ## 2026-06-25 - embedding gather 1.11x JAX loss; cores/2 cap REGRESSES (gather is latency-bound) (SlateHarrier)
 
 Probed embedding/row gather (`bench_embedding_gather_vs_jax`): gather 2M rows from a [200000,128] f32 table —
