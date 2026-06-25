@@ -4401,6 +4401,43 @@ mod tests {
     use fj_core::LiteralBuffer;
     use std::collections::BTreeMap;
 
+    // BOLD-VERIFY: 1-D cumsum/cumprod vs JAX (16M f64, measured JAX cumsum 95.0ms / cumprod 94.2ms — XLA
+    // has no fast single-chain scan). fj-lax does a sequential latency-bound fold; this checks the ratio.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cumsum1d_vs_jax() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let data: Vec<f64> = (0..n).map(|i| 0.5 + (i % 9973) as f64 * 1e-5).collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "0".to_owned())]);
+        let bench = |label: &str, prim: Primitive| {
+            let f = || {
+                std::hint::black_box(
+                    crate::eval_primitive(prim, std::slice::from_ref(&x), &p).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..6 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("fj-lax {label} f64 16M: {:.3}ms", b * 1e3);
+        };
+        bench("cumsum1d", Primitive::Cumsum);
+        bench("cumprod1d", Primitive::Cumprod);
+    }
+
     // BOLD-VERIFY: cumsum [4096,1024] vs JAX (slow: f32 ax0 6.93 ax1 2.96ms; f64 ax0 20.85 ax1 18.28ms).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]

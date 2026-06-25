@@ -3071,6 +3071,11 @@ deque (od11p's literal ask) stays hard (data-dependent push/pop); threading clos
 
 ## 2026-06-25 - cumsum 2D already DOMINATES JAX (not a loss); f64 leading-axis BW-bound (SlateHarrier)
 
+1-D scan also a WIN (2026-06-25, `bench_cumsum1d_vs_jax`): 16M f64 single-chain — JAX cumsum **95.0ms** /
+cumprod **94.2ms** (XLA has NO fast single-chain CPU scan), fj-lax cumsum **21.2ms (4.5x WIN)** / cumprod
+**41.3ms (2.3x WIN)** via the latency-bound sequential fold. So the non-associative scan being sequential
+(bit-exact-locked) is NOT a loss on CPU — JAX's own 1-D scan is far slower. No lever; recorded as a win.
+
 Probed cumsum as a different primitive. JAX CPU cumsum is slow (sequential): [4096,1024] f64 ax0 **20.85ms**,
 ax1 18.28ms; f32 ax0 6.93ms, ax1 2.96ms. fj-lax: f64 ax0 **13.34ms (1.56x WIN)**, ax1 3.60ms (5.1x), f32 ax0
 **1.04ms (6.7x WIN)**, ax1 1.03ms (2.9x). So cumsum is a DOMINATION across the board — not a JAX loss to close.
