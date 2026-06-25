@@ -2807,6 +2807,23 @@ add/mul — fj-lax allocs+faults a fresh output per eval, JAX reuses). The TWO r
 ARCHITECTURAL/gated: **+fma (`cntiy`)** and an **output-buffer-reuse eval model**. No contained per-op kernel
 lever remains on this host.
 
+## 2026-06-25 - CONVERT thread over-subscription FIXED — cap BW-bound downcast threads at cores/2 (1.2–1.7x) (SlateHarrier)
+
+A genuine CONTAINED, bit-identical win (the first non-gated kernel lever in many turns). Measured dtype
+conversions vs JAX 0.10.2 (16M) showed f64-source casts 2–3x SLOWER (f64->f32 19.3ms vs JAX 7.2, f32->f64
+32.9 vs 14.7, f64->bf16 12.8 vs 4.6) while f32->bf16 was PARITY. The f64 casts are ALREADY threaded — so not
+threading-presence. THREAD-COUNT SWEEP (f64->f32 16M, 2 runs) found the cause: `work_scaled_threads` uses ALL
+cores (32 on the bench host) but a pure read+write convert OVER-subscribes the memory/page-fault path —
+1t 60ms / 8t 18ms / **16t 13.5ms (optimum)** / 32t 17.2ms. Added `bw_convert_threads(n) =
+work_scaled.min((cores/2).max(2))` and routed the three threaded convert downcasts (f64->f32, f64->half,
+f32->f64) through it. POST-FIX (16M, bit-identical, convert tests 11/0 + full lib 1601/0 + clippy clean):
+f64->f32 19.3->**13.45ms (1.43x)**, f32->f64 32.9->**27.9ms (1.18x)**, f64->bf16 12.8->**7.48ms (1.71x)**.
+(Still ~1.6–1.9x behind JAX — residual is the eval-model per-call alloc — but the over-subscription slice is
+now reclaimed.) BROADER LEVER: this over-subscription likely affects OTHER BW-bound threaded ops too
+(reciprocal/cheap elementwise via `work_scaled_threads`/`dense_unary_threads` at all-cores) — a follow-up to
+sweep + cap those (filed mentally; the convert win confirms the mechanism). LESSON: for BW-bound threaded ops
+on many-core hosts, all-cores OVER-subscribes; cap at the memory-saturating count (~cores/2).
+
 ## 2026-06-25 - full reductions: max/argmax BEAT JAX; sum/prod 1.5–2x LOSS, threaded-tree lever is a parity call (SlateHarrier)
 
 Measured full reductions vs JAX 0.10.2 (16M f64, `bench_full_reduce_vs_jax`):

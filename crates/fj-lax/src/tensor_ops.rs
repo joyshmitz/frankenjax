@@ -5433,10 +5433,18 @@ fn convert_bool_source_dense(
 
 /// Threaded element-cast into a PRE-ALLOCATED `out` slice (caller allocates
 /// `vec![<concrete zero>; n]` = calloc'd zero pages). Splits into contiguous chunks on
-/// scoped threads, each applying `f` per element. Lane-independent => bit-for-bit identical
-/// to the serial `src.iter().map(f).collect()`. Above [`CHEAP_BINARY_PARALLEL_MIN`] this
-/// parallel-faults the fresh output (~6 -> ~22-34 GB/s), the same lever as the elementwise
-/// and broadcast paths; below the gate the caller uses the serial map.
+/// Thread count for bandwidth-bound dtype downcasts. `work_scaled_threads` caps at ALL cores, but a
+/// pure read+write convert saturates memory well below core count on many-core hosts, so using every
+/// core OVER-subscribes the memory + page-fault path. Measured f64->f32 16M on the 32-core bench host:
+/// 32t 17.2ms vs 16t 13.5ms = 1.27x. Cap at cores/2 (the memory-saturating sweet spot); only reduces
+/// the count on >2-core hosts where over-subscription actually occurs. Bit-identical (thread count only).
+fn bw_convert_threads(n: usize) -> usize {
+    let cores = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    crate::arithmetic::work_scaled_threads(n).min((cores / 2).max(2))
+}
+
 fn threaded_convert_into<S: Copy + Send + Sync, D: Send>(
     out: &mut [D],
     src: &[S],
@@ -5497,7 +5505,7 @@ pub(crate) fn eval_convert_element_type(
                 // output + parallel fill is bit-identical (per-element `v as f32`).
                 let n = values.len();
                 if target_dtype == DType::F32 && n >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
-                    let threads = crate::arithmetic::work_scaled_threads(n);
+                    let threads = bw_convert_threads(n);
                     if threads > 1 {
                         let mut out = vec![0.0f32; n];
                         threaded_convert_into(&mut out, values, threads, |v| v as f32);
@@ -5517,7 +5525,7 @@ pub(crate) fn eval_convert_element_type(
                 if matches!(target_dtype, DType::BF16 | DType::F16)
                     && n >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN
                 {
-                    let threads = crate::arithmetic::work_scaled_threads(n);
+                    let threads = bw_convert_threads(n);
                     if threads > 1 {
                         let mut out = vec![0u16; n];
                         if target_dtype == DType::BF16 {
@@ -5590,7 +5598,7 @@ pub(crate) fn eval_convert_element_type(
                 // + parallel fill is bit-identical (per-element `f64::from(v)`).
                 let n = values.len();
                 if target_dtype == DType::F64 && n >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
-                    let threads = crate::arithmetic::work_scaled_threads(n);
+                    let threads = bw_convert_threads(n);
                     if threads > 1 {
                         let mut out = vec![0.0f64; n];
                         threaded_convert_into(&mut out, values, threads, f64::from);
@@ -14459,6 +14467,47 @@ mod tests {
             "AB column sort f64 [4096,4096] axis0: strided-1thread={s:.4}ms transpose-wrapper={w:.4}ms ({:.2}x) | JAX=2522ms",
             s / w
         );
+    }
+
+    // Dtype conversions vs JAX (16M, measured): JAX f64->f32 7.2ms / f32->f64 14.7ms / f64->bf16 4.6ms
+    // / f32->bf16 3.0ms. All BW-bound (read+write).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_convert_vs_jax() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let d64: Vec<f64> = (0..n).map(|i| (i % 9973) as f64 * 0.01 - 50.0).collect();
+        let x64 = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                d64,
+            )
+            .unwrap(),
+        );
+        let to_f32 = BTreeMap::from([("new_dtype".to_owned(), "f32".to_owned())]);
+        let x32 = eval_convert_element_type(std::slice::from_ref(&x64), &to_f32).unwrap();
+        let bench = |label: &str, input: &Value, dt: &str| {
+            let p = BTreeMap::from([("new_dtype".to_owned(), dt.to_owned())]);
+            let f = || {
+                std::hint::black_box(
+                    eval_convert_element_type(std::slice::from_ref(input), &p).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("fj-lax convert {label} 16M: {:.3}ms", b * 1e3);
+        };
+        bench("f64->f32", &x64, "f32");
+        bench("f32->f64", &x32, "f64");
+        bench("f64->bf16", &x64, "bf16");
+        bench("f32->bf16", &x32, "bf16");
     }
 
     // A/B: multi-operand (key+value) sort — serial per-row reference vs the inter-slice threaded path.
