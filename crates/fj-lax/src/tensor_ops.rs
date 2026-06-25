@@ -14471,6 +14471,53 @@ mod tests {
         );
     }
 
+    // dynamic_update_slice vs JAX (op=16M upd=1M f64, measured): JAX 24.7ms. fj-lax copies the whole
+    // operand single-thread then overwrites the slice; this times it.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_dynamic_update_slice_vs_jax() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let u = 1_000_000usize;
+        let od: Vec<f64> = (0..n).map(|i| i as f64 * 1e-3).collect();
+        let ud: Vec<f64> = (0..u).map(|i| -(i as f64)).collect();
+        let operand = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                od,
+            )
+            .unwrap(),
+        );
+        let update = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![u as u32],
+                },
+                ud,
+            )
+            .unwrap(),
+        );
+        let start = Value::Scalar(Literal::I64(5_000_000));
+        let inputs = vec![operand, update, start];
+        let p = BTreeMap::new();
+        let f = || {
+            std::hint::black_box(eval_dynamic_update_slice(&inputs, &p).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..8 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax dynamic_update_slice f64 op=16M upd=1M: {:.3}ms | JAX=24.7ms",
+            b * 1e3
+        );
+    }
+
     // Parallel-copy-into-fresh-output thread sweep — the EXACT pattern of broadcast/transpose/concat
     // (block copy_from_slice across scoped threads). Confirms whether all-cores over-subscribes the
     // copy like it did for convert (so the cap should extend to these data-movement ops).

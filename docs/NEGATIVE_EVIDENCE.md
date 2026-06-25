@@ -2835,6 +2835,10 @@ not all-cores (32) → the ~1.49x on the big-copy regime. Bit-identical (thread 
 1601/0 + clippy clean. NOTE: reciprocal/cheap-unary use `dense_unary_threads` which ALREADY caps at 16 at 16M
 (ELEMS_PER_THREAD=1<<20) — NOT over-subscribed; their residual gap stays the eval-model per-call alloc. The
 over-subscription fix is specific to the `work_scaled_threads` (ELEMS_PER_THREAD=1<<16 → all cores) callers.
+DYNAMIC_UPDATE_SLICE checked + at PARITY (2026-06-25): `bench_dynamic_update_slice_vs_jax` op=16M upd=1M f64
+= fj-lax 24.96ms vs JAX 24.7ms (1.01x). DUS copies the whole operand single-thread via `to_vec` (no zero-fill)
+then overwrites the slice — already matches JAX's full-copy DUS; threading the copy is only ~1.12x (the
+zero-fill parallel-copy path) and variance-sensitive → NOT pursued (~0-gain). No lever.
 
 ## 2026-06-25 - full reductions: max/argmax BEAT JAX; sum/prod 1.5–2x LOSS, threaded-tree lever is a parity call (SlateHarrier)
 
