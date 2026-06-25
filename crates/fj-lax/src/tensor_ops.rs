@@ -10259,28 +10259,42 @@ fn sort_multiple_along_axis(
                 start += cnt;
                 handles.push(scope.spawn(move || -> Result<(), EvalError> {
                     let mut blocks = blocks;
-                    let mut indexed: Vec<(usize, Vec<SortKey>)> = Vec::with_capacity(axis_dim);
+                    // Flat key buffer (axis_dim * num_keys), reused per line — avoids a Vec<SortKey>
+                    // allocation per element (the multi-sort path was alloc-bound). `order` holds the
+                    // sorted positions; comparison reads each row's contiguous key span.
+                    let mut keys_flat: Vec<SortKey> = Vec::with_capacity(axis_dim * num_keys);
+                    let mut order: Vec<usize> = Vec::with_capacity(axis_dim);
                     for j in 0..cnt {
                         let base = (s + j) * axis_dim;
-                        indexed.clear();
+                        keys_flat.clear();
                         for i in 0..axis_dim {
-                            let mut keys = Vec::with_capacity(num_keys);
                             for tensor in tensors_ref.iter().take(num_keys) {
-                                keys.push(sort_key(tensor.elements[base + i]).map_err(
+                                keys_flat.push(sort_key(tensor.elements[base + i]).map_err(
                                     |detail| EvalError::Unsupported { primitive, detail },
                                 )?);
                             }
-                            indexed.push((i, keys));
                         }
+                        order.clear();
+                        order.extend(0..axis_dim);
                         if descending {
-                            indexed.sort_by(|a, b| compare_sort_key_tuples(&b.1, &a.1));
+                            order.sort_by(|&a, &b| {
+                                compare_sort_key_tuples(
+                                    &keys_flat[b * num_keys..(b + 1) * num_keys],
+                                    &keys_flat[a * num_keys..(a + 1) * num_keys],
+                                )
+                            });
                         } else {
-                            indexed.sort_by(|a, b| compare_sort_key_tuples(&a.1, &b.1));
+                            order.sort_by(|&a, &b| {
+                                compare_sort_key_tuples(
+                                    &keys_flat[a * num_keys..(a + 1) * num_keys],
+                                    &keys_flat[b * num_keys..(b + 1) * num_keys],
+                                )
+                            });
                         }
-                        for (out_pos, (orig_idx, _)) in indexed.iter().enumerate() {
+                        for (out_pos, &orig_idx) in order.iter().enumerate() {
                             for (op, tensor) in tensors_ref.iter().enumerate() {
                                 blocks[op][j * axis_dim + out_pos] =
-                                    tensor.elements[base + *orig_idx];
+                                    tensor.elements[base + orig_idx];
                             }
                         }
                     }
@@ -14495,6 +14509,30 @@ mod tests {
             }
             std::hint::black_box((&out_k, &out_v));
         };
+        // Flat-keys serial replica (no per-element Vec) — isolates the alloc fix vs `serial` above.
+        let serial_flat = || {
+            let mut out_k = keys.clone();
+            let mut out_v = vals.clone();
+            let mut keys_flat: Vec<SortKey> = Vec::with_capacity(cols);
+            let mut order: Vec<usize> = Vec::with_capacity(cols);
+            for r in 0..rows {
+                let base = r * cols;
+                keys_flat.clear();
+                for i in 0..cols {
+                    keys_flat.push(super::sort_key(key_lits[base + i]).unwrap());
+                }
+                order.clear();
+                order.extend(0..cols);
+                order.sort_by(|&a, &b| {
+                    super::compare_sort_key_tuples(&keys_flat[a..a + 1], &keys_flat[b..b + 1])
+                });
+                for (pos, &oi) in order.iter().enumerate() {
+                    out_k[base + pos] = keys[base + oi];
+                    out_v[base + pos] = vals[base + oi];
+                }
+            }
+            std::hint::black_box((&out_k, &out_v));
+        };
         let bench = |f: &dyn Fn()| {
             f();
             let mut b = f64::MAX;
@@ -14506,9 +14544,12 @@ mod tests {
             b * 1e3
         };
         let sref = bench(&serial);
+        let sflat = bench(&serial_flat);
         let thr = bench(&threaded);
         println!(
-            "AB multi-sort (key f64 + val i64) [2048,2048] axis1: serial-ref={sref:.4}ms threaded={thr:.4}ms ({:.2}x)",
+            "AB multi-sort (key f64 + val i64) [2048,2048] axis1: serial-Vec={sref:.4}ms serial-flat={sflat:.4}ms threaded-flat={thr:.4}ms | alloc-fix={:.2}x thread={:.2}x total={:.2}x",
+            sref / sflat,
+            sflat / thr,
             sref / thr
         );
     }

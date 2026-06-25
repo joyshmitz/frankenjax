@@ -2665,11 +2665,17 @@ contiguous blocks of every operand's output vec via per-operand `chunks_mut`, pe
 CLEAN SAME-BINARY A/B `bench_multi_sort_threaded_ab` (key f64 + val i64) [2048,2048] axis1, serial-ref
 replicates the eval serial inner loop (per-element `Vec<SortKey>` + compare_sort_key_tuples): serial-ref
 716ms vs threaded **422ms = 1.69x**. (NOTE: an alloc-free manual sort is ~150ms — the multi-sort path is
-ALLOC-BOUND on the per-element `Vec<SortKey>`, so threading only reaches 1.69x not ~2.6x; the residual lever
-is killing that per-element alloc, e.g. SmallVec/flat keys for small num_keys — deferred, larger change.)
-Bit-identical: sort tests 27/0 + full lib 1599/0 + clippy clean. The sort-threading family is now COMPLETE
-(radix dtypes + generic/complex single + MULTI-operand + top_k, all axes via the transpose wrapper). This is
-the last contained compute-bound lever; remaining = `cntiy` +fma / owned.
+ALLOC-BOUND on the per-element `Vec<SortKey>`.) FOLLOW-UP (shipped): replaced the per-element `Vec<SortKey>`
+with a FLAT reused keys buffer (`keys_flat` of axis_dim*num_keys + `order: Vec<usize>`, comparison reads each
+row's contiguous key span) in the threaded path. 3-WAY SAME-BINARY A/B (the only trustworthy comparison —
+serial-Vec varied 716↔311ms ACROSS invocations): serial-Vec 311ms / serial-flat 232ms / threaded-flat 235ms
+→ **alloc-fix = 1.34x, threading-on-flat = 0.99x (NEUTRAL), total = 1.32x**. KEY LESSON: the ALLOCATION was
+the real bottleneck, not single-threading — once the per-element Vec is gone the multi-sort is MEMORY-bound
+(multi-operand scatter) and threading adds nothing (0.99x). Last turn's "1.69x from threading" was really
+threading masking the alloc cost; the flat buffer is the genuine lever. Kept the (now-neutral) threading
+since it's not a regression and reverting it is pure churn. Bit-identical: sort 27/0 + full lib 1599/0 +
+clippy clean. The sort-threading family is COMPLETE (radix + generic/complex single + MULTI-operand + top_k,
+all axes). Last contained compute-bound lever; remaining = `cntiy` +fma / owned.
 
 ## 2026-06-26 - gather sort-gather-scatter EMPIRICALLY REJECTED — 0.07x (random gather is HW-optimal) (SlateHarrier)
 
