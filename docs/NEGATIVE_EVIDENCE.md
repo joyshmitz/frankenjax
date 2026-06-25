@@ -2718,6 +2718,19 @@ since it's not a regression and reverting it is pure churn. Bit-identical: sort 
 clippy clean. The sort-threading family is COMPLETE (radix + generic/complex single + MULTI-operand + top_k,
 all axes). Last contained compute-bound lever; remaining = `cntiy` +fma / owned.
 
+## 2026-06-25 - alloc-first sweep of fj-lax hot paths: NO further material lever (alloc-lean) (SlateHarrier)
+
+After the multi-sort flat-keys win, swept ALL fj-lax numeric hot paths (elementwise / reduction / matmul /
+dot_general / conv / gather-scatter / cumulative) for the per-element/per-iteration heap-alloc anti-pattern
+(agent-backed). Only ONE candidate surfaced: `batched_matmul_row_block_bf16_in` (tensor_contraction.rs) — the
+bf16 GEMM ROW-REMAINDER path allocates `acc = vec![0f32; n]` per remainder row. ISOLATING micro-A/B
+`bench_rowremainder_acc_alloc_vs_reuse` (n=512 k=512, ALL 8000 rows forced through the remainder path — worst
+case): per-row-alloc 165.85ms vs reused 153.81ms = **1.078x**. In a real matmul the remainder is only
+`tile_rows % 4` rows (≤3) — the rest go through the alloc-free register-blocked loop — so the actual impact is
+~0; and even the worst-case 7% is compute-dominated (the alloc is ~1/k of each remainder row's k×n axpy). NOT
+worth a production change (REVERT ~0-gain). CONCLUSION: fj-lax hot kernels are alloc-lean; the multi-sort
+per-element `Vec<SortKey>` was the lone material alloc lever (fixed). The alloc-first lens is now exhausted.
+
 ## 2026-06-26 - gather sort-gather-scatter EMPIRICALLY REJECTED — 0.07x (random gather is HW-optimal) (SlateHarrier)
 
 The scorecard frames gather's ~15x JAX gap as the "Zen3 vgather ceiling" — but that was the SIMD approach.

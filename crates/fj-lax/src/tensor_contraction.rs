@@ -3736,6 +3736,62 @@ mod tests {
         }
     }
 
+    // Isolates the candidate lever: per-row `vec![0;n]` alloc vs a reused buffer, with the SAME
+    // K*n f32 axpy work per row (the bf16 matmul row-remainder inner loop). Decides whether the
+    // per-row allocation is material vs the compute.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_rowremainder_acc_alloc_vs_reuse() {
+        use std::time::Instant;
+        let (n, k, rows) = (512usize, 512usize, 8000usize);
+        let a: Vec<f32> = (0..rows * k).map(|i| (i % 7) as f32 * 0.1).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| (i % 5) as f32 * 0.2).collect();
+        let axpy = |acc: &mut [f32], r: usize| {
+            for l in 0..k {
+                let av = a[r * k + l];
+                let src = &b[l * n..l * n + n];
+                for (ax, bx) in acc.iter_mut().zip(src) {
+                    *ax += av * bx;
+                }
+            }
+        };
+        let with_alloc = || {
+            let mut sink = 0.0f32;
+            for r in 0..rows {
+                let mut acc = vec![0.0f32; n];
+                axpy(&mut acc, r);
+                sink += acc[0];
+            }
+            std::hint::black_box(sink);
+        };
+        let reuse = || {
+            let mut sink = 0.0f32;
+            let mut acc = vec![0.0f32; n];
+            for r in 0..rows {
+                acc.iter_mut().for_each(|x| *x = 0.0);
+                axpy(&mut acc, r);
+                sink += acc[0];
+            }
+            std::hint::black_box(sink);
+        };
+        let bench = |f: &dyn Fn()| {
+            f();
+            let mut bb = f64::MAX;
+            for _ in 0..6 {
+                let s = Instant::now();
+                f();
+                bb = bb.min(s.elapsed().as_secs_f64());
+            }
+            bb * 1e3
+        };
+        let wa = bench(&with_alloc);
+        let ru = bench(&reuse);
+        println!(
+            "AB rowremainder acc (n={n} k={k} rows={rows}): per-row-alloc={wa:.4}ms reused={ru:.4}ms ({:.3}x)",
+            wa / ru
+        );
+    }
+
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_bf16_gemm_native_vs_promote() {
