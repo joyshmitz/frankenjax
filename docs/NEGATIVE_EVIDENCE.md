@@ -4638,3 +4638,20 @@ same padded-input materialization + finite-guard) + an f32 rank-2 sum gate (let-
 win31x31 ≈naive(~O(out*961)) → 10.17ms = 3.36x WIN vs JAX 34.2; win11x11 10.24ms ≈ JAX 6.98 (~parity, but
 ~1000x over the naive).** VERIFIED: 48/0 reduce_window tests incl the bit-exact metamorphic + new
 `reduce_window_sum_separable_f32_matches_naive` (<1e-5); clippy clean. Sum-pooling now separable for f64+f32.
+
+## 2026-06-26 - sum-pool family survey: i64 already-optimal (integral image), N-D float gap bead'd (SlateHarrier)
+
+Checked the remaining sum-pool dtypes/ranks after shipping the 2-D f64+f32 separable:
+- **i64 rank-2 sum: NO lever — already optimal.** `eval_reduce_window_rank2_i64_sum_sat` uses an INTEGRAL
+  IMAGE (summed-area table): build O(input), then each window = 4 lookups (sat[r1][c1]-sat[r0][c1]-
+  sat[r1][c0]+sat[r0][c0]), all `wrapping_*` in the i64 ring → EXACT + O(input). JAX i64 [2048,2048] win31
+  31.7ms; fj-lax already O(input) ≈ parity/win. (Floats can't use the integral image — subtracting large
+  prefix sums cancels catastrophically — which is exactly why the float path needed the running-sum separable
+  instead.) 2-D sum-pool is now complete across f64/f32/i64.
+- **N-D (rank≥3) float sum: still naive** `eval_reduce_window_dense_float` O(out·∏window). JAX 3-D f64
+  [96,96,96]: win5³ 1.75ms, win9³ 9.87ms; fj-lax naive O(out·729) at win9³ is ~hundreds of ms. LEVER (bead
+  frankenjax-nd-separable-sum-pool): generalize the separable — mirror `eval_reduce_window_separable_extremum`
+  (which loops axes applying the 1-D max/min deque) with a 1-D running-window-SUM per axis. Tolerance-legal
+  (per-axis running-sum reassociates; metamorphic invariant held via the same padded/consistent approach).
+  Niche (volumetric/video pooling) + moderately complex (N-axis strided passes) → deferred, not rushed at
+  session depth.
