@@ -5063,3 +5063,15 @@ per-row sort); fj-lax shares the identical ~47ms dense path measured for f64 →
 Bit-identical: added parity guards sort_key_val_{f32,i64}_num_keys1_parity_threaded (NaN/±0/±inf/dups for f32;
 i64::MIN/MAX/0/-1/dups for i64; asc+desc; vs trusted single sort) — sort suite **30/0**, clippy clean. Mixed-
 dtype operands (e.g. f32 key + i64 indices) + non-last-axis still take the generic Literal path (bead follow-on).
+
+## 2026-06-26 - sort_key_val MIXED-dtype (f32 key + i64 value) dense — ~52x WIN vs JAX (SlateHarrier)
+
+Completed the sort_key_val family with the MIXED-dtype case (the common argsort-with-payload: sort by an f32
+score, reorder i64 indices). The uniform 1-pass path requires all operands same dtype; added a 2-pass mixed
+path (reached when uniform doesn't apply): `sort_orders_dense` computes the per-line permutation from the dense
+key (f64/f32/i64 radix), then `permute_by_orders` permutes EACH operand into its own dense typed buffer
+(f64/f32/i64). f32key+i64val [4096,4096] axis1: fj-lax **54ms vs JAX 2801ms = ~52x WIN** (2-pass adds an
+orders round-trip vs the uniform 1-pass 47ms, still huge). Bit-identical: parity guard
+sort_key_val_mixed_f32key_i64val_parity_threaded (NaN/±0/±inf/dups f32 key + i64 payload, asc+desc, vs trusted
+single sort) — sort suite 31/0, clippy clean. Operands outside {f64,f32,i64} or non-last-axis keep the generic
+Literal path. sort_key_val lever now COMPLETE for the common dtype combos (was 3.4x; uniform ~58x, mixed ~52x).

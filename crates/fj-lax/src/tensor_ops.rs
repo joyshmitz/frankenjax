@@ -10763,6 +10763,87 @@ fn sort_key_val_dense_uniform<T: Copy + Send + Sync>(
     outs
 }
 
+// Compute the per-line sort permutation (original within-line index) from a dense key, via radix on
+// (total-order u64, idx) pairs. Threaded over lines. `orders[line*axis_dim + out_pos] = original idx`.
+// Used by the MIXED-dtype sort_key_val path (key one dtype, operands various) — distinct from the uniform
+// 1-pass path which permutes inline.
+fn sort_orders_dense<T: Copy + Send + Sync>(
+    key: &[T],
+    outer_count: usize,
+    axis_dim: usize,
+    total: usize,
+    threads: usize,
+    key_mask: u64,
+    encode: impl Fn(T) -> u64 + Sync,
+) -> Vec<u32> {
+    let mut orders: Vec<u32> = vec![0u32; total];
+    let per = outer_count.div_ceil(threads.max(1));
+    let encode = &encode;
+    let mut iter = orders.chunks_mut(per * axis_dim);
+    std::thread::scope(|scope| {
+        let mut start = 0usize;
+        while start < outer_count {
+            let cnt = per.min(outer_count - start);
+            let chunk = iter.next().unwrap();
+            let s0 = start;
+            start += cnt;
+            scope.spawn(move || {
+                let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
+                let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
+                for j in 0..cnt {
+                    let base = (s0 + j) * axis_dim;
+                    pairs.clear();
+                    for i in 0..axis_dim {
+                        pairs.push((encode(key[base + i]) ^ key_mask, i as u32));
+                    }
+                    radix_pairs_ascending(&mut pairs, &mut scratch);
+                    for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                        chunk[j * axis_dim + out_pos] = orig;
+                    }
+                }
+            });
+        }
+    });
+    orders
+}
+
+// Permute one operand's dense slice by a precomputed per-line `orders` (idx within each axis_dim line) into a
+// dense typed buffer: out[line*axis_dim + pos] = src[line*axis_dim + orders[line*axis_dim + pos]]. Threaded.
+fn permute_by_orders<T: Copy + Send + Sync>(
+    src: &[T],
+    orders: &[u32],
+    axis_dim: usize,
+    total: usize,
+    threads: usize,
+    zero: T,
+) -> Vec<T> {
+    let mut out: Vec<T> = vec![zero; total];
+    let outer_count = total / axis_dim;
+    let per = outer_count.div_ceil(threads.max(1));
+    let mut oit = out.chunks_mut(per * axis_dim);
+    let mut nit = orders.chunks(per * axis_dim);
+    std::thread::scope(|scope| {
+        let mut start = 0usize;
+        while start < outer_count {
+            let cnt = per.min(outer_count - start);
+            let ochunk = oit.next().unwrap();
+            let nchunk = nit.next().unwrap();
+            let s0 = start;
+            start += cnt;
+            scope.spawn(move || {
+                for j in 0..cnt {
+                    let base = (s0 + j) * axis_dim;
+                    let loc = j * axis_dim;
+                    for pos in 0..axis_dim {
+                        ochunk[loc + pos] = src[base + nchunk[loc + pos] as usize];
+                    }
+                }
+            });
+        }
+    });
+    out
+}
+
 fn sort_multiple_along_axis(
     primitive: Primitive,
     tensors: &[&TensorValue],
@@ -10871,6 +10952,84 @@ fn sort_multiple_along_axis(
                     TensorValue::new_i64_values
                 ),
                 _ => {}
+            }
+        }
+    }
+
+    // MIXED-dtype dense path (reached only when the uniform path above didn't apply, e.g. key f32 + value i64
+    // — the argsort-with-payload pattern). Compute the per-line permutation from the dense key (f64/f32/i64),
+    // then permute EACH operand by it into its own dense typed buffer. Falls through to the generic Literal
+    // path if any operand is not a supported dense dtype. Bit-identical (same radix order). Guarded by
+    // sort_key_val_mixed_f32key_i64val_parity_threaded.
+    if num_keys == 1
+        && axis_stride == 1
+        && outer_count > 1
+        && total >= SORT_PARALLEL_MIN_TOTAL_ELEMS
+    {
+        let threads = {
+            let hw = std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1);
+            hw.min(total / SORT_PARALLEL_MIN_TOTAL_ELEMS)
+                .max(1)
+                .min(outer_count)
+        };
+        let orders: Option<Vec<u32>> = match tensors[0].dtype {
+            DType::F64 => tensors[0].elements.as_f64_slice().map(|ks| {
+                let m = if descending { u64::MAX } else { 0 };
+                sort_orders_dense(ks, outer_count, axis_dim, total, threads, m, |v: f64| {
+                    f64_sort_order_key(v)
+                })
+            }),
+            DType::F32 => tensors[0].elements.as_f32_slice().map(|ks| {
+                let m = if descending { 0xFFFF_FFFF } else { 0 };
+                sort_orders_dense(ks, outer_count, axis_dim, total, threads, m, |v: f32| {
+                    f32_sort_order_key(v) as u64
+                })
+            }),
+            DType::I64 => tensors[0].elements.as_i64_slice().map(|ks| {
+                let m = if descending { u64::MAX } else { 0 };
+                sort_orders_dense(ks, outer_count, axis_dim, total, threads, m, |v: i64| {
+                    (v as u64) ^ (1_u64 << 63)
+                })
+            }),
+            _ => None,
+        };
+        if let Some(orders) = orders {
+            let results: Option<Vec<Value>> = tensors
+                .iter()
+                .map(|t| -> Option<Value> {
+                    macro_rules! perm {
+                        ($slice:expr, $zero:expr, $ctor:expr) => {{
+                            let s = $slice?;
+                            let o = permute_by_orders(s, &orders, axis_dim, total, threads, $zero);
+                            $ctor(t.shape.clone(), o).ok().map(Value::Tensor)
+                        }};
+                    }
+                    match t.dtype {
+                        DType::F64 => {
+                            perm!(
+                                t.elements.as_f64_slice(),
+                                0.0f64,
+                                TensorValue::new_f64_values
+                            )
+                        }
+                        DType::F32 => {
+                            perm!(
+                                t.elements.as_f32_slice(),
+                                0.0f32,
+                                TensorValue::new_f32_values
+                            )
+                        }
+                        DType::I64 => {
+                            perm!(t.elements.as_i64_slice(), 0i64, TensorValue::new_i64_values)
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            if let Some(results) = results {
+                return Ok(results);
             }
         }
     }
@@ -16118,6 +16277,105 @@ mod tests {
                 assert_eq!(keys[idx], sk[i], "i64 perm at {i} desc={desc}");
             }
         }
+    }
+
+    // MIXED-dtype guard: f32 key + i64 value (argsort-with-payload). Validates the mixed dense path: sorted
+    // keys == trusted single f32 sort, and the i64 payload maps each output key back to its original.
+    #[test]
+    fn sort_key_val_mixed_f32key_i64val_parity_threaded() {
+        let rows = 1024usize;
+        let cols = 1024usize;
+        let n = rows * cols;
+        let special = [
+            3.0f32,
+            1.0,
+            f32::NAN,
+            -0.0,
+            0.0,
+            1.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let keys: Vec<f32> = (0..n)
+            .map(|i| {
+                if i < special.len() {
+                    special[i]
+                } else {
+                    ((i.wrapping_mul(2654435761) % 100003) as f32) * 0.01 - 500.0
+                }
+            })
+            .collect();
+        let vals: Vec<i64> = (0..n).map(|i| i as i64).collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let k = Value::Tensor(TensorValue::new_f32_values(shape.clone(), keys.clone()).unwrap());
+        let v = Value::Tensor(TensorValue::new_i64_values(shape.clone(), vals).unwrap());
+        for desc in [false, true] {
+            let mut p = BTreeMap::from([
+                ("axis".to_owned(), "1".to_owned()),
+                ("num_keys".to_owned(), "1".to_owned()),
+            ]);
+            if desc {
+                p.insert("descending".to_owned(), "true".to_owned());
+            }
+            let out = eval_sort_multi(Primitive::Sort, &[k.clone(), v.clone()], &p).unwrap();
+            let sk = out[0].as_tensor().unwrap().elements.as_f32_slice().unwrap();
+            let sv = out[1].as_tensor().unwrap().elements.as_i64_slice().unwrap();
+            let mut pk = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+            if desc {
+                pk.insert("descending".to_owned(), "true".to_owned());
+            }
+            let rk_val = eval_sort(Primitive::Sort, std::slice::from_ref(&k), &pk).unwrap();
+            let rk = rk_val.as_tensor().unwrap().elements.as_f32_slice().unwrap();
+            for i in 0..n {
+                assert_eq!(
+                    sk[i].to_bits(),
+                    rk[i].to_bits(),
+                    "mixed key order at {i} desc={desc}"
+                );
+                let idx = sv[i] as usize;
+                assert_eq!(
+                    keys[idx].to_bits(),
+                    sk[i].to_bits(),
+                    "mixed perm at {i} desc={desc}"
+                );
+            }
+        }
+    }
+
+    // mixed sort_key_val: f32 key + i64 value (argsort-with-payload) vs JAX (measured below).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_sort_key_val_mixed_vs_jax() {
+        use std::time::Instant;
+        let (rows, cols) = (4096usize, 4096usize);
+        let keys: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i.wrapping_mul(2654435761) % 100003) as f32) * 0.01 - 500.0)
+            .collect();
+        let vals: Vec<i64> = (0..rows * cols).map(|i| i as i64).collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let k = Value::Tensor(TensorValue::new_f32_values(shape.clone(), keys).unwrap());
+        let v = Value::Tensor(TensorValue::new_i64_values(shape, vals).unwrap());
+        let p = BTreeMap::from([
+            ("axis".to_owned(), "1".to_owned()),
+            ("num_keys".to_owned(), "1".to_owned()),
+        ]);
+        let run = || eval_sort_multi(Primitive::Sort, &[k.clone(), v.clone()], &p).unwrap();
+        let _ = run();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            let r = run();
+            b = b.min(s.elapsed().as_secs_f64());
+            std::hint::black_box(&r);
+        }
+        println!(
+            "fj-lax sort_key_val MIXED f32key+i64val [4096,4096] axis1: {:.3}ms | JAX=2750ms",
+            b * 1e3
+        );
     }
 
     // sort_key_val (variadic: sort keys, permute values) vs JAX (measured JAX f64 [4096,4096] axis1 = 2739ms
