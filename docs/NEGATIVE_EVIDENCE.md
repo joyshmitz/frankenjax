@@ -4628,3 +4628,13 @@ metamorphic `..._same_padding_zero_pads_like_valid_on_padded_input` + new tolera
 `reduce_window_sum_separable_matches_naive` (<1e-9); clippy clean. Bead
 frankenjax-reduce-window-sum-separable RESOLVED. The worst gap found this session (177-363x loss) is now a
 win/parity. (f32/strided/non-rank-2 sum pooling still naive — follow-on.)
+
+## 2026-06-25 - f32 large-window SUM pooling separable — 3.4x WIN vs JAX (default dtype) (SlateHarrier)
+
+Extended the separable sum-pool to f32 (JAX's default dtype). The rank-2 sum fast path was F64-only (gate
+`dtype==F64`), so f32 fell to the naive dense O(out*wr*wc). Added `separable_reduce_window_sum_f32` (read f32,
+accumulate the running sum in f64, narrow each output to f32 — matches the naive widen-sum-round contract;
+same padded-input materialization + finite-guard) + an f32 rank-2 sum gate (let-chain). **f32 [2048,2048]:
+win31x31 ≈naive(~O(out*961)) → 10.17ms = 3.36x WIN vs JAX 34.2; win11x11 10.24ms ≈ JAX 6.98 (~parity, but
+~1000x over the naive).** VERIFIED: 48/0 reduce_window tests incl the bit-exact metamorphic + new
+`reduce_window_sum_separable_f32_matches_naive` (<1e-5); clippy clean. Sum-pooling now separable for f64+f32.
