@@ -14286,6 +14286,45 @@ pub(crate) fn eval_expand_dims(
     }
 }
 
+// Leading-dim replication (`tile` with reps = [R, 1, 1, ...]) is just R contiguous copies of the input.
+// The single-threaded block-copy is fault+copy-bound on the fresh output (first-touch page faults dominate);
+// copying each replica in parallel makes those faults first-touch in parallel (the same fix as one_hot's
+// row-write). `zero` is the dtype's zero-bits value so the backing `vec![zero; total]` is a lazy calloc the
+// parallel `copy_from_slice` then faults. Bit-identical to the serial block copy.
+fn threaded_replicate<T: Copy + Send + Sync>(src: &[T], reps: usize, zero: T) -> Vec<T> {
+    let n = src.len();
+    let total = n.saturating_mul(reps);
+    let mut out = vec![zero; total];
+    if n == 0 || reps == 0 {
+        return out;
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(8);
+    let threads = (total / (1 << 18)).clamp(1, cores).min(reps);
+    if threads <= 1 {
+        for chunk in out.chunks_mut(n) {
+            chunk.copy_from_slice(src);
+        }
+        return out;
+    }
+    let copies_per = reps.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [T] = out.as_mut_slice();
+        while !rest.is_empty() {
+            let take = (copies_per * n).min(rest.len());
+            let (blk, tail) = rest.split_at_mut(take);
+            rest = tail;
+            scope.spawn(move || {
+                for chunk in blk.chunks_mut(n) {
+                    chunk.copy_from_slice(src);
+                }
+            });
+        }
+    });
+    out
+}
+
 pub(crate) fn eval_tile(
     inputs: &[Value],
     params: &BTreeMap<String, String>,
@@ -14393,6 +14432,43 @@ pub(crate) fn eval_tile(
                         out,
                     )?));
                 }};
+            }
+            // Leading-dim replication (reps = [R, 1, 1, ...]) -> R contiguous copies of the input;
+            // copy the replicas in PARALLEL (parallel first-touch faults) instead of the single-threaded
+            // block copy. Bit-identical (same copies, same order).
+            if reps.first().is_some_and(|&r| r >= 2) && reps[1..].iter().all(|&r| r == 1) {
+                macro_rules! threaded_tile {
+                    ($slice:expr, $zero:expr, $ctor:expr) => {{
+                        return Ok(Value::Tensor($ctor(
+                            Shape {
+                                dims: new_dims.clone(),
+                            },
+                            threaded_replicate($slice, reps[0], $zero),
+                        )?));
+                    }};
+                }
+                if let Some(s) = tensor.elements.as_f64_slice() {
+                    threaded_tile!(s, 0.0f64, TensorValue::new_f64_values);
+                }
+                if let Some(s) = tensor.elements.as_f32_slice() {
+                    threaded_tile!(s, 0.0f32, TensorValue::new_f32_values);
+                }
+                if let Some(s) = tensor.elements.as_i64_slice() {
+                    if tensor.dtype == DType::I32 {
+                        threaded_tile!(s, 0i64, TensorValue::new_i32_values);
+                    } else {
+                        threaded_tile!(s, 0i64, TensorValue::new_i64_values);
+                    }
+                }
+                if let Some(s) = tensor.elements.as_u32_slice() {
+                    threaded_tile!(s, 0u32, TensorValue::new_u32_values);
+                }
+                if let Some(s) = tensor.elements.as_u64_slice() {
+                    threaded_tile!(s, 0u64, TensorValue::new_u64_values);
+                }
+                if let Some(s) = tensor.elements.as_bool_slice() {
+                    threaded_tile!(s, false, TensorValue::new_bool_values);
+                }
             }
             if let Some(s) = tensor.elements.as_f64_slice() {
                 dense_tile!(s, TensorValue::new_f64_values);
@@ -14898,6 +14974,42 @@ mod tests {
         println!(
             "AB complex128 sort [2048,2048] axis1: serial-ref={sref:.4}ms threaded={thr:.4}ms ({:.2}x) | JAX=602ms",
             sref / thr
+        );
+    }
+
+    // tile vs JAX (measured JAX f64 [1000,1000]x(16,1)->16M = 21.9ms). fj-lax tile is dense
+    // extend_from_slice memcpy; the gap (if any) is the fresh-output fault floor (so4wo), not the algorithm.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_tile_vs_jax() {
+        use std::time::Instant;
+        let (r, c, reps) = (1000usize, 1000usize, 16usize);
+        let data: Vec<f64> = (0..r * c).map(|i| i as f64).collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![r as u32, c as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("reps".to_owned(), format!("{reps},1"))]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Tile, std::slice::from_ref(&x), &p).unwrap(),
+            );
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax tile f64 [1000,1000]x(16,1)->16M: {:.3}ms | JAX=21.9ms",
+            b * 1e3
         );
     }
 

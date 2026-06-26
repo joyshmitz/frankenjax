@@ -4849,3 +4849,14 @@ is the FRESH-OUTPUT PAGE-FAULT FLOOR (writing a 410MB mostly-off output faults ~
 path serializes — so4wo eval-model class, same as select/reciprocal; JAX's jit reuses buffers). So one_hot is
 no longer a 4.7x algorithmic loss — it's a ~1.35x so4wo-bounded loss, with the pathological random-scatter
 fault removed. The remaining 1.35x is arch (buffer reuse / fault floor), not contained.
+
+## 2026-06-26 - tile (leading-dim replication) threaded — 87→20ms, 1.1x WIN vs JAX (was 4.0x loss) (SlateHarrier)
+
+`bench_tile_vs_jax` (f64 [1000,1000] x (16,1) -> 16M, 128MB output): old fj-lax **87.3ms vs JAX 21.9 = 4.0x
+SLOWER**. The dense path (tile_recursive_dense, extend_from_slice memcpy) was correct but SINGLE-THREADED ->
+fault+copy-bound on the fresh output (1.5 GB/s). FIX: for leading-dim replication (reps = [R,1,...] -> R
+contiguous copies of the input), `threaded_replicate` copies the R replicas in PARALLEL (parallel first-touch
+page faults + memcpy), backed by a lazy-calloc `vec![zero; total]`. Bit-identical (tile 16/0, clippy clean).
+**Result: 20.0ms = 4.4x faster, 1.1x WIN vs JAX 21.9.** (Same fix class as one_hot's row-write, but tile edges
+past JAX because its copy is pure memcpy — no per-row branch.) Covers f64/f32/i64/i32/u32/u64/bool leading
+replication; inner/interleaved reps + half/complex keep the serial dense path.
