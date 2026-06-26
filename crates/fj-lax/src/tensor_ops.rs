@@ -15804,6 +15804,74 @@ mod tests {
         );
     }
 
+    // Parity guard: num_keys==1 f64-key multi-sort (sort_key_val) must produce the SAME sorted-key order as
+    // the trusted single-key sort (which matches JAX) AND a value permutation that maps each output key back
+    // to its original. 1024x1024 forces the threaded sort path (>1<<18). Adversarial keys: NaN, ±0, ±inf,
+    // duplicates. (Guards correctness for any future fast-path rework — see the dense-permute lever bead.)
+    #[test]
+    fn sort_key_val_f64_num_keys1_parity_threaded() {
+        let rows = 1024usize;
+        let cols = 1024usize;
+        let n = rows * cols;
+        let special = [
+            3.0,
+            1.0,
+            f64::NAN,
+            -0.0,
+            0.0,
+            1.0,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let keys: Vec<f64> = (0..n)
+            .map(|i| {
+                if i < special.len() {
+                    special[i]
+                } else {
+                    ((i.wrapping_mul(2654435761) % 100003) as f64) * 0.01 - 500.0
+                }
+            })
+            .collect();
+        let vals: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let k = Value::Tensor(TensorValue::new_f64_values(shape.clone(), keys.clone()).unwrap());
+        let v = Value::Tensor(TensorValue::new_f64_values(shape.clone(), vals).unwrap());
+        for desc in [false, true] {
+            let mut p = BTreeMap::from([
+                ("axis".to_owned(), "1".to_owned()),
+                ("num_keys".to_owned(), "1".to_owned()),
+            ]);
+            if desc {
+                p.insert("descending".to_owned(), "true".to_owned());
+            }
+            let out = eval_sort_multi(Primitive::Sort, &[k.clone(), v.clone()], &p).unwrap();
+            let st = out[0].as_tensor().unwrap();
+            let sk = st.elements.as_f64_slice().unwrap();
+            let sv = out[1].as_tensor().unwrap().elements.as_f64_slice().unwrap();
+            let mut pk = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+            if desc {
+                pk.insert("descending".to_owned(), "true".to_owned());
+            }
+            let rk_val = eval_sort(Primitive::Sort, std::slice::from_ref(&k), &pk).unwrap();
+            let rk = rk_val.as_tensor().unwrap().elements.as_f64_slice().unwrap();
+            for i in 0..n {
+                assert_eq!(
+                    sk[i].to_bits(),
+                    rk[i].to_bits(),
+                    "key order at {i} desc={desc}"
+                );
+                let idx = sv[i] as usize;
+                assert_eq!(
+                    keys[idx].to_bits(),
+                    sk[i].to_bits(),
+                    "perm at {i} desc={desc}"
+                );
+            }
+        }
+    }
+
     // sort_key_val (variadic: sort keys, permute values) vs JAX (measured JAX f64 [4096,4096] axis1 = 2739ms
     // — XLA-CPU full per-row sort of both arrays).
     #[test]

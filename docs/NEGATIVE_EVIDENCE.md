@@ -5026,3 +5026,17 @@ radix path — encode the key to its total-order u64 (per dtype, exactly as sort
 e.g. i64 `(v as u64)^(1<<63)`, desc via `^u64::MAX`), radix-sort (u64,idx) pairs, then permute ALL operands by
 idx. Target ~35ms sort + cache-resident per-line gathers -> ~30-50x vs JAX 2739ms. Do NOT re-try the SortKey-
 enum pair sort (measured ~0-gain).
+
+## 2026-06-26 - sort_key_val bottleneck is the Vec<Literal> PERMUTE, not the sort — radix-reuse also ~0-gain (REVERTED) (SlateHarrier)
+
+Second measured attempt on frankenjax-sortkeyval-argsort-permute. Wired the single-key RADIX path (f64 key,
+total-order u64, radix_pairs_ascending) into the threaded multi-sort for num_keys==1 — bit-identical (added
+parity guard `sort_key_val_f64_num_keys1_parity_threaded`: 1024x1024, NaN/±0/±inf/dups, asc+desc, vs trusted
+single sort; 28/0). BUT the bench was UNCHANGED: 736ms (vs 795ms enum = noise). So the sort was NEVER the
+bottleneck. ROOT CAUSE (now pinned): both paths permute via `tensor.elements[base+orig]` into `Vec<Literal>`
+output — ~32M Literal reconstructions + a densify round-trip per call; the single sort is 35ms because it
+writes a DENSE f64 slice directly. REVERTED the radix (~0-gain end-to-end). TRUE LEVER (refined): make the
+multi-sort output DENSE TYPED buffers — for each operand permute its typed slice (as_f64_slice/etc) into a
+dense Vec and build via new_f64_values, instead of Vec<Literal> + densify. Combined with the radix order that
+becomes the real win (~35ms sort + dense permute). Kept the parity guard test. Two hypotheses now ruled out by
+measurement: (1) index-indirection [turn N-1], (2) sort-compare cost [this turn] — it is the Literal permute.
