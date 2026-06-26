@@ -12125,6 +12125,47 @@ mod tests {
     // ===================================================================
 
     #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_scatter_add_vs_jax() {
+        use std::time::Instant;
+        let n_tab = 1_000_000usize;
+        let n_upd = 1_000_000usize;
+        let operand = Value::Tensor(
+            TensorValue::new_f64_values(Shape::vector(n_tab as u32), vec![0.0; n_tab]).unwrap(),
+        );
+        let idx: Vec<i64> = (0..n_upd)
+            .map(|i| (i.wrapping_mul(2654435761) % n_tab) as i64)
+            .collect();
+        let indices =
+            Value::Tensor(TensorValue::new_i64_values(Shape::vector(n_upd as u32), idx).unwrap());
+        let upd: Vec<f64> = (0..n_upd).map(|i| ((i % 9973) as f64) * 1e-3).collect();
+        let updates =
+            Value::Tensor(TensorValue::new_f64_values(Shape::vector(n_upd as u32), upd).unwrap());
+        let p = BTreeMap::from([("mode".to_owned(), "add".to_owned())]);
+        let f = || {
+            std::hint::black_box(
+                eval_primitive(
+                    Primitive::Scatter,
+                    &[operand.clone(), indices.clone(), updates.clone()],
+                    &p,
+                )
+                .unwrap(),
+            );
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax scatter-add f64 (table 1M, 1M updates): {:.3}ms | JAX=4.78ms",
+            b * 1e3
+        );
+    }
+
+    #[test]
     fn scatter_add_mode_accumulates() {
         // operand: [0.0, 0.0, 0.0] (shape [3])
         // indices: [1, 1]  (duplicate index)

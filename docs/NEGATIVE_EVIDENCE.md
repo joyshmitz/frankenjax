@@ -4668,3 +4668,11 @@ neutral/overhead at L3-resident sizes), and 64 tiny per-slice GEMM calls don't a
 frankenjax-small-batched-gemm): a direct (un-packed) microkernel for small/cache-resident per-slice GEMMs in
 the batched einsum/dot path. GEMM-tuning + fma-adjacent + matmul matrix is otherwise COMPLETE → deferred (not
 rushed at session depth); ~1.7x recoverable below the fma ceiling. The fma half stays maintainer-gated.
+
+## 2026-06-26 - scatter-add ~parity vs JAX (1.25x, latency-bound floor) — no lever (SlateHarrier)
+
+`bench_scatter_add_vs_jax` (f64 table 1M, 1M random updates, mode=add): fj-lax **5.98ms vs JAX 4.78ms =
+1.25x** — both are random-write memory-latency-bound (scatter into random table positions). No contained
+lever: the gap is the random-access latency floor, not an algorithmic inefficiency (fj-lax already does the
+dense sequential accumulate, not a boxed/odometer path). Recorded as a confirmed-competitive measured result;
+kept the bench. (Genuinely-different-primitive dig: scatter-add is competitive, not a gap.)
