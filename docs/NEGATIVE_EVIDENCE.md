@@ -4655,3 +4655,16 @@ Checked the remaining sum-pool dtypes/ranks after shipping the 2-D f64+f32 separ
   (per-axis running-sum reassociates; metamorphic invariant held via the same padded/consistent approach).
   Niche (volumetric/video pooling) + moderately complex (N-axis strided passes) → deferred, not rushed at
   session depth.
+
+## 2026-06-26 - attention/batched einsum (bqhd,bkhd->bhqk): routed to batched GEMM, ~3.4x vs JAX (partly gated) (SlateHarrier)
+
+Checked the hottest transformer op. fj-lax ALREADY routes it to permute+per-slice cache-blocked GEMM
+(`try_einsum2_matmul_general`): [8,128,8,64/128] general=12.61ms vs naive odometer 6083ms = **482x** (the
+routing works). vs JAX: fj-lax ~12.6ms@q128 vs JAX ~3.75ms (60.0ms@q512 ÷16) = **~3.4x slower**, ≈5.3 GFLOPs
+vs JAX ~17.8. ~2x of that is the deliberate no-+fma build policy (cntiy; XLA uses fma) → the fma ceiling is
+~9 GFLOPs. But fj-lax 5.3 < 9, so ~1.7x is BELOW the fma ceiling = a real contained inefficiency: the
+per-slice GEMM packs B panels even for small cache-resident slices (per gemm-bpack-regime, packing is
+neutral/overhead at L3-resident sizes), and 64 tiny per-slice GEMM calls don't amortize setup. LEVER (bead
+frankenjax-small-batched-gemm): a direct (un-packed) microkernel for small/cache-resident per-slice GEMMs in
+the batched einsum/dot path. GEMM-tuning + fma-adjacent + matmul matrix is otherwise COMPLETE → deferred (not
+rushed at session depth); ~1.7x recoverable below the fma ceiling. The fma half stays maintainer-gated.
