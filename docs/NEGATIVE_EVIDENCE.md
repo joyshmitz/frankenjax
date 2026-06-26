@@ -4584,3 +4584,21 @@ Conclusion: this is **not** a JAX win. It is kept as a gap-narrowing internal wi
 same-worker Rust A/B improves the targeted row by **1.76x** and conformance stays green; it is
 recorded here as a **0 JAX wins / 1 JAX loss / 1 kept gap-narrowing lever** result, not as a
 FrankenJAX-over-JAX victory.
+
+## 2026-06-25 - reduce_window SUM pooling is 177-363x SLOWER than JAX — separable lever filed (SlateHarrier)
+
+BIGGEST gap found this session. `eval_reduce_window_rank2_f64_sum` (general rank-2 f64 sum, non-3x3) is
+NAIVE O(out·wr·wc) — a nested per-window fold. `bench_reduce_window_sum_vs_jax` (f64 [2048,2048] VALID,
+stride 1):
+  win11x11: fj-lax **1447ms** vs JAX 8.18ms = **177x SLOWER**
+  win31x31: fj-lax **12808ms** vs JAX 35.3ms = **363x SLOWER**
+LEVER (filed, not yet shipped): SUM is SEPARABLE → a 2-pass running-sum is O(input): (1) per-row horizontal
+running window-sum over columns (s += row[oc+wc-1] - row[oc-1]) → intermediate[input_rows, out_cols];
+(2) vertical COLS-WIDE running window-sum over rows (vsum[oc] += hsum[or+wr-1][oc] - hsum[or-1][oc],
+contiguous). O(input) total, ~5-10ms → beats JAX. Tolerance-legal (running-sum reassociates + bounded
+subtract-old cancellation; same policy class as the cumsum blocked scan — and the 3x3-same path is separately
+specialized + small conformance windows use the naive/3x3 path, so a fast path gated to large windows +
+stride-1 + VALID doesn't touch them). Deferred (1 turn): the running-sum is tolerance-sensitive (verify vs
+naive within tolerance + conformance) — not to rush buggy at session depth. Bead
+frankenjax-reduce-window-sum-separable. Recorded measured loss + lever + bench `bench_reduce_window_sum_vs_jax`.
+NOTE: max/min pooling already has the separable/deque fast path; only SUM was left naive.

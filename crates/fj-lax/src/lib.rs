@@ -8412,6 +8412,50 @@ mod tests {
         }
     }
 
+    // Large-window SUM pooling vs JAX (measured JAX f64 [2048,2048] VALID: win11x11 8.18ms, win31x31
+    // 35.3ms). The general rank-2 f64 sum path is naive O(out*wr*wc); sum is SEPARABLE (two 1-D running-sum
+    // passes = O(input)) — check the gap.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_reduce_window_sum_vs_jax() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| ((i % 9973) as f64) * 1e-3 - 5.0)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32, n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        for (w, jax) in [(11usize, 8.18), (31usize, 35.3)] {
+            let mut p = BTreeMap::new();
+            p.insert("reduce_op".to_owned(), "sum".to_owned());
+            p.insert("window_dimensions".to_owned(), format!("{w},{w}"));
+            p.insert("window_strides".to_owned(), "1,1".to_owned());
+            let f = || {
+                std::hint::black_box(
+                    eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&x), &p).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..6 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!(
+                "fj-lax reduce_window sum f64 [2048,2048] win{w}x{w}: {:.3}ms | JAX={jax}ms",
+                b * 1e3
+            );
+        }
+    }
+
     // bf16 pooling production timing (eval_primitive → fast path) vs JAX bf16 (max 2.80ms, sum 2.96ms).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
