@@ -5012,3 +5012,17 @@ the fast key-sort path. LEVER (bead frankenjax-sortkeyval-argsort-permute): args
 landed; the bigger win is the internal lever (not shipped here — eval_sort_multi rework with num_keys/stability/
 NaN semantics, deferred at context depth). Another datapoint that JAX-CPU sort-lowering is catastrophic (cf
 top_k ~200x, single sort 35x).
+
+## 2026-06-26 - sort_key_val lever PINPOINTED: radix-reuse (single sort 35ms vs 736ms = 21x); enum-pair tried & REVERTED (SlateHarrier)
+
+Investigated the bead frankenjax-sortkeyval-argsort-permute. Measured target: single-KEY sort [4096,4096] f64
+axis1 = **35ms** (radix sort on packed (u64_key, u32_idx) pairs, radix_pairs_ascending_maybe_parallel); the
+variadic sort_key_val = **736ms = 21x slower**. ATTEMPT (reverted, ~0-gain 795->736ms): made the threaded
+multi-sort sort (SortKey, idx) PAIRS instead of indices-into-keys_flat — bit-identical (sort 27/0) but barely
+faster, DISPROVING the "index indirection" hypothesis. ROOT CAUSE: the multi path uses SortKey ENUM comparison
+sort (~200M enum-match compares/call); the single path uses RADIX on a raw total-order u64 (O(n), no compares).
+TRUE LEVER (well-specified, deferred — careful per-dtype + NaN/±0 + stability): for num_keys==1, reuse the
+radix path — encode the key to its total-order u64 (per dtype, exactly as sort_along_axis_dense_{i64,f64,f32}:
+e.g. i64 `(v as u64)^(1<<63)`, desc via `^u64::MAX`), radix-sort (u64,idx) pairs, then permute ALL operands by
+idx. Target ~35ms sort + cache-resident per-line gathers -> ~30-50x vs JAX 2739ms. Do NOT re-try the SortKey-
+enum pair sort (measured ~0-gain).
