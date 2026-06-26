@@ -38,11 +38,13 @@ use crate::EvalError;
 const FFT_PLAN_CACHE_MAX_ENTRIES: usize = 32;
 
 type Radix2PlanCache = Vec<((usize, bool), Arc<Radix2Plan>)>;
+type Radix4PlanCache = Vec<((usize, bool), Arc<Radix4Plan>)>;
 type TwiddlePlanCache = Vec<((usize, bool), Arc<Vec<(f64, f64)>>)>;
 type BluesteinPlanCache = Vec<((usize, bool), Arc<BluesteinPlan>)>;
 type RealRfftPower2PlanCache = Vec<(usize, Arc<RealRfftPower2Plan>)>;
 
 static RADIX2_PLAN_CACHE: OnceLock<Mutex<Radix2PlanCache>> = OnceLock::new();
+static RADIX4_PLAN_CACHE: OnceLock<Mutex<Radix4PlanCache>> = OnceLock::new();
 static TWIDDLE_PLAN_CACHE: OnceLock<Mutex<TwiddlePlanCache>> = OnceLock::new();
 static BLUESTEIN_PLAN_CACHE: OnceLock<Mutex<BluesteinPlanCache>> = OnceLock::new();
 static REAL_RFFT_POWER2_PLAN_CACHE: OnceLock<Mutex<RealRfftPower2PlanCache>> = OnceLock::new();
@@ -639,6 +641,39 @@ fn cached_radix2_plan(n: usize, inverse: bool) -> Arc<Radix2Plan> {
     }
 
     let built = Arc::new(Radix2Plan::new(n, inverse));
+    let mut guard = match cache.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some((_, plan)) = guard
+        .iter()
+        .find(|((len, direction), _)| *len == n && *direction == inverse)
+    {
+        return Arc::clone(plan);
+    }
+    if guard.len() >= FFT_PLAN_CACHE_MAX_ENTRIES {
+        guard.remove(0);
+    }
+    guard.push(((n, inverse), Arc::clone(&built)));
+    built
+}
+
+fn cached_radix4_plan(n: usize, inverse: bool) -> Arc<Radix4Plan> {
+    let cache = RADIX4_PLAN_CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    {
+        let guard = match cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some((_, plan)) = guard
+            .iter()
+            .find(|((len, direction), _)| *len == n && *direction == inverse)
+        {
+            return Arc::clone(plan);
+        }
+    }
+
+    let built = Arc::new(Radix4Plan::new(n, inverse));
     let mut guard = match cache.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -1557,6 +1592,9 @@ fn transform_batches_dense(
     // per-row path and avoid the transpose round-trip.
     const POW2_VECTORIZED_MIN_BATCH: usize = 8; // A/B TOGGLE: MAX=HEAD baseline, 8=vectorized
     if n > 1 && n.is_power_of_two() && batch_size >= POW2_VECTORIZED_MIN_BATCH {
+        if is_power_of_four(n) {
+            return transform_batches_pow4_vectorized(elements, n, batch_size, inverse);
+        }
         return transform_batches_pow2_vectorized(elements, n, batch_size, inverse);
     }
 
@@ -1804,13 +1842,11 @@ fn vectorized_pow2_block(
 }
 
 /// True for n = 4^k (k >= 1): a pure power of four, eligible for the radix-4 SoA kernel.
-#[cfg(test)]
 fn is_power_of_four(n: usize) -> bool {
     n.is_power_of_two() && n.trailing_zeros().is_multiple_of(2)
 }
 
 /// Base-4 digit-reversal permutation for n = 4^k (the radix-4 analogue of bit-reversal).
-#[cfg(test)]
 fn digit_reverse_base4(n: usize) -> Vec<usize> {
     let digits = (n.trailing_zeros() / 2) as usize;
     (0..n)
@@ -1830,14 +1866,12 @@ fn digit_reverse_base4(n: usize) -> Vec<usize> {
 /// twiddles (stage `len` = 4,16,...,n; `quarter` = len/4 twiddles each). `W_len^2j` and
 /// `W_len^3j` are derived inline in the butterfly (one square + one mul) to keep the table
 /// the same size as radix-2's.
-#[cfg(test)]
 struct Radix4Plan {
     digit_reversed: Vec<usize>,
     twiddles: Vec<(f64, f64)>,
     inverse: bool,
 }
 
-#[cfg(test)]
 impl Radix4Plan {
     fn new(n: usize, inverse: bool) -> Self {
         debug_assert!(is_power_of_four(n));
@@ -1874,7 +1908,6 @@ impl Radix4Plan {
 /// count vs radix-2 (log4 vs log2), so it sweeps the SoA buffer fewer times — the dominant
 /// cost per the `profile_soa_pow2_phases` measurement (butterflies were 57% of the kernel).
 /// Tolerance-equal (not bit-identical) to the radix-2 path: a different, fewer-op schedule.
-#[cfg(test)]
 fn soa_radix4_butterfly_stages(
     plan: &Radix4Plan,
     w: usize,
@@ -1951,7 +1984,6 @@ fn soa_radix4_butterfly_stages(
 /// Radix-4 SoA FFT over a block of `batch` length-`n` (n = 4^k) rows. Same SoA framing as
 /// `vectorized_pow2_block` (one transpose in, butterflies vertical over the batch, one
 /// transpose out) but with the radix-4 stage schedule. Tolerance-equal to the radix-2 path.
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn vectorized_pow4_block(
     plan: &Radix4Plan,
@@ -2031,6 +2063,81 @@ fn vectorized_pow2_tiled(
         );
         row0 += rows;
     }
+}
+
+fn vectorized_pow4_tiled(
+    plan: &Radix4Plan,
+    elements: &[(f64, f64)],
+    batch: usize,
+    n: usize,
+    inverse: bool,
+    out: &mut [(f64, f64)],
+) {
+    let cap = POW2_TILE_ROWS * n;
+    let mut re = vec![0.0f64; cap];
+    let mut im = vec![0.0f64; cap];
+    let mut row0 = 0usize;
+    while row0 < batch {
+        let rows = POW2_TILE_ROWS.min(batch - row0);
+        let s = row0 * n;
+        let e = s + rows * n;
+        vectorized_pow4_block(
+            plan,
+            &elements[s..e],
+            rows,
+            n,
+            inverse,
+            &mut re[..rows * n],
+            &mut im[..rows * n],
+            &mut out[s..e],
+        );
+        row0 += rows;
+    }
+}
+
+fn transform_batches_pow4_vectorized(
+    elements: &[(f64, f64)],
+    n: usize,
+    batch_size: usize,
+    inverse: bool,
+) -> Vec<(f64, f64)> {
+    let plan = cached_radix4_plan(n, inverse);
+    let total = batch_size * n;
+    let mut out: Vec<(f64, f64)> = vec![(0.0, 0.0); total];
+
+    const PARALLEL_MIN_ELEMS: usize = 1 << 18;
+    let threads = if total >= PARALLEL_MIN_ELEMS && batch_size > 1 {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(batch_size)
+    } else {
+        1
+    };
+
+    if threads <= 1 {
+        vectorized_pow4_tiled(plan.as_ref(), elements, batch_size, n, inverse, &mut out);
+        return out;
+    }
+
+    let rows_per = batch_size.div_ceil(threads);
+    let plan_ref = plan.as_ref();
+    std::thread::scope(|scope| {
+        let mut rest: &mut [(f64, f64)] = out.as_mut_slice();
+        let mut row0 = 0usize;
+        while row0 < batch_size {
+            let rows = rows_per.min(batch_size - row0);
+            let (blk, tail) = rest.split_at_mut(rows * n);
+            rest = tail;
+            let base = row0 * n;
+            let src = &elements[base..base + rows * n];
+            scope.spawn(move || {
+                vectorized_pow4_tiled(plan_ref, src, rows, n, inverse, blk);
+            });
+            row0 += rows;
+        }
+    });
+    out
 }
 
 /// Batched power-of-two FFT/IFFT via the cache-blocked vectorized SoA kernel.
@@ -3922,9 +4029,9 @@ mod tests {
     /// enough to cross the `1<<18`-element threading floor so `transform_batches_dense`
     /// fans the work across `thread::scope` chunks — exercising the chunk-boundary /
     /// row-offset / `split_at_mut` logic that would otherwise be untested in
-    /// production-active code. Asserts bit-identity vs the per-row `BatchFftPlan` (the SoA
-    /// kernels are bit-identical per row, so threading must preserve that exactly). Covers
-    /// the full-complex pow2 SoA (n=256) and the Bluestein SoA (n=127, m=256), both dirs.
+    /// production-active code. Non-radix-4 SoA kernels stay bit-identical per row, so
+    /// threading must preserve that exactly. The radix-4 pow-of-four route intentionally
+    /// changes floating-point operation order, so it is checked by tight tolerance.
     #[test]
     fn threaded_soa_dispatch_bit_identical_to_per_row() {
         let bits = |v: &[(f64, f64)]| -> Vec<(u64, u64)> {
@@ -3956,11 +4063,15 @@ mod tests {
                     reference[b * n..b * n + n].copy_from_slice(&buf);
                 }
                 let got = transform_batches_dense(&elements, n, batch, inverse);
-                assert_eq!(
-                    bits(&reference),
-                    bits(&got),
-                    "threaded SoA dispatch != per-row (n={n} batch={batch} inverse={inverse})"
-                );
+                if is_power_of_four(n) {
+                    assert_complex_close(&got, &reference, 1e-8);
+                } else {
+                    assert_eq!(
+                        bits(&reference),
+                        bits(&got),
+                        "threaded SoA dispatch != per-row (n={n} batch={batch} inverse={inverse})"
+                    );
+                }
             }
         }
     }
@@ -4588,9 +4699,9 @@ mod tests {
         );
     }
 
-    /// The vectorized SoA batch kernel must be bit-for-bit identical to applying
-    /// the scalar `Radix2Plan` per row, for both FFT and IFFT, across sizes and
-    /// batch counts (incl. signed zeros / negatives in the data).
+    /// The radix-2 SoA batch kernel must be bit-for-bit identical to applying the
+    /// scalar `Radix2Plan` per row. The production dispatcher may route batched
+    /// pow-of-four lengths to radix-4, which is tolerance-equivalent but not bit-identical.
     #[test]
     fn vectorized_pow2_batch_bit_identical_to_per_row() {
         for &n in &[2usize, 4, 8, 16, 64, 256] {
@@ -4635,14 +4746,18 @@ mod tests {
                     // And the dense batch dispatcher (which routes to the vectorized
                     // path above the gate) must agree too.
                     let dispatched = transform_batches_dense(&elements, n, batch, inverse);
-                    let dbits: Vec<(u64, u64)> = dispatched
-                        .iter()
-                        .map(|&(r, i)| (r.to_bits(), i.to_bits()))
-                        .collect();
-                    assert_eq!(
-                        rbits, dbits,
-                        "transform_batches_dense must be bit-identical to per-row Radix2Plan (n={n}, batch={batch}, inverse={inverse})"
-                    );
+                    if is_power_of_four(n) && batch >= 8 {
+                        assert_complex_close(&dispatched, &reference, 1e-8);
+                    } else {
+                        let dbits: Vec<(u64, u64)> = dispatched
+                            .iter()
+                            .map(|&(r, i)| (r.to_bits(), i.to_bits()))
+                            .collect();
+                        assert_eq!(
+                            rbits, dbits,
+                            "transform_batches_dense must be bit-identical to per-row Radix2Plan (n={n}, batch={batch}, inverse={inverse})"
+                        );
+                    }
                 }
             }
         }

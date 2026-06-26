@@ -4474,3 +4474,53 @@ also reports pre-existing `lax_baseline.rs` gather/scatter formatting, intention
 with this perf commit. `ubs` on the changed Rust files exits nonzero on pre-existing test/bench
 panic/unwrap surfaces in the large scanned files; the new local `decode`-name false positive was
 removed, and UBS now reports no JWT decode/validation bypass pattern.
+
+## 2026-06-26 - radix-4 batched FFT narrows but does not beat JAX (ProudSalmon/cod-b)
+
+BOLD-VERIFY land check: the only off-main `.scratch` / worktree commit with an obvious measured
+perf subject was `4940278be503` (`perf(fj-lax): fast-path complex boolword select`), but its
+patch-id is already present on `main` as `2c163dfdd2dd`. The other not-contained head,
+`a00dc11450d8` (`wip: qr preconditioned svd candidate`), is a WIP linalg/beads edit with no
+measured ledger win. No off-main measured win was landable.
+
+New lever: promote the existing radix-4 structure-of-arrays FFT kernel from test-only coverage to
+the production batched power-of-four complex FFT/IFFT dispatch. The route is limited to dense
+batched `n = 4^k` rows that already qualify for the power-of-two SoA path; it reuses the existing
+tile/thread schedule and adds a bounded cached `Radix4Plan`.
+
+Same-worker Rust A/B, RCH worker `ovh-a`, warm target request
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b`, command shape
+`cargo bench -p fj-lax --profile release --bench lax_baseline --
+eval/fft_batch_2048x256_complex128_dense_input --noplot`:
+
+| implementation | Criterion midpoint | Rust delta |
+| --- | ---: | ---: |
+| current `main` radix-2 SoA | 3.3898ms | baseline |
+| radix-4 batched SoA candidate | 1.9286ms | 1.76x faster |
+
+Fresh JAX comparator used `benchmarks/jax_comparison/.venv/bin/python`, JAX/JAXLIB 0.10.1 CPU,
+`jax.jit(lambda a: jnp.fft.fft(a, axis=-1))`, and the exact Rust fixture generator
+`sin(i * 0.125) + 1j * cos(i * 0.25)` for shape `2048x256 complex128`. JAX over 20 hot runs:
+mean 435.88675us, median 306.7625us, min 250.887us, p95 407.975us.
+
+Ratio vs JAX median:
+
+| implementation | Rust/JAX median ratio | outcome |
+| --- | ---: | --- |
+| current `main` radix-2 SoA | 11.05x slower | loss |
+| radix-4 batched SoA candidate | 6.29x slower | loss, gap narrowed |
+
+Validation: `cargo fmt -p fj-lax --check` passed; `cargo check -p fj-lax --profile release
+--benches` passed before the test-assertion-only patch; `cargo test -p fj-lax --profile release
+fft:: -- --nocapture` passed 55/55 active FFT tests; `cargo test -p fj-conformance --profile
+release --test fft_oracle -- --nocapture` passed 27/27; `cargo test -p fj-conformance
+--profile release --test linalg_fft_oracle_parity -- --nocapture` passed 1/1; `cargo check
+-p fj-lax --profile release --all-targets` passed; `cargo clippy -p fj-lax --profile release
+--all-targets -- -D warnings` passed. `ubs crates/fj-lax/src/fft.rs docs/NEGATIVE_EVIDENCE.md`
+exited nonzero on the pre-existing broad `fft.rs` test/bench panic, unwrap, and indexing
+inventory; its embedded formatting, clippy, cargo-check, and test-build subchecks were clean.
+
+Conclusion: this is **not** a JAX win. It is kept as a gap-narrowing internal win because the
+same-worker Rust A/B improves the targeted row by **1.76x** and conformance stays green; it is
+recorded here as a **0 JAX wins / 1 JAX loss / 1 kept gap-narrowing lever** result, not as a
+FrankenJAX-over-JAX victory.
