@@ -3213,6 +3213,20 @@ i64 backing). **i64 cumsum 52.9→35.08ms (1.91x WIN), cummax 55.6→29.15ms (2.
 ALL bit-equal; conformance cumulative_oracle GREEN; cum 49/0, clippy clean. Cumulative-scan family now also
 covers integers.
 
+## 2026-06-25 - 2-D leading-axis (column) scan is SINGLE-THREADED + compute-bound — row-block lever filed (SlateHarrier)
+
+`scan_leading_axis_to_vec` (cumsum/cummax DOWN columns, axis=0) is SINGLE-THREADED (k-outer/col-inner stream,
+cols-wide f64 acc). Measured f32 cummax [4096,4096] axis0 = 46.8ms vs JAX 49.3 = parity — but it's COMPUTE-bound
+(128MB would be ~13ms memory-bound; the extra ~34ms is per-element jax_minmax single-thread), so threading
+would WIN, not just match. LEVER (filed, not yet shipped): row-block parallel prefix scan with a COLS-WIDE
+carry — row-blocks are contiguous (safe split_at_mut, unlike column-blocks which are strided). pass1 each block
+computes cols-wide column-totals; pass2 directional cols-wide prefix → per-block cols-wide carry; pass3 each
+block re-scans from its carry. Bit-identical for cummax (associative), tolerance-legal for cumsum (only the
+inter-block carry reassociates — same policy as the 1-D blocked scan). ~3-6x potential (parity→win). Deferred:
+parity is not a loss + the cols-wide generic rescan is moderately complex (generic S/T, directional) — not to
+rush at session depth. Bead frankenjax-leading-axis-scan-thread. The 1-D cumulative campaign (10 shipped wins,
+all dtypes × directions) is the completed deliverable; this 2-D case is the documented follow-on.
+
 ## 2026-06-25 - argsort is a ~35x fj-lax WIN vs JAX (SlateHarrier)
 
 `bench_argsort2d_vs_jax`: argsort f64 [2048,2048] axis1 — fj-lax **17.4ms vs JAX 616.8ms = ~35x WIN**.
