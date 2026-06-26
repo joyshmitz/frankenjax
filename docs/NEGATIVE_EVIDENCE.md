@@ -2,6 +2,39 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-26 - REJECT: radix-4 production dispatch for pow4 FFT is mixed/under-threshold (ProudSalmon)
+
+BOLD-VERIFY land-or-dig pass: live worktree scan found no unlanded measured win.
+The dirty f64 gather and reverse-bitcast worktrees are already represented on
+`origin/main` (`dce02a09`, `adb409bc`); the only cherry-positive live head remains
+stale QR/SVD WIP `a00dc114` with no ratio ledger. New lever attempted here:
+promote the existing test-only radix-4 SoA FFT kernel into production dispatch
+for batched power-of-four complex FFTs (`n = 256`), halving stage count versus
+the radix-2 SoA path.
+
+Bench command note: this Cargo rejects `cargo bench --release`, so the valid
+crate-scoped optimized equivalent was used:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a cargo bench -p
+fj-lax --profile release --bench lax_baseline -- 'eval/fft_batch_2048x256'
+--noplot`. RCH had no admissible worker and fell open locally for both baseline
+and candidate, so the comparison is same-host/same-target but not remote.
+
+Measured rows:
+
+| workload | main midpoint | radix-4 midpoint | Rust delta | JAX mean | main/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `eval/fft_batch_2048x256_complex128` | 9.6679 ms | 10.578 ms | +9.42% regression | 257.543 us | 37.54x loss | 41.07x loss | REVERT |
+| `eval/fft_batch_2048x256_complex128_dense_input` | 5.7387 ms | 5.5099 ms | -3.99% faster | 257.543 us | 22.28x loss | 21.39x loss | under 1.15x keep threshold |
+| `eval/fft_batch_2048x256_real_dense_input` | 5.5462 ms | 5.2484 ms | -5.37% faster | 2350.235 us | 2.36x loss | 2.23x loss | under 1.15x keep threshold |
+
+Fresh JAX comparator used `/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`,
+JAX/JAXLIB 0.10.1 CPU x64, exact `2048x256` fixtures from `lax_baseline.rs`,
+20 runs x 20 inner loops. Scorecard: **0 JAX wins / 1 regression / 2
+under-threshold rows / 0 kept / code reverted**. Do not retry by simply
+switching the existing SoA pow4 path to radix-4; next FFT lever needs generated
+length-specialized butterflies or a fused extract/transform/output boundary.
+
 ## 2026-06-26 - KEEP: reverse u32->f64 bitcast direct packing narrows JAX gap (ProudSalmon)
 
 BOLD-VERIFY land-or-dig pass: all measured scratch/worktree wins found in
