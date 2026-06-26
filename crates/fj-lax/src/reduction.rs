@@ -5235,6 +5235,83 @@ mod tests {
     // column-parallelism.
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
+    fn bench_reduce3d_mid_vs_jax() {
+        use std::time::Instant;
+        let (b, s, d) = (256usize, 1024usize, 64usize);
+        let data: Vec<f64> = (0..b * s * d)
+            .map(|i| ((i.wrapping_mul(2654435761) % 100003) as f64) * 0.01 - 500.0)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![b as u32, s as u32, d as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        for (prim, name, jax) in [
+            (Primitive::ReduceMax, "max", 4.32),
+            (Primitive::ReduceSum, "sum", 4.24),
+        ] {
+            let p = BTreeMap::from([("axes".to_owned(), "1".to_owned())]);
+            let f = || {
+                std::hint::black_box(
+                    crate::eval_primitive(prim, std::slice::from_ref(&x), &p).unwrap(),
+                );
+            };
+            f();
+            let mut bst = f64::MAX;
+            for _ in 0..6 {
+                let t = Instant::now();
+                f();
+                bst = bst.min(t.elapsed().as_secs_f64());
+            }
+            println!(
+                "fj-lax {name} 3D [256,1024,64] axis1(mid): {:.3}ms | JAX={jax}ms",
+                bst * 1e3
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_argmax3d_mid_vs_jax() {
+        use std::time::Instant;
+        let (b, s, d) = (256usize, 1024usize, 64usize);
+        let data: Vec<f64> = (0..b * s * d)
+            .map(|i| ((i.wrapping_mul(2654435761) % 100003) as f64) * 0.01 - 500.0)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![b as u32, s as u32, d as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Argmax, std::slice::from_ref(&x), &p).unwrap(),
+            );
+        };
+        f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let t = Instant::now();
+            f();
+            bst = bst.min(t.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax argmax 3D [256,1024,64] axis1(mid): {:.3}ms | JAX=3.43ms",
+            bst * 1e3
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
     fn bench_cumsum3d_mid_vs_jax() {
         use std::time::Instant;
         let (b, s, d) = (256usize, 1024usize, 64usize);

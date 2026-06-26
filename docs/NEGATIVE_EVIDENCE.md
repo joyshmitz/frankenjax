@@ -5098,3 +5098,13 @@ threaded over sub-blocks via new `arg_extreme_middle_axis`. f64 + f32 (f32->f64 
 argmax_argmin_3d_mid_axis_matches_reference (f64+f32, max+min, first-occurrence ref) + argmax suite 41/0, clippy
 clean. i64 middle axis kept strided (needs an exact-int cols-wide block — bead). Second instance of the
 strided-middle-axis -> contiguous-sub-block-leading-scan lever (after cumsum).
+
+## 2026-06-26 - value-reduce MIDDLE-axis CONFIRMED done; middle-axis lever class fully mapped (SlateHarrier)
+
+`bench_reduce3d_mid_vs_jax` (f64 [256,1024,64] axis1): sum = **1.77ms vs JAX 4.24 = ~2.4x WIN** (the
+contiguous-block streaming fold already covers middle axes); max = 4.6ms vs JAX 4.32 = ~parity (compare-bound:
+NaN-aware total-order compare per element, matches JAX's cost — not a lever). Verifies the reduce family is
+done for middle axes (no strided regression like cumsum/argmax had). MIDDLE-AXIS LEVER CLASS now fully mapped
+for the [B,S,D] seq-axis pattern: cumsum/cumprod/cummax/cummin = ~2.8x WIN (fixed this session), argmax/argmin
+f64/f32 = ~1.3x WIN (fixed this session), sum = ~2.4x WIN (already), max/min = parity (compare-bound). Remaining
+strided middle paths: i64 argmax/argmin (needs exact-int cols-wide block — bead, low priority/niche).
