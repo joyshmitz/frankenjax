@@ -4310,23 +4310,64 @@ fn eval_cumulative_dense(
                 )
             }
         } else {
-            let mut out = src.to_vec();
-            for outer in 0..outer_count {
-                let base = line_base(outer);
-                let mut acc = float_init;
-                if reverse {
-                    for i in (0..axis_dim).rev() {
-                        let fi = base + i * axis_stride;
-                        acc = float_op(acc, out[fi]);
-                        out[fi] = acc;
-                    }
-                } else {
-                    for i in 0..axis_dim {
-                        let fi = base + i * axis_stride;
-                        acc = float_op(acc, out[fi]);
-                        out[fi] = acc;
-                    }
+            // Middle axis (0 < axis < last): the tensor is `before` contiguous [axis_dim, inner] sub-blocks
+            // (inner == axis_stride == product of trailing dims). The strided per-(outer) scan is cache-hostile;
+            // instead scan each contiguous sub-block along its LEADING axis (cols-wide running sum over `inner`
+            // columns, L1-resident f64 accumulators) — the SAME per-column sequential accumulation (bit-
+            // identical), but contiguous. Threaded over sub-blocks. (~1.35x JAX gap on 3D seq-axis cumsum.)
+            let inner = axis_stride;
+            let block = axis_dim * inner;
+            let before = total / block;
+            let mut out = vec![float_init; total];
+            let threads = (total / (1 << 18))
+                .clamp(1, {
+                    std::thread::available_parallelism()
+                        .map(|c| c.get())
+                        .unwrap_or(8)
+                })
+                .min(before.max(1));
+            let scan_block = |dst: &mut [f64], sub: &[f64]| {
+                let scanned = scan_leading_axis_to_vec(
+                    sub,
+                    axis_dim,
+                    inner,
+                    reverse,
+                    float_init,
+                    |x| x,
+                    |a| a,
+                    float_init,
+                    float_op,
+                );
+                dst.copy_from_slice(&scanned);
+            };
+            if threads <= 1 {
+                for blk in 0..before {
+                    let start = blk * block;
+                    scan_block(&mut out[start..start + block], &src[start..start + block]);
                 }
+            } else {
+                let per = before.div_ceil(threads);
+                std::thread::scope(|scope| {
+                    let mut rest: &mut [f64] = out.as_mut_slice();
+                    let mut b0 = 0usize;
+                    while b0 < before {
+                        let cnt = per.min(before - b0);
+                        let (chunk, tail) = rest.split_at_mut(cnt * block);
+                        rest = tail;
+                        let src_start = b0 * block;
+                        b0 += cnt;
+                        let scan_block = &scan_block;
+                        scope.spawn(move || {
+                            for k in 0..cnt {
+                                let s = k * block;
+                                scan_block(
+                                    &mut chunk[s..s + block],
+                                    &src[src_start + s..src_start + s + block],
+                                );
+                            }
+                        });
+                    }
+                });
             }
             out
         };
@@ -5194,6 +5235,42 @@ mod tests {
     // column-parallelism.
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cumsum3d_mid_vs_jax() {
+        use std::time::Instant;
+        let (b, s, d) = (256usize, 1024usize, 64usize);
+        let data: Vec<f64> = (0..b * s * d)
+            .map(|i| (i % 997) as f64 * 0.5 - 200.0)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![b as u32, s as u32, d as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(&x), &p).unwrap(),
+            );
+        };
+        f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let t = Instant::now();
+            f();
+            bst = bst.min(t.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax cumsum 3D [256,1024,64] axis1(mid): {:.3}ms | JAX=73.7ms",
+            bst * 1e3
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
     fn bench_cumsum2d_f64_vs_jax() {
         use std::time::Instant;
         let (rows, cols) = (4096usize, 4096usize);
@@ -5538,6 +5615,47 @@ mod tests {
     // Parity gate for the THREADED leading-axis scan (scan_leading_axis_to_vec_threaded): a 2-D axis=0
     // scan large enough to trigger the row-slab parallel-prefix path must match the single-threaded
     // cols-wide stream — cummax BIT-IDENTICAL (associative), cumsum within 1e-5 (inter-slab carry only).
+    // Parity gate for the MIDDLE-axis cumsum decomposition (contiguous [axis_dim, inner] sub-block leading
+    // scans, threaded). 3-D [B,S,D] axis=1, large enough to thread; must match the per-(b,d) sequential scan.
+    #[test]
+    fn cumsum_3d_mid_axis_matches_sequential() {
+        let (b, s, d) = (128usize, 1024usize, 4usize); // 512K > 1<<18 -> threaded sub-block path
+        let n = b * s * d;
+        let data: Vec<f64> = (0..n).map(|i| (i % 1009) as f64 * 0.25 - 100.0).collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![b as u32, s as u32, d as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+        let out = crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(&x), &p).unwrap();
+        let got = out.as_tensor().unwrap().elements.as_f64_slice().unwrap();
+        // reference: sequential running sum along s for each (b, d)
+        let mut want = vec![0.0f64; n];
+        for bi in 0..b {
+            for di in 0..d {
+                let mut acc = 0.0f64;
+                for si in 0..s {
+                    let idx = bi * s * d + si * d + di;
+                    acc += data[idx];
+                    want[idx] = acc;
+                }
+            }
+        }
+        for i in 0..n {
+            assert!(
+                (got[i] - want[i]).abs() <= 1e-9 * (1.0 + want[i].abs()),
+                "mid-axis cumsum at {i}: {} vs {}",
+                got[i],
+                want[i]
+            );
+        }
+    }
+
     #[test]
     fn threaded_leading_axis_scan_matches_sequential() {
         let (rows, cols) = (2048usize, 1024usize); // 2M > 1<<20, rows >> 2*threads -> threaded path

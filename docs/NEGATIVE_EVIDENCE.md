@@ -5075,3 +5075,14 @@ orders round-trip vs the uniform 1-pass 47ms, still huge). Bit-identical: parity
 sort_key_val_mixed_f32key_i64val_parity_threaded (NaN/±0/±inf/dups f32 key + i64 payload, asc+desc, vs trusted
 single sort) — sort suite 31/0, clippy clean. Operands outside {f64,f32,i64} or non-last-axis keep the generic
 Literal path. sort_key_val lever now COMPLETE for the common dtype combos (was 3.4x; uniform ~58x, mixed ~52x).
+
+## 2026-06-26 - cumsum/scan MIDDLE-axis decomposition — 98→27ms, 1.35x loss → ~2.8x WIN vs JAX (SlateHarrier)
+
+`bench_cumsum3d_mid_vs_jax` (f64 [256,1024,64] axis1 = the [B,S,D] seq-axis cumsum). eval_cumulative_dense
+routed a middle axis (0<axis<last, axis_stride!=1) to a STRIDED per-line scan (stride=inner, single-threaded,
+cache-hostile) = 98ms vs JAX 73.7 = 1.35x SLOWER. FIX: a middle axis is `before` contiguous [axis_dim, inner]
+sub-blocks (inner==axis_stride); scan each along its LEADING axis (cols-wide running sum over `inner` columns,
+L1 f64 accumulators) — the SAME per-column sequential accumulation (bit-identical) but contiguous, threaded
+over sub-blocks. **98 -> 26.7ms (best) = ~3.7x internal, ~2.8x WIN vs JAX 73.7** (was 1.35x loss). Parity guard
+cumsum_3d_mid_axis_matches_sequential (512K threaded, vs per-(b,d) sequential ref) + cumsum suite 50/0, clippy
+clean. Applies to cumsum/cumprod/cummax/cummin (shared eval_cumulative_dense), any middle axis, all reverse.
