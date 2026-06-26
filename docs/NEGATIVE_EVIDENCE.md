@@ -4969,3 +4969,12 @@ once-per-row (16M -> 4096 decodes) and reverse each contiguous row via forward c
 **Result: 50.8 -> ~28ms (best; high host variance) = ~1.8x internal, 2.2x loss -> ~1.2x vs JAX 23.4.** Residual
 is the reverse read/so4wo fault floor. axis0 (reverse a NON-last axis) is unchanged (~36ms/1.57x, the
 reverse-ORDER contiguous block copies — backward row read; left as a follow-on, harder than the per-row case).
+
+## 2026-06-26 - cumsum f64 axis=1 (last axis) — 2.4x WIN vs JAX, already threaded (SlateHarrier)
+
+`bench_cumsum2d_f64_vs_jax` (f64 [4096,4096] axis1): fj-lax **26.0ms vs JAX 62.8 = 2.4x WIN**. No lever — the
+2-D last-axis cumulative is already handled (per-row scans, threaded; JAX runs a sequential per-row scan on CPU
+= slow). Confirms the cumulative-scan win extends to f64 last-axis (the existing cummax2d bench covered f32).
+Recorded the confirmed win + kept the bench. The remaining data-movement residuals (rev axis0 1.57x, concat
+strided 1.3x, pad ~1.1x) are the so4wo fresh-output fault floor; the biggest open algorithmic gap is gather
+(~7.5x, actively worked).

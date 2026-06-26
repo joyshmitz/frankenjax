@@ -5194,6 +5194,45 @@ mod tests {
     // column-parallelism.
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cumsum2d_f64_vs_jax() {
+        use std::time::Instant;
+        let (rows, cols) = (4096usize, 4096usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| (i % 997) as f64 * 0.5 - 200.0)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let bench = |axis: &str, jax: f64| {
+            let p = BTreeMap::from([("axis".to_owned(), axis.to_owned())]);
+            let f = || {
+                std::hint::black_box(
+                    crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(&x), &p).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..6 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!(
+                "fj-lax cumsum f64 [4096,4096] axis{axis}: {:.3}ms | JAX={jax}ms",
+                b * 1e3
+            );
+        };
+        bench("1", 62.8);
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
     fn bench_cummax2d_vs_jax() {
         use std::time::Instant;
         let (rows, cols) = (4096usize, 4096usize);
