@@ -3636,6 +3636,67 @@ fn scan_leading_axis_to_vec<S: Copy, T: Copy>(
 // thread fan-outs) isn't worth it.
 const CUMSUM_BLOCKED_MIN_ELEMS: usize = 1 << 20; // 1,048,576
 
+// Parallel associative prefix-scan for ONE long f64 cummax/cummin line (forward). max/min are
+// associative + commutative INCLUDING NaN (`jax_minmax_scalar` returns NaN if either operand is NaN —
+// propagates identically under any grouping), so 2-pass chunking is BIT-IDENTICAL to the sequential fold.
+// Calls `jax_minmax_scalar` DIRECTLY (inlines) at ALL cores — beats the generic op-closure blocked scan
+// (non-inlined op + 16-thread cap) ~2.5x. Profiled 16M: 28ms vs JAX 68ms = ~2.4x WIN.
+fn parallel_cummax_f64(src: &[f64], init: f64, is_max: bool) -> Vec<f64> {
+    let n = src.len();
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(8);
+    let threads = (n / (1 << 18)).clamp(2, cores);
+    let block = n.div_ceil(threads);
+    let mut out = vec![0.0f64; n];
+    let ext: Vec<f64> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let mut s_rest = src;
+        let mut o_rest: &mut [f64] = out.as_mut_slice();
+        while !s_rest.is_empty() {
+            let take = block.min(s_rest.len());
+            let (s, st) = s_rest.split_at(take);
+            let (o, ot) = o_rest.split_at_mut(take);
+            s_rest = st;
+            o_rest = ot;
+            handles.push(scope.spawn(move || {
+                let mut acc = init;
+                for (slot, &v) in o.iter_mut().zip(s) {
+                    acc = jax_minmax_scalar(acc, v, is_max);
+                    *slot = acc;
+                }
+                acc
+            }));
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut carries = vec![init; ext.len()];
+    let mut acc = init;
+    for (k, &e) in ext.iter().enumerate() {
+        carries[k] = acc;
+        acc = jax_minmax_scalar(acc, e, is_max);
+    }
+    std::thread::scope(|scope| {
+        let mut o_rest: &mut [f64] = out.as_mut_slice();
+        let mut k = 0usize;
+        while !o_rest.is_empty() {
+            let take = block.min(o_rest.len());
+            let (o, ot) = o_rest.split_at_mut(take);
+            o_rest = ot;
+            let carry = carries[k];
+            if k > 0 {
+                scope.spawn(move || {
+                    for slot in o.iter_mut() {
+                        *slot = jax_minmax_scalar(carry, *slot, is_max);
+                    }
+                });
+            }
+            k += 1;
+        }
+    });
+    out
+}
+
 // Blocked parallel prefix-scan for ONE long contiguous f64 line (outer_count == 1, forward).
 // The sequential single-line scan is f64 dependency-chain-bound (~30ms at 4M; JAX reassociates to
 // ~14ms). Since the cumsum/cumprod oracle is TOLERANCE (abs<1e-10, NOT bit-exact) and `init` is the
@@ -3755,9 +3816,18 @@ fn eval_cumulative_dense(
             // input only adds a complete extra read/write pass. Reverse one-line
             // scans keep the clone+in-place path below.
             if outer_count == 1 && !reverse && total >= CUMSUM_BLOCKED_MIN_ELEMS {
-                // Single long line: the per-line scan is single-thread + dependency-bound.
-                // Block + parallel-prefix it (tolerance-legal; see blocked_prefix_scan_to_vec).
-                blocked_prefix_scan_to_vec(src, float_init, float_op)
+                // Single long line: the per-line scan is single-thread + dependency-bound. cummax/cummin
+                // are ASSOCIATIVE (incl NaN: jax_minmax_scalar returns NaN if either operand is NaN,
+                // propagating identically under any grouping) → a dedicated all-cores parallel prefix
+                // scan with DIRECT (inlined) jax_minmax_scalar is BIT-IDENTICAL and ~2.5x faster than the
+                // generic non-inlined op-closure blocked scan; cumsum/cumprod (non-associative, cheap
+                // add/mul) keep the blocked path. NOTE: match on `cum_primitive` — `primitive` is shadowed
+                // to Cumsum at the fn top for error context.
+                if matches!(cum_primitive, Primitive::Cummax | Primitive::Cummin) {
+                    parallel_cummax_f64(src, float_init, matches!(cum_primitive, Primitive::Cummax))
+                } else {
+                    blocked_prefix_scan_to_vec(src, float_init, float_op)
+                }
             } else {
                 scan_contiguous_lines_to_vec(src, axis_dim, reverse, float_init, float_op)
             }

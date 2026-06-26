@@ -2972,6 +2972,18 @@ context?). Bead held at P3, status BLOCKED-needs-profiler. Not a safe-Rust ceili
 diagnosis. Stopping cummax after 3 measured attempts; the loss is small (1.21x) and the contained surface
 elsewhere is exhausted.
 
+4th ATTEMPT — **LANDED, the bug was a SHADOWED `primitive`.** A print-probe (`eprintln!` in the dense
+single-chain branch keyed on `matches!(primitive, Cummax|Cummin)`) printed 0 hits — which exposed the real
+bug: `eval_cumulative_dense` does `let primitive = Primitive::Cumsum;` at the fn top (line 3719, "only used
+for stride-overflow error context"), SHADOWING the real-op parameter `cum_primitive`. So all 3 prior wirings'
+`matches!(primitive, …)` were ALWAYS FALSE → cummax always fell to the `else` (blocked op-closure scan, 70-83ms);
+`parallel_cummax_f64` was NEVER called (the 28ms direct-on-slice was the test calling it directly, bypassing
+the dead gate). Fix: match on **`cum_primitive`**. Now `parallel_cummax_f64` (direct inlined jax_minmax, all
+cores) fires: **cummax 82→29.06ms, cummin 75→27.49ms**, cum tests 48/0 bit-identical. vs JAX (cummax 68.1 /
+cummin 72.1): **cummax 2.34x WIN, cummin 2.62x WIN** — a 1.21x loss flipped to a win. SHIPPED. Bead RESOLVED.
+LESSON: when a fast-path gate silently never fires, print-probe the branch — a shadowed/rebound variable reads
+fine in static analysis but is a different value at runtime; the "28↔70 contradiction" was this all along.
+
 ## 2026-06-25 - argsort is a ~35x fj-lax WIN vs JAX (SlateHarrier)
 
 `bench_argsort2d_vs_jax`: argsort f64 [2048,2048] axis1 — fj-lax **17.4ms vs JAX 616.8ms = ~35x WIN**.
