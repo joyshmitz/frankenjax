@@ -5086,3 +5086,15 @@ L1 f64 accumulators) — the SAME per-column sequential accumulation (bit-identi
 over sub-blocks. **98 -> 26.7ms (best) = ~3.7x internal, ~2.8x WIN vs JAX 73.7** (was 1.35x loss). Parity guard
 cumsum_3d_mid_axis_matches_sequential (512K threaded, vs per-(b,d) sequential ref) + cumsum suite 50/0, clippy
 clean. Applies to cumsum/cumprod/cummax/cummin (shared eval_cumulative_dense), any middle axis, all reverse.
+
+## 2026-06-26 - argmax/argmin MIDDLE-axis decomposition — 18.3→2.6ms, 5.3x loss → ~1.3x WIN vs JAX (SlateHarrier)
+
+`bench_argmax3d_mid_vs_jax` (f64 [256,1024,64] axis1). extremum_along_axis routed a middle axis (0<axis<last)
+to a STRIDED per-line scan (single-threaded) = 18.3ms vs JAX 3.43 = 5.3x SLOWER. FIX (same shape as the cumsum
+middle-axis fix): a middle axis is `before` contiguous [axis_dim, inner] sub-blocks; each is a LEADING-axis
+arg-extreme over its `inner` columns (`arg_extreme_axis0_block`, already bit-identical to the strided reducer),
+threaded over sub-blocks via new `arg_extreme_middle_axis`. f64 + f32 (f32->f64 exact widen). **18.3 -> 2.6ms
+(best) = ~6.9x internal, ~1.3x WIN vs JAX 3.43** (was 5.3x loss). Bit-identical: parity guard
+argmax_argmin_3d_mid_axis_matches_reference (f64+f32, max+min, first-occurrence ref) + argmax suite 41/0, clippy
+clean. i64 middle axis kept strided (needs an exact-int cols-wide block — bead). Second instance of the
+strided-middle-axis -> contiguous-sub-block-leading-scan lever (after cumsum).
