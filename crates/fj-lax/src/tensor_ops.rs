@@ -10708,6 +10708,61 @@ fn sort_along_axis(
     ))
 }
 
+// Dense uniform-dtype sort_key_val core: radix-sort each contiguous line's key (via `encode` to a total-order
+// u64, `^ key_mask` for descending) into a permutation, then permute every operand's raw `T` slice into DENSE
+// `T` output — no Vec<Literal> / densify. Threaded over lines. `op_slices[0]` is the key. Bit-identical to the
+// generic comparison path (stable radix → ascending-idx ties); guarded by the sort_key_val parity tests.
+#[allow(clippy::too_many_arguments)]
+fn sort_key_val_dense_uniform<T: Copy + Send + Sync>(
+    op_slices: &[&[T]],
+    outer_count: usize,
+    axis_dim: usize,
+    total: usize,
+    threads: usize,
+    key_mask: u64,
+    zero: T,
+    encode: impl Fn(T) -> u64 + Sync,
+) -> Vec<Vec<T>> {
+    let key_slice = op_slices[0];
+    let mut outs: Vec<Vec<T>> = (0..op_slices.len()).map(|_| vec![zero; total]).collect();
+    let per = outer_count.div_ceil(threads.max(1));
+    let encode = &encode;
+    let mut out_iters: Vec<_> = outs
+        .iter_mut()
+        .map(|v| v.chunks_mut(per * axis_dim))
+        .collect();
+    std::thread::scope(|scope| {
+        let mut start = 0usize;
+        while start < outer_count {
+            let cnt = per.min(outer_count - start);
+            let blocks: Vec<&mut [T]> = out_iters.iter_mut().map(|it| it.next().unwrap()).collect();
+            let s0 = start;
+            start += cnt;
+            scope.spawn(move || {
+                let mut blocks = blocks;
+                let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
+                let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
+                for j in 0..cnt {
+                    let base = (s0 + j) * axis_dim;
+                    pairs.clear();
+                    for i in 0..axis_dim {
+                        pairs.push((encode(key_slice[base + i]) ^ key_mask, i as u32));
+                    }
+                    radix_pairs_ascending(&mut pairs, &mut scratch);
+                    for (op, blk) in blocks.iter_mut().enumerate() {
+                        let src = op_slices[op];
+                        for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
+                            blk[j * axis_dim + out_pos] = src[base + orig as usize];
+                        }
+                    }
+                }
+            });
+        }
+    });
+    drop(out_iters);
+    outs
+}
+
 fn sort_multiple_along_axis(
     primitive: Primitive,
     tensors: &[&TensorValue],
@@ -10738,81 +10793,86 @@ fn sort_multiple_along_axis(
     }
     let outer_count = total / axis_dim;
 
-    // Dense all-f64, single-key, contiguous (last-axis) fast path. The generic path below builds Vec<Literal>
-    // outputs and permutes via tensor.elements[idx] (Literal reconstruction) + a densify round-trip — MEASURED
-    // to dominate (the SortKey comparison sort is NOT the cost; see NEGATIVE_EVIDENCE 2026-06-26). Here we
-    // radix-sort each line's key into a permutation (O(n), same total-order encoding as the production f64
-    // sort -> matches JAX; stable radix keeps ties in ascending idx) and permute every operand's raw f64
-    // slice into DENSE f64 output. Bit-identical; guarded by sort_key_val_f64_num_keys1_parity_threaded.
+    // Dense uniform-dtype, single-key, contiguous (last-axis) fast path. The generic path below builds
+    // Vec<Literal> outputs + permutes via tensor.elements[idx] (Literal reconstruction) + a densify round-trip
+    // — MEASURED to dominate (the comparison sort is NOT the cost; see NEGATIVE_EVIDENCE 2026-06-26). Here we
+    // radix-sort each line's key into a permutation (O(n), same total-order encoding as the production single
+    // sort -> matches JAX; stable radix -> ascending-idx ties) and permute every operand's raw slice into
+    // DENSE typed output. Bit-identical; guarded by the sort_key_val parity tests (f64/f32/i64).
     if num_keys == 1
         && axis_stride == 1
         && outer_count > 1
-        && tensors.iter().all(|t| t.dtype == DType::F64)
         && total >= SORT_PARALLEL_MIN_TOTAL_ELEMS
-        && let Some(op_slices) = tensors
-            .iter()
-            .map(|t| t.elements.as_f64_slice())
-            .collect::<Option<Vec<&[f64]>>>()
     {
-        let key_mask: u64 = if descending { u64::MAX } else { 0 };
-        let key_slice = op_slices[0];
-        let mut outs: Vec<Vec<f64>> = (0..tensors.len()).map(|_| vec![0.0f64; total]).collect();
-        let threads = {
-            let hw = std::thread::available_parallelism()
-                .map(|p| p.get())
-                .unwrap_or(1);
-            hw.min(total / SORT_PARALLEL_MIN_TOTAL_ELEMS)
-                .max(1)
-                .min(outer_count)
-        };
-        let per = outer_count.div_ceil(threads.max(1));
-        let op_slices_ref = &op_slices;
-        let mut out_iters: Vec<_> = outs
-            .iter_mut()
-            .map(|v| v.chunks_mut(per * axis_dim))
-            .collect();
-        std::thread::scope(|scope| {
-            let mut start = 0usize;
-            while start < outer_count {
-                let cnt = per.min(outer_count - start);
-                let blocks: Vec<&mut [f64]> =
-                    out_iters.iter_mut().map(|it| it.next().unwrap()).collect();
-                let s0 = start;
-                start += cnt;
-                scope.spawn(move || {
-                    let mut blocks = blocks;
-                    let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(axis_dim);
-                    let mut scratch: Vec<(u64, u32)> = vec![(0, 0); axis_dim];
-                    for j in 0..cnt {
-                        let base = (s0 + j) * axis_dim;
-                        pairs.clear();
-                        for i in 0..axis_dim {
-                            pairs.push((
-                                f64_sort_order_key(key_slice[base + i]) ^ key_mask,
-                                i as u32,
-                            ));
-                        }
-                        radix_pairs_ascending(&mut pairs, &mut scratch);
-                        for (op, blk) in blocks.iter_mut().enumerate() {
-                            let src = op_slices_ref[op];
-                            for (out_pos, &(_, orig)) in pairs.iter().enumerate() {
-                                blk[j * axis_dim + out_pos] = src[base + orig as usize];
-                            }
-                        }
+        let key_dt = tensors[0].dtype;
+        if tensors.iter().all(|t| t.dtype == key_dt) {
+            let threads = {
+                let hw = std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(1);
+                hw.min(total / SORT_PARALLEL_MIN_TOTAL_ELEMS)
+                    .max(1)
+                    .min(outer_count)
+            };
+            let shape = tensors[0].shape.clone();
+            macro_rules! dense_kv {
+                ($collect:expr, $mask:expr, $zero:expr, $encode:expr, $ctor:expr) => {{
+                    if let Some(ops) = $collect {
+                        let outs = sort_key_val_dense_uniform(
+                            &ops,
+                            outer_count,
+                            axis_dim,
+                            total,
+                            threads,
+                            $mask,
+                            $zero,
+                            $encode,
+                        );
+                        return outs
+                            .into_iter()
+                            .map(|o| {
+                                $ctor(shape.clone(), o)
+                                    .map(Value::Tensor)
+                                    .map_err(EvalError::InvalidTensor)
+                            })
+                            .collect();
                     }
-                });
+                }};
             }
-        });
-        drop(out_iters);
-        return outs
-            .into_iter()
-            .zip(tensors)
-            .map(|(o, tensor)| {
-                TensorValue::new_f64_values(tensor.shape.clone(), o)
-                    .map(Value::Tensor)
-                    .map_err(EvalError::InvalidTensor)
-            })
-            .collect();
+            match key_dt {
+                DType::F64 => dense_kv!(
+                    tensors
+                        .iter()
+                        .map(|t| t.elements.as_f64_slice())
+                        .collect::<Option<Vec<&[f64]>>>(),
+                    if descending { u64::MAX } else { 0 },
+                    0.0f64,
+                    |v: f64| f64_sort_order_key(v),
+                    TensorValue::new_f64_values
+                ),
+                DType::F32 => dense_kv!(
+                    tensors
+                        .iter()
+                        .map(|t| t.elements.as_f32_slice())
+                        .collect::<Option<Vec<&[f32]>>>(),
+                    if descending { 0xFFFF_FFFF } else { 0 },
+                    0.0f32,
+                    |v: f32| f32_sort_order_key(v) as u64,
+                    TensorValue::new_f32_values
+                ),
+                DType::I64 => dense_kv!(
+                    tensors
+                        .iter()
+                        .map(|t| t.elements.as_i64_slice())
+                        .collect::<Option<Vec<&[i64]>>>(),
+                    if descending { u64::MAX } else { 0 },
+                    0i64,
+                    |v: i64| (v as u64) ^ (1_u64 << 63),
+                    TensorValue::new_i64_values
+                ),
+                _ => {}
+            }
+        }
     }
 
     let mut result_elements: Vec<Vec<Literal>> = tensors
@@ -15945,6 +16005,117 @@ mod tests {
                     sk[i].to_bits(),
                     "perm at {i} desc={desc}"
                 );
+            }
+        }
+    }
+
+    // f32 sibling of the dense sort_key_val parity guard (f32 = JAX default dtype). Adversarial: NaN/±0/±inf/dups.
+    #[test]
+    fn sort_key_val_f32_num_keys1_parity_threaded() {
+        let rows = 1024usize;
+        let cols = 1024usize;
+        let n = rows * cols;
+        let special = [
+            3.0f32,
+            1.0,
+            f32::NAN,
+            -0.0,
+            0.0,
+            1.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let keys: Vec<f32> = (0..n)
+            .map(|i| {
+                if i < special.len() {
+                    special[i]
+                } else {
+                    ((i.wrapping_mul(2654435761) % 100003) as f32) * 0.01 - 500.0
+                }
+            })
+            .collect();
+        let vals: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let k = Value::Tensor(TensorValue::new_f32_values(shape.clone(), keys.clone()).unwrap());
+        let v = Value::Tensor(TensorValue::new_f32_values(shape.clone(), vals).unwrap());
+        for desc in [false, true] {
+            let mut p = BTreeMap::from([
+                ("axis".to_owned(), "1".to_owned()),
+                ("num_keys".to_owned(), "1".to_owned()),
+            ]);
+            if desc {
+                p.insert("descending".to_owned(), "true".to_owned());
+            }
+            let out = eval_sort_multi(Primitive::Sort, &[k.clone(), v.clone()], &p).unwrap();
+            let sk = out[0].as_tensor().unwrap().elements.as_f32_slice().unwrap();
+            let sv = out[1].as_tensor().unwrap().elements.as_f32_slice().unwrap();
+            let mut pk = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+            if desc {
+                pk.insert("descending".to_owned(), "true".to_owned());
+            }
+            let rk_val = eval_sort(Primitive::Sort, std::slice::from_ref(&k), &pk).unwrap();
+            let rk = rk_val.as_tensor().unwrap().elements.as_f32_slice().unwrap();
+            for i in 0..n {
+                assert_eq!(
+                    sk[i].to_bits(),
+                    rk[i].to_bits(),
+                    "f32 key order at {i} desc={desc}"
+                );
+                let idx = sv[i] as usize;
+                assert_eq!(
+                    keys[idx].to_bits(),
+                    sk[i].to_bits(),
+                    "f32 perm at {i} desc={desc}"
+                );
+            }
+        }
+    }
+
+    // i64 sibling of the dense sort_key_val parity guard. Adversarial: i64::MIN/MAX, 0, -1, dups.
+    #[test]
+    fn sort_key_val_i64_num_keys1_parity_threaded() {
+        let rows = 1024usize;
+        let cols = 1024usize;
+        let n = rows * cols;
+        let special = [3i64, 1, i64::MIN, i64::MAX, 0, 1, -1, -7];
+        let keys: Vec<i64> = (0..n)
+            .map(|i| {
+                if i < special.len() {
+                    special[i]
+                } else {
+                    (i.wrapping_mul(2654435761) % 100003) as i64 - 50000
+                }
+            })
+            .collect();
+        let vals: Vec<i64> = (0..n).map(|i| i as i64).collect();
+        let shape = Shape {
+            dims: vec![rows as u32, cols as u32],
+        };
+        let k = Value::Tensor(TensorValue::new_i64_values(shape.clone(), keys.clone()).unwrap());
+        let v = Value::Tensor(TensorValue::new_i64_values(shape.clone(), vals).unwrap());
+        for desc in [false, true] {
+            let mut p = BTreeMap::from([
+                ("axis".to_owned(), "1".to_owned()),
+                ("num_keys".to_owned(), "1".to_owned()),
+            ]);
+            if desc {
+                p.insert("descending".to_owned(), "true".to_owned());
+            }
+            let out = eval_sort_multi(Primitive::Sort, &[k.clone(), v.clone()], &p).unwrap();
+            let sk = out[0].as_tensor().unwrap().elements.as_i64_slice().unwrap();
+            let sv = out[1].as_tensor().unwrap().elements.as_i64_slice().unwrap();
+            let mut pk = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+            if desc {
+                pk.insert("descending".to_owned(), "true".to_owned());
+            }
+            let rk_val = eval_sort(Primitive::Sort, std::slice::from_ref(&k), &pk).unwrap();
+            let rk = rk_val.as_tensor().unwrap().elements.as_i64_slice().unwrap();
+            for i in 0..n {
+                assert_eq!(sk[i], rk[i], "i64 key order at {i} desc={desc}");
+                let idx = sv[i] as usize;
+                assert_eq!(keys[idx], sk[i], "i64 perm at {i} desc={desc}");
             }
         }
     }

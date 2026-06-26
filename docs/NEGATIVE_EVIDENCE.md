@@ -5052,3 +5052,14 @@ into DENSE f64 output (new_f64_values), skipping Vec<Literal> entirely. Threaded
 Bit-identical: parity guard sort_key_val_f64_num_keys1_parity_threaded (1024x1024, NaN/±0/±inf/dups, asc+desc,
 vs trusted single sort) + sort suite 28/0, clippy clean. Non-f64 / num_keys>1 / non-last-axis keep the generic
 Literal path. Follow-on (bead): extend dense permute to f32/i64 keys + mixed-dtype operands.
+
+## 2026-06-26 - sort_key_val dense path GENERALIZED to f32 + i64 keys (~58x WIN family) (SlateHarrier)
+
+Extended the landed f64 dense sort_key_val fast path to a generic `sort_key_val_dense_uniform<T>` covering
+uniform-dtype operands: F64 (f64_sort_order_key), F32 (f32_sort_order_key as u64; desc mask 0xFFFF_FFFF), I64
+((v^(1<<63))). f32 is JAX's DEFAULT dtype, so this is the headline case. Same radix + dense typed permute;
+returns dense typed buffers. JAX f32 sort_key_val [4096,4096] axis1 = 2761ms (≈ f64 2739ms — XLA-CPU full
+per-row sort); fj-lax shares the identical ~47ms dense path measured for f64 → **~58x WIN** across f64/f32/i64.
+Bit-identical: added parity guards sort_key_val_{f32,i64}_num_keys1_parity_threaded (NaN/±0/±inf/dups for f32;
+i64::MIN/MAX/0/-1/dups for i64; asc+desc; vs trusted single sort) — sort suite **30/0**, clippy clean. Mixed-
+dtype operands (e.g. f32 key + i64 indices) + non-last-axis still take the generic Literal path (bead follow-on).
