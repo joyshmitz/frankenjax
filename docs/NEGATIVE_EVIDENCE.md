@@ -4986,3 +4986,18 @@ lax.top_k on CPU is catastrophic (2.44 SECONDS — it sorts every row in full; e
 does a proper bounded partial selection per row. No lever needed — recorded the (huge) confirmed win + kept the
 bench. This is the largest fj-lax-vs-JAX margin found this campaign, alongside sort/argsort (35x) — JAX-CPU's
 sequential/selection ops are fj-lax's strongest territory.
+
+## 2026-06-26 - gather random-read floor: bucketing MEASURED 0.45x (rejected); biggest gap has no contained lever (SlateHarrier)
+
+The biggest fj-lax-vs-JAX gap is the random gather (~7.5x; XLA-CPU uses gather-SIMD/prefetch fj-lax can't in
+safe Rust). `bench_gather_sorted_vs_direct_ceiling` (1M<-4M f64) quantifies the lever space DEFINITIVELY:
+  direct (shipped)        = 7.38ms
+  ideal-monotonic (sorted idx, OUTSIDE timing) = 2.10ms  (3.52x — the read-pattern ceiling)
+  bucketed (radix by high bits, build cost IN) = 16.57ms (**0.45x — SLOWER**)
+Bucketing LOSES: partitioning 4M indices into cache-sized buckets costs more than the L2-residency it buys.
+The only faster path (monotonic reads) needs pre-sorted indices the caller never provides, and pre-sorting
+them costs > the 3.52x gain. Software prefetch (the real XLA lever) needs core::intrinsics::prefetch =
+unsafe = blocked by the workspace forbid-unsafe policy. CONCLUSION (measured, not assumed): the gather random-
+read gap has NO contained safe-Rust lever — already mined (pre-pass fusion 1.86x + interleaved loads). Do NOT
+re-attempt bucketing/sorting. fj-lax's decisive territory is the opposite: sort/selection/scan where XLA-CPU
+is catastrophic (top_k ~200x, sort/argsort 35x, scans 2.4x).
