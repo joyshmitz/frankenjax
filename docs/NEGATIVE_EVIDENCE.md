@@ -4914,3 +4914,16 @@ row-blocks serially — fault+copy-bound). FIX: `dynamic_slice_dense_threaded` c
 **Result: 24.2ms = 2.5x faster, 3.0x WIN vs JAX 72.8** (the contiguous-slice path was already threaded; this
 threads the strided case). Third win in the fresh-output-thread vein (one_hot, tile, dynamic_slice) — parallel
 first-touch faults turn single-threaded data-movement losses/parity into JAX-beating wins.
+
+## 2026-06-26 - split: lazy Concat view (16x op-alone) but MATERIALIZED 1.92x SLOWER than JAX — fj-core lever (SlateHarrier)
+
+`bench_split_vs_jax` (f64 [4096,4096] into 4 axis1, strided). eval_split_multi returns LAZY `Concat` views
+(`LiteralBuffer::from_concat_slices` -> Concat storage + OnceLock): the op ALONE is 1.4ms (16x "faster" than
+JAX 22.9 — but that's lazy-vs-eager, NOT a real win; 128MB in 1.4ms is below-BW impossible). Forced to
+MATERIALIZE (as_f64_slice fills the OnceLock by gathering the strided parts), fj-lax = **43.9ms vs JAX 22.9 =
+1.92x SLOWER**. The materialization (the Concat -> contiguous strided gather in fj-core) is SINGLE-THREADED.
+LEVER (bead frankenjax-thread-concat-materialize): thread `LiteralBuffer` Concat materialization (parallel
+part-copies) — helps split + ANY concat-view consume. NOT shipped here: it's in fj-core (cross-crate, shared
+storage — broader blast radius); split's lazy view is also a deliberate optimization for workloads that don't
+materialize all pieces. Recorded measured loss + lever; kept the (materialized) bench. LESSON: a lazy-view op
+can look like a huge win on the op-alone bench while being a loss once materialized — always force the read.

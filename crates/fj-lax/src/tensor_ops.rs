@@ -15069,6 +15069,54 @@ mod tests {
         );
     }
 
+    // split vs JAX (measured JAX f64 [4096,4096] into 4 axis1 = 22.9ms). eval_split_multi uses
+    // LiteralBuffer::from_concat_slices per section (single-threaded strided gather).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_split_vs_jax() {
+        use std::time::Instant;
+        let n = 4096usize;
+        let data: Vec<f64> = (0..n * n).map(|i| i as f64).collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32, n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([
+            ("num_sections".to_owned(), "4".to_owned()),
+            ("axis".to_owned(), "1".to_owned()),
+        ]);
+        // Force MATERIALIZATION (split returns lazy Concat views; as_f64_slice fills the OnceLock) so this
+        // is a fair compute comparison vs JAX's eager copy, not lazy-vs-eager.
+        let f = || {
+            let pieces = eval_split_multi(std::slice::from_ref(&x), &p).unwrap();
+            let mut acc = 0.0f64;
+            for pv in &pieces {
+                if let Value::Tensor(t) = pv {
+                    if let Some(s) = t.elements.as_f64_slice() {
+                        acc += s.first().copied().unwrap_or(0.0);
+                    }
+                }
+            }
+            std::hint::black_box(acc);
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let st = Instant::now();
+            f();
+            b = b.min(st.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax split (materialized) f64 [4096,4096] into 4 axis1: {:.3}ms | JAX=22.9ms",
+            b * 1e3
+        );
+    }
+
     // dynamic_slice vs JAX (measured JAX f64 [4096,4096]->[4000,4000] = 72.8ms).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
