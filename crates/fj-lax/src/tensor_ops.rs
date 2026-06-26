@@ -4911,16 +4911,32 @@ pub(crate) fn eval_dynamic_slice(
                     return Ok(Value::Tensor($ctor(Shape { dims: out_dims }, out)?));
                 }
             }
-            let out = dynamic_slice_dense(
-                s,
-                rank,
-                total,
-                &slice_sizes,
-                &starts,
-                &in_strides,
-                &tensor.shape.dims,
-                contig_range,
-            );
+            let out = if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN
+                && crate::arithmetic::work_scaled_threads(total) > 1
+            {
+                // Non-contiguous (strided) large slice: copy the contiguous source blocks in parallel.
+                dynamic_slice_dense_threaded(
+                    s,
+                    rank,
+                    total,
+                    &slice_sizes,
+                    &starts,
+                    &in_strides,
+                    &tensor.shape.dims,
+                    $zero,
+                )
+            } else {
+                dynamic_slice_dense(
+                    s,
+                    rank,
+                    total,
+                    &slice_sizes,
+                    &starts,
+                    &in_strides,
+                    &tensor.shape.dims,
+                    contig_range,
+                )
+            };
             return Ok(Value::Tensor($ctor(Shape { dims: out_dims }, out)?));
         }};
     }
@@ -5060,6 +5076,82 @@ fn dynamic_slice_dense<T: Copy>(
             out_coords[ax] = 0;
         }
     }
+    out
+}
+
+// Threaded sibling of `dynamic_slice_dense` for the non-contiguous (strided) case: the slice is `outer_total`
+// contiguous source blocks of `block_len`; copy them in PARALLEL (parallel first-touch faults + memcpy)
+// instead of the single-threaded odometer. Each thread decodes its starting outer coords and strides forward.
+// `zero` is the dtype's zero-bits value (lazy-calloc backing the parallel copy). Bit-identical.
+#[allow(clippy::too_many_arguments)]
+fn dynamic_slice_dense_threaded<T: Copy + Send + Sync>(
+    src: &[T],
+    rank: usize,
+    total: usize,
+    slice_sizes: &[usize],
+    starts: &[usize],
+    in_strides: &[usize],
+    in_dims: &[u32],
+    zero: T,
+) -> Vec<T> {
+    let mut block_len = 1_usize;
+    let mut block_start = rank;
+    for ax in (0..rank).rev() {
+        if block_start < rank && slice_sizes[block_start] != in_dims[block_start] as usize {
+            break;
+        }
+        block_len *= slice_sizes[ax];
+        block_start = ax;
+    }
+    let block_base: usize = (block_start..rank)
+        .map(|ax| starts[ax] * in_strides[ax])
+        .sum();
+    let outer_total = total / block_len.max(1);
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(8);
+    let threads = (total / (1 << 18)).clamp(1, cores).min(outer_total.max(1));
+    let mut out = vec![zero; total];
+    let run = |o_lo: usize, blk: &mut [T]| {
+        // Decode the starting outer coords for linear outer index `o_lo`.
+        let mut coords = vec![0_usize; block_start];
+        let mut rem = o_lo;
+        for ax in (0..block_start).rev() {
+            coords[ax] = rem % slice_sizes[ax];
+            rem /= slice_sizes[ax];
+        }
+        for out_chunk in blk.chunks_mut(block_len) {
+            let mut base = block_base;
+            for ax in 0..block_start {
+                base += (coords[ax] + starts[ax]) * in_strides[ax];
+            }
+            out_chunk.copy_from_slice(&src[base..base + block_len]);
+            for ax in (0..block_start).rev() {
+                coords[ax] += 1;
+                if coords[ax] < slice_sizes[ax] {
+                    break;
+                }
+                coords[ax] = 0;
+            }
+        }
+    };
+    if threads <= 1 || block_start == 0 {
+        run(0, &mut out);
+        return out;
+    }
+    let outer_per = outer_total.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [T] = out.as_mut_slice();
+        let mut o0 = 0usize;
+        while o0 < outer_total {
+            let cnt = outer_per.min(outer_total - o0);
+            let (blk, tail) = rest.split_at_mut(cnt * block_len);
+            rest = tail;
+            let start_o = o0;
+            o0 += cnt;
+            scope.spawn(move || run(start_o, blk));
+        }
+    });
     out
 }
 
@@ -14974,6 +15066,48 @@ mod tests {
         println!(
             "AB complex128 sort [2048,2048] axis1: serial-ref={sref:.4}ms threaded={thr:.4}ms ({:.2}x) | JAX=602ms",
             sref / thr
+        );
+    }
+
+    // dynamic_slice vs JAX (measured JAX f64 [4096,4096]->[4000,4000] = 72.8ms).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_dynamic_slice_vs_jax() {
+        use std::time::Instant;
+        let n = 4096usize;
+        let data: Vec<f64> = (0..n * n).map(|i| i as f64).collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32, n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let s0 = Value::Scalar(Literal::I64(10));
+        let s1 = Value::Scalar(Literal::I64(10));
+        let p = BTreeMap::from([("slice_sizes".to_owned(), "4000,4000".to_owned())]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(
+                    Primitive::DynamicSlice,
+                    &[x.clone(), s0.clone(), s1.clone()],
+                    &p,
+                )
+                .unwrap(),
+            );
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let st = Instant::now();
+            f();
+            b = b.min(st.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax dynamic_slice f64 [4096,4096]->[4000,4000]: {:.3}ms | JAX=72.8ms",
+            b * 1e3
         );
     }
 

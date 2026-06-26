@@ -4903,3 +4903,14 @@ page faults + memcpy), backed by a lazy-calloc `vec![zero; total]`. Bit-identica
 **Result: 20.0ms = 4.4x faster, 1.1x WIN vs JAX 21.9.** (Same fix class as one_hot's row-write, but tile edges
 past JAX because its copy is pure memcpy — no per-row branch.) Covers f64/f32/i64/i32/u32/u64/bool leading
 replication; inner/interleaved reps + half/complex keep the serial dense path.
+
+## 2026-06-26 - dynamic_slice (strided) threaded — 60→24ms, 3.0x WIN vs JAX (SlateHarrier)
+
+`bench_dynamic_slice_vs_jax` (f64 [4096,4096]->[4000,4000], non-contiguous/strided): old fj-lax 60.2ms vs JAX
+72.8 = already 1.21x win, but single-threaded (`dynamic_slice_dense` odometer copies `outer_total` contiguous
+row-blocks serially — fault+copy-bound). FIX: `dynamic_slice_dense_threaded` copies the row-blocks in PARALLEL
+(each thread decodes its starting outer coords + strides forward), backed by lazy-calloc; wired into the
+`dense_ds!` non-contig fallback for large slices. Bit-identical (dynamic_slice 12/0, clippy clean).
+**Result: 24.2ms = 2.5x faster, 3.0x WIN vs JAX 72.8** (the contiguous-slice path was already threaded; this
+threads the strided case). Third win in the fresh-output-thread vein (one_hot, tile, dynamic_slice) — parallel
+first-touch faults turn single-threaded data-movement losses/parity into JAX-beating wins.
