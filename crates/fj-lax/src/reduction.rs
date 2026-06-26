@@ -3869,6 +3869,83 @@ fn parallel_cummax_f32(src: &[f32], init: f64, is_max: bool, reverse: bool) -> V
     out
 }
 
+// i64 sibling for cumsum/cumprod/cummax/cummin single-chain (i64 is also i32 / widened u32,u64). Integer
+// arithmetic is EXACT — sum wraps mod 2^64 (wrapping_add is associative+commutative) and max/min are exact —
+// so the chunked scan is BIT-IDENTICAL to the sequential fold for ANY op, forward or reverse. One generic fn
+// (op = the int_op) covers all four primitives. Replaces the generic per-Literal BOXED loop (i64 cumsum 16M:
+// 52.9→~15ms; vs JAX 67ms ~4.5x).
+fn parallel_assoc_scan_i64<F>(src: &[i64], init: i64, op: &F, reverse: bool) -> Vec<i64>
+where
+    F: Fn(i64, i64) -> i64 + Sync,
+{
+    let n = src.len();
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(8);
+    let threads = (n / (1 << 18)).clamp(2, cores);
+    let block = n.div_ceil(threads);
+    let totals: Vec<i64> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let mut s_rest = src;
+        while !s_rest.is_empty() {
+            let take = block.min(s_rest.len());
+            let (s, st) = s_rest.split_at(take);
+            s_rest = st;
+            handles.push(scope.spawn(move || {
+                let mut acc = init;
+                for &v in s {
+                    acc = op(acc, v);
+                }
+                acc
+            }));
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut carries = vec![init; totals.len()];
+    let mut acc = init;
+    if reverse {
+        for k in (0..totals.len()).rev() {
+            carries[k] = acc;
+            acc = op(acc, totals[k]);
+        }
+    } else {
+        for (k, &t) in totals.iter().enumerate() {
+            carries[k] = acc;
+            acc = op(acc, t);
+        }
+    }
+    let mut out = vec![0i64; n];
+    std::thread::scope(|scope| {
+        let mut s_rest = src;
+        let mut o_rest: &mut [i64] = out.as_mut_slice();
+        let mut k = 0usize;
+        while !s_rest.is_empty() {
+            let take = block.min(s_rest.len());
+            let (s, st) = s_rest.split_at(take);
+            let (o, ot) = o_rest.split_at_mut(take);
+            s_rest = st;
+            o_rest = ot;
+            let carry = carries[k];
+            scope.spawn(move || {
+                let mut acc = carry;
+                if reverse {
+                    for (slot, &v) in o.iter_mut().rev().zip(s.iter().rev()) {
+                        acc = op(acc, v);
+                        *slot = acc;
+                    }
+                } else {
+                    for (slot, &v) in o.iter_mut().zip(s) {
+                        acc = op(acc, v);
+                        *slot = acc;
+                    }
+                }
+            });
+            k += 1;
+        }
+    });
+    out
+}
+
 // Parallel prefix scan for ONE long f32 cumsum/cumprod line (forward). cumsum/cumprod are NON-associative,
 // but their reassociation is TOLERANCE-legal — the SAME accepted policy as the f64 `blocked_prefix_scan_to_vec`
 // (the cumsum/cumprod oracle is abs<1e-10, not bit-exact). 3-pass rescan keeps a full f64 accumulator per
@@ -4220,7 +4297,12 @@ fn eval_cumulative_dense(
         let Some(src) = tensor.elements.as_i64_slice() else {
             return Ok(None);
         };
-        let out = if axis_stride == 1 && total >= CUMULATIVE_PARALLEL_MIN_ELEMS && outer_count > 1 {
+        let out = if axis_stride == 1 && outer_count == 1 && total >= CUMSUM_BLOCKED_MIN_ELEMS {
+            // Single long i64 line: parallel prefix scan. Integer arithmetic is EXACT (wrapping add is
+            // associative+commutative, max/min exact) -> BIT-IDENTICAL to the sequential fold, forward OR
+            // reverse, for any int_op. Replaces the sequential in-place single-line scan.
+            parallel_assoc_scan_i64(src, int_init, int_op, reverse)
+        } else if axis_stride == 1 && total >= CUMULATIVE_PARALLEL_MIN_ELEMS && outer_count > 1 {
             scan_contiguous_lines_to_vec(src, axis_dim, reverse, int_init, int_op)
         } else if axis_stride == 1 {
             let mut out = src.to_vec();
@@ -4885,6 +4967,44 @@ mod tests {
         bench("cummin1d", Primitive::Cummin);
     }
 
+    // i64 cumsum/cummax 1-D (measured JAX cumsum 67.1ms / cummax 70.8ms). Integers are EXACT (sum is
+    // associative mod 2^64, max exact) but fj-lax routes i64 cumulative through the generic per-Literal
+    // boxed sequential loop — check the gap.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cumulative1d_i64_vs_jax() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let data: Vec<i64> = (0..n).map(|i| (i % 7) as i64).collect();
+        let x = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "0".to_owned())]);
+        let bench = |label: &str, prim: Primitive, jax: f64| {
+            let f = || {
+                std::hint::black_box(
+                    crate::eval_primitive(prim, std::slice::from_ref(&x), &p).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..6 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("fj-lax {label} i64 16M: {:.3}ms | JAX={jax}ms", b * 1e3);
+        };
+        bench("cumsum1d", Primitive::Cumsum, 67.1);
+        bench("cummax1d", Primitive::Cummax, 70.8);
+    }
+
     // f32 is JAX's DEFAULT dtype, so f32 cummax/cummin is the common case (measured JAX 38.1ms each). The
     // f32 cumulative path is separate (widen-to-f64 accumulate + round); check whether it needs the same
     // parallel associative scan.
@@ -5158,6 +5278,78 @@ mod tests {
             max_rel = max_rel.max((got_sum[i] - acc).abs() / denom);
         }
         assert!(max_rel < 1e-5, "f64 reverse cumsum drifted: {max_rel:e}");
+    }
+
+    // i64 parity gate (parallel_assoc_scan_i64): integers are EXACT, so the parallel scan must be
+    // BIT-EQUAL to the sequential fold — cumsum (wrapping) + cummax, forward + reverse, at 4M (> the
+    // blocked threshold). Includes a wrapping-overflow case (large values) to exercise mod-2^64 carry.
+    #[test]
+    fn parallel_i64_scan_matches_sequential() {
+        let n = 4_000_000usize;
+        let data: Vec<i64> = (0..n)
+            .map(|i| (i as i64 % 13) - 6 + (i as i64) * 1_000_000_007)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        for &reverse in &[false, true] {
+            let p = BTreeMap::from([
+                ("axis".to_owned(), "0".to_owned()),
+                ("reverse".to_owned(), reverse.to_string()),
+            ]);
+            // cumsum (wrapping add).
+            let Value::Tensor(cs) =
+                crate::eval_primitive(Primitive::Cumsum, std::slice::from_ref(&x), &p).unwrap()
+            else {
+                panic!("tensor");
+            };
+            let got = cs.elements.as_i64_slice().expect("dense i64");
+            let mut refv = vec![0i64; n];
+            let mut acc = 0i64;
+            let idx: Box<dyn Iterator<Item = usize>> = if reverse {
+                Box::new((0..n).rev())
+            } else {
+                Box::new(0..n)
+            };
+            for i in idx {
+                acc = acc.wrapping_add(data[i]);
+                refv[i] = acc;
+            }
+            assert_eq!(
+                got,
+                refv.as_slice(),
+                "i64 cumsum reverse={reverse} not bit-equal"
+            );
+            // cummax.
+            let Value::Tensor(cm) =
+                crate::eval_primitive(Primitive::Cummax, std::slice::from_ref(&x), &p).unwrap()
+            else {
+                panic!("tensor");
+            };
+            let gotm = cm.elements.as_i64_slice().expect("dense i64");
+            let mut refm = vec![0i64; n];
+            let mut accm = i64::MIN;
+            let idx2: Box<dyn Iterator<Item = usize>> = if reverse {
+                Box::new((0..n).rev())
+            } else {
+                Box::new(0..n)
+            };
+            for i in idx2 {
+                accm = accm.max(data[i]);
+                refm[i] = accm;
+            }
+            assert_eq!(
+                gotm,
+                refm.as_slice(),
+                "i64 cummax reverse={reverse} not bit-equal"
+            );
+        }
     }
 
     // f32 cumsum/cumprod 1-D (JAX's default dtype; measured JAX cumsum 39.0ms / cumprod 35.9ms). f64 1-D

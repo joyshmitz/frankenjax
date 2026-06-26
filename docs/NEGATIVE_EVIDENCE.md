@@ -3201,6 +3201,18 @@ gate to admit reverse single-chain ≥1M. **reverse cumsum 88.4→29.69ms (1.95x
 reverse cumsum <1e-5; conformance cumulative 28/0 + cummax 45/0; tests 51/0, clippy clean. CUMULATIVE-SCAN
 FAMILY COMPLETE: f64+f32 × forward+reverse × cummax/cummin+cumsum/cumprod, all ~2-2.6x vs JAX-on-CPU.
 
+## 2026-06-25 - INTEGER (i64/i32) cumulative parallel scan — 1.9-2.4x WIN vs JAX (SlateHarrier)
+
+i64/i32 cumulative routed through the generic per-Literal BOXED sequential loop. Measured WIN already (i64
+cumsum 52.9ms vs JAX 67.1 = 1.27x; cummax 55.6 vs 70.8 = 1.27x) but with big headroom. Added
+`parallel_assoc_scan_i64` (one generic fn over `int_op`, forward+reverse) wired into the i64/i32 dense branch
+for single-chain ≥1M. Integers are EXACT (wrapping_add associative+commutative, max/min exact) → BIT-EQUAL to
+the sequential fold for any op/direction (covers cumsum/cumprod/cummax/cummin; i32 + widened u32/u64 share the
+i64 backing). **i64 cumsum 52.9→35.08ms (1.91x WIN), cummax 55.6→29.15ms (2.43x WIN)**. VERIFIED:
+`parallel_i64_scan_matches_sequential` (4M, incl mod-2^64 wrapping-overflow data) — cumsum+cummax forward+reverse
+ALL bit-equal; conformance cumulative_oracle GREEN; cum 49/0, clippy clean. Cumulative-scan family now also
+covers integers.
+
 ## 2026-06-25 - argsort is a ~35x fj-lax WIN vs JAX (SlateHarrier)
 
 `bench_argsort2d_vs_jax`: argsort f64 [2048,2048] axis1 — fj-lax **17.4ms vs JAX 616.8ms = ~35x WIN**.
