@@ -70,6 +70,15 @@ JAX/JAXLIB 0.10.2, `JAX_ENABLE_X64=1`, CPU, 20 runs x 10 inner) measured best **
 p50 **3.8617 ms**, mean **3.8551 ms**. Candidate/JAX ratio remains a **1.59x Rust/JAX loss** by
 mean/p50, narrowed from the same-worker restored-main ratio of **3.26x** against that JAX mean.
 
+Landing recheck after `dce02a09` reached `origin/main`/`origin/master`: the requested warm target
+dir `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b` was used through
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME rch exec -- env
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b AGENT_NAME=ProudSalmon cargo bench
+-p fj-lax --profile release --bench lax_baseline -- eval/gather_scatter_1m_f64 --noplot`. RCH fell
+open locally because no worker slots were admissible; the package-scoped Criterion row measured
+**6.6511 ms** midpoint (`6.5183..6.8147 ms`), which is a **1.73x Rust/JAX loss** against the same
+JAX mean and remains a material narrowing versus the restored-main **3.26x** loss ratio.
+
 Correctness scope: f64 single-element gather only; index resolution, OOB policy, dtype construction,
 and all non-f64 paths are unchanged. GREEN: `cargo test -p fj-lax --profile release --lib gather
 -- --nocapture` 23/0 with 8 ignored perf probes; `cargo test -p fj-conformance --profile release
