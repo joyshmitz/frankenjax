@@ -13259,6 +13259,39 @@ mod tests {
         p
     }
 
+    // one_hot vs JAX (measured JAX f32 [200000,512] = 48.0ms). fj-lax is fill-off + scatter-on (O(total)
+    // fill + O(idx) scatter) — should beat JAX's broadcast-compare (O(total) compare).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_one_hot_vs_jax() {
+        use std::time::Instant;
+        let (n_idx, n_cls) = (200_000usize, 512u32);
+        let idx: Vec<i64> = (0..n_idx)
+            .map(|i| (i.wrapping_mul(2654435761) % 512) as i64)
+            .collect();
+        let indices =
+            Value::Tensor(TensorValue::new_i64_values(Shape::vector(n_idx as u32), idx).unwrap());
+        let mut p = BTreeMap::new();
+        p.insert("num_classes".to_owned(), n_cls.to_string());
+        p.insert("dtype".to_owned(), "f32".to_owned());
+        let f = || {
+            std::hint::black_box(
+                eval_primitive(Primitive::OneHot, std::slice::from_ref(&indices), &p).unwrap(),
+            );
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax one_hot f32 [200000,512]: {:.3}ms | JAX=48.0ms",
+            b * 1e3
+        );
+    }
+
     #[test]
     fn one_hot_vector_indices() {
         // one_hot([0, 2, 1], num_classes=3) → [[1,0,0],[0,0,1],[0,1,0]]

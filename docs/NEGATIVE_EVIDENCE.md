@@ -4752,3 +4752,16 @@ REMAINING LEVERS (all gated/owned/bead'd — NOT clean contained 60-min wins):
   ~1.7x below fma ceiling, codex-zone GEMM internals).
 No further clean, safe, contained, non-gated lever is available to ship in 60m; progress now needs a maintainer
 decision (fma / tree-sum tolerance), multi-session work (FFT/linalg), or the bead'd complex follow-ons.
+
+## 2026-06-26 - one_hot: random-scatter-fault pathology FIXED (224→~65ms, 3.5x); residual 1.35x = so4wo fault floor (SlateHarrier)
+
+`bench_one_hot_vs_jax` (f32 [200000,512], 410MB output): old fj-lax **224.6ms** vs JAX 48.0ms = 4.7x SLOWER.
+ROOT CAUSE: `one_hot_scatter` did `vec![off; total]` (lazy-zero calloc) then SCATTERED the `on`s at random
+output positions — each scatter faulted a cold page, and random page-faulting dominated (~200ms). FIX (shipped):
+for the contiguous-row case (class axis innermost — the common one), write each output row SEQUENTIALLY
+(off-fill + set on), threaded over rows — fault-friendly (sequential per-thread block), bit-identical
+(one_hot 10/0, clippy clean). Result: **~65ms = 3.5x faster fj-lax**. BUT still ~1.35x behind JAX: the residual
+is the FRESH-OUTPUT PAGE-FAULT FLOOR (writing a 410MB mostly-off output faults ~100k pages; the kernel fault
+path serializes — so4wo eval-model class, same as select/reciprocal; JAX's jit reuses buffers). So one_hot is
+no longer a 4.7x algorithmic loss — it's a ~1.35x so4wo-bounded loss, with the pathological random-scatter
+fault removed. The remaining 1.35x is arch (buffer reuse / fault floor), not contained.

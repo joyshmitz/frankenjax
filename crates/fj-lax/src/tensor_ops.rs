@@ -7287,7 +7287,7 @@ pub(crate) fn eval_one_hot(
 /// `idx[i]` is in `[0, nc)`, set the single on-position (input coords mapped into
 /// the output with the class axis = `idx[i]`). Generic over the element type.
 #[allow(clippy::too_many_arguments)]
-fn one_hot_scatter<T: Copy>(
+fn one_hot_scatter<T: Copy + Send + Sync>(
     on: T,
     off: T,
     total: usize,
@@ -7298,6 +7298,49 @@ fn one_hot_scatter<T: Copy>(
     in_to_out_stride: &[usize],
     class_stride: usize,
 ) -> Vec<T> {
+    // Contiguous-row fast path (class axis is innermost -> output row `i` is the contiguous slice
+    // out[i*nc .. (i+1)*nc]). The generic path below fills `off` then SCATTERS the `on`s at random output
+    // positions — each scatter faults a cold lazy-zero page, and that random page-faulting is the dominant
+    // cost (JAX writes its output sequentially and avoids it). Here we instead write every row SEQUENTIALLY
+    // (off everywhere, on at the class), threaded over rows: O(total), fault-friendly, bit-identical.
+    if class_stride == 1 && nc != 0 && total == indices.len().saturating_mul(nc) {
+        let n = indices.len();
+        let mut out = vec![off; total];
+        let cores = std::thread::available_parallelism()
+            .map(|c| c.get())
+            .unwrap_or(8);
+        let threads = (crate::arithmetic::work_scaled_threads(total))
+            .clamp(1, cores)
+            .min(n.max(1));
+        let write_rows = |idx_blk: &[i64], out_blk: &mut [T]| {
+            // Sequential `off` fill (memset-like; faults the block's pages cheaply, prefetch-friendly),
+            // then set the single `on` per row — far cheaper than a per-element branch over `total`.
+            out_blk.fill(off);
+            for (row, &idx) in out_blk.chunks_mut(nc).zip(idx_blk) {
+                if (0..nc as i64).contains(&idx) {
+                    row[idx as usize] = on;
+                }
+            }
+        };
+        if threads <= 1 {
+            write_rows(indices, &mut out);
+            return out;
+        }
+        let rows_per = n.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut o_rest: &mut [T] = out.as_mut_slice();
+            let mut i0 = 0usize;
+            while i0 < n {
+                let cnt = rows_per.min(n - i0);
+                let (o_blk, tail) = o_rest.split_at_mut(cnt * nc);
+                o_rest = tail;
+                let idx_blk = &indices[i0..i0 + cnt];
+                i0 += cnt;
+                scope.spawn(move || write_rows(idx_blk, o_blk));
+            }
+        });
+        return out;
+    }
     let mut out = vec![off; total];
     for (i, &idx) in indices.iter().enumerate() {
         if idx < 0 || idx as usize >= nc {
