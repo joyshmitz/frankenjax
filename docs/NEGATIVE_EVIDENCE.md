@@ -4948,3 +4948,13 @@ clean). Result: **80.6 → ~28-32ms = 2.5x internal**, narrowing the loss from 3
 Residual is the interleaved 8KB-segment copy granularity + the fresh-output fault floor (so4wo) — a real
 2.5x improvement on a common op, not yet a JAX win (recorded honestly, not framed away). (Also fixed a
 pre-existing collapsible_if in the split bench caught by clippy --tests.)
+
+## 2026-06-26 - pad (multi-axis) threaded — 41→~30ms, 1.49x loss narrowed to ~1.1x (near-parity) (SlateHarrier)
+
+`bench_pad_vs_jax` (f64 [4096,4096]->[4224,4224], 147MB). The par_pad threaded fast path only covers axis-0-only
+zero padding; multi-axis pad (e.g. conv H+W) fell to the single-threaded pad_copy_rows = 41.0ms vs JAX 27.6 =
+1.49x SLOWER. Added pad_rows_2d_threaded (thread by output rows; interior rows write left/right borders + copy
+the input segment exactly once — no double-write; pad rows fill) wired via a pad_rows dispatch for large rank-2
+pure pads. Bit-identical (pad 31/0, clippy clean). Result: **41.0 → ~30-31.6ms = 1.37x internal**, narrowing the
+loss from 1.49x to **~1.1x (near-parity)** vs JAX 27.6. Residual is the fresh-output fault floor (so4wo) on the
+147MB write (~4.9 vs 5.3 GB/s). Rank-2 only; N-D (4D conv NHWC) extension bead'd (frankenjax-pad-nd-thread).

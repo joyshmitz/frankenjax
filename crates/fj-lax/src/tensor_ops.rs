@@ -2324,7 +2324,17 @@ pub(crate) fn eval_pad(
             )?));
         }
         let out = if row_copyable {
-            pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
+            pad_rows(
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &out_strides,
+                &out_dims,
+                &interiors,
+            )
         } else {
             pad_fill_place(
                 src,
@@ -2345,7 +2355,17 @@ pub(crate) fn eval_pad(
     }
     if let (Some(src), Some(pad)) = (operand.elements.as_i64_slice(), pad_literal.as_i64()) {
         let out = if row_copyable {
-            pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
+            pad_rows(
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &out_strides,
+                &out_dims,
+                &interiors,
+            )
         } else {
             pad_fill_place(
                 src,
@@ -2388,7 +2408,17 @@ pub(crate) fn eval_pad(
             )?));
         }
         let out = if row_copyable {
-            pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
+            pad_rows(
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &out_strides,
+                &out_dims,
+                &interiors,
+            )
         } else {
             pad_fill_place(
                 src,
@@ -2424,7 +2454,17 @@ pub(crate) fn eval_pad(
             )?));
         }
         let out = if row_copyable {
-            pad_copy_rows(src, pb, out_total, rank, in_dims, &lows, &out_strides)
+            pad_rows(
+                src,
+                pb,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &out_strides,
+                &out_dims,
+                &interiors,
+            )
         } else {
             pad_fill_place(
                 src,
@@ -2446,7 +2486,17 @@ pub(crate) fn eval_pad(
     }
     if let (Some(src), Literal::U32(pad)) = (operand.elements.as_u32_slice(), pad_literal) {
         let out = if row_copyable {
-            pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
+            pad_rows(
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &out_strides,
+                &out_dims,
+                &interiors,
+            )
         } else {
             pad_fill_place(
                 src,
@@ -2467,7 +2517,17 @@ pub(crate) fn eval_pad(
     }
     if let (Some(src), Literal::U64(pad)) = (operand.elements.as_u64_slice(), pad_literal) {
         let out = if row_copyable {
-            pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
+            pad_rows(
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &out_strides,
+                &out_dims,
+                &interiors,
+            )
         } else {
             pad_fill_place(
                 src,
@@ -2491,7 +2551,17 @@ pub(crate) fn eval_pad(
     // path (new_bool_values stores the same bools).
     if let (Some(src), Literal::Bool(pad)) = (operand.elements.as_bool_slice(), pad_literal) {
         let out = if row_copyable {
-            pad_copy_rows(src, pad, out_total, rank, in_dims, &lows, &out_strides)
+            pad_rows(
+                src,
+                pad,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &out_strides,
+                &out_dims,
+                &interiors,
+            )
         } else {
             pad_fill_place(
                 src,
@@ -2523,7 +2593,17 @@ pub(crate) fn eval_pad(
     };
     if let (Some(src), Some(fill)) = (operand.elements.as_complex_slice(), complex_fill) {
         let out = if row_copyable {
-            pad_copy_rows(src, fill, out_total, rank, in_dims, &lows, &out_strides)
+            pad_rows(
+                src,
+                fill,
+                out_total,
+                rank,
+                in_dims,
+                &lows,
+                &out_strides,
+                &out_dims,
+                &interiors,
+            )
         } else {
             pad_fill_place(
                 src,
@@ -2595,6 +2675,93 @@ pub(crate) fn eval_pad(
 /// Dense Pad kernel for the no-interior, no-cropping case (all `low >= 0` and the
 /// input fits within the output extent): each contiguous input row (the last
 /// axis) maps to a contiguous output run, so whole rows are bulk-copied. Output
+// Threaded rank-2 pad: the serial pad_copy_rows writes the (large) output single-threaded (fault-bound).
+// Thread by output rows (eager full-row write: fill pad then copy the input segment for interior rows) so
+// the fresh-output page faults are first-touch in parallel. Bit-identical (same bytes). out_r/out_c =
+// output dims, in_r/in_c = input dims, lr/lc = low padding on each axis (assumed non-negative here).
+#[allow(clippy::too_many_arguments)]
+fn pad_rows_2d_threaded<T: Copy + Send + Sync>(
+    src: &[T],
+    pad: T,
+    out_r: usize,
+    out_c: usize,
+    in_r: usize,
+    in_c: usize,
+    lr: usize,
+    lc: usize,
+) -> Vec<T> {
+    let total = out_r * out_c;
+    let mut out = vec![pad; total];
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(8);
+    let threads = (total / (1 << 18)).clamp(1, cores).min(out_r.max(1));
+    let fill_rows = |r0: usize, blk: &mut [T]| {
+        for (ro, row) in blk.chunks_mut(out_c).enumerate() {
+            let or = r0 + ro;
+            if or >= lr && or < lr + in_r {
+                // Interior row: pad the left/right borders only and copy the input segment — each element
+                // written exactly once (filling the whole row then overwriting the middle double-writes it).
+                let ir = or - lr;
+                row[..lc].fill(pad);
+                row[lc..lc + in_c].copy_from_slice(&src[ir * in_c..ir * in_c + in_c]);
+                row[lc + in_c..].fill(pad);
+            } else {
+                row.fill(pad);
+            }
+        }
+    };
+    if threads <= 1 {
+        fill_rows(0, &mut out);
+        return out;
+    }
+    let rows_per = out_r.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [T] = out.as_mut_slice();
+        let mut r0 = 0usize;
+        while r0 < out_r {
+            let cnt = rows_per.min(out_r - r0);
+            let (blk, tail) = rest.split_at_mut(cnt * out_c);
+            rest = tail;
+            let start_r = r0;
+            r0 += cnt;
+            scope.spawn(move || fill_rows(start_r, blk));
+        }
+    });
+    out
+}
+
+// Dispatch: route a large rank-2 pure (non-interior, non-cropping) pad to the threaded row writer; otherwise
+// the serial pad_copy_rows. Bit-identical (same output either way).
+#[allow(clippy::too_many_arguments)]
+fn pad_rows<T: Copy + Send + Sync>(
+    src: &[T],
+    pad: T,
+    out_total: usize,
+    rank: usize,
+    in_dims: &[u32],
+    lows: &[i64],
+    out_strides: &[usize],
+    out_dims: &[u32],
+    interiors: &[usize],
+) -> Vec<T> {
+    if rank == 2
+        && out_total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN
+        && crate::arithmetic::work_scaled_threads(out_total) > 1
+        && interiors.iter().all(|&i| i == 0)
+        && lows[0] >= 0
+        && lows[1] >= 0
+    {
+        let (out_r, out_c) = (out_dims[0] as usize, out_dims[1] as usize);
+        let (in_r, in_c) = (in_dims[0] as usize, in_dims[1] as usize);
+        let (lr, lc) = (lows[0] as usize, lows[1] as usize);
+        if lr + in_r <= out_r && lc + in_c <= out_c {
+            return pad_rows_2d_threaded(src, pad, out_r, out_c, in_r, in_c, lr, lc);
+        }
+    }
+    pad_copy_rows(src, pad, out_total, rank, in_dims, lows, out_strides)
+}
+
 /// is row-major and `out_strides[last] == 1`, so the destination of a row is its
 /// leading-axis base plus `low[last]`. Bit-identical to per-element placement.
 fn pad_copy_rows<T: Copy>(
@@ -15171,6 +15338,47 @@ mod tests {
         println!(
             "AB complex128 sort [2048,2048] axis1: serial-ref={sref:.4}ms threaded={thr:.4}ms ({:.2}x) | JAX=602ms",
             sref / thr
+        );
+    }
+
+    // pad vs JAX (measured JAX f64 [4096,4096]->[4224,4224] = 27.6ms). fj-lax pad uses bw_bound_threads
+    // (cores/2 cap); the fresh-output fault floor may favor all-cores.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_pad_vs_jax() {
+        use std::time::Instant;
+        let n = 4096usize;
+        let data: Vec<f64> = (0..n * n).map(|i| i as f64).collect();
+        let operand = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32, n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let pad_value = Value::Scalar(Literal::from_f64(0.0));
+        let p = BTreeMap::from([
+            ("padding_low".to_owned(), "64,64".to_owned()),
+            ("padding_high".to_owned(), "64,64".to_owned()),
+        ]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Pad, &[operand.clone(), pad_value.clone()], &p)
+                    .unwrap(),
+            );
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let st = Instant::now();
+            f();
+            b = b.min(st.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax pad f64 [4096,4096]->[4224,4224]: {:.3}ms | JAX=27.6ms",
+            b * 1e3
         );
     }
 
