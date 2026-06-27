@@ -16768,6 +16768,55 @@ mod tests {
         );
     }
 
+    // i32 id-table take vs JAX (measured JAX i32 [50000,256] idx[16384] = 2.139ms). fj-lax stores i32 as 8-byte
+    // i64, so its gather table is 2x JAX's (100MB vs 50MB) — expected to trail (storage-quirk, not a gather bug).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_take_gather_i32_vs_jax() {
+        use std::time::Instant;
+        let (vocab, d, n) = (50000usize, 256usize, 16384usize);
+        let vals: Vec<i64> = (0..vocab * d).map(|i| (i % 1_000_000) as i64).collect();
+        let operand = Value::Tensor(
+            TensorValue::new_i32_values(
+                Shape {
+                    dims: vec![vocab as u32, d as u32],
+                },
+                vals,
+            )
+            .unwrap(),
+        );
+        let idx: Vec<i64> = (0..n)
+            .map(|i| (i.wrapping_mul(2654435761) % vocab) as i64)
+            .collect();
+        let indices = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                idx,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("slice_sizes".to_owned(), format!("1,{d}"))]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Gather, &[operand.clone(), indices.clone()], &p)
+                    .unwrap(),
+            );
+        };
+        f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            bst = bst.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax take i32 [50000,256] idx[16384] axis0: {:.3}ms | JAX=2.139ms",
+            bst * 1e3
+        );
+    }
+
     // dynamic_slice vs JAX (measured JAX f64 [4096,4096]->[4000,4000] = 72.8ms).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]

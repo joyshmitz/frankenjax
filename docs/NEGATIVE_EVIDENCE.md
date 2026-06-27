@@ -5701,3 +5701,17 @@ controller; the extra touch-loads add contention rather than latency-hiding (no 
 the f64 large-table gather is at the genuine memory-controller miss floor — JAX's ~2.5x edge there is its
 prefetch/codegen, not a contained lever. (bf16/f32 embeddings already WIN; only the oversized f64 table trails.)
 Do NOT re-attempt prefetch on the gather.
+
+## 2026-06-27 - i32 id-gather 3.3x SLOWER vs JAX — i32-as-i64 STORAGE doubles the gather (non-contained) (SlateHarrier)
+
+`bench_take_gather_i32_vs_jax` (i32 [50000,256] idx[16384] id-table): fj-lax **7.16ms (best) vs JAX 2.139 =
+~3.3x SLOWER** — and this is NOT a gather bug. fj-lax stores i32 as 8-byte Literal::I64, so the gather table is
+100MB (2x JAX's 50MB true-i32) and moves 8 bytes/elem vs JAX's 4. The threaded gather_contiguous_into is already
+optimal; the gap is the i32-as-i64 storage quirk manifesting on a memory-bound op. NEW MULTI-SESSION LEVER: true
+4-byte i32 storage would make the i32 gather a WIN like f32 (1.19x) and likely help every memory-bound i32 op —
+but it's a deep cross-cutting redesign (i32 is i64-backed throughout fj-lax), not a contained change. Gather
+dtype scorecard COMPLETE: bf16 1.5x WIN, f32 1.19x WIN (≤4B tables cache-resident), f64 2.5x + i32 3.3x (8B
+tables controller-floored — f64 inherently, i32 via the storage quirk).
+NOTE: the rch nightly drifted further this run — `chunks_exact`-const-size now flags pre-existing code in
+arithmetic.rs/reduction.rs/tensor_ops.rs (lines 568-12508, all committed clean earlier today). Not this change
+(the i32 bench is at ~16726, clippy-clean). Known unreliable-rch-clippy flake; CI's pinned nightly unaffected.
