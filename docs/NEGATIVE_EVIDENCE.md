@@ -2,6 +2,44 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - KEEP: 8-wide SIMD bessel i0e/i1e — flips ~1.5x JAX loss to parity/win (BlackThrush)
+
+Land-or-dig DIG that actually landed a measured win. Target: the special-function
+class my own prior entries (and SlateHarrier's) had written off as "FMA-folded".
+That was true for lgamma/digamma (scalar `ln` wall + lane-extract overhead — see
+SlateHarrier's `lgamma_simd8` 0.84x regression) — but **i0e/i1e are the exception**:
+their hot path is `chbevl` (Cephes Chebyshev/Clenshaw), pure mul/sub/add — **no
+division, no `ln`, no per-lane transcendental** — so the scalar per-element Clenshaw
+chain (30/25 dependent steps) is latency-bound and vectorizes cleanly ACROSS elements
+(the form JAX/XLA already uses), with **NO FMA needed** (per-lane f64 mul/sub/add are
+bit-identical to scalar).
+
+Lever: `chbevl_f64x8` (8 lanes, broadcast coefficients) + `bessel_i0e_f64x8`/`i1e_f64x8`
+(both Cephes branches computed branchlessly and blended by the `|x|<=8` mask; sign of
+`x` applied for i1e), driven over the dense-f64 threaded chunks (8-lane body + scalar
+tail). Falls back to the scalar parallel map for f32/boxed/below-threshold.
+
+MEASURED, same-binary A/B (`bench_special_fns_throughput`, 16M f64, x∈[0.1,~20] so both
+branches exercised; min-of-5, RCH-local on the shared host):
+
+| op | scalar (pre) | SIMD (this) | same-binary | JAX 0.10.2 (same host, same fixture) | scalar/JAX | SIMD/JAX |
+|---|---:|---:|---:|---:|---:|---:|
+| i0e | 52.6 ms | 34.6 ms | **1.52x faster** | 34.71 ms | 1.52x loss | **~parity** |
+| i1e | 52.0 ms | 31.2 ms | **1.67x faster** | 33.78 ms | 1.54x loss | **~1.08x WIN** |
+
+(A second, more-loaded run gave i0e 47.7/71.4ms = 1.50x, i1e 41.1/57.9ms = 1.41x — the
+same-binary ratio is stable 1.4–1.67x; absolute ms drift with host load, hence the
+same-binary A/B and same-host JAX are the trustworthy comparisons.) JAX measured via
+`jax.scipy.special.i0e`/`i1e` jit, `JAX_ENABLE_X64=1`, CPU, min-of-8.
+
+BIT-IDENTICAL: per-lane IEEE ops match scalar across both branches, the sign flip, and
+the SIMD tail — guarded by `bessel_i0e_i1e_simd_bit_identical_to_scalar` (70_003 elems,
+not a multiple of 8, ±x). GREEN: `cargo fmt -p fj-lax --check`; `cargo clippy -p fj-lax
+--release --lib -- -D warnings` (exit 0); `cargo test -p fj-lax --release --lib bessel`
+7/0; `bessel_oracle` conformance. Corrects this ledger's prior "special-fn gap folds
+entirely into `cntiy`" — true for the `ln`/division-bound members, NOT for the
+pure-polynomial Chebyshev bessels.
+
 ## 2026-06-27 - DIG RESULT: special-fn "just thread it" hypothesis tested & DEAD (BlackThrush)
 
 Follow-up land-or-dig pass. No new landable worktree win (same candidates as my
@@ -6263,3 +6301,24 @@ DEFINITIVE: JAX-CPU's CPU backend hits tuned FMA BLAS ONLY for raw matmul + chol
 linalg factorization (LU/QR/det/slogdet/solve/eig, real AND complex) is a slow XLA lowering that fj-lax's
 blocked GEMM-routed + threaded kernels beat 1.3-30x. Linalg is overwhelmingly a fj-lax STRENGTH. The only
 heavy-compute losses (matmul/cholesky/conv) are the FMA-policy floor (non-contained). Guard bench landed.
+
+## 2026-06-27 - KEEP: dense f64 non-pow2 RFFT skips full complex lift; 1.14x internal, ratio 2.45x -> 2.14x vs JAX (ProudSalmon)
+
+`eval/rfft_batch_64x1000_f64` had a contained layout/allocator gap before the Bluestein work: dense real input was
+first lifted into a full `Vec<(f64,f64)>`, then immediately copied again into per-row padded FFT buffers. Added a
+dense-F64, non-power-of-two RFFT path that reads the real slice directly, packs two real rows into one complex
+transform, unpacks the Hermitian halves, and preserves the existing bit-exact row-block invariant.
+
+Evidence:
+  - FrankenJAX baseline, `rch exec -- cargo bench -p fj-lax --profile release --bench lax_baseline --
+    eval/rfft_batch_64x1000_f64`: **544.23 us mean** (`[512.61, 544.23, 579.38] us`).
+  - Candidate, same crate/bench/target dir via `rch exec` local fallback: **475.83 us mean**
+    (`[461.24, 475.83, 486.59] us`; Criterion change CI `[-14.450%, -10.017%, -5.4446%]`).
+  - Exact JAX CPU/x64 comparator for the same `64x1000` data and `jnp.fft.rfft`: **222.00188 us mean**.
+  - Ratio vs JAX improved from **2.45x slower** to **2.14x slower**; internal mean speedup **1.14x**.
+
+Validation:
+  - `rch exec -- cargo test -p fj-conformance --profile release -- --nocapture`: green.
+  - `rch exec -- cargo test -p fj-lax --profile release threaded_bluestein_batch_rfft_matches_serial_row_block --lib -- --nocapture`: green.
+  - `cargo bench --release` is not accepted by this Cargo for `bench` (`unexpected argument '--release'`), so the
+    repo's already-used release-profile equivalent was used: `cargo bench -p fj-lax --profile release ...`.

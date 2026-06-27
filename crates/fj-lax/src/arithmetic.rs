@@ -10952,12 +10952,120 @@ pub(crate) fn bessel_i1e_approx(x: f64) -> f64 {
     if x < 0.0 { -result } else { result }
 }
 
+/// 8-wide Chebyshev/Clenshaw evaluation (`chbevl` across elements). Each lane runs
+/// the identical scalar recurrence `b0 = x*b1 - b2 + c` over the broadcast
+/// coefficients, so the result is BIT-FOR-BIT identical to scalar `chbevl` per lane
+/// (portable-SIMD f64 mul/sub/add are per-lane IEEE ops; no FMA contraction). This
+/// replaces the latency-bound per-element scalar Clenshaw chain (the i0e/i1e
+/// bottleneck) with one chain shared by 8 elements — the across-element vectorization
+/// JAX/XLA already uses.
+#[inline]
+fn chbevl_f64x8(x: std::simd::Simd<f64, 8>, coeffs: &[f64]) -> std::simd::Simd<f64, 8> {
+    use std::simd::Simd;
+    let mut b0 = Simd::<f64, 8>::splat(coeffs[0]);
+    let mut b1 = Simd::<f64, 8>::splat(0.0);
+    let mut b2 = Simd::<f64, 8>::splat(0.0);
+    for &c in &coeffs[1..] {
+        b2 = b1;
+        b1 = b0;
+        b0 = x * b1 - b2 + Simd::splat(c);
+    }
+    Simd::splat(0.5) * (b0 - b2)
+}
+
+/// 8-wide `bessel_i0e` — both Cephes branches computed branchlessly and blended by the
+/// `|x| <= 8` mask, mirroring [`bessel_i0e_approx`] per lane (the discarded branch's
+/// values never affect the kept lanes). Bit-identical to the scalar form.
+#[inline]
+fn bessel_i0e_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::StdFloat;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    let ax = x.abs();
+    let le = chbevl_f64x8(ax / Simd::splat(2.0) - Simd::splat(2.0), &BESSEL_I0E_A);
+    let gt = chbevl_f64x8(Simd::splat(32.0) / ax - Simd::splat(2.0), &BESSEL_I0E_B) / ax.sqrt();
+    ax.simd_le(Simd::splat(8.0)).select(le, gt)
+}
+
+/// 8-wide `bessel_i1e` (odd in `x`): `|x| <= 8` branch scales by `ax`, the far branch by
+/// `1/sqrt(ax)`, then the sign of `x` is applied — each step per-lane identical to
+/// [`bessel_i1e_approx`].
+#[inline]
+fn bessel_i1e_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::StdFloat;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    let ax = x.abs();
+    let le = chbevl_f64x8(ax / Simd::splat(2.0) - Simd::splat(2.0), &BESSEL_I1E_A) * ax;
+    let gt = chbevl_f64x8(Simd::splat(32.0) / ax - Simd::splat(2.0), &BESSEL_I1E_B) / ax.sqrt();
+    let result = ax.simd_le(Simd::splat(8.0)).select(le, gt);
+    x.simd_lt(Simd::splat(0.0)).select(-result, result)
+}
+
+/// Dense-f64 threaded driver that runs an 8-wide SIMD kernel over each thread's chunk
+/// (8-lane body + scalar tail), falling back to the scalar parallel map for every other
+/// representation (f32/boxed/below-threshold). The SIMD kernel is bit-identical to
+/// `scalar` per lane, so the dense path matches the fallback exactly.
+fn eval_unary_simd_dense_f64_parallel(
+    primitive: Primitive,
+    inputs: &[Value],
+    simd_kernel: impl Fn(std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> + Sync,
+    scalar: fn(f64) -> f64,
+) -> Result<Value, EvalError> {
+    use std::simd::Simd;
+    if let [Value::Tensor(tensor)] = inputs
+        && tensor.dtype == DType::F64
+        && let Some(src) = tensor.elements.as_f64_slice()
+    {
+        let n = src.len();
+        let threads = dense_unary_threads(n);
+        if threads > 1 {
+            let mut out = vec![0.0f64; n];
+            let chunk = n.div_ceil(threads);
+            let kref = &simd_kernel;
+            std::thread::scope(|scope| {
+                let mut rest: &mut [f64] = out.as_mut_slice();
+                let mut start = 0usize;
+                while start < n {
+                    let len = chunk.min(n - start);
+                    let (blk, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let s = start;
+                    scope.spawn(move || {
+                        let chunk_src = &src[s..s + len];
+                        let n8 = len - len % 8;
+                        let mut i = 0;
+                        while i < n8 {
+                            let x = Simd::<f64, 8>::from_slice(&chunk_src[i..i + 8]);
+                            kref(x).copy_to_slice(&mut blk[i..i + 8]);
+                            i += 8;
+                        }
+                        for j in i..len {
+                            blk[j] = scalar(chunk_src[j]);
+                        }
+                    });
+                    start += len;
+                }
+            });
+            return Ok(Value::Tensor(TensorValue::new_f64_values(
+                tensor.shape.clone(),
+                out,
+            )?));
+        }
+    }
+    eval_unary_elementwise_parallel(primitive, inputs, scalar)
+}
+
 pub(crate) fn eval_bessel_i0e(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
-    eval_unary_elementwise_parallel(primitive, inputs, bessel_i0e_approx)
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, bessel_i0e_f64x8, bessel_i0e_approx)
 }
 
 pub(crate) fn eval_bessel_i1e(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
-    eval_unary_elementwise_parallel(primitive, inputs, bessel_i1e_approx)
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, bessel_i1e_f64x8, bessel_i1e_approx)
 }
 
 fn dot_result_is_integral(lhs: &TensorValue, rhs: &TensorValue) -> bool {
@@ -23461,6 +23569,74 @@ mod tests {
                 eval_bessel_i0e(Primitive::BesselI0e, std::slice::from_ref(&input)).unwrap(),
             );
         });
+        // Same-binary A/B baselines: the pre-SIMD scalar parallel map for i0e/i1e.
+        bench("i0e_scalar", &|| {
+            std::hint::black_box(
+                eval_unary_elementwise_parallel(
+                    Primitive::BesselI0e,
+                    std::slice::from_ref(&input),
+                    bessel_i0e_approx,
+                )
+                .unwrap(),
+            );
+        });
+        bench("i1e", &|| {
+            std::hint::black_box(
+                eval_bessel_i1e(Primitive::BesselI1e, std::slice::from_ref(&input)).unwrap(),
+            );
+        });
+        bench("i1e_scalar", &|| {
+            std::hint::black_box(
+                eval_unary_elementwise_parallel(
+                    Primitive::BesselI1e,
+                    std::slice::from_ref(&input),
+                    bessel_i1e_approx,
+                )
+                .unwrap(),
+            );
+        });
+    }
+
+    #[test]
+    fn bessel_i0e_i1e_simd_bit_identical_to_scalar() {
+        // The dense-f64 8-wide SIMD i0e/i1e path must equal the scalar per-element
+        // approximation bit-for-bit across both Cephes branches (|x|<=8 and |x|>8),
+        // the sign flip, and the SIMD tail. Cover x in [0.1, ~20] like the bench.
+        let n = 70_003usize; // > threshold, not a multiple of 8 -> exercises the tail
+        let data: Vec<f64> = (0..n).map(|i| 0.1 + (i % 9973) as f64 * 0.002).collect();
+        let input = tensor_f64(vec![n as u32], &data);
+
+        let i0e_simd = extract_f64_vec(
+            &eval_bessel_i0e(Primitive::BesselI0e, std::slice::from_ref(&input)).unwrap(),
+        );
+        let i1e_simd = extract_f64_vec(
+            &eval_bessel_i1e(Primitive::BesselI1e, std::slice::from_ref(&input)).unwrap(),
+        );
+        assert_eq!(i0e_simd.len(), n);
+        assert_eq!(i1e_simd.len(), n);
+        for idx in 0..n {
+            assert_eq!(
+                i0e_simd[idx].to_bits(),
+                bessel_i0e_approx(data[idx]).to_bits(),
+                "i0e mismatch at {idx} (x={})",
+                data[idx]
+            );
+            assert_eq!(
+                i1e_simd[idx].to_bits(),
+                bessel_i1e_approx(data[idx]).to_bits(),
+                "i1e mismatch at {idx} (x={})",
+                data[idx]
+            );
+        }
+        // negative-argument sign coverage for i1e (odd function)
+        let neg: Vec<f64> = (0..n).map(|i| -(0.1 + (i % 9973) as f64 * 0.002)).collect();
+        let neg_input = tensor_f64(vec![n as u32], &neg);
+        let simd = extract_f64_vec(
+            &eval_bessel_i1e(Primitive::BesselI1e, std::slice::from_ref(&neg_input)).unwrap(),
+        );
+        for idx in 0..n {
+            assert_eq!(simd[idx].to_bits(), bessel_i1e_approx(neg[idx]).to_bits());
+        }
     }
 
     #[test]
