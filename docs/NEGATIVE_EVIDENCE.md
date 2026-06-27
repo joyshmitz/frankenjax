@@ -5374,3 +5374,15 @@ to ~4.9x (batched/2D). The 4.9x batched gap is pocketfft's explicit cross-row SI
 tiled path relies on autovec, not portable_simd lanes across rows) + the no-+fma policy. LEVER (bead murmw,
 re-scoped): explicit portable_simd cross-row butterfly (f64x4 over 4 rows' lanes) in vectorized_pow2_tiled —
 moderate, fma-adjacent; est. closes ~4.9x toward ~2x. Both 1D + 2D benches added + measured this turn.
+
+## 2026-06-26 - batched FFT explicit-SIMD butterfly REGRESSES 3.3x (reverted) — autovec already optimal (SlateHarrier)
+
+Dug the biggest measured gap (batched 2D FFT ~4.9x) to its precise lever: batch_butterfly_block is a scalar
+8-row (POW2_TILE_ROWS=8) complex-butterfly loop over 4 contiguous SoA arrays with a scalar twiddle broadcast.
+ATTEMPT: replaced it with explicit Simd<f64,8> (plain `*`/`+`/`-`, no mul_add → bit-identical; golden digests
+59/0 PASSED). RESULT: 2D batched FFT 2.81ms -> **9.3ms = 3.3x REGRESSION**. REVERTED. The from_slice/
+copy_to_slice + the function-call boundary defeat the inlined autovec the scalar loop already gets (w=8 over 4
+contiguous arrays + scalar broadcast is a textbook autovec case). CONCLUSION (measured, definitive): the batched
+FFT butterfly has NO contained SIMD lever — autovec is already optimal. The 4.9x gap is pocketfft's FMA (no-+fma
+policy) + split-radix (bit-locked by golden digests) + the AoS<->SoA transpose; all non-contained. Do NOT
+re-attempt explicit-SIMD on this butterfly.
