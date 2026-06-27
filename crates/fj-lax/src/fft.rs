@@ -4590,15 +4590,16 @@ mod tests {
         }
     }
 
-    // RFFT (real-input FFT, last-axis, batched) vs JAX (measured JAX [4096,1024] pow2 = 5.89ms, [4096,1000]
-    // non-pow2 = 1.93ms). Common DSP/audio op; tests the real-FFT SoA path (vectorized_rfft_pow2_block).
+    // RFFT (real-input FFT, last-axis, batched) vs JAX (JAX [4096,1024] pow2 = 5.89ms; [4096,1000] non-pow2 =
+    // 1.51ms re-verified min-of-10). Common DSP/audio op; fj-lax ~8.5x (pow2) / ~29x (non-pow2) SLOWER — the
+    // real-FFT lacks pocketfft's native real mixed-radix kernel (see ledger 2026-06-27).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_rfft_vs_jax() {
         use std::time::Instant;
         for (sz, jax_ms, label) in [
             (1024usize, 5.89, "pow2"),
-            (1000usize, 1.93, "non-pow2 smooth"),
+            (1000usize, 1.51, "non-pow2 smooth"),
         ] {
             let rows = 4096usize;
             let data: Vec<f64> = (0..rows * sz)
@@ -4629,16 +4630,16 @@ mod tests {
         }
     }
 
-    // FFT 1-D NON-power-of-2 batched (last-axis) vs JAX (measured JAX [4096,1000] smooth = 62.4ms,
-    // [4096,1009] prime = 99.0ms). Non-pow2 is tolerance-parity (no pow2 golden lock) → safe to optimize. Tests
-    // mixed-radix (1000=2^3*5^3) and bluestein (1009 prime) vs pocketfft.
+    // FFT 1-D NON-power-of-2 batched (last-axis) vs JAX (RE-VERIFIED min-of-10: JAX [4096,1000] smooth =
+    // 9.37ms, [4096,1009] prime = 9.46ms — earlier 62/99ms were load-inflated anomalies). fj-lax is ~7x SLOWER:
+    // non-pow2 is tolerance-parity → the mixed-radix/bluestein kernel is the gap (NOT competitive as first ledger'd).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_fft_npo2_vs_jax() {
         use std::time::Instant;
         for (sz, jax_ms, label) in [
-            (1000usize, 62.4, "smooth 2^3*5^3"),
-            (1009usize, 99.0, "prime->bluestein"),
+            (1000usize, 9.37, "smooth 2^3*5^3"),
+            (1009usize, 9.46, "prime->bluestein"),
         ] {
             let rows = 4096usize;
             let data: Vec<(f64, f64)> = (0..rows * sz)

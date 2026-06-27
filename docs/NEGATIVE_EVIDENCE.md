@@ -5907,3 +5907,19 @@ bit-locked by golden digests → must stay bit-identical; non-pow2 = tolerance, 
 the sibling complex butterfly already REGRESSED (see 2026-06-26), so autovec is likely already optimal — the win
 must come from the algorithm (fewer ops / native real symmetry), not from SIMD-ing the current one. Bench landed
 as a permanent guard + the precise next-lever spec.
+
+## 2026-06-27 - CORRECTION: non-pow2 FFT is ~7x SLOWER (prior "competitive/win" used a load-inflated JAX baseline) (SlateHarrier)
+
+RETRACTION of the two prior non-pow2 FFT ledger entries this session. The JAX baselines I used (complex [4096,
+1000]=62.4ms, [4096,1009]=99ms) were LOAD-INFLATED anomalies (the jax host was busy). Re-measured min-of-10,
+stable: JAX complex [4096,1000]=**9.37ms**, [4096,1009]=**9.46ms**; JAX rfft [4096,1000]=**1.51ms**, [4096,1009]
+=2.97ms. CORRECTED ratios (fj-lax same-binary numbers stable):
+  - complex non-pow2 1000: fj-lax 68.5ms vs JAX 9.37 = **~7.3x SLOWER** (NOT 1.1x near-parity).
+  - complex non-pow2 1009: fj-lax 72.9ms vs JAX 9.46 = **~7.7x SLOWER** (NOT a 1.36x win).
+  - rfft non-pow2 1000: fj-lax 44.5ms vs JAX 1.51 = **~29x SLOWER** (worse than the 23x first reported).
+So fj-lax's mixed-radix/bluestein kernel (complex AND real) is ~7-29x off pocketfft — a REAL tolerance-parity
+gap, the lever being a faster mixed-radix + native real-FFT (multi-session). pow2 baselines (complex batched
+0.58ms, rfft 5.89ms) stay valid — machine load only INFLATES timings, never deflates, so those mins are clean.
+METHOD LESSON: the jax host load swings timings up to ~6.6x (62 vs 9.4ms); use min-of-10 and SANITY-CHECK any
+ratio that implies a real FFT is >2x faster than its complex sibling (physically impossible) — that flagged the
+anomaly here. Bench JAX baselines in fft.rs updated to the verified values.
