@@ -2,6 +2,55 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - NO-SHIP: recursive mixed-radix largest-factor split regresses 128x1000 FFT (ProudSalmon)
+
+Land-or-dig pass after `0fe8f05a`: scratch-worktree audit found no measured
+win still absent from `main`; the visible FFT/select/GEMM/dispatch candidates
+were either patch-equivalent to current source or superseded by newer landed
+work. The remaining biggest measured JAX gap is still the FFT family. New
+graveyard/locality lever tried here: change only the recursive
+`mixed_radix_ping` split policy from smallest-prime-first to largest available
+specialized radix (`5`, then `3`, then `2`) for smooth composite rows such as
+`1000 = 2^3 * 5^3`. The idea was to reduce recursion depth while staying inside
+the existing row-local mixed-radix kernel family.
+
+The source hunk was reverted before commit.
+
+Bench command note: this Cargo rejects the requested spelling
+`cargo bench --release` with `error: unexpected argument '--release' found`, so
+the valid crate-scoped optimized equivalent was used through `rch exec`:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME rch exec
+-- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a
+AGENT_NAME=ProudSalmon cargo bench -p fj-lax --profile release --bench
+lax_baseline -- 'eval/fft_batch_128x1000_complex128' --warm-up-time 1
+--measurement-time 3 --sample-size 10 --noplot`. RCH had no admissible worker
+for the before/after bench (`insufficient_slots=3,hard_preflight=1`) and fell
+open locally, so the Rust comparison is same-host, same-target, and warm-cache.
+
+Measured row:
+
+| workload | main midpoint | candidate midpoint | Rust delta | JAX mean | main/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `eval/fft_batch_128x1000_complex128` | 2.6093 ms | 3.3498 ms | +22.101%, p=0.00 | 0.212814 ms | 12.26x loss | 15.74x loss | REVERT |
+
+JAX comparator is the fresh 2026-06-27 exact-fixture row already recorded in
+this ledger for `complex_matrix(128,1000)` using JAX/JAXLIB 0.10.1 CPU x64,
+warmed `jax.jit(lambda z: jnp.fft.fft(z, axis=-1))`, 50 hot runs, mean
+**0.212814 ms**. The result rules out factor-order retuning as a contained
+smooth-composite FFT lever; the smallest-prime recursive order stays faster on
+this row. Remaining credible work is still a deeper kernel-family change:
+length-specialized recursive/in-place `1000 = 2^3 * 5^3`, cache-blocked
+mixed-radix, native real FFT, or maintainer-approved FMA/split-radix policy.
+
+Correctness/quality gates after reverting the candidate:
+
+- `cargo test -p fj-lax --profile release
+  mixed_radix_matches_dft_for_smooth_sizes --lib -- --nocapture`: passed before
+  timing the candidate, confirming tolerance parity for the attempted op-order
+  change.
+- `cargo test -p fj-conformance --profile release -- --nocapture`: passed via
+  RCH remote `ovh-a`.
+
 ## 2026-06-27 - SURFACE: land-or-dig audit — nothing landable, contained surface re-confirmed exhausted (BlackThrush)
 
 Land-or-dig pass (BlackThrush, claude-opus-4-8). NO measured bench-worktree win was
