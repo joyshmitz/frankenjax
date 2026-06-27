@@ -5386,3 +5386,14 @@ contiguous arrays + scalar broadcast is a textbook autovec case). CONCLUSION (me
 FFT butterfly has NO contained SIMD lever — autovec is already optimal. The 4.9x gap is pocketfft's FMA (no-+fma
 policy) + split-radix (bit-locked by golden digests) + the AoS<->SoA transpose; all non-contained. Do NOT
 re-attempt explicit-SIMD on this butterfly.
+
+## 2026-06-27 - select_n (cond/switch lowering) threaded — 92→55ms, 4.8x→~2.9x vs JAX (SlateHarrier)
+
+`bench_select_n_vs_jax` (4-way f64 16M): the dense path was a single-threaded per-element gather (out[i] =
+op_slices[idx[i]][i]) into a fresh output. Refactored to decode the index once (validated -> Vec<u32>, helper
+select_n_decode_idx_u32) + a threaded generic pick (select_n_pick_threaded, fresh-output first-touch faults in
+parallel — the one_hot/tile vein). **92 -> 55ms (best) = ~1.7x internal**, narrowing 4.8x to **~2.9x vs JAX
+19.2**. Bit-identical (select_n 8/0, clippy clean). Does NOT reach near-parity (unlike the data-movement ops):
+the residual is fundamental — fj-lax is 2-pass (decode idx + memory-bound pick over N case arrays) vs JAX's
+vectorized single-pass select; + high cross-invocation contention variance (55-86ms). Kept as a real internal
+improvement on a common op; the 2.9x residual is the 2-pass/memory-bound limit.

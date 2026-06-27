@@ -7948,6 +7948,108 @@ fn select_n_index_to_usize(
     Ok(idx)
 }
 
+/// Decode a dense select_n index tensor into a validated `Vec<u32>` (every value < `n_operands`), in ONE pass,
+/// matching the per-`Literal` path's bounds errors. Lets the per-element pick run bounds-check-free + threaded.
+fn select_n_decode_idx_u32(
+    idx_tensor: &TensorValue,
+    n_operands: usize,
+    primitive: Primitive,
+) -> Result<Vec<u32>, EvalError> {
+    let n = idx_tensor.elements.len();
+    let mut out = Vec::with_capacity(n);
+    let mut push = |u: usize| -> Result<(), EvalError> {
+        if u >= n_operands {
+            return Err(EvalError::Unsupported {
+                primitive,
+                detail: format!("select_n index {u} out of bounds for {n_operands} operands"),
+            });
+        }
+        out.push(u as u32);
+        Ok(())
+    };
+    if let Some(idxs) = idx_tensor.elements.as_i64_slice() {
+        for &iv in idxs {
+            push(iv as usize)?;
+        }
+    } else if let Some(idxs) = idx_tensor.elements.as_u32_slice() {
+        for &iv in idxs {
+            push(iv as usize)?;
+        }
+    } else if let Some(idxs) = idx_tensor.elements.as_u64_slice() {
+        for &iv in idxs {
+            let signed = i64::try_from(iv).map_err(|_| EvalError::TypeMismatch {
+                primitive,
+                detail: "select_n index must be an integer or boolean",
+            })?;
+            push(signed as usize)?;
+        }
+    } else if let Some(idxs) = idx_tensor.elements.as_bool_slice() {
+        if n_operands > 2 {
+            return Err(EvalError::TypeMismatch {
+                primitive,
+                detail: "select_n with boolean index requires at most 2 operands",
+            });
+        }
+        for &flag in idxs {
+            push(if flag { 1 } else { 0 })?;
+        }
+    } else if let Some((words, len)) = idx_tensor.elements.as_bool_words() {
+        if n_operands > 2 {
+            return Err(EvalError::TypeMismatch {
+                primitive,
+                detail: "select_n with boolean index requires at most 2 operands",
+            });
+        }
+        for i in 0..len {
+            let flag = (words[i / 64] >> (i % 64)) & 1 != 0;
+            push(if flag { 1 } else { 0 })?;
+        }
+    } else {
+        for idx_lit in idx_tensor.elements.iter() {
+            push(select_n_index_to_usize(*idx_lit, n_operands, primitive)?)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Threaded per-element pick: `out[i] = op_slices[idx[i]][i]` into a dense typed buffer (`idx` pre-validated <
+/// op count). Threaded over output ranges so the fresh-output page faults are first-touch in parallel (the
+/// one_hot/tile fresh-output-thread vein). Bit-identical to the serial `op_slices[idx[i]][i]` pick.
+fn select_n_pick_threaded<T: Copy + Send + Sync>(
+    op_slices: &[&[T]],
+    idx: &[u32],
+    zero: T,
+) -> Vec<T> {
+    let n = idx.len();
+    let mut out = vec![zero; n];
+    let threads = work_scaled_threads(n);
+    if threads <= 1 || n < CHEAP_BINARY_PARALLEL_MIN {
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = op_slices[idx[i] as usize][i];
+        }
+        return out;
+    }
+    let per = n.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [T] = out.as_mut_slice();
+        let mut s = 0usize;
+        while s < n {
+            let cnt = per.min(n - s);
+            let (chunk, tail) = rest.split_at_mut(cnt);
+            rest = tail;
+            let start = s;
+            s += cnt;
+            scope.spawn(move || {
+                for (j, slot) in chunk.iter_mut().enumerate() {
+                    let i = start + j;
+                    *slot = op_slices[idx[i] as usize][i];
+                }
+            });
+        }
+    });
+    out
+}
+
 /// SelectN: select from N operands based on integer index.
 ///
 /// inputs[0] is the index (integer values 0..N-1), inputs[1..] are the N operands.
@@ -8040,8 +8142,11 @@ pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Va
             // unsupported index layouts fall back to select_n_index_to_usize, preserving
             // Bool/int handling, bounds errors, and >2-operand-Bool rejection.
             // Bit-for-bit identical: operand slice[i] == operand.elements[i].
+            // Dense fast path: every operand shares a dense typed backing -> decode the index once (validated)
+            // and pick op_slices[idx[i]][i] into dense output, THREADED over output ranges (fresh-output
+            // first-touch faults in parallel). Bit-identical (slice[i] == elements[i], same pick order).
             macro_rules! dense_select_n {
-                ($accessor:ident, $ctor:expr) => {{
+                ($accessor:ident, $zero:expr, $ctor:expr) => {{
                     let mut op_slices = Vec::with_capacity(n_operands);
                     let mut all_dense = true;
                     for op in operands {
@@ -8060,96 +8165,31 @@ pub(crate) fn eval_select_n(primitive: Primitive, inputs: &[Value]) -> Result<Va
                         }
                     }
                     if all_dense {
-                        let mut out = Vec::with_capacity(idx_tensor.elements.len());
-                        macro_rules! push_dense_index {
-                            ($pos:expr, $idx:expr) => {{
-                                let u = $idx;
-                                if u >= n_operands {
-                                    return Err(EvalError::Unsupported {
-                                        primitive,
-                                        detail: format!(
-                                            "select_n index {u} out of bounds for {n_operands} operands"
-                                        ),
-                                    });
-                                }
-                                out.push(op_slices[u][$pos]);
-                            }};
-                        }
-                        if let Some(idxs) = idx_tensor.elements.as_i64_slice() {
-                            // Dense i64 index (switch lowering): decode inline,
-                            // matching select_n_index_to_usize for an I64 literal
-                            // exactly (`v as usize`, OOB -> same error message).
-                            for (i, &iv) in idxs.iter().enumerate() {
-                                push_dense_index!(i, iv as usize);
-                            }
-                        } else if let Some(idxs) = idx_tensor.elements.as_u32_slice() {
-                            // Dense u32 switch table IDs: Literal::U32(v).as_i64()
-                            // is always Some(v as i64), so this is the same decode
-                            // without per-element Literal materialization.
-                            for (i, &iv) in idxs.iter().enumerate() {
-                                push_dense_index!(i, iv as usize);
-                            }
-                        } else if let Some(idxs) = idx_tensor.elements.as_u64_slice() {
-                            // Dense u64 table IDs preserve Literal::U64(v).as_i64():
-                            // values above i64::MAX are a TypeMismatch before bounds.
-                            for (i, &iv) in idxs.iter().enumerate() {
-                                let signed =
-                                    i64::try_from(iv).map_err(|_| EvalError::TypeMismatch {
-                                        primitive,
-                                        detail: "select_n index must be an integer or boolean",
-                                    })?;
-                                push_dense_index!(i, signed as usize);
-                            }
-                        } else if let Some(idxs) = idx_tensor.elements.as_bool_slice() {
-                            if n_operands > 2 {
-                                return Err(EvalError::TypeMismatch {
-                                    primitive,
-                                    detail: "select_n with boolean index requires at most 2 operands",
-                                });
-                            }
-                            for (i, &flag) in idxs.iter().enumerate() {
-                                push_dense_index!(i, if flag { 1 } else { 0 });
-                            }
-                        } else if let Some((words, len)) = idx_tensor.elements.as_bool_words() {
-                            if n_operands > 2 {
-                                return Err(EvalError::TypeMismatch {
-                                    primitive,
-                                    detail: "select_n with boolean index requires at most 2 operands",
-                                });
-                            }
-                            for i in 0..len {
-                                let flag = (words[i / 64] >> (i % 64)) & 1 != 0;
-                                push_dense_index!(i, if flag { 1 } else { 0 });
-                            }
-                        } else {
-                            // Other index layouts: keep per-`Literal` decode
-                            // (preserves all scalar conversion edge cases).
-                            for (i, idx_lit) in idx_tensor.elements.iter().enumerate() {
-                                let idx = select_n_index_to_usize(*idx_lit, n_operands, primitive)?;
-                                out.push(op_slices[idx][i]);
-                            }
-                        }
+                        let idx_u32 = select_n_decode_idx_u32(idx_tensor, n_operands, primitive)?;
+                        let out = select_n_pick_threaded(&op_slices, &idx_u32, $zero);
                         return Ok(Value::Tensor($ctor(idx_tensor.shape.clone(), out)?));
                     }
                 }};
             }
             match first_operand.dtype {
-                DType::F64 => dense_select_n!(as_f64_slice, TensorValue::new_f64_values),
-                DType::F32 => dense_select_n!(as_f32_slice, TensorValue::new_f32_values),
-                DType::I64 => dense_select_n!(as_i64_slice, TensorValue::new_i64_values),
-                DType::I32 => dense_select_n!(as_i64_slice, TensorValue::new_i32_values),
-                DType::U32 => dense_select_n!(as_u32_slice, TensorValue::new_u32_values),
-                DType::U64 => dense_select_n!(as_u64_slice, TensorValue::new_u64_values),
-                DType::Bool => dense_select_n!(as_bool_slice, TensorValue::new_bool_values),
+                DType::F64 => dense_select_n!(as_f64_slice, 0.0f64, TensorValue::new_f64_values),
+                DType::F32 => dense_select_n!(as_f32_slice, 0.0f32, TensorValue::new_f32_values),
+                DType::I64 => dense_select_n!(as_i64_slice, 0i64, TensorValue::new_i64_values),
+                DType::I32 => dense_select_n!(as_i64_slice, 0i64, TensorValue::new_i32_values),
+                DType::U32 => dense_select_n!(as_u32_slice, 0u32, TensorValue::new_u32_values),
+                DType::U64 => dense_select_n!(as_u64_slice, 0u64, TensorValue::new_u64_values),
+                DType::Bool => {
+                    dense_select_n!(as_bool_slice, false, TensorValue::new_bool_values)
+                }
                 DType::BF16 | DType::F16 => {
                     let dt = first_operand.dtype;
-                    dense_select_n!(as_half_float_slice, |sh, out| {
+                    dense_select_n!(as_half_float_slice, 0u16, |sh, out| {
                         TensorValue::new_half_float_values(dt, sh, out)
                     });
                 }
                 DType::Complex64 | DType::Complex128 => {
                     let dt = first_operand.dtype;
-                    dense_select_n!(as_complex_slice, |sh, out| {
+                    dense_select_n!(as_complex_slice, (0.0f64, 0.0f64), |sh, out| {
                         TensorValue::new_complex_values(dt, sh, out)
                     });
                 }
@@ -23166,6 +23206,46 @@ mod tests {
             b = b.min(s.elapsed().as_secs_f64());
         }
         println!("fj-lax select f64 16M: {:.3}ms | JAX=14.78ms", b * 1e3);
+    }
+
+    // select_n 4-way (switch lowering) vs JAX (measured JAX 4-way f64 [4096,4096] = 19.2ms). The dense path is
+    // a single-threaded per-element gather into a fresh output (the one_hot/tile fresh-output-thread vein).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_select_n_vs_jax() {
+        use std::time::Instant;
+        let n = 4096usize * 4096;
+        let idx: Vec<i64> = (0..n).map(|i| (i % 4) as i64).collect();
+        let mk = |off: f64| -> Value {
+            tensor_f64(
+                vec![n as u32],
+                &(0..n)
+                    .map(|i| (i % 9973) as f64 * 0.01 + off)
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let index = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                idx,
+            )
+            .unwrap(),
+        );
+        let inputs = vec![index, mk(0.0), mk(1.0), mk(2.0), mk(3.0)];
+        let f = || std::hint::black_box(eval_select_n(Primitive::SelectN, &inputs).unwrap());
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax select_n 4-way f64 16M: {:.3}ms | JAX=19.2ms",
+            b * 1e3
+        );
     }
 
     // Throughput of the threaded special-function paths vs JAX (16M f64, measured):
