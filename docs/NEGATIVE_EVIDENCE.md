@@ -6028,3 +6028,15 @@ measured this session):
 JAX-CPU linalg is broadly slow (its CPU lowering doesn't hit tuned LAPACK except dpotrf); fj-lax's blocked
 GEMM-routed linalg WINS or ties everything except cholesky. Linalg is a NET fj-lax STRENGTH — correcting the
 "LAPACK uniformly faster" assumption decisively. Guard benches landed.
+
+## 2026-06-27 - LU 12.9x fj-lax WIN vs JAX; DIRECT-factorization linalg family is a clean fj-lax sweep (SlateHarrier)
+
+`bench_lu_2048_vs_jax`: fj-lax blocked-LU [2048,2048] = **162.4ms vs JAX lu_factor 2087ms = ~12.9x WIN**.
+Completes the DIRECT-factorization sweep — every one is a big fj-lax win:
+  QR ~30x, LU ~12.9x, slogdet ~7.3x, det ~5.9x, solve ~5.2x.
+Iterative ops near-parity (eigh ~1.06x, svd ~1.23x). ONLY loss: cholesky ~6.25x. KEY INSIGHT: the asymmetry is
+entirely on JAX's side — JAX-CPU has exactly ONE tuned LAPACK path (cholesky/dpotrf, 32ms) and its LU/QR/det/
+slogdet/solve/inv/lstsq lowerings are all slow (2-8s); fj-lax is CONSISTENT (~160-340ms for every direct
+factorization, blocked GEMM-routed). So fj-lax LU (162ms) crushes JAX LU (2087ms) yet fj-lax cholesky (199ms)
+loses to JAX cholesky (32ms) — same fj-lax speed, wildly different JAX speed. Linalg is decisively a NET fj-lax
+STRENGTH (5 big direct-factorization wins + 2 parities vs 1 FMA-bound cholesky loss). All guard benches landed.
