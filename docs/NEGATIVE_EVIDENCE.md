@@ -36,6 +36,70 @@ lockfile were restored before commit; only this negative evidence remains. A cre
 retry needs a less-contended paired allocator run or an end-to-end `fj-py` benchmark that
 shows the cdylib allocator default moves a real Python workload.
 
+## 2026-06-27 - MEASURED (no lever): small/batched matmul microkernel is tuned + FMA-ceiling-bound (BlackThrush)
+
+Complements ProudSalmon's batched-einsum-GEMM KEEP below (they narrowed the attention gap via
+the contraction STRUCTURE). This characterizes the underlying matmul FLOOR: is small (64-512)
+`matmul_2d` an unoptimized small-matrix path (a contained lever) or the FMA ceiling? Ran the
+existing `bench_batched_matmul_f64_microkernel_vs_naive` probe (no code change). Same-binary
+NAIVE→MICRO ratios (contention-robust):
+
+| batched shape | NAIVE | MICRO (production) | ratio |
+|---|---:|---:|---:|
+| 64× `128x64x128` | 12.2 GF/s | 25.3 GF/s | **2.07x** |
+| 32× `256x128x256` | 16.2 GF/s | 21.7 GF/s | 1.34x |
+| 16× `512x128x512` | 12.5 GF/s | 17.1 GF/s | 1.36x |
+
+VERDICT: the production microkernel ALREADY beats naive by 1.34-2.07x — tuned, not an
+unoptimized small path. The ~17-25 GF/s sits near the single-core no-FMA f64 ceiling (~28 GF/s
+= AVX2 1 vmulpd + 1 vaddpd/cycle ≈ 8 flop/cycle @ 3.5 GHz), so the matmul residual is FMA +
+small-size threading granularity — NO contained microkernel lever. Confirms my reverted einsum
+experiments (no-copy strided = 1.93x regression; matmul_2d_into = ~0-gain) were correctly
+rejected: the win was in the contraction STRUCTURE (ProudSalmon's KEEP), not the kernel.
+
+CAVEAT (measurement-environment, all agents): the remote RCH worker was contended ~3x this
+session (the `eval/einsum2_general_bqhd...` bench swung 1.33 ms → 4.30 ms across invocations; a
+probe build hit an exit-1 RCH flake). Only SAME-BINARY ratios are trustworthy right now; quiet-
+host re-runs are warranted before trusting any absolute vs-JAX figure.
+
+## 2026-06-27 - KEEP: batched general-einsum GEMM narrows attention gap (ProudSalmon)
+
+BOLD-VERIFY / land-or-dig target: attention `einsum("bqhd,bkhd->bhqk")`, the
+largest still-owned measured ORIG gap after the no-copy strided contraction and
+`matmul_2d_into` routes were rejected above. New contained lever: the general
+einsum path already materializes `A` as `[bsz,M,K]` and `B` as `[bsz,K,N]`; instead
+of looping over `bsz` and allocating/extending one `matmul_2d` result per batch
+slice, route the whole block through the existing `batched_matmul_2d` helper. This
+keeps the same ascending-K accumulation order, but lets the register-blocked
+batched kernel split work across `batch * rows` and avoids the per-slice result
+`Vec`.
+
+Proof: `AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo
+test -p fj-lax --profile release einsum2_general_matmul_bit_identical_to_naive --
+--nocapture` passed (RCH local fallback because no admissible worker slots).
+`rustfmt --edition 2024 --check crates/fj-lax/src/einsum.rs` passed. Package-level
+`cargo fmt --check --package fj-lax` is still blocked by the pre-existing
+unformatted `alloc_ceiling.rs` bench hunk from the allocator evidence commit; not
+touched here.
+Conformance: `AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo
+test -p fj-conformance --profile release -- --nocapture` passed on RCH `hz2`
+(remote, 191.4s).
+
+Same-worker Criterion A/B on `ovh-a`, per-crate only, both through
+`cargo bench -p fj-lax --profile release --bench lax_baseline --
+'eval/einsum2_general_bqhd_bkhd_bhqk_f64$' --noplot` with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`:
+
+| workload | ORIG mean | candidate mean | candidate/ORIG | ORIG/JAX ref | candidate/JAX ref | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `eval/einsum2_general_bqhd_bkhd_bhqk_f64` | 1.1798 ms | 0.72957 ms | 0.618x time / 1.62x faster | 3.72x slower vs 0.317 ms | 2.30x slower vs 0.317 ms | KEEP |
+
+Conclusion: retain the one-line source change. The residual gap remains XLA's
+fused batched-GEMM / FMA-quality kernel frontier, but this contained lever removes
+a real chunk of ORIG time without weakening bit identity.
+
 ## 2026-06-27 - REVERT (1.93x REGRESSION, measured): no-copy strided einsum contraction is SLOWER than permute+matmul_2d (BlackThrush)
 
 Built and benched the lever I scoped in the entry below. Added `contiguous_k_contraction`
