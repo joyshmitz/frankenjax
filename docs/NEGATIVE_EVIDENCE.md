@@ -2,6 +2,43 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - NO-SHIP: paired Hermitian RFFT recombination regresses pow2 batch row (ProudSalmon)
+
+Land-or-dig audit found no live measured `.scratch`/bench-worktree win absent from
+`main`: `4940278b` and `b0f69d7e` are patch-equivalent to current `origin/main`,
+`1883e291` is the boxed FFT extraction already represented by landed `835051c4`,
+`29920091` is a docs rejection, and the old `a00dc114` QR/SVD WIP remains unledgered
+work that prior ledger entries already classify as rejected Jacobi/QR-preprocess
+territory. So this pass dug the remaining code-shaped FFT/RFFT gap rather than landing
+covered work.
+
+New lever from the graveyard cache-locality / vector-kernel playbook: in the pow2
+`vectorized_rfft_pow2_block` recombination stage, compute each Hermitian `k` /
+`half_len-k` pair together. The hypothesis was that loading the same transformed SoA
+lanes once and writing both output bins would cut recombination traffic without changing
+the per-bin arithmetic order.
+
+Proof gate before timing: `AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME
+rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b
+AGENT_NAME=ProudSalmon cargo test -p fj-lax --profile release
+vectorized_rfft_pow2_bit_identical_to_per_row -- --nocapture` passed on RCH `hz2`.
+
+Performance gate did not clear. Bench command, per-crate through RCH with the requested
+target dir: `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b
+cargo bench -p fj-lax --profile release --bench lax_baseline --
+'eval/rfft_batch_2048x256_f64_dense_input$' --noplot`. RCH had no admissible bench
+worker for both timing runs and fell open locally, so the comparison is same worktree,
+same target dir, same command, same host mode. JAX comparator is the standing
+same-fixture row, `0.371289 ms`.
+
+| workload | ORIG midpoint | candidate midpoint | candidate/ORIG | ORIG/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `eval/rfft_batch_2048x256_f64_dense_input` | 5.7491 ms | 7.4805 ms | 1.301x slower | 15.49x slower | 20.15x slower | REVERT |
+
+Conclusion: recombination pairing is not a contained FFT/RFFT win. The extra branch and
+dual-output loop shape lose more than the reduced mirror loads save. `fft.rs` was restored
+to `origin/main`; only this negative evidence is retained.
+
 ## 2026-06-27 - RETRACTION: my mimalloc "~2-3x RADICAL LEVER" was a DIFFERENTIAL-LOAD ARTIFACT — falsified by ProudSalmon's same-load A/B (BlackThrush)
 
 I am retracting my own 2026-06-27 mimalloc entries below ("RADICAL LEVER … captures ~2-3x
