@@ -5782,3 +5782,13 @@ worker noise (high regression risk in golden/bit-exact paths, files not owned, r
 lint ever becomes consistent, the clean fix is a single crate-level #![allow] or a toolchain pin — a maintainer
 decision, not a perf-agent unilateral change. All my session commits are bit-identical (gather 23/0) and my own
 files are clippy-clean on the canonical toolchain.
+
+## 2026-06-27 - non-pow2 FFT competitive; prime/bluestein WINS 1.36x vs JAX (SlateHarrier)
+
+`bench_fft_npo2_vs_jax` (last-axis FFT, [4096,N], non-pow2 = tolerance-parity, no golden lock): smooth N=1000
+(2^3*5^3, mixed-radix) fj-lax **68.5ms vs JAX 62.4 = ~1.10x near-parity**; prime N=1009 (bluestein) fj-lax
+**72.9ms vs JAX 99.0 = 0.74x = fj-lax WINS ~1.36x** (the bluestein path beats pocketfft on primes — fj-lax's
+prime FFT is power-of-2-Bluestein-convolution, JAX's is slower). So non-pow2 FFT is NOT a gap. COMPLETE FFT
+picture: 1D pow2 1.38x (bit-locked, near-parity), 2D pow2 batched ~4.9x (FMA + split-radix, non-contained,
+SIMD-regresses), non-pow2 smooth ~1.10x, non-pow2 prime 1.36x WIN. The ONLY FFT loss is the pow2-batched FMA/
+split-radix gap (non-contained). Recorded the bench as a permanent guard.

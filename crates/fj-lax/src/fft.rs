@@ -4590,6 +4590,52 @@ mod tests {
         }
     }
 
+    // FFT 1-D NON-power-of-2 batched (last-axis) vs JAX (measured JAX [4096,1000] smooth = 62.4ms,
+    // [4096,1009] prime = 99.0ms). Non-pow2 is tolerance-parity (no pow2 golden lock) → safe to optimize. Tests
+    // mixed-radix (1000=2^3*5^3) and bluestein (1009 prime) vs pocketfft.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_fft_npo2_vs_jax() {
+        use std::time::Instant;
+        for (sz, jax_ms, label) in [
+            (1000usize, 62.4, "smooth 2^3*5^3"),
+            (1009usize, 99.0, "prime->bluestein"),
+        ] {
+            let rows = 4096usize;
+            let data: Vec<(f64, f64)> = (0..rows * sz)
+                .map(|i| {
+                    (
+                        ((i.wrapping_mul(2654435761) % 100003) as f64) * 1e-3,
+                        (i % 97) as f64,
+                    )
+                })
+                .collect();
+            let x = Value::Tensor(
+                TensorValue::new_complex_values(
+                    DType::Complex128,
+                    Shape {
+                        dims: vec![rows as u32, sz as u32],
+                    },
+                    data,
+                )
+                .unwrap(),
+            );
+            let p = std::collections::BTreeMap::new();
+            let f = || std::hint::black_box(eval_fft(std::slice::from_ref(&x), &p).unwrap());
+            let _ = f();
+            let mut bst = f64::MAX;
+            for _ in 0..4 {
+                let t = Instant::now();
+                f();
+                bst = bst.min(t.elapsed().as_secs_f64());
+            }
+            println!(
+                "fj-lax fft [4096,{sz}] axis1 ({label}): {:.3}ms | JAX={jax_ms}ms",
+                bst * 1e3
+            );
+        }
+    }
+
     /// Same-binary A/B for the SoA real-FFT batch kernel (frankenjax-murmw): OLD =
     // FFT 2-D batched (last-axis FFT over rows) vs JAX (measured JAX 1024x1024 axis1 = 0.58ms). Tests the
     // batched/SoA-tiled path (vectorized_pow2_tiled) — the regime where pocketfft's SIMD-across-rows wins.
