@@ -2,6 +2,32 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - REVERT (1.93x REGRESSION, measured): no-copy strided einsum contraction is SLOWER than permute+matmul_2d (BlackThrush)
+
+Built and benched the lever I scoped in the entry below. Added `contiguous_k_contraction`
+in `einsum.rs`: when the contracted labels are the contiguous trailing block of both
+operands (attention `bqhd,bkhd->bhqk`), contract IN PLACE — strided source rows,
+register-blocked over N with 4 independent ascending-K accumulators — with NO
+`permute_copy_f64` transpose. BIT-IDENTICAL verified: `einsum2_contiguous_k_fast_path_bit_identical_bqhd`
+plus the existing `einsum2_general_matmul_bit_identical_to_naive` and all 18 einsum lib
+tests pass (the register-blocked ascending-K accumulation matches `matmul_2d` exactly).
+
+MEASURED same-host A/B (RCH, `eval/einsum2_general_bqhd_bkhd_bhqk_f64`, bsz=4 q=h... d=64):
+| path | median |
+|---|---:|
+| old: permute_copy + matmul_2d | **1.335 ms** |
+| new: no-copy strided register-blocked | **2.581 ms** = **1.93x SLOWER** |
+
+DISPROVES my prior hypothesis (the entry below) that the two transposes are the dominant
+cost. They are NOT: `permute_copy_f64` is already trailing-suffix-memcpy'd (cheap), and
+`matmul_2d` on the resulting CONTIGUOUS data is far faster than a hand-rolled strided
+4-stream kernel — the strided B reads (4 streams `H*D` apart, scalar inner loop that does
+not vectorize the strided gathers) cost more than the copy they save. REVERTED
+(`einsum.rs` == HEAD; WIP stashed). Confirms ProudSalmon's GEMM-family rejection from the
+no-copy angle: beating `matmul_2d` here needs a strided kernel of equal microkernel/cache
+quality (a strided GEBP) — a genuine multi-session kernel, NOT a contained win. Lever
+closed with data.
+
 ## 2026-06-27 - DIG RESULT: attention einsum `bqhd,bkhd->bhqk` (5.57x) — why the no-copy lever is blocked (BlackThrush)
 
 Dug the biggest unowned measured gap with a fresh angle. The contracted axis `d` is the
