@@ -6014,3 +6014,17 @@ CONCLUSION: JAX-CPU linalg is NOT uniformly fast — it has one tuned path (chol
 slow-to-catastrophic (QR/solve/svd/eigh). fj-lax WINS QR + solve big, ties svd/eigh, loses only cholesky
 (FMA/GEMM-tuning bound, the +fma policy + 9zwwb lever). This MAKES linalg a net fj-lax STRENGTH, correcting the
 "LAPACK uniformly faster" assumption. All guard benches landed.
+
+## 2026-06-27 - det 5.9x + slogdet 7.3x fj-lax WINS vs JAX; linalg is a fj-lax STRENGTH (only cholesky loses) (SlateHarrier)
+
+`bench_det_slogdet_2048_vs_jax`: det [2048,2048] fj-lax **338ms vs JAX 1983 = ~5.9x WIN**; slogdet **304ms vs JAX
+2233 = ~7.3x WIN**. JAX-CPU's LU-based determinant lowering is slow (QR/solve-class). Also measured JAX as slow
+(fj-lax not yet benched, but same blocked-LU/QR core → expected wins): inv [2048]=2305ms, lstsq [2048,1024]=
+8183ms (catastrophic — no fj-lax Lstsq/Inv PRIMITIVE, composed in jaxpr). FINAL linalg-vs-JAX verdict (all
+measured this session):
+  WINS: QR ~30x, slogdet ~7.3x, det ~5.9x, solve ~5.2x
+  PARITY: eigh ~1.06x, svd ~1.23x
+  LOSS: cholesky ~6.25x (the ONLY one — JAX dpotrf is the single tuned/FMA path; fj-lax FMA-policy-bound)
+JAX-CPU linalg is broadly slow (its CPU lowering doesn't hit tuned LAPACK except dpotrf); fj-lax's blocked
+GEMM-routed linalg WINS or ties everything except cholesky. Linalg is a NET fj-lax STRENGTH — correcting the
+"LAPACK uniformly faster" assumption decisively. Guard benches landed.
