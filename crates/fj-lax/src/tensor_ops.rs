@@ -16719,6 +16719,55 @@ mod tests {
         );
     }
 
+    // f32 embedding take (JAX's DEFAULT float — the canonical embedding lookup) vs JAX (measured JAX f32
+    // [50000,256] idx[16384] = 3.382ms). Validates the lowered f32 gather gate on the most common real case.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_take_gather_f32_vs_jax() {
+        use std::time::Instant;
+        let (vocab, d, n) = (50000usize, 256usize, 16384usize);
+        let vals: Vec<f32> = (0..vocab * d).map(|i| i as f32 * 1e-4).collect();
+        let operand = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![vocab as u32, d as u32],
+                },
+                vals,
+            )
+            .unwrap(),
+        );
+        let idx: Vec<i64> = (0..n)
+            .map(|i| (i.wrapping_mul(2654435761) % vocab) as i64)
+            .collect();
+        let indices = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                idx,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("slice_sizes".to_owned(), format!("1,{d}"))]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Gather, &[operand.clone(), indices.clone()], &p)
+                    .unwrap(),
+            );
+        };
+        f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            bst = bst.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax take f32 [50000,256] idx[16384] axis0: {:.3}ms | JAX=3.382ms",
+            bst * 1e3
+        );
+    }
+
     // dynamic_slice vs JAX (measured JAX f64 [4096,4096]->[4000,4000] = 72.8ms).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]

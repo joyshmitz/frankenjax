@@ -5680,3 +5680,12 @@ fj-lax WINS by ~1.5x** (smaller half table is more cache-resident + now threaded
 tensor_ops clippy-clean). The gather family is now fully threaded at realistic embedding sizes across every
 dtype; bf16 (the common ML case) BEATS JAX. (chunks_exact clippy drift remains in arithmetic/reduction —
 pre-existing, bumped rch nightly, not this change.)
+
+## 2026-06-27 - f32 embedding take (canonical case) WINS 1.19x vs JAX — validates lowered f32 gate (SlateHarrier)
+
+`bench_take_gather_f32_vs_jax` (f32 [50000,256] idx[16384] — JAX's DEFAULT-dtype embedding lookup, the most
+common real case): fj-lax **2.85ms (best) vs JAX 3.382 = 0.84x = fj-lax WINS ~1.19x**. Validates the lowered
+f32 gather gate (prev commit) on the canonical embedding. Full row-gather scorecard after the gate vein:
+**bf16 1.5x WIN, f32 1.19x WIN, f64 ~2.5x** (f64's 100MB table is less cache-resident). The common ML embedding
+dtypes (f32 default, bf16 training) now BEAT JAX; f64 stays behind only because its table is 2-4x larger
+(memory-controller miss-bound). Gather family fully mined.
