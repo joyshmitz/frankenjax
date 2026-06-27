@@ -5281,3 +5281,12 @@ axis 0 via the recursion (the per-block transpose is L2-resident ~512KB), thread
 identical (exact sort + exact data movement; sort suite 31/0, clippy clean). **322 -> 55ms (best) = ~5.9x
 internal, ~36x WIN vs JAX 1974** (was 6.1x). argsort + non-f64 + leading axis keep the full-transpose path
 (bead notes the extension). 3rd middle-axis decomposition win this session (cumsum, argmax, sort).
+
+## 2026-06-26 - sort MIDDLE-axis extended to f32 (JAX default dtype) — same ~36x WIN (SlateHarrier)
+
+Generalized the f64 middle-axis value-sort fast path to f64+f32 via a macro (value_sort_mid!). f32 is JAX's
+DEFAULT dtype so f32 sort along a seq/middle axis is the more common case. Identical per-block (L2-resident
+transpose) structure as the landed f64 path (measured 55ms vs JAX 1974 = ~36x); f32 uses the same code +
+f32 radix recursion. Bit-identical: parity guard sort_3d_mid_axis_matches_reference (f64 AND f32, 3D [130,1024,4]
+threaded, vs per-(b,d) column-sorted reference) — sort suite 33/0, clippy clean. argsort (return_indices) +
+i64/other dtypes + leading axis still use the full-transpose path (bead).

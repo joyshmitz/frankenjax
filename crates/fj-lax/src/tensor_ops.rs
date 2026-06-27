@@ -10653,17 +10653,11 @@ fn sort_along_axis(
     // axis to last (contiguous) → recurse into the threaded contiguous fast path → transpose back.
     // Bit-identical: sort is exact, transpose is exact data movement, and the swap permutation is
     // its own inverse; argsort indices are positions along the sort axis, preserved by the transpose.
-    // f64 STRICT-MIDDLE (0 < axis < last) value-sort fast path: the full-tensor transpose below is
+    // STRICT-MIDDLE (0 < axis < last) value-sort fast path (f64/f32): the full-tensor transpose below is
     // cache-hostile (~0.9 GB/s on a 3-D axis swap). A middle axis is `before` contiguous [m, inner]
     // sub-blocks; sort each along axis 0 (the recursion's per-block transpose is L2-resident), threaded over
     // sub-blocks. Bit-identical (exact sort, exact data movement). argsort/other dtypes keep the full path.
-    if rank >= 2
-        && axis > 0
-        && axis != rank - 1
-        && !return_indices
-        && tensor.dtype == DType::F64
-        && let Some(src) = tensor.elements.as_f64_slice()
-    {
+    if rank >= 2 && axis > 0 && axis != rank - 1 && !return_indices {
         let m = tensor.shape.dims[axis] as usize;
         let inner: usize = tensor.shape.dims[axis + 1..]
             .iter()
@@ -10675,67 +10669,82 @@ fn sort_along_axis(
             .product();
         let blk = m * inner;
         if blk > 0 && before > 1 {
-            let mut out = vec![0.0f64; src.len()];
             let cores = std::thread::available_parallelism()
                 .map(|c| c.get())
                 .unwrap_or(8);
-            let threads = (src.len() / (1 << 18)).clamp(1, cores).min(before);
-            let per = before.div_ceil(threads.max(1));
             let block_shape = Shape {
                 dims: vec![m as u32, inner as u32],
             };
-            let sort_blocks = |b0: usize, b1: usize, dst: &mut [f64]| -> Result<(), EvalError> {
-                for b in b0..b1 {
-                    let s = b * blk;
-                    let bt =
-                        TensorValue::new_f64_values(block_shape.clone(), src[s..s + blk].to_vec())
-                            .map_err(EvalError::InvalidTensor)?;
-                    let sorted = sort_along_axis(primitive, &bt, 0, descending, false)?;
-                    let sv = match &sorted {
-                        Value::Tensor(t) => {
-                            t.elements
-                                .as_f64_slice()
-                                .ok_or_else(|| EvalError::Unsupported {
-                                    primitive,
-                                    detail: "middle-axis block sort produced non-dense f64".into(),
-                                })?
+            macro_rules! value_sort_mid {
+                ($src:expr, $zero:expr, $ctor:expr, $extract:ident) => {{
+                    let src = $src;
+                    let mut out = vec![$zero; src.len()];
+                    let threads = (src.len() / (1 << 18)).clamp(1, cores).min(before);
+                    let per = before.div_ceil(threads.max(1));
+                    let sort_blocks =
+                        |b0: usize, b1: usize, dst: &mut [_]| -> Result<(), EvalError> {
+                            for b in b0..b1 {
+                                let s = b * blk;
+                                let bt = $ctor(block_shape.clone(), src[s..s + blk].to_vec())
+                                    .map_err(EvalError::InvalidTensor)?;
+                                let sorted = sort_along_axis(primitive, &bt, 0, descending, false)?;
+                                let sv = match &sorted {
+                                    Value::Tensor(t) => t.elements.$extract().ok_or_else(|| {
+                                        EvalError::Unsupported {
+                                            primitive,
+                                            detail: "middle-axis block sort produced wrong dtype"
+                                                .into(),
+                                        }
+                                    })?,
+                                    _ => {
+                                        return Err(EvalError::Unsupported {
+                                            primitive,
+                                            detail: "middle-axis block sort produced scalar".into(),
+                                        });
+                                    }
+                                };
+                                dst[(b - b0) * blk..(b - b0) * blk + blk].copy_from_slice(sv);
+                            }
+                            Ok(())
+                        };
+                    if threads <= 1 {
+                        sort_blocks(0, before, &mut out)?;
+                    } else {
+                        let results: Vec<Result<(), EvalError>> = std::thread::scope(|scope| {
+                            let mut handles = Vec::new();
+                            let mut rest: &mut [_] = out.as_mut_slice();
+                            let mut b0 = 0usize;
+                            while b0 < before {
+                                let cnt = per.min(before - b0);
+                                let (chunk, tail) = rest.split_at_mut(cnt * blk);
+                                rest = tail;
+                                let start = b0;
+                                b0 += cnt;
+                                handles.push(
+                                    scope.spawn(move || sort_blocks(start, start + cnt, chunk)),
+                                );
+                            }
+                            handles.into_iter().map(|h| h.join().unwrap()).collect()
+                        });
+                        for r in results {
+                            r?;
                         }
-                        _ => {
-                            return Err(EvalError::Unsupported {
-                                primitive,
-                                detail: "middle-axis block sort produced scalar".into(),
-                            });
-                        }
-                    };
-                    dst[(b - b0) * blk..(b - b0) * blk + blk].copy_from_slice(sv);
-                }
-                Ok(())
-            };
-            if threads <= 1 {
-                sort_blocks(0, before, &mut out)?;
-            } else {
-                let results: Vec<Result<(), EvalError>> = std::thread::scope(|scope| {
-                    let mut handles = Vec::new();
-                    let mut rest: &mut [f64] = out.as_mut_slice();
-                    let mut b0 = 0usize;
-                    while b0 < before {
-                        let cnt = per.min(before - b0);
-                        let (chunk, tail) = rest.split_at_mut(cnt * blk);
-                        rest = tail;
-                        let start = b0;
-                        b0 += cnt;
-                        handles.push(scope.spawn(move || sort_blocks(start, start + cnt, chunk)));
                     }
-                    handles.into_iter().map(|h| h.join().unwrap()).collect()
-                });
-                for r in results {
-                    r?;
-                }
+                    return Ok(Value::Tensor(
+                        $ctor(tensor.shape.clone(), out).map_err(EvalError::InvalidTensor)?,
+                    ));
+                }};
             }
-            return Ok(Value::Tensor(
-                TensorValue::new_f64_values(tensor.shape.clone(), out)
-                    .map_err(EvalError::InvalidTensor)?,
-            ));
+            if tensor.dtype == DType::F64
+                && let Some(s) = tensor.elements.as_f64_slice()
+            {
+                value_sort_mid!(s, 0.0f64, TensorValue::new_f64_values, as_f64_slice);
+            }
+            if tensor.dtype == DType::F32
+                && let Some(s) = tensor.elements.as_f32_slice()
+            {
+                value_sort_mid!(s, 0.0f32, TensorValue::new_f32_values, as_f32_slice);
+            }
         }
     }
 
@@ -16710,6 +16719,61 @@ mod tests {
             "fj-lax sort_key_val f64 [4096,4096] axis1: {:.3}ms | JAX=2739ms",
             b * 1e3
         );
+    }
+
+    // Parity guard for the f64/f32 STRICT-MIDDLE value-sort fast path: 3D [B,S,D] axis=1 (threaded) must equal
+    // the per-(b,d) column-sorted reference.
+    #[test]
+    fn sort_3d_mid_axis_matches_reference() {
+        let (b, s, d) = (130usize, 1024usize, 4usize); // 532K -> threaded sub-block path
+        let n = b * s * d;
+        let data64: Vec<f64> = (0..n)
+            .map(|i| (i.wrapping_mul(2654435761) % 100003) as f64)
+            .collect();
+        for f32mode in [false, true] {
+            let shape = Shape {
+                dims: vec![b as u32, s as u32, d as u32],
+            };
+            let x = if f32mode {
+                Value::Tensor(
+                    TensorValue::new_f32_values(shape, data64.iter().map(|&v| v as f32).collect())
+                        .unwrap(),
+                )
+            } else {
+                Value::Tensor(TensorValue::new_f64_values(shape, data64.clone()).unwrap())
+            };
+            let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+            let out = crate::eval_primitive(Primitive::Sort, std::slice::from_ref(&x), &p).unwrap();
+            let t = out.as_tensor().unwrap();
+            for bi in 0..b {
+                for di in 0..d {
+                    let mut col: Vec<f64> = (0..s)
+                        .map(|si| {
+                            let g = bi * s * d + si * d + di;
+                            if f32mode {
+                                data64[g] as f32 as f64
+                            } else {
+                                data64[g]
+                            }
+                        })
+                        .collect();
+                    col.sort_by(|a, c| a.partial_cmp(c).unwrap());
+                    for (si, &want) in col.iter().enumerate() {
+                        let g = bi * s * d + si * d + di;
+                        let got = if f32mode {
+                            t.elements.as_f32_slice().unwrap()[g] as f64
+                        } else {
+                            t.elements.as_f64_slice().unwrap()[g]
+                        };
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "f32={f32mode} b={bi} d={di} s={si}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // sort 3D middle axis vs JAX (measured JAX f64 [256,1024,64] axis1 = 1974ms).
