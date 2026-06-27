@@ -4674,6 +4674,46 @@ mod tests {
         }
     }
 
+    // IFFT 2-D batched (complex inverse, last-axis) vs JAX (min-of-10: JAX [1024,1024] = 0.651ms). Mirrors the
+    // forward fft batched path (transform_batches_dense, inverse=true) + 1/N scale — completes the FFT family.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_ifft_2d_batched_vs_jax() {
+        use std::time::Instant;
+        let (rows, n) = (1024usize, 1024usize);
+        let data: Vec<(f64, f64)> = (0..rows * n)
+            .map(|i| {
+                (
+                    ((i.wrapping_mul(2654435761) % 100003) as f64) * 1e-3,
+                    (i % 97) as f64,
+                )
+            })
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![rows as u32, n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = std::collections::BTreeMap::new();
+        let f = || std::hint::black_box(eval_ifft(std::slice::from_ref(&x), &p).unwrap());
+        let _ = f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let t = Instant::now();
+            f();
+            bst = bst.min(t.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax ifft 2D [1024,1024] axis1(batched): {:.3}ms | JAX=0.651ms",
+            bst * 1e3
+        );
+    }
+
     // FFT 1-D NON-power-of-2 batched (last-axis) vs JAX (RE-VERIFIED min-of-10: JAX [4096,1000] smooth =
     // 9.37ms, [4096,1009] prime = 9.46ms — earlier 62/99ms were load-inflated anomalies). fj-lax is ~7x SLOWER:
     // non-pow2 is tolerance-parity → the mixed-radix/bluestein kernel is the gap (NOT competitive as first ledger'd).

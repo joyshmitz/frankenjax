@@ -5950,3 +5950,15 @@ EVERY FFT gap is NON-CONTAINED: FMA build-policy (deliberately avoided), pow2 sp
 digests), cache-blocked mixed-radix, and a native real-FFT — all multi-session kernel/algorithm efforts or a
 maintainer +fma decision, none a contained single-turn lever. The FFT family is the frankenjax perf frontier;
 benches landed as permanent guards + the precise per-variant lever spec.
+
+## 2026-06-27 - ifft 4.9x (mirrors fft); FFT family fully measured; rfft recombine already optimal-order (SlateHarrier)
+
+`bench_ifft_2d_batched_vs_jax`: fj-lax [1024,1024] = 3.20ms vs JAX 0.651 = ~4.9x — mirrors the forward fft
+batched (same transform_batches_dense inverse path + 1/N), as expected. The FFT family is now FULLY benched +
+guarded (fft/ifft/rfft/irfft × pow2/non-pow2). REFINEMENT on the rfft lever: read vectorized_rfft_pow2_block —
+its Hermitian recombine is ALREADY k-outer/b-inner (contiguous re-read, the obvious cache-friendly loop order)
+and the half-FFT uses the SHARED optimized soa_radix2_butterfly_stages. So there is NO contained loop-order fix;
+the 8.5x rfft gap is a deeper kernel inefficiency (the AoS<->SoA pack/recombine transposes + per-8-row-tile
+amortization vs pocketfft's native real symmetry) needing profiling + a native real-FFT — multi-session. This
+rules out the loop-order dead-end for a future effort. Every FFT variant remains non-contained (FMA-policy /
+split-radix bit-lock / cache-blocked mixed-radix / native real-FFT).
