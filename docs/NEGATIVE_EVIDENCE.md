@@ -5332,3 +5332,14 @@ half radix recursion, L2-resident transpose, threaded. JAX bf16 3D [256,1024,64]
 = **26.2ms = ~93x WIN**. Bit-identical: parity guard sort_3d_mid_axis_bf16_matches_reference (per-column bf16
 bits sorted by decoded value, ties keep equal bits) + sort suite 37/0, clippy clean. MIDDLE-AXIS SORT now
 covers f64/f32/i64 (value+argsort) + bf16/f16 (value); half argsort middle + leading-axis remain (niche).
+
+## 2026-06-26 - half (bf16/f16) MIDDLE-axis ARGSORT — middle-axis sort family fully COMPLETE (SlateHarrier)
+
+Added half (bf16/f16) argsort to the middle-axis fast path (half input -> i64 indices, dedicated block, per-
+block half radix recursion). Closes the last sort tail: middle-axis sort+argsort now cover f64/f32/i64/bf16/f16.
+Same per-block L2-resident path as the measured bf16 value-sort (26ms vs JAX 2444 = ~93x) and f64 argsort
+(~75x), so half argsort middle is in the same ~75-93x regime. Bit-identical: extended
+sort_3d_mid_axis_bf16_matches_reference to also validate argsort indices (stable, ties keep ascending index) +
+sort suite green, clippy clean. MIDDLE-AXIS DECOMPOSITION CAMPAIGN COMPLETE: sort/argsort (5 dtypes), lexsort
+(f64), cumsum/cummax/min (f64/f32/i64), argmax/argmin (f64/f32), value-reduce verified — every common
+JAX-CPU-slow axis op now wins. Remaining: leading-axis 2D column sort + mixed-dtype lexsort keys (niche).

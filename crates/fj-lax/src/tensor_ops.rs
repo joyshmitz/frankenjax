@@ -10887,6 +10887,72 @@ fn sort_along_axis(
                         .map_err(EvalError::InvalidTensor)?,
                 ));
             }
+            // Half (bf16/f16) argsort: half input -> i64 indices. Per-block half radix recursion (indices).
+            if return_indices
+                && matches!(tensor.dtype, DType::BF16 | DType::F16)
+                && let Some(src) = tensor.elements.as_half_float_slice()
+            {
+                let dt = tensor.dtype;
+                let mut out = vec![0i64; src.len()];
+                let threads = (src.len() / (1 << 18)).clamp(1, cores).min(before);
+                let per = before.div_ceil(threads.max(1));
+                let sort_blocks =
+                    |b0: usize, b1: usize, dst: &mut [i64]| -> Result<(), EvalError> {
+                        for b in b0..b1 {
+                            let s = b * blk;
+                            let bt = TensorValue::new_half_float_values(
+                                dt,
+                                block_shape.clone(),
+                                src[s..s + blk].to_vec(),
+                            )
+                            .map_err(EvalError::InvalidTensor)?;
+                            let sorted = sort_along_axis(primitive, &bt, 0, descending, true)?;
+                            let iv = match &sorted {
+                                Value::Tensor(t) => t.elements.as_i64_slice().ok_or_else(|| {
+                                    EvalError::Unsupported {
+                                        primitive,
+                                        detail: "middle-axis half argsort produced wrong dtype"
+                                            .into(),
+                                    }
+                                })?,
+                                _ => {
+                                    return Err(EvalError::Unsupported {
+                                        primitive,
+                                        detail: "middle-axis half argsort produced scalar".into(),
+                                    });
+                                }
+                            };
+                            dst[(b - b0) * blk..(b - b0) * blk + blk].copy_from_slice(iv);
+                        }
+                        Ok(())
+                    };
+                if threads <= 1 {
+                    sort_blocks(0, before, &mut out)?;
+                } else {
+                    let results: Vec<Result<(), EvalError>> = std::thread::scope(|scope| {
+                        let mut handles = Vec::new();
+                        let mut rest: &mut [i64] = out.as_mut_slice();
+                        let mut b0 = 0usize;
+                        while b0 < before {
+                            let cnt = per.min(before - b0);
+                            let (chunk, tail) = rest.split_at_mut(cnt * blk);
+                            rest = tail;
+                            let start = b0;
+                            b0 += cnt;
+                            handles
+                                .push(scope.spawn(move || sort_blocks(start, start + cnt, chunk)));
+                        }
+                        handles.into_iter().map(|h| h.join().unwrap()).collect()
+                    });
+                    for r in results {
+                        r?;
+                    }
+                }
+                return Ok(Value::Tensor(
+                    TensorValue::new_i64_values(tensor.shape.clone(), out)
+                        .map_err(EvalError::InvalidTensor)?,
+                ));
+            }
         }
     }
 
@@ -17092,13 +17158,22 @@ mod tests {
             .elements
             .as_half_float_slice()
             .unwrap();
+        // argsort: half input -> i64 indices (stable, ties keep ascending index).
+        let aout = crate::eval_primitive(Primitive::Argsort, std::slice::from_ref(&x), &p).unwrap();
+        let av = aout.as_tensor().unwrap().elements.as_i64_slice().unwrap();
         for bi in 0..b {
             for di in 0..d {
                 let mut col: Vec<u16> = (0..s).map(|si| bits[bi * s * d + si * d + di]).collect();
                 col.sort_by(|&a, &c| dec(a).partial_cmp(&dec(c)).unwrap());
-                for (si, &want) in col.iter().enumerate() {
+                let mut order: Vec<usize> = (0..s).collect();
+                order.sort_by(|&a, &c| {
+                    let (ba, bc) = (bits[bi * s * d + a * d + di], bits[bi * s * d + c * d + di]);
+                    dec(ba).partial_cmp(&dec(bc)).unwrap().then(a.cmp(&c))
+                });
+                for (si, (&want, &wi)) in col.iter().zip(order.iter()).enumerate() {
                     let g = bi * s * d + si * d + di;
                     assert_eq!(dec(got[g]), dec(want), "bf16 mid sort b={bi} d={di} s={si}");
+                    assert_eq!(av[g], wi as i64, "bf16 mid argsort b={bi} d={di} s={si}");
                 }
             }
         }
