@@ -63,6 +63,54 @@ not a multiple of 8, ±x). GREEN: `cargo fmt -p fj-lax --check`; `cargo clippy -
 entirely into `cntiy`" — true for the `ln`/division-bound members, NOT for the
 pure-polynomial Chebyshev bessels.
 
+## 2026-06-27 - NO-SHIP: pow2-only real RFFT buffer regresses dense pow2 row (ProudSalmon)
+
+Land-or-dig pass found no measured bench-worktree win absent from `main` after
+rebasing: the visible FFT/select candidates were already patch-equivalent or
+represented by current `main` keeps, the QR-preconditioned SVD worktree remained
+WIP without accepted evidence, and `4685b88a` had landed the separate
+non-power-of-two dense-f64 RFFT lift-skip keep. DIG therefore targeted the
+remaining dense power-of-two RFFT gap vs JAX. The new lever came from the
+graveyard locality/vectorized-execution pattern: leave non-power-of-two rows on
+their current path, but for `fft_length >= 2 && is_power_of_two()` extract dense
+real `f64`/`f32` input directly and feed the existing SoA real-FFT kernel without
+first materializing `(re, 0.0)` tuples.
+
+Result: REJECT and revert. The candidate produced a small same-host improvement
+on `64x1000`, but it more than doubled the dense power-of-two row that was the
+intended target. The source hunk was removed before commit; only this evidence
+entry is retained.
+
+Bench command used through RCH with the requested target dir and crate scope:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME rch exec
+-- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b
+AGENT_NAME=ProudSalmon cargo bench -p fj-lax --profile release --bench
+lax_baseline -- 'eval/rfft_batch_2048x256_f64_dense_input$|eval/rfft_batch_64x1000_f64$'
+--noplot`. The main baseline RCH run had no admissible workers and fell open
+locally; the candidate RCH run selected remote `vmi1264463` and measured
+`64x1000` at **1.1100 ms** and dense `2048x256` at **19.385 ms**, so that remote
+run is routing evidence only. For the keep/reject decision, the candidate was
+then re-run on the same local host, same worktree, same target dir, and same
+release bench row set as the baseline.
+
+Fresh JAX comparators are the same 2026-06-27 exact-fixture rows already recorded
+in this ledger for `jax.jit(lambda a: jnp.fft.rfft(a, axis=-1))`, JAX/JAXLIB
+0.10.1 CPU x64, 20 hot samples, same Rust input formula. The non-power-of-two
+row below is superseded by the landed `4685b88a` dense-f64 nonpow2 keep; it is
+shown only to document that this rejected candidate had mixed signals and was
+not a contained pow2 win.
+
+| workload | main midpoint | candidate midpoint | Rust delta | JAX mean | main/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `eval/rfft_batch_64x1000_f64` | 556.55 us | 490.84 us | -11.8% faster | 0.200635 ms | 2.77x slower | 2.45x slower | insufficient; mixed with target regression |
+| `eval/rfft_batch_2048x256_f64_dense_input` | 5.9138 ms | 13.075 ms | +121.1% slower | 0.371289 ms | 15.93x slower | 35.22x slower | REVERT |
+
+Interpretation: avoiding tuple materialization is not a contained win for the
+power-of-two RFFT path. The existing pair-backed path appears to interact better
+with the SoA tiling and recombination pipeline than a separate real-slice pow2
+kernel. Do not retry pow2 direct real-buffer extraction without first replacing
+the pow2 row kernel itself or adding an output-buffer-reuse execution model.
+
 ## 2026-06-27 - DIG RESULT: special-fn "just thread it" hypothesis tested & DEAD (BlackThrush)
 
 Follow-up land-or-dig pass. No new landable worktree win (same candidates as my
