@@ -50,6 +50,64 @@ passed via RCH. Remote `fj-conformance` was blocked by missing transferred
 --profile release` with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b`
 passed.
 
+## 2026-06-27 - NO-SHIP: 128x1000 boxed FFT extraction duplicate after rebase (ProudSalmon)
+
+During the same land-or-dig pass, an independently dug direct boxed-complex
+extraction fast path measured as a keep on `eval/fft_batch_128x1000_complex128`
+before rebase. Rebase found that `origin/main` had already landed the broader
+boxed-complex literal extraction entry above, including homogeneous
+`Complex128`/`Complex64` conversion. The local source hunk became redundant and
+was removed rather than shipping an unreachable duplicate fast path.
+
+Bench command note: this Cargo rejects the literal requested spelling
+`cargo bench --release` with `error: unexpected argument '--release' found`, so
+the valid crate-scoped optimized equivalent was used:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME rch exec
+-- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a
+AGENT_NAME=ProudSalmon cargo bench -p fj-lax --profile release --bench
+lax_baseline -- 'eval/fft_batch_128x1000_complex128' --noplot`. The Rust
+baseline/candidate comparison was same-host, same-target, and warm-cache. The
+final duplicate source also benched through RCH on `hz2` at **1.1845 ms**
+midpoint before removal; that remote number was not mixed into the same-host
+ratio.
+
+Measured row:
+
+| workload | main midpoint | candidate midpoint | Rust delta | JAX mean | main/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `eval/fft_batch_128x1000_complex128` | 3.2085 ms | 1.4961 ms | -53.37% / 2.14x faster | 0.212814 ms | 15.08x loss | 7.03x loss | NO-SHIP duplicate of upstream broader keep |
+
+Fresh JAX comparator used `/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`,
+JAX/JAXLIB 0.10.1 CPU x64, exact `lax_baseline.rs` fixture
+`complex_matrix(128,1000)` (`sin(i*0.125) + 1j*cos(i*0.25)`), warmed
+`jax.jit(lambda z: jnp.fft.fft(z, axis=-1))`, 50 hot runs. JAX measured best
+**0.164321 ms**, p50 **0.207228 ms**, mean **0.212814 ms**, p95
+**0.241597 ms** under current host load. This confirms the same boxed-boundary
+family as the upstream keep; next work should target the FFT kernel itself or
+runtime representation rather than another boxed extraction retry.
+
+Correctness/quality gates:
+
+- `cargo fmt -p fj-lax --check`: passed.
+- `cargo test -p fj-lax --profile release
+  dense_complex_input_bit_identical_to_literal_input --lib -- --nocapture`:
+  passed with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`
+  after RCH fell open locally.
+- `cargo check -p fj-lax --profile release --all-targets`: passed via RCH
+  `vmi1227854`.
+- `cargo test -p fj-conformance --profile release -- --nocapture`: passed
+  locally with `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a`
+  after a duplicate RCH conformance run queued behind other work.
+- `ubs crates/fj-lax/src/fft.rs docs/NEGATIVE_EVIDENCE.md` returned nonzero
+  on pre-existing `fft.rs` inventory outside the removed duplicate source hunk
+  (test panics/unwraps, direct indexing, casts, and allocation warnings); its
+  internal fmt, clippy, cargo-check, and test-build sub-gates were clean.
+- Exact `cargo clippy -p fj-lax --profile release --all-targets -- -D warnings`
+  failed only on pre-existing broad `clippy::chunks_exact_to_as_chunks`
+  inventory in unrelated fj-lax files. The changed file had no findings, and
+  `cargo clippy -p fj-lax --profile release --all-targets -- -D warnings -A
+  clippy::chunks_exact_to_as_chunks` passed via RCH `ovh-a`.
+
 ## 2026-06-27 - KEEP: rank-3 sum-pool x-lane SIMD narrows VALID f64 reduce-window loss (ProudSalmon)
 
 Land-or-dig pass after `2846e95a`: scratch worktree audit found no measured
