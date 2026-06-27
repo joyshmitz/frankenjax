@@ -5923,3 +5923,14 @@ gap, the lever being a faster mixed-radix + native real-FFT (multi-session). pow
 METHOD LESSON: the jax host load swings timings up to ~6.6x (62 vs 9.4ms); use min-of-10 and SANITY-CHECK any
 ratio that implies a real FFT is >2x faster than its complex sibling (physically impossible) — that flagged the
 anomaly here. Bench JAX baselines in fft.rs updated to the verified values.
+
+## 2026-06-27 - threading the mixed-radix non-pow2 FFT is ~0-gain (memory-bound, not compute-bound) — reverted (SlateHarrier)
+
+transform_batches_mixed_radix_iterative_soa was SERIAL across row-tiles (unlike the pow2/Bluestein batched paths
+which thread). Hypothesis: the ~6.5x non-pow2 gap was missing parallelism. ATTEMPT: fanned row-chunks across
+threads (per-thread scratch, bit-identical — FFT golden 60/0 PASS). RESULT: [4096,1000] serial 58-64ms ->
+threaded 68-70ms = NO GAIN (slightly worse). REVERTED (stashed). The mixed-radix transform is MEMORY-bound
+(multiple SoA digit-reversal + radix passes streaming the 64MB working set), so threading saturates bandwidth
+without speedup — same class as the f64 gather controller-floor. The ~6.5x gap vs pocketfft is its
+cache-blocking / fewer-pass mixed-radix kernel, NOT parallelism — a multi-session kernel-algorithm lever
+(non-contained), tolerance-parity so legal but not a quick win. Do NOT re-attempt threading this path.
