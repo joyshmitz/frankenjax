@@ -1,14 +1,20 @@
-// Decisive test of the so4wo "eval-model" gate: BW-bound fj-lax ops allocate a fresh
-// output `Vec` per call and pay first-touch page-faults that JAX amortizes by reusing
-// buffers. glibc `munmap`s large freed buffers (>128KB) so every call re-faults; a
-// caching global allocator (mimalloc) retains the freed region and reuses the already-
-// faulted pages — capturing the gap with NO eval-model surgery.
+// Probes the so4wo "eval-model" gate: BW-bound fj-lax ops allocate a fresh output `Vec`
+// per call and pay first-touch page-faults that JAX amortizes by reusing buffers. The
+// TRUSTWORTHY signal here is the SAME-BINARY `fresh-alloc` vs `reused-buffer` delta
+// printed per row — that isolates the alloc/fault overhead within ONE binary and shows
+// the so4wo ceiling is real (fresh-alloc costs materially more than the compute floor).
 //
-// Run both:
-//   rch exec -- cargo bench -p fj-lax --bench alloc_ceiling            # system allocator
-//   rch exec -- cargo bench -p fj-lax --features mimalloc-alloc --bench alloc_ceiling
-// Same-binary control: each measures the production fresh-alloc path AND a reused-buffer
-// reference, so the alloc/fault delta is isolated within one binary.
+// ⚠️ METHODOLOGY WARNING (learned the hard way, 2026-06-27): the cross-allocator
+// comparison (`--features mimalloc-alloc` build vs default build) is NOT trustworthy.
+// A global allocator is compile-time, so comparing it needs TWO separate binaries — and
+// under variable shared-RCH-worker contention the load differential between the two
+// builds dwarfs any allocator effect. An early cross-build run here showed a fake ~2-3x
+// "mimalloc win"; ProudSalmon's same-load back-to-back A/B then measured mimalloc as
+// NEUTRAL-to-2x-WORSE (see docs/NEGATIVE_EVIDENCE.md retraction). The caching-allocator
+// lever is DEAD; do NOT draw allocator conclusions from cross-build numbers here. The
+// real so4wo fix is eval-model buffer reuse (architectural), not a global allocator.
+//
+//   rch exec -- cargo bench -p fj-lax --bench alloc_ceiling   # read the SAME-BINARY ratio only
 
 #[cfg(feature = "mimalloc-alloc")]
 #[global_allocator]
