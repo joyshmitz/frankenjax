@@ -7986,6 +7986,37 @@ mod tests {
         println!("fj-lax lu f64 [2048,2048]: {:.3}ms | JAX=2087ms", bst * 1e3);
     }
 
+    // EIG (non-symmetric eigenvalues+vectors) at scale vs JAX (measured JAX jnp.linalg.eig f64 [1024,1024] =
+    // 5715ms, min-of-6 — catastrophically slow, like QR). fj-lax = real-Schur Francis double-shift + inverse iter.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_eig_1024_vs_jax() {
+        use std::collections::BTreeMap;
+        use std::time::Instant;
+        let n = 1024usize;
+        let a: Vec<f64> = (0..n * n)
+            .map(|i| (i as f64 * 0.123).sin() + (i as f64 * 0.0457).cos())
+            .collect();
+        let am = make_matrix(n, n, &a);
+        let p = BTreeMap::new();
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive_multi(Primitive::Eig, std::slice::from_ref(&am), &p).unwrap(),
+            );
+        };
+        let _ = f();
+        let mut bst = f64::MAX;
+        for _ in 0..3 {
+            let t = Instant::now();
+            f();
+            bst = bst.min(t.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax eig f64 [1024,1024]: {:.3}ms | JAX=5715ms",
+            bst * 1e3
+        );
+    }
+
     /// Same-binary A/B for the apply_householder_left cache-layout fix (ur4h3): the OLD
     /// column-strided left-apply vs the NEW row-contiguous one, inside a full 512×512
     /// Hessenberg reduction. Asserts H and Q are bit-identical. Run `--ignored --nocapture`.

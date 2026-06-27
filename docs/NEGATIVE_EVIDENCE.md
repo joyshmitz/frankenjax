@@ -6040,3 +6040,17 @@ slogdet/solve/inv/lstsq lowerings are all slow (2-8s); fj-lax is CONSISTENT (~16
 factorization, blocked GEMM-routed). So fj-lax LU (162ms) crushes JAX LU (2087ms) yet fj-lax cholesky (199ms)
 loses to JAX cholesky (32ms) — same fj-lax speed, wildly different JAX speed. Linalg is decisively a NET fj-lax
 STRENGTH (5 big direct-factorization wins + 2 parities vs 1 FMA-bound cholesky loss). All guard benches landed.
+
+## 2026-06-27 - eig 1.58x slower (iterative); LINALG FAMILY fully measured — direct-factorizations win, iterative ties (SlateHarrier)
+
+`bench_eig_1024_vs_jax`: fj-lax non-symmetric eig [1024,1024] (Francis double-shift + inverse-iter) = 9008ms vs
+JAX jnp.linalg.eig 5715ms = ~1.58x SLOWER. eig joins the ITERATIVE eigenproblem class with svd/eigh — all
+near-parity-to-slightly-slower (eigh 1.06x, svd 1.23x, eig 1.58x), both sides iteration-bound, no contained
+lever. COMPLETE LINALG-vs-JAX MAP (this session, n>=1024):
+  DIRECT FACTORIZATIONS (fj-lax WINS — JAX-CPU lowering slow): QR ~30x, LU ~12.9x, slogdet ~7.3x, det ~5.9x,
+    solve ~5.2x.
+  ITERATIVE EIGENPROBLEMS (near-parity, iteration-bound both sides): eigh ~1.06x, svd ~1.23x, eig ~1.58x.
+  FMA/TUNED (fj-lax LOSS): cholesky ~6.25x (JAX's one tuned dpotrf path).
+Net: fj-lax beats JAX-CPU on every direct factorization (5 big wins), ties the iterative eigenproblems, loses
+only the FMA-bound cholesky. The eig 1.58x and cholesky 6.25x are the only linalg losses, both non-contained
+(iterative-algorithm tuning / FMA-policy). Linalg fully characterized + guard-benched.
