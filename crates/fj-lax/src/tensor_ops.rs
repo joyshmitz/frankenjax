@@ -10653,6 +10653,92 @@ fn sort_along_axis(
     // axis to last (contiguous) → recurse into the threaded contiguous fast path → transpose back.
     // Bit-identical: sort is exact, transpose is exact data movement, and the swap permutation is
     // its own inverse; argsort indices are positions along the sort axis, preserved by the transpose.
+    // f64 STRICT-MIDDLE (0 < axis < last) value-sort fast path: the full-tensor transpose below is
+    // cache-hostile (~0.9 GB/s on a 3-D axis swap). A middle axis is `before` contiguous [m, inner]
+    // sub-blocks; sort each along axis 0 (the recursion's per-block transpose is L2-resident), threaded over
+    // sub-blocks. Bit-identical (exact sort, exact data movement). argsort/other dtypes keep the full path.
+    if rank >= 2
+        && axis > 0
+        && axis != rank - 1
+        && !return_indices
+        && tensor.dtype == DType::F64
+        && let Some(src) = tensor.elements.as_f64_slice()
+    {
+        let m = tensor.shape.dims[axis] as usize;
+        let inner: usize = tensor.shape.dims[axis + 1..]
+            .iter()
+            .map(|&d| d as usize)
+            .product();
+        let before: usize = tensor.shape.dims[..axis]
+            .iter()
+            .map(|&d| d as usize)
+            .product();
+        let blk = m * inner;
+        if blk > 0 && before > 1 {
+            let mut out = vec![0.0f64; src.len()];
+            let cores = std::thread::available_parallelism()
+                .map(|c| c.get())
+                .unwrap_or(8);
+            let threads = (src.len() / (1 << 18)).clamp(1, cores).min(before);
+            let per = before.div_ceil(threads.max(1));
+            let block_shape = Shape {
+                dims: vec![m as u32, inner as u32],
+            };
+            let sort_blocks = |b0: usize, b1: usize, dst: &mut [f64]| -> Result<(), EvalError> {
+                for b in b0..b1 {
+                    let s = b * blk;
+                    let bt =
+                        TensorValue::new_f64_values(block_shape.clone(), src[s..s + blk].to_vec())
+                            .map_err(EvalError::InvalidTensor)?;
+                    let sorted = sort_along_axis(primitive, &bt, 0, descending, false)?;
+                    let sv = match &sorted {
+                        Value::Tensor(t) => {
+                            t.elements
+                                .as_f64_slice()
+                                .ok_or_else(|| EvalError::Unsupported {
+                                    primitive,
+                                    detail: "middle-axis block sort produced non-dense f64".into(),
+                                })?
+                        }
+                        _ => {
+                            return Err(EvalError::Unsupported {
+                                primitive,
+                                detail: "middle-axis block sort produced scalar".into(),
+                            });
+                        }
+                    };
+                    dst[(b - b0) * blk..(b - b0) * blk + blk].copy_from_slice(sv);
+                }
+                Ok(())
+            };
+            if threads <= 1 {
+                sort_blocks(0, before, &mut out)?;
+            } else {
+                let results: Vec<Result<(), EvalError>> = std::thread::scope(|scope| {
+                    let mut handles = Vec::new();
+                    let mut rest: &mut [f64] = out.as_mut_slice();
+                    let mut b0 = 0usize;
+                    while b0 < before {
+                        let cnt = per.min(before - b0);
+                        let (chunk, tail) = rest.split_at_mut(cnt * blk);
+                        rest = tail;
+                        let start = b0;
+                        b0 += cnt;
+                        handles.push(scope.spawn(move || sort_blocks(start, start + cnt, chunk)));
+                    }
+                    handles.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                for r in results {
+                    r?;
+                }
+            }
+            return Ok(Value::Tensor(
+                TensorValue::new_f64_values(tensor.shape.clone(), out)
+                    .map_err(EvalError::InvalidTensor)?,
+            ));
+        }
+    }
+
     if rank >= 2 && axis != rank - 1 {
         let mut perm: Vec<usize> = (0..rank).collect();
         perm.swap(axis, rank - 1);

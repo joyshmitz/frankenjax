@@ -5271,3 +5271,13 @@ CACHE-RESIDENT per-block transposes (block ~512KB, L2) instead of one cache-host
 322->~80-120ms (~16-24x vs JAX). Not shipped here: moderate restructure + recursion, and eval_transpose is
 "near-optimal/tiling-regresses" for 2-D so the gain is in the cache-residency not the transpose kernel —
 needs measurement. Win recorded; lever pinned. (3rd transpose-bound find; cf rev axis0 / so4wo residuals.)
+
+## 2026-06-26 - sort MIDDLE-axis (f64) per-block transpose — 322→55ms, 6.1x→~36x WIN vs JAX (SlateHarrier)
+
+LANDED the bead frankenjax-sort-midaxis-blocked-transpose. sort_along_axis sorted a non-last axis by
+transposing the FULL tensor (cache-hostile ~0.9 GB/s, ~287ms of 322 on [256,1024,64] axis1). FIX (f64 value
+sort, strict-middle 0<axis<last): decompose into `before` contiguous [m, inner] sub-blocks, sort each along
+axis 0 via the recursion (the per-block transpose is L2-resident ~512KB), threaded over sub-blocks. Bit-
+identical (exact sort + exact data movement; sort suite 31/0, clippy clean). **322 -> 55ms (best) = ~5.9x
+internal, ~36x WIN vs JAX 1974** (was 6.1x). argsort + non-f64 + leading axis keep the full-transpose path
+(bead notes the extension). 3rd middle-axis decomposition win this session (cumsum, argmax, sort).
