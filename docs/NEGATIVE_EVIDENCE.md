@@ -5343,3 +5343,13 @@ sort_3d_mid_axis_bf16_matches_reference to also validate argsort indices (stable
 sort suite green, clippy clean. MIDDLE-AXIS DECOMPOSITION CAMPAIGN COMPLETE: sort/argsort (5 dtypes), lexsort
 (f64), cumsum/cummax/min (f64/f32/i64), argmax/argmin (f64/f32), value-reduce verified — every common
 JAX-CPU-slow axis op now wins. Remaining: leading-axis 2D column sort + mixed-dtype lexsort keys (niche).
+
+## 2026-06-26 - 2D column sort (axis=0) confirmed ~25x WIN vs JAX, transpose-floored (SlateHarrier)
+
+`bench_sort2d_col_vs_jax` (f64 [4096,4096] axis0): fj-lax **100ms vs JAX 2538 = ~25x WIN** (XLA-CPU sort-
+lowering). The column_sort_transpose path = ~65ms in 2 square 128MB transposes + ~35ms radix. This is the
+bead'd leading-axis tail: it CANNOT use the middle-axis sub-block decomposition (axis=0 has no `before` dim;
+the column sub-blocks are STRIDED, not contiguous, so extracting one is itself a transpose) and cache-blocking
+the square transpose regresses (prior transpose-tiling finding). So it's at its transpose floor — already a
+solid 25x win, no contained lever. Also: JAX flip 3D [256,1024,64] axis1(mid) = 27.6ms (fast data-movement; not
+a gap). The sort/middle-axis frontier is fully mapped; remaining gaps are non-contained (FFT/gather/fma/so4wo).

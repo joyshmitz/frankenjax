@@ -17434,6 +17434,40 @@ mod tests {
         );
     }
 
+    // 2D column sort (axis=0) vs JAX (measured JAX f64 [4096,4096] axis0 = 2538ms).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_sort2d_col_vs_jax() {
+        use std::time::Instant;
+        let (rows, cols) = (4096usize, 4096usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| (i.wrapping_mul(2654435761) % 1_000_003) as f64)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![rows as u32, cols as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "0".to_owned())]);
+        let run = || eval_sort(Primitive::Sort, std::slice::from_ref(&x), &p).unwrap();
+        let _ = run();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let t = Instant::now();
+            let r = run();
+            bst = bst.min(t.elapsed().as_secs_f64());
+            std::hint::black_box(&r);
+        }
+        println!(
+            "fj-lax sort 2D [4096,4096] axis0(col): {:.3}ms | JAX=2538ms",
+            bst * 1e3
+        );
+    }
+
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_sort2d() {
