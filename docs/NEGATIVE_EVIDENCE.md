@@ -5425,3 +5425,10 @@ clean; same `u = iv as usize` + OOB semantics). FULL select_n ARC: 92 -> 55 (thr
 decode) -> 30.1ms (fused i64) = **3.06x internal, 4.8x -> 1.57x vs JAX**. The ~1.57x residual is the scalar
 data-dependent gather (op_slices[idx[i]][i]) vs JAX's vectorized select/blend tree — near-parity now. u32/u64/
 bool indices keep the 2-pass (rarer).
+
+## 2026-06-27 - logaddexp (transcendental binary elementwise) ~1.11x WIN vs JAX (done) (SlateHarrier)
+
+`bench_logaddexp_vs_jax` (f64 16M = [4096,4096]): fj-lax **36.5ms vs JAX 40.6 = ~1.11x WIN**. Confirms
+eval_binary_elementwise THREADS the closure path (max + exp + ln_1p per element) — the compute-bound
+transcendental fans across cores, slightly beating JAX. No lever. Confirms the binary-elementwise-transcendental
+surface (logaddexp/logaddexp2/hypot/atan2/nextafter/etc, all via eval_binary_elementwise) is done/competitive.
