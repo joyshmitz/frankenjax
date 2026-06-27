@@ -6054,3 +6054,14 @@ lever. COMPLETE LINALG-vs-JAX MAP (this session, n>=1024):
 Net: fj-lax beats JAX-CPU on every direct factorization (5 big wins), ties the iterative eigenproblems, loses
 only the FMA-bound cholesky. The eig 1.58x and cholesky 6.25x are the only linalg losses, both non-contained
 (iterative-algorithm tuning / FMA-policy). Linalg fully characterized + guard-benched.
+
+## 2026-06-27 - eig eigenvector loop THREADED — 9008->3820ms, flips 1.58x LOSS to 1.50x WIN vs JAX (SlateHarrier)
+
+eig_qr_iteration computed the n eigenvectors in a SERIAL loop (each an independent O(n^2) inverse iteration on
+the shared read-only Hessenberg h_hess/q0 — ~half of eig's O(n^3), embarrassingly parallel). Threaded it (fan
+eigenvalues across cores into a disjoint vks slice, per-thread eig_eigenvector_hessenberg; the cheap O(n^2)
+transpose-write stays serial). eig [1024,1024]: **9008 -> 3820ms (best) = ~2.36x internal**, flipping eig from
+~1.58x SLOWER to **~1.50x FASTER vs JAX 5715ms**. Bit-identical (eig 22/0, clippy-clean). So eig JOINS the
+linalg WIN column. Updated linalg verdict: WINS = QR 30x, LU 12.9x, slogdet 7.3x, det 5.9x, solve 5.2x, EIG
+1.5x; near-parity = eigh 1.06x, svd 1.23x (their singular/eigen-vector accumulation may have the same serial-
+loop lever — a NEXT dig); LOSS = only cholesky 6.25x (FMA). Guard bench updated.

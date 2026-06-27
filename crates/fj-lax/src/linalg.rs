@@ -5037,9 +5037,48 @@ fn eig_qr_iteration(a: &[f64], n: usize) -> EigQrResult {
     // Eigenvectors of the ORIGINAL `a` (the QR iteration's Schur vectors are not
     // eigenvectors unless T is diagonal). One eigenvalue → one column, paired by
     // index, via inverse iteration on A − λI.
+    // Each eigenvalue's eigenvector is an INDEPENDENT O(n^2) inverse-iteration reading the shared read-only
+    // h_hess/q0 — embarrassingly parallel and ~half of eig's O(n^3). Fan eigenvalues across threads (per-thread
+    // computes its columns' vectors into a disjoint vks slice); the cheap O(n^2) transpose-write into the
+    // column-strided output stays serial. Bit-identical to the serial loop (same per-eigenvalue call/result).
+    let n_ev = eigenvalues.len();
     let mut eigenvectors = vec![(0.0_f64, 0.0_f64); n * n];
-    for (col, &lambda) in eigenvalues.iter().enumerate() {
-        let vk = eig_eigenvector_hessenberg(&h_hess, &q0, n, lambda);
+    let mut vks: Vec<Vec<(f64, f64)>> = vec![Vec::new(); n_ev];
+    let threads = if n >= 64 {
+        std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(1)
+            .min(n_ev.max(1))
+    } else {
+        1
+    };
+    if threads <= 1 {
+        for (col, &lambda) in eigenvalues.iter().enumerate() {
+            vks[col] = eig_eigenvector_hessenberg(&h_hess, &q0, n, lambda);
+        }
+    } else {
+        let per = n_ev.div_ceil(threads);
+        let h_ref = &h_hess;
+        let q_ref = &q0;
+        let ev_ref = &eigenvalues;
+        std::thread::scope(|scope| {
+            let mut rest: &mut [Vec<(f64, f64)>] = vks.as_mut_slice();
+            let mut start = 0usize;
+            while start < n_ev {
+                let cnt = per.min(n_ev - start);
+                let (chunk, tail) = rest.split_at_mut(cnt);
+                rest = tail;
+                let s = start;
+                start += cnt;
+                scope.spawn(move || {
+                    for (i, slot) in chunk.iter_mut().enumerate() {
+                        *slot = eig_eigenvector_hessenberg(h_ref, q_ref, n, ev_ref[s + i]);
+                    }
+                });
+            }
+        });
+    }
+    for (col, vk) in vks.iter().enumerate() {
         for row in 0..n {
             eigenvectors[row * n + col] = vk[row];
         }
@@ -8012,7 +8051,7 @@ mod tests {
             bst = bst.min(t.elapsed().as_secs_f64());
         }
         println!(
-            "fj-lax eig f64 [1024,1024]: {:.3}ms | JAX=5715ms",
+            "fj-lax eig f64 [1024,1024] (threaded eigvecs): {:.3}ms | JAX=5715ms",
             bst * 1e3
         );
     }
