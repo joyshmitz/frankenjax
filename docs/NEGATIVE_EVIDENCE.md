@@ -5364,3 +5364,13 @@ is the AoS (f64,f64) complex-multiply butterfly without SIMD/FMA (SoA+SIMD block
 — a small near-parity residual, NOT a contained lever. CONCLUSION: the real FFT gap (bead murmw) is the
 BATCHED/2D case (pocketfft SIMD-across-rows / SoA batching) + small/mixed-radix sizes, not the 1D pow2 kernel.
 Re-scope murmw to batched-FFT SoA-SIMD. (Verified: kernel read + measured this turn.)
+
+## 2026-06-26 - FFT batched/2D measured ~4.9x (the real FFT gap); 1D pow2 ~1.38x — full picture corrects 7-43x (SlateHarrier)
+
+`bench_fft_2d_batched_vs_jax` (complex [1024,1024] last-axis = 1024 batched 1024-FFTs): fj-lax **2.81ms vs JAX
+0.58 = ~4.9x SLOWER** (the batched SoA-tiled `vectorized_pow2_tiled` path). Combined with the 1D pow2 = 1.38x
+(near-parity), the full FFT picture: the ledger's "FFT 7-43x" is STALE/overstated — current is 1.38x (1D pow2)
+to ~4.9x (batched/2D). The 4.9x batched gap is pocketfft's explicit cross-row SIMD complex butterfly (fj-lax's
+tiled path relies on autovec, not portable_simd lanes across rows) + the no-+fma policy. LEVER (bead murmw,
+re-scoped): explicit portable_simd cross-row butterfly (f64x4 over 4 rows' lanes) in vectorized_pow2_tiled —
+moderate, fma-adjacent; est. closes ~4.9x toward ~2x. Both 1D + 2D benches added + measured this turn.

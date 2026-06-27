@@ -4489,6 +4489,46 @@ mod tests {
     }
 
     /// Same-binary A/B for the SoA real-FFT batch kernel (frankenjax-murmw): OLD =
+    // FFT 2-D batched (last-axis FFT over rows) vs JAX (measured JAX 1024x1024 axis1 = 0.58ms). Tests the
+    // batched/SoA-tiled path (vectorized_pow2_tiled) — the regime where pocketfft's SIMD-across-rows wins.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_fft_2d_batched_vs_jax() {
+        use std::time::Instant;
+        let (rows, n) = (1024usize, 1024usize);
+        let data: Vec<(f64, f64)> = (0..rows * n)
+            .map(|i| {
+                (
+                    ((i.wrapping_mul(2654435761) % 100003) as f64) * 1e-3,
+                    (i % 97) as f64,
+                )
+            })
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![rows as u32, n as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = std::collections::BTreeMap::new();
+        let f = || std::hint::black_box(eval_fft(std::slice::from_ref(&x), &p).unwrap());
+        let _ = f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let t = Instant::now();
+            f();
+            bst = bst.min(t.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax fft 2D [1024,1024] axis1(batched): {:.3}ms | JAX=0.58ms",
+            bst * 1e3
+        );
+    }
+
     // FFT 1-D pow2 vs JAX (measured JAX fft 1d 2^20 = 15.95ms). fj-lax = iterative radix-2 (bit-reverse +
     // precomputed per-stage twiddles); the gap is pocketfft's split-radix + SIMD on SoA storage.
     #[test]
