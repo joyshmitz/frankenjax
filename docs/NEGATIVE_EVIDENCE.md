@@ -6065,3 +6065,15 @@ transpose-write stays serial). eig [1024,1024]: **9008 -> 3820ms (best) = ~2.36x
 linalg WIN column. Updated linalg verdict: WINS = QR 30x, LU 12.9x, slogdet 7.3x, det 5.9x, solve 5.2x, EIG
 1.5x; near-parity = eigh 1.06x, svd 1.23x (their singular/eigen-vector accumulation may have the same serial-
 loop lever — a NEXT dig); LOSS = only cholesky 6.25x (FMA). Guard bench updated.
+
+## 2026-06-27 - complex eig eigenvector loop THREADED too — 1.27x WIN vs JAX (JAX complex-eig = 24.5s) (SlateHarrier)
+
+Applied the same eigenvector-loop threading to the COMPLEX eig path (complex_eig_qr had the identical serial
+loop calling complex_eig_eigenvector_hessenberg per eigenvalue on shared read-only H0/Q0). fj-lax complex-eig
+[1024,1024] (threaded) = **19264ms vs JAX jnp.linalg.eig(complex128) 24492ms = ~1.27x WIN** (JAX complex-eig is
+catastrophically slow, 24.5s). Bit-identical (eig 22/0, clippy-clean). Now BOTH eig paths win: real eig ~1.5x,
+complex eig ~1.27x. The eigenvector-phase threading lever (eig-style clean post-loop) is exhausted — svd is
+one-sided Jacobi (sequential cyclic sweeps, no clean post-loop; parallel-Jacobi = multi-session) and eigh's
+1.06x headroom is tiny + its accumulation is interleaved. FINAL linalg verdict: WINS = QR 30x, LU 12.9x, slogdet
+7.3x, det 5.9x, solve 5.2x, eig 1.5x, complex-eig 1.27x; PARITY = eigh 1.06x, svd 1.23x; LOSS = cholesky 6.25x
+(FMA only). Linalg is overwhelmingly a fj-lax STRENGTH.
