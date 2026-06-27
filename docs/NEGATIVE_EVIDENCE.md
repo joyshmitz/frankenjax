@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - DIG RESULT: special-fn "just thread it" hypothesis tested & DEAD (BlackThrush)
+
+Follow-up land-or-dig pass. No new landable worktree win (same candidates as my
+prior entry, all already on main). DIG targeted the biggest *available* gap —
+non-FFT (ProudSalmon-owned, actively no-shipping), non-FMA: special functions
+lgamma/digamma/i0e (2.0–2.5x JAX loss, SlateHarrier 2026-06-25). Hypothesis: these
+are the most compute-bound ops (≈15 divisions + 2 lns/element), so threading should
+flip the loss (cf. transcendentals 11x). TESTED by reading the dispatch — `eval_lgamma`,
+`eval_digamma`, `eval_bessel_i0e`/`i1e` ALL already route through
+`eval_unary_elementwise_parallel` (arithmetic.rs:10043+, 10955+): SlateHarrier's
+41.7/34.4/55.3ms 16M numbers are ALREADY multi-threaded across cores. So the residual
+2–2.5x is purely **per-core SIMD/FMA** (JAX vectorizes divisions+ln via SIMD-poly with
+FMA; fj-lax runs scalar per-element inside each thread). Threading lever = dead. The
+scalar rational-Horner reform stays ~0-gain too — the 15 partial-fraction divisions are
+*independent* so they already pipeline at vdivsd throughput, and the 2 scalar lns
+dominate (matches SlateHarrier's measured `lgamma_simd8` 0.84x regression); a single-
+division P/Q recast also risks the conditioning the partial-fraction form exists to
+avoid. Gap folds into `cntiy` (+fma). `lax_baseline.rs` loss-scan: only remaining
+documented loss is the gather row, already fixed (AMAC, 1.59x). No contained ship;
+docs-only, suite unchanged.
+
 ## 2026-06-27 - NO-SHIP: recursive mixed-radix largest-factor split regresses 128x1000 FFT (ProudSalmon)
 
 Land-or-dig pass after `0fe8f05a`: scratch-worktree audit found no measured
