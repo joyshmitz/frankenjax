@@ -2,6 +2,40 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - RADICAL LEVER (measured, maintainer land): a caching global allocator captures ~2-3x of the so4wo BW gap — NO eval-model rewrite (BlackThrush)
+
+The so4wo "output-buffer-reuse eval model" gate has been treated across this ledger as
+a multi-session architectural rewrite (every BW-bound op allocs a fresh output `Vec` per
+call + first-touch page-faults; JAX reuses buffers). MEASURED an alternative that needs
+ZERO eval-model surgery: a **caching global allocator** (mimalloc) retains large freed
+buffers instead of returning them to the OS, so the next same-size eval reuses
+already-faulted pages — exactly JAX's amortization, transparently.
+
+New per-crate bench `crates/fj-lax/benches/alloc_ceiling.rs` (real `eval_primitive(Neg)`
+on 16M f64, fresh output alloc per call = the production so4wo pattern; plus a
+reused-buffer reference = the compute/BW floor). Built both ways, RCH `frankenjax-cc`:
+
+| allocator | fresh-alloc Neg 16M | reused-buffer floor | fresh/floor | vs system fresh |
+|---|---:|---:|---:|---:|
+| system (glibc, run1/run2) | 21.04 / 25.26 ms | 7.36 / 7.48 ms | **2.86x / 3.38x** | baseline |
+| **mimalloc** (run1/run2) | **11.00 / 8.59 ms** | 7.71 / 7.18 ms | **1.42x / 1.20x** | **1.9x / 2.9x faster** |
+
+glibc `munmap`s the 128 MB output on free, re-faulting every call; mimalloc retains and
+reuses it. The reused-buffer floor is identical under both (it's pure compute+BW), so the
+delta is purely the alloc/fault penalty — and mimalloc removes most of it (2.86–3.38x →
+1.20–1.42x of floor). This generalizes to the WHOLE so4wo-floored class
+(reciprocal/add/mul/clip/maximum/bitcast — SlateHarrier's "eval-model-bound" ops).
+
+LAND IS A MAINTAINER CALL (not unilateral): fj-lax is a library; the global allocator is
+set by the production artifact — `fj-py` (Python cdylib) and/or `fj-ffi`. mimalloc inside
+a Python extension has packaging/ABI considerations, so the recommendation is: set
+`#[global_allocator] = MiMalloc` in `fj-py`/`fj-ffi` (or evaluate jemalloc), validated by
+`cargo bench -p fj-lax --features mimalloc-alloc --bench alloc_ceiling`. mimalloc is wired
+as an OPTIONAL fj-lax dep (`mimalloc-alloc` feature) used by the bench only — normal
+builds and `cargo check -p fj-lax` are unaffected (verified). This reframes the largest
+non-fma blocker from "rewrite the eval model" to "set a caching allocator", with the
+measured ceiling to justify it.
+
 ## 2026-06-27 - MEASURED (no lever): bitcast f64->u32 is already memcpy-speed; residual gap is eval-model (BlackThrush)
 
 Closes the open question in my prior BLOCKER entry — is the `bitcast f64<->u32` ~2.3x

@@ -5,6 +5,11 @@ edition = "2024"
 
 [dependencies]
 fj-core = { path = "../fj-core" }
+mimalloc = { version = "0.1", optional = true, default-features = false }
+
+[features]
+# Opt-in caching global allocator for the alloc_ceiling bench only (so4wo probe).
+mimalloc-alloc = ["dep:mimalloc"]
 
 [dev-dependencies]
 fj-test-utils = { path = "../fj-test-utils" }
@@ -65,4 +70,8 @@ harness = false
 
 [[bench]]
 name = "elementwise_gauntlet"
+harness = false
+
+[[bench]]
+name = "alloc_ceiling"
 harness = false
