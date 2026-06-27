@@ -5485,3 +5485,13 @@ bool indices keep the 2-pass (rarer).
 eval_binary_elementwise THREADS the closure path (max + exp + ln_1p per element) — the compute-bound
 transcendental fans across cores, slightly beating JAX. No lever. Confirms the binary-elementwise-transcendental
 surface (logaddexp/logaddexp2/hypot/atan2/nextafter/etc, all via eval_binary_elementwise) is done/competitive.
+
+## 2026-06-27 - scatter_add re-measured ~1.07x (near-parity, corrects stale 1.25x) (SlateHarrier)
+
+`bench_scatter_add_vs_jax` (f64 table 1M, 1M updates) re-run with current code: fj-lax **5.1ms vs JAX 4.78 =
+~1.07x = near-parity** (the early-session ledger said 1.25x; the range-partition path has tightened to
+near-parity). The random-write floor is reached — no contained lever (both fj-lax and JAX are scatter-cache-miss
+bound). Updates the stale datapoint. With this + logaddexp (1.11x win) + clamp (1.06x) + select_n (1.57x) all
+confirmed this session, the per-op kernel surface is comprehensively measured: every contained op is a win or
+near-parity; the only standing losses are the documented non-contained gaps (gather random-read floor, FFT
+batched FMA/split-radix, GEMM/conv +fma-policy, eval-model so4wo buffer-reuse).
