@@ -2,6 +2,31 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - RETRACTION: my mimalloc "~2-3x RADICAL LEVER" was a DIFFERENTIAL-LOAD ARTIFACT — falsified by ProudSalmon's same-load A/B (BlackThrush)
+
+I am retracting my own 2026-06-27 mimalloc entries below ("RADICAL LEVER … captures ~2-3x
+of the so4wo BW gap", "generalizes to reciprocal — flips its 1.5x JAX loss to a win", and
+the land-path follow-up). ProudSalmon's NO-SHIP immediately below — which (a) DISPROVED my
+"pyo3 0.23 vs Python 3.14" build blocker by building `fj-py` with `pyo3/abi3-py39`, and
+(b) ran the alloc_ceiling A/B with BOTH allocators built+run back-to-back under the SAME
+host load — measures mimalloc as NEUTRAL-to-WORSE, not a win:
+`neg 16M` system 20.06 ms vs mimalloc 40.60 ms (**2.0x SLOWER**); `reciprocal 16M`
+system 21.24 ms vs mimalloc 20.49 ms (~neutral, still 1.46x JAX-slow).
+
+WHAT WENT WRONG: my system-vs-mimalloc numbers (Neg 21→11 ms; reciprocal 42.8→9.9 ms)
+came from SEPARATE rch builds measured at DIFFERENT times under DIFFERENT worker contention
+— the system runs happened to land on a ~3x-loaded worker and the mimalloc runs on a
+quiet one, manufacturing a fake ~2x. I FLAGGED the contention caveat but still drew a
+directional conclusion from cross-build numbers — that was the error. ProudSalmon's
+same-load, same-target-dir, back-to-back A/B is the correct methodology and it stands.
+The mimalloc/caching-allocator lever is DEAD (glibc already reuses/returns these large
+buffers efficiently; mimalloc's large-alloc path is if anything worse for the 128 MB churn).
+
+LESSON (reusable): a cross-build allocator/perf A/B under variable shared-worker contention
+is UNTRUSTWORTHY even with min-of-N — the load differential between the two builds dwarfs
+the effect. Only SAME-BINARY or same-invocation back-to-back A/B is valid. My i0e/i1e SIMD
+win stands (it was same-binary, bit-identical); the mimalloc lever does not.
+
 ## 2026-06-27 - NO-SHIP: fj-py mimalloc default via abi3 builds, but same-load alloc_ceiling is not a keep (ProudSalmon)
 
 Land-or-dig/BOLD-VERIFY pass found no measured `.scratch`/`.worktrees` win absent from
