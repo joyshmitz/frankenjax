@@ -3744,9 +3744,10 @@ pub(crate) fn eval_gather(
                     out,
                 )?));
             }
-            // Threaded contiguous gather above the DRAM-bound gate (calloc'd output +
-            // parallel row memcpy); bit-identical, falls through to serial on OOB/small.
-            if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+            // Threaded contiguous gather: gather is LATENCY-bound (random row-misses), so threading wins via
+            // memory-level parallelism well below the DRAM-bound elementwise gate (the embedding-lookup case is
+            // often a few M elements). Parallel row memcpy; bit-identical, serial fallback on OOB/small.
+            if total >= (1 << 19) {
                 let mut out = vec![0.0f64; total];
                 if gather_contiguous_into(&mut out, src, &resolved, f64::NAN, slice_elems) {
                     return Ok(Value::Tensor(TensorValue::new_f64_values(
@@ -3773,7 +3774,7 @@ pub(crate) fn eval_gather(
                     out,
                 )?));
             }
-            if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+            if total >= (1 << 19) {
                 let mut out = vec![0.0f32; total];
                 if gather_contiguous_into(&mut out, src, &resolved, f32::NAN, slice_elems) {
                     return Ok(Value::Tensor(TensorValue::new_f32_values(
@@ -3795,8 +3796,8 @@ pub(crate) fn eval_gather(
                     out,
                 )?));
             }
-            // i64 index/id gather at scale: threaded contiguous copy above the gate.
-            if total >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+            // i64 index/id gather at scale: threaded contiguous copy above the latency-bound gate.
+            if total >= (1 << 19) {
                 let mut out = vec![0i64; total];
                 if gather_contiguous_into(&mut out, src, &resolved, i64::MIN, slice_elems) {
                     return Ok(Value::Tensor(TensorValue::new_i64_values(
@@ -16617,6 +16618,54 @@ mod tests {
         println!(
             "fj-lax split (materialized) f64 [4096,4096] into 4 axis1: {:.3}ms | JAX=22.9ms",
             b * 1e3
+        );
+    }
+
+    // take/row-gather (embedding lookup) vs JAX (measured JAX f64 [50000,256] idx[16384] axis0 = 3.77ms).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_take_gather_vs_jax() {
+        use std::time::Instant;
+        let (vocab, d, n) = (50000usize, 256usize, 16384usize);
+        let table: Vec<f64> = (0..vocab * d).map(|i| i as f64 * 1e-4).collect();
+        let operand = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![vocab as u32, d as u32],
+                },
+                table,
+            )
+            .unwrap(),
+        );
+        let idx: Vec<i64> = (0..n)
+            .map(|i| (i.wrapping_mul(2654435761) % vocab) as i64)
+            .collect();
+        let indices = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                idx,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("slice_sizes".to_owned(), format!("1,{d}"))]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Gather, &[operand.clone(), indices.clone()], &p)
+                    .unwrap(),
+            );
+        };
+        f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            bst = bst.min(s.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax take f64 [50000,256] idx[16384] axis0: {:.3}ms | JAX=3.77ms",
+            bst * 1e3
         );
     }
 

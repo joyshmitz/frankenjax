@@ -5495,3 +5495,18 @@ bound). Updates the stale datapoint. With this + logaddexp (1.11x win) + clamp (
 confirmed this session, the per-op kernel surface is comprehensively measured: every contained op is a win or
 near-parity; the only standing losses are the documented non-contained gaps (gather random-read floor, FFT
 batched FMA/split-radix, GEMM/conv +fma-policy, eval-model so4wo buffer-reuse).
+
+## 2026-06-27 - row-gather (take/embedding) threading gate LOWERED — 23.6→9.4ms, 6.3x→~2.5x vs JAX (SlateHarrier)
+
+NEW MEASUREMENT of the production row-gather (bench_take_gather_vs_jax, f64 [50000,256] idx[16384] axis0 =
+embedding lookup): fj-lax was **23.6ms vs JAX 3.77 = 6.3x** — and it was running SERIAL because the threaded
+gather_contiguous_into was gated at total>=1<<23 (8.4M, the DRAM-BW gate), but this case is 4.19M. KEY INSIGHT:
+the row-gather is LATENCY-bound (random row-start misses), NOT bandwidth-bound — so threading wins via
+memory-level parallelism (multiple outstanding misses) far below the BW gate. Lowered the f64/f32/i64 gather
+gate to 1<<19 (512K): **23.6 -> 9.4ms (best) = ~2.5x internal**, narrowing to **~2.5x vs JAX 3.77**.
+Bit-identical (gather 23/0; gather_contiguous_into copies the same rows as the serial path). This CORRECTS the
+stale "gather threading memory-bound REGRESS" note — that was ELEMENT-gather; the ROW-gather (2KB contiguous
+rows) threads cleanly. Residual ~2.5x is the random-row cache-miss floor (JAX's gather is equally miss-bound but
+faster per-miss). NOTE: this run's rch nightly drifted and now flags `chunks_exact`-constant-size (32x) in
+arithmetic.rs/reduction.rs — PRE-EXISTING code (those files were committed clippy-clean earlier today);
+tensor_ops.rs (this change) is clippy-clean.
