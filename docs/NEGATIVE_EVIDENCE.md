@@ -2,6 +2,58 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - KEEP: all-known staged execution fast-return (ProudSalmon)
+
+Land-or-dig pass found an unlanded measured bench-worktree commit,
+`1579ae96` (`perf(fj-interpreters): fast-return all-known staged results`),
+with a small but real `fj-interpreters` win not present on current `main`. The
+landed lever returns `staged.known_outputs` directly when a staged program has
+zero unknown outputs and an empty unknown jaxpr, preserving the existing
+`OutputReconstruction` guard for inconsistent output counts and leaving mixed
+known/unknown execution on the generic path.
+
+Original worktree evidence on RCH `vmi1149989` measured
+`staging/full_pipeline/chain_100eq` **954.84 ns -> 822.22 ns** (1.161x
+midpoint). Fresh rebased proof measured the current `main` control and candidate
+with the same package, target dir, host fallback, release profile, sample count,
+and benchmark row.
+
+Bench command note: this Cargo rejects the requested spelling
+`cargo bench --release` with `error: unexpected argument '--release' found`, so
+the valid crate-scoped optimized equivalent was used through `rch exec`:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME rch exec
+-- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a
+AGENT_NAME=ProudSalmon cargo bench -p fj-interpreters --profile release --bench
+pe_baseline -- 'staging/full_pipeline/chain_100eq' --sample-size 30
+--measurement-time 2 --noplot`. RCH had no admissible worker for the accepted
+before/after bench and fell open locally; both accepted rows used the same
+command shape and target dir.
+
+| workload | main midpoint | candidate midpoint | Rust delta | JAX mean | main/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `staging/full_pipeline/chain_100eq` | 1.4253 us | 1.1022 us | -22.7% / 1.293x faster | 5.6632 us | 0.252x ratio, 3.97x Rust win | 0.195x ratio, 5.14x Rust win | KEEP |
+
+Fresh JAX comparator used
+`/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`,
+JAX/JAXLIB 0.10.1 CPU x64, warmed zero-arg `jax.jit` chain of 100 scalar i64
+adds as the nearest API-level analog for an all-known staged chain. JAX measured
+best **4.0810 us**, p50 **6.0076 us**, mean **5.6632 us**, p95 **6.6759 us**
+over 40 samples of 1000 hot calls.
+
+Validation: `cargo test -p fj-interpreters --profile release staging --lib --
+--nocapture` passed 24 focused staging tests; `cargo test -p fj-conformance
+--profile release -- --nocapture` passed after RCH remote sync to `ovh-a`
+failed over to local execution; `cargo check -p fj-interpreters --profile
+release --all-targets` passed; `cargo clippy -p fj-interpreters --profile
+release --all-targets -- -D warnings -A unknown-lints -A
+clippy::chunks_exact_to_as_chunks` passed. Formatting, `git diff --check`, and
+UBS were run on the final touched-file set; `rustfmt --edition 2024 --check`
+and `git diff --check` passed, while UBS remained nonzero from pre-existing
+file-wide `staging.rs` findings (test-only unwrap/assert/direct-index
+inventory plus a false-positive `Instant::now` security heuristic). UBS's
+embedded format, clippy, cargo check, test-build, audit, and deny sections were
+clean.
+
 ## 2026-06-27 - KEEP: direct f32 scan add-emit path flips JAX gap (ProudSalmon)
 
 Land-or-dig pass found an unlanded measured bench-worktree commit,

@@ -262,6 +262,19 @@ pub fn execute_staged(
     let expected_unknown = staged.out_unknowns.iter().filter(|u| **u).count();
     let expected_known = staged.out_unknowns.len().saturating_sub(expected_unknown);
 
+    if expected_unknown == 0 && staged.jaxpr_unknown.outvars.is_empty() {
+        if staged.known_outputs.len() == expected_known {
+            return Ok(staged.known_outputs.clone());
+        }
+
+        return Err(StagingError::OutputReconstruction {
+            expected_known,
+            actual_known: staged.known_outputs.len(),
+            expected_unknown,
+            actual_unknown: 0,
+        });
+    }
+
     if let Some(result) =
         try_execute_single_unknown_equation(staged, dynamic_args, expected_known, expected_unknown)
     {
