@@ -5290,3 +5290,13 @@ transpose) structure as the landed f64 path (measured 55ms vs JAX 1974 = ~36x); 
 f32 radix recursion. Bit-identical: parity guard sort_3d_mid_axis_matches_reference (f64 AND f32, 3D [130,1024,4]
 threaded, vs per-(b,d) column-sorted reference) — sort suite 33/0, clippy clean. argsort (return_indices) +
 i64/other dtypes + leading axis still use the full-transpose path (bead).
+
+## 2026-06-26 - argsort MIDDLE-axis (f64/f32) per-block — ~75x WIN vs JAX (SlateHarrier)
+
+Extended the middle-axis sort fast path to ARGSORT (return_indices) via a generalized sort_mid! macro
+(separate block-input ctor / i64 output ctor / return_indices flag). argsort along a seq/middle axis (rank/
+top-k) was on the slow full-transpose. JAX argsort 3D [256,1024,64] axis1 = **4116ms** (4s! XLA-CPU full
+per-seq argsort); fj-lax per-block = **54.8ms = ~75x WIN**. f64+f32 input -> i64 indices. Bit-identical: parity
+guard argsort_3d_mid_axis_matches_reference (f64+f32, distinct per-column values, vs stable per-column argsort
+ref) + sort suite 34/0, clippy clean. The middle-axis decomposition class is now COMPLETE for f64/f32 across
+sort + argsort + cumsum + arg-reduce; only i64 keys and leading-axis tails remain (bead, niche).

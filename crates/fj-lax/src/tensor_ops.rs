@@ -10657,7 +10657,7 @@ fn sort_along_axis(
     // cache-hostile (~0.9 GB/s on a 3-D axis swap). A middle axis is `before` contiguous [m, inner]
     // sub-blocks; sort each along axis 0 (the recursion's per-block transpose is L2-resident), threaded over
     // sub-blocks. Bit-identical (exact sort, exact data movement). argsort/other dtypes keep the full path.
-    if rank >= 2 && axis > 0 && axis != rank - 1 && !return_indices {
+    if rank >= 2 && axis > 0 && axis != rank - 1 {
         let m = tensor.shape.dims[axis] as usize;
         let inner: usize = tensor.shape.dims[axis + 1..]
             .iter()
@@ -10675,19 +10675,21 @@ fn sort_along_axis(
             let block_shape = Shape {
                 dims: vec![m as u32, inner as u32],
             };
-            macro_rules! value_sort_mid {
-                ($src:expr, $zero:expr, $ctor:expr, $extract:ident) => {{
+            // value-sort: out dtype == in dtype, $ret_idx=false. argsort: out i64 (indices), $ret_idx=true.
+            macro_rules! sort_mid {
+                ($src:expr, $block_ctor:expr, $out_zero:expr, $out_ctor:expr, $extract:ident, $ret_idx:expr) => {{
                     let src = $src;
-                    let mut out = vec![$zero; src.len()];
+                    let mut out = vec![$out_zero; src.len()];
                     let threads = (src.len() / (1 << 18)).clamp(1, cores).min(before);
                     let per = before.div_ceil(threads.max(1));
                     let sort_blocks =
                         |b0: usize, b1: usize, dst: &mut [_]| -> Result<(), EvalError> {
                             for b in b0..b1 {
                                 let s = b * blk;
-                                let bt = $ctor(block_shape.clone(), src[s..s + blk].to_vec())
+                                let bt = $block_ctor(block_shape.clone(), src[s..s + blk].to_vec())
                                     .map_err(EvalError::InvalidTensor)?;
-                                let sorted = sort_along_axis(primitive, &bt, 0, descending, false)?;
+                                let sorted =
+                                    sort_along_axis(primitive, &bt, 0, descending, $ret_idx)?;
                                 let sv = match &sorted {
                                     Value::Tensor(t) => t.elements.$extract().ok_or_else(|| {
                                         EvalError::Unsupported {
@@ -10731,19 +10733,61 @@ fn sort_along_axis(
                         }
                     }
                     return Ok(Value::Tensor(
-                        $ctor(tensor.shape.clone(), out).map_err(EvalError::InvalidTensor)?,
+                        $out_ctor(tensor.shape.clone(), out).map_err(EvalError::InvalidTensor)?,
                     ));
                 }};
             }
-            if tensor.dtype == DType::F64
+            if !return_indices
+                && tensor.dtype == DType::F64
                 && let Some(s) = tensor.elements.as_f64_slice()
             {
-                value_sort_mid!(s, 0.0f64, TensorValue::new_f64_values, as_f64_slice);
+                sort_mid!(
+                    s,
+                    TensorValue::new_f64_values,
+                    0.0f64,
+                    TensorValue::new_f64_values,
+                    as_f64_slice,
+                    false
+                );
             }
-            if tensor.dtype == DType::F32
+            if !return_indices
+                && tensor.dtype == DType::F32
                 && let Some(s) = tensor.elements.as_f32_slice()
             {
-                value_sort_mid!(s, 0.0f32, TensorValue::new_f32_values, as_f32_slice);
+                sort_mid!(
+                    s,
+                    TensorValue::new_f32_values,
+                    0.0f32,
+                    TensorValue::new_f32_values,
+                    as_f32_slice,
+                    false
+                );
+            }
+            if return_indices
+                && tensor.dtype == DType::F64
+                && let Some(s) = tensor.elements.as_f64_slice()
+            {
+                sort_mid!(
+                    s,
+                    TensorValue::new_f64_values,
+                    0i64,
+                    TensorValue::new_i64_values,
+                    as_i64_slice,
+                    true
+                );
+            }
+            if return_indices
+                && tensor.dtype == DType::F32
+                && let Some(s) = tensor.elements.as_f32_slice()
+            {
+                sort_mid!(
+                    s,
+                    TensorValue::new_f32_values,
+                    0i64,
+                    TensorValue::new_i64_values,
+                    as_i64_slice,
+                    true
+                );
             }
         }
     }
@@ -16776,6 +16820,57 @@ mod tests {
         }
     }
 
+    // Parity guard for the f64/f32 STRICT-MIDDLE ARGSORT fast path: per-(b,d) distinct values (a bijection
+    // shifted per column) so argsort is unambiguous; must equal the stable per-column argsort reference.
+    #[test]
+    fn argsort_3d_mid_axis_matches_reference() {
+        let (b, s, d) = (130usize, 1024usize, 4usize);
+        let n = b * s * d;
+        let val = |bi: usize, si: usize, di: usize| -> f64 {
+            ((si * 1009 + bi * 131 + di * 7) % 1024) as f64
+        };
+        let data64: Vec<f64> = (0..n)
+            .map(|g| {
+                let bi = g / (s * d);
+                let si = (g / d) % s;
+                let di = g % d;
+                val(bi, si, di)
+            })
+            .collect();
+        for f32mode in [false, true] {
+            let shape = Shape {
+                dims: vec![b as u32, s as u32, d as u32],
+            };
+            let x = if f32mode {
+                Value::Tensor(
+                    TensorValue::new_f32_values(shape, data64.iter().map(|&v| v as f32).collect())
+                        .unwrap(),
+                )
+            } else {
+                Value::Tensor(TensorValue::new_f64_values(shape, data64.clone()).unwrap())
+            };
+            let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+            let out =
+                crate::eval_primitive(Primitive::Argsort, std::slice::from_ref(&x), &p).unwrap();
+            let got = out.as_tensor().unwrap().elements.as_i64_slice().unwrap();
+            for bi in 0..b {
+                for di in 0..d {
+                    let mut idx: Vec<usize> = (0..s).collect();
+                    idx.sort_by(|&a, &c| {
+                        val(bi, a, di)
+                            .partial_cmp(&val(bi, c, di))
+                            .unwrap()
+                            .then(a.cmp(&c))
+                    });
+                    for (si, &want) in idx.iter().enumerate() {
+                        let g = bi * s * d + si * d + di;
+                        assert_eq!(got[g], want as i64, "f32={f32mode} b={bi} d={di} s={si}");
+                    }
+                }
+            }
+        }
+    }
+
     // sort 3D middle axis vs JAX (measured JAX f64 [256,1024,64] axis1 = 1974ms).
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
@@ -16806,6 +16901,43 @@ mod tests {
         }
         println!(
             "fj-lax sort 3D [256,1024,64] axis1(mid): {:.3}ms | JAX=1974ms",
+            bst * 1e3
+        );
+    }
+
+    // argsort 3D middle axis vs JAX (measured JAX f64 [256,1024,64] axis1 below).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_argsort3d_mid_vs_jax() {
+        use std::time::Instant;
+        let (b, s, d) = (256usize, 1024usize, 64usize);
+        let data: Vec<f64> = (0..b * s * d)
+            .map(|i| (i.wrapping_mul(2654435761) % 1_000_003) as f64)
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![b as u32, s as u32, d as u32],
+                },
+                data,
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::from([("axis".to_owned(), "1".to_owned())]);
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Argsort, std::slice::from_ref(&x), &p).unwrap(),
+            );
+        };
+        f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let t = Instant::now();
+            f();
+            bst = bst.min(t.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax argsort 3D [256,1024,64] axis1(mid): {:.3}ms | JAX=~2000ms",
             bst * 1e3
         );
     }
