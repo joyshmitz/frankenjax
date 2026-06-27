@@ -36,6 +36,21 @@ builds and `cargo check -p fj-lax` are unaffected (verified). This reframes the 
 non-fma blocker from "rewrite the eval model" to "set a caching allocator", with the
 measured ceiling to justify it.
 
+LAND PATH + VERIFIED BLOCKER (follow-up, BlackThrush): confirmed the land is genuinely
+NOT in-repo-verifiable from RCH, so it must be the maintainer's external build:
+(a) `fj-py` (the production cdylib) FAILS to build via RCH — `pyo3 0.23` caps at Python
+3.13 but the RCH worker ships Python 3.14 (`error: the configured Python interpreter
+version (3.14) is newer than PyO3's maximum supported version (3.13)`); so the allocator
+can't be wired + verified there without a `pyo3 >= 0.24` bump (or `abi3-py39` + pinned
+`PYO3_PYTHON`). (b) `fj-ffi` is an `rlib` (no `crate-type`), not a final cdylib/staticlib,
+so a `#[global_allocator]` there would be a duplicate-lang-item hazard, not a clean land.
+RECIPE for the maintainer once the cdylib builds: add `mimalloc = "0.1"` to `fj-py`, put
+`#[global_allocator] static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;` at the top of
+`fj-py/src/lib.rs` (scoped to the extension's Rust allocations — does NOT touch CPython's
+allocator), then re-run `cargo bench -p fj-lax --features mimalloc-alloc --bench
+alloc_ceiling` to confirm the ~2-3x. The fj-lax-side evidence + bench are already landed;
+only the one-line allocator wiring in the (currently unbuildable-via-RCH) cdylib remains.
+
 ## 2026-06-27 - MEASURED (no lever): bitcast f64->u32 is already memcpy-speed; residual gap is eval-model (BlackThrush)
 
 Closes the open question in my prior BLOCKER entry — is the `bitcast f64<->u32` ~2.3x
