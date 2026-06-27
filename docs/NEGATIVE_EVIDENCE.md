@@ -5770,3 +5770,15 @@ tables controller-floored — f64 inherently, i32 via the storage quirk).
 NOTE: the rch nightly drifted further this run — `chunks_exact`-const-size now flags pre-existing code in
 arithmetic.rs/reduction.rs/tensor_ops.rs (lines 568-12508, all committed clean earlier today). Not this change
 (the i32 bench is at ~16726, clippy-clean). Known unreliable-rch-clippy flake; CI's pinned nightly unaffected.
+
+## 2026-06-27 - chunks_exact clippy "RED" is rch-worker-nightly noise, NOT a real blocker — do not chase (SlateHarrier)
+
+The `chunks_exact`-const-size lint (suggests as_chunks::<N>()) that appeared mid-session flagging arithmetic/
+reduction/tensor_ops is rch-WORKER-INCONSISTENT: `cargo clippy -- -D warnings` on one worker reported 32 errors,
+but plain `cargo clippy` (different worker/nightly) reported NONE for it. The toolchain is unpinned (rust-
+toolchain.toml channel="nightly"), so workers drift. This is the documented unreliable-rch-clippy flake — NOT a
+consistent/CI blocker. DECISION: do NOT refactor the ~12 bit-exact SIMD chunks_exact sites to as_chunks chasing
+worker noise (high regression risk in golden/bit-exact paths, files not owned, repo-wide policy call). If the
+lint ever becomes consistent, the clean fix is a single crate-level #![allow] or a toolchain pin — a maintainer
+decision, not a perf-agent unilateral change. All my session commits are bit-identical (gather 23/0) and my own
+files are clippy-clean on the canonical toolchain.
