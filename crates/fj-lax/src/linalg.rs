@@ -7770,6 +7770,47 @@ mod tests {
         }
     }
 
+    // Cholesky at LAPACK-scale (n=2048) vs JAX (measured JAX dpotrf f64 [2048,2048] = 31.85ms, min-of-8).
+    // The heavy-compute linalg family vs JAX's LAPACK — fj-lax = blocked GEMM-routed Rust.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cholesky_2048_vs_jax() {
+        use std::collections::BTreeMap;
+        use std::time::Instant;
+        let n = 2048usize;
+        let a: Vec<f64> = (0..n * n)
+            .map(|i| (i as f64 * 0.123).sin() + (i as f64 * 0.0457).cos())
+            .collect();
+        let mut spd = vec![0.0f64; n * n];
+        for r in 0..n {
+            for c in 0..n {
+                spd[r * n + c] = a[r * n + c] + a[c * n + r];
+            }
+        }
+        for d in 0..n {
+            spd[d * n + d] += 4.0 * n as f64;
+        }
+        let spdm = make_matrix(n, n, &spd);
+        let p = BTreeMap::new();
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::Cholesky, std::slice::from_ref(&spdm), &p)
+                    .unwrap(),
+            );
+        };
+        let _ = f();
+        let mut bst = f64::MAX;
+        for _ in 0..4 {
+            let t = Instant::now();
+            f();
+            bst = bst.min(t.elapsed().as_secs_f64());
+        }
+        println!(
+            "fj-lax cholesky f64 [2048,2048]: {:.3}ms | JAX=31.85ms",
+            bst * 1e3
+        );
+    }
+
     /// Same-binary A/B for the apply_householder_left cache-layout fix (ur4h3): the OLD
     /// column-strided left-apply vs the NEW row-contiguous one, inside a full 512×512
     /// Hessenberg reduction. Asserts H and Q are bit-identical. Run `--ignored --nocapture`.

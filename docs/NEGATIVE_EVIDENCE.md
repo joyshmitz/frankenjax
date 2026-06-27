@@ -5962,3 +5962,16 @@ the 8.5x rfft gap is a deeper kernel inefficiency (the AoS<->SoA pack/recombine 
 amortization vs pocketfft's native real symmetry) needing profiling + a native real-FFT — multi-session. This
 rules out the loop-order dead-end for a future effort. Every FFT variant remains non-contained (FMA-policy /
 split-radix bit-lock / cache-blocked mixed-radix / native real-FFT).
+
+## 2026-06-27 - cholesky (heavy-compute linalg) ~6.25x vs JAX/LAPACK — FMA + GEMM-tuning bound (non-contained) (SlateHarrier)
+
+`bench_cholesky_2048_vs_jax`: fj-lax [2048,2048] = 199ms vs JAX dpotrf 31.85 = **~6.25x**. NOT a parallelism gap:
+both the trailing SYRK update (cholesky_schur_update_lower, CHOLESKY_SCHUR_PARALLEL_MIN_OPS gate + thread::scope)
+AND matmul_2d (matmul_2d_thread_count, row-block threads) are already threaded. The gap is (a) the no-+fma build
+policy (~2x on the inner GEMM/SYRK FMAs, deliberately avoided — see fma-lever-policy-blocked) + (b) MKL's
+superior microkernel/KC-pack cache-blocking (the OPEN 9zwwb GEMM lever, multi-session). Both NON-contained for a
+single turn. This completes the HEAVY-COMPUTE picture: matmul, conv, linalg (cholesky/LU/QR/SVD/solve), and FFT
+are ALL FMA-policy + GEMM-tuning bound — the single +fma maintainer decision is the unifying ~2x lever across
+every one, and the deeper KC-blocked microkernel (9zwwb) the rest. The contained (per-op threading/vectorization/
+algorithm) perf surface is exhausted; the remaining frankenjax gaps are this heavy-compute FMA/tuning class plus
+the FFT kernel family — all multi-session or policy. Permanent guard bench landed.
