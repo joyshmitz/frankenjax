@@ -523,6 +523,11 @@ fn evaluate_scan_sub_jaxprs(
     {
         return result;
     }
+    if let Some(result) =
+        try_eval_scan_f32_add_emit(equation, body_jaxpr, carry_inputs, xs, scan_len, reverse)
+    {
+        return result;
+    }
 
     let mut carry = carry_inputs.to_vec();
     let init_shapes: Vec<Shape> = carry.iter().map(value_shape).collect();
@@ -714,6 +719,129 @@ fn is_i64_add_emit_scan_body(jaxpr: &Jaxpr) -> bool {
         && emit_eqn.sub_jaxprs.is_empty()
         && emit_eqn.outputs.as_slice() == [y_out]
         && emit_eqn.inputs.as_slice() == [Atom::Var(carry_out), Atom::Lit(Literal::I64(0))]
+}
+
+fn try_eval_scan_f32_add_emit(
+    equation: &Equation,
+    body_jaxpr: &Jaxpr,
+    carry_inputs: &[Value],
+    xs: &Value,
+    scan_len: usize,
+    reverse: bool,
+) -> Option<Result<Vec<Value>, InterpreterError>> {
+    let y_bias = f32_add_emit_scan_body_bias(body_jaxpr)?;
+    if !scan_equation_params_are_i64_add_emit_safe(equation, reverse)
+        || !equation.effects.is_empty()
+        || carry_inputs.len() != 1
+    {
+        return None;
+    }
+    let Value::Tensor(carry_tensor) = carry_inputs.first()? else {
+        return None;
+    };
+    if carry_tensor.dtype != DType::F32 {
+        return None;
+    }
+    let carry_values = carry_tensor.elements.as_f32_slice()?;
+    let Value::Tensor(xs_tensor) = xs else {
+        return None;
+    };
+    if xs_tensor.dtype != DType::F32
+        || xs_tensor.rank() != carry_tensor.rank() + 1
+        || xs_tensor.shape.dims.first().copied()? as usize != scan_len
+        || xs_tensor.shape.dims[1..] != carry_tensor.shape.dims
+    {
+        return None;
+    }
+    let xs_values = xs_tensor.elements.as_f32_slice()?;
+    let row_len = carry_values.len();
+    if xs_values.len() != scan_len.checked_mul(row_len)? {
+        return None;
+    }
+
+    let mut carry = carry_values.to_vec();
+    let mut ys = vec![0.0_f32; xs_values.len()];
+    if reverse {
+        for scan_idx in (0..scan_len).rev() {
+            scan_f32_add_emit_row(&mut carry, xs_values, &mut ys, scan_idx, row_len, y_bias);
+        }
+    } else {
+        for scan_idx in 0..scan_len {
+            scan_f32_add_emit_row(&mut carry, xs_values, &mut ys, scan_idx, row_len, y_bias);
+        }
+    }
+
+    Some(
+        TensorValue::new_f32_values(carry_tensor.shape.clone(), carry)
+            .and_then(|carry_tensor| {
+                TensorValue::new_f32_values(xs_tensor.shape.clone(), ys)
+                    .map(|ys_tensor| (carry_tensor, ys_tensor))
+            })
+            .map(|(carry_tensor, ys_tensor)| {
+                vec![Value::Tensor(carry_tensor), Value::Tensor(ys_tensor)]
+            })
+            .map_err(|error| InterpreterError::Primitive(EvalError::InvalidTensor(error))),
+    )
+}
+
+fn scan_f32_add_emit_row(
+    carry: &mut [f32],
+    xs_values: &[f32],
+    ys: &mut [f32],
+    scan_idx: usize,
+    row_len: usize,
+    y_bias: f32,
+) {
+    let row_offset = scan_idx * row_len;
+    for lane in 0..row_len {
+        let next = apply_scalar_f32_binary(
+            ScalarF64BinaryOp::Add,
+            carry[lane],
+            xs_values[row_offset + lane],
+        );
+        carry[lane] = next;
+        ys[row_offset + lane] = apply_scalar_f32_binary(ScalarF64BinaryOp::Add, next, y_bias);
+    }
+}
+
+fn f32_add_emit_scan_body_bias(jaxpr: &Jaxpr) -> Option<f32> {
+    if !jaxpr.constvars.is_empty()
+        || !jaxpr.effects.is_empty()
+        || jaxpr.invars.len() != 2
+        || jaxpr.outvars.len() != 2
+        || jaxpr.equations.len() != 2
+    {
+        return None;
+    }
+
+    let carry_var = jaxpr.invars[0];
+    let x_var = jaxpr.invars[1];
+    let carry_out = jaxpr.outvars[0];
+    let y_out = jaxpr.outvars[1];
+    let carry_eqn = &jaxpr.equations[0];
+    if carry_eqn.primitive != Primitive::Add
+        || !carry_eqn.params.is_empty()
+        || !carry_eqn.effects.is_empty()
+        || !carry_eqn.sub_jaxprs.is_empty()
+        || carry_eqn.outputs.as_slice() != [carry_out]
+        || carry_eqn.inputs.as_slice() != [Atom::Var(carry_var), Atom::Var(x_var)]
+    {
+        return None;
+    }
+
+    let emit_eqn = &jaxpr.equations[1];
+    if emit_eqn.primitive != Primitive::Add
+        || !emit_eqn.params.is_empty()
+        || !emit_eqn.effects.is_empty()
+        || !emit_eqn.sub_jaxprs.is_empty()
+        || emit_eqn.outputs.as_slice() != [y_out]
+    {
+        return None;
+    }
+    let [Atom::Var(var), Atom::Lit(Literal::F32Bits(bits))] = emit_eqn.inputs.as_slice() else {
+        return None;
+    };
+    (*var == carry_out).then_some(f32::from_bits(*bits))
 }
 
 struct ScanIterationContext<'a> {
@@ -12230,6 +12358,53 @@ mod tests {
         )
     }
 
+    fn make_scan_body_f32_add_emit_carry_jaxpr() -> Jaxpr {
+        Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3), VarId(4)],
+            vec![
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                    outputs: smallvec![VarId(3)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+                Equation {
+                    primitive: Primitive::Add,
+                    inputs: smallvec![Atom::Var(VarId(3)), Atom::Lit(Literal::from_f32(0.0))],
+                    outputs: smallvec![VarId(4)],
+                    params: BTreeMap::new(),
+                    sub_jaxprs: vec![],
+                    effects: vec![],
+                },
+            ],
+        )
+    }
+
+    fn make_scan_f32_add_emit_control_flow_jaxpr(reverse: bool) -> Jaxpr {
+        let params = if reverse {
+            BTreeMap::from([("reverse".to_owned(), "true".to_owned())])
+        } else {
+            BTreeMap::new()
+        };
+        Jaxpr::new(
+            vec![VarId(1), VarId(2)],
+            vec![],
+            vec![VarId(3), VarId(4)],
+            vec![Equation {
+                primitive: Primitive::Scan,
+                inputs: smallvec![Atom::Var(VarId(1)), Atom::Var(VarId(2))],
+                outputs: smallvec![VarId(3), VarId(4)],
+                params,
+                sub_jaxprs: vec![make_scan_body_f32_add_emit_carry_jaxpr()],
+                effects: vec![],
+            }],
+        )
+    }
+
     fn make_scan_multi_carry_body_jaxpr() -> Jaxpr {
         Jaxpr::new(
             vec![VarId(1), VarId(2), VarId(3)],
@@ -18034,6 +18209,53 @@ mod tests {
         assert_eq!(
             outputs[2],
             Value::vector_i64(&[2, 5, 12]).expect("ys vector should build")
+        );
+    }
+
+    #[test]
+    fn eval_scan_f32_add_emit_fast_path_matches_generic_and_golden() {
+        let carry = f32_tensor_values(
+            vec![4],
+            vec![-0.0, 0.0, f32::from_bits(0x7fc0_1234), f32::NEG_INFINITY],
+        );
+        let xs = f32_tensor_values(
+            vec![3, 4],
+            vec![
+                0.0,
+                -0.0,
+                1.25,
+                f32::INFINITY,
+                -3.0,
+                2.0,
+                f32::NAN,
+                -1.0,
+                7.5,
+                -9.0,
+                0.0,
+                f32::INFINITY,
+            ],
+        );
+        let mut golden_rows = Vec::new();
+        for reverse in [false, true] {
+            let fast = make_scan_f32_add_emit_control_flow_jaxpr(reverse);
+            let mut generic = fast.clone();
+            generic.equations[0].sub_jaxprs[0].equations[1]
+                .params
+                .insert("force_generic".to_owned(), "1".to_owned());
+            let inputs = [carry.clone(), xs.clone()];
+
+            let fast_outputs = eval_jaxpr(&fast, &inputs).expect("fast f32 scan");
+            let generic_outputs = eval_jaxpr(&generic, &inputs).expect("generic f32 scan");
+            assert_eq!(fast_outputs, generic_outputs, "reverse={reverse}");
+            golden_rows.push(fast_outputs);
+        }
+
+        let digest = fj_test_utils::fixture_id_from_json(&("frankenjax-0x3pu", &golden_rows))
+            .expect("golden digest");
+        eprintln!("f32 scan add-emit golden digest: {digest}");
+        assert_eq!(
+            digest,
+            "62c35b04956901a98a2391c073a95a867e0655327dcb5f8063d1fe9a93c7887c"
         );
     }
 

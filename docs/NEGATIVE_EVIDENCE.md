@@ -2,6 +2,61 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - KEEP: direct f32 scan add-emit path flips JAX gap (ProudSalmon)
+
+Land-or-dig pass found an unlanded measured bench-worktree commit,
+`00bf53db` (`perf(fj-interpreters): direct f32 scan add-emit path`), with a
+guarded `fj-interpreters` win that was not present on current `main`. The
+landed lever recognizes the exact pure f32 scan body
+`carry_next = carry + xs_i; y_i = carry_next + 0.0f32`, requires one dense f32
+tensor carry plus dense f32 `xs` with a matching leading scan axis, rejects
+effects/constvars/sub-jaxpr surprises/body params, and otherwise falls through
+to the existing generic scan interpreter.
+
+The original worktree evidence on RCH `vmi1152480` measured
+`eval/scan_sub_jaxpr_f32_vector_add_emit_128x64` **685.18 us -> 5.2171 us**
+(131.33x midpoint). Current `main` had since improved the generic scan path, so
+this entry records fresh rebased proof. Because the benchmark row itself was
+only present in the worktree, the current-main baseline was measured with a
+bench-only harness first, then the runtime fast path was applied and measured
+with the same row.
+
+Bench command note: this Cargo rejects `cargo bench --release`, so the valid
+crate-scoped optimized equivalent was used through `rch exec`:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME rch exec
+-- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a
+AGENT_NAME=ProudSalmon cargo bench -p fj-interpreters --profile release --bench
+pe_baseline -- scan_sub_jaxpr_f32_vector_add_emit_128x64 --quick --noplot`.
+RCH had no admissible worker for the accepted before/after comparison and fell
+open locally; both accepted rows used the same host, command shape, target dir,
+and release profile. A supporting remote candidate-only run on `ovh-a` measured
+**2.6955 us** midpoint.
+
+| workload | main midpoint | candidate midpoint | Rust delta | JAX mean | main/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `eval/scan_sub_jaxpr_f32_vector_add_emit_128x64` | 105.01 us | 3.4659 us | -96.7% / 30.30x faster | 21.2927 us | 4.93x loss | 0.163x ratio, 6.14x Rust win | KEEP |
+
+Fresh JAX comparator used
+`/data/projects/frankenjax/benchmarks/jax_comparison/.venv/bin/python`,
+JAX/JAXLIB 0.10.1 CPU, exact f32 `[128,64]` fixture matching the Criterion row,
+`jax.jit(lambda c, x: lax.scan(body, c, x))`, 20 warmups and 10 samples of 200
+hot calls. JAX measured best **19.0580 us**, p50 **20.7481 us**, mean
+**21.2927 us**.
+
+Validation: `cargo test -p fj-interpreters --profile release
+eval_scan_f32_add_emit_fast_path_matches_generic_and_golden --lib --
+--nocapture`, `cargo test -p fj-conformance --profile release -- --nocapture`,
+`cargo check -p fj-interpreters --profile release --all-targets`, and `cargo
+clippy -p fj-interpreters --profile release --all-targets -- -D warnings -A
+unknown-lints -A clippy::chunks_exact_to_as_chunks` passed through `rch exec`
+or same-target local fallback. Plain clippy remains blocked by pre-existing
+`chunks_exact_to_as_chunks` debt in `fj-trace`/`fj-lax`, outside this edit.
+`rustfmt --edition 2024 --check crates/fj-interpreters/src/lib.rs
+crates/fj-interpreters/benches/pe_baseline.rs` and `git diff --check` passed.
+`ubs` over the touched Rust files remained nonzero from existing file-wide
+test-only `unwrap`/panic/direct-index/security-heuristic inventory; its embedded
+format, clippy, cargo check, test-build, audit, and deny sections were clean.
+
 ## 2026-06-27 - KEEP: seeded f64 fusion buffer narrows compiled-runner JAX loss (ProudSalmon)
 
 Land-or-dig pass after `60c2728a` found an unlanded measured worktree commit,
