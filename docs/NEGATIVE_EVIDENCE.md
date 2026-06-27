@@ -6090,3 +6090,16 @@ COMPLEX direct factorizations (matches real solve 5.2x + complex eig 1.27x). FUL
 Linalg (real AND complex) is decisively a fj-lax STRENGTH: JAX-CPU's CPU lowering is fast ONLY for cholesky;
 every other factorization (LU/QR/det/slogdet/solve/eig, real+complex) is 1.3-30x slower than fj-lax's blocked
 GEMM-routed + threaded kernels. The "LAPACK uniformly faster" assumption is comprehensively disproven.
+
+## 2026-06-27 - core matmul 2.92x slower (335 vs 975 GFLOP/s) — fj-lax near no-FMA ceiling; gap is purely FMA (SlateHarrier)
+
+`bench_matmul_2048_vs_jax`: fj-lax matmul_2d f64 [2048,2048] = 51.35ms = **335 GFLOP/s** vs JAX a@b 17.61ms =
+**975 GFLOP/s = ~2.92x SLOWER**. KEY: JAX-CPU matmul DOES hit tuned FMA BLAS (975 GFLOP/s) — unlike its slow
+linalg lowering (which fj-lax beats). fj-lax's 335 GFLOP/s is ~75% of the f64 AVX2 NO-FMA ceiling (~448 GFLOP/s
+= 32c x 3.5GHz x 4 flops/cyc) — so its blocked+packed+threaded microkernel is ALREADY near-optimal for the
+no-+fma policy; the ~3x gap is FUNDAMENTALLY the deliberately-avoided FMA (fused mul-add doubles flops/cycle).
+This is the DEFINITIVE heavy-compute datapoint: matmul 2.92x is the GEMM floor, and cholesky 6.25x / conv build
+on it (SYRK + panels + im2col add overhead). The unifying lever is the single +fma maintainer decision (~2x
+across matmul/cholesky/conv/GEMM-linalg); fj-lax cannot close it under forbid-unsafe + no-+fma. NON-contained.
+Guard bench landed. (Contrast: JAX-CPU's LU/QR/det/solve do NOT hit BLAS — they're slow XLA lowerings fj-lax
+beats 5-30x; only the raw GEMM + dpotrf get the tuned FMA path.)

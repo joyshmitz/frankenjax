@@ -4166,6 +4166,30 @@ mod tests {
         assert_eq!(deep, super::matmul_thread_count(1024 * 1024 * 1024, 1024));
     }
 
+    // Core f64 GEMM vs JAX (measured JAX a@b f64 [2048,2048] = 17.61ms = 975 GFLOP/s, min-of-8 — JAX-CPU matmul
+    // hits tuned FMA BLAS, unlike its slow linalg lowering). fj-lax matmul_2d = blocked+packed+threaded, NO FMA.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_matmul_2048_vs_jax() {
+        let n = 2048usize;
+        let a: Vec<f64> = (0..n * n).map(|i| (i as f64 * 0.0007).sin()).collect();
+        let b: Vec<f64> = (0..n * n).map(|i| (i as f64 * 0.0009).cos()).collect();
+        let f = || std::hint::black_box(super::matmul_2d(&a, n, n, &b, n));
+        let _ = f();
+        let mut bst = f64::MAX;
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            f();
+            bst = bst.min(t.elapsed().as_secs_f64());
+        }
+        let gf = 2.0 * (n as f64).powi(3) / bst / 1e9;
+        println!(
+            "fj-lax matmul_2d f64 [2048,2048]: {:.2}ms ({:.0} GFLOP/s) | JAX=17.61ms (975 GFLOP/s)",
+            bst * 1e3,
+            gf
+        );
+    }
+
     /// Same-binary A/B isolating THREADING (not register-tiling): forced-serial vs the
     /// production thread count, SAME pack/block plan so only `threads` differs. Quantifies
     /// the spawn-overhead-limited mid-size GEMM scaling (validates ifou2 — the persistent
