@@ -2,6 +2,33 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - CROSS-CRATE FRONTIER MAP: where the unowned contained perf surface stands (BlackThrush)
+
+Land-or-dig pass: no landable worktree win; widened the dig BEYOND fj-lax kernels (now
+exhausted) to the other crates, to stop the next agent re-running this survey. Status of
+every measured perf frontier on this no-AVX512/no-FMA host:
+
+- **fj-lax kernels** — MINED. Elementwise/reduce/scan/sort/gather/scatter/matmul/conv/
+  linalg/RNG all done; SIMD-Chebyshev landed for the only ln/exp-FREE special fns
+  (i0e/i1e); cbrt SIMD-done; digamma/erf/lgamma are ln/exp-walled (measured ~0-gain);
+  bitcast is memcpy-speed (eval-model floored).
+- **fj-interpreters** (the "per-equation dispatch tax" frontier) — ADDRESSED. The eager
+  loop still re-reads `equation.params` (BTreeMap<String,String>) + resolves inputs per
+  eqn, but `compile_jaxpr_for_repeated_eval` (the jit/repeated-eval path) already compiles
+  to typed slots and skips the tax (3.37x, committed; bench `compiled_dispatch_speed`).
+- **fj-ad** (autodiff) — CODEX-OWNED (1.1 MB lib.rs; its WIP intermittently blocks
+  fj-ad-dependent builds). Do not dig here without coordinating.
+- **FFT + attention einsum `bqhd,bkhd->bhqk` (5.57x)** — ProudSalmon-owned; the
+  permute+batched-GEMM route was MEASURED-rejected (+47.8%, the 4-D transpose dominates).
+- **so4wo eval-model (BW-bound class)** — capturable by a caching global allocator
+  (~2-3x, flips reciprocal's JAX loss to a win — see entry below); LAND blocked on the
+  fj-py/pyo3-vs-Python-3.14 build issue (maintainer).
+- **+fma (`cntiy`)** — policy-gated; caps matmul/conv/all transcendentals.
+
+NET: the only remaining JAX-gap closures are the two maintainer decisions (caching
+allocator in the production cdylib, `+fma`) plus ProudSalmon's FFT — no contained,
+unowned, verifiable-from-RCH kernel lever remains. No source touched this pass (docs-only).
+
 ## 2026-06-27 - RADICAL LEVER (measured, maintainer land): a caching global allocator captures ~2-3x of the so4wo BW gap — NO eval-model rewrite (BlackThrush)
 
 The so4wo "output-buffer-reuse eval model" gate has been treated across this ledger as
