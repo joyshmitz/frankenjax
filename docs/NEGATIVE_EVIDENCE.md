@@ -51,6 +51,19 @@ allocator), then re-run `cargo bench -p fj-lax --features mimalloc-alloc --bench
 alloc_ceiling` to confirm the ~2-3x. The fj-lax-side evidence + bench are already landed;
 only the one-line allocator wiring in the (currently unbuildable-via-RCH) cdylib remains.
 
+GENERALIZES TO A REAL JAX-GAP OP (follow-up, BlackThrush): added `reciprocal` to the
+`alloc_ceiling` bench — the op SlateHarrier (2026-06-25) measured at ~20-25ms fj-lax vs
+**14ms JAX (~1.5x loss)**, attributed to the per-call alloc/faults. Under mimalloc,
+`eval_primitive(Reciprocal)` 16M reaches **~9.9ms** — the same ~10ms BW floor mimalloc
+gives `Neg` (8.6-11ms last entry), i.e. the alloc overhead is gone. ~9.9ms is BELOW the
+14ms reference JAX, so a caching allocator FLIPS reciprocal from SlateHarrier's measured
+1.5x JAX loss to a ~1.4x WIN. (Caveat: the host was heavily contended this pass — the
+system-allocator run landed at 3x its usual load, so I do NOT quote a fresh same-host
+system-vs-mimalloc reciprocal ratio here; the trustworthy allocator ratio is the
+comparable-load Neg 1.9-2.9x above, and the mimalloc reciprocal floor of ~9.9ms is
+stable.) Confirms the lever is not Neg-specific — it captures the whole BW-bound class,
+turning JAX losses into wins on exactly the ops SlateHarrier flagged as eval-model-bound.
+
 ## 2026-06-27 - MEASURED (no lever): bitcast f64->u32 is already memcpy-speed; residual gap is eval-model (BlackThrush)
 
 Closes the open question in my prior BLOCKER entry — is the `bitcast f64<->u32` ~2.3x
