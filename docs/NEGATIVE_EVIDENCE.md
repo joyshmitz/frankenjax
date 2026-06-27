@@ -31,6 +31,44 @@ BLOCKER entry), now MEASURED rather than asserted. (The probe was a transient
 same-binary measurement; no production code changed, and a `bytemuck` dep would be dead
 weight.)
 
+## 2026-06-27 - NO-SHIP: half-L1 complex FFT tile regresses same-path ORIG gate (ProudSalmon)
+
+Land-or-dig pass found no measured bench-worktree win absent from `main`: the visible
+`.scratch`/`.worktrees` FFT/select candidates were patch-equivalent to current source,
+already represented by landed keeps/rejects, or still WIP without accepted evidence.
+Dug the remaining largest measured JAX gap in the FFT family. New graveyard lever:
+cache-morsel the pow2 complex SoA kernel by shrinking only the complex FFT tile from
+8 rows (32 KiB split re/im scratch at length 256) to 4 rows (16 KiB), leaving the real
+RFFT/IRFFT packed kernels on the old 8-row tile after the first global variant showed
+that RFFT did not want the smaller tile.
+
+Result: REJECT and revert. The first global 4-row variant had a mixed raw signal
+(`fft_batch_2048x256_complex128_dense_input` 5.7603 -> 5.3312 ms, but
+`rfft_batch_2048x256_f64_dense_input` 4.6578 -> 5.0118 ms). The refined complex-only
+variant then failed the same-worktree, saved-ORIG Criterion gate below. Source returned
+to `main`; only this ledger entry is retained. One attempted remote comparison on
+`hz2` failed before samples because RCH rewrote the worker target dir and the saved
+Criterion baseline was not present there, so that failed run is not used as evidence.
+
+Bench command shape, crate-scoped through RCH with the requested target dir:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME rch exec -- env
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b AGENT_NAME=ProudSalmon
+cargo bench -p fj-lax --profile release --bench lax_baseline --
+'eval/fft_batch_2048x256_complex128_dense_input$|eval/fft_batch_2048x256_complex128$|eval/rfft_batch_2048x256_f64_dense_input$'
+--noplot`. The decisive saved-baseline pair fell open locally due no admissible workers,
+but still ran through `rch exec` and the same target dir. JAX comparators are the
+standing same-fixture CPU x64 rows: complex FFT 0.257543 ms, dense RFFT 0.371289 ms.
+
+| workload | ORIG mean | candidate mean | candidate/ORIG | ORIG/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `eval/fft_batch_2048x256_complex128` | 7.0937 ms | 8.1624 ms | 1.151x slower | 27.54x slower | 31.69x slower | REVERT |
+| `eval/fft_batch_2048x256_complex128_dense_input` | 5.3818 ms | 7.1094 ms | 1.321x slower | 20.90x slower | 27.60x slower | REVERT |
+| `eval/rfft_batch_2048x256_f64_dense_input` | 4.9629 ms | 5.5815 ms | 1.125x slower | 13.37x slower | 15.03x slower | control also worse |
+
+Conclusion: tile-size retuning is not a stable contained lever for the FFT gap. The
+complex pow2 residual likely needs a deeper FFT kernel rewrite (stage fusion/output
+model or a different vectorized primitive), not another fixed tile-width tweak.
+
 ## 2026-06-27 - SURFACE: cod-a RFFT refresh confirms no contained pow2 lever (ProudSalmon)
 
 Land-or-dig pass found no measured bench-worktree win absent from `main`: the visible
