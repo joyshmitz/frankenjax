@@ -23326,6 +23326,41 @@ mod tests {
         println!("fj-lax select f64 16M: {:.3}ms | JAX=14.78ms", b * 1e3);
     }
 
+    // logaddexp (transcendental binary elementwise: max + exp + ln_1p) vs JAX (measured JAX [4096,4096] =
+    // 40.6ms). Checks whether the eval_binary_elementwise closure path threads the compute-bound transcendental.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_logaddexp_vs_jax() {
+        use std::time::Instant;
+        let n = 4096usize * 4096;
+        let a = tensor_f64(
+            vec![n as u32],
+            &(0..n)
+                .map(|i| (i % 9973) as f64 * 0.01 - 50.0)
+                .collect::<Vec<_>>(),
+        );
+        let b = tensor_f64(
+            vec![n as u32],
+            &(0..n)
+                .map(|i| (i % 7919) as f64 * 0.013 - 50.0)
+                .collect::<Vec<_>>(),
+        );
+        let inputs = vec![a, b];
+        let f = || {
+            std::hint::black_box(
+                crate::eval_primitive(Primitive::LogAddExp, &inputs, &BTreeMap::new()).unwrap(),
+            );
+        };
+        f();
+        let mut bst = f64::MAX;
+        for _ in 0..6 {
+            let s = Instant::now();
+            f();
+            bst = bst.min(s.elapsed().as_secs_f64());
+        }
+        println!("fj-lax logaddexp f64 16M: {:.3}ms | JAX=40.6ms", bst * 1e3);
+    }
+
     // clamp (jnp.clip) f64 scalar bounds vs JAX (measured JAX [4096,4096] = 18.58ms). Checks the threaded
     // clamp_f64_scalar_bounds path.
     #[test]

@@ -4398,6 +4398,92 @@ fn eval_reduce_window_dense_float(
     }
 }
 
+fn reduce_window_rank3_f64_sum_xlane(
+    src: &[f64],
+    input_dims: [usize; 3],
+    window_dims: [usize; 3],
+    out_dims: [usize; 3],
+) -> Vec<f64> {
+    use std::simd::Simd;
+    type F = Simd<f64, 8>;
+
+    let [_, in_y, in_x] = input_dims;
+    let [win_z, win_y, win_x] = window_dims;
+    let [out_z, out_y, out_x] = out_dims;
+    let in_z_stride = in_y * in_x;
+    let x8 = out_x - out_x % 8;
+    let rows = out_z * out_y;
+    let mut out = vec![0.0_f64; rows * out_x];
+
+    let fill_rows = |row_start: usize, rows_out: &mut [f64]| {
+        let n_rows = rows_out.len() / out_x;
+        for local_row in 0..n_rows {
+            let row = row_start + local_row;
+            let oz = row / out_y;
+            let oy = row % out_y;
+            let out_base = local_row * out_x;
+            let mut ox = 0usize;
+            while ox < x8 {
+                let mut acc = F::splat(0.0);
+                for wz in 0..win_z {
+                    let z_base = (oz + wz) * in_z_stride;
+                    for wy in 0..win_y {
+                        let row_base = z_base + (oy + wy) * in_x + ox;
+                        for wx in 0..win_x {
+                            acc += F::from_slice(&src[row_base + wx..row_base + wx + 8]);
+                        }
+                    }
+                }
+                acc.copy_to_slice(&mut rows_out[out_base + ox..out_base + ox + 8]);
+                ox += 8;
+            }
+            while ox < out_x {
+                let mut acc = 0.0_f64;
+                for wz in 0..win_z {
+                    let z_base = (oz + wz) * in_z_stride;
+                    for wy in 0..win_y {
+                        let row_base = z_base + (oy + wy) * in_x + ox;
+                        for wx in 0..win_x {
+                            acc += src[row_base + wx];
+                        }
+                    }
+                }
+                rows_out[out_base + ox] = acc;
+                ox += 1;
+            }
+        }
+    };
+
+    let work = rows
+        .saturating_mul(out_x)
+        .saturating_mul(win_z * win_y * win_x);
+    let threads = if work >= (1 << 18) && rows >= 2 {
+        crate::arithmetic::work_scaled_threads(work).min(rows)
+    } else {
+        1
+    };
+    if threads <= 1 {
+        fill_rows(0, &mut out);
+        return out;
+    }
+
+    let per = rows.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut row0 = 0usize;
+        while row0 < rows {
+            let cnt = per.min(rows - row0);
+            let (blk, tail) = rest.split_at_mut(cnt * out_x);
+            rest = tail;
+            let start = row0;
+            row0 += cnt;
+            let f = &fill_rows;
+            scope.spawn(move || f(start, blk));
+        }
+    });
+    out
+}
+
 struct ReduceWindowExtremumAxis {
     axis: usize,
     window: usize,
@@ -7386,6 +7472,51 @@ fn eval_reduce_window(
         );
     }
 
+    // Rank-3 VALID f64 SUM: SIMD across adjacent output-x cells. Each lane is an
+    // independent output cell and receives taps in the exact row-major order used
+    // by eval_reduce_window_dense_float, preserving floating-point bit identity.
+    if no_base_dilation
+        && no_window_dilation
+        && tensor.dtype == fj_core::DType::F64
+        && output_dtype == fj_core::DType::F64
+        && rank == 3
+        && reduce_window_sum_like(reduce_op)
+        && strides.iter().all(|&s| s == 1)
+        && pad_lows.iter().all(|&p| p == 0)
+        && window_dims.iter().all(|&w| w > 0)
+        && window_dims.iter().product::<usize>() >= 64
+        && let Some(src) = tensor.elements.as_f64_slice()
+    {
+        let input_dims = [
+            tensor.shape.dims[0] as usize,
+            tensor.shape.dims[1] as usize,
+            tensor.shape.dims[2] as usize,
+        ];
+        let window_dims_rank3 = [window_dims[0], window_dims[1], window_dims[2]];
+        let out_dims_rank3 = [
+            out_dims[0] as usize,
+            out_dims[1] as usize,
+            out_dims[2] as usize,
+        ];
+        if (0..3).all(|d| out_dims_rank3[d] + window_dims_rank3[d] - 1 <= input_dims[d]) {
+            let values = reduce_window_rank3_f64_sum_xlane(
+                src,
+                input_dims,
+                window_dims_rank3,
+                out_dims_rank3,
+            );
+            return Ok(Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: out_dims.clone(),
+                    },
+                    values,
+                )
+                .map_err(EvalError::from)?,
+            ));
+        }
+    }
+
     // Dense float fast path (ANY rank, sum/max/min): the F64-accumulator float case
     // for F64 or dense-F32 input. Replaces the generic per-`Literal` gather +
     // string-dispatched accumulate with a dense `f64` read and a hoisted op, plus an
@@ -8406,6 +8537,55 @@ mod tests {
                     "f32 SIMD-channel sumpool mismatch (dims={dims:?} variant={variant})"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn rank3_sum_pool_xlane_simd_matches_dense_float() {
+        for (dims, win) in [
+            ([9usize, 10usize, 17usize], [3usize, 2usize, 5usize]),
+            ([4usize, 5usize, 6usize], [2usize, 3usize, 4usize]),
+        ] {
+            let out_dims = [
+                dims[0] - win[0] + 1,
+                dims[1] - win[1] + 1,
+                dims[2] - win[2] + 1,
+            ];
+            let total: usize = dims.iter().product();
+            let mut src: Vec<f64> = (0..total)
+                .map(|i| match i % 17 {
+                    0 => -0.0,
+                    1 => f64::INFINITY,
+                    2 => f64::NEG_INFINITY,
+                    _ => ((i as f64) * 0.037).sin() * 11.0 - (i % 7) as f64,
+                })
+                .collect();
+            src[total / 3] = f64::NAN;
+            let input_strides = [dims[1] * dims[2], dims[2], 1usize];
+            let want = match super::eval_reduce_window_dense_float(
+                DType::F64,
+                "sum",
+                &src,
+                &win,
+                &[1, 1, 1],
+                &[1, 1, 1],
+                &[out_dims[0] as u32, out_dims[1] as u32, out_dims[2] as u32],
+                &[0, 0, 0],
+                &dims,
+                &input_strides,
+                out_dims.iter().product(),
+            )
+            .unwrap()
+            {
+                Value::Tensor(t) => t.elements.as_f64_slice().unwrap().to_vec(),
+                _ => panic!(),
+            };
+            let got = super::reduce_window_rank3_f64_sum_xlane(&src, dims, win, out_dims);
+            assert_eq!(
+                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "rank3 x-lane sumpool mismatch dims={dims:?} win={win:?}"
+            );
         }
     }
 
