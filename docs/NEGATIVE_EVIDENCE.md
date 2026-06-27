@@ -2,6 +2,46 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-27 - SURFACE: cod-a RFFT refresh confirms no contained pow2 lever (ProudSalmon)
+
+Land-or-dig pass found no measured bench-worktree win absent from `main`: the visible
+FFT/select/dispatch candidates were either patch-equivalent to current source, already
+represented by ledgered keeps/rejects, or WIP without accepted evidence. Dug the live
+largest measured gap using the graveyard numeric-kernel/locality playbook and the
+profile-first one-lever rule: RFFT vs JAX.
+
+Fresh current-main guard, through RCH with the requested cod-a target dir:
+`AGENT_NAME=ProudSalmon CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a
+RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME rch exec -- cargo test -p fj-lax
+--profile release bench_rfft_vs_jax -- --ignored --nocapture`. RCH had no admissible
+remote worker and fell open locally.
+
+| guard row | FrankenJAX current | JAX baseline | current/JAX |
+|---|---:|---:|---:|
+| `rfft [4096,1024] axis1 pow2` | 56.815 ms | 5.89 ms | 9.65x slower |
+| `rfft [4096,1000] axis1 smooth nonpow2` | 6.649 ms | 1.51 ms | 4.40x slower |
+
+The non-power-of-two row is much better than the stale pre-`4685b88a` ledger number,
+but the power-of-two RFFT remains the largest measured gap. Tried the only contained
+pow2 locality lever left by the prior no-ship: route dense f64 pow2 input directly
+through a real-slice SoA helper while leaving nonpow2 rows untouched. Correctness guard
+(`dense_f64_pow2_rfft_matches_complex_lift_path`) passed bit-for-bit against the
+complex-lift path, but the bench target regressed, so the code and test were reverted.
+
+Criterion A/B, same command form and target dir:
+`rch exec -- cargo bench -p fj-lax --profile release --bench lax_baseline --
+eval/rfft_batch_2048x256_f64_dense_input`.
+
+| workload | main mean | candidate mean | Rust delta | JAX comparator | main/JAX | candidate/JAX | verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `eval/rfft_batch_2048x256_f64_dense_input` | 5.0291 ms | 7.1135 ms | +41.447%, p=0.00 | 0.371289 ms | 13.54x slower | 19.16x slower | REVERT |
+
+Conclusion: no source hunk retained. The remaining RFFT win needs a native real-FFT
+kernel / split-radix policy change that crosses the pow2 golden boundary, not another
+tuple-lift or loop-order tweak. This agrees with the current top-level blocker: the
+remaining measured JAX losses are now architectural (`+fma`, `so4wo` output reuse, or a
+multi-session FFT kernel rewrite).
+
 ## 2026-06-27 - BLOCKER (maintainer decision): every remaining measured JAX loss now gates on +fma or the so4wo eval-model (BlackThrush)
 
 Land-or-dig pass, no landable worktree win. Dug the biggest measured non-FFT
