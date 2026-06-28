@@ -185,9 +185,12 @@ fn f64_compare_words(
             | Primitive::Gt
             | Primitive::Ge
     ));
-    let mut words = vec![0_u64; left.len().div_ceil(WORD_BITS)];
-    let full_words = left.len() / WORD_BITS;
-    for (word_index, word_slot) in words.iter_mut().take(full_words).enumerate() {
+    let n = left.len();
+    let mut words = vec![0_u64; n.div_ceil(WORD_BITS)];
+    let full_words = n / WORD_BITS;
+    // One output word = the SIMD compare of a disjoint 64-element block — words are
+    // INDEPENDENT, so the full-word loop is embarrassingly parallel + bit-identical.
+    let compute_word = |word_index: usize| -> u64 {
         let base = word_index * WORD_BITS;
         let mut word = 0_u64;
         for chunk in 0..(WORD_BITS / LANES) {
@@ -205,9 +208,40 @@ fn f64_compare_words(
             };
             word |= mask << (chunk * LANES);
         }
-        *word_slot = word;
+        word
+    };
+    // The 2x8-byte operand read (256MB at 16M) is BW-bound — one core cannot saturate
+    // multi-channel DRAM. Thread the disjoint full words over cores when large.
+    let threads = if n >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+        crate::arithmetic::work_scaled_threads(n)
+    } else {
+        1
+    };
+    if threads > 1 && full_words > 0 {
+        let compute_word = &compute_word;
+        let per = full_words.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [u64] = &mut words[..full_words];
+            let mut w0 = 0usize;
+            while w0 < full_words {
+                let cnt = per.min(full_words - w0);
+                let (blk, tail) = rest.split_at_mut(cnt);
+                rest = tail;
+                let start = w0;
+                w0 += cnt;
+                scope.spawn(move || {
+                    for (j, slot) in blk.iter_mut().enumerate() {
+                        *slot = compute_word(start + j);
+                    }
+                });
+            }
+        });
+    } else {
+        for (word_index, word_slot) in words.iter_mut().take(full_words).enumerate() {
+            *word_slot = compute_word(word_index);
+        }
     }
-    for index in (full_words * WORD_BITS)..left.len() {
+    for index in (full_words * WORD_BITS)..n {
         push_bool_word(&mut words, index, float_cmp(left[index], right[index]));
     }
     words
@@ -946,6 +980,54 @@ fn eval_f32_scalar_compare(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    // Same-invocation A/B for threaded f64 comparison (masking x>t). Serial inline SIMD
+    // reference vs the threaded f64_compare_words, one binary, min-of-8.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f64_compare_threaded_vs_serial() {
+        use std::simd::cmp::SimdPartialOrd;
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let left: Vec<f64> = (0..n).map(|i| (i % 100_003) as f64 - 50_000.0).collect();
+        let right: Vec<f64> = vec![0.0f64; n];
+        let serial = || -> u64 {
+            const WB: usize = 64;
+            const LANES: usize = 8;
+            let mut words = vec![0u64; n.div_ceil(WB)];
+            let fw = n / WB;
+            for (wi, slot) in words.iter_mut().take(fw).enumerate() {
+                let base = wi * WB;
+                let mut w = 0u64;
+                for c in 0..(WB / LANES) {
+                    let off = base + c * LANES;
+                    let lv = Simd::<f64, LANES>::from_slice(&left[off..off + LANES]);
+                    let rv = Simd::<f64, LANES>::from_slice(&right[off..off + LANES]);
+                    w |= lv.simd_gt(rv).to_bitmask() << (c * LANES);
+                }
+                *slot = w;
+            }
+            std::hint::black_box(&words);
+            words[123]
+        };
+        let threaded = || -> u64 {
+            std::hint::black_box(
+                f64_compare_words(Primitive::Gt, &left, &right, &|a, b| a > b)[123],
+            )
+        };
+        let time_it = |label: &str, f: &dyn Fn() -> u64| {
+            std::hint::black_box(f());
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("REF {label}: {:.3}ms", b * 1e3);
+        };
+        time_it("f64_gt_serial", &serial);
+        time_it("f64_gt_threaded", &threaded);
+    }
 
     #[test]
     fn f64_compare_fast_paths_bit_identical_to_scalar() {

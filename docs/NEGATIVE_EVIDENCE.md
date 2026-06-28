@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: f64 same-shape comparison (masking x>t) threaded — 2.45x WIN vs JAX (ProudSalmon)
+
+A DIFFERENT primitive (comparison / `Gt`/`Lt`/`Eq`/… → bool mask), the `x > thresh` masking idiom. `f64_compare_words`
+was SIMD (8-wide `simd_gt` → bitmask) but SINGLE-THREAD: a same-shape f64 compare reads 2×128MB (16M) — BW-bound,
+one core cannot saturate multi-channel DRAM. Each output u64 word covers a disjoint 64-element block, so the
+full-word loop is embarrassingly parallel → threaded it (extract `compute_word`, fan disjoint word-ranges across
+cores), gated ≥8.4M. BIT-IDENTICAL (same SIMD compare, same bit-packing, independent words).
+
+Evidence — SAME-INVOCATION A/B (serial inline SIMD vs threaded `f64_compare_words`, one binary, min-of-8),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M f64 `x>0`:
+  - serial **7.05ms → threaded 1.68ms = 4.2x**. vs JAX 0.10.2 `(a>0.0)` 4.11ms → **1.68 vs 4.11 = ~2.45x WIN**
+    (was a 1.71x LOSS at serial). (fj-lax also emits a packed bitmask = 1 bit/elem vs JAX's byte bool.)
+Comparison suite 23/0, conformance-safe (small compares below the gate stay serial). Guard bench
+`bench_f64_compare_threaded_vs_serial`. FOLLOW-UP: the f32 same-shape compare (JAX's default dtype) is currently
+SCALAR (widen-to-f64 `.map().collect()`, no SIMD, no threads) — a bigger gap; threading it needs a `+ Sync`
+bound on `float_cmp` up the `eval_comparison` chain (deferred — next lever).
+
 ## 2026-06-28 - WIN: int<->float ConvertElementType threaded — i64->f64 1.17x WIN vs JAX (ProudSalmon)
 
 A DIFFERENT primitive (ConvertElementType). f64<->f32 and f64->half casts already thread, but the int<->float
