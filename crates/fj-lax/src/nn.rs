@@ -241,10 +241,19 @@ pub fn logsumexp(x: &[f64]) -> f64 {
     if max_val.is_infinite() {
         return max_val;
     }
-    // Thread the compute-bound exp map while keeping the reduction sequential and in
-    // index order. This preserves the exact summation order of the prior iterator path.
-    let exp_shifted = threaded_f64_map(x, |v| (v - max_val).exp());
-    let sum_exp: f64 = exp_shifted.iter().sum();
+    // Large 1D logsumexp (e.g. a language-model softmax over a big vocab) is dominated by
+    // the per-element `exp`. Thread it into a buffer, then sum SERIALLY in index order —
+    // BIT-IDENTICAL to the fused `.map(exp).sum()` (same values, same left-fold order). For
+    // small inputs keep the fused single pass (no buffer / no thread-spawn overhead). (Refines
+    // a convergent unconditional-threading commit that paid a buffer+extra-pass cost on small
+    // inputs — the common axis-reduction case.)
+    const LOGSUMEXP_THREAD_MIN: usize = 1 << 21;
+    let sum_exp: f64 = if x.len() >= LOGSUMEXP_THREAD_MIN {
+        let exp_buf = threaded_f64_map(x, |v| (v - max_val).exp());
+        exp_buf.iter().sum()
+    } else {
+        x.iter().map(|&v| (v - max_val).exp()).sum()
+    };
     max_val + sum_exp.ln()
 }
 
@@ -390,7 +399,7 @@ pub fn log_softmax(x: &[f64]) -> Vec<f64> {
         return Vec::new();
     }
     let lse = logsumexp(x);
-    x.iter().map(|&v| v - lse).collect()
+    threaded_f64_map_bw(x, move |v| v - lse)
 }
 
 #[inline]
@@ -1513,6 +1522,52 @@ mod tests {
         });
         bench("threaded", &|| {
             std::hint::black_box(relu(&x));
+        });
+    }
+
+    #[test]
+    fn logsumexp_log_softmax_threaded_bit_identical() {
+        // At >= the threading gate, logsumexp/log_softmax take the threaded-exp path; they
+        // must equal the fused single-pass reference bit-for-bit (same index-order sum).
+        let n = 3_000_000usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 9973) as f64 - 5000.0) * 0.0009)
+            .collect();
+        let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let sum_ref: f64 = x.iter().map(|&v| (v - max_val).exp()).sum();
+        let lse_ref = max_val + sum_ref.ln();
+        assert_eq!(logsumexp(&x).to_bits(), lse_ref.to_bits());
+        let ls_ref: Vec<f64> = x.iter().map(|&v| v - lse_ref).collect();
+        for (a, b) in log_softmax(&x).iter().zip(&ls_ref) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_logsumexp_threaded_vs_fused() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+            .collect();
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("logsumexp f64 16M [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("fused_sequential", &|| {
+            let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let sum_exp: f64 = x.iter().map(|&v| (v - max_val).exp()).sum();
+            std::hint::black_box(max_val + sum_exp.ln());
+        });
+        bench("threaded", &|| {
+            std::hint::black_box(logsumexp(&x));
         });
     }
 

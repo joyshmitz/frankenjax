@@ -171,6 +171,17 @@ faster** (better than the ~1.7-2x expected — this host's 8-channel DRAM scales
 added at 9M (above the gate). The ENTIRE eager nn activation family now threads with the right
 gate per cost class: compute-bound via `work_scaled` (thread early), BW-bound via the L3 gate.
 
+EXTENDED #5 (logsumexp/log_softmax 1D, LM-vocab case): the 1D `logsumexp` had a FUSED
+single-threaded `.map(exp).sum()`. For large 1D (a language-model softmax over a big vocab —
+a real hot case, not just niche) the per-element `exp` dominates. Threaded the `exp` into a
+buffer + a SERIAL index-order sum (BIT-IDENTICAL to the fused left-fold), GATED at `>= 1<<21`
+so small axis-reductions (the common case) keep the fused single pass (no buffer / no spawn).
+`log_softmax`'s cheap `x - lse` map routed through `threaded_f64_map_bw`. MEASURED same-binary
+A/B (16M f64, `bench_logsumexp_threaded_vs_fused`): 71.04 ms → **39.60 ms = 1.79x faster**
+(serial sum + buffer pass cap it below the pure activations). Guard added. NOTE: a convergent
+commit had already threaded `logsumexp` UNCONDITIONALLY; this refines it — the gate avoids a
+buffer + extra pass regression on small inputs.
+
 ## 2026-06-28 - NO-SHIP: borrowed dense-complex FFT input does not beat ORIG (ProudSalmon)
 
 Land-or-dig audit found no measured `.scratch`/`.worktrees` bench win absent from
