@@ -6121,12 +6121,59 @@ pub fn frobenius_norm(a: &[f64]) -> f64 {
 
 /// Matrix 1-norm (max column sum of absolute values).
 pub fn matrix_norm_1(a: &[f64], m: usize, n: usize) -> f64 {
-    let mut max_col_sum = 0.0_f64;
-    for j in 0..n {
-        let col_sum: f64 = (0..m).map(|i| a[i * n + j].abs()).sum();
-        max_col_sum = max_col_sum.max(col_sum);
+    if m == 0 || n == 0 {
+        return 0.0;
     }
-    max_col_sum
+    // Cache-friendly ROW-PASS column sums: accumulate `col_sums[j] += |a[i,j]|` while scanning
+    // each contiguous row, instead of the original column-major scan that strided by `n` (a
+    // different cache line per element — pathological for large matrices). The per-column
+    // addition order is unchanged (each `col_sums[j]` still sees i=0,1,2,… in order), so the
+    // serial path is BIT-IDENTICAL to the strided version.
+    let total = m.saturating_mul(n);
+    let threads = if total >= (1 << 23) {
+        crate::arithmetic::work_scaled_threads(total).min(m.max(1))
+    } else {
+        1
+    };
+    let mut col_sums = vec![0.0_f64; n];
+    if threads <= 1 {
+        for i in 0..m {
+            let row = &a[i * n..i * n + n];
+            for (cs, &v) in col_sums.iter_mut().zip(row) {
+                *cs += v.abs();
+            }
+        }
+        return col_sums.into_iter().fold(0.0_f64, f64::max);
+    }
+    // Threaded: each thread sums its row-block into its own `col_sums`, then the partials are
+    // added (this REASSOCIATES the per-column sum across blocks — legal: matrix-norm parity is
+    // tolerance). Finally max over columns (associative, exact).
+    let rows_per = m.div_ceil(threads);
+    let partials: Vec<Vec<f64>> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let mut r0 = 0usize;
+        while r0 < m {
+            let r1 = (r0 + rows_per).min(m);
+            handles.push(scope.spawn(move || {
+                let mut cs = vec![0.0_f64; n];
+                for i in r0..r1 {
+                    let row = &a[i * n..i * n + n];
+                    for (c, &v) in cs.iter_mut().zip(row) {
+                        *c += v.abs();
+                    }
+                }
+                cs
+            }));
+            r0 = r1;
+        }
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    for cs in &partials {
+        for (acc, &p) in col_sums.iter_mut().zip(cs) {
+            *acc += p;
+        }
+    }
+    col_sums.into_iter().fold(0.0_f64, f64::max)
 }
 
 /// Matrix infinity-norm (max row sum of absolute values).
@@ -11835,6 +11882,68 @@ mod tests {
             serial = serial.max(rs);
         }
         assert_eq!(matrix_norm_inf(&a, m, n).to_bits(), serial.to_bits());
+    }
+
+    #[test]
+    fn matrix_norm_1_rowpass_matches_strided() {
+        // Cache-friendly row-pass matrix_norm_1: serial below the gate must equal the original
+        // strided column-major scan BIT-FOR-BIT; threaded above the gate must match within the
+        // 1e-10 matrix-norm tolerance (reassociated column sums).
+        // Small (serial → bit-identical):
+        let small = [1.0f64, -2.0, 3.0, 4.0, -5.0, 0.5];
+        let (sm, sn) = (3usize, 2usize);
+        let mut strided = 0.0_f64;
+        for j in 0..sn {
+            let cs: f64 = (0..sm).map(|i| small[i * sn + j].abs()).sum();
+            strided = strided.max(cs);
+        }
+        assert_eq!(matrix_norm_1(&small, sm, sn).to_bits(), strided.to_bits());
+        // Large (threaded → tolerance):
+        let (m, n) = (3000usize, 3000usize); // 9M > 1<<23
+        let a: Vec<f64> = (0..m * n)
+            .map(|i| ((i % 9973) as f64 - 5000.0) * 0.011)
+            .collect();
+        let mut serial_max = 0.0_f64;
+        for j in 0..n {
+            let cs: f64 = (0..m).map(|i| a[i * n + j].abs()).sum();
+            serial_max = serial_max.max(cs);
+        }
+        let got = matrix_norm_1(&a, m, n);
+        assert!(
+            (got - serial_max).abs() / serial_max < 1e-12,
+            "rel {got} vs {serial_max}"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_matrix_norm_1_rowpass_vs_strided() {
+        use std::time::Instant;
+        let (m, n) = (4000usize, 4000usize); // 16M
+        let a: Vec<f64> = (0..m * n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+            .collect();
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("matrix_norm_1 4000x4000 [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("strided-serial", &|| {
+            let mut mx = 0.0_f64;
+            for j in 0..n {
+                let cs: f64 = (0..m).map(|i| a[i * n + j].abs()).sum();
+                mx = mx.max(cs);
+            }
+            std::hint::black_box(mx);
+        });
+        bench("rowpass-threaded", &|| {
+            std::hint::black_box(matrix_norm_1(&a, m, n));
+        });
     }
 
     #[test]

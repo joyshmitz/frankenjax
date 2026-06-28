@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - KEEP (7.62x): matrix_norm_1 cache-friendly row-pass + thread — biggest norm win (BlackThrush)
+
+Corrects my own map entry below: I'd dismissed `matrix_norm_1` (operator 1-norm = max column
+|·|-sum) as "cache-hostile, not worth threading" — but that was only true of the STRIDED
+column-major scan it used (`a[i*n+j]` for i=0..m strides by `n` → a fresh cache line per element,
+pathological for large matrices). The fix is a CACHE-FRIENDLY ROW-PASS: scan each contiguous row
+once, accumulating `col_sums[j] += |a[i,j]|`. The per-column addition order is unchanged, so the
+SERIAL row-pass is already BIT-IDENTICAL to the strided version AND far faster (sequential reads);
+threading the row-blocks (per-thread `col_sums`, then sum the partials — reassoc, tolerance-legal
+for matrix-norm parity) adds the parallelism.
+
+MEASURED same-binary A/B (4000×4000 = 16M, `bench_matrix_norm_1_rowpass_vs_strided`): strided-
+serial 43.51 ms → **rowpass-threaded 5.71 ms = 7.62x faster** (the biggest of the norm wins — the
+old strided scan was pathologically cache-bound, not just unthreaded). Correctness:
+`matrix_norm_1_rowpass_matches_strided` checks the small case is bit-identical and the 9M threaded
+case is within 1e-12 (1e-10 tolerance); fmt + clippy clean. LESSON: "cache-hostile" was a property
+of the ACCESS PATTERN, not the op — restructuring the loop to row-major beat it before threading.
+
 ## 2026-06-28 - MAP: the many-core threading surface is comprehensively mined — STOP re-surveying (BlackThrush)
 
 Closing marker after a 15-win run mining "single-threaded helper / path that should thread on
@@ -18,9 +36,10 @@ compute-bound thread-early via `work_scaled`/`dense_unary`, BW-bound thread-past
   i0e/i1e SIMD-chbevl, tanh `+fma`-gate.)
 
 NOT WORTH THREADING (documented so nobody retries): `ReduceProd` (overflow/underflow reassoc
-can flip finite↔inf/nan), `matrix_norm_1` (strided column access is cache-hostile — memory-system
-bound regardless of cores), `diag` (lazy-calloc, only n cells written), `diagonal`/`trace` (tiny
+can flip finite↔inf/nan), `diag` (lazy-calloc, only n cells written), `diagonal`/`trace` (tiny
 output), `linspace`/`logspace` (cold one-time construction), Lp-norm (rare, compute-bound gate).
+(CORRECTION: I wrongly dismissed `matrix_norm_1` above — the STRIDED scan is cache-hostile, but
+the CACHE-FRIENDLY row-pass form is both faster AND threadable; now done — see entry below.)
 
 REMAINING JAX-gap levers are all OUTSIDE the contained threading surface: FFT + attention-einsum
 kernels (ProudSalmon-owned, active), `+fma` build flag (`cntiy`, maintainer policy), the so4wo
