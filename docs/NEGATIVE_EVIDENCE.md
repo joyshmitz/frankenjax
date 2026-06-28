@@ -83,8 +83,15 @@ sequential). MEASURED same-binary A/B (16M f64, `bench_softmax_1d_threaded_vs_se
 serial max/sum/divide). Guard extended to cover softmax. `log_softmax`/`logsumexp` were left
 alone — their `exp` is FUSED into the `.map().sum()` reduction, so threading would need a
 separate buffer + a non-bit-identical parallel sum (and 1D is niche; the 2D batched path
-`softmax_2d`/`log_softmax` already threads across rows). The eager nn compute-bound family is
-now fully threaded.
+`softmax_2d`/`log_softmax` already threads across rows).
+
+EXTENDED #3 (caught a miss): `sigmoid` (`1/(1+exp(-x))`) — one of the MOST common activations
+(logistic gates) — was still single-threaded; I'd threaded its sibling `silu` but missed it.
+Threaded via `threaded_f64_map`. MEASURED same-binary A/B (16M f64,
+`bench_sigmoid_threaded_vs_sequential`): 160.99 ms → **29.83 ms = 5.40x faster**. BIT-IDENTICAL
+(guard extended). NOW the eager nn compute-bound family is genuinely complete: threaded =
+sigmoid/silu/gelu/elu/celu/selu/softplus/mish/log_sigmoid/softmax(exp); left sequential (cheap
+BW-bound) = relu/relu6/leaky_relu/hard_sigmoid/hard_tanh/hard_silu/softsign.
 
 ## 2026-06-28 - NO-SHIP: borrowed dense-complex FFT input does not beat ORIG (ProudSalmon)
 

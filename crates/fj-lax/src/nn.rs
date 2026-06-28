@@ -73,7 +73,7 @@ pub fn relu6(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.sigmoid(x)` and `jax.lax.logistic(x)`.
 #[must_use]
 pub fn sigmoid(x: &[f64]) -> Vec<f64> {
-    x.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect()
+    threaded_f64_map(x, |v| 1.0 / (1.0 + (-v).exp()))
 }
 
 /// Hard sigmoid: clip((x + 3) / 6, 0, 1)
@@ -1368,6 +1368,10 @@ mod tests {
         for (a, b) in softmax(&x).iter().zip(&sm_seq) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
+        let sigmoid_seq: Vec<f64> = x.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect();
+        for (a, b) in sigmoid(&x).iter().zip(&sigmoid_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
     }
 
     #[test]
@@ -1401,6 +1405,33 @@ mod tests {
         });
         bench("threaded", &|| {
             std::hint::black_box(softmax(&x));
+        });
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_sigmoid_threaded_vs_sequential() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+            .collect();
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("sigmoid f64 16M [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("sequential", &|| {
+            let out: Vec<f64> = x.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect();
+            std::hint::black_box(out);
+        });
+        bench("threaded", &|| {
+            std::hint::black_box(sigmoid(&x));
         });
     }
 
