@@ -122,6 +122,16 @@ Threaded via `threaded_f64_map`. MEASURED same-binary A/B (16M f64,
 sigmoid/silu/gelu/elu/celu/selu/softplus/mish/log_sigmoid/softmax(exp); left sequential (cheap
 BW-bound) = relu/relu6/leaky_relu/hard_sigmoid/hard_tanh/hard_silu/softsign.
 
+EXTENDED #4 (cheap activations, BW-gated): the cheap BW-bound activations above are NOW also
+threaded — but via `threaded_f64_map_bw`, which only threads past L3 (`>= 1<<23` elems), since
+a memory-bound op below L3 REGRESSES under threading (the documented L3-scoped DO-NOT) while
+past L3 the aggregate 8-channel DRAM bandwidth wins. `relu` (THE most common activation) MEASURED
+same-binary A/B (16M f64, `bench_relu_threaded_vs_sequential`): 70.48 ms → **19.69 ms = 3.58x
+faster** (better than the ~1.7-2x expected — this host's 8-channel DRAM scales well). All 7
+(relu/relu6/leaky_relu/hard_sigmoid/hard_tanh/hard_silu/softsign) routed; BIT-IDENTICAL guard
+added at 9M (above the gate). The ENTIRE eager nn activation family now threads with the right
+gate per cost class: compute-bound via `work_scaled` (thread early), BW-bound via the L3 gate.
+
 ## 2026-06-28 - NO-SHIP: borrowed dense-complex FFT input does not beat ORIG (ProudSalmon)
 
 Land-or-dig audit found no measured `.scratch`/`.worktrees` bench win absent from

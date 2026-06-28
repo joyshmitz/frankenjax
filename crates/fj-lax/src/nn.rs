@@ -11,8 +11,8 @@ const SOFTMAX_2D_PARALLEL_MIN: usize = 1 << 18;
 /// so no value or order changes). Below the work threshold `work_scaled_threads` returns 1
 /// and the sequential map is used. Used by the COMPUTE-bound (`exp`/`tanh`) activations, which
 /// were single-threaded eager maps — a needless serial bottleneck on a many-core host (cf. the
-/// tanh FMA-gate fix). Cheap BW-bound activations (relu/clamp) stay sequential to avoid the
-/// known "thread a memory-bound op below L3 → regress" trap.
+/// tanh FMA-gate fix). Cheap BW-bound activations (relu/clamp) instead use
+/// [`threaded_f64_map_bw`], which only threads past L3 to avoid the below-L3 regress trap.
 #[inline]
 fn threaded_f64_map(x: &[f64], f: impl Fn(f64) -> f64 + Sync) -> Vec<f64> {
     let n = x.len();
@@ -42,12 +42,24 @@ fn threaded_f64_map(x: &[f64], f: impl Fn(f64) -> f64 + Sync) -> Vec<f64> {
     out
 }
 
+/// Like [`threaded_f64_map`] but for CHEAP, bandwidth-bound elementwise ops (relu/clamp):
+/// only threads past L3 (`>= 1<<23` elems), where aggregate DRAM bandwidth across cores
+/// wins ~1.7-2x; below that a single core already saturates L3 and threading a memory-bound
+/// op REGRESSES (the documented L3-scoped DO-NOT). Bit-identical to the sequential map.
+#[inline]
+fn threaded_f64_map_bw(x: &[f64], f: impl Fn(f64) -> f64 + Sync) -> Vec<f64> {
+    if x.len() < (1 << 23) {
+        return x.iter().map(|&v| f(v)).collect();
+    }
+    threaded_f64_map(x, f)
+}
+
 /// ReLU: max(x, 0)
 ///
 /// Matches `jax.nn.relu(x)`.
 #[must_use]
 pub fn relu(x: &[f64]) -> Vec<f64> {
-    x.iter().map(|&v| v.max(0.0)).collect()
+    threaded_f64_map_bw(x, |v| v.max(0.0))
 }
 
 /// Leaky ReLU: x if x >= 0 else negative_slope * x
@@ -55,9 +67,7 @@ pub fn relu(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.leaky_relu(x, negative_slope)`.
 #[must_use]
 pub fn leaky_relu(x: &[f64], negative_slope: f64) -> Vec<f64> {
-    x.iter()
-        .map(|&v| if v >= 0.0 { v } else { negative_slope * v })
-        .collect()
+    threaded_f64_map_bw(x, |v| if v >= 0.0 { v } else { negative_slope * v })
 }
 
 /// ReLU6: min(max(x, 0), 6)
@@ -65,7 +75,7 @@ pub fn leaky_relu(x: &[f64], negative_slope: f64) -> Vec<f64> {
 /// Matches `jax.nn.relu6(x)`.
 #[must_use]
 pub fn relu6(x: &[f64]) -> Vec<f64> {
-    x.iter().map(|&v| v.clamp(0.0, 6.0)).collect()
+    threaded_f64_map_bw(x, |v| v.clamp(0.0, 6.0))
 }
 
 /// Sigmoid: 1 / (1 + exp(-x))
@@ -81,9 +91,7 @@ pub fn sigmoid(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.hard_sigmoid(x)`.
 #[must_use]
 pub fn hard_sigmoid(x: &[f64]) -> Vec<f64> {
-    x.iter()
-        .map(|&v| ((v + 3.0) / 6.0).clamp(0.0, 1.0))
-        .collect()
+    threaded_f64_map_bw(x, |v| ((v + 3.0) / 6.0).clamp(0.0, 1.0))
 }
 
 /// Hard tanh: clip(x, -1, 1)
@@ -91,7 +99,7 @@ pub fn hard_sigmoid(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.hard_tanh(x)`.
 #[must_use]
 pub fn hard_tanh(x: &[f64]) -> Vec<f64> {
-    x.iter().map(|&v| v.clamp(-1.0, 1.0)).collect()
+    threaded_f64_map_bw(x, |v| v.clamp(-1.0, 1.0))
 }
 
 /// SiLU / Swish: x * sigmoid(x)
@@ -113,9 +121,7 @@ pub fn swish(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.hard_silu(x)` and `jax.nn.hard_swish(x)`.
 #[must_use]
 pub fn hard_silu(x: &[f64]) -> Vec<f64> {
-    x.iter()
-        .map(|&v| v * ((v + 3.0) / 6.0).clamp(0.0, 1.0))
-        .collect()
+    threaded_f64_map_bw(x, |v| v * ((v + 3.0) / 6.0).clamp(0.0, 1.0))
 }
 
 /// Alias for hard_silu
@@ -201,7 +207,7 @@ pub fn softplus(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.soft_sign(x)`.
 #[must_use]
 pub fn softsign(x: &[f64]) -> Vec<f64> {
-    x.iter().map(|&v| v / (1.0 + v.abs())).collect()
+    threaded_f64_map_bw(x, |v| v / (1.0 + v.abs()))
 }
 
 /// Mish: x * tanh(softplus(x))
@@ -1432,6 +1438,71 @@ mod tests {
         });
         bench("threaded", &|| {
             std::hint::black_box(sigmoid(&x));
+        });
+    }
+
+    #[test]
+    fn threaded_cheap_activations_bit_identical_to_sequential() {
+        // Cheap BW-bound activations only thread past the L3 gate (>= 1<<23), so test at a
+        // size that engages the threaded path; must equal the sequential map bit-for-bit.
+        let n = 9_000_000usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.0017)
+            .collect();
+        let relu_seq: Vec<f64> = x.iter().map(|&v| v.max(0.0)).collect();
+        let relu6_seq: Vec<f64> = x.iter().map(|&v| v.clamp(0.0, 6.0)).collect();
+        let lrelu_seq: Vec<f64> = x
+            .iter()
+            .map(|&v| if v >= 0.0 { v } else { 0.01 * v })
+            .collect();
+        let hsig_seq: Vec<f64> = x
+            .iter()
+            .map(|&v| ((v + 3.0) / 6.0).clamp(0.0, 1.0))
+            .collect();
+        let htanh_seq: Vec<f64> = x.iter().map(|&v| v.clamp(-1.0, 1.0)).collect();
+        let hsilu_seq: Vec<f64> = x
+            .iter()
+            .map(|&v| v * ((v + 3.0) / 6.0).clamp(0.0, 1.0))
+            .collect();
+        let ssign_seq: Vec<f64> = x.iter().map(|&v| v / (1.0 + v.abs())).collect();
+        let check = |got: &[f64], want: &[f64], name: &str| {
+            for (a, b) in got.iter().zip(want) {
+                assert_eq!(a.to_bits(), b.to_bits(), "{name}");
+            }
+        };
+        check(&relu(&x), &relu_seq, "relu");
+        check(&relu6(&x), &relu6_seq, "relu6");
+        check(&leaky_relu(&x, 0.01), &lrelu_seq, "leaky_relu");
+        check(&hard_sigmoid(&x), &hsig_seq, "hard_sigmoid");
+        check(&hard_tanh(&x), &htanh_seq, "hard_tanh");
+        check(&hard_silu(&x), &hsilu_seq, "hard_silu");
+        check(&softsign(&x), &ssign_seq, "softsign");
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_relu_threaded_vs_sequential() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+            .collect();
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("relu f64 16M [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("sequential", &|| {
+            let out: Vec<f64> = x.iter().map(|&v| v.max(0.0)).collect();
+            std::hint::black_box(out);
+        });
+        bench("threaded", &|| {
+            std::hint::black_box(relu(&x));
         });
     }
 
