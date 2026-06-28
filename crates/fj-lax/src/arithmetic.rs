@@ -13560,6 +13560,208 @@ impl Iterator for MultiIndexIterator {
 /// path computes `literal.as_f64()` (= `f64::from_bits`) then the same predicate,
 /// which is exactly what `as_f64_slice` + `pred` does; `new_bool_values` stores
 /// the same bools.
+#[derive(Clone, Copy)]
+enum FloatPredKind {
+    Finite,
+    Nan,
+    Inf,
+}
+
+// Build a bitmask-bool tensor (1 bit/elem) from packed words.
+fn bool_words_value(
+    primitive: Primitive,
+    shape: Shape,
+    words: Vec<u64>,
+    len: usize,
+) -> Result<Value, EvalError> {
+    let buffer =
+        fj_core::LiteralBuffer::from_bool_words(words, len).ok_or(EvalError::Unsupported {
+            primitive,
+            detail: "internal bool predicate word length mismatch".to_owned(),
+        })?;
+    Ok(Value::Tensor(TensorValue::new_with_literal_buffer(
+        DType::Bool,
+        shape,
+        buffer,
+    )?))
+}
+
+// SIMD+threaded float predicate (is_finite/is_nan/is_inf) → packed BITMASK (1 bit/elem,
+// 8x smaller than byte-bool so the wide-output write no longer caps BW). The IEEE bit test
+// `(bits & EXP) ?= EXP` over `Simd<u64,8>` is bit-identical to f64::is_finite/is_nan/is_infinite.
+// Each output word covers a disjoint 64-element block → threaded over words.
+fn f64_predicate_words(xs: &[f64], kind: FloatPredKind) -> Vec<u64> {
+    use std::simd::{Simd, cmp::SimdPartialEq, num::SimdFloat};
+    const WORD_BITS: usize = u64::BITS as usize;
+    const LANES: usize = 8;
+    const EXP: u64 = 0x7FF0_0000_0000_0000;
+    const MANT: u64 = 0x000F_FFFF_FFFF_FFFF;
+    let n = xs.len();
+    let mut words = vec![0_u64; n.div_ceil(WORD_BITS)];
+    let full_words = n / WORD_BITS;
+    let exp_v = Simd::<u64, LANES>::splat(EXP);
+    let mant_v = Simd::<u64, LANES>::splat(MANT);
+    let zero_v = Simd::<u64, LANES>::splat(0);
+    let compute_word = |wi: usize| -> u64 {
+        let base = wi * WORD_BITS;
+        let mut word = 0_u64;
+        for chunk in 0..(WORD_BITS / LANES) {
+            let off = base + chunk * LANES;
+            let bits = Simd::<f64, LANES>::from_slice(&xs[off..off + LANES]).to_bits();
+            let exp = bits & exp_v;
+            let mask = match kind {
+                FloatPredKind::Finite => exp.simd_ne(exp_v),
+                FloatPredKind::Nan => exp.simd_eq(exp_v) & (bits & mant_v).simd_ne(zero_v),
+                FloatPredKind::Inf => exp.simd_eq(exp_v) & (bits & mant_v).simd_eq(zero_v),
+            };
+            word |= mask.to_bitmask() << (chunk * LANES);
+        }
+        word
+    };
+    let threads = if n >= CHEAP_BINARY_PARALLEL_MIN {
+        work_scaled_threads(n)
+    } else {
+        1
+    };
+    if threads > 1 && full_words > 0 {
+        let compute_word = &compute_word;
+        let per = full_words.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [u64] = &mut words[..full_words];
+            let mut w0 = 0usize;
+            while w0 < full_words {
+                let cnt = per.min(full_words - w0);
+                let (blk, tail) = rest.split_at_mut(cnt);
+                rest = tail;
+                let start = w0;
+                w0 += cnt;
+                scope.spawn(move || {
+                    for (j, slot) in blk.iter_mut().enumerate() {
+                        *slot = compute_word(start + j);
+                    }
+                });
+            }
+        });
+    } else {
+        for (wi, slot) in words.iter_mut().take(full_words).enumerate() {
+            *slot = compute_word(wi);
+        }
+    }
+    let tail_start = full_words * WORD_BITS;
+    for (k, &v) in xs[tail_start..].iter().enumerate() {
+        let bit = match kind {
+            FloatPredKind::Finite => v.is_finite(),
+            FloatPredKind::Nan => v.is_nan(),
+            FloatPredKind::Inf => v.is_infinite(),
+        };
+        if bit {
+            let i = tail_start + k;
+            words[i / WORD_BITS] |= 1_u64 << (i % WORD_BITS);
+        }
+    }
+    words
+}
+
+fn f32_predicate_words(xs: &[f32], kind: FloatPredKind) -> Vec<u64> {
+    use std::simd::{Simd, cmp::SimdPartialEq, num::SimdFloat};
+    const WORD_BITS: usize = u64::BITS as usize;
+    const LANES: usize = 8;
+    const EXP: u32 = 0x7F80_0000;
+    const MANT: u32 = 0x007F_FFFF;
+    let n = xs.len();
+    let mut words = vec![0_u64; n.div_ceil(WORD_BITS)];
+    let full_words = n / WORD_BITS;
+    let exp_v = Simd::<u32, LANES>::splat(EXP);
+    let mant_v = Simd::<u32, LANES>::splat(MANT);
+    let zero_v = Simd::<u32, LANES>::splat(0);
+    let compute_word = |wi: usize| -> u64 {
+        let base = wi * WORD_BITS;
+        let mut word = 0_u64;
+        for chunk in 0..(WORD_BITS / LANES) {
+            let off = base + chunk * LANES;
+            let bits = Simd::<f32, LANES>::from_slice(&xs[off..off + LANES]).to_bits();
+            let exp = bits & exp_v;
+            let mask = match kind {
+                FloatPredKind::Finite => exp.simd_ne(exp_v),
+                FloatPredKind::Nan => exp.simd_eq(exp_v) & (bits & mant_v).simd_ne(zero_v),
+                FloatPredKind::Inf => exp.simd_eq(exp_v) & (bits & mant_v).simd_eq(zero_v),
+            };
+            word |= mask.to_bitmask() << (chunk * LANES);
+        }
+        word
+    };
+    let threads = if n >= CHEAP_BINARY_PARALLEL_MIN {
+        work_scaled_threads(n)
+    } else {
+        1
+    };
+    if threads > 1 && full_words > 0 {
+        let compute_word = &compute_word;
+        let per = full_words.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [u64] = &mut words[..full_words];
+            let mut w0 = 0usize;
+            while w0 < full_words {
+                let cnt = per.min(full_words - w0);
+                let (blk, tail) = rest.split_at_mut(cnt);
+                rest = tail;
+                let start = w0;
+                w0 += cnt;
+                scope.spawn(move || {
+                    for (j, slot) in blk.iter_mut().enumerate() {
+                        *slot = compute_word(start + j);
+                    }
+                });
+            }
+        });
+    } else {
+        for (wi, slot) in words.iter_mut().take(full_words).enumerate() {
+            *slot = compute_word(wi);
+        }
+    }
+    let tail_start = full_words * WORD_BITS;
+    for (k, &v) in xs[tail_start..].iter().enumerate() {
+        let bit = match kind {
+            FloatPredKind::Finite => v.is_finite(),
+            FloatPredKind::Nan => v.is_nan(),
+            FloatPredKind::Inf => v.is_infinite(),
+        };
+        if bit {
+            let i = tail_start + k;
+            words[i / WORD_BITS] |= 1_u64 << (i % WORD_BITS);
+        }
+    }
+    words
+}
+
+// Dense f64/f32 SIMD-bitmask predicate path (is_finite/is_nan/is_inf). Returns None for
+// other dtypes (caller falls to the generic per-Literal loop).
+fn float_predicate_words_dense(
+    primitive: Primitive,
+    tensor: &TensorValue,
+    kind: FloatPredKind,
+) -> Result<Option<Value>, EvalError> {
+    if let Some(xs) = tensor.elements.as_f64_slice() {
+        let words = f64_predicate_words(xs, kind);
+        return Ok(Some(bool_words_value(
+            primitive,
+            tensor.shape.clone(),
+            words,
+            xs.len(),
+        )?));
+    }
+    if let Some(xs) = tensor.elements.as_f32_slice() {
+        let words = f32_predicate_words(xs, kind);
+        return Ok(Some(bool_words_value(
+            primitive,
+            tensor.shape.clone(),
+            words,
+            xs.len(),
+        )?));
+    }
+    Ok(None)
+}
+
 fn f64_predicate_dense(
     tensor: &TensorValue,
     pred: impl Fn(f64) -> bool,
@@ -13626,10 +13828,9 @@ pub(crate) fn eval_is_finite(primitive: Primitive, inputs: &[Value]) -> Result<V
             Ok(Value::Scalar(Literal::Bool(is_finite)))
         }
         Value::Tensor(tensor) => {
-            if let Some(value) = f64_predicate_dense(tensor, f64::is_finite)? {
-                return Ok(value);
-            }
-            if let Some(value) = f32_predicate_dense(tensor, f32::is_finite)? {
+            if let Some(value) =
+                float_predicate_words_dense(primitive, tensor, FloatPredKind::Finite)?
+            {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(tensor.elements.len());
@@ -13691,10 +13892,8 @@ pub(crate) fn eval_is_nan(primitive: Primitive, inputs: &[Value]) -> Result<Valu
             Ok(Value::Scalar(Literal::Bool(is_nan)))
         }
         Value::Tensor(tensor) => {
-            if let Some(value) = f64_predicate_dense(tensor, f64::is_nan)? {
-                return Ok(value);
-            }
-            if let Some(value) = f32_predicate_dense(tensor, f32::is_nan)? {
+            if let Some(value) = float_predicate_words_dense(primitive, tensor, FloatPredKind::Nan)?
+            {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(tensor.elements.len());
@@ -13755,10 +13954,8 @@ pub(crate) fn eval_is_inf(primitive: Primitive, inputs: &[Value]) -> Result<Valu
             Ok(Value::Scalar(Literal::Bool(is_inf)))
         }
         Value::Tensor(tensor) => {
-            if let Some(value) = f64_predicate_dense(tensor, f64::is_infinite)? {
-                return Ok(value);
-            }
-            if let Some(value) = f32_predicate_dense(tensor, f32::is_infinite)? {
+            if let Some(value) = float_predicate_words_dense(primitive, tensor, FloatPredKind::Inf)?
+            {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(tensor.elements.len());
@@ -14321,6 +14518,35 @@ mod tests {
     use super::*;
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
+
+    // Same-invocation A/B: serial byte-bool map vs SIMD-bitmask threaded is_finite (16M f64).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_is_finite_bitmask_vs_serial() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let xs: Vec<f64> = (0..n).map(|i| (i % 100_003) as f64 - 50_000.0).collect();
+        let time_it = |label: &str, f: &dyn Fn() -> u64| {
+            std::hint::black_box(f());
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("REF {label}: {:.3}ms", b * 1e3);
+        };
+        time_it("is_finite_serial_bytebool", &|| {
+            let out: Vec<bool> = xs.iter().map(|&v| v.is_finite()).collect();
+            std::hint::black_box(&out);
+            out[123] as u64
+        });
+        time_it("is_finite_simd_bitmask", &|| {
+            let w = f64_predicate_words(&xs, FloatPredKind::Finite);
+            std::hint::black_box(&w);
+            w[1]
+        });
+    }
 
     // Same-invocation A/B: serial inline bias-add vs the threaded broadcast eval.
     #[test]

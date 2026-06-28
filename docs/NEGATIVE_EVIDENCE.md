@@ -2,6 +2,22 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: is_finite/is_nan/is_inf SIMD-BITMASK — 1.5x WIN vs JAX (the lever the prior NO-SHIP named) (ProudSalmon)
+
+Executed the deferred lever from the NO-SHIP below. Replaced the scalar byte-bool predicate path
+(`f64/f32_predicate_dense`, `Vec<bool>` 16MB output) with `f64_predicate_words`/`f32_predicate_words`: the IEEE
+exponent/mantissa bit test over `Simd<u64,8>`/`Simd<u32,8>` (`(bits & EXP) ?= EXP`, `& (bits & MANT) ?= 0`) →
+PACKED BITMASK (1 bit/elem, 2MB — 8x smaller output) + threaded over disjoint words. Covers is_finite/is_nan/
+is_inf for f64 AND f32 via one `FloatPredKind` enum. BIT-IDENTICAL to `f64::is_finite/is_nan/is_infinite`
+(predicate suite 16/0; no test pinned byte-bool — audited first).
+
+Evidence — SAME-INVOCATION A/B (serial byte-bool map vs SIMD-bitmask `f64_predicate_words`, one binary,
+min-of-8), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M f64 `is_finite`:
+  - serial byte-bool **4.86ms → SIMD-bitmask 1.96ms = 2.48x**. vs JAX 0.10.2 `jnp.isfinite` **2.93-3.58ms
+    (host variance) → 1.96 vs ~2.9 = ~1.5x WIN** (vs the prior threaded-byte-bool 4.15ms which LOST 1.4x).
+CONFIRMS the NO-SHIP diagnosis: the byte-bool output was the cap; the bitmask (small output) + SIMD bit-test +
+threading beats JAX, exactly like the same-shape comparisons. clippy+fmt clean.
+
 ## 2026-06-28 - NO-SHIP (REVERTED): threaded is_finite/is_nan loses to JAX — needs SIMD-bitmask not just threads (ProudSalmon)
 
 Tried threading the unary float predicates (`is_finite`/`is_nan`/`is_inf`, via `f64/f32_predicate_dense` —
