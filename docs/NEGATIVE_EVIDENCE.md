@@ -38,6 +38,14 @@ exact bit-equality; clippy clean. `matrix_norm_1` (column ∞-norm) left serial 
 friendly form needs per-thread partial column-sums (reassoc → not bit-identical), and its
 strided form is cache-hostile; not worth it for the niche operator-1-norm.
 
+EXTENDED #3 (norm family complete): threaded the L-inf (`max|x|`, e.g. max-norm gradient
+clipping) and L-neg-inf (`min|x|`) vector norms via `threaded_fold_abs_bw` (gated past L3).
+BIT-IDENTICAL — `max`/`min` are associative+commutative, so no tolerance needed (verified via
+`to_bits` at 9M). MEASURED same-binary A/B (16M f64): L-inf serial 10.98 ms → **threaded 5.50
+ms = 2.00x** (a touch below the sum norms — `max` is purer read-BW with less compute to
+overlap). The full vector_norm family (L1/L2/L-inf/L-neg-inf, plus Frobenius and matrix
+∞-norm) now threads; only L0 (count) and Lp (`powf`) stay serial.
+
 ## 2026-06-28 - NO-SHIP: dense-f64 RFFT exact-pack branch is not a Criterion-significant win (ProudSalmon)
 
 DIG followed the remaining FFT/RFFT gap after the dense-f64 pow2 RFFT tuple-lift

@@ -6050,6 +6050,35 @@ fn threaded_map_sum_bw(x: &[f64], f: impl Fn(f64) -> f64 + Sync) -> f64 {
     partials.iter().sum()
 }
 
+/// Threaded `fold(init, combine)` of `|x[i]|` for the L-inf (`combine=max`) / L-neg-inf
+/// (`combine=min`) norms. Gated past L3 (read-only, BW-bound). Unlike the sum reductions this
+/// is BIT-IDENTICAL: `max`/`min` are associative+commutative, so per-thread partials combined
+/// the same way give exactly the serial fold. Below the gate it is the serial fold.
+fn threaded_fold_abs_bw(x: &[f64], init: f64, combine: fn(f64, f64) -> f64) -> f64 {
+    let n = x.len();
+    let threads = if n >= (1 << 23) {
+        crate::arithmetic::work_scaled_threads(n)
+    } else {
+        1
+    };
+    if threads <= 1 {
+        return x.iter().map(|&v| v.abs()).fold(init, combine);
+    }
+    let chunk = n.div_ceil(threads);
+    let partials: Vec<f64> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let mut start = 0usize;
+        while start < n {
+            let end = (start + chunk).min(n);
+            let seg = &x[start..end];
+            handles.push(scope.spawn(move || seg.iter().map(|&v| v.abs()).fold(init, combine)));
+            start = end;
+        }
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    partials.iter().copied().fold(init, combine)
+}
+
 /// Compute vector or matrix norms.
 ///
 /// For vectors: ord=None or 2 gives L2 norm, ord=1 gives L1, ord=inf gives max.
@@ -6071,11 +6100,11 @@ pub fn vector_norm(x: &[f64], ord: f64) -> f64 {
         // L2 norm: Euclidean
         threaded_map_sum_bw(x, |v| v * v).sqrt()
     } else if ord == f64::INFINITY {
-        // L-infinity norm: max absolute value
-        x.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max)
+        // L-infinity norm: max absolute value (e.g. max-norm gradient clipping).
+        threaded_fold_abs_bw(x, 0.0_f64, f64::max)
     } else if ord == f64::NEG_INFINITY {
         // L-neg-infinity norm: min absolute value
-        x.iter().map(|&v| v.abs()).fold(f64::INFINITY, f64::min)
+        threaded_fold_abs_bw(x, f64::INFINITY, f64::min)
     } else {
         // General Lp norm
         x.iter()
@@ -11733,6 +11762,14 @@ mod tests {
         // L1 also uses the threaded BW reduction.
         let l1_serial = x.iter().map(|&v| v.abs()).sum::<f64>();
         assert!((vector_norm(&x, 1.0) - l1_serial).abs() / l1_serial < 1e-12);
+        // L-inf / L-neg-inf are BIT-IDENTICAL (max/min are associative).
+        let linf = x.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max);
+        let lninf = x.iter().map(|&v| v.abs()).fold(f64::INFINITY, f64::min);
+        assert_eq!(vector_norm(&x, f64::INFINITY).to_bits(), linf.to_bits());
+        assert_eq!(
+            vector_norm(&x, f64::NEG_INFINITY).to_bits(),
+            lninf.to_bits()
+        );
     }
 
     #[test]
@@ -11758,6 +11795,13 @@ mod tests {
         });
         bench("threaded", &|| {
             std::hint::black_box(frobenius_norm(&x));
+        });
+        // L-inf (max-norm): bit-identical, same BW profile.
+        bench("linf-serial", &|| {
+            std::hint::black_box(x.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max));
+        });
+        bench("linf-threaded", &|| {
+            std::hint::black_box(vector_norm(&x, f64::INFINITY));
         });
     }
 
