@@ -2,6 +2,33 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - SURFACE: contained per-op frontier exhausted post-pad; concat dense-i64 already lazy-view-fast (~0-gain) (ProudSalmon)
+
+After landing the N-D pad win (666e71e5, 2.48x), swept every remaining OPEN P3 perf bead for a NEW contained
+lever and confirmed each is non-contained or already-done — independently re-verified, not taken on faith:
+  - `frankenjax-thread-concat-materialize`: **NEW measured datapoint** — same-binary
+    `eval/concat_axis1_4x4096x1024_i64` (strided, outer=4096, ~134MB) = **1.32ms**, NOT slow. Reason:
+    dense-i64-backed `LiteralBuffer::from_concat_slices` builds a LAZY concat-VIEW (cheap), unlike the
+    boxed-`Vec<Literal>` f64 bench that eagerly materializes (the 80ms case SlateHarrier threaded). So adding
+    i64/u32/u64 to `concat_strided_threaded` is **~0-gain** for dense input — the eval returns a view; the only
+    i64-concat cost is the downstream lazy-view CONSUME, which is `so4wo`-class (buffer/view model), not a
+    kernel lever. Bench reverted (no change shipped).
+  - `frankenjax-dedicated-gemv`: bit-identity-blocked (SIMD-K reorders the sum → breaks matmul goldens),
+    maintainer-downgraded — confirmed from the bead, not pursued.
+  - `frankenjax-simd-argmax-axis0`: already done — f32 axis0 is SIMD'd (`simd_arg_extreme_axis0_block_f32`,
+    1.77x), i64 axis0 threaded with exact compare, and f64 axis0 SIMD was MEASURED 0.49x and deliberately left
+    scalar (tensor_ops.rs:9111-9118). Family complete.
+  - `frankenjax-special-fn-rational` (lgamma/digamma/i0e 2.0-2.5x): implemented + reverted (2026-06-25) — folds
+    into `cntiy` (+fma) because the scalar `ln`s dominate, not the divisions.
+  - `frankenjax-nd-separable-sum-pool`: documented failed lever (3-D separable running-sum loses to JAX's
+    vectorized naive; only wins when O(out·window) ≫ O(input)).
+CONCLUSION (re-affirms the 2026-06-25 consolidated classification): the contained per-op kernel frontier is
+exhausted. Every remaining vs-JAX gap is (a) FMA-policy-gated (`cntiy` — maintainer decision: matmul/conv/
+exp-log-trig/softmax/FFT-butterfly/lgamma-ln), or (b) eval-model buffer-reuse (`so4wo` — per-call output
+alloc/first-touch faults vs JAX's jit buffer reuse: reciprocal/maximum/clip/intpow/concat-view-consume), or
+(c) multi-session native rewrites (FFT real/complex kernel). No quick contained lever remains; the leverage is
+the two architectural beads `cntiy` and `so4wo`.
+
 ## 2026-06-28 - WIN: N-D pad threaded (4D NHWC conv pad) — 62.1→25.0ms = 2.48x (bead frankenjax-pad-nd-thread) (ProudSalmon)
 
 Closed the open bead `frankenjax-pad-nd-thread`. The threaded pad fast path only covered rank-2
