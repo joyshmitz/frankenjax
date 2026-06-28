@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: cheap complex tensor⊗scalar (z*c twiddle / z+c) threaded — 2.32x internal, parity vs JAX (ProudSalmon)
+
+`eval_complex_tensor_scalar`'s cheap path (z*c phase-rotation / scaling, z+c, z-c, z/c — the FFT-twiddle /
+signal-processing idiom) ran SERIAL with the stale "fan-out regresses" L3-misconception (the expensive complex
+tensor-scalar ops already threaded; only cheap was missed). Threaded over disjoint chunks past the 8.4M gate;
+`apply_complex_binary` infallible for these → unwrap == serial `?`, bit-identical (complex tensor-scalar tests 5/0).
+
+Evidence — SAME-INVOCATION A/B (`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M complex128
+`z*(2+3j)`): serial **138.7ms → eval 59.76ms = 2.32x**. vs JAX 0.10.2 `z*c` **57.17ms → 59.76 vs 57.17 = ~1.05x
+(parity)** — was a 2.4x LOSS at serial. (JAX's complex z*c 57ms / z+c 52.7ms are even SLOWER than its same-shape
+complex mul 49ms — XLA's scalar-broadcast complex is badly unoptimized.) The 256MB fresh complex output is the
+so4wo floor → parity is the ceiling; the 2.32x internal closes a common FFT op from 2.4x-slower to parity.
+clippy+fmt clean.
+
 ## 2026-06-28 - WIN: complex conj threaded — 2.77x internal, 3x JAX loss → near-parity (ProudSalmon)
 
 `eval_conj` negated the imag of each `(re,im)` scalar single-thread. Threaded the negate-imag map over slices

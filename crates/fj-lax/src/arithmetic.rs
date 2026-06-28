@@ -3566,7 +3566,44 @@ fn eval_complex_tensor_scalar(
         }
     }
 
-    // Serial dense path (cheap ops are memory-bound, where fan-out regresses).
+    // Thread the cheap complex tensor⊗scalar (z*c phase rotation / scaling, z+c — common FFT
+    // twiddle / signal-processing idioms) past the L3 gate: 256MB read + 256MB write is BW-bound
+    // DRAM-side, where one core cannot saturate it (the older "fan-out regresses" comment is
+    // L3-scoped — past L3 it WINS; JAX's complex z*c/z+c is very slow, ~52-57ms). apply_complex_
+    // binary is infallible for these ops → unwrap == the serial `?`; element-independent →
+    // bit-identical.
+    if n >= CHEAP_BINARY_PARALLEL_MIN && work_scaled_threads(n) > 1 {
+        let threads = work_scaled_threads(n);
+        let mut out = vec![(0.0f64, 0.0f64); n];
+        let chunk = n.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [(f64, f64)] = out.as_mut_slice();
+            let mut start = 0usize;
+            while start < n {
+                let len = chunk.min(n - start);
+                let (blk, tail) = rest.split_at_mut(len);
+                rest = tail;
+                let s = start;
+                start += len;
+                scope.spawn(move || {
+                    for (i, o) in blk.iter_mut().enumerate() {
+                        let x = a[s + i];
+                        *o = if scalar_on_left {
+                            apply_complex_binary(primitive, scalar, x)
+                        } else {
+                            apply_complex_binary(primitive, x, scalar)
+                        }
+                        .unwrap_or((f64::NAN, f64::NAN));
+                    }
+                });
+            }
+        });
+        return Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+            out_dtype,
+            tensor.shape.clone(),
+            out,
+        )?)));
+    }
     let mut out: Vec<(f64, f64)> = Vec::with_capacity(n);
     for &x in a {
         out.push(if scalar_on_left {
@@ -14614,6 +14651,50 @@ mod tests {
     // deliberately tuple-array literals; the type-complexity lint is noise here.
     #![allow(clippy::type_complexity)]
     use super::*;
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_complex_zmulc_threaded_vs_serial() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let z: Vec<(f64, f64)> = (0..n)
+            .map(|i| ((i % 1000) as f64, (i % 7) as f64))
+            .collect();
+        let zt = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                z.clone(),
+            )
+            .unwrap(),
+        );
+        let c = Value::Scalar(Literal::from_complex128(2.0, 3.0));
+        let time_it = |label: &str, f: &dyn Fn() -> u64| {
+            std::hint::black_box(f());
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("REF {label}: {:.3}ms", b * 1e3);
+        };
+        time_it("complex_zmulc_serial", &|| {
+            let out: Vec<(f64, f64)> = z
+                .iter()
+                .map(|&(re, im)| (re * 2.0 - im * 3.0, re * 3.0 + im * 2.0))
+                .collect();
+            std::hint::black_box(&out);
+            out[123].0.to_bits()
+        });
+        let p = BTreeMap::new();
+        time_it("complex_zmulc_eval", &|| {
+            let v = crate::eval_primitive(Primitive::Mul, &[zt.clone(), c.clone()], &p).unwrap();
+            std::hint::black_box(v.as_tensor().unwrap().elements.len()) as u64
+        });
+    }
 
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
