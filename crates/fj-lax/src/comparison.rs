@@ -276,7 +276,7 @@ pub(crate) fn eval_comparison(
                 // is the common integer-compare case that otherwise hit the generic loop.
                 if matches!(lhs.dtype, DType::I64 | DType::I32)
                     && matches!(rhs.dtype, DType::I64 | DType::I32)
-                    && let Some(value) = eval_same_shape_i64_compare(lhs, rhs, &int_cmp)?
+                    && let Some(value) = eval_same_shape_i64_compare(primitive, lhs, rhs, &int_cmp)?
                 {
                     return Ok(value);
                 }
@@ -786,30 +786,100 @@ fn eval_same_shape_half_float_compare(
 /// integer comparison closure. It only skips per-element enum dispatch and
 /// float/complex probes.
 #[inline]
+// i64/i32 sibling of `f64_compare_words`. An i64 value fits i128 exactly, so
+// `int_cmp(i128::from(a), i128::from(b))` == the i64x8 SIMD compare for the same
+// primitive (no overflow; i32 is sign-extended in its i64 slot → ordering preserved).
+// Bit-identical values, now SIMD + threaded into a packed bitmask (was a scalar
+// i128-widening `.map().collect()`).
+fn i64_compare_words(
+    primitive: Primitive,
+    left: &[i64],
+    right: &[i64],
+    int_cmp: &impl Fn(i128, i128) -> bool,
+) -> Vec<u64> {
+    const WORD_BITS: usize = u64::BITS as usize;
+    const LANES: usize = 8;
+    let n = left.len();
+    let mut words = vec![0_u64; n.div_ceil(WORD_BITS)];
+    let full_words = n / WORD_BITS;
+    let compute_word = |word_index: usize| -> u64 {
+        let base = word_index * WORD_BITS;
+        let mut word = 0_u64;
+        for chunk in 0..(WORD_BITS / LANES) {
+            let offset = base + chunk * LANES;
+            let lv = Simd::<i64, LANES>::from_slice(&left[offset..offset + LANES]);
+            let rv = Simd::<i64, LANES>::from_slice(&right[offset..offset + LANES]);
+            let mask = match primitive {
+                Primitive::Eq => lv.simd_eq(rv).to_bitmask(),
+                Primitive::Ne => lv.simd_ne(rv).to_bitmask(),
+                Primitive::Lt => lv.simd_lt(rv).to_bitmask(),
+                Primitive::Le => lv.simd_le(rv).to_bitmask(),
+                Primitive::Gt => lv.simd_gt(rv).to_bitmask(),
+                Primitive::Ge => lv.simd_ge(rv).to_bitmask(),
+                _ => 0,
+            };
+            word |= mask << (chunk * LANES);
+        }
+        word
+    };
+    let threads = if n >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+        crate::arithmetic::work_scaled_threads(n)
+    } else {
+        1
+    };
+    if threads > 1 && full_words > 0 {
+        let compute_word = &compute_word;
+        let per = full_words.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [u64] = &mut words[..full_words];
+            let mut w0 = 0usize;
+            while w0 < full_words {
+                let cnt = per.min(full_words - w0);
+                let (blk, tail) = rest.split_at_mut(cnt);
+                rest = tail;
+                let start = w0;
+                w0 += cnt;
+                scope.spawn(move || {
+                    for (j, slot) in blk.iter_mut().enumerate() {
+                        *slot = compute_word(start + j);
+                    }
+                });
+            }
+        });
+    } else {
+        for (word_index, word_slot) in words.iter_mut().take(full_words).enumerate() {
+            *word_slot = compute_word(word_index);
+        }
+    }
+    for index in (full_words * WORD_BITS)..n {
+        push_bool_word(
+            &mut words,
+            index,
+            int_cmp(i128::from(left[index]), i128::from(right[index])),
+        );
+    }
+    words
+}
+
 fn eval_same_shape_i64_compare(
+    primitive: Primitive,
     lhs: &TensorValue,
     rhs: &TensorValue,
     int_cmp: &impl Fn(i128, i128) -> bool,
 ) -> Result<Option<Value>, EvalError> {
-    // Dense i64 fast path: read both contiguous `i64` backing slices directly,
-    // skipping the per-element `Literal::I64` match + 24-byte enum stride.
-    // Bit-for-bit identical to the generic loop below — same `int_cmp` applied
-    // to `i128::from(value)` in the same element order, same Bool output.
-    // `as_i64_slice()` is `Some` only for I64 dense storage. (The Bool output is
-    // still `Vec<Literal>` — no dense Bool storage exists — so the win is on the
-    // input side.)
+    // Dense i64 fast path: SIMD i64x8 compare over both contiguous backings into a
+    // packed bitmask, threaded over disjoint words. `as_i64_slice()` is `Some` only
+    // for I64/I32 dense storage. Bit-identical to the scalar i128-widening compare.
     if let (Some(left_values), Some(right_values)) =
         (lhs.elements.as_i64_slice(), rhs.elements.as_i64_slice())
     {
-        let out: Vec<bool> = left_values
-            .iter()
-            .zip(right_values)
-            .map(|(&left, &right)| int_cmp(i128::from(left), i128::from(right)))
-            .collect();
-        return Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+        let out = i64_compare_words(primitive, left_values, right_values, int_cmp);
+        return Ok(Some(bool_words_tensor(
+            primitive,
             lhs.shape.clone(),
+            left_values.len(),
             out,
-        )?)));
+        )?));
     }
 
     let mut out = Vec::with_capacity(lhs.elements.len());
@@ -1119,6 +1189,24 @@ mod tests {
         };
         time_it("f32_gt_serial", &f32_serial);
         time_it("f32_gt_threaded", &f32_threaded);
+
+        // i64 (index masks): old scalar i128-widen map vs new SIMD+threaded words.
+        let li64: Vec<i64> = (0..n as i64).map(|i| (i % 100_003) - 50_000).collect();
+        let ri64: Vec<i64> = vec![0i64; n];
+        let i64_serial = || -> u64 {
+            let out: Vec<bool> = li64
+                .iter()
+                .zip(&ri64)
+                .map(|(&a, &b)| i128::from(a) > i128::from(b))
+                .collect();
+            std::hint::black_box(&out);
+            out[123] as u64
+        };
+        let i64_threaded = || -> u64 {
+            std::hint::black_box(i64_compare_words(Primitive::Gt, &li64, &ri64, &|a, b| a > b)[123])
+        };
+        time_it("i64_gt_serial", &i64_serial);
+        time_it("i64_gt_threaded", &i64_threaded);
     }
 
     #[test]

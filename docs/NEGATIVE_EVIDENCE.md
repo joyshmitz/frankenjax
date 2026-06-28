@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: i64/i32 same-shape comparison SIMD+threaded — 2.24x WIN vs JAX (was scalar i128) (ProudSalmon)
+
+Completes the same-shape comparison family (f64 + f32 done; integer was the last scalar holdout). The i64/i32
+compare ran fully SCALAR `.iter().zip().map(|(a,b)| int_cmp(i128::from(a), i128::from(b))).collect::<Vec<bool>>()`
+— widening every element to i128, no SIMD, no threads. Added `i64_compare_words` (i64x8 SIMD compare → packed
+bitmask, threaded over disjoint words). An i64 fits i128 exactly so `int_cmp(i128::from(a), i128::from(b))` ==
+the i64x8 SIMD compare for the same primitive (i32 is sign-extended in its i64 slot → ordering preserved) →
+BIT-IDENTICAL values (integer dense bit-identity tests stay green; no test pinned integer compare to byte-bool).
+
+Evidence — SAME-INVOCATION A/B (old scalar i128 map vs new SIMD+threaded `i64_compare_words`, one binary,
+min-of-8), `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M i64 same-shape `a>b`:
+  - serial **9.15ms → threaded 2.44ms = 3.75x** (bigger than f32's 2.0x — the scalar path also paid the i128
+    widen). vs JAX 0.10.2 same-shape `a>b` (two i64 arrays) **5.47ms → 2.44 vs 5.47 = ~2.24x WIN** (was a 1.67x
+    LOSS at scalar).
+Comparison suite 23/0, clippy+fmt clean, conformance-safe (small compares stay serial). Same-shape comparison
+family fully SIMD+threaded across f64/f32/i64/i32.
+
 ## 2026-06-28 - WIN: f32 same-shape comparison SIMD+threaded — 1.39x WIN vs JAX (was fully scalar) (ProudSalmon)
 
 The f32 (JAX's DEFAULT float) same-shape compare was the surfaced follow-up: it ran a FULLY SCALAR
