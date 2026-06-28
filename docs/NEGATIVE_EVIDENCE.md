@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - NO-SHIP (REVERTED): complex abs threaded — hypot floor leaves 2.4x JAX loss (ProudSalmon)
+
+`eval_unary_complex_abs` is scalar single-thread (`dense.iter().map(|&(re,im)| re.hypot(im)).collect()`). Threaded
+it via `threaded_complex_map_f64` (compute-heavy hypot, 128MB real output — looked like a clean win: JAX
+`jnp.abs(complex128)` is slow, 14.56ms). Measured same-invocation
+(`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M complex128):
+  - serial **134.7ms → threaded 36.6ms = 3.68x** internal, BUT vs JAX **14.56ms → 36.6 = 2.4x LOSS** (was a 9.2x
+    loss at serial). ROOT CAUSE: Rust's `f64::hypot` is libm's careful overflow-safe scaling impl (~8ns/call) —
+    far slower than JAX's vectorized abs — and threading only gave 3.68x (not ~8x) because the 128MB output write
+    (so4wo) caps it. So threading alone leaves it 2.4x slower than JAX (NOT parity, unlike complex real/imag).
+REVERTED (arithmetic.rs == HEAD; complex real/imag from e6c0654a retained). The real lever would be a naive
+`sqrt(re*re+im*im)` (fast, vectorizes) — but that diverges from the hypot reference (overflow/underflow for
+extreme |z|) and may not match JAX's abs bit-for-bit; an accuracy/parity call, deferred. Records that compute-
+bound complex unaries only WIN vs JAX when the per-element op is cheap/vectorizable — hypot is not.
+
 ## 2026-06-28 - WIN: complex real/imag threaded — 3.54x internal, 3.2x JAX loss → parity (ProudSalmon)
 
 `eval_real`/`eval_imag` extracted the re/im component scalar single-thread (`src.iter().map(|&(re,_)| re)
