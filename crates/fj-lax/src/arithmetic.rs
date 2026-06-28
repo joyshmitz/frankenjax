@@ -23535,6 +23535,44 @@ mod tests {
         );
     }
 
+    // Same-binary A/B: the dense-F64 tanh path routes >=1<<20 elems through the
+    // SINGLE-THREADED `simd_poly_tanh` (which calls `simd_poly_exp_into`, documented 0.79x
+    // SLOWER than libm WITHOUT +fma — and this host has no fma), vs the THREADED scalar
+    // `f64::tanh` fallback. On a many-core no-fma host the threaded scalar map should win.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_tanh_simd_poly_vs_threaded_scalar() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let data: Vec<f64> = (0..n).map(|i| ((i % 4001) as f64 - 2000.0) * 0.001).collect();
+        let input = tensor_f64(vec![n as u32], &data);
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("tanh f64 16M [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("simd_poly_single_thread", &|| {
+            if let Value::Tensor(t) = &input {
+                std::hint::black_box(simd_poly_tanh_f64_values(t.elements.as_f64_slice().unwrap()));
+            }
+        });
+        bench("threaded_scalar_libm", &|| {
+            std::hint::black_box(
+                eval_unary_elementwise_parallel(
+                    Primitive::Tanh,
+                    std::slice::from_ref(&input),
+                    f64::tanh,
+                )
+                .unwrap(),
+            );
+        });
+    }
+
     // Throughput of the threaded special-function paths vs JAX (16M f64, measured):
     // JAX gammaln 19.9ms / digamma 17.3ms / i0e 21.7ms. Decides whether fj-lax over-computes.
     #[test]
