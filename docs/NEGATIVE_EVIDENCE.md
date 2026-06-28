@@ -2,6 +2,25 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - KEEP (4.17x): thread triu/tril triangular extract past L3 (BlackThrush)
+
+Same many-core lens, fresh module (`array_creation.rs`): `jnp.triu`/`jnp.tril` (extract upper/
+lower triangle into a zero-filled output — used for triangular-factor extraction and mask
+matrices) were single-threaded nested `(i,j)` copies. Each output element is independent, so a
+shared `tri_extract` threads across CONTIGUOUS row-blocks past L3 (`m*n >= 1<<23`, BW-bound),
+BIT-IDENTICAL to the serial loop; below the gate it is the serial loop.
+
+MEASURED same-binary A/B (4000×4000 = 16M, `bench_triu_threaded_vs_serial`): serial 47.94 ms →
+**threaded 11.50 ms = 4.17x faster**. `threaded_tri_extract_bit_identical` covers k ∈
+{-2,0,1,5} for both triu and tril (exact `Vec` equality); fmt + clippy clean.
+
+This turn I also VERIFIED (no change needed) that every common primitive path is already
+threaded with the right gate: unary/binary elementwise (incl. expensive Pow/Atan2/Igamma…),
+`select`/`where` (f64/f32/i64/bool, L3-gated), `clamp` (L3-gated), `convert` (f64↔f32↔half,
+L3-gated), and reduce sum/max/min (f64/f32). ReduceProd stays serial (overflow-reassoc unsafe
+to thread); fj-ad VJPs route through the threaded primitives. The "single-threaded helper that
+bypasses a threaded primitive" pattern is now mined across nn + linalg-norm + array_creation.
+
 ## 2026-06-28 - KEEP (2.83x): thread L2/Frobenius norm sum-of-squares past L3 (BlackThrush)
 
 Extending the many-core lens beyond the (now-exhausted) eager nn vein to the linalg HELPER

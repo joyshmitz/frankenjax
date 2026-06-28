@@ -324,15 +324,7 @@ pub fn diag(v: &[f64], k: i32) -> Result<Value, ValueError> {
 /// Matches `jnp.triu(m, k)` where k is the diagonal offset.
 /// Elements below the k-th diagonal are zeroed.
 pub fn triu(a: &[f64], m: usize, n: usize, k: i32) -> Vec<f64> {
-    let mut result = vec![0.0; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            if (j as i32) >= (i as i32) + k {
-                result[i * n + j] = a[i * n + j];
-            }
-        }
-    }
-    result
+    tri_extract(a, m, n, k, true)
 }
 
 /// Extract the lower triangle of a matrix.
@@ -340,14 +332,65 @@ pub fn triu(a: &[f64], m: usize, n: usize, k: i32) -> Vec<f64> {
 /// Matches `jnp.tril(m, k)` where k is the diagonal offset.
 /// Elements above the k-th diagonal are zeroed.
 pub fn tril(a: &[f64], m: usize, n: usize, k: i32) -> Vec<f64> {
-    let mut result = vec![0.0; m * n];
-    for i in 0..m {
-        for j in 0..n {
-            if (j as i32) <= (i as i32) + k {
-                result[i * n + j] = a[i * n + j];
+    tri_extract(a, m, n, k, false)
+}
+
+/// Shared triangular extract for [`triu`]/[`tril`]: copies `a[i,j]` where the triangular
+/// predicate holds (`j >= i+k` for upper, `j <= i+k` for lower) into a zero-filled output.
+/// Each output element is independent, so it threads across CONTIGUOUS row-blocks past L3
+/// (`m*n >= 1<<23`, BW-bound) BIT-IDENTICALLY; below the gate it is the serial nested loop.
+fn tri_extract(a: &[f64], m: usize, n: usize, k: i32, upper: bool) -> Vec<f64> {
+    let total = m.saturating_mul(n);
+    let mut result = vec![0.0f64; total];
+    let keep = |i: usize, j: usize| -> bool {
+        let cond = (j as i32) >= (i as i32) + k;
+        if upper {
+            cond
+        } else {
+            (j as i32) <= (i as i32) + k
+        }
+    };
+    let threads = if total >= (1 << 23) {
+        crate::arithmetic::work_scaled_threads(total).min(m.max(1))
+    } else {
+        1
+    };
+    if threads <= 1 {
+        for i in 0..m {
+            for j in 0..n {
+                if keep(i, j) {
+                    result[i * n + j] = a[i * n + j];
+                }
             }
         }
+        return result;
     }
+    let rows_per = m.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = result.as_mut_slice();
+        let mut r0 = 0usize;
+        while r0 < m {
+            let r1 = (r0 + rows_per).min(m);
+            let (blk, tail) = rest.split_at_mut((r1 - r0) * n);
+            rest = tail;
+            scope.spawn(move || {
+                for i in r0..r1 {
+                    let base = (i - r0) * n;
+                    for j in 0..n {
+                        let cond = if upper {
+                            (j as i32) >= (i as i32) + k
+                        } else {
+                            (j as i32) <= (i as i32) + k
+                        };
+                        if cond {
+                            blk[base + j] = a[i * n + j];
+                        }
+                    }
+                }
+            });
+            r0 = r1;
+        }
+    });
     result
 }
 
@@ -889,5 +932,61 @@ mod tests {
         let a = [1.0, 2.0];
         let result = tile_1d(&a, 3);
         assert_eq!(result, vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn threaded_tri_extract_bit_identical() {
+        // Above the L3 gate triu/tril thread across rows; each output element is independent,
+        // so the result must equal the serial nested loop BIT-FOR-BIT. Cover several k.
+        let (m, n) = (3000usize, 3000usize); // 9M > 1<<23
+        let a: Vec<f64> = (0..m * n).map(|i| (i as f64) * 0.5 - 7.0).collect();
+        for k in [-2i32, 0, 1, 5] {
+            let mut triu_ref = vec![0.0f64; m * n];
+            let mut tril_ref = vec![0.0f64; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    if (j as i32) >= (i as i32) + k {
+                        triu_ref[i * n + j] = a[i * n + j];
+                    }
+                    if (j as i32) <= (i as i32) + k {
+                        tril_ref[i * n + j] = a[i * n + j];
+                    }
+                }
+            }
+            assert_eq!(triu(&a, m, n, k), triu_ref, "triu k={k}");
+            assert_eq!(tril(&a, m, n, k), tril_ref, "tril k={k}");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_triu_threaded_vs_serial() {
+        use std::time::Instant;
+        let (m, n) = (4000usize, 4000usize); // 16M
+        let a: Vec<f64> = (0..m * n).map(|i| (i as f64) * 0.001 - 1.0).collect();
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("triu 4000x4000 [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("serial", &|| {
+            let mut r = vec![0.0f64; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    if (j as i32) >= (i as i32) {
+                        r[i * n + j] = a[i * n + j];
+                    }
+                }
+            }
+            std::hint::black_box(r);
+        });
+        bench("threaded", &|| {
+            std::hint::black_box(triu(&a, m, n, 0));
+        });
     }
 }
