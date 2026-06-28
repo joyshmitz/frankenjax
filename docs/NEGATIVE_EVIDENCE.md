@@ -2,6 +2,22 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: f32/i64 scalar-broadcast comparison SIMD-bitmask — internal 1.4-2.0x, ~parity vs JAX (ProudSalmon)
+
+Completed the scalar-broadcast comparison family (f64 done last turn; f32/i64 were the documented follow-up).
+Both ran scalar byte-bool (`values.iter().map(|v| cmp(widen(v), scalar)).collect::<Vec<bool>>()`). Added
+`f32_scalar_compare_words` (f32x8) + `i64_scalar_compare_words` (i64x8): splat the scalar, SIMD compare → packed
+bitmask, threaded. BIT-IDENTICAL (f32→f64 widen exact/order-preserving; i64 fits i128) — comparison suite 23/0.
+
+Evidence — SAME-INVOCATION A/B (scalar map vs threaded splat words, one binary, min-of-8),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M `x>0`:
+  - f32: serial **2.22ms → threaded 1.60ms = 1.38x**; vs JAX `(a>0.0)` 1.77ms → **1.10x WIN**.
+  - i64: serial **5.14ms → threaded 2.56ms = 2.0x**; vs JAX 2.64ms → **~parity (1.03x)**.
+Honest: the vs-JAX margin is small because single-array scalar-broadcast reads only 64-128MB and JAX is already
+BW-optimal there — the win is the real internal 1.4-2.0x (removing the scalar-byte-bool path). The same-shape
+comparisons (which read 2x the data) were the bigger JAX wins (1.4-3.5x). clippy+fmt clean. Scalar-broadcast
+comparison now SIMD-bitmask+threaded across f64/f32/i64.
+
 ## 2026-06-28 - WIN: is_finite/is_nan/is_inf SIMD-BITMASK — 1.5x WIN vs JAX (the lever the prior NO-SHIP named) (ProudSalmon)
 
 Executed the deferred lever from the NO-SHIP below. Replaced the scalar byte-bool predicate path

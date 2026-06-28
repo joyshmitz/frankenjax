@@ -503,10 +503,10 @@ pub(crate) fn eval_comparison(
             if let Some(value) = eval_f64_scalar_compare(primitive, *lhs, rhs, true, &float_cmp)? {
                 return Ok(value);
             }
-            if let Some(value) = eval_f32_scalar_compare(*lhs, rhs, true, &float_cmp)? {
+            if let Some(value) = eval_f32_scalar_compare(primitive, *lhs, rhs, true)? {
                 return Ok(value);
             }
-            if let Some(value) = eval_i64_scalar_compare(*lhs, rhs, true, &int_cmp)? {
+            if let Some(value) = eval_i64_scalar_compare(primitive, *lhs, rhs, true)? {
                 return Ok(value);
             }
             if let Some(value) = eval_unsigned_scalar_compare(*lhs, rhs, true, &int_cmp)? {
@@ -529,10 +529,10 @@ pub(crate) fn eval_comparison(
             if let Some(value) = eval_f64_scalar_compare(primitive, *rhs, lhs, false, &float_cmp)? {
                 return Ok(value);
             }
-            if let Some(value) = eval_f32_scalar_compare(*rhs, lhs, false, &float_cmp)? {
+            if let Some(value) = eval_f32_scalar_compare(primitive, *rhs, lhs, false)? {
                 return Ok(value);
             }
-            if let Some(value) = eval_i64_scalar_compare(*rhs, lhs, false, &int_cmp)? {
+            if let Some(value) = eval_i64_scalar_compare(primitive, *rhs, lhs, false)? {
                 return Ok(value);
             }
             if let Some(value) = eval_unsigned_scalar_compare(*rhs, lhs, false, &int_cmp)? {
@@ -902,39 +902,112 @@ fn eval_same_shape_i64_compare(
 /// I64 operands (`int_cmp(i128::from(a), i128::from(b))`). Returns `Ok(None)`
 /// unless the scalar is `I64` and the tensor is I64 dense storage.
 #[inline]
+// i64/i32 sibling of `f64_scalar_compare_words` (splat the i64 scalar, i64x8 compare →
+// bitmask, threaded). i64 fits i128 so this matches the prior i128-widened scalar path
+// (i32 is sign-extended in its i64 slot → ordering preserved).
+fn i64_scalar_compare_words(
+    primitive: Primitive,
+    values: &[i64],
+    scalar: i64,
+    scalar_on_left: bool,
+) -> Vec<u64> {
+    const WORD_BITS: usize = u64::BITS as usize;
+    const LANES: usize = 8;
+    let n = values.len();
+    let sv = Simd::<i64, LANES>::splat(scalar);
+    let mut words = vec![0_u64; n.div_ceil(WORD_BITS)];
+    let full_words = n / WORD_BITS;
+    let compute_word = |word_index: usize| -> u64 {
+        let base = word_index * WORD_BITS;
+        let mut word = 0_u64;
+        for chunk in 0..(WORD_BITS / LANES) {
+            let offset = base + chunk * LANES;
+            let vv = Simd::<i64, LANES>::from_slice(&values[offset..offset + LANES]);
+            let (l, r) = if scalar_on_left { (sv, vv) } else { (vv, sv) };
+            let mask = match primitive {
+                Primitive::Eq => l.simd_eq(r).to_bitmask(),
+                Primitive::Ne => l.simd_ne(r).to_bitmask(),
+                Primitive::Lt => l.simd_lt(r).to_bitmask(),
+                Primitive::Le => l.simd_le(r).to_bitmask(),
+                Primitive::Gt => l.simd_gt(r).to_bitmask(),
+                Primitive::Ge => l.simd_ge(r).to_bitmask(),
+                _ => 0,
+            };
+            word |= mask << (chunk * LANES);
+        }
+        word
+    };
+    let threads = if n >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+        crate::arithmetic::work_scaled_threads(n)
+    } else {
+        1
+    };
+    if threads > 1 && full_words > 0 {
+        let compute_word = &compute_word;
+        let per = full_words.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [u64] = &mut words[..full_words];
+            let mut w0 = 0usize;
+            while w0 < full_words {
+                let cnt = per.min(full_words - w0);
+                let (blk, tail) = rest.split_at_mut(cnt);
+                rest = tail;
+                let start = w0;
+                w0 += cnt;
+                scope.spawn(move || {
+                    for (j, slot) in blk.iter_mut().enumerate() {
+                        *slot = compute_word(start + j);
+                    }
+                });
+            }
+        });
+    } else {
+        for (word_index, word_slot) in words.iter_mut().take(full_words).enumerate() {
+            *word_slot = compute_word(word_index);
+        }
+    }
+    let tail_start = full_words * WORD_BITS;
+    for (k, &v) in values[tail_start..].iter().enumerate() {
+        let bit = match primitive {
+            Primitive::Eq => v == scalar,
+            Primitive::Ne => v != scalar,
+            Primitive::Lt if scalar_on_left => scalar < v,
+            Primitive::Lt => v < scalar,
+            Primitive::Le if scalar_on_left => scalar <= v,
+            Primitive::Le => v <= scalar,
+            Primitive::Gt if scalar_on_left => scalar > v,
+            Primitive::Gt => v > scalar,
+            Primitive::Ge if scalar_on_left => scalar >= v,
+            Primitive::Ge => v >= scalar,
+            _ => false,
+        };
+        push_bool_word(&mut words, tail_start + k, bit);
+    }
+    words
+}
+
 fn eval_i64_scalar_compare(
+    primitive: Primitive,
     scalar: Literal,
     tensor: &TensorValue,
     scalar_on_left: bool,
-    int_cmp: &impl Fn(i128, i128) -> bool,
 ) -> Result<Option<Value>, EvalError> {
     let Literal::I64(scalar) = scalar else {
         return Ok(None);
     };
-    // I64 and I32 both store sign-extended i64 values, so `int_cmp(i128::from(..))` is
-    // identical; the bool output needs no narrowing. I32 is JAX's default int.
     if !matches!(tensor.dtype, DType::I64 | DType::I32) {
         return Ok(None);
     }
     let Some(values) = tensor.elements.as_i64_slice() else {
         return Ok(None);
     };
-    let scalar = i128::from(scalar);
-    let out: Vec<bool> = values
-        .iter()
-        .map(|&v| {
-            let value = i128::from(v);
-            if scalar_on_left {
-                int_cmp(scalar, value)
-            } else {
-                int_cmp(value, scalar)
-            }
-        })
-        .collect();
-    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+    let out = i64_scalar_compare_words(primitive, values, scalar, scalar_on_left);
+    Ok(Some(bool_words_tensor(
+        primitive,
         tensor.shape.clone(),
+        values.len(),
         out,
-    )?)))
+    )?))
 }
 
 /// Dense same-shape comparison for unsigned (`u32`/`u64`) operands. Reads the
@@ -1166,11 +1239,94 @@ fn eval_f64_scalar_compare(
 /// widens both F32 operands to f64 then `float_cmp`, so widening the scalar and
 /// each tap with `f64::from` is bit-for-bit identical. Returns `None` unless the
 /// scalar is `F32Bits` and the tensor is dense F32.
+// f32 sibling of `f64_scalar_compare_words` (splat the f32 scalar, f32x8 compare → bitmask,
+// threaded). f32->f64 widening is exact/order-preserving so this matches the prior scalar path.
+fn f32_scalar_compare_words(
+    primitive: Primitive,
+    values: &[f32],
+    scalar: f32,
+    scalar_on_left: bool,
+) -> Vec<u64> {
+    const WORD_BITS: usize = u64::BITS as usize;
+    const LANES: usize = 8;
+    let n = values.len();
+    let sv = Simd::<f32, LANES>::splat(scalar);
+    let mut words = vec![0_u64; n.div_ceil(WORD_BITS)];
+    let full_words = n / WORD_BITS;
+    let compute_word = |word_index: usize| -> u64 {
+        let base = word_index * WORD_BITS;
+        let mut word = 0_u64;
+        for chunk in 0..(WORD_BITS / LANES) {
+            let offset = base + chunk * LANES;
+            let vv = Simd::<f32, LANES>::from_slice(&values[offset..offset + LANES]);
+            let (l, r) = if scalar_on_left { (sv, vv) } else { (vv, sv) };
+            let mask = match primitive {
+                Primitive::Eq => l.simd_eq(r).to_bitmask(),
+                Primitive::Ne => l.simd_ne(r).to_bitmask(),
+                Primitive::Lt => l.simd_lt(r).to_bitmask(),
+                Primitive::Le => l.simd_le(r).to_bitmask(),
+                Primitive::Gt => l.simd_gt(r).to_bitmask(),
+                Primitive::Ge => l.simd_ge(r).to_bitmask(),
+                _ => 0,
+            };
+            word |= mask << (chunk * LANES);
+        }
+        word
+    };
+    let threads = if n >= crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN {
+        crate::arithmetic::work_scaled_threads(n)
+    } else {
+        1
+    };
+    if threads > 1 && full_words > 0 {
+        let compute_word = &compute_word;
+        let per = full_words.div_ceil(threads);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [u64] = &mut words[..full_words];
+            let mut w0 = 0usize;
+            while w0 < full_words {
+                let cnt = per.min(full_words - w0);
+                let (blk, tail) = rest.split_at_mut(cnt);
+                rest = tail;
+                let start = w0;
+                w0 += cnt;
+                scope.spawn(move || {
+                    for (j, slot) in blk.iter_mut().enumerate() {
+                        *slot = compute_word(start + j);
+                    }
+                });
+            }
+        });
+    } else {
+        for (word_index, word_slot) in words.iter_mut().take(full_words).enumerate() {
+            *word_slot = compute_word(word_index);
+        }
+    }
+    let tail_start = full_words * WORD_BITS;
+    for (k, &v) in values[tail_start..].iter().enumerate() {
+        let bit = match primitive {
+            Primitive::Eq => v == scalar,
+            Primitive::Ne => v != scalar,
+            Primitive::Lt if scalar_on_left => scalar < v,
+            Primitive::Lt => v < scalar,
+            Primitive::Le if scalar_on_left => scalar <= v,
+            Primitive::Le => v <= scalar,
+            Primitive::Gt if scalar_on_left => scalar > v,
+            Primitive::Gt => v > scalar,
+            Primitive::Ge if scalar_on_left => scalar >= v,
+            Primitive::Ge => v >= scalar,
+            _ => false,
+        };
+        push_bool_word(&mut words, tail_start + k, bit);
+    }
+    words
+}
+
 fn eval_f32_scalar_compare(
+    primitive: Primitive,
     scalar: Literal,
     tensor: &TensorValue,
     scalar_on_left: bool,
-    float_cmp: &impl Fn(f64, f64) -> bool,
 ) -> Result<Option<Value>, EvalError> {
     let Literal::F32Bits(scalar_bits) = scalar else {
         return Ok(None);
@@ -1181,22 +1337,14 @@ fn eval_f32_scalar_compare(
     let Some(values) = tensor.elements.as_f32_slice() else {
         return Ok(None);
     };
-    let scalar = f64::from(f32::from_bits(scalar_bits));
-    let out: Vec<bool> = values
-        .iter()
-        .map(|&value| {
-            let v = f64::from(value);
-            if scalar_on_left {
-                float_cmp(scalar, v)
-            } else {
-                float_cmp(v, scalar)
-            }
-        })
-        .collect();
-    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
+    let scalar = f32::from_bits(scalar_bits);
+    let out = f32_scalar_compare_words(primitive, values, scalar, scalar_on_left);
+    Ok(Some(bool_words_tensor(
+        primitive,
         tensor.shape.clone(),
+        values.len(),
         out,
-    )?)))
+    )?))
 }
 
 #[cfg(test)]
@@ -1300,6 +1448,26 @@ mod tests {
         };
         time_it("f64_scalar_gt_serial", &sb_serial);
         time_it("f64_scalar_gt_threaded", &sb_threaded);
+
+        // f32 + i64 scalar-broadcast (x > thresh): old scalar map vs new SIMD+threaded splat.
+        let xf32: Vec<f32> = (0..n).map(|i| (i % 100_003) as f32 - 50_000.0).collect();
+        time_it("f32_scalar_gt_serial", &|| {
+            let out: Vec<bool> = xf32.iter().map(|&v| f64::from(v) > 0.0).collect();
+            std::hint::black_box(&out);
+            out[123] as u64
+        });
+        time_it("f32_scalar_gt_threaded", &|| {
+            std::hint::black_box(f32_scalar_compare_words(Primitive::Gt, &xf32, 0.0, false)[123])
+        });
+        let xi64: Vec<i64> = (0..n as i64).map(|i| (i % 100_003) - 50_000).collect();
+        time_it("i64_scalar_gt_serial", &|| {
+            let out: Vec<bool> = xi64.iter().map(|&v| i128::from(v) > 0).collect();
+            std::hint::black_box(&out);
+            out[123] as u64
+        });
+        time_it("i64_scalar_gt_threaded", &|| {
+            std::hint::black_box(i64_scalar_compare_words(Primitive::Gt, &xi64, 0, false)[123])
+        });
     }
 
     #[test]
