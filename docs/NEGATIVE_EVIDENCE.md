@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: cheap complex binary (Add/Sub/Div) threaded — 3.6x internal, 3.5x JAX loss → parity (ProudSalmon)
+
+The cheap complex same-shape binary path (Add/Sub/Div/Rem/Max/Min) ran SERIAL with a stale comment "no threads:
+memory-bound, fan-out regresses" — the L3-SCOPED misconception ([[project_threaded_elementwise_beyond_l3]]): past
+L3 (2x16B/elem = 512MB read at 16M) fan-out WINS. (Complex Mul was already threaded via `complex128_mul_dense`;
+the expensive complex binaries too — only the cheap path was missed.) Threaded it over disjoint chunks past the
+8.4M gate; `apply_complex_binary` is infallible for these ops so unwrap == the serial `?` → bit-identical.
+
+Evidence — SAME-INVOCATION A/B (serial vs threaded `eval_primitive(Add)`, one binary, min-of-8),
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M complex128 `a+b`:
+  - serial **158.2ms → threaded 43.97ms = 3.6x**. vs JAX 0.10.2 `a+b` **45.52ms → ~parity (1.03x)** — was a
+    **3.5x LOSS** at serial.
+Honest: the 256MB fresh complex OUTPUT write hits the so4wo eval-model floor (JAX's complex add is ALSO slow,
+45ms, paying the same write), so parity is the ceiling — unlike complex-EQ (tiny bitmask output → 3.81x WIN).
+The 3.6x internal is the real win (brings complex Add/Sub/Div from 3.5x-slower-than-JAX to parity, a common
+signal-processing op). complex binary tests 3/0, clippy+fmt clean.
+
 ## 2026-06-28 - WIN: complex128 same-shape eq/ne threaded — 3.81x WIN vs JAX (JAX complex compare is slow) (ProudSalmon)
 
 A DIFFERENT dtype primitive with the BIGGEST read of the comparison family: a same-shape complex compare reads

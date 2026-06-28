@@ -3685,6 +3685,39 @@ fn eval_binary_elementwise_complex(
                     rhs.elements.as_complex_slice(),
                 ) {
                     let n = a.len();
+                    // Thread the cheap complex binary (Add/Sub/Div/Rem/Max/Min) past the L3
+                    // gate: 2x16B/elem reads (512MB at 16M) are BW-bound DRAM-side, where one
+                    // core cannot saturate it (the older "serial because memory-bound" comment
+                    // was L3-scoped — past L3 fan-out WINS; JAX's complex add/mul is ~45ms here).
+                    // apply_complex_binary is infallible for these ops, so unwrap == the serial
+                    // `?`; element-independent → bit-identical.
+                    if n >= CHEAP_BINARY_PARALLEL_MIN && work_scaled_threads(n) > 1 {
+                        let threads = work_scaled_threads(n);
+                        let mut out = vec![(0.0f64, 0.0f64); n];
+                        let chunk = n.div_ceil(threads);
+                        std::thread::scope(|scope| {
+                            let mut rest: &mut [(f64, f64)] = out.as_mut_slice();
+                            let mut start = 0usize;
+                            while start < n {
+                                let len = chunk.min(n - start);
+                                let (blk, tail) = rest.split_at_mut(len);
+                                rest = tail;
+                                let s = start;
+                                scope.spawn(move || {
+                                    for (i, o) in blk.iter_mut().enumerate() {
+                                        *o = apply_complex_binary(primitive, a[s + i], b[s + i])
+                                            .unwrap_or((f64::NAN, f64::NAN));
+                                    }
+                                });
+                                start += len;
+                            }
+                        });
+                        return Ok(Value::Tensor(TensorValue::new_complex_values(
+                            out_dtype,
+                            lhs.shape.clone(),
+                            out,
+                        )?));
+                    }
                     let mut out: Vec<(f64, f64)> = Vec::with_capacity(n);
                     for i in 0..n {
                         out.push(apply_complex_binary(primitive, a[i], b[i])?);
@@ -14516,6 +14549,61 @@ mod tests {
     // deliberately tuple-array literals; the type-complexity lint is noise here.
     #![allow(clippy::type_complexity)]
     use super::*;
+
+    // Same-invocation A/B: serial vs threaded complex128 add (512MB read, JAX ~45ms).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_complex_add_threaded_vs_serial() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let a: Vec<(f64, f64)> = (0..n)
+            .map(|i| ((i % 1000) as f64, (i % 7) as f64))
+            .collect();
+        let b: Vec<(f64, f64)> = (0..n).map(|i| ((i % 13) as f64, (i % 5) as f64)).collect();
+        let at = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                a.clone(),
+            )
+            .unwrap(),
+        );
+        let bt = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![n as u32],
+                },
+                b.clone(),
+            )
+            .unwrap(),
+        );
+        let time_it = |label: &str, f: &dyn Fn() -> u64| {
+            std::hint::black_box(f());
+            let mut bb = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                bb = bb.min(s.elapsed().as_secs_f64());
+            }
+            println!("REF {label}: {:.3}ms", bb * 1e3);
+        };
+        time_it("complex_add_serial", &|| {
+            let mut out: Vec<(f64, f64)> = Vec::with_capacity(n);
+            for i in 0..n {
+                out.push((a[i].0 + b[i].0, a[i].1 + b[i].1));
+            }
+            std::hint::black_box(&out);
+            out[123].0.to_bits()
+        });
+        let p = BTreeMap::new();
+        time_it("complex_add_threaded", &|| {
+            let v = crate::eval_primitive(Primitive::Add, &[at.clone(), bt.clone()], &p).unwrap();
+            std::hint::black_box(v.as_tensor().unwrap().elements.len()) as u64
+        });
+    }
     use fj_test_utils::fixture_id_from_json;
     use std::f64::consts::PI;
 
