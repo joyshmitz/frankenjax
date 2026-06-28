@@ -6101,13 +6101,43 @@ pub fn matrix_norm_1(a: &[f64], m: usize, n: usize) -> f64 {
 }
 
 /// Matrix infinity-norm (max row sum of absolute values).
+///
+/// Threaded across CONTIGUOUS rows past L3 (`m*n >= 1<<23`): each row's |·|-sum stays serial
+/// (so its left-fold order is unchanged) and the max across rows is associative+commutative,
+/// so the result is BIT-IDENTICAL to the serial loop. Below the gate it is the serial loop.
 pub fn matrix_norm_inf(a: &[f64], m: usize, n: usize) -> f64 {
-    let mut max_row_sum = 0.0_f64;
-    for i in 0..m {
-        let row_sum: f64 = (0..n).map(|j| a[i * n + j].abs()).sum();
-        max_row_sum = max_row_sum.max(row_sum);
+    let threads = if m.saturating_mul(n) >= (1 << 23) {
+        crate::arithmetic::work_scaled_threads(m * n).min(m.max(1))
+    } else {
+        1
+    };
+    if threads <= 1 {
+        let mut max_row_sum = 0.0_f64;
+        for i in 0..m {
+            let row_sum: f64 = a[i * n..i * n + n].iter().map(|v| v.abs()).sum();
+            max_row_sum = max_row_sum.max(row_sum);
+        }
+        return max_row_sum;
     }
-    max_row_sum
+    let rows_per = m.div_ceil(threads);
+    let maxes: Vec<f64> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let mut r0 = 0usize;
+        while r0 < m {
+            let r1 = (r0 + rows_per).min(m);
+            handles.push(scope.spawn(move || {
+                let mut mx = 0.0_f64;
+                for i in r0..r1 {
+                    let row_sum: f64 = a[i * n..i * n + n].iter().map(|v| v.abs()).sum();
+                    mx = mx.max(row_sum);
+                }
+                mx
+            }));
+            r0 = r1;
+        }
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    maxes.into_iter().fold(0.0_f64, f64::max)
 }
 
 /// Solve the linear system Ax = b using LU decomposition with partial pivoting.
@@ -11745,6 +11775,53 @@ mod tests {
         let n = matrix_norm_inf(&a, 2, 2);
         // Row sums: |1|+|-2|=3, |3|+|4|=7 → max = 7
         assert!((n - 7.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn threaded_matrix_norm_inf_bit_identical() {
+        // Above the L3 gate matrix_norm_inf threads across rows; row sums stay serial and the
+        // max-across-rows is associative, so it must equal the serial loop BIT-FOR-BIT.
+        let (m, n) = (3000usize, 3000usize); // 9M > 1<<23
+        let a: Vec<f64> = (0..m * n)
+            .map(|i| ((i % 9973) as f64 - 5000.0) * 0.011)
+            .collect();
+        let mut serial = 0.0_f64;
+        for i in 0..m {
+            let rs: f64 = a[i * n..i * n + n].iter().map(|v| v.abs()).sum();
+            serial = serial.max(rs);
+        }
+        assert_eq!(matrix_norm_inf(&a, m, n).to_bits(), serial.to_bits());
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_matrix_norm_inf_threaded_vs_serial() {
+        use std::time::Instant;
+        let (m, n) = (4000usize, 4000usize); // 16M
+        let a: Vec<f64> = (0..m * n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+            .collect();
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..7 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("matrix_norm_inf 4000x4000 [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("serial", &|| {
+            let mut mx = 0.0_f64;
+            for i in 0..m {
+                let rs: f64 = a[i * n..i * n + n].iter().map(|v| v.abs()).sum();
+                mx = mx.max(rs);
+            }
+            std::hint::black_box(mx);
+        });
+        bench("threaded", &|| {
+            std::hint::black_box(matrix_norm_inf(&a, m, n));
+        });
     }
 
     // ── Solve tests ─────────────────────────────────────────────────

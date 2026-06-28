@@ -29,6 +29,15 @@ through it too — same BW/L3 profile as L2, so the same ~2.8x at scale. Toleran
 vector/matrix norm family (L1, L2, Frobenius) now threads past L3; L-inf/L0 stay serial (max/
 count, cheap) and the rare Lp (compute-bound `powf`, different gate) is left as-is.
 
+EXTENDED #2: threaded `matrix_norm_inf` (max row-|·|-sum, the operator ∞-norm) across
+CONTIGUOUS rows past L3 — BIT-IDENTICAL (each row sum stays serial so its left-fold order is
+unchanged; max-across-rows is associative+commutative), no tolerance needed. MEASURED
+same-binary A/B (4000×4000 = 16M, `bench_matrix_norm_inf_threaded_vs_serial`): serial 11.76 ms
+→ **threaded 3.50 ms = 3.36x faster**; `threaded_matrix_norm_inf_bit_identical` (9M) confirms
+exact bit-equality; clippy clean. `matrix_norm_1` (column ∞-norm) left serial — its cache-
+friendly form needs per-thread partial column-sums (reassoc → not bit-identical), and its
+strided form is cache-hostile; not worth it for the niche operator-1-norm.
+
 ## 2026-06-28 - NO-SHIP: dense-f64 RFFT exact-pack branch is not a Criterion-significant win (ProudSalmon)
 
 DIG followed the remaining FFT/RFFT gap after the dense-f64 pow2 RFFT tuple-lift
