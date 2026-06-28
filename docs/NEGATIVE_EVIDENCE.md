@@ -38,6 +38,48 @@ all 8). fmt + nn lib tests GREEN. (Clippy on the fj-lax lib shows pre-existing
 rch-worker clippy-version drift — NOT in `nn.rs` and not introduced here; the gelu commit
 passed clippy clean on the prior worker with those files unchanged.)
 
+## 2026-06-28 - NO-SHIP: borrowed dense-complex FFT input does not beat ORIG (ProudSalmon)
+
+Land-or-dig audit found no measured `.scratch`/`.worktrees` bench win absent from
+`main`: the visible recent ProudSalmon FFT heads were already landed, patch-equivalent,
+or documented no-ships. Dug the biggest remaining code-shaped complex FFT gap:
+`eval/fft_batch_2048x256_complex128_dense_input`.
+
+New lever from the representation-erasure / cache-locality playbook: route dense
+complex tensors' packed `as_complex_slice()` directly into `transform_batches_dense`
+for `fft`/`ifft`, avoiding the generic `extract_tensor_complex` `dense.to_vec()` input
+copy. This preserves the same batch kernel and output construction; only the dense
+input materialization boundary moved.
+
+Proof gate before timing:
+- `AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_WORKER
+  CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo test
+  -p fj-lax dense_complex_input_bit_identical_to_literal_input --release` passed through
+  RCH local fallback. The test compares dense-complex FFT/IFFT output bit-for-bit against
+  literal-backed input for radix-2 and Bluestein lengths.
+
+Bench command, per-crate through RCH with the requested target dir:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_WORKER
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-a rch exec -- cargo bench
+-p fj-lax --profile release --bench lax_baseline --
+'eval/fft_batch_2048x256_complex128_dense_input$' --warm-up-time 1 --measurement-time 2
+--sample-size 10 --noplot`. RCH had no admissible bench worker for both timing runs and
+fell open locally, so the comparison is same worktree, same target dir, same command,
+same host mode.
+
+| workload | ORIG midpoint | candidate midpoint | candidate/ORIG | verdict |
+|---|---:|---:|---:|---|
+| `eval/fft_batch_2048x256_complex128_dense_input` | 9.6885 ms | 11.353 ms | 1.172x runtime / 0.853x speed | NO-SHIP |
+
+Criterion reported `change: [-57.658% -17.275% +32.680%] (p = 0.51 > 0.05)` and
+`No change in performance detected`; the point estimate was worse. Reverted the code
+lever and kept this ledger entry only. Local conformance passed with the requested
+target dir: `cargo test -p fj-conformance --release`. The remote `rch exec` conformance
+attempt failed because project `.rchignore` excludes the tracked `artifacts/` tree
+required by `fj-conformance::artifact_schemas`, not because of this docs-only change.
+Next non-covered FFT lever should target the actual radix kernel/recombination schedule,
+not dense input ownership.
+
 ## 2026-06-28 - NO-SHIP: even nonpow2 RFFT wrapper-plan cache is not a credible keep (ProudSalmon)
 
 LAND-OR-DIG scratch audit found no measured `.scratch`/`.worktrees` bench win absent
