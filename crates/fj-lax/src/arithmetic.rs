@@ -11014,6 +11014,89 @@ fn bessel_i1e_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
     x.simd_lt(Simd::splat(0.0)).select(-result, result)
 }
 
+/// 8-wide `erf` for the common `|x| < 1.25` range — the two fdlibm minimax-rational branches,
+/// which are plain mul+add Horner (NO fma dependency, so bit-exact without `+fma`, unlike the
+/// gated exp/tanh polys). Lanes with `|x| >= 1.25`, `x == 0`, or non-finite fall back to scalar
+/// [`erf_approx`] (its exp/series tail + signed-zero/NaN handling), so every lane is bit-identical
+/// to `erf_approx`. erf concentrates near 0 in its hot uses (exact GELU, the normal CDF), so most
+/// lanes take the SIMD path.
+#[inline]
+#[allow(clippy::excessive_precision)]
+fn erf_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+    use std::simd::num::SimdFloat;
+    #[inline]
+    fn horner8(x: Simd<f64, 8>, coeffs: &[f64]) -> Simd<f64, 8> {
+        let mut y = Simd::splat(coeffs[coeffs.len() - 1]);
+        for &c in coeffs[..coeffs.len() - 1].iter().rev() {
+            y = y * x + Simd::splat(c);
+        }
+        y
+    }
+    const ERX: f64 = 8.45062911510467529297e-01;
+    const PP: [f64; 5] = [
+        1.28379167095512558561e-01,
+        -3.25042107247001499370e-01,
+        -2.84817495755985104766e-02,
+        -5.77027029648944159157e-03,
+        -2.37630166566501626084e-05,
+    ];
+    const QQ: [f64; 5] = [
+        3.97917223959155352819e-01,
+        6.50222499887672944485e-02,
+        5.08130628187576562776e-03,
+        1.32494738004321644526e-04,
+        -3.96022827877536812320e-06,
+    ];
+    const PA: [f64; 7] = [
+        -2.36211856075265944077e-03,
+        4.14856118683748331666e-01,
+        -3.72207876035701323847e-01,
+        3.18346619901161753674e-01,
+        -1.10894694282396677476e-01,
+        3.54783043256182359371e-02,
+        -2.16637559486879084300e-03,
+    ];
+    const QA: [f64; 6] = [
+        1.06420880400844228286e-01,
+        5.40397917702171048937e-01,
+        7.18286544141962662868e-02,
+        1.26171219808761642112e-01,
+        1.36370839120290507362e-02,
+        1.19844998467991074170e-02,
+    ];
+    let one = Simd::splat(1.0);
+    let ax = x.abs();
+    let sign = x.simd_lt(Simd::splat(0.0)).select(Simd::splat(-1.0), one);
+    // branch 1: ax < 0.84375
+    let z1 = ax * ax;
+    let r1 = horner8(z1, &PP);
+    let s1 = one + z1 * horner8(z1, &QQ);
+    let b1 = sign * (ax + ax * r1 / s1);
+    // branch 2: 0.84375 <= ax < 1.25
+    let z2 = ax - one;
+    let p2 = horner8(z2, &PA);
+    let q2 = one + z2 * horner8(z2, &QA);
+    let b2 = sign * (Simd::splat(ERX) + p2 / q2);
+    let mut res = ax.simd_lt(Simd::splat(0.84375)).select(b1, b2);
+    // Scalar fallback for lanes the rationals don't cover: |x| >= 1.25 (incl. inf/NaN, which
+    // compare false against 1.25) or x == 0 (erf_approx returns the signed zero).
+    let simd_ok = ax.simd_lt(Simd::splat(1.25)) & x.simd_ne(Simd::splat(0.0));
+    if !simd_ok.all() {
+        let xa = x.to_array();
+        let mut ra = res.to_array();
+        for k in 0..8 {
+            if !(xa[k] != 0.0 && xa[k].abs() < 1.25) {
+                ra[k] = erf_approx(xa[k]);
+            }
+        }
+        res = Simd::from_array(ra);
+    }
+    res
+}
+
 /// Dense-f64 threaded driver that runs an 8-wide SIMD kernel over each thread's chunk
 /// (8-lane body + scalar tail), falling back to the scalar parallel map for every other
 /// representation (f32/boxed/below-threshold). The SIMD kernel is bit-identical to
@@ -11119,6 +11202,12 @@ pub(crate) fn eval_bessel_i0e(primitive: Primitive, inputs: &[Value]) -> Result<
 
 pub(crate) fn eval_bessel_i1e(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     eval_unary_simd_dense_f64_parallel(primitive, inputs, bessel_i1e_f64x8, bessel_i1e_approx)
+}
+
+/// `erf` via the dense SIMD driver (F64 + F32) — the common `|x| < 1.25` lanes use the 8-wide
+/// rational kernel, the rest fall back to scalar `erf_approx`. Bit-identical to the scalar map.
+pub(crate) fn eval_erf(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, erf_f64x8, erf_approx)
 }
 
 fn dot_result_is_integral(lhs: &TensorValue, rhs: &TensorValue) -> bool {
@@ -23837,6 +23926,131 @@ mod tests {
             std::hint::black_box(
                 eval_bessel_i0e(Primitive::BesselI0e, std::slice::from_ref(&input)).unwrap(),
             );
+        });
+    }
+
+    #[test]
+    fn erf_simd_bit_identical_to_scalar() {
+        // erf via the SIMD driver must equal scalar erf_approx bit-for-bit across BOTH rational
+        // branches (|x|<0.84375, 0.84375<=|x|<1.25) AND the scalar-fallback tail (|x|>=1.25), for
+        // f64 and f32, plus the special lanes (signed zero, +/-inf). Span [-4,4] -> mixes SIMD
+        // lanes and fallback lanes within blocks.
+        let n = 70_003usize; // not a multiple of 8 -> exercises the tail
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i % 8000) as f64 - 4000.0) * 0.001)
+            .collect();
+        let f64_in = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let got =
+            extract_f64_vec(&eval_erf(Primitive::Erf, std::slice::from_ref(&f64_in)).unwrap());
+        for idx in 0..n {
+            assert_eq!(
+                got[idx].to_bits(),
+                erf_approx(data[idx]).to_bits(),
+                "f64 erf at x={}",
+                data[idx]
+            );
+        }
+        let dataf: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let f32_in = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                dataf.clone(),
+            )
+            .unwrap(),
+        );
+        let gotf = match eval_erf(Primitive::Erf, std::slice::from_ref(&f32_in)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected tensor"),
+        };
+        for idx in 0..n {
+            assert_eq!(
+                gotf[idx].to_bits(),
+                (erf_approx(dataf[idx] as f64) as f32).to_bits(),
+                "f32 erf at idx {idx}"
+            );
+        }
+        for &x in &[0.0_f64, -0.0, f64::INFINITY, f64::NEG_INFINITY] {
+            let xi = Value::Tensor(
+                TensorValue::new_f64_values(Shape { dims: vec![16] }, vec![x; 16]).unwrap(),
+            );
+            let g = extract_f64_vec(&eval_erf(Primitive::Erf, std::slice::from_ref(&xi)).unwrap());
+            assert_eq!(g[0].to_bits(), erf_approx(x).to_bits(), "special x={x}");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_erf_simd_vs_scalar() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        // GELU/normal-CDF-like input: most |x| < 1.25 -> SIMD-heavy (the hot erf regime).
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i % 2400) as f64 - 1200.0) * 0.001)
+            .collect();
+        let f64_in = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let dataf: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let f32_in = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                dataf,
+            )
+            .unwrap(),
+        );
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("erf 16M [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("f64-scalar", &|| {
+            std::hint::black_box(
+                eval_unary_elementwise_parallel(
+                    Primitive::Erf,
+                    std::slice::from_ref(&f64_in),
+                    erf_approx,
+                )
+                .unwrap(),
+            );
+        });
+        bench("f64-simd", &|| {
+            std::hint::black_box(eval_erf(Primitive::Erf, std::slice::from_ref(&f64_in)).unwrap());
+        });
+        bench("f32-scalar", &|| {
+            std::hint::black_box(
+                eval_unary_elementwise_parallel(
+                    Primitive::Erf,
+                    std::slice::from_ref(&f32_in),
+                    erf_approx,
+                )
+                .unwrap(),
+            );
+        });
+        bench("f32-simd", &|| {
+            std::hint::black_box(eval_erf(Primitive::Erf, std::slice::from_ref(&f32_in)).unwrap());
         });
     }
 

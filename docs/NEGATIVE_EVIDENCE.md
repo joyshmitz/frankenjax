@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - KEEP (1.51x f64 / 1.66x f32): SIMD erf — the lever I twice dismissed, reopened by the f32 driver (BlackThrush)
+
+I'd twice written off erf-SIMD: "multi-branch + a variable-iteration series loop, too complex."
+What changed: (1) adding the dense-F32 branch to the unary SIMD driver means an erf kernel now
+SIMDs BOTH F64 and F32 (the common exact-GELU case), and (2) erf's two HOT branches (`|x|<1.25`)
+are plain mul+add Horner rationals — NO fma dependency, so bit-exact without `+fma` (unlike the
+gated exp/tanh polys). So I only need to SIMD those two branches and SCALAR-fall-back the rare
+tail (`|x|>=1.25`, exp/series) plus `x==0`/non-finite. erf concentrates near 0 in its hot uses
+(exact GELU, the normal CDF Φ), so most lanes take the SIMD path.
+
+`erf_f64x8`: both rational branches in 8-wide SIMD, blended by `|x|<0.84375`, with a per-lane
+scalar `erf_approx` fallback for lanes where `!(x!=0 && |x|<1.25)`. Routed `Primitive::Erf`
+through the dense driver (F64 + F32). MEASURED same-binary A/B (16M, GELU-like input |x| mostly
+<1.25, `bench_erf_simd_vs_scalar`): f64 scalar 46.72 ms → **simd 30.90 ms = 1.51x**; f32 scalar
+26.81 ms → **simd 16.12 ms = 1.66x**. Correctness: `erf_simd_bit_identical_to_scalar` checks f64
+AND f32 over [-4,4] (both rationals + the fallback tail) plus ±0/±inf lanes, all bit-for-bit vs
+`erf_approx`; fmt + clippy clean. LESSON (3rd time this session re-examining a dismissal paid
+off, after matrix_norm_1 and the f32-driver gap): a dismissal can hinge on ONE blocking
+assumption — here "F64-only, misses F32" — that a *different* change later removes. Re-walk
+dismissals after the surface shifts.
+
 ## 2026-06-28 - KEEP (1.82x): extend the unary SIMD driver to dense f32 — i0e/i1e on JAX's default dtype (BlackThrush)
 
 My landed i0e/i1e SIMD-chbevl path (`eval_unary_simd_dense_f64_parallel`) only fired for dense
