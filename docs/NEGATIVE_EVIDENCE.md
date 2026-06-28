@@ -2,6 +2,60 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - NO-SHIP: even nonpow2 RFFT wrapper-plan cache is not a credible keep (ProudSalmon)
+
+LAND-OR-DIG scratch audit found no measured `.scratch`/`.worktrees` bench win absent
+from `main`: `4940278b` and `b0f69d7e` are patch-equivalent to current main,
+`1883e291` is the boxed FFT extraction already represented by landed `835051c4`, and
+`29920091` is a docs-only rejection. Dug a new cache-locality / memoization lever on
+the remaining RFFT family instead of re-verifying the already-landed even-nonpow2
+half-plan keep.
+
+New lever tested: cache the immutable `RealRfftEvenPlan` wrapper for even
+non-power-of-two f64 RFFT, mirroring the existing power-of-two real-plan cache. The
+hypothesis was that repeated eager evals should avoid rebuilding half-plan twiddles and
+wrapper state for `eval/rfft_batch_64x1000_f64` and `eval/rfft_batch_64x1500_mixed_f64`
+without changing the arithmetic path.
+
+Correctness while the candidate hunk was present:
+
+- `rustfmt --edition 2024 --check crates/fj-lax/src/fft.rs` passed.
+- `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b
+  AGENT_NAME=ProudSalmon cargo test -p fj-lax --profile release
+  cached_real_rfft_even_plan_reuses_immutable_plan -- --nocapture` passed
+  (RCH local fallback).
+- `rch exec -- env CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b
+  AGENT_NAME=ProudSalmon cargo test -p fj-lax --profile release
+  half_length_rfft_matches_full_fft_reference -- --nocapture` passed
+  (RCH local fallback).
+
+Bench command, per-crate through RCH with the requested target dir, using this Cargo's
+accepted release spelling: `rch exec -- env
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b AGENT_NAME=ProudSalmon
+cargo bench -p fj-lax --profile release --bench lax_baseline --
+'eval/rfft_batch_64x1000_f64$|eval/rfft_batch_64x1500_mixed_f64$|eval/rfft_batch_64x1003_bluestein_f64$'
+--warm-up-time 1 --measurement-time 2 --sample-size 10 --noplot`.
+
+The only clean remote ORIG run landed on `ovh-a`: 1000 = 374.25 us, 1003 = 1.2745 ms,
+1500 = 605.17 us. RCH then had no admissible worker slots for candidate timing, so the
+remote row could not be paired and is routing-only. Local fallback A/B was too noisy:
+the odd 1003 Bluestein control, which the even-plan cache cannot affect, moved by
+similar factors across adjacent runs.
+
+| local fallback pair | workload | ORIG midpoint | candidate midpoint | candidate/ORIG | verdict |
+|---|---|---:|---:|---:|---|
+| A | `eval/rfft_batch_64x1000_f64` | 550.30 us | 1.0447 ms | 1.898x slower | REVERT |
+| A | `eval/rfft_batch_64x1003_bluestein_f64` | 1.9306 ms | 2.6823 ms | 1.389x slower | noise/control |
+| A | `eval/rfft_batch_64x1500_mixed_f64` | 1.8580 ms | 1.0270 ms | 0.553x time / 1.81x faster | untrusted |
+| B | `eval/rfft_batch_64x1000_f64` | 1.2213 ms | 523.59 us | 0.429x time / 2.33x faster | untrusted |
+| B | `eval/rfft_batch_64x1003_bluestein_f64` | 3.1639 ms | 1.7192 ms | 0.543x time / 1.84x faster | noise/control |
+| B | `eval/rfft_batch_64x1500_mixed_f64` | 1.2456 ms | 828.61 us | 0.665x time / 1.50x faster | untrusted |
+
+Conclusion: the cache idea may be worth a same-invocation A/B bench later, but this pass
+does not have a credible measured keep. The unaffected odd control moved almost as much
+as the intended even rows, and no remote same-worker candidate slot was available.
+`fft.rs` was restored to `origin/main`; only this negative evidence is retained.
+
 ## 2026-06-28 - KEEP (1.89x): gate the no-fma-regressing simd_poly tanh path behind actual FMA (BlackThrush)
 
 A REAL contained win, found by an inverse-lever dig. `eval_tanh` routed every dense-F64
