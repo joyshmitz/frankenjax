@@ -2,6 +2,34 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - KEEP (9.74x): thread the compute-bound eager nn activations gelu/silu/softplus/mish (BlackThrush)
+
+Extending the tanh-fix vein (single-threaded eager paths that should thread): the `jax.nn`
+activation helpers in `nn.rs` were SINGLE-THREADED `x.iter().map(f).collect()` maps. The
+compute-bound ones (`tanh`/`exp`/`expm1` per element) left ~all cores idle on a many-core
+host — a needless serial bottleneck for eager `jax.nn.gelu/silu/softplus/mish` on large
+arrays.
+
+FIX: added `threaded_f64_map` (work-scaled scoped threads; below the `work_scaled_threads`
+gate it returns 1 and uses the sequential map → unchanged for small inputs) and routed
+gelu/silu/softplus/mish through it. BIT-IDENTICAL — pure elementwise, threading never
+reorders (guarded by `threaded_activations_bit_identical_to_sequential`, 5M elems).
+
+MEASURED same-binary A/B (16M f64, `bench_gelu_threaded_vs_sequential`, contention-robust):
+
+| gelu 16M f64 | time | ratio |
+|---|---:|---:|
+| sequential (prior) | 292.28 ms | baseline |
+| **threaded (new)** | **30.01 ms** | **9.74x faster** |
+
+Near-linear core scaling (gelu is compute-bound on the per-element `tanh`). silu/softplus/
+mish share the identical map shape and the same speedup. GREEN: `fj-lax` nn lib tests 59/0,
+`cargo fmt --check`, `cargo clippy -p fj-lax --release --lib -- -D warnings` (exit 0). Cheap
+BW-bound activations (relu/relu6/hard_sigmoid/hard_tanh/softsign/leaky_relu) deliberately
+LEFT sequential — memory-bound, would risk the "thread below L3 → regress" trap. Probe kept
+as a guard. (Note: this is the EAGER `jax.nn.*` path; jit'd models lower to threaded
+primitives already.)
+
 ## 2026-06-28 - NO-SHIP: even nonpow2 RFFT wrapper-plan cache is not a credible keep (ProudSalmon)
 
 LAND-OR-DIG scratch audit found no measured `.scratch`/`.worktrees` bench win absent

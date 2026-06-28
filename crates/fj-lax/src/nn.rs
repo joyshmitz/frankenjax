@@ -6,6 +6,42 @@ use std::f64::consts::PI;
 
 const SOFTMAX_2D_PARALLEL_MIN: usize = 1 << 18;
 
+/// Threaded elementwise `f64` map: applies `f` over `x` across work-scaled scoped threads,
+/// BIT-IDENTICAL to the sequential `x.iter().map(f).collect()` (each element is independent,
+/// so no value or order changes). Below the work threshold `work_scaled_threads` returns 1
+/// and the sequential map is used. Used by the COMPUTE-bound (`exp`/`tanh`) activations, which
+/// were single-threaded eager maps — a needless serial bottleneck on a many-core host (cf. the
+/// tanh FMA-gate fix). Cheap BW-bound activations (relu/clamp) stay sequential to avoid the
+/// known "thread a memory-bound op below L3 → regress" trap.
+#[inline]
+fn threaded_f64_map(x: &[f64], f: impl Fn(f64) -> f64 + Sync) -> Vec<f64> {
+    let n = x.len();
+    let threads = crate::arithmetic::work_scaled_threads(n);
+    if threads <= 1 {
+        return x.iter().map(|&v| f(v)).collect();
+    }
+    let mut out = vec![0.0f64; n];
+    let chunk = n.div_ceil(threads);
+    let f = &f;
+    std::thread::scope(|scope| {
+        let mut rest: &mut [f64] = out.as_mut_slice();
+        let mut start = 0usize;
+        while start < n {
+            let len = chunk.min(n - start);
+            let (blk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let src = &x[start..start + len];
+            scope.spawn(move || {
+                for (o, &v) in blk.iter_mut().zip(src) {
+                    *o = f(v);
+                }
+            });
+            start += len;
+        }
+    });
+    out
+}
+
 /// ReLU: max(x, 0)
 ///
 /// Matches `jax.nn.relu(x)`.
@@ -63,7 +99,7 @@ pub fn hard_tanh(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.silu(x)` and `jax.nn.swish(x)`.
 #[must_use]
 pub fn silu(x: &[f64]) -> Vec<f64> {
-    x.iter().map(|&v| v / (1.0 + (-v).exp())).collect()
+    threaded_f64_map(x, |v| v / (1.0 + (-v).exp()))
 }
 
 /// Alias for silu
@@ -95,12 +131,10 @@ pub fn hard_swish(x: &[f64]) -> Vec<f64> {
 #[must_use]
 pub fn gelu(x: &[f64]) -> Vec<f64> {
     let sqrt_2_over_pi = (2.0 / PI).sqrt();
-    x.iter()
-        .map(|&v| {
-            let inner = sqrt_2_over_pi * (v + 0.044715 * v * v * v);
-            0.5 * v * (1.0 + inner.tanh())
-        })
-        .collect()
+    threaded_f64_map(x, |v| {
+        let inner = sqrt_2_over_pi * (v + 0.044715 * v * v * v);
+        0.5 * v * (1.0 + inner.tanh())
+    })
 }
 
 /// ELU (Exponential Linear Unit): x if x > 0 else alpha * (exp(x) - 1)
@@ -165,7 +199,7 @@ fn softplus_scalar(v: f64) -> f64 {
 /// Numerically stable for all inputs (no overflow). Matches `jax.nn.softplus(x)`.
 #[must_use]
 pub fn softplus(x: &[f64]) -> Vec<f64> {
-    x.iter().map(|&v| softplus_scalar(v)).collect()
+    threaded_f64_map(x, softplus_scalar)
 }
 
 /// Softsign: x / (1 + |x|)
@@ -181,7 +215,7 @@ pub fn softsign(x: &[f64]) -> Vec<f64> {
 /// Matches `jax.nn.mish(x)`.
 #[must_use]
 pub fn mish(x: &[f64]) -> Vec<f64> {
-    x.iter().map(|&v| v * softplus_scalar(v).tanh()).collect()
+    threaded_f64_map(x, |v| v * softplus_scalar(v).tanh())
 }
 
 /// Log sigmoid: log(sigmoid(x)) = -softplus(-x)
@@ -1265,5 +1299,72 @@ mod tests {
                 "logsumexp({x:?}) vs ln(sum(exp(x)))"
             );
         }
+    }
+
+    #[test]
+    fn threaded_activations_bit_identical_to_sequential() {
+        // The threaded compute-bound activations must equal the sequential map bit-for-bit
+        // (pure elementwise; threading never reorders). Size > work threshold to engage it.
+        let n = 5_000_000usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.0017)
+            .collect();
+        let sqrt_2_over_pi = (2.0 / PI).sqrt();
+        let gelu_seq: Vec<f64> = x
+            .iter()
+            .map(|&v| {
+                let inner = sqrt_2_over_pi * (v + 0.044715 * v * v * v);
+                0.5 * v * (1.0 + inner.tanh())
+            })
+            .collect();
+        let silu_seq: Vec<f64> = x.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
+        let softplus_seq: Vec<f64> = x.iter().map(|&v| softplus_scalar(v)).collect();
+        let mish_seq: Vec<f64> = x.iter().map(|&v| v * softplus_scalar(v).tanh()).collect();
+        for (a, b) in gelu(&x).iter().zip(&gelu_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        for (a, b) in silu(&x).iter().zip(&silu_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        for (a, b) in softplus(&x).iter().zip(&softplus_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        for (a, b) in mish(&x).iter().zip(&mish_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_gelu_threaded_vs_sequential() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+            .collect();
+        let sqrt_2_over_pi = (2.0 / PI).sqrt();
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("gelu f64 16M [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("sequential", &|| {
+            let out: Vec<f64> = x
+                .iter()
+                .map(|&v| {
+                    let inner = sqrt_2_over_pi * (v + 0.044715 * v * v * v);
+                    0.5 * v * (1.0 + inner.tanh())
+                })
+                .collect();
+            std::hint::black_box(out);
+        });
+        bench("threaded", &|| {
+            std::hint::black_box(gelu(&x));
+        });
     }
 }
