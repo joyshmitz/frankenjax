@@ -20,6 +20,17 @@ old strided scan was pathologically cache-bound, not just unthreaded). Correctne
 case is within 1e-12 (1e-10 tolerance); fmt + clippy clean. LESSON: "cache-hostile" was a property
 of the ACCESS PATTERN, not the op — restructuring the loop to row-major beat it before threading.
 
+CACHE-RESTRUCTURE SWEEP COMPLETE (this find prompted a hunt for other strided/column-major loops):
+matrix_norm_1 was the one clean standalone case. The rest are NOT levers and need no change:
+the `(0..n).map(|i| a[i*n+p])` column extractions in the Jacobi eigh/SVD are INTENTIONAL cache
+gathers (copy a strided column to contiguous, rotate, scatter back — the extraction IS the
+optimization, removing it makes the rotation strided); `diagonal`/`trace`/diagonal-extract are
+O(n) (a few KB, immaterial); `dense::add/sub/mul/div/scalar_op` are serial REFERENCE helpers
+(no production caller — the threaded `eval_binary_elementwise` is the real path). So the
+contained perf surface is now mined across FOUR lever types — threading, cache-restructure,
+SIMD-across-elements (i0e/i1e), and no-fma gating (tanh) — with only owned (FFT/einsum),
+maintainer-gated (+fma, so4wo), and too-complex (erf multi-branch+series) levers left.
+
 ## 2026-06-28 - MAP: the many-core threading surface is comprehensively mined — STOP re-surveying (BlackThrush)
 
 Closing marker after a 15-win run mining "single-threaded helper / path that should thread on
