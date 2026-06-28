@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - NO-SHIP (REVERTED): threaded is_finite/is_nan loses to JAX — needs SIMD-bitmask not just threads (ProudSalmon)
+
+Tried threading the unary float predicates (`is_finite`/`is_nan`/`is_inf`, via `f64/f32_predicate_dense` —
+scalar `.iter().map(pred).collect::<Vec<bool>>()`). Two attempts, both measured same-invocation
+(`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M f64 `is_finite`):
+  - `threaded_index_fill_into(|i| pred(xs[i]))`: **4.81→4.88ms = ~0-gain** — the per-index closure call DEFEATS
+    the autovectorized SIMD bit-test the serial `.map()` gets (LESSON: index-fill threading kills autovec; thread
+    over SLICES so each thread's `chunk.iter().map(pred)` still vectorizes).
+  - slice-chunk threading (autovec preserved): **5.52→4.15ms = 1.33x** internal — but vs JAX `jnp.isfinite`
+    **2.93ms → 4.15 = 1.4x LOSS**. ROOT CAUSE: unlike comparison (packed BITMASK output, 1 bit/elem = 2MB), the
+    predicate path emits BYTE-bool (`Vec<bool>`, 16MB) — the wide output write caps BW scaling and JAX's
+    bitmask/fused path wins. Threading alone is insufficient.
+REVERTED (arithmetic.rs == HEAD). TRUE LEVER (deferred, larger): SIMD-bitmask the predicates like
+`f64_compare_words` — `(bits & 0x7FF0…) != 0x7FF0…` for is_finite, etc., via `Simd<u64,8>` bit ops → packed
+bitmask (8x smaller output) + SIMD + threaded. That should beat JAX as the same-shape comparisons did; the
+byte-bool→bitmask output change needs a test-representation audit first (no predicate test may pin byte-bool).
+
 ## 2026-06-28 - WIN: f64 broadcast binary (bias-add/scale) threaded — 3.32x internal, 3.5x JAX loss → parity (ProudSalmon)
 
 A DIFFERENT primitive: broadcast binary arithmetic (`[rows,inner] + [inner]` bias-add, `[N,1]*[1,M]` scale — the
