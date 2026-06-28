@@ -263,7 +263,10 @@ pub fn softmax(x: &[f64]) -> Vec<f64> {
         return Vec::new();
     }
     let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let exp_shifted: Vec<f64> = x.iter().map(|&v| (v - max_val).exp()).collect();
+    // Thread the compute-bound `exp` map (≈20 flop/elem dominates the cheap O(1) max/sum
+    // reductions). `exp_shifted` is built in index order, so the serial `sum` below reads it
+    // in the same order — BIT-IDENTICAL. The cheap divide stays sequential (BW-bound).
+    let exp_shifted = threaded_f64_map(x, |v| (v - max_val).exp());
     let sum_exp: f64 = exp_shifted.iter().sum();
     exp_shifted.iter().map(|&e| e / sum_exp).collect()
 }
@@ -1357,6 +1360,48 @@ mod tests {
         for (a, b) in log_sigmoid(&x).iter().zip(&lsig_seq) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
+        // softmax: threaded exp map must match the sequential reference bit-for-bit.
+        let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let exp_seq: Vec<f64> = x.iter().map(|&v| (v - max_val).exp()).collect();
+        let sum_seq: f64 = exp_seq.iter().sum();
+        let sm_seq: Vec<f64> = exp_seq.iter().map(|&e| e / sum_seq).collect();
+        for (a, b) in softmax(&x).iter().zip(&sm_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_softmax_1d_threaded_vs_sequential() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let x: Vec<f64> = (0..n)
+            .map(|i| ((i % 4001) as f64 - 2000.0) * 0.001)
+            .collect();
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("softmax_1d f64 16M [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("sequential", &|| {
+            let max_val = x.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let exp_shifted: Vec<f64> = x.iter().map(|&v| (v - max_val).exp()).collect();
+            let sum_exp: f64 = exp_shifted.iter().sum();
+            std::hint::black_box(
+                exp_shifted
+                    .iter()
+                    .map(|&e| e / sum_exp)
+                    .collect::<Vec<f64>>(),
+            );
+        });
+        bench("threaded", &|| {
+            std::hint::black_box(softmax(&x));
+        });
     }
 
     #[test]

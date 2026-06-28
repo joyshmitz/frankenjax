@@ -76,6 +76,16 @@ all 8). fmt + nn lib tests GREEN. (Clippy on the fj-lax lib shows pre-existing
 rch-worker clippy-version drift — NOT in `nn.rs` and not introduced here; the gelu commit
 passed clippy clean on the prior worker with those files unchanged.)
 
+EXTENDED #2: threaded the 1D `softmax` `exp` map (the `exp_shifted` buffer is built in index
+order, so the serial `sum` reads it in the same order → BIT-IDENTICAL; cheap divide left
+sequential). MEASURED same-binary A/B (16M f64, `bench_softmax_1d_threaded_vs_sequential`):
+257.14 ms → **132.41 ms = 1.94x faster** (lower than the pure activations because of the
+serial max/sum/divide). Guard extended to cover softmax. `log_softmax`/`logsumexp` were left
+alone — their `exp` is FUSED into the `.map().sum()` reduction, so threading would need a
+separate buffer + a non-bit-identical parallel sum (and 1D is niche; the 2D batched path
+`softmax_2d`/`log_softmax` already threads across rows). The eager nn compute-bound family is
+now fully threaded.
+
 ## 2026-06-28 - NO-SHIP: borrowed dense-complex FFT input does not beat ORIG (ProudSalmon)
 
 Land-or-dig audit found no measured `.scratch`/`.worktrees` bench win absent from
