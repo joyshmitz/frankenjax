@@ -2,6 +2,40 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - NO-SHIP: SIMD erfc via 1-erf regresses against current scalar ORIG (ProudSalmon)
+
+BOLD-VERIFY audited the unpushed WIP heads `92704cea` / `e2899927`
+(`perf(fj-lax): SIMD erfc via 1-erf + tail fallback`). The idea was adjacent to
+the landed SIMD `erf` win: compute `erfc(x)` as `1 - erf_f64x8(x)` for the
+moderate range and fall back to scalar `erfc_approx` for the continued-fraction
+tail. The behavior proof shape was plausible, but the current scalar
+`Primitive::Erfc` path is already faster on the real Criterion rows.
+
+Temporary identical Criterion rows were added to clean ORIG and candidate
+worktrees for measurement only: `eval/erfc_16m_f64_vec` and
+`eval/erfc_16m_f32_vec` in `crates/fj-lax/benches/lax_baseline.rs`. The exact
+requested bench spelling was tried first through RCH:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_WORKER
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b RCH_WORKER=hz2
+rch exec -- cargo bench --release -p fj-lax --bench lax_baseline --
+'eval/erfc_16m_(f64|f32)_vec$' --warm-up-time 1 --measurement-time 2
+--sample-size 10 --noplot`. RCH had no admissible workers and fell open locally;
+Cargo then rejected `--release` for bench targets with `unexpected argument
+'--release'`. The accepted release spelling was used for the A/B:
+`rch exec -- cargo bench -p fj-lax --profile release --bench lax_baseline --
+'eval/erfc_16m_(f64|f32)_vec$' --warm-up-time 1 --measurement-time 2
+--sample-size 10 --noplot`, same fallback host and same target dir.
+
+| workload | ORIG midpoint | candidate midpoint | candidate/ORIG | verdict |
+|---|---:|---:|---:|---|
+| `eval/erfc_16m_f64_vec` | 28.427 ms | 31.885 ms | 1.122x time / 0.892x speed | NO-SHIP |
+| `eval/erfc_16m_f32_vec` | 19.340 ms | 27.244 ms | 1.409x time / 0.710x speed | NO-SHIP |
+
+Criterion also reported regression for both rows (`+9.14%` midpoint for f64,
+`+40.27%` midpoint for f32). Do not land this erfc SIMD route without a new
+same-binary row that beats the current scalar `erfc_approx` path; route away
+from the `1 - erf_f64x8` family.
+
 ## 2026-06-28 - KEEP (1.51x f64 / 1.66x f32): SIMD erf — the lever I twice dismissed, reopened by the f32 driver (BlackThrush)
 
 I'd twice written off erf-SIMD: "multi-branch + a variable-iteration series loop, too complex."
