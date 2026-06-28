@@ -241,7 +241,10 @@ pub fn logsumexp(x: &[f64]) -> f64 {
     if max_val.is_infinite() {
         return max_val;
     }
-    let sum_exp: f64 = x.iter().map(|&v| (v - max_val).exp()).sum();
+    // Thread the compute-bound exp map while keeping the reduction sequential and in
+    // index order. This preserves the exact summation order of the prior iterator path.
+    let exp_shifted = threaded_f64_map(x, |v| (v - max_val).exp());
+    let sum_exp: f64 = exp_shifted.iter().sum();
     max_val + sum_exp.ln()
 }
 
@@ -1376,6 +1379,13 @@ mod tests {
         }
         let sigmoid_seq: Vec<f64> = x.iter().map(|&v| 1.0 / (1.0 + (-v).exp())).collect();
         for (a, b) in sigmoid(&x).iter().zip(&sigmoid_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        // logsumexp/log_softmax: exp map may thread, but the sum remains in index order.
+        let lse_seq = max_val + sum_seq.ln();
+        assert_eq!(logsumexp(&x).to_bits(), lse_seq.to_bits());
+        let lsm_seq: Vec<f64> = x.iter().map(|&v| v - lse_seq).collect();
+        for (a, b) in log_softmax(&x).iter().zip(&lsm_seq) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
     }

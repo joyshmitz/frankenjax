@@ -7041,6 +7041,19 @@ fn bench_softmax_2d_fused_ab(c: &mut Criterion) {
     });
 }
 
+fn bench_logsumexp_1d_large(c: &mut Criterion) {
+    let n = 16_000_000usize;
+    let x: Vec<f64> = (0..n).map(|k| ((k as f64) * 0.013).sin() * 4.0).collect();
+
+    c.bench_function("nn/logsumexp_16m_f64", |bencher| {
+        bencher.iter(|| black_box(fj_lax::nn::logsumexp(black_box(&x))))
+    });
+
+    c.bench_function("nn/log_softmax_16m_f64", |bencher| {
+        bencher.iter(|| black_box(fj_lax::nn::log_softmax(black_box(&x))))
+    });
+}
+
 criterion_group!(
     name = qr_blocked_ab;
     config = Criterion::default().sample_size(10);
@@ -7112,6 +7125,7 @@ criterion_group!(
     bench_lt_broadcast_256_f64_vec,
     bench_lt_broadcast_256_f64_literal_reference,
     bench_nextafter_1k,
+    bench_logsumexp_1d_large,
     bench_dot_100,
     bench_dot_256_matrix_f64,
     bench_eig_48,

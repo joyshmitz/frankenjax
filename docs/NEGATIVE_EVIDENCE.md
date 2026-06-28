@@ -31,6 +31,45 @@ retry this exact no-padding-branch RFFT pack gate without a same-binary A/B or a
 lower-noise worker result; the remaining FFT gap is in the kernel schedule /
 recombination arithmetic, not this branch.
 
+## 2026-06-28 - KEEP: thread the 1D logsumexp exp map while preserving serial reduction (ProudSalmon)
+
+LAND-OR-DIG found the visible softmax WIP already landed on `origin/main` as
+`ca6b8616`, so this pass dug the adjacent still-serial eager NN reduction path:
+`logsumexp`/`log_softmax` over one large f64 vector. Graveyard mapping:
+vectorized execution + morsel-driven parallelism for the compute-bound `exp`
+map, with the alien-artifact proof obligation that the reduction remains
+sequential and in index order.
+
+Change: `logsumexp` now builds `exp(x - max)` through `threaded_f64_map`, then
+sums the resulting buffer sequentially. That preserves the exact summation
+order of the prior iterator path. `log_softmax` benefits through its existing
+`logsumexp` call. The 2D row kernels are unchanged.
+
+Proof guard: extended `threaded_activations_bit_identical_to_sequential` to
+compare `logsumexp` and `log_softmax` bit-for-bit against the old sequential
+definition on a thread-gated 5M-element fixture.
+
+Bench rows were added to `crates/fj-lax/benches/lax_baseline.rs`:
+`nn/logsumexp_16m_f64` and `nn/log_softmax_16m_f64`. The exact requested
+`cargo bench --release` form was tried through RCH and failed after transfer
+with Cargo's `unexpected argument '--release'`; the accepted release spelling
+was then used:
+`AGENT_NAME=ProudSalmon RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR,AGENT_NAME,RCH_WORKER
+CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cod-b RCH_WORKER=hz2
+rch exec -- cargo bench -p fj-lax --profile release --bench lax_baseline --
+'nn/log(sumexp|_softmax)_16m_f64$' --warm-up-time 1 --measurement-time 2
+--sample-size 10 --noplot`. RCH selected `hz2` for ORIG and candidate; it also
+rewrote `CARGO_TARGET_DIR` to worker-scoped paths for both runs.
+
+| workload | ORIG midpoint | candidate midpoint | candidate/ORIG | verdict |
+|---|---:|---:|---:|---|
+| `nn/logsumexp_16m_f64` | 83.498 ms | 61.941 ms | 0.742x time / 1.35x faster | KEEP |
+| `nn/log_softmax_16m_f64` | 150.38 ms | 130.70 ms | 0.869x time / 1.15x faster | KEEP |
+
+EV score: Impact 3 * Confidence 4 * Reuse 3 / Effort 1 / Friction 1 = 36.
+Fallback trigger: if a future same-worker A/B shows <=1.03x speedup or a
+bit-identity guard fails, revert this single `logsumexp` map-routing change.
+
 ## 2026-06-28 - SCOPE CORRECTION: 1M Criterion rows do not support broad eager-nn threading (ProudSalmon)
 
 LAND-OR-DIG audit initially found the local `main` WIP
