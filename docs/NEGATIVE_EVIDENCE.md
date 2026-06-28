@@ -30,6 +30,14 @@ LEFT sequential — memory-bound, would risk the "thread below L3 → regress" t
 as a guard. (Note: this is the EAGER `jax.nn.*` path; jit'd models lower to threaded
 primitives already.)
 
+EXTENDED (same pass): routed the remaining compute-bound (`expm1`/`exp`/`ln_1p`) eager
+activations — `elu`, `celu`, `selu`, `log_sigmoid` — through the same `threaded_f64_map`.
+Same map shape, same ~9.74x-class speedup, BIT-IDENTICAL (the bit-identity guard now covers
+all 8). fmt + nn lib tests GREEN. (Clippy on the fj-lax lib shows pre-existing
+`chunks_exact_to_as_chunks` lints in arithmetic/lib/reduction/simd_exp/tensor_ops surfaced by
+rch-worker clippy-version drift — NOT in `nn.rs` and not introduced here; the gelu commit
+passed clippy clean on the prior worker with those files unchanged.)
+
 ## 2026-06-28 - NO-SHIP: even nonpow2 RFFT wrapper-plan cache is not a credible keep (ProudSalmon)
 
 LAND-OR-DIG scratch audit found no measured `.scratch`/`.worktrees` bench win absent

@@ -144,9 +144,7 @@ pub fn gelu(x: &[f64]) -> Vec<f64> {
 /// relative precision there from the cancellation, while `expm1(x)` is exact.
 #[must_use]
 pub fn elu(x: &[f64], alpha: f64) -> Vec<f64> {
-    x.iter()
-        .map(|&v| if v > 0.0 { v } else { alpha * v.exp_m1() })
-        .collect()
+    threaded_f64_map(x, |v| if v > 0.0 { v } else { alpha * v.exp_m1() })
 }
 
 /// CELU (Continuously-differentiable ELU): max(x, 0) + min(0, alpha * (exp(x/alpha) - 1))
@@ -156,9 +154,7 @@ pub fn elu(x: &[f64], alpha: f64) -> Vec<f64> {
 /// precision to cancellation).
 #[must_use]
 pub fn celu(x: &[f64], alpha: f64) -> Vec<f64> {
-    x.iter()
-        .map(|&v| v.max(0.0) + alpha * (v.min(0.0) / alpha).exp_m1())
-        .collect()
+    threaded_f64_map(x, |v| v.max(0.0) + alpha * (v.min(0.0) / alpha).exp_m1())
 }
 
 /// SELU (Scaled ELU): scale * (max(x, 0) + alpha * min(0, exp(x) - 1))
@@ -173,9 +169,7 @@ pub fn celu(x: &[f64], alpha: f64) -> Vec<f64> {
 pub fn selu(x: &[f64]) -> Vec<f64> {
     const ALPHA: f64 = 1.6732632423543772;
     const SCALE: f64 = 1.0507009873554805;
-    x.iter()
-        .map(|&v| SCALE * if v > 0.0 { v } else { ALPHA * v.exp_m1() })
-        .collect()
+    threaded_f64_map(x, |v| SCALE * if v > 0.0 { v } else { ALPHA * v.exp_m1() })
 }
 
 /// Numerically-stable scalar softplus matching `jax.nn.softplus(x) =
@@ -225,7 +219,7 @@ pub fn mish(x: &[f64]) -> Vec<f64> {
 #[must_use]
 pub fn log_sigmoid(x: &[f64]) -> Vec<f64> {
     // log(sigmoid(x)) = -softplus(-x); reuse the exact stable softplus.
-    x.iter().map(|&v| -softplus_scalar(-v)).collect()
+    threaded_f64_map(x, |v| -softplus_scalar(-v))
 }
 
 /// Compute log-sum-exp in a numerically stable way.
@@ -1330,6 +1324,37 @@ mod tests {
             assert_eq!(a.to_bits(), b.to_bits());
         }
         for (a, b) in mish(&x).iter().zip(&mish_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        // elu/celu/selu/log_sigmoid (expm1-bound) also threaded.
+        let alpha = 1.3;
+        let elu_seq: Vec<f64> = x
+            .iter()
+            .map(|&v| if v > 0.0 { v } else { alpha * v.exp_m1() })
+            .collect();
+        let celu_seq: Vec<f64> = x
+            .iter()
+            .map(|&v| v.max(0.0) + alpha * (v.min(0.0) / alpha).exp_m1())
+            .collect();
+        let selu_seq: Vec<f64> = x
+            .iter()
+            .map(|&v| {
+                const A: f64 = 1.6732632423543772;
+                const S: f64 = 1.0507009873554805;
+                S * if v > 0.0 { v } else { A * v.exp_m1() }
+            })
+            .collect();
+        let lsig_seq: Vec<f64> = x.iter().map(|&v| -softplus_scalar(-v)).collect();
+        for (a, b) in elu(&x, alpha).iter().zip(&elu_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        for (a, b) in celu(&x, alpha).iter().zip(&celu_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        for (a, b) in selu(&x).iter().zip(&selu_seq) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+        for (a, b) in log_sigmoid(&x).iter().zip(&lsig_seq) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
     }
