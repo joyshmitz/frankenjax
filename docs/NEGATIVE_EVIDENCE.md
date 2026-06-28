@@ -2,6 +2,25 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: signbit SIMD-bitmask — 1.33x WIN vs JAX (+ fixes a pre-existing RED) (ProudSalmon)
+
+`Signbit` (`eval_signbit`) used the scalar byte-bool `f64/f32_predicate_dense`. Added `FloatPredKind::SignNeg`
+(trivial `(bits & 0x8000…) != 0` test) to the existing SIMD-bitmask `f64_predicate_words`/`f32_predicate_words`
+and routed signbit through `float_predicate_words_dense` (removing the now-dead `*_predicate_dense` fns).
+BIT-IDENTICAL to `f64/f32::is_sign_negative` (incl. -0.0/-NaN). Matches the refined heuristic exactly: CONTIGUOUS
+128MB read + trivial vectorizable bit-test + tiny bitmask output + JAX-slow.
+
+Evidence — SAME-INVOCATION A/B (`CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M f64 signbit):
+serial byte-bool **4.84ms → SIMD-bitmask 2.37ms = 2.05x**. vs JAX 0.10.2 `jnp.signbit` **3.16ms → 2.37 vs 3.16
+= ~1.33x WIN**.
+
+ALSO FIXED a pre-existing RED: `f32_float_predicates_dense_path_truth_table` asserted byte-bool (`as_bool_slice`)
+for is_finite/is_nan/is_inf — but those became BITMASK at commit 79d18107 (the is_finite SIMD-bitmask), so the
+test had been FAILING on main since then. My filtered `cargo test -- is_finite is_nan is_inf` runs missed it (the
+test name lacks those substrings). Made the assertion representation-agnostic (accept `as_bool_words`). LESSON:
+run the FULL `-p fj-lax --lib` suite, not a name-filtered subset, after any output-representation change. Full lib
+suite now **1640/0**, clippy+fmt clean.
+
 ## 2026-06-28 - NO-SHIP (REVERTED): complex is_finite/is_nan dense-bitmask — strided read BW-limits to ~parity (ProudSalmon)
 
 Complex `is_finite`/`is_nan` fell to the slow per-Literal boxed loop (`float_predicate_words_dense` returned None

@@ -13663,6 +13663,7 @@ enum FloatPredKind {
     Finite,
     Nan,
     Inf,
+    SignNeg,
 }
 
 // Build a bitmask-bool tensor (1 bit/elem) from packed words.
@@ -13694,11 +13695,13 @@ fn f64_predicate_words(xs: &[f64], kind: FloatPredKind) -> Vec<u64> {
     const LANES: usize = 8;
     const EXP: u64 = 0x7FF0_0000_0000_0000;
     const MANT: u64 = 0x000F_FFFF_FFFF_FFFF;
+    const SIGN: u64 = 0x8000_0000_0000_0000;
     let n = xs.len();
     let mut words = vec![0_u64; n.div_ceil(WORD_BITS)];
     let full_words = n / WORD_BITS;
     let exp_v = Simd::<u64, LANES>::splat(EXP);
     let mant_v = Simd::<u64, LANES>::splat(MANT);
+    let sign_v = Simd::<u64, LANES>::splat(SIGN);
     let zero_v = Simd::<u64, LANES>::splat(0);
     let compute_word = |wi: usize| -> u64 {
         let base = wi * WORD_BITS;
@@ -13711,6 +13714,7 @@ fn f64_predicate_words(xs: &[f64], kind: FloatPredKind) -> Vec<u64> {
                 FloatPredKind::Finite => exp.simd_ne(exp_v),
                 FloatPredKind::Nan => exp.simd_eq(exp_v) & (bits & mant_v).simd_ne(zero_v),
                 FloatPredKind::Inf => exp.simd_eq(exp_v) & (bits & mant_v).simd_eq(zero_v),
+                FloatPredKind::SignNeg => (bits & sign_v).simd_ne(zero_v),
             };
             word |= mask.to_bitmask() << (chunk * LANES);
         }
@@ -13751,6 +13755,7 @@ fn f64_predicate_words(xs: &[f64], kind: FloatPredKind) -> Vec<u64> {
             FloatPredKind::Finite => v.is_finite(),
             FloatPredKind::Nan => v.is_nan(),
             FloatPredKind::Inf => v.is_infinite(),
+            FloatPredKind::SignNeg => v.is_sign_negative(),
         };
         if bit {
             let i = tail_start + k;
@@ -13766,11 +13771,13 @@ fn f32_predicate_words(xs: &[f32], kind: FloatPredKind) -> Vec<u64> {
     const LANES: usize = 8;
     const EXP: u32 = 0x7F80_0000;
     const MANT: u32 = 0x007F_FFFF;
+    const SIGN: u32 = 0x8000_0000;
     let n = xs.len();
     let mut words = vec![0_u64; n.div_ceil(WORD_BITS)];
     let full_words = n / WORD_BITS;
     let exp_v = Simd::<u32, LANES>::splat(EXP);
     let mant_v = Simd::<u32, LANES>::splat(MANT);
+    let sign_v = Simd::<u32, LANES>::splat(SIGN);
     let zero_v = Simd::<u32, LANES>::splat(0);
     let compute_word = |wi: usize| -> u64 {
         let base = wi * WORD_BITS;
@@ -13783,6 +13790,7 @@ fn f32_predicate_words(xs: &[f32], kind: FloatPredKind) -> Vec<u64> {
                 FloatPredKind::Finite => exp.simd_ne(exp_v),
                 FloatPredKind::Nan => exp.simd_eq(exp_v) & (bits & mant_v).simd_ne(zero_v),
                 FloatPredKind::Inf => exp.simd_eq(exp_v) & (bits & mant_v).simd_eq(zero_v),
+                FloatPredKind::SignNeg => (bits & sign_v).simd_ne(zero_v),
             };
             word |= mask.to_bitmask() << (chunk * LANES);
         }
@@ -13823,6 +13831,7 @@ fn f32_predicate_words(xs: &[f32], kind: FloatPredKind) -> Vec<u64> {
             FloatPredKind::Finite => v.is_finite(),
             FloatPredKind::Nan => v.is_nan(),
             FloatPredKind::Inf => v.is_infinite(),
+            FloatPredKind::SignNeg => v.is_sign_negative(),
         };
         if bit {
             let i = tail_start + k;
@@ -13858,43 +13867,6 @@ fn float_predicate_words_dense(
         )?));
     }
     Ok(None)
-}
-
-fn f64_predicate_dense(
-    tensor: &TensorValue,
-    pred: impl Fn(f64) -> bool,
-) -> Result<Option<Value>, EvalError> {
-    if tensor.dtype != DType::F64 {
-        return Ok(None);
-    }
-    let Some(xs) = tensor.elements.as_f64_slice() else {
-        return Ok(None);
-    };
-    let out: Vec<bool> = xs.iter().map(|&v| pred(v)).collect();
-    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
-        tensor.shape.clone(),
-        out,
-    )?)))
-}
-
-/// Dense f32 sibling of `f64_predicate_dense`. For F32Bits elements the generic
-/// path applies the same predicate to `f32::from_bits`, so reading the packed
-/// f32 slice and emitting dense Bool storage is bit-identical.
-fn f32_predicate_dense(
-    tensor: &TensorValue,
-    pred: impl Fn(f32) -> bool,
-) -> Result<Option<Value>, EvalError> {
-    if tensor.dtype != DType::F32 {
-        return Ok(None);
-    }
-    let Some(xs) = tensor.elements.as_f32_slice() else {
-        return Ok(None);
-    };
-    let out: Vec<bool> = xs.iter().map(|&v| pred(v)).collect();
-    Ok(Some(Value::Tensor(TensorValue::new_bool_values(
-        tensor.shape.clone(),
-        out,
-    )?)))
 }
 
 pub(crate) fn eval_is_finite(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
@@ -14113,10 +14085,9 @@ pub(crate) fn eval_signbit(primitive: Primitive, inputs: &[Value]) -> Result<Val
             Ok(Value::Scalar(Literal::Bool(signbit)))
         }
         Value::Tensor(tensor) => {
-            if let Some(value) = f64_predicate_dense(tensor, f64::is_sign_negative)? {
-                return Ok(value);
-            }
-            if let Some(value) = f32_predicate_dense(tensor, f32::is_sign_negative)? {
+            if let Some(value) =
+                float_predicate_words_dense(primitive, tensor, FloatPredKind::SignNeg)?
+            {
                 return Ok(value);
             }
             let mut elements = Vec::with_capacity(tensor.elements.len());
@@ -14716,6 +14687,32 @@ mod tests {
     use std::f64::consts::PI;
 
     // Same-invocation A/B: serial byte-bool map vs SIMD-bitmask threaded is_finite (16M f64).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_signbit_bitmask_vs_serial() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let xs: Vec<f64> = (0..n).map(|i| (i % 100_003) as f64 - 50_000.0).collect();
+        let time_it = |label: &str, f: &dyn Fn() -> u64| {
+            std::hint::black_box(f());
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("REF {label}: {:.3}ms", b * 1e3);
+        };
+        time_it("signbit_serial_bytebool", &|| {
+            let out: Vec<bool> = xs.iter().map(|&v| v.is_sign_negative()).collect();
+            std::hint::black_box(&out);
+            out[123] as u64
+        });
+        time_it("signbit_simd_bitmask", &|| {
+            std::hint::black_box(f64_predicate_words(&xs, FloatPredKind::SignNeg)[1])
+        });
+    }
+
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_is_finite_bitmask_vs_serial() {
@@ -15458,10 +15455,17 @@ mod tests {
             let out = eval_fn(primitive, std::slice::from_ref(&x)).unwrap();
             let tensor = out.as_tensor().unwrap();
             assert_eq!(tensor.dtype, DType::Bool, "{label} dtype");
-            let bools = tensor
-                .elements
-                .as_bool_slice()
-                .unwrap_or_else(|| panic!("{label} did not emit dense bool storage"));
+            // The SIMD-bitmask predicate path emits packed bool words; accept either
+            // representation and compare VALUES.
+            let bools: Vec<bool> = if let Some(s) = tensor.elements.as_bool_slice() {
+                s.to_vec()
+            } else if let Some((words, len)) = tensor.elements.as_bool_words() {
+                (0..len)
+                    .map(|i| (words[i / 64] >> (i % 64)) & 1 == 1)
+                    .collect()
+            } else {
+                panic!("{label} did not emit bool storage");
+            };
             let expected: Vec<bool> = xs.iter().map(|&v| pred(v)).collect();
             assert_eq!(bools, expected.as_slice(), "{label} truth table");
         }
