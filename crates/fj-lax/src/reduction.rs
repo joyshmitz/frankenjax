@@ -446,6 +446,130 @@ fn threaded_complex_full_reduce(
     (re, im)
 }
 
+// Decode + fold one contiguous half-float chunk into an f64 accumulator, EXACTLY as the
+// scalar BF16/F16 full-reduce arms do (SIMD widen for chunks_exact(8) + scalar tail; f16
+// falls to scalar decode for subnormal/inf/NaN lanes). `mul` selects product vs sum.
+fn half_fold_chunk(chunk: &[u16], is_f16: bool, mul: bool) -> f64 {
+    use std::simd::{
+        Simd,
+        num::{SimdFloat, SimdUint},
+    };
+    const LANES: usize = 8;
+    let mut acc = if mul { 1.0 } else { 0.0 };
+    let op = |a: f64, v: f64| if mul { a * v } else { a + v };
+    let chunks = chunk.chunks_exact(LANES);
+    let tail = chunks.remainder();
+    if is_f16 {
+        for c in chunks {
+            let u = Simd::<u16, LANES>::from_slice(c);
+            if crate::arithmetic::f16_input_needs_scalar(u) {
+                for &bits in c {
+                    acc = op(acc, Literal::F16Bits(bits).as_f64().unwrap_or(0.0));
+                }
+            } else {
+                for &v in crate::arithmetic::f16_widen8(u).to_array().iter() {
+                    acc = op(acc, v);
+                }
+            }
+        }
+        for &bits in tail {
+            acc = op(acc, Literal::F16Bits(bits).as_f64().unwrap_or(0.0));
+        }
+    } else {
+        for c in chunks {
+            let u16v = Simd::<u16, LANES>::from_slice(c);
+            let u32v = u16v.cast::<u32>() << Simd::splat(16u32);
+            let f64v = Simd::<f32, LANES>::from_bits(u32v).cast::<f64>();
+            for &v in f64v.to_array().iter() {
+                acc = op(acc, v);
+            }
+        }
+        for &bits in tail {
+            acc = op(acc, f64::from(f32::from_bits((bits as u32) << 16)));
+        }
+    }
+    acc
+}
+
+// SIMD-accumulating half-float SUM of one chunk: decode 8 lanes and add them into an f64x8
+// accumulator VECTOR (no per-lane scalar extraction — that was the decode-bound floor), then
+// horizontal-sum at the end. The 8-lane split reassociates the sum (TOLERANCE) → LARGE-input
+// path only. f16 lanes needing the scalar IEEE decode (subnormal/inf/NaN) fold into a side acc.
+fn half_simd_sum_chunk(chunk: &[u16], is_f16: bool) -> f64 {
+    use std::simd::{
+        Simd,
+        num::{SimdFloat, SimdUint},
+    };
+    const LANES: usize = 8;
+    let mut accv = Simd::<f64, LANES>::splat(0.0);
+    let chunks = chunk.chunks_exact(LANES);
+    let tail = chunks.remainder();
+    let mut scalar_acc = 0.0;
+    if is_f16 {
+        for c in chunks {
+            let u = Simd::<u16, LANES>::from_slice(c);
+            if crate::arithmetic::f16_input_needs_scalar(u) {
+                for &bits in c {
+                    scalar_acc += Literal::F16Bits(bits).as_f64().unwrap_or(0.0);
+                }
+            } else {
+                accv += crate::arithmetic::f16_widen8(u);
+            }
+        }
+        for &bits in tail {
+            scalar_acc += Literal::F16Bits(bits).as_f64().unwrap_or(0.0);
+        }
+    } else {
+        for c in chunks {
+            let u16v = Simd::<u16, LANES>::from_slice(c);
+            let u32v = u16v.cast::<u32>() << Simd::splat(16u32);
+            accv += Simd::<f32, LANES>::from_bits(u32v).cast::<f64>();
+        }
+        for &bits in tail {
+            scalar_acc += f64::from(f32::from_bits((bits as u32) << 16));
+        }
+    }
+    accv.reduce_sum() + scalar_acc
+}
+
+// Threaded half-float (bf16/f16) full sum/prod. The per-element decode (widen) was the floor;
+// SUM uses the vectorized f64x8 accumulator (`half_simd_sum_chunk`) per thread to reach the read
+// BW (JAX is BW-floored here), PROD keeps the scalar fold (rare for half, no SIMD product win).
+// Chunk boundaries align to the 8-lane SIMD width; per-chunk f64 partials combine with +/*.
+// Reassociation is TOLERANCE (same contract as the f64/f32 reduces). Small inputs stay on the
+// single ascending fold (`half_fold_chunk` over the whole slice — bit-identical to the boxed path).
+fn threaded_reduce_half(values: &[u16], is_f16: bool, mul: bool) -> f64 {
+    let n = values.len();
+    let threads = crate::arithmetic::work_scaled_threads(n).min(8);
+    if n < crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN || threads <= 1 {
+        return half_fold_chunk(values, is_f16, mul);
+    }
+    let chunk = n.div_ceil(threads).next_multiple_of(8);
+    let partials: Vec<f64> = std::thread::scope(|scope| {
+        let handles: Vec<_> = values
+            .chunks(chunk)
+            .map(|c| {
+                scope.spawn(move || {
+                    if mul {
+                        half_fold_chunk(c, is_f16, true)
+                    } else {
+                        half_simd_sum_chunk(c, is_f16)
+                    }
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("half reduce partial-fold thread"))
+            .collect()
+    });
+    let mut acc = if mul { 1.0 } else { 0.0 };
+    for p in partials {
+        acc = if mul { acc * p } else { acc + p };
+    }
+    acc
+}
+
 /// f32 sibling of [`threaded_reduce_minmax_f64`].
 fn threaded_reduce_minmax_f32(values: &[f32], is_max: bool) -> f32 {
     let n = values.len();
@@ -1438,26 +1562,9 @@ fn eval_dense_float_full_reduce(
         // ascending order — no reassociation — so it is BIT-IDENTICAL to the generic
         // per-Literal fold (verified incl ±inf/NaN/signed-zero). Tail handled scalar.
         DType::BF16 => {
-            use std::simd::{
-                Simd,
-                num::{SimdFloat, SimdUint},
-            };
-            const LANES: usize = 8;
             let values = tensor.elements.as_half_float_slice()?;
-            let mut acc = float_init;
-            let chunks = values.chunks_exact(LANES);
-            let tail = chunks.remainder();
-            for chunk in chunks {
-                let u16v = Simd::<u16, LANES>::from_slice(chunk);
-                let u32v = u16v.cast::<u32>() << Simd::splat(16u32);
-                let f64v = Simd::<f32, LANES>::from_bits(u32v).cast::<f64>();
-                for &v in f64v.to_array().iter() {
-                    acc = float_op(acc, v);
-                }
-            }
-            for &bits in tail {
-                acc = float_op(acc, f64::from(f32::from_bits((bits as u32) << 16)));
-            }
+            let mul = primitive == Primitive::ReduceProd;
+            let acc = threaded_reduce_half(values, false, mul);
             Some(Value::Scalar(reduce_real_literal(DType::BF16, acc)))
         }
         // F16 needs the IEEE 5-bit-exponent decode (not a shift), and that widen is the
@@ -1468,27 +1575,9 @@ fn eval_dense_float_full_reduce(
         // and the SIMD widen equals `as_f64` exactly for normal/±0), so it is BIT-IDENTICAL
         // to the per-element scalar fold incl ±inf/NaN/subnormal/signed-zero.
         DType::F16 => {
-            use std::simd::Simd;
-            const LANES: usize = 8;
             let values = tensor.elements.as_half_float_slice()?;
-            let mut acc = float_init;
-            let chunks = values.chunks_exact(LANES);
-            let tail = chunks.remainder();
-            for chunk in chunks {
-                let u = Simd::<u16, LANES>::from_slice(chunk);
-                if crate::arithmetic::f16_input_needs_scalar(u) {
-                    for &bits in chunk {
-                        acc = float_op(acc, Literal::F16Bits(bits).as_f64().unwrap_or(0.0));
-                    }
-                } else {
-                    for &v in crate::arithmetic::f16_widen8(u).to_array().iter() {
-                        acc = float_op(acc, v);
-                    }
-                }
-            }
-            for &bits in tail {
-                acc = float_op(acc, Literal::F16Bits(bits).as_f64().unwrap_or(0.0));
-            }
+            let mul = primitive == Primitive::ReduceProd;
+            let acc = threaded_reduce_half(values, true, mul);
             Some(Value::Scalar(reduce_real_literal(DType::F16, acc)))
         }
         _ => None,
@@ -6441,6 +6530,17 @@ mod tests {
             let (re, im) = threaded_complex_full_reduce(&cdata, (0.0, 0.0), &csum_fold);
             re + im
         });
+
+        // bf16 (dominant training dtype) full sum — decode-bound, threads well.
+        let bf16bits: Vec<u16> = (0..n)
+            .map(|i| ((1.0f32 + (i % 9973) as f32 * 1e-6).to_bits() >> 16) as u16)
+            .collect();
+        time_it("bf16_sum_scalar", &|| {
+            half_fold_chunk(&bf16bits, false, false)
+        });
+        time_it("bf16_sum_threaded", &|| {
+            threaded_reduce_half(&bf16bits, false, false)
+        });
     }
 
     // BOLD-VERIFY: max-reduce 2D vs JAX (f32 ax0 1.67 ax1 0.65ms; f64 ax0 10.36 ax1 3.13ms).
@@ -7189,6 +7289,38 @@ mod tests {
             (prod_got - prod_seq).abs() <= prod_tol,
             "large tree f32 reduce_prod got {prod_got}, sequential {prod_seq}"
         );
+    }
+
+    #[test]
+    fn threaded_reduce_half_matches_scalar() {
+        let n = crate::arithmetic::CHEAP_BINARY_PARALLEL_MIN + 999;
+        // bf16 and f16 bit patterns near 1.0 (decode finite, sum stays well-conditioned).
+        for is_f16 in [false, true] {
+            let bits: Vec<u16> = (0..n)
+                .map(|i| {
+                    let v = 1.0f32 + (i % 9973) as f32 * 1e-6;
+                    if is_f16 {
+                        half::f16::from_f32(v).to_bits()
+                    } else {
+                        (v.to_bits() >> 16) as u16
+                    }
+                })
+                .collect();
+            // SUM: threaded SIMD-accumulate vs the scalar ascending fold — TOLERANCE.
+            let threaded = threaded_reduce_half(&bits, is_f16, false);
+            let scalar = half_fold_chunk(&bits, is_f16, false);
+            assert!(
+                (threaded - scalar).abs() <= scalar.abs() * 1e-5 + 1e-3,
+                "half sum is_f16={is_f16}: threaded {threaded} vs scalar {scalar}"
+            );
+            // PROD threads via the scalar chunk fold; combine reassociation TOLERANCE.
+            let tp = threaded_reduce_half(&bits, is_f16, true);
+            let sp = half_fold_chunk(&bits, is_f16, true);
+            assert!(
+                (tp - sp).abs() <= sp.abs() * 1e-9 + 1e-9,
+                "half prod is_f16={is_f16}: threaded {tp} vs scalar {sp}"
+            );
+        }
     }
 
     #[test]
