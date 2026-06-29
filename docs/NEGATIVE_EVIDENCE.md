@@ -2,6 +2,29 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - BLOCKER (FFT, fresh isolated): batched pow2 14.9x is the biggest real gap; kernel-quality, already SoA+threaded (ProudSalmon)
+
+Re-measured the FFT family ISOLATED (the bf16 lesson: never trust stale/load numbers). The gaps are
+REAL and the largest in the project:
+
+| FFT bench | fj-lax | JAX | ratio |
+|---|---:|---:|---|
+| fft 2D [1024,1024] axis1 batched (pow2) | 8.65 ms | 0.58 ms | **14.9x** |
+| fft [4096,1009] axis1 (prime->bluestein) | 62.6 ms | 9.46 ms | 6.6x |
+| fft [4096,1000] axis1 (smooth 2^3·5^3) | 53.0 ms | 9.37 ms | 5.65x |
+| rfft [4096,1000] (non-pow2 smooth) | 4.37 ms | 1.51 ms | 2.9x |
+| fft 1d 2^20 complex | 28.4 ms | 15.95 ms | 1.78x |
+| rfft [4096,1024] (pow2) | 5.99 ms | 5.89 ms | ~parity |
+
+The biggest gap (batched pow2 14.9x) is NOT a missing-threading issue: `transform_batches_pow2_vectorized`
+is ALREADY SoA + cache-tiled + threaded across rows (gate 1<<18). The residual is pure SIMD-butterfly
+KERNEL QUALITY — fj-lax's safe-Rust radix-2/4 (`vectorized_pow2_tiled`) vs pocketfft's tuned radix-8
+SIMD butterflies. Closing it needs either AVX complex-mul intrinsics (blocked by `#![forbid(unsafe_code)]`)
+or a multi-session pure-safe radix-8 + register-blocked-butterfly rewrite (bead `frankenjax-murmw` /
+`.1` split-radix; prior radix-4 + Winograd attempts REGRESSED — flop reduction loses to kernel
+fragmentation, see `winograd-conv-f23-regresses`). FFT is the single biggest unowned legal-to-fix gap
+but is NOT a contained per-crate session win. No code change — fresh measurement confirms the blocker.
+
 ## 2026-06-29 - SURVEY: array-manipulation family all WINS; contained frontier comprehensively swept (ProudSalmon)
 
 Isolated re-measure of array manipulation (the last un-swept compute family):
