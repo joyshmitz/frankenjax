@@ -2,6 +2,30 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (LANDED, 10th win): N-D (rank>=4) separable sum-pooling — 2.91x @rank-5 3D-CNN win5³ (ProudSalmon)
+
+Generalizes the rank-3 separable to ANY rank, covering the REALISTIC 3D-CNN avg-pool: rank-5
+`[N,D,H,W,C]` with windows on D/H/W (=1 on N/C), which fell to the naive per-tap
+`eval_reduce_window_dense_float`. New `reduce_window_separable_sum_nd_f64` reduces each windowed axis
+with an independent 1-D pass — a per-line BLOCK PREFIX SUM over `inner`-wide CONTIGUOUS blocks then
+`pre[end]-pre[start]` — so it handles any stride/padding (OOB taps = sum identity 0 ⇒ clamp window to
+`[0,l)`) at O(input+output) per axis. The block-prefix (vs per-strided-scalar-lane) is the key: in
+channel-last layouts `inner` is large, so the contiguous-block loop stays cache-warm + autovectorizes
+(per-lane striding measured only 1.49x; block-prefix 2.91x). Reads the f64 view → serves f64/f32/half,
+narrows at the end.
+
+Same-binary A/B (`bench_sumpool_nd_separable_ab`, rank-5 [2,48,48,48,16] f64, min-of-5), generic vs separable:
+
+| window | generic | separable | ratio |
+|---|---:|---:|---:|
+| win3³ | 44.47 ms | 23.87 ms | 1.86x |
+| win5³ | 67.95 ms | 23.33 ms | **2.91x** |
+
+Wired for rank>=4 float sum at `∏window > 2·∑window` (same break-even as separable max/min); rank<=3
+keeps its dedicated paths. Tolerance-equal (prefix reassoc, f64 accumulate). Gates: `cargo fmt -p fj-lax
+--check` clean; new `separable_sum_nd_matches_generic` test (rank-5 VALID + rank-4 strided/padded,
+max-rel <1e-10) passes. This is the realistic-workload win of the pooling vein (volumetric CNN pooling).
+
 ## 2026-06-29 - KEEP (LANDED, 9th win): i64 rank-3 separable 3D sum-pooling — 184.76x over naive @win9³, BIT-IDENTICAL (ProudSalmon)
 
 Completes the 3D separable sum-pool family (f64 7th, f32 8th, i64 now). i64 rank-3 volumetric sum had

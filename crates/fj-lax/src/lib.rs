@@ -7114,6 +7114,76 @@ fn reduce_window_separable_maxmin(
     cur
 }
 
+/// N-D separable sliding-window SUM for dense float (f64 view; caller narrows to the output
+/// dtype). The float sibling of `reduce_window_separable_maxmin`: reduces each WINDOWED axis with
+/// an independent 1-D pass — a per-line PREFIX SUM then `pre[end]-pre[start]` per output — so it
+/// handles ANY stride/padding (OOB taps are the sum identity 0 ⇒ clamp the window to `[0,l)`) at
+/// O(input+output) per axis vs the per-window O(output·∏window) dense path. Generalises the
+/// rank-3 separable to any rank (the realistic 3-D-CNN avg-pool is rank-5 `[N,D,H,W,C]`, windows
+/// on D/H/W). Tolerance-equal (running/prefix sum reassociates the adds); accumulates in f64.
+fn reduce_window_separable_sum_nd_f64(
+    src: &[f64],
+    input_dims: &[usize],
+    window_dims: &[usize],
+    strides: &[usize],
+    pad_lows: &[usize],
+    out_dims: &[usize],
+) -> Vec<f64> {
+    let rank = input_dims.len();
+    let mut cur = src.to_vec();
+    let mut cur_dims = input_dims.to_vec();
+    for d in 0..rank {
+        // Identity axis (window 1, stride 1, no padding): output == input along d.
+        if window_dims[d] == 1 && strides[d] == 1 && pad_lows[d] == 0 && cur_dims[d] == out_dims[d]
+        {
+            continue;
+        }
+        let l = cur_dims[d];
+        let out_l = out_dims[d];
+        let inner: usize = cur_dims[d + 1..].iter().product();
+        let outer: usize = cur_dims[..d].iter().product();
+        let (wd, sd, pd) = (window_dims[d], strides[d], pad_lows[d]);
+        let mut next = vec![0.0f64; outer * out_l * inner];
+        // Block-prefix over `inner`-wide CONTIGUOUS blocks: prefix[k][..] = Σ_{j<k} cur[block j].
+        // Operating on the contiguous inner block (rather than one strided scalar lane at a time)
+        // keeps the hot loop sequential + autovectorizable — critical for channel-last layouts
+        // where `inner` (e.g. C·…) is large and per-lane striding would thrash cache.
+        let mut prefix = vec![0.0f64; (l + 1) * inner];
+        for o in 0..outer {
+            let cur_o = o * l * inner;
+            let next_o = o * out_l * inner;
+            // prefix[0] block is zero; accumulate forward.
+            for v in prefix[0..inner].iter_mut() {
+                *v = 0.0;
+            }
+            for k in 0..l {
+                let (lo, hi) = prefix.split_at_mut((k + 1) * inner);
+                let prev = &lo[k * inner..(k + 1) * inner];
+                let nextp = &mut hi[0..inner];
+                let row = &cur[cur_o + k * inner..cur_o + (k + 1) * inner];
+                for ((p, &pv), &rv) in nextp.iter_mut().zip(prev).zip(row) {
+                    *p = pv + rv;
+                }
+            }
+            for ol in 0..out_l {
+                let raw_start = ol as isize * sd as isize - pd as isize;
+                let raw_end = raw_start + wd as isize;
+                let start = raw_start.clamp(0, l as isize) as usize;
+                let end = raw_end.clamp(0, l as isize) as usize;
+                let lo = &prefix[start * inner..(start + 1) * inner];
+                let hi = &prefix[end * inner..(end + 1) * inner];
+                let out_blk = &mut next[next_o + ol * inner..next_o + (ol + 1) * inner];
+                for ((o_, &h), &l_) in out_blk.iter_mut().zip(hi).zip(lo) {
+                    *o_ = h - l_;
+                }
+            }
+        }
+        cur = next;
+        cur_dims[d] = out_l;
+    }
+    cur
+}
+
 /// Separable sliding-window max/min for dense i64 — the integer sibling of
 /// `reduce_window_separable_maxmin`. Reduces each window axis with an independent
 /// monotonic-deque 1D pass: O(input+output) per axis, WINDOW-INDEPENDENT, vs the
@@ -7930,6 +8000,59 @@ fn eval_reduce_window(
                 .map_err(EvalError::from)?,
             ));
         }
+    }
+
+    // Rank>=4 float SUM with large windows: the N-D separable prefix-sum (per-axis 1-D pass)
+    // beats the per-tap dense loop once ∏window outgrows the per-axis overhead — the realistic
+    // 3-D-CNN avg-pool is rank-5 [N,D,H,W,C] (windows on D/H/W). Same `∏window > 2·∑window`
+    // break-even the separable max/min path uses; rank<=3 keeps its dedicated paths above.
+    // Tolerance-equal (prefix-sum reassoc, f64 accumulate, narrow to output dtype).
+    if no_base_dilation
+        && no_window_dilation
+        && rank >= 4
+        && reduce_window_sum_like(reduce_op)
+        && matches!(
+            output_dtype,
+            fj_core::DType::F64 | fj_core::DType::F32 | fj_core::DType::BF16 | fj_core::DType::F16
+        )
+        && window_dims.iter().product::<usize>() > 2 * window_dims.iter().sum::<usize>()
+        && let Some(src) = reduce_window_dense_f64_view(tensor)
+    {
+        let input_dims: Vec<usize> = tensor.shape.dims.iter().map(|d| *d as usize).collect();
+        let out_dims_usize: Vec<usize> = out_dims.iter().map(|&d| d as usize).collect();
+        let values = reduce_window_separable_sum_nd_f64(
+            src.as_ref(),
+            &input_dims,
+            &window_dims,
+            &strides,
+            &pad_lows,
+            &out_dims_usize,
+        );
+        let shape = Shape {
+            dims: out_dims.clone(),
+        };
+        return match output_dtype {
+            fj_core::DType::F32 => Ok(Value::Tensor(
+                TensorValue::new_f32_values(shape, values.iter().map(|&v| v as f32).collect())
+                    .map_err(EvalError::from)?,
+            )),
+            fj_core::DType::BF16 | fj_core::DType::F16 => {
+                let bits: Vec<u16> = values
+                    .iter()
+                    .map(|&v| match reduce_window_literal_from_f64(output_dtype, v) {
+                        fj_core::Literal::BF16Bits(b) | fj_core::Literal::F16Bits(b) => b,
+                        _ => 0,
+                    })
+                    .collect();
+                Ok(Value::Tensor(
+                    TensorValue::new_half_float_values(output_dtype, shape, bits)
+                        .map_err(EvalError::from)?,
+                ))
+            }
+            _ => Ok(Value::Tensor(
+                TensorValue::new_f64_values(shape, values).map_err(EvalError::from)?,
+            )),
+        };
     }
 
     // Dense float fast path (ANY rank, sum/max/min): the F64-accumulator float case
@@ -9759,6 +9882,158 @@ mod tests {
             assert_eq!(
                 sep, nvals,
                 "i64 separable 3D sum != naive at n={n} win={win}"
+            );
+        }
+    }
+
+    // N-D (rank-5 3D-CNN [N,D,H,W,C]) separable sum vs the generic dense-float per-tap loop.
+    // Tolerance match (prefix-sum reassoc) + verifies general stride/pad on a 4-D case.
+    #[test]
+    fn separable_sum_nd_matches_generic() {
+        // (input_dims, window, strides, pad)
+        let cases: &[(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)] = &[
+            // rank-5 3D-CNN avg-pool, VALID unit stride.
+            (
+                vec![2, 16, 16, 16, 8],
+                vec![1, 5, 5, 5, 1],
+                vec![1, 1, 1, 1, 1],
+                vec![0, 0, 0, 0, 0],
+            ),
+            // rank-4 strided + padded volumetric pool.
+            (
+                vec![3, 20, 20, 20],
+                vec![1, 6, 6, 6],
+                vec![1, 2, 2, 2],
+                vec![0, 1, 1, 1],
+            ),
+        ];
+        for (input_dims, window, strides, pad) in cases {
+            let rank = input_dims.len();
+            let total: usize = input_dims.iter().product();
+            let src: Vec<f64> = (0..total)
+                .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+                .collect();
+            let out_dims: Vec<usize> = (0..rank)
+                .map(|d| (input_dims[d] + 2 * pad[d] - window[d]) / strides[d] + 1)
+                .collect();
+            let sep = super::reduce_window_separable_sum_nd_f64(
+                &src, input_dims, window, strides, pad, &out_dims,
+            );
+            let out_u32: Vec<u32> = out_dims.iter().map(|&d| d as u32).collect();
+            let dil = vec![1usize; rank];
+            let mut in_strides = vec![1usize; rank];
+            for d in (0..rank - 1).rev() {
+                in_strides[d] = in_strides[d + 1] * input_dims[d + 1];
+            }
+            let total_out: usize = out_dims.iter().product();
+            let generic = super::eval_reduce_window_dense_float(
+                DType::F64,
+                "add",
+                &src,
+                window,
+                strides,
+                &dil,
+                &out_u32,
+                pad,
+                input_dims,
+                &in_strides,
+                total_out,
+            )
+            .unwrap();
+            let gvals: Vec<f64> = generic
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    fj_core::Literal::F64Bits(b) => f64::from_bits(*b),
+                    other => panic!("expected f64, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(sep.len(), gvals.len());
+            let mut max_rel = 0.0f64;
+            for (&a, &b) in sep.iter().zip(&gvals) {
+                max_rel = max_rel.max((a - b).abs() / b.abs().max(1.0));
+            }
+            assert!(
+                max_rel < 1e-10,
+                "N-D separable sum drifted (rank={rank}): max rel {max_rel:e}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_sumpool_nd_separable_ab() {
+        use std::time::Instant;
+        // rank-5 3D-CNN avg-pool: [N,D,H,W,C], windows on D/H/W.
+        let input_dims = vec![2usize, 48, 48, 48, 16];
+        let rank = input_dims.len();
+        let total: usize = input_dims.iter().product();
+        let src: Vec<f64> = (0..total)
+            .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+            .collect();
+        let best = |f: &dyn Fn() -> f64| -> u64 {
+            let mut b = u64::MAX;
+            for _ in 0..5 {
+                let t0 = Instant::now();
+                let acc = f();
+                let dt = t0.elapsed().as_nanos() as u64;
+                std::hint::black_box(acc);
+                b = b.min(dt);
+            }
+            b
+        };
+        for k in [3usize, 5] {
+            let window = vec![1, k, k, k, 1];
+            let strides = vec![1usize; rank];
+            let pad = vec![0usize; rank];
+            let out_dims: Vec<usize> = (0..rank)
+                .map(|d| (input_dims[d] - window[d]) / strides[d] + 1)
+                .collect();
+            let out_u32: Vec<u32> = out_dims.iter().map(|&d| d as u32).collect();
+            let dil = vec![1usize; rank];
+            let mut in_strides = vec![1usize; rank];
+            for d in (0..rank - 1).rev() {
+                in_strides[d] = in_strides[d + 1] * input_dims[d + 1];
+            }
+            let total_out: usize = out_dims.iter().product();
+            let generic = best(&|| {
+                let v = super::eval_reduce_window_dense_float(
+                    DType::F64,
+                    "add",
+                    &src,
+                    &window,
+                    &strides,
+                    &dil,
+                    &out_u32,
+                    &pad,
+                    &input_dims,
+                    &in_strides,
+                    total_out,
+                )
+                .unwrap();
+                match &v.as_tensor().unwrap().elements.as_slice()[0] {
+                    fj_core::Literal::F64Bits(b) => f64::from_bits(*b),
+                    _ => 0.0,
+                }
+            });
+            let sep = best(&|| {
+                let v = super::reduce_window_separable_sum_nd_f64(
+                    &src,
+                    &input_dims,
+                    &window,
+                    &strides,
+                    &pad,
+                    &out_dims,
+                );
+                v[0] + v[v.len() / 2]
+            });
+            eprintln!(
+                "[sumpool-nd rank5 48^3 win{k}] generic={:.3}ms separable={:.3}ms ratio={:.2}x (min of 5)",
+                generic as f64 / 1e6,
+                sep as f64 / 1e6,
+                generic as f64 / sep as f64,
             );
         }
     }
