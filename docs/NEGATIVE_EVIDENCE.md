@@ -2,6 +2,34 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (LANDED, 7th win): rank-3 separable running-sum 3D sum-pooling — 3.48x over shipped xlane, ~5.4x vs JAX (ProudSalmon)
+
+Bead `frankenjax-nd-separable-sum-pool-72v5f`: the shipped rank-3 f64 SUM `reduce_window` is the per-tap
+SIMD `reduce_window_rank3_f64_sum_xlane` (O(out·∏window)). Implemented the N-D analogue of the rank-2
+separable: three O(input) add-new-subtract-old running-window sums, one per axis (x innermost → y → z),
+each phase reading the prior phase's contiguous output. Op count drops from ∏window taps/cell to ~3
+adds/cell (win9³: 729→3). Tolerance-equal (running-sum reassoc) — gated to all-finite input (∞−∞=NaN
+would diverge) exactly like the rank-2 separable; falls back to the bit-identical xlane path otherwise.
+
+Same-binary A/B (`bench_sumpool_3d_separable_ab`, 96³ f64 VALID unit-stride, min-of-7), xlane vs separable:
+
+| window | xlane | separable | ratio |
+|---|---:|---:|---:|
+| win5³ | 2.16 ms | 8.40 ms | 0.26x (LOSS) |
+| win6³ | 3.13 ms | 1.73 ms | 1.81x |
+| win7³ | 3.85 ms | 1.72 ms | 2.23x |
+| win8³ | 5.18 ms | 1.65 ms | 3.13x |
+| win9³ | 6.36 ms | 1.83 ms | **3.48x** |
+
+The separable cost is window-INDEPENDENT (~1.7ms = 3 passes) while xlane scales with ∏window, so the
+crossover is clean at win6³=216 taps. WIRED gated at `∏window >= 216` (small windows keep the faster
+xlane — separable loses there because its 3 memory passes outweigh few taps). vs JAX: the bead's prior
+fresh measure had win9³ JAX=9.87ms, xlane=5.70ms (1.73x win); separable ~1.83ms → **~5.4x vs JAX** (turns
+the small-win lead into a dominant one on volumetric sum/avg pooling). Gates: `cargo fmt -p fj-lax
+--check` clean; new `separable_sum_3d_matches_xlane` tolerance test (4 shapes, max-rel <1e-10) passes;
+`cargo test -p fj-lax --lib` 1642 passed / 0 failed; `reduce_window` subset 48/0. NOTE: this only helps
+volumetric (rank-3) pooling with large windows — niche but a real, measured, tolerance-safe JAX win.
+
 ## 2026-06-29 - REJECT (bench-backed) + DO-NOT-REDIG: cummax serial-chain min/max is latency-bound, not branch-bound (bead rekyb) (ProudSalmon)
 
 Investigated bead `frankenjax-cummax-scan-max-cost-rekyb` ("faster NaN-aware max in the cummax/cummin

@@ -3882,6 +3882,109 @@ fn separable_reduce_window_sum_f32(
     Some(output)
 }
 
+/// Rank-3 separable running-window-SUM for VALID (pad 0), unit-stride f64 sum pooling
+/// (volumetric/3D `reduce_window` add). Replaces the naive O(out·∏window) tap loop in
+/// [`reduce_window_rank3_f64_sum_xlane`] with three O(input) add-new-subtract-old running
+/// sums — one per axis (x innermost, then y, then z), each phase reading the prior phase's
+/// contiguous output. Op count drops from `∏window` taps/cell to ~3 adds/cell (win5³: 125→3,
+/// win9³: 729→3). Tolerance-equal (not bit-identical) to the naive fold — the running-sum
+/// reassociates the additions — so it is gated to the same all-finite inputs as the rank-2
+/// separable (a NaN/±inf window would make the subtract-old diverge: ∞−∞ = NaN). Returns
+/// `None` (fall back to the bit-identical xlane path) on non-finite input or a size mismatch.
+fn separable_reduce_window_sum_3d_f64(
+    src: &[f64],
+    input_dims: [usize; 3],
+    window_dims: [usize; 3],
+    out_dims: [usize; 3],
+) -> Option<Vec<f64>> {
+    let [in_z, in_y, in_x] = input_dims;
+    let [win_z, win_y, win_x] = window_dims;
+    let [out_z, out_y, out_x] = out_dims;
+    if src.len() != in_z.checked_mul(in_y)?.checked_mul(in_x)? {
+        return None;
+    }
+    // VALID unit-stride geometry: out_ax = in_ax − win_ax + 1 (caller already checks the
+    // halo fits, but re-derive defensively so the running-sum index math can't go OOB).
+    if win_x == 0
+        || win_y == 0
+        || win_z == 0
+        || out_x + win_x - 1 != in_x
+        || out_y + win_y - 1 != in_y
+        || out_z + win_z - 1 != in_z
+    {
+        return None;
+    }
+    if !src.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+
+    // Phase 1: horizontal (x) running window-sum -> hx[in_z, in_y, out_x].
+    let zy_rows = in_z * in_y;
+    let mut hx = vec![0.0f64; zy_rows * out_x];
+    for zy in 0..zy_rows {
+        let row = &src[zy * in_x..zy * in_x + in_x];
+        let hr = &mut hx[zy * out_x..(zy + 1) * out_x];
+        let mut s = 0.0;
+        for &v in &row[0..win_x] {
+            s += v;
+        }
+        hr[0] = s;
+        for ox in 1..out_x {
+            s += row[ox + win_x - 1] - row[ox - 1];
+            hr[ox] = s;
+        }
+    }
+
+    // Phase 2: vertical (y) running window-sum within each z-plane -> hy[in_z, out_y, out_x].
+    let in_plane = in_y * out_x;
+    let out_plane = out_y * out_x;
+    let mut hy = vec![0.0f64; in_z * out_plane];
+    let mut vsum = vec![0.0f64; out_x];
+    for z in 0..in_z {
+        let plane = &hx[z * in_plane..(z + 1) * in_plane];
+        let outp = &mut hy[z * out_plane..(z + 1) * out_plane];
+        for v in vsum.iter_mut() {
+            *v = 0.0;
+        }
+        for wy in 0..win_y {
+            for (v, &h) in vsum.iter_mut().zip(&plane[wy * out_x..(wy + 1) * out_x]) {
+                *v += h;
+            }
+        }
+        outp[0..out_x].copy_from_slice(&vsum);
+        for oy in 1..out_y {
+            let add = &plane[(oy + win_y - 1) * out_x..(oy + win_y) * out_x];
+            let sub = &plane[(oy - 1) * out_x..oy * out_x];
+            for ((v, &a), &s) in vsum.iter_mut().zip(add).zip(sub) {
+                *v += a - s;
+            }
+            outp[oy * out_x..(oy + 1) * out_x].copy_from_slice(&vsum);
+        }
+    }
+
+    // Phase 3: depth (z) running window-sum over planes -> output[out_z, out_y, out_x].
+    let mut output = vec![0.0f64; out_z * out_plane];
+    let mut zsum = vec![0.0f64; out_plane];
+    for wz in 0..win_z {
+        for (v, &h) in zsum
+            .iter_mut()
+            .zip(&hy[wz * out_plane..(wz + 1) * out_plane])
+        {
+            *v += h;
+        }
+    }
+    output[0..out_plane].copy_from_slice(&zsum);
+    for oz in 1..out_z {
+        let add = &hy[(oz + win_z - 1) * out_plane..(oz + win_z) * out_plane];
+        let sub = &hy[(oz - 1) * out_plane..oz * out_plane];
+        for ((v, &a), &s) in zsum.iter_mut().zip(add).zip(sub) {
+            *v += a - s;
+        }
+        output[oz * out_plane..(oz + 1) * out_plane].copy_from_slice(&zsum);
+    }
+    Some(output)
+}
+
 fn eval_reduce_window_rank2_f64_sum(
     primitive: Primitive,
     tensor: &TensorValue,
@@ -7539,6 +7642,30 @@ fn eval_reduce_window(
             out_dims[2] as usize,
         ];
         if (0..3).all(|d| out_dims_rank3[d] + window_dims_rank3[d] - 1 <= input_dims[d]) {
+            // Large windows: the separable 3-pass running-sum is window-INDEPENDENT, so it
+            // beats the per-tap xlane path once ∏window crosses the measured break-even
+            // (~win6³=216 on this host: xlane scales with ∏window, separable stays ~flat —
+            // win9³ is 3.48x faster). Tolerance-equal (running-sum reassoc); falls back to
+            // the bit-identical xlane path on non-finite input or below the gate.
+            const SEPARABLE_3D_SUM_MIN_TAPS: usize = 216;
+            if window_dims_rank3.iter().product::<usize>() >= SEPARABLE_3D_SUM_MIN_TAPS
+                && let Some(values) = separable_reduce_window_sum_3d_f64(
+                    src,
+                    input_dims,
+                    window_dims_rank3,
+                    out_dims_rank3,
+                )
+            {
+                return Ok(Value::Tensor(
+                    TensorValue::new_f64_values(
+                        Shape {
+                            dims: out_dims.clone(),
+                        },
+                        values,
+                    )
+                    .map_err(EvalError::from)?,
+                ));
+            }
             let values = reduce_window_rank3_f64_sum_xlane(
                 src,
                 input_dims,
@@ -9217,6 +9344,90 @@ mod tests {
                     odo / fused
                 );
             }
+        }
+    }
+
+    // Correctness + same-binary A/B for the rank-3 separable running-window-SUM (3D volumetric
+    // sum pooling) vs the shipped naive SIMD-x-lane path. Tolerance match (running-sum reassoc).
+    #[test]
+    fn separable_sum_3d_matches_xlane() {
+        for &(n, win) in &[(96usize, 5usize), (96, 9), (40, 3), (33, 7)] {
+            let out = n - win + 1;
+            let src: Vec<f64> = (0..n * n * n)
+                .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+                .collect();
+            let sep = super::separable_reduce_window_sum_3d_f64(
+                &src,
+                [n, n, n],
+                [win, win, win],
+                [out, out, out],
+            )
+            .expect("separable should accept finite VALID input");
+            let naive = super::reduce_window_rank3_f64_sum_xlane(
+                &src,
+                [n, n, n],
+                [win, win, win],
+                [out, out, out],
+            );
+            assert_eq!(sep.len(), naive.len());
+            let mut max_rel = 0.0f64;
+            for (&a, &b) in sep.iter().zip(&naive) {
+                let denom = b.abs().max(1.0);
+                max_rel = max_rel.max((a - b).abs() / denom);
+            }
+            assert!(
+                max_rel < 1e-10,
+                "separable 3D sum drifted at n={n} win={win}: max rel {max_rel:e}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_sumpool_3d_separable_ab() {
+        use std::time::Instant;
+        let n = 96usize;
+        let src: Vec<f64> = (0..n * n * n)
+            .map(|i| ((i % 9973) as f64) * 0.013 - 50.0)
+            .collect();
+        let best = |f: &dyn Fn() -> f64| -> u64 {
+            let mut b = u64::MAX;
+            for _ in 0..7 {
+                let t0 = Instant::now();
+                let acc = f();
+                let dt = t0.elapsed().as_nanos() as u64;
+                std::hint::black_box(acc);
+                b = b.min(dt);
+            }
+            b
+        };
+        for win in [5usize, 6, 7, 8, 9] {
+            let out = n - win + 1;
+            let naive = best(&|| {
+                let v = super::reduce_window_rank3_f64_sum_xlane(
+                    &src,
+                    [n, n, n],
+                    [win, win, win],
+                    [out, out, out],
+                );
+                v[0] + v[v.len() / 2]
+            });
+            let sep = best(&|| {
+                let v = super::separable_reduce_window_sum_3d_f64(
+                    &src,
+                    [n, n, n],
+                    [win, win, win],
+                    [out, out, out],
+                )
+                .unwrap();
+                v[0] + v[v.len() / 2]
+            });
+            eprintln!(
+                "[sumpool3d {n}^3 win{win}] xlane={:.3}ms separable={:.3}ms ratio={:.2}x (min of 7)",
+                naive as f64 / 1e6,
+                sep as f64 / 1e6,
+                naive as f64 / sep as f64,
+            );
         }
     }
 
