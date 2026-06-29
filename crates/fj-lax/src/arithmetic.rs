@@ -7166,7 +7166,7 @@ pub(crate) fn eval_unary_int_or_float(
             Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => match primitive {
                 Primitive::Sign => {
                     let (re, im) = literal_to_complex_parts(primitive, *literal)?;
-                    let magnitude = re.hypot(im);
+                    let magnitude = complex_abs_f64(re, im);
                     let (out_re, out_im) = if magnitude == 0.0 {
                         (0.0, 0.0)
                     } else {
@@ -7302,7 +7302,7 @@ pub(crate) fn eval_unary_int_or_float(
                     .iter()
                     .map(|&(re, im)| match primitive {
                         Primitive::Sign => {
-                            let magnitude = re.hypot(im);
+                            let magnitude = complex_abs_f64(re, im);
                             Ok(if magnitude == 0.0 {
                                 (0.0, 0.0)
                             } else {
@@ -7362,7 +7362,7 @@ pub(crate) fn eval_unary_int_or_float(
                     Literal::Complex64Bits(..) | Literal::Complex128Bits(..) => match primitive {
                         Primitive::Sign => {
                             let (re, im) = literal_to_complex_parts(primitive, literal)?;
-                            let magnitude = re.hypot(im);
+                            let magnitude = complex_abs_f64(re, im);
                             let (out_re, out_im) = if magnitude == 0.0 {
                                 (0.0, 0.0)
                             } else {
@@ -15062,6 +15062,71 @@ mod tests {
         });
         eprintln!(
             "[complex_asin |z±1| {n}] hypot={:.3}ms sqrt-elision={:.3}ms ratio={:.2}x",
+            hyp * 1e3,
+            fast * 1e3,
+            hyp / fast
+        );
+    }
+
+    // complex Sign (z/|z|) hypot-elision: the live eval path must match a hypot reference within
+    // tolerance, and the in-process A/B shows the win on a large complex array.
+    #[test]
+    fn complex_sign_hypot_elision_matches_and_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22;
+        let data: Vec<(f64, f64)> = (0..n)
+            .map(|i| (((i % 397) as f64) * 0.02 - 4.0, ((i % 521) as f64) * 0.02 - 5.0))
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: vec![n as u32] },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let got = crate::eval_primitive(
+            Primitive::Sign,
+            std::slice::from_ref(&input),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+        let gp = got.as_tensor().unwrap().elements.as_complex_slice().unwrap();
+        let mut maxerr = 0.0f64;
+        for (k, &(re, im)) in data.iter().enumerate() {
+            let mag = re.hypot(im);
+            let want = if mag == 0.0 { (0.0, 0.0) } else { (re / mag, im / mag) };
+            maxerr = maxerr.max((gp[k].0 - want.0).abs()).max((gp[k].1 - want.1).abs());
+        }
+        assert!(maxerr < 1e-9, "complex sign hypot-elision vs hypot ref: {maxerr:e}");
+        let best = |f: &dyn Fn() -> f64| -> f64 {
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let acc = f();
+                std::hint::black_box(acc);
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let hyp = best(&|| {
+            data.iter()
+                .map(|&(re, im)| {
+                    let m = re.hypot(im);
+                    if m == 0.0 { 0.0 } else { re / m + im / m }
+                })
+                .sum()
+        });
+        let fast = best(&|| {
+            data.iter()
+                .map(|&(re, im)| {
+                    let m = super::complex_abs_f64(re, im);
+                    if m == 0.0 { 0.0 } else { re / m + im / m }
+                })
+                .sum()
+        });
+        eprintln!(
+            "[complex_sign {n}] hypot={:.3}ms sqrt-elision={:.3}ms ratio={:.2}x",
             hyp * 1e3,
             fast * 1e3,
             hyp / fast

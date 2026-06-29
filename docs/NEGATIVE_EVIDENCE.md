@@ -2,6 +2,22 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (2.10x): complex Sign (z/|z|) hypot-elision — the site I missed (BlackThrush)
+
+CORRECTION to yesterday's "complex hypot-elision vein MINED OUT" survey: a cross-CRATE `grep '\.hypot('`
+(not just the complex helper fns I'd searched) found 3 more sites — complex **Sign** (`z/|z|`, the
+unit-vector) in `eval_unary_int_or_float` (scalar + dense-map + boxed paths, all `let magnitude =
+re.hypot(im)`). Routed all 3 through the `is_normal`-guarded `complex_abs_f64` (sqrt(re²+im²) when normal,
+hypot fallback) — keeps dense==boxed bit-identity.
+
+Measured in-process A/B (`complex_sign_hypot_elision_matches_and_ab`, 4M complex128, 1-thread):
+hypot **30.99 ms → 14.78 ms = 2.10x** on the WHOLE Sign op (hypot + the two `/|z|` divisions — so the
+hypot was ~half the per-element cost). Eval-path `Sign` matches a libm hypot reference to **<1e-9**.
+fj-lax lib **1653/0** (complex Sign dense-vs-boxed + sign oracle), conformance green, fmt + clippy clean.
+NOW the complex hypot-elision vein is actually mined out (log/abs/sqrt/pow/asin-acos/sign). LESSON: grep
+the WHOLE crate set for a pattern, not just the obvious helper module — `Sign`'s magnitude lived inline in
+the generic unary dispatch, not in a `complex_*` helper.
+
 ## 2026-06-29 - SURVEY (no code): NN activations + remaining complex ops confirmed FMA-floor / mined (BlackThrush)
 
 Closing-out check after the complex-libm-elision series. Confirmed the NN activations are all single-libm-
