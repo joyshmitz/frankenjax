@@ -2,6 +2,37 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - SURVEY (no code): unary-transcendental + selection veins confirmed exhausted; 3 new DO-NOT datapoints (BlackThrush)
+
+Land-or-dig after the lgamma SIMD land (30c59438): no unlanded bench-worktree win (the 8 `AHEAD`
+scratch heads are all already on `origin/main` under rebased SHAs or prior rejects — re-verified by
+content grep, e.g. `extract_homogeneous_complex_literals`/`complex128_literal_to_pair` present at
+fft.rs:100/116; logsumexp `threaded_f64_map` at nn.rs:252). Dug the unary/special-fn vein for the next
+contained lever; it is EXHAUSTED. Three new confirmations so the next digger skips them:
+
+1. **Special-fn SIMD family is COMPLETE** — erf/erfc/digamma/lgamma AND bessel i0e/i1e all route through
+   the 8-wide `eval_unary_simd_dense_f64_parallel` driver (verified `bessel_i0e_f64x8`/`bessel_i1e_f64x8`
+   already wired at arithmetic.rs:11695/11699). No series-based special fn left on the scalar map.
+2. **All remaining scalar unary ops are libm transcendentals → FMA-floored, NOT contained.**
+   exp/ln/sin/cos/tan/sinh/cosh/tanh/asinh/acosh/atanh/sigmoid/softplus/erf_inv all call libm (or compose
+   exp/ln). A bit-identical SIMD needs a poly approx, which (a) breaks the special-fn golden digests and
+   (b) is FMA-gated: `simd_poly_exp` is the documented 0.79x-WITHOUT-fma path. CONFIRMED on this host the
+   build is `target-feature=+avx2` ONLY (no `+fma`, .cargo/config.toml:24) — so the EXISTING
+   `simd_poly_tanh` path is deliberately `cfg!(target_feature="fma")`-gated OFF (arithmetic.rs:6283) and
+   falls to threaded scalar `f64::tanh`. erf_inv additionally fails the ≤1-transcendental rule (1 ln + 3
+   erf + 3 exp per elem via Newton). DO-NOT re-attempt SIMD-poly transcendentals without a maintainer
+   `+fma` decision (same root as the matmul/conv/cholesky FMA floor).
+3. **top_k is already partial-select optimal** — `order_top_k_pairs` (tensor_ops.rs:8059) uses
+   `select_nth_unstable_by` (quickselect, O(n)) + sort-only-the-k-prefix for small k, LSD radix for large
+   k, threaded across slices (`for_each_top_k_slice`). No full-sort-for-top-k gap. reduce_window is also
+   heavily specialized (3x3/sum/max-min/separable-extremum/sat fast paths). DO-NOT re-dig either.
+
+RULE distilled from the lgamma land + this sweep: a bit-identical SIMD unary special-fn wins f64 ONLY if
+it is SERIES-based (the series vectorizes) AND has ≤1 per-element libm call (digamma=1 ln → win;
+lgamma=2 ln → f64 neutral, f32 1.27x). Everything matching that is now done; the residual contained
+surface is empty. The only remaining vs-JAX losses stay non-contained: FFT butterfly kernel (murmw,
++fma/split-radix, multi-session) and the +fma cluster (matmul/conv/cholesky).
+
 ## 2026-06-29 - KEEP (f32 1.27x, f64 neutral): SIMD lgamma via the 8-wide dense unary driver — completes the digamma/erf/erfc SIMD family (BlackThrush)
 
 `eval_lgamma` was the last hot special-fn still on the scalar `eval_unary_elementwise_parallel` path
