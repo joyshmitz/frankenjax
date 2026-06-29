@@ -2,6 +2,17 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - DO-NOT-REDIG (FFT): pow4 radix already used for 1024; no contained radix lever, 14.9x is the AVX-butterfly floor (ProudSalmon)
+
+Follow-up to the FFT blocker below: checked the `transform_batches_dense` dispatch — `n=1024` is a
+power of four, so it ALREADY routes to `transform_batches_pow4_vectorized` (radix-4 SoA, fewer stages
+than radix-2), NOT the radix-2 path. So "switch 1024 to radix-4" is a non-lever (already done). The
+batched pow2/pow4 path is fully safe-Rust-optimized: SoA transpose + radix-4 + cache-tiled + threaded
+across rows (gate 1<<18). The 14.9x residual is pocketfft's AVX radix-8 complex-mul butterflies —
+needs unsafe intrinsics (`#![forbid(unsafe_code)]`) or the multi-session split-radix rewrite (bead
+`murmw.1`; radix-4/Winograd already regressed). No contained per-crate FFT lever exists. Do not re-dig
+FFT radix dispatch. No code change.
+
 ## 2026-06-29 - BLOCKER (FFT, fresh isolated): batched pow2 14.9x is the biggest real gap; kernel-quality, already SoA+threaded (ProudSalmon)
 
 Re-measured the FFT family ISOLATED (the bf16 lesson: never trust stale/load numbers). The gaps are
