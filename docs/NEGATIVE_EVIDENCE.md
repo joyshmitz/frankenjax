@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: round/reciprocal/deg2rad/rad2deg threaded — 1.12-1.24x WIN vs JAX (ProudSalmon)
+
+Extends the floor/ceil/trunc fix: `Round` (`eval_round`), `Reciprocal`, `Deg2Rad`, `Rad2Deg` were the remaining
+cheap f64 unary ops on the SERIAL `eval_unary_elementwise` (the L3-misconception). Rerouted all to
+`eval_unary_elementwise_parallel` (threads dense f64/f32/half past the gate). `eval_unary_elementwise` is now
+unused in lib.rs (import removed; the fn stays as the parallel path's serial fallback). BIT-IDENTICAL — round/
+reciprocal/deg2rad/rad2deg tests 22/0.
+
+Evidence — `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M f64 (quiet-host):
+  - round threaded **20.44ms** vs JAX `jnp.round` **22.85ms = 1.12x WIN**.
+  - reciprocal threaded **19.73ms** vs JAX `1/x` **24.56ms = 1.24x WIN**.
+  - deg2rad/rad2deg share the path (JAX 22.3/24.3ms → same ~1.1-1.2x).
+CONFIRMS the broader finding: JAX-CPU is slow (~10 GB/s) on cheap f64 unary/binary ops, so fj-lax's threaded
+dense path (~20ms, ~13 GB/s) actually BEATS it — these reach a small WIN, not just parity (floor last turn was
+parity only because its measurement run was slightly more host-loaded). clippy+fmt clean. The cheap-f64-unary
+serial-path family (floor/ceil/trunc/round/reciprocal/deg2rad/rad2deg) is now fully threaded.
+
 ## 2026-06-28 - WIN: floor/ceil/trunc threaded — ~1.95x internal, 2x JAX loss → parity (ProudSalmon)
 
 `Floor`/`Ceil`/`Trunc` dispatched to the SERIAL `eval_unary_elementwise` (the "cheap unary is memory-bound,

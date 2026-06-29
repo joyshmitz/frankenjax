@@ -54,7 +54,7 @@ use arithmetic::{
     eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf, eval_is_nan,
     eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_polygamma, eval_real, eval_round,
     eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
-    eval_unary_elementwise, eval_unary_elementwise_parallel, eval_unary_int_or_float, eval_zeta,
+    eval_unary_elementwise_parallel, eval_unary_int_or_float, eval_zeta,
 };
 
 use comparison::eval_comparison;
@@ -350,8 +350,8 @@ fn eval_primitive_inner(
         Primitive::Asin => eval_float_complex_unary(primitive, inputs, f64::asin),
         Primitive::Acos => eval_float_complex_unary(primitive, inputs, f64::acos),
         Primitive::Atan => eval_float_complex_unary(primitive, inputs, f64::atan),
-        Primitive::Deg2Rad => eval_unary_elementwise(primitive, inputs, f64::to_radians),
-        Primitive::Rad2Deg => eval_unary_elementwise(primitive, inputs, f64::to_degrees),
+        Primitive::Deg2Rad => eval_unary_elementwise_parallel(primitive, inputs, f64::to_radians),
+        Primitive::Rad2Deg => eval_unary_elementwise_parallel(primitive, inputs, f64::to_degrees),
         // Hyperbolic
         Primitive::Sinh => eval_sinh(primitive, inputs),
         Primitive::Cosh => eval_cosh(primitive, inputs),
@@ -386,7 +386,7 @@ fn eval_primitive_inner(
             |x| x.wrapping_mul(x),
             |x| x * x,
         ),
-        Primitive::Reciprocal => eval_unary_elementwise(primitive, inputs, |x| 1.0 / x),
+        Primitive::Reciprocal => eval_unary_elementwise_parallel(primitive, inputs, |x| 1.0 / x),
         Primitive::Logistic => {
             // Sigmoid is compute-bound (an exp per element), so thread it like the
             // other transcendentals (exp/erf/tanh/…) instead of the serial path.

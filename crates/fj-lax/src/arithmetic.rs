@@ -6957,7 +6957,7 @@ pub(crate) fn eval_round(
         }
     };
 
-    eval_unary_elementwise(primitive, inputs, op)
+    eval_unary_elementwise_parallel(primitive, inputs, op)
 }
 
 /// Unary elementwise that preserves integer types (for neg, abs).
@@ -14898,6 +14898,17 @@ mod tests {
         let p = BTreeMap::new();
         time_it("floor_eval_threaded", &|| {
             let v = crate::eval_primitive(Primitive::Floor, std::slice::from_ref(&xt), &p).unwrap();
+            std::hint::black_box(v.as_tensor().unwrap().elements.as_f64_slice().unwrap()[123])
+                .to_bits()
+        });
+        time_it("round_eval_threaded", &|| {
+            let v = crate::eval_primitive(Primitive::Round, std::slice::from_ref(&xt), &p).unwrap();
+            std::hint::black_box(v.as_tensor().unwrap().elements.as_f64_slice().unwrap()[123])
+                .to_bits()
+        });
+        time_it("reciprocal_eval_threaded", &|| {
+            let v = crate::eval_primitive(Primitive::Reciprocal, std::slice::from_ref(&xt), &p)
+                .unwrap();
             std::hint::black_box(v.as_tensor().unwrap().elements.as_f64_slice().unwrap()[123])
                 .to_bits()
         });
