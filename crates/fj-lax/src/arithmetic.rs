@@ -6962,12 +6962,49 @@ pub(crate) fn eval_round(
 
 /// Unary elementwise that preserves integer types (for neg, abs).
 #[inline]
+// Slice-threaded dense integer unary map (neg/abs/sign over i64/i32/u32/u64). The dense
+// int map reads its packed backing into a fresh same-size output — BW-bound past L3, and
+// JAX-CPU is slow on these (~22-23ms). Threads over contiguous chunks (each thread's
+// `chunk.iter().map(f)` stays autovectorized — index-fill would not). Bit-identical.
+fn threaded_unary_typed_map<T: Copy + Send + Sync + Default>(
+    src: &[T],
+    f: &(impl Fn(T) -> T + Sync),
+) -> Vec<T> {
+    let n = src.len();
+    let mut out = vec![T::default(); n];
+    if n < CHEAP_BINARY_PARALLEL_MIN || work_scaled_threads(n) <= 1 {
+        for (o, &v) in out.iter_mut().zip(src) {
+            *o = f(v);
+        }
+        return out;
+    }
+    let threads = work_scaled_threads(n);
+    let chunk = n.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut o_rest = out.as_mut_slice();
+        let mut x0 = 0usize;
+        while x0 < n {
+            let cnt = chunk.min(n - x0);
+            let (oblk, otail) = o_rest.split_at_mut(cnt);
+            o_rest = otail;
+            let sblk = &src[x0..x0 + cnt];
+            x0 += cnt;
+            scope.spawn(move || {
+                for (o, &v) in oblk.iter_mut().zip(sblk) {
+                    *o = f(v);
+                }
+            });
+        }
+    });
+    out
+}
+
 pub(crate) fn eval_unary_int_or_float(
     primitive: Primitive,
     inputs: &[Value],
-    int_op: impl Fn(i64) -> i64,
-    u32_op: impl Fn(u32) -> u32,
-    u64_op: impl Fn(u64) -> u64,
+    int_op: impl Fn(i64) -> i64 + Sync,
+    u32_op: impl Fn(u32) -> u32 + Sync,
+    u64_op: impl Fn(u64) -> u64 + Sync,
     float_op: impl Fn(f64) -> f64 + Sync,
 ) -> Result<Value, EvalError> {
     if inputs.len() != 1 {
@@ -7064,7 +7101,7 @@ pub(crate) fn eval_unary_int_or_float(
             if tensor.dtype == DType::I64
                 && let Some(src) = tensor.elements.as_i64_slice()
             {
-                let out: Vec<i64> = src.iter().map(|&v| int_op(v)).collect();
+                let out = threaded_unary_typed_map(src, &int_op);
                 return Ok(Value::Tensor(TensorValue::new_i64_values(
                     tensor.shape.clone(),
                     out,
@@ -7077,7 +7114,7 @@ pub(crate) fn eval_unary_int_or_float(
             if tensor.dtype == DType::I32
                 && let Some(src) = tensor.elements.as_i64_slice()
             {
-                let out: Vec<i64> = src.iter().map(|&v| i64::from(int_op(v) as i32)).collect();
+                let out = threaded_unary_typed_map(src, &|v: i64| i64::from(int_op(v) as i32));
                 return Ok(Value::Tensor(TensorValue::new_i32_values(
                     tensor.shape.clone(),
                     out,
@@ -7086,14 +7123,14 @@ pub(crate) fn eval_unary_int_or_float(
             // Dense U32/U64 fast paths (as_u32/u64_slice are Some only for that dtype):
             // mirror the generic U32/U64 arms (u32_op/u64_op) into dense storage.
             if let Some(src) = tensor.elements.as_u32_slice() {
-                let out: Vec<u32> = src.iter().map(|&v| u32_op(v)).collect();
+                let out = threaded_unary_typed_map(src, &u32_op);
                 return Ok(Value::Tensor(TensorValue::new_u32_values(
                     tensor.shape.clone(),
                     out,
                 )?));
             }
             if let Some(src) = tensor.elements.as_u64_slice() {
-                let out: Vec<u64> = src.iter().map(|&v| u64_op(v)).collect();
+                let out = threaded_unary_typed_map(src, &u64_op);
                 return Ok(Value::Tensor(TensorValue::new_u64_values(
                     tensor.shape.clone(),
                     out,
@@ -14860,6 +14897,44 @@ mod tests {
         });
         time_it("signbit_simd_bitmask", &|| {
             std::hint::black_box(f64_predicate_words(&xs, FloatPredKind::SignNeg)[1])
+        });
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_i64_abs_threaded_vs_serial() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let xs: Vec<i64> = (0..n as i64).map(|i| (i % 200_003) - 100_000).collect();
+        let xt = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xs.clone(),
+            )
+            .unwrap(),
+        );
+        let time_it = |label: &str, f: &dyn Fn() -> u64| {
+            std::hint::black_box(f());
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("REF {label}: {:.3}ms", b * 1e3);
+        };
+        time_it("i64_abs_serial", &|| {
+            let out: Vec<i64> = xs.iter().map(|&v| v.wrapping_abs()).collect();
+            std::hint::black_box(&out);
+            out[123] as u64
+        });
+        let p = BTreeMap::new();
+        time_it("i64_abs_eval_threaded", &|| {
+            let v = crate::eval_primitive(Primitive::Abs, std::slice::from_ref(&xt), &p).unwrap();
+            std::hint::black_box(v.as_tensor().unwrap().elements.as_i64_slice().unwrap()[123])
+                as u64
         });
     }
 

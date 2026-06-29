@@ -2,6 +2,22 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: integer neg/abs/sign (i64/i32/u32/u64) threaded — 2.84x internal, parity-to-1.10x WIN (ProudSalmon)
+
+`eval_unary_int_or_float`'s INTEGER dense paths (i64/i32/u32/u64) ran serial `.iter().map(int_op).collect()`
+while only its f64/f32 fast-paths threaded — so integer neg/abs/sign were single-thread. JAX-CPU is slow on
+these (i64 abs/neg/sign ~22-27ms). Added `threaded_unary_typed_map` (slice-threaded, autovec preserved — NOT
+index-fill) + `+ Sync` on int_op/u32_op/u64_op (callers pass fn pointers / pure closures), routed all four int
+dtypes. BIT-IDENTICAL — neg/abs/sign tests 83/0.
+
+Evidence — `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M i64 abs:
+  - serial **68.3ms → threaded 24.0ms = 2.84x** internal.
+  - vs JAX `jnp.abs(int64)` (varies 22.9-26.8ms across runs; fj-lax stable ~24ms): **24.3 vs 26.8 = ~1.10x WIN**
+    (parity-to-win). Covers neg/abs/sign for i64/i32/u32/u64.
+Extends the cheap-elementwise-vs-slow-JAX-CPU finding to the INTEGER unary paths. The f64/f32 elementwise unary
+AND binary (max/min/clamp confirmed winning 1.09-1.14x; add/sub/mul/rem threaded) vein is now fully mined; this
+closes the last integer-unary serial gap. clippy+fmt clean.
+
 ## 2026-06-28 - WIN: round/reciprocal/deg2rad/rad2deg threaded — 1.12-1.24x WIN vs JAX (ProudSalmon)
 
 Extends the floor/ceil/trunc fix: `Round` (`eval_round`), `Reciprocal`, `Deg2Rad`, `Rad2Deg` were the remaining
