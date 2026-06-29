@@ -2,6 +2,35 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (LANDED): threaded Concat materialization — split→materialize 3.7x→1.23x vs JAX (~2.8x internal), bead b6w0e (ProudSalmon)
+
+Landed bead `frankenjax-thread-concat-materialize-b6w0e`. `split` returns lazy `Concat` views; the
+`LiteralBuffer` OnceLock fill (`materialize_concat_*_slices` in fj-core) gathered the in-order parts
+with a SINGLE-THREADED `extend_from_slice` loop. That gather is a DRAM-bandwidth-bound memcpy from a
+large strided source (the split bench reads 4096 row-slices of 1024 f64 out of a 128MB `[4096,4096]`
+buffer), so it aggregates memory channels when the disjoint contiguous output ranges are fanned
+across threads. Bit-identical: `copy_from_slice` is exact and parts stay in order; gated at
+`CONCAT_PARALLEL_MIN_ELEMS = 1<<21` so small concats stay serial. Generalized to all dense lanes
+(f64/f32/i64/half/complex/u32/u64) via one `concat_copy<T>` helper.
+
+Same-binary A/B (`FJ_CONCAT_SERIAL` forces the old serial path — trustworthy, contention-immune),
+`cargo test -p fj-lax bench_split_vs_jax --ignored`, f64 `[4096,4096]` split into 4 along axis 1:
+
+| path | run A | run B | best |
+|---|---:|---:|---:|
+| threaded (new default) | 32.12 ms | 28.23 ms | **28.23 ms** |
+| serial (FJ_CONCAT_SERIAL) | 79.68 ms | 90.91 ms | 79.68 ms |
+
+Internal **~2.8x** (79.68/28.23; non-overlapping). Vs JAX 22.9 ms: **3.7x→1.23x slower** (was the
+bead's recorded 1.92x at lower load; the serial path is now measured worse under this host, the
+threaded path narrows to near-parity). Helps `split` + any concat-view consume.
+
+Gates: `rustfmt --edition 2024 --check` clean; `cargo test -p fj-core --lib` 161 passed / 0 failed;
+`cargo test -p fj-lax --lib concat` 10 passed / 0 failed; `cargo clippy -p fj-core --lib -D warnings`
+clean. Bit-exactness preserved (memcpy). CAVEAT noted in bead: fj-core is shared cross-crate storage;
+the threshold keeps non-materializing / small workloads on the serial path. NEXT (sibling not yet
+separately benched): f32/i64/half/complex/u32/u64 use the identical bit-exact path, threshold-gated.
+
 ## 2026-06-29 - GRAVEYARD-PASS: only remaining non-policy lever = eval-model buffer donation, prize MEASURED 1.62x (same-binary); allocator shortcut dead (ProudSalmon)
 
 Ran the prescribed `/alien-graveyard` against the biggest gaps. Two applicable canonical entries:

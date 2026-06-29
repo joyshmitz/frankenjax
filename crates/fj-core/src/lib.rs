@@ -2850,44 +2850,107 @@ where
 }
 
 fn materialize_concat_f64_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<f64>> {
-    let mut values = Vec::with_capacity(len);
+    // Resolve every part to a concrete source slice first (propagates `None` on dtype/range
+    // mismatch). The part-copy gather is a DRAM-bandwidth-bound memcpy; for large `len` it
+    // aggregates more memory channels by fanning disjoint output ranges across threads
+    // (bit-identical: copy_from_slice is exact, parts stay in order).
+    let mut srcs: Vec<&[f64]> = Vec::with_capacity(parts.len());
     for part in parts {
         let source = part.buffer.as_f64_slice()?;
         let end = part.start.checked_add(part.len)?;
-        values.extend_from_slice(source.get(part.start..end)?);
+        srcs.push(source.get(part.start..end)?);
     }
-    Some(values)
+    Some(concat_copy(&srcs, len, 0.0))
+}
+
+/// Output-element gate below which the threaded part-copy isn't worth the spawn overhead
+/// (memcpy is L3-fast under this; threading only wins once the gather is DRAM-bound).
+const CONCAT_PARALLEL_MIN_ELEMS: usize = 1 << 21;
+
+/// Materialize a `Concat` lane by copying its in-order parts into one dense `Vec<T>`. For large
+/// outputs the per-part memcpy gather is DRAM-bandwidth-bound, so disjoint contiguous output
+/// ranges are fanned across threads to aggregate memory channels. Bit-identical to the serial
+/// `extend_from_slice` loop (copy_from_slice is exact; parts stay in order). `zero` is the fill
+/// for the pre-sized buffer (every element is overwritten by a copy). `FJ_CONCAT_SERIAL` forces
+/// the serial path (same-binary A/B hook + escape hatch); the threshold keeps small concats serial.
+fn concat_copy<T: Copy + Send + Sync>(srcs: &[&[T]], len: usize, zero: T) -> Vec<T> {
+    if len < CONCAT_PARALLEL_MIN_ELEMS
+        || srcs.len() < 2
+        || std::env::var_os("FJ_CONCAT_SERIAL").is_some()
+    {
+        let mut values = Vec::with_capacity(len);
+        for s in srcs {
+            values.extend_from_slice(s);
+        }
+        return values;
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(8);
+    let threads = (len / (1 << 19)).clamp(2, cores.min(16));
+    let target = len.div_ceil(threads);
+    // Partition the in-order parts into contiguous groups of ~`target` elements each; each
+    // group owns a disjoint contiguous output range (the concatenation is order-preserving).
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < srcs.len() {
+        let start = i;
+        let mut acc = 0usize;
+        while i < srcs.len() && (acc == 0 || acc < target) {
+            acc += srcs[i].len();
+            i += 1;
+        }
+        groups.push((start, i));
+    }
+    let mut out = vec![zero; len];
+    std::thread::scope(|scope| {
+        let mut o_rest: &mut [T] = out.as_mut_slice();
+        for &(gs, ge) in &groups {
+            let group = &srcs[gs..ge];
+            let group_len: usize = group.iter().map(|s| s.len()).sum();
+            let (o, ot) = o_rest.split_at_mut(group_len);
+            o_rest = ot;
+            scope.spawn(move || {
+                let mut pos = 0usize;
+                for s in group {
+                    o[pos..pos + s.len()].copy_from_slice(s);
+                    pos += s.len();
+                }
+            });
+        }
+    });
+    out
 }
 
 fn materialize_concat_f32_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<f32>> {
-    let mut values = Vec::with_capacity(len);
+    let mut srcs: Vec<&[f32]> = Vec::with_capacity(parts.len());
     for part in parts {
         let source = part.buffer.as_f32_slice()?;
         let end = part.start.checked_add(part.len)?;
-        values.extend_from_slice(source.get(part.start..end)?);
+        srcs.push(source.get(part.start..end)?);
     }
-    Some(values)
+    Some(concat_copy(&srcs, len, 0.0))
 }
 
 fn materialize_concat_i64_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<i64>> {
-    let mut values = Vec::with_capacity(len);
+    let mut srcs: Vec<&[i64]> = Vec::with_capacity(parts.len());
     for part in parts {
         let source = part.buffer.as_i64_slice()?;
         let end = part.start.checked_add(part.len)?;
-        values.extend_from_slice(source.get(part.start..end)?);
+        srcs.push(source.get(part.start..end)?);
     }
-    Some(values)
+    Some(concat_copy(&srcs, len, 0))
 }
 
 fn materialize_concat_half_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<u16>> {
     uniform_concat_half_dtype(parts)?;
-    let mut values = Vec::with_capacity(len);
+    let mut srcs: Vec<&[u16]> = Vec::with_capacity(parts.len());
     for part in parts {
         let source = part.buffer.as_half_float_slice()?;
         let end = part.start.checked_add(part.len)?;
-        values.extend_from_slice(source.get(part.start..end)?);
+        srcs.push(source.get(part.start..end)?);
     }
-    Some(values)
+    Some(concat_copy(&srcs, len, 0))
 }
 
 fn materialize_concat_complex_slices(
@@ -2895,13 +2958,13 @@ fn materialize_concat_complex_slices(
     len: usize,
 ) -> Option<Vec<(f64, f64)>> {
     uniform_concat_complex_dtype(parts)?;
-    let mut values = Vec::with_capacity(len);
+    let mut srcs: Vec<&[(f64, f64)]> = Vec::with_capacity(parts.len());
     for part in parts {
         let source = part.buffer.as_complex_slice()?;
         let end = part.start.checked_add(part.len)?;
-        values.extend_from_slice(source.get(part.start..end)?);
+        srcs.push(source.get(part.start..end)?);
     }
-    Some(values)
+    Some(concat_copy(&srcs, len, (0.0, 0.0)))
 }
 
 fn uniform_concat_half_dtype(parts: &[LiteralBufferSlice]) -> Option<DType> {
@@ -2941,23 +3004,23 @@ fn materialize_concat_bool_slices(parts: &[LiteralBufferSlice], len: usize) -> O
 }
 
 fn materialize_concat_u32_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<u32>> {
-    let mut values = Vec::with_capacity(len);
+    let mut srcs: Vec<&[u32]> = Vec::with_capacity(parts.len());
     for part in parts {
         let source = part.buffer.as_u32_slice()?;
         let end = part.start.checked_add(part.len)?;
-        values.extend_from_slice(source.get(part.start..end)?);
+        srcs.push(source.get(part.start..end)?);
     }
-    Some(values)
+    Some(concat_copy(&srcs, len, 0))
 }
 
 fn materialize_concat_u64_slices(parts: &[LiteralBufferSlice], len: usize) -> Option<Vec<u64>> {
-    let mut values = Vec::with_capacity(len);
+    let mut srcs: Vec<&[u64]> = Vec::with_capacity(parts.len());
     for part in parts {
         let source = part.buffer.as_u64_slice()?;
         let end = part.start.checked_add(part.len)?;
-        values.extend_from_slice(source.get(part.start..end)?);
+        srcs.push(source.get(part.start..end)?);
     }
-    Some(values)
+    Some(concat_copy(&srcs, len, 0))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
