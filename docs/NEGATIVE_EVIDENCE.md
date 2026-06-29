@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - SURFACE (maintainer action): cntiy (+fma) is the #1 unblock — widest cluster, evidence ALREADY exists (cz0g0) (ProudSalmon)
+
+Both halves of land-or-dig are exhausted (3 wins landed incl. recovered erfc; contained kernel surface
+mined across every primitive/special-fn/FFT-path; worktree scan clean). Of the 3 remaining
+non-contained gates, `frankenjax-cntiy` (+fma / scoped-unsafe `target_feature`) is the HIGHEST-leverage
+maintainer action because it gates the WIDEST cluster — this session's audit confirmed it blocks:
+transcendental elementwise (exp/log SIMD-poly: 2.2x WITH fma / 0.79x WITHOUT), ALL transcendental-
+dependent special-fns (erf_inv/lgamma/digamma/igamma/betainc/zeta — each needs SIMD ln/exp), GEMM
+(matmul_fma ~2x, bit-exact-capped at ~XLA/2), conv (im2col+GEMM), and attention/scaled_matmul.
+QUANTIFICATION ALREADY EXISTS — do NOT re-bench: `crates/fj-lax/src/cz0g0_fma_evidence.rs`
+(`bench_fma_vs_nonfma_matmul`, run with `RUSTFLAGS=-Ctarget-cpu=native`) holds the FMA-GEMM kernels +
+tolerance proof; `simd_exp.rs` holds the SIMD-poly exp evidence. The blocker is purely the maintainer
+trade-off: enabling +fma changes mul+add rounding -> breaks the current XLA-bit-exact goldens (would
+need to move those ops to TOLERANCE parity, which JAX/XLA itself uses since it also fuses FMA).
+DECISION NEEDED, not more agent measurement. `murmw` (FFT kernel) and `jjb1h` (buffer donation) are the
+other two gates; both multi-session. No contained per-crate lever remains. No code change.
+
 ## 2026-06-29 - DO-NOT-REDIG: erf_inv is FMA-walled, not a polynomial-SIMD lever — special-fn SIMD question fully closed (ProudSalmon)
 
 Checked `erf_inv` (the one remaining special-fn that LOOKED polynomial like erf): `erf_inv_approx`
