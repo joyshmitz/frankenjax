@@ -11282,9 +11282,21 @@ fn bessel_i0e_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
     use std::simd::cmp::SimdPartialOrd;
     use std::simd::num::SimdFloat;
     let ax = x.abs();
+    let mask = ax.simd_le(Simd::splat(8.0));
+    // Per-group branch skip: i0e computes BOTH Cephes branches branchlessly (JAX/XLA does too), but
+    // when all 8 lanes are in one regime (the common case for smooth/monotonic inputs) the other
+    // branch's 30-coeff Clenshaw is pure waste — skip it. Bit-identical: the skipped branch's values
+    // are discarded by the select anyway. The `all/any` movemask is ~2cyc vs the chbevl, so the mixed
+    // case is unaffected.
+    if mask.all() {
+        return chbevl_f64x8(ax / Simd::splat(2.0) - Simd::splat(2.0), &BESSEL_I0E_A);
+    }
+    if !mask.any() {
+        return chbevl_f64x8(Simd::splat(32.0) / ax - Simd::splat(2.0), &BESSEL_I0E_B) / ax.sqrt();
+    }
     let le = chbevl_f64x8(ax / Simd::splat(2.0) - Simd::splat(2.0), &BESSEL_I0E_A);
     let gt = chbevl_f64x8(Simd::splat(32.0) / ax - Simd::splat(2.0), &BESSEL_I0E_B) / ax.sqrt();
-    ax.simd_le(Simd::splat(8.0)).select(le, gt)
+    mask.select(le, gt)
 }
 
 /// 8-wide `bessel_i1e` (odd in `x`): `|x| <= 8` branch scales by `ax`, the far branch by
@@ -11298,9 +11310,18 @@ fn bessel_i1e_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
     use std::simd::cmp::SimdPartialOrd;
     use std::simd::num::SimdFloat;
     let ax = x.abs();
-    let le = chbevl_f64x8(ax / Simd::splat(2.0) - Simd::splat(2.0), &BESSEL_I1E_A) * ax;
-    let gt = chbevl_f64x8(Simd::splat(32.0) / ax - Simd::splat(2.0), &BESSEL_I1E_B) / ax.sqrt();
-    let result = ax.simd_le(Simd::splat(8.0)).select(le, gt);
+    let mask = ax.simd_le(Simd::splat(8.0));
+    // Per-group branch skip (see bessel_i0e_f64x8): compute only the taken Clenshaw when the group is
+    // homogeneous. Bit-identical (the discarded branch never reaches the select).
+    let result = if mask.all() {
+        chbevl_f64x8(ax / Simd::splat(2.0) - Simd::splat(2.0), &BESSEL_I1E_A) * ax
+    } else if !mask.any() {
+        chbevl_f64x8(Simd::splat(32.0) / ax - Simd::splat(2.0), &BESSEL_I1E_B) / ax.sqrt()
+    } else {
+        let le = chbevl_f64x8(ax / Simd::splat(2.0) - Simd::splat(2.0), &BESSEL_I1E_A) * ax;
+        let gt = chbevl_f64x8(Simd::splat(32.0) / ax - Simd::splat(2.0), &BESSEL_I1E_B) / ax.sqrt();
+        mask.select(le, gt)
+    };
     x.simd_lt(Simd::splat(0.0)).select(-result, result)
 }
 

@@ -2,6 +2,30 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (LANDED, 4th win): bessel i0e/i1e per-group branch skip — 1.20x/1.30x internal, narrows i0e 1.67x->1.28x vs JAX (ProudSalmon)
+
+After the 4x-unroll reject (below) showed i0e is THROUGHPUT-bound (both Cephes branches computed
+branchlessly = 2x Clenshaw work), found the real non-fma lever: `bessel_i0e_f64x8`/`bessel_i1e_f64x8`
+compute BOTH branches (|x|<=8 and |x|>8) for every f64x8 group and `select` — but JAX/XLA does the
+same. When all 8 lanes are in ONE regime (the common case for smooth/monotonic inputs), the other
+branch's 30-coeff Clenshaw is pure waste. Added a per-group `mask.all()`/`!mask.any()` skip: compute
+only the taken branch when homogeneous, else fall back to both+select. BIT-IDENTICAL (the skipped
+branch's values are discarded by the select regardless; bessel tests 8/0). The all/any movemask is
+~2cyc vs the chbevl, so mixed/random inputs are neutral (never a regression) — strictly better.
+
+Same-session A/B (separate builds; SKIP confirmed stable over 2 runs), `bench_special_fns_throughput`:
+
+| op (16M f64) | no-skip | skip | internal | vs JAX |
+|---|---:|---:|---:|---|
+| i0e | 33.64 ms | 27.8 ms (27.80/28.15) | **1.20x** | 1.67x -> 1.28x |
+| i1e | 35.42 ms | 26.6 ms (26.58/27.78) | **1.30x** | (no JAX ref) |
+
+Gates: rustfmt clean; `cargo test -p fj-lax --lib bessel` 8 passed/0 failed (bit-identical incl. scalar
+ref); `cargo test -p fj-conformance` GREEN; clippy clean at the changed lines (the repo's pre-existing
+`chunks_exact` nightly-drift in reduction/arithmetic is `mcqr.111`, not introduced here). The residual
+i0e 1.28x is the no-FMA Clenshaw + boundary 2x -> `cntiy`. This is a contained NON-fma win on a real
+special-fn gap (different primitive from the session's other 3 wins).
+
 ## 2026-06-29 - REJECT (bench-backed): 4x-unroll of SIMD-unary driver REGRESSES i0e (register spill); gap is throughput not latency (ProudSalmon)
 
 Pursued the i0e/bessel gap (3gsc5-adjacent): lgamma 36.4 / digamma 32.0 / i0e 36.3ms vs JAX 19.9/17.3/
