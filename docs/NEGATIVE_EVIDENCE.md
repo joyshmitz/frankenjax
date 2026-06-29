@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - NO-SHIP (measured 0.26-0.51x REGRESSION): Gauss 3-mul complex matmul — DO-NOT (BlackThrush)
+
+Complex GEMM `C = A·B` (A=Ar+iAi, B=Br+iBi) currently uses the naive 4-real-multiply kernel
+(`rank2_complex_matmul`: `ar·br−ai·bi` / `ar·bi+ai·br` per MAC, single fused pass, 4-row register
+blocking). Tried Gauss/Karatsuba's 3-multiply trick (25% fewer GEMM flops): P1=Ar·Br, P2=Ai·Bi,
+P3=(Ar+Ai)(Br+Bi); Cre=P1−P2, Cim=P3−P1−P2 — routed through the tuned real `matmul_2d`.
+
+MEASURED A/B (`frankenjax-cc`, square complex128): **512³ 5.55→21.5ms = 0.26x; 1024³ 38.0→74.8ms =
+0.51x** — a hard REGRESSION. Tolerance-equal (<1e-6·scale). ROOT CAUSE: the 4-mul kernel is ONE fused
+complex GEMM that streams A and B once and does all four products in-register; Gauss is THREE SEPARATE
+`matmul_2d` passes, each re-streaming m·k+k·n and writing m·n, PLUS 6 O(n²) deinterleave allocations
+(ar/ai/br/bi/asum/bsum, ~48MB at 1024²) + the combine. The 3× memory traffic and extra passes are
+memory-bound and swamp the 25% flop saving. SAME LESSON as Strassen-linalg + radix-4 SoA + the FFT
+twiddle no-ship: a FLOP reduction LOSES when it fragments one efficient fused/cache-resident kernel into
+multiple memory-bound passes. DO-NOT re-attempt Gauss/Karatsuba/Strassen for complex (or real) matmul —
+the fused single-pass kernel is the floor; the real complex-matmul gap stays the +fma microkernel ceiling.
+
 ## 2026-06-29 - NO-SHIP (measured +3.9% REGRESSION): radix-4 SoA twiddle-free j==0 butterfly — DO-NOT (BlackThrush)
 
 Attacked the biggest gap (batched pow4 FFT, `fft_batch_2048x256` ~14-18x vs JAX/pocketfft). In
