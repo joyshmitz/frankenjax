@@ -2,6 +2,31 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - REJECT (bench-backed): forward f64 cumsum via 2-pass-total rescan == blocked scan (~1.0x), REVERTED (ProudSalmon)
+
+DIG + measure on the 4M forward-cumsum path (at a genuinely idle window: `eval/cumsum_4m_f64_1d`
+baseline 8.19ms, NOT the load-inflated 30ms). Hypothesis: forward cumsum's
+`blocked_prefix_scan_to_vec` does PassA local-scan + PassB offset-add = **2 output writes** over the
+32MB result (160MB total traffic incl. init), whereas the reverse path already uses the leaner
+`parallel_assoc_scan_f64` (Pass0 totals, no write + Pass1 single writing pass = **1 output write**,
+128MB). Routed forward through the existing/tested `parallel_assoc_scan_f64(..., reverse=false)` —
+TOLERANCE-legal (same reassociation class the reverse path already ships).
+
+Same-binary env-gated A/B (`FJ_FWD_ASSOC`), idle host, median of repeats:
+
+| path | run 1 | run 2 | median |
+|---|---:|---:|---:|
+| blocked (baseline) | 8.19 ms | 8.30 ms | **8.25 ms** |
+| 2-pass-total (cand) | 11.12 ms* | 8.13 ms | **8.13 ms** |
+
+(*CAND run-1 was a load-spike outlier — loadavg climbed to 18.7 mid-run, CI [9.77,12.60]; the clean
+run-2 is representative.) Candidate **8.13 vs 8.25 ms = 1.01x = within noise = ~0 gain**. The
+"1 write vs 2 writes" traffic edge does NOT materialize: the 2-pass-total re-reads `src` a second
+time (Pass0), which offsets the saved output write, and at 8ms the op is not write-bound enough to
+care. REVERTED (reduction.rs back to HEAD, zero net change). Lesson: forward cumsum's blocked scan
+and the reverse rescan are perf-equivalent at 4M — do NOT re-attempt unifying them for speed.
+Conformance unaffected (no code landed).
+
 ## 2026-06-29 - SURFACE (corrected): 4M cumsum floor is PAGE-FAULT-bound (~33ms, load-INVARIANT), not contention; real gap is per-call 32MB alloc (ProudSalmon)
 
 SELF-CORRECTION of a wrong conclusion I nearly committed. First read of `eval/cumsum_4m_f64_1d_tight`
