@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (3.55x): thread the complex IntegerPow dense kernel (was single-threaded) (BlackThrush)
+
+Continuing the "thread compute-bound complex dense kernels" audit (after abs 5.02x, sign/square 4.91x):
+complex `IntegerPow` (`z^n`, integer n) dense path was `xs.iter().map(|z| complex_powi(z, exponent)).collect()`
+— single-threaded. `complex_powi` is ~log2(|n|) `complex_mul`s/elem (exponentiation by squaring), so it is
+compute-bound for |n|≥3. Routed through the `threaded_complex_unary_map` helper (work-scaled `thread::scope`,
+serial below the gate, exponent captured by the closure).
+
+Measured same-binary A/B (`complex_integer_pow_threaded_vs_serial_ab`, 16M complex128, exponent 5):
+serial-map **160.1 ms → threaded-eval 45.2 ms = 3.55x**, bit-identical (`to_bits` vs the squaring reference).
+(Smaller exponents are lighter/more BW-bound so the speedup tapers, but the work-scaled gate keeps tiny
+arrays serial — no regression.) fj-lax lib **1654/0**, conformance green, fmt + clippy clean. The complex
+dense-unary-kernel threading audit (abs/sign/square/intpow) is now complete; real/integer powi and the
+transcendentals were already covered (libm threaded; intpow on real is cheap powi).
+
 ## 2026-06-29 - KEEP (4.91x): thread the complex Sign/Square dense kernel (was single-threaded) (BlackThrush)
 
 The follow-up flagged in the complex-Abs-threading entry: complex **Sign** (z/|z|) and **Square** (z²)

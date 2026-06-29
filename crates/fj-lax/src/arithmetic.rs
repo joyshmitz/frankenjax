@@ -14827,8 +14827,9 @@ pub(crate) fn eval_integer_pow(
                 }
                 DType::Complex64 | DType::Complex128 => {
                     if let Some(xs) = tensor.elements.as_complex_slice() {
-                        let out: Vec<(f64, f64)> =
-                            xs.iter().map(|&z| complex_powi(z, exponent)).collect();
+                        // complex_powi is ~log2(|n|) complex_muls/elem → compute-bound for |n|≥3;
+                        // thread it (work-scaled, serial below the gate). Bit-identical.
+                        let out = threaded_complex_unary_map(xs, &|z| complex_powi(z, exponent));
                         return Ok(Value::Tensor(
                             TensorValue::new_complex_values(out_dtype, shape, out)
                                 .map_err(EvalError::InvalidTensor)?,
@@ -15165,6 +15166,73 @@ mod tests {
             hyp * 1e3,
             fast * 1e3,
             hyp / fast
+        );
+    }
+
+    // complex IntegerPow is now THREADED. A/B at exponent 5 (compute-bound) on 16M.
+    #[test]
+    #[ignore = "perf; run explicitly"]
+    fn complex_integer_pow_threaded_vs_serial_ab() {
+        use std::time::Instant;
+        let n = 1usize << 24;
+        let data: Vec<(f64, f64)> = (0..n)
+            .map(|i| (((i % 397) as f64) * 0.005 - 0.9, ((i % 521) as f64) * 0.005 - 1.1))
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: vec![n as u32] },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let params = BTreeMap::from([("exponent".to_owned(), "5".to_owned())]);
+        // serial reference (the pre-thread map) for correctness
+        let serial_pow = |z: (f64, f64)| -> (f64, f64) {
+            let mut result = (1.0, 0.0);
+            let mut base = z;
+            let mut e = 5u32;
+            while e > 0 {
+                if e & 1 == 1 {
+                    result = super::complex_mul(result, base);
+                }
+                base = super::complex_mul(base, base);
+                e >>= 1;
+            }
+            result
+        };
+        let got = eval_integer_pow(Primitive::IntegerPow, std::slice::from_ref(&input), &params)
+            .unwrap();
+        let gp = got.as_tensor().unwrap().elements.as_complex_slice().unwrap();
+        for (k, &z) in data.iter().enumerate() {
+            let w = serial_pow(z);
+            assert_eq!((gp[k].0.to_bits(), gp[k].1.to_bits()), (w.0.to_bits(), w.1.to_bits()));
+        }
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let threaded = best(&|| {
+            std::hint::black_box(
+                eval_integer_pow(Primitive::IntegerPow, std::slice::from_ref(&input), &params)
+                    .unwrap(),
+            );
+        });
+        let serial = best(&|| {
+            let out: Vec<(f64, f64)> = data.iter().map(|&z| serial_pow(z)).collect();
+            std::hint::black_box(out);
+        });
+        eprintln!(
+            "[complex_intpow^5 16M] serial-map={:.3}ms threaded-eval={:.3}ms ratio={:.2}x",
+            serial * 1e3,
+            threaded * 1e3,
+            serial / threaded
         );
     }
 
