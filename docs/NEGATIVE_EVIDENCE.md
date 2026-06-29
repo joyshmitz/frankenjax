@@ -27,7 +27,14 @@ dtypes.) Gates: `erfc_simd_bit_identical_to_scalar` PASS (f64+f32 over [-5,5] + 
 A/B/fallback hook. This is a contained kernel WIN that the comprehensive sweep missed because it lived
 in an unpushed worktree, not in main's source.
 
-## 2026-06-29 - SESSION SUMMARY (ProudSalmon): contained frontier exhaustively swept; 2 wins landed, 4 levers reverted, 3 non-contained gates remain
+## 2026-06-29 - SESSION SUMMARY (ProudSalmon): contained frontier exhaustively swept; 3 wins landed (incl. 1 recovered unpushed worktree), 4 levers reverted, 3 non-contained gates remain
+
+UPDATE: a 3rd win landed (`e519aa7c` SIMD erfc, f64 1.15x / f32 1.31x) — RECOVERED from an unpushed
+worktree (`c8fb1785`), NOT found in main's source. Lesson: the LAND half of land-or-dig is not
+subsumed by sweeping main — always scan `.scratch`/worktrees for ahead-of-main perf commits that were
+never pushed; my multi-turn "contained surface exhausted" sweep missed this because it audited main's
+source, not the worktrees. (Checked the other ahead worktrees too: softmax/logsumexp = noship eager-nn
+threading; complex-boolword-select = superseded/on-main. erfc was the only genuinely unlanded one.)
 
 Authoritative index for this session's 18 entries below. Method: re-measure every vs-JAX bench
 ISOLATED (the batched/load-inflated sweep and stale "current Xms" comments produce phantom gaps —
