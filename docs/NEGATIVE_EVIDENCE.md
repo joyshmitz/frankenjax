@@ -2,6 +2,18 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - BEAD-TRIAGE COMPLETE: remaining open perf beads are all fragile/policy/done — none a clean contained lever (ProudSalmon)
+
+Final pass over the open perf-bead backlog (closing the loop): `sortkeyval-s2yc8` DONE for common
+dtypes (f64/f32/i64+mixed ~52-58x), only niche complex/half/u32/u64/bool operand tails remain (low
+pri); `small-batched-gemm-q032w` = below fma ceiling -> `cntiy`; `dedicated-gemv-h36uj` =
+bit-identity-blocked (SIMD-K reorders sum, breaks matmul goldens), maintainer-gated; `cummax-scan-rekyb`
++ `reduce-window-simd-od11p` = NaN-aware-mask SIMD on already-threaded ops (same BW-bound + portable-simd
+NaN-mask-fragility class as the select-blend I measured REGRESSING this session); `fgk6m` = a DIAGNOSTIC
+needing a quiesced host (unavailable under swarm contention). None is a clean contained per-crate lever.
+With both halves of land-or-dig exhausted and the bead backlog triaged, the session's actionable
+contained surface is empty; remaining work is `cntiy` (maintainer +fma) / `murmw` / `jjb1h`. No code.
+
 ## 2026-06-29 - CORRECTION/REFINE: FFT (murmw) and +fma (cntiy) are COUPLED — FMA butterflies are tolerance-legal for FFT (ProudSalmon)
 
 Refines the earlier "FFT 14.9x is NOT +fma-gated, separate from cntiy" entry. That was right about the
