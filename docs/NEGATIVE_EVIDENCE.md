@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - REJECT (bench-backed): fused bf16 NHWC maxpool == current f64 path (~0 gain); the "26ms" target was STALE (ProudSalmon)
+
+Chased the largest-looking non-FFT gap: `bench_fused_bf16_maxpool_proto`'s comment "current 26ms, JAX
+2.80ms" (~9.3x). Wired the verified channel-vectorized `fused_bf16_pool_nhwc` (f32x16, reads half-size
+bf16, NaN-aware) into `eval_reduce_window` for the rank-4 NHWC VALID max case (max-only; gated;
+`half_pool_simd_channel_bit_identical` confirmed bit-identity). Same-binary A/B (`FJ_BF16POOL_SLOW`
+forces the old widen→f64 path), `eval_primitive` bf16 maxpool `[4,112,112,64]` 3x3/s2:
+
+| path | best |
+|---|---:|
+| FAST (fused) | 0.7552 ms |
+| SLOW (old f64) | 0.7487 ms |
+
+**~1.0x = no gain** (fused is even marginally slower). ROOT CAUSE: the prototype's "26ms current" is
+STALE — it predates the f64 reduce_window optimizations (SIMD bf16→f64 widen `widen_bf16_slice_to_f64`
++ separable monotonic-deque extremum). The CURRENT bf16 maxpool path is already ~0.75ms = **3.7x
+FASTER than JAX 2.80ms** — bf16 maxpool is already a WIN, not a gap. The "9.3x" was an outdated-comment
+illusion. REVERTED (lib.rs to HEAD; work preserved in stash). LESSON: re-measure the CURRENT baseline
+before trusting an embedded "current Xms" comment — they go stale as the surrounding path is optimized.
+No code change; tree clean.
+
 ## 2026-06-29 - FRONTIER-MAP: post-concat-win, every remaining open perf bead is blocked/fragile/done (ProudSalmon)
 
 After landing b6w0e (below), audited the full open perf-bead backlog (`br`) + the relevant kernels to
