@@ -3050,8 +3050,11 @@ fn complex_asin_finite_hft(re: f64, im: f64) -> (f64, f64) {
         let avg = scale * avg_scaled;
         (avg, real_arg)
     } else {
-        let plus = (re + 1.0).hypot(im);
-        let minus = (re - 1.0).hypot(im);
+        // Common (non-overflow) branch: |z±1| via the guarded sqrt helper (hypot-elision).
+        // complex_abs_f64 falls back to libm hypot if `(re±1)²+im²` would overflow, so the
+        // HFT decomposition's overflow safety is preserved; ≤1 ULP on each magnitude.
+        let plus = complex_abs_f64(re + 1.0, im);
+        let minus = complex_abs_f64(re - 1.0, im);
         let avg = 0.5 * plus + 0.5 * minus;
         (avg, re / avg)
     };
@@ -15001,6 +15004,69 @@ mod tests {
     // deliberately tuple-array literals; the type-complexity lint is noise here.
     #![allow(clippy::type_complexity)]
     use super::*;
+
+    // complex asin (HFT) hypot-elision: the live eval path must match a hypot reference within
+    // tolerance, and the in-process A/B shows the win on a large complex array.
+    #[test]
+    fn complex_asin_hypot_elision_matches_and_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22;
+        // moderate |z| (the common non-overflow HFT branch), mixed sign of im.
+        let data: Vec<(f64, f64)> = (0..n)
+            .map(|i| (((i % 397) as f64) * 0.02 - 4.0, ((i % 521) as f64) * 0.02 - 5.0))
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: vec![n as u32] },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let got =
+            eval_float_complex_unary(Primitive::Asin, std::slice::from_ref(&input), f64::asin)
+                .unwrap();
+        let gp = got.as_tensor().unwrap().elements.as_complex_slice().unwrap();
+        // reference: HFT with libm hypot for the avg magnitude.
+        let mut maxerr = 0.0f64;
+        for (k, &(re, im)) in data.iter().enumerate() {
+            let avg = 0.5 * (re + 1.0).hypot(im) + 0.5 * (re - 1.0).hypot(im);
+            let real = (re / avg).clamp(-1.0, 1.0).asin();
+            let imag_mag = if avg <= 1.0 { 0.0 } else { avg.acosh() };
+            let imag = if im < 0.0 { -imag_mag } else { imag_mag };
+            maxerr = maxerr.max((gp[k].0 - real).abs()).max((gp[k].1 - imag).abs());
+        }
+        assert!(maxerr < 1e-9, "complex asin hypot-elision vs hypot ref: {maxerr:e}");
+        let best = |f: &dyn Fn() -> f64| -> f64 {
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let acc = f();
+                std::hint::black_box(acc);
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let hyp = best(&|| {
+            data.iter()
+                .map(|&(re, im)| 0.5 * (re + 1.0).hypot(im) + 0.5 * (re - 1.0).hypot(im))
+                .sum()
+        });
+        let fast = best(&|| {
+            data.iter()
+                .map(|&(re, im)| {
+                    0.5 * super::complex_abs_f64(re + 1.0, im)
+                        + 0.5 * super::complex_abs_f64(re - 1.0, im)
+                })
+                .sum()
+        });
+        eprintln!(
+            "[complex_asin |z±1| {n}] hypot={:.3}ms sqrt-elision={:.3}ms ratio={:.2}x",
+            hyp * 1e3,
+            fast * 1e3,
+            hyp / fast
+        );
+    }
 
     // complex abs fast path (sqrt(re²+im²) when normal) vs libm hypot: same value within
     // tolerance, A/B shows the hypot-elision win on a large complex array (the Abs primitive).

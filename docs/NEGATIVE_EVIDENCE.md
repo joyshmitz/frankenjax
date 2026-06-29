@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (3.0x on the |z±1| magnitudes): complex asin/acos HFT hypot-elision (BlackThrush)
+
+Completes the complex hypot-elision family (log/abs/sqrt/pow done earlier; I'd skipped this one citing
+accuracy). `complex_asin_finite_hft`'s COMMON (non-overflow) branch computes `|z+1|` and `|z-1|` via libm
+`hypot`. Routed them through the `is_normal`-guarded `complex_abs_f64` (sqrt(x²+y²) when normal, hypot
+fallback on overflow). Crucially the HFT decomposition's overflow safety is UNCHANGED — the rare large-|z|
+branches (`scale > √MAX`, non-finite avg) keep their scaled `hypot`, and `complex_abs_f64`'s guard catches
+any residual `(re±1)²+im²` overflow inside the common branch. Only the magnitude is touched; the
+accuracy-critical HFT structure (avoiding `z²` cancellation) is preserved.
+
+Measured in-process A/B (`complex_asin_hypot_elision_matches_and_ab`, 4M complex128, 1-thread — isolated,
+NOT the contention-noisy full-pipeline benches): the two `|z±1|` magnitudes **53.5 ms → 17.8 ms = 3.0x**
+(2 hypot → 2 guarded sqrt). The full complex asin/acos win is smaller (asin+acosh dominate the rest), but
+the magnitude phase is a third of it. Eval-path correctness: the live `Asin` complex path matches a libm
+hypot reference to **<1e-9**. Propagates to complex asin, acos (→asin), and asinh (→asin). fj-lax lib
+**1652/0** (complex asin/acos/asinh metamorphic + oracle), conformance green, fmt + clippy clean. The
+complex hypot-elision lever (log/abs/sqrt/pow/asin/acos) is now COMPLETE.
+
 ## 2026-06-29 - NO-SHIP (unmeasurable on contended host): linalg complex norm² sqrt-elision — DO-NOT chase (BlackThrush)
 
 linalg.rs has 8 sites of `complex_abs(z).powi(2)` (column norms / `vᴴv` in complex QR/SVD/eigh) — i.e.
