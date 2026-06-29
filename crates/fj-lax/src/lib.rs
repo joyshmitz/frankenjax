@@ -47,10 +47,10 @@ pub(crate) fn new_boxed(
 }
 
 use arithmetic::{
-    ensure_float_or_complex_operands, erfc_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh,
+    ensure_float_or_complex_operands, eval_abs, eval_acosh, eval_asinh, eval_atanh,
     eval_bessel_i0e, eval_bessel_i1e, eval_betainc, eval_binary_elementwise, eval_clamp,
     eval_complex, eval_conj, eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general,
-    eval_erf, eval_erf_inv, eval_exp, eval_float_complex_unary, eval_fma, eval_igamma,
+    eval_erf, eval_erf_inv, eval_erfc, eval_exp, eval_float_complex_unary, eval_fma, eval_igamma,
     eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf, eval_is_nan,
     eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_polygamma, eval_real, eval_round,
     eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
@@ -393,7 +393,7 @@ fn eval_primitive_inner(
             eval_float_complex_unary(primitive, inputs, |x| 1.0 / (1.0 + (-x).exp()))
         }
         Primitive::Erf => eval_erf(primitive, inputs),
-        Primitive::Erfc => eval_unary_elementwise_parallel(primitive, inputs, erfc_approx),
+        Primitive::Erfc => eval_erfc(primitive, inputs),
         Primitive::Lgamma => eval_lgamma(primitive, inputs),
         Primitive::Digamma => eval_digamma(primitive, inputs),
         Primitive::Polygamma => eval_polygamma(primitive, inputs),

@@ -11500,6 +11500,40 @@ pub(crate) fn eval_erf(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     eval_unary_simd_dense_f64_parallel(primitive, inputs, erf_f64x8, erf_approx)
 }
 
+/// 8-wide `erfc`. `erfc_approx` is exactly `1 - erf_approx(x)` for `|x| < 3.5`, so on that range
+/// `1 - erf_f64x8(x)` is bit-identical (and SIMD-accelerated wherever `erf_f64x8` is — `|x|<1.25`).
+/// Lanes with `|x| >= 3.5` (the Laplace continued-fraction tail, where `1-erf` would cancel) plus
+/// inf/NaN fall back to scalar `erfc_approx`, so every lane equals `erfc_approx` bit-for-bit.
+#[inline]
+fn erfc_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    let ax = x.abs();
+    let mut res = Simd::splat(1.0) - erf_f64x8(x);
+    let simd_ok = ax.simd_lt(Simd::splat(3.5));
+    if !simd_ok.all() {
+        let xa = x.to_array();
+        let mut ra = res.to_array();
+        for k in 0..8 {
+            if xa[k].abs() >= 3.5 || xa[k].is_nan() {
+                ra[k] = erfc_approx(xa[k]);
+            }
+        }
+        res = Simd::from_array(ra);
+    }
+    res
+}
+
+/// `erfc` via the dense SIMD driver (F64 + F32). Bit-identical to the scalar `erfc_approx` map.
+pub(crate) fn eval_erfc(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // FJ_ERFC_SCALAR forces the pre-landing scalar-map path (same-binary A/B hook).
+    if std::env::var_os("FJ_ERFC_SCALAR").is_some() {
+        return eval_unary_elementwise_parallel(primitive, inputs, erfc_approx);
+    }
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, erfc_f64x8, erfc_approx)
+}
+
 fn dot_result_is_integral(lhs: &TensorValue, rhs: &TensorValue) -> bool {
     lhs.elements.iter().all(|literal| literal.is_integral())
         && rhs.elements.iter().all(|literal| literal.is_integral())
@@ -24982,6 +25016,135 @@ mod tests {
         });
         bench("f32-simd", &|| {
             std::hint::black_box(eval_erf(Primitive::Erf, std::slice::from_ref(&f32_in)).unwrap());
+        });
+    }
+
+    #[test]
+    fn erfc_simd_bit_identical_to_scalar() {
+        // erfc via the SIMD driver must equal scalar erfc_approx bit-for-bit across: |x|<1.25
+        // (SIMD 1-erf), 1.25<=|x|<3.5 (scalar 1-erf), |x|>=3.5 (continued-fraction tail), for f64
+        // AND f32, plus ±0/±inf. Span [-5,5] to mix all branches within blocks.
+        let n = 70_003usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i % 10000) as f64 - 5000.0) * 0.001)
+            .collect();
+        let f64_in = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let got =
+            extract_f64_vec(&eval_erfc(Primitive::Erfc, std::slice::from_ref(&f64_in)).unwrap());
+        for idx in 0..n {
+            assert_eq!(
+                got[idx].to_bits(),
+                erfc_approx(data[idx]).to_bits(),
+                "f64 erfc at x={}",
+                data[idx]
+            );
+        }
+        let dataf: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let f32_in = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                dataf.clone(),
+            )
+            .unwrap(),
+        );
+        let gotf = match eval_erfc(Primitive::Erfc, std::slice::from_ref(&f32_in)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected tensor"),
+        };
+        for idx in 0..n {
+            assert_eq!(
+                gotf[idx].to_bits(),
+                (erfc_approx(dataf[idx] as f64) as f32).to_bits(),
+                "f32 erfc at idx {idx}"
+            );
+        }
+        for &x in &[0.0_f64, -0.0, f64::INFINITY, f64::NEG_INFINITY] {
+            let xi = Value::Tensor(
+                TensorValue::new_f64_values(Shape { dims: vec![16] }, vec![x; 16]).unwrap(),
+            );
+            let g =
+                extract_f64_vec(&eval_erfc(Primitive::Erfc, std::slice::from_ref(&xi)).unwrap());
+            assert_eq!(g[0].to_bits(), erfc_approx(x).to_bits(), "special x={x}");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_erfc_simd_vs_scalar() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        // Moderate-x input (normal-CDF / Q-function regime): most |x| < 1.25 -> SIMD via 1-erf.
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i % 2400) as f64 - 1200.0) * 0.001)
+            .collect();
+        let f64_in = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        let dataf: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+        let f32_in = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                dataf,
+            )
+            .unwrap(),
+        );
+        let bench = |label: &str, f: &dyn Fn()| {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("erfc 16M [{label}]: {:.3}ms", b * 1e3);
+        };
+        bench("f64-scalar", &|| {
+            std::hint::black_box(
+                eval_unary_elementwise_parallel(
+                    Primitive::Erfc,
+                    std::slice::from_ref(&f64_in),
+                    erfc_approx,
+                )
+                .unwrap(),
+            );
+        });
+        bench("f64-simd", &|| {
+            std::hint::black_box(
+                eval_erfc(Primitive::Erfc, std::slice::from_ref(&f64_in)).unwrap(),
+            );
+        });
+        bench("f32-scalar", &|| {
+            std::hint::black_box(
+                eval_unary_elementwise_parallel(
+                    Primitive::Erfc,
+                    std::slice::from_ref(&f32_in),
+                    erfc_approx,
+                )
+                .unwrap(),
+            );
+        });
+        bench("f32-simd", &|| {
+            std::hint::black_box(
+                eval_erfc(Primitive::Erfc, std::slice::from_ref(&f32_in)).unwrap(),
+            );
         });
     }
 

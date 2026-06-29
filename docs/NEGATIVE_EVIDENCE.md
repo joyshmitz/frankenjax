@@ -2,6 +2,31 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (LANDED, 3rd win): SIMD erfc dense driver — f64 1.15x / f32 1.31x faster, recovered from an unpushed worktree (ProudSalmon)
+
+LAND half of land-or-dig: found `frankenjax-cod-a-erfc-conformance` commit `c8fb1785`
+("perf(fj-lax): SIMD erfc through dense unary driver", authored ProudSalmon) was AHEAD of main and
+NEVER pushed to origin/main. Verified current main still dispatched `Erfc` to the SCALAR
+`eval_unary_elementwise_parallel(erfc_approx)` and had zero `erfc_f64x8`. Applied the source change
+(arithmetic.rs `erfc_f64x8` + `eval_erfc` via `eval_unary_simd_dense_f64_parallel`; lib.rs dispatch +
+import; resolved a 3-way import conflict). `erfc_approx(x) == 1 - erf_approx(x)` for `|x|<3.5`, so the
+SIMD path reuses `erf_f64x8` and falls back per-lane only for the continued-fraction tail / non-finite.
+
+RE-VERIFIED on current main (same-binary, `bench_erfc_simd_vs_scalar` measures both paths in one
+binary; per the re-measure lesson, not trusting the worktree's day-old number):
+
+| dtype | scalar | SIMD | ratio |
+|---|---:|---:|---:|
+| f64 16M | 27.06 ms | 23.43 ms | **1.15x faster** |
+| f32 16M | 17.90 ms | 13.65 ms | **1.31x faster** |
+
+(The worktree's recorded 1.36x/1.18x split shifted under current host/input, but the win holds in BOTH
+dtypes.) Gates: `erfc_simd_bit_identical_to_scalar` PASS (f64+f32 over [-5,5] + ±0/±inf, all SIMD /
+1-erf / continued-fraction-tail regimes — BIT-IDENTICAL to `erfc_approx`); `cargo clippy -p fj-lax
+--lib -D warnings` clean (my lines); `cargo test -p fj-conformance` GREEN. Added `FJ_ERFC_SCALAR`
+A/B/fallback hook. This is a contained kernel WIN that the comprehensive sweep missed because it lived
+in an unpushed worktree, not in main's source.
+
 ## 2026-06-29 - SESSION SUMMARY (ProudSalmon): contained frontier exhaustively swept; 2 wins landed, 4 levers reverted, 3 non-contained gates remain
 
 Authoritative index for this session's 18 entries below. Method: re-measure every vs-JAX bench
