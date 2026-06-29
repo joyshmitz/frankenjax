@@ -2,6 +2,17 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - ROOT-CAUSE: win5 sum-pool 2.27x = runtime-window non-unrolled loop; lever = const-window specialization (combinatorial/niche) (ProudSalmon)
+
+Read `reduce_window_rank3_f64_sum_xlane` (the rank-3 VALID f64 sum SIMD kernel). The win5-vs-win9
+efficiency gap (24 vs 87 GFLOPs) root cause: the per-output-group inner reduction is a RUNTIME-bounded
+`for wz in 0..win_z { for wy in 0..win_y { for wx in 0..win_x { acc += f64x8 load }}}` — since
+win_z/y/x are runtime values, the compiler can't unroll, so the triple-loop entry/branch overhead per
+output-group dominates at small windows (125 taps) but amortizes at large (729 -> win9 WINS). JAX
+const-specializes common window sizes. The only lever is monomorphizing the kernel over const window
+sizes (unroll) — combinatorial (sizes × 3 axes) and NICHE (volumetric pooling), so poor-EV. NOT a
+clean contained lever. win5 characterized + DO-NOT-grind. No code change.
+
 ## 2026-06-29 - STALE-BEAD CORRECTED: rank-3 sum-pool (72v5f) is already a WIN at large windows, not "hundreds of ms" (ProudSalmon)
 
 Re-measured `nd-separable-sum-pool-72v5f` (claimed `eval_reduce_window_dense_float` naive ~hundreds of
