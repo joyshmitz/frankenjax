@@ -2,6 +2,28 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (LANDED, 8th win): f32 rank-3 separable 3D sum-pooling — 25.8x over generic baseline @win9³ (ProudSalmon)
+
+Follow-on to the f64 3D separable (7th win): f32 is JAX's DEFAULT float, so f32 volumetric sum/avg
+pooling is the realistic signal case — and it had NO dedicated kernel (f32 rank-3 sum fell to the generic
+`eval_reduce_window_dense_float` per-tap loop; the f64 xlane path is F64-only). Added
+`separable_reduce_window_sum_3d_f32` (f64 running-sum accumulate, narrow output to f32 — same contract as
+the rank-2 f32 separable) and wired it for rank-3 f32 VALID unit-stride sum at `∏window >= 216`.
+
+Same-binary A/B (`bench_sumpool_3d_f32_separable_ab`, 96³ f32 VALID, min-of-7), generic vs separable:
+
+| window | generic | separable | ratio |
+|---|---:|---:|---:|
+| win6³ | 13.52 ms | 1.36 ms | 9.96x |
+| win9³ | 34.25 ms | 1.33 ms | **25.80x** |
+
+The generic per-tap loop scales with ∏window (34ms at win9³ — a multi-x JAX LOSS); the separable is
+window-independent (~1.3ms = 3 f64-accumulate passes). This turns the f32 volumetric-pool loss into a
+dominant JAX win. Tolerance-equal (f64 accumulate, narrow), all-finite-gated like the f64 path. Gates:
+`cargo fmt -p fj-lax --check` clean; new `separable_sum_3d_f32_matches_generic` test (3 shapes, max-rel
+<1e-5) passes; `reduce_window` subset 48/0. Same gate (`∏window>=216`) so small-window f32 keeps the
+generic path (separable's 3 passes lose there, same crossover as f64).
+
 ## 2026-06-29 - KEEP (LANDED, 7th win): rank-3 separable running-sum 3D sum-pooling — 3.48x over shipped xlane, ~5.4x vs JAX (ProudSalmon)
 
 Bead `frankenjax-nd-separable-sum-pool-72v5f`: the shipped rank-3 f64 SUM `reduce_window` is the per-tap

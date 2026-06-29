@@ -3985,6 +3985,110 @@ fn separable_reduce_window_sum_3d_f64(
     Some(output)
 }
 
+/// f32 sibling of [`separable_reduce_window_sum_3d_f64`] (f32 is JAX's default float, so f32
+/// volumetric sum/avg pooling is the common signal case). The running sums stay in f64 and only
+/// the final output is narrowed to f32 — matching the naive f32 sum contract (widen each tap to
+/// f64, accumulate in f64, round each output to f32), so it is tolerance-close to the naive fold.
+/// Same all-finite guard + VALID unit-stride geometry as the f64 version. f32 rank-3 volumetric
+/// sum has NO dedicated kernel today (it falls to the generic `eval_reduce_window_dense_float`
+/// per-tap loop), so the win is larger here than for f64.
+fn separable_reduce_window_sum_3d_f32(
+    src: &[f32],
+    input_dims: [usize; 3],
+    window_dims: [usize; 3],
+    out_dims: [usize; 3],
+) -> Option<Vec<f32>> {
+    let [in_z, in_y, in_x] = input_dims;
+    let [win_z, win_y, win_x] = window_dims;
+    let [out_z, out_y, out_x] = out_dims;
+    if src.len() != in_z.checked_mul(in_y)?.checked_mul(in_x)? {
+        return None;
+    }
+    if win_x == 0
+        || win_y == 0
+        || win_z == 0
+        || out_x + win_x - 1 != in_x
+        || out_y + win_y - 1 != in_y
+        || out_z + win_z - 1 != in_z
+    {
+        return None;
+    }
+    if !src.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+
+    // Phase 1: horizontal (x) running window-sum in f64 -> hx[in_z, in_y, out_x].
+    let zy_rows = in_z * in_y;
+    let mut hx = vec![0.0f64; zy_rows * out_x];
+    for zy in 0..zy_rows {
+        let row = &src[zy * in_x..zy * in_x + in_x];
+        let hr = &mut hx[zy * out_x..(zy + 1) * out_x];
+        let mut s = 0.0f64;
+        for &v in &row[0..win_x] {
+            s += f64::from(v);
+        }
+        hr[0] = s;
+        for ox in 1..out_x {
+            s += f64::from(row[ox + win_x - 1]) - f64::from(row[ox - 1]);
+            hr[ox] = s;
+        }
+    }
+
+    // Phase 2: vertical (y) running window-sum within each z-plane -> hy[in_z, out_y, out_x].
+    let in_plane = in_y * out_x;
+    let out_plane = out_y * out_x;
+    let mut hy = vec![0.0f64; in_z * out_plane];
+    let mut vsum = vec![0.0f64; out_x];
+    for z in 0..in_z {
+        let plane = &hx[z * in_plane..(z + 1) * in_plane];
+        let outp = &mut hy[z * out_plane..(z + 1) * out_plane];
+        for v in vsum.iter_mut() {
+            *v = 0.0;
+        }
+        for wy in 0..win_y {
+            for (v, &h) in vsum.iter_mut().zip(&plane[wy * out_x..(wy + 1) * out_x]) {
+                *v += h;
+            }
+        }
+        outp[0..out_x].copy_from_slice(&vsum);
+        for oy in 1..out_y {
+            let add = &plane[(oy + win_y - 1) * out_x..(oy + win_y) * out_x];
+            let sub = &plane[(oy - 1) * out_x..oy * out_x];
+            for ((v, &a), &s) in vsum.iter_mut().zip(add).zip(sub) {
+                *v += a - s;
+            }
+            outp[oy * out_x..(oy + 1) * out_x].copy_from_slice(&vsum);
+        }
+    }
+
+    // Phase 3: depth (z) running window-sum over planes, narrowing output to f32.
+    let mut output = vec![0.0f32; out_z * out_plane];
+    let mut zsum = vec![0.0f64; out_plane];
+    for wz in 0..win_z {
+        for (v, &h) in zsum
+            .iter_mut()
+            .zip(&hy[wz * out_plane..(wz + 1) * out_plane])
+        {
+            *v += h;
+        }
+    }
+    for (o, &v) in output[0..out_plane].iter_mut().zip(&zsum) {
+        *o = v as f32;
+    }
+    for oz in 1..out_z {
+        let add = &hy[(oz + win_z - 1) * out_plane..(oz + win_z) * out_plane];
+        let sub = &hy[(oz - 1) * out_plane..oz * out_plane];
+        for ((v, &a), &s) in zsum.iter_mut().zip(add).zip(sub) {
+            *v += a - s;
+        }
+        let orow = &mut output[oz * out_plane..(oz + 1) * out_plane];
+        for (o, &v) in orow.iter_mut().zip(&zsum) {
+            *o = v as f32;
+        }
+    }
+    Some(output)
+}
+
 fn eval_reduce_window_rank2_f64_sum(
     primitive: Primitive,
     tensor: &TensorValue,
@@ -7684,6 +7788,54 @@ fn eval_reduce_window(
         }
     }
 
+    // Rank-3 VALID f32 SUM: large-window separable running-sum. f32 volumetric sum has no
+    // dedicated kernel (it falls to the generic dense-float per-tap loop below), so the
+    // window-independent 3-pass separable wins above the same ∏window break-even as f64.
+    // Tolerance-equal (running-sum reassoc, f64 accumulate, narrow output); falls back to the
+    // generic loop on non-finite input or below the gate.
+    if no_base_dilation
+        && no_window_dilation
+        && tensor.dtype == fj_core::DType::F32
+        && output_dtype == fj_core::DType::F32
+        && rank == 3
+        && reduce_window_sum_like(reduce_op)
+        && strides.iter().all(|&s| s == 1)
+        && pad_lows.iter().all(|&p| p == 0)
+        && window_dims.iter().all(|&w| w > 0)
+        && window_dims.iter().product::<usize>() >= 216
+        && let Some(src) = tensor.elements.as_f32_slice()
+    {
+        let input_dims = [
+            tensor.shape.dims[0] as usize,
+            tensor.shape.dims[1] as usize,
+            tensor.shape.dims[2] as usize,
+        ];
+        let window_dims_rank3 = [window_dims[0], window_dims[1], window_dims[2]];
+        let out_dims_rank3 = [
+            out_dims[0] as usize,
+            out_dims[1] as usize,
+            out_dims[2] as usize,
+        ];
+        if (0..3).all(|d| out_dims_rank3[d] + window_dims_rank3[d] - 1 <= input_dims[d])
+            && let Some(values) = separable_reduce_window_sum_3d_f32(
+                src,
+                input_dims,
+                window_dims_rank3,
+                out_dims_rank3,
+            )
+        {
+            return Ok(Value::Tensor(
+                TensorValue::new_f32_values(
+                    Shape {
+                        dims: out_dims.clone(),
+                    },
+                    values,
+                )
+                .map_err(EvalError::from)?,
+            ));
+        }
+    }
+
     // Dense float fast path (ANY rank, sum/max/min): the F64-accumulator float case
     // for F64 or dense-F32 input. Replaces the generic per-`Literal` gather +
     // string-dispatched accumulate with a dense `f64` read and a hoisted op, plus an
@@ -9344,6 +9496,137 @@ mod tests {
                     odo / fused
                 );
             }
+        }
+    }
+
+    // f32 rank-3 separable sum vs the generic dense-float per-tap loop (the current f32 volumetric
+    // baseline). Tolerance match (f64 accumulate, narrow output) + same-binary A/B ratio.
+    #[test]
+    fn separable_sum_3d_f32_matches_generic() {
+        for &(n, win) in &[(96usize, 6usize), (96, 9), (40, 7)] {
+            let out = n - win + 1;
+            let s32: Vec<f32> = (0..n * n * n)
+                .map(|i| (((i % 9973) as f64) * 0.013 - 50.0) as f32)
+                .collect();
+            let sep = super::separable_reduce_window_sum_3d_f32(
+                &s32,
+                [n, n, n],
+                [win, win, win],
+                [out, out, out],
+            )
+            .expect("f32 separable should accept finite VALID input");
+            // Generic dense-float baseline (f64 accumulate, narrow to f32) — same contract.
+            let widened: Vec<f64> = s32.iter().map(|&v| f64::from(v)).collect();
+            let dims = [n, n, n];
+            let wd = [win, win, win];
+            let st = [1usize, 1, 1];
+            let dil = [1usize; 3];
+            let pad = [0usize; 3];
+            let out_u32 = [out as u32, out as u32, out as u32];
+            let mut in_strides = [1usize; 3];
+            for d in (0..2).rev() {
+                in_strides[d] = in_strides[d + 1] * dims[d + 1];
+            }
+            let generic = super::eval_reduce_window_dense_float(
+                DType::F32,
+                "add",
+                &widened,
+                &wd,
+                &st,
+                &dil,
+                &out_u32,
+                &pad,
+                &dims,
+                &in_strides,
+                out * out * out,
+            )
+            .unwrap();
+            let gvals: Vec<f32> = generic
+                .as_tensor()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|l| match l {
+                    fj_core::Literal::F32Bits(b) => f32::from_bits(*b),
+                    other => panic!("expected f32, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(sep.len(), gvals.len());
+            let mut max_rel = 0.0f64;
+            for (&a, &b) in sep.iter().zip(&gvals) {
+                let denom = (b.abs() as f64).max(1.0);
+                max_rel = max_rel.max((f64::from(a) - f64::from(b)).abs() / denom);
+            }
+            assert!(
+                max_rel < 1e-5,
+                "f32 separable 3D sum drifted at n={n} win={win}: max rel {max_rel:e}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_sumpool_3d_f32_separable_ab() {
+        use std::time::Instant;
+        let n = 96usize;
+        let s32: Vec<f32> = (0..n * n * n)
+            .map(|i| (((i % 9973) as f64) * 0.013 - 50.0) as f32)
+            .collect();
+        let widened: Vec<f64> = s32.iter().map(|&v| f64::from(v)).collect();
+        let best = |f: &dyn Fn() -> f32| -> u64 {
+            let mut b = u64::MAX;
+            for _ in 0..7 {
+                let t0 = Instant::now();
+                let acc = f();
+                let dt = t0.elapsed().as_nanos() as u64;
+                std::hint::black_box(acc);
+                b = b.min(dt);
+            }
+            b
+        };
+        for win in [6usize, 9] {
+            let out = n - win + 1;
+            let dims = [n, n, n];
+            let wd = [win, win, win];
+            let st = [1usize, 1, 1];
+            let dil = [1usize; 3];
+            let pad = [0usize; 3];
+            let out_u32 = [out as u32; 3];
+            let mut in_strides = [1usize; 3];
+            for d in (0..2).rev() {
+                in_strides[d] = in_strides[d + 1] * dims[d + 1];
+            }
+            let generic = best(&|| {
+                let v = super::eval_reduce_window_dense_float(
+                    DType::F32,
+                    "add",
+                    &widened,
+                    &wd,
+                    &st,
+                    &dil,
+                    &out_u32,
+                    &pad,
+                    &dims,
+                    &in_strides,
+                    out * out * out,
+                )
+                .unwrap();
+                match &v.as_tensor().unwrap().elements.as_slice()[0] {
+                    fj_core::Literal::F32Bits(b) => f32::from_bits(*b),
+                    _ => 0.0,
+                }
+            });
+            let sep = best(&|| {
+                let v = super::separable_reduce_window_sum_3d_f32(&s32, dims, wd, [out, out, out])
+                    .unwrap();
+                v[0] + v[v.len() / 2]
+            });
+            eprintln!(
+                "[sumpool3d-f32 {n}^3 win{win}] generic={:.3}ms separable={:.3}ms ratio={:.2}x (min of 7)",
+                generic as f64 / 1e6,
+                sep as f64 / 1e6,
+                generic as f64 / sep as f64,
+            );
         }
     }
 
