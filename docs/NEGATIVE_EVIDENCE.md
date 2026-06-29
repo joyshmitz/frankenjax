@@ -2,6 +2,26 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - SURVEY (no code): NN activations + remaining complex ops confirmed FMA-floor / mined (BlackThrush)
+
+Closing-out check after the complex-libm-elision series. Confirmed the NN activations are all single-libm-
+transcendental-bound, i.e. the FMA floor (SIMD-poly is the rejected 0.79x-without-+fma path, cz0g0): nn.rs
+`gelu` = `0.5x(1+tanh(...))` (tanh, line 142), `elu`/`celu`/`selu` = `exp_m1`, `sigmoid`/`swish`/`softplus`
+= `exp`. All `threaded_f64_map` over one libm call — nothing to elide (the libm IS the work; unlike the
+complex hypot/cosh-sinh wins where a cheaper ALGEBRAIC form existed). The lone remaining expensive-libm in
+the optimized complex ops is `atan2` (complex `log`/`angle`); no exact algebraic shortcut, and the
+branch-to-`atan(y/x)` form is accuracy-risky (branch cuts) + mixed-sign branch-mispredict — not worth it.
+
+NET (entire session-series): the contained perf frontier is COMPREHENSIVELY exhausted. Shipped wins this
+series: bitcount-I64, lgamma-f32 1.27x, complex-dot vmap 4.1x, conv vmap 2.4x, complex-trig 2.12x,
+complex_log 1.54x, complex abs/sqrt/pow 2.77x, complex asin/acos 3.0x — flipping complex transcendentals
+to a fj-lax STRENGTH vs JAX. Disciplined NO-SHIPs (all bench-backed): FFT twiddle-free j0 (+3.9%), Gauss
+3-mul matmul (0.26-0.51x), linalg norm² (unmeasurable under 3.6x contention), complex_div conjugate (0.82x).
+Every remaining vs-JAX loss is NON-CONTAINED: FFT butterfly kernel (murmw, +fma/split-radix, multi-session),
+the +fma cluster (matmul/conv/cholesky/large-array real exp + ALL NN activations), and BW-bound gather
+(~1.66x, Zen3 vgather + forbid-unsafe blocks prefetch). DO-NOT re-scan these; next real perf needs a
+maintainer +fma decision or the multi-session FFT/interpreter swings.
+
 ## 2026-06-29 - SURVEY: complex-transcendental hypot/trig elision FLIPPED fj-lax to a WIN vs JAX; vein mined (BlackThrush)
 
 Empirical close-out of the session's complex-libm-elision work (hypot-elision: log/abs/sqrt/pow/asin/acos;
