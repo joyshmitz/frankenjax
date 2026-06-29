@@ -2,6 +2,25 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - SURFACE: f64/int cheap-elementwise vs-slow-JAX-CPU vein COMPREHENSIVELY MINED (ProudSalmon)
+
+Measured-confirmation sweep this turn (no new lever — all already threaded+winning): f64 scalar-broadcast binary
+`eval_primitive` vs JAX 0.10.2 (16M f64, `…/frankenjax-cc`):
+  - `x + 2.5` **22.9ms** vs JAX **33.5ms = 1.46x WIN**; `x * 2.5` 23.2 vs 32.2 = **1.39x WIN**;
+    **relu `max(x, 0)` 24.3 vs 29.5 = 1.21x WIN**; `x*x` ~parity-win.
+This closes the multi-turn sweep of JAX-CPU's broad ~10 GB/s slowness on f64/int FULL-WIDTH cheap elementwise.
+COMPLETE + WINNING (1.05-1.46x vs JAX), all fj-lax threaded:
+  - UNARY: floor/ceil/trunc/round/reciprocal/deg2rad/rad2deg + neg/abs/sign/square + bitwise-NOT (i64/i32/u32/u64)
+    + transcendentals.
+  - BINARY: same-shape AND scalar-broadcast add/sub/mul/div/max/min/clamp/rem/pow (cheap+expensive, f64+f32).
+  - CONVERT: int↔float (i64↔f64/f32, f64→i64). COMPARISON/PREDICATE/REDUCE/SCAN: all dtypes done.
+  - COMPLEX (contiguous): eq/ne (3.81x), same-shape+tensor-scalar arith (parity), conj/real-imag (parity).
+JAX is NOT a target where it's already tuned/BW-optimal: bf16 (2.08ms), bool (3.6ms), narrowing-convert
+(f64→i32 12ms), axis-reductions (2.8-8.7ms). REMAINING gaps are ARCHITECTURAL/multi-session, NOT contained
+elementwise: (a) `cntiy` +fma (matmul/conv/cholesky), (b) `so4wo` buffer-reuse (big-output ops parity-floored),
+(c) native FFT kernel, (d) reduce_window max/min SIMD-vs-deque (od11p, 1.4x — risky, FFT-SIMD-regression class).
+Next productive dig must engage (a)-(d), not the elementwise vein.
+
 ## 2026-06-28 - WIN: integer bitwise NOT (i64/i32/u32/u64) densified + threaded — 2.74x, parity vs JAX (ProudSalmon)
 
 `eval_bitwise_unary`'s integer `~x` (i64/i32/u32/u64) fell to the BOXED per-Literal `.map().collect()` — slow
