@@ -2,6 +2,19 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - MEASURED-SURFACE SWEEP COMPLETE: top_k 460x WIN; sort family + nearly all ops beat JAX (ProudSalmon)
+
+Last un-measured JAX-target op: `top_k k=64 f64 [4096,4096]` = 5.31ms vs JAX 2440ms = **460x WIN**
+(JAX/XLA-CPU does a full per-row sort; fj-lax does partial selection). The whole sort family crushes
+JAX: top_k 460x, sort_key_val 68x, argsort/sort/lexsort (JAX 600-3157ms, fj-lax tens of ms). This
+closes the measured-vs-JAX surface sweep for the session — EVERY op with a JAX-target bench is now
+measured, and the verdict is decisive: **fj-lax beats JAX on the overwhelming majority** (sort 68-460x,
+linalg 1.3-30x, array-manip/dynamic_slice 1.1-3.66x, most reductions/elementwise, rfft parity, FFT-1d
+near-parity, cumsum/any/sum/argmax all wins). The genuine vs-JAX LOSSES are a short list, all
+non-contained or now-mined: FFT batched (murmw/cntiy), special-fn Clenshaw/Lanczos/ln residual (cntiy;
+branch-skip already extracted), GEMM/conv/attention (cntiy), 8-byte gather + select (BW/latency floor,
+already threaded), one_hot alloc (jjb1h). No contained non-fma kernel lever remains. No code change.
+
 ## 2026-06-29 - DO-NOT-REDIG: per-group branch-skip vein FULLY MINED (erf+bessel done; rest cntiy/iterative) (ProudSalmon)
 
 Closed the branch-skip vein (2 wins landed: bessel `eb0e1954`, erf `01f4d01e`). Audited ALL SIMD
