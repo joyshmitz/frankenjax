@@ -2968,7 +2968,17 @@ fn complex_expm1((re, im): (f64, f64)) -> (f64, f64) {
 }
 
 fn complex_log((re, im): (f64, f64)) -> (f64, f64) {
-    (re.hypot(im).ln(), im.atan2(re))
+    // ln|z| = ln(hypot(re,im)) = 0.5·ln(re²+im²). When `re²+im²` is a NORMAL f64 (the common
+    // case) compute it directly — avoiding the libm `hypot` (sqrt + overflow scaling). Falls back
+    // to `hypot` when the squared sum would overflow/underflow/denormalize (|z|≳1.3e154 or ≲1.5e-154),
+    // where hypot's scaling is needed. Tolerance-equal (≤1 ULP on ln|z|); the angle is unchanged.
+    let sq = re * re + im * im;
+    let ln_mag = if sq.is_normal() {
+        0.5 * sq.ln()
+    } else {
+        re.hypot(im).ln()
+    };
+    (ln_mag, im.atan2(re))
 }
 
 fn complex_reciprocal(z: (f64, f64)) -> (f64, f64) {
@@ -14964,6 +14974,55 @@ mod tests {
     // deliberately tuple-array literals; the type-complexity lint is noise here.
     #![allow(clippy::type_complexity)]
     use super::*;
+
+    // complex_log fast path (0.5·ln(re²+im²) when normal) vs the hypot.ln() form: same value
+    // within tolerance, and the A/B shows the hypot-elision win on a large complex array.
+    #[test]
+    fn complex_log_fastpath_matches_hypot_and_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22;
+        let data: Vec<(f64, f64)> = (0..n)
+            .map(|i| (((i % 521) as f64) * 0.03 - 7.0, ((i % 733) as f64) * 0.02 - 7.0))
+            .collect();
+        let mut maxerr = 0.0f64;
+        for &(re, im) in &data {
+            let want = (re.hypot(im).ln(), im.atan2(re));
+            let got = super::complex_log((re, im));
+            maxerr = maxerr.max((got.0 - want.0).abs()).max((got.1 - want.1).abs());
+        }
+        assert!(maxerr < 1e-12, "complex_log fastpath vs hypot: {maxerr:e}");
+        let best = |f: &dyn Fn() -> f64| -> f64 {
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let acc = f();
+                std::hint::black_box(acc);
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let hyp = best(&|| {
+            let mut s = 0.0;
+            for &(re, im) in &data {
+                s += re.hypot(im).ln() + im.atan2(re);
+            }
+            s
+        });
+        let fast = best(&|| {
+            let mut s = 0.0;
+            for &(re, im) in &data {
+                let (a, b) = super::complex_log((re, im));
+                s += a + b;
+            }
+            s
+        });
+        eprintln!(
+            "[complex_log {n}] hypot.ln()={:.3}ms fastpath={:.3}ms ratio={:.2}x",
+            hyp * 1e3,
+            fast * 1e3,
+            hyp / fast
+        );
+    }
 
     // Complex sin via the live eval path (now uses one `sin_cos`) must match the prior
     // separate-sin/cos reference within tolerance, and the A/B shows the libm-call win.

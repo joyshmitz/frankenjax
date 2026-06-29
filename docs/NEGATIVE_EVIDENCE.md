@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (1.54x): complex_log elides libm hypot via 0.5·ln(re²+im²) (BlackThrush)
+
+`complex_log` computed `re.hypot(im).ln()` — a libm `hypot` (sqrt + overflow scaling) feeding `ln`.
+But `ln|z| = ln(hypot) = 0.5·ln(re²+im²)`, so when `re²+im²` is a NORMAL f64 (the common case) compute
+it directly and skip `hypot` entirely (2 mul + add + ln). Guarded with `sq.is_normal()` → falls back to
+`hypot.ln()` only when the squared sum would overflow/underflow/denormalize (|z|≳1.3e154 or ≲1.5e-154),
+where hypot's scaling is required. The angle `im.atan2(re)` is UNCHANGED (no branch-cut risk).
+
+Measured same-binary A/B (`complex_log_fastpath_matches_hypot_and_ab`, 4M complex128, 1-thread):
+hypot.ln() **188.1 ms** → fastpath **121.8 ms = 1.54x**; max abs err vs hypot.ln() **<1e-12**.
+Tolerance-equal (complex parity is metamorphic/oracle tolerance). This propagates to EVERY complex
+function built on `complex_log`: complex `log`, `atan` (2 logs), `asin`/`acos` (non-finite path),
+`pow`, `cbrt`, `lgamma` reflection, `logistic`. fj-lax lib **1650/0** (all complex log/atan/asin/acos/
+pow/lgamma metamorphic + oracle tests hold at tolerance), conformance green, fmt + clippy clean.
+NEAR-MISS avoided same session: complex CUMSUM is ALREADY dense (eval_cumulative_dense complex branch,
+commit 56cdf176 2.34x) — do not re-add it.
+
 ## 2026-06-29 - NO-SHIP (measured 0.26-0.51x REGRESSION): Gauss 3-mul complex matmul — DO-NOT (BlackThrush)
 
 Complex GEMM `C = A·B` (A=Ar+iAi, B=Br+iBi) currently uses the naive 4-real-multiply kernel
