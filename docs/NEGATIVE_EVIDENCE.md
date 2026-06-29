@@ -2,6 +2,37 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - SURVEY + REJECT: elementwise (select/clamp/...) — select 1.35x is BW-bound; SIMD-blend REGRESSES, reverted (ProudSalmon)
+
+Isolated re-measure of the elementwise family (16M f64):
+
+| op | fj-lax | JAX | verdict |
+|---|---:|---:|---|
+| select f64 | 20.0 ms | 14.78 ms | 1.35x loss |
+| clamp f64 scalar-bounds | 19.6 ms | 18.58 ms | ~parity |
+| select_n 4-way | 27.8 ms | 19.2 ms | 1.45x loss |
+| dynamic_update_slice 16M/1M | 21.3 ms | 24.7 ms | WIN |
+| logaddexp f64 | 25.0 ms | 40.6 ms | WIN 1.62x |
+| remainder f64 | 23.7 ms | 30.7 ms | WIN 1.30x |
+
+select/select_n are the only losses; both are ALREADY THREADED (`threaded_index_fill_into` /
+`select_n_pick_threaded`). The bench predicate is a bit-packed BoolWords mask (from `Gt`), whose scalar
+per-element bit-test `(words[i/64]>>(i%64))&1` blocks a vector blend — so I tried an `f64x8` SIMD blend
+(expand each word-byte's bits to a lane mask via `Select`, pick whole on_true/on_false values;
+bit-identical, no NaN/arithmetic). Same-binary A/B (`FJ_SELECT_SCALAR`):
+
+| select path | best |
+|---|---:|
+| scalar bit-test (current) | 20.42 ms |
+| f64x8 SIMD blend | 23.83 ms |
+
+**REGRESSION 0.86x** — the per-8-lane mask construction (`splat(byte) & lane_bits`, `simd_ne`) costs
+more than the blend saves; select reads BOTH 128MB branches either way, so it is pure-BW-bound (19 vs
+JAX's 26 GB/s) and the scalar path already saturates it. REVERTED (arithmetic.rs to HEAD; preserved in
+stash). select tests 38/0 (the blend WAS bit-correct, just slower). The select 1.35x is the same
+BW-efficiency floor as the gather/alloc family — no contained kernel lever. (Note: `Select` trait
+import is required for `Mask::select` on this nightly — the documented portable-simd drift.)
+
 ## 2026-06-29 - SURVEY: take/row-gather family — 8-byte gather ~1.66x JAX (already threaded, latency floor); no clean lever (ProudSalmon)
 
 Isolated re-measure of the `take`/row-gather (`eval_gather`) family:
