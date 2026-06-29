@@ -2,6 +2,35 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (2.4x large / ~2x small): vmap(conv) batched-kernel fanned across threads via the expensive-passthrough allowlist (BlackThrush)
+
+Continuing the "serial per-slice → thread::scope fan-out" vein (after batched-linalg 2.6-5.1x and last
+session's vmap-complex-dot 4.1-5.0x): `batch_conv` handles the common input-batched-at-0 case directly,
+but the batched-KERNEL / non-leading-batch cases (per-example conv weights — hypernetworks / MAML-style
+meta-learning) fall to `batch_control_flow_fallback` → `batch_passthrough_leading`, which only threads
+primitives in the `passthrough_expensive_linalg` allowlist (Solve/Det/Lu/Slogdet/Eig). Conv — an
+independent expensive im2col+GEMM per slice — was absent → serial.
+
+FIX: added `Primitive::Conv` to the allowlist + a Conv branch in `passthrough_work_estimate` (16×
+multiplier, since a conv slice does `output·kernel` MACs ≫ its input^1.5; mirrors Eig). The threaded
+passthrough path is already proven bit-identical (each slice eval'd by the same deterministic
+`eval_primitive` into its fixed batch index).
+
+Measured same-binary A/B (`bench_batched_conv_serial_vs_threaded`, target `frankenjax-cc`, serial
+per-slice eval vs threaded `batch_passthrough_leading(Conv)`, 2 runs):
+| shape | serial | threaded | speedup |
+|-------|--------|----------|---------|
+| b=64, 16×16×8→16 k3² | 1.79-2.41 ms | 1.12-1.16 ms | **1.3-2.1x** |
+| b=32, 64×64×32→64 k3² | 148-156 ms | 62.8-63.4 ms | **2.37-2.46x** |
+
+NOTE — the per-slice conv's internal `matmul_2d` ALREADY threads, so I expected nested-threading
+oversubscription to REGRESS the large case; it does NOT (it WINS MORE, 2.4x) because batch threading
+overlaps the SERIAL portions (im2col build, dispatch, allocation) across slices that the per-slice GEMM
+threading cannot. The work-gate keeps tiny convs serial (no regression). BIT-IDENTICAL:
+`batched_conv_passthrough_matches_per_slice` asserts `to_bits()` equality vs the serial per-slice stack.
+fj-dispatch lib 306/0, fmt + clippy clean, conformance green. LESSON: a per-slice op whose kernel is
+itself threaded can STILL win from batch fan-out when it has non-trivial serial setup per slice.
+
 ## 2026-06-29 - KEEP (4.11-4.98x): vmap(complex matmul) routed to threaded batched complex GEMM (was serial per-slice loop) (BlackThrush)
 
 Land-or-dig after the einsum-7r0ck-closed survey: no unlanded bench-worktree win. Dug fj-dispatch's

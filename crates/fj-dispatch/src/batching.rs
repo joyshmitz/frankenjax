@@ -5724,6 +5724,10 @@ fn passthrough_expensive_linalg(primitive: Primitive) -> bool {
         // per-eigenvalue Hessenberg inverse iteration (its work is well above the
         // batch·n³ estimate, so the work-scaled thread count is conservative).
         Primitive::Solve | Primitive::Det | Primitive::Lu | Primitive::Slogdet | Primitive::Eig
+        // `Conv` reaches the per-slice passthrough only for the batched-KERNEL / non-leading
+        // batch cases (per-example weights — hypernetworks / meta-learning); each slice is an
+        // independent expensive im2col+GEMM convolution, so it fans out like the linalg ops.
+            | Primitive::Conv
     )
 }
 
@@ -5739,7 +5743,13 @@ fn passthrough_work_estimate(primitive: Primitive, batched: &Value, batch_size: 
     }
     let total = batched.as_tensor().map(|t| t.elements.len()).unwrap_or(0);
     let per_slice = total / batch_size;
-    let mult = if primitive == Primitive::Eig { 16 } else { 1 };
+    // Iterative/heavy ops cost far more than the `n³` estimate of their leading tensor:
+    // Eig is iterative Francis QR; a Conv slice does `output·kernel` MACs ≫ its input^1.5.
+    let mult = if matches!(primitive, Primitive::Eig | Primitive::Conv) {
+        16
+    } else {
+        1
+    };
     batch_size
         .saturating_mul(per_slice)
         .saturating_mul(per_slice.isqrt())
@@ -9040,6 +9050,146 @@ mod tests {
                 sb_ * 1e3,
                 bb * 1e3,
                 sb_ / bb
+            );
+        }
+    }
+
+    // vmap of a 2D conv with a BATCHED kernel (per-example weights — hypernetworks /
+    // meta-learning) lands in batch_passthrough_leading; now that Conv is in the
+    // expensive-passthrough allowlist its independent per-slice convs fan across threads.
+    // Must be bit-identical to the serial per-slice eval+stack.
+    fn make_batched_conv_inputs(
+        batch: usize,
+        h: usize,
+        w: usize,
+        cin: usize,
+        kh: usize,
+        kw: usize,
+        cout: usize,
+    ) -> (BatchTracer, BatchTracer) {
+        // input  [batch, 1, h, w, cin]  (conv batch dim 1 per slice), batch_dim 0
+        // kernel [batch, kh, kw, cin, cout],                          batch_dim 0
+        let in_len = batch * h * w * cin;
+        let ker_len = batch * kh * kw * cin * cout;
+        let input: Vec<f64> = (0..in_len)
+            .map(|i| ((i % 97) as f64) * 0.01 - 0.5)
+            .collect();
+        let kernel: Vec<f64> = (0..ker_len)
+            .map(|i| ((i % 89) as f64) * 0.01 - 0.4)
+            .collect();
+        let in_t = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![batch as u32, 1, h as u32, w as u32, cin as u32],
+                },
+                input,
+            )
+            .unwrap(),
+        );
+        let ker_t = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![batch as u32, kh as u32, kw as u32, cin as u32, cout as u32],
+                },
+                kernel,
+            )
+            .unwrap(),
+        );
+        (
+            BatchTracer::batched(in_t, 0),
+            BatchTracer::batched(ker_t, 0),
+        )
+    }
+
+    #[test]
+    fn batched_conv_passthrough_matches_per_slice() {
+        let (batch, h, w, cin, kh, kw, cout) =
+            (6usize, 7usize, 7usize, 3usize, 3usize, 3usize, 4usize);
+        let (in_tr, ker_tr) = make_batched_conv_inputs(batch, h, w, cin, kh, kw, cout);
+        let params = {
+            let mut p = BTreeMap::new();
+            p.insert("padding".to_owned(), "valid".to_owned());
+            p.insert("strides".to_owned(), "1".to_owned());
+            p
+        };
+        // Threaded (allowlisted) passthrough.
+        let got =
+            batch_passthrough_leading(Primitive::Conv, &[in_tr.clone(), ker_tr.clone()], &params)
+                .unwrap();
+        let got_t = got.value.as_tensor().unwrap();
+        // Serial per-slice reference.
+        let in_t = in_tr.value.as_tensor().unwrap();
+        let ker_t = ker_tr.value.as_tensor().unwrap();
+        let mut slices: Vec<Value> = Vec::with_capacity(batch);
+        for i in 0..batch {
+            let si = in_t.slice_axis0(i).unwrap();
+            let sk = ker_t.slice_axis0(i).unwrap();
+            slices.push(eval_primitive(Primitive::Conv, &[si, sk], &params).unwrap());
+        }
+        let want_t = TensorValue::stack_axis0(&slices).unwrap();
+        assert_eq!(got_t.shape.dims, want_t.shape.dims, "shape");
+        let g = extract_f64_vec(&got.value);
+        let want_v = extract_f64_vec(&Value::Tensor(want_t));
+        assert_eq!(g.len(), want_v.len());
+        for (i, (x, y)) in g.iter().zip(&want_v).enumerate() {
+            assert_eq!(x.to_bits(), y.to_bits(), "conv[{i}]");
+        }
+    }
+
+    // Same-binary A/B for the conv lever: serial per-slice eval vs the threaded passthrough.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_batched_conv_serial_vs_threaded() {
+        use std::time::Instant;
+        for (batch, h, w, cin, kh, kw, cout) in [
+            (64usize, 16usize, 16usize, 8usize, 3usize, 3usize, 16usize),
+            (32, 64, 64, 32, 3, 3, 64), // large per-slice conv (internal GEMM already threads)
+        ] {
+            let (in_tr, ker_tr) = make_batched_conv_inputs(batch, h, w, cin, kh, kw, cout);
+            let params = {
+                let mut p = BTreeMap::new();
+                p.insert("padding".to_owned(), "valid".to_owned());
+                p.insert("strides".to_owned(), "1".to_owned());
+                p
+            };
+            let in_t = in_tr.value.as_tensor().unwrap().clone();
+            let ker_t = ker_tr.value.as_tensor().unwrap().clone();
+            let serial = || -> Vec<Value> {
+                let mut out = Vec::with_capacity(batch);
+                for i in 0..batch {
+                    let si = in_t.slice_axis0(i).unwrap();
+                    let sk = ker_t.slice_axis0(i).unwrap();
+                    out.push(eval_primitive(Primitive::Conv, &[si, sk], &params).unwrap());
+                }
+                out
+            };
+            let threaded = || {
+                batch_passthrough_leading(
+                    Primitive::Conv,
+                    &[in_tr.clone(), ker_tr.clone()],
+                    &params,
+                )
+                .unwrap()
+            };
+            let _ = serial();
+            let _ = threaded();
+            let mut sb = f64::MAX;
+            let mut tb = f64::MAX;
+            for _ in 0..10 {
+                let t = Instant::now();
+                let x = serial();
+                sb = sb.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&x);
+                let t = Instant::now();
+                let y = threaded();
+                tb = tb.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&y);
+            }
+            println!(
+                "BENCH batched-conv b={batch} {h}x{w}x{cin}->{cout} k{kh}x{kw}: serial={:.4}ms threaded={:.4}ms speedup={:.2}x",
+                sb * 1e3,
+                tb * 1e3,
+                sb / tb
             );
         }
     }
