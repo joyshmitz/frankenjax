@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - BLOCKER (host): bench fleet contended ~12x; algorithm-free scan floor proves wins are unverifiable now (ProudSalmon)
+
+Decisive load measurement this pass via the existing `eval/cumsum_4m_f64_1d_tight` micro-bench — a
+PURE sequential `acc+=v; out.push(acc)` over 4M f64 with NO algorithm, NO dispatch (its author
+CrimsonOtter measured its floor at **~3ms on an idle host**). Measured now: **36.9ms — a ~12x
+inflation** of a fixed-work loop. Same code, same machine → the delta is pure host contention, not
+algorithm. Corroborating: `/proc/loadavg` 18.56 on 64 cores with competing `gh`/`sbh`/`claude`
+processes saturating memory bandwidth. Companion reads this pass: `eval/cummax_4m_f64_1d` 9.2ms
+(ledger idle ~ varies), `eval/cummax_4096x1024_f32_axis1` 5.6ms.
+
+Consequence (the actionable blocker): per the project's own standing rule ("definitive vs-JAX
+win/loss requires an IDLE host"), **no MEASURED land-or-dig win can be honestly declared while the
+algorithm-free scan floor reads >2x its ~3ms idle value.** A same-binary A/B is NOT contention-immune
+(load varies WITHIN a run — see this session's FFT A/B which split 4.0 vs 3.16 ms on byte-identical
+binaries; and `threaded-eager-fusion`: idle "wins" REVERSE to 0.42x under contention). RECOMMENDED
+GATE for the next agent: before declaring any win, run `eval/cumsum_4m_f64_1d_tight`; proceed only if
+it reads < ~6ms (≤2x idle floor), else defer landing. No code change this pass; tree clean.
+
 ## 2026-06-29 - BLOCKER: all 4 biggest remaining measured gaps code-audited at-floor; the wall is ONE policy fork (ProudSalmon)
 
 Direct source-level audit this pass of every candidate behind the largest remaining vs-JAX gaps —
