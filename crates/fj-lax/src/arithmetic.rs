@@ -6110,6 +6110,18 @@ pub(crate) fn eval_log(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     }
 }
 
+/// `(cosh(x), sinh(x))` from a SINGLE `exp(x)` — `cosh=(e+1/e)/2`, `sinh=(e-1/e)/2` —
+/// halving the libm calls in the complex-trig kernels (which need both). Overflow matches
+/// libm: `x→+∞ ⇒ e=∞,1/e=0 ⇒ both →∞`; `x→−∞ ⇒ e=0,1/e=∞ ⇒ cosh→∞, sinh→−∞`; NaN→NaN.
+/// Tolerance-accurate (complex-trig parity is tolerance): the `e−1/e` cancellation costs
+/// <1 decimal digit for |x|≥~0.01, and the imag part it feeds is scaled by `cos a ∈ [−1,1]`.
+#[inline]
+fn cosh_sinh_from_exp(x: f64) -> (f64, f64) {
+    let e = x.exp();
+    let inv = 1.0 / e;
+    (0.5 * (e + inv), 0.5 * (e - inv))
+}
+
 pub(crate) fn eval_sin(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX sin_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
@@ -6117,7 +6129,12 @@ pub(crate) fn eval_sin(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
-            (a.sin() * b.cosh(), a.cos() * b.sinh())
+            // sin(a+bi) = (sin a cosh b, cos a sinh b). Collapse 4 libm calls → 2:
+            // one `sin_cos(a)` + one `exp(b)` (cosh/sinh derived). Tolerance-equal
+            // (complex-trig parity is tolerance); inf/overflow behavior matches libm.
+            let (sa, ca) = a.sin_cos();
+            let (cosh_b, sinh_b) = cosh_sinh_from_exp(b);
+            (sa * cosh_b, ca * sinh_b)
         })
     } else {
         eval_unary_elementwise_parallel(primitive, inputs, f64::sin)
@@ -6131,7 +6148,10 @@ pub(crate) fn eval_cos(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
-            (a.cos() * b.cosh(), -a.sin() * b.sinh())
+            // cos(a+bi) = (cos a cosh b, -sin a sinh b). `sin_cos(a)` + one `exp(b)`.
+            let (sa, ca) = a.sin_cos();
+            let (cosh_b, sinh_b) = cosh_sinh_from_exp(b);
+            (ca * cosh_b, -sa * sinh_b)
         })
     } else {
         eval_unary_elementwise_parallel(primitive, inputs, f64::cos)
@@ -6150,10 +6170,13 @@ pub(crate) fn eval_tan(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             // sign(Im)·i. numpy's c_tan large-|y| branch (real part is the
             // vanishing 4·sin·cos·e^(-2|b|) correction).
             if b.abs() > 20.0 {
-                (4.0 * a.sin() * a.cos() * (-2.0 * b.abs()).exp(), b.signum())
+                let (sa, ca) = a.sin_cos();
+                (4.0 * sa * ca * (-2.0 * b.abs()).exp(), b.signum())
             } else {
-                let denom = (2.0 * a).cos() + (2.0 * b).cosh();
-                ((2.0 * a).sin() / denom, (2.0 * b).sinh() / denom)
+                let (s2a, c2a) = (2.0 * a).sin_cos();
+                let (cosh_2b, sinh_2b) = cosh_sinh_from_exp(2.0 * b);
+                let denom = c2a + cosh_2b;
+                (s2a / denom, sinh_2b / denom)
             }
         })
     } else {
@@ -6232,7 +6255,10 @@ pub(crate) fn eval_sinh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
     }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
-            (a.sinh() * b.cos(), a.cosh() * b.sin())
+            // sinh(a+bi) = (sinh a cos b, cosh a sin b). `sin_cos(b)` + one `exp(a)`.
+            let (sb, cb) = b.sin_cos();
+            let (cosh_a, sinh_a) = cosh_sinh_from_exp(a);
+            (sinh_a * cb, cosh_a * sb)
         })
     } else {
         eval_unary_elementwise_parallel(primitive, inputs, f64::sinh)
@@ -6246,7 +6272,10 @@ pub(crate) fn eval_cosh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
     }
     if inputs.first().is_some_and(value_contains_complex) {
         eval_unary_complex_map(primitive, inputs, |a, b| {
-            (a.cosh() * b.cos(), a.sinh() * b.sin())
+            // cosh(a+bi) = (cosh a cos b, sinh a sin b). `sin_cos(b)` + one `exp(a)`.
+            let (sb, cb) = b.sin_cos();
+            let (cosh_a, sinh_a) = cosh_sinh_from_exp(a);
+            (cosh_a * cb, sinh_a * sb)
         })
     } else {
         eval_unary_elementwise_parallel(primitive, inputs, f64::cosh)
@@ -6266,10 +6295,13 @@ pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
             // a vanishing 4·sin·cos·e^(-2|a|) correction); continuous with the
             // regular formula to ~1 ULP at the threshold.
             if a.abs() > 20.0 {
-                (a.signum(), 4.0 * b.sin() * b.cos() * (-2.0 * a.abs()).exp())
+                let (sb, cb) = b.sin_cos();
+                (a.signum(), 4.0 * sb * cb * (-2.0 * a.abs()).exp())
             } else {
-                let denom = (2.0 * a).cosh() + (2.0 * b).cos();
-                ((2.0 * a).sinh() / denom, (2.0 * b).sin() / denom)
+                let (s2b, c2b) = (2.0 * b).sin_cos();
+                let (cosh_2a, sinh_2a) = cosh_sinh_from_exp(2.0 * a);
+                let denom = cosh_2a + c2b;
+                (sinh_2a / denom, s2b / denom)
             }
         })
     } else {
@@ -14927,6 +14959,72 @@ mod tests {
     // deliberately tuple-array literals; the type-complexity lint is noise here.
     #![allow(clippy::type_complexity)]
     use super::*;
+
+    // Complex sin via the live eval path (now uses one `sin_cos`) must match the prior
+    // separate-sin/cos reference within tolerance, and the A/B shows the libm-call win.
+    #[test]
+    fn complex_sin_sincos_matches_separate_and_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22;
+        let data: Vec<(f64, f64)> = (0..n)
+            .map(|i| (((i % 617) as f64) * 0.01 - 3.0, ((i % 919) as f64) * 0.01 - 4.5))
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: vec![n as u32] },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        // Live eval path (sin_cos).
+        let got = eval_sin(Primitive::Sin, std::slice::from_ref(&input)).unwrap();
+        let got_pairs = got.as_tensor().unwrap().elements.as_complex_slice().unwrap();
+        // Reference: separate sin/cos, the pre-change formula.
+        let mut maxerr = 0.0f64;
+        for (k, &(a, b)) in data.iter().enumerate() {
+            let want = (a.sin() * b.cosh(), a.cos() * b.sinh());
+            maxerr = maxerr
+                .max((got_pairs[k].0 - want.0).abs())
+                .max((got_pairs[k].1 - want.1).abs());
+        }
+        assert!(maxerr < 1e-9, "complex sin sin_cos vs separate: {maxerr:e}");
+        // A/B on the raw map cost (separate sin+cos vs one sin_cos), single thread.
+        let best = |f: &dyn Fn() -> f64| -> f64 {
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let acc = f();
+                std::hint::black_box(acc);
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let sep = best(&|| {
+            let mut s = 0.0;
+            for &(a, b) in &data {
+                let (r, i) = (a.sin() * b.cosh(), a.cos() * b.sinh());
+                s += r + i;
+            }
+            s
+        });
+        let sc = best(&|| {
+            let mut s = 0.0;
+            for &(a, b) in &data {
+                let (sa, ca) = a.sin_cos();
+                let (cosh_b, sinh_b) = cosh_sinh_from_exp(b);
+                let (r, i) = (sa * cosh_b, ca * sinh_b);
+                s += r + i;
+            }
+            s
+        });
+        eprintln!(
+            "[complex_sin {n}] separate(4 libm)={:.3}ms sincos+exp(2 libm)={:.3}ms ratio={:.2}x",
+            sep * 1e3,
+            sc * 1e3,
+            sep / sc
+        );
+    }
 
     #[test]
     #[ignore = "perf benchmark; run explicitly"]

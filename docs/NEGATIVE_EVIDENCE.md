@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (2.12x): complex trig (sin/cos/tan/sinh/cosh/tanh) halve libm calls 4→2 (BlackThrush)
+
+The complex-trig kernels needed both `cosh(t)` AND `sinh(t)` of the same argument (2 libm calls) plus a
+separate `sin(s)`/`cos(s)` pair (2 more) — 4 libm transcendentals per element. JAX (vectorized libm)
+beats fj-lax here on the per-element transcendental count (the non-+fma libm floor). Collapsed to 2 calls
+per element: `sin_cos(s)` (one call for the sin+cos pair) + a new `cosh_sinh_from_exp(t)` that derives
+both hyperbolics from ONE `exp(t)` (`cosh=(e+1/e)/2`, `sinh=(e-1/e)/2`). Applied to all six complex
+forms (sin/cos via `exp(im)`, sinh/cosh via `exp(re)`, tan/tanh via `exp(2·im|re)` in the non-saturating
+branch; the existing large-argument saturation branches keep their special path).
+
+Measured same-binary A/B (`complex_sin_sincos_matches_separate_and_ab`, 4M complex128, single-thread to
+isolate the per-element cost): separate-4-libm **143.6 ms** vs sin_cos+exp-2-libm **67.6 ms = 2.12x**.
+(`sin_cos` alone was only 1.02x — the cosh/sinh pair was the real cost; deriving both from one `exp` is
+the lever.) These ops are already dense + threaded, so the 2.12x is on top of the existing parallelism.
+
+ACCURACY: tolerance-equal (complex-trig parity is metamorphic/oracle tolerance, not bit-exact). The
+`e−1/e` cancellation costs <1 decimal digit for |t|≥~0.01 and the imag part it feeds is scaled by
+`cos s ∈ [−1,1]`; max abs err vs the prior separate-libm formula <1e-9 over [−3,3]×[−4.5,4.7]. Overflow
+matches libm (t→±∞ ⇒ cosh→∞, sinh→±∞; NaN→NaN). fj-lax lib 1649/0 (incl. complex sin/cos/tan/tanh
+metamorphic + prop tests), conformance green (complex-trig oracles), fmt + clippy clean.
+
 ## 2026-06-29 - SURVEY (no code, empirical re-measure): contained frontier reconfirmed vs JAX 0.10.2; softmax at PARITY (BlackThrush)
 
 Land-or-dig after the vmap-vein survey: no unlanded win. Rather than reason from the (aging) ledger, ran
