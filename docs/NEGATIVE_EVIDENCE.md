@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - STALE-BEAD CORRECTED: rank-3 sum-pool (72v5f) is already a WIN at large windows, not "hundreds of ms" (ProudSalmon)
+
+Re-measured `nd-separable-sum-pool-72v5f` (claimed `eval_reduce_window_dense_float` naive ~hundreds of
+ms for rank-3 f64 sum). CURRENT state (isolated, `eval/sumpool_96x96x96_*_f64_vec`):
+
+| window | fj-lax | JAX | verdict |
+|---|---:|---:|---|
+| win9^3 (large) | 5.70 ms | 9.87 ms | **WIN 1.73x** |
+| win5^3 (small) | 3.97 ms | 1.75 ms | 2.27x loss |
+
+The bead's premise is STALE: dense_float is now BOTH threaded (work_scaled_threads + thread::scope,
+lib.rs:4384) AND the rank-3 VALID f64 SUM "SIMD across adjacent output-x cells" path exists — so large
+windows already WIN (87 vs JAX 50 GFLOPs at win9). Same stale-bead pattern as bf16-maxpool. The only
+residual is win5 (small window) at 2.27x = fixed per-cell setup overhead that doesn't amortize at few
+taps (24 vs 55 GFLOPs); the SIMD path already exists, it's overhead-bound + niche (volumetric pooling).
+No clean lever. Recommend RE-SCOPING 72v5f to "win5-class small-window overhead (niche, 2.27x)" or
+closing — the big gap it describes is gone. No code change.
+
 ## 2026-06-29 - REJECT (bench-backed): gemv SIMD-K (h36uj) REGRESSES 0.83x; matmul_2d N==1 already near-parity (ProudSalmon)
 
 Pursued `dedicated-gemv-h36uj` (the one remaining bead with a per-crate bench). Hypothesis: at N==1
