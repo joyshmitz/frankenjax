@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (27.9x internal; 126x→4.5x JAX loss): thread the dense-F32 polygamma path (was serial) (BlackThrush)
+
+DIFFERENT-primitive dig after the complex-dense-kernel audit closed. Surveyed the heavy special
+functions: erf/erfc/lgamma/digamma/bessel are SIMD(f64x8)+threaded for BOTH F64 and F32;
+igamma/igammac/zeta (binary) and betainc (ternary) are all threaded; FFT is bit-frozen+threaded.
+The ONE residual serial gap: `eval_polygamma`'s `(Scalar n, Tensor x)` arm threaded ONLY a dense-F64
+`x` — a dense-F32 `x` (F32 is JAX's DEFAULT float) fell through to the serial per-`Literal` loop while
+`polygamma_approx` (a heavy series/asymptotic per element) ran single-threaded. Added an F32 threaded
+block mirroring the F64 one: widen f32→f64 via `f64::from` (EXACTLY what the serial
+`polygamma_literal_to_f64` does) and emit a DType::F64 tensor (EXACTLY the serial fallback's output),
+so it is BIT-IDENTICAL (guard `threaded_dense_polygamma_f32_bit_identical_to_reference`, n∈{0,1,2,3}).
+
+Same-invocation A/B (`polygamma_f32_threaded_vs_serial_ab`, trigamma n=1, 4M f32, Zen3 5975WX):
+serial-map=1314.7ms vs threaded-eval=47.1ms = **27.9x internal** (near-linear over the core count —
+polygamma is deeply compute-bound). Vs JAX `jax.scipy.special.polygamma(1, f32[4M])` jit = 10.38ms:
+this flips polygamma-f32 from a ~126x JAX LOSS (1314ms) to a 4.5x loss (47ms). Still a residual loss:
+the remaining gap is the missing SIMD kernel (polygamma_approx is scalar per element; lgamma/digamma
+got f64x8 series kernels but polygamma did not — per-`n` branching makes the SIMD kernel a separate
+multi-session lever). fmt+clippy clean (clippy `chunks_exact` warnings are pre-existing SIMD code, not
+this change); `cargo test -p fj-lax --lib polygamma` = 6 passed / 1 ignored (the perf bench).
+
 ## 2026-06-29 - KEEP (3.55x): thread the complex IntegerPow dense kernel (was single-threaded) (BlackThrush)
 
 Continuing the "thread compute-bound complex dense kernels" audit (after abs 5.02x, sign/square 4.91x):

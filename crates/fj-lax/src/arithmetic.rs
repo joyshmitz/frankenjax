@@ -10765,6 +10765,49 @@ pub(crate) fn eval_polygamma(primitive: Primitive, inputs: &[Value]) -> Result<V
                 }
             }
 
+            // F32-argument sibling of the F64 threaded path above. F32 is JAX's
+            // default float, yet a dense-F32 `x` fell through to the serial
+            // Literal loop while F64 fanned out. polygamma_approx is a heavy
+            // series/asymptotic per element, so thread it. For F32Bits,
+            // polygamma_literal_to_f64 == f64::from(f32::from_bits(..)) — exactly
+            // the widening done here — and the serial fallback emits
+            // Literal::from_f64(polygamma_approx(n, x)) into a DType::F64 tensor,
+            // so this is BIT-IDENTICAL (same widen, same op, same F64 output).
+            if x_tensor.dtype == DType::F32
+                && let Some(xs) = x_tensor.elements.as_f32_slice()
+                && xs.len() >= (1 << 13)
+            {
+                let len = xs.len();
+                let threads = std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(1)
+                    .min(len);
+                if threads > 1 {
+                    let mut out = vec![0.0f64; len];
+                    let chunk = len.div_ceil(threads);
+                    std::thread::scope(|scope| {
+                        let mut rest: &mut [f64] = out.as_mut_slice();
+                        let mut start = 0usize;
+                        while start < len {
+                            let take = chunk.min(len - start);
+                            let (blk, tail) = rest.split_at_mut(take);
+                            rest = tail;
+                            let s = start;
+                            scope.spawn(move || {
+                                for (i, o) in blk.iter_mut().enumerate() {
+                                    *o = polygamma_approx(n, f64::from(xs[s + i]));
+                                }
+                            });
+                            start += take;
+                        }
+                    });
+                    return Ok(Value::Tensor(TensorValue::new_f64_values(
+                        x_tensor.shape.clone(),
+                        out,
+                    )?));
+                }
+            }
+
             let mut elements = Vec::with_capacity(x_tensor.elements.len());
             for x_elem in &x_tensor.elements {
                 let x = polygamma_literal_to_f64(*x_elem, primitive)?;
@@ -22826,6 +22869,118 @@ mod tests {
                 "polygamma n={n} threaded != element-wise reference"
             );
         }
+    }
+
+    /// F32-argument sibling: the threaded dense-F32 polygamma path must equal the
+    /// serial fallback bit-for-bit (widen f32->f64 exactly via `f64::from`, op,
+    /// emit F64 — matching `polygamma_literal_to_f64` + `Literal::from_f64`).
+    #[test]
+    fn threaded_dense_polygamma_f32_bit_identical_to_reference() {
+        let len = 1usize << 13;
+        let x: Vec<f32> = (0..len).map(|i| 0.5 + (i % 4096) as f32 * 0.01).collect();
+        let xt = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![len as u32],
+                },
+                x.clone(),
+            )
+            .unwrap(),
+        );
+        for n in [0i64, 1, 2, 3] {
+            let got = crate::eval_primitive(
+                Primitive::Polygamma,
+                &[Value::scalar_i64(n), xt.clone()],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+            let got_tensor = got.as_tensor().unwrap();
+            // The serial fallback widens f32->f64 and emits a DType::F64 tensor; the
+            // threaded path must do the same (dtype + bits).
+            assert_eq!(got_tensor.dtype, DType::F64, "polygamma f32 output dtype");
+            let got_bits: Vec<u64> = got_tensor
+                .elements
+                .iter()
+                .map(|l| l.as_f64().unwrap().to_bits())
+                .collect();
+            let expect: Vec<u64> = x
+                .iter()
+                .map(|&v| polygamma_approx(n, f64::from(v)).to_bits())
+                .collect();
+            assert_eq!(
+                got_bits, expect,
+                "polygamma f32 n={n} threaded != element-wise reference"
+            );
+        }
+    }
+
+    /// Same-invocation A/B for the new threaded dense-F32 polygamma path:
+    /// threaded `eval_primitive` vs the serial reference map (the pre-thread
+    /// fallback). polygamma_approx is a heavy series/asymptotic per element, so
+    /// the trigamma (n=1) hot case is compute-bound and threads well. Ratio is
+    /// printed for the ledger; run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "perf; run explicitly"]
+    fn polygamma_f32_threaded_vs_serial_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22; // 4M
+        let x: Vec<f32> = (0..n).map(|i| 0.5 + (i % 8192) as f32 * 0.01).collect();
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, x.clone()).unwrap(),
+        );
+        let order = 1i64; // trigamma
+        let serial_map = || -> Vec<f64> {
+            x.iter()
+                .map(|&v| polygamma_approx(order, f64::from(v)))
+                .collect()
+        };
+        // correctness: threaded eval == serial map, bit-for-bit
+        let got = crate::eval_primitive(
+            Primitive::Polygamma,
+            &[Value::scalar_i64(order), input.clone()],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let gp: Vec<u64> = got
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_f64().unwrap().to_bits())
+            .collect();
+        let refv = serial_map();
+        for (k, r) in refv.iter().enumerate() {
+            assert_eq!(gp[k], r.to_bits(), "polygamma f32 threaded != serial at {k}");
+        }
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let threaded = best(&|| {
+            std::hint::black_box(
+                crate::eval_primitive(
+                    Primitive::Polygamma,
+                    &[Value::scalar_i64(order), input.clone()],
+                    &BTreeMap::new(),
+                )
+                .unwrap(),
+            );
+        });
+        let serial = best(&|| {
+            std::hint::black_box(serial_map());
+        });
+        eprintln!(
+            "[polygamma(trigamma) f32 4M] serial-map={:.3}ms threaded-eval={:.3}ms ratio={:.2}x",
+            serial * 1e3,
+            threaded * 1e3,
+            serial / threaded
+        );
     }
 
     #[test]
