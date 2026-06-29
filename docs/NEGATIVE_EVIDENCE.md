@@ -2,6 +2,26 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - REJECT (bench-backed): gemv SIMD-K (h36uj) REGRESSES 0.83x; matmul_2d N==1 already near-parity (ProudSalmon)
+
+Pursued `dedicated-gemv-h36uj` (the one remaining bead with a per-crate bench). Hypothesis: at N==1
+matmul_2d's K-dot is a scalar dependent-accumulation chain (latency-bound), so a dedicated gemv with 4
+independent `f64x8` accumulators + horizontal reduce (tolerance-legal — JAX gemv is BLAS-reordered; no
+n==1 bit-exact golden, the ikj guard uses n=19) would break the chain -> memory-bound. Gated N==1,
+k>=64, threaded across rows. Same-binary A/B (`FJ_GEMV_SCALAR`), `bench_gemv [4096,4096]@[4096] f64`:
+
+| path | best |
+|---|---:|
+| matmul_2d N==1 (current) | 2.83 ms |
+| dedicated gemv SIMD-K | 3.39 ms |
+
+**0.83x REGRESSION.** Hypothesis WRONG: the existing matmul_2d N==1 path is already efficient (2.83ms ≈
+**1.08x vs JAX 2.63ms = near parity**, NOT the bead's stale 1.27x/38GB-s) — its row-block threading +
+kernel already break the latency chain better than my standalone SIMD-K row-dot (whose per-row
+`from_slice`/reduce overhead + non-blocked A streaming lose to matmul_2d's tuned path). REVERTED
+(tensor_contraction.rs to HEAD; stash). gemv is near-parity, not a real gap — recommend downgrading/
+closing h36uj. This was the last per-crate-benchable open bead; all now confirmed non-levers.
+
 ## 2026-06-29 - BEAD-TRIAGE COMPLETE: remaining open perf beads are all fragile/policy/done — none a clean contained lever (ProudSalmon)
 
 Final pass over the open perf-bead backlog (closing the loop): `sortkeyval-s2yc8` DONE for common
