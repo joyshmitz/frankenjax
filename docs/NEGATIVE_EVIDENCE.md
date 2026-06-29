@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-28 - WIN: floor/ceil/trunc threaded — ~1.95x internal, 2x JAX loss → parity (ProudSalmon)
+
+`Floor`/`Ceil`/`Trunc` dispatched to the SERIAL `eval_unary_elementwise` (the "cheap unary is memory-bound,
+don't thread" L3-misconception) while transcendentals use the threaded `_parallel` variant. JAX-CPU is slow on
+these (floor 24.5ms = only ~10 GB/s — XLA-CPU isn't BW-optimal here). One-line reroute to
+`eval_unary_elementwise_parallel` (which threads dense f64/f32/half past the gate; falls back to serial for
+small/non-dense). BIT-IDENTICAL (same `f64::floor/ceil/trunc`, element-independent) — floor/ceil/trunc tests 12/0.
+
+Evidence — `CARGO_TARGET_DIR=/data/projects/.rch-targets/frankenjax-cc`, 16M f64 floor:
+  - same-invocation internal ~**1.95x** (serial 93.8ms → threaded 48ms on a LOADED host; ratio stable).
+  - vs JAX `jnp.floor` (QUIET-host re-measure, both ~24ms): threaded **24.31ms vs 24.56ms = ~parity (1.01x)** —
+    was a ~2x LOSS at serial. (CAUTION: the first run measured threaded 48ms / serial 93.8ms under host load —
+    re-measuring on a quiet host gave the real 24.3ms. Cross-process ratios MUST be re-checked when the rust
+    serial looks inflated.)
+Closes common rounding ops from 2x-slower-than-JAX to parity. clippy+fmt clean. (Distinct from floor being
+so4wo-bound — here both fj-lax and JAX hit the same ~24ms output-write floor, so parity is reachable; the
+threading recovers the single-thread deficit.)
+
 ## 2026-06-28 - NO-SHIP (REVERTED): complex broadcast threaded — odometer index-decode leaves 1.25x JAX loss (ProudSalmon)
 
 Threaded the cheap complex broadcast (`[B,N] complex + [N]` bias-add) by porting the f64-broadcast per-thread

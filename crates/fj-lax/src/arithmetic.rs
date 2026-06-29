@@ -14865,6 +14865,46 @@ mod tests {
 
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
+    fn bench_floor_threaded_vs_serial() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let xs: Vec<f64> = (0..n)
+            .map(|i| (i % 100_003) as f64 * 0.5 - 25_000.0)
+            .collect();
+        let xt = Value::Tensor(
+            TensorValue::new_f64_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xs.clone(),
+            )
+            .unwrap(),
+        );
+        let time_it = |label: &str, f: &dyn Fn() -> u64| {
+            std::hint::black_box(f());
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            println!("REF {label}: {:.3}ms", b * 1e3);
+        };
+        time_it("floor_serial", &|| {
+            let out: Vec<f64> = xs.iter().map(|&v| v.floor()).collect();
+            std::hint::black_box(&out);
+            out[123].to_bits()
+        });
+        let p = BTreeMap::new();
+        time_it("floor_eval_threaded", &|| {
+            let v = crate::eval_primitive(Primitive::Floor, std::slice::from_ref(&xt), &p).unwrap();
+            std::hint::black_box(v.as_tensor().unwrap().elements.as_f64_slice().unwrap()[123])
+                .to_bits()
+        });
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
     fn bench_is_finite_bitmask_vs_serial() {
         use std::time::Instant;
         let n = 16_000_000usize;

@@ -47,13 +47,13 @@ pub(crate) fn new_boxed(
 }
 
 use arithmetic::{
-    ensure_float_or_complex_operands, erfc_approx, eval_abs, eval_acosh, eval_asinh,
-    eval_atanh, eval_bessel_i0e, eval_bessel_i1e, eval_betainc, eval_binary_elementwise,
-    eval_clamp, eval_complex, eval_conj, eval_cos, eval_cosh, eval_digamma, eval_dot,
-    eval_dot_general, eval_erf, eval_erf_inv, eval_exp, eval_float_complex_unary, eval_fma,
-    eval_igamma, eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf,
-    eval_is_nan, eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_polygamma, eval_real,
-    eval_round, eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
+    ensure_float_or_complex_operands, erfc_approx, eval_abs, eval_acosh, eval_asinh, eval_atanh,
+    eval_bessel_i0e, eval_bessel_i1e, eval_betainc, eval_binary_elementwise, eval_clamp,
+    eval_complex, eval_conj, eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general,
+    eval_erf, eval_erf_inv, eval_exp, eval_float_complex_unary, eval_fma, eval_igamma,
+    eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf, eval_is_nan,
+    eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_polygamma, eval_real, eval_round,
+    eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
     eval_unary_elementwise, eval_unary_elementwise_parallel, eval_unary_int_or_float, eval_zeta,
 };
 
@@ -339,10 +339,10 @@ fn eval_primitive_inner(
         // back to the identical serial dense map below the threshold (bit-for-bit identical).
         Primitive::Sqrt => eval_float_complex_unary(primitive, inputs, f64::sqrt),
         Primitive::Rsqrt => eval_float_complex_unary(primitive, inputs, |x| 1.0 / x.sqrt()),
-        Primitive::Floor => eval_unary_elementwise(primitive, inputs, f64::floor),
-        Primitive::Ceil => eval_unary_elementwise(primitive, inputs, f64::ceil),
+        Primitive::Floor => eval_unary_elementwise_parallel(primitive, inputs, f64::floor),
+        Primitive::Ceil => eval_unary_elementwise_parallel(primitive, inputs, f64::ceil),
         Primitive::Round => eval_round(primitive, inputs, params),
-        Primitive::Trunc => eval_unary_elementwise(primitive, inputs, f64::trunc),
+        Primitive::Trunc => eval_unary_elementwise_parallel(primitive, inputs, f64::trunc),
         // Trigonometric
         Primitive::Sin => eval_sin(primitive, inputs),
         Primitive::Cos => eval_cos(primitive, inputs),
