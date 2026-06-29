@@ -1000,8 +1000,16 @@ fn simd_minmax_inner_axis_reduce_f64(
         f64::INFINITY
     };
     let mut result = vec![init; outer * inner];
-    for o in 0..outer {
-        let out_row = &mut result[o * inner..(o + 1) * inner];
+    // The `outer` cells are independent (each folds its own `reduce`×`inner` block in the
+    // SAME ascending-r order) -> fan disjoint output-row blocks across threads. Bit-identical
+    // to the serial fold. Mirrors the trailing-axis `simd_minmax_axis_reduce_f64` threading;
+    // the previous serial loop left middle-axis max/min ~2.3x slower than the threaded SUM.
+    let threads = if values.len() >= (1 << 18) && std::env::var_os("FJ_MIDMAX_SERIAL").is_none() {
+        crate::arithmetic::work_scaled_threads(values.len()).min(outer)
+    } else {
+        1
+    };
+    let fold_cell = |out_row: &mut [f64], o: usize| {
         let base = o * reduce * inner;
         for r in 0..reduce {
             simd_minmax_row_acc_f64(
@@ -1009,6 +1017,30 @@ fn simd_minmax_inner_axis_reduce_f64(
                 &values[base + r * inner..base + r * inner + inner],
                 is_max,
             );
+        }
+    };
+    if threads > 1 {
+        let rows_per = outer.div_ceil(threads);
+        let fold_cell = &fold_cell;
+        std::thread::scope(|scope| {
+            let mut res_rest: &mut [f64] = result.as_mut_slice();
+            let mut o0 = 0usize;
+            while o0 < outer {
+                let cnt = rows_per.min(outer - o0);
+                let (blk, tail) = res_rest.split_at_mut(cnt * inner);
+                res_rest = tail;
+                let start = o0;
+                o0 += cnt;
+                scope.spawn(move || {
+                    for j in 0..cnt {
+                        fold_cell(&mut blk[j * inner..(j + 1) * inner], start + j);
+                    }
+                });
+            }
+        });
+    } else {
+        for o in 0..outer {
+            fold_cell(&mut result[o * inner..(o + 1) * inner], o);
         }
     }
     result

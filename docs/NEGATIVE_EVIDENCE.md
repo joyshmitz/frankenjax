@@ -2,6 +2,31 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (LANDED): thread f64 middle/leading-axis max/min reduce — 1.67x JAX LOSS -> 1.28x WIN (2.77x internal) (ProudSalmon)
+
+Re-measured the vs-JAX bench suite in ISOLATION (the batched sweep is load-inflated — `any(x>0)` read
+35ms under contention but 3.2ms isolated = a 1.85x WIN; `sum 3D-mid` 12.6ms->3.1ms = WIN). The one
+REAL stable gap: `max 3D [256,1024,64] axis1(mid)` = 7.2ms vs JAX 4.32ms = 1.67x slower, AND 2.3x
+slower than our own `sum` on the identical shape. ROOT CAUSE: `simd_minmax_inner_axis_reduce_f64`
+(middle/leading-axis max/min) was the ONLY inner-axis reduce left SERIAL — its f32/bf16/f16 siblings
+were already threaded, and the trailing-axis `simd_minmax_axis_reduce_f64` too. The `outer` cells are
+independent (each folds its `reduce`×`inner` block in the same ascending-r order), so fan disjoint
+output-row blocks across `work_scaled_threads(len).min(outer)` threads. Bit-identical to the serial
+fold (covers max AND min, any f64 leading/middle-axis reduction).
+
+Same-binary A/B (`FJ_MIDMAX_SERIAL` forces serial), `max 3D [256,1024,64] axis1`:
+
+| path | best |
+|---|---:|
+| threaded (new default) | **3.382 ms** |
+| serial (old) | 9.373 ms |
+
+Internal **2.77x** (9.373/3.382); vs JAX 4.32ms: **1.67x LOSS -> 1.28x WIN**. Gates: `rustfmt --check`
+clean; `cargo test -p fj-lax --lib reduce` 146 passed / 0 failed (bit-exact); `cargo test -p
+fj-conformance` GREEN (0 failed). Pre-existing nightly clippy `chunks_exact` drift in arithmetic/
+reduction.rs is unrelated (not my lines). LESSON (again): re-measure isolated — the load-inflated
+sweep falsely flagged `any`/`sum` as 6x/3x gaps when both are already JAX WINS.
+
 ## 2026-06-29 - REJECT (bench-backed): fused bf16 NHWC maxpool == current f64 path (~0 gain); the "26ms" target was STALE (ProudSalmon)
 
 Chased the largest-looking non-FFT gap: `bench_fused_bf16_maxpool_proto`'s comment "current 26ms, JAX
