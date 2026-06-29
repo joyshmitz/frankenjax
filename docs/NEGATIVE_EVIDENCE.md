@@ -2,6 +2,18 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - CLARIFY (FFT root cause): batched FFT 14.9x is NOT +fma-gated (no mul_add); it's the standalone pocketfft kernel (murmw) (ProudSalmon)
+
+Refined the FFT blocker root cause. The butterfly kernels (`soa_radix2/4_butterfly_stages`,
+`vectorized_pow2/4_tiled`) use PLAIN `*`/`+` complex arithmetic — ZERO `mul_add`/`fma` calls in
+fft.rs (grep-verified). So the 14.9x batched gap is NOT the `+fma` cluster (`cntiy`): the mul+add
+already autovectorizes under the workspace's `+avx2` flag, and there is no 25x mul_add libcall to
+unblock. The residual vs pocketfft (JAX 0.58ms for 1024² ≈ cache-resident across stages + wide SIMD)
+is the SoA-transpose round-trip (two 16MB transposes per call) + butterfly vectorization width/quality
+— a standalone multi-session pure-safe kernel problem (bead `murmw`), SEPARATE from `cntiy`. So the
+two big policy/arch gates are independent: `cntiy` (+fma) unlocks transcendental/GEMM/attention;
+`murmw` (FFT kernel) is its own multi-session rewrite. Neither is contained. No code change.
+
 ## 2026-06-29 - REJECT (bench-backed): single-row pow4 FFT via batched radix-4 kernel REGRESSES 3x (ProudSalmon)
 
 Tried routing large single-row pow4 FFTs (`fft_1d_into`, e.g. 2^20=4^10) through the existing tested
