@@ -2,6 +2,30 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - REJECT (bench-backed) + DO-NOT-REDIG: cummax serial-chain min/max is latency-bound, not branch-bound (bead rekyb) (ProudSalmon)
+
+Investigated bead `frankenjax-cummax-scan-max-cost-rekyb` ("faster NaN-aware max in the cummax/cummin
+sequential scan"). The hypothesis was that `jax_minmax_scalar`'s `if a.is_nan() || b.is_nan()` branch on
+the per-element critical path of the Pass-1 serial chain (`parallel_cummax_f64`) is the cost. Built a
+branchless candidate (`f64::max` is NaN-SUPPRESSING, so OR-detect NaN with `|` and cmov-select NaN —
+bit-identical) and A/B'd the serial cummax chain, 16M f64, min-of-7:
+
+| chain | best |
+|---|---:|
+| current branchy `jax_minmax_scalar` | 16.55 ms |
+| branchless cmov candidate | 16.39 ms |
+
+**1.01x = NEUTRAL.** The bottleneck is the `maxsd` **latency dependency** (`acc → maxsd → acc`, ~4 cyc/elem),
+NOT the NaN branch (predicted-not-taken on finite data, off the critical path). Branchless can't shorten
+the data dependency. REVERTED (test-only). The only way to beat the serial chain is to break the
+dependency with a **SIMD intra-vector prefix-max** (1 carry-max per 4-8 lanes instead of per element) —
+but that is BIT-IDENTITY-BLOCKED for cummax: `f64::max(+0,-0)` returns the SECOND operand, so the ±0 SIGN
+of each running-max OUTPUT is left-to-right-order-dependent (same ±0 class `simd_reduce_minmax_f64`
+defers to scalar for), and a SIMD prefix regroups the maxes → can flip the ±0 sign per output element,
+diverging from the bit-exact scalar chain (cummax parity is bit-exact, not tolerance). DO-NOT pursue
+branchless minmax (neutral) or SIMD-prefix cummax (±0-sign bit-divergence) — the parallel 3-pass chunked
+scan (already ~2.4x JAX WIN at 16M) is the floor for the contained lever.
+
 ## 2026-06-29 - REJECT (bench-backed): radix-4/2 split FFT for `n = 2·4^k` REGRESSES at the common lengths (ProudSalmon)
 
 Targeted the murmw.1 lever: extend the shipped radix-4 pow2 SoA FFT (1.76x win at pow4 lengths,
