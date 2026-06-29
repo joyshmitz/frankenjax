@@ -1545,11 +1545,78 @@ fn batch_paired_numeric_dot(
         return Ok(None);
     }
 
+    let batch = lhs.shape.dims[0] as usize;
+
+    // Complex batched dot (both operands complex): route through fj-lax's THREADED +
+    // 4-row-register-blocked complex batched GEMM instead of the serial per-slice
+    // `eval_primitive(Dot)` loop the caller falls back to (one un-threaded
+    // `rank2_complex_matmul` per slice + per-slice dispatch/slice/stack overhead).
+    // `batched_rank2_complex_matmul` folds the contracted index `l` in ascending order
+    // exactly like the per-slice path, so the result is bit-identical to the per-slice
+    // stack (4-row blocking only interleaves independent same-batch rows). Mixed
+    // complex/real dot falls through to the per-slice path (correct promotion via eval).
+    if matches!(lhs.dtype, DType::Complex64 | DType::Complex128)
+        && matches!(rhs.dtype, DType::Complex64 | DType::Complex128)
+    {
+        let dims = match (lhs.rank(), rhs.rank()) {
+            (2, 2) if rhs.shape.dims[1] == lhs.shape.dims[1] => Some((
+                1usize,
+                lhs.shape.dims[1] as usize,
+                1usize,
+                vec![batch as u32],
+            )),
+            (3, 2) if rhs.shape.dims[1] == lhs.shape.dims[2] => {
+                let rows = lhs.shape.dims[1] as usize;
+                let k = lhs.shape.dims[2] as usize;
+                Some((rows, k, 1usize, vec![batch as u32, rows as u32]))
+            }
+            (2, 3) if rhs.shape.dims[1] == lhs.shape.dims[1] => {
+                let k = lhs.shape.dims[1] as usize;
+                let cols = rhs.shape.dims[2] as usize;
+                Some((1usize, k, cols, vec![batch as u32, cols as u32]))
+            }
+            (3, 3) if rhs.shape.dims[1] == lhs.shape.dims[2] => {
+                let rows = lhs.shape.dims[1] as usize;
+                let k = lhs.shape.dims[2] as usize;
+                let cols = rhs.shape.dims[2] as usize;
+                Some((rows, k, cols, vec![batch as u32, rows as u32, cols as u32]))
+            }
+            _ => None,
+        };
+        let Some((m, k, n, out_dims)) = dims else {
+            return Ok(None);
+        };
+        let to_pairs = |t: &TensorValue| -> Result<Vec<(f64, f64)>, BatchError> {
+            if let Some(s) = t.elements.as_complex_slice() {
+                Ok(s.to_vec())
+            } else {
+                t.elements
+                    .iter()
+                    .map(|l| {
+                        l.as_complex128()
+                            .or_else(|| l.as_complex64().map(|(re, im)| (re as f64, im as f64)))
+                    })
+                    .collect::<Option<Vec<(f64, f64)>>>()
+                    .ok_or_else(|| BatchError::EvalError("expected complex dot tensor".to_owned()))
+            }
+        };
+        let a = to_pairs(lhs)?;
+        let b = to_pairs(rhs)?;
+        // Match `dot`'s complex output promotion (Complex64 only when both inputs are
+        // Complex64; anything involving Complex128 widens to Complex128).
+        let out_dtype = match promote_dtype_public(lhs.dtype, rhs.dtype) {
+            DType::Complex64 => DType::Complex64,
+            _ => DType::Complex128,
+        };
+        let c = fj_lax::tensor_contraction::batched_rank2_complex_matmul(&a, batch, m, k, &b, n);
+        let out = TensorValue::new_complex_values(out_dtype, Shape { dims: out_dims }, c)
+            .map_err(|e| BatchError::TensorError(e.to_string()))?;
+        return Ok(Some(BatchTracer::batched(Value::Tensor(out), 0)));
+    }
+
     let Some(output_kind) = batch_dot_output_kind(lhs, rhs) else {
         return Ok(None);
     };
-
-    let batch = lhs.shape.dims[0] as usize;
 
     // Route the REAL (f64/f32/…) batched dot through fj-lax's vectorized/threaded GEMM
     // instead of the per-element-boxed triple loop below. Each rank pair is a batched
@@ -8843,6 +8910,136 @@ mod tests {
                 nb * 1e3,
                 gb * 1e3,
                 nb / gb
+            );
+        }
+    }
+
+    // Complex sibling: vmap of a complex 2D dot previously fell THROUGH
+    // batch_paired_numeric_dot (output_kind None for complex) to the serial per-slice
+    // eval_primitive(Dot) loop. Now routed through fj-lax's threaded batched complex GEMM.
+    // Must be bit-identical to the per-slice eval path.
+    #[test]
+    fn batched_complex_dot_fast_path_matches_per_slice() {
+        let (batch, m, k, n) = (5usize, 4usize, 6usize, 3usize);
+        let mk = |len: usize, s: f64| -> Vec<(f64, f64)> {
+            (0..len)
+                .map(|i| ((i as f64 * s).sin() * 1.7, (i as f64 * s * 1.3).cos() * 0.9))
+                .collect()
+        };
+        let a = mk(batch * m * k, 0.017);
+        let b = mk(batch * k * n, 0.013);
+        let a_t = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![batch as u32, m as u32, k as u32],
+                },
+                a,
+            )
+            .unwrap(),
+        );
+        let b_t = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape {
+                    dims: vec![batch as u32, k as u32, n as u32],
+                },
+                b,
+            )
+            .unwrap(),
+        );
+        // Fast path under test.
+        let fast = batch_paired_numeric_dot(&a_t, &b_t)
+            .unwrap()
+            .expect("complex batched-dot fast path should fire");
+        let fast_t = fast.value.as_tensor().unwrap();
+        // Per-slice reference: eval_primitive(Dot) per batch slice, then stack.
+        let a_tensor = a_t.as_tensor().unwrap();
+        let b_tensor = b_t.as_tensor().unwrap();
+        let mut slices: Vec<Value> = Vec::with_capacity(batch);
+        for i in 0..batch {
+            let sa = a_tensor.slice_axis0(i).unwrap();
+            let sb = b_tensor.slice_axis0(i).unwrap();
+            let r = eval_primitive(Primitive::Dot, &[sa, sb], &BTreeMap::new()).unwrap();
+            slices.push(r);
+        }
+        let want_t = TensorValue::stack_axis0(&slices).unwrap();
+        assert_eq!(fast_t.dtype, want_t.dtype, "dtype");
+        assert_eq!(fast_t.shape.dims, want_t.shape.dims, "shape");
+        let got = fast_t.elements.as_complex_slice().unwrap();
+        let want = want_t.elements.as_complex_slice().unwrap();
+        assert_eq!(got.len(), want.len());
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            assert_eq!(g.0.to_bits(), w.0.to_bits(), "re[{i}]");
+            assert_eq!(g.1.to_bits(), w.1.to_bits(), "im[{i}]");
+        }
+    }
+
+    // Same-binary A/B for the complex lever: serial per-slice `rank2_complex_matmul`
+    // (the kernel the per-slice eval fallback runs) vs the single threaded
+    // `batched_rank2_complex_matmul`. Conservative (excludes the per-slice dispatch/
+    // slice/stack overhead the real fallback also pays).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_batched_complex_dot_serial_vs_batched() {
+        use std::time::Instant;
+        for (batch, m, k, n) in [(128usize, 64usize, 64usize, 64usize), (64, 128, 128, 128)] {
+            let a: Vec<(f64, f64)> = (0..batch * m * k)
+                .map(|i| {
+                    (
+                        ((i % 1009) as f64) * 0.001 - 0.5,
+                        ((i % 1013) as f64) * 0.001 - 0.5,
+                    )
+                })
+                .collect();
+            let b: Vec<(f64, f64)> = (0..batch * k * n)
+                .map(|i| {
+                    (
+                        ((i % 1019) as f64) * 0.001 - 0.5,
+                        ((i % 1021) as f64) * 0.001 - 0.5,
+                    )
+                })
+                .collect();
+            let serial = || -> Vec<(f64, f64)> {
+                let mut out = Vec::with_capacity(batch * m * n);
+                for bi in 0..batch {
+                    let sa = &a[bi * m * k..(bi + 1) * m * k];
+                    let sb = &b[bi * k * n..(bi + 1) * k * n];
+                    out.extend(fj_lax::tensor_contraction::rank2_complex_matmul(
+                        sa, m, k, sb, n,
+                    ));
+                }
+                out
+            };
+            let batched =
+                || fj_lax::tensor_contraction::batched_rank2_complex_matmul(&a, batch, m, k, &b, n);
+            let cs = serial();
+            let cb = batched();
+            let maxerr = cs
+                .iter()
+                .zip(&cb)
+                .map(|(x, y)| (x.0 - y.0).abs().max((x.1 - y.1).abs()))
+                .fold(0.0_f64, f64::max);
+            assert!(maxerr < 1e-9, "batched diverges from serial: {maxerr:e}");
+            let _ = serial();
+            let _ = batched();
+            let mut sb_ = f64::MAX;
+            let mut bb = f64::MAX;
+            for _ in 0..15 {
+                let t = Instant::now();
+                let x = serial();
+                sb_ = sb_.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&x);
+                let t = Instant::now();
+                let y = batched();
+                bb = bb.min(t.elapsed().as_secs_f64());
+                std::hint::black_box(&y);
+            }
+            println!(
+                "BENCH batched-complex-dot b={batch} {m}x{k}x{n}: serial={:.4}ms batched={:.4}ms speedup={:.2}x",
+                sb_ * 1e3,
+                bb * 1e3,
+                sb_ / bb
             );
         }
     }

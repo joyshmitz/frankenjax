@@ -2,6 +2,38 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (4.11-4.98x): vmap(complex matmul) routed to threaded batched complex GEMM (was serial per-slice loop) (BlackThrush)
+
+Land-or-dig after the einsum-7r0ck-closed survey: no unlanded bench-worktree win. Dug fj-dispatch's
+vmap batch rules and found a genuine "serial per-slice → existing batched kernel" gap (the same lever
+that gave 2.6-5.1x on batched linalg). `batch_dot` (vmap of `Primitive::Dot`, both operands batched)
+routes Real→`batched_matmul_2d` and Integral→`batched_rank2_i64_matmul`, but COMPLEX fell through
+(`batch_dot_output_kind` returns None for complex) to the serial per-slice `eval_primitive(Dot)` loop —
+one un-threaded `rank2_complex_matmul` per slice plus per-slice dispatch/`slice_axis0`/`stack` overhead.
+fj-lax already had `batched_rank2_complex_matmul` (thread::scope fan-out over batch*m rows + 4-row
+register blocking), unused by the vmap path.
+
+FIX: added a both-operands-complex fast path in `batch_paired_numeric_dot` (before the output-kind bail)
+that extracts the dense `(re,im)` pairs (`as_complex_slice`, boxed-literal fallback), routes the
+[batch,m,k]·[batch,k,n] product through `batched_rank2_complex_matmul`, and emits dense complex output
+(dtype = `dot`'s complex promotion: Complex64 only when both inputs are Complex64). Mixed complex/real
+dot still falls through to the per-slice path (correct promotion via eval).
+
+Measured same-binary A/B (`bench_batched_complex_dot_serial_vs_batched`, target `frankenjax-cc`,
+serial per-slice `rank2_complex_matmul` vs `batched_rank2_complex_matmul`):
+| shape | serial | batched | speedup |
+|-------|--------|---------|---------|
+| b=128, 64×64×64 | 10.637 ms | 2.588 ms | **4.11x** |
+| b=64, 128×128×128 | 31.882 ms | 6.396 ms | **4.98x** |
+(Conservative — excludes the per-slice eval dispatch/slice/stack overhead the real fallback also pays.)
+
+BIT-IDENTICAL to the per-slice `eval_primitive(Dot)` path: `batched_complex_dot_fast_path_matches_per_slice`
+asserts re/im `to_bits()` equality across a [5,4,6]·[5,6,3] complex128 batch (the batched kernel folds
+the contracted index `l` ascending, exactly like the per-slice kernel; 4-row blocking only interleaves
+independent same-batch rows). fj-dispatch lib 305/0 (one pre-existing parallel-order flake in
+`prepared_metadata_yields_identical_response`, passes in isolation + on rerun — unrelated to this dot
+rule), fmt + clippy clean, conformance green.
+
 ## 2026-06-29 - SURVEY (no code): unary-transcendental + selection veins confirmed exhausted; 3 new DO-NOT datapoints (BlackThrush)
 
 Land-or-dig after the lgamma SIMD land (30c59438): no unlanded bench-worktree win (the 8 `AHEAD`
