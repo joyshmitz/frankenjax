@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (2.77x): complex abs/sqrt/pow elide libm hypot via sqrt(re²+im²) (BlackThrush)
+
+Sibling of yesterday's `complex_log` hypot-elision (1.54x). The complex **Abs** primitive
+(`eval_unary_complex_abs`) computed `re.hypot(im)` per element (a libm call: sqrt + overflow scaling) —
+but the abs-oracle spec is literally `|z| = sqrt(re²+im²)`. Added `complex_abs_f64`/`complex_abs_f32`:
+compute `sqrt(re*re+im*im)` directly when the squared sum is a NORMAL f64 (common case), falling back to
+`hypot` only on over/underflow/denormal (|z|≳1.3e154 or ≲1.5e-154). Routed BOTH the dense path and the
+boxed `abs_literal` (and `complex_sqrt`'s magnitude + `complex_pow`'s radius) through the shared helper —
+so the dense-vs-boxed bit-identity test still holds, and the change propagates to the sqrt/pow primitives.
+
+Measured same-binary A/B (`complex_abs_fastpath_matches_hypot_and_ab`, 4M complex128, 1-thread):
+hypot **25.14 ms** → sqrt-fastpath **9.07 ms = 2.77x** (bigger than complex_log's 1.54x because abs is
+PURE hypot — no ln/atan2 to dilute). Max abs err vs hypot **<1e-9**. The abs oracle is tolerance
+(`assert_close`) and its spec IS sqrt(re²+im²). fj-lax lib **1651/0** (incl. `complex_abs_dense_matches_
+boxed_bit_for_bit` + complex sqrt/pow metamorphic), conformance green (abs/sqrt/pow oracles), fmt + clippy
+clean. NOTE: left `complex_asin_finite_hft`'s hypots alone (accuracy-sensitive numpy/XLA decomposition).
+REUSABLE: `x.hypot(y)` on a hot path → guard `(x*x+y*y).is_normal()` then `sqrt`/`0.5·ln` directly.
+
 ## 2026-06-29 - KEEP (1.54x): complex_log elides libm hypot via 0.5·ln(re²+im²) (BlackThrush)
 
 `complex_log` computed `re.hypot(im).ln()` — a libm `hypot` (sqrt + overflow scaling) feeding `ln`.

@@ -2999,7 +2999,7 @@ fn complex_sqrt((re, im): (f64, f64)) -> (f64, f64) {
     if re == 0.0 && im == 0.0 {
         return (0.0, 0.0);
     }
-    let magnitude = re.hypot(im);
+    let magnitude = complex_abs_f64(re, im);
     if re >= 0.0 {
         let out_re = ((magnitude + re) * 0.5).sqrt();
         let out_im = im / (2.0 * out_re);
@@ -3502,7 +3502,7 @@ fn apply_complex_pow(lhs: (f64, f64), rhs: (f64, f64)) -> Result<(f64, f64), Eva
         return Ok(complex_reciprocal(positive));
     }
 
-    let radius = base_re.hypot(base_im);
+    let radius = complex_abs_f64(base_re, base_im);
     let angle = base_im.atan2(base_re);
     let log_base = (radius.ln(), angle);
     Ok(complex_exp(complex_mul((exp_re, exp_im), log_base)))
@@ -5940,6 +5940,30 @@ fn eval_unary_complex_map(
     }
 }
 
+/// `|z| = sqrt(re²+im²)` (the abs-oracle spec) avoiding the libm `hypot` (sqrt + overflow scaling)
+/// when `re²+im²` is a NORMAL f64 — the common case. Falls back to `hypot` on over/underflow/
+/// denormal (|z|≳1.3e154 or ≲1.5e-154) where hypot's scaling is needed. Tolerance-equal (≤1 ULP).
+#[inline]
+fn complex_abs_f64(re: f64, im: f64) -> f64 {
+    let s = re * re + im * im;
+    if s.is_normal() {
+        s.sqrt()
+    } else {
+        re.hypot(im)
+    }
+}
+
+/// f32 sibling of [`complex_abs_f64`].
+#[inline]
+fn complex_abs_f32(re: f32, im: f32) -> f32 {
+    let s = re * re + im * im;
+    if s.is_normal() {
+        s.sqrt()
+    } else {
+        re.hypot(im)
+    }
+}
+
 fn eval_unary_complex_abs(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     if inputs.len() != 1 {
         return Err(EvalError::ArityMismatch {
@@ -5951,12 +5975,14 @@ fn eval_unary_complex_abs(primitive: Primitive, inputs: &[Value]) -> Result<Valu
 
     let abs_literal = |lit: Literal| -> Result<Literal, EvalError> {
         match lit {
-            Literal::Complex64Bits(re_bits, im_bits) => Ok(Literal::from_f32(
-                f32::from_bits(re_bits).hypot(f32::from_bits(im_bits)),
-            )),
-            Literal::Complex128Bits(re_bits, im_bits) => Ok(Literal::from_f64(
-                f64::from_bits(re_bits).hypot(f64::from_bits(im_bits)),
-            )),
+            Literal::Complex64Bits(re_bits, im_bits) => Ok(Literal::from_f32(complex_abs_f32(
+                f32::from_bits(re_bits),
+                f32::from_bits(im_bits),
+            ))),
+            Literal::Complex128Bits(re_bits, im_bits) => Ok(Literal::from_f64(complex_abs_f64(
+                f64::from_bits(re_bits),
+                f64::from_bits(im_bits),
+            ))),
             _ => Err(EvalError::TypeMismatch {
                 primitive,
                 detail: "abs expects complex-valued input",
@@ -5977,7 +6003,8 @@ fn eval_unary_complex_abs(primitive: Primitive, inputs: &[Value]) -> Result<Valu
             if let Some(dense) = tensor.elements.as_complex_slice() {
                 match tensor.dtype {
                     DType::Complex128 => {
-                        let out: Vec<f64> = dense.iter().map(|&(re, im)| re.hypot(im)).collect();
+                        let out: Vec<f64> =
+                            dense.iter().map(|&(re, im)| complex_abs_f64(re, im)).collect();
                         return Ok(Value::Tensor(TensorValue::new_f64_values(
                             tensor.shape.clone(),
                             out,
@@ -5986,7 +6013,7 @@ fn eval_unary_complex_abs(primitive: Primitive, inputs: &[Value]) -> Result<Valu
                     DType::Complex64 => {
                         let out: Vec<f32> = dense
                             .iter()
-                            .map(|&(re, im)| (re as f32).hypot(im as f32))
+                            .map(|&(re, im)| complex_abs_f32(re as f32, im as f32))
                             .collect();
                         return Ok(Value::Tensor(TensorValue::new_f32_values(
                             tensor.shape.clone(),
@@ -14974,6 +15001,51 @@ mod tests {
     // deliberately tuple-array literals; the type-complexity lint is noise here.
     #![allow(clippy::type_complexity)]
     use super::*;
+
+    // complex abs fast path (sqrt(re²+im²) when normal) vs libm hypot: same value within
+    // tolerance, A/B shows the hypot-elision win on a large complex array (the Abs primitive).
+    #[test]
+    fn complex_abs_fastpath_matches_hypot_and_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22;
+        let data: Vec<(f64, f64)> = (0..n)
+            .map(|i| (((i % 521) as f64) * 0.03 - 7.0, ((i % 733) as f64) * 0.02 - 7.0))
+            .collect();
+        let input = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: vec![n as u32] },
+                data.clone(),
+            )
+            .unwrap(),
+        );
+        // live eval path (now sqrt-based) vs hypot reference
+        let got = eval_abs(Primitive::Abs, std::slice::from_ref(&input)).unwrap();
+        let gv = got.as_tensor().unwrap().elements.as_f64_slice().unwrap();
+        let mut maxerr = 0.0f64;
+        for (k, &(re, im)) in data.iter().enumerate() {
+            maxerr = maxerr.max((gv[k] - re.hypot(im)).abs());
+        }
+        assert!(maxerr < 1e-9, "complex abs fastpath vs hypot: {maxerr:e}");
+        let best = |f: &dyn Fn() -> f64| -> f64 {
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                let acc = f();
+                std::hint::black_box(acc);
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let hyp = best(&|| data.iter().map(|&(re, im)| re.hypot(im)).sum());
+        let fast = best(&|| data.iter().map(|&(re, im)| super::complex_abs_f64(re, im)).sum());
+        eprintln!(
+            "[complex_abs {n}] hypot={:.3}ms sqrt-fastpath={:.3}ms ratio={:.2}x",
+            hyp * 1e3,
+            fast * 1e3,
+            hyp / fast
+        );
+    }
 
     // complex_log fast path (0.5·ln(re²+im²) when normal) vs the hypot.ln() form: same value
     // within tolerance, and the A/B shows the hypot-elision win on a large complex array.
