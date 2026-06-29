@@ -2,6 +2,26 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - REJECT (bench-backed): single-row pow4 FFT via batched radix-4 kernel REGRESSES 3x (ProudSalmon)
+
+Tried routing large single-row pow4 FFTs (`fft_1d_into`, e.g. 2^20=4^10) through the existing tested
+radix-4 SoA kernel (`transform_batches_pow4_vectorized`, batch=1) — radix-4 has half the butterfly
+stages of radix-2 (10 vs 20), so fewer stage-streaming passes. Same-binary A/B (`FJ_FFT1D_RADIX2`
+forces radix-2), fft 1d 2^20 complex:
+
+| path | best |
+|---|---:|
+| radix-2 (current) | 19.86 ms |
+| radix-4 via batched kernel (batch=1) | 60.88 ms |
+
+**3.06x REGRESSION** — the batched kernel's SoA transpose round-trip + batch-vectorized inner loop are
+pure overhead at batch=1 (one lane, no batch SIMD), dwarfing the stage-count saving. A dedicated
+single-row radix-4 butterfly kernel might help but is a big implementation, and prior radix-4 attempts
+already regressed (kernel fragmentation, see `winograd`). REVERTED (fft.rs to HEAD; stash). Tests 56/0
+(radix-4 was bit-correct, just slow). BONUS finding: radix-2 single-row 2^20 is really 19.86ms vs JAX
+15.95ms = **1.25x** (the prior isolated 28.4ms/1.78x was load-inflated) — near parity, not worth
+chasing. The big FFT gap stays the BATCHED pow2 14.9x (AVX-butterfly floor). No code landed.
+
 ## 2026-06-29 - SWEEP 100% COMPLETE: transcendental/activation/softmax have no contained vs-JAX gap; all vs-JAX benches now measured (ProudSalmon)
 
 Final family: transcendentals (exp/log/tanh/sigmoid/gelu) and softmax/logsumexp/attention have NO
