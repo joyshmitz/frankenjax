@@ -2,6 +2,17 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - LAND-HALF EXHAUSTED: comprehensive worktree scan clean after erfc — no more unlanded perf wins (ProudSalmon)
+
+After landing erfc (below), ran a COMPREHENSIVE scan of every `.scratch`/worktree commit ahead of
+main: for each `perf`/`thread`/`SIMD`/`speed`/`faster` commit, extracted the new `fn` names it adds in
+`crates/*/src/*.rs` and checked each against main's source. Result: ZERO ahead commits add a function
+absent from main — every worktree perf change is now landed or superseded (erfc was the last genuine
+one; softmax/logsumexp = noship eager-nn-threading; complex-boolword-select + FFT-leaf-fusion = already
+on main). Both halves of land-or-dig are now exhausted: LAND (no unpushed wins remain) and DIG
+(contained kernel surface mined across all primitives, 4 levers reverted). The only residual headroom
+is the three non-contained gates `murmw`/`cntiy`/`jjb1h`. No code change.
+
 ## 2026-06-29 - KEEP (LANDED, 3rd win): SIMD erfc dense driver — f64 1.15x / f32 1.31x faster, recovered from an unpushed worktree (ProudSalmon)
 
 LAND half of land-or-dig: found `frankenjax-cod-a-erfc-conformance` commit `c8fb1785`
