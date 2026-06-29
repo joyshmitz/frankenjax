@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - KEEP (3.3x over threaded; 4.5x→1.37x JAX, NEAR-PARITY): SIMD trigamma (polygamma n=1) f64x8 kernel (BlackThrush)
+
+Follow-on lever the prior entry flagged: polygamma still lost 4.5x to JAX purely for lack of a SIMD
+kernel (lgamma/digamma have f64x8 series kernels; polygamma did not). The dominant cost in
+`polygamma_approx` is the shift-to-100 loop (~100 divides/elem). For the HOT trigamma case (n=1 — the
+common use: Beta/Dirichlet variance, KL Hessians) each iteration is exactly
+`result += 1.0/(shifted*shifted); shifted += 1` and the tail is a fixed inv-polynomial — both
+8-wide SIMD-able. Added `trigamma_f64x8` mirroring `digamma_f64x8`'s masked-shift idiom: `shifted.powi(2)
+== shifted*shifted` and the asymptotic uses the SAME op order as `polygamma_asymptotic`, so it is
+BIT-IDENTICAL per lane (guard `trigamma_f64x8_bit_identical_to_scalar`: 2570+ pts incl. x<0.5
+reflection, ±inf, NaN, x>=100). Lanes outside the regime (x<0.5 / non-finite) fall back to scalar.
+Wired into the eval n==1 F64 and F32 threaded blocks (f32->f64 cast is exact == f64::from); n!=1 keeps
+the scalar threaded path. Guards: `threaded_dense_polygamma_bit_identical_to_reference` (f64) +
+`_f32_` (n∈{0,1,2,3}) both green.
+
+A/B (`polygamma_f32_threaded_vs_serial_ab`, trigamma 4M f32, Zen3 5975WX, 2 runs): scalar-serial
+~1300ms vs SIMD+threaded **14.2-15.1ms = ~89x internal**. Vs the prior threading-only main (47ms) that
+is **3.3x incremental**; vs JAX `polygamma(1, f32[4M])` jit=10.38ms this flips a **4.5x loss to 1.37x
+(near-parity)**. Tests: all 30 *gamma* lib tests pass. (Higher-n SIMD deferred: n>=2 needs bit-exact
+`powi(n+1)` replication — separate lever, far rarer than trigamma.)
+
 ## 2026-06-29 - KEEP (27.9x internal; 126x→4.5x JAX loss): thread the dense-F32 polygamma path (was serial) (BlackThrush)
 
 DIFFERENT-primitive dig after the complex-dense-kernel audit closed. Surveyed the heavy special
