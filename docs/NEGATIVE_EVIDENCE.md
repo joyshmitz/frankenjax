@@ -2,6 +2,17 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - DO-NOT-REDIG (FFT transpose): pow4 path is tile-local SoA, not a naive transpose — no contained transpose lever (ProudSalmon)
+
+Last FFT contained angle: the SoA "transpose" is NOT a naive full 16MB matrix transpose.
+`vectorized_pow4_tiled` processes `POW2_TILE_ROWS` rows per tile, gathering each tile into cache-
+resident re/im split scratch (`cap = POW2_TILE_ROWS * n`) before the radix-4 butterfly stages — so the
+de-interleave is tile-local and cache-friendly (the "transpose TILING REGRESSES" note applies only to
+the standalone `transpose_general`). FFT is now verified at the contained floor from EVERY angle:
+radix-4 used (pow4), threaded across rows (1<<18 gate), cache-tiled (POW2_TILE_ROWS), local SoA re/im
+split, zero mul_add. The 14.9x batched residual is purely pocketfft's radix-8 + wider-SIMD butterfly
+throughput — bead `murmw`, multi-session. No contained FFT lever exists at any granularity. Done.
+
 ## 2026-06-29 - DO-NOT-REDIG: conv + convert confirmed (GEMM-FMA-floor / already-threaded); primitive sweep absolutely complete (ProudSalmon)
 
 Last two un-checked primitives:
