@@ -2,6 +2,25 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - REJECT (bench-backed): parallel associative_scan(max/min) REGRESSES vs its tight in-place serial scan (ProudSalmon)
+
+Tried routing 1-D (inner==1) `associative_scan` max/min over a long leading axis to the proven
+`parallel_cummax_f64` 3-pass chunked scan (made it pub(crate)). Bit-identity CONFIRMED (parallel == the
+sequential `jax_max_f64`/`jax_min_f64` fold, exact, incl. NaN/±0 — so `jax_max_f64` ≡
+`jax_minmax_scalar`). But same-binary A/B at 2M f64:
+
+| op | serial in-place | parallel 3-pass | ratio |
+|---|---:|---:|---:|
+| max | 2.47 ms | 3.11 ms | 0.79x (REGRESSION) |
+| min | 3.18 ms | 2.75 ms | 1.16x (marginal) |
+
+Unlike cummax (whose 2.4x win was vs the GENERIC per-equation dispatch), `eval_associative_scan` already
+has a tight SINGLE-PASS IN-PLACE dense scan, so the parallel kernel's 3 memory passes + output alloc +
+thread-spawn lose at 2M (max regresses) and only break even much larger. Below the 1.15x bar → REVERTED
+(routing, the pub(crate), and the test). DO-NOT parallelize associative_scan's dense scan: its serial
+in-place pass is the floor for these sizes. (KEY lesson: a parallel scan only wins over a baseline that
+isn't already a tight single-pass in-place loop.)
+
 ## 2026-06-29 - KEEP (LANDED, 11th win): N-D (rank>=4) i64 separable sum-pooling — 8.90x @rank-5 win5³, BIT-IDENTICAL (ProudSalmon)
 
 i64 sibling of the rank>=4 N-D float separable: integer volumetric sum pooling (rank-5 `[N,D,H,W,C]`)
