@@ -2,6 +2,28 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - FRONTIER-MAP: post-concat-win, every remaining open perf bead is blocked/fragile/done (ProudSalmon)
+
+After landing b6w0e (below), audited the full open perf-bead backlog (`br`) + the relevant kernels to
+find the next contained lever. Result — the remaining open beads are NOT contained session wins:
+- `murmw` / `murmw.1` (FFT 7-43x / split-radix-4) — SoA/radix-4 already rejected; split-radix is a
+  high-risk op-count reform that prior radix-4 + Winograd lessons say loses to kernel fragmentation.
+  Deep/multi-session, not clean.
+- `cntiy` (+fma), `special-fn-3gsc5` (lgamma/digamma — SIMD-div REGRESSED 0.84x, ln is fma-capped,
+  folds into cntiy), `small-batched-gemm-q032w` (below fma ceiling) — all gate on the +fma maintainer
+  decision. Policy-walled.
+- `dedicated-gemv-h36uj` (1.27x) — a fast gemv must SIMD-across-K which REORDERS the sum and breaks
+  matmul's bit-exact `matches_generic` guard; needs maintainer sign-off that gemv parity is tolerance.
+  Bit-identity-blocked (same class as cummax-scan).
+- `cummax-scan-rekyb` (~parity) + `reduce-window-simd-od11p` (1.4x) — both already THREADED across
+  lines; only sub-lever left is NaN-aware SIMD compare/masks (`jax_minmax_scalar` exact NaN→NaN),
+  documented-fragile + nightly trait drift, for ≤1.4x. Poor-EV.
+- `sortkeyval-s2yc8` — DONE for f64/f32/i64 + mixed (~52-58x); only niche complex/half/u32/u64/bool
+  operand tails remain.
+- Closed `simd-argmax-axis0-9yw7e` this pass (f32-ax0 shipped, f64-ax0 SIMD regresses, ax1 inherent).
+The contained low-risk frontier is the concat win below; everything else needs a +fma / bit-identity
+maintainer decision or multi-session FFT/architectural work. No code change in this entry; tree clean.
+
 ## 2026-06-29 - KEEP (LANDED): threaded Concat materialization — split→materialize 3.7x→1.23x vs JAX (~2.8x internal), bead b6w0e (ProudSalmon)
 
 Landed bead `frankenjax-thread-concat-materialize-b6w0e`. `split` returns lazy `Concat` views; the
