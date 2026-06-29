@@ -2,6 +2,22 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - DO-NOT-REDIG: SIMD-unary-driver routing mined (the erfc lever); no unwired kernel remains (ProudSalmon)
+
+After landing erfc (route scalar unary -> `eval_unary_simd_dense_f64_parallel`), checked whether OTHER
+scalar-path unary ops could reuse the same trick. Result — fully mined:
+- Special functions WITH a SIMD f64x8 kernel (`erf`, `erfc`, `bessel_i0e`, `bessel_i1e`) are ALL
+  already wired through the SIMD driver (handles f64 + f32). No unwired kernel exists.
+- Cheap scalar-path ops (`Floor`/`Ceil`/`Trunc`/`Reciprocal`/`Deg2Rad`/`Rad2Deg`/`Sinc`) are single-
+  instruction + compiler-autovectorized inside the threaded `eval_unary_elementwise_parallel` chunk
+  map (floor->roundpd, 1/x->divpd) and already threaded (1.12-1.24x wins landed earlier). SIMD-driver
+  routing would not help.
+- Composable transcendentals (expm1/exp2/log1p) can't reuse a SIMD kernel: the f64 SIMD-poly `exp`/
+  `log` are FMA-gated (2.2x WITH fma / 0.79x WITHOUT, breaks goldens) -> `cntiy`. lgamma/digamma/
+  igamma/betainc/zeta are the hard continued-fraction/series special-fn frontier (also ln/fma-capped).
+The erfc-style SIMD-driver lever is mined; erfc was the last unwired one (and it was unpushed, not
+unwritten). No code change.
+
 ## 2026-06-29 - LAND-HALF EXHAUSTED: comprehensive worktree scan clean after erfc — no more unlanded perf wins (ProudSalmon)
 
 After landing erfc (below), ran a COMPREHENSIVE scan of every `.scratch`/worktree commit ahead of
