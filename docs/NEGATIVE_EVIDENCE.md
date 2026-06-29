@@ -2,6 +2,37 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - BLOCKER: all 4 biggest remaining measured gaps code-audited at-floor; the wall is ONE policy fork (ProudSalmon)
+
+Direct source-level audit this pass of every candidate behind the largest remaining vs-JAX gaps —
+result: each is already at its contained-Rust floor, and the residual gap traces to a SINGLE
+maintainer policy decision, not to any un-mined lever.
+
+- **FFT batch (4.40x, biggest clean gap).** `mixed_radix_ping` (crates/fj-lax/src/fft.rs) is already
+  fully tuned: specialized radix-2/3/5 butterflies, fused nn==2/3/5 leaf cases (e05febcf), twiddle
+  indexing by increment-and-wrap (no per-element modulo), and a caller-reused scratch buffer (no
+  per-recursion alloc). The remaining gap vs JAX/pocketfft is SIMD-vectorized complex butterflies,
+  which needs either the SoA layout (already MEASURED SLOWER and rejected for `frankenjax-murmw`) or
+  AVX complex-multiply intrinsics (blocked by workspace `#![forbid(unsafe_code)]`).
+- **matmul / cholesky / conv microkernel.** FMA-bound; needs the deliberately-avoided global `+fma`
+  build flag (see `fma-lever-policy-blocked`). Same wall.
+- **pow / atan2 scalar transcendental (5.4-8.4x).** libm scalar floor; SIMD-poly needs FMA to win
+  (0.79x WITHOUT FMA, see `simd-poly-exp-fma-finding`) AND breaks the exp golden. Same wall.
+- **cummax/cummin (~1.13x, NOISE).** `parallel_cummax_f64/f32` is already a 3-pass threaded
+  parallel-prefix; measured 18.5ms vs JAX 20.9ms is parity/cross-invocation-variance, not a real
+  loss. Only sub-lever is SIMD in-lane prefix-max needing hand-rolled NaN-propagation masks to match
+  `jax_minmax_scalar` (NaN→canonical NaN) — fragile bit-exact work for zero real headroom. Skip.
+- **scatter / axis-cumsum.** `eval_scatter_dense` (range-partitioned, packed-u64, complex-partition
+  variants) and `eval_cumulative_dense` (contiguous-line / leading-axis / middle-axis all threaded
+  via `work_scaled_threads`) are already row-parallelized and bit-exact. Mined.
+
+DECISION NEEDED (the actual unblock, NOT a "safe-Rust ceiling"): authorize ONE of —
+(a) a scoped `unsafe` SIMD module (FFT complex butterflies + GEMM microkernel), or
+(b) the global `+fma` flag (bit-exactness trade-off already characterized in the ledger).
+Either unblocks an estimated 2-4x on the heavy-compute frontier; without one, the contained Rust
+frontier vs JAX-CPU is provably at its floor (every higher-level linalg factorization already WINS
+1.3-30x — see the linalg tally below). No code change this pass; tree clean, conformance unaffected.
+
 ## 2026-06-29 - SURFACE: mixed-radix FFT leaf fusion was CONVERGENTLY already landed; no unlanded worktree win remains (ProudSalmon)
 
 LAND-OR-DIG pass. The most promising scratch candidate was `frankenjax-proudsalmon-fft-dig`
