@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - DO-NOT-REDIG: the 2 remaining non-cntiy-adjacent gaps confirmed floor/cntiy (gather, digamma) (ProudSalmon)
+
+Closing the investigation of the only vs-JAX losses not obviously cntiy/murmw:
+- **8-byte row-gather (1.66x)**: `gather_contiguous_into` is already all-cores threaded + EXTENSIVELY
+  production-tuned (its own comment documents reverted cap attempts: 32t 175.6ms vs cores/2 212.4ms;
+  "measure production not a synthetic proxy"). It's the random-source-row LATENCY floor — JAX's edge is
+  prefetch intrinsics, unavailable under `#![forbid(unsafe_code)]`. Within-thread MLP (multi-row
+  prefetch-ahead) is fiddly over `copy_from_slice` + the 32-thread OoO already provides MLP. No safe
+  lever. (Same BW/latency-floor class as select-blend + gemv, both REJECTED this session.)
+- **digamma 1.85x / lgamma 1.83x**: ln-dominated; a SIMD kernel with SCALAR-ln-per-lane only speeds the
+  shift-loop/poly (~40% of work) -> ~1.1x partial, ln stays the bottleneck -> `cntiy` (SIMD-ln needs
+  +fma). Substantial impl for a partial ln-capped gain; not worth it. igamma/betainc/zeta/polygamma are
+  iterative continued-fractions/series (data-dependent, niche).
+So EVERY vs-JAX loss is now accounted for: cntiy (special-fn ln/Clenshaw, GEMM, conv, attention, FFT
+butterflies), murmw (FFT kernel), jjb1h (alloc), or BW/latency floor (gather/select, already threaded).
+No contained non-fma kernel lever remains. No code change.
+
 ## 2026-06-29 - REJECT (bench-backed): 2x-unroll of SIMD-unary driver is NEUTRAL post-branch-skip; threading already saturates (ProudSalmon)
 
 Re-attempted driver unroll under NEW conditions: after the bessel branch-skip, i0e is single-branch
