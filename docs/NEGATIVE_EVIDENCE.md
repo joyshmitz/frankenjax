@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - REVERTED (~0-gain) + STALE-TITLE: f32 SIMD pow is memory-bound — the "5.4-8.4x pow loss" is FALSE, threaded-scalar pow already ≈ JAX parity (BlackThrush)
+
+Tried to extend the reopened f32-transcendental frontier to the `Pow` primitive (`pow(b,e)=exp(e·ln b)`
+via the SIMD exp/log pair). Wired + accuracy-guarded (edge lanes b≤0/specials → scalar `powf`, regime
+within 1e-4). But the HONEST baseline kills it — A/B vs the PRIOR PRODUCTION path (threaded-scalar
+`powf`, not single-thread):
+- `[pow f32 4M]` threaded-scalar(prior)=**5.05ms** vs SIMD-eval(new)=**5.07ms = gain 1.00x**. REVERTED.
+
+WHY (the generalizable rule): pow is **1 powf/element → MEMORY-BANDWIDTH-bound** at 4M (read 2×16MB +
+write 16MB). The threaded scalar already saturates DRAM bandwidth, so 8-wide SIMD on the compute does
+NOTHING — the bottleneck is bytes, not flops. This is the EXACT inverse of zeta (~12 powf/element →
+COMPUTE-bound → SIMD wins 2.54x, below). RULE for the f32-transcendental-SIMD frontier: it wins ONLY
+where the kernel does MANY transcendentals per element (special functions: zeta ✓, betainc?, the CF
+internals). A single transcendental per element is memory-bound → SIMD is ~0-gain → do not wire.
+
+Also CORRECTS a stale title: the documented "pow/atan2 5.4-8.4x JAX loss" is FALSE for f32 at scale —
+threaded-scalar pow f32 4M = 5.05ms vs JAX `power` 4.37ms = **1.15x (near-parity)**, NOT a 5-8x loss
+(that number was scalar-dispatch or pre-threading). atan2 is the same shape (1 transcendental/elem,
+memory-bound) → expect the same; do not chase it. Reverted clean (lib.rs + arithmetic.rs back to HEAD);
+ledger-only record. (4th measure-don't-assume correction this run.)
+
 ## 2026-06-29 - WIRED WIN (2.54x; 2.4x JAX LOSS → 1.05x WIN): f32 SIMD+threaded Hurwitz zeta via the exp/log pair (BlackThrush)
 
 Cashed in the f32 SIMD exp+log building blocks: wired an 8-wide f32 SIMD+threaded Hurwitz-zeta fast
