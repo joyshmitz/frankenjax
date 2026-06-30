@@ -23343,6 +23343,58 @@ mod tests {
         );
     }
 
+    /// Measure fj's threaded betainc vs scalar serial map. betainc is a data-dependent continued
+    /// fraction (like igamma) → XLA-CPU can't vectorize it (JAX `betainc` f32 4M ~1359ms on this
+    /// host), so fj's threaded scalar CF is expected to WIN big. Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "perf; run explicitly"]
+    fn betainc_f32_threaded_vs_serial_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22;
+        let av: Vec<f32> = (0..n).map(|i| 0.5 + (i % 50) as f32 * 0.1).collect();
+        let bv: Vec<f32> = (0..n).map(|i| 0.5 + (i % 40) as f32 * 0.1).collect();
+        let xv: Vec<f32> = (0..n).map(|i| 0.05 + (i % 18) as f32 * 0.05).collect();
+        let a = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, av.clone()).unwrap(),
+        );
+        let b = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, bv.clone()).unwrap(),
+        );
+        let x = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, xv.clone()).unwrap(),
+        );
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut t = f64::MAX;
+            for _ in 0..5 {
+                let i = Instant::now();
+                f();
+                t = t.min(i.elapsed().as_secs_f64());
+            }
+            t
+        };
+        let threaded = best(&|| {
+            std::hint::black_box(
+                eval_betainc(Primitive::Betainc, &[a.clone(), b.clone(), x.clone()]).unwrap(),
+            );
+        });
+        let serial = best(&|| {
+            let out: Vec<f64> = av
+                .iter()
+                .zip(&bv)
+                .zip(&xv)
+                .map(|((&a, &b), &x)| betainc_approx(f64::from(a), f64::from(b), f64::from(x)))
+                .collect();
+            std::hint::black_box(out);
+        });
+        eprintln!(
+            "[betainc f32 4M] serial-map={:.3}ms threaded-eval={:.3}ms internal={:.2}x  (JAX betainc ~1359ms)",
+            serial * 1e3,
+            threaded * 1e3,
+            serial / threaded
+        );
+    }
+
     /// Measure fj's threaded zeta vs scalar serial map (JAX `zeta` f32 4M ~13ms on this host).
     #[test]
     #[ignore = "perf; run explicitly"]

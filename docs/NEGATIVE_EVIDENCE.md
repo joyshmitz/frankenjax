@@ -2,6 +2,27 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - MEASURED-VS-JAX: betainc is a 9.8x WIN — settles the special-fn frontier (CFs win, only fixed-powf zeta lost) (BlackThrush)
+
+Applied the rule from the pow-revert entry to pick the next target by MEASURING, not assuming. betainc
+is a data-dependent continued fraction (Lentz CF + lgamma), the SAME shape as igamma → predicted fj
+WIN (XLA-CPU can't vectorize data-dependent CFs). Confirmed: **JAX `betainc` f32 4M = 1358.6ms vs fj
+threaded = 138.5ms = fj WINS 9.8x** (`betainc_f32_threaded_vs_serial_ab`; internal serial→threaded
+5.78x — lower than the 16x of powf-bound kernels because CF iteration counts vary per element, hurting
+load balance, but still a decisive win). NOT a gap — remove betainc from any remaining-loss list.
+
+This SETTLES the special-function frontier vs JAX-CPU, cleanly split by the compute-shape rule:
+- **Data-dependent CF** (igamma 27x, igammac, betainc 9.8x): XLA-CPU can't vectorize → fj threading
+  already WINS. No SIMD needed.
+- **Fixed-length transcendental sum** (zeta: ~12 powf/elem): XLA vectorizes → fj LOST → the f32 SIMD
+  exp/log pair fixed it (2.54x, now a 1.05x win). zeta was the UNIQUE such loss; lgamma/digamma/erf/
+  erfc/bessel already carry f64x8 SIMD kernels, and the trigamma shift-loop is SIMD'd.
+- **1 transcendental/elem** (pow/atan2): memory-bound → already ≈ JAX parity, SIMD ~0-gain (reverted).
+
+So the f32-transcendental-SIMD frontier opened this run has no remaining un-mined wirable target: zeta
+was it. Committed `betainc_f32_threaded_vs_serial_ab` as a reusable bench; #[ignore], conformance
+unaffected. (5th measure-don't-assume data point this run.)
+
 ## 2026-06-29 - REVERTED (~0-gain) + STALE-TITLE: f32 SIMD pow is memory-bound — the "5.4-8.4x pow loss" is FALSE, threaded-scalar pow already ≈ JAX parity (BlackThrush)
 
 Tried to extend the reopened f32-transcendental frontier to the `Pow` primitive (`pow(b,e)=exp(e·ln b)`
