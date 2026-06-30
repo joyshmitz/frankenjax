@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - SWEEP-VS-JAX: common-op map confirms every contained lever is mined; losses are FMA- or BW-gated only (BlackThrush)
+
+Broad empirical sweep (4M f32 / [4096,4096], JAX 0.10.1 CPU jit, Zen3 5975WX) to find any HIDDEN
+contained loss after the igamma surprise proved assumptions unreliable. Fresh JAX-CPU numbers:
+- `sort` 4M = **587ms**, `sort [4096,4096] ax-1` = **1020ms**, `argsort` 4M = **831ms** — XLA-CPU sort
+  is a sorting-network dog; fj's pdqsort/radix already WINS massively (cf. the 68x sort_key_val entry).
+- `cumsum` 4M = **7.4ms** — PARITY (fj's threaded parallel-prefix; memory-bound sequential-dependency
+  floor, ~4GB/s both sides). Not a lever; f32 reassoc would change bits anyway.
+- `gather/take` 4M = **1.1ms** — fj's documented ~1.66x is the pure-BW floor (8-byte row gather).
+- `igamma` JAX 469.7ms → fj 17.2ms = **27x WIN**; `zeta` JAX 13.0ms → fj 31.5ms = **2.4x LOSS**
+  (powf-bound, FMA-gated). `pow`/`atan2`/`exp` stay 5.4-8.4x losses (same FMA gate).
+
+CONCLUSION (institutional, so future passes don't re-dig these): fj WINS wherever XLA-CPU is weak
+(sort/argsort/igamma/linalg 1.3-68x) and the ONLY losses are (a) FMA-gated SIMD transcendentals
+(pow/atan2/exp/zeta + the GEMM/conv/cholesky microkernel) — all gated by the one `simd-poly-exp-fma
+-finding` 0.79x-without-FMA result — or (b) BW-bound-at-floor (gather/select ~1.66x). No contained,
+bit/tolerance-safe lever remains without the `+fma` decision or a scoped `unsafe` SIMD module (FFT).
+
 ## 2026-06-29 - MEASURED-VS-JAX: igamma is a 27x WIN (not a loss); zeta is a real 2.4x loss (FMA-blocked) (BlackThrush)
 
 EMPIRICAL land-or-dig pass: stopped ASSUMING the CF special functions "lose to JAX" and MEASURED
