@@ -216,6 +216,56 @@ pub fn exp_block_f32(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
     p * two_n
 }
 
+/// 8-wide f32 natural `log` (Cephes `logf`: frexp split into mantissa∈[0.5,1)·2^e, degree-8 minimax
+/// poly, ln2 reconstruction). Explicit `*`/`+` (NO `mul_add`). Companion to [`exp_block_f32`] so the
+/// pair gives `pow(b,p) = exp(p·ln b)` 8-wide without `+fma`. Accuracy ~1 ulp for finite x>0
+/// (`log_block_f32_accuracy`); DOMAIN x>0 finite (the zeta/pow consumers guarantee it) — x≤0 / NaN /
+/// inf lanes return implementation-defined values and must be masked by the caller.
+#[inline]
+pub fn log_block_f32(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdInt;
+    use std::simd::num::SimdUint;
+    type F = Simd<f32, 8>;
+    const SQRTHF: f32 = 0.707_106_77;
+    const LN2_HI: f32 = 0.693_359_375;
+    const LN2_LO: f32 = -2.121_944_4e-4;
+    // frexp: split x into mantissa m∈[0.5,1) and integer exponent e (x = m·2^e).
+    let bits = x.to_bits();
+    let e = ((bits >> Simd::splat(23)) & Simd::splat(0xff)).cast::<i32>() - Simd::splat(126);
+    let m_bits = (bits & Simd::splat(0x007f_ffff)) | Simd::splat(126u32 << 23);
+    let mut m = F::from_bits(m_bits);
+    let mut ef = e.cast::<f32>();
+    // Bring m into [sqrt(0.5), sqrt(2)) around 1: if m < SQRTHF, m = 2m - 1 (e-=1), else m -= 1.
+    let lo = m.simd_lt(F::splat(SQRTHF));
+    ef -= lo.select(F::splat(1.0), F::splat(0.0));
+    m = m + lo.select(m, F::splat(0.0)) - F::splat(1.0);
+    let z = m * m;
+    // Cephes logf degree-8 poly P(m), evaluated by Horner.
+    const P: [f32; 9] = [
+        7.037_683_6e-2,
+        -1.151_461e-1,
+        1.167_699_9e-1,
+        -1.242_014_1e-1,
+        1.424_932_3e-1,
+        -1.666_805_8e-1,
+        2.000_071_5e-1,
+        -2.499_999_4e-1,
+        3.333_333_1e-1,
+    ];
+    let mut p = F::splat(P[0]);
+    for &c in &P[1..] {
+        p = p * m + F::splat(c);
+    }
+    let mut y = p * m * z;
+    y += ef * F::splat(LN2_LO);
+    y += F::splat(-0.5) * z;
+    let r = m + y;
+    r + ef * F::splat(LN2_HI)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +396,55 @@ mod tests {
             simd_ns / 1e6,
             libm_ns / simd_ns
         );
+    }
+
+    #[test]
+    fn log_block_f32_accuracy() {
+        use std::simd::Simd;
+        let mut maxrel = 0.0f32;
+        // Sweep x>0 over the zeta-relevant range (bases n+q for q∈[1,10], n∈0..9 → ~[1,20]) plus
+        // small/large magnitudes to exercise the full exponent range.
+        let mut x = 0.01f32;
+        while x <= 100.0 {
+            let mut arr = [0.0f32; 8];
+            for (j, a) in arr.iter_mut().enumerate() {
+                *a = x + j as f32 * 0.0007;
+            }
+            let got = log_block_f32(Simd::from_array(arr)).to_array();
+            for (j, &g) in got.iter().enumerate() {
+                let e = arr[j].ln();
+                if e != 0.0 {
+                    maxrel = maxrel.max(((g - e) / e).abs());
+                } else {
+                    maxrel = maxrel.max((g - e).abs());
+                }
+            }
+            x += 0.013;
+        }
+        eprintln!("[log_block_f32] max relative error vs libm over [0.01,100] = {maxrel:e}");
+        assert!(maxrel < 5e-6, "f32 SIMD log rel err {maxrel:e} too large");
+    }
+
+    // pow(b,p) = exp(p·ln b) via the SIMD pair — the building block for zeta's (n+q)^{-s}.
+    #[test]
+    fn simd_pow_via_exp_log_f32_accuracy() {
+        use std::simd::Simd;
+        let mut maxrel = 0.0f32;
+        for bi in 1..=40 {
+            let b = bi as f32 * 0.5; // bases 0.5..20
+            for si in 1..=40 {
+                let s = si as f32 * 0.1; // exponents 0.1..4
+                let bb = Simd::<f32, 8>::splat(b);
+                let ss = Simd::<f32, 8>::splat(-s);
+                let got = exp_block_f32(ss * log_block_f32(bb)).to_array()[0];
+                let expect = b.powf(-s);
+                if expect != 0.0 {
+                    maxrel = maxrel.max(((got - expect) / expect).abs());
+                }
+            }
+        }
+        eprintln!("[simd pow=exp(p*log) f32] max rel error = {maxrel:e}");
+        assert!(maxrel < 2e-5, "f32 SIMD pow rel err {maxrel:e} too large");
     }
 
     #[test]

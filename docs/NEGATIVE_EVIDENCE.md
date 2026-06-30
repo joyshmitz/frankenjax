@@ -28,6 +28,12 @@ can consume SIMD exp/log directly. Next bead: 8-wide f32 SIMD log, then route ze
 = `exp(-s·ln(n+q))` through the SIMD pair to close its measured 2.4x JAX loss. (Meta-lesson, third
 time this run after igamma + the f64/f32 split: MEASURE the blocking assumption — do not inherit it.)
 
+UPDATE: the companion `pub fn log_block_f32` (Cephes `logf`: frexp + degree-8 poly, no FMA) is now
+landed + verified — **1.19e-7 max rel error** (`log_block_f32_accuracy`), and the composed
+`pow(b,p)=exp(p·log b)` is **8.0e-7** (`simd_pow_via_exp_log_f32_accuracy`), both ~1 ulp / within f32
+tolerance parity. The SIMD f32 exp+log+pow building blocks are complete; wiring them into zeta's f32
+path (8-wide across elements through the Euler-Maclaurin sum) is the next step.
+
 ## 2026-06-29 - SWEEP-VS-JAX: common-op map confirms every contained lever is mined; losses are FMA- or BW-gated only (BlackThrush)
 
 Broad empirical sweep (4M f32 / [4096,4096], JAX 0.10.1 CPU jit, Zen3 5975WX) to find any HIDDEN
