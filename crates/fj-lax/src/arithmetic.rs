@@ -23145,6 +23145,96 @@ mod tests {
         );
     }
 
+    /// Measure fj's threaded igamma vs the scalar serial map (same invocation) and report ms
+    /// for the vs-JAX comparison (JAX `gammainc` f32 4M was measured ~470ms on this host —
+    /// XLA-CPU's incomplete gamma is poorly vectorized). Run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "perf; run explicitly"]
+    fn igamma_f32_threaded_vs_serial_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22; // 4M
+        let av: Vec<f32> = (0..n).map(|i| 1.0 + (i % 64) as f32 * 0.1).collect();
+        let xv: Vec<f32> = (0..n).map(|i| 0.5 + (i % 128) as f32 * 0.05).collect();
+        let a = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, av.clone()).unwrap(),
+        );
+        let x = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, xv.clone()).unwrap(),
+        );
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let threaded = best(&|| {
+            std::hint::black_box(
+                eval_igamma(Primitive::Igamma, &[a.clone(), x.clone()]).unwrap(),
+            );
+        });
+        let serial = best(&|| {
+            let out: Vec<f32> = av
+                .iter()
+                .zip(&xv)
+                .map(|(&a, &x)| igamma_approx(f64::from(a), f64::from(x)) as f32)
+                .collect();
+            std::hint::black_box(out);
+        });
+        eprintln!(
+            "[igamma f32 4M] serial-map={:.3}ms threaded-eval={:.3}ms internal={:.2}x  (JAX gammainc ~470ms)",
+            serial * 1e3,
+            threaded * 1e3,
+            serial / threaded
+        );
+    }
+
+    /// Measure fj's threaded zeta vs scalar serial map (JAX `zeta` f32 4M ~13ms on this host).
+    #[test]
+    #[ignore = "perf; run explicitly"]
+    fn zeta_f32_threaded_vs_serial_ab() {
+        use std::time::Instant;
+        let n = 1usize << 22;
+        let sv: Vec<f32> = (0..n).map(|i| 1.5 + (i % 32) as f32 * 0.05).collect();
+        let qv: Vec<f32> = (0..n).map(|i| 1.0 + (i % 64) as f32 * 0.1).collect();
+        let s = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, sv.clone()).unwrap(),
+        );
+        let q = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, qv.clone()).unwrap(),
+        );
+        let best = |f: &dyn Fn()| -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let t = Instant::now();
+                f();
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let threaded = best(&|| {
+            std::hint::black_box(eval_zeta(Primitive::Zeta, &[s.clone(), q.clone()]).unwrap());
+        });
+        let serial = best(&|| {
+            let out: Vec<f32> = sv
+                .iter()
+                .zip(&qv)
+                .map(|(&s, &q)| hurwitz_zeta_approx(f64::from(s), f64::from(q)) as f32)
+                .collect();
+            std::hint::black_box(out);
+        });
+        eprintln!(
+            "[zeta f32 4M] serial-map={:.3}ms threaded-eval={:.3}ms internal={:.2}x  (JAX zeta ~13ms)",
+            serial * 1e3,
+            threaded * 1e3,
+            serial / threaded
+        );
+    }
+
     #[test]
     fn cheap_binary_parallel_f64_bit_identical_to_serial() {
         // Exercise the large-array threaded cheap-binop path (n >= CHEAP_BINARY_PARALLEL_MIN)

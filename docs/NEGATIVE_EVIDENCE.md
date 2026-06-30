@@ -2,6 +2,30 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-06-29 - MEASURED-VS-JAX: igamma is a 27x WIN (not a loss); zeta is a real 2.4x loss (FMA-blocked) (BlackThrush)
+
+EMPIRICAL land-or-dig pass: stopped ASSUMING the CF special functions "lose to JAX" and MEASURED
+them (4M f32, JAX 0.10.1 CPU jit on this Zen3 5975WX, fj threaded eval). Results overturn the
+assumption:
+- **igamma (`gammainc`): JAX 469.7ms vs fj 17.2ms = fj WINS ~27x.** XLA-CPU's regularized incomplete
+  gamma is poorly vectorized (data-dependent continued fraction); fj's threaded scalar CF across 32
+  cores crushes it. NOT a gap — remove igamma/igammac from any "remaining loss" list. (Internal
+  serial-map 284ms → threaded 17.2ms = 16.6x, the threading that wins it.)
+- **zeta (Hurwitz, `zeta(s,q)`): JAX 13.0ms vs fj 31.5ms = fj LOSES ~2.4x.** This is a REAL,
+  newly-identified gap. Root cause: `hurwitz_zeta_approx` is a fixed-length Euler-Maclaurin with ~11
+  `(n+q).powf(-s)` per element; fj uses SCALAR libm `powf` (threaded), XLA vectorizes its powf. The
+  only fj lever is SIMD `powf`/`exp`-`ln`, which is the documented FMA-gated path (`simd-poly-exp-fma
+  -finding`: SIMD-poly exp is 0.79x WITHOUT FMA = slower) — so zeta's 2.4x is FMA-blocked, same wall
+  as the GEMM/conv microkernel, NOT an un-mined contained lever.
+
+Method note reinforced (meta-finding): perf assumptions about special functions are unreliable until
+measured — one CF function (igamma) is a 27x WIN and its sibling (zeta) is a 2.4x loss, for the same
+"threaded scalar series" implementation. The difference is entirely whether the per-element kernel is
+`powf`-dominated (zeta, XLA-vectorizable → fj loses) or a branchy data-dependent CF (igamma,
+XLA-can't-vectorize → fj wins). Committed `igamma_f32_threaded_vs_serial_ab` +
+`zeta_f32_threaded_vs_serial_ab` as reusable same-invocation A/B benches. No code change to the eval
+paths; conformance unaffected (both #[ignore]).
+
 ## 2026-06-29 - KEEP (3.3x over threaded; 4.5x→1.37x JAX, NEAR-PARITY): SIMD trigamma (polygamma n=1) f64x8 kernel (BlackThrush)
 
 Follow-on lever the prior entry flagged: polygamma still lost 4.5x to JAX purely for lack of a SIMD
