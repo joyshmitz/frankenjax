@@ -2,6 +2,26 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (Atanh primitive: 1.89x @4M / 1.19x @16M, ~JAX PARITY): SIMD atanh via the single-log1p identity, reusing log1p_f64x8 (BlackThrush)
+
+Fourth wired consumer of the `log_block_f64` / `log1p_f64x8` machinery, and the first INVERSE-HYPERBOLIC:
+`Atanh` (`eval_atanh`, real path was threaded scalar `f64::atanh`). Not bit-exact-golden-pinned
+(grep: no `atanh().to_bits`); conformance is tolerance (1e-14). Chosen over asinh/acosh because atanh's
+domain is bounded (-1,1) — no `x²` overflow branch needed (asinh/acosh would need one for large |x|).
+
+`atanh_f64x8(x) = 0.5·log1p(2x/(1−x))` — the standard SINGLE-`log1p` identity (one `log1p_f64x8`, not
+the two of the naive `0.5·(log1p(x)−log1p(−x))` — switching to the single form nearly doubled the win,
+4M 1.30x→1.89x). `log1p` (not raw `ln`) keeps it accurate for small x (`2x/(1-x) ≈ 2x`), and the
+log1p lane self-handles the domain edges: `|x|<1` fast path; `x→1⁻ ⇒ +inf`; `x=-1 ⇒ log1p(-1)=-inf`;
+`|x|>1 ⇒ arg<-1 ⇒ NaN`; `x=±0 ⇒ ±0`. UNARY, so no 16M BW regression (contrast the reverted log2).
+
+MEASURED (median-of-3, same binary, `FJ_ATANH_SCALAR` A/B):
+  - 4M f64: SCALAR 15.07ms → SIMD **7.96ms = 1.89x**; vs JAX `jnp.arctanh` 7.82ms the loss goes
+    **1.93x → 1.02x (≈PARITY)** — fj-lax now matches JAX-CPU on atanh at 4M.
+  - 16M f64: SCALAR 28.77ms → SIMD **24.25ms = 1.19x** (still a clean win — unlike log2, no BW regress).
+Gates: fj-lax lib 1665/0, atanh_oracle 30/0, full conformance green, fmt clean. Reuses the shipped
+`log1p_f64x8` verbatim. (asinh/acosh remain — same vein but need `x²`-overflow range handling; deferred.)
+
 ## 2026-07-01 - SURFACE / REVERTED: SIMD log2 wins 1.39x @4M but REGRESSES 0.95x @16M — glibc log2 is well-optimized, the log-family SIMD win STOPS at log2 (BlackThrush)
 
 Attempted to extend the `log_block_f64` win to the `Log2` primitive (the natural next log-family

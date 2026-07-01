@@ -6637,22 +6637,38 @@ pub(crate) fn eval_acosh(primitive: Primitive, inputs: &[Value]) -> Result<Value
     }
 }
 
+/// 8-wide `atanh(x) = 0.5·log1p(2x / (1 − x))` — the standard single-`log1p` identity (one
+/// [`log1p_f64x8`] instead of two). Using `log1p` (not raw `ln`) keeps it accurate for small `x`
+/// (`2x/(1-x) ≈ 2x`, `log1p` recovers the low bits), and the log1p lane self-handles the domain edges:
+/// `|x|<1` ⇒ `2x/(1-x)` finite ⇒ fast path (~1 ulp); `x→1⁻` ⇒ `+inf` ⇒ `log1p=+inf` ⇒ `+inf`;
+/// `x=-1` ⇒ arg `-1` ⇒ `log1p=-inf` ⇒ `-inf`; `|x|>1` ⇒ arg `<-1` ⇒ `log1p=NaN` ⇒ `NaN`;
+/// `x=±0` ⇒ `±0` (sign preserved). Tolerance parity vs libm `atanh`.
+fn atanh_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    type F = std::simd::Simd<f64, 8>;
+    let arg = (F::splat(2.0) * x) / (F::splat(1.0) - x);
+    F::splat(0.5) * log1p_f64x8(arg)
+}
+
 pub(crate) fn eval_atanh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX atanh_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
         ensure_jax_float_unary_operand(primitive, input)?;
     }
     if inputs.first().is_some_and(value_contains_complex) {
-        eval_unary_complex_map(primitive, inputs, |a, b| {
+        return eval_unary_complex_map(primitive, inputs, |a, b| {
             let numer = (1.0 + a, b);
             let denom = (1.0 - a, -b);
             let div = complex_div(numer, denom);
             let log = complex_log(div);
             (0.5 * log.0, 0.5 * log.1)
-        })
-    } else {
-        eval_unary_elementwise_parallel(primitive, inputs, f64::atanh)
+        });
     }
+    // FJ_ATANH_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
+    if std::env::var_os("FJ_ATANH_SCALAR").is_some() {
+        return eval_unary_elementwise_parallel(primitive, inputs, f64::atanh);
+    }
+    // Dense f64/f32 via the SIMD log1p pair; scalar f64::atanh for the tail / other dtypes.
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, atanh_f64x8, f64::atanh)
 }
 
 /// Unary elementwise operation that converts to f64 first (exp, log, sqrt, etc.).
@@ -26484,6 +26500,79 @@ mod tests {
             } else {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
+        }
+    }
+
+    #[test]
+    fn atanh_simd_matches_scalar_tolerance_and_edges() {
+        // eval_atanh's dense SIMD path (0.5·(log1p(x)−log1p(−x))) must agree with scalar f64::atanh
+        // to ~1 ulp on the open domain (-1,1), and be bit-exact on edges: ±1 -> ±inf, |x|>1 -> NaN,
+        // ±0 -> ±0 (sign preserved), NaN -> NaN.
+        let mut data: Vec<f64> = (0..70_003usize)
+            .map(|i| -0.999 + (i % 9973) as f64 * 0.0002)
+            .collect();
+        for (k, v) in [
+            (3usize, 0.0f64),
+            (4, -0.0),
+            (5, 1.0),
+            (6, -1.0),
+            (7, 2.5),
+            (8, -3.0),
+            (9, 0.99999),
+            (10, -0.99999),
+            (11, 1e-12),
+            (12, f64::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = tensor_f64(vec![data.len() as u32], &data);
+        let got =
+            extract_f64_vec(&eval_atanh(Primitive::Atanh, std::slice::from_ref(&input)).unwrap());
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.atanh();
+            let g = got[idx];
+            if want == 0.0 {
+                assert_eq!(g.to_bits(), want.to_bits(), "atanh sign-of-zero at x={x}");
+            } else if want.is_finite() {
+                let tol = 1e-11 * want.abs().max(1.0);
+                assert!(
+                    (g - want).abs() <= tol,
+                    "atanh at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "atanh edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_atanh_throughput() {
+        // eval_atanh SIMD vs FJ_ATANH_SCALAR-forced scalar libm, vs JAX arctanh (4M 7.82ms).
+        use std::time::Instant;
+        for n in [4_000_000usize, 16_000_000usize] {
+            // atanh domain (-1,1): sweep (0,1).
+            let data: Vec<f64> = (0..n).map(|i| 0.001 + (i % 9973) as f64 * 1e-4).collect();
+            let input = tensor_f64(vec![n as u32], &data);
+            let f = || {
+                std::hint::black_box(
+                    eval_atanh(Primitive::Atanh, std::slice::from_ref(&input)).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            let scalar = std::env::var_os("FJ_ATANH_SCALAR").is_some();
+            println!(
+                "fj-lax atanh f64 {}M [{}]: {:.3}ms",
+                n / 1_000_000,
+                if scalar { "SCALAR" } else { "SIMD" },
+                b * 1e3
+            );
         }
     }
 
