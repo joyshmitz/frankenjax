@@ -6506,21 +6506,58 @@ pub(crate) fn eval_sinh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
     }
 }
 
+/// 8-wide `cosh(x) = 0.5·(e + 1/e)` with `e = exp(|x|)` via the SIMD Cephes rational exp. cosh is a
+/// SUM (no small-x cancellation, unlike sinh/tanh), so this is accurate everywhere in the SIMD regime
+/// `|x| < 709` (where `exp(|x|)` is finite). `|x| ≥ 709` (overflow → `+inf`), `±inf`, `NaN` route to
+/// scalar `f64::cosh` for exact edges. Even function ⇒ `abs(x)` handles sign. Tolerance parity vs libm.
+fn cosh_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f64, 8>;
+    let t = x.abs();
+    let ok = t.simd_lt(F::splat(709.0)); // false for NaN, +inf, overflow magnitudes
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f64; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].cosh();
+        }
+        return F::from_array(ra);
+    }
+    let e = crate::simd_exp::exp_cephes_block_f64(t);
+    let mut r = F::splat(0.5) * (e + F::splat(1.0) / e);
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() < 709.0) {
+                ra[k] = xa[k].cosh();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
 pub(crate) fn eval_cosh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX cosh_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
         ensure_jax_float_unary_operand(primitive, input)?;
     }
     if inputs.first().is_some_and(value_contains_complex) {
-        eval_unary_complex_map(primitive, inputs, |a, b| {
+        return eval_unary_complex_map(primitive, inputs, |a, b| {
             // cosh(a+bi) = (cosh a cos b, sinh a sin b). `sin_cos(b)` + one `exp(a)`.
             let (sb, cb) = b.sin_cos();
             let (cosh_a, sinh_a) = cosh_sinh_from_exp(a);
             (cosh_a * cb, sinh_a * sb)
-        })
-    } else {
-        eval_unary_elementwise_parallel(primitive, inputs, f64::cosh)
+        });
     }
+    // FJ_COSH_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
+    if std::env::var_os("FJ_COSH_SCALAR").is_some() {
+        return eval_unary_elementwise_parallel(primitive, inputs, f64::cosh);
+    }
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, cosh_f64x8, f64::cosh)
 }
 
 pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
@@ -26634,6 +26671,73 @@ mod tests {
             } else {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
+        }
+    }
+
+    #[test]
+    fn cosh_simd_matches_scalar_tolerance_and_edges() {
+        // eval_cosh dense SIMD (0.5·(e+1/e), e=Cephes exp(|x|)) vs scalar f64::cosh: ~1 ulp on
+        // |x|<709, bit-exact edges (±inf -> +inf, NaN, overflow via scalar). cosh even, cosh(0)=1.
+        let mut data: Vec<f64> = (0..70_003usize)
+            .map(|i| -50.0 + (i % 9973) as f64 * 0.01)
+            .collect();
+        for (k, v) in [
+            (3usize, 0.0f64),
+            (4, -0.0),
+            (5, 1e-9),
+            (6, 708.5),
+            (7, -708.5),
+            (8, 720.0),
+            (9, f64::INFINITY),
+            (10, f64::NEG_INFINITY),
+            (11, f64::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = tensor_f64(vec![data.len() as u32], &data);
+        let got =
+            extract_f64_vec(&eval_cosh(Primitive::Cosh, std::slice::from_ref(&input)).unwrap());
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.cosh();
+            let g = got[idx];
+            if want.is_finite() {
+                let tol = 1e-12 * want.abs().max(1.0);
+                assert!(
+                    (g - want).abs() <= tol,
+                    "cosh at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "cosh edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cosh_throughput() {
+        use std::time::Instant;
+        for n in [4_000_000usize, 16_000_000usize] {
+            let data: Vec<f64> = (0..n).map(|i| -10.0 + (i % 9973) as f64 * 0.002).collect();
+            let input = tensor_f64(vec![n as u32], &data);
+            let f = || {
+                std::hint::black_box(
+                    eval_cosh(Primitive::Cosh, std::slice::from_ref(&input)).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            let scalar = std::env::var_os("FJ_COSH_SCALAR").is_some();
+            println!(
+                "fj-lax cosh f64 {}M [{}]: {:.3}ms",
+                n / 1_000_000,
+                if scalar { "SCALAR" } else { "SIMD" },
+                b * 1e3
+            );
         }
     }
 

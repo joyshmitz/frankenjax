@@ -2,6 +2,17 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (Cosh primitive: 1.78x @4M / 1.09x @16M): SIMD cosh via Cephes rational exp (BlackThrush)
+
+Second consumer of `exp_cephes_block_f64` (the reopened exp vein — see below). `Cosh` (`eval_cosh`, real
+path was scalar libm `f64::cosh`). Not golden-pinned. `cosh_f64x8(x) = 0.5·(e + 1/e)` with `e = exp(|x|)`
+— a SUM, so NO small-x cancellation (unlike sinh/tanh which subtract near-equal values, deferred). SIMD
+for `|x| < 709` (where `exp(|x|)` is finite); `|x|≥709` (overflow→+inf), `±inf`, `NaN` → scalar `f64::cosh`.
+Even fn ⇒ `abs(x)` handles sign. MEASURED (median-of-3, `FJ_COSH_SCALAR`): 4M SCALAR 13.97ms → SIMD
+**7.84ms = 1.78x**; 16M 26.73ms → **24.57ms = 1.09x** (BW-bound, positive). Gates: fj-lax lib 1670/0,
+full conformance green, fmt clean. (sinh/tanh next — both need expm1-style small-x handling to avoid the
+`e-1/e` cancellation; NOT a naive `0.5·(e-1/e)`.)
+
 ## 2026-07-01 - FINDING + WIRED WIN: the "exp SIMD loses no-FMA (0.79x)" verdict is STALE (pre-AVX2); Cephes rational exp is 2.59x → Logistic 1.43x @4M (BlackThrush)
 
 MAJOR re-measurement. The `simd-poly-exp-fma-finding` (exp_block 0.79x vs libm without FMA) PREDATES the
