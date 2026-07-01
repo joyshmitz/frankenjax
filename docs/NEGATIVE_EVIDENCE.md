@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (Acosh primitive: 1.63x @4M / 1.22x @16M): SIMD acosh (cancellation-free log1p form) — completes the inverse-hyperbolic trio (BlackThrush)
+
+Sixth wired consumer; completes asinh/acosh/atanh. `Acosh` (`eval_acosh`, real path was threaded scalar
+`f64::acosh`). Not bit-exact pinned. `acosh_f64x8(x) = log1p((x−1) + √((x−1)(x+1)))` for x≥1 —
+cancellation-free near x=1 (naive `ln(x+√(x²−1))` loses precision there). SIMD only for `1 ≤ x < 1e150`
+(so `(x-1)(x+1)` can't overflow); `x<1`/`NaN`/`±inf`/huge-x lanes route to scalar `f64::acosh` (exact
+edges: `acosh(x<1)=NaN`, `acosh(1)=0`, `acosh(inf)=inf`, large-x → `ln(2x)`). acosh≥0 ⇒ no sign work
+(simpler than asinh).
+
+MEASURED (median-of-3, same binary, `FJ_ACOSH_SCALAR`): 4M SCALAR 15.19ms → SIMD **9.34ms = 1.63x**
+(vs JAX `arccosh` 7.80ms: 1.95x → 1.20x); 16M 29.70ms → **24.29ms = 1.22x** (clean, no BW regress).
+Gates: acosh_oracle 29/0, accuracy/edge test green, fmt clean. Reuses `log1p_f64x8`. INVERSE-HYPERBOLIC
+FAMILY COMPLETE (atanh ~parity, asinh 1.68x, acosh 1.63x @4M) — all via the log1p SIMD building block.
+
 ## 2026-07-01 - WIRED WIN (Asinh primitive: 1.68x @4M / 1.35x @16M): SIMD asinh (cancellation-free log1p form) reusing log1p_f64x8 (BlackThrush)
 
 Fifth wired consumer; second inverse-hyperbolic. `Asinh` (`eval_asinh`, real path was threaded scalar

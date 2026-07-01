@@ -6658,13 +6658,48 @@ pub(crate) fn eval_asinh(primitive: Primitive, inputs: &[Value]) -> Result<Value
     eval_unary_simd_dense_f64_parallel(primitive, inputs, asinh_f64x8, f64::asinh)
 }
 
+/// 8-wide `acosh(x) = log1p((x−1) + √((x−1)(x+1)))` for `x ≥ 1` — the cancellation-free form (for
+/// `x` near 1, `x-1` and `√((x-1)(x+1))` are both small ⇒ `log1p` of a small arg, accurate; the naive
+/// `ln(x+√(x²-1))` loses precision there). SIMD only for the safe regime `1 ≤ x < 1e150` (so
+/// `(x-1)(x+1)` can't overflow); `x<1` / `NaN` / `±inf` / huge-x lanes route to scalar `f64::acosh`
+/// (exact edges: `acosh(x<1)=NaN`, `acosh(inf)=inf`, large-x → `ln(2x)`). acosh ≥ 0, so no sign work.
+fn acosh_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Simd;
+    use std::simd::StdFloat;
+    use std::simd::cmp::SimdPartialOrd;
+    type F = Simd<f64, 8>;
+    let ok = x.simd_ge(F::splat(1.0)) & x.simd_lt(F::splat(1e150));
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f64; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].acosh();
+        }
+        return F::from_array(ra);
+    }
+    let xm1 = x - F::splat(1.0);
+    let s = (xm1 * (x + F::splat(1.0))).sqrt();
+    let mut r = log1p_f64x8(xm1 + s);
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k] >= 1.0 && xa[k] < 1e150) {
+                ra[k] = xa[k].acosh();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
 pub(crate) fn eval_acosh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX acosh_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
         ensure_jax_float_unary_operand(primitive, input)?;
     }
     if inputs.first().is_some_and(value_contains_complex) {
-        eval_unary_complex_map(primitive, inputs, |a, b| {
+        return eval_unary_complex_map(primitive, inputs, |a, b| {
             // Principal acosh(z) = log(z + sqrt(z+1)·sqrt(z-1)). Using the PRODUCT of
             // two principal square roots (not sqrt(z²-1)) selects the principal branch
             // with Re >= 0 (C99 Annex G / numpy / XLA convention). The old
@@ -6675,10 +6710,13 @@ pub(crate) fn eval_acosh(primitive: Primitive, inputs: &[Value]) -> Result<Value
             let sm = complex_sqrt((a - 1.0, b)); // sqrt(z - 1)
             let prod = complex_mul(sp, sm);
             complex_log((a + prod.0, b + prod.1))
-        })
-    } else {
-        eval_unary_elementwise_parallel(primitive, inputs, f64::acosh)
+        });
     }
+    // FJ_ACOSH_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
+    if std::env::var_os("FJ_ACOSH_SCALAR").is_some() {
+        return eval_unary_elementwise_parallel(primitive, inputs, f64::acosh);
+    }
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, acosh_f64x8, f64::acosh)
 }
 
 /// 8-wide `atanh(x) = 0.5·log1p(2x / (1 − x))` — the standard single-`log1p` identity (one
@@ -26544,6 +26582,72 @@ mod tests {
             } else {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
+        }
+    }
+
+    #[test]
+    fn acosh_simd_matches_scalar_tolerance_and_edges() {
+        // eval_acosh dense SIMD (log1p((x-1)+√((x-1)(x+1)))) vs scalar f64::acosh: ~1 ulp on x>=1,
+        // bit-exact edges (x<1 -> NaN, x=1 -> 0, +inf -> +inf, huge-x via scalar, NaN).
+        let mut data: Vec<f64> = (0..70_003usize)
+            .map(|i| 1.0 + (i % 9973) as f64 * 0.01)
+            .collect();
+        for (k, v) in [
+            (3usize, 1.0f64),
+            (4, 1.0 + 1e-12),
+            (5, 0.5),
+            (6, -3.0),
+            (7, 1e8),
+            (8, 1e200),
+            (9, f64::INFINITY),
+            (10, f64::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = tensor_f64(vec![data.len() as u32], &data);
+        let got =
+            extract_f64_vec(&eval_acosh(Primitive::Acosh, std::slice::from_ref(&input)).unwrap());
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.acosh();
+            let g = got[idx];
+            if want.is_finite() {
+                let tol = 1e-11 * want.abs().max(1.0);
+                assert!(
+                    (g - want).abs() <= tol,
+                    "acosh at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "acosh edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_acosh_throughput() {
+        use std::time::Instant;
+        for n in [4_000_000usize, 16_000_000usize] {
+            let data: Vec<f64> = (0..n).map(|i| 1.1 + (i % 9973) as f64 * 0.002).collect();
+            let input = tensor_f64(vec![n as u32], &data);
+            let f = || {
+                std::hint::black_box(
+                    eval_acosh(Primitive::Acosh, std::slice::from_ref(&input)).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            let scalar = std::env::var_os("FJ_ACOSH_SCALAR").is_some();
+            println!(
+                "fj-lax acosh f64 {}M [{}]: {:.3}ms",
+                n / 1_000_000,
+                if scalar { "SCALAR" } else { "SIMD" },
+                b * 1e3
+            );
         }
     }
 
