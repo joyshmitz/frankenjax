@@ -2,6 +2,22 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (Tanh primitive: 2.43x @4M / 1.30x @16M): UNGATE the SIMD tanh via Cephes rational exp (BlackThrush)
+
+Third consumer of `exp_cephes_block_f64`, and the highest-value (tanh is a top-tier ML activation).
+`eval_tanh` had a `simd_poly_tanh` path but it was GATED behind `cfg!(target_feature="fma")` — because
+it routed through the degree-13 Taylor `simd_poly_exp_into` (the now-STALE 0.79x-no-FMA finding). New
+`tanh_f64x8(x) = sign(x)·(1−e)/(1+e)`, `e = exp_cephes(−2|x|)` (arg ≤0 ⇒ `e∈(0,1]`, no overflow),
+THREADED via `eval_unary_simd_dense_f64_parallel` and UNGATED. SIMD for `|x|<354` (so `−2|x|>−708`, e
+finite-normal); `|x|≥354` (saturated ±1), `±inf`, `NaN` → scalar `f64::tanh`. Sign via sign-bit. The
+`(1-e)` small-x cancellation is only ~1e-16 ABSOLUTE and `tanh≈x`, so it stays within the oracle's
+ABSOLUTE 1e-10 bar (same math as the pre-existing simd_poly_tanh).
+
+MEASURED (median-of-3, `FJ_TANH_SCALAR`): 4M SCALAR 19.14ms → SIMD **7.87ms = 2.43x** (libm tanh is
+slow, ~4.8ns/elem, so the biggest exp-vein win yet); 16M 34.62ms → **26.69ms = 1.30x**. Gates: fj-lax
+lib 1671/0, full conformance green, fmt clean. The old FMA-gated simd_poly path is kept (referenced under
+`cfg!(fma)`) but this build now takes the ungated Cephes path. (sinh still needs expm1-style small-x.)
+
 ## 2026-07-01 - WIRED WIN (Cosh primitive: 1.78x @4M / 1.09x @16M): SIMD cosh via Cephes rational exp (BlackThrush)
 
 Second consumer of `exp_cephes_block_f64` (the reopened exp vein — see below). `Cosh` (`eval_cosh`, real

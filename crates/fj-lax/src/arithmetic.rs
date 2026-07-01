@@ -6560,6 +6560,45 @@ pub(crate) fn eval_cosh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
     eval_unary_simd_dense_f64_parallel(primitive, inputs, cosh_f64x8, f64::cosh)
 }
 
+/// 8-wide `tanh(x) = sign(x)·(1−e)/(1+e)` with `e = exp(−2|x|)` via the SIMD Cephes rational exp.
+/// The `exp` arg is `≤ 0` so `e ∈ (0,1]` (no overflow). Matches the existing `simd_poly_tanh` math
+/// (which passes the oracle's ABSOLUTE 1e-10 bar — the `(1-e)` small-x cancellation is only ~1e-16
+/// absolute, and `tanh(x)≈x` so that's within bar). SIMD for `|x| < 354` (so `−2|x| > −708`, `e`
+/// finite-normal); `|x| ≥ 354` (saturated to `±1`), `±inf`, `NaN` route to scalar `f64::tanh`. Sign
+/// via the sign bit (odd fn; keeps `tanh(±0)=±0`). Tolerance parity vs libm.
+fn tanh_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f64, 8>;
+    type U = Simd<u64, 8>;
+    let ax = x.abs();
+    let ok = ax.simd_lt(F::splat(354.0)); // false for NaN, ±inf, and saturated magnitudes
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f64; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].tanh();
+        }
+        return F::from_array(ra);
+    }
+    let e = crate::simd_exp::exp_cephes_block_f64(F::splat(-2.0) * ax);
+    let mag = (F::splat(1.0) - e) / (F::splat(1.0) + e); // tanh(|x|) ∈ [0,1)
+    let signbit = U::splat(0x8000_0000_0000_0000);
+    let mut r = F::from_bits((mag.to_bits() & !signbit) | (x.to_bits() & signbit));
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() < 354.0) {
+                ra[k] = xa[k].tanh();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
 pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX tanh_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
@@ -6596,7 +6635,13 @@ pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
         {
             return Ok(value);
         }
-        eval_unary_elementwise_parallel(primitive, inputs, f64::tanh)
+        // FJ_TANH_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
+        if std::env::var_os("FJ_TANH_SCALAR").is_some() {
+            return eval_unary_elementwise_parallel(primitive, inputs, f64::tanh);
+        }
+        // Threaded dense f64/f32 SIMD via the Cephes rational exp (ungated — the old FMA gate on
+        // simd_poly_tanh was for the degree-13 Taylor exp, now superseded: exp_cephes wins no-FMA).
+        eval_unary_simd_dense_f64_parallel(primitive, inputs, tanh_f64x8, f64::tanh)
     }
 }
 
@@ -26671,6 +26716,75 @@ mod tests {
             } else {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
+        }
+    }
+
+    #[test]
+    fn tanh_simd_matches_scalar_tolerance_and_edges() {
+        // eval_tanh dense SIMD (Cephes exp, (1-e)/(1+e)) vs scalar f64::tanh: absolute ~1e-12 across
+        // the range (matches the oracle's ABSOLUTE bar), bit-exact edges (±inf -> ±1, NaN, ±0).
+        let mut data: Vec<f64> = (0..70_003usize)
+            .map(|i| -25.0 + (i % 9973) as f64 * 0.005)
+            .collect();
+        for (k, v) in [
+            (3usize, 0.0f64),
+            (4, -0.0),
+            (5, 1e-9),
+            (6, 400.0),
+            (7, -400.0),
+            (8, f64::INFINITY),
+            (9, f64::NEG_INFINITY),
+            (10, f64::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = tensor_f64(vec![data.len() as u32], &data);
+        let got =
+            extract_f64_vec(&eval_tanh(Primitive::Tanh, std::slice::from_ref(&input)).unwrap());
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.tanh();
+            let g = got[idx];
+            if want.is_nan() {
+                assert!(g.is_nan(), "tanh NaN at x={x}");
+            } else {
+                // ABSOLUTE tolerance (tanh∈[-1,1]; the (1-e) form is ~1e-16 abs on small x).
+                assert!(
+                    (g - want).abs() <= 1e-12,
+                    "tanh at x={x}: simd {g} vs scalar {want}"
+                );
+                if x == 0.0 {
+                    assert_eq!(g.to_bits(), want.to_bits(), "tanh sign-of-zero at x={x}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_tanh_cephes_throughput() {
+        use std::time::Instant;
+        for n in [4_000_000usize, 16_000_000usize] {
+            let data: Vec<f64> = (0..n).map(|i| -6.0 + (i % 9973) as f64 * 0.0012).collect();
+            let input = tensor_f64(vec![n as u32], &data);
+            let f = || {
+                std::hint::black_box(
+                    eval_tanh(Primitive::Tanh, std::slice::from_ref(&input)).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            let scalar = std::env::var_os("FJ_TANH_SCALAR").is_some();
+            println!(
+                "fj-lax tanh f64 {}M [{}]: {:.3}ms",
+                n / 1_000_000,
+                if scalar { "SCALAR" } else { "SIMD" },
+                b * 1e3
+            );
         }
     }
 
