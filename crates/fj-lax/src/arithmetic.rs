@@ -6292,6 +6292,65 @@ pub(crate) fn eval_log(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
     eval_unary_simd_dense_f64_parallel(primitive, inputs, log_f64x8, f64::ln)
 }
 
+/// 8-wide `log1p` via the Kahan/Goldberg correction `log1p(x) = x·ln(u)/(u−1)` with `u = 1+x`,
+/// which recovers the low bits lost when `1+x` rounds (so it stays ~1 ulp even for tiny `x`, unlike
+/// a naive `ln(1+x)`). `ln(u)` uses the SIMD Cephes [`crate::simd_exp::log_block_f64`]. When `u == 1`
+/// (i.e. `x` is below the ulp of 1, incl. ±0 / subnormals) the exact result is `x` itself — returned
+/// verbatim so `log1p(±0)` keeps the sign of zero (bit-exact, as the oracle requires). Lanes where
+/// `u = 1+x` is `<= 0` / subnormal / `+inf` / `NaN` route to scalar `f64::ln_1p` (bit-exact edges:
+/// `log1p(-1)=-inf`, `log1p(<-1)=NaN`, `log1p(inf)=inf`). Positive-normal `u` ⇒ ~1 ulp, tolerance.
+fn log1p_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::cmp::SimdPartialOrd;
+    type F = Simd<f64, 8>;
+    let one = F::splat(1.0);
+    let u = one + x;
+    // Fast path valid only where u = 1+x is a positive normal & finite.
+    let normal = u.simd_ge(F::splat(f64::MIN_POSITIVE)) & u.simd_lt(F::splat(f64::INFINITY));
+    if !normal.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f64; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].ln_1p();
+        }
+        return F::from_array(ra);
+    }
+    let lnu = crate::simd_exp::log_block_f64(u);
+    let um1 = u - one;
+    // um1 == 0 ⇔ u rounded to exactly 1 ⇔ result is x (avoids the 0/0 in x/um1).
+    let is_one = um1.simd_eq(F::splat(0.0));
+    let corrected = is_one.select(x, x * lnu / um1);
+    let mut r = corrected;
+    if !normal.all() {
+        let xa = x.to_array();
+        let ua = u.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(ua[k] >= f64::MIN_POSITIVE && ua[k] < f64::INFINITY) {
+                ra[k] = xa[k].ln_1p();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
+pub(crate) fn eval_log1p(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX log1p_p = standard_unop(_float | _complex): integer operands rejected. Complex + tail +
+    // other-dtype fall through to eval_unary_elementwise_parallel (which dispatches complex by
+    // primitive via complex_unary_elementwise), preserving the prior eval_float_complex_unary path.
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
+    // FJ_LOG1P_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
+    if std::env::var_os("FJ_LOG1P_SCALAR").is_some() {
+        return eval_unary_elementwise_parallel(primitive, inputs, f64::ln_1p);
+    }
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, log1p_f64x8, f64::ln_1p)
+}
+
 /// `(cosh(x), sinh(x))` from a SINGLE `exp(x)` — `cosh=(e+1/e)/2`, `sinh=(e-1/e)/2` —
 /// halving the libm calls in the complex-trig kernels (which need both). Overflow matches
 /// libm: `x→+∞ ⇒ e=∞,1/e=0 ⇒ both →∞`; `x→−∞ ⇒ e=0,1/e=∞ ⇒ cosh→∞, sinh→−∞`; NaN→NaN.
@@ -26379,6 +26438,82 @@ mod tests {
                     data[idx]
                 );
             }
+        }
+    }
+
+    #[test]
+    fn log1p_simd_matches_scalar_tolerance_and_edges() {
+        // eval_log1p's dense SIMD path (Kahan-corrected log_block_f64) must: (a) hit the tight
+        // small-x oracle band (log1p(1e-10)≈1e-10 rel 1e-10; log1p(1e-15)≈1e-15 rel 1e-14),
+        // (b) preserve ±0 bit-exactly, (c) match scalar f64::ln_1p to ~1 ulp on positive normals,
+        // (d) be BIT-EXACT on edges (x<=-1 -> -inf/NaN, +inf -> +inf, NaN) via the scalar fallback.
+        let mut data: Vec<f64> = (0..70_003usize)
+            .map(|i| -0.9 + (i % 9973) as f64 * 0.001)
+            .collect();
+        for (k, v) in [
+            (3usize, 0.0f64),
+            (4, -0.0),
+            (5, 1e-10),
+            (6, 1e-15),
+            (7, -1e-12),
+            (8, -1.0),
+            (9, -2.5),
+            (10, f64::INFINITY),
+            (11, f64::NAN),
+            (12, 1e12),
+            (13, f64::MIN_POSITIVE / 2.0),
+        ] {
+            data[k] = v;
+        }
+        let input = tensor_f64(vec![data.len() as u32], &data);
+        let got =
+            extract_f64_vec(&eval_log1p(Primitive::Log1p, std::slice::from_ref(&input)).unwrap());
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.ln_1p();
+            let g = got[idx];
+            if want == 0.0 {
+                // ±0: sign must be preserved bit-exactly.
+                assert_eq!(g.to_bits(), want.to_bits(), "log1p sign-of-zero at x={x}");
+            } else if want.is_finite() {
+                let tol = 1e-12 * want.abs().max(1e-300);
+                assert!(
+                    (g - want).abs() <= tol,
+                    "log1p at x={x}: simd {g} vs scalar {want} (rel {})",
+                    ((g - want) / want).abs()
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_log1p_throughput() {
+        // eval_log1p SIMD vs FJ_LOG1P_SCALAR-forced scalar libm, vs JAX (4M 2.75ms / 16M 19.86ms).
+        use std::time::Instant;
+        for n in [4_000_000usize, 16_000_000usize] {
+            let data: Vec<f64> = (0..n).map(|i| 0.1 + (i % 9973) as f64 * 0.002).collect();
+            let input = tensor_f64(vec![n as u32], &data);
+            let f = || {
+                std::hint::black_box(
+                    eval_log1p(Primitive::Log1p, std::slice::from_ref(&input)).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            let scalar = std::env::var_os("FJ_LOG1P_SCALAR").is_some();
+            println!(
+                "fj-lax log1p f64 {}M [{}]: {:.3}ms",
+                n / 1_000_000,
+                if scalar { "SCALAR" } else { "SIMD" },
+                b * 1e3
+            );
         }
     }
 

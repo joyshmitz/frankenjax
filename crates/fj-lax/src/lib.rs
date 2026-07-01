@@ -52,7 +52,8 @@ use arithmetic::{
     eval_complex, eval_conj, eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general,
     eval_erf, eval_erf_inv, eval_erfc, eval_exp, eval_float_complex_unary, eval_fma, eval_igamma,
     eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf, eval_is_nan,
-    eval_lgamma, eval_log, eval_neg, eval_nextafter, eval_polygamma, eval_real, eval_round,
+    eval_lgamma, eval_log, eval_log1p, eval_neg, eval_nextafter, eval_polygamma, eval_real,
+    eval_round,
     eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
     eval_unary_elementwise_parallel, eval_unary_int_or_float, eval_zeta,
 };
@@ -361,7 +362,7 @@ fn eval_primitive_inner(
         Primitive::Atanh => eval_atanh(primitive, inputs),
         // Additional math
         Primitive::Expm1 => eval_float_complex_unary(primitive, inputs, f64::exp_m1),
-        Primitive::Log1p => eval_float_complex_unary(primitive, inputs, f64::ln_1p),
+        Primitive::Log1p => eval_log1p(primitive, inputs),
         Primitive::Sign => eval_unary_int_or_float(
             primitive,
             inputs,

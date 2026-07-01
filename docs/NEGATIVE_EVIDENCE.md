@@ -2,6 +2,28 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (Log1p primitive: 1.79x @4M / 1.13x @16M): SIMD Kahan-corrected log1p reuses log_block_f64 (BlackThrush)
+
+Third consumer of the `log_block_f64` kernel. `Log1p` (`eval_log1p`, was `eval_float_complex_unary(f64::ln_1p)`)
+was pure scalar libm `log1p` — and libm `log1p` is SLOWER than libm `ln` (scalar 14.68ms vs 9.34ms @4M),
+so the SIMD win is even larger than plain `log`. Not bit-exact-golden-pinned (grep: no `ln_1p().to_bits`).
+
+New `log1p_f64x8` uses the Kahan/Goldberg correction `log1p(x) = x·ln(u)/(u−1)` with `u = 1+x` — recovers
+the low bits lost when `1+x` rounds, so it stays ~1 ulp even for tiny `x` (the naive `ln(1+x)` would not).
+`ln(u)` via the SIMD Cephes `log_block_f64`; when `u == 1` (|x| below the ulp of 1, incl. ±0 / subnormals)
+the exact result is `x` returned verbatim (so `log1p(±0)` keeps zero's sign — bit-exact). Lanes with
+`u = 1+x <= 0` / subnormal / `+inf` / `NaN` route to scalar `f64::ln_1p` (bit-exact edges). The tight
+`log1p_oracle` band — `log1p(1e-10)≈1e-10` (rel 1e-10), `log1p(1e-15)≈1e-15` (rel 1e-14), `log1p(±0)`
+bit-exact — all PASS (38/0). Complex + tail + other dtypes unchanged (fall through to the by-primitive
+`complex_unary_elementwise` dispatch, exactly as before).
+
+MEASURED (same binary, min-of-5, `FJ_LOG1P_SCALAR` A/B):
+  - 4M f64: SCALAR 14.68ms → SIMD **8.21ms = 1.79x**; vs JAX `jnp.log1p` 2.75ms **5.34x → 2.99x**.
+  - 16M f64: SCALAR 26.70ms → SIMD **23.63ms = 1.13x**; vs JAX 19.86ms **1.34x → 1.19x** (16M=128MB is
+    DRAM-BW-bound, masking the compute win; 4M nearer cache shows the true ~1.8x kernel speedup).
+Residual vs-JAX = the +fma-poly wall. Gates: fj-lax lib 1664/0, conformance green (log1p_oracle 38/0),
+fmt clean. `log_block_f64` reused verbatim — no new kernel.
+
 ## 2026-07-01 - WIRED WIN (Log primitive: 1.53x @4M / 1.15x @16M): route dense eval_log through the SIMD Cephes log (BlackThrush)
 
 Follow-on to the `log_block_f64` land (below): the `Log` PRIMITIVE itself (`eval_log`) was pure scalar
