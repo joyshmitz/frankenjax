@@ -10940,3 +10940,15 @@ fused O(k^2) bf16 path (SUM only — max/min keep the deque path). fj FLAT in wi
 **w64=8.45 ms** = vs JAX **10.6x / 32.5x / 141.6x FASTER**. Verified vs brute-force bf16 reference
 (`rw4d_nhwc_separable_sum_bf16_matches_bruteforce`, tolerance-gated for coarse bf16 rounding) + rw4d tests green.
 NHWC box-sum now O(k) for f32/f64/bf16; f16 + strided/SAME-pad remain (follow-up).
+
+## 2026-07-02 - WIN: f16 4D NHWC separable sum-pool (large-window) — up to 6.4x FASTER than JAX (BlackThrush)
+
+Completed the half-precision NHWC separable sum-pool family with f16 (`separable_reduce_window_sum_4d_nhwc_f16`,
+IEEE-half codec via `Literal::F16Bits`/`from_f16_f64`). Unlike bf16 (bit-shift decode), f16 uses the SCALAR half
+codec, so the O(input) running-sum overhead only beats the fused O(k^2) path for LARGE windows — measured crossover
+~w24 (JAX f16 [4,256,256,16] w16=33ms vs fj-separable 57ms LOSS; w32=116ms vs 65ms WIN; w64=330ms vs 51.5ms).
+GATED to >= 900 taps (~w30+): smaller windows fall through to the fused f16 path (no regression, w16 stays ~32ms ≈
+JAX 33ms). RESULT (separable zone): w32 **1.78x**, w64 **6.4x FASTER**. Verified vs brute-force f16 reference at a
+32x32 window (`rw4d_nhwc_separable_sum_f16_matches_bruteforce`) + rw4d tests green. NHWC box-sum now O(k) for
+f32/f64/bf16 (all windows) + f16 (large windows). Follow-up for a clean f16 all-window win: SIMD the decode via the
+existing `f16_widen8_full_f32` in the running loop (would drop f16 to bf16-like ~10ms). Strided/SAME-pad still open.

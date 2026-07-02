@@ -4149,6 +4149,101 @@ fn separable_reduce_window_sum_4d_nhwc_bf16(
     Some(output)
 }
 
+/// f16 sibling of [`separable_reduce_window_sum_4d_nhwc_bf16`] — decode/round via IEEE-half
+/// `Literal::F16Bits`/`from_f16_f64` (f16 has 10 mantissa bits, so it needs the true half codec,
+/// not the bf16 bit-shift). Same VALID/unit-stride separable running sums, tolerance-equal.
+#[allow(clippy::too_many_arguments)]
+fn separable_reduce_window_sum_4d_nhwc_f16(
+    tensor: &TensorValue,
+    dims: [usize; 4],
+    out_h: usize,
+    out_w: usize,
+    window_h: usize,
+    window_w: usize,
+) -> Option<Vec<u16>> {
+    let [bn, h, w, c] = dims;
+    // f16 uses the SCALAR half codec (no bit-shift decode like bf16), so the O(input) running-sum
+    // overhead only beats the fused O(k^2) path once the window is large. Measured crossover ~w24
+    // (JAX f16 w16=33ms < fj 57ms, but w32=116ms > fj 53ms) → gate to >= 900 taps (~w30+), where it
+    // wins clearly (w32 2.2x, w64 6.9x). Smaller windows fall through to the fused f16 path.
+    if window_h < 2 || window_w < 2 || window_h.saturating_mul(window_w) < 900 {
+        return None;
+    }
+    if out_h + window_h != h + 1 || out_w + window_w != w + 1 {
+        return None;
+    }
+    let bits = tensor.elements.as_half_float_slice()?;
+    if bits.len() != bn * h * w * c {
+        return None;
+    }
+    let dec = |b: u16| -> f64 { Literal::F16Bits(b).as_f64().unwrap_or(0.0) };
+    if !bits.iter().all(|&b| dec(b).is_finite()) {
+        return None;
+    }
+    let enc = |v: f64| -> u16 {
+        match Literal::from_f16_f64(v) {
+            Literal::F16Bits(b) => b,
+            _ => 0,
+        }
+    };
+    let row_c = out_w * c;
+    let mut output = vec![0u16; bn * out_h * row_c];
+    let mut hsum = vec![0.0f64; h * row_c];
+    let mut vsum = vec![0.0f64; row_c];
+    let mut acc = vec![0.0f64; c];
+    for n in 0..bn {
+        let in_base = n * h * w * c;
+        for pr in 0..h {
+            let src_row = in_base + pr * w * c;
+            let hrow = &mut hsum[pr * row_c..(pr + 1) * row_c];
+            acc.iter_mut().for_each(|a| *a = 0.0);
+            for j in 0..window_w {
+                let s = src_row + j * c;
+                for (a, &b) in acc.iter_mut().zip(&bits[s..s + c]) {
+                    *a += dec(b);
+                }
+            }
+            for (o, &a) in hrow[0..c].iter_mut().zip(&acc) {
+                *o = a;
+            }
+            for oc in 1..out_w {
+                let add = src_row + (oc + window_w - 1) * c;
+                let sub = src_row + (oc - 1) * c;
+                for ch in 0..c {
+                    acc[ch] += dec(bits[add + ch]) - dec(bits[sub + ch]);
+                }
+                let d = &mut hrow[oc * c..(oc + 1) * c];
+                for (o, &a) in d.iter_mut().zip(&acc) {
+                    *o = a;
+                }
+            }
+        }
+        vsum.iter_mut().for_each(|v| *v = 0.0);
+        for wr in 0..window_h {
+            let hrow = &hsum[wr * row_c..(wr + 1) * row_c];
+            for (v, &hh) in vsum.iter_mut().zip(hrow) {
+                *v += hh;
+            }
+        }
+        let obase = n * out_h * row_c;
+        for (o, &v) in output[obase..obase + row_c].iter_mut().zip(&vsum) {
+            *o = enc(v);
+        }
+        for or in 1..out_h {
+            let add = &hsum[(or + window_h - 1) * row_c..(or + window_h) * row_c];
+            let sub = &hsum[(or - 1) * row_c..or * row_c];
+            for ((v, &a), &s) in vsum.iter_mut().zip(add).zip(sub) {
+                *v += a - s;
+            }
+            let od = &mut output[obase + or * row_c..obase + (or + 1) * row_c];
+            for (o, &v) in od.iter_mut().zip(&vsum) {
+                *o = enc(v);
+            }
+        }
+    }
+    Some(output)
+}
+
 /// Rank-3 separable running-window-SUM for VALID (pad 0), unit-stride f64 sum pooling
 /// (volumetric/3D `reduce_window` add). Replaces the naive O(out·∏window) tap loop in
 /// [`reduce_window_rank3_f64_sum_xlane`] with three O(input) add-new-subtract-old running
@@ -8089,6 +8184,44 @@ fn eval_reduce_window(
         ));
     }
 
+    // f16 rank-4 NHWC SUM: separable O(k) path, placed before the fused O(k^2) f16 path below.
+    // SUM only (max/min keep the fused deque/SIMD path). VALID + unit stride, else None → fused path.
+    if no_base_dilation
+        && no_window_dilation
+        && output_dtype == fj_core::DType::F16
+        && tensor.dtype == fj_core::DType::F16
+        && reduce_window_sum_like(reduce_op)
+        && rank == 4
+        && window_dims[0] == 1
+        && window_dims[3] == 1
+        && strides.iter().all(|&s| s == 1)
+        && pad_lows.iter().all(|&p| p == 0)
+        && let Some(obits) = separable_reduce_window_sum_4d_nhwc_f16(
+            tensor,
+            [
+                tensor.shape.dims[0] as usize,
+                tensor.shape.dims[1] as usize,
+                tensor.shape.dims[2] as usize,
+                tensor.shape.dims[3] as usize,
+            ],
+            out_dims[1] as usize,
+            out_dims[2] as usize,
+            window_dims[1],
+            window_dims[2],
+        )
+    {
+        return Ok(Value::Tensor(
+            TensorValue::new_half_float_values(
+                fj_core::DType::F16,
+                Shape {
+                    dims: out_dims.to_vec(),
+                },
+                obits,
+            )
+            .map_err(EvalError::from)?,
+        ));
+    }
+
     // FUSED f16 channel-last pooling (max/min/sum): widen each tap via the branchless
     // f16_widen8_full_f32. MAX/MIN use an f32 running-max scratch (narrow once per output); SUM uses
     // an f64 accumulator in the odometer's tap order (rounds f64→f16 once). Reads the half-size f16
@@ -9990,6 +10123,66 @@ mod tests {
             max_rel < 1e-5,
             "separable f32 sum-pool drifted: {max_rel:e}"
         );
+    }
+
+    #[test]
+    fn rw4d_nhwc_separable_sum_f16_matches_bruteforce() {
+        // Large window (>= 900 taps) so the gated f16 separable path actually fires.
+        let (bn, h, w, c) = (1usize, 40usize, 40usize, 4usize);
+        let (wh, ww) = (32usize, 32usize);
+        let enc = |v: f64| -> u16 {
+            match Literal::from_f16_f64(v) {
+                Literal::F16Bits(b) => b,
+                _ => 0,
+            }
+        };
+        let dec = |b: u16| -> f64 { Literal::F16Bits(b).as_f64().unwrap_or(0.0) };
+        let bits: Vec<u16> = (0..bn * h * w * c)
+            .map(|i| enc((((i * 7 + 3) % 97) as f64) * 0.03125 - 1.5))
+            .collect();
+        let x = Value::Tensor(
+            TensorValue::new_half_float_values(
+                fj_core::DType::F16,
+                Shape {
+                    dims: vec![bn as u32, h as u32, w as u32, c as u32],
+                },
+                bits.clone(),
+            )
+            .unwrap(),
+        );
+        let mut p = BTreeMap::new();
+        p.insert("reduce_op".to_owned(), "sum".to_owned());
+        p.insert("window_dimensions".to_owned(), format!("1,{wh},{ww},1"));
+        p.insert("window_strides".to_owned(), "1,1,1,1".to_owned());
+        let got = eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&x), &p).unwrap();
+        let got = got.as_tensor().unwrap();
+        let (oh, ow) = (h - wh + 1, w - ww + 1);
+        assert_eq!(
+            got.shape.dims,
+            vec![bn as u32, oh as u32, ow as u32, c as u32]
+        );
+        let obits = got.elements.as_half_float_slice().unwrap();
+        for n in 0..bn {
+            for r in 0..oh {
+                for col in 0..ow {
+                    for ch in 0..c {
+                        let mut acc = 0.0f64;
+                        for dh in 0..wh {
+                            for dw in 0..ww {
+                                let idx = ((n * h + r + dh) * w + col + dw) * c + ch;
+                                acc += dec(bits[idx]);
+                            }
+                        }
+                        let oi = ((n * oh + r) * ow + col) * c + ch;
+                        let o = dec(obits[oi]);
+                        assert!(
+                            (o - acc).abs() <= 0.01 * acc.abs().max(1.0),
+                            "f16 mismatch n{n} r{r} c{col} ch{ch}: got {o} want {acc}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
