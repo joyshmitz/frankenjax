@@ -15306,6 +15306,29 @@ mod tests {
         assert_eq!(vals, vec![58.0, 64.0, 139.0, 154.0]);
     }
 
+    // Guards the i32 Dot fast path (rank2_i64_matmul_dot tagged I32 + narrow chokepoint):
+    // [[1,2,3],[4,5,6]] @ [[7,8],[9,10],[11,12]] in i32 = [58,64,139,154].
+    #[test]
+    fn i32_dot_fast_path_matches_expected() {
+        let a = Value::Tensor(
+            TensorValue::new_i32_values(Shape { dims: vec![2, 3] }, vec![1, 2, 3, 4, 5, 6]).unwrap(),
+        );
+        let b = Value::Tensor(
+            TensorValue::new_i32_values(Shape { dims: vec![3, 2] }, vec![7, 8, 9, 10, 11, 12])
+                .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Dot, &[a, b], &no_params()).unwrap();
+        assert_eq!(out.as_tensor().unwrap().dtype, DType::I32);
+        let vals: Vec<i64> = out
+            .as_tensor()
+            .unwrap()
+            .elements
+            .iter()
+            .map(|l| l.as_i64().unwrap())
+            .collect();
+        assert_eq!(vals, vec![58, 64, 139, 154]);
+    }
+
     // Guards the u32/u64 Dot fast path (rank2_u64_matmul_dot): [[1,2,3],[4,5,6]] @
     // [[7,8],[9,10],[11,12]] in u64 = [58,64,139,154].
     #[test]

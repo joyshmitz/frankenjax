@@ -14087,7 +14087,14 @@ fn rank2_i64_matmul_dot(
     rhs: &TensorValue,
     output_dims: &[u32],
 ) -> Result<Option<Value>, EvalError> {
-    if lhs.dtype != DType::I64 || rhs.dtype != DType::I64 || lhs.rank() != 2 || rhs.rank() != 2 {
+    // I32 shares the I64 dense storage; tag the output I32 and the eval_primitive
+    // `narrow_i32_tensor_result` chokepoint wraps mod 2^32 (mod commutes with the i64
+    // wrapping fold — same as the dot_general canonical i32/i64 path).
+    let int_dtype = match dot_output_kind(lhs, rhs) {
+        DotOutputKind::Integral(dt @ (DType::I32 | DType::I64)) => dt,
+        _ => return Ok(None),
+    };
+    if lhs.rank() != 2 || rhs.rank() != 2 {
         return Ok(None);
     }
     let m = lhs.shape.dims[0] as usize;
@@ -14097,12 +14104,14 @@ fn rank2_i64_matmul_dot(
         return Ok(None);
     };
     let values = rank2_i64_matmul(a, m, k, b, n);
-    Ok(Some(Value::Tensor(TensorValue::new_i64_values(
+    let mut out = TensorValue::new_i64_values(
         Shape {
             dims: output_dims.to_vec(),
         },
         values,
-    )?)))
+    )?;
+    out.dtype = int_dtype;
+    Ok(Some(Value::Tensor(out)))
 }
 
 /// Dense rank-2 f32 matmul fast path for the `Dot` primitive. f32 is JAX's DEFAULT

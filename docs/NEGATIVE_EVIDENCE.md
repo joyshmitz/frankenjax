@@ -10710,3 +10710,13 @@ frontend + fj-ad). Both fell to the per-element odometer (~14 s for 1024³).
 51 dot tests green + new guards `f32_dot_fast_path_matches_expected`, `u64_dot_fast_path_matches_expected`,
 `i64_dot_fast_path_matches_expected`. STILL UNWIRED in Dot: complex (rank2_complex_matmul), i32 (i64+narrow) — next.
 No ceiling.
+
+## 2026-07-02 - WIN: i32 Dot fast path — completes integer matmul coverage on the Dot primitive (BlackThrush)
+
+Extended `rank2_i64_matmul_dot` to accept I32 (it shares the dense I64 storage): use `dot_output_kind` → tag the
+i64 output I32, and the `eval_primitive` `narrow_i32_tensor_result` chokepoint (lib.rs:262, applied to EVERY
+result) wraps mod 2^32 — BIT-IDENTICAL to the generic i32 odometer + mirrors the dot_general canonical i32 path.
+So i32 `dot`/`matmul` now routes through the SAME threaded `rank2_i64_matmul` as i64 (measured 17.23 ms / ~230x
+FASTER than JAX's BLAS-less integer loop) instead of the ~14 s per-element odometer. Verified:
+`i32_dot_fast_path_matches_expected` (dtype==I32 + values) + 52 dot tests green. eval_tensor_dot integer coverage
+now COMPLETE (i64/i32/u64/u32) + f32 regression-fixed; only complex remains (rank2_complex_matmul, next). No ceiling.
