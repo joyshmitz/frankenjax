@@ -10820,3 +10820,21 @@ only ACROSS slices — so a single-slice 16M sort runs the radix SINGLE-THREADED
 comparison sort). LEVER: thread the single-slice radix (parallel histogram + partitioned scatter, or an MSD split
 that fans slices to threads) → 1D i64 sort 1114→~300 ms would BEAT JAX, and f64 971→~300 ms widens the win.
 Substantial (stable parallel radix is fiddly), so pinned not attempted. No ceiling.
+
+### 2026-07-02 correction: 1D sort is ALREADY parallel — the real i64-sort lever is pairs→keys-only (~2x), not threading (BlackThrush)
+
+My prior "single-slice radix is single-threaded" hypothesis was WRONG. `sort_along_axis_dense_i64/f64` DO parallelize
+the single large slice: `use_parallel_radix(outer_count==1, axis_dim>=PARALLEL_RADIX_MIN_PAIRS)` → `radix_pairs_
+ascending_parallel` (MSD top-byte partition into 256 globally-ordered buckets, then per-bucket LSD sorted across
+threads). So the i64-sort loss is NOT missing parallelism.
+
+REAL LEVER (verified by analysis, pinned): both paths radix-sort `(u64 key, u32 index)` PAIRS = **16 bytes/elem**
+(u32 padded) even for a VALUE sort (`return_indices=false`). But for i64/f64 value sort the key is the value
+bijectively (i64: `(v as u64)^(1<<63)^mask`, self-inverse; f64: total-order key, invertible), so a **keys-only**
+radix on `Vec<u64>` (**8 bytes/elem**) halves the memory traffic AND the random-scatter cache footprint → est.
+~2x. i64 value sort 1114→~550 ms would BEAT JAX (873 ms); f64 971→~500 ms widens the 4.5x win to ~9x. BIT-IDENTICAL
+for value sort: equal keys ⇒ equal values, so stability is irrelevant (no index needed). SCOPE (why not landed
+in-turn): needs keys-only copies of `radix_pairs_ascending_passes`/`_parallel`/`radix_sort_slice_8pass` (~150 lines,
+subtle) + a keys-only value-sort slice path — a stable-radix rewrite is fiddly, and a bit-buggy radix is worse than
+a clean handoff. Next dig: implement + verify against the existing pairs sort (`radix_sort_i64_ascending_matches_
+comparison_sort`), argsort keeps pairs. No ceiling.
