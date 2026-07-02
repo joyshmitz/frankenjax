@@ -4162,11 +4162,7 @@ fn separable_reduce_window_sum_4d_nhwc_f16(
     window_w: usize,
 ) -> Option<Vec<u16>> {
     let [bn, h, w, c] = dims;
-    // f16 uses the SCALAR half codec (no bit-shift decode like bf16), so the O(input) running-sum
-    // overhead only beats the fused O(k^2) path once the window is large. Measured crossover ~w24
-    // (JAX f16 w16=33ms < fj 57ms, but w32=116ms > fj 53ms) → gate to >= 900 taps (~w30+), where it
-    // wins clearly (w32 2.2x, w64 6.9x). Smaller windows fall through to the fused f16 path.
-    if window_h < 2 || window_w < 2 || window_h.saturating_mul(window_w) < 900 {
+    if window_h < 2 || window_w < 2 || window_h.saturating_mul(window_w) < 25 {
         return None;
     }
     if out_h + window_h != h + 1 || out_w + window_w != w + 1 {
@@ -4186,7 +4182,16 @@ fn separable_reduce_window_sum_4d_nhwc_f16(
             _ => 0,
         }
     };
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+    // SIMD the f16 DECODE only (f16→f32 widen exact, cast f32→f64 exact) → the f64 accumulation is
+    // numerically IDENTICAL to the scalar `dec()` path; this removes the scalar-codec floor.
+    let widen8 = |base: usize| -> Simd<f64, 8> {
+        crate::arithmetic::f16_widen8_full_f32(Simd::<u16, 8>::from_slice(&bits[base..base + 8]))
+            .cast::<f64>()
+    };
     let row_c = out_w * c;
+    let cw = c - c % 8;
     let mut output = vec![0u16; bn * out_h * row_c];
     let mut hsum = vec![0.0f64; h * row_c];
     let mut vsum = vec![0.0f64; row_c];
@@ -4199,8 +4204,15 @@ fn separable_reduce_window_sum_4d_nhwc_f16(
             acc.iter_mut().for_each(|a| *a = 0.0);
             for j in 0..window_w {
                 let s = src_row + j * c;
-                for (a, &b) in acc.iter_mut().zip(&bits[s..s + c]) {
-                    *a += dec(b);
+                let mut ci = 0;
+                while ci < cw {
+                    let a = Simd::<f64, 8>::from_slice(&acc[ci..ci + 8]);
+                    (a + widen8(s + ci)).copy_to_slice(&mut acc[ci..ci + 8]);
+                    ci += 8;
+                }
+                while ci < c {
+                    acc[ci] += dec(bits[s + ci]);
+                    ci += 1;
                 }
             }
             for (o, &a) in hrow[0..c].iter_mut().zip(&acc) {
@@ -4209,8 +4221,15 @@ fn separable_reduce_window_sum_4d_nhwc_f16(
             for oc in 1..out_w {
                 let add = src_row + (oc + window_w - 1) * c;
                 let sub = src_row + (oc - 1) * c;
-                for ch in 0..c {
-                    acc[ch] += dec(bits[add + ch]) - dec(bits[sub + ch]);
+                let mut ci = 0;
+                while ci < cw {
+                    let a = Simd::<f64, 8>::from_slice(&acc[ci..ci + 8]);
+                    (a + widen8(add + ci) - widen8(sub + ci)).copy_to_slice(&mut acc[ci..ci + 8]);
+                    ci += 8;
+                }
+                while ci < c {
+                    acc[ci] += dec(bits[add + ci]) - dec(bits[sub + ci]);
+                    ci += 1;
                 }
                 let d = &mut hrow[oc * c..(oc + 1) * c];
                 for (o, &a) in d.iter_mut().zip(&acc) {
@@ -10127,9 +10146,9 @@ mod tests {
 
     #[test]
     fn rw4d_nhwc_separable_sum_f16_matches_bruteforce() {
-        // Large window (>= 900 taps) so the gated f16 separable path actually fires.
-        let (bn, h, w, c) = (1usize, 40usize, 40usize, 4usize);
-        let (wh, ww) = (32usize, 32usize);
+        // c=16 (>= 8) so the SIMD f16-widen path is exercised, plus a scalar-tail size elsewhere.
+        let (bn, h, w, c) = (2usize, 13usize, 11usize, 16usize);
+        let (wh, ww) = (5usize, 5usize);
         let enc = |v: f64| -> u16 {
             match Literal::from_f16_f64(v) {
                 Literal::F16Bits(b) => b,

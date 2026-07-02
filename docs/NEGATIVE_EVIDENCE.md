@@ -10952,3 +10952,17 @@ JAX 33ms). RESULT (separable zone): w32 **1.78x**, w64 **6.4x FASTER**. Verified
 32x32 window (`rw4d_nhwc_separable_sum_f16_matches_bruteforce`) + rw4d tests green. NHWC box-sum now O(k) for
 f32/f64/bf16 (all windows) + f16 (large windows). Follow-up for a clean f16 all-window win: SIMD the decode via the
 existing `f16_widen8_full_f32` in the running loop (would drop f16 to bf16-like ~10ms). Strided/SAME-pad still open.
+
+## 2026-07-02 - WIN: f16 NHWC sum-pool SIMD decode — now ALL-window win (up to 10.7x), gate removed (BlackThrush)
+
+Follow-up to the gated f16 pool (c131e5ef): SIMD the f16 DECODE via the existing `f16_widen8_full_f32`
+(8 f16→f32x8, cast f32→f64x8) in the two running-sum hot loops. f16→f32 widen and f32→f64 cast are both
+EXACT, so the f64 accumulation is numerically IDENTICAL to the scalar `Literal::F16Bits` path — pure speedup,
+no precision change. f16 pool now FLAT ~31ms (was 47-57ms scalar; the residual is the scalar f64→f16 output
+encode). REMOVED the 900-tap gate — now a win at ALL windows vs JAX f16 [4,256,256,16]: w16 33→30.84ms
+**1.07x** (was a LOSS), w32 116→31.61ms **3.67x**, w64 330→30.81ms **10.7x**. Verified with c=16 (exercises the
+8-wide SIMD path) vs brute-force f16 reference + 4 rw4d tests green. NHWC box-sum now a clean all-window O(k)
+win for f32/f64/bf16/f16. NOTE (maxpool, surfaced not fixed): fj f32 overlapping MAXPOOL uses the deque O(n)
+path but with a heavy ~100ms flat constant — LOSES to JAX at w16 (119 vs 27ms)/w32 (100 vs 80ms), wins only at
+w64 (88 vs 264ms, 3x). The deque f32→f64 widen + branchy bookkeeping is the cost; a real (risky, shared-code)
+lever remains there.
