@@ -10597,3 +10597,14 @@ Replicates JAX's vectorized-while overwrite semantics (`k_out = select(accept,k,
 elements until the global loop ends). With gamma (8241ad8e) this closes the two hardest rejection samplers; the
 RNG derived-distribution parity front is now essentially complete (geometric/exp/gumbel/laplace already faithful).
 No ceiling.
+
+## 2026-07-02 - WIN (parity): random_beta rewritten to JAX loggamma + log-max combine — element-wise match vs JAX-f32 (BlackThrush)
+
+Third sampler. Even with faithful gamma, `random_beta` diverged: JAX `_beta` draws LOG-gamma (`_gamma_one` with
+log_space=True — boost via `-Exponential = log1p(-uniform)` instead of `Uniform^(1/a)`) for each parameter, then
+combines `gamma_a/(gamma_a+gamma_b)` via the numerically-stable log-max trick (`exp(log_g - log_max)`). fj used
+plain gamma + direct ratio. Added the `log_space` path to `gamma_one` and rewrote `random_beta` to split the key
+(`random_split(key)` == JAX `_split`), draw per-element loggamma for a and b, and log-max combine. VERIFIED
+element-for-element vs JAX-f32 `random.beta(PRNGKey(0),a,b,(8,))`: oracle green for (2,3) AND (0.5,0.5) to 1e-4.
+Full suite green: fj-lax rng 44/0, conformance stat 18/0. gamma/poisson/beta now all JAX-faithful; dirichlet
+(also composes gamma) is the remaining compose-sampler to audit. No ceiling.

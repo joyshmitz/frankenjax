@@ -966,17 +966,18 @@ pub fn random_gamma(key: PRNGKey, count: usize, shape_param: f64) -> Vec<f64> {
     // element-wise. Draws use fj's JAX-f32-matching uniform/normal + `random_split_n`.
     random_split_n(key, count)
         .into_iter()
-        .map(|k| gamma_one(k, shape_param))
+        .map(|k| gamma_one(k, shape_param, false))
         .collect()
 }
 
 /// Faithful port of JAX's `_gamma_one` (jax/_src/random.py): Marsaglia-Tsang with
 /// per-iteration key evolution. For `alpha < 1` it boosts to `alpha+1` and scales by
-/// `Uniform^(1/alpha)`. The accept/reject math is the (already-correct) squeeze test;
-/// the fidelity fix is the JAX key schedule — each element/iteration draws from its own
-/// split subkey, so results follow JAX element-for-element (to f32 tolerance; fj arith
-/// is f64 on f32-matching draws — see NEGATIVE_EVIDENCE 2026-07-02).
-fn gamma_one(key: PRNGKey, alpha_orig: f64) -> f64 {
+/// `Uniform^(1/alpha)`. `log_space` returns `log(sample)` via `-Exponential` boost (used
+/// by `random_beta`/loggamma) — matching JAX's numerically-stable log path. The
+/// accept/reject math is the (already-correct) squeeze test; the fidelity fix is the JAX
+/// key schedule — each element/iteration draws from its own split subkey, so results
+/// follow JAX element-for-element (f32 tolerance; fj arith is f64 on f32-matching draws).
+fn gamma_one(key: PRNGKey, alpha_orig: f64, log_space: bool) -> f64 {
     let boost = alpha_orig < 1.0;
     let alpha = if boost { alpha_orig + 1.0 } else { alpha_orig };
     let d = alpha - 1.0 / 3.0;
@@ -1007,7 +1008,16 @@ fn gamma_one(key: PRNGKey, alpha_orig: f64) -> f64 {
         uu = random_uniform(s3[2], 1, 0.0, 1.0)[0];
     }
 
-    if boost {
+    if log_space {
+        // log_samples = -Exponential(subkey) = log1p(-uniform(subkey)); boost only for a<1.
+        let log_samples = (-random_uniform(subkey, 1, 0.0, 1.0)[0]).ln_1p();
+        let log_boost = if !boost || log_samples == 0.0 {
+            0.0
+        } else {
+            log_samples / alpha_orig
+        };
+        d.ln() + vv.ln() + log_boost
+    } else if boost {
         let s = 1.0 - random_uniform(subkey, 1, 0.0, 1.0)[0];
         d * vv * s.powf(1.0 / alpha_orig)
     } else {
@@ -1021,16 +1031,25 @@ fn gamma_one(key: PRNGKey, alpha_orig: f64) -> f64 {
 /// Uses the relationship: Beta(a,b) = Gamma(a) / (Gamma(a) + Gamma(b))
 #[must_use]
 pub fn random_beta(key: PRNGKey, count: usize, a: f64, b: f64) -> Vec<f64> {
+    // JAX `_beta`: split the key, draw LOG-gamma for each parameter (per-element keys),
+    // then combine gamma_a/(gamma_a+gamma_b) via the numerically-stable log-max trick
+    // (exp(log_g - log_max)). Using loggamma (not plain gamma) + log-max is what makes
+    // this match JAX element-for-element, incl. small a/b where plain gamma underflows.
     let (k1, k2) = random_split(key);
-    let gamma_a = random_gamma(k1, count, a);
-    let gamma_b = random_gamma(k2, count, b);
-
-    gamma_a
-        .iter()
-        .zip(gamma_b.iter())
-        .map(|(&ga, &gb)| {
-            let sum = ga + gb;
-            if sum > 0.0 { ga / sum } else { 0.5 }
+    let log_ga: Vec<f64> = random_split_n(k1, count)
+        .into_iter()
+        .map(|k| gamma_one(k, a, true))
+        .collect();
+    let log_gb: Vec<f64> = random_split_n(k2, count)
+        .into_iter()
+        .map(|k| gamma_one(k, b, true))
+        .collect();
+    (0..count)
+        .map(|i| {
+            let log_max = log_ga[i].max(log_gb[i]);
+            let ga_s = (log_ga[i] - log_max).exp();
+            let gb_s = (log_gb[i] - log_max).exp();
+            ga_s / (ga_s + gb_s)
         })
         .collect()
 }
@@ -2701,6 +2720,50 @@ mod tests {
         let key = random_key(42);
         let vals = random_gamma(key, 100, 2.0);
         assert!(vals.iter().all(|&v| v > 0.0 || v.is_nan()));
+    }
+
+    #[test]
+    fn random_beta_matches_jax_reference_f32() {
+        // jax.random.beta(random.PRNGKey(0), a, b, (8,)) in DEFAULT f32 mode.
+        let cases: [(f64, f64, [f64; 8]); 2] = [
+            (
+                2.0,
+                3.0,
+                [
+                    0.2362736165523529,
+                    0.4904595613479614,
+                    0.6837947964668274,
+                    0.5423442125320435,
+                    0.4902370274066925,
+                    0.3394175171852112,
+                    0.07781261205673218,
+                    0.27173343300819397,
+                ],
+            ),
+            (
+                0.5,
+                0.5,
+                [
+                    0.774951696395874,
+                    0.9974318146705627,
+                    0.961112380027771,
+                    0.35893872380256653,
+                    0.1144595518708229,
+                    0.9511231184005737,
+                    0.8620636463165283,
+                    0.463880330324173,
+                ],
+            ),
+        ];
+        for (a, b, want) in cases {
+            let got = random_beta(random_key(0), 8, a, b);
+            for (i, (&w, &g)) in want.iter().zip(got.iter()).enumerate() {
+                assert!(
+                    (w - g).abs() <= 1e-4 * w.abs().max(1.0),
+                    "beta(a={a},b={b}) elem {i}: JAX-f32 {w} vs fj {g}"
+                );
+            }
+        }
     }
 
     #[test]
