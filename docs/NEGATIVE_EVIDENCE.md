@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-02 - WIN: native-f32 Atan2 ~2.7x FASTER than JAX — UN-blocks the reverted atan2 via the new binary driver (BlackThrush)
+
+Revives the native-f32 Atan2 that was REVERTED earlier today (blocked by the shared bit-pin
+`f32_expensive_binary_threaded_bit_identical_and_faster`). Two things changed since: (1) the pow work landed a reusable
+`eval_binary_simd_dense_f32_native` driver, and (2) atan2 measured a MUCH bigger vs-JAX win than the earlier 1.5x
+INTERNAL number — JAX 0.10.x CPU f32 16M atan2 = **31.6ms** (under-parallelized like atan/sin/cos), so native is ~2.7x.
+Added `atan2_f32x8(y,x) = atan_f32x8(y/x)` + `copysign(π, y)` when `x<0` (axis/±inf/NaN → scalar `f32::atan2`), an
+`eval_atan2_f32_native` intercept in the lib.rs Atan2 dispatch (SEPARATE from the pinned expensive path), and RELAXED
+the shared test's Atan2 case to TOLERANCE (legitimate — JAX atan2 parity is tolerance; Div/Hypot keep the strict
+bit-pin). RESULT (same-binary A/B, `FJ_ATAN2_SCALAR`, f32 16M): NATIVE **~11.5ms** vs WIDEN ~19.5ms = **~1.7x**; vs JAX
+31.6ms = **~2.7x FASTER**. Accuracy ~1-2 f32 ulp over all four quadrants + x=0/±inf/NaN edges
+(`atan2_f32_native_matches_libm`, tol 3e-6). fj-lax lib suite green (1725). Hypot NOT pursued (JAX f32 hypot 9.2ms is
+already parallelized). The binary-f32-SIMD driver now has TWO consumers (Pow, Atan2).
+
 ## 2026-07-02 - WIN (modest, real code): native-f32 same-shape Pow x^y ~1.3x A/B — FIRST binary-f32-SIMD kernel (BlackThrush)
 
 Follow-up to the pow-widen record (27354f28). The reverted native-f32 Atan2 established that the f32

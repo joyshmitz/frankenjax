@@ -6863,6 +6863,20 @@ pub(crate) fn eval_pow_f32_native(inputs: &[Value]) -> Option<Value> {
     None
 }
 
+/// Native-f32 same-shape `Atan2` fast path (JAX default dtype): `atan(y/x)`+quadrant in f32, ~2x the
+/// widen-to-f64 `f64::atan2` path (XLA's f32 atan2 is compute-bound + under-parallelized, ~31ms/16M).
+/// Operand order matches the generic path: `inputs[0]=y`, `inputs[1]=x` (`f32::atan2` is `y.atan2(x)`).
+/// `None` for non-(F32,F32)-same-shape / sub-threshold / `FJ_ATAN2_SCALAR`.
+pub(crate) fn eval_atan2_f32_native(inputs: &[Value]) -> Option<Value> {
+    if std::env::var_os("FJ_ATAN2_SCALAR").is_some() {
+        return None;
+    }
+    if let [Value::Tensor(lhs), Value::Tensor(rhs)] = inputs {
+        return eval_binary_simd_dense_f32_native(lhs, rhs, atan2_f32x8, f32::atan2);
+    }
+    None
+}
+
 pub(crate) fn eval_sin(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX sin_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
@@ -7802,6 +7816,41 @@ fn atan_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
         for k in 0..8 {
             if !xa[k].abs().is_finite() {
                 ra[k] = xa[k].atan();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
+/// NATIVE-f32 8-wide `atan2(y, x)` = `atan(y/x)` + a per-quadrant `±π` offset when `x < 0`
+/// (`copysign(π, y)`), built on [`atan_f32x8`] (which itself maps `y/x = ±inf → ±π/2`). The common
+/// lanes need `x` finite-and-nonzero and `y` finite; the axis/±inf/NaN corners (`x = 0`, `±inf`, NaN)
+/// fall back to scalar `f32::atan2`, which reproduces libm/JAX's exact edge semantics. ~f32 tolerance
+/// (atan2 parity is tolerance), NOT bit-identical to the widen-to-f64 `f64::atan2` path.
+fn atan2_f32x8(y: std::simd::Simd<f32, 8>, x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+    use std::simd::num::SimdFloat;
+    type F = Simd<f32, 8>;
+    type U = Simd<u32, 8>;
+    let ok = x.is_finite() & y.is_finite() & x.simd_ne(F::splat(0.0));
+    let base = atan_f32x8(y / x);
+    // x < 0 ⇒ add copysign(π, y): +π for the 2nd quadrant, −π for the 3rd.
+    let signbit = U::splat(0x8000_0000);
+    let pi_signed = F::from_bits(
+        (F::splat(std::f32::consts::PI).to_bits() & !signbit) | (y.to_bits() & signbit),
+    );
+    let adj = x.simd_lt(F::splat(0.0)).select(pi_signed, F::splat(0.0));
+    let mut r = base + adj;
+    if !ok.all() {
+        let ya = y.to_array();
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].is_finite() && ya[k].is_finite() && xa[k] != 0.0) {
+                ra[k] = ya[k].atan2(xa[k]);
             }
         }
         r = F::from_array(ra);
@@ -18501,6 +18550,69 @@ mod tests {
         assert!(maxrel < 3e-4, "pow f32 native maxrel={maxrel:e}");
     }
 
+    #[test]
+    fn atan2_f32_native_matches_libm() {
+        // n >= 1<<20 fires the native path. Grid over ALL quadrants (x<0 flips) plus x=0/±inf edges
+        // (scalar fallback). abs error (atan2 ∈ [−π,π]); a wrong quadrant would be O(1) and caught.
+        let n = 2_000_000usize;
+        let ys: Vec<f32> = (0..n).map(|i| ((i % 1201) as f32) * 0.005 - 3.0).collect();
+        let xs: Vec<f32> = (0..n)
+            .map(|i| match i % 8 {
+                0 => 0.0,
+                1 => f32::INFINITY,
+                2 => f32::NEG_INFINITY,
+                _ => ((i % 1301) as f32) * 0.005 - 3.25, // spans x<0 and x>0
+            })
+            .collect();
+        let sh = Shape {
+            dims: vec![n as u32],
+        };
+        // Atan2(inputs[0]=y, inputs[1]=x) per the lib.rs dispatch (`a.atan2(b)`).
+        let yt = Value::Tensor(TensorValue::new_f32_values(sh.clone(), ys.clone()).unwrap());
+        let xt = Value::Tensor(TensorValue::new_f32_values(sh.clone(), xs.clone()).unwrap());
+        let p = BTreeMap::new();
+        let got = crate::eval_primitive(Primitive::Atan2, &[yt, xt], &p).unwrap();
+        let out = got.as_tensor().unwrap().elements.as_f32_slice().unwrap();
+        let mut maxerr = 0.0f64;
+        for i in 0..n {
+            let want = f64::from(ys[i]).atan2(f64::from(xs[i]));
+            maxerr = maxerr.max((f64::from(out[i]) - want).abs());
+        }
+        assert!(maxerr < 3e-6, "atan2 f32 native maxerr={maxerr:e}");
+    }
+
+    // atan2 f32 vs JAX (measured JAX 0.10.x CPU f32 16M = 31.6ms — under-parallelized like atan).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_atan2_f32_vs_jax() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let ys: Vec<f32> = (0..n).map(|i| (i % 60000) as f32 * 0.0001 - 3.0).collect();
+        let xs: Vec<f32> = (0..n).map(|i| (i % 47000) as f32 * 0.0001 - 2.3).collect();
+        let sh = Shape {
+            dims: vec![n as u32],
+        };
+        let yt = Value::Tensor(TensorValue::new_f32_values(sh.clone(), ys).unwrap());
+        let xt = Value::Tensor(TensorValue::new_f32_values(sh.clone(), xs).unwrap());
+        let p = BTreeMap::new();
+        let run = |label: &str| {
+            let f = || {
+                let v =
+                    crate::eval_primitive(Primitive::Atan2, &[yt.clone(), xt.clone()], &p).unwrap();
+                v.as_tensor().unwrap().elements.as_f32_slice().unwrap()[123]
+            };
+            std::hint::black_box(f());
+            let mut best = f64::MAX;
+            for _ in 0..6 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                best = best.min(s.elapsed().as_secs_f64());
+            }
+            println!("fj {label}: {:.2}ms", best * 1e3);
+        };
+        run("atan2 f32 (JAX 31.6ms)");
+    }
+
     // gcd/lcm vs JAX (measured JAX 0.10.x CPU int64 8M: gcd 59.6ms, lcm 60.4ms — XLA lowers
     // gcd to a `while_loop` Euclidean, parallelized). fj ran the Euclidean map dense-but-SERIAL
     // below the 8.4M CHEAP i64-parallel threshold; the compute-bound EXPENSIVE path threads it.
@@ -20261,8 +20373,21 @@ mod tests {
                 .as_f32_slice()
                 .expect("f32 threaded output must be dense");
             for i in 0..n {
-                let want = (op(f64::from(a[i]), f64::from(b[i])) as f32).to_bits();
-                assert_eq!(ov[i].to_bits(), want, "f32 {name} mismatch at {i}");
+                let want = op(f64::from(a[i]), f64::from(b[i])) as f32;
+                if matches!(prim, Primitive::Atan2) {
+                    // Atan2 f32 is now served by the native-f32 SIMD kernel (`atan2_f32x8`, ~2x the
+                    // widen path). Its parity is TOLERANCE (JAX atan2 parity is tolerance), not the
+                    // bit-identity the widened Div/Hypot still hold. ~1-2 f32 ulp; a wrong quadrant
+                    // would be O(1) and caught. Div/Hypot keep the strict threaded==serial bit pin.
+                    let e = (f64::from(ov[i]) - f64::from(want)).abs();
+                    assert!(e < 3e-6, "f32 atan2 tol mismatch at {i}: err={e:e}");
+                } else {
+                    assert_eq!(
+                        ov[i].to_bits(),
+                        want.to_bits(),
+                        "f32 {name} mismatch at {i}"
+                    );
+                }
             }
 
             let reps = 8u32;

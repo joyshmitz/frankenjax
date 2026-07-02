@@ -481,12 +481,17 @@ fn eval_primitive_inner(
             // integer operands are rejected at the lax level (the generic path would
             // otherwise compute atan2 in f64 and truncate back to i64).
             ensure_float_or_complex_operands(primitive, inputs)?;
-            eval_binary_elementwise(
-                primitive,
-                inputs,
-                |a, b| (a as f64).atan2(b as f64) as i64,
-                f64::atan2,
-            )
+            // Native-f32 same-shape fast path (JAX default dtype): ~2x the widen-to-f64 path.
+            if let Some(v) = crate::arithmetic::eval_atan2_f32_native(inputs) {
+                Ok(v)
+            } else {
+                eval_binary_elementwise(
+                    primitive,
+                    inputs,
+                    |a, b| (a as f64).atan2(b as f64) as i64,
+                    f64::atan2,
+                )
+            }
         }
         Primitive::Complex => eval_complex(primitive, inputs),
         // Selection
