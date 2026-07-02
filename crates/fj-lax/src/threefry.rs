@@ -1333,20 +1333,25 @@ pub fn random_dirichlet(key: PRNGKey, count: usize, alpha: &[f64]) -> Vec<f64> {
     }
 
     let output_len = checked_random_output_len("random_dirichlet", count, k);
+    // JAX `_dirichlet`: draw LOG-gamma over the full (count, K) shape from ONE key
+    // (`loggamma(key, alpha, (count,K))` splits into count*K per-element keys, element
+    // (i,j) uses alpha[j]), then `softmax(log_gamma, axis=-1)` per row — the stable
+    // log-space normalize. Replaces the prior plain-gamma + sequential-split + direct
+    // ratio, which matched neither the algorithm nor JAX's key schedule.
+    let keys = random_split_n(key, output_len);
     let mut result = Vec::with_capacity(output_len);
-    let mut current_key = key;
-
-    for _ in 0..count {
-        let mut gamma_samples = Vec::with_capacity(k);
-        for &a in alpha {
-            let (k1, k2) = random_split(current_key);
-            current_key = k2;
-            let g = random_gamma(k1, 1, a);
-            gamma_samples.push(g[0]);
+    for i in 0..count {
+        let base = i * k;
+        let mut log_g = Vec::with_capacity(k);
+        for (j, &a) in alpha.iter().enumerate() {
+            log_g.push(gamma_one(keys[base + j], a, true));
         }
-        let sum: f64 = gamma_samples.iter().sum();
-        for g in gamma_samples {
-            result.push(g / sum);
+        // softmax over the row: exp(x - max) / sum(exp(x - max)).
+        let max = log_g.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let exps: Vec<f64> = log_g.iter().map(|&x| (x - max).exp()).collect();
+        let sum: f64 = exps.iter().sum();
+        for e in exps {
+            result.push(e / sum);
         }
     }
     result
@@ -2720,6 +2725,33 @@ mod tests {
         let key = random_key(42);
         let vals = random_gamma(key, 100, 2.0);
         assert!(vals.iter().all(|&v| v > 0.0 || v.is_nan()));
+    }
+
+    #[test]
+    fn random_dirichlet_matches_jax_reference_f32() {
+        // jax.random.dirichlet(PRNGKey(0), [1,2,3], (4,)) in DEFAULT f32 mode (4 rows x 3).
+        let want: [f64; 12] = [
+            0.14228560030460358,
+            0.40488260984420776,
+            0.45283177495002747,
+            0.28478530049324036,
+            0.351531058549881,
+            0.36368367075920105,
+            0.1310892552137375,
+            0.10866259038448334,
+            0.7602481842041016,
+            0.10009737312793732,
+            0.2562600374221802,
+            0.6436426043510437,
+        ];
+        let got = random_dirichlet(random_key(0), 4, &[1.0, 2.0, 3.0]);
+        assert_eq!(got.len(), want.len());
+        for (i, (&w, &g)) in want.iter().zip(got.iter()).enumerate() {
+            assert!(
+                (w - g).abs() <= 1e-4 * w.abs().max(1.0),
+                "dirichlet elem {i}: JAX-f32 {w} vs fj {g}"
+            );
+        }
     }
 
     #[test]

@@ -10608,3 +10608,15 @@ plain gamma + direct ratio. Added the `log_space` path to `gamma_one` and rewrot
 element-for-element vs JAX-f32 `random.beta(PRNGKey(0),a,b,(8,))`: oracle green for (2,3) AND (0.5,0.5) to 1e-4.
 Full suite green: fj-lax rng 44/0, conformance stat 18/0. gamma/poisson/beta now all JAX-faithful; dirichlet
 (also composes gamma) is the remaining compose-sampler to audit. No ceiling.
+
+## 2026-07-02 - WIN (parity): random_dirichlet rewritten to JAX loggamma + softmax — element-wise match vs JAX-f32; RNG sampler parity COMPLETE (BlackThrush)
+
+Fourth and last compose-sampler. JAX `_dirichlet` draws LOG-gamma over the full (count, K) shape from ONE key
+(`loggamma(key, alpha, (count,K))` → `split(key, count*K)` per-element keys, element (i,j) uses alpha[j]) then
+`softmax(log_gamma, -1)` per row (stable log-space normalize). fj used plain gamma + sequential per-(i,j) split +
+direct g/sum — wrong algorithm AND wrong key schedule. Rewrote to `random_split_n(key, count*K)` per-element
+loggamma + per-row softmax. VERIFIED element-for-element vs JAX-f32 `random.dirichlet(PRNGKey(0),[1,2,3],(4,))`
+(4x3): oracle green to 1e-4. Conformance stat 18/0. RNG DERIVED-DISTRIBUTION PARITY NOW COMPLETE: gamma
+(8241ad8e) + poisson (9a12efa6) + beta (d928fd55) + dirichlet all JAX-faithful with element-wise oracles, on top
+of the already-faithful core (uniform/normal/split) + inverse-transform samplers (exp/gumbel/laplace/geometric).
+The whole jax.random derived surface now matches JAX to f32 tolerance. No ceiling.
