@@ -2,6 +2,19 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-02 - WIN: native-f32 SIMD Tan ~1.9x FASTER than JAX — completes the native-f32 trig family (BlackThrush)
+
+Last common trig op still widening f32→f64. Tan is an EXPENSIVE-poly f32 op (JAX 0.10.x CPU f32 16M tan = 22.9ms,
+under-parallelized like sin/cos/asin), so the native-f32 lever applies. Added `tan_f32x8` = Cephes `tanf`: REUSES the
+validated `sincos_reduce_f32x8` (tan's period is π, so only octant bit 1 matters — `j & 2` selects the cotangent
+branch `−1/tan(z)`, and `j&2` is invariant under the reduce helper's `&7`/`−4` folding), a degree-6 minimax `tan(z)`
+poly on [−π/4, π/4], and `sign = sign(x)` (tan is odd). `|x| ≥ 8192` / `±inf` / `NaN` → scalar `f32::tan` per lane.
+RESULT (`bench_sin_cos_f32_vs_jax`, f32 16M): fj tan **11.5-13.5ms** vs JAX 22.9ms = **~1.9x FASTER**. Accuracy ~1-2
+f32 ulp verified vs f64 over [−1.5, 1.5] (both branches, relative error, `tan_f32_native_matches_libm`, tol 1e-4 —
+poles excluded as ill-conditioned). fj-lax lib suite green (1723 passed). No RNG/golden dep. Native-f32 trig family
+(sin/cos/tan + asin/acos/atan) now COMPLETE. Remaining native-f32 gaps are cheap ops (reciprocal/sinc) that JAX
+already parallelizes → not fj wins (see the boundary in bench_native_f32_transcendental_vs_jax).
+
 ## 2026-07-02 - WIN: existing native-f32 asin/acos/atan/cbrt 1.8-2.6x FASTER than JAX (never measured vs JAX until now) (BlackThrush)
 
 Corollary of the sin/cos win (ec585058): the 07-01 native-f32 sweep (16+ ops) was only benchmarked vs the fj

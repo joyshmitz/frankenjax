@@ -6715,6 +6715,60 @@ fn cos_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
     r
 }
 
+/// NATIVE-f32 8-wide `tan(x)` — Cephes `tanf`. Reuses [`sincos_reduce_f32x8`] (tan's period is π, so
+/// only bit 1 of the octant matters: `j & 2` selects the cotangent branch `−1/tan(z)`; `j&2` is
+/// invariant under the reduce helper's `&7`/`−4` folding). Degree-6 minimax `tan(z)` poly on
+/// [−π/4, π/4]; tan is odd so the sign is just `sign(x)`. `|x| ≥ 8192` / `±inf` / `NaN` → scalar
+/// `f32::tan` per lane. ~1-2 f32 ulp for `|x| < 8192` (tolerance; near poles tan is ill-conditioned).
+fn tan_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+    use std::simd::num::SimdFloat;
+    type F = Simd<f32, 8>;
+    type I = Simd<i32, 8>;
+    type U = Simd<u32, 8>;
+    const T0: f32 = 9.385_401_9e-3;
+    const T1: f32 = 3.119_922_3e-3;
+    const T2: f32 = 2.443_013_5e-2;
+    const T3: f32 = 5.341_128e-2;
+    const T4: f32 = 1.333_879_9e-1;
+    const T5: f32 = 3.333_315_7e-1;
+    let ok = x.abs().simd_lt(F::splat(8192.0));
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].tan();
+        }
+        return F::from_array(ra);
+    }
+    let (j, z, _) = sincos_reduce_f32x8(x.abs());
+    let zz = z * z;
+    let p = ((((F::splat(T0) * zz + F::splat(T1)) * zz + F::splat(T2)) * zz + F::splat(T3)) * zz
+        + F::splat(T4))
+        * zz
+        + F::splat(T5);
+    let y_tan = z + z * (zz * p);
+    // Octant bit 1 → cotangent branch tan(x) = −1/tan(z).
+    let cot = (j & I::splat(2)).simd_eq(I::splat(2));
+    let mag = cot.select(-F::splat(1.0) / y_tan, y_tan);
+    // tan is odd: apply the original sign bit (preserves ±0).
+    let x_neg = (x.to_bits() & U::splat(0x8000_0000)).simd_ne(U::splat(0));
+    let mut r = x_neg.select(-mag, mag);
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() < 8192.0) {
+                ra[k] = xa[k].tan();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
 pub(crate) fn eval_sin(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX sin_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
@@ -6785,6 +6839,12 @@ pub(crate) fn eval_tan(primitive: Primitive, inputs: &[Value]) -> Result<Value, 
             }
         })
     } else {
+        // Native-f32 fast path (JAX default dtype), ~2x the widen-to-f64 path.
+        if std::env::var_os("FJ_TAN_SCALAR").is_none()
+            && let Some(v) = eval_unary_simd_dense_f32_native(inputs, tan_f32x8, f32::tan)
+        {
+            return v;
+        }
         if let [Value::Tensor(tensor)] = inputs
             && let Some(value) = fast_small_tan_f64_tensor(tensor)
         {
@@ -18074,6 +18134,7 @@ mod tests {
         };
         time_it("sin (JAX 27.1ms)", Primitive::Sin);
         time_it("cos (JAX 24.6ms)", Primitive::Cos);
+        time_it("tan (JAX 22.9ms)", Primitive::Tan);
     }
 
     // Existing native-f32 kernels (shipped 07-01, measured only vs the fj scalar/widen baseline) vs
@@ -18153,6 +18214,34 @@ mod tests {
             }
             assert!(maxerr < 2e-5, "{prim:?} f32 native maxerr={maxerr:e}");
         }
+    }
+
+    #[test]
+    fn tan_f32_native_matches_libm() {
+        // Native-f32 tan over the base period avoiding the ±π/2 poles (tan is ill-conditioned
+        // there). [-1.5, 1.5] exercises both the tan branch and the j&2 cotangent branch. Compare
+        // to the f64 reference with RELATIVE error (tan ranges to ~14 near the ends).
+        let n = 2_000_000usize;
+        let xs: Vec<f32> = (0..n).map(|i| (i as f32) * 0.000_001_5 - 1.5).collect();
+        let xt = Value::Tensor(
+            TensorValue::new_f32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xs.clone(),
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::new();
+        let got = crate::eval_primitive(Primitive::Tan, std::slice::from_ref(&xt), &p).unwrap();
+        let out = got.as_tensor().unwrap().elements.as_f32_slice().unwrap();
+        let mut maxrel = 0.0f64;
+        for i in 0..n {
+            let want = f64::from(xs[i]).tan();
+            let rel = (f64::from(out[i]) - want).abs() / want.abs().max(1.0);
+            maxrel = maxrel.max(rel);
+        }
+        assert!(maxrel < 1e-4, "tan f32 native maxrel={maxrel:e}");
     }
 
     // gcd/lcm vs JAX (measured JAX 0.10.x CPU int64 8M: gcd 59.6ms, lcm 60.4ms — XLA lowers
