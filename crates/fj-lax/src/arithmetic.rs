@@ -7071,6 +7071,40 @@ fn acosh_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
     r
 }
 
+/// NATIVE-f32 `acosh(x) = log1p((x−1) + √((x−1)(x+1)))` for `x ≥ 1` — the f32 sibling of
+/// [`acosh_f64x8`], reusing [`log1p_f32x8`] (cancellation-free near x=1). SIMD for `1 ≤ x < 1e18`
+/// (so `(x-1)(x+1)` stays finite in f32); `x<1` (→ NaN), `x≥1e18`, `±inf`, `NaN` → scalar `f32::acosh`.
+/// acosh ≥ 0 ⇒ no sign work. ~f32 tolerance.
+fn acosh_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Simd;
+    use std::simd::StdFloat;
+    use std::simd::cmp::SimdPartialOrd;
+    type F = Simd<f32, 8>;
+    let ok = x.simd_ge(F::splat(1.0)) & x.simd_lt(F::splat(1e18));
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].acosh();
+        }
+        return F::from_array(ra);
+    }
+    let xm1 = x - F::splat(1.0);
+    let s = (xm1 * (x + F::splat(1.0))).sqrt();
+    let mut r = log1p_f32x8(xm1 + s);
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k] >= 1.0 && xa[k] < 1e18) {
+                ra[k] = xa[k].acosh();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
 pub(crate) fn eval_acosh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX acosh_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
@@ -7093,6 +7127,10 @@ pub(crate) fn eval_acosh(primitive: Primitive, inputs: &[Value]) -> Result<Value
     // FJ_ACOSH_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
     if std::env::var_os("FJ_ACOSH_SCALAR").is_some() {
         return eval_unary_elementwise_parallel(primitive, inputs, f64::acosh);
+    }
+    // Native-f32 fast path (JAX default dtype), ~2x the widen-to-f64 path.
+    if let Some(v) = eval_unary_simd_dense_f32_native(inputs, acosh_f32x8, f32::acosh) {
+        return v;
     }
     eval_unary_simd_dense_f64_parallel(primitive, inputs, acosh_f64x8, f64::acosh)
 }
@@ -27219,6 +27257,71 @@ mod tests {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
         }
+    }
+
+    #[test]
+    fn acosh_f32_native_matches_scalar_tolerance_and_edges() {
+        // eval_acosh native-f32 path (acosh_f32x8) vs scalar f32 acosh: few-ulp f32 on x>=1, bit-exact
+        // edges (x<1 -> NaN, x=1 -> 0, +inf, NaN, large-x via scalar).
+        let n = 300_003usize;
+        let mut data: Vec<f32> = (0..n).map(|i| 1.0 + (i % 9973) as f32 * 0.01).collect();
+        for (k, v) in [
+            (3usize, 1.0f32),
+            (4, 1.0 + 1e-6),
+            (5, 0.5),
+            (6, -3.0),
+            (7, 1e6),
+            (8, 1e20),
+            (9, f32::INFINITY),
+            (10, f32::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_acosh(Primitive::Acosh, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.acosh();
+            let g = got[idx];
+            if want.is_finite() {
+                assert!(
+                    (g - want).abs() <= 1e-5 * want.abs().max(1.0),
+                    "acosh f32 at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "acosh f32 edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_acosh_f32_throughput() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n).map(|i| 1.1 + (i % 9973) as f32 * 0.002).collect();
+        let input =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap());
+        let f = || {
+            std::hint::black_box(eval_acosh(Primitive::Acosh, std::slice::from_ref(&input)).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        let scalar = std::env::var_os("FJ_ACOSH_SCALAR").is_some();
+        println!(
+            "fj-lax acosh f32 4M [{}]: {:.3}ms",
+            if scalar { "SCALAR-ORIG" } else { "NATIVE" },
+            b * 1e3
+        );
     }
 
     #[test]

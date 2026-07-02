@@ -2,6 +2,18 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Acosh: 1.65x vs scalar ORIG): eighth native-f32 consumer, completes the inverse-hyperbolic trio (BlackThrush)
+
+Eighth consumer of `eval_unary_simd_dense_f32_native`, completes native-f32 asinh/acosh/atanh.
+`acosh_f32x8 = log1p_f32((x−1) + √((x−1)(x+1)))` for x≥1 — f32 sibling of `acosh_f64x8`, reusing
+`log1p_f32x8` (cancellation-free near x=1). SIMD for `1 ≤ x < 1e18`; `x<1` (→NaN)/`≥1e18`/`±inf`/`NaN`
+→ scalar `f32::acosh`. acosh≥0 ⇒ no sign work.
+MEASURED (4M f32, `FJ_ACOSH_SCALAR` A/B): scalar-ORIG 14.62ms → NATIVE **8.85ms = 1.65x** (lower than
+the others — the extra sqrt + subtracts). Gates: fj-lax lib green, full conformance green, few-ulp f32
+accuracy green. Native-f32 vein tally (8): tanh 2.27x, logistic 2.02x, cosh 2.24x, log 2.04x, log1p
+3.45x, atanh 2.63x, asinh 2.50x, acosh 1.65x. Remaining need NEW f32 kernels (erf poly; expm1_block_f32
+for expm1/sinh) — a step up from the log1p/exp_block_f32 reuse.
+
 ## 2026-07-01 - WIRED WIN (native-f32 Asinh: 2.50x vs scalar ORIG): seventh native-f32 consumer (BlackThrush)
 
 Seventh consumer of `eval_unary_simd_dense_f32_native`. `asinh_f32x8 = sign(x)·log1p_f32(t + t²/(1+√(1+t²)))`,
