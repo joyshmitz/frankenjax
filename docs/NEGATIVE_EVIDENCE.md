@@ -2,6 +2,15 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Asinh: 2.50x vs scalar ORIG): seventh native-f32 consumer (BlackThrush)
+
+Seventh consumer of `eval_unary_simd_dense_f32_native`. `asinh_f32x8 = sign(x)·log1p_f32(t + t²/(1+√(1+t²)))`,
+`t=|x|` — f32 sibling of `asinh_f64x8`, reusing `log1p_f32x8` (cancellation-free small-x). SIMD for
+`t < 1e18` (t² finite in f32); `t≥1e18`/`±inf`/`NaN` → scalar `f32::asinh`. Sign via sign bit.
+MEASURED (4M f32, `FJ_ASINH_SCALAR` A/B): scalar-ORIG 14.29ms → NATIVE **5.72ms = 2.50x**. Gates: fj-lax
+lib green, full conformance green, few-ulp f32 accuracy green. Native-f32 vein: tanh 2.27x, logistic
+2.02x, cosh 2.24x, log 2.04x, log1p 3.45x, atanh 2.63x, asinh 2.50x. (acosh f32 next, same log1p_f32+sqrt.)
+
 ## 2026-07-01 - WIRED WIN (native-f32 Atanh: 2.63x vs scalar ORIG); exp-f32 confirmed bit-pinned (BlackThrush)
 
 Sixth consumer of `eval_unary_simd_dense_f32_native`, first native-f32 inverse-hyperbolic — unlocked by

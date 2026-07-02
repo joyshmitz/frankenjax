@@ -6991,7 +6991,49 @@ pub(crate) fn eval_asinh(primitive: Primitive, inputs: &[Value]) -> Result<Value
     if std::env::var_os("FJ_ASINH_SCALAR").is_some() {
         return eval_unary_elementwise_parallel(primitive, inputs, f64::asinh);
     }
+    // Native-f32 fast path (JAX default dtype), ~2x the widen-to-f64 path.
+    if let Some(v) = eval_unary_simd_dense_f32_native(inputs, asinh_f32x8, f32::asinh) {
+        return v;
+    }
     eval_unary_simd_dense_f64_parallel(primitive, inputs, asinh_f64x8, f64::asinh)
+}
+
+/// NATIVE-f32 `asinh(x) = sign(x)·log1p(t + t²/(1 + √(1+t²)))`, `t = |x|` — the f32 sibling of
+/// [`asinh_f64x8`], reusing [`log1p_f32x8`]. Cancellation-free for small x. SIMD for `t < 1e18` (so
+/// `t²` stays finite in f32); `t ≥ 1e18` / `±inf` / `NaN` → scalar `f32::asinh`. Sign via the sign bit
+/// (odd fn; keeps `asinh(±0)=±0`). ~f32 tolerance.
+fn asinh_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Simd;
+    use std::simd::StdFloat;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f32, 8>;
+    type U = Simd<u32, 8>;
+    let t = x.abs();
+    let ok = t.simd_lt(F::splat(1e18)); // false for NaN, +inf, and t² overflow risk
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].asinh();
+        }
+        return F::from_array(ra);
+    }
+    let s = (F::splat(1.0) + t * t).sqrt();
+    let mag = log1p_f32x8(t + (t * t) / (F::splat(1.0) + s));
+    let signbit = U::splat(0x8000_0000);
+    let mut r = F::from_bits((mag.to_bits() & !signbit) | (x.to_bits() & signbit));
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() < 1e18) {
+                ra[k] = xa[k].asinh();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
 }
 
 /// 8-wide `acosh(x) = log1p((x−1) + √((x−1)(x+1)))` for `x ≥ 1` — the cancellation-free form (for
@@ -27177,6 +27219,74 @@ mod tests {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
         }
+    }
+
+    #[test]
+    fn asinh_f32_native_matches_scalar_tolerance_and_edges() {
+        // eval_asinh native-f32 path (asinh_f32x8) vs scalar f32 asinh: few-ulp f32 across range incl.
+        // tiny x, bit-exact ±0, edges (±inf -> ±inf, NaN, huge |x| via scalar).
+        let n = 300_003usize;
+        let mut data: Vec<f32> = (0..n).map(|i| -50.0 + (i % 9973) as f32 * 0.01).collect();
+        for (k, v) in [
+            (3usize, 0.0f32),
+            (4, -0.0),
+            (5, 1e-7),
+            (6, 1e6),
+            (7, -1e6),
+            (8, 1e20),
+            (9, f32::INFINITY),
+            (10, f32::NEG_INFINITY),
+            (11, f32::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_asinh(Primitive::Asinh, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.asinh();
+            let g = got[idx];
+            if want == 0.0 {
+                assert_eq!(g.to_bits(), want.to_bits(), "asinh f32 sign-of-zero at x={x}");
+            } else if want.is_finite() {
+                assert!(
+                    (g - want).abs() <= 1e-5 * want.abs().max(1.0),
+                    "asinh f32 at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "asinh f32 edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_asinh_f32_throughput() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n).map(|i| -10.0 + (i % 9973) as f32 * 0.002).collect();
+        let input =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap());
+        let f = || {
+            std::hint::black_box(eval_asinh(Primitive::Asinh, std::slice::from_ref(&input)).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        let scalar = std::env::var_os("FJ_ASINH_SCALAR").is_some();
+        println!(
+            "fj-lax asinh f32 4M [{}]: {:.3}ms",
+            if scalar { "SCALAR-ORIG" } else { "NATIVE" },
+            b * 1e3
+        );
     }
 
     #[test]
