@@ -260,7 +260,13 @@ fn bench_atan2_1m_f64_vec(c: &mut Criterion) {
 // Some x are zero (~1/97) to exercise the 0·log ⇒ 0 mask branch.
 fn bench_xlogy_4m_f64_vec(c: &mut Criterion) {
     let a: Vec<f64> = (0..1 << 22)
-        .map(|i| if i % 97 == 0 { 0.0 } else { (i % 211) as f64 + 1.0 })
+        .map(|i| {
+            if i % 97 == 0 {
+                0.0
+            } else {
+                (i % 211) as f64 + 1.0
+            }
+        })
         .collect();
     let b: Vec<f64> = (0..1 << 22).map(|i| (i % 307) as f64 + 0.5).collect();
     let lhs = Value::vector_f64(&a).unwrap();
