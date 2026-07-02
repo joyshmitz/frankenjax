@@ -6649,7 +6649,45 @@ pub(crate) fn eval_cosh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
     if std::env::var_os("FJ_COSH_SCALAR").is_some() {
         return eval_unary_elementwise_parallel(primitive, inputs, f64::cosh);
     }
+    // Native-f32 fast path (JAX default dtype), ~2x the widen-to-f64 path.
+    if let Some(v) = eval_unary_simd_dense_f32_native(inputs, cosh_f32x8, f32::cosh) {
+        return v;
+    }
     eval_unary_simd_dense_f64_parallel(primitive, inputs, cosh_f64x8, f64::cosh)
+}
+
+/// NATIVE-f32 8-wide `cosh(x) = 0.5·(e + 1/e)`, `e = exp_block_f32(|x|)` — runs entirely in f32. cosh
+/// is a SUM (no small-x cancellation). SIMD for `|x| < 30` (inside `exp_block_f32`'s accurate range;
+/// `cosh(30)≈5e12` finite in f32); `|x| ≥ 30` (up to overflow at ~89), `±inf`, `NaN` → scalar
+/// `f32::cosh`. Even fn ⇒ `abs(x)` handles sign. ~f32 tolerance (few ulp) vs libm.
+fn cosh_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f32, 8>;
+    let t = x.abs();
+    let ok = t.simd_lt(F::splat(30.0)); // false for NaN, ±inf, large |x| (deferred to scalar)
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].cosh();
+        }
+        return F::from_array(ra);
+    }
+    let e = crate::simd_exp::exp_block_f32(t);
+    let mut r = F::splat(0.5) * (e + F::splat(1.0) / e);
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() < 30.0) {
+                ra[k] = xa[k].cosh();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
 }
 
 /// 8-wide `tanh(x) = sign(x)·(1−e)/(1+e)` with `e = exp(−2|x|)` via the SIMD Cephes rational exp.
@@ -27046,6 +27084,73 @@ mod tests {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
         }
+    }
+
+    #[test]
+    fn cosh_f32_native_matches_scalar_tolerance_and_edges() {
+        // eval_cosh native-f32 path (cosh_f32x8) vs scalar f32 cosh: few-ulp f32 relative across the
+        // range, correct edges (±inf -> +inf, NaN). cosh even, cosh(0)=1.
+        let n = 300_003usize;
+        let mut data: Vec<f32> = (0..n).map(|i| -20.0 + (i % 9973) as f32 * 0.004).collect();
+        for (k, v) in [
+            (3usize, 0.0f32),
+            (4, -0.0),
+            (5, 1e-7),
+            (6, 29.0),
+            (7, -29.0),
+            (8, 50.0),
+            (9, f32::INFINITY),
+            (10, f32::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_cosh(Primitive::Cosh, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = (x as f64).cosh() as f32;
+            let g = got[idx];
+            if want.is_nan() {
+                assert!(g.is_nan(), "cosh f32 NaN at x={x}");
+            } else if want.is_finite() {
+                assert!(
+                    (g - want).abs() <= 1e-5 * want.abs().max(1.0),
+                    "cosh f32 at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert!(g.is_infinite() && g > 0.0, "cosh f32 inf at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_cosh_f32_throughput() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n).map(|i| -10.0 + (i % 9973) as f32 * 0.002).collect();
+        let input =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap());
+        let f = || {
+            std::hint::black_box(eval_cosh(Primitive::Cosh, std::slice::from_ref(&input)).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        let scalar = std::env::var_os("FJ_COSH_SCALAR").is_some();
+        println!(
+            "fj-lax cosh f32 4M [{}]: {:.3}ms",
+            if scalar { "SCALAR-ORIG" } else { "NATIVE" },
+            b * 1e3
+        );
     }
 
     #[test]

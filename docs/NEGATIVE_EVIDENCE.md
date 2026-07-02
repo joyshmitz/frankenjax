@@ -2,6 +2,18 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Cosh: 2.24x vs scalar ORIG): third native-f32 consumer (BlackThrush)
+
+Third consumer of `eval_unary_simd_dense_f32_native` (after tanh, logistic). `Cosh` f32 was routing
+through widen-to-f64. New `cosh_f32x8 = 0.5·(e + 1/e)`, `e = exp_block_f32(|x|)` — runs entirely in f32;
+cosh is a SUM (no small-x cancellation). SIMD for `|x| < 30` (inside `exp_block_f32`'s accurate range;
+`cosh(30)≈5e12` finite in f32); `|x| ≥ 30`/`±inf`/`NaN` → scalar `f32::cosh`. Even fn ⇒ abs handles sign.
+
+MEASURED (4M f32, `FJ_COSH_SCALAR` A/B): scalar-ORIG 10.12ms → NATIVE **4.52ms = 2.24x**. Gates: fj-lax
+lib green, full conformance green, few-ulp f32 accuracy test green. Native-f32 vein tally: tanh 2.27x,
+logistic 2.02x, cosh 2.24x. (sinh needs an f32 expm1 for the small-x `e−1/e` cancellation; erf needs a
+dedicated f32 poly — both bigger than the exp_block_f32-reuse ops. Deferred.)
+
 ## 2026-07-01 - WIRED WIN (native-f32 Logistic: 2.02x vs scalar ORIG): second consumer of the native-f32 vein (BlackThrush)
 
 Second consumer of `eval_unary_simd_dense_f32_native` (after tanh f32). `Logistic` f32 (JAX's default
