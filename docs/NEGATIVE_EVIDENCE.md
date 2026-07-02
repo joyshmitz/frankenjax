@@ -2,6 +2,26 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-02 - NEGATIVE / BOUNDARY: structural-lever sweep — no new winnable primitive (all done/blocked/quirk) (BlackThrush)
+
+After the elementwise wins (gcd i64/i32, igamma family) swept the STRUCTURAL space (vmap-over-slow-linalg / conv /
+bit-count) for a fresh lever. Measured JAX 0.10.x CPU — none is an fj target:
+- **vmap(inv) [512,64,64] = 417ms** — slow, BUT a JAX-`inv` API QUIRK, not an fj win: matrix inverse = `solve(A,I)`
+  and XLA batches solve FAST (vmap(tri_solve) 1.2ms), so a JAX user just writes solve; fj also has no Inv primitive.
+- **vmap(pinv) [512,64,32] = 10.2ms, vmap(lstsq) = 7.6ms** — XLA now batches these WELL (unlike eigh/svd); NOT wins.
+- **vmap(expm) [256,32,32] = 185ms** — slow, but `expm` is not an fj primitive (Padé+scaling/squaring composition).
+- **conv2d 7x7 [8,64,64,32] = 64.5ms** — fj conv is FMA-policy-blocked (`cntiy`, maintainer +fma decision, caps at
+  ~XLA/2 bit-exact); a known non-winnable loss, not re-openable here.
+- **population_count/clz u32/u64 32M = 14-19ms** — BW-bound (~17GB/s, XLA under-parallelized), BUT fj already threads
+  I64 bit-counts and DELIBERATELY keeps U32/U64/I32 serial (code comment: threaded-dense U32 measured 0.80x = REGRESSES
+  under load / contention). Prior decision + a measured DO-NOT — not re-grinding.
+
+CONCLUSION: the winnable, non-FMA-policy-gated, non-FFT veins are mined out. Both this arc's elementwise families
+(data-dependent series → igamma/igammac/betainc; while_loop → gcd/lcm incl. its int32 default-dtype half) are shipped.
+Every remaining vs-JAX gap is on record: FMA-policy-gated (`cntiy`: matmul/conv/attention/special-fn) or FFT
+mixed-radix (`murmw`, multi-session) or the interpreter→typed-slot compile — all big-swing / maintainer-gated, none a
+contained single-session lever.
+
 ## 2026-07-02 - WIN: threaded int32 Gcd/Lcm ~19x FASTER than JAX (its DEFAULT int dtype) (BlackThrush)
 
 Completes the Gcd win (d9435567) for the dtype users actually hit: JAX defaults integers to int32, and — surprise
