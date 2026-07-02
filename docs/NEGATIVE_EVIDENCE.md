@@ -10498,3 +10498,28 @@ oracle tests pass, but not bit-equal). So the lever would ALSO require regenerat
 worth it for a regression. REVERTED (stash `bluestein-radix4-REGRESSION…`). NET: the radix-4 pass-reduction vein is
 CLOSED beyond the landed mixed-radix win — SoA radix-2 is already optimal for the pow2/Bluestein FFT paths. No
 ceiling: FFT native-real-kernel + matmul/cholesky FMA-floor remain the (multi-session/policy) open gaps.
+
+## 2026-07-02 - SURFACE (parity gap, not perf): RNG distribution samplers (gamma/beta/poisson/dirichlet) use a non-JAX shared-pool heuristic — stat-tested only, do NOT match jax.random element-wise (BlackThrush)
+
+Land-or-dig turn after the FFT radix-4 vein closed. Probed RNG: the CORE is done — `random_uniform`, `random_normal`
+(threaded erfinv, golden-pinned), exp/gumbel/laplace/randint all thread bit-identically to JAX. But the higher
+DISTRIBUTION samplers are NOT JAX-faithful:
+  - `random_gamma` (threefry.rs:945) pre-generates `count*10` normals + uniforms from ONE key, then runs a single
+    GLOBAL Marsaglia-Tsang rejection loop reusing that shared pool by running index (`uniforms[idx % len]`). JAX's
+    `random.gamma` instead splits the key PER ELEMENT and runs an independent per-element rejection stream, so its
+    output is deterministic per (key, element-index). The shared-pool loop produces statistically-valid but
+    ELEMENT-WISE-DIFFERENT values, and 10× over-samples (JAX needs ~1.1× on average).
+  - `random_beta`/`random_dirichlet` compose `random_gamma`, so they inherit the divergence; `random_poisson`
+    (threefry.rs:1035) and `random_geometric` similarly are not the JAX algorithms.
+VERIFIED this is unguarded: `crates/fj-conformance/tests/random_distributions_oracle.rs` states in its header
+"Tests statistical properties of random distributions rather than exact values" — gamma/beta/poisson are checked
+by mean/variance tolerance (`test_gamma_mean`), NEVER against JAX reference draws. So the parity gap passes CI.
+
+CLASSIFICATION: this is a PARITY/correctness gap, NOT a perf lever (the directive's focus) — hence surfaced, not
+"fixed": a faithful fix is a per-element-key rewrite of each sampler (gamma via JAX's `_gamma_one` loop, poisson
+via Knuth/PTRS by regime, etc.) validated against `jax.random.*` reference draws from the venv — multi-session,
+needs the JAX oracle harness. Bonus: the faithful gamma also does LESS RNG work (no 10× pool), so it's parity AND
+a minor perf improvement. PERF STATE (this session, comprehensive): contained levers mined — FFT radix-4 landed
+(~1.02–1.08x valuation-dependent), Bluestein radix-4 regressed, xlogy SIMD memory-bound, complex-transcendentals
+FMA-blocked, TopK/einsum/i64-matmul/fj-ad-VJPs already optimal. No ceiling: RNG-sampler parity, FFT native-real-
+kernel, interpreter→typed-slots, and the matmul/cholesky FMA-floor are the open (multi-session/policy) fronts.
