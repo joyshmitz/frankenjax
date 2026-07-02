@@ -15329,6 +15329,31 @@ mod tests {
         assert_eq!(vals, vec![58, 64, 139, 154]);
     }
 
+    // Guards the complex Dot fast path (rank2_complex_matmul_dot):
+    // [[1+2i, 3]] @ [[i],[1]] = (1+2i)*i + 3 = (i-2) + 3 = 1+i.
+    #[test]
+    fn complex_dot_fast_path_matches_expected() {
+        let a = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: vec![1, 2] },
+                vec![(1.0, 2.0), (3.0, 0.0)],
+            )
+            .unwrap(),
+        );
+        let b = Value::Tensor(
+            TensorValue::new_complex_values(
+                DType::Complex128,
+                Shape { dims: vec![2, 1] },
+                vec![(0.0, 1.0), (1.0, 0.0)],
+            )
+            .unwrap(),
+        );
+        let out = eval_primitive(Primitive::Dot, &[a, b], &no_params()).unwrap();
+        let vals = out.as_tensor().unwrap().elements.as_complex_slice().unwrap().to_vec();
+        assert_eq!(vals, vec![(1.0, 1.0)]);
+    }
+
     // Guards the u32/u64 Dot fast path (rank2_u64_matmul_dot): [[1,2,3],[4,5,6]] @
     // [[7,8],[9,10],[11,12]] in u64 = [58,64,139,154].
     #[test]

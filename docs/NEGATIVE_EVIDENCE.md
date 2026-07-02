@@ -10720,3 +10720,15 @@ So i32 `dot`/`matmul` now routes through the SAME threaded `rank2_i64_matmul` as
 FASTER than JAX's BLAS-less integer loop) instead of the ~14 s per-element odometer. Verified:
 `i32_dot_fast_path_matches_expected` (dtype==I32 + values) + 52 dot tests green. eval_tensor_dot integer coverage
 now COMPLETE (i64/i32/u64/u32) + f32 regression-fixed; only complex remains (rank2_complex_matmul, next). No ceiling.
+
+## 2026-07-02 - complex Dot fast path — eval_tensor_dot dtype coverage now COMPLETE (BlackThrush)
+
+Wired the last dtype: `rank2_complex_matmul_dot` (via `as_complex_slice` + `rank2_complex_matmul`, bit-identical to
+the generic complex fold) after the u64 path in `eval_tensor_dot`. Complex `dot`/`matmul` was the last dtype
+falling to the ~14 s odometer. Regression fix, NOT a vs-JAX win (XLA has cgemm), but eliminates the odometer.
+Guard `complex_dot_fast_path_matches_expected` ((1+2i,3)·(i,1)=1+i) + 53 dot tests green. **eval_tensor_dot (the
+`Dot` primitive) is now FULLY dtype-covered: f64/i64/i32/u64/u32/f32/complex** — closing the gap where it had
+ONLY f64 wired while DotGeneral had everything. Session Dot arc: i64 230x + u64 14.1x FASTER than JAX (integers
+have no XLA BLAS), i32 (shared i64 kernel), f32/complex regression-fixes (FMA/cgemm floors). ALSO FOUND: integer
+CONV is NOT a fj win — JAX i64 conv = 0.86 ms (XLA vectorizes integer conv), so the "no-BLAS" thesis is
+matmul-specific. No ceiling.

@@ -14173,6 +14173,41 @@ fn rank2_u64_matmul_dot(
     Ok(Some(u64_matmul_output(out_dtype, values, output_dims)?))
 }
 
+/// Dense rank-2 complex matmul fast path for the `Dot` primitive — the last dtype that
+/// fell to the ~14 s odometer in `eval_tensor_dot`. Runs the `rank2_complex_matmul`
+/// kernel (bit-identical to the generic per-element complex fold). Regression fix (XLA
+/// has cgemm, so this doesn't beat JAX — but eliminates the odometer). `None` otherwise.
+fn rank2_complex_matmul_dot(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    output_dims: &[u32],
+) -> Result<Option<Value>, EvalError> {
+    let out_dtype = match dot_output_kind(lhs, rhs) {
+        DotOutputKind::Complex(dt) => dt,
+        _ => return Ok(None),
+    };
+    if lhs.rank() != 2 || rhs.rank() != 2 {
+        return Ok(None);
+    }
+    let (Some(la), Some(rb)) = (
+        lhs.elements.as_complex_slice(),
+        rhs.elements.as_complex_slice(),
+    ) else {
+        return Ok(None);
+    };
+    let m = lhs.shape.dims[0] as usize;
+    let k = lhs.shape.dims[1] as usize;
+    let n = rhs.shape.dims[1] as usize;
+    let values = rank2_complex_matmul(la, m, k, rb, n);
+    Ok(Some(Value::Tensor(TensorValue::new_complex_values(
+        out_dtype,
+        Shape {
+            dims: output_dims.to_vec(),
+        },
+        values,
+    )?)))
+}
+
 /// Transpose a contiguous row-major `[rows, cols]` f64 matrix to `[cols, rows]`.
 fn transpose_rows_cols_f64(data: &[f64], rows: usize, cols: usize) -> Vec<f64> {
     let mut out = vec![0.0_f64; rows * cols];
@@ -15144,6 +15179,9 @@ fn eval_tensor_dot(
         return Ok(value);
     }
     if let Some(value) = rank2_u64_matmul_dot(lhs, rhs, &output_dims)? {
+        return Ok(value);
+    }
+    if let Some(value) = rank2_complex_matmul_dot(lhs, rhs, &output_dims)? {
         return Ok(value);
     }
 
