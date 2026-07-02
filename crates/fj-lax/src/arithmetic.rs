@@ -6327,6 +6327,47 @@ fn log_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
     r
 }
 
+/// NATIVE-f32 base-2 log via [`crate::simd_exp::log2_block_f32`] (EXACT at powers of two). Positive-
+/// normal lanes take the block; `x ≤ 0` / subnormal / `+inf` / `NaN` → scalar `f32::log2` (which is also
+/// exact at powers). ~f32 tolerance for non-powers.
+fn log2_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    type F = Simd<f32, 8>;
+    let normal = x.simd_ge(F::splat(f32::MIN_POSITIVE)) & x.simd_lt(F::splat(f32::INFINITY));
+    if !normal.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].log2();
+        }
+        return F::from_array(ra);
+    }
+    let mut r = crate::simd_exp::log2_block_f32(x);
+    if !normal.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k] >= f32::MIN_POSITIVE && xa[k] < f32::INFINITY) {
+                ra[k] = xa[k].log2();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
+pub(crate) fn eval_log2(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // Native-f32 fast path (JAX default dtype), ~2x the widen-to-f64 scalar path. Unlike f64 log2
+    // (REVERTED — glibc log2 is fast), f32 wins because its baseline is the slow WIDENED libm.
+    if std::env::var_os("FJ_LOG2_SCALAR").is_none()
+        && let Some(v) = eval_unary_simd_dense_f32_native(inputs, log2_f32x8, f32::log2)
+    {
+        return v;
+    }
+    eval_float_complex_unary(primitive, inputs, f64::log2)
+}
+
 /// 8-wide `log1p` via the Kahan/Goldberg correction `log1p(x) = x·ln(u)/(u−1)` with `u = 1+x`,
 /// which recovers the low bits lost when `1+x` rounds (so it stays ~1 ulp even for tiny `x`, unlike
 /// a naive `ln(1+x)`). `ln(u)` uses the SIMD Cephes [`crate::simd_exp::log_block_f64`]. When `u == 1`
@@ -28468,6 +28509,74 @@ mod tests {
         let scalar = std::env::var_os("FJ_LOG1P_SCALAR").is_some();
         println!(
             "fj-lax log1p f32 4M [{}]: {:.3}ms",
+            if scalar { "SCALAR-ORIG" } else { "NATIVE" },
+            b * 1e3
+        );
+    }
+
+    #[test]
+    fn log2_f32_native_matches_scalar_exact_powers_and_edges() {
+        // eval_log2 native-f32 path (log2_block_f32) must be BIT-EXACT at powers of two (log2(2^k)==k),
+        // ~1 ulp elsewhere, and bit-exact edges (x<=0 -> NaN/-inf, +inf, NaN) via scalar fallback.
+        let n = 300_003usize;
+        let mut data: Vec<f32> = (0..n).map(|i| 1e-3 + (i % 9973) as f32 * 0.03).collect();
+        for (kk, v) in [
+            (3usize, 1.0f32),
+            (4, 2.0),
+            (5, 4.0),
+            (6, 1024.0),
+            (7, 0.5),
+            (8, 0.25),
+            (9, 0.0),
+            (10, -2.0),
+            (11, f32::INFINITY),
+            (12, f32::NAN),
+        ] {
+            data[kk] = v;
+        }
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_log2(Primitive::Log2, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.log2();
+            let g = got[idx];
+            // Integer log2 (⟺ power of two) and non-finite edges must be bit-exact; else ~1 ulp.
+            if want.is_finite() && want.fract() != 0.0 {
+                assert!(
+                    (g - want).abs() <= 1e-6 * want.abs().max(1.0),
+                    "log2 f32 at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "log2 f32 exact/edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_log2_f32_throughput() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n).map(|i| 0.1 + (i % 9973) as f32 * 0.002).collect();
+        let input =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap());
+        let f = || {
+            std::hint::black_box(eval_log2(Primitive::Log2, std::slice::from_ref(&input)).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        let scalar = std::env::var_os("FJ_LOG2_SCALAR").is_some();
+        println!(
+            "fj-lax log2 f32 4M [{}]: {:.3}ms",
             if scalar { "SCALAR-ORIG" } else { "NATIVE" },
             b * 1e3
         );

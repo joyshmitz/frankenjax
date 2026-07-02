@@ -301,6 +301,49 @@ pub fn log_block_f32(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
     r + ef * F::splat(LN2_HI)
 }
 
+/// 8-wide f32 base-2 log for NORMAL POSITIVE inputs — same Cephes frexp + degree-8 mantissa poly as
+/// [`log_block_f32`], but the EXACT integer exponent `ef` is kept SEPARATE: `log2(x) = ef + ln(m)·LOG2E`.
+/// At an exact power of two the reduced mantissa is `0` ⇒ `ln(m)=0` ⇒ result is exactly `ef` (matching
+/// libm `log2f(2^k)=k`; the oracle asserts exact powers). ~f32 tolerance for non-powers. Caller routes
+/// `x ≤ 0` / subnormal / ±inf / NaN to scalar `f32::log2`.
+pub fn log2_block_f32(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdInt;
+    use std::simd::num::SimdUint;
+    type F = Simd<f32, 8>;
+    const SQRTHF: f32 = 0.707_106_77;
+    const LOG2E: f32 = std::f32::consts::LOG2_E;
+    let bits = x.to_bits();
+    let e = ((bits >> Simd::splat(23)) & Simd::splat(0xff)).cast::<i32>() - Simd::splat(126);
+    let m_bits = (bits & Simd::splat(0x007f_ffff)) | Simd::splat(126u32 << 23);
+    let mut m = F::from_bits(m_bits);
+    let mut ef = e.cast::<f32>();
+    let lo = m.simd_lt(F::splat(SQRTHF));
+    ef -= lo.select(F::splat(1.0), F::splat(0.0));
+    m = m + lo.select(m, F::splat(0.0)) - F::splat(1.0);
+    let z = m * m;
+    const P: [f32; 9] = [
+        7.037_683_6e-2,
+        -1.151_461e-1,
+        1.167_699_9e-1,
+        -1.242_014_1e-1,
+        1.424_932_3e-1,
+        -1.666_805_8e-1,
+        2.000_071_5e-1,
+        -2.499_999_4e-1,
+        3.333_333_1e-1,
+    ];
+    let mut p = F::splat(P[0]);
+    for &c in &P[1..] {
+        p = p * m + F::splat(c);
+    }
+    // Mantissa log ln(m) = m + p·m·z − 0.5·z (NO exponent term). Exactly 0 when m == 0.
+    let ln_m = m + p * m * z - F::splat(0.5) * z;
+    ef + ln_m * F::splat(LOG2E)
+}
+
 /// 8-wide `f64` natural log for NORMAL POSITIVE inputs — Cephes double-precision `log`
 /// (degree-5/5 rational on the reduced mantissa + frexp exponent reconstruction). Accurate
 /// to ~1 ulp (`log_block_f64_accuracy`: < 1e-15 relative), i.e. WELL within JAX/XLA tolerance

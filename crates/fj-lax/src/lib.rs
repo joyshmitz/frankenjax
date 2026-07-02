@@ -54,8 +54,8 @@ use arithmetic::{
     eval_erf, eval_erf_inv, eval_erfc, eval_exp, eval_expm1, eval_float_complex_unary, eval_fma,
     eval_igamma,
     eval_igammac, eval_imag, eval_integer_pow, eval_is_finite, eval_is_inf, eval_is_nan,
-    eval_lgamma, eval_log, eval_log1p, eval_logistic, eval_neg, eval_nextafter, eval_polygamma,
-    eval_real,
+    eval_lgamma, eval_log, eval_log1p, eval_log2, eval_logistic, eval_neg, eval_nextafter,
+    eval_polygamma, eval_real,
     eval_round,
     eval_rsqrt,
     eval_select, eval_select_n, eval_signbit, eval_sin, eval_sinh, eval_tan, eval_tanh,
@@ -327,7 +327,7 @@ fn eval_primitive_inner(
         Primitive::Abs => eval_abs(primitive, inputs),
         Primitive::Exp => eval_exp(primitive, inputs),
         Primitive::Log => eval_log(primitive, inputs),
-        Primitive::Log2 => eval_float_complex_unary(primitive, inputs, f64::log2),
+        Primitive::Log2 => eval_log2(primitive, inputs),
         Primitive::Exp2 => eval_float_complex_unary(primitive, inputs, f64::exp2),
         // Sinc carries a sin + div per element (compute-bound), so thread it like
         // the other transcendentals instead of the serial path.

@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Log2: 2.04x) — f32 WINS where f64 log2 REGRESSED/reverted (BlackThrush)
+
+`Log2` f32 widened to slow scalar `f64::log2`. New `log2_block_f32` (f32 sibling of the reverted
+`log2_block_f64`): same Cephes frexp + degree-8 mantissa poly as `log_block_f32`, but keeps the EXACT
+integer exponent `ef` separate — `log2(x)=ef+ln(m)·LOG2E` — so `log2(2^k)=k` bit-exact. `log2_f32x8`:
+positive-normal → block; `x≤0`/subnormal/`±inf`/`NaN` → scalar `f32::log2`. MEASURED (4M f32,
+`FJ_LOG2_SCALAR` A/B): scalar-ORIG 7.82ms → NATIVE **3.83ms = 2.04x**. Gates: fj-lax lib green, full
+conformance green (log2_exp2_oracle exact-powers incl.), f32 exact-power+edge test green.
+
+STRIKING CONTRAST: f64 log2 was SURFACE+REVERTED (0.90x regression — glibc log2 is fast) but f32 log2
+WINS 2.04x — because the f32 baseline is the slow WIDENED `f64::log2` scalar map (branchy libcall, no
+autovec), NOT native `log2f`. Same inversion as asin (f64 lost, f32 won). RULE: a f64-reverted op can
+still be a clean f32 win when its f32 path is scalar-widened. Native-f32 vein (17): the exp/log/hyperbolic
+/inverse-hyperbolic/inverse-trig families + rsqrt/cbrt/digamma/log2 (1.31-5.67x).
+
 ## 2026-07-01 - WIRED WIN (native-f32 Acos: 1.64x vs scalar ORIG): 16th native-f32 consumer, completes inverse-trig (BlackThrush)
 
 `Acos` f32 widened to slow scalar libm. New `acos_f32x8` = Cephes `acosf` reusing `asin_f32x8`: `x>0.5 ⇒
