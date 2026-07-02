@@ -26434,35 +26434,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn time_sort_complex64_4m_tempbt() {
-        let n = 4_000_000usize;
-        let data: Vec<(f64, f64)> = (0..n)
-            .map(|i| {
-                let a = ((i as i64).wrapping_mul(2654435761) & 0xffff) as f64;
-                let b = ((i as i64).wrapping_mul(40503) & 0xffff) as f64;
-                (a * 1e-2 - 300.0, b * 1e-2 - 300.0)
-            })
-            .collect();
-        let asc = params(&[("dimension", "0"), ("descending", "false")]);
-        let mut best = f64::INFINITY;
-        for _ in 0..4 {
-            let v = Value::Tensor(
-                TensorValue::new_complex_values(
-                    fj_core::DType::Complex64,
-                    Shape::vector(n as u32),
-                    data.clone(),
-                )
-                .unwrap(),
-            );
-            let t = std::time::Instant::now();
-            let _ = eval_sort(Primitive::Sort, &[v], &asc).unwrap();
-            best = best.min(t.elapsed().as_secs_f64() * 1e3);
-        }
-        println!("fj sort complex64 4M: {:.2}ms", best);
-    }
-
-    #[test]
     fn radix_keys_unsigned_value_sort_matches_comparison_large() {
         // >= PARALLEL_RADIX_MIN_PAIRS so the keys-only unsigned value-sort path fires.
         // Covers u32 and u64, ascending + descending, with 0/MAX/dups.
