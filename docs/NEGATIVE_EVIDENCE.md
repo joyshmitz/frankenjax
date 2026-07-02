@@ -10534,3 +10534,19 @@ gross element-wise divergence (the shared-pool heuristic, not per-element-key st
 Landed `random_gamma_matches_jax_reference_x64` (threefry.rs, `#[ignore]`d — CI green) hard-coding the JAX f64
 reference: it's the ready verification harness for the future `_gamma_one` (jax/_src/random.py:1298) per-element-key
 port — un-ignore it when gamma is rewritten. Groundwork committed; the faithful rewrite itself stays multi-session.
+
+### 2026-07-02 follow-up 2: gamma-port DE-RISKED (fj key primitives match JAX-f32 EXACTLY) + oracle corrected x64→f32 (BlackThrush)
+
+Gated feasibility of the faithful `_gamma_one` port by checking fj's RNG primitives vs JAX (venv):
+  - `random_split(PRNGKey(0))` = `([1797259609,2579123966],[928981903,3453687069])` == `jax.random.split(key,2)`
+    **EXACTLY** (n-way split just needs generalizing — JAX's `split(key,n)` is threefry counting from 0, and
+    `split(key,3)` shares its first 2 keys with `split(key,2)`, confirming the prefix-stable counter scheme).
+  - `random_uniform(key0,1)[0]` = 0.9476670026779175 == JAX-**f32** `uniform(key,())` **EXACTLY**;
+    `random_normal(key0,1)[0]` = 1.6226418 ≈ JAX-f32 `normal(key,())` 1.6226422 (~3e-7, fj erfinv in f64).
+KEY CORRECTION: fj's RNG is **f32-based** (mantissa-bits trick → JAX-f32 values in f64 storage), so last turn's
+gamma oracle used the WRONG reference (JAX x64 gamma). Re-pinned `random_gamma_matches_jax_reference_f32` to
+JAX's DEFAULT f32-mode `gamma(PRNGKey(0),2.0,(8,))` = `[1.5898,1.7599,1.1290,3.9743,2.9546,1.9788,1.4844,0.4591]`
+(tol 1e-4 — fj arithmetic is f64 on f32-matching draws; tune at port). NET: the per-element-key gamma port is now
+GREEN-LIT (all key primitives verified JAX-faithful) — remaining work is purely the `_gamma_one` loop translation
+(n-way split + per-element Marsaglia-Tsang while-loop + boost), a bounded next-session task with a ready oracle. No
+ceiling.

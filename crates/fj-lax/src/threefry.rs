@@ -2661,33 +2661,39 @@ mod tests {
     /// heuristic (pre-generate count*10 normals from ONE key, global reject loop) that
     /// diverges element-wise — see docs/NEGATIVE_EVIDENCE.md 2026-07-02. JAX instead
     /// splits the key PER ELEMENT (`_gamma_one`, jax/_src/random.py:1298) and runs an
-    /// independent Marsaglia-Tsang while-loop per element. The reference values below
-    /// were captured from the venv with `jax_enable_x64=True` (matching fj's f64 compute,
-    /// so the f32-vs-f64 caveat is removed): `random.gamma(PRNGKey(0), a, (8,))`.
+    /// independent Marsaglia-Tsang while-loop per element.
     ///
-    /// MEASURED gap at capture time (a=2.0, elem 0): JAX 1.3520 vs fj 4.7617. Un-ignore
-    /// this test once `random_gamma` is rewritten to the per-element-key `_gamma_one`
-    /// algorithm — it then verifies the fix against JAX ground truth to tolerance.
+    /// PORT FEASIBILITY (verified 2026-07-02, BlackThrush): fj's key primitives ALREADY
+    /// match JAX bit/f32-exactly, so the port is de-risked —
+    ///   * `random_split(PRNGKey(0))` = `([1797259609,2579123966],[928981903,3453687069])`
+    ///     == `jax.random.split(key,2)` EXACTLY (n-way split just needs generalizing);
+    ///   * `random_uniform(key0,1)[0]` = 0.9476670026779175 == JAX-**f32** `uniform(key,())`
+    ///     EXACTLY; `random_normal(key0,1)[0]` = 1.6226418 ≈ JAX-f32 `normal(key,())`
+    ///     1.6226422 (~3e-7, fj does erfinv in f64).
+    /// So the reference below is JAX in its DEFAULT **f32** mode (NOT x64 — fj's RNG is
+    /// f32-based; the earlier x64 reference was the wrong target). A faithful `_gamma_one`
+    /// port will match these to ~f32 tolerance (fj arithmetic is f64 on f32-matching draws,
+    /// so tune the tol at implementation — 1e-4 is a starting bound).
     #[test]
     #[ignore = "random_gamma is not yet the JAX per-element-key algorithm (parity gap; \
                 see NEGATIVE_EVIDENCE 2026-07-02). Un-ignore when _gamma_one is ported."]
-    fn random_gamma_matches_jax_reference_x64() {
-        // jax.random.gamma(random.PRNGKey(0), a, (8,)) with jax_enable_x64=True.
+    fn random_gamma_matches_jax_reference_f32() {
+        // jax.random.gamma(random.PRNGKey(0), 2.0, (8,)) in DEFAULT f32 mode.
         let jax_a2: [f64; 8] = [
-            1.3520307957942443,
-            1.124359450100187,
-            3.7324041613131316,
-            0.20633363401274485,
-            1.7981591432708315,
-            5.270398754058958,
-            1.3284945432310016,
-            2.2726653490638054,
+            1.5897877216339111,
+            1.7599413394927979,
+            1.12900710105896,
+            3.9743340015411377,
+            2.9546000957489014,
+            1.9788084030151367,
+            1.4843521118164062,
+            0.4591488242149353,
         ];
         let fj_a2 = random_gamma(random_key(0), 8, 2.0);
         for (i, (&want, &got)) in jax_a2.iter().zip(fj_a2.iter()).enumerate() {
             assert!(
-                (want - got).abs() <= 1e-9 * want.abs().max(1.0),
-                "gamma(a=2) elem {i}: JAX {want} vs fj {got}"
+                (want - got).abs() <= 1e-4 * want.abs().max(1.0),
+                "gamma(a=2) elem {i}: JAX-f32 {want} vs fj {got}"
             );
         }
     }
