@@ -253,6 +253,24 @@ fn bench_atan2_1m_f64_vec(c: &mut Criterion) {
     });
 }
 
+// 4M xlogy(x, y) = x·ln(y) over dense f64 — a binary transcendental (one libm ln
+// per element) on the threaded scalar path. Permanent throughput guard: an 8-wide
+// SIMD-log rewrite was measured at ~1.02x (CIs overlap) — memory-bandwidth-bound at
+// this scale, so vectorizing the ln buys nothing (see NEGATIVE_EVIDENCE 2026-07-02).
+// Some x are zero (~1/97) to exercise the 0·log ⇒ 0 mask branch.
+fn bench_xlogy_4m_f64_vec(c: &mut Criterion) {
+    let a: Vec<f64> = (0..1 << 22)
+        .map(|i| if i % 97 == 0 { 0.0 } else { (i % 211) as f64 + 1.0 })
+        .collect();
+    let b: Vec<f64> = (0..1 << 22).map(|i| (i % 307) as f64 + 0.5).collect();
+    let lhs = Value::vector_f64(&a).unwrap();
+    let rhs = Value::vector_f64(&b).unwrap();
+    let p = no_params();
+    c.bench_function("eval/xlogy_4m_f64_vec", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::XLogY, &[lhs.clone(), rhs.clone()], &p))
+    });
+}
+
 // 1M erf (Gaussian CDF) — a compute-bound unary transcendental that was on the
 // serial path; routed through eval_unary_elementwise_parallel.
 fn bench_erf_1m_f64_vec(c: &mut Criterion) {
@@ -7151,6 +7169,7 @@ criterion_group!(
     bench_pow_scalar_1m_f64_vec,
     bench_pow_scalar_1m_f64_literal_reference,
     bench_atan2_1m_f64_vec,
+    bench_xlogy_4m_f64_vec,
     bench_erf_1m_f64_vec,
     bench_polygamma_n2_256k_f64,
     bench_igamma_256k_f64,

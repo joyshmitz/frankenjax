@@ -10381,3 +10381,28 @@ handle the two edges scalar-per-lane inside the SIMD loop via `to_array()` only 
 are rare, so the fast lane stays vectorized). Then rebuild, run `xlogy_oracle` (green) + the `FJ_XLOGY_SCALAR`
 same-binary A/B on a large dense-f64 array. WIP stash: `git stash list` → "WIP XLogY SIMD ... BlackThrush".
 NO CEILING — this is a live, small, high-confidence lever, just trait-blocked this session.
+
+## 2026-07-02 - SURFACE + REVERT: xlogy/xlog1py 8-wide SIMD-log is ~1.02x near-parity (memory-bound at scale) — kept a guard bench (BlackThrush)
+
+Followed up last session's pinned XLogY lever. Unblocked the drafted dense-f64 SIMD kernel
+(`eval_xlogy_family_simd_dense_f64`): the `Mask::select` E0599 was the known portable-SIMD trait-drift, so I
+dropped masks entirely — vectorize the dominant `x·log_f64x8(y)` for all lanes, then a mask-free scalar fix-up
+pass over only the two edges the oracle pins by `assert_eq` (`x==0 ⇒ 0`, `y==edge ⇒ x·0`; every non-normal `y`
+is already bit-exact because `log_f64x8` self-routes those lanes to libm). Compiled clean, `xlogy_oracle`
+**38/38 green**.
+
+First A/B was a false regression (my helper used `dense_unary_threads` = only ~4 threads at 4M vs the scalar
+path's `work_scaled_threads` = ~cores); after matching the thread count the honest same-binary A/B
+(`eval/xlogy_4m_f64_vec`, `FJ_XLOGY_SCALAR` toggling scalar vs SIMD in ONE binary) is:
+  - Candidate (SIMD Cephes log): **8.7853 ms** (`[8.6853, 8.7853, 8.8854]`).
+  - Baseline (threaded libm `y.ln()`): **8.9604 ms** (`[8.8629, 8.9604, 9.0589]`).
+  - Ratio **~1.02x — CIs OVERLAP**, i.e. statistically indistinguishable. NO measurable win.
+
+VERDICT: xlogy is ONE transcendental per element; at 4M f64 across ~cores threads it is memory-bandwidth-bound
+(read 2×32 MB + write 32 MB), so the ~2.36x per-core SIMD-`ln` advantage is fully hidden behind memory traffic —
+plus the correctness fix-up adds a second O(n) read pass. This is the binary-op confirmation of the standing rule
+(`project_simd_poly_exp_fma_finding`): SIMD transcendentals win only for MANY-transcendental/compute-bound
+kernels, not 1-op-per-element memory-bound ones (cf. f32 pow ~0-gain, exp2/atan2 near-parity reverts). REVERTED
+the SIMD source (arithmetic.rs + lib.rs → stash `xlogy-simd-nearparity-1.02x-revert-BlackThrush`); KEPT
+`bench_xlogy_4m_f64_vec` as a permanent throughput guard. NO CEILING — a compute-bound / cache-resident xlogy
+regime (or an FMA-enabled build) could still flip it; not chased here.
