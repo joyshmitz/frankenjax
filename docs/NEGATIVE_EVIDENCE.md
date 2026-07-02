@@ -10732,3 +10732,18 @@ ONLY f64 wired while DotGeneral had everything. Session Dot arc: i64 230x + u64 
 have no XLA BLAS), i32 (shared i64 kernel), f32/complex regression-fixes (FMA/cgemm floors). ALSO FOUND: integer
 CONV is NOT a fj win — JAX i64 conv = 0.86 ms (XLA vectorizes integer conv), so the "no-BLAS" thesis is
 matmul-specific. No ceiling.
+
+## 2026-07-02 - SURFACE: cumprod is ~parity vs JAX but 3.5x slower than fj's own cumsum (anomaly, pinned lever); einsum2 is test-only (BlackThrush)
+
+Dug different primitives after completing eval_tensor_dot. Two findings:
+  - **einsum has NO integer gap**: `einsum2` (the f64-only matmul-routing helper in einsum.rs) is called ONLY from
+    tests — production einsum decomposes to `dot_general` at the frontend (which covers all dtypes). So the
+    "integer no-BLAS" thesis does not open an einsum lever.
+  - **cumprod anomaly (pinned):** isolated-target f64, `[4096,4096]` axis=1 — JAX `jnp.cumprod` **73.52 ms** vs fj
+    **78.60 ms** = ~parity (fj 1.07x slower). BUT fj's own `cumsum` on the identical shape is **22.09 ms** (3.07x
+    FASTER than JAX). cumsum and cumprod take the SAME `eval_cumulative_dense` path, differing only in the
+    add-vs-mul `float_op` closure + init (0/1) — yet cumprod is **3.5x slower than fj cumsum**, far more than
+    mul-vs-add dependency-chain latency (~1.25x) explains. So cumprod is LEAVING a ~3x-vs-JAX win on the table for
+    an unexplained reason (a Cumsum-specific fast path it misses, or a mul-specific codegen/denormal effect — needs
+    a profiler/perf-A-B to pin; JAX treats cumsum≈cumprod at 67/73 ms, fj does not). PINNED as a probable 3x lever;
+    cause unconfirmed, so not claimed as a win. No ceiling.
