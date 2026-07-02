@@ -10637,3 +10637,15 @@ RESULT: `random_gamma(key,100_000,2.0)` = **47.74 ms** (best of 7) — **313x** 
 identical); beta/dirichlet inherit the speedup (they call `gamma_one`). fj-lax rng 43/0. Isolated-target build
 (rch E0514 drift). Lesson: per-element rejection samplers must use scalar (Vec-free) draws, never `random_*(k,1)`.
 No ceiling.
+
+### 2026-07-02 follow-up: beta/dirichlet inherit the gamma scalar-draw win — all 3 rejection samplers now BEAT JAX (BlackThrush)
+
+The `gamma_one` scalar-draw fix (7fd450fb) propagates through every sampler that composes it. Same-host measured
+(fj isolated-target f64 vs JAX-CPU f64, 100k samples, best-of median):
+  - gamma(2.0):     fj **47.74 ms** vs JAX **103.21 ms** = **2.16x FASTER**.
+  - beta(2,3):      fj **90.43 ms** vs JAX **171.68 ms** = **1.90x FASTER** (draws 2 loggamma/elem).
+  - dirichlet[1,2,3]: fj **131.46 ms** vs JAX **345.43 ms** = **2.63x FASTER** (3 loggamma/elem + softmax).
+So the whole rejection-sampler family is now parity-faithful (element-wise oracles green) AND faster than
+XLA-CPU's vmap'd while-loop. NOTE (method): jax.nn.softmax [4096,4096] f64 first measured 76.9 ms but log_softmax
+(near-identical op) was 23.0 ms and fj log_softmax 21.5 ms (~parity) — the 76.9 ms was a host-load anomaly, so
+softmax is NOT a 3x win; sanity-check surprising ratios (cf. the FFT load-inflation lesson). No ceiling.
