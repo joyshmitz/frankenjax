@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - SURFACE / REVERTED: SIMD exp2 REGRESSES 0.90x @4M — glibc exp2 is well-optimized (mirrors the log2 revert) (BlackThrush)
+
+Attempted to extend the Cephes exp vein to `Exp2`. Built a CORRECT `exp2_f64x8`: `2ⁿ · exp_cephes(r·ln2)`
+with `n=round(x)`, `r=x−n∈[−0.5,0.5]` — integer x ⇒ `r=0` ⇒ `exp_cephes(0)=1.0` EXACTLY ⇒ `exp2(k)=2ᵏ`
+bit-for-bit (the oracle asserts `exp2(10)==1024`, `exp2(-1)==0.5` with assert_eq; all pass). Accuracy
+green: exact powers verified, log2_exp2_oracle 42/0, edge test green.
+
+BUT the A/B (median-of-3, `FJ_EXP2_SCALAR`) is a REGRESSION, not a win:
+  - 4M f64: SCALAR 8.13ms → SIMD **9.02ms = 0.90x** (SLOWER).
+  - 16M f64: SCALAR 26.72ms → SIMD 26.54ms = 1.01x (parity).
+EXACT same pattern as the reverted log2: glibc `exp2` (8.13ms/4M ≈ 2.0 ns/elem) is ALREADY well-optimized
+— like `log2`, and UNLIKE the slow `exp`/`expm1`/`ln`/`log1p`/`sinh`/`cosh`/`tanh` where SIMD wins. So the
+Cephes SIMD win does NOT extend to the base-2 functions.
+
+RULE (now confirmed twice — log2 AND exp2): glibc's base-2 transcendentals (`exp2`/`log2`) are fast enough
+that SIMD only ~parities or regresses; the vein wins ONLY where the natural-base/hyperbolic libm fn is slow.
+REVERTED (stashed, not dropped). Correctness was green; working tree restored to HEAD; conformance unaffected.
+
 ## 2026-07-01 - WIRED WIN (Sinh primitive: 2.32x @4M / 1.37x @16M): SIMD sinh via cancellation-free expm1 difference (BlackThrush)
 
 Fifth consumer of the Cephes exp vein, reusing `expm1_cephes_block_f64` (landed just before). `Sinh`
