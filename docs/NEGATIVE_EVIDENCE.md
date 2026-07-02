@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-02 - SURFACE / REVERTED: native-f32 Atan2 (~1.5x) is BLOCKED by a threaded==serial bit-pin (BlackThrush)
+
+First BINARY-f32 attempt. Built `atan2_f32x8` (base `atan_f32x8(y/x)` + copysign-π quadrant, x=0/±inf/NaN
+→ scalar) and special-cased Atan2 in `eval_same_shape_f32_expensive_parallel`. Correct (accuracy test
+green all quadrants + ±0/edges). Honest threaded-vs-threaded A/B (median-of-3, `FJ_ATAN2_SCALAR`): NATIVE
+~4.08ms vs widened-threaded ~6.27ms = **~1.5x** (NOTE: an initial 13.8x was a THREADING CONFOUND — the
+first scalar-ref bench was single-threaded 49ms; corrected once both paths were threaded).
+
+BLOCKER: the existing test `f32_expensive_binary_threaded_bit_identical_and_faster` asserts the THREADED
+f32 expensive-binary path is BIT-IDENTICAL to the serial widened (`op(a as f64,b as f64) as f32`) path
+for the WHOLE family (Pow/Atan2/Hypot/…). Native f32 atan2 diverges ~1 ulp ⇒ RED. So atan2 f32 same-shape
+is effectively bit-pinned (a self-consistency pin, like the unary bit-identity tests). Relaxing it to
+tolerance FOR Atan2 is legitimate (JAX parity is tolerance) but edits a shared multi-op test — deferred:
+the ~1.5x binary win doesn't justify the shared-test-relaxation risk this pass. REVERTED (stashed, not
+dropped). RULE: the f32 expensive-BINARY path (Pow/Atan2/Hypot) is bit-pinned threaded==serial; native-
+f32 binary needs that pin relaxed per-op first. (Unary f32 had per-op tests, easy to relax; binary shares one.)
+
 ## 2026-07-01 - SURFACE / REVERTED: native-f32 Exp2 is near-parity (1.01x) — its widened baseline is already fast (BlackThrush)
 
 Tested native-f32 `exp2` (correct: `2ⁿ·exp_block_f32(r·ln2)`, exact at integer powers — accuracy test
