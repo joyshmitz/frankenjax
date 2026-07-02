@@ -47,8 +47,8 @@ pub(crate) fn new_boxed(
 }
 
 use arithmetic::{
-    ensure_float_or_complex_operands, eval_abs, eval_acosh, eval_asin, eval_asinh, eval_atan,
-    eval_atanh,
+    ensure_float_or_complex_operands, eval_abs, eval_acos, eval_acosh, eval_asin, eval_asinh,
+    eval_atan, eval_atanh,
     eval_bessel_i0e, eval_bessel_i1e, eval_betainc, eval_binary_elementwise, eval_cbrt, eval_clamp,
     eval_complex, eval_conj, eval_cos, eval_cosh, eval_digamma, eval_dot, eval_dot_general,
     eval_erf, eval_erf_inv, eval_erfc, eval_exp, eval_expm1, eval_float_complex_unary, eval_fma,
@@ -353,7 +353,7 @@ fn eval_primitive_inner(
         Primitive::Cos => eval_cos(primitive, inputs),
         Primitive::Tan => eval_tan(primitive, inputs),
         Primitive::Asin => eval_asin(primitive, inputs),
-        Primitive::Acos => eval_float_complex_unary(primitive, inputs, f64::acos),
+        Primitive::Acos => eval_acos(primitive, inputs),
         Primitive::Atan => eval_atan(primitive, inputs),
         Primitive::Deg2Rad => eval_unary_elementwise_parallel(primitive, inputs, f64::to_radians),
         Primitive::Rad2Deg => eval_unary_elementwise_parallel(primitive, inputs, f64::to_degrees),

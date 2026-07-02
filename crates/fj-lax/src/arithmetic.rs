@@ -7427,6 +7427,63 @@ pub(crate) fn eval_asin(primitive: Primitive, inputs: &[Value]) -> Result<Value,
     eval_float_complex_unary(primitive, inputs, f64::asin)
 }
 
+/// NATIVE-f32 `acos(x)` — Cephes `acosf`, reusing [`asin_f32x8`]: `x>0.5 ⇒ 2·asin(√((1−x)/2))`,
+/// `x<−0.5 ⇒ π − 2·asin(√((1+x)/2))`, else `π/2 − asin(x)` (the sqrt reductions keep near-±1 accurate).
+/// One `asin_f32x8` on a selected arg, combined per branch. acos ≥ 0 ⇒ no sign. SIMD for `|x| ≤ 1`;
+/// `|x|>1`/`±inf`/`NaN` → scalar `f32::acos` (NaN). ~f32 tolerance.
+fn acos_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::StdFloat;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f32, 8>;
+    const PI: f32 = std::f32::consts::PI;
+    const FRAC_PI_2: f32 = std::f32::consts::FRAC_PI_2;
+    let ok = x.abs().simd_le(F::splat(1.0));
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].acos();
+        }
+        return F::from_array(ra);
+    }
+    let gt = x.simd_gt(F::splat(0.5));
+    let lt = x.simd_lt(F::splat(-0.5));
+    let s_gt = ((F::splat(1.0) - x) * F::splat(0.5)).sqrt();
+    let s_lt = ((F::splat(1.0) + x) * F::splat(0.5)).sqrt();
+    let arg = gt.select(s_gt, lt.select(s_lt, x));
+    let a = asin_f32x8(arg);
+    let mag = gt.select(
+        F::splat(2.0) * a,
+        lt.select(F::splat(PI) - F::splat(2.0) * a, F::splat(FRAC_PI_2) - a),
+    );
+    let mut r = mag;
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() <= 1.0) {
+                ra[k] = xa[k].acos();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
+pub(crate) fn eval_acos(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // Native-f32 fast path (JAX default dtype); f64 / complex / integer-rejection / tail via the
+    // generic float-complex path (which dispatches complex by primitive via complex_unary_elementwise).
+    if std::env::var_os("FJ_ACOS_SCALAR").is_none()
+        && let Some(v) = eval_unary_simd_dense_f32_native(inputs, acos_f32x8, f32::acos)
+    {
+        return v;
+    }
+    eval_float_complex_unary(primitive, inputs, f64::acos)
+}
+
 /// 8-wide `atanh(x) = 0.5·log1p(2x / (1 − x))` — the standard single-`log1p` identity (one
 /// [`log1p_f64x8`] instead of two). Using `log1p` (not raw `ln`) keeps it accurate for small `x`
 /// (`2x/(1-x) ≈ 2x`, `log1p` recovers the low bits), and the log1p lane self-handles the domain edges:
@@ -27605,6 +27662,74 @@ mod tests {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
         }
+    }
+
+    #[test]
+    fn acos_f32_native_matches_scalar_tolerance_and_edges() {
+        // eval_acos native-f32 path (acos_f32x8 via asin_f32x8) vs scalar f32 acos: few-ulp f32 across
+        // all 3 regimes incl. near ±1, edges (x=1 -> 0, x=-1 -> π, |x|>1 -> NaN).
+        let n = 300_003usize;
+        let mut data: Vec<f32> = (0..n).map(|i| -1.0 + (i % 9973) as f32 * (2.0 / 9973.0)).collect();
+        for (k, v) in [
+            (3usize, 0.0f32),
+            (4, 1.0),
+            (5, -1.0),
+            (6, 0.5),
+            (7, -0.5),
+            (8, 0.999999),
+            (9, -0.999999),
+            (10, 2.0),
+            (11, f32::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_acos(Primitive::Acos, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.acos();
+            let g = got[idx];
+            if want.is_nan() {
+                assert!(g.is_nan(), "acos f32 NaN at x={x}");
+            } else {
+                assert!(
+                    (g - want).abs() <= 1e-5 * want.abs().max(1.0),
+                    "acos f32 at x={x}: simd {g} vs scalar {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_acos_f32_throughput() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n)
+            .map(|i| -1.0 + (i % 9973) as f32 * (2.0 / 9973.0))
+            .collect();
+        let input =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap());
+        let f = || {
+            std::hint::black_box(eval_acos(Primitive::Acos, std::slice::from_ref(&input)).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        let scalar = std::env::var_os("FJ_ACOS_SCALAR").is_some();
+        println!(
+            "fj-lax acos f32 4M [{}]: {:.3}ms",
+            if scalar { "SCALAR-ORIG" } else { "NATIVE" },
+            b * 1e3
+        );
     }
 
     #[test]

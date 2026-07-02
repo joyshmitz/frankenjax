@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Acos: 1.64x vs scalar ORIG): 16th native-f32 consumer, completes inverse-trig (BlackThrush)
+
+`Acos` f32 widened to slow scalar libm. New `acos_f32x8` = Cephes `acosf` reusing `asin_f32x8`: `x>0.5 ⇒
+2·asin(√((1−x)/2))`, `x<−0.5 ⇒ π−2·asin(√((1+x)/2))`, else `π/2−asin(x)` (sqrt reductions keep near-±1
+accurate). One `asin_f32x8` on a selected arg, combined per branch. SIMD for `|x|≤1`; `|x|>1`/`±inf`/`NaN`
+→ scalar `f32::acos`. MEASURED (4M f32, `FJ_ACOS_SCALAR` A/B): scalar-ORIG 10.37ms → NATIVE **6.32ms =
+1.64x** (heavier — 2 sqrts + asin/atan compose). Gates: fj-lax lib green, full conformance green, f32
+accuracy+edge green. Completes native-f32 inverse-trig (atan/asin/acos).
+
+Native-f32 vein (16): tanh/logistic/cosh/log/log1p/atanh/asinh/acosh/expm1/sinh/digamma (2.0-3.7x) +
+rsqrt 1.31x + cbrt 5.67x + atan 4.80x + asin 2.06x + acos 1.64x. The exp/log/hyperbolic/inverse-hyperbolic
+/inverse-trig transcendental families + cbrt/rsqrt are ALL native-f32 now. Remaining: bit-pinned
+(exp/erf/sin/cos), cancellation (lgamma), output-f64 (polygamma).
+
 ## 2026-07-01 - WIRED WIN (native-f32 Asin: 2.06x vs scalar ORIG) — f32 WINS where f64 asin lost (BlackThrush)
 
 `Asin` f32 widened to slow scalar libm. New `asin_f32x8` reuses `atan_f32x8` (small branch
