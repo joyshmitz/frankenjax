@@ -9559,6 +9559,20 @@ fn f64_total_order_key(value: f64) -> u64 {
     (transformed as u64) ^ (1_u64 << 63)
 }
 
+/// Inverse of [`f64_total_order_key`] — recover the f64 from its total-order key. A
+/// bijection over NON-NaN f64 (NaN is NOT invertible: `f64_sort_order_key` maps every
+/// NaN to `u64::MAX`, so the keys-only value-sort path guards on `!is_nan`). Positive
+/// keys have the top bit set (`bits = key ^ (1<<63)`); negative keys were `!bits`.
+#[inline]
+fn f64_from_total_order_key(key: u64) -> f64 {
+    let bits = if key >> 63 == 1 {
+        key ^ (1_u64 << 63)
+    } else {
+        !key
+    };
+    f64::from_bits(bits)
+}
+
 /// 32-bit total-order key for `f32`, the exact `u32` analogue of
 /// [`f64_total_order_key`]. f32→f64 promotion is order-preserving and injective,
 /// so this key induces the SAME ordering (and tie structure) as
@@ -9873,6 +9887,32 @@ fn sort_along_axis_dense_f64(
         return Ok(None);
     }
     let outer_count = total / axis_dim;
+
+    // Keys-only VALUE-sort fast path for a single large contiguous slice with NO NaN:
+    // the total-order key is a bijection over non-NaN f64, so sort u64 keys directly
+    // (8 bytes/elem vs 16 for pairs, ~2x less traffic) and invert. NaN (which the key
+    // maps many-to-one to u64::MAX) keeps the pairs path so its payload/order via the
+    // original index is preserved. The `is_nan` scan is one cheap pass, dwarfed by sort.
+    if axis_stride == 1
+        && !return_indices
+        && use_parallel_radix(outer_count, axis_dim)
+        && !values.iter().any(|v| v.is_nan())
+    {
+        let mut keys: Vec<u64> = values
+            .iter()
+            .map(|&v| f64_total_order_key(v) ^ key_mask)
+            .collect();
+        let mut scratch: Vec<u64> = Vec::new();
+        radix_keys_ascending_parallel(&mut keys, &mut scratch);
+        let out: Vec<f64> = keys
+            .iter()
+            .map(|&k| f64_from_total_order_key(k ^ key_mask))
+            .collect();
+        return Ok(Some(Value::Tensor(
+            TensorValue::new_f64_values(tensor.shape.clone(), out)
+                .map_err(EvalError::InvalidTensor)?,
+        )));
+    }
 
     // Contiguous last axis (axis_stride == 1) fans its disjoint slices across
     // threads; argsort writes i64 indices, sort writes f64 values — each to its
@@ -25806,6 +25846,46 @@ mod tests {
             lit * 1e3,
             dense_t * 1e3,
             lit / dense_t
+        );
+    }
+
+    #[test]
+    fn radix_keys_f64_value_sort_matches_comparison_large() {
+        // >= PARALLEL_RADIX_MIN_PAIRS, NO NaN (so the keys-only path fires): ±inf, ±0,
+        // negatives, dups. Sort must equal a total-order comparison reference.
+        let n = 1_000_000usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| match i % 17 {
+                0 => f64::INFINITY,
+                1 => f64::NEG_INFINITY,
+                2 => 0.0,
+                3 => -0.0,
+                4 => -1.0,
+                5 => f64::MIN_POSITIVE,
+                _ => (((i as i64).wrapping_mul(2654435761)) as f64) * 1e-6,
+            })
+            .collect();
+        let mut want = data.clone();
+        want.sort_by(|a, b| a.total_cmp(b));
+        let asc = params(&[("dimension", "0"), ("descending", "false")]);
+        let got = extract_f64_vec(
+            &eval_sort(Primitive::Sort, &[Value::vector_f64(&data).unwrap()], &asc).unwrap(),
+        );
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "keys-only f64 value sort ascending (bit-exact incl -0.0)"
+        );
+        let mut want_desc = data.clone();
+        want_desc.sort_by(|a, b| b.total_cmp(a));
+        let desc = params(&[("dimension", "0"), ("descending", "true")]);
+        let got_desc = extract_f64_vec(
+            &eval_sort(Primitive::Sort, &[Value::vector_f64(&data).unwrap()], &desc).unwrap(),
+        );
+        assert_eq!(
+            got_desc.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want_desc.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "keys-only f64 value sort descending"
         );
     }
 

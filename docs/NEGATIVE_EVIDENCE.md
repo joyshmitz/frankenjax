@@ -10850,3 +10850,14 @@ flips the prior 1.28x LOSS to a WIN. Verified bit-correct (asc + desc, negatives
 (`radix_keys_i64_value_sort_matches_comparison_large`, 1M) + all 38 sort tests green. Only the single-slice value
 path uses keys-only; argsort and multi-slice keep the pairs path. NEXT: f64 value sort (already 4.5x, keys-only
 would widen it) needs the invertible total-order transform; u32/u64/f32 similar. No ceiling.
+
+## 2026-07-02 - WIN: keys-only f64 value sort — widens the 4.5x win to ~8.2x FASTER than JAX (BlackThrush)
+
+Extended keys-only (bd3af073) to f64. For a single large contiguous f64 VALUE sort with NO NaN, the total-order
+key is a BIJECTION over non-NaN f64, so `sort_along_axis_dense_f64` sorts u64 keys directly and inverts via the new
+`f64_from_total_order_key` (positive keys have top bit set → `bits=key^(1<<63)`; negative → `bits=!key`). NaN (which
+`f64_sort_order_key` maps many-to-one to u64::MAX) keeps the pairs path so its payload/index-order is preserved
+(cheap one-pass `is_nan` guard). RESULT: fj f64 sort 16M = **971 → 534.99 ms** (1.82x internal), widening the win vs
+JAX `jnp.sort` (4409 ms) from **4.5x to ~8.2x FASTER**. Verified BIT-EXACT (incl -0.0 vs +0.0, ±inf, dups) asc+desc
+vs `total_cmp` reference (`radix_keys_f64_value_sort_matches_comparison_large`, 1M) + all 39 sort tests green.
+Sort keys-only now covers i64 + f64 value sorts; argsort/multi-slice/NaN-f64 keep pairs; u32/u64/f32 next. No ceiling.
