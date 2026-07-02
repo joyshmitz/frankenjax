@@ -10567,3 +10567,18 @@ even then Rust `f32::ln` vs XLA-f32 `log` may differ — so element-wise parity 
 polynomial in the cond, or accepting a documented tolerance with occasional boundary misses. Oracle
 (`random_gamma_matches_jax_reference_f32`, tol 1e-4) is ready to iterate against. This is the crux to solve; the
 plumbing (split + draws) is done.
+
+## 2026-07-02 - WIN (parity): random_gamma rewritten to faithful JAX per-element-key _gamma_one — element-wise match vs JAX-f32, oracle un-ignored (BlackThrush)
+
+LANDED the faithful port. `random_gamma` now splits the base key into `count` per-element keys
+(`random_split_n`) and runs an independent Marsaglia-Tsang stream per element with JAX's exact key schedule
+(`_gamma_one`: per-iteration `split(k,3)` → normal(x_key)/uniform(U_key), inner redraw-until-v>0 loop, boost for
+a<1 via `Uniform^(1/a)`). Replaces the non-JAX shared-pool heuristic (10× oversample + global reject loop) that
+diverged element-wise. VERIFIED against JAX-f32 ground truth (`random.gamma(PRNGKey(0), a, (8,))`), oracle
+`random_gamma_matches_jax_reference_f32` UN-IGNORED and green for a=2.0, a=5.0 (non-boost) AND a=0.5 (boost),
+element-for-element to 1e-4 (fj does the arith in f64 on f32-matching draws; the feared rejection-boundary
+precision flip did NOT occur on these cases). Full suite green: fj-lax gamma/beta/dirichlet/split/poisson 43/0,
+conformance random_distributions_oracle 18/0 (statistical tests still pass). beta/dirichlet compose gamma so they
+inherit the faithful per-element streams. Build via isolated target (rch E0514 drift). This closes the
+gamma-parity front opened 2026-07-02; poisson/geometric remain (geometric already faithful; poisson still
+shared-pool — next). No ceiling.

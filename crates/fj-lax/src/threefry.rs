@@ -959,65 +959,60 @@ pub fn random_gamma(key: PRNGKey, count: usize, shape_param: f64) -> Vec<f64> {
     if shape_param <= 0.0 {
         return vec![f64::NAN; count];
     }
+    // JAX `random.gamma`: split the base key into `count` per-element keys and run an
+    // INDEPENDENT Marsaglia-Tsang stream per element (jax `_gamma_impl` vmaps
+    // `_gamma_one` over `split(key, count)`). This replaces the previous non-JAX
+    // shared-pool heuristic (10x-oversample + global reject loop) that diverged
+    // element-wise. Draws use fj's JAX-f32-matching uniform/normal + `random_split_n`.
+    random_split_n(key, count)
+        .into_iter()
+        .map(|k| gamma_one(k, shape_param))
+        .collect()
+}
 
-    // For shape < 1, use transformation: Gamma(a) = Gamma(a+1) * U^(1/a)
-    let (effective_shape, needs_transform) = if shape_param < 1.0 {
-        (shape_param + 1.0, true)
+/// Faithful port of JAX's `_gamma_one` (jax/_src/random.py): Marsaglia-Tsang with
+/// per-iteration key evolution. For `alpha < 1` it boosts to `alpha+1` and scales by
+/// `Uniform^(1/alpha)`. The accept/reject math is the (already-correct) squeeze test;
+/// the fidelity fix is the JAX key schedule — each element/iteration draws from its own
+/// split subkey, so results follow JAX element-for-element (to f32 tolerance; fj arith
+/// is f64 on f32-matching draws — see NEGATIVE_EVIDENCE 2026-07-02).
+fn gamma_one(key: PRNGKey, alpha_orig: f64) -> f64 {
+    let boost = alpha_orig < 1.0;
+    let alpha = if boost { alpha_orig + 1.0 } else { alpha_orig };
+    let d = alpha - 1.0 / 3.0;
+    let c = (1.0 / 3.0) / d.sqrt();
+
+    let pre = random_split_n(key, 2);
+    let mut k = pre[0];
+    let subkey = pre[1];
+
+    // while_loop over state (key, X, V, U); the condition is JAX's REJECT test, so the
+    // initial (X=0, V=1, U=2) enters the loop, and it exits on the first ACCEPT.
+    let (mut xx, mut vv, mut uu) = (0.0f64, 1.0f64, 2.0f64);
+    while uu >= 1.0 - 0.0331 * xx * xx && uu.ln() >= 0.5 * xx + d * (1.0 - vv + vv.ln()) {
+        let s3 = random_split_n(k, 3);
+        k = s3[0];
+        // inner loop: redraw the normal until v = 1 + x*c > 0.
+        let mut ik = s3[1];
+        let mut x = 0.0f64;
+        let mut v = -1.0f64;
+        while v <= 0.0 {
+            let isk = random_split_n(ik, 2);
+            ik = isk[0];
+            x = random_normal(isk[1], 1)[0];
+            v = 1.0 + x * c;
+        }
+        xx = x * x;
+        vv = v * v * v;
+        uu = random_uniform(s3[2], 1, 0.0, 1.0)[0];
+    }
+
+    if boost {
+        let s = 1.0 - random_uniform(subkey, 1, 0.0, 1.0)[0];
+        d * vv * s.powf(1.0 / alpha_orig)
     } else {
-        (shape_param, false)
-    };
-
-    // Marsaglia & Tsang's method for shape >= 1
-    let d = effective_shape - 1.0 / 3.0;
-    let c = 1.0 / (9.0 * d).sqrt();
-
-    // Need extra uniforms for transformation
-    let extra = if needs_transform { count } else { 0 };
-    let uniforms = random_uniform(key, count * 10 + extra, 0.0, 1.0);
-    let normals = random_normal(key, count * 10);
-
-    let mut result = Vec::with_capacity(count);
-    let mut idx = 0;
-    let mut attempts = 0;
-
-    while result.len() < count && attempts < count * 100 {
-        if idx >= normals.len() {
-            break;
-        }
-
-        let x = normals[idx];
-        let v_base = 1.0 + c * x;
-
-        if v_base > 0.0 {
-            let v = v_base * v_base * v_base;
-            let u = uniforms[idx % uniforms.len()];
-
-            // Accept/reject
-            let accept =
-                u < 1.0 - 0.0331 * x * x * x * x || u.ln() < 0.5 * x * x + d * (1.0 - v + v.ln());
-
-            if accept {
-                let mut sample = d * v;
-
-                // Transform for shape < 1
-                if needs_transform && result.len() < count {
-                    let u_transform = uniforms[(count * 5 + result.len()) % uniforms.len()];
-                    sample *= u_transform.powf(1.0 / shape_param);
-                }
-
-                result.push(sample);
-            }
-        }
-        idx += 1;
-        attempts += 1;
+        d * vv
     }
-
-    // Fill remaining with NaN if not enough samples generated
-    while result.len() < count {
-        result.push(f64::NAN);
-    }
-
-    result
 }
 
 /// Generate beta-distributed samples.
@@ -2686,44 +2681,65 @@ mod tests {
 
     /// STRICT element-wise parity oracle for `random_gamma` vs `jax.random.gamma`.
     ///
-    /// IGNORED because `random_gamma` currently uses a non-JAX shared-pool rejection
-    /// heuristic (pre-generate count*10 normals from ONE key, global reject loop) that
-    /// diverges element-wise — see docs/NEGATIVE_EVIDENCE.md 2026-07-02. JAX instead
-    /// splits the key PER ELEMENT (`_gamma_one`, jax/_src/random.py:1298) and runs an
-    /// independent Marsaglia-Tsang while-loop per element.
-    ///
-    /// PORT FEASIBILITY (verified 2026-07-02, BlackThrush): fj's key primitives ALREADY
-    /// match JAX bit/f32-exactly, so the port is de-risked —
-    ///   * `random_split(PRNGKey(0))` = `([1797259609,2579123966],[928981903,3453687069])`
-    ///     == `jax.random.split(key,2)` EXACTLY (n-way split just needs generalizing);
-    ///   * `random_uniform(key0,1)[0]` = 0.9476670026779175 == JAX-**f32** `uniform(key,())`
-    ///     EXACTLY; `random_normal(key0,1)[0]` = 1.6226418 ≈ JAX-f32 `normal(key,())`
-    ///     1.6226422 (~3e-7, fj does erfinv in f64).
-    /// So the reference below is JAX in its DEFAULT **f32** mode (NOT x64 — fj's RNG is
-    /// f32-based; the earlier x64 reference was the wrong target). A faithful `_gamma_one`
-    /// port will match these to ~f32 tolerance (fj arithmetic is f64 on f32-matching draws,
-    /// so tune the tol at implementation — 1e-4 is a starting bound).
+    /// `random_gamma` is now the faithful per-element-key `_gamma_one` port
+    /// (jax/_src/random.py), so it matches JAX ELEMENT-FOR-ELEMENT. References are JAX in
+    /// its DEFAULT **f32** mode (fj's RNG is f32-based — mantissa-bits uniform matches JAX-f32
+    /// exactly, normal ~3e-7). fj does the Marsaglia-Tsang arithmetic in f64 on those
+    /// f32-matching draws, so parity is to ~f32 tolerance (1e-4), not bit-exact. Covers the
+    /// non-boost path (a>=1: a=2, a=5) AND the boost path (a<1: a=0.5, which scales by
+    /// `Uniform^(1/a)`). See docs/NEGATIVE_EVIDENCE.md 2026-07-02.
     #[test]
-    #[ignore = "random_gamma is not yet the JAX per-element-key algorithm (parity gap; \
-                see NEGATIVE_EVIDENCE 2026-07-02). Un-ignore when _gamma_one is ported."]
     fn random_gamma_matches_jax_reference_f32() {
-        // jax.random.gamma(random.PRNGKey(0), 2.0, (8,)) in DEFAULT f32 mode.
-        let jax_a2: [f64; 8] = [
-            1.5897877216339111,
-            1.7599413394927979,
-            1.12900710105896,
-            3.9743340015411377,
-            2.9546000957489014,
-            1.9788084030151367,
-            1.4843521118164062,
-            0.4591488242149353,
+        // jax.random.gamma(random.PRNGKey(0), a, (8,)) in DEFAULT f32 mode.
+        let cases: [(f64, [f64; 8]); 3] = [
+            (
+                2.0,
+                [
+                    1.5897877216339111,
+                    1.7599413394927979,
+                    1.12900710105896,
+                    3.9743340015411377,
+                    2.9546000957489014,
+                    1.9788084030151367,
+                    1.4843521118164062,
+                    0.4591488242149353,
+                ],
+            ),
+            (
+                5.0,
+                [
+                    4.537209510803223,
+                    4.821604251861572,
+                    3.7203195095062256,
+                    8.080060005187988,
+                    6.656269073486328,
+                    5.176936149597168,
+                    4.356862545013428,
+                    2.311718702316284,
+                ],
+            ),
+            (
+                0.5,
+                [
+                    0.8845648169517517,
+                    1.0290775299072266,
+                    0.04707420989871025,
+                    0.07322501391172409,
+                    0.3485542833805084,
+                    1.3415878129308112e-05,
+                    0.3963169455528259,
+                    0.22419296205043793,
+                ],
+            ),
         ];
-        let fj_a2 = random_gamma(random_key(0), 8, 2.0);
-        for (i, (&want, &got)) in jax_a2.iter().zip(fj_a2.iter()).enumerate() {
-            assert!(
-                (want - got).abs() <= 1e-4 * want.abs().max(1.0),
-                "gamma(a=2) elem {i}: JAX-f32 {want} vs fj {got}"
-            );
+        for (a, want) in cases {
+            let got = random_gamma(random_key(0), 8, a);
+            for (i, (&w, &g)) in want.iter().zip(got.iter()).enumerate() {
+                assert!(
+                    (w - g).abs() <= 1e-4 * w.abs().max(1.0),
+                    "gamma(a={a}) elem {i}: JAX-f32 {w} vs fj {g}"
+                );
+            }
         }
     }
 
