@@ -10523,3 +10523,14 @@ a minor perf improvement. PERF STATE (this session, comprehensive): contained le
 (~1.02–1.08x valuation-dependent), Bluestein radix-4 regressed, xlogy SIMD memory-bound, complex-transcendentals
 FMA-blocked, TopK/einsum/i64-matmul/fj-ad-VJPs already optimal. No ceiling: RNG-sampler parity, FFT native-real-
 kernel, interpreter→typed-slots, and the matmul/cholesky FMA-floor are the open (multi-session/policy) fronts.
+
+### 2026-07-02 follow-up: MEASURED gamma divergence vs JAX + landed a strict (ignored) parity oracle (BlackThrush)
+
+Quantified the `random_gamma` parity gap empirically. JAX reference (venv, `jax_enable_x64=True` so it matches
+fj's f64 compute — no f32 caveat): `random.gamma(PRNGKey(0), 2.0, (8,))` =
+`[1.3520, 1.1244, 3.7324, 0.2063, 1.7982, 5.2704, 1.3285, 2.2727]`. fj's `random_gamma(random_key(0), 8, 2.0)` =
+`[4.7617, 1.1672, 1.5672, 1.9045, 0.7003, 1.1055, 2.3898, 2.6799]`. Element 0: **JAX 1.3520 vs fj 4.7617** — a
+gross element-wise divergence (the shared-pool heuristic, not per-element-key streams), NOT just f32/f64 rounding.
+Landed `random_gamma_matches_jax_reference_x64` (threefry.rs, `#[ignore]`d — CI green) hard-coding the JAX f64
+reference: it's the ready verification harness for the future `_gamma_one` (jax/_src/random.py:1298) per-element-key
+port — un-ignore it when gamma is rewritten. Groundwork committed; the faithful rewrite itself stays multi-session.

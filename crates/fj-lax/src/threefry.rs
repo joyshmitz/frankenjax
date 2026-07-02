@@ -2655,6 +2655,43 @@ mod tests {
         assert!(vals.iter().all(|&v| v > 0.0 || v.is_nan()));
     }
 
+    /// STRICT element-wise parity oracle for `random_gamma` vs `jax.random.gamma`.
+    ///
+    /// IGNORED because `random_gamma` currently uses a non-JAX shared-pool rejection
+    /// heuristic (pre-generate count*10 normals from ONE key, global reject loop) that
+    /// diverges element-wise — see docs/NEGATIVE_EVIDENCE.md 2026-07-02. JAX instead
+    /// splits the key PER ELEMENT (`_gamma_one`, jax/_src/random.py:1298) and runs an
+    /// independent Marsaglia-Tsang while-loop per element. The reference values below
+    /// were captured from the venv with `jax_enable_x64=True` (matching fj's f64 compute,
+    /// so the f32-vs-f64 caveat is removed): `random.gamma(PRNGKey(0), a, (8,))`.
+    ///
+    /// MEASURED gap at capture time (a=2.0, elem 0): JAX 1.3520 vs fj 4.7617. Un-ignore
+    /// this test once `random_gamma` is rewritten to the per-element-key `_gamma_one`
+    /// algorithm — it then verifies the fix against JAX ground truth to tolerance.
+    #[test]
+    #[ignore = "random_gamma is not yet the JAX per-element-key algorithm (parity gap; \
+                see NEGATIVE_EVIDENCE 2026-07-02). Un-ignore when _gamma_one is ported."]
+    fn random_gamma_matches_jax_reference_x64() {
+        // jax.random.gamma(random.PRNGKey(0), a, (8,)) with jax_enable_x64=True.
+        let jax_a2: [f64; 8] = [
+            1.3520307957942443,
+            1.124359450100187,
+            3.7324041613131316,
+            0.20633363401274485,
+            1.7981591432708315,
+            5.270398754058958,
+            1.3284945432310016,
+            2.2726653490638054,
+        ];
+        let fj_a2 = random_gamma(random_key(0), 8, 2.0);
+        for (i, (&want, &got)) in jax_a2.iter().zip(fj_a2.iter()).enumerate() {
+            assert!(
+                (want - got).abs() <= 1e-9 * want.abs().max(1.0),
+                "gamma(a=2) elem {i}: JAX {want} vs fj {got}"
+            );
+        }
+    }
+
     #[test]
     fn test_gamma_shape_less_than_one() {
         let key = random_key(42);
