@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-02 - NEGATIVE/BOUNDARY: the native-f32 trig wins DO NOT extend to f64 (no f64-SIMD kernels) (BlackThrush)
+
+The f32 native-SIMD trig wins (2x vs JAX) prompted checking f64 — JAX under-parallelizes f64 transcendentals TOO
+(JAX 0.10.x CPU f64 16M: asin 30.1, acos 31.4, atan 23.5, sin 25.5, tan 23.6, atan2 31.2, cbrt 20.2ms). But fj's
+f64 path is threaded SCALAR libm (no f64-SIMD kernel — the native-f32 kernels are f32-only; f64 goes through
+`eval_float_complex_unary(f64::sin)` etc.), so it does NOT reliably beat JAX (`bench_f64_transcendental_vs_jax`,
+f64 16M): asin **25.2ms = 1.19x**, acos **26.8 = 1.17x** (MARGINAL wins), atan 23.3 / atan2 29.6 = ~PARITY, and
+sin **29.6 = 0.86x**, tan **29.1 = 0.81x**, cbrt **23.2 = 0.87x** = fj LOSES. So the f32-vs-f64 asymmetry: f32 wins
+~2x because fj has 8-wide native-f32 SIMD vs XLA's under-parallelized f32; f64 only ties/loses because fj runs
+threaded scalar there. SCOPED FOLLOW-UP (real ~2x code win, a future session): f64-SIMD trig kernels (sin/cos/tan/
+asin/acos/atan/atan2/cbrt as `Simd<f64,8>` with f64-precision polys + Cody-Waite reduction) — more poly terms than
+the f32 versions, and f64 is the NON-default dtype so lower priority. RULE: fj beats JAX on f32 expensive-poly trig
+(native SIMD) but NOT f64 (scalar) until f64-SIMD kernels exist.
+
 ## 2026-07-02 - WIN: f32 Zeta ~1.7-2.6x FASTER than JAX (record-only); NEGATIVE polygamma LOSES (BlackThrush)
 
 Closing the zeta/polygamma follow-up flagged by the sinc sweep. Both are Euler-Maclaurin / Hurwitz-zeta series

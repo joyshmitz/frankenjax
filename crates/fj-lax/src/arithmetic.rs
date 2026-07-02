@@ -18465,6 +18465,80 @@ mod tests {
         t("log2 (JAX 12.9)", Primitive::Log2, &pos);
     }
 
+    // f64 transcendentals vs JAX 0.10.x CPU f64 16M (asin 30.1, acos 31.4, atan 23.5, sin 25.5,
+    // tan 23.6, atan2 31.2, cbrt 20.2ms — XLA under-parallelizes f64 expensive-poly ops too). fj's
+    // f64 path is THREADED SCALAR libm (no f64-SIMD kernel for these) — measure if it still wins.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_f64_transcendental_vs_jax() {
+        use std::time::Instant;
+        let n = 16_000_000usize;
+        let mk = |f: &dyn Fn(usize) -> f64| -> Value {
+            Value::Tensor(
+                TensorValue::new_f64_values(
+                    Shape {
+                        dims: vec![n as u32],
+                    },
+                    (0..n).map(f).collect(),
+                )
+                .unwrap(),
+            )
+        };
+        let unit = mk(&|i| (i % 20001) as f64 * 0.00009 - 0.9);
+        let wide = mk(&|i| (i % 40001) as f64 * 0.0001 - 2.0);
+        let wide2 = mk(&|i| (i % 40001) as f64 * 0.0001 - 1.5);
+        let p = BTreeMap::new();
+        let t = |label: &str, prim: Primitive, args: &[Value]| {
+            let f = || {
+                let v = crate::eval_primitive(prim, args, &p).unwrap();
+                v.as_tensor().unwrap().elements.as_f64_slice().unwrap()[123]
+            };
+            std::hint::black_box(f());
+            let mut best = f64::MAX;
+            for _ in 0..6 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                best = best.min(s.elapsed().as_secs_f64());
+            }
+            println!("fj {label}: {:.2}ms", best * 1e3);
+        };
+        t(
+            "asin (JAX 30.1)",
+            Primitive::Asin,
+            std::slice::from_ref(&unit),
+        );
+        t(
+            "acos (JAX 31.4)",
+            Primitive::Acos,
+            std::slice::from_ref(&unit),
+        );
+        t(
+            "atan (JAX 23.5)",
+            Primitive::Atan,
+            std::slice::from_ref(&wide),
+        );
+        t(
+            "sin (JAX 25.5)",
+            Primitive::Sin,
+            std::slice::from_ref(&wide),
+        );
+        t(
+            "tan (JAX 23.6)",
+            Primitive::Tan,
+            std::slice::from_ref(&wide),
+        );
+        t(
+            "cbrt (JAX 20.2)",
+            Primitive::Cbrt,
+            std::slice::from_ref(&wide),
+        );
+        t(
+            "atan2 (JAX 31.2)",
+            Primitive::Atan2,
+            &[wide.clone(), wide2.clone()],
+        );
+    }
+
     // Complex64 transcendentals vs JAX 0.10.x CPU c64 16M (cexp 37.6ms, clog 22.5ms, csin 37.3ms,
     // ctanh 39.4ms). XLA under-parallelizes complex transcendentals (each is several real libm calls);
     // fj threads them (threaded_complex_unary_map, computed in f64). Record-only, no code change.
