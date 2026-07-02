@@ -2,6 +2,18 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - SURFACE / REVERTED: SIMD asin via atan-composition is near-parity (0.99x @4M) — the composition is too costly (BlackThrush)
+
+Tried `asin` by REUSING `atan_f64x8`: `asin(a)=atan(a/√(1−a²))` small branch, `π/2−2·atan(s/√(1−s²))`
+(`s=√((1−a)/2)`) near-1 branch, ONE atan call on a selected arg. CORRECT (asin_oracle 32/0, ~1 ulp both
+branches incl. near ±1, ±0 bit-exact). But A/B (median-of-3, `FJ_ASIN_SCALAR`): 4M SCALAR 10.63ms → SIMD
+**10.77ms = 0.99x**; 16M 1.04x — NEAR-PARITY. Root cause: the composition costs 2 `sqrt` + a full
+`atan_f64x8` (with its own range reduction + rational), which is ~as expensive as glibc's already-decent
+`asin` (~2.6 ns/elem). REVERTED (stashed, not dropped). LESSON: reusing a heavy SIMD kernel by COMPOSITION
+(vs a direct dedicated poly) can erase the win — a DIRECT Cephes asin (one rational on `x²`, no atan, one
+sqrt only in the near-1 branch) would likely win, but needs the P/Q/R/S coefficient set (deferred, risk).
+Conformance unaffected; working tree restored to HEAD.
+
 ## 2026-07-01 - WIRED WIN (Atan primitive: 2.41x @4M / 1.25x @16M) — the stale-FMA finding extends to INVERSE TRIG, opens a new vein (BlackThrush)
 
 The old "atan SIMD needs FMA to win (0.79x without)" verdict is the SAME pre-AVX2 stale finding that was
