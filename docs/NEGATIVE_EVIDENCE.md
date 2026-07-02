@@ -10805,3 +10805,18 @@ Probed the `vec![non_zero; N]`-memset lever (cumprod calloc win) in OTHER primit
 So the calloc win is specific to WRITE-ONLY output buffers with a non-zero fill — which in practice is the
 cumulative scans (out written from a separate acc), now fully fixed (103f2337 + 533c646f, all axes/dtypes via the
 generic `T::default()`). Reductions/pooling/pad all either read the init (accumulator) or already calloc. No ceiling.
+
+## 2026-07-02 - MEASURED: 1D sort 16M — f64 4.5x WIN confirmed, but i64 is a 1.28x LOSS (single-slice radix is single-threaded) (BlackThrush)
+
+Fresh large-scale 1D sort measurement (isolated target, 16M elements), nuancing the ledger's blanket "sort family
+all wins":
+  - **f64**: fj **971 ms** vs JAX `jnp.sort` **4409 ms** = **~4.5x FASTER** (XLA-CPU float sort is a slow
+    comparison sort; fj's total-order-key radix crushes it — confirms the known win at 16M scale).
+  - **i64**: fj **1114 ms** vs JAX **873 ms** = **~1.28x SLOWER** — the exception. XLA-CPU's INTEGER sort is a
+    decent threaded sort (873 ms), while fj's i64 radix is oddly SLOWER than its own f64 radix (1114 vs 971 ms).
+ROOT (hypothesis, pinned): a 1D sort = ONE slice, and the dense radix (`sort_along_axis_dense_i64/f64`) parallelizes
+only ACROSS slices — so a single-slice 16M sort runs the radix SINGLE-THREADED (bandwidth-bound at ~1 GB traffic /
+8 LSD passes). XLA threads its sort, so it wins on i64 (and would lose harder on f64 if its float sort weren't a
+comparison sort). LEVER: thread the single-slice radix (parallel histogram + partitioned scatter, or an MSD split
+that fans slices to threads) → 1D i64 sort 1114→~300 ms would BEAT JAX, and f64 971→~300 ms widens the win.
+Substantial (stable parallel radix is fiddly), so pinned not attempted. No ceiling.
