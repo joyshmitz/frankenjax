@@ -6288,6 +6288,20 @@ fn bench_fft_batch_128x1000(c: &mut Criterion) {
     });
 }
 
+// Batched 2-heavy smooth-composite FFT: 128 rows of length 3072 = 2^10 * 3. The
+// high 2-adic valuation (10) is where the mixed-radix radix-4 peel pays off most —
+// it collapses the 2^10 factor into five radix-4 passes instead of ten radix-2
+// passes (vs n=1000 = 2^3*5^3, valuation 3, where radix-4 saves only one pass and
+// the A/B is ~1.02x near-parity). FJ_MIXED_RADIX_NO4=1 forces the radix-2-only
+// baseline for the same-binary A/B that quantifies the radix-4 benefit by valuation.
+fn bench_fft_batch_128x3072(c: &mut Criterion) {
+    let input = complex_matrix(128, 3072);
+    let p = no_params();
+    c.bench_function("eval/fft_batch_128x3072_complex128", |bencher| {
+        bencher.iter(|| eval_primitive(Primitive::Fft, std::slice::from_ref(&input), &p))
+    });
+}
+
 // Batched power-of-two FFT along the last axis: 2048 rows of length 256.
 // 256 is a power of two so the radix-2 transform is fast (O(n log n) with cheap
 // butterflies) — making the serial complex<->Literal conversion the dominant
@@ -7450,6 +7464,7 @@ criterion_group!(
     bench_fft_1009_prime,
     bench_fft_batch_256x1009_prime_dense_input,
     bench_fft_batch_128x1000,
+    bench_fft_batch_128x3072,
     bench_fft_batch_2048x256,
     bench_fft_batch_2048x256_dense_input,
     bench_complex_build_dense_512k,

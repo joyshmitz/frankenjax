@@ -10424,3 +10424,27 @@ source — it is stashed: `git stash list` → "WIP FJ_MIXED_RADIX_NO4 A/B hook 
 rch rebuilds clean): `git stash apply`, then same-binary A/B on `eval/fft_batch_128x1000_complex128` with/without
 `FJ_MIXED_RADIX_NO4=1` to replace the indicative ~2.3x with a trustworthy ratio. The radix-4 win itself remains
 landed and correct (60/0 tolerance-vs-DFT). No ceiling — this is a pending measurement, not a limit.
+
+## 2026-07-02 - DEFINITIVE + CORRECTION: radix-4 mixed-radix FFT is ~1.02x (n=1000) to ~1.08x (n=3072) — valuation-dependent, NOT ~2.3x (BlackThrush)
+
+Ran the same-binary A/B the earlier entries deferred, escaping the rch shared-target toolchain drift (E0514, still
+FLAPPING between workers) by building LOCALLY into an ISOLATED `CARGO_TARGET_DIR=/data/tmp/bt-iso-target` (local
+rustc `f46ec5218 2026-06-30` matches the worker; a private target dodges the 2026-07-01 pollution entirely). The
+`FJ_MIXED_RADIX_NO4` hook (cached OnceLock) forces the pre-radix-4 smallest-prime-only split so candidate and
+baseline run in ONE binary. fft lib tests 60/0 with the hook.
+
+  - `eval/fft_batch_128x1000_complex128` (n=1000 = 2^3·5^3, 2-adic valuation 3):
+      radix-4 **2.3910 ms** `[2.3509, 2.3910, 2.4327]` vs radix-2 **2.4455 ms** `[2.3992, 2.4455, 2.4914]`
+      = **~1.02x, CIs OVERLAP** → near-parity (radix-4 collapses only ONE of ~5 passes here).
+  - `eval/fft_batch_128x3072_complex128` (n=3072 = 2^10·3, valuation 10):
+      radix-4 **5.8681 ms** `[5.8033, 5.8681, 5.9314]` vs radix-2 **6.3508 ms** `[6.1972, 6.3508, 6.5096]`
+      = **~1.08x, CIs SEPARATE** → a clear, significant win (radix-4 collapses FIVE 2-passes into radix-4).
+
+CORRECTION: the landed radix-4 commit (17776c0a) recorded "~2.3x indicative" from a CROSS-invocation A/B whose
+5.63 ms radix-2 baseline was LOAD-INFLATED (I flagged that risk at the time). The TRUE contained gain is small and
+scales with the 2-adic valuation of the length: ~1.02x (near-parity) for low-valuation smooth lengths like 1000,
+rising to ~1.08x for 2-heavy lengths like 3072. Radix-4 stays landed (correct, zero downside, larger benefit on
+2-heavy lengths); added `bench_fft_batch_128x3072` as the permanent high-valuation guard + committed the verified
+`FJ_MIXED_RADIX_NO4` A/B hook. METHOD LESSON (reinforced): cross-invocation FFT baselines inflate under host load —
+only same-binary, and here only an isolated-target build, gives a trustworthy ratio. No ceiling: radix-8 would
+collapse the residual odd 2-power but is marginal on these valuations (not chased).

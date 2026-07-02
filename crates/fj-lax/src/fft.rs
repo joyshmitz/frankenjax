@@ -1151,6 +1151,15 @@ fn ifft_1d_into(input: &[(f64, f64)], output: &mut Vec<(f64, f64)>) {
     }
 }
 
+/// A/B hook: when `FJ_MIXED_RADIX_NO4` is set, `mixed_radix_ping` reverts to the
+/// smallest-prime-factor split (no radix-4 peel), the pre-2026-07-02 baseline. Read
+/// once and cached in a `OnceLock` so the hot recursion pays only a relaxed atomic
+/// load, never a `std::env` lookup per node.
+fn mixed_radix_no4() -> bool {
+    static NO4: OnceLock<bool> = OnceLock::new();
+    *NO4.get_or_init(|| std::env::var_os("FJ_MIXED_RADIX_NO4").is_some())
+}
+
 /// Largest prime factor a length may have to take the mixed-radix path instead
 /// of Bluestein. The radix base-case is a direct O(p²) DFT, so this is kept small
 /// — any larger prime factor (e.g. a prime length) falls back to Bluestein.
@@ -1283,8 +1292,10 @@ fn mixed_radix_ping(
     // over the (memory-bound) work buffers and trimming twiddle multiplies (the
     // quarter rotation W_4 is applied once instead of the two W_2 stages). This is
     // the tolerance path (smooth non-power-of-two lengths — powers of two never
-    // reach mixed_radix), so no golden digest is affected.
-    let p = if nn.is_multiple_of(4) {
+    // reach mixed_radix), so no golden digest is affected. FJ_MIXED_RADIX_NO4 forces
+    // the pre-radix-4 (smallest-prime-only) split for the same-binary A/B (read once,
+    // cached — the atomic load per node is far cheaper than the butterflies it gates).
+    let p = if !mixed_radix_no4() && nn.is_multiple_of(4) {
         4
     } else {
         smallest_prime_factor(nn)
