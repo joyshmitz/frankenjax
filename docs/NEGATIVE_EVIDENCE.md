@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Asin: 2.06x vs scalar ORIG) — f32 WINS where f64 asin lost (BlackThrush)
+
+`Asin` f32 widened to slow scalar libm. New `asin_f32x8` reuses `atan_f32x8` (small branch
+`atan(a/√(1−a²))`; near-1 `π/2−2·atan(s/√(1−s²))`, `s=√((1−a)/2)`) — one atan on a selected arg, copysign.
+KEY: the f64 asin native-compose was REVERTED (near-parity vs fast native glibc asin), but f32 WINS —
+its scalar baseline is the slow WIDENED libm (branchy, no autovec), not fast native glibc. MEASURED (4M
+f32, `FJ_ASIN_SCALAR` A/B): scalar-ORIG 10.41ms → NATIVE **5.06ms = 2.06x**. Gates: fj-lax lib green, full
+conformance green, f32 accuracy+edge test green.
+
+Native-f32 vein (15): tanh/logistic/cosh/log/log1p/atanh/asinh/acosh/expm1/sinh/digamma (2.0-3.7x) +
+rsqrt 1.31x + cbrt 5.67x + atan 4.80x + asin 2.06x. LESSON REFINED: the f64-vs-native tradeoff can INVERT
+at f32 — where f64-native lost to fast native glibc, f32-native wins because the f32 baseline is
+slow-widened-libm. acos f32 next (same asin/atan reuse).
+
 ## 2026-07-01 - WIRED WIN (native-f32 Atan: 4.80x vs scalar ORIG): 14th native-f32 consumer (BlackThrush)
 
 `Atan` f32 widened f32→f64 (`atan_f64x8`). New `atan_f32x8` = Cephes single-precision `atanf`: reduce

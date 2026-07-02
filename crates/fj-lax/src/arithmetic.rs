@@ -7371,6 +7371,62 @@ fn atan_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
     r
 }
 
+/// NATIVE-f32 `asin(x)` built on [`atan_f32x8`] (f32 sibling of the reverted-in-f64 asin — but f32
+/// WINS because its scalar baseline is the slow widened libm, not fast native glibc). `asin(a) =
+/// atan(a/√(1−a²))` for `a ≤ 0.625`; near-1, `asin(a) = π/2 − 2·asin(s)` with `s = √((1−a)/2)`.
+/// One `atan_f32x8` on a selected argument, combined per branch; copysign (odd fn). SIMD for `|x| ≤ 1`;
+/// `|x|>1`/`±inf`/`NaN` → scalar `f32::asin` (NaN). ~f32 tolerance.
+fn asin_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::StdFloat;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f32, 8>;
+    type U = Simd<u32, 8>;
+    let ax = x.abs();
+    let ok = ax.simd_le(F::splat(1.0));
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].asin();
+        }
+        return F::from_array(ra);
+    }
+    let big = ax.simd_gt(F::splat(0.625));
+    let small_arg = ax / (F::splat(1.0) - ax * ax).sqrt();
+    let s = ((F::splat(1.0) - ax) * F::splat(0.5)).sqrt();
+    let big_arg = s / (F::splat(1.0) - s * s).sqrt();
+    let arg = big.select(big_arg, small_arg);
+    let av = atan_f32x8(arg);
+    let mag = big.select(F::splat(std::f32::consts::FRAC_PI_2) - F::splat(2.0) * av, av);
+    let signbit = U::splat(0x8000_0000);
+    let mut r = F::from_bits((mag.to_bits() & !signbit) | (x.to_bits() & signbit));
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() <= 1.0) {
+                ra[k] = xa[k].asin();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
+pub(crate) fn eval_asin(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // Native-f32 fast path (JAX default dtype); f64 / complex / integer-rejection / tail via the
+    // generic float-complex path (which dispatches complex by primitive via complex_unary_elementwise).
+    if std::env::var_os("FJ_ASIN_SCALAR").is_none()
+        && let Some(v) = eval_unary_simd_dense_f32_native(inputs, asin_f32x8, f32::asin)
+    {
+        return v;
+    }
+    eval_float_complex_unary(primitive, inputs, f64::asin)
+}
+
 /// 8-wide `atanh(x) = 0.5·log1p(2x / (1 − x))` — the standard single-`log1p` identity (one
 /// [`log1p_f64x8`] instead of two). Using `log1p` (not raw `ln`) keeps it accurate for small `x`
 /// (`2x/(1-x) ≈ 2x`, `log1p` recovers the low bits), and the log1p lane self-handles the domain edges:
@@ -27549,6 +27605,75 @@ mod tests {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
         }
+    }
+
+    #[test]
+    fn asin_f32_native_matches_scalar_tolerance_and_edges() {
+        // eval_asin native-f32 path (asin_f32x8 via atan_f32x8) vs scalar f32 asin: few-ulp f32 both
+        // regimes incl. near ±1, bit-exact ±0, edges (|x|>1 -> NaN).
+        let n = 300_003usize;
+        let mut data: Vec<f32> = (0..n).map(|i| -1.0 + (i % 9973) as f32 * (2.0 / 9973.0)).collect();
+        for (k, v) in [
+            (3usize, 0.0f32),
+            (4, -0.0),
+            (5, 1.0),
+            (6, -1.0),
+            (7, 0.625),
+            (8, 0.999999),
+            (9, 2.0),
+            (10, f32::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_asin(Primitive::Asin, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.asin();
+            let g = got[idx];
+            if want == 0.0 {
+                assert_eq!(g.to_bits(), want.to_bits(), "asin f32 sign-of-zero at x={x}");
+            } else if want.is_finite() {
+                assert!(
+                    (g - want).abs() <= 1e-5 * want.abs().max(1.0),
+                    "asin f32 at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert!(g.is_nan(), "asin f32 edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_asin_f32_throughput() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n)
+            .map(|i| -1.0 + (i % 9973) as f32 * (2.0 / 9973.0))
+            .collect();
+        let input =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap());
+        let f = || {
+            std::hint::black_box(eval_asin(Primitive::Asin, std::slice::from_ref(&input)).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        let scalar = std::env::var_os("FJ_ASIN_SCALAR").is_some();
+        println!(
+            "fj-lax asin f32 4M [{}]: {:.3}ms",
+            if scalar { "SCALAR-ORIG" } else { "NATIVE" },
+            b * 1e3
+        );
     }
 
     #[test]
