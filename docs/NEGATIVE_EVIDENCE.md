@@ -2,6 +2,19 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (Sinh primitive: 2.32x @4M / 1.37x @16M): SIMD sinh via cancellation-free expm1 difference (BlackThrush)
+
+Fifth consumer of the Cephes exp vein, reusing `expm1_cephes_block_f64` (landed just before). `Sinh`
+(`eval_sinh`, real path was scalar libm `f64::sinh`). Not golden-pinned. `sinh_f64x8(x) =
+0.5·(expm1(x) − expm1(−x))` — CANCELLATION-FREE (unlike `0.5·(e − 1/e)`): for small x both `expm1(±x)
+≈ ±x` are given directly, so the difference is an accurate `≈ 2x` (sinh(1e-15)≈1e-15 verified). SIMD for
+`|x| < 709`; `|x| ≥ 709` (overflow), `±inf`, `NaN` → scalar `f64::sinh`. A `x == 0 → x` select restores
+`sinh(±0) = ±0` (odd fn; the even-symmetric expm1 difference gives `+0` for `−0`).
+
+MEASURED (median-of-3, `FJ_SINH_SCALAR`): 4M SCALAR 23.16ms → SIMD **10.00ms = 2.32x**; 16M 35.31ms →
+**25.74ms = 1.37x**. Gates: fj-lax lib green, full conformance green (sinh_oracle 31/0), fmt clean.
+Completes sinh/cosh/tanh + logistic + exp2-family(expm1) on the Cephes exp vein.
+
 ## 2026-07-01 - WIRED WIN (Expm1 primitive: 1.95x @4M / 1.25x @16M): SIMD expm1 via cancellation-free Cephes reconstruction (BlackThrush)
 
 Fourth consumer of the Cephes exp vein, via a new `expm1_cephes_block_f64` (reuses the exp.c rational

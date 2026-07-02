@@ -6489,21 +6489,63 @@ fn fast_small_tan_f64(x: f64) -> f64 {
     x + x * y
 }
 
+/// 8-wide `sinh(x) = 0.5·(expm1(x) − expm1(−x))` via the SIMD Cephes expm1
+/// ([`crate::simd_exp::expm1_cephes_block_f64`]). Using `expm1` (not `0.5·(e − 1/e)`) is
+/// CANCELLATION-FREE: for small x both `expm1(±x) ≈ ±x` (given directly, not as `1 ± small`), so the
+/// difference is an accurate `≈ 2x`. SIMD for `|x| < 709` (both `expm1` finite); `|x| ≥ 709` (overflow),
+/// `±inf`, `NaN` → scalar `f64::sinh`. A `x == 0 → x` select restores `sinh(±0) = ±0` (odd fn; the raw
+/// even-symmetric `expm1` difference would give `+0` for `−0`). Tolerance parity vs libm.
+fn sinh_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f64, 8>;
+    let ok = x.abs().simd_lt(F::splat(709.0)); // false for NaN, ±inf, overflow magnitudes
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f64; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].sinh();
+        }
+        return F::from_array(ra);
+    }
+    let ep = crate::simd_exp::expm1_cephes_block_f64(x);
+    let en = crate::simd_exp::expm1_cephes_block_f64(-x);
+    let raw = F::splat(0.5) * (ep - en);
+    let mut r = x.simd_eq(F::splat(0.0)).select(x, raw); // restore ±0 sign
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() < 709.0) {
+                ra[k] = xa[k].sinh();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
 pub(crate) fn eval_sinh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX sinh_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
         ensure_jax_float_unary_operand(primitive, input)?;
     }
     if inputs.first().is_some_and(value_contains_complex) {
-        eval_unary_complex_map(primitive, inputs, |a, b| {
+        return eval_unary_complex_map(primitive, inputs, |a, b| {
             // sinh(a+bi) = (sinh a cos b, cosh a sin b). `sin_cos(b)` + one `exp(a)`.
             let (sb, cb) = b.sin_cos();
             let (cosh_a, sinh_a) = cosh_sinh_from_exp(a);
             (sinh_a * cb, cosh_a * sb)
-        })
-    } else {
-        eval_unary_elementwise_parallel(primitive, inputs, f64::sinh)
+        });
     }
+    // FJ_SINH_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
+    if std::env::var_os("FJ_SINH_SCALAR").is_some() {
+        return eval_unary_elementwise_parallel(primitive, inputs, f64::sinh);
+    }
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, sinh_f64x8, f64::sinh)
 }
 
 /// 8-wide `expm1(x) = exp(x) − 1` via the cancellation-free Cephes reconstruction
@@ -26831,6 +26873,75 @@ mod tests {
             let scalar = std::env::var_os("FJ_TANH_SCALAR").is_some();
             println!(
                 "fj-lax tanh f64 {}M [{}]: {:.3}ms",
+                n / 1_000_000,
+                if scalar { "SCALAR" } else { "SIMD" },
+                b * 1e3
+            );
+        }
+    }
+
+    #[test]
+    fn sinh_simd_matches_scalar_tolerance_and_edges() {
+        // eval_sinh dense SIMD (0.5·(expm1(x)-expm1(-x))) vs scalar f64::sinh: ~1 ulp incl. tiny x
+        // (sinh(1e-15)≈1e-15), bit-exact ±0, edges (|x|>=709 -> ±inf, ±inf, NaN via scalar).
+        let mut data: Vec<f64> = (0..70_003usize)
+            .map(|i| -30.0 + (i % 9973) as f64 * 0.006)
+            .collect();
+        for (k, v) in [
+            (3usize, 0.0f64),
+            (4, -0.0),
+            (5, 1e-15),
+            (6, -1e-12),
+            (7, 710.0),
+            (8, -710.0),
+            (9, f64::INFINITY),
+            (10, f64::NEG_INFINITY),
+            (11, f64::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = tensor_f64(vec![data.len() as u32], &data);
+        let got =
+            extract_f64_vec(&eval_sinh(Primitive::Sinh, std::slice::from_ref(&input)).unwrap());
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.sinh();
+            let g = got[idx];
+            if want == 0.0 {
+                assert_eq!(g.to_bits(), want.to_bits(), "sinh sign-of-zero at x={x}");
+            } else if want.is_finite() {
+                let tol = 1e-12 * want.abs().max(1e-300);
+                assert!(
+                    (g - want).abs() <= tol,
+                    "sinh at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "sinh edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_sinh_throughput() {
+        use std::time::Instant;
+        for n in [4_000_000usize, 16_000_000usize] {
+            let data: Vec<f64> = (0..n).map(|i| -5.0 + (i % 9973) as f64 * 0.001).collect();
+            let input = tensor_f64(vec![n as u32], &data);
+            let f = || {
+                std::hint::black_box(
+                    eval_sinh(Primitive::Sinh, std::slice::from_ref(&input)).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            let scalar = std::env::var_os("FJ_SINH_SCALAR").is_some();
+            println!(
+                "fj-lax sinh f64 {}M [{}]: {:.3}ms",
                 n / 1_000_000,
                 if scalar { "SCALAR" } else { "SIMD" },
                 b * 1e3
