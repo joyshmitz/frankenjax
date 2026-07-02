@@ -10966,3 +10966,18 @@ win for f32/f64/bf16/f16. NOTE (maxpool, surfaced not fixed): fj f32 overlapping
 path but with a heavy ~100ms flat constant — LOSES to JAX at w16 (119 vs 27ms)/w32 (100 vs 80ms), wins only at
 w64 (88 vs 264ms, 3x). The deque f32→f64 widen + branchy bookkeeping is the cost; a real (risky, shared-code)
 lever remains there.
+
+## 2026-07-02 - WIN: van Herk NHWC max/min pool (f32) — turns a LOSS into up to 33x FASTER than JAX (BlackThrush)
+
+Fixed the maxpool loss surfaced last turn (ecd07269 note). fj's general deque max/min path is O(n) but carries
+a heavy ~100ms constant (f32→f64 widen via Cow::Owned + branchy monotonic-deque bookkeeping), so f32 overlapping
+maxpool LOST to JAX at small windows (w16 119 vs 27ms). max/min are separable AND order-independent, so the van
+Herk / Gil-Werman running extremum (per ww/wh block: prefix + suffix maxima, then out = op(suffix[o],
+prefix[o+k-1])) gives ~3 ops/cell INDEPENDENT of window, SIMD across C channels, f32-native (no widen). Added
+`separable_reduce_window_maxmin_4d_nhwc_f32` (VALID/unit-stride, both max and min), placed before the deque path.
+BIT-IDENTICAL to the naive fold for finite inputs (extremum selects an element — no float reassociation), gated
+all-finite (NaN/±inf keep the deque's canonicalization). RESULT (f32 [4,256,256,16]): deque 116/106/78ms → van
+Herk **8.67 / 11.13 / 7.97 ms** (13x internal). vs JAX maxpool (27.27 / 80.65 / 263.70ms) = **3.14x / 7.24x /
+33.1x FASTER**; minpool similar (JAX 24/79/259ms). Verified bit-exact (to_bits) max+min vs brute-force
+(`rw4d_nhwc_vanherk_maxmin_matches_bruteforce`, c=16) + rw4d tests green. f64/bf16/f16 max/min via van Herk are
+the natural follow-up (deque still serves them). NHWC pooling now fast for BOTH sum (f32/f64/bf16/f16) and f32 max/min.
