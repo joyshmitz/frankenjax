@@ -17820,6 +17820,50 @@ mod tests {
         });
     }
 
+    // Special-function binaries vs JAX (measured JAX 0.10.x CPU f64 8M: igamma 561.7ms,
+    // igammac 2012.5ms, betainc 2618.1ms — XLA runs the series / continued-fraction scalar
+    // and poorly parallelized). fj already threads these (is_expensive_binary / eval_ternary);
+    // this bench records the fj-vs-JAX ratio (existing threaded code, no behavior change).
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_special_binary_vs_jax() {
+        use std::time::Instant;
+        let n = 8_000_000usize;
+        let av: Vec<f64> = (0..n).map(|i| ((i % 997) as f64) * 0.01 + 0.5).collect();
+        let xv: Vec<f64> = (0..n).map(|i| ((i % 991) as f64) * 0.01 + 0.5).collect();
+        let bv: Vec<f64> = (0..n).map(|i| ((i % 983) as f64) * 0.01 + 0.5).collect();
+        let uv: Vec<f64> = (0..n).map(|i| ((i % 1009) as f64) / 1009.0).collect();
+        let shape = Shape {
+            dims: vec![n as u32],
+        };
+        let a = Value::Tensor(TensorValue::new_f64_values(shape.clone(), av).unwrap());
+        let x = Value::Tensor(TensorValue::new_f64_values(shape.clone(), xv).unwrap());
+        let b = Value::Tensor(TensorValue::new_f64_values(shape.clone(), bv).unwrap());
+        let u = Value::Tensor(TensorValue::new_f64_values(shape.clone(), uv).unwrap());
+        let time_it = |label: &str, f: &dyn Fn() -> f64| {
+            std::hint::black_box(f());
+            let mut best = f64::MAX;
+            for _ in 0..4 {
+                let s = Instant::now();
+                std::hint::black_box(f());
+                best = best.min(s.elapsed().as_secs_f64());
+            }
+            println!("{label}: {:.3}ms", best * 1e3);
+        };
+        time_it("fj igamma  (JAX 561.7ms)", &|| {
+            let v = eval_igamma(Primitive::Igamma, &[a.clone(), x.clone()]).unwrap();
+            v.as_tensor().unwrap().elements.as_f64_slice().unwrap()[123]
+        });
+        time_it("fj igammac (JAX 2012.5ms)", &|| {
+            let v = eval_igammac(Primitive::Igammac, &[a.clone(), x.clone()]).unwrap();
+            v.as_tensor().unwrap().elements.as_f64_slice().unwrap()[123]
+        });
+        time_it("fj betainc (JAX 2618.1ms)", &|| {
+            let v = eval_betainc(Primitive::Betainc, &[a.clone(), b.clone(), u.clone()]).unwrap();
+            v.as_tensor().unwrap().elements.as_f64_slice().unwrap()[123]
+        });
+    }
+
     // gcd/lcm vs JAX (measured JAX 0.10.x CPU int64 8M: gcd 59.6ms, lcm 60.4ms — XLA lowers
     // gcd to a `while_loop` Euclidean, parallelized). fj ran the Euclidean map dense-but-SERIAL
     // below the 8.4M CHEAP i64-parallel threshold; the compute-bound EXPENSIVE path threads it.

@@ -2,6 +2,22 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-02 - WIN: threaded special-function binaries 11-59x FASTER than JAX (igamma/igammac/betainc) (BlackThrush)
+
+Same lever as the Gcd win (XLA stuck on a slow non-vectorizable path; fj threads it), but on the special
+functions — a DIFFERENT primitive family and a MUCH bigger gap. `igamma`/`igammac` (regularized incomplete
+gamma, a series / continued fraction per element) and `betainc` (regularized incomplete beta, a 200-term
+continued fraction + 3 lgamma) do NOT SIMD-vectorize (data-dependent convergence), so XLA runs them scalar and
+poorly parallelized: JAX 0.10.x CPU f64 8M = **igamma 561.7ms, igammac 2012.5ms, betainc 2618.1ms**. fj already
+threads them (igamma/igammac via `is_expensive_binary` → `eval_same_shape_f64_expensive_parallel`; betainc via
+the threaded `eval_ternary_elementwise`): fj 8M = **igamma 32-39ms, igammac 34-37ms, betainc 212-239ms** =
+vs JAX **~15x / ~57x / ~11x FASTER**. Existing threaded code — this records the fj-vs-JAX ratio + a reproducible
+`#[ignore]` bench (`bench_special_binary_vs_jax`), no behavior change. (Contrast: `zeta` 8M JAX = 22.3ms is fast —
+XLA vectorizes its Euler-Maclaurin tail, so zeta is NOT a win; and `logaddexp2`/`xlog1py` JAX = 12/10ms ARE
+SIMD-vectorized by XLA, so threading fj's scalar-libm path there would NOT beat JAX — checked, not pursued.)
+RULE: fj threads elementwise special functions and wins BIG wherever XLA can't vectorize the per-element series
+(igamma/igammac/betainc = data-dependent convergence). Verified via oracle tests (accuracy ~1e-13, tolerance).
+
 ## 2026-07-02 - WIN: threaded Gcd/Lcm (compute-bound integer binop) ~3.1x FASTER than JAX (DIFFERENT PRIMITIVE) (BlackThrush)
 
 New primitive from the boundary sweep (53c3383a probed gcd/lcm = zero coverage). `Gcd`/`Lcm` run an
