@@ -10764,3 +10764,20 @@ path is itself faster than a pure latency-bound chain, so it IS reassociating �
 so a matching prefix-product is tolerance-legal for cumprod too). Would flip cumprod from ~parity to a ~3x-vs-JAX
 WIN. NOT attempted here (needs a disasm/profiler confirm of the auto-vec hypothesis before a speculative rewrite).
 This CONFIRMS + de-risks the lever pinned in the prior entry. No ceiling.
+
+## 2026-07-02 - WIN (perf vs JAX): cumprod 3.5x FASTER after calloc fix — root cause was vec![init] memset, NOT the mul op (BlackThrush)
+
+RESOLVED the cumprod anomaly — and my prior "mul-codegen" hypothesis was WRONG. Diagnostic (same 16M f64 data):
+single-thread scalar mul-scan = 13.6 ms (fast!), but the THREADED production kernel `scan_contiguous_lines_to_vec`
+gave mul **67.6 ms** vs add **7.7 ms**. Same kernel, same threading — the ONLY difference is the output alloc:
+`vec![init; N]`. Rust's `SpecFromElem` runtime-checks `is_zero`, so cumsum's `init=0.0` → `alloc_zeroed` (calloc,
+lazy pages) but cumprod's `init=1.0` → **memset 128 MB single-threaded (~32K page faults)** before the parallel
+scan. Since the scan OVERWRITES every element, `init` in the output buffer is irrelevant.
+
+FIX (bit-identical, general): `vec![init; src.len()]` → `vec![T::default(); src.len()]` (+ `T: Default` bound) in
+both the threaded and reverse branches of `scan_contiguous_lines_to_vec` — zero-default types (f64/i64/u16…)
+calloc, dodging the memset+fault. RESULT: production `Cumprod [4096,4096] axis=1 f64` = **20.83 ms** (was 74.85 ms,
+3.6x internal) — now **~3.5x FASTER than JAX** (73.52 ms), matching cumsum's win. Correctness 31/0 cumulative tests.
+BONUS: fixes ALL non-zero-init cumulative scans — cummax/cummin (init ±inf) hit the same memset. LESSON: `vec![v; n]`
+with a runtime NON-zero `v` memsets+faults single-threaded; if the buffer is fully overwritten, use a zeroed
+(calloc) alloc. simd8-across-rows was a red herring (strided loads, 29 ms — slower). No ceiling.

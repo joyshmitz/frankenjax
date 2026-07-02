@@ -3720,7 +3720,7 @@ fn scan_contiguous_lines_to_vec<T, F>(
     op: F,
 ) -> Vec<T>
 where
-    T: Copy + Send + Sync,
+    T: Copy + Send + Sync + Default,
     F: Fn(T, T) -> T + Sync,
 {
     let outer = src.len() / axis_dim.max(1);
@@ -3735,7 +3735,11 @@ where
 
     if threads <= 1 {
         if reverse {
-            let mut out = vec![init; src.len()];
+            // Zeroed alloc (calloc, lazy pages) — the reverse scan overwrites every
+            // element, so `init` is irrelevant here; using `init` directly made
+            // non-zero-init scans (cumprod init=1.0) memset+page-fault the whole buffer
+            // single-threaded (cumprod was 67ms vs cumsum 9ms; see NEGATIVE_EVIDENCE).
+            let mut out = vec![T::default(); src.len()];
             scan_contiguous_lines_from(src, &mut out, axis_dim, true, init, &op);
             return out;
         }
@@ -3751,7 +3755,10 @@ where
         return out;
     }
 
-    let mut out = vec![init; src.len()];
+    // Zeroed alloc (calloc) — the threaded scan overwrites every element, so `init`
+    // is irrelevant; `vec![init; ..]` with non-zero init (cumprod 1.0) memset+faulted
+    // the buffer single-threaded, making cumprod ~7x slower than cumsum.
+    let mut out = vec![T::default(); src.len()];
     let lines_per = outer.div_ceil(threads);
     let block = lines_per * axis_dim;
     let op_ref = &op;
@@ -5277,6 +5284,7 @@ mod tests {
     #![allow(clippy::type_complexity)]
     use super::*;
     use fj_core::LiteralBuffer;
+
     use std::collections::BTreeMap;
 
     // PROFILE the cummax 29<->73 puzzle (bead frankenjax-parallel-cummax-scan): time the 2-pass parallel
