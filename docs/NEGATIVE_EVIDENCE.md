@@ -10889,3 +10889,18 @@ baseline, so kept as an internal win). Verified BIT-EXACT asc+desc (0/MAX/dups) 
 (`radix_keys_unsigned_value_sort_matches_comparison_large`) + 41 sort tests green. Keys-only value-sort family
 now COMPLETE for i64/f64/f32/u32/u64; argsort/multi-slice keep pairs. NOTE for future: XLA integer sort is
 radix-tuned (~740ms) — only u32 (4x traffic cut) clears it comfortably; do not expect big i64/u64 sort wins.
+
+## 2026-07-02 - WIN: dedicated dense i32 sort/argsort path — value 3.75x, argsort 7.66x FASTER than JAX (BlackThrush)
+
+DIFFERENT PRIMITIVE (argsort) + a distinct dtype (i32). i32 tensors (dtype `I32`, i64-backed buffer) had NO
+dense sort branch — they fell to `sort_along_axis_literal_radix` (materializes 24-byte `Literal`s + 8-byte
+key = 8 radix passes), so both i32 sort AND argsort ran the slow generic path (~1376 ms @ 16M). Added
+`sort_along_axis_dense_i32`: the signed→unsigned monotonic key `(v as u32) ^ (1<<31)` gives a 4-pass u32
+radix — value sort uses KEYS-ONLY (4 bytes/elem), argsort uses (u64 key, u32 index) pairs. RESULTS (16M):
+i32 VALUE sort 1376 → **197.54 ms** (7x internal) vs JAX `jnp.sort` i32 740 ms = **3.75x FASTER**; i32 ARGSORT
+1376 → **638.21 ms** (2.16x internal) vs JAX `jnp.argsort` i32 4891 ms = **7.66x FASTER** (was 3.55x on the
+generic path). Bit-exact value sort asc+desc + argsort (gather-is-sorted) vs `sort()` reference
+(`dense_i32_sort_and_argsort_match_comparison_large`) + 42 sort tests green. Separately measured JAX argsort
+is comparison-based and VERY slow (f32 5348 ms, i32 4891 ms @ 16M) — fj's existing pairs-radix f32 argsort
+already ~608 ms = **8.8x FASTER** (previously undocumented). Surveyed + REJECTED as XLA-tuned this session:
+scatter-add (~9 ms), int32 conv2d (33 ms ≈ f32), bf16/f16 matmul (2.5-2.9 ms, upcasts to f32 BLAS).
