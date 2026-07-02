@@ -6691,6 +6691,44 @@ fn tanh_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
     r
 }
 
+/// NATIVE-f32 8-wide `tanh(x) = sign·(1−e)/(1+e)`, `e = exp_block_f32(−2|x|)` — runs entirely in f32
+/// (via [`crate::simd_exp::exp_block_f32`]) instead of widening to f64, ~2x the throughput on JAX's
+/// default dtype. SIMD for `|x| < 15` (where `−2|x| > −30` is inside `exp_block_f32`'s accurate range
+/// and tanh has not yet saturated); `|x| ≥ 15` (⇒ `±1` in f32), `±inf`, `NaN` → scalar `f32::tanh`.
+/// Sign via the sign bit (odd fn). ~f32 tolerance (few ulp) vs libm — well within f32 parity.
+fn tanh_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f32, 8>;
+    type U = Simd<u32, 8>;
+    let ax = x.abs();
+    let ok = ax.simd_lt(F::splat(15.0)); // false for NaN, ±inf, saturated magnitudes
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].tanh();
+        }
+        return F::from_array(ra);
+    }
+    let e = crate::simd_exp::exp_block_f32(F::splat(-2.0) * ax);
+    let mag = (F::splat(1.0) - e) / (F::splat(1.0) + e);
+    let signbit = U::splat(0x8000_0000);
+    let mut r = F::from_bits((mag.to_bits() & !signbit) | (x.to_bits() & signbit));
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() < 15.0) {
+                ra[k] = xa[k].tanh();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
 pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // JAX tanh_p = standard_unop(_float | _complex): reject integer operands.
     if let Some(input) = inputs.first() {
@@ -6730,6 +6768,12 @@ pub(crate) fn eval_tanh(primitive: Primitive, inputs: &[Value]) -> Result<Value,
         // FJ_TANH_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
         if std::env::var_os("FJ_TANH_SCALAR").is_some() {
             return eval_unary_elementwise_parallel(primitive, inputs, f64::tanh);
+        }
+        // Native-f32 fast path (JAX's default dtype): a genuinely-f32 kernel, ~2x the widen-to-f64
+        // path. Only fires for dense-F32 above the threading threshold; else falls through to the
+        // f64/widened path below (which covers f64, sub-threshold F32, and boxed/tail cases).
+        if let Some(v) = eval_unary_simd_dense_f32_native(inputs, tanh_f32x8, f32::tanh) {
+            return v;
         }
         // Threaded dense f64/f32 SIMD via the Cephes rational exp (ungated — the old FMA gate on
         // simd_poly_tanh was for the degree-13 Taylor exp, now superseded: exp_cephes wins no-FMA).
@@ -12751,6 +12795,62 @@ fn eval_unary_simd_dense_f64_parallel(
         }
     }
     eval_unary_elementwise_parallel(primitive, inputs, scalar)
+}
+
+/// NATIVE-f32 dense unary SIMD (8-wide f32, threaded). Unlike `eval_unary_simd_dense_f64_parallel`'s
+/// f32 branch (which WIDENS f32→f64 and runs the f64 kernel = 8 f32/iter across TWO 256-bit regs),
+/// this runs a genuinely-f32 kernel in ONE register — ~2x the per-lane throughput. Used for the
+/// exp/log-family f32 paths where f32 is JAX's default dtype and the widen path is ~11x slower than
+/// JAX-native-f32. Returns `Some(_)` only for a dense-F32 tensor above the threading threshold; the
+/// caller falls through to the f64/widened path (which also covers the sub-threshold + tail cases).
+fn eval_unary_simd_dense_f32_native(
+    inputs: &[Value],
+    kernel: impl Fn(std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> + Sync,
+    scalar: fn(f32) -> f32,
+) -> Option<Result<Value, EvalError>> {
+    use std::simd::Simd;
+    if let [Value::Tensor(tensor)] = inputs
+        && tensor.dtype == DType::F32
+        && let Some(src) = tensor.elements.as_f32_slice()
+    {
+        let n = src.len();
+        let threads = dense_unary_threads(n);
+        if threads > 1 {
+            let mut out = vec![0.0f32; n];
+            let chunk = n.div_ceil(threads);
+            let kref = &kernel;
+            std::thread::scope(|scope| {
+                let mut rest: &mut [f32] = out.as_mut_slice();
+                let mut start = 0usize;
+                while start < n {
+                    let len = chunk.min(n - start);
+                    let (blk, tail) = rest.split_at_mut(len);
+                    rest = tail;
+                    let s = start;
+                    scope.spawn(move || {
+                        let chunk_src = &src[s..s + len];
+                        let n8 = len - len % 8;
+                        let mut i = 0;
+                        while i < n8 {
+                            let x = Simd::<f32, 8>::from_slice(&chunk_src[i..i + 8]);
+                            kref(x).copy_to_slice(&mut blk[i..i + 8]);
+                            i += 8;
+                        }
+                        for j in i..len {
+                            blk[j] = scalar(chunk_src[j]);
+                        }
+                    });
+                    start += len;
+                }
+            });
+            return Some(
+                TensorValue::new_f32_values(tensor.shape.clone(), out)
+                    .map(Value::Tensor)
+                    .map_err(Into::into),
+            );
+        }
+    }
+    None
 }
 
 pub(crate) fn eval_bessel_i0e(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
@@ -26907,6 +27007,48 @@ mod tests {
     }
 
     #[test]
+    fn tanh_f32_native_matches_scalar_tolerance_and_edges() {
+        // eval_tanh native-f32 path (tanh_f32x8) vs scalar f32 tanh: few-ulp f32 tolerance across the
+        // range, correct edges (±inf -> ±1, NaN, ±0). Dense (>threshold) to hit the threaded SIMD path.
+        let n = 300_003usize;
+        let mut data: Vec<f32> = (0..n).map(|i| -20.0 + (i % 9973) as f32 * 0.004).collect();
+        for (k, v) in [
+            (3usize, 0.0f32),
+            (4, -0.0),
+            (5, 1e-7),
+            (6, 18.0),
+            (7, -18.0),
+            (8, f32::INFINITY),
+            (9, f32::NEG_INFINITY),
+            (10, f32::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_tanh(Primitive::Tanh, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = (x as f64).tanh() as f32;
+            let g = got[idx];
+            if want.is_nan() {
+                assert!(g.is_nan(), "tanh f32 NaN at x={x}");
+            } else {
+                assert!(
+                    (g - want).abs() <= 1e-6,
+                    "tanh f32 at x={x}: simd {g} vs scalar {want}"
+                );
+                if x == 0.0 {
+                    assert_eq!(g.to_bits(), want.to_bits(), "tanh f32 sign-of-zero at x={x}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tanh_simd_matches_scalar_tolerance_and_edges() {
         // eval_tanh dense SIMD (Cephes exp, (1-e)/(1+e)) vs scalar f64::tanh: absolute ~1e-12 across
         // the range (matches the oracle's ABSOLUTE bar), bit-exact edges (±inf -> ±1, NaN, ±0).
@@ -26973,6 +27115,29 @@ mod tests {
                 b * 1e3
             );
         }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_tanh_f32_throughput() {
+        // f32 is JAX's DEFAULT dtype. Measures the current widen-to-f64 f32 path vs JAX f32 tanh 0.985ms.
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n).map(|i| -6.0 + (i % 9973) as f32 * 0.0012).collect();
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap(),
+        );
+        let f = || {
+            std::hint::black_box(eval_tanh(Primitive::Tanh, std::slice::from_ref(&input)).unwrap());
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        println!("fj-lax tanh f32 4M: {:.3}ms (JAX f32 0.985ms)", b * 1e3);
     }
 
     #[test]

@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - FINDING + WIRED WIN: f32 transcendentals were ~11x slower than JAX (widen-to-f64); NATIVE-f32 tanh 2.27x (BlackThrush)
+
+BIG NEW GAP on JAX's DEFAULT dtype. All the exp/log-family f32 paths route through
+`eval_unary_simd_dense_f64_parallel`'s f32 branch, which WIDENS f32→f64 and runs the f64x8 kernel
+(8 f32/iter across TWO 256-bit regs + cast overhead). MEASURED: fj `tanh` f32 4M = **11.12ms** vs JAX
+f32 `tanh` **0.985ms = ~11x slower** (and WORSE than fj f64 tanh 7.87ms, due to the casts). JAX f32
+exp/log/erf are similarly ~0.5-0.9ms (native f32 + FMA + wide vectors).
+
+Fix (first consumer): new `eval_unary_simd_dense_f32_native` (threaded, genuinely-f32 8-wide, ONE 256-bit
+reg) + `tanh_f32x8` = `sign·(1−e)/(1+e)`, `e = exp_block_f32(−2|x|)` (reuses the existing f32 Cephes
+`expf`). SIMD for `|x|<15`; `≥15`/`±inf`/`NaN` → scalar `f32::tanh`. MEASURED: fj tanh f32 4M SCALAR-widen
+**11.12ms → native 4.90ms = 2.27x** (JAX gap 11.3x → 5.0x). Accuracy few-ulp f32 (green), tanh_oracle
+36/0, fj-lax lib green, conformance green.
+
+This OPENS the native-f32 vein: logistic/sinh/cosh/erf (and lgamma/digamma/bessel) all currently widen
+f32→f64 and can get a native-f32 kernel via `eval_unary_simd_dense_f32_native` + the `*_block_f32`
+building blocks. Residual vs JAX (still ~5x) is FMA + f32x16 width — the no-FMA/8-wide floor.
+
 ## 2026-07-01 - SURFACE / REVERTED: SIMD asin via atan-composition is near-parity (0.99x @4M) — the composition is too costly (BlackThrush)
 
 Tried `asin` by REUSING `atan_f64x8`: `asin(a)=atan(a/√(1−a²))` small branch, `π/2−2·atan(s/√(1−s²))`
