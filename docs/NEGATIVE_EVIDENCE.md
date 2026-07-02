@@ -2,6 +2,18 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Logistic: 2.02x vs scalar ORIG): second consumer of the native-f32 vein (BlackThrush)
+
+Second consumer of `eval_unary_simd_dense_f32_native` (after tanh f32). `Logistic` f32 (JAX's default
+dtype) was routing through the widen-to-f64 path. New `logistic_f32x8 = 1/(1+exp_block_f32(-x))` runs
+entirely in f32; SIMD for `|x|<30` (exp arg in `exp_block_f32`'s accurate range, pre-saturation),
+`|x|≥30`/`±inf`/`NaN` → scalar `logistic_f32_scalar` (correct via inf-arithmetic).
+
+MEASURED (4M f32, `FJ_LOGISTIC_SCALAR` A/B): scalar-ORIG 7.96ms → NATIVE **3.94ms = 2.02x** (vs JAX f32
+~0.5ms: ~16x → ~8x). Gates: fj-lax lib green, full conformance green, few-ulp f32 accuracy test green.
+Native-f32 vein continues (sinh/cosh/erf next via the same helper + `*_block_f32` blocks). Residual vs
+JAX = the no-FMA + f32x8 (vs f32x16) floor.
+
 ## 2026-07-01 - FINDING + WIRED WIN: f32 transcendentals were ~11x slower than JAX (widen-to-f64); NATIVE-f32 tanh 2.27x (BlackThrush)
 
 BIG NEW GAP on JAX's DEFAULT dtype. All the exp/log-family f32 paths route through

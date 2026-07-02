@@ -7093,7 +7093,49 @@ pub(crate) fn eval_logistic(primitive: Primitive, inputs: &[Value]) -> Result<Va
     if std::env::var_os("FJ_LOGISTIC_SCALAR").is_some() {
         return eval_unary_elementwise_parallel(primitive, inputs, logistic_scalar);
     }
+    // Native-f32 fast path (JAX default dtype), ~2x the widen-to-f64 path.
+    if let Some(v) = eval_unary_simd_dense_f32_native(inputs, logistic_f32x8, logistic_f32_scalar) {
+        return v;
+    }
     eval_unary_simd_dense_f64_parallel(primitive, inputs, logistic_f64x8, logistic_scalar)
+}
+
+/// Scalar f32 sigmoid `1/(1+exp(-x))` — native-f32 tail/edge fallback for [`logistic_f32x8`].
+fn logistic_f32_scalar(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// NATIVE-f32 8-wide `logistic(x) = 1/(1+exp_block_f32(-x))` — runs entirely in f32 (no widen to f64).
+/// SIMD for `|x| < 30` (where `exp(∓x)` is inside `exp_block_f32`'s accurate range and logistic has
+/// not saturated); `|x| ≥ 30` (⇒ ~0 or ~1), `±inf`, `NaN` → scalar `logistic_f32_scalar` (correct via
+/// inf-arithmetic). ~f32 tolerance (few ulp) vs libm.
+fn logistic_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f32, 8>;
+    let ok = x.abs().simd_lt(F::splat(30.0)); // false for NaN, ±inf, saturated tails
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = logistic_f32_scalar(xa[k]);
+        }
+        return F::from_array(ra);
+    }
+    let e = crate::simd_exp::exp_block_f32(-x);
+    let mut r = F::splat(1.0) / (F::splat(1.0) + e);
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !(xa[k].abs() < 30.0) {
+                ra[k] = logistic_f32_scalar(xa[k]);
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
 }
 
 pub(crate) fn eval_atanh(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
@@ -27004,6 +27046,72 @@ mod tests {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
         }
+    }
+
+    #[test]
+    fn logistic_f32_native_matches_scalar_tolerance_and_edges() {
+        // eval_logistic native-f32 path (logistic_f32x8) vs scalar f32 1/(1+exp(-x)): few-ulp f32
+        // across the active region, correct saturated tails/edges (x->+inf =>1, -inf =>0, NaN).
+        let n = 300_003usize;
+        let mut data: Vec<f32> = (0..n).map(|i| -25.0 + (i % 9973) as f32 * 0.005).collect();
+        for (k, v) in [
+            (3usize, 0.0f32),
+            (4, 40.0),
+            (5, -40.0),
+            (6, 29.5),
+            (7, f32::INFINITY),
+            (8, f32::NEG_INFINITY),
+            (9, f32::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_logistic(Primitive::Logistic, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = 1.0f32 / (1.0 + (-(x as f64)).exp() as f32);
+            let g = got[idx];
+            if want.is_nan() {
+                assert!(g.is_nan(), "logistic f32 NaN at x={x}");
+            } else {
+                assert!(
+                    (g - want).abs() <= 1e-6,
+                    "logistic f32 at x={x}: simd {g} vs scalar {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_logistic_f32_throughput() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n).map(|i| -8.0 + (i % 9973) as f32 * 0.0016).collect();
+        let input =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap());
+        let f = || {
+            std::hint::black_box(
+                eval_logistic(Primitive::Logistic, std::slice::from_ref(&input)).unwrap(),
+            );
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        let scalar = std::env::var_os("FJ_LOGISTIC_SCALAR").is_some();
+        println!(
+            "fj-lax logistic f32 4M [{}]: {:.3}ms (JAX f32 ~0.5ms)",
+            if scalar { "SCALAR-widen" } else { "NATIVE" },
+            b * 1e3
+        );
     }
 
     #[test]
