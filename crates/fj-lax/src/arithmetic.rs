@@ -11656,10 +11656,74 @@ fn digamma_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
     res
 }
 
+/// Scalar f32 digamma — the widened reference (f64 `digamma_approx` rounded to f32), used for the
+/// reflection (`x<0.5`) / non-finite lanes and the native-f32 tail. Widening keeps the reflection
+/// (which subtracts `π/tan(πx)`) accurate.
+fn digamma_f32_scalar(x: f32) -> f32 {
+    digamma_approx(x as f64) as f32
+}
+
+/// NATIVE-f32 `digamma` — f32 sibling of [`digamma_f64x8`]: shift `x` up to `>=8` accumulating
+/// `-1/shifted`, then the asymptotic series with `ln(shifted)` via [`crate::simd_exp::log_block_f32`].
+/// All terms are O(1) (NO large-coefficient cancellation, UNLIKE lgamma's Lanczos sum — which is why
+/// lgamma f32 must widen), so this is f32-stable. SIMD for `x >= 0.5` finite; `x<0.5` (reflection),
+/// pole, non-finite → scalar `digamma_f32_scalar`. ~f32 tolerance.
+fn digamma_f32x8(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    type F = Simd<f32, 8>;
+    let half = F::splat(0.5);
+    let eight = F::splat(8.0);
+    let one = F::splat(1.0);
+    let simd_ok = x.simd_ge(half) & x.simd_lt(F::splat(f32::INFINITY));
+    if !simd_ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f32; 8];
+        for k in 0..8 {
+            ra[k] = digamma_f32_scalar(xa[k]);
+        }
+        return F::from_array(ra);
+    }
+    let mut shifted = x;
+    let mut result = F::splat(0.0);
+    loop {
+        let m = shifted.simd_lt(eight) & simd_ok;
+        if !m.any() {
+            break;
+        }
+        result -= m.select(one / shifted, F::splat(0.0));
+        shifted += m.select(one, F::splat(0.0));
+    }
+    let inv = one / shifted;
+    let inv2 = inv * inv;
+    let inv4 = inv2 * inv2;
+    let inv6 = inv4 * inv2;
+    let ln = crate::simd_exp::log_block_f32(shifted);
+    // f32 asymptotic: ln(s) - 1/(2s) - 1/(12s²) + 1/(120s⁴) - 1/(252s⁶) (enough terms for f32 at s>=8).
+    let mut res = result + ln - half * inv - inv2 / F::splat(12.0) + inv4 / F::splat(120.0)
+        - inv6 / F::splat(252.0);
+    if !simd_ok.all() {
+        let xa = x.to_array();
+        let mut ra = res.to_array();
+        for k in 0..8 {
+            if !(xa[k] >= 0.5 && xa[k] < f32::INFINITY) {
+                ra[k] = digamma_f32_scalar(xa[k]);
+            }
+        }
+        res = F::from_array(ra);
+    }
+    res
+}
+
 pub(crate) fn eval_digamma(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
     // FJ_DIGAMMA_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
     if std::env::var_os("FJ_DIGAMMA_SCALAR").is_some() {
         return eval_unary_elementwise_parallel(primitive, inputs, digamma_approx);
+    }
+    // Native-f32 fast path (JAX default dtype), ~2x the widen-to-f64 path.
+    if let Some(v) = eval_unary_simd_dense_f32_native(inputs, digamma_f32x8, digamma_f32_scalar) {
+        return v;
     }
     eval_unary_simd_dense_f64_parallel(primitive, inputs, digamma_f64x8, digamma_approx)
 }
@@ -27337,6 +27401,57 @@ mod tests {
                 assert_eq!(g.to_bits(), want.to_bits(), "log1p edge at x={x}");
             }
         }
+    }
+
+    #[test]
+    fn digamma_f32_native_matches_scalar_tolerance() {
+        // eval_digamma native-f32 path (digamma_f32x8) vs the widened f64 reference: f32 tolerance
+        // (~1e-4) on x>=0.5 (SIMD shift+asymptotic), exact on x<0.5 (scalar reflection fallback).
+        let n = 300_003usize;
+        let data: Vec<f32> = (0..n).map(|i| 0.25 + (i % 9973) as f32 * 0.02).collect();
+        let input = Value::Tensor(
+            TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data.clone()).unwrap(),
+        );
+        let got = match eval_digamma(Primitive::Digamma, std::slice::from_ref(&input)).unwrap() {
+            Value::Tensor(t) => t.elements.as_f32_slice().unwrap().to_vec(),
+            _ => panic!("expected f32 tensor"),
+        };
+        for (idx, &x) in data.iter().enumerate() {
+            let want = digamma_approx(x as f64) as f32;
+            let g = got[idx];
+            assert!(
+                (g - want).abs() <= 1e-4 * want.abs().max(1.0),
+                "digamma f32 at x={x}: simd {g} vs ref {want}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_digamma_f32_throughput() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f32> = (0..n).map(|i| 0.5 + (i % 9973) as f32 * 0.002).collect();
+        let input =
+            Value::Tensor(TensorValue::new_f32_values(Shape { dims: vec![n as u32] }, data).unwrap());
+        let f = || {
+            std::hint::black_box(
+                eval_digamma(Primitive::Digamma, std::slice::from_ref(&input)).unwrap(),
+            );
+        };
+        f();
+        let mut b = f64::MAX;
+        for _ in 0..5 {
+            let s = Instant::now();
+            f();
+            b = b.min(s.elapsed().as_secs_f64());
+        }
+        let scalar = std::env::var_os("FJ_DIGAMMA_SCALAR").is_some();
+        println!(
+            "fj-lax digamma f32 4M [{}]: {:.3}ms (JAX f32 ~?)",
+            if scalar { "SCALAR-ORIG" } else { "NATIVE" },
+            b * 1e3
+        );
     }
 
     #[test]

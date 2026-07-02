@@ -2,6 +2,24 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Digamma: 3.08x); lgamma-f32 BLOCKED by Lanczos cancellation (BlackThrush)
+
+Eleventh consumer of `eval_unary_simd_dense_f32_native`, first native-f32 SPECIAL function. `digamma_f32x8`
+= f32 sibling of `digamma_f64x8`: shift `x→≥8` accumulating `-1/shifted`, then asymptotic series with
+`ln` via `log_block_f32`. All terms O(1) ⇒ f32-stable. SIMD for `x≥0.5` finite; `x<0.5`/pole/non-finite
+→ scalar `digamma_f32_scalar` (widened reflection). MEASURED (4M f32, `FJ_DIGAMMA_SCALAR` A/B): scalar-ORIG
+17.19ms → NATIVE **5.59ms = 3.08x**. Gates: fj-lax lib green, full conformance green, f32 accuracy (tol
+1e-4) green.
+
+KEY BLOCKER surfaced: native-f32 `lgamma` is NOT viable — its Lanczos `acc = c0 + Σ cᵢ/(z+i)` has LARGE
+alternating coefficients (676.5, −1259.1, 771.3, …) that cancel to O(1); stable in f64 (15 digits) but
+CATASTROPHIC in f32 (~3-4 digits lost → ~1e-3 error, fails f32 tolerance). So lgamma f32 MUST widen to
+f64 (the existing path is correct). digamma has no such sum ⇒ safe. RULE: native-f32 of a special-fn is
+only viable if its intermediate sums are O(1); large-cancellation series (Lanczos) require f64 intermediate.
+
+Native-f32 vein (11): tanh 2.27x, logistic 2.02x, cosh 2.24x, log 2.04x, log1p 3.45x, atanh 2.63x, asinh
+2.50x, acosh 1.65x, expm1 3.15x, sinh 3.66x, digamma 3.08x.
+
 ## 2026-07-01 - WIRED WIN (native-f32 Sinh: 3.66x vs scalar ORIG): tenth native-f32 consumer (BlackThrush)
 
 Tenth consumer of `eval_unary_simd_dense_f32_native`, unlocked by `expm1_block_f32`. `sinh_f32x8 =
