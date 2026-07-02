@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (Atan primitive: 2.41x @4M / 1.25x @16M) — the stale-FMA finding extends to INVERSE TRIG, opens a new vein (BlackThrush)
+
+The old "atan SIMD needs FMA to win (0.79x without)" verdict is the SAME pre-AVX2 stale finding that was
+wrong for exp/log. Built `atan_f64x8` = Cephes `atan.c`: reduce `|x|` into `[0,0.66]` via `π/2−atan(1/x)`
+(|x|>2.414) / `π/4+atan((x−1)/(x+1))` (|x|>0.66), then a degree-4/5 rational + MOREBITS low-π correction;
+copysign restores the sign (odd fn ⇒ `atan(±0)=±0`). SIMD for finite x; `±inf`/`NaN` → scalar `f64::atan`.
+Not golden-pinned (atan_oracle tol 1e-14 + bit-exact ±0); all 36 oracle cases pass.
+
+MEASURED (median-of-3, `FJ_ATAN_SCALAR`): 4M SCALAR 15.88ms → SIMD **6.59ms = 2.41x** (vs JAX `arctan`
+4.87ms: 3.26x → 1.35x); 16M 27.97ms → **22.29ms = 1.25x**. Gates: fj-lax lib green, full conformance green
+(atan_oracle 36/0), fmt clean. This OPENS the inverse-trig vein: `asin`/`acos` build on atan/sqrt (next),
+and the `atan2` binary (currently 5.4-8.4x LOSS, thought FMA-blocked — that block is stale too).
+
+
+
 ## 2026-07-01 - SURFACE / REVERTED: SIMD exp2 REGRESSES 0.90x @4M — glibc exp2 is well-optimized (mirrors the log2 revert) (BlackThrush)
 
 Attempted to extend the Cephes exp vein to `Exp2`. Built a CORRECT `exp2_f64x8`: `2ⁿ · exp_cephes(r·ln2)`

@@ -6893,6 +6893,101 @@ pub(crate) fn eval_acosh(primitive: Primitive, inputs: &[Value]) -> Result<Value
     eval_unary_simd_dense_f64_parallel(primitive, inputs, acosh_f64x8, f64::acosh)
 }
 
+/// 8-wide `atan(x)` — Cephes `atan.c`: reduce `|x|` into `[0, 0.66]` via `atan(x)=π/2−atan(1/x)`
+/// (|x|>2.414) or `π/4+atan((x−1)/(x+1))` (|x|>0.66), then a degree-4/5 rational, with the MOREBITS
+/// low-π correction; sign restored by copysign (odd fn ⇒ `atan(±0)=±0`). Short rational ⇒ wins no-FMA
+/// (the old "atan SIMD needs FMA" verdict was pre-AVX2 stale, same as exp/log). SIMD for finite x;
+/// `±inf`/`NaN` route to scalar `f64::atan`. ~1 ulp, tolerance parity.
+fn atan_f64x8(x: std::simd::Simd<f64, 8>) -> std::simd::Simd<f64, 8> {
+    use std::simd::Select;
+    use std::simd::Simd;
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    type F = Simd<f64, 8>;
+    type U = Simd<u64, 8>;
+    const T3P8: f64 = 2.414_213_562_373_095_048_802; // tan(3π/8)
+    const MOREBITS: f64 = 6.123_233_995_736_765_886_130e-17; // low bits of π/2
+    #[allow(clippy::excessive_precision)]
+    const P: [f64; 5] = [
+        -8.750_608_600_031_904_122_785e-1,
+        -1.615_753_718_733_365_076_637e1,
+        -7.500_855_792_314_704_667_340e1,
+        -1.228_866_684_490_136_173_410e2,
+        -6.485_021_904_942_025_371_773e1,
+    ];
+    #[allow(clippy::excessive_precision)]
+    const Q: [f64; 5] = [
+        2.485_846_490_142_306_297_962e1,
+        1.650_270_098_316_988_542_046e2,
+        4.328_810_604_912_902_668_951e2,
+        4.853_903_996_359_136_964_868e2,
+        1.945_506_571_482_613_964_425e2,
+    ];
+    let ok = x.abs().simd_lt(F::splat(f64::INFINITY)); // finite; NaN/±inf → scalar
+    if !ok.any() {
+        let xa = x.to_array();
+        let mut ra = [0.0f64; 8];
+        for k in 0..8 {
+            ra[k] = xa[k].atan();
+        }
+        return F::from_array(ra);
+    }
+    let ax = x.abs();
+    let big = ax.simd_gt(F::splat(T3P8));
+    let mid = ax.simd_gt(F::splat(0.66)) & !big;
+    // Reduced argument per regime: big → −1/ax; mid → (ax−1)/(ax+1); else ax.
+    let xr = big.select(
+        -(F::splat(1.0) / ax),
+        mid.select((ax - F::splat(1.0)) / (ax + F::splat(1.0)), ax),
+    );
+    let y_off = big.select(
+        F::splat(std::f64::consts::FRAC_PI_2),
+        mid.select(F::splat(std::f64::consts::FRAC_PI_4), F::splat(0.0)),
+    );
+    let corr = big.select(
+        F::splat(MOREBITS),
+        mid.select(F::splat(0.5 * MOREBITS), F::splat(0.0)),
+    );
+    let z = xr * xr;
+    let mut pp = F::splat(P[0]); // polevl(z, P, 4)
+    for &c in &P[1..] {
+        pp = pp * z + F::splat(c);
+    }
+    let mut qq = z + F::splat(Q[0]); // p1evl(z, Q, 5) — monic
+    for &c in &Q[1..] {
+        qq = qq * z + F::splat(c);
+    }
+    let poly = z * pp / qq;
+    let mag = xr * poly + xr + corr + y_off; // atan(|x|) ≥ 0
+    // copysign(mag, x): odd function; preserves atan(±0) = ±0.
+    let signbit = U::splat(0x8000_0000_0000_0000);
+    let mut r = F::from_bits((mag.to_bits() & !signbit) | (x.to_bits() & signbit));
+    if !ok.all() {
+        let xa = x.to_array();
+        let mut ra = r.to_array();
+        for k in 0..8 {
+            if !xa[k].abs().is_finite() {
+                ra[k] = xa[k].atan();
+            }
+        }
+        r = F::from_array(ra);
+    }
+    r
+}
+
+pub(crate) fn eval_atan(primitive: Primitive, inputs: &[Value]) -> Result<Value, EvalError> {
+    // JAX atan_p = standard_unop(_float | _complex): integer operands rejected. Complex + tail +
+    // other-dtype fall through to eval_unary_elementwise_parallel (dispatches complex by primitive).
+    if let Some(input) = inputs.first() {
+        ensure_jax_float_unary_operand(primitive, input)?;
+    }
+    // FJ_ATAN_SCALAR forces the pre-SIMD scalar-map path (same-binary A/B hook).
+    if std::env::var_os("FJ_ATAN_SCALAR").is_some() {
+        return eval_unary_elementwise_parallel(primitive, inputs, f64::atan);
+    }
+    eval_unary_simd_dense_f64_parallel(primitive, inputs, atan_f64x8, f64::atan)
+}
+
 /// 8-wide `atanh(x) = 0.5·log1p(2x / (1 − x))` — the standard single-`log1p` identity (one
 /// [`log1p_f64x8`] instead of two). Using `log1p` (not raw `ln`) keeps it accurate for small `x`
 /// (`2x/(1-x) ≈ 2x`, `log1p` recovers the low bits), and the log1p lane self-handles the domain edges:
@@ -26873,6 +26968,76 @@ mod tests {
             let scalar = std::env::var_os("FJ_TANH_SCALAR").is_some();
             println!(
                 "fj-lax tanh f64 {}M [{}]: {:.3}ms",
+                n / 1_000_000,
+                if scalar { "SCALAR" } else { "SIMD" },
+                b * 1e3
+            );
+        }
+    }
+
+    #[test]
+    fn atan_simd_matches_scalar_tolerance_and_edges() {
+        // eval_atan dense SIMD (Cephes rational) vs scalar f64::atan: ~1 ulp across all 3 range-
+        // reduction regimes, bit-exact ±0, and edges (±inf -> ±π/2, NaN).
+        let mut data: Vec<f64> = (0..70_003usize)
+            .map(|i| -200.0 + (i % 9973) as f64 * 0.04)
+            .collect();
+        for (k, v) in [
+            (3usize, 0.0f64),
+            (4, -0.0),
+            (5, 1.0),
+            (6, -1.0),
+            (7, 0.5),
+            (8, 3.0),
+            (9, 1e12),
+            (10, f64::INFINITY),
+            (11, f64::NEG_INFINITY),
+            (12, f64::NAN),
+        ] {
+            data[k] = v;
+        }
+        let input = tensor_f64(vec![data.len() as u32], &data);
+        let got =
+            extract_f64_vec(&eval_atan(Primitive::Atan, std::slice::from_ref(&input)).unwrap());
+        for (idx, &x) in data.iter().enumerate() {
+            let want = x.atan();
+            let g = got[idx];
+            if want == 0.0 {
+                assert_eq!(g.to_bits(), want.to_bits(), "atan sign-of-zero at x={x}");
+            } else if want.is_finite() {
+                let tol = 1e-13 * want.abs().max(1.0);
+                assert!(
+                    (g - want).abs() <= tol,
+                    "atan at x={x}: simd {g} vs scalar {want}"
+                );
+            } else {
+                assert_eq!(g.to_bits(), want.to_bits(), "atan edge at x={x}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_atan_throughput() {
+        use std::time::Instant;
+        for n in [4_000_000usize, 16_000_000usize] {
+            let data: Vec<f64> = (0..n).map(|i| -100.0 + (i % 9973) as f64 * 0.02).collect();
+            let input = tensor_f64(vec![n as u32], &data);
+            let f = || {
+                std::hint::black_box(
+                    eval_atan(Primitive::Atan, std::slice::from_ref(&input)).unwrap(),
+                );
+            };
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..5 {
+                let s = Instant::now();
+                f();
+                b = b.min(s.elapsed().as_secs_f64());
+            }
+            let scalar = std::env::var_os("FJ_ATAN_SCALAR").is_some();
+            println!(
+                "fj-lax atan f64 {}M [{}]: {:.3}ms",
                 n / 1_000_000,
                 if scalar { "SCALAR" } else { "SIMD" },
                 b * 1e3
