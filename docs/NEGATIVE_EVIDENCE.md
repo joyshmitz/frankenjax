@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-01 - WIRED WIN (native-f32 Expm1: 3.15x vs scalar ORIG); erf-f32 confirmed bit-pinned (BlackThrush)
+
+Ninth consumer of `eval_unary_simd_dense_f32_native`, via a new `expm1_block_f32` in simd_exp.rs. It
+reuses `exp_block_f32`'s EXACT reduction + poly (minimal transcription risk) but reconstructs
+`expm1(x)=2ⁿ·(exp(r)−1)+(2ⁿ−1)` — the poly already yields `exp(r)−1 = p·z+r` DIRECTLY (before the `+1`),
+so no `exp(x)−1` cancellation for small x. `expm1_f32x8`: SIMD for `|x|<88`; `x≥88`(+inf)/`x≤−88`(−1)/
+`±inf`/`NaN` → scalar `f32::exp_m1`; `x==0→x` select restores ±0. Not bit-pinned.
+MEASURED (4M f32, `FJ_EXPM1_SCALAR` A/B): scalar-ORIG 12.76ms → NATIVE **4.06ms = 3.15x**. Gates: fj-lax
+lib green, full conformance green (incl. tight expm1_oracle small-x band), few-ulp f32 accuracy green.
+
+CHECKED (blocker): native-f32 `erf` is bit-pinned — arithmetic.rs ~28729 asserts f32 erf ==
+`(erf_approx(x as f64) as f32).to_bits()` (the widened path), so a native f32 erf (A&S ~1.5e-7, marginal)
+would break it. Deferred. Native-f32 vein (9): tanh 2.27x, logistic 2.02x, cosh 2.24x, log 2.04x, log1p
+3.45x, atanh 2.63x, asinh 2.50x, acosh 1.65x, expm1 3.15x. `expm1_block_f32` also unlocks native-f32 sinh.
+
 ## 2026-07-01 - WIRED WIN (native-f32 Acosh: 1.65x vs scalar ORIG): eighth native-f32 consumer, completes the inverse-hyperbolic trio (BlackThrush)
 
 Eighth consumer of `eval_unary_simd_dense_f32_native`, completes native-f32 asinh/acosh/atanh.

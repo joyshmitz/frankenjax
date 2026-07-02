@@ -216,6 +216,41 @@ pub fn exp_block_f32(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
     p * two_n
 }
 
+/// 8-wide f32 `expm1(x) = exp(x) − 1` — reuses [`exp_block_f32`]'s exact reduction + poly but with the
+/// CANCELLATION-FREE reconstruction `expm1(x) = 2ⁿ·(exp(r)−1) + (2ⁿ−1)`. The poly already computes
+/// `exp(r)−1 = p·z + r` DIRECTLY (before the `+1` that [`exp_block_f32`] adds), so for `n == 0` (small
+/// x) the result is exactly that — accurate to ~f32 ulp even where `exp(x)−1` would cancel. For
+/// IN-RANGE `x` only; caller routes overflow/underflow/±inf/NaN + the ±0 sign to scalar.
+pub fn expm1_block_f32(x: std::simd::Simd<f32, 8>) -> std::simd::Simd<f32, 8> {
+    use std::simd::Simd;
+    use std::simd::StdFloat;
+    use std::simd::num::SimdInt;
+    type F = Simd<f32, 8>;
+    const LOG2E: f32 = std::f32::consts::LOG2_E;
+    const LN2_HI: f32 = 0.693_359_375;
+    const LN2_LO: f32 = -2.121_944_4e-4;
+    const C: [f32; 6] = [
+        1.987_569_15e-4,
+        1.398_199_95e-3,
+        8.333_451_9e-3,
+        4.166_579_6e-2,
+        1.666_666_55e-1,
+        5.000_000_1e-1,
+    ];
+    let nf = (x * F::splat(LOG2E)).round();
+    let r = x - nf * F::splat(LN2_HI);
+    let r = r - nf * F::splat(LN2_LO);
+    let mut p = F::splat(C[0]);
+    for &c in &C[1..] {
+        p = p * r + F::splat(c);
+    }
+    let z = r * r;
+    let er_m1 = p * z + r; // exp(r) − 1, computed directly (no cancellation)
+    let ni = nf.cast::<i32>();
+    let two_n = F::from_bits(((ni + Simd::splat(127)) << Simd::splat(23)).cast::<u32>());
+    two_n * er_m1 + (two_n - F::splat(1.0))
+}
+
 /// 8-wide f32 natural `log` (Cephes `logf`: frexp split into mantissa∈[0.5,1)·2^e, degree-8 minimax
 /// poly, ln2 reconstruction). Explicit `*`/`+` (NO `mul_add`). Companion to [`exp_block_f32`] so the
 /// pair gives `pow(b,p) = exp(p·ln b)` 8-wide without `+fma`. Accuracy ~1 ulp for finite x>0
