@@ -4149,6 +4149,159 @@ fn op_c_rowwide(
     }
 }
 
+/// Half-precision (bf16/f16) sibling of [`separable_reduce_window_maxmin_4d_nhwc_f32`] — XLA is
+/// catastrophic here (no vectorized half compare: JAX bf16 maxpool w64 ~1.28s, f16 ~0.9s). Maps each
+/// finite half bit-pattern to a TOTAL-ORDER u16 key (sign-flip: positives set bit15, negatives
+/// complemented) so unsigned `simd_max`/`simd_min` on keys == float extremum, runs the van Herk
+/// separable passes on u16 keys (SIMD across C), then maps the winning key back to its bits. The
+/// extremum is an INPUT element, so this is BIT-IDENTICAL to the naive fold for finite inputs (same
+/// transform for bf16 and f16 — sign bit at 0x8000). Finite-gated (NaN/±inf keep the deque path).
+#[allow(clippy::too_many_arguments)]
+fn separable_reduce_window_maxmin_4d_nhwc_half(
+    tensor: &TensorValue,
+    dims: [usize; 4],
+    out_h: usize,
+    out_w: usize,
+    window_h: usize,
+    window_w: usize,
+    is_max: bool,
+    is_bf16: bool,
+) -> Option<Vec<u16>> {
+    use std::simd::Simd;
+    use std::simd::cmp::SimdOrd;
+    let [bn, h, w, c] = dims;
+    if window_h < 2 || window_w < 2 || window_h.saturating_mul(window_w) < 25 {
+        return None;
+    }
+    if out_h + window_h != h + 1 || out_w + window_w != w + 1 {
+        return None;
+    }
+    let bits = tensor.elements.as_half_float_slice()?;
+    if bits.len() != bn * h * w * c {
+        return None;
+    }
+    let finite = |b: u16| -> bool {
+        if is_bf16 {
+            f32::from_bits((b as u32) << 16).is_finite()
+        } else {
+            Literal::F16Bits(b).as_f64().unwrap_or(f64::NAN).is_finite()
+        }
+    };
+    if !bits.iter().all(|&b| finite(b)) {
+        return None;
+    }
+    let to_key = |b: u16| -> u16 { if b & 0x8000 != 0 { !b } else { b | 0x8000 } };
+    let from_key = |k: u16| -> u16 { if k & 0x8000 != 0 { k & 0x7fff } else { !k } };
+    let keys: Vec<u16> = bits.iter().map(|&b| to_key(b)).collect();
+    let cw = c - c % 8;
+    let vop = |a: Simd<u16, 8>, b: Simd<u16, 8>| {
+        if is_max { a.simd_max(b) } else { a.simd_min(b) }
+    };
+    let sop = |a: u16, b: u16| if is_max { a.max(b) } else { a.min(b) };
+    let row_c = out_w * c;
+    let mut output = vec![0u16; bn * out_h * row_c];
+    let mut hmax = vec![0u16; h * row_c];
+    let mut pref = vec![0u16; w * c];
+    let mut suf = vec![0u16; w * c];
+    let mut prefh = vec![0u16; h * row_c];
+    let mut sufh = vec![0u16; h * row_c];
+    macro_rules! op_c {
+        ($dstbuf:expr, $d:expr, $abuf:expr, $a:expr, $bbuf:expr, $b:expr) => {{
+            let mut ci = 0;
+            while ci < cw {
+                let av = Simd::<u16, 8>::from_slice(&$abuf[$a + ci..$a + ci + 8]);
+                let bv = Simd::<u16, 8>::from_slice(&$bbuf[$b + ci..$b + ci + 8]);
+                vop(av, bv).copy_to_slice(&mut $dstbuf[$d + ci..$d + ci + 8]);
+                ci += 8;
+            }
+            while ci < c {
+                $dstbuf[$d + ci] = sop($abuf[$a + ci], $bbuf[$b + ci]);
+                ci += 1;
+            }
+        }};
+    }
+    // Row-wide (len == row_c) op where dst and a alias the same buffer at rows db/ab.
+    macro_rules! op_row {
+        ($buf:expr, $db:expr, $ab:expr, $bbuf:expr, $bb:expr) => {{
+            let mut k = 0;
+            while k + 8 <= row_c {
+                let av = Simd::<u16, 8>::from_slice(&$buf[$ab + k..$ab + k + 8]);
+                let bv = Simd::<u16, 8>::from_slice(&$bbuf[$bb + k..$bb + k + 8]);
+                vop(av, bv).copy_to_slice(&mut $buf[$db + k..$db + k + 8]);
+                k += 8;
+            }
+            while k < row_c {
+                $buf[$db + k] = sop($buf[$ab + k], $bbuf[$bb + k]);
+                k += 1;
+            }
+        }};
+    }
+    for n in 0..bn {
+        let in_base = n * h * w * c;
+        for r in 0..h {
+            let rb = in_base + r * w * c;
+            for j in 0..w {
+                let db = j * c;
+                if j % window_w == 0 {
+                    pref[db..db + c].copy_from_slice(&keys[rb + db..rb + db + c]);
+                } else {
+                    op_c!(pref, db, pref, (j - 1) * c, keys, rb + db);
+                }
+            }
+            for j in (0..w).rev() {
+                let db = j * c;
+                if j % window_w == window_w - 1 || j == w - 1 {
+                    suf[db..db + c].copy_from_slice(&keys[rb + db..rb + db + c]);
+                } else {
+                    op_c!(suf, db, suf, (j + 1) * c, keys, rb + db);
+                }
+            }
+            let hb = r * row_c;
+            for o in 0..out_w {
+                op_c!(hmax, hb + o * c, suf, o * c, pref, (o + window_w - 1) * c);
+            }
+        }
+        for r in 0..h {
+            let rb = r * row_c;
+            if r % window_h == 0 {
+                prefh[rb..rb + row_c].copy_from_slice(&hmax[rb..rb + row_c]);
+            } else {
+                op_row!(prefh, rb, (r - 1) * row_c, hmax, rb);
+            }
+        }
+        for r in (0..h).rev() {
+            let rb = r * row_c;
+            if r % window_h == window_h - 1 || r == h - 1 {
+                sufh[rb..rb + row_c].copy_from_slice(&hmax[rb..rb + row_c]);
+            } else {
+                op_row!(sufh, rb, (r + 1) * row_c, hmax, rb);
+            }
+        }
+        let obase = n * out_h * row_c;
+        for o in 0..out_h {
+            let sr = o * row_c;
+            let pr = (o + window_h - 1) * row_c;
+            let ob = obase + o * row_c;
+            let mut k = 0;
+            while k + 8 <= row_c {
+                let s = Simd::<u16, 8>::from_slice(&sufh[sr + k..sr + k + 8]);
+                let p = Simd::<u16, 8>::from_slice(&prefh[pr + k..pr + k + 8]);
+                vop(s, p).copy_to_slice(&mut output[ob + k..ob + k + 8]);
+                k += 8;
+            }
+            while k < row_c {
+                output[ob + k] = sop(sufh[sr + k], prefh[pr + k]);
+                k += 1;
+            }
+        }
+    }
+    // keys -> bits.
+    for o in output.iter_mut() {
+        *o = from_key(*o);
+    }
+    Some(output)
+}
+
 /// f64 sibling of [`separable_reduce_window_sum_4d_nhwc_f32`] — native-f64 accumulation, same
 /// VALID/unit-stride NHWC box-sum separability (O(k) not O(k^2)). Tolerance-equal (reassociates),
 /// finite-gated.
@@ -8072,6 +8225,45 @@ fn eval_reduce_window(
             .map_err(EvalError::InvalidTensor)?,
         ));
     }
+    // bf16/f16 rank-4 NHWC MAX/MIN: van Herk on total-order u16 keys (SIMD), placed before the deque
+    // path. XLA is catastrophic on half maxpool (JAX bf16 w64 ~1.28s); the deque widens half→f64.
+    if no_base_dilation
+        && no_window_dilation
+        && matches!(tensor.dtype, fj_core::DType::BF16 | fj_core::DType::F16)
+        && output_dtype == tensor.dtype
+        && rank == 4
+        && matches!(reduce_op, "max" | "min")
+        && window_dims[0] == 1
+        && window_dims[3] == 1
+        && strides.iter().all(|&s| s == 1)
+        && pad_lows.iter().all(|&p| p == 0)
+        && let Some(obits) = separable_reduce_window_maxmin_4d_nhwc_half(
+            tensor,
+            [
+                tensor.shape.dims[0] as usize,
+                tensor.shape.dims[1] as usize,
+                tensor.shape.dims[2] as usize,
+                tensor.shape.dims[3] as usize,
+            ],
+            out_dims[1] as usize,
+            out_dims[2] as usize,
+            window_dims[1],
+            window_dims[2],
+            reduce_op == "max",
+            tensor.dtype == fj_core::DType::BF16,
+        )
+    {
+        return Ok(Value::Tensor(
+            TensorValue::new_half_float_values(
+                tensor.dtype,
+                Shape {
+                    dims: out_dims.to_vec(),
+                },
+                obits,
+            )
+            .map_err(EvalError::from)?,
+        ));
+    }
 
     // Separable max/min fast path (ANY rank): when ∏window is meaningfully larger than
     // ∑window, reduce each window axis with an independent 1D pass — O(output·∑window)
@@ -10505,6 +10697,85 @@ mod tests {
                             (o - acc).abs() <= 1e-9 * acc.abs().max(1.0),
                             "f64 mismatch n{n} r{r} c{col} ch{ch}: got {o} want {acc}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rw4d_nhwc_vanherk_maxmin_half_matches_bruteforce() {
+        let (bn, h, w, c) = (2usize, 13usize, 11usize, 16usize);
+        let (wh, ww) = (5usize, 5usize);
+        for is_bf16 in [true, false] {
+            let dt = if is_bf16 {
+                fj_core::DType::BF16
+            } else {
+                fj_core::DType::F16
+            };
+            let enc = |v: f64| -> u16 {
+                if is_bf16 {
+                    (f32::to_bits(v as f32) >> 16) as u16
+                } else {
+                    match Literal::from_f16_f64(v) {
+                        Literal::F16Bits(b) => b,
+                        _ => 0,
+                    }
+                }
+            };
+            let dec = |b: u16| -> f64 {
+                if is_bf16 {
+                    f64::from(f32::from_bits((b as u32) << 16))
+                } else {
+                    Literal::F16Bits(b).as_f64().unwrap_or(0.0)
+                }
+            };
+            let bits: Vec<u16> = (0..bn * h * w * c)
+                .map(|i| enc((((i * 13 + 5) % 101) as f64) * 0.02 - 1.0))
+                .collect();
+            for opname in ["max", "min"] {
+                let x = Value::Tensor(
+                    TensorValue::new_half_float_values(
+                        dt,
+                        Shape {
+                            dims: vec![bn as u32, h as u32, w as u32, c as u32],
+                        },
+                        bits.clone(),
+                    )
+                    .unwrap(),
+                );
+                let mut p = BTreeMap::new();
+                p.insert("reduce_op".to_owned(), opname.to_owned());
+                p.insert("window_dimensions".to_owned(), format!("1,{wh},{ww},1"));
+                p.insert("window_strides".to_owned(), "1,1,1,1".to_owned());
+                let got =
+                    eval_primitive(Primitive::ReduceWindow, std::slice::from_ref(&x), &p).unwrap();
+                let got = got.as_tensor().unwrap();
+                let (oh, ow) = (h - wh + 1, w - ww + 1);
+                let obits = got.elements.as_half_float_slice().unwrap();
+                for n in 0..bn {
+                    for r in 0..oh {
+                        for col in 0..ow {
+                            for ch in 0..c {
+                                let mut acc = if opname == "max" { f64::MIN } else { f64::MAX };
+                                for dh in 0..wh {
+                                    for dw in 0..ww {
+                                        let v =
+                                            dec(bits[((n * h + r + dh) * w + col + dw) * c + ch]);
+                                        acc = if opname == "max" {
+                                            acc.max(v)
+                                        } else {
+                                            acc.min(v)
+                                        };
+                                    }
+                                }
+                                let o = dec(obits[((n * oh + r) * ow + col) * c + ch]);
+                                assert_eq!(
+                                    o, acc,
+                                    "{dt:?} {opname} mismatch n{n} r{r} c{col} ch{ch}"
+                                );
+                            }
+                        }
                     }
                 }
             }

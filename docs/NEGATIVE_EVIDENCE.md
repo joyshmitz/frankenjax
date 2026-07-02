@@ -10981,3 +10981,18 @@ Herk **8.67 / 11.13 / 7.97 ms** (13x internal). vs JAX maxpool (27.27 / 80.65 / 
 33.1x FASTER**; minpool similar (JAX 24/79/259ms). Verified bit-exact (to_bits) max+min vs brute-force
 (`rw4d_nhwc_vanherk_maxmin_matches_bruteforce`, c=16) + rw4d tests green. f64/bf16/f16 max/min via van Herk are
 the natural follow-up (deque still serves them). NHWC pooling now fast for BOTH sum (f32/f64/bf16/f16) and f32 max/min.
+
+## 2026-07-02 - WIN: van Herk NHWC max/min pool bf16+f16 — up to 86x FASTER than JAX (BlackThrush)
+
+Completed the half-precision NHWC max/min pool (f32 was 297672f4). XLA is catastrophic on half maxpool (no
+vectorized half compare): JAX bf16 [4,256,256,16] maxpool w16=129.88/w32=442/w64=**1283.99ms**; f16
+w16=84.33/w32=278.98/w64=**898.32ms**. `separable_reduce_window_maxmin_4d_nhwc_half` maps each finite half
+bit-pattern to a TOTAL-ORDER u16 key (sign-flip: positives set bit15, negatives complemented) so unsigned
+`simd_max`/`simd_min` on keys == float extremum, runs van Herk (block prefix+suffix, out=op(suffix[o],
+prefix[o+k-1])) on u16 keys SIMD across C, then maps the winning key back to bits. SAME transform for bf16 and
+f16 (sign at 0x8000). BIT-IDENTICAL to naive for finite (extremum selects an input element; key map is a
+bijection); finite-gated (NaN keeps deque). RESULTS: fj bf16 maxpool w16=18.69/w32=18.36/w64=14.89ms = vs JAX
+**6.95x / 24.1x / 86.2x FASTER**; f16 w16=30.26/w32=27.65/w64=26.10ms = **2.79x / 10.1x / 34.4x** (f16 slower:
+scalar Literal finite-check). Verified bit-exact max+min for BOTH dtypes vs brute-force
+(`rw4d_nhwc_vanherk_maxmin_half_matches_bruteforce`, c=16) + rw4d tests green. NHWC max/min pool now fast for
+f32/bf16/f16 (f64 remains on the deque — niche). NHWC POOLING FAMILY: sum (f32/f64/bf16/f16) + max/min (f32/bf16/f16) all O(k).
