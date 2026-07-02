@@ -845,10 +845,14 @@ pub(crate) fn eval_binary_elementwise(
                 // CHEAP threshold (8.4M) that `eval_same_shape_i64_parallel` uses
                 // for memory-bound i64 arith. Must precede that call so Gcd/Lcm
                 // fan out at moderate sizes instead of running dense-but-serial.
-                if lhs.dtype == DType::I64
-                    && rhs.dtype == DType::I64
-                    && let Some(value) =
-                        eval_same_shape_i64_expensive_parallel(primitive, lhs, rhs, &int_op)
+                // Covers both I64 and I32 (JAX's default int dtype); I32 is i64-backed
+                // so `int_op` reads the true signed values and the eval_primitive
+                // `narrow_i32_tensor_result` chokepoint wraps the I32 output mod 2^32.
+                if matches!(
+                    (lhs.dtype, rhs.dtype),
+                    (DType::I64, DType::I64) | (DType::I32, DType::I32)
+                ) && let Some(value) =
+                    eval_same_shape_i64_expensive_parallel(primitive, lhs, rhs, &int_op)
                 {
                     return Ok(value);
                 }
@@ -2328,18 +2332,21 @@ fn eval_same_shape_i64_parallel(
         .map(Value::Tensor)
 }
 
-/// Threaded dense-i64 path for the COMPUTE-bound integer binops (Gcd/Lcm). Unlike
-/// [`eval_same_shape_i64_parallel`] (memory-bound i64 arith, gated at the high
-/// `CHEAP_BINARY_PARALLEL_MIN` = 8.4M so it only wins once the working set spills
-/// past L3), Gcd/Lcm run an iterative Euclidean remainder loop — ~10-20 integer
-/// `%` ops per element — so they are compute-bound and thread profitably at the
-/// same low `EXPENSIVE_BINARY_PARALLEL_MIN` (65_536) as the transcendental/Div
-/// binaries. Integer `int_op` is exact (no FP reassociation), so the threaded
-/// output is BIT-FOR-BIT identical to the serial `eval_same_shape_i64_binop` for
-/// any chunk partition — same `int_op`, same element order, same dense-I64 output.
+/// Threaded dense integer path for the COMPUTE-bound integer binops (Gcd/Lcm) over
+/// both I64 and I32 (JAX's default int dtype). Unlike [`eval_same_shape_i64_parallel`]
+/// (memory-bound i64 arith, gated at the high `CHEAP_BINARY_PARALLEL_MIN` = 8.4M so it
+/// only wins once the working set spills past L3), Gcd/Lcm run an iterative Euclidean
+/// remainder loop — ~10-20 integer `%` ops per element — so they are compute-bound and
+/// thread profitably at the same low `EXPENSIVE_BINARY_PARALLEL_MIN` (65_536) as the
+/// transcendental/Div binaries. Integer `int_op` is exact (no FP reassociation), so the
+/// threaded output is BIT-FOR-BIT identical to the serial `eval_same_shape_i64_binop`
+/// for any chunk partition — same `int_op`, same element order. I32 tensors are i64-
+/// backed, so `as_i64_slice` reads the true sign-extended values and we emit an I32
+/// tensor whose out-of-range lcm the eval_primitive `narrow_i32_tensor_result`
+/// chokepoint wraps mod 2^32 (identical to the generic I32 path; gcd never overflows).
 /// `FJ_GCD_LCM_SERIAL` forces the pre-thread serial path (same-binary A/B hook).
 /// Returns `None` (fall through to the serial/cheap paths) for non-Gcd/Lcm ops,
-/// non-dense I64 storage, sub-threshold `n`, or a single-thread machine.
+/// mixed/other dtypes, non-dense storage, sub-threshold `n`, or a single-thread machine.
 fn eval_same_shape_i64_expensive_parallel(
     primitive: Primitive,
     lhs: &TensorValue,
@@ -2352,6 +2359,16 @@ fn eval_same_shape_i64_expensive_parallel(
     if std::env::var_os("FJ_GCD_LCM_SERIAL").is_some() {
         return None;
     }
+    // Both I64 or both I32. I32 is i64-backed (`new_i32_values`), so `as_i64_slice`
+    // yields the true sign-extended values; we emit an I32-dtyped tensor and the
+    // `narrow_i32_tensor_result` chokepoint in eval_primitive wraps it mod 2^32
+    // (a no-op for gcd, which never overflows i32; correct wrap for lcm), matching
+    // the generic I32 path bit-for-bit.
+    let out_i32 = match (lhs.dtype, rhs.dtype) {
+        (DType::I64, DType::I64) => false,
+        (DType::I32, DType::I32) => true,
+        _ => return None,
+    };
     let (a, b) = (lhs.elements.as_i64_slice()?, rhs.elements.as_i64_slice()?);
     let n = a.len();
     if n < EXPENSIVE_BINARY_PARALLEL_MIN {
@@ -2380,9 +2397,12 @@ fn eval_same_shape_i64_expensive_parallel(
             start += len;
         }
     });
-    TensorValue::new_i64_values(lhs.shape.clone(), out)
-        .ok()
-        .map(Value::Tensor)
+    let built = if out_i32 {
+        TensorValue::new_i32_values(lhs.shape.clone(), out)
+    } else {
+        TensorValue::new_i64_values(lhs.shape.clone(), out)
+    };
+    built.ok().map(Value::Tensor)
 }
 
 /// I64 scalar⊗tensor broadcast fast path. `scalar_on_left` distinguishes
@@ -17920,11 +17940,37 @@ mod tests {
             out[123]
         });
         let p = BTreeMap::new();
-        time_it("gcd_eval_threaded", &|| {
+        time_it("gcd_eval_threaded i64", &|| {
             let v = crate::eval_primitive(Primitive::Gcd, &[ta.clone(), tb.clone()], &p).unwrap();
             v.as_tensor().unwrap().elements.as_i64_slice().unwrap()[123]
         });
         println!("(JAX int64 8M gcd = 59.6ms)");
+        // I32 = JAX's DEFAULT int dtype (and JAX's int32 gcd is 7x SLOWER than its int64:
+        // measured 441.8ms vs 59.6ms). fj threads it via the same expensive path.
+        let ta32 = Value::Tensor(
+            TensorValue::new_i32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xa.clone(),
+            )
+            .unwrap(),
+        );
+        let tb32 = Value::Tensor(
+            TensorValue::new_i32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xb.clone(),
+            )
+            .unwrap(),
+        );
+        time_it("gcd_eval_threaded i32", &|| {
+            let v =
+                crate::eval_primitive(Primitive::Gcd, &[ta32.clone(), tb32.clone()], &p).unwrap();
+            v.as_tensor().unwrap().elements.as_i64_slice().unwrap()[123]
+        });
+        println!("(JAX int32 8M gcd = 441.8ms)");
     }
 
     #[test]
@@ -17986,6 +18032,70 @@ mod tests {
                 (a.abs() * b.abs()) / gcd(a, b)
             };
             assert_eq!(gl[i], want, "lcm mismatch at {i}");
+        }
+    }
+
+    #[test]
+    fn gcd_i32_threaded_matches_serial_and_narrows() {
+        // I32 is JAX's DEFAULT int dtype. n > EXPENSIVE_BINARY_PARALLEL_MIN so the
+        // threaded expensive path fires; verify the I32-dtyped output matches serial
+        // gcd (never overflows) and that lcm narrows mod 2^32 via the eval_primitive
+        // chokepoint (operand magnitudes up to ~46_340 so many pairwise lcm overflow
+        // i32) — identical to the generic I32 path.
+        let n = 200_000usize;
+        let xa: Vec<i64> = (0..n as i64).map(|i| (i % 46_337) + 3).collect();
+        let xb: Vec<i64> = (0..n as i64).map(|i| (i % 46_340) + 2).collect();
+        let ta = Value::Tensor(
+            TensorValue::new_i32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xa.clone(),
+            )
+            .unwrap(),
+        );
+        let tb = Value::Tensor(
+            TensorValue::new_i32_values(
+                Shape {
+                    dims: vec![n as u32],
+                },
+                xb.clone(),
+            )
+            .unwrap(),
+        );
+        let p = BTreeMap::new();
+        let gcd = |mut a: i64, mut b: i64| {
+            while b != 0 {
+                let t = b;
+                b = a % b;
+                a = t;
+            }
+            a.abs()
+        };
+        let got_gcd = crate::eval_primitive(Primitive::Gcd, &[ta.clone(), tb.clone()], &p).unwrap();
+        let gt = got_gcd.as_tensor().unwrap();
+        assert_eq!(gt.dtype, DType::I32, "gcd i32 output dtype");
+        let gg = gt.elements.as_i64_slice().unwrap();
+        for i in 0..n {
+            assert_eq!(gg[i], gcd(xa[i], xb[i]), "i32 gcd mismatch at {i}");
+        }
+        let got_lcm = crate::eval_primitive(Primitive::Lcm, &[ta, tb], &p).unwrap();
+        let lt = got_lcm.as_tensor().unwrap();
+        assert_eq!(lt.dtype, DType::I32, "lcm i32 output dtype");
+        let gl = lt.elements.as_i64_slice().unwrap();
+        for i in 0..n {
+            let (a, b) = (xa[i], xb[i]);
+            let full = if a == 0 || b == 0 {
+                0
+            } else {
+                (a.abs() * b.abs()) / gcd(a, b)
+            };
+            // eval_primitive's narrow_i32_tensor_result wraps the I32 output mod 2^32.
+            assert_eq!(
+                gl[i],
+                i64::from(full as i32),
+                "i32 lcm wrap mismatch at {i}"
+            );
         }
     }
 

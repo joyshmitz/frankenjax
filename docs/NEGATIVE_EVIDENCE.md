@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-02 - WIN: threaded int32 Gcd/Lcm ~19x FASTER than JAX (its DEFAULT int dtype) (BlackThrush)
+
+Completes the Gcd win (d9435567) for the dtype users actually hit: JAX defaults integers to int32, and — surprise
+— JAX 0.10.x CPU int32 gcd 8M = **441.8ms**, ~7x SLOWER than its own int64 gcd (59.6ms). fj had threaded I64 only
+(`eval_same_shape_i64_expensive_parallel` gated `dtype == I64`), so int32 gcd fell to the generic SERIAL boxed
+loop and lost. FIX: I32 tensors are i64-backed (`new_i32_values`), so `as_i64_slice` yields the true sign-extended
+values — extend the expensive path to accept `(I32,I32)`, run the same threaded Euclidean `int_op`, and emit an
+I32-dtyped tensor; the eval_primitive `narrow_i32_tensor_result` chokepoint then wraps mod 2^32 (a no-op for gcd,
+which never overflows i32; the correct wrap for lcm) — BIT-IDENTICAL to the generic I32 path, guarded by
+`gcd_i32_threaded_matches_serial_and_narrows` (asserts gcd == serial and lcm == `full as i32`, with operands up to
+46_340 so many pairwise lcm overflow i32). RESULT (`bench_gcd_threaded_vs_serial`, 8M): fj int32 gcd **21-24ms**
+vs JAX **441.8ms = ~19x FASTER** (and int64 unchanged at ~18ms = 3.2x). fj-lax lib suite green (1721 passed).
+Same-shape only (scalar-broadcast still serial — follow-up). Real code, no behavior change beyond the fast path.
+
 ## 2026-07-02 - NEGATIVE / BOUNDARY: the "XLA-can't-vectorize" lever is mined out — winnable ops all shipped (BlackThrush)
 
 After the Gcd (~3x) and igamma/igammac/betainc (11-59x) wins, swept the rest of the elementwise-transcendental
