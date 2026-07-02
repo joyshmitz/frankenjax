@@ -10996,3 +10996,17 @@ bijection); finite-gated (NaN keeps deque). RESULTS: fj bf16 maxpool w16=18.69/w
 scalar Literal finite-check). Verified bit-exact max+min for BOTH dtypes vs brute-force
 (`rw4d_nhwc_vanherk_maxmin_half_matches_bruteforce`, c=16) + rw4d tests green. NHWC max/min pool now fast for
 f32/bf16/f16 (f64 remains on the deque — niche). NHWC POOLING FAMILY: sum (f32/f64/bf16/f16) + max/min (f32/bf16/f16) all O(k).
+
+## 2026-07-02 - WIN: keys-only complex64 lexicographic sort — 9x FASTER than JAX (BlackThrush)
+
+DIFFERENT PRIMITIVE (complex sort). fj complex sort fell through the radix `literal_radix` (F32/U32/I32 only) to
+the generic threaded COMPARISON sort — already 1.75x faster than JAX (fj 780ms vs JAX `jnp.sort(complex64)` 4M
+1368ms), but O(n log n). Complex64 components are f32 (`Complex64Bits(u32,u32)`), so BOTH total-order keys pack
+into a u64: `real_key<<32 | imag_key` orders by (real, imag) lexicographically — exactly JAX's complex comparator
+— sortable by the existing keys-only u64 radix (`radix_keys_ascending_parallel`), then reconstruct the value from
+the sorted key (bijection over finite f32; descending = full-key complement = reverse lexicographic). Added
+`sort_along_axis_dense_complex64` (value sort, single large contiguous slice, finite-gated; argsort/multi-slice/
+Complex128/NaN keep the comparison path). RESULT: fj complex64 sort 4M **780 → 151.25 ms** (5.16x internal) vs
+JAX 1368ms = **9.05x FASTER** (was 1.75x). Verified BIT-EXACT asc + desc vs a lexicographic total_cmp reference
+(`dense_complex64_sort_matches_lexicographic_large`, 1M, 17 reals × 5 imag ties) + 13 sort tests green.
+Keys-only value sort now covers i64/f64/f32/u32/u64/i32 + complex64.
