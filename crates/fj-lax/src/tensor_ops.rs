@@ -9479,7 +9479,10 @@ fn sort_along_axis_dense_i64(
             .collect();
         let mut scratch: Vec<u64> = Vec::new();
         radix_keys_ascending_parallel(&mut keys, &mut scratch);
-        let out: Vec<i64> = keys.iter().map(|&k| ((k ^ key_mask) ^ FLIP) as i64).collect();
+        let out: Vec<i64> = keys
+            .iter()
+            .map(|&k| ((k ^ key_mask) ^ FLIP) as i64)
+            .collect();
         return Ok(Some(Value::Tensor(
             TensorValue::new_i64_values(tensor.shape.clone(), out)
                 .map_err(EvalError::InvalidTensor)?,
@@ -9586,6 +9589,18 @@ fn f32_total_order_key(value: f32) -> u32 {
     (transformed as u32) ^ (1_u32 << 31)
 }
 
+/// Inverse of [`f32_total_order_key`] (defined only for non-NaN keys). Positive-side keys
+/// have the top bit set (`bits = key ^ (1<<31)`); negative-side keys are bit-complemented.
+#[inline]
+fn f32_from_total_order_key(key: u32) -> f32 {
+    let bits = if key >> 31 == 1 {
+        key ^ (1_u32 << 31)
+    } else {
+        !key
+    };
+    f32::from_bits(bits)
+}
+
 /// f32 sort key with JAX NaN-last semantics (every NaN ranks as the single
 /// maximum), mirroring [`f64_sort_order_key`].
 #[inline]
@@ -9651,6 +9666,31 @@ fn sort_along_axis_dense_f32(
         return Ok(None);
     }
     let outer_count = total / axis_dim;
+    // KEYS-ONLY f32 value sort: for one large contiguous slice with NO NaN, the total-order
+    // key is a bijection over non-NaN f32, so we radix-sort u32 KEYS directly (4 bytes/elem)
+    // instead of (u64 key, u32 index) pairs (16 bytes) — a 4x traffic cut — and invert via
+    // `f32_from_total_order_key`. NaN (which maps many-to-one to u32::MAX) keeps the pairs path.
+    if axis_stride == 1
+        && !return_indices
+        && use_parallel_radix(outer_count, axis_dim)
+        && !values.iter().any(|v| v.is_nan())
+    {
+        let desc_mask: u32 = if descending { u32::MAX } else { 0 };
+        let mut keys: Vec<u32> = values
+            .iter()
+            .map(|&v| f32_total_order_key(v) ^ desc_mask)
+            .collect();
+        let mut scratch: Vec<u32> = Vec::new();
+        radix_keys_u32_ascending_parallel(&mut keys, &mut scratch);
+        let out: Vec<f32> = keys
+            .iter()
+            .map(|&k| f32_from_total_order_key(k ^ desc_mask))
+            .collect();
+        return Ok(Some(Value::Tensor(
+            TensorValue::new_f32_values(tensor.shape.clone(), out)
+                .map_err(EvalError::InvalidTensor)?,
+        )));
+    }
     // u32 total-order key (NaN last); the 4-pass u32 radix ignores the high 32 bits,
     // so the descending `^ key_mask` (u64::MAX) is effectively a 32-bit complement.
     let key = |v: f32| u64::from(f32_sort_order_key(v));
@@ -10930,6 +10970,125 @@ fn radix_keys_ascending_parallel(keys: &mut Vec<u64>, scratch: &mut Vec<u64>) {
                                 tmp.resize(len, 0);
                             }
                             radix_keys_slice_8pass(&mut group_slice[s..e], &mut tmp[..len]);
+                        }
+                    }
+                });
+            }
+        });
+    }
+    keys[..n].copy_from_slice(&scratch[..n]);
+}
+
+/// 4-pass LSD radix of a `u32` key slice into `tmp` (result left in `data`). The u32
+/// analogue of [`radix_keys_slice_8pass`] — half the passes for f32/u32 value sorts.
+fn radix_keys_u32_slice_4pass(data: &mut [u32], tmp: &mut [u32]) {
+    let mut src: &mut [u32] = data;
+    let mut dst: &mut [u32] = tmp;
+    for byte in 0..4 {
+        let shift = byte * 8;
+        let mut counts = [0_usize; 256];
+        for &key in src.iter() {
+            counts[((key >> shift) & 0xff) as usize] += 1;
+        }
+        let mut sum = 0_usize;
+        for c in counts.iter_mut() {
+            let count = *c;
+            *c = sum;
+            sum += count;
+        }
+        for &key in src.iter() {
+            let bucket = ((key >> shift) & 0xff) as usize;
+            dst[counts[bucket]] = key;
+            counts[bucket] += 1;
+        }
+        std::mem::swap(&mut src, &mut dst);
+    }
+    // 4 swaps -> `src` aliases the original `data`, which holds the result.
+}
+
+/// Parallel keys-only u32 radix for a single LARGE slice (f32/u32 value sort): MSD
+/// top-byte (bits 24..31) partition into 256 globally-ordered buckets, then LSD-sort
+/// each bucket across threads. Mirrors [`radix_keys_ascending_parallel`].
+fn radix_keys_u32_ascending_parallel(keys: &mut Vec<u32>, scratch: &mut Vec<u32>) {
+    let n = keys.len();
+    if n <= 1 {
+        return;
+    }
+    if scratch.len() < n {
+        scratch.resize(n, 0);
+    }
+    const SHIFT: u32 = 24; // top byte of a u32
+    let mut starts = [0_usize; 256];
+    {
+        let mut counts = [0_usize; 256];
+        for &key in keys.iter() {
+            counts[(key >> SHIFT) as usize] += 1;
+        }
+        let mut sum = 0_usize;
+        for b in 0..256 {
+            starts[b] = sum;
+            sum += counts[b];
+        }
+    }
+    let mut wpos = starts;
+    for &key in keys.iter() {
+        let b = (key >> SHIFT) as usize;
+        scratch[wpos[b]] = key;
+        wpos[b] += 1;
+    }
+    let hardware = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
+    let buf = &mut scratch[..n];
+    if hardware <= 1 {
+        let mut tmp: Vec<u32> = Vec::new();
+        let mut start = 0usize;
+        for b in 0..256 {
+            let end = if b == 255 { n } else { starts[b + 1] };
+            let len = end - start;
+            if len > 1 {
+                if tmp.len() < len {
+                    tmp.resize(len, 0);
+                }
+                radix_keys_u32_slice_4pass(&mut buf[start..end], &mut tmp[..len]);
+            }
+            start = end;
+        }
+    } else {
+        let target = n.div_ceil(hardware).max(1);
+        let bucket_end = |b: usize| -> usize { if b + 1 >= 256 { n } else { starts[b + 1] } };
+        let mut group_bucket_bounds: Vec<usize> = vec![0];
+        let mut group_start_elem = 0usize;
+        for b in 0..256 {
+            if bucket_end(b) - group_start_elem >= target && b + 1 < 256 {
+                group_bucket_bounds.push(b + 1);
+                group_start_elem = starts[b + 1];
+            }
+        }
+        group_bucket_bounds.push(256);
+        std::thread::scope(|scope| {
+            let mut rest: &mut [u32] = buf;
+            for w in 0..group_bucket_bounds.len() - 1 {
+                let gb_start = group_bucket_bounds[w];
+                let gb_end = group_bucket_bounds[w + 1];
+                let elem_start = starts[gb_start];
+                let elem_end = if gb_end >= 256 { n } else { starts[gb_end] };
+                let group_len = elem_end - elem_start;
+                let (group_slice, tail) = rest.split_at_mut(group_len);
+                rest = tail;
+                let local_bounds: Vec<usize> = (gb_start..=gb_end)
+                    .map(|b| (if b >= 256 { n } else { starts[b] }) - elem_start)
+                    .collect();
+                scope.spawn(move || {
+                    let mut tmp: Vec<u32> = Vec::new();
+                    for win in local_bounds.windows(2) {
+                        let (s, e) = (win[0], win[1]);
+                        let len = e - s;
+                        if len > 1 {
+                            if tmp.len() < len {
+                                tmp.resize(len, 0);
+                            }
+                            radix_keys_u32_slice_4pass(&mut group_slice[s..e], &mut tmp[..len]);
                         }
                     }
                 });
@@ -25886,6 +26045,55 @@ mod tests {
             got_desc.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             want_desc.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "keys-only f64 value sort descending"
+        );
+    }
+
+    #[test]
+    fn radix_keys_f32_value_sort_matches_comparison_large() {
+        // >= PARALLEL_RADIX_MIN_PAIRS, NO NaN (so the keys-only u32 path fires): ±inf, ±0,
+        // negatives, subnormal, dups. Sort must equal a total-order comparison reference.
+        let n = 1_000_000usize;
+        let data: Vec<f32> = (0..n)
+            .map(|i| match i % 17 {
+                0 => f32::INFINITY,
+                1 => f32::NEG_INFINITY,
+                2 => 0.0,
+                3 => -0.0,
+                4 => -1.0,
+                5 => f32::MIN_POSITIVE,
+                _ => (((i as i64).wrapping_mul(2654435761)) as f32) * 1e-3,
+            })
+            .collect();
+        let extract = |val: &Value| -> Vec<f32> {
+            val.as_tensor()
+                .unwrap()
+                .elements
+                .as_f32_slice()
+                .unwrap()
+                .to_vec()
+        };
+        let make = || {
+            Value::Tensor(
+                TensorValue::new_f32_values(Shape::vector(n as u32), data.clone()).unwrap(),
+            )
+        };
+        let mut want = data.clone();
+        want.sort_by(|a, b| a.total_cmp(b));
+        let asc = params(&[("dimension", "0"), ("descending", "false")]);
+        let got = extract(&eval_sort(Primitive::Sort, &[make()], &asc).unwrap());
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "keys-only f32 value sort ascending (bit-exact incl -0.0)"
+        );
+        let mut want_desc = data.clone();
+        want_desc.sort_by(|a, b| b.total_cmp(a));
+        let desc = params(&[("dimension", "0"), ("descending", "true")]);
+        let got_desc = extract(&eval_sort(Primitive::Sort, &[make()], &desc).unwrap());
+        assert_eq!(
+            got_desc.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want_desc.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "keys-only f32 value sort descending"
         );
     }
 

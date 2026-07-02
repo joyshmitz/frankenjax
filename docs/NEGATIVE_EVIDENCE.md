@@ -10861,3 +10861,17 @@ key is a BIJECTION over non-NaN f64, so `sort_along_axis_dense_f64` sorts u64 ke
 JAX `jnp.sort` (4409 ms) from **4.5x to ~8.2x FASTER**. Verified BIT-EXACT (incl -0.0 vs +0.0, ±inf, dups) asc+desc
 vs `total_cmp` reference (`radix_keys_f64_value_sort_matches_comparison_large`, 1M) + all 39 sort tests green.
 Sort keys-only now covers i64 + f64 value sorts; argsort/multi-slice/NaN-f64 keep pairs; u32/u64/f32 next. No ceiling.
+
+## 2026-07-02 - WIN: keys-only f32 value sort — 11.1x FASTER than JAX on the DEFAULT float dtype (BlackThrush)
+
+Extended keys-only (bd3af073 i64, 6620c8a2 f64) to f32 — JAX's default float dtype, so the most common
+float sort. The f32 pairs path stored `(u64 key, u32 index)` = 16 bytes even though the total-order key is
+only u32, so keys-only sorts u32 KEYS directly = **4 bytes/elem, a 4x traffic cut** (vs 2x for f64). Added a
+dedicated 4-pass u32 keys radix (`radix_keys_u32_slice_4pass` + `radix_keys_u32_ascending_parallel`, MSD
+top-byte bits 24..31 partition + per-bucket LSD across threads, mirroring the u64 keys radix) and the inverse
+`f32_from_total_order_key`. Fires only for a single large contiguous f32 VALUE sort with NO NaN (bijection
+requirement; NaN→u32::MAX many-to-one keeps the pairs path via a cheap one-pass guard). RESULT: fj f32 sort
+16M = **244.73 ms** vs JAX `jnp.sort` (16M f32) = **2720.55 ms** = **11.1x FASTER**. Verified BIT-EXACT (incl
+-0.0 vs +0.0, ±inf, subnormal MIN_POSITIVE, dups) asc+desc vs `total_cmp` reference
+(`radix_keys_f32_value_sort_matches_comparison_large`, 1M) + all 40 sort tests green. Keys-only now covers
+i64+f64+f32 value sorts; argsort/multi-slice/NaN-f32 keep pairs; u32/u64 integer next. No ceiling.
