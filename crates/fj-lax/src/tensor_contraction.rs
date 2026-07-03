@@ -560,7 +560,7 @@ pub fn matmul_2d_with_pack(
 }
 
 #[inline]
-fn matmul_thread_count(ops: usize, rows: usize) -> usize {
+pub(crate) fn matmul_thread_count(ops: usize, rows: usize) -> usize {
     const MIN_PARALLEL_OPS: usize = 1 << 23; // ~8M FMAs
     const OPS_PER_THREAD: usize = 1 << 21; // ~2M FMAs/thread
     const MAX_MATMUL_THREADS: usize = 16;

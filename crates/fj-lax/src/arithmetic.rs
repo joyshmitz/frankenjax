@@ -9,7 +9,7 @@ use crate::simd_exp::simd_poly_exp_into;
 use crate::tensor_contraction::{
     batched_matmul_2d, batched_matmul_2d_bf16_in, batched_matmul_2d_f16_in,
     batched_matmul_2d_f32_in, batched_rank2_complex_matmul, batched_rank2_i64_matmul, matmul_2d,
-    rank2_complex_matmul, rank2_i64_matmul,
+    matmul_thread_count, rank2_complex_matmul, rank2_i64_matmul,
 };
 use crate::type_promotion::{binary_literal_op, promote_dtype};
 
@@ -15619,21 +15619,54 @@ fn rank2_u64_matmul(a: &[u64], m: usize, k: usize, b: &[u64], n: usize) -> Vec<u
     if m == 0 || n == 0 || k == 0 {
         return c;
     }
-    let full = m - m % 4; // rows covered by whole 4-row register tiles
-    let (blocked, tail) = c.split_at_mut(full * n);
+    // Thread over disjoint output-row blocks — matmul is COMPUTE-bound (m·k·n wrapping
+    // MACs), so this parallelizes robustly (bit-identical: each output row's fold is
+    // independent, `Z/2^64` is a ring). Mirrors the threaded i64 `rank2_i64_matmul`;
+    // the u64 path was previously SERIAL (~5.6x slower than i64 at 512³ — measured).
+    let ops = m.saturating_mul(k).saturating_mul(n);
+    let threads = matmul_thread_count(ops, m);
+    if threads <= 1 {
+        rank2_u64_row_block(a, b, k, n, 0, &mut c);
+        return c;
+    }
+    let rows_per = m.div_ceil(threads);
+    std::thread::scope(|scope| {
+        let mut rest: &mut [u64] = c.as_mut_slice();
+        let mut row_start = 0usize;
+        while row_start < m {
+            let chunk_rows = rows_per.min(m - row_start);
+            let (block, tail) = rest.split_at_mut(chunk_rows * n);
+            rest = tail;
+            let rs = row_start;
+            scope.spawn(move || rank2_u64_row_block(a, b, k, n, rs, block));
+            row_start += chunk_rows;
+        }
+    });
+    c
+}
 
-    // 4-row register blocking: four output rows share ONE `brow` load per `l`, so
-    // B is streamed `m/4` times instead of `m` (4x less C-vs-B cache traffic, plus
-    // 4-way ILP on the wrapping MACs). BIT-IDENTICAL: each output still folds its
-    // products over `l` in ascending order with `wrapping_mul`/`wrapping_add`;
-    // `Z/2^64` is a commutative ring, so interleaving four independent output rows
-    // never regroups any one output's partial sum. Mirrors the i64 kernel
-    // `rank2_i64_row_block` (commit 69e37c68). Win is RAM-bound-regime-dependent.
+/// 4-row register-blocked i-k-j kernel for the rows `[row_start, row_start+block.len()/n)`
+/// of a u64 matmul. Four output rows share ONE `brow` load per `l` (4x less C-vs-B cache
+/// traffic + 4-way ILP on the wrapping MACs). BIT-IDENTICAL to a single-row fold: each
+/// output accumulates over `l` in ascending order with `wrapping_mul`/`wrapping_add`, and
+/// `Z/2^64` is a commutative ring so interleaving independent rows never regroups a sum.
+/// u64 sibling of `rank2_i64_row_block`.
+fn rank2_u64_row_block(
+    a: &[u64],
+    b: &[u64],
+    k: usize,
+    n: usize,
+    row_start: usize,
+    block: &mut [u64],
+) {
+    let rows = block.len() / n;
+    let full = rows - rows % 4;
+    let (blocked, tail) = block.split_at_mut(full * n);
     for (g, four) in blocked.chunks_mut(4 * n).enumerate() {
         let (c0, rest) = four.split_at_mut(n);
         let (c1, rest) = rest.split_at_mut(n);
         let (c2, c3) = rest.split_at_mut(n);
-        let base = (g * 4) * k;
+        let base = (row_start + g * 4) * k;
         let (a0o, a1o, a2o, a3o) = (base, base + k, base + 2 * k, base + 3 * k);
         for l in 0..k {
             let a0 = a[a0o + l];
@@ -15655,11 +15688,9 @@ fn rank2_u64_matmul(a: &[u64], m: usize, k: usize, b: &[u64], n: usize) -> Vec<u
             }
         }
     }
-
-    // Remainder rows (`m % 4`): the original single-row i-k-j loop, unchanged.
     for (ri_rem, crow) in tail.chunks_mut(n).enumerate() {
         let i = full + ri_rem;
-        let arow = &a[i * k..i * k + k];
+        let arow = &a[(row_start + i) * k..(row_start + i) * k + k];
         for l in 0..k {
             let av = arow[l];
             let brow = &b[l * n..l * n + n];
@@ -15668,7 +15699,6 @@ fn rank2_u64_matmul(a: &[u64], m: usize, k: usize, b: &[u64], n: usize) -> Vec<u
             }
         }
     }
-    c
 }
 
 /// Transpose a contiguous row-major `[rows, cols]` u64 matrix to `[cols, rows]`.

@@ -2,6 +2,20 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - FIX (real kernel win): threaded the u64 matmul — 3.53x (u64 512 GEMM 28.77ms -> 8.14ms, 41.7x vs JAX) (TealMarten)
+
+Turned last arc's SURFACED sub-gap into a shipped fix. `rank2_u64_matmul` (arithmetic.rs) ran the 4-row
+register-blocked kernel SERIALLY, while its i64 sibling `rank2_i64_matmul` (tensor_contraction.rs) threads
+over disjoint output-row blocks — so u64 512³ GEMM was 28.77ms vs i64's 5.06ms (~5.6x). Extracted a
+`rank2_u64_row_block` helper (u64 sibling of `rank2_i64_row_block`) and made `rank2_u64_matmul` fan the
+row-blocks across `matmul_thread_count(ops, m)` threads (made that fn `pub(crate)`). matmul is
+COMPUTE-bound so threading wins robustly + BIT-IDENTICAL (each output row's fold is independent; Z/2^64 is
+a ring). MEASURED: **u64 matmul 512 = 28.77ms -> 8.14ms = 3.53x** (now 41.7x vs JAX's no-BLAS 339.2ms, up
+from 11.8x). Correctness: `rank2_u64_matmul_4row_block_matches_single_row_reference` + full fj-lax lib
+1727/0 green. Residual u64 8.14ms vs i64 5.06ms is minor (thread-count/first-touch), not chased. This is
+a REAL fj-lax kernel change (not a bench recording).
+
+
 ## 2026-07-02 - WIN: BroadcastInDim replicated-axis FILL fast-path — 2.24x on reduce-then-broadcast (softmax/layernorm/attention) (TealMarten)
 
 Pivoted off FFT to a NON-FFT measured gap: `jax.nn.softmax` in fj decomposes to primitives
@@ -70,9 +84,8 @@ vectorizes 32-bit). fj has a blocked i64 GEMM kernel (new benches `eval/int64_ma
 - **int64 matmul 512: fj 5.06ms vs JAX 336.6ms = 66.5x FASTER**
 - **int64 matmul 1024: fj 26.87ms vs JAX 3851ms = 143x FASTER**
 - **int64 BATCHED matmul (bmm) 64x128: fj 8.31ms vs JAX 146.7ms = 17.7x FASTER** (batched linear/GNN).
-- **uint64 matmul 512: fj 28.77ms vs JAX 339.2ms = 11.8x FASTER** (NOTE: fj u64 GEMM 28.77ms is ~5.6x
-  slower than fj i64 GEMM 5.06ms at the same 512 — the u64 kernel is less blocked than i64's 4-row path;
-  a future contained win, but it still crushes JAX's no-BLAS u64).
+- **uint64 matmul 512: fj 8.14ms vs JAX 339.2ms = 41.7x FASTER** (FIXED this arc — see the FIX entry at
+  top: the u64 GEMM was SERIAL, now threads over row-blocks like i64; 28.77ms -> 8.14ms = 3.53x).
 Integer matmul (embeddings/indexing/exact arithmetic) is a clean fj domination — NOT FMA-gated (integer
 = exact, no bit-parity FMA wall), NOT threading-fragile (compute-bound GEMM). Contrasts with FLOAT matmul
 which IS an fj loss (FMA-policy-gated, ~XLA/2). Biggest single-op win recorded alongside top_k-per-row
