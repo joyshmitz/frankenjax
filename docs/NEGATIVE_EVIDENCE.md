@@ -86,6 +86,13 @@ x_f64_vsjax`):
 - **qr 256: fj 6.80ms vs JAX 107ms = 15.7x FASTER**; **qr 512: fj 49.3ms vs 557ms = 11.3x**
 - **eig 256 (NON-symmetric eigvals): fj 68.4ms vs JAX 230ms = 3.4x FASTER** (fj real-Schur Francis
   double-shift vs JAX iterative CPU eig; `linalg/eig_256x256_f64_vsjax`).
+- **COMPLEX Hermitian eigh: fj LOSS ~10x** (`linalg/complex_eigh_128x128_vsjax`). JAX cheigh_128 =
+  118.6ms (and cheigh_256 = 3196ms — JAX complex eigh also scales badly), but **fj 128 = 1.23s = ~10x
+  SLOWER**. UNLIKE real eigh (12x WIN), fj's complex Hermitian eigh uses a slow complex Jacobi that LACKS
+  the tred2/tql2 tridiagonalization the real path got. GAP FILED: port the complex path to
+  Householder-tridiag + implicit-QL (the complex analog of the real tred2/tql2) — would flip this 10x
+  loss to a win. Bench only n=128 (256 is multi-second). This is the honest counterexample to the eigh
+  win: the win is REAL-only.
 BOUNDARY (honest): cholesky/det/inv are LAPACK-backed in JAX and FAST (0.34/0.55/11.4ms at n=256), so
 those are fj LOSSES (LAPACK is hard to beat) — NOT recorded as wins. The eigh/qr wins are where JAX's
 CPU path is iterative; fj's direct tridiag/Householder algorithms dominate. Adds the decomposition family

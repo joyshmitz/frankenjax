@@ -1609,6 +1609,41 @@ fn bench_eigh_qr_vs_jax(c: &mut Criterion) {
     }
 }
 
+// Complex Hermitian eigh vs JAX 0.10.2 x64 (jaxvenv, 2026-07-02): cheigh_128 = 118.6ms.
+// UNLIKE real eigh (fj WINS 12x), fj's COMPLEX Hermitian eigh is a LOSS: fj 128 = 1.23s
+// = ~10x SLOWER (slow complex Jacobi; lacks the tred2/tql2 tridiag speedup real eigh has).
+// Only n=128 benched (n=256 is multi-second). Documented gap/reproducer, not a win.
+fn bench_complex_eigh_vs_jax(c: &mut Criterion) {
+    for n in [128usize] {
+        let mut elems: Vec<Literal> = Vec::with_capacity(n * n);
+        for i in 0..n {
+            for j in 0..n {
+                let re =
+                    (((i * 7 + j * 13) % 11) as f64) - 5.0 + if i == j { n as f64 } else { 0.0 };
+                let im = if i == j {
+                    0.0
+                } else if i < j {
+                    (((i * 3 + j * 5) % 7) as f64) - 3.0
+                } else {
+                    -((((j * 3 + i * 5) % 7) as f64) - 3.0)
+                };
+                elems.push(Literal::from_complex128(re, im));
+            }
+        }
+        let m = Value::Tensor(TensorValue {
+            dtype: DType::Complex128,
+            shape: Shape {
+                dims: vec![n as u32, n as u32],
+            },
+            elements: elems.into(),
+        });
+        let p = no_params();
+        c.bench_function(&format!("linalg/complex_eigh_{n}x{n}_vsjax"), |b| {
+            b.iter(|| eval_primitive_multi(Primitive::Eigh, std::slice::from_ref(&m), &p))
+        });
+    }
+}
+
 // Non-symmetric eig vs JAX 0.10.2 x64 (jaxvenv, 2026-07-02): jnp.linalg.eigvals(256) =
 // 230ms (iterative on CPU). fj uses real-Schur Francis double-shift.
 fn bench_eig_256_vs_jax(c: &mut Criterion) {
@@ -7753,6 +7788,7 @@ criterion_group!(
     bench_dot_256_matrix_f64,
     bench_eig_48,
     bench_eigh_qr_vs_jax,
+    bench_complex_eigh_vs_jax,
     bench_eig_256_vs_jax,
     bench_eigh_48,
     bench_cholesky_128_f64,
