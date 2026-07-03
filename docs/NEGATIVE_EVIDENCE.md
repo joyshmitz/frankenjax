@@ -116,6 +116,21 @@ compute-bound. REFINED RULE: hand-SIMD an opaque-libm op ONLY when the scalar li
 (atan2/tan/pow-via-exp) AND the op is compute-bound (not masked by multi-tensor BW). Fast-libm (ln) or
 light-compute binary ops stay scalar. Kept the bench as a marker. full fj-lax lib unaffected (revert).
 
+## 2026-07-03 - WIRED WIN (THREADED, now 1.43x FASTER than JAX): i64/i32 leading-axis cumulative 3-pass blocked prefix (TealMarten)
+
+FOLLOW-UP to the contiguous-streaming win below — threaded it. Added `scan_leading_axis_i64_threaded`: the
+exact-i64 sibling of the f64 `scan_leading_axis_to_vec_threaded` (3-pass blocked prefix over contiguous row
+slabs — pass1 per-slab cols-wide totals, pass2 directional exclusive prefix -> per-slab i64 carry, pass3
+each slab re-scans). BIT-IDENTICAL: every integer op (wrapping add/mul, max/min) is ASSOCIATIVE, so
+regrouping the per-column reduction changes nothing (verified at rows=600×512 threaded AND 300×96 serial,
+incl. values > 2^53 + cummax + reverse). Gated like the f64 path (`axis_dim >= 2·threads && total >=
+CUMSUM_BLOCKED_MIN_ELEMS`). Measured (`eval/cumsum_16kx1k_i64_axis0`): strided 241ms -> contiguous 86.9ms
+-> **threaded 33.2ms = 7.3x total over the original strided**, and **33.2ms vs JAX 47.5ms = 1.43x FASTER**
+(was ~5.4x SLOWER than JAX originally — a JAX loss flipped to a WIN, matching the f64 leading-axis's
+1.65x-faster). full fj-lax lib 1736/0. i64 leading-axis cumulative is now COMPLETE (contiguous + threaded,
+i64 + i32); middle-axis (0<axis<last) i64 could get the same treatment (reuse scan_leading_axis_i64 per
+sub-block, threaded) — filed, nicher.
+
 ## 2026-07-03 - WIRED WIN (2.77x measured): i64/i32 leading-axis cumulative — contiguous streaming vs strided serial (TealMarten)
 
 Different primitive (cumulative, not pooling). The i64/i32 cumsum/cummax/cummin/cumprod along the LEADING

@@ -3914,6 +3914,95 @@ fn scan_leading_axis_to_vec<S: Copy, T: Copy + Default>(
     out
 }
 
+/// Threaded EXACT-i64 leading-axis scan — the integer sibling of [`scan_leading_axis_to_vec_threaded`]
+/// (which accumulates in f64, lossy for |i64| > 2^53). Same 3-pass blocked-prefix over contiguous row
+/// slabs: pass1 per-slab cols-wide totals, pass2 directional exclusive prefix -> per-slab i64 carry, pass3
+/// each slab re-scans from its carry. BIT-IDENTICAL to the serial scan: every integer `op` (wrapping add
+/// / wrapping mul / max / min) is ASSOCIATIVE, so regrouping the per-column reduction changes nothing.
+#[allow(clippy::too_many_arguments)]
+fn scan_leading_axis_i64_threaded(
+    src: &[i64],
+    rows: usize,
+    cols: usize,
+    reverse: bool,
+    init: i64,
+    op: impl Fn(i64, i64) -> i64 + Sync,
+    threads: usize,
+) -> Vec<i64> {
+    let rows_per = rows.div_ceil(threads.max(1)).max(1);
+    let nblocks = rows.div_ceil(rows_per);
+    let op = &op;
+    // Pass 1: per-slab cols-wide totals (order-independent op-reduction over the slab's rows).
+    let totals: Vec<Vec<i64>> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for b in 0..nblocks {
+            let r0 = b * rows_per;
+            let r1 = (r0 + rows_per).min(rows);
+            let blk = &src[r0 * cols..r1 * cols];
+            handles.push(scope.spawn(move || {
+                let mut acc = vec![init; cols];
+                for k in 0..(r1 - r0) {
+                    let row = &blk[k * cols..(k + 1) * cols];
+                    for (a, &s) in acc.iter_mut().zip(row) {
+                        *a = op(*a, s);
+                    }
+                }
+                acc
+            }));
+        }
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    // Pass 2: directional exclusive prefix of the slab totals -> per-slab cols-wide carry.
+    let mut carries = vec![vec![init; cols]; nblocks];
+    let mut running = vec![init; cols];
+    let order: Vec<usize> = if reverse {
+        (0..nblocks).rev().collect()
+    } else {
+        (0..nblocks).collect()
+    };
+    for &b in &order {
+        carries[b].clone_from(&running);
+        for (r, &t) in running.iter_mut().zip(&totals[b]) {
+            *r = op(*r, t);
+        }
+    }
+    // Pass 3: each slab re-scans DIRECTIONALLY from its carry into its contiguous output slab.
+    let mut out = vec![0i64; rows * cols];
+    std::thread::scope(|scope| {
+        let mut rest: &mut [i64] = out.as_mut_slice();
+        for (b, carry) in carries.iter().enumerate() {
+            let r0 = b * rows_per;
+            let r1 = (r0 + rows_per).min(rows);
+            let len = (r1 - r0) * cols;
+            let (oblk, tail) = rest.split_at_mut(len);
+            rest = tail;
+            let sblk = &src[r0 * cols..r1 * cols];
+            let blkrows = r1 - r0;
+            scope.spawn(move || {
+                let mut acc = carry.clone();
+                let mut scan_one = |k: usize, acc: &mut [i64], oblk: &mut [i64]| {
+                    let srow = &sblk[k * cols..(k + 1) * cols];
+                    let orow = &mut oblk[k * cols..(k + 1) * cols];
+                    for ((a, &s), o) in acc.iter_mut().zip(srow).zip(orow.iter_mut()) {
+                        *a = op(*a, s);
+                        *o = *a;
+                    }
+                };
+                if reverse {
+                    for k in (0..blkrows).rev() {
+                        scan_one(k, &mut acc, oblk);
+                    }
+                } else {
+                    for k in 0..blkrows {
+                        scan_one(k, &mut acc, oblk);
+                    }
+                }
+            });
+        }
+    });
+    out
+}
+
 /// Leading-axis (axis=0) i64 scan with an EXACT i64 accumulator — the integer sibling of
 /// [`scan_leading_axis_to_vec`] (which accumulates in f64 and would lose precision for |i64| > 2^53).
 /// Streams `rows` k-outer / `cols`-inner: for each row, update the `cols`-wide L1-resident i64 accumulator
@@ -4817,8 +4906,26 @@ fn eval_cumulative_dense(
         } else if axis == 0 && outer_count > 1 {
             // Leading axis (down the columns): CONTIGUOUS streaming with an exact i64 accumulator (cols =
             // outer_count = product of trailing dims), replacing the cache-hostile strided serial scan.
-            // Bit-identical (same per-column sequential int_op, same order). f64/f32 already do this.
-            scan_leading_axis_i64(src, axis_dim, outer_count, reverse, int_init, &int_op)
+            // Bit-identical (same per-column sequential int_op, same order). f64/f32 already do this; and
+            // when large, the 3-pass blocked prefix threads it (integer ops are associative -> bit-exact).
+            let lead_threads = (total / (1 << 18)).clamp(2, {
+                std::thread::available_parallelism()
+                    .map(|c| c.get())
+                    .unwrap_or(8)
+            });
+            if axis_dim >= 2 * lead_threads && total >= CUMSUM_BLOCKED_MIN_ELEMS {
+                scan_leading_axis_i64_threaded(
+                    src,
+                    axis_dim,
+                    outer_count,
+                    reverse,
+                    int_init,
+                    &int_op,
+                    lead_threads,
+                )
+            } else {
+                scan_leading_axis_i64(src, axis_dim, outer_count, reverse, int_init, &int_op)
+            }
         } else {
             let mut out = src.to_vec();
             for outer in 0..outer_count {
@@ -12003,63 +12110,65 @@ mod tests {
         // Exercises the new EXACT-i64 streaming leading-axis path (scan_leading_axis_i64) vs an
         // independent per-column serial reference. Values > 2^53 confirm the i64 accumulator is exact
         // (the f64 scan_leading_axis_to_vec would lose precision here). cumsum (wrapping) + cummax + reverse.
-        let (rows, cols) = (300usize, 96usize);
-        let raw: Vec<i64> = (0..rows * cols)
-            .map(|i| (i as i64).wrapping_mul(6_364_136_223_846_793_005) ^ (1i64 << 60))
-            .collect();
-        let tensor = Value::Tensor(
-            TensorValue::new_i64_values(
-                Shape {
-                    dims: vec![rows as u32, cols as u32],
-                },
-                raw.clone(),
-            )
-            .unwrap(),
-        );
-        for (op, is_sum, reverse) in [
-            ("cumsum", true, false),
-            ("cumsum", true, true),
-            ("cummax", false, false),
-            ("cummax", false, true),
-        ] {
-            let prim = if is_sum {
-                Primitive::Cumsum
-            } else {
-                Primitive::Cummax
-            };
-            let mut p = BTreeMap::new();
-            p.insert("axis".to_owned(), "0".to_owned());
-            if reverse {
-                p.insert("reverse".to_owned(), "true".to_owned());
-            }
-            let got = match crate::eval_primitive(prim, std::slice::from_ref(&tensor), &p).unwrap()
-            {
-                Value::Tensor(t) => t.elements.as_i64_slice().unwrap().to_vec(),
-                _ => panic!(),
-            };
-            // reference: per-column sequential scan (same order the strided path used).
-            let mut want = vec![0i64; rows * cols];
-            for c in 0..cols {
-                let mut acc = if is_sum { 0i64 } else { i64::MIN };
-                let idxs: Vec<usize> = if reverse {
-                    (0..rows).rev().collect()
-                } else {
-                    (0..rows).collect()
-                };
-                for &k in &idxs {
-                    let fi = k * cols + c;
-                    acc = if is_sum {
-                        acc.wrapping_add(raw[fi])
-                    } else {
-                        acc.max(raw[fi])
-                    };
-                    want[fi] = acc;
-                }
-            }
-            assert_eq!(
-                got, want,
-                "i64 leading-axis {op} reverse={reverse} diverges"
+        // Two sizes: (300,96) small -> serial contiguous path; (600,512) large -> threaded 3-pass path.
+        for &(rows, cols) in &[(300usize, 96usize), (600usize, 512usize)] {
+            let raw: Vec<i64> = (0..rows * cols)
+                .map(|i| (i as i64).wrapping_mul(6_364_136_223_846_793_005) ^ (1i64 << 60))
+                .collect();
+            let tensor = Value::Tensor(
+                TensorValue::new_i64_values(
+                    Shape {
+                        dims: vec![rows as u32, cols as u32],
+                    },
+                    raw.clone(),
+                )
+                .unwrap(),
             );
+            for (op, is_sum, reverse) in [
+                ("cumsum", true, false),
+                ("cumsum", true, true),
+                ("cummax", false, false),
+                ("cummax", false, true),
+            ] {
+                let prim = if is_sum {
+                    Primitive::Cumsum
+                } else {
+                    Primitive::Cummax
+                };
+                let mut p = BTreeMap::new();
+                p.insert("axis".to_owned(), "0".to_owned());
+                if reverse {
+                    p.insert("reverse".to_owned(), "true".to_owned());
+                }
+                let got =
+                    match crate::eval_primitive(prim, std::slice::from_ref(&tensor), &p).unwrap() {
+                        Value::Tensor(t) => t.elements.as_i64_slice().unwrap().to_vec(),
+                        _ => panic!(),
+                    };
+                // reference: per-column sequential scan (same order the strided path used).
+                let mut want = vec![0i64; rows * cols];
+                for c in 0..cols {
+                    let mut acc = if is_sum { 0i64 } else { i64::MIN };
+                    let idxs: Vec<usize> = if reverse {
+                        (0..rows).rev().collect()
+                    } else {
+                        (0..rows).collect()
+                    };
+                    for &k in &idxs {
+                        let fi = k * cols + c;
+                        acc = if is_sum {
+                            acc.wrapping_add(raw[fi])
+                        } else {
+                            acc.max(raw[fi])
+                        };
+                        want[fi] = acc;
+                    }
+                }
+                assert_eq!(
+                    got, want,
+                    "i64 leading-axis {op} reverse={reverse} diverges (rows={rows} cols={cols})"
+                );
+            }
         }
     }
 
