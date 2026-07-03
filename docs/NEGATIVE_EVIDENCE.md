@@ -130,6 +130,19 @@ serial **177.9ms -> threaded 14.65ms = 12.1x**, and **14.65ms vs JAX 13.27ms = ~
 for bf16 AND f16. (i64 MIDDLE-axis argmax stays strided-serial: arg_extreme widens to f64, lossy for i64 >
 2^53 — needs an exact-i64 middle-axis; filed, niche.)
 
+## 2026-07-03 - WIRED WIN (completeness): i64/i32 MIDDLE-axis cumulative — contiguous sub-block scan, threaded (TealMarten)
+
+Completes the integer cumulative family after the leading-axis win below. i64/i32 cumsum/cummax/cummin/
+cumprod along a MIDDLE axis (0<axis<last) still used the cache-hostile strided per-outer serial scan.
+Replaced it (mirroring the f64 middle-axis path): `before` contiguous [axis_dim, inner] sub-blocks, each
+scanned along its leading axis by `scan_leading_axis_i64` (contiguous, exact i64 acc), threaded over
+sub-blocks. Bit-identical (same per-column sequential int_op, same order — integer add/max/min exact),
+verified by new `i64_middle_axis_cumulative_matches_serial_reference` (3D axis=1, values > 2^53, cummax +
+reverse). Structural win (contiguous + threaded vs strided serial), same class as the leading-axis 7.3x —
+transfers by construction (strictly replaces the slower path). full fj-lax lib 1737/0. Integer cumulative
+is now COMPLETE across axes (last / leading / middle, i64 + i32). Niche i64 MIDDLE-axis ARGMAX remains
+strided-serial (arg_extreme widens to f64, lossy > 2^53 — needs an exact-i64 middle-axis; filed).
+
 ## 2026-07-03 - WIRED WIN (THREADED, now 1.43x FASTER than JAX): i64/i32 leading-axis cumulative 3-pass blocked prefix (TealMarten)
 
 FOLLOW-UP to the contiguous-streaming win below — threaded it. Added `scan_leading_axis_i64_threaded`: the

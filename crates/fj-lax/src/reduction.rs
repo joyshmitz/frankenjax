@@ -4927,23 +4927,54 @@ fn eval_cumulative_dense(
                 scan_leading_axis_i64(src, axis_dim, outer_count, reverse, int_init, &int_op)
             }
         } else {
-            let mut out = src.to_vec();
-            for outer in 0..outer_count {
-                let base = line_base(outer);
-                let mut acc = int_init;
-                if reverse {
-                    for i in (0..axis_dim).rev() {
-                        let fi = base + i * axis_stride;
-                        acc = int_op(acc, out[fi]);
-                        out[fi] = acc;
-                    }
-                } else {
-                    for i in 0..axis_dim {
-                        let fi = base + i * axis_stride;
-                        acc = int_op(acc, out[fi]);
-                        out[fi] = acc;
-                    }
+            // Middle axis (0 < axis < last): `before` contiguous [axis_dim, inner] sub-blocks
+            // (inner == axis_stride == trailing-dims product). Scan each along its LEADING axis with the
+            // exact-i64 contiguous streamer, threaded over sub-blocks — replaces the cache-hostile strided
+            // per-outer scan. Bit-identical (same per-column sequential int_op, same order). Mirrors f64.
+            let inner = axis_stride;
+            let block = axis_dim * inner;
+            let before = total / block;
+            let mut out = vec![0i64; total];
+            let threads = (total / (1 << 18))
+                .clamp(1, {
+                    std::thread::available_parallelism()
+                        .map(|c| c.get())
+                        .unwrap_or(8)
+                })
+                .min(before.max(1));
+            let scan_block = |dst: &mut [i64], sub: &[i64]| {
+                let scanned =
+                    scan_leading_axis_i64(sub, axis_dim, inner, reverse, int_init, &int_op);
+                dst.copy_from_slice(&scanned);
+            };
+            if threads <= 1 {
+                for blk in 0..before {
+                    let start = blk * block;
+                    scan_block(&mut out[start..start + block], &src[start..start + block]);
                 }
+            } else {
+                let per = before.div_ceil(threads);
+                std::thread::scope(|scope| {
+                    let mut rest: &mut [i64] = out.as_mut_slice();
+                    let mut b0 = 0usize;
+                    while b0 < before {
+                        let cnt = per.min(before - b0);
+                        let (chunk, tail) = rest.split_at_mut(cnt * block);
+                        rest = tail;
+                        let src_start = b0 * block;
+                        b0 += cnt;
+                        let scan_block = &scan_block;
+                        scope.spawn(move || {
+                            for k in 0..cnt {
+                                let s = k * block;
+                                scan_block(
+                                    &mut chunk[s..s + block],
+                                    &src[src_start + s..src_start + s + block],
+                                );
+                            }
+                        });
+                    }
+                });
             }
             out
         };
@@ -12169,6 +12200,68 @@ mod tests {
                     "i64 leading-axis {op} reverse={reverse} diverges (rows={rows} cols={cols})"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn i64_middle_axis_cumulative_matches_serial_reference() {
+        // 3D [before, axis_dim, inner] i64 cumsum/cummax along the MIDDLE axis (axis 1) — the new
+        // contiguous sub-block path (scan_leading_axis_i64 per block, threaded) vs a per-(before,inner)
+        // serial reference. Values > 2^53 confirm exactness; incl. reverse.
+        let (before, axis_dim, inner) = (48usize, 400usize, 32usize); // total 614400 -> threaded
+        let raw: Vec<i64> = (0..before * axis_dim * inner)
+            .map(|i| (i as i64).wrapping_mul(6_364_136_223_846_793_005) ^ (1i64 << 61))
+            .collect();
+        let tensor = Value::Tensor(
+            TensorValue::new_i64_values(
+                Shape {
+                    dims: vec![before as u32, axis_dim as u32, inner as u32],
+                },
+                raw.clone(),
+            )
+            .unwrap(),
+        );
+        for (is_sum, reverse) in [(true, false), (true, true), (false, false), (false, true)] {
+            let prim = if is_sum {
+                Primitive::Cumsum
+            } else {
+                Primitive::Cummax
+            };
+            let mut p = BTreeMap::new();
+            p.insert("axis".to_owned(), "1".to_owned());
+            if reverse {
+                p.insert("reverse".to_owned(), "true".to_owned());
+            }
+            let got = match crate::eval_primitive(prim, std::slice::from_ref(&tensor), &p).unwrap()
+            {
+                Value::Tensor(t) => t.elements.as_i64_slice().unwrap().to_vec(),
+                _ => panic!(),
+            };
+            let mut want = vec![0i64; raw.len()];
+            let block = axis_dim * inner;
+            for b in 0..before {
+                for j in 0..inner {
+                    let mut acc = if is_sum { 0i64 } else { i64::MIN };
+                    let ks: Vec<usize> = if reverse {
+                        (0..axis_dim).rev().collect()
+                    } else {
+                        (0..axis_dim).collect()
+                    };
+                    for &k in &ks {
+                        let fi = b * block + k * inner + j;
+                        acc = if is_sum {
+                            acc.wrapping_add(raw[fi])
+                        } else {
+                            acc.max(raw[fi])
+                        };
+                        want[fi] = acc;
+                    }
+                }
+            }
+            assert_eq!(
+                got, want,
+                "i64 middle-axis cumsum={is_sum} reverse={reverse} diverges"
+            );
         }
     }
 
