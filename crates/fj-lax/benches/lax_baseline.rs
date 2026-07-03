@@ -1434,6 +1434,52 @@ fn bench_int_gemm_family_vs_jax(c: &mut Criterion) {
     c.bench_function("eval/uint64_bmm_64x128_vsjax", |bn| {
         bn.iter(|| eval_primitive(Primitive::DotGeneral, &[ubl.clone(), ubr.clone()], &pb))
     });
+
+    // uint32 matmul + bmm — JAX uint32 matmul 512 = 265.7ms (XLA does NOT vectorize
+    // UNSIGNED 32-bit, unlike signed int32's fast 0.66ms), so u32 GEMM is a winnable case.
+    let m = 512usize;
+    let u32a: Vec<u32> = (0..m * m)
+        .map(|i| (i as u32).wrapping_mul(2654435761) % 199)
+        .collect();
+    let u32b: Vec<u32> = (0..m * m)
+        .map(|i| (i as u32).wrapping_mul(40503) % 199)
+        .collect();
+    let u32l = Value::Tensor(
+        TensorValue::new_u32_values(
+            Shape {
+                dims: vec![m as u32, m as u32],
+            },
+            u32a,
+        )
+        .unwrap(),
+    );
+    let u32r = Value::Tensor(
+        TensorValue::new_u32_values(
+            Shape {
+                dims: vec![m as u32, m as u32],
+            },
+            u32b,
+        )
+        .unwrap(),
+    );
+    let p2 = no_params();
+    c.bench_function("eval/uint32_matmul_512x512_vsjax", |bn| {
+        bn.iter(|| eval_primitive(Primitive::Dot, &[u32l.clone(), u32r.clone()], &p2))
+    });
+    let (bt2, un2) = (64usize, 128usize);
+    let u32ba: Vec<u32> = (0..(bt2 * un2 * un2))
+        .map(|i| (i as u32).wrapping_mul(2654435761) % 199)
+        .collect();
+    let u32bb: Vec<u32> = (0..(bt2 * un2 * un2))
+        .map(|i| (i as u32).wrapping_mul(40503) % 199)
+        .collect();
+    let u32d = vec![bt2 as u32, un2 as u32, un2 as u32];
+    let u32bl =
+        Value::Tensor(TensorValue::new_u32_values(Shape { dims: u32d.clone() }, u32ba).unwrap());
+    let u32br = Value::Tensor(TensorValue::new_u32_values(Shape { dims: u32d }, u32bb).unwrap());
+    c.bench_function("eval/uint32_bmm_64x128_vsjax", |bn| {
+        bn.iter(|| eval_primitive(Primitive::DotGeneral, &[u32bl.clone(), u32br.clone()], &pb))
+    });
 }
 
 fn bench_dot_100(c: &mut Criterion) {

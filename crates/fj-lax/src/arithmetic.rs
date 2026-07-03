@@ -14669,8 +14669,32 @@ fn batched_standard_u64_matmul(
     ) else {
         return Ok(None);
     };
-    let (Some(a), Some(b)) = (lhs.elements.as_u64_slice(), rhs.elements.as_u64_slice()) else {
-        return Ok(None);
+    // Accept either a dense u64 backing (borrow, no copy) or a dense u32 backing
+    // (widen u32->u64 into an owned Vec — a cheap O(input) copy vs the general-path
+    // permute). JAX has no BLAS for u32 EITHER (uint32 matmul 512 = 265.7ms; unlike
+    // signed int32 XLA does NOT vectorize unsigned 32-bit), so this canonical path
+    // covers the u32 bmm win too.
+    let a_owned: Vec<u64>;
+    let a: &[u64] = match lhs.elements.as_u64_slice() {
+        Some(s) => s,
+        None => match lhs.elements.as_u32_slice() {
+            Some(s32) => {
+                a_owned = s32.iter().map(|&v| u64::from(v)).collect();
+                &a_owned
+            }
+            None => return Ok(None),
+        },
+    };
+    let b_owned: Vec<u64>;
+    let b: &[u64] = match rhs.elements.as_u64_slice() {
+        Some(s) => s,
+        None => match rhs.elements.as_u32_slice() {
+            Some(s32) => {
+                b_owned = s32.iter().map(|&v| u64::from(v)).collect();
+                &b_owned
+            }
+            None => return Ok(None),
+        },
     };
     let values = batched_rank2_u64_matmul(a, batch, m, k, b, n);
     let shape = Shape {

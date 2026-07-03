@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - WIN + FIX: uint32 GEMM is ALSO a JAX weakness — u32 matmul 31.3x FASTER; extended canonical bmm path to u32 (49->11.85ms) (TealMarten)
+
+KEY: XLA does NOT vectorize UNSIGNED 32-bit (unlike SIGNED int32 which is fast 0.66ms): **JAX uint32
+matmul 512 = 265.7ms** — slow like u64. So u32 GEMM is a winnable case, not the JAX-fast int32 case.
+- **u32 matmul 512: fj 8.48ms vs JAX 265.7ms = 31.3x FASTER** (2D u32 Dot already worked — routes through
+  rank2_u64_matmul_dot, extract u32->u64 -> the now-threaded rank2_u64_matmul).
+- **u32 BMM 64x128: FIXED 49.08ms -> 11.85ms = 4.1x** (~22x vs JAX's ~265ms/134M-op no-BLAS scale). My
+  canonical `batched_standard_u64_matmul` used `as_u64_slice()` which returns None for U32-backed input,
+  so u32 bmm fell to the general permute. Extended it to accept a u32 backing (widen u32->u64 into an
+  owned Vec — cheap O(input) copy vs the permute; the +4ms vs u64 bmm's 7.98ms is that widen). Bit-
+  identical; 42 matmul + full fj-lax lib 1727/0 green.
+So the full unsigned-GEMM family now wins: u64 matmul 41.7x/bmm 18.4x, u32 matmul 31.3x/bmm ~22x. LESSON
+(sharpens the int-GEMM map): XLA CPU BLAS covers SIGNED int32 (fast) but NOT unsigned 32/64-bit nor
+signed int64 — all four of {i64, u64, u32} GEMM are fj wins; only i32 is a JAX-fast case.
+
 ## 2026-07-03 - FIX (RESOLVED the 6x anomaly): added the canonical u64 batched matmul path — u64 bmm 50.4ms -> 7.98ms = 6.3x (18.4x vs JAX) (TealMarten)
 
 Root-caused + fixed the 6x batched-u64-vs-i64 gap I filed below. i64 bmm had a CANONICAL fast path
