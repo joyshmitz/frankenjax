@@ -14637,6 +14637,56 @@ fn batched_standard_i64_matmul(
     )?)))
 }
 
+/// Canonical batched UNSIGNED (u32/u64) matmul -> contiguous multi-threaded
+/// `batched_rank2_u64_matmul` directly on the dense `u64` backings, WITHOUT the
+/// `general_unsigned_tensordot` permute/extract round-trip. The unsigned sibling of
+/// [`batched_standard_i64_matmul`]: i64 bmm had this canonical fast path but u64/u32 did
+/// NOT, so unsigned bmm always ate the general path (measured ~6x slower than i64 bmm).
+/// Bit-identical: wrapping-u64 fold is associative/exact; U32 output narrows `v as u32`
+/// (= mod 2^32, the low bits the u64 fold already holds), matching `u64_matmul_output`.
+#[allow(clippy::too_many_arguments)]
+fn batched_standard_u64_matmul(
+    lhs: &TensorValue,
+    rhs: &TensorValue,
+    lhs_batch: &[usize],
+    rhs_batch: &[usize],
+    lhs_contracting: &[usize],
+    rhs_contracting: &[usize],
+    lhs_free_dims: &[usize],
+    rhs_free_dims: &[usize],
+    out_dtype: DType,
+    output_dims: &[u32],
+) -> Result<Option<Value>, EvalError> {
+    let Some((batch, m, k, n)) = canonical_batched_matmul_dims(
+        lhs,
+        rhs,
+        lhs_batch,
+        rhs_batch,
+        lhs_contracting,
+        rhs_contracting,
+        lhs_free_dims,
+        rhs_free_dims,
+    ) else {
+        return Ok(None);
+    };
+    let (Some(a), Some(b)) = (lhs.elements.as_u64_slice(), rhs.elements.as_u64_slice()) else {
+        return Ok(None);
+    };
+    let values = batched_rank2_u64_matmul(a, batch, m, k, b, n);
+    let shape = Shape {
+        dims: output_dims.to_vec(),
+    };
+    let out = match out_dtype {
+        DType::U64 => Value::Tensor(TensorValue::new_u64_values(shape, values)?),
+        DType::U32 => {
+            let v32: Vec<u32> = values.into_iter().map(|v| v as u32).collect();
+            Value::Tensor(TensorValue::new_u32_values(shape, v32)?)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(out))
+}
+
 /// Canonical batched complex matmul -> contiguous multi-threaded
 /// `batched_rank2_complex_matmul` instead of the generic strided per-element complex
 /// loop. Bit-identical (same ascending-`l` complex_mul + real/imag adds, f64
@@ -16407,6 +16457,26 @@ pub(crate) fn eval_dot_general(
         {
             t.dtype = DType::I32;
         }
+        return Ok(value);
+    }
+
+    // Canonical batched UNSIGNED (U32/U64) matmul -> dense batched_rank2_u64_matmul,
+    // skipping the general_unsigned_tensordot permute (u64 bmm was ~6x slower than i64
+    // bmm because i64 had this canonical path and unsigned did not). Bit-identical.
+    if let DotOutputKind::Integral(u_dtype @ (DType::U32 | DType::U64)) = output_kind
+        && let Some(value) = batched_standard_u64_matmul(
+            lhs,
+            rhs,
+            &lhs_batch,
+            &rhs_batch,
+            &lhs_contracting,
+            &rhs_contracting,
+            &lhs_free_dims,
+            &rhs_free_dims,
+            u_dtype,
+            &output_dims,
+        )?
+    {
         return Ok(value);
     }
 

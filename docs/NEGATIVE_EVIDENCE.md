@@ -2,6 +2,21 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - FIX (RESOLVED the 6x anomaly): added the canonical u64 batched matmul path — u64 bmm 50.4ms -> 7.98ms = 6.3x (18.4x vs JAX) (TealMarten)
+
+Root-caused + fixed the 6x batched-u64-vs-i64 gap I filed below. i64 bmm had a CANONICAL fast path
+(`batched_standard_i64_matmul`, dispatch ~16393) that runs `batched_rank2_i64_matmul` DIRECTLY on the
+dense `as_i64_slice()` backings; U32/U64 had NO such path (dispatch gated `Integral(I32|I64)` only), so
+unsigned bmm fell all the way to `general_unsigned_tensordot` which PERMUTES + re-extracts operands to
+`Vec<u64>` — the whole 6x. Added `batched_standard_u64_matmul` (dense `as_u64_slice()` ->
+`batched_rank2_u64_matmul` -> `new_u64_values`/`new_u32_values`, U32 narrows `v as u32` = mod 2^32) and
+wired an `Integral(U32|U64)` dispatch arm after the i64 one. MEASURED u64 bmm 64x128: **50.4ms -> 7.98ms
+= 6.3x** — now matches i64 bmm 8.3ms, and **18.4x vs JAX int64 bmm 146.7ms** (was 2.9x). Bit-identical
+(42 matmul tests + full fj-lax lib 1727/0 green; U32 narrow-at-end is exact since the u64 wrapping fold
+holds the low 32 bits). The batched-u64 gap I filed last commit is CLOSED. LESSON: an integer/unsigned
+dtype missing a CANONICAL fast path silently routes through the general permute tensordot — audit for
+dtype-asymmetric fast-path coverage (i64 had it, u64 didn't).
+
 ## 2026-07-03 - FIX + SURFACE: threaded batched u64 matmul (was serial per-item); + FILED an unexplained 6x batched-u64-vs-i64 gap (TealMarten)
 
 Continued the u64-GEMM parity work: `batched_rank2_u64_matmul` looped `for bt in 0..batch` (serial per
