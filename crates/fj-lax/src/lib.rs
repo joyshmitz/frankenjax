@@ -1176,6 +1176,13 @@ fn eval_associative_scan(
                 }
             }
 
+            // NOTE (2026-07-03, TealMarten): a dense bf16/f16 scan (per-element Literal decode → op →
+            // round) was tried to skip the generic per-slice dispatch, but it REGRESSED the batched case
+            // 2.9x — the generic path dispatches per ROW, each a VECTORIZED bf16 elementwise op over the
+            // inner dim, which beats scalar per-element Literal work. The dispatch overhead only dominates
+            // for inner==1 (1-D bf16 scan, niche). DO-NOT re-add a scalar dense half scan; a real win needs
+            // SIMD across the inner dim (== what the generic per-row path already does).
+
             let mut results: Vec<Value> = Vec::with_capacity(leading_dim);
 
             if reverse {
@@ -19169,6 +19176,99 @@ mod tests {
             assert_eq!(vals, vec![3.0, 3.0, 4.0, 4.0, 5.0]);
         } else {
             panic!("expected tensor output");
+        }
+    }
+
+    // The dense half (bf16/f16) associative_scan fast path must be BIT-IDENTICAL to the generic
+    // per-slice reference (sequential eval_primitive(body_op) scan) — forward + reverse, add/mul/max/min,
+    // batched (inner > 1). Reference replicates exactly what the generic fallback computed.
+    #[test]
+    fn associative_scan_half_matches_generic_reference() {
+        use fj_core::DType;
+        let (lead, inner) = (11usize, 6usize);
+        // Values with a bf16/f16-representable spread; include negatives and a repeat for max/min ties.
+        let f64src: Vec<f64> = (0..lead * inner)
+            .map(|i| (((i * 37 + 5) % 41) as f64) * 0.25 - 5.0)
+            .collect();
+        for &dt in &[DType::BF16, DType::F16] {
+            // Build the half tensor by rounding each value through the primitive dtype.
+            let bits: Vec<u16> = f64src
+                .iter()
+                .map(|&v| match super::reduce_window_literal_from_f64(dt, v) {
+                    fj_core::Literal::BF16Bits(b) | fj_core::Literal::F16Bits(b) => b,
+                    _ => 0,
+                })
+                .collect();
+            let shape = Shape {
+                dims: vec![lead as u32, inner as u32],
+            };
+            let tensor =
+                TensorValue::new_half_float_values(dt, shape.clone(), bits.clone()).unwrap();
+            for op in ["add", "mul", "max", "min"] {
+                for &reverse in &[false, true] {
+                    let mut p = assoc_scan_params(op);
+                    p.insert("reverse".to_owned(), reverse.to_string());
+                    let got = match eval_primitive(
+                        Primitive::AssociativeScan,
+                        std::slice::from_ref(&Value::Tensor(tensor.clone())),
+                        &p,
+                    )
+                    .unwrap()
+                    {
+                        Value::Tensor(t) => t.elements.as_half_float_slice().unwrap().to_vec(),
+                        _ => panic!(),
+                    };
+                    // Reference: sequential per-slice scan via eval_primitive(body_op), exactly the
+                    // generic fallback. Rebuild each row as a [inner] half tensor and combine.
+                    let body = match op {
+                        "add" => Primitive::Add,
+                        "mul" => Primitive::Mul,
+                        "max" => Primitive::Max,
+                        _ => Primitive::Min,
+                    };
+                    let row = |i: usize| -> Value {
+                        Value::Tensor(
+                            TensorValue::new_half_float_values(
+                                dt,
+                                Shape {
+                                    dims: vec![inner as u32],
+                                },
+                                bits[i * inner..i * inner + inner].to_vec(),
+                            )
+                            .unwrap(),
+                        )
+                    };
+                    let mut rows: Vec<Vec<u16>> = vec![vec![0u16; inner]; lead];
+                    let extract = |v: &Value| -> Vec<u16> {
+                        match v {
+                            Value::Tensor(t) => t.elements.as_half_float_slice().unwrap().to_vec(),
+                            _ => panic!(),
+                        }
+                    };
+                    if reverse {
+                        let mut acc = row(lead - 1);
+                        rows[lead - 1] = extract(&acc);
+                        for i in (0..lead - 1).rev() {
+                            acc = eval_primitive(body, &[row(i), acc.clone()], &BTreeMap::new())
+                                .unwrap();
+                            rows[i] = extract(&acc);
+                        }
+                    } else {
+                        let mut acc = row(0);
+                        rows[0] = extract(&acc);
+                        for i in 1..lead {
+                            acc = eval_primitive(body, &[acc.clone(), row(i)], &BTreeMap::new())
+                                .unwrap();
+                            rows[i] = extract(&acc);
+                        }
+                    }
+                    let want: Vec<u16> = rows.into_iter().flatten().collect();
+                    assert_eq!(
+                        got, want,
+                        "half assoc_scan diverges: dt={dt:?} op={op} reverse={reverse}"
+                    );
+                }
+            }
         }
     }
 

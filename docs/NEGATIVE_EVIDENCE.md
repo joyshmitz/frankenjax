@@ -46,6 +46,20 @@ transpose-sort, but transpose tiling is memory-flagged DO-NOT (`transpose_alread
 all regimes). Genuine hard gap: any axis-0 sort must touch data with column-stride. Benches kept as markers.
 DO-NOT re-attempt the naive strided column-gather; the lever is a blocked transpose (separately gated) or nothing.
 
+## 2026-07-03 - NEGATIVE (DO-NOT-REATTEMPT): scalar dense bf16/f16 associative_scan REGRESSES the batched case 2.9x (TealMarten)
+
+`eval_associative_scan` has a dense typed-buffer fast path for f64/f32/i64/i32 but half (bf16/f16) falls to
+the generic path (leading_dim separate `eval_primitive(body_op)` dispatches + stack). Hypothesized a ~13x
+gap (the f64 dense-path comment cites 13x "on 1-D scans where inner==1") and added a dense half scan: per
+element decode via `Literal::as_f64`, op, round via `reduce_window_literal_from_f64`. Bit-identical
+(verified add/mul/max/min × bf16/f16 × fwd/rev against a per-slice reference — the round DID match). But
+the A/B INVERTED: `eval/assoc_scan_bf16_512x512_add` generic **0.67ms** vs dense-half **1.93ms = 2.9x
+SLOWER**. Root cause: the generic path dispatches per ROW, and each row op is a VECTORIZED bf16 elementwise
+(`inner`=512 wide); scalar per-element Literal decode/encode can't compete. The dispatch overhead only
+dominates for inner==1 (1-D bf16 scan — niche). REVERTED (left a DO-NOT comment + kept the bench as a
+marker). A real bf16-scan win would need SIMD across the inner dim, which is exactly what the generic
+per-row path already does. DO-NOT re-add a scalar dense half scan.
+
 ## 2026-07-03 - NEGATIVE (DO-NOT-REATTEMPT): multi-accumulator ILP does NOT speed up SIMD reduce_max/min — already BW-bound (TealMarten)
 
 The ledger recorded reduce_max 4M f64 = 2.46ms vs JAX 0.71ms = 3.5x. Two findings: (1) that 2.46ms was

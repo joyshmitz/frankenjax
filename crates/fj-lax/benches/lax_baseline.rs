@@ -3434,6 +3434,36 @@ fn bench_cumsum_64k_f64_literal_reference(c: &mut Criterion) {
 // 64k i64 ascending sort: exercises the LSD radix path (pass74) vs the prior
 // comparison sort. Pseudo-random keys (negatives, wide range, duplicates) so the
 // sort does real work; ascending is the default direction.
+// bf16 batched associative_scan (SSM/linear-recurrence dtype), [512, 512] along axis 0. Marker for the
+// generic per-slice path — it dispatches per ROW (vectorized bf16 elementwise over inner), ~0.67ms; a
+// scalar per-element dense half scan REGRESSED this 2.9x (see NEGATIVE_EVIDENCE 2026-07-03), so batched
+// bf16 scan stays on the generic path.
+fn bench_assoc_scan_bf16_batched(c: &mut Criterion) {
+    let (lead, inner) = (512usize, 512usize);
+    let bits: Vec<u16> = (0..lead * inner)
+        .map(|i| {
+            let v = (((i * 37 + 5) % 401) as f32) * 0.01 - 2.0;
+            ((v.to_bits() >> 16) as u16).wrapping_add(0) // truncate f32 -> bf16 (round-to-zero ok for bench)
+        })
+        .collect();
+    let input = Value::Tensor(
+        TensorValue::new_half_float_values(
+            DType::BF16,
+            Shape {
+                dims: vec![lead as u32, inner as u32],
+            },
+            bits,
+        )
+        .unwrap(),
+    );
+    let mut p = BTreeMap::new();
+    p.insert("body_op".to_owned(), "add".to_owned());
+    c.bench_function("eval/assoc_scan_bf16_512x512_add", |bencher| {
+        bencher
+            .iter(|| eval_primitive(Primitive::AssociativeScan, std::slice::from_ref(&input), &p))
+    });
+}
+
 fn bench_sort_64k_i64(c: &mut Criterion) {
     let data: Vec<i64> = (0..LARGE_ELEMENTWISE_LEN as i64)
         .map(|i| (i.wrapping_mul(2_654_435_761)).rem_euclid(1_000_003) - 500_000)
@@ -8459,6 +8489,7 @@ criterion_group!(
     bench_cumsum_4096x1024_f64_axis1,
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
+    bench_assoc_scan_bf16_batched,
     bench_sort_argsort_4m_f64,
     bench_half_f32_sort_vs_jax,
     bench_complex_sort_4m_vsjax,
