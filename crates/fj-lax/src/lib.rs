@@ -5249,7 +5249,9 @@ fn eval_reduce_window_rank2_f64_sum(
 /// Finite-gated (the fill identity is ±inf, and `op(finite, ±inf)` never yields
 /// NaN, so for finite inputs plain `f64::max`/`min` == `jax_max_f64`/`jax_min_f64`
 /// and OOB-skip == identity-fill — bit-identical to the naive fold). stride 1 only;
-/// `window_rows*window_cols >= 25` amortization gate (matches the sum/4D paths).
+/// `window_rows*window_cols >= 9` gate (3x3+): van Herk is window-INDEPENDENT (block prefix/suffix is
+/// O(input) regardless of window), so 3x3 costs what 7x7 costs — 3x3-VALID maxpool was ~3.2x slower on
+/// the scalar naive fold than 7x7 on this path (see docs/NEGATIVE_EVIDENCE.md 2026-07-03).
 #[allow(clippy::too_many_arguments)]
 fn separable_reduce_window_rank2_maxmin_f64(
     src: &[f64],
@@ -5271,7 +5273,7 @@ fn separable_reduce_window_rank2_maxmin_f64(
         || stride_cols != 1
         || window_rows < 2
         || window_cols < 2
-        || window_rows.saturating_mul(window_cols) < 25
+        || window_rows.saturating_mul(window_cols) < 9
     {
         return None;
     }
@@ -13171,7 +13173,7 @@ mod tests {
             }
             out
         };
-        for &(wr, wc) in &[(7usize, 5usize), (5, 7), (6, 6)] {
+        for &(wr, wc) in &[(7usize, 5usize), (5, 7), (6, 6), (3, 3), (3, 4)] {
             for &is_max in &[true, false] {
                 for &(pr, pc) in &[(0usize, 0usize), (wr - 1, wc - 1)] {
                     let out_rows = rows + 2 * pr - wr + 1;

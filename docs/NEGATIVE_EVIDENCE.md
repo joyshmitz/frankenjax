@@ -355,6 +355,19 @@ COVERED for large windows; my "rank-2 sum has no separable path" was wrong. ACCU
 Net: the important 4D-NHWC CNN pooling is covered; rank-2 plain-matrix MAX is the clean uncovered shape.
 Still filed (not fixed — actively-worked van-Herk area, and rank-2 plain pooling is a niche layout).
 
+## 2026-07-03 - WIRED WIN (3.16x internal): lower the rank-2 MAX/MIN van Herk gate to cover 3x3 maxpool (TealMarten)
+
+Symmetric follow-up to the sum-pool gate fix below. maxpool2d 1024² w3s1 VALID (9 taps, overlapping) fell
+BELOW both the deque gate (`win_total > 2·win_sum` = 9 > 12 false) AND the van Herk `>= 25` gate, so it
+ran the SCALAR naive rank-2 fold. Same-run A/B (contention-robust): w3-naive **24.40ms** vs w7-vanHerk
+**7.71ms** — w3 was 3.16x SLOWER despite doing LESS work per window (9 vs 49 taps), pure dispatch gap.
+van Herk is WINDOW-INDEPENDENT (block prefix/suffix is O(input) regardless of window), so lowered the
+maxmin gate `< 25` -> `< 9` (3x3+; 2x2/6-tap stay naive). After: w3 **24.40 -> 7.73ms = 3.16x**, now
+EQUAL to w7 (7.18ms) in the same run — confirming w3 rides the identical van Herk path. Covers f64 +
+f32/bf16/f16 (the hoisted dispatch widens). Bit-identical (max/min assoc+idempotent; van_herk test now
+includes 3x3/3x4). full fj-lax lib 1728/0. vs JAX ~1.28ms still ~6x (XLA maxpool deeply SIMD) but
+narrowed from ~19x. The whole rank-2 float max/min pooling family (3x3..NxN, f64/f32/half) now on van Herk.
+
 ## 2026-07-03 - WIRED WIN (~6x internal; 52x JAX LOSS -> ~9x): lower the rank-2 SUM-pool separable gate to cover 3x3 (TealMarten)
 
 sumpool2d 1024² w3s1 VALID measured **16.8ms vs JAX 0.32ms = 52x SLOWER** — while w7s1 (49 taps) was only
