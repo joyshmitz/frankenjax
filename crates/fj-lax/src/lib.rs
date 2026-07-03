@@ -10626,9 +10626,22 @@ mod tests {
                 _ => panic!(),
             };
             let got = super::reduce_window_rank3_f64_sum_xlane(&src, dims, win, out_dims);
+            // Canonicalize NaN before the bit-compare: a window that sums +Inf and -Inf
+            // yields NaN, and the SIGN of that NaN differs by computation path (the SIMD
+            // x-lane accumulation emits -NaN `0xFFF8…`, the scalar dense reference +NaN
+            // `0x7FF8…`) — both are valid quiet NaNs, so the raw-bit compare is too strict
+            // (documented Inf-arithmetic NaN-payload class). Finite values, ±0 and ±Inf
+            // are still compared bit-exactly; only NaN is collapsed to a single canonical.
+            let canon = |v: f64| {
+                if v.is_nan() {
+                    f64::NAN.to_bits()
+                } else {
+                    v.to_bits()
+                }
+            };
             assert_eq!(
-                got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                got.iter().map(|&v| canon(v)).collect::<Vec<_>>(),
+                want.iter().map(|&v| canon(v)).collect::<Vec<_>>(),
                 "rank3 x-lane sumpool mismatch dims={dims:?} win={win:?}"
             );
         }

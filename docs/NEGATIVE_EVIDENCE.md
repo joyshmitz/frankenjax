@@ -62,6 +62,20 @@ benches `nn/scalar_broadcast_fill_4m_f64`, `nn/bias_broadcast_4096x1024_f64`, al
   already delivers 6.4ms). LESSON (again): measure sibling sites before assuming a shared mis-gate — 2 of
   3 here were already fast.
 
+## 2026-07-02 - FIX (RED->GREEN): fj-lax lib suite was 1726/1 — the 1 failure was a NaN-sign test-strictness bug, now GREEN (TealMarten)
+
+The fj-lax `--lib` suite had ONE failing test on main since 2026-06-27 (47da44ad):
+`rank3_sum_pool_xlane_simd_matches_dense_float`. Root-caused by diffing the two output arrays: **2 of 819
+elements differed, both NaN-vs-NaN** — the SIMD x-lane sumpool emits `-NaN 0xFFF8…` while the scalar dense
+reference emits `+NaN 0x7FF8…` for windows summing +Inf and -Inf (order-dependent NaN sign; both valid
+quiet NaNs). ALL finite values, ±0 and ±Inf matched bit-exactly. So the KERNEL is correct; the test's
+raw-`to_bits()` compare was too strict for the documented Inf-arithmetic NaN-payload class (k9nss). Fixed
+the TEST (not the kernel): canonicalize NaN before the bit-compare (`v.is_nan() -> f64::NAN.to_bits()`),
+keeping finite/±0/±Inf strictness. Suite now **1727 passed / 0 failed**. This clears the RED I'd been
+flagging as "pre-existing, not mine" across prior passes — it was a 6-line test-strictness fix, not a real
+bug. LESSON: diff the actual arrays before assuming a SIMD-vs-scalar bit mismatch is a kernel bug — it's
+usually NaN-sign/payload.
+
 ## 2026-07-02 - NEGATIVE/BOUNDARY: the "decomposed softmax 34x fusion" is a PHANTOM — no confirmed user path produces it (TealMarten)
 
 Definitively closing the softmax-fusion lever I'd deferred to across several passes. I'd measured a
