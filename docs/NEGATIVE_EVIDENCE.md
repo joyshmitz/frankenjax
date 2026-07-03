@@ -62,6 +62,24 @@ benches `nn/scalar_broadcast_fill_4m_f64`, `nn/bias_broadcast_4096x1024_f64`, al
   already delivers 6.4ms). LESSON (again): measure sibling sites before assuming a shared mis-gate — 2 of
   3 here were already fast.
 
+## 2026-07-02 - WIN (argmax) + NO-SHIP (threaded max/min reduce regresses) at 4M full-reduce (TealMarten)
+
+Benched fj full-reduce 4M f64 vs JAX 0.10.2 x64 (jaxvenv, new `eval/{reduce_sum,reduce_max,argmax}_4m_f64`):
+- **argmax 4M: fj 3.18ms vs JAX 5.60ms = 1.76x FASTER** — recorded win (fj SIMD argmax beats XLA's slow
+  comparison reduce; complements the sort/argsort 6.1x/4.3x wins). Serial (below the 8.4M gate) and still
+  wins.
+- **reduce_max 4M: fj 2.46ms (serial) vs JAX 0.71ms = 3.5x SLOWER**; **reduce_sum 4M: fj 3.42ms vs 0.60ms
+  = 5.7x SLOWER**. Both are BELOW the 8.4M threading gate -> serial. max/min are associative (fj's
+  `threaded_reduce_minmax_f64` is proven bit-exact), so I lowered the minmax gate to 1<<20 to thread the
+  32MB read-only reduce, hypothesizing multi-core read beats single-core bandwidth.
+- **NO-SHIP: threaded max 4M measured 5.3 / 5.1 / 4.3ms (3 runs) = ~2x SLOWER than serial 2.46ms AND
+  flaky.** Threading the reduce REGRESSES on the contended swarm host (thread-spawn + combine + DRAM
+  contention dominate; the read-parallelizes hypothesis fails here). The 8.4M gate is CORRECT for
+  reductions. Reverted. fj's max/sum full-reduce loss vs JAX is a threading-on-IDLE-cores gap (XLA fans
+  the reduce across quiet cores; unmeasurable/unwinnable on the shared rch host — same class as the FFT
+  threaded-A/B contention caveat). DO-NOT lower the reduce threading gate off a single-host bench. Kept
+  the bench as the reproducer + argmax-win record.
+
 ## 2026-07-02 - WIN: thread the BroadcastInDim replicated-axis fill — page-fault-bound, 2.83x more (6.3x total vs odometer) (TealMarten)
 
 Follow-up to the replicated-axis FILL fast-path. The fill was gated serial at

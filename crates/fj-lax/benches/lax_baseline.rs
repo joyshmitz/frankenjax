@@ -3160,6 +3160,29 @@ fn bench_sort_argsort_4m_f64(c: &mut Criterion) {
     });
 }
 
+// Full-reduce 4M f64 vs JAX 0.10.2 x64 (jaxvenv, 2026-07-02): sum 0.60ms, max 0.71ms,
+// argmax 5.60ms. sum/max/argmax full-reduces at 4M fall BELOW the 8.4M threading gate ->
+// serial. max/min/argmax are ASSOCIATIVE (bit-exact under reordering), so threading a
+// DRAM-bound (32MB > L3) read-only reduce is legal and lets multi-core read exceed
+// single-core bandwidth. Isolates whether the serial full-reduce loses to JAX at 4M.
+fn bench_full_reduce_4m_f64(c: &mut Criterion) {
+    let n = 1usize << 22;
+    let data: Vec<f64> = (0..n).map(|i| ((i as f64) * 1.000_173).sin()).collect();
+    let input = Value::vector_f64(&data).unwrap();
+    let empty = no_params();
+    let mut axis0 = BTreeMap::new();
+    axis0.insert("axis".to_owned(), "0".to_owned());
+    c.bench_function("eval/reduce_sum_4m_f64", |b| {
+        b.iter(|| eval_primitive(Primitive::ReduceSum, std::slice::from_ref(&input), &empty))
+    });
+    c.bench_function("eval/reduce_max_4m_f64", |b| {
+        b.iter(|| eval_primitive(Primitive::ReduceMax, std::slice::from_ref(&input), &empty))
+    });
+    c.bench_function("eval/argmax_4m_f64", |b| {
+        b.iter(|| eval_primitive(Primitive::Argmax, std::slice::from_ref(&input), &axis0))
+    });
+}
+
 // ConvertElementType over a 64k dense f64 tensor: dense fast path (pass103,
 // reads as_f64_slice) vs the generic per-element Literal-materialize + convert.
 fn bench_convert_64k_f64_to_i64(c: &mut Criterion) {
@@ -7567,6 +7590,7 @@ criterion_group!(
     bench_cumsum_64k_f64_literal_reference,
     bench_sort_64k_i64,
     bench_sort_argsort_4m_f64,
+    bench_full_reduce_4m_f64,
     bench_sort_64k_f64,
     bench_sort3d_mid_256x1024x64_f64,
     bench_argsort_64k_f64,
