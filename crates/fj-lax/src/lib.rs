@@ -3771,7 +3771,7 @@ fn separable_reduce_window_sum_f64(
         || stride_cols != 1
         || window_rows < 2
         || window_cols < 2
-        || window_rows.saturating_mul(window_cols) < 25
+        || window_rows.saturating_mul(window_cols) < 9
     {
         return None;
     }
@@ -3857,7 +3857,7 @@ fn separable_reduce_window_sum_f32(
         || stride_cols != 1
         || window_rows < 2
         || window_cols < 2
-        || window_rows.saturating_mul(window_cols) < 25
+        || window_rows.saturating_mul(window_cols) < 9
     {
         return None;
     }
@@ -5066,8 +5066,11 @@ fn eval_reduce_window_rank2_f64_sum(
         return eval_reduce_window_rank2_f64_sum_3x3_same(tensor, out_dims, total_output);
     }
 
-    // Separable running-sum fast path for LARGE windows (stride 1, FINITE inputs): SUM is separable, so two
-    // O(input) running-sum passes replace the naive O(out*wr*wc) fold (177-363x slower than JAX at 11/31).
+    // Separable running-sum fast path (stride 1, FINITE inputs, window >= 3x3): SUM is separable, so two
+    // WINDOW-INDEPENDENT O(input) running-sum passes replace the naive O(out*wr*wc) fold. The running sum
+    // is add-one/drop-one so its cost is identical for 3x3 and 31x31 — gated only at >=9 taps (3x3), the
+    // point where the two-buffer pass beats the naive fold (3x3 VALID sum was ~52x slower than JAX on the
+    // naive path; w7 already rode this path at ~6x less time — see docs/NEGATIVE_EVIDENCE.md 2026-07-03).
     // It materializes the zero-padded input (matching the naive OOB=0 semantics for ANY pad_low), so
     // same-padding and valid-on-zero-padded produce the SAME padded array -> bit-identical to each other
     // (the metamorphic invariant holds within the separable). The running-sum subtract-old would do

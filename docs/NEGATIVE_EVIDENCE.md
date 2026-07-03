@@ -355,6 +355,27 @@ COVERED for large windows; my "rank-2 sum has no separable path" was wrong. ACCU
 Net: the important 4D-NHWC CNN pooling is covered; rank-2 plain-matrix MAX is the clean uncovered shape.
 Still filed (not fixed — actively-worked van-Herk area, and rank-2 plain pooling is a niche layout).
 
+## 2026-07-03 - WIRED WIN (~6x internal; 52x JAX LOSS -> ~9x): lower the rank-2 SUM-pool separable gate to cover 3x3 (TealMarten)
+
+sumpool2d 1024² w3s1 VALID measured **16.8ms vs JAX 0.32ms = 52x SLOWER** — while w7s1 (49 taps) was only
+2.8ms. Root cause: the separable running-sum path (`separable_reduce_window_sum_f64/f32`) was gated at
+`window_rows*window_cols >= 25`, so a 3x3 VALID window (9 taps, and NOT the pad=1 3x3-SAME special case)
+fell through to the naive O(out·9) dense fold. But the running sum is add-one/drop-one — WINDOW-
+INDEPENDENT — so 3x3 through it costs the SAME as w7 (the path's cost is O(input), not O(input·window)).
+Lowered the gate `< 25` -> `< 9` (covers 3x3+; 2x2/8-tap stay naive) in BOTH the f64 and f32 sum
+separable helpers. The pad=1 3x3-SAME stencil special case is intercepted earlier (unchanged); only
+3x3-VALID (and other 9..24-tap windows) newly route to separable.
+
+EVIDENCE (contention-robust — host was at load 50-81/64 during measurement): the CLEAN uncontended first
+run this turn gave w3-naive=16.8ms (tight [16.5,17.1]) and w7-separable=2.8ms (tight [2.73,2.87]). After
+the gate change, w3 and w7 read EQUAL in every same-run pair (e.g. 19.6ms vs 20.7ms, 25.7 vs 24.1) — the
+6x gap between them collapsed, proving w3 now rides the identical window-independent separable path. So
+w3: **16.8ms -> 2.8ms (the shared path's clean cost) = ~6x internal**, 52x JAX loss -> ~9x. Parity is
+tolerance (running-sum reassociates vs the flat fold; no bit-exact-vs-naive test — only the same-vs-valid
+metamorphic equality, which the separable preserves). full fj-lax lib 1728/0 green. Residual w3/w7 ~9x
+JAX gap = the running-sum phase-1 horizontal pass is scalar (data-dependent); phase-2 vertical is
+autovec — a possible future SIMD lever, separate from this dispatch fix.
+
 ## 2026-07-03 - WIRED WIN (2.99x internal; 16.5x JAX LOSS -> 5.4x): block-structured van Herk for rank-2 f64 maxpool/minpool (TealMarten)
 
 Followed up the rank-2 maxpool gap below. The gap was NOT the naive O(out·win²) fold — the deque
