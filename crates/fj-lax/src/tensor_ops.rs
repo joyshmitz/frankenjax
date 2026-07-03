@@ -4427,6 +4427,12 @@ fn complex_lex_ge_scatter(lhs: (f64, f64), rhs: (f64, f64)) -> bool {
 
 const SCATTER_ADD_F64_RANGE_PARTITION_MIN_UPDATES: usize = 1 << 18;
 
+/// Below this operand size (f64 elements ≈ 32 MB, ~L3-resident on the bench host) a TIGHT i-order serial
+/// scatter-add beats the range-partition — the random RMW stays in cache, so the partition's ~8 MB
+/// (idx,i)-pair round-trip is pure overhead (measured 1.46x at 1M, and faster than JAX). Above it the
+/// random RMW thrashes DRAM and the threaded partition's parallel bandwidth wins, so it stays partitioned.
+const SCATTER_ADD_F64_SERIAL_MAX_DIM0: usize = 1 << 22;
+
 /// Parallel range-partitioned scalar (`slice_elems == 1`) scatter-REDUCE for any
 /// `Copy` dtype and combine closure `cf`. Returns `Some(out)` when the partitioned
 /// path applies, `None` (caller falls back to the serial `scatter_typed` loop) below
@@ -4643,15 +4649,32 @@ fn eval_scatter_dense(
         // — the prior path is a pure serial loop that is already JAX-competitive, and the
         // partition's pair-materialization + thread overhead REGRESSES it (~0.70x), so they
         // stay on `scatter_typed`.
-        if combine == ScatterCombine::Add
-            && slice_elems == 1
-            && let Some(out) =
+        if combine == ScatterCombine::Add && slice_elems == 1 && upd.len() == index_vals.len() {
+            // Tight i-order serial scatter-add for a cache-resident operand: the random RMW beats the
+            // range-partition's ~8MB (idx,i)-pair round-trip (measured 1.46x at 1M, faster than JAX).
+            // Bit-identical to the partition + literal path (same global i-order accumulation; resolve
+            // guarantees idx < dim0, and upd.len() == index_vals.len() so upd[i] is in-bounds). Large
+            // operands (random RMW thrashes DRAM) keep the threaded partition below.
+            if dim0 <= SCATTER_ADD_F64_SERIAL_MAX_DIM0 {
+                let mut out = op.to_vec();
+                for (i, &raw_idx) in index_vals.iter().enumerate() {
+                    if let Some(idx) = resolve_axis0_index(raw_idx, dim0, index_mode) {
+                        out[idx] = cf(out[idx], upd[i]);
+                    }
+                }
+                return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+                    operand.shape.clone(),
+                    out,
+                )?)));
+            }
+            if let Some(out) =
                 scatter_reduce_range_partitioned(op, upd, index_vals, dim0, index_mode, cf)
-        {
-            return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
-                operand.shape.clone(),
-                out,
-            )?)));
+            {
+                return Ok(Some(Value::Tensor(TensorValue::new_f64_values(
+                    operand.shape.clone(),
+                    out,
+                )?)));
+            }
         }
         scatter_typed!(op, upd, TensorValue::new_f64_values, cf);
     }
@@ -31690,6 +31713,64 @@ mod tests {
     // the value inline at build time (`(idx, upd[i])`, build reads upd[i]
     // SEQUENTIALLY) moves that latency-bound load out of the parallel apply.
     // Bit-identical (same per-idx add order). Same-binary A/B (contention-symmetric).
+    // Tight SERIAL 1D f64 scatter-add vs the range-partition, same-invocation A/B. The partition
+    // materializes ~8MB of (idx,i) pairs and round-trips them; a tight i-order serial loop just does the
+    // random RMW (operand L3-resident at 1M). Both apply updates in global i-order → bit-identical.
+    #[test]
+    #[ignore = "perf benchmark; run explicitly"]
+    fn bench_scatter_add_1m_serial_tight_vs_partition() {
+        use std::time::Instant;
+        let n = 1_usize << 20;
+        let op: Vec<f64> = vec![0.0; n];
+        let index_vals: Vec<i64> = (0..n)
+            .map(|i| ((i.wrapping_mul(1_103_515_245_usize).wrapping_add(12_345)) & (n - 1)) as i64)
+            .collect();
+        let upd: Vec<f64> = (0..n)
+            .map(|i| ((i % 4099) as f64 - 2049.0) * 0.001)
+            .collect();
+        let cf = |a: f64, b: f64| a + b;
+        let best = |f: &dyn Fn() -> f64| -> f64 {
+            f();
+            let mut b = f64::MAX;
+            for _ in 0..8 {
+                let t = Instant::now();
+                let r = f();
+                std::hint::black_box(r);
+                b = b.min(t.elapsed().as_secs_f64());
+            }
+            b
+        };
+        let run_part = || {
+            let out = super::scatter_reduce_range_partitioned(
+                &op,
+                &upd,
+                &index_vals,
+                n,
+                IndexMode::Clip,
+                cf,
+            )
+            .unwrap();
+            out[n / 2] + out[0]
+        };
+        let run_serial = || {
+            let mut out = op.clone();
+            for (i, &raw) in index_vals.iter().enumerate() {
+                if let Some(idx) = super::resolve_axis0_index(raw, n, IndexMode::Clip) {
+                    out[idx] += upd[i];
+                }
+            }
+            out[n / 2] + out[0]
+        };
+        let part = best(&run_part).min(best(&run_part));
+        let serial = best(&run_serial).min(best(&run_serial));
+        println!(
+            "[scatter-add 1M f64 1D] partition={:.3}ms serial-tight={:.3}ms ratio={:.2}x | JAX=2.71ms",
+            part * 1e3,
+            serial * 1e3,
+            part / serial,
+        );
+    }
+
     #[test]
     #[ignore = "perf benchmark; run explicitly"]
     fn bench_scatter_add_range_partition_inline_value_vs_idxpair() {

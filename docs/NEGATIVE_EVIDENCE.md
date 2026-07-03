@@ -2,6 +2,23 @@
 
 Canonical project ledger: `../evidence/perf/negative_evidence_ledger.md`.
 
+## 2026-07-03 - WIRED WIN (1.7x; 2.35x JAX LOSS -> 1.38x): f64 scatter-add tight-serial for cache-resident operand (TealMarten)
+
+Profile-first found a fresh gap: fj **scatter-add 1M f64 = 6.37ms vs JAX 2.71ms = 2.35x SLOWER** (embedding
+gradient / segment-sum, a common ML op; JAX `o.at[i].add(u)` jit x64). fj routed f64-add-1D through
+`scatter_reduce_range_partitioned`, which materializes ~8MB of `(idx,i)` pairs and round-trips them — pure
+overhead when the operand is CACHE-RESIDENT (the random RMW stays in L3). Added a TIGHT i-order serial
+scatter-add (`out[idx] += upd[i]`) for `dim0 <= 1<<22` (~32MB f64, ~L3); above it the partition's threaded
+bandwidth still wins (random RMW thrashes DRAM), so it stays. BIT-IDENTICAL: the partition already
+preserves GLOBAL i-order accumulation (proven by `range_partitioned_f64_scatter_add_matches_literal_path`,
+which now exercises the serial path and still passes with duplicate indices), so the tight loop matches the
+literal path exactly. Isolated A/B at 1M: partition=2.99ms vs serial=**2.05ms = 1.46x** (and the 2.05ms
+serial core alone BEATS JAX's 2.71ms). Clean end-to-end `eval/scatter_add_1m_f64_1d`: **6.37ms -> 3.74ms =
+1.7x**, narrowing the JAX gap from 2.35x to ~1.38x. The residual ~1ms vs JAX is wrapper/alloc overhead
+(the 8MB `index_vals.to_vec()` + operand copy + output alloc + interpreter dispatch) — a follow-up
+(borrow indices via Cow instead of to_vec) could close most of it. f32/i64 scatter-add already use a serial
+loop. Full fj-lax lib green.
+
 ## 2026-07-03 - NEGATIVE (0.61x): block-column fused transpose+sort for axis-0 rank-2 f64 sort REGRESSES (TealMarten)
 
 Second attempt at the sort2d(axis=0) gap (after the single-column-gather negative above). Hypothesis: the
